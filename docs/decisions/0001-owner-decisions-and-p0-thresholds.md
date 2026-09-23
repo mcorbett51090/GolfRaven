@@ -93,7 +93,7 @@ Rules, fixed now and not revisitable once any volume has been read:
 - **Search Console search type is pinned to Web** (not Image, Video, News or Discover) for the SWC Part A read
   in the same file, so that check is equally closed before data is read.
 
-This closes B1 in the P0 gate review (2026-09-23): the keyword list was open-ended and would have let whoever
+This closes B2 in the P0 gate review (2026-09-23): the keyword list was open-ended and would have let whoever
 read the numbers add terms until the combined sum reached the bar.
 
 ### X7 measurement (in-database p95, mixed hit/miss point set)
@@ -118,3 +118,23 @@ Pre-registering, before any X7 run is treated as the recorded result:
   so the recorded number is legible as "p95 over a realistic mixed workload", not "p95 over an empty probe".
 
 This closes S1 in the P0 gate review (2026-09-23).
+
+## Addendum C (2026-09-23, before any K1 reply is read) — K1 8-week anchor and denominator
+
+The plan's Check text gives the full-gate window as "within 8 wk" without saying what it is measured from, and
+K1's own working memo had informally anchored it to "first contact" (an addition not in the plan). Fixed here,
+before any operator reply is read:
+
+- **The 8-week window is anchored to the plan's P0 start date, 2026-10-05** (plan §10 conventions), so the
+  full-gate window closes on **2026-11-30** and the verdict is read around week 10 (≈ 2026-12-14), matching the
+  plan's schedule. It is **not** anchored to this record's date (work began early on 2026-09-23, before any
+  outreach was sent, which must not shorten the window) and **not** to each operator's individual first-contact
+  date (which would let a late contact extend the window).
+- **The denominator is the 5 operators the Check text requires to be contacted**: the three pilot-slate trail
+  operators (TN Golf Trail, Vancouver Island Golf Trail, Robert Trent Jones Golf Trail) plus the ≥ 2 co-op/DMO
+  warm reserves contacted to satisfy "Contact ≥ 5 operators". If more than 5 are contacted, the denominator is
+  the **first 5 contacted, in the order logged in the K1 tracking table** (`docs/partners/k1-outreach.md`),
+  whether or not they reply. The same 5 are the early-read denominator. It is never "≥ 2 of however many
+  operators are ultimately contacted".
+
+This closes S2 in the P0 gate review (2026-09-23).

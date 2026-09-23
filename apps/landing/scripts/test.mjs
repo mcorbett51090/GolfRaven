@@ -10,6 +10,10 @@ import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(here, "..", "src");
+// dist/ is what actually ships (scripts/build.mjs copies src/ -> dist/
+// verbatim); check the built output, not just the source, so a stale or
+// hand-edited dist/ can't drift from src/ unnoticed (gate review N6).
+const distDir = join(here, "..", "dist");
 
 let failures = 0;
 
@@ -22,13 +26,15 @@ function ok(message) {
   console.log(`ok: ${message}`);
 }
 
-const html = await readFile(join(srcDir, "index.html"), "utf8");
-const config = await readFile(join(srcDir, "config.js"), "utf8");
+const html = await readFile(join(distDir, "index.html"), "utf8");
+const config = await readFile(join(distDir, "config.js"), "utf8");
 
-// No third-party origins referenced from any src/href.
-const externalRefs = [...html.matchAll(/(?:src|href)="(https?:\/\/[^"]+)"/g)].map(
-  (m) => m[1],
-);
+// No third-party origins referenced from any src/href — including
+// protocol-relative references ("//host/...") which the previous
+// https?:// -only pattern missed (gate review N6).
+const externalRefs = [
+  ...html.matchAll(/(?:src|href)="((?:https?:)?\/\/[^"]+)"/g),
+].map((m) => m[1]);
 if (externalRefs.length > 0) {
   fail(`found external script/link references: ${externalRefs.join(", ")}`);
 } else {

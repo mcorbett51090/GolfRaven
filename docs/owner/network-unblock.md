@@ -14,7 +14,7 @@ exact queries/URLs once unblocked.
 |---|---|
 | `rtjgolf.com` | Robert Trent Jones Golf Trail's own site — roster + rules |
 | `tngolftrail.net` | Confirmed blocked this session; not the host cited in `research/us-trails.md` (which uses `tnstateparks.com`) — allow both until the canonical TN host is confirmed |
-| `tnstateparks.com` | Tennessee State Parks — the TN Golf Trail host per `research/us-trails.md` (not separately confirmed blocked this session, but likely under the same policy family as `tn.gov`) |
+| `tnstateparks.com` | Tennessee State Parks — the TN Golf Trail host per `research/us-trails.md` (confirmed blocked this session, 2026-09-23: proxy CONNECT `403`) |
 | `golfvancouverisland.ca` | Vancouver Island Golf Trail's own site — roster + rules + Trail Pass terms |
 | `tn.gov` | Tennessee state government domain family, relevant if the trail's rules live under a `.tn.gov` subdomain |
 
@@ -35,7 +35,7 @@ exact queries/URLs once unblocked.
 | Host | Why |
 |---|---|
 | `golfnow.com` | Terms of Use (`golfnow.com/support/about-us/terms`) and the Business Partnership page |
-| `affiliate.gnsvc.com` | GolfNow's Affiliate & Partner API docs (not separately confirmed blocked this session — same integration family as `golfnow.com`, verify independently) |
+| `affiliate.gnsvc.com` | GolfNow's Affiliate & Partner API docs (confirmed blocked this session, 2026-09-23: proxy CONNECT `403`) |
 
 ### Account-setup steps that also hit blocked hosts this session (not a gating check, but worth unblocking together)
 
@@ -48,9 +48,10 @@ exact queries/URLs once unblocked.
 ## Confirmed this session (evidence, not inference)
 
 `CONNECT` to `rtjgolf.com`, `tngolftrail.net`, `golfvancouverisland.ca`, `tn.gov`, `golfnow.com`,
-`overpass-api.de`, `developers.cloudflare.com`, `supabase.com` and `rdap.verisign.com` all returned proxy
-`403` this session; `WebFetch` was also blocked for the same hosts. `affiliate.gnsvc.com` and `tnstateparks.com`
-were not separately probed this session — verify them independently rather than assuming either status.
+`overpass-api.de`, `developers.cloudflare.com`, `supabase.com`, `rdap.verisign.com`,
+`affiliate.gnsvc.com` and `tnstateparks.com` all returned proxy `403` this session (2026-09-23; the last
+two probed and confirmed as part of the P0 gate review; see `docs/p0/X6.md` and `docs/p0/X2.md`); `WebFetch`
+was also blocked for the same hosts.
 
 ## After unblocking
 

@@ -6,6 +6,12 @@
 (function () {
   "use strict";
 
+  // Bump this whenever the privacy notice / consent copy in index.html
+  // changes materially, so stored signups can be matched back to the
+  // wording they actually agreed to (see the privacy section's "What we
+  // store" bullet).
+  var CONSENT_VERSION = "2026-09-23";
+
   var yearEl = document.getElementById("year");
   if (yearEl) {
     yearEl.textContent = String(new Date().getFullYear());
@@ -53,8 +59,10 @@
 
     var emailInput = document.getElementById("email");
     var trailInput = form.querySelector('input[name="trail"]:checked');
+    var ageConfirmInput = document.getElementById("age-confirm");
     var email = emailInput ? emailInput.value.trim() : "";
     var trail = trailInput ? trailInput.value : "either";
+    var ageConfirmed = !!(ageConfirmInput && ageConfirmInput.checked);
 
     if (!email) {
       setStatus("Please enter your email address.");
@@ -66,10 +74,19 @@
     }
     setStatus("Sending…");
 
+    // ageConfirmed and consentVersion are sent so the backend can store the
+    // 16+ attestation and which wording of the privacy notice the signup
+    // agreed to (see the privacy section above and README.md "How signups
+    // work") -- there is otherwise no durable consent/age record at all.
     fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email, trail: trail }),
+      body: JSON.stringify({
+        email: email,
+        trail: trail,
+        ageConfirmed: ageConfirmed,
+        consentVersion: CONSENT_VERSION,
+      }),
     })
       .then(function (response) {
         if (!response.ok) {

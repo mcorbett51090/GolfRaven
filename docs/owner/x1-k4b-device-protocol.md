@@ -75,12 +75,14 @@ Apple Watch + phone with a golf app), so one round covers all three:
 
 ### 2e. Android Health Connect pass
 
-Uses "a minimal Health Connect reader built in the P0 skeleton (0.5 pw, reused by P4)" — **this reader does
-not exist in the repo yet as of 2026-09-23** (checked: no `apps/mobile` directory exists). Building it is a
-separate P0 engineering task, out of scope for this runbook (which only covers `docs/owner/`). Once it
-exists, run the equivalent round on Android and use the reader to inspect, per source app installed on the
-Android phone: the Health Connect **exercise type**, whether a **route** is present, and the **`dataOrigin`**
-(the Health Connect analogue of `HKSource.bundleIdentifier`).
+Uses "a minimal Health Connect reader built in the P0 skeleton (0.5 pw, reused by P4)" — as of 2026-09-23
+**this reader is built** (`apps/mobile/src/health-connect/`; typechecks, and its pure shaping logic is
+unit-tested), but it is **not device-tested**: nothing in it has run on a real Android device or emulator
+with Health Connect installed (see `apps/mobile/README.md` "Not device-tested"). Running the round on
+Android is the device test this reader still needs. Once a real round has been recorded and the app run on
+a real device, use the reader to inspect, per source app installed on the Android phone: the Health
+Connect **exercise type**, whether a **route** is present, and the **`dataOrigin`** (the Health Connect
+analogue of `HKSource.bundleIdentifier`).
 
 ### 2f. What to inspect, restated (both OSes)
 
@@ -115,7 +117,8 @@ Android phone: the Health Connect **exercise type**, whether a **route** is pres
 |---|---|---|---|---|---|
 | Garmin watch + Connect Mobile | iOS | | | | |
 | Garmin watch + Connect Mobile | Android | | | | |
-| Apple Watch Workout | iOS | | — (Android N/A) | | |
+| Apple Watch Workout | iOS | | | | |
+| Apple Watch Workout | Android | N/A | N/A | N/A | N/A (no Apple Watch on Android) |
 | Phone golf app | iOS | | | | |
 | Phone golf app | Android | | | | |
 

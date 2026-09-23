@@ -5,7 +5,9 @@ roster and confirms completion — with a finisher's marker to show for it.
 It launches with two pilot trails, the Tennessee Golf Trail and the
 Vancouver Island Golf Trail, and expands from there. See the full plan at
 [`../docs/golf-trails/02-build-plan.md`](../docs/golf-trails/02-build-plan.md)
-(architecture in §3, this repo's layout at §3.1).
+(architecture in §3, this repo's layout at §3.1). **This link points into
+the `RavenGolf` repo** (the plan lives there, not here) and will break
+once `golfraven/` is extracted to its own repo — see "Staging note" below.
 
 This is the **P0 monorepo skeleton**: workspace plumbing, placeholder
 packages/apps, and the P0 deliverables (the K2 landing page, the Android
@@ -27,10 +29,11 @@ it moves:
   `.github/workflows/` at whatever the repo root is, so the **live**
   workflow currently sits at `RavenGolf/.github/workflows/golfraven-ci.yml`
   (repo root) and scopes itself into `golfraven/` via
-  `defaults.run.working-directory: golfraven`. A byte-for-byte
-  post-extraction copy — the same jobs, without that scoping — already
-  lives at `golfraven/.github/workflows/ci.yml`, so extraction needs no CI
-  edit, just moving that file up to `.github/workflows/`.
+  `defaults.run.working-directory: golfraven`. A post-extraction copy —
+  equivalent apart from working-directory, cache path and comments (the
+  jobs themselves are the same) — already lives at
+  `golfraven/.github/workflows/ci.yml`, so extraction needs no CI edit,
+  just moving that file up to `.github/workflows/`.
 - Extraction itself is `git subtree split --prefix=golfraven` from the
   `RavenGolf` repo, pushed to the new `golfraven` repo as its initial
   history.
@@ -59,8 +62,10 @@ golfraven/
 │                    Functions). Placeholder — migrations arrive P3.
 ├── data/            Catalog content (git, PR-reviewed). Placeholder —
 │                    seeded data arrives P1.
-└── .github/         CODEOWNERS, gitleaks config, PR template, the
-                     post-extraction CI copy.
+├── .gitleaks.toml   gitleaks config (at the golfraven/ root, not under
+│                    .github/ — used by both the live workflow and the
+│                    post-extraction copy below).
+└── .github/         CODEOWNERS, PR template, the post-extraction CI copy.
 ```
 
 Each package/app has its own `README.md` explaining what phase actually

@@ -64,7 +64,7 @@ elapsed days... then an Android pass"). Exact steps:
      `ExerciseSession` data — accept it;
    - reads the last 30 days of `ExerciseSession` records, filters to golf,
      and shows the resulting JSON.
-4. **Copy that JSON into the X1 memo** (`docs/p0/x1-*.md` — owned by
+4. **Copy that JSON into the X1 memo** (`docs/p0/X1.md` — owned by
    whichever agent/session writes the P0 memos, not this skeleton). It has
    exactly what X1 needs per source: start/end, `dataOrigin` (the
    recording app's package name — this is what feeds the §7.3 lane-5

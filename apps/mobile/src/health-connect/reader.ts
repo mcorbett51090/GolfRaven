@@ -42,6 +42,20 @@ export class HealthConnectUnavailableError extends Error {
   }
 }
 
+/** Thrown when the user denies (or the manifest fails to declare) the
+ * `read ExerciseSession` permission. `requestPermission`'s returned
+ * granted-permissions list is the only reliable signal here (Android
+ * does not otherwise surface a denial as an error) — see gate review S3:
+ * previously this return value was ignored, so a silent no-grant would
+ * fall through into `readRecords` and fail there with a less legible
+ * error, or (worse) silently return no data. */
+export class HealthConnectPermissionDeniedError extends Error {
+  constructor() {
+    super("Health Connect did not grant read access to ExerciseSession");
+    this.name = "HealthConnectPermissionDeniedError";
+  }
+}
+
 /**
  * Confirms Health Connect is available and initialized. Call this once
  * before `requestGolfReadPermission` / `readGolfSessions`.
@@ -74,7 +88,13 @@ export async function ensureHealthConnectReady(): Promise<void> {
  * shipped .d.ts, not from a real device]`
  */
 export async function requestGolfReadPermission(): Promise<void> {
-  await requestPermission([{ accessType: "read", recordType: "ExerciseSession" }]);
+  const granted = await requestPermission([{ accessType: "read", recordType: "ExerciseSession" }]);
+  const hasExerciseRead = granted.some(
+    (permission) => permission.accessType === "read" && permission.recordType === "ExerciseSession",
+  );
+  if (!hasExerciseRead) {
+    throw new HealthConnectPermissionDeniedError();
+  }
 }
 
 /**
@@ -86,19 +106,31 @@ export async function readGolfSessions(windowDays = 30): Promise<GolfSessionRead
   const now = new Date();
   const start = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
 
-  const { records } = await readRecords("ExerciseSession", {
-    timeRangeFilter: {
-      operator: "between",
-      startTime: start.toISOString(),
-      endTime: now.toISOString(),
-    },
-    ascendingOrder: false,
-  });
+  // readRecords paginates (a `pageToken` comes back whenever there are more
+  // records than fit in one page). At X1's real scale (a handful of rounds
+  // within `windowDays`) a single page is almost certainly enough, but
+  // ignoring `pageToken` entirely would silently drop sessions on any device
+  // with a longer Health Connect history — see gate review N5.
+  const allRecords: RawExerciseSessionRecord[] = [];
+  let pageToken: string | undefined;
+  do {
+    const { records, pageToken: nextPageToken } = await readRecords("ExerciseSession", {
+      timeRangeFilter: {
+        operator: "between",
+        startTime: start.toISOString(),
+        endTime: now.toISOString(),
+      },
+      ascendingOrder: false,
+      pageToken,
+    });
+    // The library's ExerciseSessionRecordResult is a structural superset of
+    // RawExerciseSessionRecord (see types.ts), so this is a safe narrowing
+    // cast, not an unsound one — every field shape.ts reads is present.
+    allRecords.push(...(records as unknown as RawExerciseSessionRecord[]));
+    pageToken = nextPageToken;
+  } while (pageToken);
 
-  // The library's ExerciseSessionRecordResult is a structural superset of
-  // RawExerciseSessionRecord (see types.ts), so this is a safe narrowing
-  // cast, not an unsound one — every field shape.ts reads is present.
-  return shapeGolfSessions(records as unknown as RawExerciseSessionRecord[], windowDays, now);
+  return shapeGolfSessions(allRecords, windowDays, now);
 }
 
 /**

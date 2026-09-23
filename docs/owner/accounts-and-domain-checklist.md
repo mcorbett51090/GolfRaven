@@ -116,9 +116,9 @@ whichever is picked and why.
 **Done when:** The project exists, PostGIS can be enabled on it (feeds X7 directly), and its region is
 recorded.
 
-**P0 acceptance test satisfied:** Feeds X7 (`docs/p0/X7.md`) and is a P1 pre-build gate item ("Supabase
-region + DPA reviewed," plan §10 P3 pre-build gates — reviewed again before P3, but the project itself is
-created in P0/P1).
+**P0 acceptance test satisfied:** Feeds X7 (`docs/p0/X7.md`); the region/DPA review itself is a **P3
+pre-build gate** item ("Supabase region + DPA reviewed," plan §10 — reviewed again before P3, since money
+and personal data go live only after P3), but the project itself is created in P0/P1.
 
 **Note:** `supabase.com` returned a proxy 403 in this session — project creation may need the network-unblock
 step (`docs/owner/network-unblock.md`) if attempted from this environment.

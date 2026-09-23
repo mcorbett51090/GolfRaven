@@ -21,8 +21,9 @@ it never states a number they don't already state.
 | K4 | Sync signal = X1 **or** K4b | Matt (physical devices) | OWNER — needs borrowed devices + real rounds (K4 = X1 OR K4b; see `X1.md` and `docs/owner/x1-k4b-device-protocol.md`) | _(blank)_ |
 
 Each `docs/p0/<ID>.md` memo carries the check verbatim, its pre-registered pass bar and kill consequence
-verbatim, the method, the owner split, and a dated log. No memo in this directory has a measured value or
-verdict filled in yet — none of the 11 checks has been run.
+verbatim, the method, the owner split, and a dated log. **X3 is closed (PASS, 2026-09-23)** with a
+measured value and verdict recorded. The other 10 of the 11 checks have not been run and their memos are
+still blank.
 
 ## Non-gating P0 work (plan §10 P0, "Non-gating work, in parallel")
 
@@ -38,7 +39,7 @@ verdict filled in yet — none of the 11 checks has been run.
 | Google OAuth client (under the organisation Google account) | Matt | PENDING |
 | Custom SMTP (Postmark/SES) on the P0 domain with SPF/DKIM/DMARC | Matt | PENDING |
 | Bundle IDs reserved (iOS + Android) | Matt | PENDING |
-| Applications with dated receipts: GolfNow T1 + business form, Lightspeed, GHIN GPA, Arccos, Garmin waitlist + Golf API BD email, Supreme Golf (applicant = P0 legal entity) | Matt | PENDING — none filed yet (`docs/partners/applications.md` not yet created) |
+| Applications with dated receipts: GolfNow T1 + business form, Lightspeed, GHIN GPA, Arccos, Garmin waitlist + Golf API BD email, Supreme Golf (applicant = P0 legal entity) | Matt | PENDING — drafts ready in `docs/partners/applications.md`; none filed yet, no dated receipts |
 | Counsel brief L1–L7 and L-OSM | Matt (retains counsel) | PENDING — see `docs/owner/counsel-brief.md` |
 | SP10 — `passport_mark` event in SWC (~1 h build; needs owner approval before it ships) | Agent (build), Matt (approval) | PENDING — approval not yet given |
 

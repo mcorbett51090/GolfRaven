@@ -20,7 +20,7 @@ result text I could not verify by fetching the source page — WebFetch is block
 | 1 | **Tennessee Golf Trail** (9 courses; slate) | State-run (TN State Parks / TDEC) | TN State Parks golf division — no named marketing contact found this session; route through the general public-body correspondence channel (SP6: "public-body email") | tnstateparks.com/golf contact form; individual Bear Trace course lines (e.g. 931-707-1640) found, no central golf-trail marketing email `[unverified — no director name found]` | `research/us-trails.md` — "Tennessee Golf Trail … run by Tennessee State Parks (tnstateparks.com/golf)"; build plan §9.9 slate row |
 | 2 | **Vancouver Island Golf Trail** (11–13 courses; slate) | Course-owner co-op ("Golf Vancouver Island") | **Chris Elder, Director of Marketing** `[snippet-only — name/title from a WebSearch result; email was masked by the search tool, not independently confirmed]` | golfvancouverisland.ca "Media Room" page / contact form; phone reported as 250.889.0973 `[snippet-only]` | `research/canada-trails.md` — "Operator: 'Golf Vancouver Island' … golf-course-owned-and-operated … site golfvancouverisland.ca"; build plan §9.9 |
 | 3 | **Robert Trent Jones Golf Trail** (26 courses / 11 sites; slate) | Retirement Systems of Alabama (RSA) | RTJ Golf Trail general/corporate contact | Info@RTJGolf.com, 1-800-949-4444, rtjgolf.com/contact `[snippet-only — contact page located by WebSearch, not fetched directly]` | `research/us-trails.md` — "Owned by the Retirement Systems of Alabama (RSA)"; build plan §9.9 — "RTJ: extend the Trail Card, do not compete with it" |
-| 4 | **Oklahoma Golf Trail** (18 courses; reserve — contact only if a slate trail drops, per §9.9) | State commission (Oklahoma Golf Trail Commission) | Sheila Dills, Commission chair (named in research) — no direct email found | oklahoma.golf (About page) `[unknown — find contact on day 1; no email surfaced this session]` | `research/us-trails.md` — "Oklahoma Golf Trail Commission … created via HB 3647 … chair … Sheila Dills" |
+| 4 | **Oklahoma Golf Trail** (18 courses; reserve — contact only if a slate trail drops, per §9.9) | State commission (Oklahoma Golf Trail Commission) | Sheila Dills — authored HB 3647, the 2022 legislation creating the Commission (per research); current commission role unknown — find on day 1. No direct email found | oklahoma.golf (About page) `[unknown — find contact on day 1; no email surfaced this session]` | `research/us-trails.md:82,184` — "Oklahoma Golf Trail Commission … created via HB 3647 … authored by then-Rep. Sheila Dills" |
 | 5 | **Hammock Coast Golf Trail** (11–12 courses; warm co-op reserve) | Nonprofit marketing co-op (Georgetown County, SC), formed 2007 | Georgetown County Chamber of Commerce / Tourism Marketing Commission | Phone 843-546-8436; email info@visitgeorge.com `[snippet-only]` | `research/us-trails.md` — "Hammock Coast … Nonprofit marketing co-op, formed 2007 in Georgetown County SC"; build plan §9.9 reserve 2 |
 | 6 | **Canadian Rockies Golf Consortium** (6 courses, Alberta; warm co-op reserve) | Course co-op marketing partnership | Gord Schultz, Executive Director (named in a trade-press quote) | canadianrockiesgolf.ca `[unverified — no direct contact email found this session; use site contact form]` | `research/canada-trails.md` — "Canadian Rockies Golf Consortium … co-op marketing partnership of the 6 independently owned/operated courses … executive director Gord Schultz" |
 
@@ -30,8 +30,8 @@ result text I could not verify by fetching the source page — WebFetch is block
 
 | # | Prospect | Category | Why them |
 |---|---|---|---|
-| 1 | **Alabama Tourism Department** — Golf Marketing Director **Kerry Teague** `[snippet-only]` | Tourism board | Already runs a "Sweet Home Alabama" golf campaign built around the RTJ Trail (`https://tourism.alabama.gov`); a natural co-funder of RTJ's special-marker run and Trail Card extension — the sponsor and the operator's own promotion already point the same direction. |
-| 2 | **Tourism Vancouver Island** | Tourism board / DMO | The regional DMO that already promotes Golf Vancouver Island and its Trail Pass (`research/canada-trails.md` — "Tourism Vancouver Island is one of six Regional Destination Management Organizations in British Columbia … contracted to deliver marketing services specific to … the Vancouver Island Region"); VI is the likely first go-live (year-round golf), so its sponsor conversation can start earliest. |
+| 1 | **Alabama Tourism Department** — Golf Marketing Director **Kerry Teague** `[snippet-only]` | Tourism board | `[snippet-only — WebSearch result text, not fetched/verified, and not traceable to any research/*.md file]`: reported to already run a "Sweet Home Alabama" golf campaign built around the RTJ Trail (`https://tourism.alabama.gov`); if confirmed, a natural co-funder of RTJ's special-marker run and Trail Card extension. |
+| 2 | **Tourism Vancouver Island** | Tourism board / DMO | `[snippet-only — WebSearch result text; not present in `research/canada-trails.md` or any other research file — grep: 0 hits]`: reported to be the regional DMO that promotes Golf Vancouver Island and its Trail Pass, one of six Regional Destination Management Organizations in British Columbia. Verify independently before citing to a prospect. VI is the likely first go-live (year-round golf), so its sponsor conversation can start earliest regardless. |
 | 3 | **Callaway Brands** (Callaway / Odyssey / OGIO / TravisMathew umbrella) | Equipment + apparel | Already operates a cross-brand loyalty program (Callaway Rewards, found this session) spanning clubs and apparel; a special-marker + Wallet-card attribution package is a small incremental ask for an organization already running reward mechanics. `[inference — no existing golf-trail sponsorship by Callaway Brands was found this session; this is a fit rationale, not a confirmed relationship]` |
 | 4 | **Bushnell Golf** | Equipment (GPS / rangefinders) | A tech-forward consumer golf brand whose core product (distance/location measurement) pairs narratively with the app's GPS-verified course-QR mechanic. `[inference — speculative fit, not a sourced existing sponsorship]` |
 
@@ -73,10 +73,9 @@ Matt [Last Name]
 
 **Tennessee Golf Trail (public body — TN State Parks):**
 ```
-I know TN State Parks operates under public-procurement rules, so I want to be upfront: this is a
-season programme agreement, not a purchase requiring a formal bid process on our side — happy to
-route it however your procurement team needs. No player data is sold or shared with any state agency
-beyond aggregate visit counts you'd see in your own operator dashboard.
+I know public bodies have procurement rules — I'd follow whatever process your team requires. No
+player data is sold or shared with any state agency beyond aggregate visit counts you'd see in your
+own operator dashboard.
 ```
 
 **Vancouver Island Golf Trail (references the existing digital Trail Pass):**
@@ -108,7 +107,8 @@ I'm Matt [Last Name], building GolfRaven, an app that tracks golfers' progress o
 and rewards trail completion with a numbered, collectible finisher's marker — handed over in person at
 a member pro shop, nothing shipped.
 
-[Trail Name] is one of the trails I'm building this for. A season sponsor pays for that trail's
+[Trail Name] is a trail we hope to pilot with; any sponsorship is subject to the trail operator's
+approval. A season sponsor pays for that trail's
 finisher-marker run (delivered to the trail's own vendor, never through us) and/or funds
 finish-the-trail discounts at member courses. In return, the sponsor's name appears on the marker
 itself, its in-app card, the trail page and the share card golfers see when they finish — plus a

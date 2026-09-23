@@ -24,8 +24,9 @@ Subject: Quote request — golf ball markers (course + special/commemorative), U
 
 Hello,
 
-I'm working with a set of golf trails (a multi-course collection marketed and tracked together) on a
-marker programme, and I'd like a quote covering two products:
+I'm developing a marker programme for golf trails (multi-course collections marketed and tracked
+together); quotes are indicative for trails that would order directly with you, and I'd like a quote
+covering two products:
 
 1. Course markers — a small, flat ball marker (standard ~25mm size, similar to a typical logo ball
    marker) with a single-color or full-color course logo. Per-course, low volume.
@@ -47,7 +48,9 @@ For each product, could you quote:
 - Any tooling/setup fee, and whether it's reusable for reorders of the same design
 
 Rough initial order size to plan around: [100–500] units per trail per season, split across [8–26] pro
-shops. We'd want a recurring relationship (reorders each season), not a one-time buy.
+shops. Each trail operator orders and pays for its own marker run directly with you — I'm gathering
+these quotes on the trails' behalf, not as the buyer of record — and a given trail would likely be a
+recurring, reorder-each-season relationship rather than a one-time buy.
 
 Happy to send artwork specs once we have a sense of your pricing tiers.
 

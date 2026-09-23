@@ -1,0 +1,12 @@
+# Cloudflare Pages _headers file — served as-is alongside the static page
+# (copied to dist/ by scripts/build.mjs). The page loads no third-party
+# scripts, fonts, images or frames, and does not need to be framed by
+# anyone else, so the CSP is deliberately tight. `connect-src` is left at
+# 'self' here as a safe default for a not-yet-deployed page with no
+# SIGNUP_ENDPOINT configured (src/config.js); once a real endpoint is
+# wired up (README.md "How signups work"), add its origin to connect-src
+# here so the signup POST is not blocked by this policy.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

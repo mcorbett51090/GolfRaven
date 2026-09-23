@@ -23,26 +23,37 @@ promotion, not paid, per O23/O24).
 
 ## How signups work (double opt-in)
 
-1. The visitor submits their email (and trail preference) to
-   `SIGNUP_ENDPOINT` as `POST { email, trail }` (JSON).
-2. **The backend is not built yet.** Wiring `SIGNUP_ENDPOINT` to something
+1. The visitor submits their email, trail preference, 16+ confirmation and
+   the consent-copy version to `SIGNUP_ENDPOINT` as
+   `POST { email, trail, ageConfirmed, consentVersion }` (JSON).
+2. **⚠️ P0 owner step — the backend is not built yet, and K2's 6-week clock
+   cannot start until it is.** This is a named P0 prerequisite (build plan
+   §10 P0, K2), not a "nice to have": the page can show "Signups open soon"
+   forever without it, and it must exist, with SMTP configured, before the
+   K2 clock is treated as running. Wiring `SIGNUP_ENDPOINT` to something
    real requires, at minimum:
    - an endpoint that accepts the POST, validates the email, and stores
-     `{ email, trail, confirmedAt: null }` somewhere durable (even a simple
-     KV/table is enough at P0 scale);
+     `{ email, trail, ageConfirmed, consentVersion, signedUpAt, confirmedAt: null, confirmationToken }`
+     somewhere durable (even a simple KV/table is enough at P0 scale);
    - **custom SMTP with SPF, DKIM and DMARC configured for the sending
      domain** (build plan §10 P0: "Set up custom SMTP with SPF/DKIM/DMARC"
      is an explicit P0 external prerequisite, owned by Matt) — without
      correctly configured SPF/DKIM/DMARC, confirmation emails land in spam
      or get rejected outright, which would quietly sink K2's signup count;
-   - the confirmation email itself, with a single-use confirmation link
-     that flips `confirmedAt` and is what actually adds the signup to the
-     list — an unconfirmed row never counts toward K2's N = 300 (build
-     plan §10 P0, K2's full gate);
-   - an unsubscribe path (link in every email, or a reply-to address) per
-     the privacy notice on the page.
+   - the confirmation email itself, with a **single-use, expiring**
+     confirmation link/token that flips `confirmedAt` and is what actually
+     adds the signup to the list — an unconfirmed row never counts toward
+     K2's N = 300 (build plan §10 P0, K2's full gate);
+   - **abuse controls on the public POST**, since a bare "email + send a
+     confirmation email" endpoint can otherwise be used to mail arbitrary
+     third parties and damage the sending domain's reputation, which would
+     quietly sink K2: email-format validation, a rate limit per IP/email,
+     and a bot check (Cloudflare Turnstile or equivalent);
+   - a **one-click unsubscribe link in every email** — this is required,
+     not "link or a reply-to address."
 3. Until that backend exists, `SIGNUP_ENDPOINT` stays `""` and the page
-   correctly shows "Signups open soon" — this is deliberate, not a bug.
+   correctly shows "Signups open soon" — this is deliberate, not a bug, but
+   it also means **no signup can be recorded and K2 has not started**.
 
 ## Deployment (owner step, not done in this P0 skeleton)
 

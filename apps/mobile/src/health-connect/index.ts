@@ -6,4 +6,5 @@ export {
   readGolfSessions,
   runX1HealthConnectCheck,
   HealthConnectUnavailableError,
+  HealthConnectPermissionDeniedError,
 } from "./reader.js";

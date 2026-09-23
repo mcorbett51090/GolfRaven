@@ -23,8 +23,9 @@ of record (O20). A D-U-N-S number is applied for in P0 if the entity does not al
 external prerequisites).
 
 **Garmin — plain statement for the file (per task instruction):** New Garmin Connect Developer Program
-applications, which cover the Golf Premium API's sibling programs, were reported paused industry-wide as
-of mid-September 2026 with no reopening timeline (`research/golf-app-sync.md` — "Garmin has paused all new
+applications, which cover the Golf Premium API's sibling programs, were reported paused **program-wide**
+(across the whole Garmin Connect Developer Program, not the fitness/golf industry generally) as of
+mid-September 2026 with no reopening timeline (`research/golf-app-sync.md` — "Garmin has paused all new
 Connect Developer Program applications … reported mid-September 2026, no reopening date given"). There is
 no confirmed waitlist. This row is therefore a **watch-and-BD-outreach** item, not a normal application:
 check developer.garmin.com periodically, and send the BD note below to whatever Garmin Golf partnerships
@@ -70,8 +71,8 @@ verifies course visits. Several pilot trail courses may run on Lightspeed Golf (
 to request staging credentials for the Partner API v2 to evaluate a read-only integration (tee sheet /
 course identity, not booking automation, at this stage).
 
-What GolfRaven is: a completion tracker and collectible-marker programme for golf trails, built with the
-participating course's/operator's agreement, at no cost or POS change to the course.
+What GolfRaven is: a completion tracker and collectible-marker programme for golf trails, designed to run
+with each trail operator's agreement, at no cost or POS change to the course.
 
 Integration we want: read access to confirm course identity and, if useful, booking/round records tied
 to a specific course and date, to help verify trail-course completions.
@@ -98,8 +99,8 @@ visits, and rewards trail completion. I'm interested in exploring Golfer Product
 handicap-posting records (course + date, and score where posted) as one verification signal for a
 golfer's played rounds, alongside our own device-based and in-app verification.
 
-What GolfRaven is: a trail-completion tracker and collectible-marker programme, built with each trail
-operator's agreement.
+What GolfRaven is: a trail-completion tracker and collectible-marker programme, designed to run with each
+trail operator's agreement.
 
 Data use: GHIN data would only be used to help confirm a golfer's own recorded rounds against trail
 courses; never resold, never shown to any user other than the golfer, and deletable on request per our
@@ -125,8 +126,8 @@ I'm building GolfRaven, a golf-trail completion tracker. I'd like to explore par
 On-Course Data API (rounds, course catalog) as an additional signal for verifying a golfer's played
 rounds on trail courses, for golfers who already use Arccos hardware/software.
 
-What GolfRaven is: a completion tracker and collectible-marker programme for branded golf trails, built
-with each trail operator's agreement, at no cost to the course.
+What GolfRaven is: a completion tracker and collectible-marker programme for branded golf trails, designed
+to run with each trail operator's agreement, at no cost to the course.
 
 Data use: Arccos round data received would be used only to support the golfer's own trail-completion
 record; never resold or shown to other users; deletable on the golfer's request.
@@ -180,8 +181,8 @@ verifies course visits, with links out to book tee times. I'd like to explore a 
 pulling Supreme Golf's aggregated tee-time feed to show live availability and booking links on our trail
 and course pages, similar to your existing partner sites (Barstool Golf Time, GolfDigest, etc.).
 
-What GolfRaven is: a completion tracker and collectible-marker programme for golf trails, built with each
-trail operator's agreement.
+What GolfRaven is: a completion tracker and collectible-marker programme for golf trails, designed to run
+with each trail operator's agreement.
 
 Data use: booking-related data would be used only to support the golfer's own trail-completion record
 and to send them to book; never resold.

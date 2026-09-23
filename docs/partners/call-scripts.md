@@ -15,7 +15,7 @@ QR, staff portal sign-in, daily PIN read-out, "Marker sold" tap) and the special
 hand-over, before any of this is built. This is a dry run of the checklist in build plan §9.2, not a
 sales pitch — the goal is to find out what breaks.
 
-**Questions (7):**
+**Questions (8):**
 1. Does the shop have a device (tablet, laptop, or phone) at or near the till that could stay signed in
    to a web portal during business hours?
 2. Is there reliable Wi-Fi or cellular data at the counter, or is connectivity spotty/none? (Decides
@@ -175,37 +175,44 @@ the special-marker programme would attach to Card-holder benefits.
 
 ---
 
-## SP9 — Reverse-integration pitches to golf apps (run this script twice, once per app)
+## SP9 — Reverse-integration pitches to no-public-API golf apps (run this script twice, once per app)
 
-**Goal.** Pitch an existing golf-tracking app (e.g. one from `research/passports-loyalty.md`'s comparison
-table — Golfed, CourseVaults, TheGrint, 18Birdies, GolfN) on a **reverse integration**: they surface
-GolfRaven trail-completion data or deep links inside their own app, rather than GolfRaven building
-duplicate GPS/round-tracking infrastructure. This tests whether a distribution partnership is viable as
-an alternative or complement to building the tracking stack in-house.
+**Goal.** Plan §7.3 names the target set precisely: **18Birdies, Hole19, TheGrint, Golfshot, SwingU** —
+apps with **no public developer API** (`research/golf-app-sync.md`) that today show trail progress, if
+at all, only by each building their own tracking. Pitch a **reverse integration**: instead of GolfRaven
+calling into them, **they call a read-only Trails API we provide** to show a golfer's GolfRaven
+trail-completion progress inside their own app. The build plan builds that API in P8 **only if one of
+these apps replies with interest** — this call's job is to produce that P8 trigger signal, not to source
+inbound round data from the app.
 
 **Questions (6):**
 1. Does your app currently support any form of "trail" or multi-course challenge concept, or would this
    be new for you?
-2. Would you be open to a partner integration where a golfer's round data (course + date, already
-   captured by your app) contributes toward a GolfRaven trail's completion count, via an API or export?
-3. What would that require from your side — an API you already expose, or new development?
+2. Would you be open to displaying a golfer's GolfRaven trail-completion progress inside your app by
+   calling a **read-only Trails API we would provide** (you call us, not the reverse) — e.g. "3 of 9
+   courses complete on the Tennessee Golf Trail"?
+3. What would that require from your side — is there room in your UI for a partner badge/progress
+   element, or would this need new development?
 4. Is there a business-development or partnerships contact who owns integration decisions like this?
-5. Would attribution (e.g. "tracked via GolfRaven, verified in [App]") be acceptable, or would you want
-   the relationship framed differently?
-6. Roughly what timeline would a conversation like this move on — weeks, months, not at all right now?
+5. Would attribution (e.g. "trail progress via GolfRaven") be acceptable, or would you want the
+   relationship framed differently?
+6. (Optional, secondary) Separately — do you have, or would you consider, an API or export that lets a
+   golfer share their own round data (course + date) back to us, as one more verification signal? This
+   is a nice-to-have, not what we're asking for today.
 
 **What a yes/no means for the plan:**
-- **Real interest + an existing exportable API** → a candidate integration partner for reducing the
-  build cost of course-matching/GPS ingestion (see `research/golf-app-sync.md` — most third-party apps
-  have no public read API today, so a "yes" here would be a meaningful exception worth prioritizing).
-- **Interest but no API today** → log as a future partnership, not a P0/P1 dependency; nothing in the
-  plan currently assumes this integration exists.
-- **No interest** → no change to the plan; GolfRaven's own HealthKit/Health Connect + course-QR lanes
-  (build plan §9.2, `research/golf-app-sync.md` §b) remain the primary path regardless.
+- **Replied with interest (Y)** → this is the P8 trigger (build plan §7.3/P8): the read-only Trails API
+  is built in P8 for this integration.
+- **No reply / not interested (N)** → no change to the plan; GolfRaven's own HealthKit/Health Connect +
+  course-QR lanes (build plan §9.2, `research/golf-app-sync.md` §b) remain the primary path regardless,
+  and P8 does not start for this app.
 
 **Notes table:**
 
-| App | Call date | Contact (name/role) | Has exportable API today? | Interest level | Next step |
-|---|---|---|---|---|---|
-| App 1 | | | | | |
-| App 2 | | | | | |
+| App | Call date | Contact (name/role) | Replied with interest (Y/N) — P8 trigger | Next step |
+|---|---|---|---|---|
+| 18Birdies | | | | |
+| Hole19 | | | | |
+| TheGrint | | | | |
+| Golfshot | | | | |
+| SwingU | | | | |
