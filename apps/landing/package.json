@@ -1,0 +1,11 @@
+{
+  "name": "@golfraven/landing",
+  "private": true,
+  "version": "0.0.0",
+  "description": "The K2 landing page (build plan §10 P0, K2): static, dependency-free, double-opt-in email signups.",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "echo \"@golfraven/landing: plain JS, no TypeScript to check\"",
+    "test": "node ./scripts/build.mjs && node ./scripts/test.mjs"
+  }
+}

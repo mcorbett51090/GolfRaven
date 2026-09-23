@@ -1,0 +1,6 @@
+# CODEOWNERS for the golfraven repo.
+# This repo was extracted from RavenGolf's golfraven/ staging directory via
+# `git subtree split --prefix=golfraven` (see the root README.md
+# "Provenance"). Paths below are repo-root-relative, as they are here now.
+
+* @mcorbett51090

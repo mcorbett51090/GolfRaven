@@ -1,0 +1,104 @@
+name: golfraven CI
+
+# Live CI for the golfraven repo. (Originally written as the post-extraction copy while the
+# monorepo was staged under golfraven/ in RavenGolf; it became live when the repo was split out.)
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: install / typecheck / build / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: pnpm -r test
+
+  gitleaks:
+    name: gitleaks scan (git history + working tree/bundles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (so bundles under dist/ exist to scan — gate review S13)
+        run: pnpm -r build
+
+      - name: Install gitleaks (checksum-pinned, no third-party Action)
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION="8.30.1"
+          GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/gitleaks-bin
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp/gitleaks-bin gitleaks
+          chmod +x /tmp/gitleaks-bin/gitleaks
+          echo "/tmp/gitleaks-bin" >> "$GITHUB_PATH"
+
+      - name: Scan git history (no service-role, Stripe or OAuth secret in any commit)
+        run: |
+          set -euo pipefail
+          # This is now its own repo root (post-extraction), so a full
+          # history scan is meaningful here in a way it isn't for the
+          # currently-live root workflow (gate review S13) — fetch-depth: 0
+          # above gets the full history to scan.
+          gitleaks git . --config .gitleaks.toml --redact -v --exit-code 1
+
+      - name: Scan working tree + dist/ bundles (no service-role, Stripe or OAuth secret in any bundle)
+        run: |
+          set -euo pipefail
+          # `gitleaks dir` (not the deprecated `detect --no-git` alias),
+          # run AFTER the build step so dist/ bundles are included — the
+          # git-history scan above never sees build output that isn't
+          # committed (gate review S13).
+          gitleaks dir . --config .gitleaks.toml --redact -v --exit-code 1

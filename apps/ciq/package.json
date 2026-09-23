@@ -1,0 +1,11 @@
+{
+  "name": "@golfraven/ciq",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Garmin Connect IQ (Monkey C) 'Trail Check-in' component (build plan §3.1 row I). Placeholder — real feasibility work is P0-K4b; the component itself is built later.",
+  "scripts": {
+    "build": "echo \"@golfraven/ciq: nothing to build yet (Connect IQ / Monkey C project, gated on P0-K4b — build plan §3.1 row I, §7.3)\"",
+    "typecheck": "echo \"@golfraven/ciq: no TypeScript here (Monkey C, not part of the TS workspace type graph)\"",
+    "test": "echo \"@golfraven/ciq: no tests yet\""
+  }
+}

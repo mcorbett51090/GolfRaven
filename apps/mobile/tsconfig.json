@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Extends expo/tsconfig.base, not the repo's tsconfig.base.json: Expo/
+  // React Native uses Metro (module: "preserve", moduleResolution:
+  // "bundler", jsx: "react-jsx"), a different module system from the
+  // NodeNext ESM the pure TS packages (catalog/matching/rules) use. This
+  // is the same split the Expo TS template itself ships with.
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "dist"]
+}

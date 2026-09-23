@@ -1,0 +1,27 @@
+{
+  "name": "@golfraven/catalog",
+  "private": true,
+  "version": "0.0.0",
+  "description": "GolfRaven catalog schema SSOT: Zod schema -> JSON Schema + TS types, loadCatalog(). Placeholder until P1 (build plan §4.1).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}
