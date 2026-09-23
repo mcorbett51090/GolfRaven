@@ -41,10 +41,25 @@ export const DEFAULT_TIMEOUT_MS = 190_000;
  * a hard-coded personal address committed to the repo) and defaults to the
  * project URL when unset.
  */
-const DEFAULT_CONTACT = "https://github.com/golfraven/golfraven (contact not set — export X5_CONTACT)";
+const DEFAULT_CONTACT =
+  "https://github.com/golfraven/golfraven (contact not set - export X5_CONTACT)";
 
+/**
+ * Gate finding F-S5: a header value above 0xFF is not a valid ByteString,
+ * and `fetch` throws on it — with no indication of which header or
+ * character caused it. Fail with a clear, pointed message instead of
+ * letting every live run crash inside `fetch` with a cryptic error.
+ */
 export function buildUserAgent(): string {
   const contact = process.env.X5_CONTACT?.trim() || DEFAULT_CONTACT;
+  for (let i = 0; i < contact.length; i++) {
+    if (contact.charCodeAt(i) > 0xff) {
+      throw new Error(
+        `X5_CONTACT must be Latin-1 (ByteString) text for the Overpass User-Agent header — ` +
+          `found a non-Latin-1 character at index ${i}. Use plain ASCII (e.g. "-" instead of an em dash).`,
+      );
+    }
+  }
   return `GolfRaven-P0-X5/0.1 (P0 desk check, docs/p0/X5.md; contact: ${contact})`;
 }
 
@@ -70,7 +85,10 @@ out count;`;
  * course's fetch window (see `boundingBox` doc for why the radius here is
  * a fetch-window choice, not itself part of the pre-registered match
  * rule). */
-export function buildCourseCoverageQuery(center: LatLon, radiusMeters: number): string {
+export function buildCourseCoverageQuery(
+  center: LatLon,
+  radiusMeters: number,
+): string {
   const { south, west, north, east } = boundingBox(center, radiusMeters);
   const bbox = `${south},${west},${north},${east}`;
   return `[out:json][timeout:60];
@@ -120,7 +138,10 @@ export interface OverpassResponse {
  * — as HTTP 200 with partial/empty `elements`) must stop the run outright,
  * never silently count as "unmatched".
  */
-export function assertNoOverpassRemark(response: OverpassResponse, context: string): void {
+export function assertNoOverpassRemark(
+  response: OverpassResponse,
+  context: string,
+): void {
   if (response.remark) {
     throw new Error(
       `Overpass returned a runtime error (remark) for ${context}: ${response.remark} — refusing to treat this ` +
@@ -142,14 +163,19 @@ export function parseNOsm(response: OverpassResponse): number {
   }
   const total = Number(countEl.tags.total);
   if (Number.isNaN(total)) {
-    throw new Error(`Overpass count element's tags.total is not a number: ${countEl.tags.total}`);
+    throw new Error(
+      `Overpass count element's tags.total is not a number: ${countEl.tags.total}`,
+    );
   }
   return total;
 }
 
 export interface CoverageQueryResult {
   matchingElements: OverpassGeometryElement[];
-  golfHoleWaysInBbox: number;
+  /** Gate finding F-N3: `null` when the response carries no `count`
+   * element at all (unknown), never conflated with a genuine, confirmed
+   * zero. */
+  golfHoleWaysInBbox: number | null;
 }
 
 /** Splits a course-coverage response into its two result sets (the query
@@ -160,7 +186,10 @@ export interface CoverageQueryResult {
  * polygon-containment refinement X5.md does not specify). Gate finding B-4:
  * a `remark` on this response is a run-stopping error (see
  * `assertNoOverpassRemark`), not an "unmatched" result. */
-export function splitCoverageResponse(response: OverpassResponse, context: string): CoverageQueryResult {
+export function splitCoverageResponse(
+  response: OverpassResponse,
+  context: string,
+): CoverageQueryResult {
   assertNoOverpassRemark(response, context);
   if (!response || !Array.isArray(response.elements)) {
     throw new Error(
@@ -169,10 +198,16 @@ export function splitCoverageResponse(response: OverpassResponse, context: strin
     );
   }
   const matchingElements = response.elements.filter(
-    (e): e is OverpassGeometryElement => e.type === "way" || e.type === "relation",
+    (e): e is OverpassGeometryElement =>
+      e.type === "way" || e.type === "relation",
   );
-  const countEl = response.elements.find((e): e is OverpassCountElement => e.type === "count");
-  const golfHoleWaysInBbox = countEl ? Number(countEl.tags.total) || 0 : 0;
+  const countEl = response.elements.find(
+    (e): e is OverpassCountElement => e.type === "count",
+  );
+  // Gate finding F-N3: a genuinely missing count element is UNKNOWN, not a
+  // confirmed 0 — record `null` rather than silently reporting "0 holes in
+  // bbox" for a response that just never carried the count query's result.
+  const golfHoleWaysInBbox = countEl ? Number(countEl.tags.total) || 0 : null;
   return { matchingElements, golfHoleWaysInBbox };
 }
 
@@ -228,35 +263,44 @@ export type MatchedVia = "point" | "name" | null;
  * way or relation (outer-ring geometry — gate finding B-1: a relation's
  * rings are assembled from its `outer`-role members, not read off a
  * top-level `geometry` that only ways have) matches when EITHER (a) the
- * course's known point lies inside the polygon, OR, when no known point is
- * available, (b) the names match (`namesMatch`, Addendum F's exact
- * normalisation) AND the shortest distance from the course's approximate
- * location to the polygon is ≤ 500 m — 0 when the point is inside the
- * polygon (gate finding B-2: this is polygon distance, never a centroid
- * distance). A known point that ISN'T inside any candidate does not fall
- * back to the name-match branch — X5.md's original "known point vs.
- * approximate location" distinction is unchanged by Addendum F, which only
- * pins the name-normalisation and distance-measurement ambiguities the
- * round-3 gate found (B-1/B-2/B-3), not this branch selection.
+ * course's known point lies inside the polygon, OR (b) the names match
+ * (`namesMatch`, Addendum F's exact normalisation) AND the shortest
+ * distance from the course's point to the polygon is ≤ 500 m — 0 when the
+ * point is inside the polygon (gate finding B-2: this is polygon distance,
+ * never a centroid distance).
+ *
+ * Gate finding F-S1: both branches are evaluated whenever a known point
+ * exists — (a) failing to find a containing polygon does NOT skip (b). The
+ * name branch's distance is measured from the known point when one is
+ * available, and from the listed approximate `lat`/`lon` otherwise (X5.md's
+ * "known point vs. approximate location" distinction still selects which
+ * point feeds the distance measurement; it no longer gates whether (b) runs
+ * at all).
  */
 export function matchCourse(
   course: PilotCandidateCourse,
   elements: OverpassGeometryElement[],
 ): MatchedVia {
-  const withRings = elements.map((el) => ({ el, rings: resolveOuterRings(el) }));
+  const withRings = elements.map((el) => ({
+    el,
+    rings: resolveOuterRings(el),
+  }));
 
   if (course.knownPoint) {
     for (const { rings } of withRings) {
       if (pointInAnyRing(course.knownPoint, rings)) return "point";
     }
-    return null;
   }
 
+  const distancePoint = course.knownPoint ?? {
+    lat: course.lat,
+    lon: course.lon,
+  };
   for (const { el, rings } of withRings) {
     if (rings.length === 0) continue;
     const candidateName = el.tags?.name;
     if (!candidateName || !namesMatch(candidateName, course.name)) continue;
-    const distance = distanceToPolygonMeters({ lat: course.lat, lon: course.lon }, rings);
+    const distance = distanceToPolygonMeters(distancePoint, rings);
     if (distance <= NAME_MATCH_RADIUS_METERS) {
       return "name";
     }
@@ -271,7 +315,9 @@ export function matchCourse(
 export interface CourseCoverageEntry {
   course: PilotCandidateCourse;
   matchedVia: MatchedVia;
-  golfHoleWaysInBbox: number;
+  /** Gate finding F-N3: `null` when unknown (no count element in the
+   * response), never a confirmed 0. */
+  golfHoleWaysInBbox: number | null;
 }
 
 export interface DenominatorEntry {
@@ -354,7 +400,10 @@ export function buildDenominatorEntries(
   return entries;
 }
 
-export function computeCoverage(entries: DenominatorEntry[], warnings: string[] = []): CoverageSummary {
+export function computeCoverage(
+  entries: DenominatorEntry[],
+  warnings: string[] = [],
+): CoverageSummary {
   const matchedCount = entries.filter((e) => e.matched).length;
   const total = entries.length;
   const pct = total === 0 ? 0 : (matchedCount / total) * 100;
@@ -368,7 +417,11 @@ export function computeCoverage(entries: DenominatorEntry[], warnings: string[] 
   }
   for (const [trail, group] of byTrail) {
     const m = group.filter((e) => e.matched).length;
-    perTrail[trail] = { matchedCount: m, total: group.length, pct: group.length === 0 ? 0 : (m / group.length) * 100 };
+    perTrail[trail] = {
+      matchedCount: m,
+      total: group.length,
+      pct: group.length === 0 ? 0 : (m / group.length) * 100,
+    };
   }
 
   return {
@@ -406,7 +459,9 @@ export async function runOverpassQuery(
     });
     if (!res.ok) {
       const bodyText = await res.text().catch(() => "<no body>");
-      throw new Error(`Overpass request failed: HTTP ${res.status} ${res.statusText} — ${bodyText.slice(0, 500)}`);
+      throw new Error(
+        `Overpass request failed: HTTP ${res.status} ${res.statusText} — ${bodyText.slice(0, 500)}`,
+      );
     }
     return (await res.json()) as OverpassResponse;
   } finally {
@@ -430,14 +485,48 @@ function parseFlags(argv: string[]): Record<string, string> {
   return flags;
 }
 
+/**
+ * A saved single-response file — either a bare Overpass response (what
+ * `--from-file` / `--responses` have always accepted, e.g. hand-built for
+ * a test) or the `{query, fetchedAt, response}` envelope that a LIVE run
+ * now writes (gate findings F-S4 / B-5). Accept both shapes so a file a
+ * live run just wrote can always be replayed by the same tool that wrote
+ * it.
+ */
+type SavedResponseEnvelope =
+  | OverpassResponse
+  | { query: string; fetchedAt: string; response: OverpassResponse };
+
+function unwrapSavedResponse(saved: SavedResponseEnvelope): OverpassResponse {
+  if (saved && typeof saved === "object" && "response" in saved) {
+    return (saved as { response: OverpassResponse }).response;
+  }
+  return saved as OverpassResponse;
+}
+
 export async function runNOsm(flags: Record<string, string>): Promise<void> {
   const endpoint = flags.endpoint || DEFAULT_ENDPOINT;
-  const timeoutMs = flags["timeout-ms"] ? Number(flags["timeout-ms"]) : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = flags["timeout-ms"]
+    ? Number(flags["timeout-ms"])
+    : DEFAULT_TIMEOUT_MS;
+  const query = buildNOsmQuery();
   let response: OverpassResponse;
   if (flags["from-file"]) {
-    response = JSON.parse(await readFile(flags["from-file"], "utf8")) as OverpassResponse;
+    const saved = JSON.parse(
+      await readFile(flags["from-file"], "utf8"),
+    ) as SavedResponseEnvelope;
+    response = unwrapSavedResponse(saved);
   } else {
-    response = await runOverpassQuery(buildNOsmQuery(), endpoint, timeoutMs);
+    response = await runOverpassQuery(query, endpoint, timeoutMs);
+    // Gate finding F-S4: "every live response is saved" applies to n-osm
+    // too, not just coverage — save the raw response so this exact run can
+    // be replayed offline via --from-file.
+    const outPrefix = flags.out || "x5-overpass-n-osm-result";
+    await writeFile(
+      `${outPrefix}.json`,
+      `${JSON.stringify({ query, fetchedAt: new Date().toISOString(), response }, null, 2)}\n`,
+      "utf8",
+    );
   }
   const nOsm = parseNOsm(response);
   process.stdout.write(`N_osm (US+CA leisure=golf_course count): ${nOsm}\n`);
@@ -458,22 +547,30 @@ function assertNonEmptyCourseList(courses: PilotCandidateCourse[]): void {
   }
 }
 
-export async function runCoverage(flags: Record<string, string>): Promise<void> {
+export async function runCoverage(
+  flags: Record<string, string>,
+): Promise<void> {
   if (!flags.courses) {
     throw new Error("coverage requires --courses <path-to-courses.json>");
   }
   const endpoint = flags.endpoint || DEFAULT_ENDPOINT;
-  const timeoutMs = flags["timeout-ms"] ? Number(flags["timeout-ms"]) : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = flags["timeout-ms"]
+    ? Number(flags["timeout-ms"])
+    : DEFAULT_TIMEOUT_MS;
   const bboxRadiusMeters = flags["bbox-radius-meters"]
     ? Number(flags["bbox-radius-meters"])
     : DEFAULT_BBOX_RADIUS_METERS;
 
-  const courses = JSON.parse(await readFile(flags.courses, "utf8")) as PilotCandidateCourse[];
+  const courses = JSON.parse(
+    await readFile(flags.courses, "utf8"),
+  ) as PilotCandidateCourse[];
   assertNonEmptyCourseList(courses);
 
-  let savedResponses: Record<string, OverpassResponse> | null = null;
+  let savedResponses: Record<string, SavedResponseEnvelope> | null = null;
   if (flags.responses) {
-    savedResponses = JSON.parse(await readFile(flags.responses, "utf8")) as Record<string, OverpassResponse>;
+    savedResponses = JSON.parse(
+      await readFile(flags.responses, "utf8"),
+    ) as Record<string, SavedResponseEnvelope>;
   }
 
   const outPrefix = flags.out || "x5-overpass-coverage-result";
@@ -483,7 +580,10 @@ export async function runCoverage(flags: Record<string, string>): Promise<void> 
   // Gate finding B-5: in LIVE mode (no --responses), every raw response is
   // saved alongside the result, keyed exactly as --responses expects, so
   // the verdict can be replayed offline / re-audited later.
-  const rawResponsesToSave: Record<string, { query: string; fetchedAt: string; response: OverpassResponse }> = {};
+  const rawResponsesToSave: Record<
+    string,
+    { query: string; fetchedAt: string; response: OverpassResponse }
+  > = {};
 
   for (const course of courses) {
     const key = courseKey(course);
@@ -498,7 +598,10 @@ export async function runCoverage(flags: Record<string, string>): Promise<void> 
             "unmatched (decision 0001 Addendum F: a missing response stops the run).",
         );
       }
-      response = saved;
+      // Gate finding F-S4: accept both the bare-response shape and the
+      // {query, fetchedAt, response} envelope a live run writes, so a
+      // just-saved file round-trips through --responses unmodified.
+      response = unwrapSavedResponse(saved);
     } else {
       // Gate finding B-11: the bbox is centered on knownPoint when the
       // course has one — otherwise a point more than the bbox radius away
@@ -506,7 +609,11 @@ export async function runCoverage(flags: Record<string, string>): Promise<void> 
       const center = course.knownPoint ?? { lat: course.lat, lon: course.lon };
       const query = buildCourseCoverageQuery(center, bboxRadiusMeters);
       response = await runOverpassQuery(query, endpoint, timeoutMs);
-      rawResponsesToSave[key] = { query, fetchedAt: new Date().toISOString(), response };
+      rawResponsesToSave[key] = {
+        query,
+        fetchedAt: new Date().toISOString(),
+        response,
+      };
     }
     const { matchingElements, golfHoleWaysInBbox } = splitCoverageResponse(
       response,
@@ -519,7 +626,11 @@ export async function runCoverage(flags: Record<string, string>): Promise<void> 
   const entries = buildDenominatorEntries(coverage, warnings);
   const summary = computeCoverage(entries, warnings);
 
-  await writeFile(`${outPrefix}.json`, `${JSON.stringify({ coverage, summary }, null, 2)}\n`, "utf8");
+  await writeFile(
+    `${outPrefix}.json`,
+    `${JSON.stringify({ coverage, summary }, null, 2)}\n`,
+    "utf8",
+  );
   if (!savedResponses) {
     await writeFile(
       `${outPrefix}-responses.json`,
@@ -533,10 +644,14 @@ export async function runCoverage(flags: Record<string, string>): Promise<void> 
       `(${summary.combined.pct.toFixed(1)}%) vs ${summary.passBarPct}% bar — ${summary.overallVerdict.toUpperCase()}\n`,
   );
   for (const [trail, tc] of Object.entries(summary.perTrail)) {
-    process.stdout.write(`  ${trail}: ${tc.matchedCount}/${tc.total} (${tc.pct.toFixed(1)}%)\n`);
+    process.stdout.write(
+      `  ${trail}: ${tc.matchedCount}/${tc.total} (${tc.pct.toFixed(1)}%)\n`,
+    );
   }
   if (warnings.length > 0) {
-    process.stderr.write(`Warnings:\n${warnings.map((w) => `  - ${w}`).join("\n")}\n`);
+    process.stderr.write(
+      `Warnings:\n${warnings.map((w) => `  - ${w}`).join("\n")}\n`,
+    );
   }
 }
 

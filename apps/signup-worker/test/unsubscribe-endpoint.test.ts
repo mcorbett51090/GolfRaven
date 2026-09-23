@@ -19,18 +19,25 @@ async function seedConfirmedRow(env: ReturnType<typeof makeTestEnv>) {
     confirm_token_hash: null,
     confirm_expires_at: null,
     unsubscribe_token_hash: hash,
+    unsubscribe_token_hash_prev: null,
   });
 }
 
 function unsubGetRequest(token: string): Request {
-  return new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(token)}`, {
-    method: "GET",
-  });
+  return new Request(
+    `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(token)}`,
+    {
+      method: "GET",
+    },
+  );
 }
 function unsubPostRequest(token: string): Request {
-  return new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(token)}`, {
-    method: "POST",
-  });
+  return new Request(
+    `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(token)}`,
+    {
+      method: "POST",
+    },
+  );
 }
 
 describe("GET /api/unsubscribe", () => {
@@ -60,7 +67,10 @@ describe("POST /api/unsubscribe — one-click (RFC 8058)", () => {
     await handleUnsubscribeSubmit(unsubPostRequest(RAW_TOKEN), env);
     const firstUnsubscribedAt = env.DB.rows[0]?.unsubscribed_at;
 
-    const res2 = await handleUnsubscribeSubmit(unsubPostRequest(RAW_TOKEN), env);
+    const res2 = await handleUnsubscribeSubmit(
+      unsubPostRequest(RAW_TOKEN),
+      env,
+    );
     expect(res2.status).toBe(200);
     expect(env.DB.rows[0]?.unsubscribed_at).toBe(firstUnsubscribedAt);
   });
@@ -68,14 +78,22 @@ describe("POST /api/unsubscribe — one-click (RFC 8058)", () => {
   it("shows a generic invalid message for an unknown token", async () => {
     const env = makeTestEnv();
     await seedConfirmedRow(env);
-    const res = await handleUnsubscribeSubmit(unsubPostRequest("wrong-token"), env);
+    const res = await handleUnsubscribeSubmit(
+      unsubPostRequest("wrong-token"),
+      env,
+    );
     expect(res.status).toBe(400);
     expect(env.DB.rows[0]?.unsubscribed_at).toBeNull();
   });
 
   it("400s with no token", async () => {
     const env = makeTestEnv();
-    const res = await handleUnsubscribeSubmit(new Request("https://golfraven.example/api/unsubscribe", { method: "POST" }), env);
+    const res = await handleUnsubscribeSubmit(
+      new Request("https://golfraven.example/api/unsubscribe", {
+        method: "POST",
+      }),
+      env,
+    );
     expect(res.status).toBe(400);
   });
 });

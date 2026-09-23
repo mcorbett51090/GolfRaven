@@ -23,13 +23,13 @@ each file's header comment says exactly what was reused and why.
 
 ## Endpoints
 
-| Route | Method | What it does |
-|---|---|---|
-| `/api/signup` | POST | Validate, rate-limit, verify Turnstile, upsert a pending row, send the confirmation email **if the send limits allow it** (see "Send limits" below). **Always** returns the same generic `202` — whether the address is new, already pending, already confirmed, or previously unsubscribed, and whether or not an email was actually sent (no account enumeration, no signal that a send was skipped). |
-| `/api/confirm` | GET | Renders a minimal page with a "Confirm" button. Never confirms — so an email-link scanner that GETs the link doesn't trigger it. |
-| `/api/confirm` | POST | Performs the confirmation. **Single-use, not idempotent** (gate finding F4): the token is cleared on success, so a second POST with the same token shows the generic "invalid or already used" page rather than re-confirming. Expired/unknown token → the same generic page. |
-| `/api/unsubscribe` | GET | Renders a page with an "Unsubscribe" button. |
-| `/api/unsubscribe` | POST | Unsubscribes. Idempotent (a second POST is a no-op, still 200). This is also the RFC 8058 one-click target — every email's `List-Unsubscribe`/`List-Unsubscribe-Post` headers point a mail client's automated POST straight here, no page visit needed. |
+| Route              | Method | What it does                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/signup`      | POST   | Validate, rate-limit, verify Turnstile, upsert a pending row, send the confirmation email **if the send limits allow it** (see "Send limits" below). **Always** returns the same generic `202` — whether the address is new, already pending, already confirmed, or previously unsubscribed, and whether or not an email was actually sent (no account enumeration, no signal that a send was skipped). |
+| `/api/confirm`     | GET    | Renders a minimal page with a "Confirm" button. Never confirms — so an email-link scanner that GETs the link doesn't trigger it.                                                                                                                                                                                                                                                                        |
+| `/api/confirm`     | POST   | Performs the confirmation. **Single-use, not idempotent** (gate finding F4): the token is cleared on success, so a second POST with the same token shows the generic "invalid or already used" page rather than re-confirming. Expired/unknown token → the same generic page.                                                                                                                           |
+| `/api/unsubscribe` | GET    | Renders a page with an "Unsubscribe" button.                                                                                                                                                                                                                                                                                                                                                            |
+| `/api/unsubscribe` | POST   | Unsubscribes. Idempotent (a second POST is a no-op, still 200). This is also the RFC 8058 one-click target — every email's `List-Unsubscribe`/`List-Unsubscribe-Post` headers point a mail client's automated POST straight here, no page visit needed.                                                                                                                                                 |
 
 ## Send limits (gate findings F6, N1, N3)
 
@@ -41,9 +41,9 @@ A confirmation email is sent only if ALL of these pass, checked in this order:
    address. This is an intentional abuse brake, not a bug: without SOME ceiling, an attacker who can
    trigger 500+ Turnstile-solved requests could either burn through the Resend plan's quota (a hard
    failure for everyone) or run up its bill. The trade-off is real and visible: once tripped, every
-   *other* legitimate signup that UTC day gets the normal `202` "check your inbox" response but
+   _other_ legitimate signup that UTC day gets the normal `202` "check your inbox" response but
    **no email is ever sent** — there is no user-facing error, only a `console.error("confirmation
-   email skipped by send limit", { reason: "global-send-daily-cap" })` log line. Size the cap to the
+email skipped by send limit", { reason: "global-send-daily-cap" })` log line. Size the cap to the
    Resend plan, and put a Workers Logs alert on that log line if you want to be notified when it trips.
 
 **N1 (BLOCKING, fixed):** none of the three checks above ever invalidates a link that was already
@@ -74,11 +74,11 @@ A brand-new address's very first insert is unaffected (there is no prior emailed
 
 The confirm token and the unsubscribe token behave differently on purpose:
 
-| | Confirm token | Unsubscribe token |
-|---|---|---|
-| Generation | `generateToken()` — 256-bit random | `deriveUnsubscribeToken(TOKEN_PEPPER, email_lc)` — deterministic HMAC-SHA256 |
-| Changes on resend? | Yes — rotates, and the previous one is invalidated | **No** — identical on every send to this address |
-| Single-use? | Yes — cleared on successful confirm | No — reusable, same as any unsubscribe link should be |
+|                    | Confirm token                                      | Unsubscribe token                                                            |
+| ------------------ | -------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Generation         | `generateToken()` — 256-bit random                 | `deriveUnsubscribeToken(TOKEN_PEPPER, email_lc)` — deterministic HMAC-SHA256 |
+| Changes on resend? | Yes — rotates, and the previous one is invalidated | **No** — identical on every send to this address                             |
+| Single-use?        | Yes — cleared on successful confirm                | No — reusable, same as any unsubscribe link should be                        |
 
 A mailbox can hold several confirmation emails at once (the initial send
 plus any resends), and **every one of them must have a working one-click
@@ -98,13 +98,13 @@ It's still unguessable without the pepper — this is a **keyed** HMAC
 short of `TOKEN_PEPPER` lets anyone compute another address's unsubscribe
 link. The stored `unsubscribe_token_hash` is unchanged in shape — still
 `sha256(pepper + ":" + token)` via `hashWithPepper`, looked up the same
-way as before — only *what* gets hashed is now derived rather than random.
+way as before — only _what_ gets hashed is now derived rather than random.
 
 **Rotating `TOKEN_PEPPER`:** because the unsubscribe token is derived from
 the pepper, rotating `TOKEN_PEPPER` changes every address's unsubscribe
-token at once and invalidates every unsubscribe link already sent — **do
-not rotate it casually.** If it must be rotated (suspected compromise, a
-routine security policy), do it as a two-step transition:
+token at once — **do not rotate it casually.** If it must be rotated
+(suspected compromise, a routine security policy), do it as a two-step
+transition:
 
 1. `wrangler secret put TOKEN_PEPPER_PREVIOUS` — set it to the **old**
    `TOKEN_PEPPER` value, THEN
@@ -114,15 +114,36 @@ While `TOKEN_PEPPER_PREVIOUS` is set, `handleUnsubscribeSubmit`
 (`src/index.ts`'s `findRowByRawUnsubscribeToken`) looks a submitted token
 up under the CURRENT pepper first and falls back to the PREVIOUS one, so
 already-emailed unsubscribe links keep working through the transition.
-(This does **not** help the confirm token or the rate-limit IP hash — both
-those are unaffected by an unsubscribe-only concern, and a confirm link
-is short-lived, 48h TTL, so a pepper rotation mid-flight just means the
-small number of confirm links issued in that window go dead, same as
-before this change.) Once every unsubscribe link derived under the old
-pepper has had time to age out — there's no hard expiry on it, so use
-judgement (e.g. keep `TOKEN_PEPPER_PREVIOUS` set for as long as you'd
-reasonably expect a subscriber to still act on an old email, a few
-months, not days) — unset `TOKEN_PEPPER_PREVIOUS` to close the fallback.
+
+**Gate finding F-S7 (migrations/0002_unsubscribe_prev_hash.sql):** a bare
+rotation alone only protects links for a row that never resends again — a
+resend (`rotateAndSendIfAllowed`'s
+`maybeMigrateUnsubscribeHashForPepperRotation`) EMAILS a new,
+current-pepper-derived unsubscribe link, but without this fix the row's
+stored `unsubscribe_token_hash` still held the _previous_ pepper's
+derivation, so that brand-new email's own link 400'd. The fix: the first
+resend after a rotation detects that its row's stored hash matches the
+previous-pepper derivation, moves that OLD hash into a second column
+(`unsubscribe_token_hash_prev`, re-hashed under the _current_ pepper so it
+never again depends on `TOKEN_PEPPER_PREVIOUS`), and writes the new
+current-pepper hash into `unsubscribe_token_hash`.
+`findByUnsubscribeTokenHash` (`src/db.ts`) matches an incoming token
+against EITHER column. Net effect: **every unsubscribe link ever emailed
+to a row keeps working, permanently, once that row has been through one
+resend after the rotation** — not just while `TOKEN_PEPPER_PREVIOUS`
+happens to still be set.
+
+This does **not** help the confirm token or the rate-limit IP hash — both
+those are unaffected by an unsubscribe-only concern, and a confirm link is
+short-lived, 48h TTL, so a pepper rotation mid-flight just means the small
+number of confirm links issued in that window go dead, same as before this
+change. It also does not retroactively migrate a row that never resends —
+`TOKEN_PEPPER_PREVIOUS` is still what protects THAT row's already-emailed
+link, so don't unset it until either (a) every row has resent at least once
+since the rotation, or (b) enough time has passed that any address that
+was going to click an old, unmigrated link already would have (use
+judgement — a few months, not days) and you've accepted the residual risk
+for rows that never resend.
 
 **Deliberately NOT stored anywhere in D1: IP address or user agent.**
 Rate limiting (`src/ratelimit.ts`) lives entirely in KV, keyed by
@@ -145,7 +166,7 @@ A scheduled (cron) handler (`src/index.ts`'s `scheduled`, wired in
 - **Confirmed-but-unsubscribed rows**, more than 30 days past their
   `unsubscribed_at`, are deleted too — but **only once the K2 verdict is
   safely past its recording window** (N2, BLOCKING fix — the previous gate
-  let deletion start as soon as `K2_GATE_CLOSES_AT` parsed to *any* past
+  let deletion start as soon as `K2_GATE_CLOSES_AT` parsed to _any_ past
   date, including malformed values like `"2026"` or `"1"`, which
   `new Date(...)` happily parses to 2026-01-01 / 2001-01-01 and enables
   deletion immediately):
@@ -192,28 +213,41 @@ be filled in first. None of this was run as part of building this
 package; it's the checklist for whoever deploys it.
 
 1. **Create the D1 database and KV namespace:**
+
    ```shell
    npx wrangler@4 d1 create golfraven-signups
    npx wrangler@4 kv namespace create RATE_LIMIT_KV
    ```
+
    Paste the returned `database_id`/`id` into `wrangler.toml`, and set
    `account_id` (`npx wrangler@4 whoami`).
 
 2. **Apply the migration:**
+
    ```shell
    npx wrangler@4 d1 execute golfraven-signups --remote --file=./migrations/0001_create_signups.sql
+   npx wrangler@4 d1 execute golfraven-signups --remote --file=./migrations/0002_unsubscribe_prev_hash.sql
    ```
 
 3. **Set secrets** (never put these in `wrangler.toml`):
+
    ```shell
    npx wrangler@4 secret put RESEND_API_KEY
    npx wrangler@4 secret put TURNSTILE_SECRET
-   npx wrangler@4 secret put TOKEN_PEPPER   # e.g. `openssl rand -hex 32`
+   npx wrangler@4 secret put TOKEN_PEPPER   # `openssl rand -hex 32` — MUST be random, never a
+                                             # passphrase/word-based value (gate finding F-N6): every
+                                             # subscriber's own unsubscribe token is now an offline oracle
+                                             # for this value (see "Unsubscribe token" above), so its only
+                                             # protection is entropy. Enforced minimum: 32 characters.
    ```
+
    Don't rotate `TOKEN_PEPPER` casually once live — it derives the stable
    unsubscribe token (see "Unsubscribe token: stable, not rotated" above),
-   and a rotation invalidates every previously emailed unsubscribe link
-   unless you also set `TOKEN_PEPPER_PREVIOUS` to the old value.
+   and rotating it means setting `TOKEN_PEPPER_PREVIOUS` to the old value
+   first (see "Rotating TOKEN_PEPPER" above for the full transition, and
+   gate finding F-S7 for how a resend keeps every previously-emailed link
+   working through it). `TOKEN_PEPPER_PREVIOUS`, when set, is held to the
+   same 32-character minimum.
 
 4. **Verify the sending domain in Resend** and add its SPF, DKIM and DMARC
    DNS records (this is the P0 external prerequisite `apps/landing`'s
@@ -248,25 +282,35 @@ package; it's the checklist for whoever deploys it.
    allow-list for `https://challenges.cloudflare.com` actually matches what
    Turnstile needs before relying on it end to end in the next step.
 
-9. **List, commit AND PUSH the e2e test address BEFORE running the end-to-end test — not after** (gate
-   finding A-6; this order is the OPPOSITE of the previous "test first, exclude after" step). Day 0
-   is defined as the date the end-to-end test below succeeds, so the test necessarily happens ON day
-   0 — running the test first and excluding the address afterward means the exclusion is committed
-   on day 0 itself, and decision 0001 Addendum F excludes an address only if it FIRST APPEARED
-   strictly BEFORE day 0 00:00 UTC (see "How to run the K2 count" below). Concretely:
+9. **List, commit AND PUSH the e2e test address BEFORE running the end-to-end test — not after — and on
+   a UTC calendar date strictly EARLIER than the day the test runs** (gate finding A-6, and its gate-final
+   residual: exclusion requires the address's first appearance to be strictly BEFORE day 0 00:00 UTC,
+   and day 0 is defined as the date the end-to-end test below succeeds — so committing+pushing and
+   testing on the SAME UTC day still fails the "strictly before" rule, even though the commit came
+   first within that day). Concretely:
    1. Decide the test address (e.g. `test-e2e@golfraven.example`), add it to `docs/p0/K2.md`'s
       "Excluded addresses" section, and **commit and `git push` that change** — a local commit alone
       isn't enough; per Addendum F's "Known limit", the pushed-to-GitHub copy is the actual server-side
       record that makes the exclusion checkable (git commit timestamps are otherwise self-asserted by
       whoever makes the commit).
-   2. **Only then** submit the landing page's form for real using that address, confirm the email
-      arrives (check spam too), click confirm, and confirm the row's `confirmed_at` is set
-      (`npx wrangler@4 d1 execute golfraven-signups --remote --command "SELECT email_lc, confirmed_at FROM signups"`).
-   3. **Only then** log day 0 in `docs/p0/K2.md`, before any promotion (decision 0001 Addendum D R3)
-      — this package does not, and should not, set that date itself. Once day 0 is logged, also set
-      `K2_GATE_CLOSES_AT` **and** `K2_DAY0` in `wrangler.toml` (`K2_DAY0` = day 0 verbatim,
-      `K2_GATE_CLOSES_AT` = day 0 + 42 days — see "Data retention" above, gate finding A-3: the
-      retention cron refuses to delete anything unless both are set AND consistent) and redeploy.
+   2. **Wait until the NEXT UTC calendar date** (check the current UTC date — e.g. `date -u
++%Y-%m-%d` — and wait for it to roll over) before doing anything else in this step. The exclusion
+      commit's UTC date must be strictly earlier than the day the e2e test runs, because that test day
+      becomes day 0.
+   3. **Only then**, on that later UTC date, submit the landing page's form for real using the test
+      address, confirm the email arrives (check spam too), click confirm, and confirm the row's
+      `confirmed_at` is set (`npx wrangler@4 d1 execute golfraven-signups --remote --command "SELECT
+email_lc, confirmed_at FROM signups"`).
+   4. **Only then** log THAT day (the day the test ran and succeeded) as day 0 in `docs/p0/K2.md`,
+      before any promotion (decision 0001 Addendum D R3) — this package does not, and should not, set
+      that date itself. Once day 0 is logged, also set `K2_GATE_CLOSES_AT` **and** `K2_DAY0` in
+      `wrangler.toml` (`K2_DAY0` = day 0 verbatim, `K2_GATE_CLOSES_AT` = day 0 + 42 days — see "Data
+      retention" above, gate finding A-3: the retention cron refuses to delete anything unless both are
+      set AND consistent) and redeploy.
+   5. `scripts/k2-count.mjs` now prints a **WARNING** naming any excluded address whose first
+      appearance lands ON day 0 itself (correctly NOT excluded, per Addendum F's "strictly before") —
+      if that warning names the test address, step 2's wait didn't happen; redo the exclusion commit on
+      an earlier UTC date and re-run the test.
 
 ## How to run the K2 count
 

@@ -55,6 +55,8 @@
  * convention X1.md itself quotes.
  */
 import { createReadStream, existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import path from "node:path";
 import sax from "sax";
 
 export const GOLF_ACTIVITY_TYPE = "HKWorkoutActivityTypeGolf";
@@ -87,11 +89,55 @@ export interface ParseHealthExportResult {
 }
 
 /**
+ * Gate finding F-N7 (the second half of B-8's fix): lists the `.gpx` files
+ * actually sitting in the export's `workout-routes/` directory (a sibling
+ * of `export.xml` in the real Apple Health export bundle
+ * `[unverified — training knowledge]`) and returns the basenames of any
+ * that no `<Workout>`'s `routeFileReferencePath` references. Returns `[]`
+ * (never throws) when that directory doesn't exist at all — a synthetic
+ * test fixture, or an export bundle laid out differently, is not itself a
+ * shape error.
+ */
+async function findUnreferencedGpxFiles(
+  xmlPath: string,
+  workouts: RawIosWorkout[],
+): Promise<string[]> {
+  const routesDir = path.join(path.dirname(xmlPath), "workout-routes");
+  if (!existsSync(routesDir)) return [];
+
+  const referenced = new Set(
+    workouts
+      .map((w) => w.routeFileReferencePath)
+      .filter((p): p is string => Boolean(p))
+      .map((p) => path.basename(p)),
+  );
+  const entries = await readdir(routesDir);
+  const gpxFiles = entries.filter((f) => f.toLowerCase().endsWith(".gpx"));
+  return gpxFiles.filter((f) => !referenced.has(f));
+}
+
+export interface ParseHealthExportXmlOptions {
+  /**
+   * Gate finding F-N7: also check the export's `workout-routes/` directory
+   * (a sibling of `xmlPath`) for `.gpx` files no `<Workout>` references at
+   * all, and throw if any are found. Defaults to `false` — a synthetic
+   * test fixture (or any other caller not laid out as a real, one-per-bundle
+   * Apple Health export directory) should not be checked against a
+   * `workout-routes/` directory that may be shared with, or absent for,
+   * other fixtures. The real CLI (`x1-ios-export.ts`) passes `true`.
+   */
+  checkUnreferencedGpxFiles?: boolean;
+}
+
+/**
  * Streams `xmlPath` and returns every `<Workout>` element found, with a
  * loud failure (see module doc) instead of a silent empty result when the
  * file's shape doesn't match what this parser expects.
  */
-export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExportResult> {
+export function parseHealthExportXml(
+  xmlPath: string,
+  opts: ParseHealthExportXmlOptions = {},
+): Promise<ParseHealthExportResult> {
   if (!existsSync(xmlPath)) {
     return Promise.reject(new Error(`export.xml not found at ${xmlPath}`));
   }
@@ -129,68 +175,75 @@ export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExport
     // loudly instead of silently reporting zero routes.
     let siblingWorkoutRouteCount = 0;
 
-    parser.on("opentag", (node: { name: string; attributes: Record<string, string> }) => {
-      depth += 1;
-      if (rootTag === null) {
-        rootTag = node.name;
-        if (rootTag !== "HealthData") {
-          fail(
-            new HealthExportShapeError(
-              `Unexpected root element <${rootTag}> in export.xml — expected <HealthData> ` +
-                `[unverified — training knowledge]. This export.xml does not look like an Apple ` +
-                `Health export, or Apple's format has changed; refusing to report a possibly-empty ` +
-                `result silently.`,
-            ),
-          );
+    parser.on(
+      "opentag",
+      (node: { name: string; attributes: Record<string, string> }) => {
+        depth += 1;
+        if (rootTag === null) {
+          rootTag = node.name;
+          if (rootTag !== "HealthData") {
+            fail(
+              new HealthExportShapeError(
+                `Unexpected root element <${rootTag}> in export.xml — expected <HealthData> ` +
+                  `[unverified — training knowledge]. This export.xml does not look like an Apple ` +
+                  `Health export, or Apple's format has changed; refusing to report a possibly-empty ` +
+                  `result silently.`,
+              ),
+            );
+          }
+          return;
         }
-        return;
-      }
 
-      if (node.name === "Workout") {
-        totalWorkoutElementsSeen += 1;
-        const a = node.attributes;
-        if (a.workoutActivityType) {
-          totalWorkoutElementsWithActivityType += 1;
+        if (node.name === "Workout") {
+          totalWorkoutElementsSeen += 1;
+          const a = node.attributes;
+          if (a.workoutActivityType) {
+            totalWorkoutElementsWithActivityType += 1;
+          }
+          currentWorkout = {
+            workoutActivityType: a.workoutActivityType ?? "",
+            sourceName: a.sourceName ?? "",
+            sourceVersion: a.sourceVersion ?? null,
+            device: a.device ?? null,
+            creationDate: a.creationDate ?? null,
+            startDate: a.startDate ?? null,
+            endDate: a.endDate ?? null,
+            duration: a.duration ?? null,
+            durationUnit: a.durationUnit ?? null,
+            hasWorkoutRoute: false,
+            routeFileReferencePath: null,
+          };
+          insideWorkoutRoute = false;
+          return;
         }
-        currentWorkout = {
-          workoutActivityType: a.workoutActivityType ?? "",
-          sourceName: a.sourceName ?? "",
-          sourceVersion: a.sourceVersion ?? null,
-          device: a.device ?? null,
-          creationDate: a.creationDate ?? null,
-          startDate: a.startDate ?? null,
-          endDate: a.endDate ?? null,
-          duration: a.duration ?? null,
-          durationUnit: a.durationUnit ?? null,
-          hasWorkoutRoute: false,
-          routeFileReferencePath: null,
-        };
-        insideWorkoutRoute = false;
-        return;
-      }
 
-      if (node.name === "WorkoutRoute") {
-        if (currentWorkout) {
-          insideWorkoutRoute = true;
-          currentWorkout.hasWorkoutRoute = true;
-        } else {
-          // B-8: a <WorkoutRoute> outside any <Workout> — the sibling shape
-          // this reader does not (and, per the module doc, cannot safely)
-          // support. Counted now; the parse fails loudly once complete
-          // (see the closetag handler) rather than mid-stream, so the
-          // error message can report how many were seen.
-          siblingWorkoutRouteCount += 1;
+        if (node.name === "WorkoutRoute") {
+          if (currentWorkout) {
+            insideWorkoutRoute = true;
+            currentWorkout.hasWorkoutRoute = true;
+          } else {
+            // B-8: a <WorkoutRoute> outside any <Workout> — the sibling shape
+            // this reader does not (and, per the module doc, cannot safely)
+            // support. Counted now; the parse fails loudly once complete
+            // (see the closetag handler) rather than mid-stream, so the
+            // error message can report how many were seen.
+            siblingWorkoutRouteCount += 1;
+          }
+          return;
         }
-        return;
-      }
 
-      if (node.name === "FileReference" && insideWorkoutRoute && currentWorkout) {
-        if (node.attributes.path) {
-          currentWorkout.routeFileReferencePath = node.attributes.path;
+        if (
+          node.name === "FileReference" &&
+          insideWorkoutRoute &&
+          currentWorkout
+        ) {
+          if (node.attributes.path) {
+            currentWorkout.routeFileReferencePath = node.attributes.path;
+          }
+          return;
         }
-        return;
-      }
-    });
+      },
+    );
 
     parser.on("closetag", (name: string) => {
       depth -= 1;
@@ -203,7 +256,10 @@ export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExport
       }
       if (depth === 0 && rootTag !== null) {
         // Closed the root element — parsing is complete.
-        if (totalWorkoutElementsSeen > 0 && totalWorkoutElementsWithActivityType === 0) {
+        if (
+          totalWorkoutElementsSeen > 0 &&
+          totalWorkoutElementsWithActivityType === 0
+        ) {
           fail(
             new HealthExportShapeError(
               `Found ${totalWorkoutElementsSeen} <Workout> element(s) in export.xml, but none carry ` +
@@ -226,7 +282,44 @@ export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExport
           );
           return;
         }
-        succeed({ rootTag, totalWorkoutElementsSeen, workouts });
+        // Captured as a const: TS's null-narrowing of the mutable `rootTag`
+        // doesn't survive into the async `.then()` closure below.
+        const resolvedRootTag: string = rootTag;
+        if (!opts.checkUnreferencedGpxFiles) {
+          succeed({
+            rootTag: resolvedRootTag,
+            totalWorkoutElementsSeen,
+            workouts,
+          });
+          return;
+        }
+        // Gate finding F-N7 (B-8's second half): a GPX file present in the
+        // export's workout-routes/ directory that NO <Workout> references
+        // at all — never caught by the per-workout checks above, since
+        // there's no workout element to attach it to. Async, so chain it
+        // rather than resolving inline.
+        findUnreferencedGpxFiles(xmlPath, workouts)
+          .then((unreferenced) => {
+            if (unreferenced.length > 0) {
+              fail(
+                new HealthExportShapeError(
+                  `Found ${unreferenced.length} GPX file(s) in workout-routes/ that no <Workout> element ` +
+                    `references at all (gate finding F-N7): ${unreferenced.join(", ")}. Refusing to silently ` +
+                    "ignore a route this export clearly recorded — update health-export-xml.ts once the " +
+                    "real cause (an unlinked route, or a shape this parser doesn't yet correlate) is known.",
+                ),
+              );
+              return;
+            }
+            succeed({
+              rootTag: resolvedRootTag,
+              totalWorkoutElementsSeen,
+              workouts,
+            });
+          })
+          .catch((err: unknown) =>
+            fail(err instanceof Error ? err : new Error(String(err))),
+          );
       }
     });
 
@@ -274,6 +367,8 @@ export function countGpxTrackpoints(
       tail = combined.slice(Math.max(0, combined.length - (NEEDLE.length - 1)));
     });
     stream.on("end", () => resolve({ exists: true, count }));
-    stream.on("error", (err) => reject(new Error(`Failed to read ${gpxPath}: ${err.message}`)));
+    stream.on("error", (err) =>
+      reject(new Error(`Failed to read ${gpxPath}: ${err.message}`)),
+    );
   });
 }

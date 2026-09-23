@@ -20,9 +20,19 @@ export interface SignupRow {
   confirm_token_hash: string | null;
   confirm_expires_at: string | null;
   unsubscribe_token_hash: string;
+  /** Gate finding F-S7 / migrations/0002_unsubscribe_prev_hash.sql: the
+   * row's PRIOR `unsubscribe_token_hash`, preserved here once a resend
+   * detects the pepper rotated, so every unsubscribe link ever emailed
+   * keeps matching even after `Env.TOKEN_PEPPER_PREVIOUS` is later unset —
+   * see `rotateUnsubscribeTokenHashForPepperRotation` in index.ts. NULL
+   * until the first resend after a rotation. */
+  unsubscribe_token_hash_prev: string | null;
 }
 
-export async function findByEmailLc(db: D1Like, emailLc: string): Promise<SignupRow | null> {
+export async function findByEmailLc(
+  db: D1Like,
+  emailLc: string,
+): Promise<SignupRow | null> {
   const row = await db
     .prepare("SELECT * FROM signups WHERE email_lc = ?1")
     .bind(emailLc)
@@ -57,7 +67,10 @@ function extractChanges(result: unknown): number {
  * Returns `inserted: false` in that case so the caller can re-read the row
  * and fall through to the rotate-and-resend path instead.
  */
-export async function createPendingSignup(db: D1Like, p: NewSignupParams): Promise<{ inserted: boolean }> {
+export async function createPendingSignup(
+  db: D1Like,
+  p: NewSignupParams,
+): Promise<{ inserted: boolean }> {
   const result = await db
     .prepare(
       `INSERT INTO signups
@@ -95,18 +108,30 @@ export interface RotateTokenParams {
  * `confirmed_at`/`unsubscribed_at` — those only change when the new token
  * is actually confirmed (index.ts handleConfirmSubmit).
  */
-export async function rotateConfirmToken(db: D1Like, p: RotateTokenParams): Promise<void> {
+export async function rotateConfirmToken(
+  db: D1Like,
+  p: RotateTokenParams,
+): Promise<void> {
   await db
     .prepare(
       `UPDATE signups
          SET consent_version = ?2, source = ?3, confirm_token_hash = ?4, confirm_expires_at = ?5
        WHERE id = ?1`,
     )
-    .bind(p.id, p.consentVersion, p.source, p.confirmTokenHash, p.confirmExpiresAt)
+    .bind(
+      p.id,
+      p.consentVersion,
+      p.source,
+      p.confirmTokenHash,
+      p.confirmExpiresAt,
+    )
     .run();
 }
 
-export async function findByConfirmTokenHash(db: D1Like, hash: string): Promise<SignupRow | null> {
+export async function findByConfirmTokenHash(
+  db: D1Like,
+  hash: string,
+): Promise<SignupRow | null> {
   const row = await db
     .prepare("SELECT * FROM signups WHERE confirm_token_hash = ?1")
     .bind(hash)
@@ -134,7 +159,11 @@ export async function findByConfirmTokenHash(db: D1Like, hash: string): Promise<
  *     the "confirm, unsubscribe, then replay the old link" re-subscribe
  *     hole the old (idempotent-forever) behavior allowed.
  */
-export async function recordConfirmation(db: D1Like, id: string, confirmedAt: string): Promise<void> {
+export async function recordConfirmation(
+  db: D1Like,
+  id: string,
+  confirmedAt: string,
+): Promise<void> {
   await db
     .prepare(
       `UPDATE signups
@@ -148,15 +177,60 @@ export async function recordConfirmation(db: D1Like, id: string, confirmedAt: st
     .run();
 }
 
-export async function findByUnsubscribeTokenHash(db: D1Like, hash: string): Promise<SignupRow | null> {
+/**
+ * Gate finding F-S7: matches the incoming token's hash against EITHER
+ * `unsubscribe_token_hash` OR `unsubscribe_token_hash_prev` (both indexed —
+ * migrations/0002_unsubscribe_prev_hash.sql) — a row that has been through
+ * one pepper-rotation-triggered resend has its OLD hash preserved in the
+ * `_prev` column, so an older still-in-a-mailbox email's link keeps
+ * matching without needing `Env.TOKEN_PEPPER_PREVIOUS` to still be set.
+ */
+export async function findByUnsubscribeTokenHash(
+  db: D1Like,
+  hash: string,
+): Promise<SignupRow | null> {
   const row = await db
-    .prepare("SELECT * FROM signups WHERE unsubscribe_token_hash = ?1")
+    .prepare(
+      "SELECT * FROM signups WHERE unsubscribe_token_hash = ?1 OR unsubscribe_token_hash_prev = ?1",
+    )
     .bind(hash)
     .first<SignupRow>();
   return row ?? null;
 }
 
-export async function markUnsubscribed(db: D1Like, id: string, unsubscribedAt: string): Promise<void> {
+export interface RotateUnsubscribeTokenHashParams {
+  id: string;
+  unsubscribeTokenHash: string;
+  unsubscribeTokenHashPrev: string;
+}
+
+/**
+ * Gate finding F-S7: called on a resend when the row's stored
+ * `unsubscribe_token_hash` is found to have been derived under
+ * `Env.TOKEN_PEPPER_PREVIOUS` (a pepper rotation happened since this row
+ * was last written) — moves that prior hash into `unsubscribe_token_hash_prev`
+ * (permanently, so it survives `TOKEN_PEPPER_PREVIOUS` later being unset)
+ * and stores the current-pepper derivation in `unsubscribe_token_hash`.
+ */
+export async function rotateUnsubscribeTokenHashForPepperRotation(
+  db: D1Like,
+  p: RotateUnsubscribeTokenHashParams,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE signups
+         SET unsubscribe_token_hash = ?2, unsubscribe_token_hash_prev = ?3
+       WHERE id = ?1`,
+    )
+    .bind(p.id, p.unsubscribeTokenHash, p.unsubscribeTokenHashPrev)
+    .run();
+}
+
+export async function markUnsubscribed(
+  db: D1Like,
+  id: string,
+  unsubscribedAt: string,
+): Promise<void> {
   await db
     .prepare("UPDATE signups SET unsubscribed_at = ?2 WHERE id = ?1")
     .bind(id, unsubscribedAt)
@@ -176,7 +250,11 @@ export async function markUnsubscribed(db: D1Like, id: string, unsubscribedAt: s
  * `created_at`, so a `created_at`-only cutoff could delete a row out from
  * under a link someone can still legitimately click.
  */
-export async function deleteStaleUnconfirmed(db: D1Like, createdBeforeIso: string, nowIso: string): Promise<number> {
+export async function deleteStaleUnconfirmed(
+  db: D1Like,
+  createdBeforeIso: string,
+  nowIso: string,
+): Promise<number> {
   const result = await db
     .prepare(
       `DELETE FROM signups
@@ -196,9 +274,14 @@ export async function deleteStaleUnconfirmed(db: D1Like, createdBeforeIso: strin
  * function a cutoff only after `Env.K2_GATE_CLOSES_AT` has passed; it
  * never calls this at all while that var is unset).
  */
-export async function deleteStaleUnsubscribed(db: D1Like, unsubscribedBeforeIso: string): Promise<number> {
+export async function deleteStaleUnsubscribed(
+  db: D1Like,
+  unsubscribedBeforeIso: string,
+): Promise<number> {
   const result = await db
-    .prepare("DELETE FROM signups WHERE unsubscribed_at IS NOT NULL AND unsubscribed_at < ?1")
+    .prepare(
+      "DELETE FROM signups WHERE unsubscribed_at IS NOT NULL AND unsubscribed_at < ?1",
+    )
     .bind(unsubscribedBeforeIso)
     .run();
   return extractChanges(result);

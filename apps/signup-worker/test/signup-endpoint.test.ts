@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SIGNUP_EMAIL_DAILY_CAP } from "../src/config";
-import { handleConfirmSubmit, handleSignup, handleUnsubscribeSubmit } from "../src/index";
+import {
+  handleConfirmSubmit,
+  handleSignup,
+  handleUnsubscribeSubmit,
+} from "../src/index";
 import { generateToken, hashWithPepper } from "../src/tokens";
 import { makeTestEnv } from "./env";
 import { resendCalls, stubExternalFetch } from "./fetch-mock";
@@ -11,12 +15,21 @@ import { resendCalls, stubExternalFetch } from "./fetch-mock";
  * HASHES aren't directly comparable) — see buildConfirmationEmail in
  * src/email.ts for the exact shapes these are extracted from.
  */
-function tokensFromResendCall(call: unknown): { confirmToken: string; unsubscribeToken: string } {
+function tokensFromResendCall(call: unknown): {
+  confirmToken: string;
+  unsubscribeToken: string;
+} {
   const [, init] = call as [unknown, { body: string }];
-  const body = JSON.parse(init.body) as { html: string; headers: { "List-Unsubscribe": string } };
+  const body = JSON.parse(init.body) as {
+    html: string;
+    headers: { "List-Unsubscribe": string };
+  };
   const confirmMatch = body.html.match(/\/api\/confirm\?token=([^"&]+)/);
-  const unsubMatch = body.headers["List-Unsubscribe"].match(/\/api\/unsubscribe\?token=([^>]+)/);
-  if (!confirmMatch || !unsubMatch) throw new Error("could not extract tokens from captured Resend call");
+  const unsubMatch = body.headers["List-Unsubscribe"].match(
+    /\/api\/unsubscribe\?token=([^>]+)/,
+  );
+  if (!confirmMatch || !unsubMatch)
+    throw new Error("could not extract tokens from captured Resend call");
   return {
     confirmToken: decodeURIComponent(confirmMatch[1]!),
     unsubscribeToken: decodeURIComponent(unsubMatch[1]!),
@@ -27,7 +40,11 @@ function jsonText(body: unknown): string {
   return JSON.stringify(body);
 }
 
-function signupRequest(body: unknown, ip = "203.0.113.10", extraHeaders: Record<string, string> = {}): Request {
+function signupRequest(
+  body: unknown,
+  ip = "203.0.113.10",
+  extraHeaders: Record<string, string> = {},
+): Request {
   const text = jsonText(body);
   return new Request("https://golfraven.example/api/signup", {
     method: "POST",
@@ -51,7 +68,11 @@ function signupRequest(body: unknown, ip = "203.0.113.10", extraHeaders: Record<
 function makeWaitUntilCtx() {
   const waited: Promise<unknown>[] = [];
   return {
-    ctx: { waitUntil: (p: Promise<unknown>) => { waited.push(p); } },
+    ctx: {
+      waitUntil: (p: Promise<unknown>) => {
+        waited.push(p);
+      },
+    },
     flush: () => Promise.all(waited),
   };
 }
@@ -76,7 +97,10 @@ describe("POST /api/signup — validation", () => {
     const res = await handleSignup(
       new Request("https://golfraven.example/api/signup", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": String(badText.length) },
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": String(badText.length),
+        },
         body: badText,
       }),
       env,
@@ -89,7 +113,11 @@ describe("POST /api/signup — validation", () => {
     const fetchMock = stubExternalFetch({});
     const env = makeTestEnv();
     const { ctx } = makeWaitUntilCtx();
-    const res = await handleSignup(signupRequest({ ...VALID_BODY, ageConfirmed: false }), env, ctx);
+    const res = await handleSignup(
+      signupRequest({ ...VALID_BODY, ageConfirmed: false }),
+      env,
+      ctx,
+    );
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -137,7 +165,10 @@ describe("POST /api/signup — body limits (F10, N5)", () => {
     const res = await handleSignup(
       new Request("https://golfraven.example/api/signup", {
         method: "POST",
-        headers: { "Content-Type": "application/json; charset=utf-8", "CF-Connecting-IP": "203.0.113.10" },
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "CF-Connecting-IP": "203.0.113.10",
+        },
         body: jsonText(VALID_BODY),
       }),
       env,
@@ -154,7 +185,10 @@ describe("POST /api/signup — body limits (F10, N5)", () => {
     const res = await handleSignup(
       new Request("https://golfraven.example/api/signup", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.11" },
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "203.0.113.11",
+        },
         body: jsonText(VALID_BODY),
       }),
       env,
@@ -186,7 +220,10 @@ describe("POST /api/signup — body limits (F10, N5)", () => {
     const res = await handleSignup(
       new Request("https://golfraven.example/api/signup", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": "not-a-number" },
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": "not-a-number",
+        },
         body: jsonText(VALID_BODY),
       }),
       env,
@@ -250,12 +287,20 @@ describe("POST /api/signup — order of checks (F5)", () => {
     for (let i = 0; i < SIGNUP_EMAIL_DAILY_CAP + 2; i += 1) {
       const { ctx } = makeWaitUntilCtx();
       // Different IPs so only the per-email cap is at stake, not the per-IP one.
-      const res = await handleSignup(signupRequest(VALID_BODY, `198.51.100.${i}`), env, ctx);
+      const res = await handleSignup(
+        signupRequest(VALID_BODY, `198.51.100.${i}`),
+        env,
+        ctx,
+      );
       expect(res.status).toBe(400);
     }
     stubExternalFetch({ turnstileOk: true });
     const { ctx, flush } = makeWaitUntilCtx();
-    const res = await handleSignup(signupRequest(VALID_BODY, "203.0.113.200"), env, ctx);
+    const res = await handleSignup(
+      signupRequest(VALID_BODY, "203.0.113.200"),
+      env,
+      ctx,
+    );
     // If the email slot had been spent by the attacker's failed-Turnstile
     // attempts above, this would 429 instead of 202.
     expect(res.status).toBe(202);
@@ -271,7 +316,14 @@ describe("POST /api/signup — rate limiting", () => {
     let lastStatus = 0;
     for (let i = 0; i < 21; i += 1) {
       const { ctx } = makeWaitUntilCtx();
-      const res = await handleSignup(signupRequest({ ...VALID_BODY, email: `user${i}@example.com` }, "203.0.113.55"), env, ctx);
+      const res = await handleSignup(
+        signupRequest(
+          { ...VALID_BODY, email: `user${i}@example.com` },
+          "203.0.113.55",
+        ),
+        env,
+        ctx,
+      );
       lastStatus = res.status;
     }
     // SIGNUP_IP_DAILY_CAP is 20 — the 21st distinct-email request from the
@@ -285,7 +337,11 @@ describe("POST /api/signup — rate limiting", () => {
     let lastStatus = 0;
     for (let i = 0; i < SIGNUP_EMAIL_DAILY_CAP + 1; i += 1) {
       const { ctx } = makeWaitUntilCtx();
-      const res = await handleSignup(signupRequest(VALID_BODY, `203.0.113.${60 + i}`), env, ctx);
+      const res = await handleSignup(
+        signupRequest(VALID_BODY, `203.0.113.${60 + i}`),
+        env,
+        ctx,
+      );
       lastStatus = res.status;
     }
     expect(lastStatus).toBe(429);
@@ -299,7 +355,11 @@ describe("POST /api/signup — rate limiting", () => {
       const { ctx } = makeWaitUntilCtx();
       // Same /64, low 64 bits rotate every request.
       const ip = `2001:db8:abcd:1234:${i.toString(16)}::1`;
-      const res = await handleSignup(signupRequest({ ...VALID_BODY, email: `v6user${i}@example.com` }, ip), env, ctx);
+      const res = await handleSignup(
+        signupRequest({ ...VALID_BODY, email: `v6user${i}@example.com` }, ip),
+        env,
+        ctx,
+      );
       lastStatus = res.status;
     }
     expect(lastStatus).toBe(429);
@@ -314,7 +374,12 @@ describe("POST /api/signup — timing oracle (F2)", () => {
       resolveResend = resolve;
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
       if (url.includes("challenges.cloudflare.com")) {
         return new Response(JSON.stringify({ success: true }), { status: 200 });
       }
@@ -330,7 +395,9 @@ describe("POST /api/signup — timing oracle (F2)", () => {
     const res = await handleSignup(signupRequest(VALID_BODY), env, ctx);
     expect(res.status).toBe(202);
 
-    resolveResend(new Response(JSON.stringify({ id: "re_bg" }), { status: 200 }));
+    resolveResend(
+      new Response(JSON.stringify({ id: "re_bg" }), { status: 200 }),
+    );
     await flush();
     expect(env.DB.rows).toHaveLength(1);
     expect(env.DB.rows[0]?.confirm_token_hash).not.toBeNull(); // not confirmed yet, still pending
@@ -350,10 +417,15 @@ describe("POST /api/signup — timing oracle (F2)", () => {
       confirm_token_hash: null,
       confirm_expires_at: null,
       unsubscribe_token_hash: "irrelevant-hash",
+      unsubscribe_token_hash_prev: null,
     });
     const fetchMock = stubExternalFetch({});
     const { ctx, flush } = makeWaitUntilCtx();
-    const res = await handleSignup(signupRequest({ ...VALID_BODY, email: "confirmed@example.com" }), env, ctx);
+    const res = await handleSignup(
+      signupRequest({ ...VALID_BODY, email: "confirmed@example.com" }),
+      env,
+      ctx,
+    );
     expect(res.status).toBe(202);
     await flush();
     expect(resendCalls(fetchMock)).toHaveLength(0);
@@ -389,9 +461,14 @@ describe("POST /api/signup — enumeration safety + upsert cases", () => {
       confirm_token_hash: null,
       confirm_expires_at: null,
       unsubscribe_token_hash: "irrelevant-hash",
+      unsubscribe_token_hash_prev: null,
     });
     const { ctx: ctxB, flush: flushB } = makeWaitUntilCtx();
-    const resB = await handleSignup(signupRequest({ ...VALID_BODY, email: "confirmed@example.com" }), env, ctxB);
+    const resB = await handleSignup(
+      signupRequest({ ...VALID_BODY, email: "confirmed@example.com" }),
+      env,
+      ctxB,
+    );
     const bodyB = await resB.json();
     expect(resB.status).toBe(202);
     expect(bodyB).toEqual(bodyA);
@@ -437,6 +514,7 @@ describe("POST /api/signup — enumeration safety + upsert cases", () => {
       confirm_token_hash: null,
       confirm_expires_at: null,
       unsubscribe_token_hash: "old-hash",
+      unsubscribe_token_hash_prev: null,
     });
 
     const { ctx, flush } = makeWaitUntilCtx();
@@ -453,7 +531,6 @@ describe("POST /api/signup — enumeration safety + upsert cases", () => {
     expect(env.DB.rows[0]?.confirmed_at).toBe(originalConfirmedAt);
     expect(resendCalls(fetchMock)).toHaveLength(1);
   });
-
 });
 
 // F3's "concurrent insert never 500s" guarantee (ON CONFLICT DO NOTHING +
@@ -482,14 +559,24 @@ describe("POST /api/signup — resend send limits (F6)", () => {
     const env = makeTestEnv({ GLOBAL_DAILY_SEND_CAP: "1" });
     const fetchMock = stubExternalFetch({});
     const { ctx: ctx1, flush: flush1 } = makeWaitUntilCtx();
-    const res1 = await handleSignup(signupRequest({ ...VALID_BODY, email: "first@example.com" }), env, ctx1);
+    const res1 = await handleSignup(
+      signupRequest({ ...VALID_BODY, email: "first@example.com" }),
+      env,
+      ctx1,
+    );
     await flush1();
     expect(res1.status).toBe(202);
     expect(resendCalls(fetchMock)).toHaveLength(1);
 
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const { ctx: ctx2, flush: flush2 } = makeWaitUntilCtx();
-    const res2 = await handleSignup(signupRequest({ ...VALID_BODY, email: "second@example.com" }), env, ctx2);
+    const res2 = await handleSignup(
+      signupRequest({ ...VALID_BODY, email: "second@example.com" }),
+      env,
+      ctx2,
+    );
     await flush2();
     expect(res2.status).toBe(202);
     expect(resendCalls(fetchMock)).toHaveLength(1); // the second send was skipped
@@ -511,7 +598,9 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
     await handleSignup(signupRequest(VALID_BODY), env, ctx1);
     await flush1();
     expect(resendCalls(fetchMock)).toHaveLength(1);
-    const { confirmToken, unsubscribeToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+    const { confirmToken, unsubscribeToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
     const rowAfterFirstSend = { ...env.DB.rows[0]! };
 
     // Re-submit immediately — still inside the 10-minute cooldown, so the
@@ -525,14 +614,21 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
 
     // N1: the row's tokens must be BYTE-IDENTICAL to what they were right
     // after the first (and only) send — a skipped send must never rotate.
-    expect(env.DB.rows[0]?.confirm_token_hash).toBe(rowAfterFirstSend.confirm_token_hash);
-    expect(env.DB.rows[0]?.unsubscribe_token_hash).toBe(rowAfterFirstSend.unsubscribe_token_hash);
+    expect(env.DB.rows[0]?.confirm_token_hash).toBe(
+      rowAfterFirstSend.confirm_token_hash,
+    );
+    expect(env.DB.rows[0]?.unsubscribe_token_hash).toBe(
+      rowAfterFirstSend.unsubscribe_token_hash,
+    );
 
     // The confirm link from the ONLY email actually sent must still work.
     const confirmRes = await handleConfirmSubmit(
-      new Request(`https://golfraven.example/api/confirm?token=${encodeURIComponent(confirmToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/confirm?token=${encodeURIComponent(confirmToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(confirmRes.status).toBe(200);
@@ -540,9 +636,12 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
 
     // The one-click unsubscribe link from that same email must also still work.
     const unsubRes = await handleUnsubscribeSubmit(
-      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(unsubRes.status).toBe(200);
@@ -555,7 +654,11 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
 
     // Burn the global cap with a different address first.
     const { ctx: burnCtx, flush: burnFlush } = makeWaitUntilCtx();
-    await handleSignup(signupRequest({ ...VALID_BODY, email: "other@example.com" }), env, burnCtx);
+    await handleSignup(
+      signupRequest({ ...VALID_BODY, email: "other@example.com" }),
+      env,
+      burnCtx,
+    );
     await burnFlush();
     expect(resendCalls(fetchMock)).toHaveLength(1);
 
@@ -574,6 +677,7 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
       confirm_token_hash: "existing-confirm-hash",
       confirm_expires_at: new Date(Date.now() + 3600_000).toISOString(),
       unsubscribe_token_hash: "existing-unsub-hash",
+      unsubscribe_token_hash_prev: null,
     });
 
     const { ctx, flush } = makeWaitUntilCtx();
@@ -582,8 +686,13 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
     await flush();
 
     expect(resendCalls(fetchMock)).toHaveLength(1); // still just the one send
-    expect(env.DB.rows.find((r) => r.id === "existing-pending")?.confirm_token_hash).toBe("existing-confirm-hash");
-    expect(env.DB.rows.find((r) => r.id === "existing-pending")?.unsubscribe_token_hash).toBe("existing-unsub-hash");
+    expect(
+      env.DB.rows.find((r) => r.id === "existing-pending")?.confirm_token_hash,
+    ).toBe("existing-confirm-hash");
+    expect(
+      env.DB.rows.find((r) => r.id === "existing-pending")
+        ?.unsubscribe_token_hash,
+    ).toBe("existing-unsub-hash");
   });
 });
 
@@ -596,8 +705,14 @@ describe("POST /api/signup — A-1 regression: a rotate-then-SEND-FAILS attempt 
     // below in "Resend failure path").
     const oldRawConfirmToken = generateToken();
     const oldRawUnsubscribeToken = generateToken();
-    const oldConfirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, oldRawConfirmToken);
-    const oldUnsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, oldRawUnsubscribeToken);
+    const oldConfirmTokenHash = await hashWithPepper(
+      env.TOKEN_PEPPER,
+      oldRawConfirmToken,
+    );
+    const oldUnsubscribeTokenHash = await hashWithPepper(
+      env.TOKEN_PEPPER,
+      oldRawUnsubscribeToken,
+    );
     env.DB.rows.push({
       id: "existing-pending",
       email_lc: "player@example.com",
@@ -610,11 +725,14 @@ describe("POST /api/signup — A-1 regression: a rotate-then-SEND-FAILS attempt 
       confirm_token_hash: oldConfirmTokenHash,
       confirm_expires_at: new Date(Date.now() + 3600_000).toISOString(),
       unsubscribe_token_hash: oldUnsubscribeTokenHash,
+      unsubscribe_token_hash_prev: null,
     });
 
     // This one and only send attempt FAILS at Resend.
     stubExternalFetch({ resendOk: false });
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const { ctx, flush } = makeWaitUntilCtx();
     const res = await handleSignup(signupRequest(VALID_BODY), env, ctx);
     expect(res.status).toBe(202);
@@ -633,17 +751,23 @@ describe("POST /api/signup — A-1 regression: a rotate-then-SEND-FAILS attempt 
 
     // The OLD (only ever delivered) links must still work.
     const confirmRes = await handleConfirmSubmit(
-      new Request(`https://golfraven.example/api/confirm?token=${encodeURIComponent(oldRawConfirmToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/confirm?token=${encodeURIComponent(oldRawConfirmToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(confirmRes.status).toBe(200);
 
     const unsubRes = await handleUnsubscribeSubmit(
-      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldRawUnsubscribeToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldRawUnsubscribeToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(unsubRes.status).toBe(200);
@@ -653,7 +777,9 @@ describe("POST /api/signup — A-1 regression: a rotate-then-SEND-FAILS attempt 
 describe("POST /api/signup — Resend failure path", () => {
   it("still returns the generic 202 (no enumeration signal), but does not claim the email as sent, and logs only a fixed status (F14)", async () => {
     stubExternalFetch({ resendOk: false });
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const env = makeTestEnv();
     const { ctx, flush } = makeWaitUntilCtx();
     const res = await handleSignup(signupRequest(VALID_BODY), env, ctx);
@@ -679,7 +805,9 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     const { ctx: ctx1, flush: flush1 } = makeWaitUntilCtx();
     await handleSignup(signupRequest(VALID_BODY), env, ctx1);
     await flush1();
-    const { unsubscribeToken: firstUnsubscribeToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+    const { unsubscribeToken: firstUnsubscribeToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
 
     // Two more successful resends (clearing the cooldown key between each,
     // same as the case-C test above, so the send limit doesn't skip them).
@@ -694,7 +822,9 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     await flush3();
 
     expect(resendCalls(fetchMock)).toHaveLength(3);
-    const { unsubscribeToken: thirdUnsubscribeToken } = tokensFromResendCall(resendCalls(fetchMock)[2]);
+    const { unsubscribeToken: thirdUnsubscribeToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[2],
+    );
 
     // The token itself never rotated across the resends.
     expect(thirdUnsubscribeToken).toBe(firstUnsubscribeToken);
@@ -702,9 +832,12 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     // The regression: the link from the FIRST email — the oldest one still
     // sitting in an inbox — must still work, not just the most recent one.
     const unsubRes = await handleUnsubscribeSubmit(
-      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(firstUnsubscribeToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(firstUnsubscribeToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(unsubRes.status).toBe(200);
@@ -718,19 +851,29 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     const { ctx: ctx1, flush: flush1 } = makeWaitUntilCtx();
     await handleSignup(signupRequest(VALID_BODY), env, ctx1);
     await flush1();
-    const { unsubscribeToken: firstToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+    const { unsubscribeToken: firstToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
 
     env.RATE_LIMIT_KV.store.clear();
     const { ctx: ctx2, flush: flush2 } = makeWaitUntilCtx();
     await handleSignup(signupRequest(VALID_BODY), env, ctx2);
     await flush2();
-    const { unsubscribeToken: secondToken } = tokensFromResendCall(resendCalls(fetchMock)[1]);
+    const { unsubscribeToken: secondToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[1],
+    );
     expect(secondToken).toBe(firstToken);
 
     const { ctx: ctx3, flush: flush3 } = makeWaitUntilCtx();
-    await handleSignup(signupRequest({ ...VALID_BODY, email: "other-player@example.com" }), env, ctx3);
+    await handleSignup(
+      signupRequest({ ...VALID_BODY, email: "other-player@example.com" }),
+      env,
+      ctx3,
+    );
     await flush3();
-    const { unsubscribeToken: otherAddressToken } = tokensFromResendCall(resendCalls(fetchMock)[2]);
+    const { unsubscribeToken: otherAddressToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[2],
+    );
     expect(otherAddressToken).not.toBe(firstToken);
   });
 
@@ -741,7 +884,9 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     const { ctx, flush } = makeWaitUntilCtx();
     await handleSignup(signupRequest(VALID_BODY), env, ctx);
     await flush();
-    const { unsubscribeToken: oldToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+    const { unsubscribeToken: oldToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
 
     // Rotate: the old pepper moves to TOKEN_PEPPER_PREVIOUS, a new one
     // becomes TOKEN_PEPPER. The stored row (and the emailed link) are
@@ -750,9 +895,12 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     env.TOKEN_PEPPER = "new-pepper-9876543210";
 
     const res = await handleUnsubscribeSubmit(
-      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(res.status).toBe(200);
@@ -766,18 +914,124 @@ describe("POST /api/signup — A-2 regression: the unsubscribe link must keep wo
     const { ctx, flush } = makeWaitUntilCtx();
     await handleSignup(signupRequest(VALID_BODY), env, ctx);
     await flush();
-    const { unsubscribeToken: oldToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+    const { unsubscribeToken: oldToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
 
     // Rotate WITHOUT setting TOKEN_PEPPER_PREVIOUS.
     env.TOKEN_PEPPER = "new-pepper-9876543210";
 
     const res = await handleUnsubscribeSubmit(
-      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`, {
-        method: "POST",
-      }),
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`,
+        {
+          method: "POST",
+        },
+      ),
       env,
     );
     expect(res.status).toBe(400);
     expect(env.DB.rows[0]?.unsubscribed_at).toBeNull();
+  });
+
+  it("gate finding F-S7: a RESEND after a pepper rotation migrates the row — both the new email's link and the OLD (pre-rotation) email's link work", async () => {
+    const env = makeTestEnv({ TOKEN_PEPPER: "old-pepper-0123456789" });
+    const fetchMock = stubExternalFetch({});
+
+    const { ctx, flush } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx);
+    await flush();
+    const { unsubscribeToken: oldToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
+
+    // Rotate.
+    env.TOKEN_PEPPER_PREVIOUS = "old-pepper-0123456789";
+    env.TOKEN_PEPPER = "new-pepper-9876543210";
+    env.RATE_LIMIT_KV.store.clear(); // bypass the per-email resend cooldown (F6), unrelated to this test
+
+    // A RESEND (same still-pending address) under the new pepper.
+    const { ctx: ctx2, flush: flush2 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx2);
+    await flush2();
+    const { unsubscribeToken: newToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[1],
+    );
+    expect(newToken).not.toBe(oldToken);
+
+    // The NEW email's link works.
+    const resNew = await handleUnsubscribeSubmit(
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(newToken)}`,
+        {
+          method: "POST",
+        },
+      ),
+      env,
+    );
+    expect(resNew.status).toBe(200);
+    expect(env.DB.rows[0]?.unsubscribed_at).not.toBeNull();
+
+    // The OLD, already-delivered email's link ALSO still works (idempotent
+    // unsubscribe of the same row — it must still be found, not 400).
+    const resOld = await handleUnsubscribeSubmit(
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`,
+        {
+          method: "POST",
+        },
+      ),
+      env,
+    );
+    expect(resOld.status).toBe(200);
+  });
+
+  it("gate finding F-S7: after the migrating resend, both links keep working even once TOKEN_PEPPER_PREVIOUS is unset", async () => {
+    const env = makeTestEnv({ TOKEN_PEPPER: "old-pepper-0123456789" });
+    const fetchMock = stubExternalFetch({});
+
+    const { ctx, flush } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx);
+    await flush();
+    const { unsubscribeToken: oldToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[0],
+    );
+
+    env.TOKEN_PEPPER_PREVIOUS = "old-pepper-0123456789";
+    env.TOKEN_PEPPER = "new-pepper-9876543210";
+    env.RATE_LIMIT_KV.store.clear();
+
+    const { ctx: ctx2, flush: flush2 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx2);
+    await flush2();
+    const { unsubscribeToken: newToken } = tokensFromResendCall(
+      resendCalls(fetchMock)[1],
+    );
+
+    // The pepper rotation is now fully complete — TOKEN_PEPPER_PREVIOUS is
+    // unset, per the README's rotation runbook cutover step.
+    delete env.TOKEN_PEPPER_PREVIOUS;
+
+    const resOld = await handleUnsubscribeSubmit(
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`,
+        {
+          method: "POST",
+        },
+      ),
+      env,
+    );
+    expect(resOld.status).toBe(200);
+
+    const resNew = await handleUnsubscribeSubmit(
+      new Request(
+        `https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(newToken)}`,
+        {
+          method: "POST",
+        },
+      ),
+      env,
+    );
+    expect(resNew.status).toBe(200);
   });
 });

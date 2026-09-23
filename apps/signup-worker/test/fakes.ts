@@ -17,8 +17,25 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
 
   async function run(): Promise<unknown> {
     if (sql.startsWith("INSERT INTO signups")) {
-      const [id, emailLc, consentVersion, source, createdAt, confirmTokenHash, confirmExpiresAt, unsubscribeTokenHash] =
-        bound as [string, string, string, string | null, string, string, string, string];
+      const [
+        id,
+        emailLc,
+        consentVersion,
+        source,
+        createdAt,
+        confirmTokenHash,
+        confirmExpiresAt,
+        unsubscribeTokenHash,
+      ] = bound as [
+        string,
+        string,
+        string,
+        string | null,
+        string,
+        string,
+        string,
+        string,
+      ];
       // Mirrors the real `ON CONFLICT(email_lc) DO NOTHING` (gate finding
       // F3): a concurrent insert for an already-present email_lc is a
       // silent no-op with meta.changes: 0, not a thrown error.
@@ -37,17 +54,13 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
         confirm_token_hash: confirmTokenHash,
         confirm_expires_at: confirmExpiresAt,
         unsubscribe_token_hash: unsubscribeTokenHash,
+        unsubscribe_token_hash_prev: null,
       });
       return { success: true, meta: { changes: 1 } };
     }
     if (sql.includes("SET consent_version = ?2")) {
-      const [id, consentVersion, source, confirmTokenHash, confirmExpiresAt] = bound as [
-        string,
-        string,
-        string | null,
-        string,
-        string,
-      ];
+      const [id, consentVersion, source, confirmTokenHash, confirmExpiresAt] =
+        bound as [string, string, string | null, string, string];
       const row = rows.find((r) => r.id === id);
       if (row) {
         row.consent_version = consentVersion;
@@ -75,13 +88,29 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
       if (row) row.unsubscribed_at = unsubscribedAt;
       return { success: true, meta: { changes: row ? 1 : 0 } };
     }
+    if (
+      sql.includes(
+        "SET unsubscribe_token_hash = ?2, unsubscribe_token_hash_prev = ?3",
+      )
+    ) {
+      const [id, hash, hashPrev] = bound as [string, string, string];
+      const row = rows.find((r) => r.id === id);
+      if (row) {
+        row.unsubscribe_token_hash = hash;
+        row.unsubscribe_token_hash_prev = hashPrev;
+      }
+      return { success: true, meta: { changes: row ? 1 : 0 } };
+    }
     if (sql.includes("SET unsubscribe_token_hash = ?2")) {
       const [id, hash] = bound as [string, string];
       const row = rows.find((r) => r.id === id);
       if (row) row.unsubscribe_token_hash = hash;
       return { success: true, meta: { changes: row ? 1 : 0 } };
     }
-    if (sql.startsWith("DELETE FROM signups") && sql.includes("confirmed_at IS NULL")) {
+    if (
+      sql.startsWith("DELETE FROM signups") &&
+      sql.includes("confirmed_at IS NULL")
+    ) {
       const [createdBefore, now] = bound as [string, string];
       const before = rows.length;
       const kept = rows.filter(
@@ -97,10 +126,18 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
       rows.push(...kept);
       return { success: true, meta: { changes: deleted } };
     }
-    if (sql.startsWith("DELETE FROM signups") && sql.includes("unsubscribed_at IS NOT NULL")) {
+    if (
+      sql.startsWith("DELETE FROM signups") &&
+      sql.includes("unsubscribed_at IS NOT NULL")
+    ) {
       const [unsubscribedBefore] = bound as [string];
       const before = rows.length;
-      const kept = rows.filter((r) => !(r.unsubscribed_at !== null && r.unsubscribed_at < unsubscribedBefore));
+      const kept = rows.filter(
+        (r) =>
+          !(
+            r.unsubscribed_at !== null && r.unsubscribed_at < unsubscribedBefore
+          ),
+      );
       const deleted = before - kept.length;
       rows.length = 0;
       rows.push(...kept);
@@ -111,13 +148,28 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
 
   async function first<T>(): Promise<T | null> {
     if (sql.includes("WHERE email_lc = ?1")) {
-      return (rows.find((r) => r.email_lc === bound[0]) as unknown as T) ?? null;
+      return (
+        (rows.find((r) => r.email_lc === bound[0]) as unknown as T) ?? null
+      );
     }
     if (sql.includes("WHERE confirm_token_hash = ?1")) {
-      return (rows.find((r) => r.confirm_token_hash === bound[0]) as unknown as T) ?? null;
+      return (
+        (rows.find((r) => r.confirm_token_hash === bound[0]) as unknown as T) ??
+        null
+      );
     }
-    if (sql.includes("WHERE unsubscribe_token_hash = ?1")) {
-      return (rows.find((r) => r.unsubscribe_token_hash === bound[0]) as unknown as T) ?? null;
+    if (
+      sql.includes(
+        "WHERE unsubscribe_token_hash = ?1 OR unsubscribe_token_hash_prev = ?1",
+      )
+    ) {
+      return (
+        (rows.find(
+          (r) =>
+            r.unsubscribe_token_hash === bound[0] ||
+            r.unsubscribe_token_hash_prev === bound[0],
+        ) as unknown as T) ?? null
+      );
     }
     throw new Error(`FakeD1: no first() handler for query: ${sql}`);
   }

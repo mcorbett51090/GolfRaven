@@ -27,7 +27,11 @@ class ThrowingD1 implements D1Like {
 function makeCtx() {
   const waited: Promise<unknown>[] = [];
   return {
-    ctx: { waitUntil: (p: Promise<unknown>) => { waited.push(p); } },
+    ctx: {
+      waitUntil: (p: Promise<unknown>) => {
+        waited.push(p);
+      },
+    },
     flush: () => Promise.all(waited),
   };
 }
@@ -38,7 +42,7 @@ function baseEnv(overrides: Partial<Env> = {}): Env {
     RATE_LIMIT_KV: new FakeKV(),
     RESEND_API_KEY: "test-resend-key",
     TURNSTILE_SECRET: "test-turnstile-secret",
-    TOKEN_PEPPER: "test-pepper-0123456789",
+    TOKEN_PEPPER: "test-pepper-0123456789-0123456789", // >= the 32-char minimum (gate finding F-N6)
     RESEND_FROM_EMAIL: "GolfRaven <hello@golfraven.example>",
     PUBLIC_BASE_URL: "https://golfraven.example",
     ALLOWED_DEV_ORIGINS: "",
@@ -51,7 +55,9 @@ describe("default export fetch — router-level error handling (F3)", () => {
     const env = baseEnv();
     const { ctx } = makeCtx();
     const res = await worker.fetch(
-      new Request("https://golfraven.example/api/confirm?token=abc", { method: "POST" }),
+      new Request("https://golfraven.example/api/confirm?token=abc", {
+        method: "POST",
+      }),
       env,
       ctx,
     );
@@ -66,7 +72,9 @@ describe("default export fetch — required secrets present (F13)", () => {
     const env = baseEnv({ TOKEN_PEPPER: "" });
     const { ctx } = makeCtx();
     const res = await worker.fetch(
-      new Request("https://golfraven.example/api/confirm?token=abc", { method: "GET" }),
+      new Request("https://golfraven.example/api/confirm?token=abc", {
+        method: "GET",
+      }),
       env,
       ctx,
     );
@@ -77,7 +85,22 @@ describe("default export fetch — required secrets present (F13)", () => {
     const env = baseEnv({ TOKEN_PEPPER: "short" });
     const { ctx } = makeCtx();
     const res = await worker.fetch(
-      new Request("https://golfraven.example/api/confirm?token=abc", { method: "GET" }),
+      new Request("https://golfraven.example/api/confirm?token=abc", {
+        method: "GET",
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(500);
+  });
+
+  it("gate finding F-N6: 500s when TOKEN_PEPPER_PREVIOUS is set but shorter than the minimum length", async () => {
+    const env = baseEnv({ TOKEN_PEPPER_PREVIOUS: "short" });
+    const { ctx } = makeCtx();
+    const res = await worker.fetch(
+      new Request("https://golfraven.example/api/confirm?token=abc", {
+        method: "GET",
+      }),
       env,
       ctx,
     );
@@ -89,7 +112,11 @@ describe("default export fetch — unknown routes", () => {
   it("404s", async () => {
     const env = baseEnv();
     const { ctx } = makeCtx();
-    const res = await worker.fetch(new Request("https://golfraven.example/nope", { method: "GET" }), env, ctx);
+    const res = await worker.fetch(
+      new Request("https://golfraven.example/nope", { method: "GET" }),
+      env,
+      ctx,
+    );
     expect(res.status).toBe(404);
   });
 });

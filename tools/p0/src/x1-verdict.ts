@@ -27,7 +27,11 @@
 import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { X1IosExportResult, X1IosWorkoutRecord } from "./x1-ios-export.js";
-import { isWithinRoundWindow, readLoggedRoundWindows, type RoundWindow } from "./round-windows.js";
+import {
+  isWithinRoundWindow,
+  readLoggedRoundWindows,
+  type RoundWindow,
+} from "./round-windows.js";
 
 /** Minimal shape of the Android Health Connect reader's per-session record
  * (`apps/mobile/src/health-connect/types.ts` `GolfSessionSummary`),
@@ -81,7 +85,8 @@ export interface SourceMap {
   };
 }
 
-export type SourceOsVerdict = "pass" | "fail-no-route" | "fail-not-written" | "not-applicable";
+export type SourceOsVerdict =
+  "pass" | "fail-no-route" | "fail-not-written" | "not-applicable";
 
 export interface SourceVerdict {
   ios: SourceOsVerdict;
@@ -145,7 +150,9 @@ function iosVerdictFor(
 ): SourceOsVerdict {
   const matches = workouts.filter((w) => sourceNames.includes(w.sourceName));
   if (matches.length === 0) {
-    warnings.push(`${sourceLabel}: no matching iOS workout found (sourceName in [${sourceNames.join(", ")}]).`);
+    warnings.push(
+      `${sourceLabel}: no matching iOS workout found (sourceName in [${sourceNames.join(", ")}]).`,
+    );
     return "fail-not-written";
   }
   const anyRoute = matches.some((w) => w.routePresent);
@@ -161,7 +168,9 @@ function androidVerdictFor(
 ): SourceOsVerdict {
   const matches = sessions.filter((s) => dataOrigins.includes(s.dataOrigin));
   if (matches.length === 0) {
-    warnings.push(`${sourceLabel}: no matching Android session found (dataOrigin in [${dataOrigins.join(", ")}]).`);
+    warnings.push(
+      `${sourceLabel}: no matching Android session found (dataOrigin in [${dataOrigins.join(", ")}]).`,
+    );
     return "fail-not-written";
   }
   const anyRoute = matches.some((s) => {
@@ -170,7 +179,9 @@ function androidVerdictFor(
       // Decision 0001, Addendum D, R6: CONSENT_REQUIRED counts as
       // "route present" only via a follow-up read returning ≥ 1 point.
       const followUp = followUps[s.recordId];
-      return Boolean(followUp && followUp.routePresent && followUp.routePointCount >= 1);
+      return Boolean(
+        followUp && followUp.routePresent && followUp.routePointCount >= 1,
+      );
     }
     return false;
   });
@@ -212,7 +223,10 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   // is a literal violation of R6 — fail loudly rather than silently
   // crediting Hole19 data as the source verdict.
   const phoneApp = input.sourceMap.phoneApp;
-  if (phoneApp.appUsed === "Hole19" && phoneApp.hole19SwapLoggedBeforeRound !== true) {
+  if (
+    phoneApp.appUsed === "Hole19" &&
+    phoneApp.hole19SwapLoggedBeforeRound !== true
+  ) {
     throw new Error(
       "sourceMap.phoneApp.appUsed is 'Hole19' but hole19SwapLoggedBeforeRound is not true. " +
         "Decision 0001 Addendum D R6: Hole19 replaces 18Birdies as the phone-app source only when the " +
@@ -238,12 +252,35 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   // Gate finding B-7: enforce the round window HERE too, independently of
   // whatever filtering x1-ios-export already did to its JSON — a stale or
   // hand-edited export.json must not widen the verdict.
-  const iosWorkoutsInWindow = input.ios.workouts.filter((w) => isWithinRoundWindow(w.startDate, input.roundWindows));
+  const iosWorkoutsInWindow = input.ios.workouts.filter((w) =>
+    isWithinRoundWindow(w.startDate, input.roundWindows),
+  );
   const androidSessionsInWindow = input.android.sessions.filter((s) =>
     isWithinRoundWindow(s.start, input.roundWindows),
   );
+  // Gate finding F-N5: this filter can silently drop older/out-of-window
+  // records with no trace — count what it dropped so a suspiciously-large
+  // drop (e.g. every workout, from a mis-logged window) is visible.
+  const iosDropped = input.ios.workouts.length - iosWorkoutsInWindow.length;
+  const androidDropped =
+    input.android.sessions.length - androidSessionsInWindow.length;
+  if (iosDropped > 0) {
+    warnings.push(
+      `${iosDropped} iOS workout(s) fell outside the logged round window(s) and were excluded.`,
+    );
+  }
+  if (androidDropped > 0) {
+    warnings.push(
+      `${androidDropped} Android session(s) fell outside the logged round window(s) and were excluded.`,
+    );
+  }
 
-  const garminIos = iosVerdictFor(iosWorkoutsInWindow, input.sourceMap.garmin.iosSourceNames, warnings, "Garmin (iOS)");
+  const garminIos = iosVerdictFor(
+    iosWorkoutsInWindow,
+    input.sourceMap.garmin.iosSourceNames,
+    warnings,
+    "Garmin (iOS)",
+  );
   const garminAndroid = androidVerdictFor(
     androidSessionsInWindow,
     input.sourceMap.garmin.androidDataOrigins,
@@ -297,11 +334,19 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   // on DIFFERENT OSes do not combine. So count passes PER OS, never a
   // per-source "passes anywhere" tally.
   const sourcesPassingByOs = {
-    ios: [garmin.ios, appleWatch.ios, phoneAppVerdict.ios].filter((v) => v === "pass").length,
-    android: [garmin.android, appleWatch.android, phoneAppVerdict.android].filter((v) => v === "pass").length,
+    ios: [garmin.ios, appleWatch.ios, phoneAppVerdict.ios].filter(
+      (v) => v === "pass",
+    ).length,
+    android: [
+      garmin.android,
+      appleWatch.android,
+      phoneAppVerdict.android,
+    ].filter((v) => v === "pass").length,
   };
   const overallVerdict: "pass" | "kill" =
-    sourcesPassingByOs.ios >= 2 || sourcesPassingByOs.android >= 2 ? "pass" : "kill";
+    sourcesPassingByOs.ios >= 2 || sourcesPassingByOs.android >= 2
+      ? "pass"
+      : "kill";
 
   // docs/p0/K4.md: "if ... X1's Garmin source specifically fails (even
   // while X1 passes overall on the other two sources)" the written
@@ -324,8 +369,12 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
   const lines: string[] = [];
   lines.push("| Source | iOS | Android | Passes on ≥ 1 OS? |");
   lines.push("|---|---|---|---|");
-  lines.push(`| Garmin watch + Connect Mobile | ${result.perSource.garmin.ios} | ${result.perSource.garmin.android} | ${result.perSource.garmin.passesOnAnyOS ? "Yes" : "No"} |`);
-  lines.push(`| Apple Watch Workout | ${result.perSource.appleWatch.ios} | ${result.perSource.appleWatch.android} | ${result.perSource.appleWatch.passesOnAnyOS ? "Yes" : "No"} |`);
+  lines.push(
+    `| Garmin watch + Connect Mobile | ${result.perSource.garmin.ios} | ${result.perSource.garmin.android} | ${result.perSource.garmin.passesOnAnyOS ? "Yes" : "No"} |`,
+  );
+  lines.push(
+    `| Apple Watch Workout | ${result.perSource.appleWatch.ios} | ${result.perSource.appleWatch.android} | ${result.perSource.appleWatch.passesOnAnyOS ? "Yes" : "No"} |`,
+  );
   lines.push(
     `| Phone app (${result.perSource.phoneApp.appUsed}) | ${result.perSource.phoneApp.ios} | ${result.perSource.phoneApp.android} | ${result.perSource.phoneApp.passesOnAnyOS ? "Yes" : "No"} |`,
   );
@@ -334,7 +383,9 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
     `**Sources passing per OS: iOS ${result.sourcesPassingByOs.ios} of 3, Android ${result.sourcesPassingByOs.android} of 3** ` +
       "(decision 0001 Addendum F: sources passing on different OSes do not combine).",
   );
-  lines.push(`**X1 overall verdict: ${result.overallVerdict.toUpperCase()}** (bar: ≥ 2 of 3 on ONE OS).`);
+  lines.push(
+    `**X1 overall verdict: ${result.overallVerdict.toUpperCase()}** (bar: ≥ 2 of 3 on ONE OS).`,
+  );
   lines.push(
     `**K4 Garmin written statement triggered by X1: ${result.garminWrittenStatementTriggeredByX1 ? "YES" : "no"}** (K4b failing independently also triggers it; not assessed by this tool).`,
   );
@@ -358,7 +409,13 @@ function parseArgs(argv: string[]): CliArgs {
       i += 1;
     }
   }
-  const { ios, android, "follow-ups": followUps, "source-map": sourceMap, out } = opts;
+  const {
+    ios,
+    android,
+    "follow-ups": followUps,
+    "source-map": sourceMap,
+    out,
+  } = opts;
   if (!ios || !android || !sourceMap) {
     throw new Error(
       "Usage: node dist/x1-verdict.js --ios <x1-ios-export.json> --android <health-connect-reader.json> " +
@@ -376,11 +433,20 @@ function parseArgs(argv: string[]): CliArgs {
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const ios = JSON.parse(await readFile(args.iosPath, "utf8")) as X1IosExportResult;
-  const android = JSON.parse(await readFile(args.androidPath, "utf8")) as AndroidGolfSessionReadResult;
-  const sourceMap = JSON.parse(await readFile(args.sourceMapPath, "utf8")) as SourceMap;
+  const ios = JSON.parse(
+    await readFile(args.iosPath, "utf8"),
+  ) as X1IosExportResult;
+  const android = JSON.parse(
+    await readFile(args.androidPath, "utf8"),
+  ) as AndroidGolfSessionReadResult;
+  const sourceMap = JSON.parse(
+    await readFile(args.sourceMapPath, "utf8"),
+  ) as SourceMap;
   const androidRouteFollowUps = args.followUpsPath
-    ? (JSON.parse(await readFile(args.followUpsPath, "utf8")) as Record<string, AndroidRouteFollowUp>)
+    ? (JSON.parse(await readFile(args.followUpsPath, "utf8")) as Record<
+        string,
+        AndroidRouteFollowUp
+      >)
     : undefined;
   const roundWindows = await readLoggedRoundWindows();
 
@@ -392,8 +458,16 @@ async function main(argv: string[]): Promise<void> {
     ...(androidRouteFollowUps ? { androidRouteFollowUps } : {}),
   });
   const { writeFile } = await import("node:fs/promises");
-  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify(result, null, 2)}\n`, "utf8");
-  await writeFile(`${args.outPrefix}.md`, `${renderVerdictMarkdown(result)}\n`, "utf8");
+  await writeFile(
+    `${args.outPrefix}.json`,
+    `${JSON.stringify(result, null, 2)}\n`,
+    "utf8",
+  );
+  await writeFile(
+    `${args.outPrefix}.md`,
+    `${renderVerdictMarkdown(result)}\n`,
+    "utf8",
+  );
   process.stdout.write(`${renderVerdictMarkdown(result)}\n`);
 }
 

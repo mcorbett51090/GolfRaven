@@ -90,13 +90,13 @@ node dist/x1-verdict.js \
 
   If `phoneApp.appUsed` is `"Hole19"`, you must also set `"hole19SwapLoggedBeforeRound": true` —
   the tool **throws** otherwise (decision 0001 Addendum D R6: Hole19 replaces 18Birdies as the
-  source verdict only when the swap was logged in `docs/p0/X1.md`'s Log *before* the round; this
+  source verdict only when the swap was logged in `docs/p0/X1.md`'s Log _before_ the round; this
   is a literal validation, not a suggestion). Any source not listed here (TheGrint, Golfshot,
   SwingU, ...) is ignored for verdict purposes even if it appears in the iOS/Android data —
   "supplementary, never the source verdict" per R6.
 
 - `--follow-ups` (optional) — a JSON object `{ "<Health Connect recordId>": { "routePresent": bool,
-  "routePointCount": n } }` for any Android session Health Connect reported as `CONSENT_REQUIRED`,
+"routePointCount": n } }` for any Android session Health Connect reported as `CONSENT_REQUIRED`,
   from a follow-up `requestExerciseRoute(recordId)` call (R6). A `CONSENT_REQUIRED` session with no
   entry here defaults to "not present," per R6.
 
@@ -108,7 +108,7 @@ widen the verdict.
 
 **The "≥ 1 OS" bar, made exact (decision 0001 Addendum F, gate finding B-6).** X1 passes only if
 there is **one** operating system on which **≥ 2 of the 3 sources** pass. Sources that pass on
-*different* OSes (e.g. Apple Watch only on iOS, Garmin only on Android) do **not** combine — that
+_different_ OSes (e.g. Apple Watch only on iOS, Garmin only on Android) do **not** combine — that
 reading predicts what a user actually gets, since a user syncs from one phone. The result's
 `sourcesPassingByOs: { ios, android }` shows both counts explicitly, alongside `overallVerdict`.
 
@@ -138,9 +138,19 @@ node dist/x5-overpass.js coverage --courses pilot-candidate-courses.json \
 
   ```json
   [
-    { "name": "Pilot Ridge Golf Course", "lat": 36.0, "lon": -87.0, "trail": "TN", "unit": "course" },
     {
-      "name": "RTJ Course A", "lat": 34.0, "lon": -86.0, "trail": "RTJ", "unit": "course",
+      "name": "Pilot Ridge Golf Course",
+      "lat": 36.0,
+      "lon": -87.0,
+      "trail": "TN",
+      "unit": "course"
+    },
+    {
+      "name": "RTJ Course A",
+      "lat": 34.0,
+      "lon": -86.0,
+      "trail": "RTJ",
+      "unit": "course",
       "facilityId": "rtj-site-1"
     }
   ]
@@ -151,11 +161,15 @@ node dist/x5-overpass.js coverage --courses pilot-candidate-courses.json \
   implemented verbatim: one denominator entry per course even when several share a facility
   polygon; `facility`-unit trails count one entry per `facilityId`, covered if any of its courses
   matched, and `hole`-unit trails count one entry per course — both pinned in decision 0001 Addendum E
-  before any X5 data). `knownPoint: {lat, lon}` is optional — when present, the match rule uses point
-  containment; otherwise it falls back to the 500 m name-match. `id` is optional (gate finding B-12):
+  before any X5 data). `knownPoint: {lat, lon}` is optional — when present, the match rule tries point
+  containment, and _also_ uses it as the distance origin for the 500 m name-match (both branches are
+  always evaluated; a known point outside every polygon does not skip the name-match branch — gate
+  finding F-S1). With no known point, the name-match branch uses the approximate `lat`/`lon` instead.
+  `id` is optional (gate finding B-12):
   a stable id from X2, used to key saved responses/denominator entries instead of `name` — set it
   when two pilot-candidate courses can share a name (e.g. across RTJ sites); the bbox query is
   also centered on `knownPoint` when given, not the approximate `lat`/`lon` (gate finding B-11).
+
 - `--endpoint` (default `https://overpass-api.de/api/interpreter`), `--timeout-ms` (default
   190000), `--bbox-radius-meters` (default 2000 — a query-fetch window size, **not** part of the
   pre-registered match rule; see `overpass-geo.ts`).
@@ -166,18 +180,20 @@ node dist/x5-overpass.js coverage --courses pilot-candidate-courses.json \
 - `--from-file <file>` (the `n-osm` subcommand only) — same idea, one saved response for the
   N_osm query.
 
-**Match rule, made exact (decision 0001 Addendum F, gate findings B-1/B-2/B-3) — supersedes this
+**Match rule, made exact (decision 0001 Addendum F, gate findings B-1/B-2/B-3/F-S1) — supersedes this
 README's and X5.md's own looser wording wherever they differ.** A `leisure=golf_course` way **or
-relation** matches when either (a) the course's known point lies inside the polygon — a relation's
+relation** matches when **either** (a) the course's known point lies inside the polygon — a relation's
 outer ring(s) are assembled from its `outer`-role `way` members (Overpass `out geom` puts a
 relation's geometry under `members[]`, never a top-level `geometry` — a way-only reading silently
-skipped every relation-mapped course), or (b), with no known point, the names match **and** the
-shortest distance from the course's approximate location to the polygon is ≤ 500 m (0 if inside —
-never a centroid distance, which was skewed by vertex density and could put an inside point outside
-its own polygon). Names match after normalisation (Unicode NFKD, diacritics stripped, lower-cased,
-non-letter/digit → space, whitespace collapsed) on equality or whole-word containment — **no
-abbreviation list or fuzzy matching** ("St." and "Saint" do NOT unify; "Golf Club" and "Golf Course"
-do NOT unify).
+skipped every relation-mapped course) — **or** (b) the names match **and** the shortest distance
+from the course's point to the polygon is ≤ 500 m (0 if inside — never a centroid distance, which
+was skewed by vertex density and could put an inside point outside its own polygon). **Both branches
+are always evaluated when a known point exists** — a known point that lies outside every candidate
+polygon does not skip the name-match branch; it just supplies that branch's distance origin instead
+of the approximate `lat`/`lon` (gate finding F-S1). Names match after normalisation (Unicode NFKD,
+diacritics stripped, lower-cased, non-letter/digit → space, whitespace collapsed) on equality or
+whole-word containment — **no abbreviation list or fuzzy matching** ("St." and "Saint" do NOT unify;
+"Golf Club" and "Golf Course" do NOT unify).
 
 **Run integrity (decision 0001 Addendum F).** An Overpass `remark` (its way of reporting a runtime
 error, e.g. a timeout, as HTTP 200 with partial/empty `elements`), a missing or unparseable response

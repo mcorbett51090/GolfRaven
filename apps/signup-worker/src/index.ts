@@ -55,6 +55,7 @@ import {
   markUnsubscribed,
   recordConfirmation,
   rotateConfirmToken,
+  rotateUnsubscribeTokenHashForPepperRotation,
   type SignupRow,
 } from "./db";
 import { sendConfirmationEmail } from "./email";
@@ -71,8 +72,19 @@ import {
   checkAndConsumeIpRateLimit,
   checkAndConsumeResendSendLimits,
 } from "./ratelimit";
-import { corsHeadersFor, genericSignupAccepted, htmlResponse, jsonResponse } from "./responses";
-import { deriveUnsubscribeToken, generateToken, hashWithPepper, isExpired, isoTimeFromNow } from "./tokens";
+import {
+  corsHeadersFor,
+  genericSignupAccepted,
+  htmlResponse,
+  jsonResponse,
+} from "./responses";
+import {
+  deriveUnsubscribeToken,
+  generateToken,
+  hashWithPepper,
+  isExpired,
+  isoTimeFromNow,
+} from "./tokens";
 import { verifyTurnstileToken } from "./turnstile";
 import { validateSignupPayload } from "./validate";
 
@@ -102,7 +114,8 @@ function expectedTurnstileHostname(env: Env): string | undefined {
   }
 }
 
-type BodyReadResult = { ok: true; value: unknown } | { ok: false; response: Response };
+type BodyReadResult =
+  { ok: true; value: unknown } | { ok: false; response: Response };
 
 /**
  * F10 residual (1): compares the media-type ESSENCE (the part before any
@@ -147,7 +160,10 @@ async function readSignupBody(request: Request): Promise<BodyReadResult> {
   if (!isJsonContentType(contentType)) {
     return {
       ok: false,
-      response: jsonResponse(415, { status: "error", error: "Content-Type must be application/json" }),
+      response: jsonResponse(415, {
+        status: "error",
+        error: "Content-Type must be application/json",
+      }),
     };
   }
 
@@ -155,15 +171,33 @@ async function readSignupBody(request: Request): Promise<BodyReadResult> {
   if (contentLengthHeader !== null) {
     const contentLength = Number(contentLengthHeader);
     if (!Number.isInteger(contentLength) || contentLength < 0) {
-      return { ok: false, response: jsonResponse(413, { status: "error", error: "invalid Content-Length" }) };
+      return {
+        ok: false,
+        response: jsonResponse(413, {
+          status: "error",
+          error: "invalid Content-Length",
+        }),
+      };
     }
     if (contentLength > MAX_SIGNUP_BODY_BYTES) {
-      return { ok: false, response: jsonResponse(413, { status: "error", error: "request body too large" }) };
+      return {
+        ok: false,
+        response: jsonResponse(413, {
+          status: "error",
+          error: "request body too large",
+        }),
+      };
     }
   }
 
   if (!request.body) {
-    return { ok: false, response: jsonResponse(400, { status: "error", error: "request body must be valid JSON" }) };
+    return {
+      ok: false,
+      response: jsonResponse(400, {
+        status: "error",
+        error: "request body must be valid JSON",
+      }),
+    };
   }
 
   const reader = request.body.getReader();
@@ -174,7 +208,13 @@ async function readSignupBody(request: Request): Promise<BodyReadResult> {
     try {
       step = await reader.read();
     } catch {
-      return { ok: false, response: jsonResponse(400, { status: "error", error: "could not read request body" }) };
+      return {
+        ok: false,
+        response: jsonResponse(400, {
+          status: "error",
+          error: "could not read request body",
+        }),
+      };
     }
     if (step.done) break;
     const value = step.value;
@@ -182,7 +222,13 @@ async function readSignupBody(request: Request): Promise<BodyReadResult> {
       totalBytes += value.byteLength;
       if (totalBytes > MAX_SIGNUP_BODY_BYTES) {
         await reader.cancel().catch(() => {});
-        return { ok: false, response: jsonResponse(413, { status: "error", error: "request body too large" }) };
+        return {
+          ok: false,
+          response: jsonResponse(413, {
+            status: "error",
+            error: "request body too large",
+          }),
+        };
       }
       chunks.push(value);
     }
@@ -192,12 +238,24 @@ async function readSignupBody(request: Request): Promise<BodyReadResult> {
   try {
     return { ok: true, value: JSON.parse(text) };
   } catch {
-    return { ok: false, response: jsonResponse(400, { status: "error", error: "request body must be valid JSON" }) };
+    return {
+      ok: false,
+      response: jsonResponse(400, {
+        status: "error",
+        error: "request body must be valid JSON",
+      }),
+    };
   }
 }
 
-export async function handleSignupOptions(request: Request, env: Env): Promise<Response> {
-  return new Response(null, { status: 204, headers: corsHeadersFor(request, env) });
+export async function handleSignupOptions(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeadersFor(request, env),
+  });
 }
 
 /**
@@ -214,7 +272,9 @@ async function checkSendAllowed(env: Env, emailLc: string): Promise<boolean> {
     globalDailyCap: globalDailySendCap(env),
   });
   if (!sendLimit.allowed) {
-    console.error("confirmation email skipped by send limit", { reason: sendLimit.reason });
+    console.error("confirmation email skipped by send limit", {
+      reason: sendLimit.reason,
+    });
     return false;
   }
   return true;
@@ -236,7 +296,9 @@ async function sendConfirmationEmailAndLog(
   if (!sendResult.ok) {
     // F14: log the fixed HTTP status / transport code, never Resend's
     // free-text message (which may echo the recipient address).
-    console.error("confirmation email send failed", { status: sendResult.status });
+    console.error("confirmation email send failed", {
+      status: sendResult.status,
+    });
   }
   return sendResult.ok;
 }
@@ -255,7 +317,12 @@ async function maybeSendConfirmationEmail(
   rawUnsubscribeToken: string,
 ): Promise<void> {
   if (!(await checkSendAllowed(env, emailLc))) return;
-  await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+  await sendConfirmationEmailAndLog(
+    env,
+    emailLc,
+    rawConfirmToken,
+    rawUnsubscribeToken,
+  );
 }
 
 /**
@@ -287,7 +354,56 @@ async function maybeSendConfirmationEmail(
  * carries the SAME unsubscribe link, which is what keeps an older email's
  * one-click link working after a later resend — see README.md
  * "Unsubscribe token: stable, not rotated".
+ *
+ * Gate finding F-S7: that stability guarantee breaks the FIRST resend
+ * after a `TOKEN_PEPPER` rotation — the row's stored
+ * `unsubscribe_token_hash` was derived under whichever pepper was active
+ * when the row was last written, so a resend that derives the new email's
+ * token under the (now current) pepper carries a link that no longer
+ * matches. `maybeMigrateUnsubscribeHashForPepperRotation` below detects
+ * exactly that case and migrates the row so BOTH the old and new emails'
+ * links keep working, permanently (not just while `TOKEN_PEPPER_PREVIOUS`
+ * happens to still be set) — see db.ts's
+ * `rotateUnsubscribeTokenHashForPepperRotation` and README.md "Rotating
+ * TOKEN_PEPPER".
  */
+async function maybeMigrateUnsubscribeHashForPepperRotation(
+  env: Env,
+  row: SignupRow,
+  emailLc: string,
+): Promise<void> {
+  const currentToken = await deriveUnsubscribeToken(env.TOKEN_PEPPER, emailLc);
+  const currentHash = await hashWithPepper(env.TOKEN_PEPPER, currentToken);
+  if (row.unsubscribe_token_hash === currentHash) return; // already up to date — the common case
+
+  if (!env.TOKEN_PEPPER_PREVIOUS) return; // can't verify or derive the old token — leave the row alone
+
+  const previousToken = await deriveUnsubscribeToken(
+    env.TOKEN_PEPPER_PREVIOUS,
+    emailLc,
+  );
+  const previousHash = await hashWithPepper(
+    env.TOKEN_PEPPER_PREVIOUS,
+    previousToken,
+  );
+  if (row.unsubscribe_token_hash !== previousHash) return; // stored hash isn't the previous-pepper derivation — don't guess
+
+  // Re-hash the OLD raw token under the CURRENT pepper for storage, so a
+  // later lookup only ever needs to know the pepper that's current AT
+  // THAT TIME — never `TOKEN_PEPPER_PREVIOUS` from this rotation, which
+  // may since have been unset (F-S7's "keeps working even after
+  // TOKEN_PEPPER_PREVIOUS is later unset").
+  const previousHashUnderCurrentPepper = await hashWithPepper(
+    env.TOKEN_PEPPER,
+    previousToken,
+  );
+  await rotateUnsubscribeTokenHashForPepperRotation(env.DB, {
+    id: row.id,
+    unsubscribeTokenHash: currentHash,
+    unsubscribeTokenHashPrev: previousHashUnderCurrentPepper,
+  });
+}
+
 async function rotateAndSendIfAllowed(
   env: Env,
   row: SignupRow,
@@ -298,11 +414,22 @@ async function rotateAndSendIfAllowed(
   if (!(await checkSendAllowed(env, emailLc))) return;
 
   const rawConfirmToken = generateToken();
-  const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
+  const confirmTokenHash = await hashWithPepper(
+    env.TOKEN_PEPPER,
+    rawConfirmToken,
+  );
   const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
-  const rawUnsubscribeToken = await deriveUnsubscribeToken(env.TOKEN_PEPPER, emailLc);
+  const rawUnsubscribeToken = await deriveUnsubscribeToken(
+    env.TOKEN_PEPPER,
+    emailLc,
+  );
 
-  const sent = await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+  const sent = await sendConfirmationEmailAndLog(
+    env,
+    emailLc,
+    rawConfirmToken,
+    rawUnsubscribeToken,
+  );
   if (!sent) return;
 
   await rotateConfirmToken(env.DB, {
@@ -312,6 +439,7 @@ async function rotateAndSendIfAllowed(
     confirmTokenHash,
     confirmExpiresAt,
   });
+  await maybeMigrateUnsubscribeHashForPepperRotation(env, row, emailLc);
 }
 
 /**
@@ -322,7 +450,12 @@ async function rotateAndSendIfAllowed(
  */
 async function runSignupSideEffects(
   env: Env,
-  params: { emailLc: string; consentVersion: string; source?: string | undefined; existing: SignupRow | null },
+  params: {
+    emailLc: string;
+    consentVersion: string;
+    source?: string | undefined;
+    existing: SignupRow | null;
+  },
 ): Promise<void> {
   const { emailLc, consentVersion, source, existing } = params;
 
@@ -343,14 +476,23 @@ async function runSignupSideEffects(
     // that follows is allowed (N1 only protects an EXISTING row's
     // already-emailed tokens — see rotateAndSendIfAllowed above).
     const rawConfirmToken = generateToken();
-    const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
+    const confirmTokenHash = await hashWithPepper(
+      env.TOKEN_PEPPER,
+      rawConfirmToken,
+    );
     const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
     // Deterministic, stable per-address token (gate-round3 finding A-2) —
     // written once here and never rotated again; see
     // rotateAndSendIfAllowed's doc comment above and README.md
     // "Unsubscribe token: stable, not rotated".
-    const rawUnsubscribeToken = await deriveUnsubscribeToken(env.TOKEN_PEPPER, emailLc);
-    const unsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawUnsubscribeToken);
+    const rawUnsubscribeToken = await deriveUnsubscribeToken(
+      env.TOKEN_PEPPER,
+      emailLc,
+    );
+    const unsubscribeTokenHash = await hashWithPepper(
+      env.TOKEN_PEPPER,
+      rawUnsubscribeToken,
+    );
     const { inserted } = await createPendingSignup(env.DB, {
       id: crypto.randomUUID(),
       emailLc,
@@ -363,7 +505,12 @@ async function runSignupSideEffects(
     });
 
     if (inserted) {
-      await maybeSendConfirmationEmail(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+      await maybeSendConfirmationEmail(
+        env,
+        emailLc,
+        rawConfirmToken,
+        rawUnsubscribeToken,
+      );
       return;
     }
 
@@ -373,7 +520,9 @@ async function runSignupSideEffects(
     // tokens.
     const raced = await findByEmailLc(env.DB, emailLc);
     if (!raced) {
-      console.error("signup insert race: row missing after ON CONFLICT DO NOTHING");
+      console.error(
+        "signup insert race: row missing after ON CONFLICT DO NOTHING",
+      );
       return;
     }
     if (raced.confirmed_at && !raced.unsubscribed_at) return; // became case B meanwhile
@@ -387,7 +536,11 @@ async function runSignupSideEffects(
   await rotateAndSendIfAllowed(env, existing, consentVersion, source, emailLc);
 }
 
-export async function handleSignup(request: Request, env: Env, ctx: WaitUntilCtx): Promise<Response> {
+export async function handleSignup(
+  request: Request,
+  env: Env,
+  ctx: WaitUntilCtx,
+): Promise<Response> {
   const bodyResult = await readSignupBody(request);
   if (!bodyResult.ok) return bodyResult.response;
 
@@ -402,25 +555,47 @@ export async function handleSignup(request: Request, env: Env, ctx: WaitUntilCtx
   // F5: per-IP cap is checked (and consumed) FIRST — this bounds request
   // volume from one source regardless of whether Turnstile ultimately
   // passes, so it's fine to spend before Turnstile runs.
-  const ipLimit = await checkAndConsumeIpRateLimit(env, ip, SIGNUP_IP_DAILY_CAP);
+  const ipLimit = await checkAndConsumeIpRateLimit(
+    env,
+    ip,
+    SIGNUP_IP_DAILY_CAP,
+  );
   if (!ipLimit.allowed) {
-    return jsonResponse(429, { status: "error", error: "too many requests, try again later" });
+    return jsonResponse(429, {
+      status: "error",
+      error: "too many requests, try again later",
+    });
   }
 
   // F5: Turnstile BEFORE the per-EMAIL slot is ever touched. Otherwise
   // anyone could send a junk turnstileToken for a victim's address and
   // burn that address's per-email cap without solving a challenge.
-  const turnstile = await verifyTurnstileToken(turnstileToken, env.TURNSTILE_SECRET, ip === "unknown" ? null : ip, {
-    hostname: expectedTurnstileHostname(env),
-    action: "signup",
-  });
+  const turnstile = await verifyTurnstileToken(
+    turnstileToken,
+    env.TURNSTILE_SECRET,
+    ip === "unknown" ? null : ip,
+    {
+      hostname: expectedTurnstileHostname(env),
+      action: "signup",
+    },
+  );
   if (!turnstile.success) {
-    return jsonResponse(400, { status: "error", error: "turnstile verification failed" });
+    return jsonResponse(400, {
+      status: "error",
+      error: "turnstile verification failed",
+    });
   }
 
-  const emailLimit = await checkAndConsumeEmailRateLimit(env, emailLc, SIGNUP_EMAIL_DAILY_CAP);
+  const emailLimit = await checkAndConsumeEmailRateLimit(
+    env,
+    emailLc,
+    SIGNUP_EMAIL_DAILY_CAP,
+  );
   if (!emailLimit.allowed) {
-    return jsonResponse(429, { status: "error", error: "too many requests, try again later" });
+    return jsonResponse(429, {
+      status: "error",
+      error: "too many requests, try again later",
+    });
   }
 
   // Same SELECT for every case — this is NOT a timing discriminator (F2):
@@ -429,15 +604,26 @@ export async function handleSignup(request: Request, env: Env, ctx: WaitUntilCtx
   const existing = await findByEmailLc(env.DB, emailLc);
 
   ctx.waitUntil(
-    runSignupSideEffects(env, { emailLc, consentVersion, source, existing }).catch((err) => {
-      console.error("signup side effects failed", err instanceof Error ? err.message : String(err));
+    runSignupSideEffects(env, {
+      emailLc,
+      consentVersion,
+      source,
+      existing,
+    }).catch((err) => {
+      console.error(
+        "signup side effects failed",
+        err instanceof Error ? err.message : String(err),
+      );
     }),
   );
 
   return genericSignupAccepted(request, env);
 }
 
-export async function handleConfirmPage(request: Request, _env: Env): Promise<Response> {
+export async function handleConfirmPage(
+  request: Request,
+  _env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token");
   if (!token) {
@@ -445,10 +631,16 @@ export async function handleConfirmPage(request: Request, _env: Env): Promise<Re
   }
   // GET never touches the database and never confirms — it just renders
   // the button. The actual validity check happens on POST.
-  return htmlResponse(200, confirmPromptPage(`/api/confirm?token=${encodeURIComponent(token)}`));
+  return htmlResponse(
+    200,
+    confirmPromptPage(`/api/confirm?token=${encodeURIComponent(token)}`),
+  );
 }
 
-export async function handleConfirmSubmit(request: Request, env: Env): Promise<Response> {
+export async function handleConfirmSubmit(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token");
   if (!token) {
@@ -476,13 +668,21 @@ export async function handleConfirmSubmit(request: Request, env: Env): Promise<R
   return htmlResponse(200, confirmSuccessPage());
 }
 
-export async function handleUnsubscribePage(request: Request, _env: Env): Promise<Response> {
+export async function handleUnsubscribePage(
+  request: Request,
+  _env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token");
   if (!token) {
     return htmlResponse(400, unsubscribeInvalidPage());
   }
-  return htmlResponse(200, unsubscribePromptPage(`/api/unsubscribe?token=${encodeURIComponent(token)}`));
+  return htmlResponse(
+    200,
+    unsubscribePromptPage(
+      `/api/unsubscribe?token=${encodeURIComponent(token)}`,
+    ),
+  );
 }
 
 /**
@@ -499,17 +699,26 @@ export async function handleUnsubscribePage(request: Request, _env: Env): Promis
  * a since-rotated pepper fails cleanly (the generic invalid page) — same
  * as any other unrecognized token.
  */
-async function findRowByRawUnsubscribeToken(env: Env, rawToken: string): Promise<SignupRow | null> {
+async function findRowByRawUnsubscribeToken(
+  env: Env,
+  rawToken: string,
+): Promise<SignupRow | null> {
   const currentHash = await hashWithPepper(env.TOKEN_PEPPER, rawToken);
   const row = await findByUnsubscribeTokenHash(env.DB, currentHash);
   if (row) return row;
 
   if (!env.TOKEN_PEPPER_PREVIOUS) return null;
-  const previousHash = await hashWithPepper(env.TOKEN_PEPPER_PREVIOUS, rawToken);
+  const previousHash = await hashWithPepper(
+    env.TOKEN_PEPPER_PREVIOUS,
+    rawToken,
+  );
   return await findByUnsubscribeTokenHash(env.DB, previousHash);
 }
 
-export async function handleUnsubscribeSubmit(request: Request, env: Env): Promise<Response> {
+export async function handleUnsubscribeSubmit(
+  request: Request,
+  env: Env,
+): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token");
   if (!token) {
@@ -569,8 +778,14 @@ export async function runRetentionCron(
   const dayMs = 24 * 60 * 60 * 1000;
   const nowIso = new Date(now).toISOString();
 
-  const unconfirmedCutoff = new Date(now - UNCONFIRMED_RETENTION_DAYS * dayMs).toISOString();
-  const deletedUnconfirmed = await deleteStaleUnconfirmed(env.DB, unconfirmedCutoff, nowIso);
+  const unconfirmedCutoff = new Date(
+    now - UNCONFIRMED_RETENTION_DAYS * dayMs,
+  ).toISOString();
+  const deletedUnconfirmed = await deleteStaleUnconfirmed(
+    env.DB,
+    unconfirmedCutoff,
+    nowIso,
+  );
 
   let deletedUnsubscribed = 0;
   const gateCheck = checkK2GateClosesAt(env.K2_GATE_CLOSES_AT);
@@ -584,30 +799,45 @@ export async function runRetentionCron(
   } else if (!day0Check.ok) {
     skipReason = `K2_DAY0: ${day0Check.reason}`;
   } else {
-    const matchCheck = checkK2GateMatchesDay0(gateCheck.gateCloses, day0Check.day0);
+    const matchCheck = checkK2GateMatchesDay0(
+      gateCheck.gateCloses,
+      day0Check.day0,
+    );
     if (!matchCheck.ok) skipReason = matchCheck.reason;
   }
 
   if (skipReason === null && gateCheck.ok) {
     const graceMs = K2_VERDICT_GRACE_DAYS * dayMs;
     if (now >= gateCheck.gateCloses.getTime() + graceMs) {
-      const unsubscribedCutoff = new Date(now - UNSUBSCRIBED_RETENTION_DAYS * dayMs).toISOString();
-      deletedUnsubscribed = await deleteStaleUnsubscribed(env.DB, unsubscribedCutoff);
+      const unsubscribedCutoff = new Date(
+        now - UNSUBSCRIBED_RETENTION_DAYS * dayMs,
+      ).toISOString();
+      deletedUnsubscribed = await deleteStaleUnsubscribed(
+        env.DB,
+        unsubscribedCutoff,
+      );
     }
   } else if (skipReason !== null) {
     // N2/A-3: exactly one PII-free warning per cron run — no address, no
     // raw env value, just the classification of why it's not safe to
     // delete yet.
-    console.warn("K2 gate/day0 configuration is not valid and consistent — skipping confirmed-row retention deletion", {
-      reason: skipReason,
-    });
+    console.warn(
+      "K2 gate/day0 configuration is not valid and consistent — skipping confirmed-row retention deletion",
+      {
+        reason: skipReason,
+      },
+    );
   }
 
   return { deletedUnconfirmed, deletedUnsubscribed };
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: WaitUntilCtx): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: WaitUntilCtx,
+  ): Promise<Response> {
     // F13: a missing/short secret must fail loudly, not silently hash
     // over "undefined:..." or a brute-forceable plain-IP hash.
     const secretsCheck = assertRequiredSecretsPresent(env);
@@ -619,14 +849,20 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/api/signup") {
-        if (request.method === "POST") return await handleSignup(request, env, ctx);
-        if (request.method === "OPTIONS") return await handleSignupOptions(request, env);
+        if (request.method === "POST")
+          return await handleSignup(request, env, ctx);
+        if (request.method === "OPTIONS")
+          return await handleSignupOptions(request, env);
       } else if (url.pathname === "/api/confirm") {
-        if (request.method === "GET") return await handleConfirmPage(request, env);
-        if (request.method === "POST") return await handleConfirmSubmit(request, env);
+        if (request.method === "GET")
+          return await handleConfirmPage(request, env);
+        if (request.method === "POST")
+          return await handleConfirmSubmit(request, env);
       } else if (url.pathname === "/api/unsubscribe") {
-        if (request.method === "GET") return await handleUnsubscribePage(request, env);
-        if (request.method === "POST") return await handleUnsubscribeSubmit(request, env);
+        if (request.method === "GET")
+          return await handleUnsubscribePage(request, env);
+        if (request.method === "POST")
+          return await handleUnsubscribeSubmit(request, env);
       }
       return notFound();
     } catch (err) {
@@ -645,7 +881,10 @@ export default {
           console.log("retention cron completed", result);
         })
         .catch((err) => {
-          console.error("retention cron failed", err instanceof Error ? err.message : String(err));
+          console.error(
+            "retention cron failed",
+            err instanceof Error ? err.message : String(err),
+          );
         }),
     );
   },

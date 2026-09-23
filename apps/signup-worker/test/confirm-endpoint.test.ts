@@ -5,7 +5,13 @@ import { makeTestEnv } from "./env";
 
 const RAW_TOKEN = "test-confirm-token-value";
 
-async function seedPendingRow(env: ReturnType<typeof makeTestEnv>, overrides: Partial<{ expiresInSeconds: number; alreadyConfirmed: string | null }> = {}) {
+async function seedPendingRow(
+  env: ReturnType<typeof makeTestEnv>,
+  overrides: Partial<{
+    expiresInSeconds: number;
+    alreadyConfirmed: string | null;
+  }> = {},
+) {
   const hash = await hashWithPepper(env.TOKEN_PEPPER, RAW_TOKEN);
   env.DB.rows.push({
     id: "row-1",
@@ -19,14 +25,21 @@ async function seedPendingRow(env: ReturnType<typeof makeTestEnv>, overrides: Pa
     confirm_token_hash: hash,
     confirm_expires_at: isoTimeFromNow(overrides.expiresInSeconds ?? 3600),
     unsubscribe_token_hash: "unrelated-unsub-hash",
+    unsubscribe_token_hash_prev: null,
   });
 }
 
 function confirmGetRequest(token: string): Request {
-  return new Request(`https://golfraven.example/api/confirm?token=${encodeURIComponent(token)}`, { method: "GET" });
+  return new Request(
+    `https://golfraven.example/api/confirm?token=${encodeURIComponent(token)}`,
+    { method: "GET" },
+  );
 }
 function confirmPostRequest(token: string): Request {
-  return new Request(`https://golfraven.example/api/confirm?token=${encodeURIComponent(token)}`, { method: "POST" });
+  return new Request(
+    `https://golfraven.example/api/confirm?token=${encodeURIComponent(token)}`,
+    { method: "POST" },
+  );
 }
 
 describe("GET /api/confirm — never confirms", () => {
@@ -46,7 +59,10 @@ describe("GET /api/confirm — never confirms", () => {
   });
 
   it("400s with no token", async () => {
-    const res = await handleConfirmPage(new Request("https://golfraven.example/api/confirm", { method: "GET" }), env);
+    const res = await handleConfirmPage(
+      new Request("https://golfraven.example/api/confirm", { method: "GET" }),
+      env,
+    );
     expect(res.status).toBe(400);
   });
 });
@@ -83,7 +99,10 @@ describe("POST /api/confirm — confirms exactly once, then is idempotent", () =
     // Simulate the address unsubscribing afterward.
     env.DB.rows[0]!.unsubscribed_at = "2026-02-01T00:00:00.000Z";
 
-    const replay = await handleConfirmSubmit(confirmPostRequest(RAW_TOKEN), env);
+    const replay = await handleConfirmSubmit(
+      confirmPostRequest(RAW_TOKEN),
+      env,
+    );
     expect(replay.status).toBe(400);
     // The old link must NOT have cleared unsubscribed_at.
     expect(env.DB.rows[0]?.unsubscribed_at).toBe("2026-02-01T00:00:00.000Z");
@@ -104,7 +123,10 @@ describe("POST /api/confirm — confirms exactly once, then is idempotent", () =
   it("shows the generic invalid/expired page for an unknown token", async () => {
     const env = makeTestEnv();
     await seedPendingRow(env);
-    const res = await handleConfirmSubmit(confirmPostRequest("wrong-token"), env);
+    const res = await handleConfirmSubmit(
+      confirmPostRequest("wrong-token"),
+      env,
+    );
     expect(res.status).toBe(400);
     expect(env.DB.rows[0]?.confirmed_at).toBeNull();
   });
@@ -119,7 +141,10 @@ describe("POST /api/confirm — confirms exactly once, then is idempotent", () =
 
   it("400s with no token", async () => {
     const env = makeTestEnv();
-    const res = await handleConfirmSubmit(new Request("https://golfraven.example/api/confirm", { method: "POST" }), env);
+    const res = await handleConfirmSubmit(
+      new Request("https://golfraven.example/api/confirm", { method: "POST" }),
+      env,
+    );
     expect(res.status).toBe(400);
   });
 });

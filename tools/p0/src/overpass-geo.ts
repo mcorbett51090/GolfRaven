@@ -19,7 +19,8 @@ export function haversineMeters(a: LatLon, b: LatLon): number {
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
   const h =
-    Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
@@ -56,7 +57,8 @@ export function boundingBox(
   radiusMeters: number,
 ): { south: number; west: number; north: number; east: number } {
   const latDelta = radiusMeters / 111320;
-  const lonDelta = radiusMeters / (111320 * Math.cos((center.lat * Math.PI) / 180));
+  const lonDelta =
+    radiusMeters / (111320 * Math.cos((center.lat * Math.PI) / 180));
   return {
     south: center.lat - latDelta,
     west: center.lon - lonDelta,
@@ -70,10 +72,13 @@ export function boundingBox(
  * gate finding B-2, which measures distance to the polygon itself, not to
  * a centroid). Plain arithmetic mean. */
 export function ringCentroid(ring: LatLon[]): LatLon {
-  const sum = ring.reduce((acc, p) => ({ lat: acc.lat + p.lat, lon: acc.lon + p.lon }), {
-    lat: 0,
-    lon: 0,
-  });
+  const sum = ring.reduce(
+    (acc, p) => ({ lat: acc.lat + p.lat, lon: acc.lon + p.lon }),
+    {
+      lat: 0,
+      lon: 0,
+    },
+  );
   return { lat: sum.lat / ring.length, lon: sum.lon / ring.length };
 }
 
@@ -94,7 +99,10 @@ export interface OverpassMember {
 const RING_JOIN_EPSILON_DEG = 1e-9;
 
 function samePoint(a: LatLon, b: LatLon): boolean {
-  return Math.abs(a.lat - b.lat) < RING_JOIN_EPSILON_DEG && Math.abs(a.lon - b.lon) < RING_JOIN_EPSILON_DEG;
+  return (
+    Math.abs(a.lat - b.lat) < RING_JOIN_EPSILON_DEG &&
+    Math.abs(a.lon - b.lon) < RING_JOIN_EPSILON_DEG
+  );
 }
 
 /**
@@ -168,11 +176,41 @@ export function resolveOuterRings(el: {
   if (el.type === "way") {
     return el.geometry && el.geometry.length >= 3 ? [el.geometry] : [];
   }
-  const outerSegments = (el.members ?? [])
-    .filter((m) => m.type === "way" && m.role === "outer" && m.geometry && m.geometry.length >= 2)
-    .map((m) => m.geometry!);
+  const members = el.members ?? [];
+  let outerMembers = members.filter(
+    (m) =>
+      m.type === "way" &&
+      m.role === "outer" &&
+      m.geometry &&
+      m.geometry.length >= 2,
+  );
+  // Gate finding F-N2: legacy multipolygon tagging sometimes leaves a
+  // member's role blank instead of "outer". Only fall back to treating
+  // blank-role way members as outer when there are NO explicit `outer`
+  // members at all — a relation that already has explicit outer members
+  // should never have an unrelated blank-role member (e.g. a stray
+  // `inner` mistagged blank) silently folded into the boundary.
+  if (outerMembers.length === 0) {
+    const blankRoleMembers = members.filter(
+      (m) =>
+        m.type === "way" &&
+        m.role === "" &&
+        m.geometry &&
+        m.geometry.length >= 2,
+    );
+    if (blankRoleMembers.length > 0) {
+      console.warn(
+        `overpass-geo: relation has no explicit "outer"-role way member(s) — treating ${blankRoleMembers.length} ` +
+          "blank-role way member(s) as outer (gate finding F-N2, legacy multipolygon tagging).",
+      );
+      outerMembers = blankRoleMembers;
+    }
+  }
+  const outerSegments = outerMembers.map((m) => m.geometry!);
   if (outerSegments.length === 0) return [];
-  return joinSegmentsIntoRings(outerSegments).filter((ring) => ring.length >= 3);
+  return joinSegmentsIntoRings(outerSegments).filter(
+    (ring) => ring.length >= 3,
+  );
 }
 
 /** True if `point` is inside ANY of the given rings (a relation may have
@@ -192,7 +230,10 @@ export function pointInAnyRing(point: LatLon, rings: LatLon[][]): boolean {
  * compute point-to-segment distance, then converts back to meters via
  * `haversineMeters` scale.
  */
-export function distanceToPolygonMeters(point: LatLon, rings: LatLon[][]): number {
+export function distanceToPolygonMeters(
+  point: LatLon,
+  rings: LatLon[][],
+): number {
   if (pointInAnyRing(point, rings)) return 0;
   let best = Infinity;
   for (const ring of rings) {
@@ -206,15 +247,25 @@ export function distanceToPolygonMeters(point: LatLon, rings: LatLon[][]): numbe
   return best;
 }
 
+// Gate finding F-N1: meters per degree of latitude derived from the SAME
+// Earth radius `haversineMeters` uses (2π × 6,371,000m / 360°), not the
+// WGS-84 surveying constant (111,320) — the two differ by ~0.1-0.3%, which
+// at the 500m name-match boundary is up to ~2m in the kill direction.
+const METERS_PER_DEGREE = (2 * Math.PI * EARTH_RADIUS_METERS) / 360;
+
 /** Point-to-segment distance in meters, via a local equirectangular
  * projection centered on `point` (accurate at the sub-few-km scale golf
  * courses are measured at). */
-function distancePointToSegmentMeters(point: LatLon, a: LatLon, b: LatLon): number {
+function distancePointToSegmentMeters(
+  point: LatLon,
+  a: LatLon,
+  b: LatLon,
+): number {
   const toXY = (p: LatLon): { x: number; y: number } => {
     const latRad = (point.lat * Math.PI) / 180;
     return {
-      x: (p.lon - point.lon) * Math.cos(latRad) * 111320,
-      y: (p.lat - point.lat) * 111320,
+      x: (p.lon - point.lon) * Math.cos(latRad) * METERS_PER_DEGREE,
+      y: (p.lat - point.lat) * METERS_PER_DEGREE,
     };
   };
   const p = { x: 0, y: 0 }; // point projects to the origin by construction
@@ -241,13 +292,21 @@ function distancePointToSegmentMeters(point: LatLon, a: LatLon, b: LatLon): numb
  * or fuzzy matching — e.g. "St." and "Saint" are deliberately NOT unified.
  */
 export function normalizeName(raw: string): string {
-  return raw
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "") // strip combining diacritical marks
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ");
+  return (
+    raw
+      .normalize("NFKD")
+      // Gate finding F-N4: strip EVERY Unicode combining-mark character
+      // (`\p{M}`), not just the U+0300-036F "Combining Diacritical Marks"
+      // block — a mark from another combining block (e.g. U+1AB0 range)
+      // used to fall through to the next line's letter/digit strip, which
+      // replaces it with a SPACE instead of deleting it (splitting one
+      // accented character into two normalized tokens).
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim()
+      .replace(/\s+/g, " ")
+  );
 }
 
 /**

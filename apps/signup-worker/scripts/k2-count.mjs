@@ -29,21 +29,33 @@
 // lower-cased.
 //
 // K2 exclusion dating (decision 0001 Addendum F, superseding the round-2
-// per-line `git blame` rule — see src/k2-blame.ts's module doc for why):
-// every candidate exclusion is checked against docs/p0/K2.md's FULL git
-// history via `git log --reverse --format=%H%x09%cI -S<address> --
-// docs/p0/K2.md` — the address counts as excluded ONLY if the EARLIEST
-// commit whose diff added that exact string has a COMMITTER time strictly
-// before Day 0 00:00 UTC. A later reformat or deletion of the line cannot
-// change this (it dates the ADDRESS, not the line). An address added
-// on/after Day 0, or with no commit history at all, is listed in the
-// output as "not excluded" rather than silently applied. This script
-// REFUSES OUTRIGHT (non-zero exit) in a shallow clone
+// per-line `git blame` rule, and gate findings F-S2/F-S3 superseding the
+// round-3 `git log -S<address>` pickaxe — see src/k2-blame.ts's module doc
+// for the full history):
+//
+// This script walks docs/p0/K2.md's FULL history, oldest to newest, via
+// `git log --reverse -p --format=... -- docs/p0/K2.md` (argv only, no
+// shell — every element is a separate execFileSync argv entry). At each
+// revision it reads the file's full content (`git show <sha>:<path>`) and
+// parses its "Excluded addresses" section with EXACTLY the same
+// decoration-stripping / lower-casing extraction the count itself uses
+// (never a raw `-S` substring search — gate finding F-S3: `-S` matched
+// `ba@x.com` for a search on `a@x.com`, and was case-sensitive so
+// `A@X.com` evaded a lower-cased exclusion). An address's first appearance
+// is the EARLIEST revision whose parsed address set contains it that the
+// immediately preceding revision's parsed set did not — so a later
+// reformat (which leaves the parsed address unchanged) never re-dates it.
+// The candidate set is every address ANY revision of the full history ever
+// added, not just the addresses currently listed (gate finding F-S2:
+// deleting an excluded address from K2.md after day 0 no longer silently
+// un-excludes it). The address counts as excluded ONLY if its
+// first-appearance COMMITTER time is strictly before Day 0 00:00 UTC. This
+// script REFUSES OUTRIGHT (non-zero exit) in a shallow clone
 // (`git rev-parse --is-shallow-repository`) — a shallow clone cannot hold
-// the full history `git log -S` needs, and would otherwise silently
-// under- or over-exclude. The actual decision logic lives in the pure,
-// git-free src/k2-blame.ts (unit-tested with fake first-appearance data) —
-// this script only shells out to git and parses its output.
+// the full history this needs, and would otherwise silently under- or
+// over-exclude. The actual decision logic lives in the pure, git-free
+// src/k2-blame.ts (unit-tested with fake first-appearance data) — this
+// script only shells out to git and parses its output.
 //
 // Known limit (decision 0001 Addendum F, stated verbatim): git timestamps
 // are set by whoever makes the commit, so this is not tamper-proof by
@@ -124,7 +136,8 @@ const EXCLUDED_HEADING_RE = /^excluded addresses/i;
 // Matches a bare date OR a date-time (with optional offset) — used to
 // detect "how many date-like things are in this section" and "is the one
 // we found a bare date or something with a time attached".
-const DATE_TOKEN_RE = /\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/g;
+const DATE_TOKEN_RE =
+  /\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/g;
 const BARE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
@@ -142,7 +155,9 @@ export function parseDay0FromK2Doc(markdown) {
   const lines = markdown.split("\n");
   const range = findSectionRange(lines, (text) => DAY0_HEADING_RE.test(text));
   if (range === null) {
-    throw new Error('K2.md is missing its "## Day 0" heading — cannot determine day 0.');
+    throw new Error(
+      'K2.md is missing its "## Day 0" heading — cannot determine day 0.',
+    );
   }
   const body = lines.slice(range.bodyStart, range.bodyEnd).join("\n");
 
@@ -166,12 +181,15 @@ export function parseDay0FromK2Doc(markdown) {
 
   const [y, m, d] = token.split("-").map(Number);
   const check = new Date(Date.UTC(y, m - 1, d));
-  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== m - 1 || check.getUTCDate() !== d) {
+  if (
+    check.getUTCFullYear() !== y ||
+    check.getUTCMonth() !== m - 1 ||
+    check.getUTCDate() !== d
+  ) {
     throw new Error(`K2 Day 0 ("${token}") is not a valid calendar date.`);
   }
   return token;
 }
-
 
 /**
  * Gate finding F8 residual (1): markdown italic/bold wraps a token in a
@@ -212,7 +230,10 @@ function isBulletLine(line) {
  * never get concatenated into one bad token.
  */
 function stripMarkdownDecoration(text) {
-  return text.replace(/`+/g, " ").replace(/mailto:/gi, " ").replace(/[<>[\]()]/g, " ");
+  return text
+    .replace(/`+/g, " ")
+    .replace(/mailto:/gi, " ")
+    .replace(/[<>[\]()]/g, " ");
 }
 
 // Deliberately tighter than validate.ts's pragmatic signup-time regex: this
@@ -240,7 +261,10 @@ const EMAIL_TOKEN_RE = /[\p{L}\p{N}._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
  * character) untouched.
  */
 function stripPairedEmphasisAroundTokens(text) {
-  return text.replace(/([_*])([\p{L}\p{N}._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\1/gu, (_m, _marker, token) => token);
+  return text.replace(
+    /([_*])([\p{L}\p{N}._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\1/gu,
+    (_m, _marker, token) => token,
+  );
 }
 
 /**
@@ -257,8 +281,14 @@ function extractAddressesFromLine(rawLine) {
   const wasBullet = isBulletLine(rawLine);
   const withoutBullet = stripBulletPrefix(rawLine);
   const withoutEmphasis = stripPairedEmphasis(withoutBullet);
-  const cleaned = stripPairedEmphasisAroundTokens(stripMarkdownDecoration(withoutEmphasis));
-  const matches = [...new Set([...cleaned.matchAll(EMAIL_TOKEN_RE)].map((m) => m[0].toLowerCase()))];
+  const cleaned = stripPairedEmphasisAroundTokens(
+    stripMarkdownDecoration(withoutEmphasis),
+  );
+  const matches = [
+    ...new Set(
+      [...cleaned.matchAll(EMAIL_TOKEN_RE)].map((m) => m[0].toLowerCase()),
+    ),
+  ];
 
   if (wasBullet && withoutBullet.trim() !== "" && matches.length !== 1) {
     throw new Error(
@@ -287,7 +317,9 @@ export function parseExcludedAddressesFromK2Doc(markdown) {
  */
 export function parseExcludedAddressEntriesFromK2Doc(markdown) {
   const lines = markdown.split("\n");
-  const range = findSectionRange(lines, (text) => EXCLUDED_HEADING_RE.test(text));
+  const range = findSectionRange(lines, (text) =>
+    EXCLUDED_HEADING_RE.test(text),
+  );
   if (range === null) {
     throw new Error(
       'K2.md is missing an "Excluded addresses" heading (expected one starting with "Excluded ' +
@@ -313,11 +345,18 @@ export function parseExcludedAddressEntriesFromK2Doc(markdown) {
  * --json` actually prints (`[{ results: [...], success: true, meta: {...} }]`).
  */
 export function extractRows(parsed) {
-  if (Array.isArray(parsed) && parsed.length > 0 && parsed[0] && Array.isArray(parsed[0].results)) {
+  if (
+    Array.isArray(parsed) &&
+    parsed.length > 0 &&
+    parsed[0] &&
+    Array.isArray(parsed[0].results)
+  ) {
     return parsed[0].results;
   }
   if (Array.isArray(parsed)) return parsed;
-  throw new Error("export JSON is neither a row array nor a `wrangler d1 execute --json` result array");
+  throw new Error(
+    "export JSON is neither a row array nor a `wrangler d1 execute --json` result array",
+  );
 }
 
 /**
@@ -336,63 +375,125 @@ export function isShallowRepository() {
       encoding: "utf8",
     });
   } catch (err) {
-    throw new Error(`could not run "git rev-parse --is-shallow-repository": ${err.message}`);
+    throw new Error(
+      `could not run "git rev-parse --is-shallow-repository": ${err.message}`,
+    );
   }
   return output.trim() === "true";
 }
 
-/**
- * Parses `git log --reverse --format=%H%x09%cI -S<address> --
- * docs/p0/K2.md` output and returns the FIRST (earliest) line's committer
- * time (the `%cI` field — ISO-8601 with an explicit offset), or `null` if
- * the command produced no output at all (no commit in the file's history
- * ever changed that exact string's occurrence count).
- */
-export function parseFirstAppearanceLog(output) {
-  const firstLine = output.split("\n").find((l) => l.trim() !== "");
-  if (!firstLine) return null;
-  const tabIdx = firstLine.indexOf("\t");
-  if (tabIdx === -1) return null;
-  const committerTimeIso = firstLine.slice(tabIdx + 1).trim();
-  return committerTimeIso || null;
-}
+// A control character that cannot appear in `git log`'s own output (commit
+// messages, diff text) — used as an unambiguous per-revision delimiter so
+// the header line (sha + committer time) can be split out even though `-p`
+// also emits each revision's full diff body, which this parses past (see
+// getK2DocRevisions's doc comment for why `-p` is used at all).
+const REVISION_DELIMITER = "\x01";
 
 /**
- * Decision 0001 Addendum F: for ONE address, the COMMITTER time of the
- * EARLIEST commit in docs/p0/K2.md's full history whose diff added that
- * exact string — `git log -S` (pickaxe, a literal-string occurrence-count
- * search, never a regex) rather than `git blame` on the file's CURRENT
- * state, so a later reformat or deletion of the line cannot change when
- * the address first appeared. Committer time, not author time, per
- * Addendum F: both are self-asserted by whoever makes the commit (neither
- * is tamper-proof — see the module's "Known limit" note above), but
- * committer time is what a `git push` timestamps at the remote, which is
- * the actual protection this rule relies on.
+ * Gate findings F-S2/F-S3: walks docs/p0/K2.md's FULL history via `git log
+ * --reverse -p --format=... -- docs/p0/K2.md` (argv only — every element
+ * below is a separate execFileSync argv entry, never shell-interpolated)
+ * and returns `{sha, committerTimeIso}` for every revision that touched
+ * the file, oldest first. `-p` is passed (rather than a plain `git log`)
+ * so the per-revision diff is available for anyone auditing this output by
+ * eye; this function itself only reads the `--format` header line ahead of
+ * each diff and discards the diff body — the actual first-appearance dating
+ * below reads each revision's FULL FILE content (`git show <sha>:<path>`),
+ * not the diff, so a content reformat can never look like an "add".
  */
-function getFirstAppearanceCommitterTime(address) {
+function getK2DocRevisions() {
   let output;
   try {
     output = execFileSync(
       "git",
-      ["log", "--reverse", "--format=%H%x09%cI", "-S", address, "--", K2_DOC_RELATIVE_PATH],
-      { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+      [
+        "log",
+        "--reverse",
+        "-p",
+        `--format=${REVISION_DELIMITER}%H%x09%cI`,
+        "--",
+        K2_DOC_RELATIVE_PATH,
+      ],
+      { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
     );
   } catch (err) {
     throw new Error(
-      `could not run "git log -S" for an excluded address on ${K2_DOC_RELATIVE_PATH}: ${err.message}`,
+      `could not run "git log -p" over ${K2_DOC_RELATIVE_PATH}'s full history: ${err.message}`,
     );
   }
-  return parseFirstAppearanceLog(output);
+  return output
+    .split(REVISION_DELIMITER)
+    .map((chunk) => chunk.split("\n", 1)[0])
+    .filter((header) => header && header.trim() !== "")
+    .map((header) => {
+      const tabIdx = header.indexOf("\t");
+      return {
+        sha: header.slice(0, tabIdx),
+        committerTimeIso: header.slice(tabIdx + 1).trim(),
+      };
+    });
 }
 
-/** Builds the `address -> {committerTimeIso}` map `resolveK2Exclusions`
- * expects, one `git log -S` call per distinct address. */
-function getFirstAppearanceByAddress(addresses) {
-  const map = new Map();
-  for (const address of addresses) {
-    map.set(address, { committerTimeIso: getFirstAppearanceCommitterTime(address) });
+/** The file's content at one revision, or `null` if it did not exist there
+ * (deleted, or the commit predates the file's creation). */
+function getFileContentAtRevision(sha) {
+  try {
+    return execFileSync("git", ["show", `${sha}:${K2_DOC_RELATIVE_PATH}`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch {
+    return null;
   }
-  return map;
+}
+
+/** Parses a historical revision's "Excluded addresses" section with the
+ * SAME address-extraction logic the count uses today (gate finding F-S3:
+ * exact, whole-address, lower-cased identity — never a substring search).
+ * Lenient: an early revision that predates the heading, or one this
+ * script's stricter parser can't cleanly parse, contributes no addresses
+ * for that revision rather than aborting the whole historical walk. */
+function parseExclusionSetLenient(markdown) {
+  try {
+    return new Set(parseExcludedAddressesFromK2Doc(markdown));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Gate findings F-S2/F-S3: builds `address -> {committerTimeIso}` for
+ * EVERY address any revision of docs/p0/K2.md's full history ever added
+ * to the "Excluded addresses" section — independent of whether it is
+ * still listed today (F-S2) — by walking revisions oldest-to-newest and,
+ * at each one, diffing its PARSED address set against the immediately
+ * preceding revision's PARSED address set (never a raw-line diff): an
+ * address counts as "added" at the first revision whose set contains it
+ * that the prior revision's set did not. Because both sides of that
+ * comparison are fully-parsed, exact, lower-cased addresses (F-S3), a pure
+ * reformat that leaves the address itself unchanged is never seen as an
+ * "add", and a later deletion never removes the address's already-recorded
+ * first appearance (only ADDING it again after having been previously
+ * absent could, and even then the earliest recorded date wins, since this
+ * only ever sets a date the first time an address is seen at all).
+ */
+function getFirstAppearanceByAddress() {
+  const revisions = getK2DocRevisions();
+  const firstSeen = new Map();
+  let previousSet = new Set();
+  for (const { sha, committerTimeIso } of revisions) {
+    const content = getFileContentAtRevision(sha);
+    const currentSet =
+      content === null ? new Set() : parseExclusionSetLenient(content);
+    for (const address of currentSet) {
+      if (!previousSet.has(address) && !firstSeen.has(address)) {
+        firstSeen.set(address, { committerTimeIso });
+      }
+    }
+    previousSet = currentSet;
+  }
+  return firstSeen;
 }
 
 async function main() {
@@ -433,15 +534,17 @@ async function main() {
   }
 
   const excludedEntries = parseExcludedAddressEntriesFromK2Doc(k2Doc);
-  const uniqueAddresses = [...new Set(excludedEntries.map((e) => e.address))];
-  const firstAppearanceByAddress = getFirstAppearanceByAddress(uniqueAddresses);
+  const firstAppearanceByAddress = getFirstAppearanceByAddress();
 
   const distJsPath = join(packageRoot, "dist", "k2-count.js");
   const blameJsPath = join(packageRoot, "dist", "k2-blame.js");
   let k2CountModule;
   let k2BlameModule;
   try {
-    [k2CountModule, k2BlameModule] = await Promise.all([import(distJsPath), import(blameJsPath)]);
+    [k2CountModule, k2BlameModule] = await Promise.all([
+      import(distJsPath),
+      import(blameJsPath),
+    ]);
   } catch (err) {
     console.error(
       `could not load ${distJsPath} / ${blameJsPath} — run "pnpm --filter @golfraven/signup-worker build" first.\n${err.message}`,
@@ -452,29 +555,62 @@ async function main() {
 
   const exclusionResult = k2BlameModule.resolveK2Exclusions({
     day0,
-    entries: excludedEntries,
     firstAppearanceByAddress,
+    currentEntries: excludedEntries,
   });
   const excludedAddresses = exclusionResult.excluded;
 
-  const rawExport = JSON.parse(await readFile(resolve(args.exportPath), "utf8"));
+  const rawExport = JSON.parse(
+    await readFile(resolve(args.exportPath), "utf8"),
+  );
   const rows = extractRows(rawExport);
 
-  const result = k2CountModule.computeK2Counts({ rows, day0, excludedAddresses });
+  const result = k2CountModule.computeK2Counts({
+    rows,
+    day0,
+    excludedAddresses,
+  });
 
   console.log(`K2 signup count — day 0: ${result.day0}`);
-  console.log(`  excluded addresses (${excludedAddresses.length}): ${excludedAddresses.length > 0 ? excludedAddresses.join(", ") : "(none)"}`);
+  console.log(
+    `  excluded addresses (${excludedAddresses.length}): ${excludedAddresses.length > 0 ? excludedAddresses.join(", ") : "(none)"}`,
+  );
   if (exclusionResult.notExcluded.length > 0) {
     for (const entry of exclusionResult.notExcluded) {
       console.log(`    ${entry.address} (K2.md:${entry.line}) — ${entry.note}`);
     }
   }
-  console.log(`  export rows: ${result.totalRows}  confirmed (raw): ${result.totalConfirmedRaw}`);
+  // Gate finding F-S2: an address excluded by history but no longer
+  // visible in today's K2.md — still applied, but a reader of the current
+  // doc alone would otherwise never know it exists.
+  if (exclusionResult.excludedButNoLongerListed.length > 0) {
+    console.log(
+      `  NOTE: excluded (by history) but no longer listed in K2.md (${exclusionResult.excludedButNoLongerListed.length}): ` +
+        `${exclusionResult.excludedButNoLongerListed.join(", ")}`,
+    );
+  }
+  // A-6 / runbook step 9: an address whose first appearance lands ON day 0
+  // itself is correctly NOT excluded (Addendum F requires strictly BEFORE
+  // day 0) — warn so a same-UTC-day exclusion commit is caught, not
+  // silently absorbed into the count.
+  if (exclusionResult.excludedOnDay0.length > 0) {
+    console.log(
+      `  WARNING: first appeared ON day 0 itself — correctly NOT excluded, but check the runbook's ` +
+        `"commit before day 0" step (${exclusionResult.excludedOnDay0.length}): ${exclusionResult.excludedOnDay0.join(", ")}`,
+    );
+  }
+  console.log(
+    `  export rows: ${result.totalRows}  confirmed (raw): ${result.totalConfirmedRaw}`,
+  );
   if (result.malformedConfirmedAtCount > 0) {
-    console.log(`  WARNING: rows with an unparsable confirmed_at, skipped: ${result.malformedConfirmedAtCount}`);
+    console.log(
+      `  WARNING: rows with an unparsable confirmed_at, skipped: ${result.malformedConfirmedAtCount}`,
+    );
   }
   console.log(`  excluded rows matched: ${result.excludedMatchCount}`);
-  console.log(`  distinct confirmed (post-exclusion): ${result.distinctConfirmed}`);
+  console.log(
+    `  distinct confirmed (post-exclusion): ${result.distinctConfirmed}`,
+  );
   console.log("");
   console.log(
     `  Advisory (< ${result.advisoryCutoff}, day0+14d): ${result.advisoryCount} / ${k2CountModule.ADVISORY_THRESHOLD} — ${

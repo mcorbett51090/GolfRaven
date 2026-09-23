@@ -4,7 +4,6 @@ import {
   parseDay0FromK2Doc,
   parseExcludedAddressEntriesFromK2Doc,
   parseExcludedAddressesFromK2Doc,
-  parseFirstAppearanceLog,
   isShallowRepository,
 } from "../scripts/k2-count.mjs";
 // Reads docs/p0/K2.md's ACTUAL content at test-transform time (Vite/Vitest's
@@ -54,7 +53,9 @@ Day 0 is 2026-10-05, logged before any promotion.
 
 ## Excluded addresses (pre-Day-0 list)
 `;
-    expect(() => parseDay0FromK2Doc(markdown)).toThrow(/must be a bare YYYY-MM-DD date/);
+    expect(() => parseDay0FromK2Doc(markdown)).toThrow(
+      /must be a bare YYYY-MM-DD date/,
+    );
   });
 
   it("refuses a date-time with NO explicit UTC offset (ambiguous local time)", () => {
@@ -84,7 +85,9 @@ logged 2026-10-12: day 0 is 2026-10-10
 
 ## Excluded addresses (pre-Day-0 list)
 `;
-    expect(() => parseDay0FromK2Doc(markdown)).toThrow(/not a valid calendar date/);
+    expect(() => parseDay0FromK2Doc(markdown)).toThrow(
+      /not a valid calendar date/,
+    );
   });
 
   it("throws when the '## Day 0' heading is missing entirely", () => {
@@ -92,7 +95,9 @@ logged 2026-10-12: day 0 is 2026-10-10
 
 _(blank)_
 `;
-    expect(() => parseDay0FromK2Doc(markdown)).toThrow(/missing its "## Day 0" heading/);
+    expect(() => parseDay0FromK2Doc(markdown)).toThrow(
+      /missing its "## Day 0" heading/,
+    );
   });
 });
 
@@ -128,7 +133,9 @@ _(blank — any owner/test email addresses to exclude ...)_
 
 ## OWNER
 `;
-    expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["owner@golfraven.example"]);
+    expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual([
+      "owner@golfraven.example",
+    ]);
   });
 
   it("throws (never silently returns []) when no 'Excluded addresses...' heading exists at all", () => {
@@ -138,42 +145,53 @@ _(blank — any owner/test email addresses to exclude ...)_
 
 ## OWNER
 `;
-    expect(() => parseExcludedAddressesFromK2Doc(markdown)).toThrow(/missing an "Excluded addresses" heading/);
+    expect(() => parseExcludedAddressesFromK2Doc(markdown)).toThrow(
+      /missing an "Excluded addresses" heading/,
+    );
   });
 
   describe("decoration forms (F8)", () => {
     it("strips backticks", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- `a@b.com`\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- `a@b.com`\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a@b.com"]);
     });
 
     it("strips a markdown link, without concatenating the text and target into one bad token", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- [a@b.com](mailto:a@b.com)\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- [a@b.com](mailto:a@b.com)\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a@b.com"]);
     });
 
     it("strips a bare mailto: prefix", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- mailto:a@b.com\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- mailto:a@b.com\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a@b.com"]);
     });
 
     it("strips trailing sentence punctuation", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\nOwner test address is a@b.com.\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\nOwner test address is a@b.com.\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a@b.com"]);
     });
 
     it("strips angle brackets", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- <a@b.com>\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- <a@b.com>\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a@b.com"]);
     });
 
     it("lower-cases mixed-case addresses", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- Matt@GolfRaven.example\n";
-      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["matt@golfraven.example"]);
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- Matt@GolfRaven.example\n";
+      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual([
+        "matt@golfraven.example",
+      ]);
     });
 
     it("F8 residual: strips paired underscore emphasis without dropping the address", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- _x@y.com_\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- _x@y.com_\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["x@y.com"]);
     });
 
@@ -182,76 +200,76 @@ _(blank — any owner/test email addresses to exclude ...)_
       // WRONG address, "_a2@x.com" (leading underscore included, since the
       // whole-line strip above only fires when the marker is at the very
       // end of the trimmed line too).
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- _a2@x.com_ (owner)\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- _a2@x.com_ (owner)\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a2@x.com"]);
     });
 
     it("A-8: strips asterisk emphasis wrapped tightly around the address with trailing prose", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- *a2@x.com* (owner)\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- *a2@x.com* (owner)\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a2@x.com"]);
     });
 
     it("A-8: a genuine underscore that is part of the local part (not a pair) is left alone", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- test_user@golfraven.example\n";
-      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["test_user@golfraven.example"]);
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- test_user@golfraven.example\n";
+      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual([
+        "test_user@golfraven.example",
+      ]);
     });
 
     it("F8 residual: strips paired asterisk emphasis", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- *x@y.com*\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- *x@y.com*\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["x@y.com"]);
     });
 
     it("F8 residual: accepts a unicode local part instead of matching only its ASCII suffix", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- ünï13@x.com\n";
-      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["ünï13@x.com"]);
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- ünï13@x.com\n";
+      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual([
+        "ünï13@x.com",
+      ]);
     });
 
     it("strips a trailing comma in prose", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\nOwner test address is a@b.com, for now.\n";
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\nOwner test address is a@b.com, for now.\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a@b.com"]);
     });
 
     it("F8 residual (3): a bullet with no valid TLD is a hard refusal, not a silent drop", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- test10@localhost\n";
-      expect(() => parseExcludedAddressesFromK2Doc(markdown)).toThrow(/does not contain exactly one/);
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- test10@localhost\n";
+      expect(() => parseExcludedAddressesFromK2Doc(markdown)).toThrow(
+        /does not contain exactly one/,
+      );
     });
 
     it("F8 residual (3): a spelled-out, unparseable bullet is a hard refusal", () => {
-      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- matt at golfraven dot com\n";
-      expect(() => parseExcludedAddressesFromK2Doc(markdown)).toThrow(/does not contain exactly one/);
+      const markdown =
+        "## Excluded addresses (pre-Day-0 list)\n\n- matt at golfraven dot com\n";
+      expect(() => parseExcludedAddressesFromK2Doc(markdown)).toThrow(
+        /does not contain exactly one/,
+      );
     });
   });
 });
 
 describe("parseExcludedAddressEntriesFromK2Doc (F7/F8 residual — line numbers for git blame)", () => {
   it("reports the 1-indexed absolute line number of each address's first occurrence", () => {
-    const markdown = ["## Excluded addresses (pre-Day-0 list)", "", "- matt@golfraven.example", "- test@golfraven.example", ""].join(
-      "\n",
-    );
+    const markdown = [
+      "## Excluded addresses (pre-Day-0 list)",
+      "",
+      "- matt@golfraven.example",
+      "- test@golfraven.example",
+      "",
+    ].join("\n");
     expect(parseExcludedAddressEntriesFromK2Doc(markdown)).toEqual([
       { address: "matt@golfraven.example", line: 3 },
       { address: "test@golfraven.example", line: 4 },
     ]);
-  });
-});
-
-describe("parseFirstAppearanceLog (decision 0001 Addendum F glue — parses `git log --format=%H%x09%cI -S` output)", () => {
-  it("returns the first line's committer time", () => {
-    const output = [
-      "abc123\t2026-09-30T00:00:00-04:00",
-      "def456\t2026-10-06T00:00:00-04:00", // a later commit (e.g. re-adding after a deletion) — ignored
-      "",
-    ].join("\n");
-    expect(parseFirstAppearanceLog(output)).toBe("2026-09-30T00:00:00-04:00");
-  });
-
-  it("returns null for empty output (no commit ever added this string)", () => {
-    expect(parseFirstAppearanceLog("")).toBeNull();
-    expect(parseFirstAppearanceLog("\n\n")).toBeNull();
-  });
-
-  it("returns null for a line with no tab separator", () => {
-    expect(parseFirstAppearanceLog("not-tab-separated")).toBeNull();
   });
 });
 
@@ -290,14 +308,21 @@ describe("parses the REAL docs/p0/K2.md (F1 — this is exactly what hid the bug
 
 describe("extractRows", () => {
   it("accepts a plain row array", () => {
-    const rows = [{ email_lc: "a@example.com", confirmed_at: "2026-10-06T00:00:00.000Z" }];
+    const rows = [
+      { email_lc: "a@example.com", confirmed_at: "2026-10-06T00:00:00.000Z" },
+    ];
     expect(extractRows(rows)).toBe(rows);
   });
 
   it("unwraps a `wrangler d1 execute --json` result array", () => {
     const wranglerShape = [
       {
-        results: [{ email_lc: "a@example.com", confirmed_at: "2026-10-06T00:00:00.000Z" }],
+        results: [
+          {
+            email_lc: "a@example.com",
+            confirmed_at: "2026-10-06T00:00:00.000Z",
+          },
+        ],
         success: true,
         meta: {},
       },

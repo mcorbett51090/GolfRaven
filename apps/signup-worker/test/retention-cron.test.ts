@@ -10,7 +10,11 @@ import type { TestEnv } from "./env";
 // behavior: no deletion of a confirmed-then-unsubscribed row unless
 // K2_GATE_CLOSES_AT is strictly valid AND the grace period has elapsed.
 
-function seedUnsubscribedRow(env: TestEnv, id: string, unsubscribedAt: string): void {
+function seedUnsubscribedRow(
+  env: TestEnv,
+  id: string,
+  unsubscribedAt: string,
+): void {
   env.DB.rows.push({
     id,
     email_lc: `${id}@example.com`,
@@ -23,6 +27,7 @@ function seedUnsubscribedRow(env: TestEnv, id: string, unsubscribedAt: string): 
     confirm_token_hash: null,
     confirm_expires_at: null,
     unsubscribe_token_hash: `hash-${id}`,
+    unsubscribe_token_hash_prev: null,
   });
 }
 
@@ -42,26 +47,36 @@ describe("runRetentionCron — confirmed-row deletion gate (N2)", () => {
     ["unset", undefined],
     ["empty string", ""],
     ["garbage", "garbage"],
-    ['bare year "2026" (used to parse to 2026-01-01 and delete immediately)', "2026"],
+    [
+      'bare year "2026" (used to parse to 2026-01-01 and delete immediately)',
+      "2026",
+    ],
     ['bare "1" (V8 parses to 2001-01-01)', "1"],
     ["date-only, no time component", "2026-11-20"],
     ["day 0 typed into this var by mistake", "2026-10-10T00:00:00Z"],
     ["one second before the floor", "2026-11-15T23:59:59Z"],
-  ])("deletes NO confirmed-then-unsubscribed row when K2_GATE_CLOSES_AT is %s", async (_label, value) => {
-    const env = makeTestEnv(value === undefined ? {} : { K2_GATE_CLOSES_AT: value });
-    seedUnsubscribedRow(env, "old", OLD_UNSUB);
-    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  ])(
+    "deletes NO confirmed-then-unsubscribed row when K2_GATE_CLOSES_AT is %s",
+    async (_label, value) => {
+      const env = makeTestEnv(
+        value === undefined ? {} : { K2_GATE_CLOSES_AT: value },
+      );
+      seedUnsubscribedRow(env, "old", OLD_UNSUB);
+      const consoleWarnSpy = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => {});
 
-    const result = await runRetentionCron(env);
+      const result = await runRetentionCron(env);
 
-    expect(result.deletedUnsubscribed).toBe(0);
-    expect(env.DB.rows).toHaveLength(1);
-    expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-    // No PII (no address) in the warning payload.
-    const [, payload] = consoleWarnSpy.mock.calls[0]!;
-    expect(JSON.stringify(payload)).not.toContain("@example.com");
-    consoleWarnSpy.mockRestore();
-  });
+      expect(result.deletedUnsubscribed).toBe(0);
+      expect(env.DB.rows).toHaveLength(1);
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
+      // No PII (no address) in the warning payload.
+      const [, payload] = consoleWarnSpy.mock.calls[0]!;
+      expect(JSON.stringify(payload)).not.toContain("@example.com");
+      consoleWarnSpy.mockRestore();
+    },
+  );
 
   it("deletes NO row when the gate is valid but the 30-day grace period has NOT yet elapsed", async () => {
     // Gate closes 5 days before "now" — well short of the 30-day grace.
@@ -77,7 +92,10 @@ describe("runRetentionCron — confirmed-row deletion gate (N2)", () => {
     // Gate closed well over 30 days before "now". K2_GATE_CLOSES_AT here is
     // the floor (2026-11-16), which is exactly day0 (2026-10-05, the plan's
     // P0 start) + 42 days — matching K2_DAY0 below (A-3: both vars required).
-    const env = makeTestEnv({ K2_GATE_CLOSES_AT: "2026-11-16T00:00:00Z", K2_DAY0: "2026-10-05" });
+    const env = makeTestEnv({
+      K2_GATE_CLOSES_AT: "2026-11-16T00:00:00Z",
+      K2_DAY0: "2026-10-05",
+    });
     seedUnsubscribedRow(env, "old", OLD_UNSUB);
     seedUnsubscribedRow(env, "recent", "2026-12-10T00:00:00.000Z"); // within 30d of FIXED_NOW
 
@@ -88,7 +106,10 @@ describe("runRetentionCron — confirmed-row deletion gate (N2)", () => {
 
   it("deletes exactly at the grace boundary (now == gateCloses + 30 days)", async () => {
     // FIXED_NOW is 2026-12-20T00:00:00.000Z; gateCloses + 30d must equal that exactly.
-    const env = makeTestEnv({ K2_GATE_CLOSES_AT: "2026-11-20T00:00:00Z", K2_DAY0: "2026-10-09" });
+    const env = makeTestEnv({
+      K2_GATE_CLOSES_AT: "2026-11-20T00:00:00Z",
+      K2_DAY0: "2026-10-09",
+    });
     seedUnsubscribedRow(env, "old", OLD_UNSUB);
 
     const result = await runRetentionCron(env);
@@ -118,9 +139,14 @@ describe("runRetentionCron — K2_DAY0 / K2_GATE_CLOSES_AT consistency gate (A-3
     // The mistake: K2_GATE_CLOSES_AT was set to day 0 itself instead of
     // day 0 + 42 days. K2_GATE_CLOSES_AT's floor check alone would ACCEPT
     // this (2026-11-20 > floor) — only the K2_DAY0 cross-check catches it.
-    const env = makeTestEnv({ K2_DAY0: "2026-11-20", K2_GATE_CLOSES_AT: "2026-11-20T00:00:00Z" });
+    const env = makeTestEnv({
+      K2_DAY0: "2026-11-20",
+      K2_GATE_CLOSES_AT: "2026-11-20T00:00:00Z",
+    });
     seedUnsubscribedRow(env, "old", OLD_UNSUB);
-    const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const consoleWarnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
 
     const result = await runRetentionCron(env);
 
@@ -140,14 +166,20 @@ describe("runRetentionCron — K2_DAY0 / K2_GATE_CLOSES_AT consistency gate (A-3
   });
 
   it("deletes NOTHING when K2_DAY0 is set but does not match K2_GATE_CLOSES_AT - 42 days at all", async () => {
-    const env = makeTestEnv({ K2_DAY0: "2026-09-01", K2_GATE_CLOSES_AT: "2026-11-16T00:00:00Z" });
+    const env = makeTestEnv({
+      K2_DAY0: "2026-09-01",
+      K2_GATE_CLOSES_AT: "2026-11-16T00:00:00Z",
+    });
     seedUnsubscribedRow(env, "old", OLD_UNSUB);
     const result = await runRetentionCron(env);
     expect(result.deletedUnsubscribed).toBe(0);
   });
 
   it("deletes correctly once K2_DAY0 and K2_GATE_CLOSES_AT (= day0 + 42d) are BOTH set and consistent", async () => {
-    const env = makeTestEnv({ K2_DAY0: "2026-10-05", K2_GATE_CLOSES_AT: "2026-11-16T00:00:00Z" });
+    const env = makeTestEnv({
+      K2_DAY0: "2026-10-05",
+      K2_GATE_CLOSES_AT: "2026-11-16T00:00:00Z",
+    });
     seedUnsubscribedRow(env, "old", OLD_UNSUB);
     const result = await runRetentionCron(env);
     expect(result.deletedUnsubscribed).toBe(1);

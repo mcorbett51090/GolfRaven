@@ -21,7 +21,11 @@ import {
   parseHealthExportXml,
   type RawIosWorkout,
 } from "./health-export-xml.js";
-import { isWithinRoundWindow, readLoggedRoundWindows, type RoundWindow } from "./round-windows.js";
+import {
+  isWithinRoundWindow,
+  readLoggedRoundWindows,
+  type RoundWindow,
+} from "./round-windows.js";
 
 export interface X1IosWorkoutRecord {
   sourceName: string;
@@ -64,7 +68,8 @@ function toRecord(
   routeFileExists: boolean,
   routeTrackpointCount: number,
 ): X1IosWorkoutRecord {
-  const routePresent = raw.hasWorkoutRoute && routeFileExists && routeTrackpointCount > 0;
+  const routePresent =
+    raw.hasWorkoutRoute && routeFileExists && routeTrackpointCount > 0;
   return {
     sourceName: raw.sourceName,
     sourceVersion: raw.sourceVersion,
@@ -100,7 +105,7 @@ export async function runX1IosExport(
   if (!opts.roundWindows || opts.roundWindows.length === 0) {
     throw new Error(
       "runX1IosExport requires at least one round window (decision 0001 Addendum F) — refusing to run with " +
-        'no logged window. Log the UTC start/end time of each test round in docs/p0/X1.md\'s "## Round ' +
+        "no logged window. Log the UTC start/end time of each test round in docs/p0/X1.md's \"## Round " +
         'windows" section first.',
     );
   }
@@ -118,13 +123,22 @@ export async function runX1IosExport(
 
   const sinceDate = opts.since ? new Date(`${opts.since}T00:00:00`) : null;
   if (opts.since && Number.isNaN(sinceDate?.getTime())) {
-    throw new Error(`--since value is not a valid date: ${opts.since} (expected YYYY-MM-DD)`);
+    throw new Error(
+      `--since value is not a valid date: ${opts.since} (expected YYYY-MM-DD)`,
+    );
   }
 
-  const parsed = await parseHealthExportXml(xmlPath);
+  // Gate finding F-N7: the real CLI opts into the workout-routes/
+  // unreferenced-GPX-file check; synthetic test fixtures do not (see
+  // health-export-xml.ts's ParseHealthExportXmlOptions doc).
+  const parsed = await parseHealthExportXml(xmlPath, {
+    checkUnreferencedGpxFiles: true,
+  });
   const warnings: string[] = [];
 
-  const golf = parsed.workouts.filter((w) => w.workoutActivityType === GOLF_ACTIVITY_TYPE);
+  const golf = parsed.workouts.filter(
+    (w) => w.workoutActivityType === GOLF_ACTIVITY_TYPE,
+  );
 
   const sinceFiltered = golf.filter((w) => {
     if (!sinceDate) return true;
@@ -284,7 +298,9 @@ async function main(argv: string[]): Promise<void> {
       `Wrote ${jsonPath} and ${mdPath}.\n`,
   );
   if (result.warnings.length > 0) {
-    process.stderr.write(`Warnings:\n${result.warnings.map((w) => `  - ${w}`).join("\n")}\n`);
+    process.stderr.write(
+      `Warnings:\n${result.warnings.map((w) => `  - ${w}`).join("\n")}\n`,
+    );
   }
 }
 

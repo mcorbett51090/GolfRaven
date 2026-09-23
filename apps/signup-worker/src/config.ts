@@ -24,7 +24,11 @@ export interface D1Like {
 
 export interface KVLike {
   get(key: string): Promise<string | null>;
-  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number },
+  ): Promise<void>;
 }
 
 export interface Env {
@@ -164,7 +168,8 @@ export const K2_VERDICT_GRACE_DAYS = 30;
 
 const K2_GATE_CLOSES_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
-export type K2GateCheckResult = { ok: true; gateCloses: Date } | { ok: false; reason: string };
+export type K2GateCheckResult =
+  { ok: true; gateCloses: Date } | { ok: false; reason: string };
 
 /**
  * N2: validates `Env.K2_GATE_CLOSES_AT` strictly — a strict full ISO-8601
@@ -175,7 +180,9 @@ export type K2GateCheckResult = { ok: true; gateCloses: Date } | { ok: false; re
  * must NOT delete any confirmed-then-unsubscribed row unless this returns
  * `ok: true`, and even then only once `now >= gateCloses + K2_VERDICT_GRACE_DAYS`.
  */
-export function checkK2GateClosesAt(raw: string | undefined): K2GateCheckResult {
+export function checkK2GateClosesAt(
+  raw: string | undefined,
+): K2GateCheckResult {
   if (!raw || raw.trim() === "") {
     return { ok: false, reason: "unset" };
   }
@@ -192,18 +199,26 @@ export function checkK2GateClosesAt(raw: string | undefined): K2GateCheckResult 
   // direction (it only pushes gateCloses later), but it's not the strict
   // calendar check the format implies, so reject it outright instead.
   if (gateCloses.toISOString().replace(".000Z", "Z") !== raw) {
-    return { ok: false, reason: "not a valid calendar date (round-trip mismatch, e.g. a day-of-month rollover)" };
+    return {
+      ok: false,
+      reason:
+        "not a valid calendar date (round-trip mismatch, e.g. a day-of-month rollover)",
+    };
   }
   const floor = new Date(K2_GATE_CLOSES_AT_FLOOR);
   if (gateCloses.getTime() < floor.getTime()) {
-    return { ok: false, reason: `earlier than the earliest possible K2 gate close (${K2_GATE_CLOSES_AT_FLOOR})` };
+    return {
+      ok: false,
+      reason: `earlier than the earliest possible K2 gate close (${K2_GATE_CLOSES_AT_FLOOR})`,
+    };
   }
   return { ok: true, gateCloses };
 }
 
 const K2_DAY0_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export type K2Day0CheckResult = { ok: true; day0: Date } | { ok: false; reason: string };
+export type K2Day0CheckResult =
+  { ok: true; day0: Date } | { ok: false; reason: string };
 
 /**
  * Gate finding A-3: validates `Env.K2_DAY0` — a strict, bare `YYYY-MM-DD`
@@ -228,7 +243,8 @@ export function checkK2Day0(raw: string | undefined): K2Day0CheckResult {
 
 const K2_GATE_WINDOW_DAYS = 42;
 
-export type K2GateMatchesDay0Result = { ok: true } | { ok: false; reason: string };
+export type K2GateMatchesDay0Result =
+  { ok: true } | { ok: false; reason: string };
 
 /**
  * Gate finding A-3 (BLOCKING-adjacent SHOULD-FIX): `checkK2GateClosesAt`'s
@@ -246,7 +262,10 @@ export type K2GateMatchesDay0Result = { ok: true } | { ok: false; reason: string
  * refuses deletion outright; see `runRetentionCron` in index.ts for the
  * single PII-free warning this produces.
  */
-export function checkK2GateMatchesDay0(gateCloses: Date, day0: Date): K2GateMatchesDay0Result {
+export function checkK2GateMatchesDay0(
+  gateCloses: Date,
+  day0: Date,
+): K2GateMatchesDay0Result {
   const expectedMs = day0.getTime() + K2_GATE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   if (gateCloses.getTime() !== expectedMs) {
     return {
@@ -257,7 +276,13 @@ export function checkK2GateMatchesDay0(gateCloses: Date, day0: Date): K2GateMatc
   return { ok: true };
 }
 
-const MIN_SECRET_LENGTH = 16;
+// Gate finding F-N6: now that every subscriber's own unsubscribe token is
+// an offline oracle for TOKEN_PEPPER (HMAC-SHA256 keyed by it, computable
+// by anyone who knows their own token), the pepper's length is the ONLY
+// enforced strength property — raised from the generic 16-char minimum to
+// 32 (a `openssl rand -hex 32` output's actual byte-entropy, not just its
+// string length; see README.md "Rotating TOKEN_PEPPER").
+const MIN_PEPPER_LENGTH = 32;
 
 export type SecretsCheckResult = { ok: true } | { ok: false; error: string };
 
@@ -280,8 +305,24 @@ export function assertRequiredSecretsPresent(env: Env): SecretsCheckResult {
       return { ok: false, error: `missing required secret/config: ${name}` };
     }
   }
-  if (env.TOKEN_PEPPER.length < MIN_SECRET_LENGTH) {
-    return { ok: false, error: `TOKEN_PEPPER is too short (minimum ${MIN_SECRET_LENGTH} characters)` };
+  if (env.TOKEN_PEPPER.length < MIN_PEPPER_LENGTH) {
+    return {
+      ok: false,
+      error: `TOKEN_PEPPER is too short (minimum ${MIN_PEPPER_LENGTH} characters)`,
+    };
+  }
+  // Gate finding F-N6: TOKEN_PEPPER_PREVIOUS was not length-checked at
+  // all — during a rotation window it derives real, currently-valid
+  // unsubscribe-token hashes exactly like TOKEN_PEPPER does, so it needs
+  // the same floor.
+  if (
+    env.TOKEN_PEPPER_PREVIOUS &&
+    env.TOKEN_PEPPER_PREVIOUS.length < MIN_PEPPER_LENGTH
+  ) {
+    return {
+      ok: false,
+      error: `TOKEN_PEPPER_PREVIOUS is too short (minimum ${MIN_PEPPER_LENGTH} characters)`,
+    };
   }
   return { ok: true };
 }
@@ -290,5 +331,7 @@ export function assertRequiredSecretsPresent(env: Env): SecretsCheckResult {
 export function globalDailySendCap(env: Env): number {
   const raw = env.GLOBAL_DAILY_SEND_CAP;
   const parsed = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GLOBAL_DAILY_SEND_CAP;
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_GLOBAL_DAILY_SEND_CAP;
 }
