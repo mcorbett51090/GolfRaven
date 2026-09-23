@@ -1,14 +1,7 @@
 name: golfraven CI
 
-# POST-EXTRACTION COPY. This is what the live workflow becomes once
-# golfraven/ is split out to its own repo root (git subtree split
-# --prefix=golfraven) — same jobs as the currently-live
-# /.github/workflows/golfraven-ci.yml at the RavenGolf repo root, minus
-# the golfraven/ working-directory scoping that file needs while
-# golfraven/ is still a subdirectory. This file is not live until that
-# split happens (a workflow only runs from .github/workflows/ at whatever
-# is the repo root at the time). Keeping it in sync now means extraction
-# needs no CI edit — see the root README.md "Staging note".
+# Live CI for the golfraven repo. (Originally written as the post-extraction copy while the
+# monorepo was staged under golfraven/ in RavenGolf; it became live when the repo was split out.)
 
 on:
   pull_request:

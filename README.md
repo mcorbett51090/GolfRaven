@@ -2,41 +2,24 @@
 
 GolfRaven tracks a golfer's rounds against a trail's official course
 roster and confirms completion — with a finisher's marker to show for it.
-It launches with two pilot trails, the Tennessee Golf Trail and the
-Vancouver Island Golf Trail, and expands from there. See the full plan at
-[`../docs/golf-trails/02-build-plan.md`](../docs/golf-trails/02-build-plan.md)
-(architecture in §3, this repo's layout at §3.1). **This link points into
-the `RavenGolf` repo** (the plan lives there, not here) and will break
-once `golfraven/` is extracted to its own repo — see "Staging note" below.
+Its pilot slate is the Tennessee Golf Trail, the Vancouver Island Golf Trail and
+the Robert Trent Jones Golf Trail (Oklahoma Golf Trail in reserve), and it expands
+from there. The full build plan lives in the RavenGolf repo:
+[`docs/golf-trails/02-build-plan.md`](https://github.com/mcorbett51090/RavenGolf/blob/main/docs/golf-trails/02-build-plan.md) (architecture §3, this repo's
+layout §3.1, Phase 0 §10). Every `docs/golf-trails/…` path cited in this repo refers
+to that RavenGolf plan set.
 
 This is the **P0 monorepo skeleton**: workspace plumbing, placeholder
 packages/apps, and the P0 deliverables (the K2 landing page, the Android
 Health Connect reader for check X1). Almost nothing here is the real
 product yet — each package/app README says what phase actually builds it.
 
-## Staging note
+## Provenance
 
-**This directory is staged inside the `RavenGolf` repo, not yet its own
-repo.** The build plan (§3.1) calls for a dedicated `golfraven` repo, but
-that repo could not be created yet, so this monorepo lives at
-`RavenGolf/golfraven/` for now. It is written to need **no changes** when
-it moves:
-
-- Every path inside `golfraven/` (workspace globs, CODEOWNERS, config
-  files) is relative to `golfraven/` itself, never to the `RavenGolf`
-  repo root.
-- The one exception is CI: a GitHub Actions workflow only runs from
-  `.github/workflows/` at whatever the repo root is, so the **live**
-  workflow currently sits at `RavenGolf/.github/workflows/golfraven-ci.yml`
-  (repo root) and scopes itself into `golfraven/` via
-  `defaults.run.working-directory: golfraven`. A post-extraction copy —
-  equivalent apart from working-directory, cache path and comments (the
-  jobs themselves are the same) — already lives at
-  `golfraven/.github/workflows/ci.yml`, so extraction needs no CI edit,
-  just moving that file up to `.github/workflows/`.
-- Extraction itself is `git subtree split --prefix=golfraven` from the
-  `RavenGolf` repo, pushed to the new `golfraven` repo as its initial
-  history.
+This repo was staged under `golfraven/` in the RavenGolf repo on 2026-09-23 while it
+did not yet exist, then moved here with its history intact via
+`git subtree split --prefix=golfraven`. The staging copy in RavenGolf was removed after
+the move.
 
 ## Layout
 

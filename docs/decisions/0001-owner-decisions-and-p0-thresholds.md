@@ -138,3 +138,9 @@ before any operator reply is read:
   operators are ultimately contacted".
 
 This closes S2 in the P0 gate review (2026-09-23).
+
+## Update (2026-09-23) — repository created and monorepo moved
+
+The owner created the `golfraven` repository. The staged monorepo was moved here with history via
+`git subtree split --prefix=golfraven` and merged onto the repository's initial commit; the staging copy and
+its CI workflow were removed from RavenGolf. The "Monorepo staging" rule above is therefore closed.
