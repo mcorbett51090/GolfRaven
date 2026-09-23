@@ -1,0 +1,129 @@
+{
+  "generatedAt": "2026-09-23T23:54:44.707Z",
+  "outDir": "/home/user/golfraven/tools/p0/p0-desk-run-2026-09-23T23-54-43-835Z/x2-evidence",
+  "trails": {
+    "TN": [
+      {
+        "trail": "TN",
+        "url": "https://www.tnstateparks.com/golf",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:43.935Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (www.tnstateparks.com): HTTP 403 (Host not in allowlist: www.tnstateparks.com. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      },
+      {
+        "trail": "TN",
+        "url": "https://tngolftrail.net/",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:43.977Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (tngolftrail.net): HTTP 403 (Host not in allowlist: tngolftrail.net. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      },
+      {
+        "trail": "TN",
+        "url": "https://www.tn.gov/",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:44.092Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (www.tn.gov): HTTP 403 (Host not in allowlist: www.tn.gov. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      }
+    ],
+    "VI": [
+      {
+        "trail": "VI",
+        "url": "https://golfvancouverisland.ca/",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:44.286Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (golfvancouverisland.ca): HTTP 403 (Host not in allowlist: golfvancouverisland.ca. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      },
+      {
+        "trail": "VI",
+        "url": "https://golfvancouverisland.ca/about-us/golf-trail-pass/",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:44.562Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (golfvancouverisland.ca): HTTP 403 (Host not in allowlist: golfvancouverisland.ca. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      },
+      {
+        "trail": "VI",
+        "url": "https://golfvancouverisland.ca/wp-content/uploads/2024/10/2024-GVI-Trail-Pass-Terms-and-Restrictions.pdf",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:44.571Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (golfvancouverisland.ca): HTTP 403 (Host not in allowlist: golfvancouverisland.ca. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      }
+    ],
+    "RTJ": [
+      {
+        "trail": "RTJ",
+        "url": "https://www.rtjgolf.com/",
+        "status": "failed",
+        "httpStatus": null,
+        "finalUrl": null,
+        "contentType": null,
+        "fetchedAt": "2026-09-23T23:54:44.576Z",
+        "sha256": null,
+        "rawFile": null,
+        "textFile": null,
+        "textExtraction": "n/a",
+        "blocked": true,
+        "error": "BLOCKED — network policy (www.rtjgolf.com): HTTP 403 (Host not in allowlist: www.rtjgolf.com. Add this host to your network egress settings to allow access.)",
+        "draftCandidateNames": []
+      }
+    ]
+  },
+  "draftCandidateNames": {
+    "TN": [],
+    "VI": [],
+    "RTJ": []
+  }
+}
