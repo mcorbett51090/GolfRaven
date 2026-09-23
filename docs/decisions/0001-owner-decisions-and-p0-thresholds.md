@@ -184,3 +184,17 @@ Otherwise it counts as "not present". The phone golf app is **18Birdies**. If, b
 cannot be installed or offers no Apple Health / Health Connect write setting, **Hole19** replaces it, and the
 reason is logged in `docs/p0/X1.md` before the round. Any other app tried is supplementary data, never the
 source verdict.
+
+## Addendum E (2026-09-23, before any X5 query is run) — X5 denominator for facility- and hole-unit trails
+
+`docs/p0/X5.md` pre-registers the match rule and the `course`-unit denominator (one entry per course, even when
+several courses share one facility polygon). It does not say how `facility`- and `hole`-unit trails enter the
+denominator. Fixed here, before any Overpass data is read:
+
+- **`completionUnit = facility`:** one denominator entry per facility (grouped by `facilityId` from X2). The entry
+  is covered if at least one course at that facility matched a `leisure=golf_course` polygon under X5.md's match
+  rule. A course with no `facilityId` is its own facility.
+- **`completionUnit = hole`:** one denominator entry per course, exactly as for `course`. `golf=hole` coverage is
+  recorded as a quality measurement only and never enters the pass/fail denominator.
+- The 60% bar is computed over the combined denominator across the pilot slate. These rules are implemented in
+  `tools/p0` (`x5-overpass`) and cited there.

@@ -1,0 +1,83 @@
+{
+  "generatedAt": "2026-09-23T20:08:54.522Z",
+  "exportDir": "/home/user/golfraven-p0tools/tools/p0/test/fixtures",
+  "since": null,
+  "totalWorkoutElementsSeen": 6,
+  "golfWorkoutCount": 5,
+  "workouts": [
+    {
+      "sourceName": "Garmin Connect",
+      "sourceVersion": "4.75",
+      "device": "<<HKDevice: garmin-watch>>",
+      "workoutActivityType": "HKWorkoutActivityTypeGolf",
+      "startDate": "2026-09-20 09:00:00 -0400",
+      "endDate": "2026-09-20 13:00:00 -0400",
+      "hasWorkoutRoute": true,
+      "routeFileReferencePath": "/workout-routes/route_garmin_2026-09-20.gpx",
+      "routeFileExists": true,
+      "routeTrackpointCount": 2,
+      "routePresent": true,
+      "verdict": "pass"
+    },
+    {
+      "sourceName": "Matt's Apple Watch",
+      "sourceVersion": "11.0",
+      "device": null,
+      "workoutActivityType": "HKWorkoutActivityTypeGolf",
+      "startDate": "2026-09-20 09:01:00 -0400",
+      "endDate": "2026-09-20 12:59:00 -0400",
+      "hasWorkoutRoute": false,
+      "routeFileReferencePath": null,
+      "routeFileExists": false,
+      "routeTrackpointCount": 0,
+      "routePresent": false,
+      "verdict": "fail"
+    },
+    {
+      "sourceName": "18Birdies",
+      "sourceVersion": "9.1",
+      "device": null,
+      "workoutActivityType": "HKWorkoutActivityTypeGolf",
+      "startDate": "2026-09-20 09:02:00 -0400",
+      "endDate": "2026-09-20 12:58:00 -0400",
+      "hasWorkoutRoute": true,
+      "routeFileReferencePath": "/workout-routes/route_18birdies_MISSING.gpx",
+      "routeFileExists": false,
+      "routeTrackpointCount": 0,
+      "routePresent": false,
+      "verdict": "fail"
+    },
+    {
+      "sourceName": "Garmin Connect",
+      "sourceVersion": "4.70",
+      "device": null,
+      "workoutActivityType": "HKWorkoutActivityTypeGolf",
+      "startDate": "2026-08-01 09:00:00 -0400",
+      "endDate": "2026-08-01 13:00:00 -0400",
+      "hasWorkoutRoute": false,
+      "routeFileReferencePath": null,
+      "routeFileExists": false,
+      "routeTrackpointCount": 0,
+      "routePresent": false,
+      "verdict": "fail"
+    },
+    {
+      "sourceName": "Hole19",
+      "sourceVersion": "3.2",
+      "device": null,
+      "workoutActivityType": "HKWorkoutActivityTypeGolf",
+      "startDate": "2026-09-15 09:00:00 -0400",
+      "endDate": "2026-09-15 13:00:00 -0400",
+      "hasWorkoutRoute": true,
+      "routeFileReferencePath": "/workout-routes/route_hole19_empty.gpx",
+      "routeFileExists": true,
+      "routeTrackpointCount": 0,
+      "routePresent": false,
+      "verdict": "fail"
+    }
+  ],
+  "warnings": [
+    "Workout (source \"18Birdies\", start 2026-09-20 09:02:00 -0400) references a WorkoutRoute file \"/workout-routes/route_18birdies_MISSING.gpx\" that does not exist under /home/user/golfraven-p0tools/tools/p0/test/fixtures.",
+    "Workout (source \"Hole19\", start 2026-09-15 09:00:00 -0400)'s route file has 0 trackpoints."
+  ]
+}

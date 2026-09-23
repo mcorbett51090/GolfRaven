@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+  <ExportDate value="2026-09-21 09:00:00 -0400"/>
+  <Me HKCharacteristicTypeIdentifierDateOfBirth="1980-01-01"/>
+
+  <!-- Garmin: golf workout with a route (2 trackpoints in its GPX). -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeGolf" duration="240" durationUnit="min"
+    sourceName="Garmin Connect" sourceVersion="4.75" device="&lt;&lt;HKDevice: garmin-watch&gt;&gt;"
+    creationDate="2026-09-20 13:05:00 -0400" startDate="2026-09-20 09:00:00 -0400" endDate="2026-09-20 13:00:00 -0400">
+    <WorkoutRoute sourceName="Garmin Connect" sourceVersion="4.75"
+      creationDate="2026-09-20 13:05:00 -0400" startDate="2026-09-20 09:00:00 -0400" endDate="2026-09-20 13:00:00 -0400">
+      <FileReference path="/workout-routes/route_garmin_2026-09-20.gpx"/>
+    </WorkoutRoute>
+  </Workout>
+
+  <!-- Apple Watch: golf workout with NO route at all. -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeGolf" duration="238" durationUnit="min"
+    sourceName="Matt's Apple Watch" sourceVersion="11.0"
+    creationDate="2026-09-20 13:04:00 -0400" startDate="2026-09-20 09:01:00 -0400" endDate="2026-09-20 12:59:00 -0400">
+  </Workout>
+
+  <!-- 18Birdies: golf workout referencing a GPX file that does not exist on disk. -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeGolf" duration="235" durationUnit="min"
+    sourceName="18Birdies" sourceVersion="9.1"
+    creationDate="2026-09-20 13:03:00 -0400" startDate="2026-09-20 09:02:00 -0400" endDate="2026-09-20 12:58:00 -0400">
+    <WorkoutRoute sourceName="18Birdies" sourceVersion="9.1"
+      creationDate="2026-09-20 13:03:00 -0400" startDate="2026-09-20 09:02:00 -0400" endDate="2026-09-20 12:58:00 -0400">
+      <FileReference path="/workout-routes/route_18birdies_MISSING.gpx"/>
+    </WorkoutRoute>
+  </Workout>
+
+  <!-- A second Garmin golf workout, older, for the since-cutoff filtering test. -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeGolf" duration="230" durationUnit="min"
+    sourceName="Garmin Connect" sourceVersion="4.70"
+    creationDate="2026-08-01 13:00:00 -0400" startDate="2026-08-01 09:00:00 -0400" endDate="2026-08-01 13:00:00 -0400">
+  </Workout>
+
+  <!-- A workout with an EMPTY GPX route file (0 trackpoints) — should not count as route-present. -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeGolf" duration="220" durationUnit="min"
+    sourceName="Hole19" sourceVersion="3.2"
+    creationDate="2026-09-15 13:00:00 -0400" startDate="2026-09-15 09:00:00 -0400" endDate="2026-09-15 13:00:00 -0400">
+    <WorkoutRoute sourceName="Hole19" sourceVersion="3.2"
+      creationDate="2026-09-15 13:00:00 -0400" startDate="2026-09-15 09:00:00 -0400" endDate="2026-09-15 13:00:00 -0400">
+      <FileReference path="/workout-routes/route_hole19_empty.gpx"/>
+    </WorkoutRoute>
+  </Workout>
+
+  <!-- A NON-golf workout, to confirm the tool filters correctly. -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" durationUnit="min"
+    sourceName="Matt's Apple Watch" sourceVersion="11.0"
+    creationDate="2026-09-10 07:30:00 -0400" startDate="2026-09-10 07:00:00 -0400" endDate="2026-09-10 07:30:00 -0400">
+  </Workout>
+
+  <Record type="HKQuantityTypeIdentifierStepCount" sourceName="Matt's iPhone" unit="count"
+    creationDate="2026-09-20 08:00:00 -0400" startDate="2026-09-20 07:00:00 -0400" endDate="2026-09-20 08:00:00 -0400" value="500"/>
+</HealthData>

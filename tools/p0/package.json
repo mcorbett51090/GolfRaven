@@ -1,0 +1,28 @@
+{
+  "name": "@golfraven/p0-tools",
+  "private": true,
+  "version": "0.0.0",
+  "description": "GolfRaven P0 kill-experiment check tools: x1-ios-export, x1-verdict, x5-overpass (build plan §10 P0, docs/p0/X1.md, docs/p0/X5.md).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "sax": "1.4.1"
+  },
+  "devDependencies": {
+    "@types/sax": "1.2.7",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}

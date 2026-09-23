@@ -1,0 +1,25 @@
+{
+  "Pilot Ridge Golf Course": {
+    "version": 0.6,
+    "generator": "test-fixture",
+    "elements": [
+      {
+        "type": "way",
+        "id": 111,
+        "tags": { "leisure": "golf_course", "name": "Pilot Ridge Golf Course" },
+        "geometry": [
+          { "lat": 35.99, "lon": -87.01 },
+          { "lat": 35.99, "lon": -86.99 },
+          { "lat": 36.01, "lon": -86.99 },
+          { "lat": 36.01, "lon": -87.01 }
+        ]
+      },
+      { "type": "count", "id": 0, "tags": { "nodes": "0", "ways": "18", "relations": "0", "total": "18" } }
+    ]
+  },
+  "No Match Golf Course": {
+    "version": 0.6,
+    "generator": "test-fixture",
+    "elements": [{ "type": "count", "id": 0, "tags": { "nodes": "0", "ways": "0", "relations": "0", "total": "0" } }]
+  }
+}
