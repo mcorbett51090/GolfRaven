@@ -144,3 +144,43 @@ This closes S2 in the P0 gate review (2026-09-23).
 The owner created the `golfraven` repository. The staged monorepo was moved here with history via
 `git subtree split --prefix=golfraven` and merged onto the repository's initial commit; the staging copy and
 its CI workflow were removed from RavenGolf. The "Monorepo staging" rule above is therefore closed.
+
+## Addendum D (2026-09-23, before any K1 outreach, K2 launch, K3 read or X1 round) — remaining read rules
+
+The P0 gate re-verification (`docs/p0/gate-reverify.md`, R1–R6) found six places where a reading rule could
+still be chosen after its data is visible. Each is fixed here, before that data exists. None of the pass bars
+changes.
+
+**R1 — K1 early-read window.** The early read counts operators whose acceptance of an exploratory call is
+**dated on or before 2026-10-19** (P0 start 2026-10-05 + 14 days), whenever the call itself takes place.
+
+**R2 — K1 denominator, named now.** The five operators are: **Tennessee Golf Trail, Vancouver Island Golf
+Trail, Robert Trent Jones Golf Trail, Hammock Coast, Canadian Rockies Golf Consortium.** Ties in contact order
+do not matter because the five are named. The Oklahoma Golf Trail counts only if the plan's X2 swap rule
+activates it as the slate reserve, and it then replaces the dropped slate trail, never a co-op. The single K1
+log is the tracking table in `docs/partners/k1-outreach.md` §(g). Early read and full gate use the same five.
+
+**R3 — K2 day 0 and counting.** Day 0 is the UTC date on which the landing page is publicly reachable **and**
+its double-opt-in backend has delivered a confirmation email end to end. Matt logs that date in `docs/p0/K2.md`
+before any promotion. The clock is never restarted. The count is distinct lower-cased email addresses whose
+`confirmedAt` falls before day 0 + 14 days (advisory read) and before day 0 + 42 days (gate). Owner and test
+addresses are excluded only if listed in `docs/p0/K2.md` before day 0.
+
+**R4 — K3 Search Console months.** The months are fixed: **July, August and September 2026**. The property is
+southern-wine-country's Search Console property (Matt records its exact property id in `docs/p0/K3.md` before
+opening the report). Search type **Web**, all countries, all devices. The first read performed is the recorded
+one. There are no re-reads.
+
+**R5 — K3 Keyword Planner read.** Tool: Keyword Planner → "Get search volume and forecasts" → the historical
+metrics view. Location: United States and Canada. Language: English. Date range: **September 2025 – August
+2026**. Metric: "Avg. monthly searches", using the lower bound of each reported range. The tool reports
+keyword-level volume and may fold close variants together, so Addendum B's "exact-match only" wording is
+replaced by this: **if two of the six terms return the identical range, count that range once.** The rest of
+Addendum B's list and rules stand.
+
+**R6 — X1 route rule and the phone app.** On Android, a session reported as `CONSENT_REQUIRED` counts as
+"route present" only if a follow-up `requestExerciseRoute` for that session returns at least one point.
+Otherwise it counts as "not present". The phone golf app is **18Birdies**. If, before the round, 18Birdies
+cannot be installed or offers no Apple Health / Health Connect write setting, **Hole19** replaces it, and the
+reason is logged in `docs/p0/X1.md` before the round. Any other app tried is supplementary data, never the
+source verdict.
