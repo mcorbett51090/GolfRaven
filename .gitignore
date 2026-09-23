@@ -34,3 +34,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# Test scratch output (tests write to the OS temp dir; this guards against regressions)
+.tmp-test-*

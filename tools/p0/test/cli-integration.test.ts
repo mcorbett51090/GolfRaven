@@ -8,7 +8,8 @@
  * needing a build).
  */
 import { describe, expect, it } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -20,6 +21,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.join(__dirname, "..");
 const DIST = path.join(PKG_ROOT, "dist");
 const FIXTURES = path.join(__dirname, "fixtures");
+// Per-run scratch dir for CLI outputs, so tests never write into the source tree.
+const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-tools-"));
 
 const distBuilt = existsSync(path.join(DIST, "x5-overpass.js")) && existsSync(path.join(DIST, "x1-ios-export.js"));
 
@@ -46,7 +49,7 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
         "--responses",
         path.join(FIXTURES, "overpass", "coverage-responses.json"),
         "--out",
-        path.join(PKG_ROOT, ".tmp-test-x5-coverage-result"),
+        path.join(OUT_DIR, "x5-coverage-result"),
       ],
       { cwd: PKG_ROOT },
     );
@@ -54,7 +57,7 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   });
 
   it("x1-ios-export CLI writes JSON + markdown for the fixture export dir", async () => {
-    const outPrefix = path.join(PKG_ROOT, ".tmp-test-x1-ios-export-result");
+    const outPrefix = path.join(OUT_DIR, "x1-ios-export-result");
     const { stdout } = await execFileAsync("node", [
       path.join(DIST, "x1-ios-export.js"),
       FIXTURES,
