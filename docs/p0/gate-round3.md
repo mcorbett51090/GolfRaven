@@ -1,0 +1,266 @@
+# Gate round 3: signup-worker fixes and the new P0 tools
+
+- **Scope:**
+  - A: `apps/signup-worker/**` and `apps/landing/**`, re-verified against `docs/p0/signup-worker-reverify.md`.
+  - B: `tools/p0/**` (new) and decision 0001 Addendum E.
+- **Branch:** `claude/golf-trails-golfnow-app-lumnqo`. The gate started at `cd39f58`. HEAD moved to `5db71f3`
+  while the gate was running. That commit only moves the CLI test output to a temp dir and untracks the
+  committed `.tmp-test-*` files, which this gate would otherwise have flagged. Every result below is for
+  `5db71f3`.
+- **Method:**
+  - All probes are scratch vitest and node scripts under the session scratchpad. They import `src/*.ts` or
+    the built `dist/*.js` directly.
+  - The K2 exclusion gate was tested end to end. The real `scripts/k2-count.mjs` and `dist/` were copied into
+    throwaway git repos, and commits were made with controlled `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`.
+  - No repo file other than this report was written. Git state was not changed: `git status --short` is
+    clean after every run.
+- **Date:** 2026-09-23.
+
+## Commands
+
+| command | result |
+|---|---|
+| `pnpm install --frozen-lockfile --config.engine-strict=false` | OK, exit 0 |
+| `pnpm --config.engine-strict=false -r typecheck` | OK, exit 0 |
+| `pnpm --config.engine-strict=false -r build` | OK, exit 0 |
+| `pnpm --config.engine-strict=false -r test` | OK, exit 0. signup-worker 15 files / 171 tests; tools/p0 4 files / 53 tests; mobile 8, catalog 3, matching 1, rules 1; landing smoke checks pass. |
+
+---
+
+## Part A: signup-worker, third round
+
+### A.1 Status of the re-verification findings
+
+| id | reverify status | now | evidence |
+|---|---|---|---|
+| F7 | PARTIAL | **CLOSED** | `--k2-doc` is removed. `node scripts/k2-count.mjs --k2-doc x --export y` gives "unrecognized argument … no --day0 or --k2-doc override", exit 1. |
+| F8 | PARTIAL | **PARTIAL** | The list is now echoed. Unparseable or multi-address bullets throw. Unicode local parts parse (`ünï13@x.com`). The exclusion-timing rule is new, but it has defects (A-5, A-6). Residual: `- _a2@x.com_ (owner)` parses as `_a2@x.com` (A-8). |
+| F9 | PARTIAL | **CLOSED** | `apps/landing/src/main.js` resets Turnstile in `.finally()`. |
+| F10 | PARTIAL | **CLOSED** | `text/plain; x=application/json` gives 415. `Application/JSON; charset=utf-8` gives 202. See the body probes in A.2. |
+| F12 | PARTIAL | **CLOSED** | `data-action="signup"` is now set (`main.js:53-56`). |
+| F15 | PARTIAL | **CLOSED** | The runbook uses `npx wrangler@4` throughout. The only bare `wrangler dev` is in the "Local dev (not part of this build)" note. |
+| F16 | PARTIAL | **PARTIAL** | `docs/p0/K2.md` STATUS / MEASURED VALUE still say the signup backend does not exist (A-9). |
+| N1 | BLOCKING | **CLOSED** (for skipped sends) | Tokens rotate only after `checkSendAllowed` passes (`src/index.ts:299-320`). Repeated probe in A.2. Residual: A-1, where a Resend **failure** after rotation kills the old links. |
+| N2 | BLOCKING | **CLOSED** (for every value the reverify listed) | Strict regex, a floor, and +30 d grace (`src/config.ts:128-168`, `src/index.ts:534-561`). Repeated probe in A.2. Residual: A-3, day 0 typed by mistake once day 0 ≥ 2026-11-16. |
+| N3 | SHOULD-FIX | **CLOSED** | README "Send limits" documents the trade-off. The log line carries the fixed reason `global-send-daily-cap`, and the README suggests an alert on it. |
+| N5 | SHOULD-FIX | **CLOSED** | A streaming reader caps the bytes actually read. There is no 411. A bad Content-Length gets an early 413. See A.2. |
+| N7 | NIT | **CLOSED** | Both sides are compared with `realpath`. Run via a symlinked checkout path, it refuses with exit 1 (was: exit 0 and no output). |
+| N8 | NIT | **CLOSED** | `AND (confirm_expires_at IS NULL OR confirm_expires_at < ?2)`. Probe: a pending row older than 30 d with a live token gives `deletedUnconfirmed=0`. |
+| N9 | NIT | **CLOSED** | `rateLimitIpKeyMaterial` lower-cases, strips leading zeros, and maps `::ffff:a.b.c.d` to the IPv4 address (`src/ratelimit.ts:72-92`). |
+| N10 | NIT | **CLOSED** | The README Endpoints table says confirm is single-use and that sends are limit-gated. |
+| N11 | NIT | **CLOSED** | The README runbook covers the Turnstile hostname constraint (`README.md:164-167`). |
+| N12 | NIT | **CLOSED** | The notice says "about 3 days". A `confirmed_at` without `Z` or an offset is counted as malformed (`src/k2-count.ts:115-125`). |
+| N13 | NIT | **PARTIAL** | Runbook step 9 now tells the owner to exclude the test address, but the order it gives does not work with the tool's rule (A-6). |
+
+### A.2 Repeated and new probes
+
+**N1 reproduction.** Sign up, and capture the only email that was delivered. Re-submit from a different IP.
+Then use the **last delivered** email's links.
+
+```
+N1 cooldown:        second signup 202 | attempted sends 1->1 (delivered 1) | last-delivered unsubscribe -> 200 | last-delivered confirm -> 200 | confirmed_at set
+N1 email-daily-cap: second signup 202 | attempted sends 3->3 (delivered 3) | last-delivered unsubscribe -> 200 | last-delivered confirm -> 200 | confirmed_at set
+N1 global-cap:      second signup 202 | attempted sends 1->1 (delivered 1) | last-delivered unsubscribe -> 200 | last-delivered confirm -> 200 | confirmed_at set
+N1 resend-500:      second signup 202 | attempted sends 1->2 (delivered 1) | last-delivered unsubscribe -> 400 | last-delivered confirm -> 400 | confirmed_at null   <- A-1
+```
+
+Skipped sends now leave the emailed confirm and one-click unsubscribe links working, so N1 as reported is
+closed. The fourth row is the same failure reached another way; see A-1.
+
+**N2 reproduction.** Each run used one row confirmed and then unsubscribed early, plus one active row. The
+clock was pinned with vitest fake timers.
+
+```
+unset / "" / "2026" / "1"               -> deletedUnsubscribed=0 (reason unset|malformed)
+"2026-11-21" (date-only)                -> 0 (malformed)
+"2026-10-10T00:00:00Z" (day 0, < floor)  -> 0 (earlier than floor)
+"2026-11-15T23:59:59Z" (pre-floor)       -> 0
+"2026-11-21T00:00:00.000Z" / "+00:00" / leading space -> 0 (malformed)
+valid "2026-11-21T00:00:00Z", now = 2026-11-28 (verdict week, in grace) -> 0
+valid, now = gate+30d - 1 s                                            -> 0
+valid, now = gate+30d exactly / after                                  -> 1 (by design, post-verdict)
+"2026-11-31T00:00:00Z" / "2026-11-16T24:00:00Z" (calendar roll-over) -> accepted, 1   <- A-4 (rolls FORWARD, harmless)
+MISTAKE with late day 0: day 0 = 2026-11-20, var set to day 0 ("2026-11-20T00:00:00Z", passes floor):
+  now 2026-12-20 -> deleted 1 (pre-day-0 confirmer); now 2026-12-25 -> deleted 2 incl. a row confirmed day0+2   <- A-3
+```
+
+Every case the brief asked for is safe: unset, `'2026'`, `'1'`, date-only, a pre-2026-11-16 timestamp, and a
+valid timestamp both inside and after its +30 d grace. The floor guards against the "day 0 typed by
+mistake" case only while day 0 is before 2026-11-16 (A-3).
+
+**Timing and enumeration.** Fake D1 adds 40 ms to every op. Resend is stubbed at 300 ms. The same `default.fetch` path was run 3 times.
+
+```
+new                      status=202 ms=113 (module warm-up)  bodySame hdrSame  sends=1
+pending                  status=202 ms=49                    bodySame hdrSame  sends=1
+confirmed-active         status=202 ms=49                    bodySame hdrSame  sends=0
+confirmed-unsubscribed   status=202 ms=48                    bodySame hdrSame  sends=1
+... reps 2-3: every state 47-49 ms, body and full header set byte-identical
+```
+
+Status, body, headers and timing are the same in every state. Each response takes about one D1 round-trip.
+Resend and all case-dependent writes run in `waitUntil`.
+
+**Streaming body reader.**
+
+| input | result |
+|---|---|
+| no Content-Length, good body | 202 |
+| Content-Length `-1` | 413 `invalid Content-Length` |
+| body of exactly 8192 bytes, no Content-Length | 202 |
+| body of 8193 bytes, no Content-Length | 413 |
+| Content-Length `10` sent with a 9000-byte body | 413 |
+| 1 MiB streamed in 1 KiB chunks | 413 after **9** chunks pulled |
+| empty body, or no body | 400 |
+| body with a leading BOM | 202 |
+
+The cap is enforced on the bytes actually read.
+
+**Git-blame exclusion gate** (real CLI, throwaway repos, day 0 = 2026-10-10, `a@x.com` committed 2026-10-05):
+
+| scenario | result |
+|---|---|
+| S1 baseline | a@ excluded ✅ |
+| S2 old line re-formatted with backticks on 10-20 | **a@ NOT excluded** (count +1; listed as a "not excluded" note, exit 0) |
+| S2b whitespace-only edit of the old line on 10-20 | **a@ NOT excluded** |
+| S2c new line inserted above old line | a@ still excluded ✅ (pure shifts are fine) |
+| S3 b@ added 10-20 with `GIT_AUTHOR_DATE=10-01` | **b@ excluded** (backdated) |
+| S3b c@ added with author+committer dates both spoofed | **c@ excluded** |
+| S5 a@ deleted from the list on 10-20 | **a@ counts again, and is not mentioned in the output at all** |
+| S6 `git clone --depth 1` of the S1 repo plus one later commit | **a@ NOT excluded**. The whole file blames to the shallow boundary commit. Day 0 still looks "committed". Exit 0. |
+| S7 runbook order: e2e test on day 0, then exclusion + Day 0 committed together at 10-10 15:00 | **a@ NOT excluded**. The test address counts. |
+
+**Author-time vs committer-time.**
+
+- **Which is safer.** Neither is a trust anchor: both are set by the committer (S3/S3b).
+  - Author-time survives rebase and cherry-pick. That protects legitimate pre-day-0 lines from history
+    rewrites. But it also credits a line written before day 0 on a branch that only landed on the counting
+    branch **after** day 0, and that line was not "listed in K2.md" before day 0.
+  - Committer-time moves forward on rebase or amend. That would drop legitimate exclusions, which inflates
+    the count.
+  - Author-time is the more reasonable of the two for accidental history operations. Neither resists
+    tampering.
+- **Where the choice is documented.** `src/k2-blame.ts:23-26` and `apps/signup-worker/README.md:224-226`
+  document it, with the rationale "not when it was rebased". Neither place says the check guards against
+  accidents, not tampering, or mentions the late-landing-branch case (A-7).
+- **The larger defect is that the rule works per line.** Any later edit to an old line re-dates it. A
+  deletion is invisible. A shallow clone re-dates the whole file (A-5).
+
+### A.3 Part A findings
+
+| id | severity | file:line | finding | fix |
+|---|---|---|---|---|
+| A-1 | SHOULD-FIX | `apps/signup-worker/src/index.ts:299-320` (rotate at `:311`, send at `:319`) | **N1 can still happen when the Resend send fails.** Tokens rotate when a send is *allowed*, before the send is attempted. If Resend then fails (5xx, network error, 4xx), the new tokens were never delivered and the old, delivered links are already dead. Probe: last-delivered confirm and unsubscribe both give 400. The commit message says "rotate only when a confirmation email is actually sent", which is not what the code does. The cooldown and caps are also consumed by the failed attempt. The trigger is narrower than N1's (a provider failure), and the failure is logged. | Generate the tokens and send first. Write the new hashes (`rotateConfirmToken` plus the unsubscribe update) only when `sendResult.ok`. Add a regression test: re-signup after the cooldown with Resend returning 500, and the first email's links must still give 200. |
+| A-2 | NIT | `apps/signup-worker/src/index.ts:207-229` | The unsubscribe token still rotates on every successful resend. The reverify's second recommendation (keep it stable) was not taken. After two confirmation emails, the one-click `List-Unsubscribe` in the older email returns 400. That matters for someone who confirmed through email 2 and later presses unsubscribe on email 1. | Keep `unsubscribe_token_hash` stable across re-signups. It is not a secret that needs rotating. |
+| A-3 | SHOULD-FIX | `apps/signup-worker/src/config.ts:128,152-168`; `README.md:98-106` | **The floor catches "day 0 typed into `K2_GATE_CLOSES_AT` by mistake" only when day 0 < 2026-11-16.** If day 0 slips past that date (it depends on owner-side domain and SMTP setup), the same mistake passes the floor. Deletion then starts at day 0 + 30, **before** the gate closes at day 0 + 42. Probe: rows confirmed at day 0 + 2 and before day 0 were deleted by day 0 + 35. `README.md:105` claims the mistake "can never sneak through". That is true only for an early day 0. It needs an operator error in a documented step, which is why this is not BLOCKING. | Take day 0 as the input (`K2_DAY0=YYYY-MM-DD`, copied verbatim from K2.md) and compute the close as day 0 + 42 in code. Then the likely mistake (typing the close date where day 0 belongs) delays deletion, which is the safe direction. Or add the reverify's separate `K2_VERDICT_RECORDED_AT`. Correct the README claim. |
+| A-4 | NIT | `apps/signup-worker/src/config.ts:159` | `2026-11-31T00:00:00Z` and `…T24:00:00Z` pass the regex, and V8 rolls them forward a day. This is harmless because it only rolls later, but it is not the strict calendar check the comment claims. | Round-trip the value: `gateCloses.toISOString().replace(".000","") === raw`. |
+| A-5 | SHOULD-FIX | `apps/signup-worker/src/k2-blame.ts:83-96`; `scripts/k2-count.mjs:423-474` | **The per-line `git blame` timing rule gets R3's "listed before day 0" wrong in both directions, and exits 0.** The reproductions are in A.2. (a) A later reformat or whitespace edit of an old line re-dates it, so a legitimate pre-day-0 exclusion is dropped (S2, S2b). (b) Deleting a pre-day-0 line after day 0 silently un-excludes the address, with no note (S5). R3 freezes the list at day 0. (c) In a shallow clone, every line blames to the boundary commit, so **all** exclusions are dropped while Day 0 still looks committed (S6). The remote-session default checkout is shallow, and the count is read about 7 weeks after day 0. (d) Porcelain `boundary` markers are ignored. The effect is bounded by the size of the list (owner and test addresses), and (a) and (c) print a note, so this is not BLOCKING. Every error except backdating inflates the count, which is the pass-favouring direction for a kill gate. | Decide exclusions **by content, not by line**. Take the set of addresses in the Excluded section of `K2.md` as it stood at the last commit reachable from the counting HEAD whose date is before day 0 00:00 UTC (`git log -1 --before=… -- docs/p0/K2.md`, then `git show <sha>:docs/p0/K2.md`). A later reformat, move or deletion then cannot change it. Refuse to run when `git rev-parse --is-shallow-repository` is `true`, or when any consulted commit is a boundary. Add a real-git integration test (the scratch repos above are a template). |
+| A-6 | SHOULD-FIX | `apps/signup-worker/README.md:182-196` (step 9); `docs/p0/K2.md` "Excluded addresses" text | **Following runbook step 9 as written leaves the test address counted.** Day 0 is defined as the date the backend first delivered a confirmation email end to end, which is step 9's own test. So the test happens **on** day 0. The runbook says "commit that BEFORE logging day 0", which the owner will naturally do on day 0 itself. The tool requires the commit time to be before day 0 00:00 UTC, so the address is not excluded (S7). K2.md's own wording ("listed **before** Day 0 is set above") also differs from R3 ("before day 0"). The tool follows R3, which is authoritative, but the doc the owner edits says otherwise. | Rewrite step 9: "commit the test address to Excluded addresses on a UTC date **before** the end-to-end test; the test day becomes day 0". Align K2.md's Excluded-section text with R3. |
+| A-7 | NIT | `apps/signup-worker/src/k2-blame.ts:23-26`; `README.md:222-232` | The author-time choice is documented, but not its limits. Both author and committer dates are self-asserted, so this is a guard against accidents, not tampering (S3/S3b show backdating works). Author-time also credits a pre-day-0-authored commit that landed after day 0. | State both limits. Record the Day-0 commit SHA in K2.md's Log so an audit can check ancestry. |
+| A-8 | NIT | `apps/signup-worker/scripts/k2-count.mjs:295-304,338` | Emphasis is stripped only when it wraps the whole line. `- _a2@x.com_ (owner)` excludes the wrong address, `_a2@x.com`. It is echoed, so it is visible, but the real `a2@x.com` counts. | Strip paired `_`/`*` around each email token, not only around the whole line. Or refuse a token that starts or ends with `_`. |
+| A-9 | NIT | `docs/p0/K2.md:66-72` | STATUS and MEASURED VALUE still say the page is "blocked on … the signup backend" and that "no signup backend exists yet" (F16 residual). | Update both lines to point at `apps/signup-worker`. |
+| A-10 | NIT | `apps/landing/src/index.html:143`; `wrangler.toml:75` | The notice says an unsubscribed record is deleted "within 30 days of your unsubscribe" once the K2 result is recorded. In fact deletion waits until gate close + 30 d, and never happens if `K2_GATE_CLOSES_AT` is never set (it ships blank). | Word it as "deleted about 30 days after the K2 test closes (or 30 days after you unsubscribe, whichever is later)". Add the variable to a post-verdict runbook step. |
+
+**Part A:** 0 BLOCKING, 4 SHOULD-FIX, 6 NIT. The two reverify BLOCKING findings are closed.
+
+---
+
+## Part B: `tools/p0/**` and Addendum E
+
+### B.1 What checks out
+
+- **Addendum E timing.** It was committed in `cd39f58` together with the tool.
+  - No X5 measured value exists anywhere. X5.md MEASURED VALUE is blank, and nothing outside the test
+    fixtures contains an N_osm value.
+  - Addendum E itself says it was pinned "before any Overpass data is read".
+  - `overpass-api.de` is proxy-blocked in this session (CONNECT 403, observed during this gate), which is
+    consistent with no data having been fetched here.
+  - Addendum E's rules are implemented as written (`buildDenominatorEntries`):
+    - facility unit: one entry per `facilityId`, covered if any of its courses matched;
+    - a course with no `facilityId` is its own facility;
+    - hole unit: one entry per course;
+    - the 60 % bar is computed over the combined denominator.
+- **The 60 % boundary.** `pct >= 60` means exactly 60 % passes. An exhaustive check of every exact-60 %
+  fraction with n ≤ 200 found none that fell below 60 through floating point. The 500 m name-match boundary
+  is inclusive (`<=`) and tested.
+- **The Overpass request is well-formed.**
+  - It is a POST with `application/x-www-form-urlencoded`, body `data=<encodeURIComponent(query)>`.
+  - Query 1 is verbatim from X5.md §1. Query 2 matches the §2 template (two blocks, `out geom;` then `out count;`).
+  - The client timeout is 190 s, above the 180 s server timeout.
+- **No network in tests.** They use `--from-file` / `--responses` and pure functions, and CLI output goes
+  to an `os.tmpdir()` directory.
+- **R6 is implemented literally.** A CONSENT_REQUIRED session counts only when a follow-up returns
+  `routePresent && routePointCount >= 1`. A missing follow-up counts as "not present". `appUsed: "Hole19"`
+  without `hole19SwapLoggedBeforeRound: true` throws.
+- **A verdict is recorded per source.** Garmin, Apple Watch and the phone app each get their own verdict, as
+  A2-14 requires.
+- **The Android field semantics match** `apps/mobile/src/health-connect/shape.ts`. There, `routePresent` is
+  true only for `DATA` with at least one point.
+- **x1-ios-export fails loudly** on a non-`HealthData` root, on `<Workout>` elements that all lack
+  `workoutActivityType`, and on malformed XML. A real-style internal DTD subset (`<!DOCTYPE HealthData [ … ]>`)
+  parses correctly.
+
+### B.2 Probes
+
+```
+X5 relation (Overpass `out geom` shape: geometry under members[], no top-level geometry)
+   knownPoint inside                  -> null        <- B-1
+   same name, distance 0              -> null        <- B-1
+X5 name rule: "Pilot Ridge Golf Course" vs OSM
+   "pilot ridge golf course " -> name | "Pilot Ridge Golf Club" -> null | "Pilot Ridge" -> null
+   "Hammock's Dunes" vs "Hammock’s Dunes" -> null | NBSP -> null | double space -> null
+   "Grand National — Links" vs "Robert Trent Jones Golf Trail at Grand National" -> null
+X5 approximate location INSIDE a same-named ~1.3 km polygon, near its edge -> null   <- B-2
+   same point supplied as knownPoint -> "point"
+X5 remark-only (HTTP 200 runtime error) response -> matchingElements [] (course unmatched)   <- B-4
+X5 empty course list -> "kill"
+X1 mixed OS: iOS routes only from the Apple Watch, Android routes only from Garmin -> PASS (2 of 3)   <- B-6
+X1 old 2025 Garmin golf workout with a route + X1-round Garmin workout without one, no --since -> Garmin iOS "pass"   <- B-7
+X1 <WorkoutRoute> as a sibling of <Workout> -> golf 2, routePresent false for all, warnings []   <- B-8
+X1 appUsed=18Birdies with "Hole19" in phoneApp.iosSourceNames -> phone app "pass" from Hole19 data   <- B-9
+```
+
+**How the relation-shape claim was checked.** Overpass itself is blocked here. The reference Overpass-JSON
+converter `osmtogeojson` (`index.js`, fetched this session from GitHub) reads relation geometry from
+`rel.members[i].geometry` and way geometry from `way.geometry`. That confirms a relation has no top-level
+`geometry`.
+
+### B.3 Part B findings
+
+| id | severity | file:line | finding | fix |
+|---|---|---|---|---|
+| B-1 | **BLOCKING** | `tools/p0/src/x5-overpass.ts:74-79,170,183` | **Relation-mapped golf courses can never match.** Overpass `out geom` puts a relation's geometry in `members[].geometry`, not `geometry`. `OverpassGeometryElement` has no `members`, and both branches of the match rule require `el.geometry`. So a `leisure=golf_course` **multipolygon relation** fails containment and fails name-match, even with the exact name at 0 m (probe). The query deliberately fetches relations, so every relation-mapped course is systematically counted as *uncovered*. This biases a pre-registered pass/kill verdict toward kill. The tests never feed a realistically shaped relation. | Parse `members[]` with role `outer` (and `inner` for holes) and assemble the rings. Member ways can be open segments, so join them end to end, or use `osmtogeojson`. Apply containment and the distance test to the assembled multipolygon. Add a fixture with a real-shaped relation, including a split outer ring. |
+| B-2 | **BLOCKING** | `tools/p0/src/x5-overpass.ts:183-187`; `src/overpass-geo.ts:73-79` | **The 500 m name-match measures the distance to the polygon's vertex-average centroid.** A course polygon is often 1 km or more across, and trail sites usually give a clubhouse or address point near its edge. Probe: an approximate location **inside** a same-named 1.3 km polygon returns `null`. X5.md says "name-matched within a 500 m radius of the course's approximate location". Under no plausible reading should a same-named polygon that *contains* the location fail. A vertex average is also skewed by vertex density. This biases toward kill on the branch X5.md expects to be used whenever X2 has no point. | Use the distance from the location to the polygon: 0 if the location is inside, otherwise the nearest edge. Pin that reading in decision 0001 (see B-3) before any X5 run. |
+| B-3 | SHOULD-FIX (must be done before the first X5 run) | `tools/p0/src/x5-overpass.ts:179-182`; `tools/p0/README.md:134` | **The name rule is the tool's own choice, not X5.md's.** X5.md says only "name-matched". The tool implements trim + lower-case + exact equality, and the README calls this "exactly as X5.md specifies". Consequences: `Golf Club` vs `Golf Course`, typographic apostrophes, NBSP and double spaces all miss. More importantly, when no point is available, a shared facility polygon (usually named for the facility) cannot credit its courses, although X5.md says "a shared facility polygon counts for **every** course at that facility". Whether X2's coordinates are a "known point" or an "approximate location" is also left to whoever writes `courses.json`, and that choice switches which rule applies. Each of these can flip the verdict. Nothing is measured yet, so this is fixable without a pre-registration breach. | Before any X5 query, add a decision 0001 addendum pinning: the name normalisation (NFKC, fold case, collapse whitespace, unify apostrophes and dashes; decide on generic suffixes like "golf course/club/links"); how a facility-named polygon credits its courses on the name path (for example by an X2 facility-name alias list); which X2 fields count as a "known point"; and the distance reading from B-2. Then implement exactly that, and make the README say what was chosen. |
+| B-4 | SHOULD-FIX | `tools/p0/src/x5-overpass.ts:123,304,337,393-398` | **Missing data is counted as "no polygon" instead of stopping the run.** (a) Overpass reports runtime errors such as timeouts as HTTP 200 with a `remark` field and partial or empty `elements` `[training knowledge]`. `remark` is ignored, so that course scores as unmatched. (b) A course missing from `--responses` is "treated as unmatched" with only a warning. (c) An empty course list gives `kill` at 0/0. (d) A missing `golf=hole` count element becomes 0. Each of these biases toward kill. | Throw on any response carrying `remark`. Throw (not warn) on a missing saved response or an empty list. Treat a missing count element as unknown. |
+| B-5 | SHOULD-FIX | `tools/p0/src/x5-overpass.ts:359-370,400-414` | **A live run does not save the raw Overpass responses**, only the derived `{coverage, summary}`. N_osm is printed and never saved. The pass/kill verdict therefore cannot be re-derived or audited later, and the `--responses` replay path cannot be used on the real run. | In live mode, also write `<out>-responses.json`, keyed as `--responses` expects, with the query text and a timestamp. Write the raw N_osm response too. |
+| B-6 | SHOULD-FIX (must be done before the round) | `tools/p0/src/x1-verdict.ts:215-233` | **The scope of "≥ 1 OS" in the X1 bar is ambiguous and not pinned anywhere.** The bar "≥ 2 of 3 sources write golf workouts with routes on ≥ 1 OS" can mean *count the sources that pass on any OS* (the tool's reading) or *there exists an OS on which ≥ 2 sources pass*. These give opposite verdicts in a plausible case: Apple Watch routes only on iOS and Garmin routes only on Android. The probe gives **PASS** under the tool's reading and would give kill under the other. The tool picked the pass-favouring reading, calls it "literal", and does not say it chose. Neither Addendum D nor X1.md settles this. | Pin the reading in decision 0001 before the X1 round. Implement it, and emit the per-OS source counts next to the verdict so both readings stay visible. |
+| B-7 | SHOULD-FIX | `tools/p0/src/x1-verdict.ts:131-137`; `tools/p0/src/x1-ios-export.ts:103,113-129` | **Nothing limits the verdict to the X1 round.** `--since` is optional, and `x1-verdict` has no window check on either OS. A route on **any** historical golf workout from that source passes it. Probe: an old 2025 Garmin workout with a route makes Garmin iOS "pass" although the round's workout has none. `--since` is also parsed in local time (`new Date("YYYY-MM-DDT00:00:00")`). | Require a round window (`--round-start/--round-end`, UTC or with an explicit offset). Enforce it in `x1-verdict` on both OS inputs. Refuse when a source has workouts outside the window unless they are explicitly acknowledged. |
+| B-8 | SHOULD-FIX | `tools/p0/src/health-export-xml.ts:36-44,161-172` | **The loud-failure contract has a gap exactly where the author flags the most doubt.** If `<WorkoutRoute>` is a sibling of `<Workout>` rather than nested inside it (the shape the module doc calls least certain), it is silently ignored. Every workout then reports `routePresent: false` with **no warning**, which is a silent false X1 kill (probe). The nested shape is the likelier one `[training knowledge]`, so this is not BLOCKING. | Count every `<WorkoutRoute>` seen outside a `<Workout>`, and every GPX file in `workout-routes/` that no workout references. If either is non-zero, throw `HealthExportShapeError`. |
+| B-9 | NIT | `tools/p0/src/x1-verdict.ts:62-81,201-213` | Nothing checks the phone-app source lists against `appUsed`. With `appUsed: "18Birdies"` and `"Hole19"` in `iosSourceNames`, Hole19 data becomes the source verdict (probe), which contradicts R6. `hole19SwapLoggedBeforeRound` is also self-asserted. | Reject a source list containing the other app's identifiers. Optionally check X1.md's Log for a dated Hole19 entry. |
+| B-10 | NIT | `tools/p0/src/x5-overpass.ts:30` | The owner's personal email address is hard-coded into the `User-Agent` sent to a third-party API and committed to the repo. | Read the contact from an env var or flag. Default to the project URL. |
+| B-11 | NIT | `tools/p0/src/x5-overpass.ts:402,444`; `x1-verdict.ts:322`; `x1-ios-export.ts:251-253` | The bbox is centred on the approximate `lat`/`lon` even when `knownPoint` is given, so a point more than 2 km away can miss its own polygon. The `isMain` checks compare against unresolved `argv[1]`, which is the N7 symlink bug again: the CLI does nothing and exits 0. | Centre the bbox on `knownPoint` when present. Compare `realpath`s. |
+| B-12 | NIT | `tools/p0/src/x5-overpass.ts:394,261` | Saved responses and course-unit denominator keys use the course `name`, so two pilot courses with the same name (possible across RTJ sites) share one response. | Key by a stable course id from X2. |
+
+**Part B:** 2 BLOCKING, 6 SHOULD-FIX, 4 NIT.
+
+---
+
+## Totals
+
+| | BLOCKING | SHOULD-FIX | NIT |
+|---|---|---|---|
+| Part A | 0 | 4 | 6 |
+| Part B | 2 | 6 | 4 |
+| **Total** | **2** | **10** | **10** |
+
+Part A has no BLOCKING findings. Both reverify BLOCKING items are closed, and the enumeration/timing
+property holds. Part B's X5 matcher has two defects that systematically undercount coverage. Both bias a
+pre-registered pass/kill verdict toward kill:
+
+- relation-mapped courses can never match (B-1);
+- a same-named polygon that contains the course location can fail the 500 m name-match (B-2).
+
+B-3, B-6 and B-7 are reading rules that must be pinned before X5 or X1 data exists.
+
+PR: FIX REQUIRED
