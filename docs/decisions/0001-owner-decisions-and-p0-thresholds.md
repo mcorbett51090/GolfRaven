@@ -229,3 +229,21 @@ side, count. Older workouts on the device are ignored.
 reformatting or deletion does not change it. The count refuses to run in a shallow clone. Known limit: git
 timestamps can be set by whoever makes the commit; the protection is that exclusions are pushed to GitHub before
 day 0, which leaves a server-side record Matt can check.
+
+## Addendum G (2026-09-23, before any X2 or X4 fetch) — X2 confirmation rule and X4 scope
+
+**X2 "confirmed from a direct fetch".** Every page used is fetched directly and stored as evidence: the raw
+bytes, the final URL after redirects, the HTTP status, the retrieval time (UTC) and a SHA-256 of the bytes. A
+slate trail counts as confirmed only when all three of its facts — the roster, the `completionUnit` and the
+season window — are backed by quotes that appear **verbatim** (after whitespace collapsing) in the text of that
+stored evidence, and every roster entry's name appears in it. A fact supported only by a research-file snippet,
+or by a quote not found in the stored evidence, leaves the trail unconfirmed. X2 passes when at least 2 of the
+3 slate trails are confirmed (plan bar, unchanged).
+
+**X4 scope and "live page".** X4 is evaluated **per trail**: each slate trail is its own pass (≥ 80% of its X2
+roster courses have a live GolfNow facility page) or kill (course-native links become that trail's primary
+booking link). The X4 row records every trail's result; no combined figure decides anything. A facility page is
+**live** when a GET of `https://www.golfnow.com/tee-times/facility/<id>-<slug>/search` returns HTTP 200, the
+final URL after redirects still contains `/tee-times/facility/<id>-`, and the page text contains the course's
+name under Addendum F's name normalisation. Facility ids are looked up by hand on golfnow.com (the X4 memo's
+method); no tool automates GolfNow search while the X6 terms read is outstanding.
