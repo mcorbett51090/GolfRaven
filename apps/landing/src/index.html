@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GolfRaven — Track &amp; complete a golf trail</title>
+    <meta
+      name="description"
+      content="Track and complete the Tennessee Golf Trail or the Vancouver Island Golf Trail with GolfRaven, and earn the finisher's marker. Sign up to hear when it's ready."
+    />
+    <!--
+      Configurable signup endpoint. Left blank ("") until an endpoint
+      exists. See config.js and README.md "How signups work".
+    -->
+    <script src="config.js"></script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <header class="site-header">
+      <div class="wrap">
+        <span class="wordmark">GolfRaven</span>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <div class="wrap">
+          <h1>Track &amp; complete the Tennessee Golf Trail and the Vancouver Island Golf Trail — get the finisher's marker.</h1>
+          <p class="subhead">
+            GolfRaven tracks your rounds against a trail's official roster of
+            courses and confirms when you've completed it — with a
+            finisher's marker to show for it. No scorekeeping app to fuss
+            with mid-round: GolfRaven works quietly in the background.
+          </p>
+        </div>
+      </section>
+
+      <section class="signup" aria-labelledby="signup-heading">
+        <div class="wrap">
+          <h2 id="signup-heading">Get notified when GolfRaven launches</h2>
+          <p class="double-opt-in-note">
+            We'll send a confirmation email — you're only on the list once
+            you click the link in it (double opt-in). No spam, and you can
+            unsubscribe any time.
+          </p>
+
+          <!--
+            Rendered by JS depending on whether SIGNUP_ENDPOINT is
+            configured. The <noscript> fallback covers browsers with
+            JavaScript disabled, and always shows the "not open yet"
+            message rather than a form that can't work without JS to wire
+            up the fetch/validation.
+          -->
+          <form id="signup-form" class="signup-form" hidden novalidate>
+            <div class="field">
+              <label for="email">Email address</label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                inputmode="email"
+                autocomplete="email"
+                required
+                aria-describedby="email-hint"
+              />
+              <p id="email-hint" class="hint">
+                We'll only use this to send your confirmation and, later,
+                launch updates.
+              </p>
+            </div>
+
+            <fieldset class="field">
+              <legend>Which trail are you most interested in?</legend>
+              <div class="radio-row">
+                <label>
+                  <input type="radio" name="trail" value="tennessee-golf-trail" checked />
+                  Tennessee Golf Trail
+                </label>
+                <label>
+                  <input type="radio" name="trail" value="vancouver-island-golf-trail" />
+                  Vancouver Island Golf Trail
+                </label>
+                <label>
+                  <input type="radio" name="trail" value="either" />
+                  Either / not sure yet
+                </label>
+              </div>
+            </fieldset>
+
+            <div class="field checkbox-field">
+              <label>
+                <input id="age-confirm" name="age-confirm" type="checkbox" required />
+                I confirm I am 16 years of age or older.
+              </label>
+            </div>
+
+            <button type="submit">Notify me</button>
+
+            <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
+          </form>
+
+          <p id="signups-closed" class="signups-closed" hidden>
+            <strong>Signups open soon.</strong> The early-access list isn't
+            live yet — check back shortly.
+          </p>
+
+          <noscript>
+            <p class="signups-closed">
+              <strong>Signups open soon.</strong> This page needs JavaScript
+              enabled to sign up (no trackers or third-party scripts run —
+              see the privacy notice below).
+            </p>
+          </noscript>
+        </div>
+      </section>
+
+      <section class="privacy" aria-labelledby="privacy-heading">
+        <div class="wrap">
+          <h2 id="privacy-heading">Privacy, in brief</h2>
+          <ul>
+            <li><strong>16+ only.</strong> GolfRaven is not directed at children, and we don't knowingly collect signups from anyone under 16.</li>
+            <li><strong>What we store.</strong> Just your email address, your trail preference, and the timestamp of your confirmation — nothing else, and nothing is sold or shared with advertisers.</li>
+            <li><strong>Double opt-in.</strong> You're added to the list only after you click the confirmation link we email you.</li>
+            <li><strong>Unsubscribe any time.</strong> Every email includes a one-click unsubscribe link, and you can also email us directly to be removed.</li>
+            <li><strong>No trackers.</strong> This page loads no third-party scripts, analytics, or cookies.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <p>GolfRaven — working name. &copy; <span id="year"></span> GolfRaven.</p>
+      </div>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>

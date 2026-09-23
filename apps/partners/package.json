@@ -1,0 +1,11 @@
+{
+  "name": "@golfraven/partners",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Staff/operator/admin portal PWA (build plan §3.1 row H). Placeholder — no build work before P5.",
+  "scripts": {
+    "build": "echo \"@golfraven/partners: nothing to build yet (placeholder before P5, build plan §3.1 row H)\"",
+    "typecheck": "echo \"@golfraven/partners: no TypeScript yet (placeholder before P5)\"",
+    "test": "echo \"@golfraven/partners: no tests yet (placeholder before P5)\""
+  }
+}

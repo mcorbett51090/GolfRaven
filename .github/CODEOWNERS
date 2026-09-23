@@ -1,0 +1,7 @@
+# CODEOWNERS for golfraven/
+# Staged inside RavenGolf until this directory is extracted to its own repo
+# (git subtree split --prefix=golfraven). This file's repo-root-relative
+# paths are written so it works unchanged once golfraven/ becomes the repo
+# root — see the root README.md "Staging note".
+
+* @mcorbett51090

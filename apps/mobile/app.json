@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "GolfRaven",
+    "slug": "golfraven",
+    "scheme": "golfraven",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "android": {
+      "package": "com.golfraven.app"
+    },
+    "ios": {
+      "bundleIdentifier": "com.golfraven.app"
+    },
+    "plugins": ["react-native-health-connect"]
+  }
+}
