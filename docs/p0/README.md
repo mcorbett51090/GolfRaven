@@ -50,8 +50,8 @@ still blank.
 2. Every application has a dated receipt.
 3. `pnpm -r build` passes on the skeleton in CI.
 4. **Any kill verdict has an owner-signed replan note** before P1 starts.
-5. The GolfRaven domain resolves, SMTP passes a DMARC check, and the organisation store accounts exist in
-   the operating entity's name (or their pending status is dated).
+5. The organisation store accounts exist in the operating entity's name (or their pending status is dated).
+   The domain-resolves and DMARC checks move with the K2 deploy (decision 0002) and are met before K2 day 0.
 6. The P0 DoD carries a `/security-review` report and Matt's recorded self-attestation (O22).
 
 A kill on any one of the 11 checks means: **replan before P1** (plan §10 P0 Scope: "A kill on any one → replan

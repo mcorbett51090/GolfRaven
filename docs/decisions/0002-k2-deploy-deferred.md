@@ -26,6 +26,8 @@ the last responsible moment, defined so the deferral cannot silently become "nev
   decision**. K2's only hard consequence was ever to hold P4.2 (its kill text: "P1 is not held"), so P1 may
   start once the other ten verdicts are written or replanned. This record is the owner-signed replan the P0
   acceptance test (4) requires.
+- **P0 acceptance test (5)** is split: the Apple and Google organisation accounts stay in P0; the domain
+  resolving and the DMARC check move with the K2 deploy and must pass before K2 day 0.
 - **Everything already pinned for K2 still applies unchanged:** decision 0001 Addenda D (R3) and F, the
   thresholds (100 advisory by day 14, 300 by day 42), exclusion dating and the no-restart rule.
 - **Built and gated, not deployed:** `apps/signup-worker` and `apps/landing` are merged and CI-green, so the
