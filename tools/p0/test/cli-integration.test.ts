@@ -56,17 +56,17 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     expect(stdout).toMatch(/X5 coverage: 1\/2 \(50\.0%\) vs 60% bar — KILL/);
   });
 
-  it("x1-ios-export CLI writes JSON + markdown for the fixture export dir", async () => {
+  // Decision 0001 Addendum F: the CLI ALWAYS reads the repo's own real
+  // docs/p0/X1.md for its logged round window(s) — there is no override
+  // flag (same philosophy as the K2 CLI's no-`--k2-doc` rule). Pre-round,
+  // that section is genuinely blank, so this is a real end-to-end proof the
+  // refusal is wired all the way through the built CLI, not just unit-level.
+  it("x1-ios-export CLI refuses (non-zero exit) against the real, pre-round docs/p0/X1.md with no round window logged", async () => {
     const outPrefix = path.join(OUT_DIR, "x1-ios-export-result");
-    const { stdout } = await execFileAsync("node", [
-      path.join(DIST, "x1-ios-export.js"),
-      FIXTURES,
-      "--out",
-      outPrefix,
-    ]);
-    expect(stdout).toContain("golf workout(s) found");
-    expect(existsSync(`${outPrefix}.json`)).toBe(true);
-    expect(existsSync(`${outPrefix}.md`)).toBe(true);
+    await expect(
+      execFileAsync("node", [path.join(DIST, "x1-ios-export.js"), FIXTURES, "--out", outPrefix]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("round window") });
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
   });
 
   // NOTE: hitting the real default Overpass endpoint is deliberately NOT

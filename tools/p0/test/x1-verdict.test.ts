@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeX1Verdict, type AndroidGolfSessionReadResult, type SourceMap } from "../src/x1-verdict.js";
 import type { X1IosExportResult, X1IosWorkoutRecord } from "../src/x1-ios-export.js";
+import type { RoundWindow } from "../src/round-windows.js";
 
 function iosWorkout(overrides: Partial<X1IosWorkoutRecord>): X1IosWorkoutRecord {
   return {
@@ -25,6 +26,7 @@ function iosResult(workouts: X1IosWorkoutRecord[]): X1IosExportResult {
     generatedAt: new Date().toISOString(),
     exportDir: "/fake",
     since: null,
+    roundWindows: ROUND_WINDOWS,
     totalWorkoutElementsSeen: workouts.length,
     golfWorkoutCount: workouts.length,
     workouts,
@@ -37,6 +39,10 @@ function androidResult(
 ): AndroidGolfSessionReadResult {
   return { generatedAt: new Date().toISOString(), windowDays: 7, sessionCount: sessions.length, sessions };
 }
+
+/** Covers both the iOS fixture workouts ("2026-09-20 09:00:00 -0400" =
+ * 13:00 UTC) and the Android fixture sessions ("2026-09-21T09:00:00Z"). */
+const ROUND_WINDOWS: RoundWindow[] = [{ startIso: "2026-09-20T00:00:00Z", endIso: "2026-09-22T00:00:00Z" }];
 
 const BASE_SOURCE_MAP: SourceMap = {
   garmin: {
@@ -51,7 +57,7 @@ const BASE_SOURCE_MAP: SourceMap = {
   },
 };
 
-describe("x1-verdict: source-level verdicts and the 2-of-3 bar", () => {
+describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decision 0001 Addendum F)", () => {
   it("passes when all 3 sources write golf workouts with routes on iOS", () => {
     const ios = iosResult([
       iosWorkout({ sourceName: "Garmin Connect" }),
@@ -59,24 +65,24 @@ describe("x1-verdict: source-level verdicts and the 2-of-3 bar", () => {
       iosWorkout({ sourceName: "18Birdies" }),
     ]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.garmin.passesOnAnyOS).toBe(true);
     expect(result.perSource.appleWatch.passesOnAnyOS).toBe(true);
     expect(result.perSource.phoneApp.passesOnAnyOS).toBe(true);
-    expect(result.sourcesPassingCount).toBe(3);
+    expect(result.sourcesPassingByOs).toEqual({ ios: 3, android: 0 });
     expect(result.overallVerdict).toBe("pass");
     expect(result.garminWrittenStatementTriggeredByX1).toBe(false);
   });
 
-  it("BOUNDARY: exactly 2 of 3 sources passing is a pass", () => {
+  it("BOUNDARY: exactly 2 of 3 sources passing on the SAME OS is a pass", () => {
     const ios = iosResult([
       iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" }), // Garmin fails
       iosWorkout({ sourceName: "Matt's Apple Watch" }),
       iosWorkout({ sourceName: "18Birdies" }),
     ]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
-    expect(result.sourcesPassingCount).toBe(2);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.sourcesPassingByOs).toEqual({ ios: 2, android: 0 });
     expect(result.overallVerdict).toBe("pass");
     // Garmin specifically failed -> K4 written statement triggers even though X1 passes overall.
     expect(result.garminWrittenStatementTriggeredByX1).toBe(true);
@@ -89,15 +95,42 @@ describe("x1-verdict: source-level verdicts and the 2-of-3 bar", () => {
       iosWorkout({ sourceName: "18Birdies" }),
     ]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
-    expect(result.sourcesPassingCount).toBe(1);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.sourcesPassingByOs).toEqual({ ios: 1, android: 0 });
+    expect(result.overallVerdict).toBe("kill");
+  });
+
+  it("gate finding B-6: sources passing on DIFFERENT OSes do NOT combine — this is a KILL, not a pass", () => {
+    // Decision 0001 Addendum F's own example: Apple Watch routes only on
+    // iOS, Garmin routes only on Android. Under the old ('any OS') reading
+    // this was a pass (2 of 3 pass somewhere); Addendum F pins the reading
+    // that predicts what a user actually gets — a kill, since no ONE OS has
+    // 2 of 3 passing.
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Matt's Apple Watch" }), // Apple Watch passes on iOS only
+    ]);
+    const android = androidResult([
+      {
+        recordId: "r1",
+        start: "2026-09-21T09:00:00Z",
+        end: "2026-09-21T13:00:00Z",
+        dataOrigin: "com.garmin.android.apps.connectmobile",
+        routePresent: true,
+        routePointCount: 50,
+        routeRequiresConsent: false,
+      },
+    ]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.perSource.appleWatch.passesOnAnyOS).toBe(true);
+    expect(result.perSource.garmin.passesOnAnyOS).toBe(true);
+    expect(result.sourcesPassingByOs).toEqual({ ios: 1, android: 1 });
     expect(result.overallVerdict).toBe("kill");
   });
 
   it("a source with no matching data at all is fail-not-written", () => {
     const ios = iosResult([iosWorkout({ sourceName: "18Birdies" })]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.garmin.ios).toBe("fail-not-written");
     expect(result.perSource.garmin.android).toBe("fail-not-written");
     expect(result.perSource.garmin.passesOnAnyOS).toBe(false);
@@ -119,7 +152,7 @@ describe("x1-verdict: source-level verdicts and the 2-of-3 bar", () => {
         routeRequiresConsent: false,
       },
     ]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.garmin.ios).toBe("fail-not-written");
     expect(result.perSource.garmin.android).toBe("pass");
     expect(result.perSource.garmin.passesOnAnyOS).toBe(true);
@@ -128,9 +161,45 @@ describe("x1-verdict: source-level verdicts and the 2-of-3 bar", () => {
   it("Apple Watch is not-applicable on Android and its passesOnAnyOS depends only on iOS", () => {
     const ios = iosResult([iosWorkout({ sourceName: "Matt's Apple Watch", routePresent: false, verdict: "fail" })]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.appleWatch.android).toBe("not-applicable");
     expect(result.perSource.appleWatch.passesOnAnyOS).toBe(false);
+  });
+});
+
+describe("x1-verdict: round window (decision 0001 Addendum F, gate finding B-7)", () => {
+  it("refuses (throws) when roundWindows is empty", () => {
+    const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect" })]);
+    const android = androidResult([]);
+    expect(() => computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: [] })).toThrow(
+      /round window/,
+    );
+  });
+
+  it("excludes an iOS workout outside every window, even though x1-ios-export's own JSON already claims a verdict for it", () => {
+    // Defense in depth: the verdict re-applies the window filter itself,
+    // independent of whatever filtering produced the `ios` JSON.
+    const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect", startDate: "2020-01-01 09:00:00 -0400" })]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.perSource.garmin.ios).toBe("fail-not-written");
+  });
+
+  it("excludes an Android session outside every window", () => {
+    const ios = iosResult([]);
+    const android = androidResult([
+      {
+        recordId: "old",
+        start: "2020-01-01T09:00:00Z",
+        end: "2020-01-01T13:00:00Z",
+        dataOrigin: "com.garmin.android.apps.connectmobile",
+        routePresent: true,
+        routePointCount: 50,
+        routeRequiresConsent: false,
+      },
+    ]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.perSource.garmin.android).toBe("fail-not-written");
   });
 });
 
@@ -152,6 +221,7 @@ describe("x1-verdict: decision 0001 Addendum D R6 — CONSENT_REQUIRED follow-up
       ios,
       android,
       sourceMap: BASE_SOURCE_MAP,
+      roundWindows: ROUND_WINDOWS,
       androidRouteFollowUps: { "consent-1": { routePresent: true, routePointCount: 1 } },
     });
     expect(result.perSource.garmin.android).toBe("pass");
@@ -174,6 +244,7 @@ describe("x1-verdict: decision 0001 Addendum D R6 — CONSENT_REQUIRED follow-up
       ios,
       android,
       sourceMap: BASE_SOURCE_MAP,
+      roundWindows: ROUND_WINDOWS,
       androidRouteFollowUps: { "consent-2": { routePresent: false, routePointCount: 0 } },
     });
     expect(result.perSource.garmin.android).toBe("fail-no-route");
@@ -192,7 +263,7 @@ describe("x1-verdict: decision 0001 Addendum D R6 — CONSENT_REQUIRED follow-up
         routeRequiresConsent: true,
       },
     ]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.garmin.android).toBe("fail-no-route");
   });
 });
@@ -201,7 +272,7 @@ describe("x1-verdict: decision 0001 Addendum D R6 — the phone-app source and t
   it("18Birdies as appUsed needs no swap log and works normally", () => {
     const ios = iosResult([iosWorkout({ sourceName: "18Birdies" })]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.phoneApp.ios).toBe("pass");
   });
 
@@ -217,7 +288,7 @@ describe("x1-verdict: decision 0001 Addendum D R6 — the phone-app source and t
     };
     const ios = iosResult([iosWorkout({ sourceName: "Hole19" })]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap });
+    const result = computeX1Verdict({ ios, android, sourceMap, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.phoneApp.appUsed).toBe("Hole19");
     expect(result.perSource.phoneApp.ios).toBe("pass");
   });
@@ -234,7 +305,9 @@ describe("x1-verdict: decision 0001 Addendum D R6 — the phone-app source and t
     };
     const ios = iosResult([iosWorkout({ sourceName: "Hole19" })]);
     const android = androidResult([]);
-    expect(() => computeX1Verdict({ ios, android, sourceMap })).toThrow(/hole19SwapLoggedBeforeRound/);
+    expect(() => computeX1Verdict({ ios, android, sourceMap, roundWindows: ROUND_WINDOWS })).toThrow(
+      /hole19SwapLoggedBeforeRound/,
+    );
   });
 
   it("Hole19 as appUsed with hole19SwapLoggedBeforeRound omitted also throws", () => {
@@ -248,7 +321,7 @@ describe("x1-verdict: decision 0001 Addendum D R6 — the phone-app source and t
     };
     const ios = iosResult([iosWorkout({ sourceName: "Hole19" })]);
     const android = androidResult([]);
-    expect(() => computeX1Verdict({ ios, android, sourceMap })).toThrow();
+    expect(() => computeX1Verdict({ ios, android, sourceMap, roundWindows: ROUND_WINDOWS })).toThrow();
   });
 
   it("extra/supplementary apps present in the data but not in the source map are ignored", () => {
@@ -257,9 +330,23 @@ describe("x1-verdict: decision 0001 Addendum D R6 — the phone-app source and t
       iosWorkout({ sourceName: "TheGrint", routePresent: true, verdict: "pass" }), // supplementary, not configured
     ]);
     const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     // TheGrint data doesn't appear anywhere in perSource — only phoneApp (18Birdies) does.
     expect(result.perSource.phoneApp.appUsed).toBe("18Birdies");
     expect(JSON.stringify(result.perSource)).not.toContain("TheGrint");
+  });
+
+  it("gate finding B-9: a source list leaking the OTHER app's identifier throws", () => {
+    const sourceMap: SourceMap = {
+      ...BASE_SOURCE_MAP,
+      phoneApp: {
+        iosSourceNames: ["18Birdies", "Hole19"], // leaks the other app's name
+        androidDataOrigins: ["com.eighteenbirdies.android"],
+        appUsed: "18Birdies",
+      },
+    };
+    const ios = iosResult([iosWorkout({ sourceName: "18Birdies" })]);
+    const android = androidResult([]);
+    expect(() => computeX1Verdict({ ios, android, sourceMap, roundWindows: ROUND_WINDOWS })).toThrow(/OTHER app/);
   });
 });

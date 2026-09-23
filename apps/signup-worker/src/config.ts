@@ -74,6 +74,17 @@ export interface Env {
    * day 0 is known — the cron skips that deletion class entirely until then.
    */
   K2_GATE_CLOSES_AT?: string;
+  /**
+   * Gate finding A-3: bare `YYYY-MM-DD` day 0, copied VERBATIM from
+   * `docs/p0/K2.md`'s "## Day 0" section — set alongside `K2_GATE_CLOSES_AT`
+   * (never instead of it). The retention cron additionally requires
+   * `K2_GATE_CLOSES_AT` to equal EXACTLY this date + 42 days at
+   * `00:00:00Z` (`checkK2GateMatchesDay0`) before it will delete a
+   * confirmed-then-unsubscribed row — see that function's doc for why
+   * `K2_GATE_CLOSES_AT`'s own floor check alone isn't enough once day 0
+   * itself lands late.
+   */
+  K2_DAY0?: string;
 }
 
 /**
@@ -160,11 +171,75 @@ export function checkK2GateClosesAt(raw: string | undefined): K2GateCheckResult 
   if (Number.isNaN(gateCloses.getTime())) {
     return { ok: false, reason: "not a valid calendar date/time" };
   }
+  // A-4: round-trip the value — `new Date("2026-11-31T00:00:00Z")` etc.
+  // don't throw; V8 rolls a nonexistent calendar date FORWARD (e.g. to
+  // 2026-12-01), which the regex + NaN checks above don't catch. Harmless
+  // direction (it only pushes gateCloses later), but it's not the strict
+  // calendar check the format implies, so reject it outright instead.
+  if (gateCloses.toISOString().replace(".000Z", "Z") !== raw) {
+    return { ok: false, reason: "not a valid calendar date (round-trip mismatch, e.g. a day-of-month rollover)" };
+  }
   const floor = new Date(K2_GATE_CLOSES_AT_FLOOR);
   if (gateCloses.getTime() < floor.getTime()) {
     return { ok: false, reason: `earlier than the earliest possible K2 gate close (${K2_GATE_CLOSES_AT_FLOOR})` };
   }
   return { ok: true, gateCloses };
+}
+
+const K2_DAY0_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export type K2Day0CheckResult = { ok: true; day0: Date } | { ok: false; reason: string };
+
+/**
+ * Gate finding A-3: validates `Env.K2_DAY0` — a strict, bare `YYYY-MM-DD`
+ * date (the same value Matt copies verbatim into `docs/p0/K2.md`'s
+ * "## Day 0"), interpreted as 00:00:00Z. Anything else (unset, malformed,
+ * or a calendar-rollover date like "2026-11-31") is rejected the same way
+ * `checkK2GateClosesAt` rejects a bad `K2_GATE_CLOSES_AT`.
+ */
+export function checkK2Day0(raw: string | undefined): K2Day0CheckResult {
+  if (!raw || raw.trim() === "") {
+    return { ok: false, reason: "unset" };
+  }
+  if (!K2_DAY0_RE.test(raw)) {
+    return { ok: false, reason: "malformed (must be a bare YYYY-MM-DD date)" };
+  }
+  const day0 = new Date(`${raw}T00:00:00Z`);
+  if (Number.isNaN(day0.getTime()) || day0.toISOString().slice(0, 10) !== raw) {
+    return { ok: false, reason: "not a valid calendar date" };
+  }
+  return { ok: true, day0 };
+}
+
+const K2_GATE_WINDOW_DAYS = 42;
+
+export type K2GateMatchesDay0Result = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Gate finding A-3 (BLOCKING-adjacent SHOULD-FIX): `checkK2GateClosesAt`'s
+ * floor only catches "day 0 typed into `K2_GATE_CLOSES_AT` by mistake"
+ * while day 0 itself is earlier than `K2_GATE_CLOSES_AT_FLOOR`
+ * (2026-11-16). If day 0 slips past that date — plausible, since it
+ * depends on owner-side domain/SMTP setup — the exact same mistake passes
+ * the floor check and deletion of confirmed-then-unsubscribed rows could
+ * start at day 0 + 30, BEFORE the real gate closes at day 0 + 42.
+ *
+ * This closes that gap directly: deletion additionally requires
+ * `K2_GATE_CLOSES_AT` to equal EXACTLY `K2_DAY0 + 42 days` at
+ * `00:00:00Z` — not merely "parses and clears the floor". Any mismatch
+ * (including the "day 0 typed into the gate var" case, at ANY day 0)
+ * refuses deletion outright; see `runRetentionCron` in index.ts for the
+ * single PII-free warning this produces.
+ */
+export function checkK2GateMatchesDay0(gateCloses: Date, day0: Date): K2GateMatchesDay0Result {
+  const expectedMs = day0.getTime() + K2_GATE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  if (gateCloses.getTime() !== expectedMs) {
+    return {
+      ok: false,
+      reason: `K2_GATE_CLOSES_AT does not equal K2_DAY0 + ${K2_GATE_WINDOW_DAYS} days at 00:00:00Z`,
+    };
+  }
+  return { ok: true };
 }
 
 const MIN_SECRET_LENGTH = 16;

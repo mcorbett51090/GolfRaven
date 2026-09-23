@@ -27,21 +27,30 @@ node dist/x1-ios-export.js /path/to/apple_health_export --since 2026-09-15 --out
 ```
 
 - `<path>` — the directory that directly contains `export.xml` and `workout-routes/`.
-- `--since YYYY-MM-DD` (optional) — only include workouts starting on/after this date, so a
-  years-long Health history doesn't have to be sifted by eye for the one test round.
+- `--since YYYY-MM-DD` (optional) — an extra, coarser pre-filter on top of the round window below.
 - `--out <prefix>` (optional, default `x1-ios-export-result`) — writes `<prefix>.json` and
   `<prefix>.md`.
+
+**Round windows (decision 0001 Addendum F, gate finding B-7) — REQUIRED, no override flag.** Before
+running, the CLI always reads the repo's own `docs/p0/X1.md` "## Round windows" section for the
+logged UTC start/end time of each test round, and **refuses to run if it's still blank** — never
+silently treats every workout on the device as in-round. Only a workout whose start time falls
+inside a logged window, with 60 minutes of slack either side, counts; older workouts on the device
+are excluded (with a warning naming how many). Log the window(s) in `docs/p0/X1.md` before reading
+the export.
 
 **Feeds:** the JSON is one of `x1-verdict`'s two inputs. The markdown table's columns match
 `docs/owner/x1-k4b-device-protocol.md` §4's results table (Source / OS / Workout written? / Route
 present? / CONSENT_REQUIRED column (always "N/A (iOS)" here) / Source id / Verdict) — copy rows
 straight into that table, then into `docs/p0/X1.md` MEASURED VALUE once the round is run.
 
-**Loud-failure contract:** if `export.xml`'s root element isn't `<HealthData>`, or `<Workout>`
-elements exist but none carry a `workoutActivityType` attribute, the tool **throws and exits 1** —
-it never silently reports zero golf workouts for a shape it doesn't recognize. Genuinely zero golf
-workouts in a well-shaped file is not an error (see `--since`/wrong-directory sanity-check it
-yourself if that's surprising). See `src/health-export-xml.ts`'s module doc for the full list of
+**Loud-failure contract:** if `export.xml`'s root element isn't `<HealthData>`, `<Workout>`
+elements exist but none carry a `workoutActivityType` attribute, or a `<WorkoutRoute>` appears as a
+**sibling** of `<Workout>` rather than nested inside one (gate finding B-8 — the least-certain part
+of the assumed shape), the tool **throws and exits 1** — it never silently reports zero golf
+workouts, or zero routes, for a shape it doesn't recognize. Genuinely zero golf workouts in a
+well-shaped file is not an error (see `--since`/wrong-directory sanity-check it yourself if that's
+surprising). See `src/health-export-xml.ts`'s module doc for the full list of
 `[unverified — training knowledge]` assumptions about Apple's export.xml shape this relies on, and
 "Known risk" below.
 
@@ -91,6 +100,18 @@ node dist/x1-verdict.js \
   from a follow-up `requestExerciseRoute(recordId)` call (R6). A `CONSENT_REQUIRED` session with no
   entry here defaults to "not present," per R6.
 
+**Round windows — REQUIRED (same as `x1-ios-export` above).** The CLI also always reads
+`docs/p0/X1.md`'s logged round window(s) and refuses to run if none is logged. It re-applies the
+window filter to both the `--ios` and `--android` inputs itself (gate finding B-7) — independent of
+whatever filtering already happened upstream — so a stale or hand-edited JSON file can't silently
+widen the verdict.
+
+**The "≥ 1 OS" bar, made exact (decision 0001 Addendum F, gate finding B-6).** X1 passes only if
+there is **one** operating system on which **≥ 2 of the 3 sources** pass. Sources that pass on
+*different* OSes (e.g. Apple Watch only on iOS, Garmin only on Android) do **not** combine — that
+reading predicts what a user actually gets, since a user syncs from one phone. The result's
+`sourcesPassingByOs: { ios, android }` shows both counts explicitly, alongside `overallVerdict`.
+
 **Feeds:** `overallVerdict` → `docs/p0/X1.md` VERDICT; `perSource` → the per-source column of
 `docs/owner/x1-k4b-device-protocol.md` §4 and `docs/p0/X1.md`'s A2-14 requirement;
 `garminWrittenStatementTriggeredByX1` → the first half of `docs/p0/K4.md`'s "written statement"
@@ -131,15 +152,42 @@ node dist/x5-overpass.js coverage --courses pilot-candidate-courses.json \
   polygon; `facility`-unit trails count one entry per `facilityId`, covered if any of its courses
   matched, and `hole`-unit trails count one entry per course — both pinned in decision 0001 Addendum E
   before any X5 data). `knownPoint: {lat, lon}` is optional — when present, the match rule uses point
-  containment; otherwise it falls back to the 500 m name-match, both exactly as X5.md specifies.
+  containment; otherwise it falls back to the 500 m name-match. `id` is optional (gate finding B-12):
+  a stable id from X2, used to key saved responses/denominator entries instead of `name` — set it
+  when two pilot-candidate courses can share a name (e.g. across RTJ sites); the bbox query is
+  also centered on `knownPoint` when given, not the approximate `lat`/`lon` (gate finding B-11).
 - `--endpoint` (default `https://overpass-api.de/api/interpreter`), `--timeout-ms` (default
   190000), `--bbox-radius-meters` (default 2000 — a query-fetch window size, **not** part of the
   pre-registered match rule; see `overpass-geo.ts`).
-- `--responses <file>` — a JSON object keyed by course `name`, each value a saved Overpass response
-  for that course's coverage query (from a prior live run, or hand-built for a test). When given,
-  no network call is made.
+- `--responses <file>` — a JSON object keyed by each course's `id` (or `name` if it has none), each
+  value a saved Overpass response for that course's coverage query (from a prior live run, or
+  hand-built for a test). When given, no network call is made, and a course missing from this file
+  is a hard **refusal** (gate finding B-4), never a silent "treat as unmatched".
 - `--from-file <file>` (the `n-osm` subcommand only) — same idea, one saved response for the
   N_osm query.
+
+**Match rule, made exact (decision 0001 Addendum F, gate findings B-1/B-2/B-3) — supersedes this
+README's and X5.md's own looser wording wherever they differ.** A `leisure=golf_course` way **or
+relation** matches when either (a) the course's known point lies inside the polygon — a relation's
+outer ring(s) are assembled from its `outer`-role `way` members (Overpass `out geom` puts a
+relation's geometry under `members[]`, never a top-level `geometry` — a way-only reading silently
+skipped every relation-mapped course), or (b), with no known point, the names match **and** the
+shortest distance from the course's approximate location to the polygon is ≤ 500 m (0 if inside —
+never a centroid distance, which was skewed by vertex density and could put an inside point outside
+its own polygon). Names match after normalisation (Unicode NFKD, diacritics stripped, lower-cased,
+non-letter/digit → space, whitespace collapsed) on equality or whole-word containment — **no
+abbreviation list or fuzzy matching** ("St." and "Saint" do NOT unify; "Golf Club" and "Golf Course"
+do NOT unify).
+
+**Run integrity (decision 0001 Addendum F).** An Overpass `remark` (its way of reporting a runtime
+error, e.g. a timeout, as HTTP 200 with partial/empty `elements`), a missing or unparseable response
+for any course, or an empty `--courses` list all **stop the run with a non-zero exit** — none of
+them is ever silently counted as "unmatched" or a vacuous 0/0 (gate finding B-4). In **live** mode
+(no `--responses`), every raw Overpass response is also saved to `<out>-responses.json`, keyed the
+same way `--responses` expects, with the query text and a fetch timestamp — so the verdict can be
+replayed offline / re-audited later (gate finding B-5). The contact string in the Overpass
+`User-Agent` is read from the `X5_CONTACT` env var (gate finding B-10), not hard-coded — set it to
+a real contact before a live run; it defaults to a generic project URL when unset.
 
 **Feeds:** `n-osm`'s printed total → `docs/p0/X5.md` MEASURED VALUE's `N_osm`. `coverage`'s
 combined/per-trail percentages and PASS/KILL line → `docs/p0/X5.md` MEASURED VALUE and VERDICT

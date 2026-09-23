@@ -11,16 +11,17 @@
  * `src/health-export-xml.ts` for the `[unverified — training knowledge]`
  * export.xml shape this relies on and the loud-failure contract.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   countGpxTrackpoints,
   GOLF_ACTIVITY_TYPE,
   parseHealthExportXml,
   type RawIosWorkout,
 } from "./health-export-xml.js";
+import { isWithinRoundWindow, readLoggedRoundWindows, type RoundWindow } from "./round-windows.js";
 
 export interface X1IosWorkoutRecord {
   sourceName: string;
@@ -48,6 +49,10 @@ export interface X1IosExportResult {
   generatedAt: string;
   exportDir: string;
   since: string | null;
+  /** Decision 0001 Addendum F: the logged round window(s) this run was
+   * filtered against — recorded for auditability. Always non-empty (a run
+   * with none logged refuses outright — see `runX1IosExport`). */
+  roundWindows: RoundWindow[];
   totalWorkoutElementsSeen: number;
   golfWorkoutCount: number;
   workouts: X1IosWorkoutRecord[];
@@ -87,8 +92,19 @@ function resolveRoutePath(exportDir: string, referencePath: string): string {
 
 export async function runX1IosExport(
   exportDir: string,
-  opts: { since?: string } = {},
+  opts: { since?: string; roundWindows: RoundWindow[] },
 ): Promise<X1IosExportResult> {
+  // Decision 0001 Addendum F: refuse outright if no round window is
+  // logged, rather than silently treating every workout on the device as
+  // in-round. This check runs BEFORE touching the (possibly huge) export.
+  if (!opts.roundWindows || opts.roundWindows.length === 0) {
+    throw new Error(
+      "runX1IosExport requires at least one round window (decision 0001 Addendum F) — refusing to run with " +
+        'no logged window. Log the UTC start/end time of each test round in docs/p0/X1.md\'s "## Round ' +
+        'windows" section first.',
+    );
+  }
+
   const xmlPath = path.join(exportDir, "export.xml");
   if (!existsSync(exportDir)) {
     throw new Error(`Export directory not found: ${exportDir}`);
@@ -110,7 +126,7 @@ export async function runX1IosExport(
 
   const golf = parsed.workouts.filter((w) => w.workoutActivityType === GOLF_ACTIVITY_TYPE);
 
-  const filtered = golf.filter((w) => {
+  const sinceFiltered = golf.filter((w) => {
     if (!sinceDate) return true;
     if (!w.startDate) {
       warnings.push(
@@ -127,6 +143,25 @@ export async function runX1IosExport(
     }
     return start.getTime() >= sinceDate.getTime();
   });
+
+  // Decision 0001 Addendum F / gate finding B-7: the AUTHORITATIVE filter —
+  // only a workout whose start time falls inside a logged round window
+  // (±60 min) counts. Unlike --since above, a missing/unparseable start
+  // time does NOT get the benefit of the doubt here: it cannot be shown to
+  // be in-round, so it is excluded, with a warning naming how many were.
+  let excludedByWindow = 0;
+  const filtered = sinceFiltered.filter((w) => {
+    if (isWithinRoundWindow(w.startDate, opts.roundWindows)) return true;
+    excludedByWindow += 1;
+    return false;
+  });
+  if (excludedByWindow > 0) {
+    warnings.push(
+      `${excludedByWindow} golf workout(s) excluded: start time (or a missing/unparseable start time) falls ` +
+        'outside every logged round window (±60 min) in docs/p0/X1.md\'s "Round windows" section (decision ' +
+        "0001 Addendum F).",
+    );
+  }
 
   const workouts: X1IosWorkoutRecord[] = [];
   for (const w of filtered) {
@@ -168,6 +203,7 @@ export async function runX1IosExport(
     generatedAt: new Date().toISOString(),
     exportDir,
     since: opts.since ?? null,
+    roundWindows: opts.roundWindows,
     totalWorkoutElementsSeen: parsed.totalWorkoutElementsSeen,
     golfWorkoutCount: workouts.length,
     workouts,
@@ -229,7 +265,11 @@ function parseArgs(argv: string[]): CliArgs {
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const result = await runX1IosExport(args.exportDir, args.since !== undefined ? { since: args.since } : {});
+  const roundWindows = await readLoggedRoundWindows();
+  const result = await runX1IosExport(args.exportDir, {
+    roundWindows,
+    ...(args.since !== undefined ? { since: args.since } : {}),
+  });
   const md = renderMarkdownTable(result);
 
   const outDir = path.dirname(path.resolve(args.outPrefix));
@@ -248,11 +288,24 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-const isMain =
-  process.argv[1] !== undefined &&
-  pathToFileURL(process.argv[1]).href === import.meta.url;
+/** Gate finding B-11 (the N7 symlink bug, again): real-path comparison, not
+ * a raw `process.argv[1]` vs. `import.meta.url` comparison that silently
+ * never matches (and so never runs `main`, exiting 0) when invoked through
+ * a symlinked checkout path. */
+async function isMainModule(): Promise<boolean> {
+  if (!process.argv[1]) return false;
+  try {
+    const [herePath, argvPath] = await Promise.all([
+      realpath(fileURLToPath(import.meta.url)),
+      realpath(process.argv[1]),
+    ]);
+    return herePath === argvPath;
+  } catch {
+    return false;
+  }
+}
 
-if (isMain) {
+if (await isMainModule()) {
   main(process.argv.slice(2)).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`x1-ios-export: ${message}\n`);

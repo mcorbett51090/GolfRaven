@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { K2_GATE_CLOSES_AT_FLOOR, checkK2GateClosesAt } from "../src/config";
+import { K2_GATE_CLOSES_AT_FLOOR, checkK2Day0, checkK2GateClosesAt, checkK2GateMatchesDay0 } from "../src/config";
 
 // N2: the retention cron must never be able to delete a confirmed row the
 // K2 verdict still needs. Every invalid form from the reverify report's
@@ -61,5 +61,67 @@ describe("checkK2GateClosesAt (N2)", () => {
 
   it("rejects trailing milliseconds (must match the exact strict pattern)", () => {
     expect(checkK2GateClosesAt("2026-12-01T09:00:00.000Z").ok).toBe(false);
+  });
+
+  // A-4: a calendar day-of-month rollover (e.g. Nov has 30 days) passes the
+  // regex + NaN checks, and V8 silently rolls it FORWARD a day — harmless
+  // direction, but not the strict calendar check the format implies.
+  it("A-4: rejects a nonexistent calendar date that V8 would silently roll forward", () => {
+    const result = checkK2GateClosesAt("2026-11-31T00:00:00Z");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/round-trip/);
+  });
+
+  it("A-4: rejects a 24:00:00 rollover the same way", () => {
+    expect(checkK2GateClosesAt("2026-11-16T24:00:00Z").ok).toBe(false);
+  });
+});
+
+// A-3: K2_DAY0 is the bare-date companion Matt copies verbatim from
+// docs/p0/K2.md, cross-checked against K2_GATE_CLOSES_AT below.
+describe("checkK2Day0 (A-3)", () => {
+  it("rejects unset", () => {
+    expect(checkK2Day0(undefined).ok).toBe(false);
+  });
+
+  it("rejects an empty string", () => {
+    expect(checkK2Day0("").ok).toBe(false);
+  });
+
+  it("rejects a date-time (must be a bare date)", () => {
+    expect(checkK2Day0("2026-10-05T00:00:00Z").ok).toBe(false);
+  });
+
+  it("rejects a nonexistent calendar date", () => {
+    expect(checkK2Day0("2026-02-30").ok).toBe(false);
+  });
+
+  it("accepts a well-formed bare date", () => {
+    const result = checkK2Day0("2026-10-05");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.day0.toISOString()).toBe("2026-10-05T00:00:00.000Z");
+  });
+});
+
+// A-3: the cross-check that closes the gap checkK2GateClosesAt's floor
+// alone leaves open once day 0 itself lands after the floor date.
+describe("checkK2GateMatchesDay0 (A-3)", () => {
+  it("accepts when K2_GATE_CLOSES_AT is exactly K2_DAY0 + 42 days", () => {
+    const day0 = new Date("2026-10-05T00:00:00Z");
+    const gateCloses = new Date("2026-11-16T00:00:00Z"); // +42 days exactly
+    expect(checkK2GateMatchesDay0(gateCloses, day0).ok).toBe(true);
+  });
+
+  it('rejects "day 0 typed into the gate var" — gateCloses == day0, not day0+42', () => {
+    const day0 = new Date("2026-11-20T00:00:00Z");
+    const gateCloses = new Date("2026-11-20T00:00:00Z"); // the mistake
+    const result = checkK2GateMatchesDay0(gateCloses, day0);
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects an off-by-one-day mismatch", () => {
+    const day0 = new Date("2026-10-05T00:00:00Z");
+    const gateCloses = new Date("2026-11-17T00:00:00Z"); // +43 days
+    expect(checkK2GateMatchesDay0(gateCloses, day0).ok).toBe(false);
   });
 });

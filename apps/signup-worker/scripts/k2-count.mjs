@@ -28,15 +28,27 @@
 // trailing punctuation) stripped and unicode local parts accepted, then
 // lower-cased.
 //
-// F7/F8 residual (R3's "listed BEFORE Day 0" rule): every candidate
-// exclusion is additionally checked against `git blame` on docs/p0/K2.md —
-// it counts as excluded ONLY if its own line's commit author-time is
-// strictly before Day 0 00:00 UTC. An address added on/after Day 0, or
-// whose line is not yet committed, is listed in the output as "not
-// excluded" rather than silently applied. Day 0's own line must be
-// committed too, or the CLI refuses outright. The actual decision logic
-// lives in the pure, git-free src/k2-blame.ts (unit-tested with fake blame
-// data) — this script only shells out to git and parses its output.
+// K2 exclusion dating (decision 0001 Addendum F, superseding the round-2
+// per-line `git blame` rule — see src/k2-blame.ts's module doc for why):
+// every candidate exclusion is checked against docs/p0/K2.md's FULL git
+// history via `git log --reverse --format=%H%x09%cI -S<address> --
+// docs/p0/K2.md` — the address counts as excluded ONLY if the EARLIEST
+// commit whose diff added that exact string has a COMMITTER time strictly
+// before Day 0 00:00 UTC. A later reformat or deletion of the line cannot
+// change this (it dates the ADDRESS, not the line). An address added
+// on/after Day 0, or with no commit history at all, is listed in the
+// output as "not excluded" rather than silently applied. This script
+// REFUSES OUTRIGHT (non-zero exit) in a shallow clone
+// (`git rev-parse --is-shallow-repository`) — a shallow clone cannot hold
+// the full history `git log -S` needs, and would otherwise silently
+// under- or over-exclude. The actual decision logic lives in the pure,
+// git-free src/k2-blame.ts (unit-tested with fake first-appearance data) —
+// this script only shells out to git and parses its output.
+//
+// Known limit (decision 0001 Addendum F, stated verbatim): git timestamps
+// are set by whoever makes the commit, so this is not tamper-proof by
+// itself — the protection is that exclusions are pushed to GitHub before
+// day 0, which leaves a server-side record Matt can check independently.
 //
 // Producing the export (see also README.md "How to run the K2 count"):
 //   wrangler d1 execute golfraven-signups --remote --json \
@@ -114,9 +126,6 @@ const EXCLUDED_HEADING_RE = /^excluded addresses/i;
 // we found a bare date or something with a time attached".
 const DATE_TOKEN_RE = /\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/g;
 const BARE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// Non-global sibling of DATE_TOKEN_RE, used per-line to find WHICH line
-// holds the (already-validated) date token, for git-blame purposes.
-const DATE_TOKEN_LINE_RE = /\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/;
 
 /**
  * Gate findings F1/F7. Returns:
@@ -163,26 +172,6 @@ export function parseDay0FromK2Doc(markdown) {
   return token;
 }
 
-/**
- * F7/F8 residual (blame gating): the 1-indexed absolute line number within
- * `markdown` where Day 0's own date token lives. Only meaningful once
- * `parseDay0FromK2Doc` has returned a non-null, validated value — this
- * re-scans independently rather than trusting that ordering, so it throws
- * its own clear error if the heading is somehow missing when called.
- */
-export function parseDay0LineFromK2Doc(markdown) {
-  const lines = markdown.split("\n");
-  const range = findSectionRange(lines, (text) => DAY0_HEADING_RE.test(text));
-  if (range === null) {
-    throw new Error('K2.md is missing its "## Day 0" heading — cannot determine day 0.');
-  }
-  for (let i = range.bodyStart; i < range.bodyEnd; i += 1) {
-    if (DATE_TOKEN_LINE_RE.test(lines[i])) {
-      return i + 1; // 1-indexed
-    }
-  }
-  throw new Error('K2.md\'s "## Day 0" section has no date token on any line — cannot locate it for git blame.');
-}
 
 /**
  * Gate finding F8 residual (1): markdown italic/bold wraps a token in a
@@ -239,19 +228,36 @@ function stripMarkdownDecoration(text) {
 const EMAIL_TOKEN_RE = /[\p{L}\p{N}._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
 
 /**
+ * Gate finding A-8 (F8 residual): `stripPairedEmphasis` above only strips
+ * emphasis that wraps the WHOLE trimmed line. `- _a2@x.com_ (owner)` does
+ * NOT end with the marker (it ends with `)`), so that whole-line strip
+ * leaves the leading `_` in place — and since `_` is a legal email
+ * local-part character, `EMAIL_TOKEN_RE` then happily swallows it, matching
+ * `_a2@x.com` instead of the real address `a2@x.com`. This strips a paired
+ * `_`/`*` wrapped TIGHTLY around an email-shaped token specifically
+ * (`_x@y.com_`, `*x@y.com*`), wherever it sits on the line, leaving a bare
+ * underscore that is NOT part of such a pair (a genuine local-part
+ * character) untouched.
+ */
+function stripPairedEmphasisAroundTokens(text) {
+  return text.replace(/([_*])([\p{L}\p{N}._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\1/gu, (_m, _marker, token) => token);
+}
+
+/**
  * One line's worth of address extraction: strips the bullet prefix, paired
- * emphasis, and markdown decoration, then extracts distinct lower-cased
- * email addresses. Gate finding F8 residual (3): if the line IS a bullet
- * list item and its cleaned content does not resolve to EXACTLY ONE
- * distinct address, this throws instead of silently dropping it (an
- * unparseable bullet like "matt at golfraven dot com" or "test10@localhost"
- * used to vanish with no trace but the total count).
+ * emphasis (both whole-line and per-token — gate finding A-8), and markdown
+ * decoration, then extracts distinct lower-cased email addresses. Gate
+ * finding F8 residual (3): if the line IS a bullet list item and its
+ * cleaned content does not resolve to EXACTLY ONE distinct address, this
+ * throws instead of silently dropping it (an unparseable bullet like "matt
+ * at golfraven dot com" or "test10@localhost" used to vanish with no trace
+ * but the total count).
  */
 function extractAddressesFromLine(rawLine) {
   const wasBullet = isBulletLine(rawLine);
   const withoutBullet = stripBulletPrefix(rawLine);
   const withoutEmphasis = stripPairedEmphasis(withoutBullet);
-  const cleaned = stripMarkdownDecoration(withoutEmphasis);
+  const cleaned = stripPairedEmphasisAroundTokens(stripMarkdownDecoration(withoutEmphasis));
   const matches = [...new Set([...cleaned.matchAll(EMAIL_TOKEN_RE)].map((m) => m[0].toLowerCase()))];
 
   if (wasBullet && withoutBullet.trim() !== "" && matches.length !== 1) {
@@ -315,63 +321,78 @@ export function extractRows(parsed) {
 }
 
 /**
- * Parses `git blame --porcelain`'s output into a `line -> {authorTimeIso}`
- * map covering every line of the file. An uncommitted (working-tree-only)
- * line reports the all-zero SHA and is mapped to `authorTimeIso: null`
- * regardless of its (bogus/current-time) `author-time` field — matching
- * src/k2-blame.ts's `BlameLine` shape.
+ * Decision 0001 Addendum F / gate findings A-5, A-6: `git rev-parse
+ * --is-shallow-repository` prints "true"/"false". A shallow clone cannot
+ * hold the full history `git log -S` needs to find an address's TRUE first
+ * appearance — a shallow boundary commit can make a line look "recently
+ * added" when it is not — so the CLI refuses outright rather than risk
+ * silently mis-dating every exclusion.
  */
-export function parseGitBlamePorcelain(output) {
-  const lines = output.split("\n");
-  const shaAuthorTimeUnix = new Map();
-  const finalLineSha = new Map();
-  const headerRe = /^([0-9a-f]{40}) (\d+) (\d+)(?: \d+)?$/;
-
-  let i = 0;
-  while (i < lines.length) {
-    const header = headerRe.exec(lines[i]);
-    if (!header) {
-      i += 1;
-      continue;
-    }
-    const sha = header[1];
-    const finalLineNo = Number(header[3]);
-    i += 1;
-    while (i < lines.length && !lines[i].startsWith("\t")) {
-      const authorTimeMatch = /^author-time (\d+)$/.exec(lines[i]);
-      if (authorTimeMatch) shaAuthorTimeUnix.set(sha, Number(authorTimeMatch[1]));
-      i += 1;
-    }
-    if (i < lines.length) i += 1; // consume the tab-prefixed content line
-    finalLineSha.set(finalLineNo, sha);
-  }
-
-  const blameByLine = new Map();
-  for (const [lineNo, sha] of finalLineSha) {
-    const isUncommitted = /^0+$/.test(sha);
-    const authorTimeUnix = shaAuthorTimeUnix.get(sha);
-    const authorTimeIso =
-      !isUncommitted && typeof authorTimeUnix === "number"
-        ? new Date(authorTimeUnix * 1000).toISOString()
-        : null;
-    blameByLine.set(lineNo, { authorTimeIso });
-  }
-  return blameByLine;
-}
-
-/** Runs `git blame --porcelain` on K2.md (relative to the repo root) and parses it. */
-function getK2DocBlame() {
+export function isShallowRepository() {
   let output;
   try {
-    output = execFileSync("git", ["blame", "--porcelain", "--", K2_DOC_RELATIVE_PATH], {
+    output = execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
       cwd: repoRoot,
       encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
     });
   } catch (err) {
-    throw new Error(`could not run "git blame" on ${K2_DOC_RELATIVE_PATH}: ${err.message}`);
+    throw new Error(`could not run "git rev-parse --is-shallow-repository": ${err.message}`);
   }
-  return parseGitBlamePorcelain(output);
+  return output.trim() === "true";
+}
+
+/**
+ * Parses `git log --reverse --format=%H%x09%cI -S<address> --
+ * docs/p0/K2.md` output and returns the FIRST (earliest) line's committer
+ * time (the `%cI` field — ISO-8601 with an explicit offset), or `null` if
+ * the command produced no output at all (no commit in the file's history
+ * ever changed that exact string's occurrence count).
+ */
+export function parseFirstAppearanceLog(output) {
+  const firstLine = output.split("\n").find((l) => l.trim() !== "");
+  if (!firstLine) return null;
+  const tabIdx = firstLine.indexOf("\t");
+  if (tabIdx === -1) return null;
+  const committerTimeIso = firstLine.slice(tabIdx + 1).trim();
+  return committerTimeIso || null;
+}
+
+/**
+ * Decision 0001 Addendum F: for ONE address, the COMMITTER time of the
+ * EARLIEST commit in docs/p0/K2.md's full history whose diff added that
+ * exact string — `git log -S` (pickaxe, a literal-string occurrence-count
+ * search, never a regex) rather than `git blame` on the file's CURRENT
+ * state, so a later reformat or deletion of the line cannot change when
+ * the address first appeared. Committer time, not author time, per
+ * Addendum F: both are self-asserted by whoever makes the commit (neither
+ * is tamper-proof — see the module's "Known limit" note above), but
+ * committer time is what a `git push` timestamps at the remote, which is
+ * the actual protection this rule relies on.
+ */
+function getFirstAppearanceCommitterTime(address) {
+  let output;
+  try {
+    output = execFileSync(
+      "git",
+      ["log", "--reverse", "--format=%H%x09%cI", "-S", address, "--", K2_DOC_RELATIVE_PATH],
+      { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+    );
+  } catch (err) {
+    throw new Error(
+      `could not run "git log -S" for an excluded address on ${K2_DOC_RELATIVE_PATH}: ${err.message}`,
+    );
+  }
+  return parseFirstAppearanceLog(output);
+}
+
+/** Builds the `address -> {committerTimeIso}` map `resolveK2Exclusions`
+ * expects, one `git log -S` call per distinct address. */
+function getFirstAppearanceByAddress(addresses) {
+  const map = new Map();
+  for (const address of addresses) {
+    map.set(address, { committerTimeIso: getFirstAppearanceCommitterTime(address) });
+  }
+  return map;
 }
 
 async function main() {
@@ -379,6 +400,20 @@ async function main() {
   if (args.help || !args.exportPath) {
     usage();
     process.exitCode = args.help ? 0 : 1;
+    return;
+  }
+
+  // Decision 0001 Addendum F / gate findings A-5, A-6: refuse outright in a
+  // shallow clone, before anything else — a shallow checkout cannot be
+  // trusted for ANY of the git-history-dependent exclusion dating below.
+  if (isShallowRepository()) {
+    console.error(
+      "This is a shallow git clone (git rev-parse --is-shallow-repository = true) — the K2 exclusion " +
+        "dating rule (decision 0001 Addendum F) needs docs/p0/K2.md's FULL history to find each excluded " +
+        "address's true first appearance. Refusing to run. Un-shallow the clone (e.g. `git fetch " +
+        "--unshallow`) and try again.",
+    );
+    process.exitCode = 1;
     return;
   }
 
@@ -397,9 +432,9 @@ async function main() {
     return;
   }
 
-  const day0Line = parseDay0LineFromK2Doc(k2Doc);
   const excludedEntries = parseExcludedAddressEntriesFromK2Doc(k2Doc);
-  const blameByLine = getK2DocBlame();
+  const uniqueAddresses = [...new Set(excludedEntries.map((e) => e.address))];
+  const firstAppearanceByAddress = getFirstAppearanceByAddress(uniqueAddresses);
 
   const distJsPath = join(packageRoot, "dist", "k2-count.js");
   const blameJsPath = join(packageRoot, "dist", "k2-blame.js");
@@ -417,15 +452,9 @@ async function main() {
 
   const exclusionResult = k2BlameModule.resolveK2Exclusions({
     day0,
-    day0Line,
     entries: excludedEntries,
-    blameByLine,
+    firstAppearanceByAddress,
   });
-  if (!exclusionResult.ok) {
-    console.error(exclusionResult.error);
-    process.exitCode = 1;
-    return;
-  }
   const excludedAddresses = exclusionResult.excluded;
 
   const rawExport = JSON.parse(await readFile(resolve(args.exportPath), "utf8"));

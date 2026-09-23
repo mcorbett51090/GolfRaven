@@ -41,7 +41,14 @@
  *    nested inside `Workout` or a sibling correlated by timestamp) — it is
  *    exactly what the synthetic fixtures in `tools/p0/test/fixtures/` encode
  *    and what the tests pin down, so Matt's real export.xml is the first
- *    real-world check of this assumption (see README "Known risk").
+ *    real-world check of this assumption (see README "Known risk"). Gate
+ *    finding B-8: because this is the LEAST certain part of the shape, a
+ *    `<WorkoutRoute>` seen as a SIBLING of `<Workout>` (not nested inside
+ *    one) is exactly the case most likely for a real export to hit — and
+ *    the nested-only reader used to ignore it entirely, silently reporting
+ *    `routePresent: false` for every workout with no warning at all (a
+ *    silent false X1 kill). Any such sibling `<WorkoutRoute>` now throws
+ *    `HealthExportShapeError` instead.
  *
  * `workoutActivityType === "HKWorkoutActivityTypeGolf"` is the exact string
  * this filters on, per the same unverified-training-knowledge naming
@@ -117,6 +124,10 @@ export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExport
     let depth = 0;
     let currentWorkout: RawIosWorkout | null = null;
     let insideWorkoutRoute = false;
+    // Gate finding B-8: a <WorkoutRoute> seen while NOT inside a <Workout>
+    // (a sibling, not a nested child) — counted so the whole parse can fail
+    // loudly instead of silently reporting zero routes.
+    let siblingWorkoutRouteCount = 0;
 
     parser.on("opentag", (node: { name: string; attributes: Record<string, string> }) => {
       depth += 1;
@@ -158,9 +169,18 @@ export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExport
         return;
       }
 
-      if (node.name === "WorkoutRoute" && currentWorkout) {
-        insideWorkoutRoute = true;
-        currentWorkout.hasWorkoutRoute = true;
+      if (node.name === "WorkoutRoute") {
+        if (currentWorkout) {
+          insideWorkoutRoute = true;
+          currentWorkout.hasWorkoutRoute = true;
+        } else {
+          // B-8: a <WorkoutRoute> outside any <Workout> — the sibling shape
+          // this reader does not (and, per the module doc, cannot safely)
+          // support. Counted now; the parse fails loudly once complete
+          // (see the closetag handler) rather than mid-stream, so the
+          // error message can report how many were seen.
+          siblingWorkoutRouteCount += 1;
+        }
         return;
       }
 
@@ -190,6 +210,18 @@ export function parseHealthExportXml(xmlPath: string): Promise<ParseHealthExport
                 `a workoutActivityType attribute — the Workout element shape has changed from what ` +
                 `this tool expects [unverified — training knowledge]. Refusing to silently report ` +
                 `zero golf workouts; update health-export-xml.ts to match the real shape.`,
+            ),
+          );
+          return;
+        }
+        if (siblingWorkoutRouteCount > 0) {
+          fail(
+            new HealthExportShapeError(
+              `Found ${siblingWorkoutRouteCount} <WorkoutRoute> element(s) that are NOT nested inside a ` +
+                `<Workout> element (a sibling, not a child) — gate finding B-8. This reader only supports ` +
+                `the nested shape [unverified — training knowledge], so it cannot correlate a sibling route ` +
+                `to its workout; refusing to silently report every workout as routePresent: false. Update ` +
+                `health-export-xml.ts to match the real shape once Matt's real export.xml confirms it.`,
             ),
           );
           return;

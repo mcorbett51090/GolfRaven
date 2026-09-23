@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   extractRows,
   parseDay0FromK2Doc,
-  parseDay0LineFromK2Doc,
   parseExcludedAddressEntriesFromK2Doc,
   parseExcludedAddressesFromK2Doc,
-  parseGitBlamePorcelain,
+  parseFirstAppearanceLog,
+  isShallowRepository,
 } from "../scripts/k2-count.mjs";
 // Reads docs/p0/K2.md's ACTUAL content at test-transform time (Vite/Vitest's
 // `?raw` suffix — see vite-raw.d.ts) — this IS the real file, not a copy of
@@ -177,6 +177,25 @@ _(blank — any owner/test email addresses to exclude ...)_
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["x@y.com"]);
     });
 
+    it("A-8: strips underscore emphasis wrapped TIGHTLY around the address even with trailing prose on the line", () => {
+      // Round-3 gate repro: "- _a2@x.com_ (owner)" used to extract the
+      // WRONG address, "_a2@x.com" (leading underscore included, since the
+      // whole-line strip above only fires when the marker is at the very
+      // end of the trimmed line too).
+      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- _a2@x.com_ (owner)\n";
+      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a2@x.com"]);
+    });
+
+    it("A-8: strips asterisk emphasis wrapped tightly around the address with trailing prose", () => {
+      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- *a2@x.com* (owner)\n";
+      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["a2@x.com"]);
+    });
+
+    it("A-8: a genuine underscore that is part of the local part (not a pair) is left alone", () => {
+      const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- test_user@golfraven.example\n";
+      expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["test_user@golfraven.example"]);
+    });
+
     it("F8 residual: strips paired asterisk emphasis", () => {
       const markdown = "## Excluded addresses (pre-Day-0 list)\n\n- *x@y.com*\n";
       expect(parseExcludedAddressesFromK2Doc(markdown)).toEqual(["x@y.com"]);
@@ -216,84 +235,29 @@ describe("parseExcludedAddressEntriesFromK2Doc (F7/F8 residual — line numbers 
   });
 });
 
-describe("parseDay0LineFromK2Doc (F7/F8 residual — line number for git blame)", () => {
-  it("reports the 1-indexed absolute line number of the day 0 date token", () => {
-    const markdown = ["## Day 0", "", "2026-10-05", "", "## Excluded addresses (pre-Day-0 list)"].join("\n");
-    expect(parseDay0LineFromK2Doc(markdown)).toBe(3);
+describe("parseFirstAppearanceLog (decision 0001 Addendum F glue — parses `git log --format=%H%x09%cI -S` output)", () => {
+  it("returns the first line's committer time", () => {
+    const output = [
+      "abc123\t2026-09-30T00:00:00-04:00",
+      "def456\t2026-10-06T00:00:00-04:00", // a later commit (e.g. re-adding after a deletion) — ignored
+      "",
+    ].join("\n");
+    expect(parseFirstAppearanceLog(output)).toBe("2026-09-30T00:00:00-04:00");
   });
 
-  it("finds the date token even amid surrounding prose", () => {
-    const markdown = ["## Day 0", "", "Day 0 is 2026-10-05, logged before any promotion.", ""].join("\n");
-    expect(parseDay0LineFromK2Doc(markdown)).toBe(3);
+  it("returns null for empty output (no commit ever added this string)", () => {
+    expect(parseFirstAppearanceLog("")).toBeNull();
+    expect(parseFirstAppearanceLog("\n\n")).toBeNull();
+  });
+
+  it("returns null for a line with no tab separator", () => {
+    expect(parseFirstAppearanceLog("not-tab-separated")).toBeNull();
   });
 });
 
-describe("parseGitBlamePorcelain (N7/F7 glue — parses `git blame --porcelain` output)", () => {
-  it("maps a committed line to its author-time", () => {
-    const sha = "a".repeat(40);
-    const output = [
-      `${sha} 1 1 1`,
-      "author Matt",
-      "author-mail <matt@example.com>",
-      "author-time 1760054400",
-      "author-tz +0000",
-      "committer Matt",
-      "committer-mail <matt@example.com>",
-      "committer-time 1760054400",
-      "committer-tz +0000",
-      "summary initial",
-      "filename docs/p0/K2.md",
-      "\tsome content",
-      "",
-    ].join("\n");
-    const blame = parseGitBlamePorcelain(output);
-    expect(blame.get(1)?.authorTimeIso).toBe(new Date(1760054400 * 1000).toISOString());
-  });
-
-  it("maps an uncommitted (working-tree-only) line to null, ignoring its bogus author-time", () => {
-    const sha = "0".repeat(40);
-    const output = [
-      `${sha} 5 5 1`,
-      "author Not Committed Yet",
-      "author-mail <not.committed.yet>",
-      "author-time 9999999999",
-      "author-tz +0000",
-      "committer Not Committed Yet",
-      "committer-mail <not.committed.yet>",
-      "committer-time 9999999999",
-      "committer-tz +0000",
-      "summary Version of docs/p0/K2.md from docs/p0/K2.md",
-      "filename docs/p0/K2.md",
-      "\tuncommitted content",
-      "",
-    ].join("\n");
-    const blame = parseGitBlamePorcelain(output);
-    expect(blame.get(5)?.authorTimeIso).toBeNull();
-  });
-
-  it("carries a commit's author-time across repeated (abbreviated-header) lines for the same commit", () => {
-    const sha = "b".repeat(40);
-    const output = [
-      `${sha} 1 1 2`,
-      "author Matt",
-      "author-mail <matt@example.com>",
-      "author-time 1760054400",
-      "author-tz +0000",
-      "committer Matt",
-      "committer-mail <matt@example.com>",
-      "committer-time 1760054400",
-      "committer-tz +0000",
-      "summary initial",
-      "filename docs/p0/K2.md",
-      "\tline one",
-      `${sha} 2 2`,
-      "filename docs/p0/K2.md",
-      "\tline two",
-      "",
-    ].join("\n");
-    const blame = parseGitBlamePorcelain(output);
-    expect(blame.get(1)?.authorTimeIso).toBe(blame.get(2)?.authorTimeIso);
-    expect(blame.get(2)?.authorTimeIso).toBe(new Date(1760054400 * 1000).toISOString());
+describe("isShallowRepository (decision 0001 Addendum F / gate findings A-5, A-6)", () => {
+  it("returns a boolean against the real checkout (this repo may itself be shallow in a CI/web-session clone)", () => {
+    expect(typeof isShallowRepository()).toBe("boolean");
   });
 });
 
@@ -308,7 +272,11 @@ describe("parses the REAL docs/p0/K2.md (F1 — this is exactly what hid the bug
 
   it("would find real addresses if the owner filled the section in, matching the real heading's exact text", () => {
     const filledIn = realMarkdown.replace(
-      "_(blank — any owner/test email addresses to exclude from the K2 count go here, listed **before** Day 0 is\nset above. An address added after Day 0 does not retroactively exclude prior signups — decision 0001,\nAddendum D, R3.)_",
+      "_(blank — any owner/test email addresses to exclude from the K2 count go here. Decision 0001 Addendum F\n" +
+        '("K2 exclusion dating"): an address is excluded only if it **first appeared** in this file\'s git history\n' +
+        "in a commit **committed and pushed to GitHub before Day 0 00:00 UTC**. A later reformat or deletion of the\n" +
+        "line does not change that. List and commit+push the address here BEFORE running any end-to-end test that\n" +
+        "uses it, and before logging Day 0 above — see `apps/signup-worker/README.md`'s deploy runbook step 9.)_",
       "- matt@golfraven.example\n- `test1@golfraven.example`\n- [test2@golfraven.example](mailto:test2@golfraven.example)",
     );
     expect(filledIn).not.toBe(realMarkdown); // sanity: the replace actually matched

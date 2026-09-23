@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SIGNUP_EMAIL_DAILY_CAP } from "../src/config";
 import { handleConfirmSubmit, handleSignup, handleUnsubscribeSubmit } from "../src/index";
+import { generateToken, hashWithPepper } from "../src/tokens";
 import { makeTestEnv } from "./env";
 import { resendCalls, stubExternalFetch } from "./fetch-mock";
 
@@ -583,6 +584,69 @@ describe("POST /api/signup — N1 regression: a skipped resend must not invalida
     expect(resendCalls(fetchMock)).toHaveLength(1); // still just the one send
     expect(env.DB.rows.find((r) => r.id === "existing-pending")?.confirm_token_hash).toBe("existing-confirm-hash");
     expect(env.DB.rows.find((r) => r.id === "existing-pending")?.unsubscribe_token_hash).toBe("existing-unsub-hash");
+  });
+});
+
+describe("POST /api/signup — A-1 regression: a rotate-then-SEND-FAILS attempt must not invalidate the previously emailed links", () => {
+  it("re-submitting an existing row when Resend fails leaves the OLD confirm+unsubscribe tokens working", async () => {
+    const env = makeTestEnv();
+    // Seed an existing PENDING row with known raw tokens (as if a prior,
+    // successful send had happened) — this is case C/D's rotate path, the
+    // one A-1 is about (case A, a brand-new row, is covered separately
+    // below in "Resend failure path").
+    const oldRawConfirmToken = generateToken();
+    const oldRawUnsubscribeToken = generateToken();
+    const oldConfirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, oldRawConfirmToken);
+    const oldUnsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, oldRawUnsubscribeToken);
+    env.DB.rows.push({
+      id: "existing-pending",
+      email_lc: "player@example.com",
+      consent_version: "2026-09-23",
+      age_confirmed: 1,
+      source: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      confirmed_at: null,
+      unsubscribed_at: null,
+      confirm_token_hash: oldConfirmTokenHash,
+      confirm_expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      unsubscribe_token_hash: oldUnsubscribeTokenHash,
+    });
+
+    // This one and only send attempt FAILS at Resend.
+    stubExternalFetch({ resendOk: false });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ctx, flush } = makeWaitUntilCtx();
+    const res = await handleSignup(signupRequest(VALID_BODY), env, ctx);
+    expect(res.status).toBe(202);
+    await flush();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "confirmation email send failed",
+      expect.objectContaining({ status: expect.anything() }),
+    );
+    consoleErrorSpy.mockRestore();
+
+    // A-1: the row's tokens must be BYTE-IDENTICAL to before the failed
+    // attempt — a failed send must never persist new tokens.
+    const row = env.DB.rows.find((r) => r.id === "existing-pending");
+    expect(row?.confirm_token_hash).toBe(oldConfirmTokenHash);
+    expect(row?.unsubscribe_token_hash).toBe(oldUnsubscribeTokenHash);
+
+    // The OLD (only ever delivered) links must still work.
+    const confirmRes = await handleConfirmSubmit(
+      new Request(`https://golfraven.example/api/confirm?token=${encodeURIComponent(oldRawConfirmToken)}`, {
+        method: "POST",
+      }),
+      env,
+    );
+    expect(confirmRes.status).toBe(200);
+
+    const unsubRes = await handleUnsubscribeSubmit(
+      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldRawUnsubscribeToken)}`, {
+        method: "POST",
+      }),
+      env,
+    );
+    expect(unsubRes.status).toBe(200);
   });
 });
 

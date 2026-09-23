@@ -97,19 +97,30 @@ A scheduled (cron) handler (`src/index.ts`'s `scheduled`, wired in
   deletion immediately):
   - `Env.K2_GATE_CLOSES_AT` must be a **strict, full ISO-8601 UTC
     timestamp**, `YYYY-MM-DDTHH:MM:SSZ` exactly (no bare date, no other
-    offset form, no fractional seconds) — see `checkK2GateClosesAt` in
-    `src/config.ts`.
+    offset form, no fractional seconds, and no calendar-rollover date like
+    `2026-11-31T00:00:00Z` — gate finding A-4) — see `checkK2GateClosesAt`
+    in `src/config.ts`.
   - It must be **no earlier than `2026-11-16T00:00:00Z`** — the earliest a
     real K2 gate close could ever be (plan P0 start 2026-10-05 + the
-    42-day gate window) — so a value like day 0 typed into this var by
-    mistake can never sneak through.
+    42-day gate window).
+  - **Gate finding A-3: `Env.K2_DAY0` must ALSO be set** (a bare
+    `YYYY-MM-DD`, copied verbatim from `docs/p0/K2.md`'s "## Day 0"), and
+    `K2_GATE_CLOSES_AT` must equal **EXACTLY** `K2_DAY0 + 42 days` at
+    `00:00:00Z` (`checkK2GateMatchesDay0`). The floor check above alone
+    only catches "day 0 typed into `K2_GATE_CLOSES_AT` by mistake" while
+    day 0 itself is earlier than 2026-11-16 — once day 0 slips past that
+    date (plausible: it depends on owner-side domain/SMTP setup), the
+    identical mistake passes the floor. The `K2_DAY0` cross-check closes
+    that gap at every possible day 0, not just early ones.
   - Deletion of this class still doesn't start until **30 days AFTER**
-    that timestamp (K2's own verdict is read at "≈ wk 7", after the gate
-    itself closes at wk 6 — this extra margin is the actual safety buffer).
-  - Any other value (unset, malformed, too early, or the grace period not
-    yet elapsed) deletes **nothing** in this class and logs one PII-free
-    `console.warn` per cron run naming the reason (no address, no raw env
-    value) — see `runRetentionCron` in `src/index.ts`.
+    `K2_GATE_CLOSES_AT` (K2's own verdict is read at "≈ wk 7", after the
+    gate itself closes at wk 6 — this extra margin is the actual safety
+    buffer).
+  - Any other case (either var unset/malformed, too early, the two
+    inconsistent with each other, or the grace period not yet elapsed)
+    deletes **nothing** in this class and logs one PII-free `console.warn`
+    per cron run naming the reason (no address, no raw env value) — see
+    `runRetentionCron` in `src/index.ts`.
 
   Until all of the above hold, a confirmed signup is effectively kept
   indefinitely once unsubscribed, which is the safe default.
@@ -179,21 +190,25 @@ package; it's the checklist for whoever deploys it.
    allow-list for `https://challenges.cloudflare.com` actually matches what
    Turnstile needs before relying on it end to end in the next step.
 
-9. **Verify end to end** before logging K2's day 0: submit the landing
-   page's form for real, confirm the email arrives (check spam too), click
-   confirm, and confirm the row's `confirmed_at` is set
-   (`npx wrangler@4 d1 execute golfraven-signups --remote --command "SELECT email_lc, confirmed_at FROM signups"`).
-   **N13: if the test address used here should NOT count toward K2, add it
-   to `docs/p0/K2.md`'s "Excluded addresses" section and commit that BEFORE
-   logging day 0** — R3 has no lower bound on `confirmedAt`, so this
-   end-to-end confirmation counts toward the K2 gate unless excluded, and
-   the exclusion only takes effect if its own line was committed strictly
-   before day 0 (see "How to run the K2 count" below).
-   **Only then** log day 0 in `docs/p0/K2.md`, before any promotion
-   (decision 0001 Addendum D R3) — this package does not, and should not,
-   set that date itself. Once day 0 is logged, also set
-   `K2_GATE_CLOSES_AT` in `wrangler.toml` to day 0 + 42 days (see "Data
-   retention" above) and redeploy.
+9. **List, commit AND PUSH the e2e test address BEFORE running the end-to-end test — not after** (gate
+   finding A-6; this order is the OPPOSITE of the previous "test first, exclude after" step). Day 0
+   is defined as the date the end-to-end test below succeeds, so the test necessarily happens ON day
+   0 — running the test first and excluding the address afterward means the exclusion is committed
+   on day 0 itself, and decision 0001 Addendum F excludes an address only if it FIRST APPEARED
+   strictly BEFORE day 0 00:00 UTC (see "How to run the K2 count" below). Concretely:
+   1. Decide the test address (e.g. `test-e2e@golfraven.example`), add it to `docs/p0/K2.md`'s
+      "Excluded addresses" section, and **commit and `git push` that change** — a local commit alone
+      isn't enough; per Addendum F's "Known limit", the pushed-to-GitHub copy is the actual server-side
+      record that makes the exclusion checkable (git commit timestamps are otherwise self-asserted by
+      whoever makes the commit).
+   2. **Only then** submit the landing page's form for real using that address, confirm the email
+      arrives (check spam too), click confirm, and confirm the row's `confirmed_at` is set
+      (`npx wrangler@4 d1 execute golfraven-signups --remote --command "SELECT email_lc, confirmed_at FROM signups"`).
+   3. **Only then** log day 0 in `docs/p0/K2.md`, before any promotion (decision 0001 Addendum D R3)
+      — this package does not, and should not, set that date itself. Once day 0 is logged, also set
+      `K2_GATE_CLOSES_AT` **and** `K2_DAY0` in `wrangler.toml` (`K2_DAY0` = day 0 verbatim,
+      `K2_GATE_CLOSES_AT` = day 0 + 42 days — see "Data retention" above, gate finding A-3: the
+      retention cron refuses to delete anything unless both are set AND consistent) and redeploy.
 
 ## How to run the K2 count
 
@@ -212,24 +227,43 @@ node scripts/k2-count.mjs --export export.json
 ```
 
 The script **refuses to run** if day 0 isn't logged in `docs/p0/K2.md`
-yet (decision 0001 Addendum D R3), or if day 0's own line in K2.md isn't
-committed. It prints the advisory (day0+14d, bar 100) and gate (day0+42d,
-bar 300) counts and a PASS/FAIL verdict against each, plus the full result
-as JSON. `src/k2-count.ts` implements the counting rule literally — see
-its header comment, especially: **it counts confirmations, not current
-subscribers** — an address that confirmed before the cutoff and later
-unsubscribed still counts.
+yet (decision 0001 Addendum D R3), or if this is a **shallow git clone**
+(`git rev-parse --is-shallow-repository` — gate findings A-5/A-6: a
+shallow clone cannot hold the full history the exclusion-dating rule below
+needs; un-shallow it, e.g. `git fetch --unshallow`, and retry). It prints
+the advisory (day0+14d, bar 100) and gate (day0+42d, bar 300) counts and a
+PASS/FAIL verdict against each, plus the full result as JSON.
+`src/k2-count.ts` implements the counting rule literally — see its header
+comment, especially: **it counts confirmations, not current subscribers**
+— an address that confirmed before the cutoff and later unsubscribed still
+counts.
 
-**Exclusion timing (F7/F8 residual):** R3 excludes an address only if it
-was "listed ... before Day 0". The CLI enforces this with `git blame` on
-`docs/p0/K2.md` — an address counts as excluded ONLY if its own line's
-commit author-time is strictly before day 0 00:00 UTC. An address added
-on/after day 0, or whose line isn't committed yet, is printed in the
-output as "not excluded (added on/after day 0 or uncommitted)" rather than
+**Exclusion timing (decision 0001 Addendum F, superseding the earlier
+per-line `git blame` rule — gate findings A-5/A-6):** R3/Addendum F
+excludes an address only if it "first appeared" in `docs/p0/K2.md` before
+Day 0. The CLI finds this from the file's FULL git history —
+`git log --reverse --format=%H%x09%cI -S<address> -- docs/p0/K2.md`, the
+EARLIEST result — rather than `git blame` on the file's current state, so
+a later reformat of the line (backticks, whitespace) or even its deletion
+cannot change when the address first appeared (the earlier per-line rule
+got both of those wrong — see `src/k2-blame.ts`'s module doc). An address
+counts as excluded ONLY if that earliest commit's **COMMITTER time** is
+strictly before day 0 00:00 UTC. An address with no such commit at all (or
+one first added on/after day 0) is printed in the output as "not excluded
+(first committed on/after day 0, or no commit history found)" rather than
 silently applied. The full excluded-addresses list actually used is always
 echoed in the output (never just a count), and a bullet that doesn't
 resolve to exactly one clean email address is a hard refusal, not a silent
 drop.
+
+**Timestamp tamper limit (decision 0001 Addendum F, stated verbatim):**
+git commit timestamps — author time AND committer time — are set by
+whoever makes the commit; neither is cryptographically trustworthy on its
+own. The actual protection is that exclusions are **pushed to GitHub
+before day 0**, which leaves a server-side record (the commit's presence
+on `origin` with a timestamp GitHub itself recorded) that Matt can check
+independently of the local repo — see runbook step 9 above for the
+commit-and-push-before-testing order this depends on.
 
 ## Testing approach
 

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   buildNOsmQuery,
   buildCourseCoverageQuery,
@@ -7,12 +10,17 @@ import {
   matchCourse,
   buildDenominatorEntries,
   computeCoverage,
+  courseKey,
+  assertNoOverpassRemark,
+  runCoverage,
   type OverpassResponse,
   type OverpassGeometryElement,
   type PilotCandidateCourse,
   type CourseCoverageEntry,
 } from "../src/x5-overpass.js";
 import { boundingBox, haversineMeters, pointInPolygon } from "../src/overpass-geo.js";
+
+const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-x5-test-"));
 
 describe("x5-overpass: query builders match docs/p0/X5.md verbatim", () => {
   it("buildNOsmQuery reproduces the exact X5.md §1 query", () => {
@@ -48,9 +56,34 @@ describe("x5-overpass: N_osm parsing", () => {
     const response: OverpassResponse = { elements: [] };
     expect(() => parseNOsm(response)).toThrow(/count/);
   });
+
+  it("gate finding B-4: throws on an Overpass remark (runtime error), never silently returns", () => {
+    const response: OverpassResponse = { elements: [], remark: "runtime error: query timed out" };
+    expect(() => parseNOsm(response)).toThrow(/remark/);
+  });
 });
 
-describe("x5-overpass: match rule (docs/p0/X5.md, literal)", () => {
+describe("x5-overpass: assertNoOverpassRemark / run integrity (decision 0001 Addendum F)", () => {
+  it("does not throw when there is no remark", () => {
+    expect(() => assertNoOverpassRemark({ elements: [] }, "ctx")).not.toThrow();
+  });
+
+  it("throws, naming the context, when a remark is present", () => {
+    expect(() => assertNoOverpassRemark({ elements: [], remark: "timeout" }, "course X")).toThrow(/course X/);
+  });
+
+  it("splitCoverageResponse throws on a remark instead of returning an empty/unmatched result", () => {
+    const response = { elements: [], remark: "runtime error: query timed out" } as unknown as OverpassResponse;
+    expect(() => splitCoverageResponse(response, "course X")).toThrow(/remark/);
+  });
+
+  it("splitCoverageResponse throws on an unparseable response (no elements array)", () => {
+    const response = { foo: "bar" } as unknown as OverpassResponse;
+    expect(() => splitCoverageResponse(response, "course X")).toThrow(/unparseable/);
+  });
+});
+
+describe("x5-overpass: match rule (decision 0001 Addendum F, literal)", () => {
   // A simple square polygon "containing" (36.00, -87.00).
   const containingWay: OverpassGeometryElement = {
     type: "way",
@@ -112,33 +145,31 @@ describe("x5-overpass: match rule (docs/p0/X5.md, literal)", () => {
     expect(matchCourse(course, [neighborWay])).toBeNull();
   });
 
-  it("name-match fallback: matches within the 500m radius when no known point is given", () => {
+  it("name-match: a point INSIDE a same-named polygon matches (distance 0 — gate finding B-2)", () => {
     const course: PilotCandidateCourse = {
       name: "Pilot Ridge Golf Course",
       lat: 36.0,
-      lon: -87.0, // very close to containingWay's centroid
+      lon: -87.0, // inside containingWay
       trail: "TN",
       unit: "course",
     };
     expect(matchCourse(course, [containingWay])).toBe("name");
   });
 
-  it("BOUNDARY: name-match fails just outside 500m, passes just inside", () => {
-    // containingWay's centroid is at lat 36.00, lon -87.00 (average of the 4 corners).
-    const centroid = { lat: 36.0, lon: -87.0 };
-    // ~499m north
+  it("BOUNDARY: name-match distance is to the POLYGON EDGE, not a centroid — 499m outside passes, 501m fails", () => {
+    // containingWay's north edge is at lat 36.01.
+    const northEdgeLat = 36.01;
     const justInside: PilotCandidateCourse = {
       name: "Pilot Ridge Golf Course",
-      lat: centroid.lat + 499 / 111320,
-      lon: centroid.lon,
+      lat: northEdgeLat + 499 / 111320, // ~499m north of the edge itself
+      lon: -87.0,
       trail: "TN",
       unit: "course",
     };
-    // ~501m north
     const justOutside: PilotCandidateCourse = {
       name: "Pilot Ridge Golf Course",
-      lat: centroid.lat + 501 / 111320,
-      lon: centroid.lon,
+      lat: northEdgeLat + 501 / 111320, // ~501m north of the edge itself
+      lon: -87.0,
       trail: "TN",
       unit: "course",
     };
@@ -157,7 +188,7 @@ describe("x5-overpass: match rule (docs/p0/X5.md, literal)", () => {
     expect(matchCourse(course, [containingWay])).toBeNull();
   });
 
-  it("name-match is case-insensitive", () => {
+  it("name-match is case-insensitive (Addendum F normalisation)", () => {
     const course: PilotCandidateCourse = {
       name: "pilot ridge golf course",
       lat: 36.0,
@@ -182,6 +213,132 @@ describe("x5-overpass: match rule (docs/p0/X5.md, literal)", () => {
   });
 });
 
+describe("x5-overpass: name normalisation (decision 0001 Addendum F, gate finding B-3 — literal, no abbreviation list)", () => {
+  function namedWay(name: string): OverpassGeometryElement {
+    return {
+      type: "way",
+      id: 99,
+      tags: { name, leisure: "golf_course" },
+      geometry: [
+        { lat: 35.99, lon: -87.01 },
+        { lat: 35.99, lon: -86.99 },
+        { lat: 36.01, lon: -86.99 },
+        { lat: 36.01, lon: -87.01 },
+      ],
+    };
+  }
+  function courseNamed(name: string): PilotCandidateCourse {
+    return { name, lat: 36.0, lon: -87.0, trail: "TN", unit: "course" };
+  }
+
+  it("trailing whitespace and case differences are normalised away", () => {
+    expect(matchCourse(courseNamed("Pilot Ridge Golf Course"), [namedWay("  pilot ridge golf course  ")])).toBe(
+      "name",
+    );
+  });
+
+  it("typographic apostrophes are unified by NFKD + non-letter/digit stripping", () => {
+    expect(matchCourse(courseNamed("Hammock's Dunes"), [namedWay("Hammock’s Dunes")])).toBe("name");
+  });
+
+  it("NBSP and doubled internal whitespace collapse to a single space", () => {
+    expect(matchCourse(courseNamed("Pilot Ridge Golf Course"), [namedWay("Pilot Ridge  Golf   Course")])).toBe(
+      "name",
+    );
+  });
+
+  it("diacritics are stripped via NFKD (Café Course == Cafe Course)", () => {
+    expect(matchCourse(courseNamed("Cafe Course"), [namedWay("Café Course")])).toBe("name");
+  });
+
+  it('"St." and "Saint" do NOT match — no abbreviation list, per Addendum F literally', () => {
+    expect(matchCourse(courseNamed("St. Andrews Golf Course"), [namedWay("Saint Andrews Golf Course")])).toBeNull();
+  });
+
+  it('"Golf Club" and "Golf Course" do NOT match — no generic-suffix unification', () => {
+    expect(matchCourse(courseNamed("Pilot Ridge Golf Club"), [namedWay("Pilot Ridge Golf Course")])).toBeNull();
+  });
+
+  it("whole-word containment: the course name as a whole-word sequence inside a longer OSM name matches", () => {
+    // "the OSM name equals the course name, or contains it as a whole-word sequence"
+    expect(
+      matchCourse(courseNamed("Grand National"), [namedWay("Robert Trent Jones Golf Trail at Grand National")]),
+    ).toBe("name");
+  });
+
+  it("whole-word containment does NOT match a mere substring across word boundaries", () => {
+    expect(matchCourse(courseNamed("Grand"), [namedWay("Grandview Golf Course")])).toBeNull();
+  });
+
+  it("an empty/whitespace-only course name never matches", () => {
+    expect(matchCourse(courseNamed("   "), [namedWay("Anything Golf Course")])).toBeNull();
+  });
+});
+
+describe("x5-overpass: relation (multipolygon) outer-ring assembly — gate finding B-1", () => {
+  // A rectangle split into two OPEN "outer"-role way segments that must be
+  // joined end-to-end (Overpass out geom shape: a relation's geometry is
+  // under members[], never a top-level `geometry`).
+  const A = { lat: 36.0, lon: -87.01 };
+  const B = { lat: 36.0, lon: -86.99 };
+  const C = { lat: 36.02, lon: -86.99 };
+  const D = { lat: 36.02, lon: -87.01 };
+  const splitRingRelation: OverpassGeometryElement = {
+    type: "relation",
+    id: 500,
+    tags: { name: "Split Ring Course", leisure: "golf_course" },
+    members: [
+      { type: "way", ref: 1, role: "outer", geometry: [A, B, C] },
+      { type: "way", ref: 2, role: "outer", geometry: [C, D, A] },
+    ],
+  };
+  const insidePoint = { lat: 36.01, lon: -87.0 };
+
+  it("a relation has NO top-level geometry (confirms the shape this fixture and the fix target)", () => {
+    expect((splitRingRelation as unknown as { geometry?: unknown }).geometry).toBeUndefined();
+  });
+
+  it("point-containment matches against a relation's assembled outer ring (split across 2 members)", () => {
+    const course: PilotCandidateCourse = {
+      name: "Anything",
+      lat: insidePoint.lat,
+      lon: insidePoint.lon,
+      trail: "TN",
+      unit: "course",
+      knownPoint: insidePoint,
+    };
+    expect(matchCourse(course, [splitRingRelation])).toBe("point");
+  });
+
+  it("name-match against a relation gets distance 0 for a point inside its assembled outer ring", () => {
+    const course: PilotCandidateCourse = {
+      name: "Split Ring Course",
+      lat: insidePoint.lat,
+      lon: insidePoint.lon,
+      trail: "TN",
+      unit: "course",
+    };
+    expect(matchCourse(course, [splitRingRelation])).toBe("name");
+  });
+
+  it("a relation with only NODE members (no way geometry) has no rings and never matches", () => {
+    const nodeOnlyRelation: OverpassGeometryElement = {
+      type: "relation",
+      id: 501,
+      tags: { name: "No Geometry Course", leisure: "golf_course" },
+      members: [{ type: "node", ref: 9, role: "outer" }],
+    };
+    const course: PilotCandidateCourse = {
+      name: "No Geometry Course",
+      lat: 36.01,
+      lon: -87.0,
+      trail: "TN",
+      unit: "course",
+    };
+    expect(matchCourse(course, [nodeOnlyRelation])).toBeNull();
+  });
+});
+
 describe("x5-overpass: splitCoverageResponse separates geometry from the golf=hole count", () => {
   it("splits way/relation elements from the count element", () => {
     const response: OverpassResponse = {
@@ -190,15 +347,30 @@ describe("x5-overpass: splitCoverageResponse separates geometry from the golf=ho
         { type: "count", id: 0, tags: { total: "9" } },
       ],
     };
-    const { matchingElements, golfHoleWaysInBbox } = splitCoverageResponse(response);
+    const { matchingElements, golfHoleWaysInBbox } = splitCoverageResponse(response, "test");
     expect(matchingElements).toHaveLength(1);
     expect(golfHoleWaysInBbox).toBe(9);
   });
 });
 
 describe("x5-overpass: unit + facility-sharing rules (docs/p0/X5.md 'Unit', literal)", () => {
-  function coverageEntry(name: string, trail: string, unit: PilotCandidateCourse["unit"], matched: boolean, facilityId?: string): CourseCoverageEntry {
-    const course: PilotCandidateCourse = { name, lat: 0, lon: 0, trail, unit, ...(facilityId ? { facilityId } : {}) };
+  function coverageEntry(
+    name: string,
+    trail: string,
+    unit: PilotCandidateCourse["unit"],
+    matched: boolean,
+    facilityId?: string,
+    id?: string,
+  ): CourseCoverageEntry {
+    const course: PilotCandidateCourse = {
+      name,
+      lat: 0,
+      lon: 0,
+      trail,
+      unit,
+      ...(facilityId ? { facilityId } : {}),
+      ...(id ? { id } : {}),
+    };
     return { course, matchedVia: matched ? "point" : null, golfHoleWaysInBbox: 0 };
   }
 
@@ -233,6 +405,20 @@ describe("x5-overpass: unit + facility-sharing rules (docs/p0/X5.md 'Unit', lite
     expect(denom).toHaveLength(1);
     // Addendum E pins hole-unit as one entry per course, so no "unspecified rule" warning is emitted.
     expect(warnings.some((w) => w.includes("does not specify hole-unit"))).toBe(false);
+  });
+
+  it("gate finding B-12: two courses sharing a NAME get distinct denominator entries when each has its own id", () => {
+    const entries = [
+      coverageEntry("Pilot Course", "TN", "course", true, undefined, "tn-1"),
+      coverageEntry("Pilot Course", "RTJ", "course", false, undefined, "rtj-9"),
+    ];
+    const denom = buildDenominatorEntries(entries, []);
+    expect(denom.map((e) => e.key).sort()).toEqual(["rtj-9", "tn-1"]);
+  });
+
+  it("courseKey falls back to name when no id is given", () => {
+    const course: PilotCandidateCourse = { name: "No Id Course", lat: 0, lon: 0, trail: "TN", unit: "course" };
+    expect(courseKey(course)).toBe("No Id Course");
   });
 });
 
@@ -302,5 +488,99 @@ describe("x5-overpass: geometry helpers", () => {
     expect(bbox.north).toBeGreaterThan(36);
     expect(bbox.west).toBeLessThan(-87);
     expect(bbox.east).toBeGreaterThan(-87);
+  });
+});
+
+describe("x5-overpass: run integrity at the CLI level (decision 0001 Addendum F)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("refuses (throws) on an empty course list, never a vacuous 0/0", async () => {
+    const coursesPath = path.join(OUT_DIR, "empty-courses.json");
+    writeFileSync(coursesPath, "[]\n", "utf8");
+    await expect(
+      runCoverage({ courses: coursesPath, out: path.join(OUT_DIR, "empty-result") }),
+    ).rejects.toThrow(/empty course list/);
+  });
+
+  it("refuses (throws) when --responses is missing a course's response, rather than treating it as unmatched", async () => {
+    const coursesPath = path.join(OUT_DIR, "missing-response-courses.json");
+    writeFileSync(
+      coursesPath,
+      JSON.stringify([{ name: "Ghost Course", lat: 36.0, lon: -87.0, trail: "TN", unit: "course" }]),
+      "utf8",
+    );
+    const responsesPath = path.join(OUT_DIR, "missing-response-responses.json");
+    writeFileSync(responsesPath, "{}\n", "utf8");
+    await expect(
+      runCoverage({
+        courses: coursesPath,
+        responses: responsesPath,
+        out: path.join(OUT_DIR, "missing-response-result"),
+      }),
+    ).rejects.toThrow(/No saved Overpass response/);
+  });
+
+  it("gate finding B-5: a LIVE run (no --responses) saves every raw response alongside the result", async () => {
+    const coursesPath = path.join(OUT_DIR, "live-courses.json");
+    writeFileSync(
+      coursesPath,
+      JSON.stringify([{ name: "Live Course", lat: 36.0, lon: -87.0, trail: "TN", unit: "course" }]),
+      "utf8",
+    );
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          elements: [
+            { type: "count", id: 0, tags: { total: "0" } },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outPrefix = path.join(OUT_DIR, "live-result");
+    await runCoverage({ courses: coursesPath, out: outPrefix });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse(readFileSync(`${outPrefix}-responses.json`, "utf8")) as Record<
+      string,
+      { query: string; fetchedAt: string; response: unknown }
+    >;
+    expect(Object.keys(saved)).toEqual(["Live Course"]);
+    expect(saved["Live Course"]?.query).toContain("out geom;");
+    expect(typeof saved["Live Course"]?.fetchedAt).toBe("string");
+  });
+
+  it("gate finding B-11: the bbox is centered on knownPoint when present, not the approximate lat/lon", async () => {
+    const coursesPath = path.join(OUT_DIR, "known-point-courses.json");
+    writeFileSync(
+      coursesPath,
+      JSON.stringify([
+        {
+          name: "Known Point Course",
+          lat: 0,
+          lon: 0, // far from knownPoint — would produce a very different bbox
+          trail: "TN",
+          unit: "course",
+          knownPoint: { lat: 36.0, lon: -87.0 },
+        },
+      ]),
+      "utf8",
+    );
+    let capturedBody = "";
+    const fetchMock = vi.fn(async (_url: unknown, init: { body: string }) => {
+      capturedBody = init.body;
+      return new Response(JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "0" } }] }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await runCoverage({ courses: coursesPath, out: path.join(OUT_DIR, "known-point-result") });
+    const decoded = decodeURIComponent(capturedBody.replace(/^data=/, ""));
+    // The bbox should be built around (36, -87), not (0, 0).
+    expect(decoded).toMatch(/3[0-9]\.\d+,-8[0-9]\.\d+,3[0-9]\.\d+,-8[0-9]\.\d+/);
   });
 });

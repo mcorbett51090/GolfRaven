@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+  <ExportDate value="2026-09-21 09:00:00 -0400"/>
+
+  <!-- Gate finding B-8: a <WorkoutRoute> that is a SIBLING of <Workout>,
+       not nested inside it — the least-certain shape assumption this
+       reader documents, and the one a real export is most likely to hit. -->
+  <Workout workoutActivityType="HKWorkoutActivityTypeGolf" duration="240" durationUnit="min"
+    sourceName="Garmin Connect" sourceVersion="4.75"
+    creationDate="2026-09-20 13:05:00 -0400" startDate="2026-09-20 09:00:00 -0400" endDate="2026-09-20 13:00:00 -0400">
+  </Workout>
+  <WorkoutRoute sourceName="Garmin Connect" sourceVersion="4.75"
+    creationDate="2026-09-20 13:05:00 -0400" startDate="2026-09-20 09:00:00 -0400" endDate="2026-09-20 13:00:00 -0400">
+    <FileReference path="/workout-routes/route_garmin_2026-09-20.gpx"/>
+  </WorkoutRoute>
+</HealthData>

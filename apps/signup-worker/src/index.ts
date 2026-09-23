@@ -30,7 +30,9 @@
 import {
   ALLOWED_CONSENT_VERSIONS,
   assertRequiredSecretsPresent,
+  checkK2Day0,
   checkK2GateClosesAt,
+  checkK2GateMatchesDay0,
   CONFIRM_TOKEN_TTL_SECONDS,
   globalDailySendCap,
   K2_VERDICT_GRACE_DAYS,
@@ -199,36 +201,6 @@ export async function handleSignupOptions(request: Request, env: Env): Promise<R
 }
 
 /**
- * Re-signup of an existing row (cases C: still pending, or D: previously
- * unsubscribed): mints a fresh confirm token AND a fresh unsubscribe
- * token, returning the raw unsubscribe token for the email link. Shared by
- * the normal path and the F3 concurrent-insert-race fallback below.
- */
-async function rotateAndGetUnsubscribeToken(
-  env: Env,
-  row: SignupRow,
-  consentVersion: string,
-  source: string | undefined,
-  confirmTokenHash: string,
-  confirmExpiresAt: string,
-): Promise<string> {
-  await rotateConfirmToken(env.DB, {
-    id: row.id,
-    consentVersion,
-    source: source ?? row.source,
-    confirmTokenHash,
-    confirmExpiresAt,
-  });
-  const rawUnsubscribeToken = generateToken();
-  const unsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawUnsubscribeToken);
-  await env.DB
-    .prepare("UPDATE signups SET unsubscribe_token_hash = ?2 WHERE id = ?1")
-    .bind(row.id, unsubscribeTokenHash)
-    .run();
-  return rawUnsubscribeToken;
-}
-
-/**
  * Gate finding F6: checks (and, if allowed, consumes) the per-email
  * cooldown, per-email daily cap, and global daily cap. A denial is NOT an
  * error — the HTTP response is already the generic 202 either way — it
@@ -248,12 +220,14 @@ async function checkSendAllowed(env: Env, emailLc: string): Promise<boolean> {
   return true;
 }
 
+/** Returns whether the send succeeded, so callers that must not persist
+ * anything on failure (A-1, below) can branch on it. */
 async function sendConfirmationEmailAndLog(
   env: Env,
   emailLc: string,
   rawConfirmToken: string,
   rawUnsubscribeToken: string,
-): Promise<void> {
+): Promise<boolean> {
   const sendResult = await sendConfirmationEmail(env, {
     to: emailLc,
     confirmUrl: confirmUrl(env, rawConfirmToken),
@@ -264,6 +238,7 @@ async function sendConfirmationEmailAndLog(
     // free-text message (which may echo the recipient address).
     console.error("confirmation email send failed", { status: sendResult.status });
   }
+  return sendResult.ok;
 }
 
 /**
@@ -284,17 +259,23 @@ async function maybeSendConfirmationEmail(
 }
 
 /**
- * N1 fix: cases C/D (an EXISTING row — still pending, or previously
- * unsubscribed) rotate the confirm/unsubscribe tokens ONLY in the branch
- * that actually goes on to send a new confirmation email — i.e. only after
- * the cooldown, per-email daily cap, and global daily cap all pass. If the
- * send is skipped for any reason, this returns without touching the row at
- * all: the confirm/unsubscribe tokens from the last email that WAS
- * actually sent stay valid and unchanged, so a re-submit inside the
- * cooldown (ordinary, expected user behavior — F9's residual makes it more
- * likely) can never invalidate a link the person already has in their
- * inbox. Previously this rotated both tokens FIRST and only then checked
- * the limits, so a denied resend silently burned the only working links.
+ * N1 fix (and its A-1 residual, now also closed): cases C/D (an EXISTING
+ * row — still pending, or previously unsubscribed) rotate the
+ * confirm/unsubscribe tokens ONLY once a new confirmation email has
+ * actually been ACCEPTED by Resend — never merely "allowed to attempt".
+ *
+ * A-1: the previous fix still rotated (persisted) the new token hashes
+ * BEFORE attempting the send, gated only on the send being *allowed* by
+ * the rate limiter. If Resend then failed (5xx, network error, a 4xx), the
+ * new tokens had already overwritten the old ones in the row, but were
+ * never delivered anywhere — so the OLD, already-delivered email's confirm
+ * and unsubscribe links went dead with no replacement. The fix: generate
+ * the new tokens, ATTEMPT the send first, and persist the new hashes
+ * (`rotateConfirmToken` plus the unsubscribe-token update) ONLY when
+ * `sendConfirmationEmailAndLog` reports success. On a send failure, this
+ * returns without writing anything — the row (and its last-emailed,
+ * still-valid tokens) is left exactly as it was, mirroring the "send
+ * skipped by rate limit" case above.
  */
 async function rotateAndSendIfAllowed(
   env: Env,
@@ -308,15 +289,23 @@ async function rotateAndSendIfAllowed(
   const rawConfirmToken = generateToken();
   const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
   const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
-  const rawUnsubscribeToken = await rotateAndGetUnsubscribeToken(
-    env,
-    row,
+  const rawUnsubscribeToken = generateToken();
+  const unsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawUnsubscribeToken);
+
+  const sent = await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+  if (!sent) return;
+
+  await rotateConfirmToken(env.DB, {
+    id: row.id,
     consentVersion,
-    source,
+    source: source ?? row.source,
     confirmTokenHash,
     confirmExpiresAt,
-  );
-  await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+  });
+  await env.DB
+    .prepare("UPDATE signups SET unsubscribe_token_hash = ?2 WHERE id = ?1")
+    .bind(row.id, unsubscribeTokenHash)
+    .run();
 }
 
 /**
@@ -530,6 +519,15 @@ function notFound(): Response {
  * needed. Until the owner sets a valid value, and until the grace period
  * elapses, this half is skipped entirely and a single PII-free warning is
  * logged (see README.md "Data retention").
+ *
+ * A-3: `K2_GATE_CLOSES_AT`'s own floor check only catches "day 0 typed into
+ * this var by mistake" while day 0 is earlier than the floor
+ * (2026-11-16) — a day 0 that lands later makes the identical mistake pass.
+ * So deletion ALSO requires `Env.K2_DAY0` (the bare date Matt copies from
+ * `docs/p0/K2.md`) to be set, valid, AND for `K2_GATE_CLOSES_AT` to equal
+ * EXACTLY `K2_DAY0 + 42 days` at `00:00:00Z` (`checkK2GateMatchesDay0`).
+ * Any mismatch is treated the same as an invalid `K2_GATE_CLOSES_AT`: no
+ * deletion, one PII-free warning.
  */
 export async function runRetentionCron(
   env: Env,
@@ -543,17 +541,32 @@ export async function runRetentionCron(
 
   let deletedUnsubscribed = 0;
   const gateCheck = checkK2GateClosesAt(env.K2_GATE_CLOSES_AT);
-  if (gateCheck.ok) {
+  const day0Check = checkK2Day0(env.K2_DAY0);
+
+  // A-3: a single failure reason, computed once, so exactly one warning is
+  // ever logged per cron run regardless of which of the three checks fails.
+  let skipReason: string | null = null;
+  if (!gateCheck.ok) {
+    skipReason = `K2_GATE_CLOSES_AT: ${gateCheck.reason}`;
+  } else if (!day0Check.ok) {
+    skipReason = `K2_DAY0: ${day0Check.reason}`;
+  } else {
+    const matchCheck = checkK2GateMatchesDay0(gateCheck.gateCloses, day0Check.day0);
+    if (!matchCheck.ok) skipReason = matchCheck.reason;
+  }
+
+  if (skipReason === null && gateCheck.ok) {
     const graceMs = K2_VERDICT_GRACE_DAYS * dayMs;
     if (now >= gateCheck.gateCloses.getTime() + graceMs) {
       const unsubscribedCutoff = new Date(now - UNSUBSCRIBED_RETENTION_DAYS * dayMs).toISOString();
       deletedUnsubscribed = await deleteStaleUnsubscribed(env.DB, unsubscribedCutoff);
     }
-  } else {
-    // N2: exactly one PII-free warning per cron run — no address, no raw
-    // env value, just the classification of why it's not safe to delete yet.
-    console.warn("K2_GATE_CLOSES_AT is not set to a valid, sufficiently-late value — skipping confirmed-row retention deletion", {
-      reason: gateCheck.reason,
+  } else if (skipReason !== null) {
+    // N2/A-3: exactly one PII-free warning per cron run — no address, no
+    // raw env value, just the classification of why it's not safe to
+    // delete yet.
+    console.warn("K2 gate/day0 configuration is not valid and consistent — skipping confirmed-row retention deletion", {
+      reason: skipReason,
     });
   }
 
