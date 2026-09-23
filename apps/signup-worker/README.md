@@ -70,6 +70,60 @@ A brand-new address's very first insert is unaffected (there is no prior emailed
   **hashes only**. Raw tokens exist only in the email link and are never
   written to D1.
 
+### Unsubscribe token: stable, not rotated (gate-round3 finding A-2)
+
+The confirm token and the unsubscribe token behave differently on purpose:
+
+| | Confirm token | Unsubscribe token |
+|---|---|---|
+| Generation | `generateToken()` — 256-bit random | `deriveUnsubscribeToken(TOKEN_PEPPER, email_lc)` — deterministic HMAC-SHA256 |
+| Changes on resend? | Yes — rotates, and the previous one is invalidated | **No** — identical on every send to this address |
+| Single-use? | Yes — cleared on successful confirm | No — reusable, same as any unsubscribe link should be |
+
+A mailbox can hold several confirmation emails at once (the initial send
+plus any resends), and **every one of them must have a working one-click
+unsubscribe link** — that's an anti-spam/compliance requirement, not just
+a nicety. The old behavior drew a fresh random unsubscribe token on each
+resend and overwrote `unsubscribe_token_hash`, so only the MOST RECENT
+email's link kept working; an older email's `List-Unsubscribe` link
+returned a `400` once superseded. Deriving the token instead of rotating
+it makes that structurally impossible: there is only ever one correct
+unsubscribe token per address, computed the same way at first insert,
+every resend, and every lookup, so every email carries the same link.
+
+It's still unguessable without the pepper — this is a **keyed** HMAC
+(`base64url(HMAC-SHA256(key = TOKEN_PEPPER, message =
+"golfraven-unsubscribe-v1:" + email_lc))`, see `src/tokens.ts`'s
+`deriveUnsubscribeToken`), not a hash of public data alone, so nothing
+short of `TOKEN_PEPPER` lets anyone compute another address's unsubscribe
+link. The stored `unsubscribe_token_hash` is unchanged in shape — still
+`sha256(pepper + ":" + token)` via `hashWithPepper`, looked up the same
+way as before — only *what* gets hashed is now derived rather than random.
+
+**Rotating `TOKEN_PEPPER`:** because the unsubscribe token is derived from
+the pepper, rotating `TOKEN_PEPPER` changes every address's unsubscribe
+token at once and invalidates every unsubscribe link already sent — **do
+not rotate it casually.** If it must be rotated (suspected compromise, a
+routine security policy), do it as a two-step transition:
+
+1. `wrangler secret put TOKEN_PEPPER_PREVIOUS` — set it to the **old**
+   `TOKEN_PEPPER` value, THEN
+2. `wrangler secret put TOKEN_PEPPER` — set it to the new value.
+
+While `TOKEN_PEPPER_PREVIOUS` is set, `handleUnsubscribeSubmit`
+(`src/index.ts`'s `findRowByRawUnsubscribeToken`) looks a submitted token
+up under the CURRENT pepper first and falls back to the PREVIOUS one, so
+already-emailed unsubscribe links keep working through the transition.
+(This does **not** help the confirm token or the rate-limit IP hash — both
+those are unaffected by an unsubscribe-only concern, and a confirm link
+is short-lived, 48h TTL, so a pepper rotation mid-flight just means the
+small number of confirm links issued in that window go dead, same as
+before this change.) Once every unsubscribe link derived under the old
+pepper has had time to age out — there's no hard expiry on it, so use
+judgement (e.g. keep `TOKEN_PEPPER_PREVIOUS` set for as long as you'd
+reasonably expect a subscriber to still act on an old email, a few
+months, not days) — unset `TOKEN_PEPPER_PREVIOUS` to close the fallback.
+
 **Deliberately NOT stored anywhere in D1: IP address or user agent.**
 Rate limiting (`src/ratelimit.ts`) lives entirely in KV, keyed by
 `sha256(pepper + ip)` — never the raw address — and is TTL'd (expires on
@@ -156,6 +210,10 @@ package; it's the checklist for whoever deploys it.
    npx wrangler@4 secret put TURNSTILE_SECRET
    npx wrangler@4 secret put TOKEN_PEPPER   # e.g. `openssl rand -hex 32`
    ```
+   Don't rotate `TOKEN_PEPPER` casually once live — it derives the stable
+   unsubscribe token (see "Unsubscribe token: stable, not rotated" above),
+   and a rotation invalidates every previously emailed unsubscribe link
+   unless you also set `TOKEN_PEPPER_PREVIOUS` to the old value.
 
 4. **Verify the sending domain in Resend** and add its SPF, DKIM and DMARC
    DNS records (this is the P0 external prerequisite `apps/landing`'s

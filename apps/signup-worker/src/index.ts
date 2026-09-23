@@ -72,7 +72,7 @@ import {
   checkAndConsumeResendSendLimits,
 } from "./ratelimit";
 import { corsHeadersFor, genericSignupAccepted, htmlResponse, jsonResponse } from "./responses";
-import { generateToken, hashWithPepper, isExpired, isoTimeFromNow } from "./tokens";
+import { deriveUnsubscribeToken, generateToken, hashWithPepper, isExpired, isoTimeFromNow } from "./tokens";
 import { verifyTurnstileToken } from "./turnstile";
 import { validateSignupPayload } from "./validate";
 
@@ -270,12 +270,23 @@ async function maybeSendConfirmationEmail(
  * new tokens had already overwritten the old ones in the row, but were
  * never delivered anywhere — so the OLD, already-delivered email's confirm
  * and unsubscribe links went dead with no replacement. The fix: generate
- * the new tokens, ATTEMPT the send first, and persist the new hashes
- * (`rotateConfirmToken` plus the unsubscribe-token update) ONLY when
+ * the new confirm token, ATTEMPT the send first, and persist the new
+ * confirm-token hash (`rotateConfirmToken`) ONLY when
  * `sendConfirmationEmailAndLog` reports success. On a send failure, this
  * returns without writing anything — the row (and its last-emailed,
- * still-valid tokens) is left exactly as it was, mirroring the "send
- * skipped by rate limit" case above.
+ * still-valid confirm token) is left exactly as it was, mirroring the
+ * "send skipped by rate limit" case above.
+ *
+ * The unsubscribe token is deliberately OUTSIDE this rotate-on-success
+ * dance (gate-round3 finding A-2): it's derived deterministically from
+ * the address (`deriveUnsubscribeToken`, src/tokens.ts), not drawn fresh
+ * per send, so it is byte-identical on every resend and there is nothing
+ * to persist here — `unsubscribe_token_hash` is written once, on first
+ * insert (see `runSignupSideEffects` case A below), and never rotated
+ * again. Every confirmation email ever sent to this address therefore
+ * carries the SAME unsubscribe link, which is what keeps an older email's
+ * one-click link working after a later resend — see README.md
+ * "Unsubscribe token: stable, not rotated".
  */
 async function rotateAndSendIfAllowed(
   env: Env,
@@ -289,8 +300,7 @@ async function rotateAndSendIfAllowed(
   const rawConfirmToken = generateToken();
   const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
   const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
-  const rawUnsubscribeToken = generateToken();
-  const unsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawUnsubscribeToken);
+  const rawUnsubscribeToken = await deriveUnsubscribeToken(env.TOKEN_PEPPER, emailLc);
 
   const sent = await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
   if (!sent) return;
@@ -302,10 +312,6 @@ async function rotateAndSendIfAllowed(
     confirmTokenHash,
     confirmExpiresAt,
   });
-  await env.DB
-    .prepare("UPDATE signups SET unsubscribe_token_hash = ?2 WHERE id = ?1")
-    .bind(row.id, unsubscribeTokenHash)
-    .run();
 }
 
 /**
@@ -339,7 +345,11 @@ async function runSignupSideEffects(
     const rawConfirmToken = generateToken();
     const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
     const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
-    const rawUnsubscribeToken = generateToken();
+    // Deterministic, stable per-address token (gate-round3 finding A-2) —
+    // written once here and never rotated again; see
+    // rotateAndSendIfAllowed's doc comment above and README.md
+    // "Unsubscribe token: stable, not rotated".
+    const rawUnsubscribeToken = await deriveUnsubscribeToken(env.TOKEN_PEPPER, emailLc);
     const unsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawUnsubscribeToken);
     const { inserted } = await createPendingSignup(env.DB, {
       id: crypto.randomUUID(),
@@ -475,6 +485,30 @@ export async function handleUnsubscribePage(request: Request, _env: Env): Promis
   return htmlResponse(200, unsubscribePromptPage(`/api/unsubscribe?token=${encodeURIComponent(token)}`));
 }
 
+/**
+ * Looks up a signup row by its raw unsubscribe token, trying the CURRENT
+ * `TOKEN_PEPPER` first and — only if that misses — the PREVIOUS one
+ * (`Env.TOKEN_PEPPER_PREVIOUS`), when set. This is the fallback that keeps
+ * an already-emailed unsubscribe link working across a `TOKEN_PEPPER`
+ * rotation: `unsubscribe_token_hash` was stored using whichever pepper was
+ * active at signup time, and neither the derived token itself nor its
+ * stored hash changes retroactively when the pepper rotates — only a
+ * lookup that tries both peppers can still find that row. See
+ * config.ts's `TOKEN_PEPPER_PREVIOUS` doc and README.md "Rotating
+ * TOKEN_PEPPER". Without `TOKEN_PEPPER_PREVIOUS` set, a link derived under
+ * a since-rotated pepper fails cleanly (the generic invalid page) — same
+ * as any other unrecognized token.
+ */
+async function findRowByRawUnsubscribeToken(env: Env, rawToken: string): Promise<SignupRow | null> {
+  const currentHash = await hashWithPepper(env.TOKEN_PEPPER, rawToken);
+  const row = await findByUnsubscribeTokenHash(env.DB, currentHash);
+  if (row) return row;
+
+  if (!env.TOKEN_PEPPER_PREVIOUS) return null;
+  const previousHash = await hashWithPepper(env.TOKEN_PEPPER_PREVIOUS, rawToken);
+  return await findByUnsubscribeTokenHash(env.DB, previousHash);
+}
+
 export async function handleUnsubscribeSubmit(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token");
@@ -482,8 +516,7 @@ export async function handleUnsubscribeSubmit(request: Request, env: Env): Promi
     return htmlResponse(400, unsubscribeInvalidPage());
   }
 
-  const hash = await hashWithPepper(env.TOKEN_PEPPER, token);
-  const row = await findByUnsubscribeTokenHash(env.DB, hash);
+  const row = await findRowByRawUnsubscribeToken(env, token);
   if (!row) {
     return htmlResponse(400, unsubscribeInvalidPage());
   }

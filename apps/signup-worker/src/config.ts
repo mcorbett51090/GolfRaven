@@ -45,6 +45,21 @@ export interface Env {
    * lever if the hashing scheme ever needs to change.
    */
   TOKEN_PEPPER: string;
+  /**
+   * Optional PREVIOUS value of `TOKEN_PEPPER`, set only during a pepper
+   * rotation. The unsubscribe token is derived deterministically from
+   * `TOKEN_PEPPER` + the address (see `src/tokens.ts`'s
+   * `deriveUnsubscribeToken`), so rotating `TOKEN_PEPPER` alone would
+   * invalidate every unsubscribe link already sent. While this is set,
+   * `handleUnsubscribeSubmit` (src/index.ts) tries a lookup under the
+   * CURRENT pepper first and falls back to this PREVIOUS one, so old
+   * links keep working during the transition — see README.md "Rotating
+   * TOKEN_PEPPER" for the full runbook. Unset it once the previous
+   * pepper's unsubscribe links have all aged out (>= the confirm-token
+   * TTL plus a safety margin is not enough on its own — see that README
+   * section for the actual retention-driven cutover point).
+   */
+  TOKEN_PEPPER_PREVIOUS?: string;
 
   /** e.g. `"GolfRaven <hello@golfraven.example>"` — must be on a Resend-verified sending domain. */
   RESEND_FROM_EMAIL: string;

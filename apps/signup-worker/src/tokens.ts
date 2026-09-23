@@ -29,6 +29,40 @@ export async function hashWithPepper(pepper: string, value: string): Promise<str
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * The unsubscribe token, unlike the confirm token, is deliberately
+ * DETERMINISTIC and STABLE per address rather than random-and-rotated
+ * (gate-round3 finding A-2): `base64url(HMAC-SHA256(key = pepper,
+ * message = "golfraven-unsubscribe-v1:" + email_lc))`.
+ *
+ * Why: RFC 8058 one-click unsubscribe must keep working from EVERY
+ * confirmation email ever sent to an address, not just the most recent
+ * resend — a mailbox can hold several confirmation emails (initial send
+ * plus resends) at once, and each one's `List-Unsubscribe` link has to
+ * resolve. Deriving the token from the address (instead of drawing a
+ * fresh random value per send, as the confirm token does) makes every
+ * email's unsubscribe link identical, so an old email's link 400ing after
+ * a later resend — the exact regression this closes — becomes
+ * structurally impossible: there is only ever one value to compute.
+ *
+ * It stays unguessable without the pepper: this is a keyed HMAC over
+ * public data (the address), not a hash of public data alone, so nothing
+ * short of TOKEN_PEPPER lets an attacker compute another address's
+ * unsubscribe token. The corollary: rotating TOKEN_PEPPER changes every
+ * derived unsubscribe token at once and invalidates every previously
+ * emailed unsubscribe link — see config.ts's `Env.TOKEN_PEPPER_PREVIOUS`
+ * and README.md "Rotating TOKEN_PEPPER" for the transition path (accept
+ * either pepper for a lookup window) before rotating it in production.
+ */
+export async function deriveUnsubscribeToken(pepper: string, emailLc: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", encoder.encode(pepper), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`golfraven-unsubscribe-v1:${emailLc}`));
+  return toBase64Url(new Uint8Array(signature));
+}
+
 /** ISO-8601 timestamp `secondsFromNow` seconds in the future, for `confirm_expires_at`. */
 export function isoTimeFromNow(secondsFromNow: number): string {
   return new Date(Date.now() + secondsFromNow * 1000).toISOString();

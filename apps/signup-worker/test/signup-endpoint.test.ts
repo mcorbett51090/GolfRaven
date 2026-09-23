@@ -669,3 +669,115 @@ describe("POST /api/signup — Resend failure path", () => {
     consoleErrorSpy.mockRestore();
   });
 });
+
+describe("POST /api/signup — A-2 regression: the unsubscribe link must keep working from EVERY email ever sent", () => {
+  it("after two successful resends, the unsubscribe link from the FIRST email still unsubscribes", async () => {
+    const env = makeTestEnv();
+    const fetchMock = stubExternalFetch({});
+
+    // First send.
+    const { ctx: ctx1, flush: flush1 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx1);
+    await flush1();
+    const { unsubscribeToken: firstUnsubscribeToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+
+    // Two more successful resends (clearing the cooldown key between each,
+    // same as the case-C test above, so the send limit doesn't skip them).
+    env.RATE_LIMIT_KV.store.clear();
+    const { ctx: ctx2, flush: flush2 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx2);
+    await flush2();
+
+    env.RATE_LIMIT_KV.store.clear();
+    const { ctx: ctx3, flush: flush3 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx3);
+    await flush3();
+
+    expect(resendCalls(fetchMock)).toHaveLength(3);
+    const { unsubscribeToken: thirdUnsubscribeToken } = tokensFromResendCall(resendCalls(fetchMock)[2]);
+
+    // The token itself never rotated across the resends.
+    expect(thirdUnsubscribeToken).toBe(firstUnsubscribeToken);
+
+    // The regression: the link from the FIRST email — the oldest one still
+    // sitting in an inbox — must still work, not just the most recent one.
+    const unsubRes = await handleUnsubscribeSubmit(
+      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(firstUnsubscribeToken)}`, {
+        method: "POST",
+      }),
+      env,
+    );
+    expect(unsubRes.status).toBe(200);
+    expect(env.DB.rows[0]?.unsubscribed_at).not.toBeNull();
+  });
+
+  it("the derived unsubscribe token is identical across resends and differs across addresses", async () => {
+    const env = makeTestEnv();
+    const fetchMock = stubExternalFetch({});
+
+    const { ctx: ctx1, flush: flush1 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx1);
+    await flush1();
+    const { unsubscribeToken: firstToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+
+    env.RATE_LIMIT_KV.store.clear();
+    const { ctx: ctx2, flush: flush2 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx2);
+    await flush2();
+    const { unsubscribeToken: secondToken } = tokensFromResendCall(resendCalls(fetchMock)[1]);
+    expect(secondToken).toBe(firstToken);
+
+    const { ctx: ctx3, flush: flush3 } = makeWaitUntilCtx();
+    await handleSignup(signupRequest({ ...VALID_BODY, email: "other-player@example.com" }), env, ctx3);
+    await flush3();
+    const { unsubscribeToken: otherAddressToken } = tokensFromResendCall(resendCalls(fetchMock)[2]);
+    expect(otherAddressToken).not.toBe(firstToken);
+  });
+
+  it("with TOKEN_PEPPER rotated and TOKEN_PEPPER_PREVIOUS set, an old unsubscribe link still works", async () => {
+    const env = makeTestEnv({ TOKEN_PEPPER: "old-pepper-0123456789" });
+    const fetchMock = stubExternalFetch({});
+
+    const { ctx, flush } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx);
+    await flush();
+    const { unsubscribeToken: oldToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+
+    // Rotate: the old pepper moves to TOKEN_PEPPER_PREVIOUS, a new one
+    // becomes TOKEN_PEPPER. The stored row (and the emailed link) are
+    // untouched — no re-send happens on a pepper rotation.
+    env.TOKEN_PEPPER_PREVIOUS = "old-pepper-0123456789";
+    env.TOKEN_PEPPER = "new-pepper-9876543210";
+
+    const res = await handleUnsubscribeSubmit(
+      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`, {
+        method: "POST",
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(env.DB.rows[0]?.unsubscribed_at).not.toBeNull();
+  });
+
+  it("with TOKEN_PEPPER rotated and NO TOKEN_PEPPER_PREVIOUS, the old link fails cleanly", async () => {
+    const env = makeTestEnv({ TOKEN_PEPPER: "old-pepper-0123456789" });
+    const fetchMock = stubExternalFetch({});
+
+    const { ctx, flush } = makeWaitUntilCtx();
+    await handleSignup(signupRequest(VALID_BODY), env, ctx);
+    await flush();
+    const { unsubscribeToken: oldToken } = tokensFromResendCall(resendCalls(fetchMock)[0]);
+
+    // Rotate WITHOUT setting TOKEN_PEPPER_PREVIOUS.
+    env.TOKEN_PEPPER = "new-pepper-9876543210";
+
+    const res = await handleUnsubscribeSubmit(
+      new Request(`https://golfraven.example/api/unsubscribe?token=${encodeURIComponent(oldToken)}`, {
+        method: "POST",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(env.DB.rows[0]?.unsubscribed_at).toBeNull();
+  });
+});
