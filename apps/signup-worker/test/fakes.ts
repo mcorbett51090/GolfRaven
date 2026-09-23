@@ -82,9 +82,16 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
       return { success: true, meta: { changes: row ? 1 : 0 } };
     }
     if (sql.startsWith("DELETE FROM signups") && sql.includes("confirmed_at IS NULL")) {
-      const [createdBefore] = bound as [string];
+      const [createdBefore, now] = bound as [string, string];
       const before = rows.length;
-      const kept = rows.filter((r) => !(r.confirmed_at === null && r.created_at < createdBefore));
+      const kept = rows.filter(
+        (r) =>
+          !(
+            r.confirmed_at === null &&
+            r.created_at < createdBefore &&
+            (r.confirm_expires_at === null || r.confirm_expires_at < now)
+          ),
+      );
       const deleted = before - kept.length;
       rows.length = 0;
       rows.push(...kept);

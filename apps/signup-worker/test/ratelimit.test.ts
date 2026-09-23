@@ -73,6 +73,22 @@ describe("rateLimitIpKeyMaterial (F5/F6 — IPv6 /64 scoping)", () => {
       rateLimitIpKeyMaterial("2001:db8:abcd:1234:0:0:0:1"),
     );
   });
+
+  it("N9: is case-insensitive — the same /64 buckets together regardless of hex case", () => {
+    expect(rateLimitIpKeyMaterial("2001:DB8:1:2::9")).toBe(rateLimitIpKeyMaterial("2001:db8:1:2::9"));
+  });
+
+  it("N9: strips leading zeros per hextet to a canonical bucket", () => {
+    expect(rateLimitIpKeyMaterial("2001:0db8:0001:0002::9")).toBe(rateLimitIpKeyMaterial("2001:db8:1:2::9"));
+  });
+
+  it("N9: an IPv4-mapped address (::ffff:a.b.c.d) buckets by its embedded IPv4 address, not one shared bucket", () => {
+    const a = rateLimitIpKeyMaterial("::ffff:198.51.100.7");
+    const b = rateLimitIpKeyMaterial("::ffff:203.0.113.9");
+    expect(a).not.toBe(b);
+    expect(a).toBe("198.51.100.7");
+    expect(b).toBe("203.0.113.9");
+  });
 });
 
 describe("checkAndConsumeResendSendLimits (F6)", () => {

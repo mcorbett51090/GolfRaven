@@ -30,8 +30,10 @@
 import {
   ALLOWED_CONSENT_VERSIONS,
   assertRequiredSecretsPresent,
+  checkK2GateClosesAt,
   CONFIRM_TOKEN_TTL_SECONDS,
   globalDailySendCap,
+  K2_VERDICT_GRACE_DAYS,
   MAX_SIGNUP_BODY_BYTES,
   RESEND_COOLDOWN_SECONDS,
   RESEND_EMAIL_DAILY_CAP,
@@ -101,14 +103,46 @@ function expectedTurnstileHostname(env: Env): string | undefined {
 type BodyReadResult = { ok: true; value: unknown } | { ok: false; response: Response };
 
 /**
- * Gate finding F10: caps the request body at MAX_SIGNUP_BODY_BYTES and
- * requires `Content-Type: application/json` BEFORE `JSON.parse` ever runs,
- * so an oversized or wrong-Content-Type body (e.g. a cross-site "simple"
- * request with `text/plain`) is rejected cheaply.
+ * F10 residual (1): compares the media-type ESSENCE (the part before any
+ * `;` parameter), not a substring — `Content-Type: text/plain;
+ * x=application/json` used to pass the old `.includes("application/json")`
+ * check (a CORS-safelisted "simple" request), which reopened exactly the
+ * cross-site-POST path this check exists to close.
+ */
+function isJsonContentType(contentType: string): boolean {
+  const essence = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return essence === "application/json";
+}
+
+function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  const out = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+/**
+ * Gate finding F10 / N5: caps the request body at MAX_SIGNUP_BODY_BYTES and
+ * requires `Content-Type: application/json` (by media-type essence) BEFORE
+ * `JSON.parse` ever runs, so a wrong-Content-Type body (e.g. a cross-site
+ * "simple" request with `text/plain`) is rejected cheaply.
+ *
+ * N5: this does NOT require `Content-Length` — Cloudflare does not always
+ * forward it to the Worker (chunked/HTTP2/HTTP3 bodies), so a hard 411
+ * there would silently fail every signup from those clients. When the
+ * header IS present, an early, cheap reject uses it (non-numeric, negative,
+ * or already-oversized); but the actual limit is enforced by capping the
+ * BYTES ACTUALLY READ via a streaming reader, never by trusting a header
+ * that can be absent or lie (the old code accepted `Content-Length: -1`
+ * and then still buffered the whole body via `request.text()` before its
+ * size check ever ran).
  */
 async function readSignupBody(request: Request): Promise<BodyReadResult> {
   const contentType = request.headers.get("Content-Type") ?? "";
-  if (!contentType.toLowerCase().includes("application/json")) {
+  if (!isJsonContentType(contentType)) {
     return {
       ok: false,
       response: jsonResponse(415, { status: "error", error: "Content-Type must be application/json" }),
@@ -116,22 +150,43 @@ async function readSignupBody(request: Request): Promise<BodyReadResult> {
   }
 
   const contentLengthHeader = request.headers.get("Content-Length");
-  const contentLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : NaN;
-  if (!Number.isFinite(contentLength)) {
-    return {
-      ok: false,
-      response: jsonResponse(411, { status: "error", error: "Content-Length header is required" }),
-    };
-  }
-  if (contentLength > MAX_SIGNUP_BODY_BYTES) {
-    return { ok: false, response: jsonResponse(413, { status: "error", error: "request body too large" }) };
-  }
-
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_SIGNUP_BODY_BYTES) {
-    return { ok: false, response: jsonResponse(413, { status: "error", error: "request body too large" }) };
+  if (contentLengthHeader !== null) {
+    const contentLength = Number(contentLengthHeader);
+    if (!Number.isInteger(contentLength) || contentLength < 0) {
+      return { ok: false, response: jsonResponse(413, { status: "error", error: "invalid Content-Length" }) };
+    }
+    if (contentLength > MAX_SIGNUP_BODY_BYTES) {
+      return { ok: false, response: jsonResponse(413, { status: "error", error: "request body too large" }) };
+    }
   }
 
+  if (!request.body) {
+    return { ok: false, response: jsonResponse(400, { status: "error", error: "request body must be valid JSON" }) };
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  for (;;) {
+    let step: ReadableStreamReadResult<Uint8Array>;
+    try {
+      step = await reader.read();
+    } catch {
+      return { ok: false, response: jsonResponse(400, { status: "error", error: "could not read request body" }) };
+    }
+    if (step.done) break;
+    const value = step.value;
+    if (value) {
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_SIGNUP_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, response: jsonResponse(413, { status: "error", error: "request body too large" }) };
+      }
+      chunks.push(value);
+    }
+  }
+
+  const text = new TextDecoder().decode(concatChunks(chunks, totalBytes));
   try {
     return { ok: true, value: JSON.parse(text) };
   } catch {
@@ -174,18 +229,13 @@ async function rotateAndGetUnsubscribeToken(
 }
 
 /**
- * Gate finding F6: sends the confirmation email only if the per-email
- * cooldown, per-email daily cap, and global daily cap all allow it. A
- * denial is NOT an error — the HTTP response is already the generic 202
- * either way — it just means this particular send is skipped, and that is
- * logged (no PII beyond the fixed reason code / HTTP status — F14).
+ * Gate finding F6: checks (and, if allowed, consumes) the per-email
+ * cooldown, per-email daily cap, and global daily cap. A denial is NOT an
+ * error — the HTTP response is already the generic 202 either way — it
+ * just means this particular send is skipped, and that is logged (no PII
+ * beyond the fixed reason code / HTTP status — F14).
  */
-async function maybeSendConfirmationEmail(
-  env: Env,
-  emailLc: string,
-  rawConfirmToken: string,
-  rawUnsubscribeToken: string,
-): Promise<void> {
+async function checkSendAllowed(env: Env, emailLc: string): Promise<boolean> {
   const sendLimit = await checkAndConsumeResendSendLimits(env, emailLc, {
     cooldownSeconds: RESEND_COOLDOWN_SECONDS,
     emailDailyCap: RESEND_EMAIL_DAILY_CAP,
@@ -193,9 +243,17 @@ async function maybeSendConfirmationEmail(
   });
   if (!sendLimit.allowed) {
     console.error("confirmation email skipped by send limit", { reason: sendLimit.reason });
-    return;
+    return false;
   }
+  return true;
+}
 
+async function sendConfirmationEmailAndLog(
+  env: Env,
+  emailLc: string,
+  rawConfirmToken: string,
+  rawUnsubscribeToken: string,
+): Promise<void> {
   const sendResult = await sendConfirmationEmail(env, {
     to: emailLc,
     confirmUrl: confirmUrl(env, rawConfirmToken),
@@ -206,6 +264,59 @@ async function maybeSendConfirmationEmail(
     // free-text message (which may echo the recipient address).
     console.error("confirmation email send failed", { status: sendResult.status });
   }
+}
+
+/**
+ * Case A (brand-new address) helper: the limit check gates whether an
+ * email is sent, same as the rotate path below, but there is no PRIOR
+ * emailed link on a brand-new row to protect — the row was just created in
+ * this same side-effect run — so a denial here just means "insert the
+ * pending row, but don't send yet", not "leave stale tokens alone".
+ */
+async function maybeSendConfirmationEmail(
+  env: Env,
+  emailLc: string,
+  rawConfirmToken: string,
+  rawUnsubscribeToken: string,
+): Promise<void> {
+  if (!(await checkSendAllowed(env, emailLc))) return;
+  await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+}
+
+/**
+ * N1 fix: cases C/D (an EXISTING row — still pending, or previously
+ * unsubscribed) rotate the confirm/unsubscribe tokens ONLY in the branch
+ * that actually goes on to send a new confirmation email — i.e. only after
+ * the cooldown, per-email daily cap, and global daily cap all pass. If the
+ * send is skipped for any reason, this returns without touching the row at
+ * all: the confirm/unsubscribe tokens from the last email that WAS
+ * actually sent stay valid and unchanged, so a re-submit inside the
+ * cooldown (ordinary, expected user behavior — F9's residual makes it more
+ * likely) can never invalidate a link the person already has in their
+ * inbox. Previously this rotated both tokens FIRST and only then checked
+ * the limits, so a denied resend silently burned the only working links.
+ */
+async function rotateAndSendIfAllowed(
+  env: Env,
+  row: SignupRow,
+  consentVersion: string,
+  source: string | undefined,
+  emailLc: string,
+): Promise<void> {
+  if (!(await checkSendAllowed(env, emailLc))) return;
+
+  const rawConfirmToken = generateToken();
+  const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
+  const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
+  const rawUnsubscribeToken = await rotateAndGetUnsubscribeToken(
+    env,
+    row,
+    consentVersion,
+    source,
+    confirmTokenHash,
+    confirmExpiresAt,
+  );
+  await sendConfirmationEmailAndLog(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
 }
 
 /**
@@ -229,15 +340,16 @@ async function runSignupSideEffects(
     return;
   }
 
-  const rawConfirmToken = generateToken();
-  const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
-  const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
-
-  let unsubscribeTokenForEmail: string;
-
   if (!existing) {
     // Case A: brand new address. Race-safe insert (F3): ON CONFLICT DO
     // NOTHING means a concurrent signup for the same address never 500s.
+    // There is no prior emailed link on a brand-new row, so it's fine to
+    // mint tokens for the insert itself regardless of whether the send
+    // that follows is allowed (N1 only protects an EXISTING row's
+    // already-emailed tokens — see rotateAndSendIfAllowed above).
+    const rawConfirmToken = generateToken();
+    const confirmTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawConfirmToken);
+    const confirmExpiresAt = isoTimeFromNow(CONFIRM_TOKEN_TTL_SECONDS);
     const rawUnsubscribeToken = generateToken();
     const unsubscribeTokenHash = await hashWithPepper(env.TOKEN_PEPPER, rawUnsubscribeToken);
     const { inserted } = await createPendingSignup(env.DB, {
@@ -252,38 +364,28 @@ async function runSignupSideEffects(
     });
 
     if (inserted) {
-      unsubscribeTokenForEmail = rawUnsubscribeToken;
-    } else {
-      // Lost the race: another request inserted this address first. Re-read
-      // and fall through to the rotate path instead of doing nothing.
-      const raced = await findByEmailLc(env.DB, emailLc);
-      if (!raced) {
-        console.error("signup insert race: row missing after ON CONFLICT DO NOTHING");
-        return;
-      }
-      if (raced.confirmed_at && !raced.unsubscribed_at) return; // became case B meanwhile
-      unsubscribeTokenForEmail = await rotateAndGetUnsubscribeToken(
-        env,
-        raced,
-        consentVersion,
-        source,
-        confirmTokenHash,
-        confirmExpiresAt,
-      );
+      await maybeSendConfirmationEmail(env, emailLc, rawConfirmToken, rawUnsubscribeToken);
+      return;
     }
-  } else {
-    // Case C (still pending) or D (previously unsubscribed).
-    unsubscribeTokenForEmail = await rotateAndGetUnsubscribeToken(
-      env,
-      existing,
-      consentVersion,
-      source,
-      confirmTokenHash,
-      confirmExpiresAt,
-    );
+
+    // Lost the race: another request inserted this address first. Re-read
+    // and fall through to the rotate-if-allowed path (N1) instead of doing
+    // nothing, or instead of unconditionally rotating this EXISTING row's
+    // tokens.
+    const raced = await findByEmailLc(env.DB, emailLc);
+    if (!raced) {
+      console.error("signup insert race: row missing after ON CONFLICT DO NOTHING");
+      return;
+    }
+    if (raced.confirmed_at && !raced.unsubscribed_at) return; // became case B meanwhile
+    await rotateAndSendIfAllowed(env, raced, consentVersion, source, emailLc);
+    return;
   }
 
-  await maybeSendConfirmationEmail(env, emailLc, rawConfirmToken, unsubscribeTokenForEmail);
+  // Case C (still pending) or D (previously unsubscribed): N1 — only
+  // rotate this existing row's tokens (and only send) if the send limits
+  // actually allow a new email to go out.
+  await rotateAndSendIfAllowed(env, existing, consentVersion, source, emailLc);
 }
 
 export async function handleSignup(request: Request, env: Env, ctx: WaitUntilCtx): Promise<Response> {
@@ -410,34 +512,49 @@ function notFound(): Response {
 
 /**
  * Gate finding F11 (retention cron): deletes rows that were never
- * confirmed and are older than UNCONFIRMED_RETENTION_DAYS. Unconfirmed
- * rows never count toward K2 (src/k2-count.ts only ever reads rows with a
- * non-null confirmed_at — see its header comment), so this deletion can
- * never change a K2 count.
+ * confirmed and are older than UNCONFIRMED_RETENTION_DAYS AND whose confirm
+ * token has already expired (N8). Unconfirmed rows never count toward K2
+ * (src/k2-count.ts only ever reads rows with a non-null confirmed_at — see
+ * its header comment), so this deletion can never change a K2 count.
  *
- * Also deletes confirmed-but-unsubscribed rows more than
- * UNSUBSCRIBED_RETENTION_DAYS past their unsubscribe date — but ONLY once
- * `Env.K2_GATE_CLOSES_AT` (day 0 + 42 days) has passed, so a K2 recount
- * always remains reconstructable from confirmed_at until the verdict is
- * safely recorded. Until the owner sets that var, this half is skipped
- * entirely (see README.md "Data retention").
+ * N2 (BLOCKING fix): also deletes confirmed-but-unsubscribed rows more than
+ * UNSUBSCRIBED_RETENTION_DAYS past their unsubscribe date — but ONLY when
+ * `Env.K2_GATE_CLOSES_AT` passes `checkK2GateClosesAt` (a strict, full
+ * ISO-8601 UTC timestamp, not earlier than the earliest possible gate
+ * close), AND only once `now >= gateCloses + K2_VERDICT_GRACE_DAYS`. This
+ * two-part gate is deliberately stricter than "the gate date has passed":
+ * K2's own verdict is read at "≈ wk 7" (after the gate itself closes at wk
+ * 6), and a malformed/partial value (`"2026"`, `"1"`, day 0 typed into this
+ * var by mistake) must never enable deletion early — those previously
+ * parsed as an arbitrary Date and could delete a row the K2 count still
+ * needed. Until the owner sets a valid value, and until the grace period
+ * elapses, this half is skipped entirely and a single PII-free warning is
+ * logged (see README.md "Data retention").
  */
 export async function runRetentionCron(
   env: Env,
 ): Promise<{ deletedUnconfirmed: number; deletedUnsubscribed: number }> {
   const now = Date.now();
   const dayMs = 24 * 60 * 60 * 1000;
+  const nowIso = new Date(now).toISOString();
 
   const unconfirmedCutoff = new Date(now - UNCONFIRMED_RETENTION_DAYS * dayMs).toISOString();
-  const deletedUnconfirmed = await deleteStaleUnconfirmed(env.DB, unconfirmedCutoff);
+  const deletedUnconfirmed = await deleteStaleUnconfirmed(env.DB, unconfirmedCutoff, nowIso);
 
   let deletedUnsubscribed = 0;
-  if (env.K2_GATE_CLOSES_AT) {
-    const gateCloses = new Date(env.K2_GATE_CLOSES_AT);
-    if (!Number.isNaN(gateCloses.getTime()) && now >= gateCloses.getTime()) {
+  const gateCheck = checkK2GateClosesAt(env.K2_GATE_CLOSES_AT);
+  if (gateCheck.ok) {
+    const graceMs = K2_VERDICT_GRACE_DAYS * dayMs;
+    if (now >= gateCheck.gateCloses.getTime() + graceMs) {
       const unsubscribedCutoff = new Date(now - UNSUBSCRIBED_RETENTION_DAYS * dayMs).toISOString();
       deletedUnsubscribed = await deleteStaleUnsubscribed(env.DB, unsubscribedCutoff);
     }
+  } else {
+    // N2: exactly one PII-free warning per cron run — no address, no raw
+    // env value, just the classification of why it's not safe to delete yet.
+    console.warn("K2_GATE_CLOSES_AT is not set to a valid, sufficiently-late value — skipping confirmed-row retention deletion", {
+      reason: gateCheck.reason,
+    });
   }
 
   return { deletedUnconfirmed, deletedUnsubscribed };

@@ -85,6 +85,16 @@ describe("computeK2Counts", () => {
     expect(result.gateCount).toBe(1);
   });
 
+  it("N12: treats a confirmed_at with no explicit UTC offset (ambiguous local time) as malformed rather than silently local-parsing it", () => {
+    const rows = [
+      { email_lc: "good@example.com", confirmed_at: "2026-10-06T00:00:00.000Z" },
+      { email_lc: "no-offset@example.com", confirmed_at: "2026-10-06T00:00:00" },
+    ];
+    const result = computeK2Counts({ rows, day0: DAY0, excludedAddresses: [] });
+    expect(result.malformedConfirmedAtCount).toBe(1);
+    expect(result.distinctConfirmed).toBe(1);
+  });
+
   it("reports (rather than silently drops) rows with a malformed confirmed_at (F17)", () => {
     const rows = [
       { email_lc: "good@example.com", confirmed_at: "2026-10-06T00:00:00.000Z" },

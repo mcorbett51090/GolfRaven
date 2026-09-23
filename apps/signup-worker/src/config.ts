@@ -118,6 +118,55 @@ export const UNCONFIRMED_RETENTION_DAYS = 30;
 /** Gate finding F11: unsubscribed (and confirmed) rows are purged this long after unsubscribe. */
 export const UNSUBSCRIBED_RETENTION_DAYS = 30;
 
+/**
+ * N2: the earliest `K2_GATE_CLOSES_AT` could ever legitimately be — plan P0
+ * start (2026-10-05) + the 42-day gate window. Any configured value earlier
+ * than this is necessarily wrong (either a typo, or day 0 itself typed into
+ * this var by mistake — exactly the gate-review probe that caught this),
+ * so it is rejected the same as a malformed value.
+ */
+export const K2_GATE_CLOSES_AT_FLOOR = "2026-11-16T00:00:00Z";
+/**
+ * N2: once the gate closes, retention still waits this many additional
+ * days before it's allowed to delete a confirmed-then-unsubscribed row —
+ * the same margin as UNSUBSCRIBED_RETENTION_DAYS, but a DISTINCT knob: this
+ * one gates *whether* deletion may run at all (a grace period after the
+ * verdict window), the other gates *which* rows within that run are old
+ * enough to delete.
+ */
+export const K2_VERDICT_GRACE_DAYS = 30;
+
+const K2_GATE_CLOSES_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+export type K2GateCheckResult = { ok: true; gateCloses: Date } | { ok: false; reason: string };
+
+/**
+ * N2: validates `Env.K2_GATE_CLOSES_AT` strictly — a strict full ISO-8601
+ * UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`), not earlier than
+ * K2_GATE_CLOSES_AT_FLOOR. Anything else (unset, malformed, a bare year
+ * like `"2026"`, a bare `"1"`, a date-only string, or a date earlier than
+ * the floor) is rejected — the retention cron (index.ts runRetentionCron)
+ * must NOT delete any confirmed-then-unsubscribed row unless this returns
+ * `ok: true`, and even then only once `now >= gateCloses + K2_VERDICT_GRACE_DAYS`.
+ */
+export function checkK2GateClosesAt(raw: string | undefined): K2GateCheckResult {
+  if (!raw || raw.trim() === "") {
+    return { ok: false, reason: "unset" };
+  }
+  if (!K2_GATE_CLOSES_AT_RE.test(raw)) {
+    return { ok: false, reason: "malformed (must match YYYY-MM-DDTHH:MM:SSZ)" };
+  }
+  const gateCloses = new Date(raw);
+  if (Number.isNaN(gateCloses.getTime())) {
+    return { ok: false, reason: "not a valid calendar date/time" };
+  }
+  const floor = new Date(K2_GATE_CLOSES_AT_FLOOR);
+  if (gateCloses.getTime() < floor.getTime()) {
+    return { ok: false, reason: `earlier than the earliest possible K2 gate close (${K2_GATE_CLOSES_AT_FLOOR})` };
+  }
+  return { ok: true, gateCloses };
+}
+
 const MIN_SECRET_LENGTH = 16;
 
 export type SecretsCheckResult = { ok: true } | { ok: false; error: string };

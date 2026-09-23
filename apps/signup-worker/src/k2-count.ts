@@ -112,6 +112,17 @@ export function computeK2Counts(params: K2CountParams): K2CountResult {
       }
       continue;
     }
+    // N12: a `confirmed_at` with no explicit UTC offset (`Z` or `+HH:MM`)
+    // is ambiguous — `new Date(...)` parses it as LOCAL time, which moved
+    // the advisory count from 9 (TZ=UTC) to 8 (TZ=America/New_York) in the
+    // gate-review probe. D1 rows are always written via `toISOString()`
+    // (always has a `Z`), so this only matters for a hand-edited export —
+    // but rather than silently vary by the machine running this script,
+    // treat it as malformed the same as an unparsable date (F17).
+    if (typeof row.confirmed_at !== "string" || !/(Z|[+-]\d{2}:?\d{2})$/.test(row.confirmed_at)) {
+      malformedConfirmedAtCount += 1;
+      continue;
+    }
     const confirmedAt = new Date(row.confirmed_at);
     if (Number.isNaN(confirmedAt.getTime())) {
       // Gate finding F17: report this instead of silently dropping it.

@@ -75,10 +75,45 @@ describe("retention cron deletes (F11)", () => {
     });
     await recordConfirmation(db, "old-confirmed", "2026-01-02T00:00:00.000Z");
 
-    const deleted = await deleteStaleUnconfirmed(db, "2026-03-01T00:00:00.000Z");
+    const deleted = await deleteStaleUnconfirmed(db, "2026-03-01T00:00:00.000Z", "2026-03-01T00:00:00.000Z");
     expect(deleted).toBe(1);
     const remainingIds = db.rows.map((r) => r.id).sort();
     expect(remainingIds).toEqual(["old-confirmed", "recent-unconfirmed"].sort());
+  });
+
+  it("N8: does NOT delete an old-created row whose confirm token was re-issued and is still valid", async () => {
+    const db = new FakeD1();
+    // created 31 days before "now", but a re-signup rotated in a fresh
+    // token that's still valid for another 47h — created_at alone would
+    // wrongly call this stale.
+    await createPendingSignup(db, {
+      ...NEW_ROW,
+      id: "resigned-up-recently",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      confirmExpiresAt: "2026-02-02T23:00:00.000Z", // valid until just before "now" + 47h... see below
+    });
+    const nowIso = "2026-02-01T00:00:00.000Z"; // 31 days after created_at
+    const cutoffIso = "2026-01-31T00:00:00.000Z"; // 30-day-old cutoff — created_at is before this
+
+    const deleted = await deleteStaleUnconfirmed(db, cutoffIso, nowIso);
+    expect(deleted).toBe(0);
+    expect(db.rows).toHaveLength(1);
+  });
+
+  it("N8: DOES delete an old, unconfirmed row once its confirm token has actually expired", async () => {
+    const db = new FakeD1();
+    await createPendingSignup(db, {
+      ...NEW_ROW,
+      id: "truly-stale",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      confirmExpiresAt: "2026-01-03T00:00:00.000Z", // long expired by "now"
+    });
+    const nowIso = "2026-02-01T00:00:00.000Z";
+    const cutoffIso = "2026-01-31T00:00:00.000Z";
+
+    const deleted = await deleteStaleUnconfirmed(db, cutoffIso, nowIso);
+    expect(deleted).toBe(1);
+    expect(db.rows).toHaveLength(0);
   });
 
   it("deleteStaleUnsubscribed removes only rows unsubscribed before the cutoff", async () => {

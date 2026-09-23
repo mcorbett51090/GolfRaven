@@ -51,17 +51,33 @@ async function bumpCount(kv: Env["RATE_LIMIT_KV"], key: string, current: number,
 }
 
 /**
- * Gate finding F5/F6: groups an IPv6 address to its /64 so an attacker who
- * controls a whole /64 (common with residential/VPS IPv6 allocations)
+ * Gate finding F5/F6, N9: groups an IPv6 address to its /64 so an attacker
+ * who controls a whole /64 (common with residential/VPS IPv6 allocations)
  * can't bypass the cap by rotating the low 64 bits. Best-effort: handles
  * the full 8-hextet form and the single "::" shorthand, which covers the
  * addresses CF-Connecting-IP actually sends. IPv4 addresses (and the
  * "unknown" fallback) pass through unchanged.
+ *
+ * N9: two fixes so distinct clients don't collapse into the same bucket:
+ *   - the address is lower-cased and each hextet's leading zeros are
+ *     stripped to a canonical form, so `2001:DB8::9` and
+ *     `2001:0db8:0000::9` land in the same /64 key they actually share,
+ *     instead of case/padding producing different buckets for what's
+ *     really one client;
+ *   - an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is treated as its
+ *     embedded IPv4 address rather than falling through to the /64 logic,
+ *     which previously collapsed EVERY `::ffff:*` client into one shared
+ *     `0:0:0:0::/64` bucket regardless of the real IPv4 address.
  */
 export function rateLimitIpKeyMaterial(ip: string): string {
-  if (!ip.includes(":")) return ip; // IPv4 or "unknown"
+  if (!ip.includes(":")) return ip.toLowerCase(); // IPv4 or "unknown"
   const withoutZone = ip.split("%")[0] ?? ip;
-  const parts = withoutZone.split(":");
+  const lower = withoutZone.toLowerCase();
+
+  const ipv4Mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (ipv4Mapped) return ipv4Mapped[1]!;
+
+  const parts = lower.split(":");
   let hextets = parts;
   const collapseIdx = parts.indexOf("");
   if (collapseIdx !== -1) {
@@ -71,7 +87,8 @@ export function rateLimitIpKeyMaterial(ip: string): string {
       (p) => p !== "",
     );
   }
-  return `${hextets.slice(0, 4).join(":")}::/64`;
+  const normalized = hextets.slice(0, 4).map((h) => h.replace(/^0+(?=.)/, "") || "0");
+  return `${normalized.join(":")}::/64`;
 }
 
 export interface RateLimitResult {

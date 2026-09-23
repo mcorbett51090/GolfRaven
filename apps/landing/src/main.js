@@ -50,6 +50,10 @@
   if (turnstileContainer) {
     turnstileContainer.classList.add("cf-turnstile");
     turnstileContainer.setAttribute("data-sitekey", turnstileSiteKey);
+    // Gate finding F12: matches the server-side `action: "signup"` check
+    // in apps/signup-worker/src/turnstile.ts — without this, the widget
+    // never sends an `action` in its token, so that check was inert.
+    turnstileContainer.setAttribute("data-action", "signup");
   }
   var turnstileScript = document.createElement("script");
   turnstileScript.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
@@ -153,9 +157,15 @@
         setStatus(
           "Something went wrong sending that. Please try again in a moment.",
         );
-        resetTurnstileWidget();
       })
       .finally(function () {
+        // F9 residual: reset the widget on EVERY completed submit, not
+        // just the error path — form.reset() above does not reset the
+        // Turnstile widget itself, so a second submission right after a
+        // SUCCESS (an impatient re-submit — exactly N1's trigger) would
+        // otherwise resend the already-spent token and get a generic 400
+        // before the widget was ever reset.
+        resetTurnstileWidget();
         if (submitButton) {
           submitButton.disabled = false;
         }

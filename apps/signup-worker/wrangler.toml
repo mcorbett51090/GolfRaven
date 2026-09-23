@@ -63,10 +63,15 @@ ALLOWED_DEV_ORIGINS = ""
 # Gate finding F6: global daily cap on confirmation emails actually sent
 # (on top of the per-IP/per-email attempt caps). Raise/lower as needed.
 GLOBAL_DAILY_SEND_CAP = "500"
-# Gate finding F11: ISO-8601 date/time K2's 6-week gate closes (day 0 + 42
+# Gate finding F11/N2: the date/time K2's 6-week gate closes (day 0 + 42
 # days) — see README.md "Data retention". Leave blank ("") until day 0 is
-# logged in docs/p0/K2.md; the retention cron skips deleting unsubscribed
-# rows entirely until this is set, so a K2 recount always stays possible.
+# logged in docs/p0/K2.md. MUST be a strict, full ISO-8601 UTC timestamp,
+# exactly "YYYY-MM-DDTHH:MM:SSZ" (e.g. "2026-11-16T09:00:00Z") — a bare
+# date, a bare year, or anything else is rejected outright by
+# src/config.ts's checkK2GateClosesAt and never enables deletion. Even once
+# set, the retention cron waits an ADDITIONAL 30 days past this timestamp
+# before deleting any confirmed-then-unsubscribed row, so a K2 recount
+# always stays possible through the verdict window (read at "≈ wk 7").
 K2_GATE_CLOSES_AT = ""
 
 # --- Secrets (set with `wrangler secret put <NAME>` — NEVER put values here) ---

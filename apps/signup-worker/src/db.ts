@@ -164,16 +164,27 @@ export async function markUnsubscribed(db: D1Like, id: string, unsubscribedAt: s
 }
 
 /**
- * Retention cron (gate finding F11): deletes rows that were NEVER
- * confirmed and are older than the cutoff. Unconfirmed rows never count
- * toward K2 (src/k2-count.ts only ever reads rows with a non-null
- * `confirmed_at`), so this deletion can never change a K2 count — see
- * also README.md "Data retention".
+ * Retention cron (gate finding F11, N8): deletes rows that were NEVER
+ * confirmed, are older than `createdBeforeIso`, AND whose confirm token is
+ * either absent or already expired as of `nowIso`. Unconfirmed rows never
+ * count toward K2 (src/k2-count.ts only ever reads rows with a non-null
+ * `confirmed_at`), so this deletion can never change a K2 count — see also
+ * README.md "Data retention".
+ *
+ * N8: `created_at` alone isn't enough — a re-signup near the 30-day mark
+ * rotates in a fresh, still-valid confirm token (48h TTL) without moving
+ * `created_at`, so a `created_at`-only cutoff could delete a row out from
+ * under a link someone can still legitimately click.
  */
-export async function deleteStaleUnconfirmed(db: D1Like, createdBeforeIso: string): Promise<number> {
+export async function deleteStaleUnconfirmed(db: D1Like, createdBeforeIso: string, nowIso: string): Promise<number> {
   const result = await db
-    .prepare("DELETE FROM signups WHERE confirmed_at IS NULL AND created_at < ?1")
-    .bind(createdBeforeIso)
+    .prepare(
+      `DELETE FROM signups
+        WHERE confirmed_at IS NULL
+          AND created_at < ?1
+          AND (confirm_expires_at IS NULL OR confirm_expires_at < ?2)`,
+    )
+    .bind(createdBeforeIso, nowIso)
     .run();
   return extractChanges(result);
 }
