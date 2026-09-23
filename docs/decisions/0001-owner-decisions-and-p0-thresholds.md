@@ -57,3 +57,11 @@ Technical checks X1–X7 keep the pass bars in plan §10 P0 unchanged; each memo
 - **Monorepo staging:** the GitHub integration could not create the `golfraven` repository (`403 Resource not
   accessible by integration`). The monorepo is staged under `golfraven/` in the RavenGolf repo and moves to its
   own repository with history (`git subtree split --prefix=golfraven`) once the owner creates it.
+
+## Addendum A (2026-09-23, before any K3 data is read) — K3 median method
+
+The plan says "90-day median" without saying how to group the days. The method is fixed here so it cannot be
+chosen after the numbers are visible: **take the three most recent complete calendar months before the read
+date, total organic clicks for each, and use the median of those three monthly totals.** Partial months are
+excluded. The keyword-volume check uses the lower bound of each Keyword Planner range, summed across the
+keyword list in `docs/owner/k3-seo-reads.md`.
