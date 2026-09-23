@@ -19,6 +19,12 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
     if (sql.startsWith("INSERT INTO signups")) {
       const [id, emailLc, consentVersion, source, createdAt, confirmTokenHash, confirmExpiresAt, unsubscribeTokenHash] =
         bound as [string, string, string, string | null, string, string, string, string];
+      // Mirrors the real `ON CONFLICT(email_lc) DO NOTHING` (gate finding
+      // F3): a concurrent insert for an already-present email_lc is a
+      // silent no-op with meta.changes: 0, not a thrown error.
+      if (rows.some((r) => r.email_lc === emailLc)) {
+        return { success: true, meta: { changes: 0 } };
+      }
       rows.push({
         id,
         email_lc: emailLc,
@@ -32,7 +38,7 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
         confirm_expires_at: confirmExpiresAt,
         unsubscribe_token_hash: unsubscribeTokenHash,
       });
-      return { success: true };
+      return { success: true, meta: { changes: 1 } };
     }
     if (sql.includes("SET consent_version = ?2")) {
       const [id, consentVersion, source, confirmTokenHash, confirmExpiresAt] = bound as [
@@ -49,7 +55,7 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
         row.confirm_token_hash = confirmTokenHash;
         row.confirm_expires_at = confirmExpiresAt;
       }
-      return { success: true };
+      return { success: true, meta: { changes: row ? 1 : 0 } };
     }
     if (sql.includes("SET confirmed_at = COALESCE(confirmed_at, ?2)")) {
       const [id, confirmedAt] = bound as [string, string];
@@ -57,20 +63,41 @@ function makePrepared(sql: string, rows: SignupRow[]): D1PreparedLike {
       if (row) {
         row.confirmed_at = row.confirmed_at ?? confirmedAt;
         row.unsubscribed_at = null;
+        // Gate finding F4: single-use — clear the confirm token on success.
+        row.confirm_token_hash = null;
+        row.confirm_expires_at = null;
       }
-      return { success: true };
+      return { success: true, meta: { changes: row ? 1 : 0 } };
     }
     if (sql.includes("SET unsubscribed_at = ?2")) {
       const [id, unsubscribedAt] = bound as [string, string];
       const row = rows.find((r) => r.id === id);
       if (row) row.unsubscribed_at = unsubscribedAt;
-      return { success: true };
+      return { success: true, meta: { changes: row ? 1 : 0 } };
     }
     if (sql.includes("SET unsubscribe_token_hash = ?2")) {
       const [id, hash] = bound as [string, string];
       const row = rows.find((r) => r.id === id);
       if (row) row.unsubscribe_token_hash = hash;
-      return { success: true };
+      return { success: true, meta: { changes: row ? 1 : 0 } };
+    }
+    if (sql.startsWith("DELETE FROM signups") && sql.includes("confirmed_at IS NULL")) {
+      const [createdBefore] = bound as [string];
+      const before = rows.length;
+      const kept = rows.filter((r) => !(r.confirmed_at === null && r.created_at < createdBefore));
+      const deleted = before - kept.length;
+      rows.length = 0;
+      rows.push(...kept);
+      return { success: true, meta: { changes: deleted } };
+    }
+    if (sql.startsWith("DELETE FROM signups") && sql.includes("unsubscribed_at IS NOT NULL")) {
+      const [unsubscribedBefore] = bound as [string];
+      const before = rows.length;
+      const kept = rows.filter((r) => !(r.unsubscribed_at !== null && r.unsubscribed_at < unsubscribedBefore));
+      const deleted = before - kept.length;
+      rows.length = 0;
+      rows.push(...kept);
+      return { success: true, meta: { changes: deleted } };
     }
     throw new Error(`FakeD1: no run() handler for query: ${sql}`);
   }
@@ -121,5 +148,15 @@ export class FakeKV implements KVLike {
 
   async put(key: string, value: string): Promise<void> {
     this.store.set(key, value);
+  }
+
+  /**
+   * Not part of KVLike (the real Worker never needs to delete a rate-limit
+   * key — TTL handles that) — a test-only convenience so a test can
+   * simulate a KV TTL expiring without this fake having to implement real
+   * TTL semantics.
+   */
+  delete(key: string): void {
+    this.store.delete(key);
   }
 }

@@ -49,6 +49,12 @@ export interface K2CountResult {
   totalRows: number;
   /** Rows with a non-null confirmed_at, before dedup/exclusion. */
   totalConfirmedRaw: number;
+  /**
+   * Gate finding F17: rows with a non-null `confirmed_at` that fails to
+   * parse as a date are skipped (defensively) rather than silently
+   * dropped — this surfaces that count instead of hiding it.
+   */
+  malformedConfirmedAtCount: number;
   /** Distinct lower-cased confirmed emails that matched the exclusion list. */
   excludedMatchCount: number;
   /** Distinct lower-cased confirmed emails, after exclusion — the pool both counts are drawn from. */
@@ -86,6 +92,7 @@ export function computeK2Counts(params: K2CountParams): K2CountResult {
   );
 
   let totalConfirmedRaw = 0;
+  let malformedConfirmedAtCount = 0;
   // email_lc -> earliest confirmed_at seen for that address (defensive
   // dedup; D1's UNIQUE constraint on email_lc already guarantees one row
   // per address at the source, but the export is arbitrary JSON, not a
@@ -106,7 +113,11 @@ export function computeK2Counts(params: K2CountParams): K2CountResult {
       continue;
     }
     const confirmedAt = new Date(row.confirmed_at);
-    if (Number.isNaN(confirmedAt.getTime())) continue; // malformed timestamp — skip defensively
+    if (Number.isNaN(confirmedAt.getTime())) {
+      // Gate finding F17: report this instead of silently dropping it.
+      malformedConfirmedAtCount += 1;
+      continue;
+    }
     const existing = earliestConfirmedByEmail.get(emailLc);
     if (!existing || confirmedAt.getTime() < existing.getTime()) {
       earliestConfirmedByEmail.set(emailLc, confirmedAt);
@@ -129,6 +140,7 @@ export function computeK2Counts(params: K2CountParams): K2CountResult {
     gateCutoff: gateCutoff.toISOString(),
     totalRows: (params.rows ?? []).length,
     totalConfirmedRaw,
+    malformedConfirmedAtCount,
     excludedMatchCount,
     distinctConfirmed: earliestConfirmedByEmail.size,
     advisoryCount,

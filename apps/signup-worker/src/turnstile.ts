@@ -18,10 +18,20 @@ export interface TurnstileResult {
   errorCodes?: string[];
 }
 
+/**
+ * Gate finding F12 (NIT, defense in depth only — the site key is already
+ * hostname-restricted in the Cloudflare dashboard): when `expectedHostname`
+ * or `expectedAction` is passed AND the siteverify response actually
+ * carries that field, it must match. A field the response omits is not
+ * treated as a mismatch (keeps this lenient enough for test doubles and
+ * any future siteverify response shape change), but a field that IS
+ * present and wrong fails closed.
+ */
 export async function verifyTurnstileToken(
   token: string,
   secretKey: string,
   remoteIp: string | null,
+  expected?: { hostname?: string | undefined; action?: string | undefined },
 ): Promise<TurnstileResult> {
   if (!token || token.length > 4096) {
     return { success: false, errorCodes: ["missing-or-oversized-token"] };
@@ -45,10 +55,16 @@ export async function verifyTurnstileToken(
   }
 
   const data = (await res.json().catch(() => null)) as
-    | { success?: boolean; "error-codes"?: string[] }
+    | { success?: boolean; "error-codes"?: string[]; hostname?: string; action?: string }
     | null;
   if (!data || data.success !== true) {
     return { success: false, errorCodes: data?.["error-codes"] ?? ["siteverify-malformed-response"] };
+  }
+  if (expected?.hostname && data.hostname && data.hostname !== expected.hostname) {
+    return { success: false, errorCodes: ["hostname-mismatch"] };
+  }
+  if (expected?.action && data.action && data.action !== expected.action) {
+    return { success: false, errorCodes: ["action-mismatch"] };
   }
   return { success: true };
 }

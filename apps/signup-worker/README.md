@@ -54,6 +54,29 @@ Rate limiting (`src/ratelimit.ts`) lives entirely in KV, keyed by
 `sha256(pepper + ip)` — never the raw address — and is TTL'd (expires on
 its own), never durable.
 
+## Data retention (gate finding F11)
+
+A scheduled (cron) handler (`src/index.ts`'s `scheduled`, wired in
+`wrangler.toml`'s `[triggers]`) purges two classes of row once daily:
+
+- **Unconfirmed rows older than 30 days** are deleted unconditionally.
+  Unconfirmed rows **never** count toward K2 (`src/k2-count.ts` only ever
+  reads rows with a non-null `confirmed_at` — see its header comment), so
+  this purge can never change a K2 count.
+- **Confirmed-but-unsubscribed rows**, more than 30 days past their
+  `unsubscribed_at`, are deleted too — but **only once the K2 verdict is
+  safely recorded**: the cron skips this class entirely until the owner
+  sets `Env.K2_GATE_CLOSES_AT` (an ISO-8601 date/time — day 0 + 42 days,
+  once day 0 is logged in `docs/p0/K2.md`), and even then never deletes
+  before that date. Until then, a confirmed signup is effectively kept
+  indefinitely once unsubscribed, which is the safe default.
+
+**Processors:** GolfRaven uses two data processors for this backend —
+**Cloudflare** (hosting the Worker, D1, KV, and the Turnstile bot check,
+which receives the visitor's IP via `remoteip`) and **Resend** (delivers
+the confirmation email). See `apps/landing/src/index.html`'s privacy
+section for the visitor-facing version of this notice.
+
 ## Owner deploy runbook
 
 Nothing in `wrangler.toml` is deployable as-is — every `TODO(owner)` must
@@ -96,19 +119,26 @@ package; it's the checklist for whoever deploys it.
    `PUBLIC_BASE_URL`, once the domain is registered and pointed at
    Cloudflare.
 
-7. **Deploy:** `wrangler deploy`.
+7. **Deploy:** `npx wrangler@4 deploy` (pin the version rather than
+   floating on `wrangler@latest`, so a deploy is reproducible).
 
-8. **Verify end to end** before logging K2's day 0: submit the landing
+8. **Point `apps/landing`'s `SIGNUP_ENDPOINT`** (`src/config.js`) at the
+   deployed route (e.g. `https://golfraven.example/api/signup`, or just
+   `/api/signup` for a same-origin deploy), and redeploy the landing page.
+   **Load the deployed landing page and check the browser console for zero
+   CSP violations** — this confirms `_headers`'s `script-src`/`frame-src`
+   allow-list for `https://challenges.cloudflare.com` actually matches what
+   Turnstile needs before relying on it end to end in the next step.
+
+9. **Verify end to end** before logging K2's day 0: submit the landing
    page's form for real, confirm the email arrives (check spam too), click
    confirm, and confirm the row's `confirmed_at` is set
    (`wrangler d1 execute golfraven-signups --remote --command "SELECT email_lc, confirmed_at FROM signups"`).
    **Only then** log day 0 in `docs/p0/K2.md`, before any promotion
    (decision 0001 Addendum D R3) — this package does not, and should not,
-   set that date itself.
-
-9. **Point `apps/landing`'s `SIGNUP_ENDPOINT`** (`src/config.js`) at the
-   deployed route (e.g. `https://golfraven.example/api/signup`, or just
-   `/api/signup` for a same-origin deploy) and redeploy the landing page.
+   set that date itself. Once day 0 is logged, also set
+   `K2_GATE_CLOSES_AT` in `wrangler.toml` to day 0 + 42 days (see "Data
+   retention" above) and redeploy.
 
 ## How to run the K2 count
 

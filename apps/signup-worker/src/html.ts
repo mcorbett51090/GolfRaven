@@ -42,8 +42,8 @@ export function confirmPromptPage(actionUrl: string): string {
 
 export function confirmInvalidPage(): string {
   return page(
-    "Link expired",
-    `<h1>This link is invalid or has expired</h1>
+    "Link expired or already used",
+    `<h1>This link is expired or already used</h1>
      <p>Confirmation links work once and expire after 48 hours. If you still want to sign up, submit the form on the GolfRaven site again.</p>`,
   );
 }

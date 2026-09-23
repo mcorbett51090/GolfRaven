@@ -14,7 +14,7 @@ export function makeTestEnv(overrides: Partial<Env> = {}): TestEnv {
     RATE_LIMIT_KV: new FakeKV(),
     RESEND_API_KEY: "test-resend-key",
     TURNSTILE_SECRET: "test-turnstile-secret",
-    TOKEN_PEPPER: "test-pepper",
+    TOKEN_PEPPER: "test-pepper-0123456789", // >= the 16-char minimum (config.ts assertRequiredSecretsPresent)
     RESEND_FROM_EMAIL: "GolfRaven <hello@golfraven.example>",
     PUBLIC_BASE_URL: "https://golfraven.example",
     ALLOWED_DEV_ORIGINS: "",

@@ -35,7 +35,7 @@ CREATE TABLE signups (
   confirmed_at TEXT,
   -- NULL unless the one-click unsubscribe link/header was used. A fresh
   -- confirmation clears this (re-opens the address) — see src/db.ts
-  -- markConfirmed().
+  -- recordConfirmation().
   unsubscribed_at TEXT,
   -- sha256(TOKEN_PEPPER + ":" + raw confirm token). Rotated on every
   -- re-signup of a not-yet-confirmed or unsubscribed address.

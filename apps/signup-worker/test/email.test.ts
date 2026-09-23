@@ -35,7 +35,10 @@ describe("sendEmail / sendConfirmationEmail — Resend failure path", () => {
       unsubscribeUrl: "https://golfraven.example/api/unsubscribe?token=xyz",
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toBe("invalid from address");
+    if (!result.ok) {
+      expect(result.error).toBe("invalid from address");
+      expect(result.status).toBe(422);
+    }
   });
 
   it("returns ok:false on a 2xx response missing a provider message id", async () => {
@@ -65,7 +68,10 @@ describe("sendEmail / sendConfirmationEmail — Resend failure path", () => {
       html: "<p>hi</p>",
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toBe("network-error-calling-resend");
+    if (!result.ok) {
+      expect(result.error).toBe("network-error-calling-resend");
+      expect(result.status).toBe("network-error");
+    }
   });
 
   it("returns ok:true with the provider id only on a 2xx WITH an id", async () => {

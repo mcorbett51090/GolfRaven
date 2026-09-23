@@ -57,6 +57,23 @@ export interface Env {
    * page needs no CORS at all in production. See responses.ts corsHeaders().
    */
   ALLOWED_DEV_ORIGINS?: string;
+  /**
+   * Global daily cap on confirmation emails actually SENT (gate finding F6)
+   * — a send-volume backstop on top of the per-IP/per-email attempt caps in
+   * ratelimit.ts. Configurable so the owner can raise/lower it without a
+   * code change. Optional; defaults to DEFAULT_GLOBAL_DAILY_SEND_CAP below
+   * when unset or blank.
+   */
+  GLOBAL_DAILY_SEND_CAP?: string;
+  /**
+   * ISO-8601 date/time the K2 gate closes (day 0 + 42 days) — set by the
+   * owner once day 0 is logged in docs/p0/K2.md. Used ONLY by the retention
+   * cron (gate finding F11) to decide when it's safe to delete a row that
+   * was unsubscribed >30 days ago: never before this date, so a K2 verdict
+   * can always be reconstructed from confirmed_at. Leave unset/blank until
+   * day 0 is known — the cron skips that deletion class entirely until then.
+   */
+  K2_GATE_CLOSES_AT?: string;
 }
 
 /**
@@ -85,3 +102,54 @@ export const MAX_EMAIL_LENGTH = 254;
  */
 export const MAX_SOURCE_LENGTH = 64;
 export const MAX_TURNSTILE_TOKEN_LENGTH = 4096;
+
+/** Gate finding F10: reject an oversized/absent Content-Length before parsing. */
+export const MAX_SIGNUP_BODY_BYTES = 8 * 1024;
+
+/** Gate finding F6: minimum time between confirmation emails to the same address. */
+export const RESEND_COOLDOWN_SECONDS = 10 * 60;
+/** Gate finding F6: confirmation emails actually sent to one address per UTC day. */
+export const RESEND_EMAIL_DAILY_CAP = 3;
+/** Gate finding F6: fallback for Env.GLOBAL_DAILY_SEND_CAP when unset/blank. */
+export const DEFAULT_GLOBAL_DAILY_SEND_CAP = 500;
+
+/** Gate finding F11: unconfirmed rows are purged after this many days. */
+export const UNCONFIRMED_RETENTION_DAYS = 30;
+/** Gate finding F11: unsubscribed (and confirmed) rows are purged this long after unsubscribe. */
+export const UNSUBSCRIBED_RETENTION_DAYS = 30;
+
+const MIN_SECRET_LENGTH = 16;
+
+export type SecretsCheckResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Gate finding F13: a missing secret must not silently degrade into
+ * hashing over `"undefined:..."` or a brute-forceable plain-IP hash — fail
+ * loudly with a 500 instead. Checked once per request at the top of
+ * `fetch` (see index.ts).
+ */
+export function assertRequiredSecretsPresent(env: Env): SecretsCheckResult {
+  const required: Array<[string, string | undefined]> = [
+    ["TOKEN_PEPPER", env.TOKEN_PEPPER],
+    ["TURNSTILE_SECRET", env.TURNSTILE_SECRET],
+    ["RESEND_API_KEY", env.RESEND_API_KEY],
+    ["RESEND_FROM_EMAIL", env.RESEND_FROM_EMAIL],
+    ["PUBLIC_BASE_URL", env.PUBLIC_BASE_URL],
+  ];
+  for (const [name, value] of required) {
+    if (typeof value !== "string" || value.length === 0) {
+      return { ok: false, error: `missing required secret/config: ${name}` };
+    }
+  }
+  if (env.TOKEN_PEPPER.length < MIN_SECRET_LENGTH) {
+    return { ok: false, error: `TOKEN_PEPPER is too short (minimum ${MIN_SECRET_LENGTH} characters)` };
+  }
+  return { ok: true };
+}
+
+/** Gate finding F6: resolves the effective global daily send cap. */
+export function globalDailySendCap(env: Env): number {
+  const raw = env.GLOBAL_DAILY_SEND_CAP;
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GLOBAL_DAILY_SEND_CAP;
+}

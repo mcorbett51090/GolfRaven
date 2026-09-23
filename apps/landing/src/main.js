@@ -71,6 +71,21 @@
     }
   }
 
+  // Gate finding F9: a Turnstile token is single-use. form.reset() does
+  // NOT reset the widget itself, so without this, any retry after an
+  // error (429, network failure, a 400) or a second signup would resubmit
+  // the already-spent token and fail siteverify with
+  // "timeout-or-duplicate". Calling the widget API resets it and starts a
+  // fresh challenge, so the visitor always has a valid token to submit
+  // next. [inference from Turnstile's documented single-use tokens and
+  // documented reset() API; not exercised against a live widget in this
+  // environment.]
+  function resetTurnstileWidget() {
+    if (window.turnstile && typeof window.turnstile.reset === "function") {
+      window.turnstile.reset();
+    }
+  }
+
   form.addEventListener("submit", function (event) {
     event.preventDefault();
 
@@ -138,6 +153,7 @@
         setStatus(
           "Something went wrong sending that. Please try again in a moment.",
         );
+        resetTurnstileWidget();
       })
       .finally(function () {
         if (submitButton) {

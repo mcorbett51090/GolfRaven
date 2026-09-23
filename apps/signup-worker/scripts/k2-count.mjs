@@ -2,14 +2,29 @@
 // K2 signup count CLI — decision 0001 Addendum D R3 / docs/p0/K2.md.
 //
 // Usage:
-//   node scripts/k2-count.mjs --export <path-to-d1-json-export.json> [--day0 <ISO-8601>] [--k2-doc <path>]
+//   node scripts/k2-count.mjs --export <path-to-d1-json-export.json> [--k2-doc <path>]
 //
-// If --day0 is omitted, it's parsed from docs/p0/K2.md's "## Day 0"
-// section. If --k2-doc is omitted, it defaults to the repo's
-// docs/p0/K2.md relative to this script. Excluded addresses are ALWAYS
-// parsed from that same file's "## Excluded addresses" section — there is
-// no CLI override for those, so the pre-registered list is always the one
-// actually used (decision 0001 Addendum D R3).
+// Day 0 and the excluded-addresses list are ALWAYS parsed from K2.md's
+// "## Day 0" and "## Excluded addresses..." sections — there is NO CLI
+// override for either, so the pre-registered values in docs/p0/K2.md are
+// always the ones actually used (decision 0001 Addendum D R3; gate finding
+// F1/F7: a --day0 override previously let a caller contradict the logged
+// value, which this file's history shows is exactly the mistake it must
+// not be possible to make).
+//
+// Day 0 MUST be a single bare `YYYY-MM-DD` date (Addendum D: "the UTC
+// date"), interpreted as 00:00 UTC. The CLI refuses to run — with a clear,
+// non-zero-exit message — if that field is blank, holds more than one
+// date, holds a date-time instead of a bare date (ambiguous local time if
+// it has no explicit Z/offset), or doesn't parse as a real calendar date.
+//
+// The excluded-addresses list is found by a heading that STARTS WITH
+// "Excluded addresses" (case-insensitive) — matching the real heading's
+// "(pre-Day-0 list)" suffix — and FAILS LOUDLY (non-zero exit) if no such
+// heading exists at all, rather than silently returning an empty list.
+// Each entry has markdown decoration (backticks, angle brackets, link
+// syntax, a leading "mailto:", trailing punctuation) stripped, and is
+// lower-cased before comparison.
 //
 // Producing the export (see also README.md "How to run the K2 count"):
 //   wrangler d1 execute golfraven-signups --remote --json \
@@ -32,41 +47,133 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--export") out.exportPath = argv[++i];
-    else if (arg === "--day0") out.day0 = argv[++i];
     else if (arg === "--k2-doc") out.k2Doc = argv[++i];
     else if (arg === "--help" || arg === "-h") out.help = true;
+    else {
+      throw new Error(
+        `unrecognized argument: ${arg} (there is no --day0 override — day 0 comes only from K2.md; see --help)`,
+      );
+    }
   }
   return out;
 }
 
 function usage() {
-  console.log(
-    "Usage: node scripts/k2-count.mjs --export <export.json> [--day0 <ISO-8601>] [--k2-doc <path/to/K2.md>]",
-  );
+  console.log("Usage: node scripts/k2-count.mjs --export <export.json> [--k2-doc <path/to/K2.md>]");
 }
 
-/** Extracts the text between a "## <heading>" line and the next "## " line (or EOF). */
-function sectionBody(markdown, heading) {
+/** Extracts the heading text of a markdown "## ..." (1-6 #s) line, or null. */
+function headingText(line) {
+  const m = line.trim().match(/^#{1,6}\s*(.+?)\s*$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Finds the body between the first heading line for which `matchHeading`
+ * returns true and the next heading line (or EOF). Returns `null` — never
+ * `""` — when no matching heading exists at all, so callers can
+ * distinguish "heading missing" from "heading present, body blank".
+ */
+function findSection(markdown, matchHeading) {
   const lines = markdown.split("\n");
-  const startIdx = lines.findIndex((l) => l.trim().toLowerCase() === `## ${heading}`.toLowerCase());
-  if (startIdx === -1) return "";
+  const startIdx = lines.findIndex((l) => {
+    const text = headingText(l);
+    return text !== null && matchHeading(text);
+  });
+  if (startIdx === -1) return null;
   const rest = lines.slice(startIdx + 1);
-  const endIdx = rest.findIndex((l) => l.startsWith("## "));
+  const endIdx = rest.findIndex((l) => headingText(l) !== null);
   return (endIdx === -1 ? rest : rest.slice(0, endIdx)).join("\n");
 }
 
-const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/;
-const EMAIL_RE = /[^\s,()<>]+@[^\s,()<>]+\.[^\s,()<>]+/g;
+const DAY0_HEADING_RE = /^day 0\b/i;
+const EXCLUDED_HEADING_RE = /^excluded addresses/i;
 
+// Matches a bare date OR a date-time (with optional offset) — used to
+// detect "how many date-like things are in this section" and "is the one
+// we found a bare date or something with a time attached".
+const DATE_TOKEN_RE = /\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/g;
+const BARE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Gate findings F1/F7. Returns:
+ *   - a bare "YYYY-MM-DD" string once day 0 is set and valid,
+ *   - `null` if the "## Day 0" section exists but is still blank (the
+ *     normal pre-launch state — the caller prints the standard "not set
+ *     yet" refusal for this case),
+ *   - throws for every other problem (missing heading, more than one
+ *     date, a date-time instead of a bare date, an invalid calendar date)
+ *     — these are configuration mistakes, not the normal blank state, and
+ *     must not be swallowed into "not set yet".
+ */
 export function parseDay0FromK2Doc(markdown) {
-  const body = sectionBody(markdown, "Day 0");
-  const match = body.match(ISO_DATE_RE);
-  return match ? match[0] : null;
+  const body = findSection(markdown, (text) => DAY0_HEADING_RE.test(text));
+  if (body === null) {
+    throw new Error('K2.md is missing its "## Day 0" heading — cannot determine day 0.');
+  }
+
+  const tokens = [...body.matchAll(DATE_TOKEN_RE)].map((m) => m[0]);
+  if (tokens.length === 0) return null; // still blank — not an error
+  if (tokens.length > 1) {
+    throw new Error(
+      `K2 Day 0 section contains more than one date (${tokens.join(", ")}) — it must contain exactly one bare YYYY-MM-DD date.`,
+    );
+  }
+
+  const token = tokens[0];
+  if (!BARE_DATE_RE.test(token)) {
+    const hasExplicitOffset = /(Z|[+-]\d{2}:?\d{2})$/.test(token);
+    throw new Error(
+      hasExplicitOffset
+        ? `K2 Day 0 ("${token}") includes a time — it must be a bare YYYY-MM-DD date (Addendum D: "the UTC date"), interpreted as 00:00 UTC.`
+        : `K2 Day 0 ("${token}") includes a time with no explicit UTC offset (ambiguous local time) — it must be a bare YYYY-MM-DD date.`,
+    );
+  }
+
+  const [y, m, d] = token.split("-").map(Number);
+  const check = new Date(Date.UTC(y, m - 1, d));
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== m - 1 || check.getUTCDate() !== d) {
+    throw new Error(`K2 Day 0 ("${token}") is not a valid calendar date.`);
+  }
+  return token;
 }
 
+/**
+ * Gate finding F8: strips markdown decoration around an email address —
+ * backticks, angle brackets, link-syntax brackets/parens, and a leading
+ * "mailto:" — by replacing (not deleting) them with a space, so two
+ * decorated addresses on one line (e.g. a `[text](mailto:url)` link)
+ * never get concatenated into one bad token.
+ */
+function stripMarkdownDecoration(text) {
+  return text.replace(/`+/g, " ").replace(/mailto:/gi, " ").replace(/[<>[\]()]/g, " ");
+}
+
+// Deliberately tighter than validate.ts's pragmatic signup-time regex: this
+// one must reject trailing markdown punctuation like a bullet's trailing
+// period ("a@b.com.") without being told to — and it does, because the
+// domain/TLD groups only match letters/digits/dot/hyphen, so a trailing
+// "." (not followed by 2+ letters) is simply left out of the match.
+const EMAIL_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
+/**
+ * Gate finding F1: the heading is matched by PREFIX ("starts with
+ * 'excluded addresses'", case-insensitive) so it finds the real K2.md
+ * heading "Excluded addresses (pre-Day-0 list)", not just an exact
+ * "Excluded addresses" — and throws (never silently returns `[]`) if no
+ * such heading exists in the document at all.
+ */
 export function parseExcludedAddressesFromK2Doc(markdown) {
-  const body = sectionBody(markdown, "Excluded addresses");
-  return [...body.matchAll(EMAIL_RE)].map((m) => m[0]);
+  const body = findSection(markdown, (text) => EXCLUDED_HEADING_RE.test(text));
+  if (body === null) {
+    throw new Error(
+      'K2.md is missing an "Excluded addresses" heading (expected one starting with "Excluded ' +
+        'addresses", case-insensitive) — refusing to silently treat the exclusion list as empty.',
+    );
+  }
+  const cleaned = stripMarkdownDecoration(body);
+  const matches = [...cleaned.matchAll(EMAIL_TOKEN_RE)].map((m) => m[0].toLowerCase());
+  return [...new Set(matches)];
 }
 
 /**
@@ -94,10 +201,10 @@ async function main() {
     throw new Error(`could not read K2 doc at ${k2DocPath}: ${err.message}`);
   });
 
-  const day0 = args.day0 ?? parseDay0FromK2Doc(k2Doc);
+  const day0 = parseDay0FromK2Doc(k2Doc);
   if (!day0) {
     console.error(
-      `K2 day 0 is not set in ${k2DocPath} (the "## Day 0" section is still blank) and --day0 was not passed.\n` +
+      `K2 day 0 is not set in ${k2DocPath} (the "## Day 0" section is still blank).\n` +
         "Refusing to run — decision 0001 Addendum D R3: day 0 must be logged before any count is read.",
     );
     process.exitCode = 1;
@@ -126,6 +233,9 @@ async function main() {
   console.log(`K2 signup count — day 0: ${result.day0}`);
   console.log(`  excluded addresses (from ${k2DocPath}): ${excludedAddresses.length}`);
   console.log(`  export rows: ${result.totalRows}  confirmed (raw): ${result.totalConfirmedRaw}`);
+  if (result.malformedConfirmedAtCount > 0) {
+    console.log(`  WARNING: rows with an unparsable confirmed_at, skipped: ${result.malformedConfirmedAtCount}`);
+  }
   console.log(`  excluded rows matched: ${result.excludedMatchCount}`);
   console.log(`  distinct confirmed (post-exclusion): ${result.distinctConfirmed}`);
   console.log("");

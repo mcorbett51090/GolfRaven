@@ -50,4 +50,41 @@ describe("verifyTurnstileToken", () => {
     expect((await verifyTurnstileToken("x".repeat(5000), "secret", null)).success).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  describe("hostname/action check (F12, defense in depth)", () => {
+    it("succeeds when the response's hostname/action match what's expected", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ success: true, hostname: "golfraven.example", action: "signup" }), { status: 200 })),
+      );
+      const result = await verifyTurnstileToken("tok", "secret", "1.2.3.4", { hostname: "golfraven.example", action: "signup" });
+      expect(result.success).toBe(true);
+    });
+
+    it("fails when the response's hostname is present but does not match", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ success: true, hostname: "evil.example" }), { status: 200 })),
+      );
+      const result = await verifyTurnstileToken("tok", "secret", "1.2.3.4", { hostname: "golfraven.example" });
+      expect(result.success).toBe(false);
+      expect(result.errorCodes).toContain("hostname-mismatch");
+    });
+
+    it("fails when the response's action is present but does not match", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify({ success: true, action: "other" }), { status: 200 })),
+      );
+      const result = await verifyTurnstileToken("tok", "secret", "1.2.3.4", { action: "signup" });
+      expect(result.success).toBe(false);
+      expect(result.errorCodes).toContain("action-mismatch");
+    });
+
+    it("does not fail when hostname/action are expected but the response omits them", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 })));
+      const result = await verifyTurnstileToken("tok", "secret", "1.2.3.4", { hostname: "golfraven.example", action: "signup" });
+      expect(result.success).toBe(true);
+    });
+  });
 });

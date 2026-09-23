@@ -85,6 +85,16 @@ describe("computeK2Counts", () => {
     expect(result.gateCount).toBe(1);
   });
 
+  it("reports (rather than silently drops) rows with a malformed confirmed_at (F17)", () => {
+    const rows = [
+      { email_lc: "good@example.com", confirmed_at: "2026-10-06T00:00:00.000Z" },
+      { email_lc: "bad@example.com", confirmed_at: "not-a-date" },
+    ];
+    const result = computeK2Counts({ rows, day0: DAY0, excludedAddresses: [] });
+    expect(result.malformedConfirmedAtCount).toBe(1);
+    expect(result.distinctConfirmed).toBe(1);
+  });
+
   it("handles a `wrangler d1 execute --json`-shaped export via the CLI's row extractor semantics (rows array itself)", () => {
     // computeK2Counts itself only takes a plain rows array — the
     // wrangler-shape unwrapping happens in scripts/k2-count.mjs — this

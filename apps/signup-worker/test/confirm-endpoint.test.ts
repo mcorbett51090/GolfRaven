@@ -62,15 +62,31 @@ describe("POST /api/confirm — confirms exactly once, then is idempotent", () =
     expect(env.DB.rows[0]?.confirmed_at).not.toBeNull();
   });
 
-  it("is idempotent: a second POST with the same (still-valid) token does not change confirmed_at", async () => {
+  it("is single-use (F4): a second POST with the same token shows the generic invalid/already-used page and does not change confirmed_at", async () => {
     const env = makeTestEnv();
     await seedPendingRow(env);
     await handleConfirmSubmit(confirmPostRequest(RAW_TOKEN), env);
     const firstConfirmedAt = env.DB.rows[0]?.confirmed_at;
+    expect(env.DB.rows[0]?.confirm_token_hash).toBeNull(); // cleared on success (F4)
 
     const res2 = await handleConfirmSubmit(confirmPostRequest(RAW_TOKEN), env);
-    expect(res2.status).toBe(200);
+    expect(res2.status).toBe(400);
+    const html2 = await res2.text();
+    expect(html2.toLowerCase()).toContain("already used");
     expect(env.DB.rows[0]?.confirmed_at).toBe(firstConfirmedAt);
+  });
+
+  it("a used link cannot be replayed to re-subscribe after an unsubscribe (F4 — closes the reuse hole)", async () => {
+    const env = makeTestEnv();
+    await seedPendingRow(env);
+    await handleConfirmSubmit(confirmPostRequest(RAW_TOKEN), env);
+    // Simulate the address unsubscribing afterward.
+    env.DB.rows[0]!.unsubscribed_at = "2026-02-01T00:00:00.000Z";
+
+    const replay = await handleConfirmSubmit(confirmPostRequest(RAW_TOKEN), env);
+    expect(replay.status).toBe(400);
+    // The old link must NOT have cleared unsubscribed_at.
+    expect(env.DB.rows[0]?.unsubscribed_at).toBe("2026-02-01T00:00:00.000Z");
   });
 
   it("re-opens a previously-unsubscribed row without moving the original confirmed_at", async () => {

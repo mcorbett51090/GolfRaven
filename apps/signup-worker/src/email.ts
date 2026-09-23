@@ -25,7 +25,15 @@ export interface EmailMessage {
   headers?: Record<string, string>;
 }
 
-export type SendResult = { ok: true; providerId: string } | { ok: false; error: string };
+/**
+ * Gate finding F14: `error` may be Resend's free-text `message`, which can
+ * echo the recipient address — never log it. `status` is a fixed,
+ * PII-free code (the HTTP status, or a fixed string for a transport-level
+ * failure) safe to log; callers should log `status`, not `error`.
+ */
+export type SendResult =
+  | { ok: true; providerId: string }
+  | { ok: false; error: string; status: number | "network-error" };
 
 /**
  * The Resend JSON body. Exported for the byte-identity test, same reasoning
@@ -52,14 +60,14 @@ async function sendViaResend(env: Env, msg: EmailMessage): Promise<SendResult> {
       body: JSON.stringify(resendBody(msg)),
     });
   } catch {
-    return { ok: false, error: "network-error-calling-resend" };
+    return { ok: false, error: "network-error-calling-resend", status: "network-error" };
   }
 
   const data = (await res.json().catch(() => null)) as { id?: string; message?: string } | null;
   if (res.ok && data && typeof data.id === "string" && data.id.length > 0) {
     return { ok: true, providerId: data.id };
   }
-  return { ok: false, error: data?.message ?? `resend-http-${res.status}` };
+  return { ok: false, error: data?.message ?? `resend-http-${res.status}`, status: res.status };
 }
 
 /** Sends through Resend (the only configured provider — see README). */
