@@ -20,15 +20,16 @@ import {
   getSdkStatus,
   initialize,
   readRecords,
+  requestExerciseRoute,
   requestPermission,
   SdkAvailabilityStatus,
 } from "react-native-health-connect";
-import type { RawExerciseSessionRecord } from "./types.js";
-import { shapeGolfSessions } from "./shape.js";
+import type { RawExerciseSessionRecord, RouteFollowUpResult } from "./types.js";
+import { shapeGolfSessions, shapeRouteFollowUp } from "./shape.js";
 import type { GolfSessionReadResult } from "./types.js";
 
-export type { GolfSessionReadResult, GolfSessionSummary } from "./types.js";
-export { shapeGolfSessions, EXERCISE_TYPE_GOLF } from "./shape.js";
+export type { GolfSessionReadResult, GolfSessionSummary, RouteFollowUpResult } from "./types.js";
+export { shapeGolfSessions, shapeRouteFollowUp, EXERCISE_TYPE_GOLF } from "./shape.js";
 
 /** Thrown when Health Connect itself isn't usable on this device (not
  * installed, or the installed provider is too old). The X1 harness
@@ -131,6 +132,31 @@ export async function readGolfSessions(windowDays = 30): Promise<GolfSessionRead
   } while (pageToken);
 
   return shapeGolfSessions(allRecords, windowDays, now);
+}
+
+/**
+ * CONSENT_REQUIRED follow-up read (decision 0001, Addendum D, R6): a
+ * session Health Connect reported via `readGolfSessions` as
+ * `routeRequiresConsent: true` counts as "route present" only if this
+ * follow-up call to `requestExerciseRoute(recordId)` — the library's
+ * per-record route-read consent flow, distinct from the up-front
+ * `ExerciseSession` read permission requested by
+ * `requestGolfReadPermission` — returns at least one point. Call this
+ * (per session that came back with `routeRequiresConsent: true`) after
+ * the device has had the chance to prompt for that per-record consent;
+ * whether the platform actually surfaces that prompt here, versus
+ * throwing or returning an empty array outright, is itself part of what
+ * X1's real device run is meant to find out `[unverified — training
+ * knowledge and this library's shipped .d.ts only, not a real device]`.
+ *
+ * @param recordId the `ExerciseSession` record id
+ *   (`GolfSessionSummary.recordId`) to request the route for.
+ */
+export async function fetchConsentRequiredRouteFollowUp(
+  recordId: string,
+): Promise<RouteFollowUpResult> {
+  const points = await requestExerciseRoute(recordId);
+  return shapeRouteFollowUp(points);
 }
 
 /**

@@ -23,7 +23,7 @@ since the pass bar is about the *chosen Supabase tier* specifically.
 ### Locally (fastest first pass)
 
 ```shell
-cd /home/user/RavenGolf/golfraven
+cd /home/user/golfraven
 supabase start
 psql "$(supabase status -o env | grep DB_URL | cut -d= -f2)" -f docs/owner/x7-postgis-benchmark.sql
 ```
@@ -61,27 +61,15 @@ The script prints several result sets in order:
 `pass` only if both the extension check succeeded **and** `p95_ms < 100`. A hit rate near 0% or near 100%
 means the point generation did not work as intended and the run should not be recorded as the result.
 
-## Alternative: pgbench custom script
+## No pgbench alternative
 
-If you prefer `pgbench` over the PL/pgSQL timing loop in the `.sql` file, an equivalent custom script is:
-
-```sql
--- pip_query.sql (pgbench custom script)
-\set lon random(-170, -52)
-\set lat random(15, 72)
-select id from x7_bench.course_polygon
-where st_contains(geom, st_setsrid(st_makepoint(:lon, :lat), 4326))
-limit 1;
-```
-
-```shell
-pgbench -n -f pip_query.sql -T 30 --progress-timestamp -c 1 -j 1 "$DATABASE_URL"
-```
-
-Note `pgbench`'s built-in `random()` needs integer bounds, so this variant loses sub-degree precision
-compared to the `.sql` file's `random()`-based floats — it's a coarser but still representative substitute.
-`pgbench` reports latency **average**, not p95, directly; add `--log` and post-process the per-transaction
-log for a true p95 if you use this path instead of the provided script.
+An earlier draft of this doc offered a `pgbench` custom-script alternative. **It is removed**: it drew every
+query point uniform-random over the full US+CA bounding box, so effectively 0% of queries hit a polygon —
+exactly the non-compliant, 0%-hit workload decision 0001, Addendum B replaced (gate review S1(b)). It cannot
+be fixed into compliance without becoming the same half-inside/half-outside point-generation logic the
+provided `.sql` file already implements, so there is no separate "equivalent" script here: **the `.sql`
+file's PL/pgSQL timing loop is the only valid X7 method.** A `pgbench`-shaped result is not a valid X7 result
+and must not be recorded in `docs/p0/X7.md`'s MEASURED VALUE.
 
 ## Local proxy run (not the Supabase tier) — 2026-09-23
 

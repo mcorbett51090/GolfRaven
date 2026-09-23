@@ -80,6 +80,26 @@ if (requiredStrings.every((needle) => html.includes(needle))) {
   ok("all required copy present (trails, finisher's marker, double opt-in, 16+, unsubscribe)");
 }
 
+// Deploy guard (gate review S5): the page must not ship with the
+// [OPERATING ENTITY NAME — TBD] / [CONTACT EMAIL — TBD] placeholders once
+// a real deploy is attempted. This only fails the build when DEPLOY=1 is
+// set, so local/dev/CI builds of the still-placeholder page stay green
+// until the owner fills these in and actually deploys (see README.md
+// "Before this page goes live").
+const placeholderPattern = /\[\s*(OPERAT\w*|CONTACT)[^\]]*\]/i;
+const hasPlaceholder = placeholderPattern.test(html);
+if (process.env.DEPLOY === "1") {
+  if (hasPlaceholder) {
+    fail(
+      "index.html still contains an [OPERATING ENTITY NAME…]/[CONTACT EMAIL…] placeholder and DEPLOY=1 is set — fill these in before deploying (see README.md \"Before this page goes live\")",
+    );
+  } else {
+    ok("no [OPERATING ENTITY NAME…]/[CONTACT EMAIL…] placeholders found (DEPLOY=1 checked)");
+  }
+} else if (hasPlaceholder) {
+  ok("placeholders present but DEPLOY=1 is not set — not blocking a non-deploy build");
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

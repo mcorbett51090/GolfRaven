@@ -5,6 +5,7 @@ export {
   requestGolfReadPermission,
   readGolfSessions,
   runX1HealthConnectCheck,
+  fetchConsentRequiredRouteFollowUp,
   HealthConnectUnavailableError,
   HealthConnectPermissionDeniedError,
 } from "./reader.js";

@@ -1,7 +1,7 @@
 # K1 outreach — operator and sponsor contact pack
 
 Status: draft for Matt to review, personalize and send from his own accounts. Nothing here has been sent.
-Sourced against `docs/golf-trails/02-build-plan.md` §9, §10 P0, §14, `golfraven/docs/decisions/0001-owner-decisions-and-p0-thresholds.md`,
+Sourced against `docs/golf-trails/02-build-plan.md` §9, §10 P0, §14, `docs/decisions/0001-owner-decisions-and-p0-thresholds.md`,
 and `docs/golf-trails/research/*.md`. Facts not traceable to those files are marked `[unverified]` or `[snippet-only]` (WebSearch
 result text I could not verify by fetching the source page — WebFetch is blocked by the network proxy in this environment).
 
@@ -24,7 +24,11 @@ result text I could not verify by fetching the source page — WebFetch is block
 | 5 | **Hammock Coast Golf Trail** (11–12 courses; warm co-op reserve) | Nonprofit marketing co-op (Georgetown County, SC), formed 2007 | Georgetown County Chamber of Commerce / Tourism Marketing Commission | Phone 843-546-8436; email info@visitgeorge.com `[snippet-only]` | `research/us-trails.md` — "Hammock Coast … Nonprofit marketing co-op, formed 2007 in Georgetown County SC"; build plan §9.9 reserve 2 |
 | 6 | **Canadian Rockies Golf Consortium** (6 courses, Alberta; warm co-op reserve) | Course co-op marketing partnership | Gord Schultz, Executive Director (named in a trade-press quote) | canadianrockiesgolf.ca `[unverified — no direct contact email found this session; use site contact form]` | `research/canada-trails.md` — "Canadian Rockies Golf Consortium … co-op marketing partnership of the 6 independently owned/operated courses … executive director Gord Schultz" |
 
-**Count: 6 operator targets** (≥ 5 required by K1: 3 slate + OK reserve + 2 co-op/DMO warm reserves).
+**Count: the 5 named operators (decision 0001, Addendum D, R2) — Tennessee Golf Trail, Vancouver Island Golf
+Trail, Robert Trent Jones Golf Trail (slate), Hammock Coast, Canadian Rockies Golf Consortium (co-op/DMO warm
+reserves).** Oklahoma Golf Trail is listed as a 6th row below for readiness only: it is contacted, and counts
+toward the 5, **only if the plan's X2 swap rule activates it as the slate reserve**, in which case it
+*replaces* the dropped slate trail — it never adds a 6th contact and never counts as a co-op/DMO.
 
 ## (b) Sponsor prospects (≥ 3 required; equipment, apparel, tourism boards per O11/§9.7/§9.9)
 

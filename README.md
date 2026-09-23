@@ -45,10 +45,9 @@ golfraven/
 │                    Functions). Placeholder — migrations arrive P3.
 ├── data/            Catalog content (git, PR-reviewed). Placeholder —
 │                    seeded data arrives P1.
-├── .gitleaks.toml   gitleaks config (at the golfraven/ root, not under
-│                    .github/ — used by both the live workflow and the
-│                    post-extraction copy below).
-└── .github/         CODEOWNERS, PR template, the post-extraction CI copy.
+├── .gitleaks.toml   gitleaks config, at the repo root (not under
+│                    .github/), consumed by .github/workflows/ci.yml.
+└── .github/         CODEOWNERS, PR template, CI workflow (ci.yml).
 ```
 
 Each package/app has its own `README.md` explaining what phase actually
@@ -60,7 +59,6 @@ Requires **pnpm 10.33.0** (pinned via `packageManager` in `package.json`;
 `corepack enable` picks it up automatically) and **Node ≥ 24** (`.nvmrc`).
 
 ```shell
-cd golfraven
 pnpm install --frozen-lockfile
 pnpm -r typecheck
 pnpm -r build
@@ -75,9 +73,10 @@ local-only workaround, never something to weaken in CI.
 
 ## CI
 
-`golfraven-ci.yml` (see "Staging note" above) runs on every PR and every
-push to `main`, with **no `paths:` filter** — it always evaluates, so a
-consumer of this workflow never sees a check stuck pending. It installs
-with a frozen lockfile, then runs `pnpm -r typecheck`, `pnpm -r build`,
-`pnpm -r test`, and a gitleaks secret scan, all pinned to full commit
-SHAs (see the workflow file for the exact SHA → version mapping).
+`.github/workflows/ci.yml` (workflow name "golfraven CI") runs on every PR
+and every push to `main`, with **no `paths:` filter** — it always
+evaluates, so a consumer of this workflow never sees a check stuck
+pending. It installs with a frozen lockfile, then runs `pnpm -r typecheck`,
+`pnpm -r build`, `pnpm -r test`, and a gitleaks secret scan, all pinned to
+full commit SHAs (see the workflow file for the exact SHA → version
+mapping).

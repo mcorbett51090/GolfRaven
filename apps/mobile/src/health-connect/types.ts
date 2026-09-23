@@ -60,6 +60,34 @@ export interface GolfSessionReadResult {
  * so the pure shaping logic can be unit-tested with plain object literals
  * instead of importing (and mocking) the native module.
  */
+/**
+ * Result of the CONSENT_REQUIRED follow-up read (decision 0001, Addendum
+ * D, R6): a session reported as `CONSENT_REQUIRED` counts as "route
+ * present" only if a follow-up `requestExerciseRoute(recordId)` call
+ * returns at least one point.
+ */
+export interface RouteFollowUpResult {
+  /** True only if the follow-up read returned ≥ 1 point. */
+  routePresent: boolean;
+  /** Number of points the follow-up read returned. 0 when `routePresent`
+   * is false. */
+  routePointCount: number;
+}
+
+/**
+ * The minimal shape this module reads off a
+ * `requestExerciseRoute(recordId)` result (`Location[]` in
+ * `react-native-health-connect`'s types). Declared locally, narrowed to
+ * only the fields used, for the same reason as `RawExerciseSessionRecord`
+ * below — keeps `shape.ts` free of any import from
+ * `react-native-health-connect`.
+ */
+export interface RawExerciseRoutePoint {
+  latitude: number;
+  longitude: number;
+  time: string;
+}
+
 export interface RawExerciseSessionRecord {
   metadata?: {
     id?: string;

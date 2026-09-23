@@ -7,7 +7,9 @@
 import type {
   GolfSessionReadResult,
   GolfSessionSummary,
+  RawExerciseRoutePoint,
   RawExerciseSessionRecord,
+  RouteFollowUpResult,
 } from "./types.js";
 
 /** Health Connect `ExerciseType.GOLF` (from `react-native-health-connect`'s
@@ -51,6 +53,24 @@ function shapeOneSession(record: RawExerciseSessionRecord): GolfSessionSummary {
  *   (recorded on the result so the memo doesn't have to be told twice).
  * @param now injectable for tests; defaults to the real current time.
  */
+/**
+ * Shapes the result of a CONSENT_REQUIRED follow-up read
+ * (`requestExerciseRoute(recordId)`, called from `reader.ts`'s
+ * `fetchConsentRequiredRouteFollowUp`) into the route-presence verdict
+ * the X1 results table needs (decision 0001, Addendum D, R6): a session
+ * Health Connect reported as `CONSENT_REQUIRED` counts as "route
+ * present" only if this follow-up read returns at least one point;
+ * otherwise it counts as "not present".
+ */
+export function shapeRouteFollowUp(
+  points: readonly RawExerciseRoutePoint[],
+): RouteFollowUpResult {
+  return {
+    routePresent: points.length > 0,
+    routePointCount: points.length,
+  };
+}
+
 export function shapeGolfSessions(
   records: readonly RawExerciseSessionRecord[],
   windowDays: number,
