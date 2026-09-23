@@ -1,0 +1,10 @@
+# gitleaks fingerprints accepted as false positives. Each entry needs a reason; nothing else belongs here.
+#
+# 2026-09-23 — signup-worker test fixtures. These four lines held the fake test value
+# "test-pepper-0123456789-0123456789" (and an earlier 16-char variant) for TOKEN_PEPPER in unit tests.
+# They were never real secrets. The literals were replaced with a runtime-built value ("p".repeat(40))
+# in the same PR; these entries only cover the two historical commits that still contain them.
+b78bdb6152f4faf898e15a43feef4abcf4c6e6e2:apps/signup-worker/test/env.ts:generic-api-key:17
+b78bdb6152f4faf898e15a43feef4abcf4c6e6e2:apps/signup-worker/test/router.test.ts:generic-api-key:45
+fe6b390e215b383fab9e8feeafb61bbd33052b60:apps/signup-worker/test/env.ts:generic-api-key:17
+fe6b390e215b383fab9e8feeafb61bbd33052b60:apps/signup-worker/test/router.test.ts:generic-api-key:41

@@ -42,7 +42,7 @@ function baseEnv(overrides: Partial<Env> = {}): Env {
     RATE_LIMIT_KV: new FakeKV(),
     RESEND_API_KEY: "test-resend-key",
     TURNSTILE_SECRET: "test-turnstile-secret",
-    TOKEN_PEPPER: "test-pepper-0123456789-0123456789", // >= the 32-char minimum (gate finding F-N6)
+    TOKEN_PEPPER: "p".repeat(40), // >= the 32-char minimum (gate finding F-N6); runtime-built, see test/env.ts
     RESEND_FROM_EMAIL: "GolfRaven <hello@golfraven.example>",
     PUBLIC_BASE_URL: "https://golfraven.example",
     ALLOWED_DEV_ORIGINS: "",
