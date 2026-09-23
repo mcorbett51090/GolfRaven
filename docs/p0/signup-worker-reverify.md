@@ -1,0 +1,229 @@
+# Signup-worker gate: re-verification of the fixes
+
+- **Scope:** `apps/signup-worker/**`, `apps/landing/**`, `docs/p0/K2.md`, and decision 0001 Addendum D R3
+  (the authoritative K2 rule). Branch `claude/golf-trails-golfnow-app-lumnqo`, HEAD `fe6b390`
+  ("p0: close signup-worker gate findings").
+- **Baseline:** `docs/p0/signup-worker-gate.md`, which found 2 BLOCKING, 9 SHOULD-FIX and 6 NIT at `66a9b1f`.
+- **Method:** each fix claim was checked against the code, not the commit message. Every original probe
+  was repeated against the fixed code, and new probes attacked the code the fixes added. The probes were
+  scratch vitest and node scripts under the session scratchpad, importing `src/*.ts` directly. No repo
+  file other than this report was written, and git state was not changed.
+- **Date:** 2026-09-23.
+
+**Verdict: `signup-worker: FIX REQUIRED`.** Both original BLOCKING findings are closed. F1's parser now
+reads the real K2.md, and F2's response is now the same for every address state. **The fixes, though,
+introduced two new BLOCKING defects.** Both damage the data the K2 kill gate is read from:
+
+- **N1:** a re-signup inside the new cooldown kills the only confirmation link the person was sent.
+- **N2:** the new retention cron can delete counted K2 rows before the week-7 verdict is read.
+
+## 1. Per-finding status
+
+| id | orig. sev | status | evidence (file:line) | residual |
+|---|---|---|---|---|
+| F1 | BLOCKING | **CLOSED** | `scripts/k2-count.mjs:90,166-177` matches the heading by prefix, case-insensitive, and throws when the heading is missing. `test/k2-count-cli.test.ts:6,170` parses the real `docs/p0/K2.md` via `?raw`. | none |
+| F2 | BLOCKING | **CLOSED** | `src/index.ts:320-336`: every case pays the same validation, IP-limit, Turnstile, email-limit and SELECT cost. All case-dependent writes and the Resend send run in `ctx.waitUntil` (`:330`). The probe in §2 shows identical status, body, headers and timing. | See the §2 note on theoretical D1 write-queue contention. It is not a finding. |
+| F3 | SHOULD-FIX | **CLOSED** | `src/index.ts:459-466` uses `return await`. `src/db.ts:60-81` uses `ON CONFLICT(email_lc) DO NOTHING` plus `meta.changes`. The race fallback is at `src/index.ts:256-273`. Probe: a failing D1 gives a JSON 500, not an escaped error. A concurrent new-address race gives `202 202`, 1 row. On real SQLite the conflicting insert reports `rowcount 0`. | none |
+| F4 | SHOULD-FIX | **CLOSED** | `src/db.ts:137-149` clears `confirm_token_hash`/`confirm_expires_at`, verified on real SQLite as `[('T1', None)]`. `src/html.ts` now shows the "expired or already used" copy. | README still calls POST confirm "Idempotent" (N10). |
+| F5 | SHOULD-FIX | **CLOSED** | `src/index.ts:304-323`: IP cap, then Turnstile, then the per-email cap. Probe: after 6 junk-token requests for a victim there were **0** `rl:email:*` keys, and the victim's own signup returned 202 with 1 send. | Burning a victim's 5/day cap now costs 5 Turnstile solves. That is accepted residual. |
+| F6 | SHOULD-FIX | **CLOSED** | (a) a 10-min per-email cooldown plus 3 sends/day (`src/ratelimit.ts:129-158`). (b) IPv6 keyed by /64 (`:61-75`). (c) a global cap, default 500 (`src/config.ts:273,310-314`). | The fixes have side effects; see N1, N3 and N9. |
+| F7 | SHOULD-FIX | **PARTIAL** | (a) bare `YYYY-MM-DD` only, built with `Date.UTC` (`k2-count.mjs:124-138`). (b) zero or several dates cause a refusal (`:115-121`). (c) `--day0` removed (`:53-55`). All confirmed by the CLI probes in §3. | **`--k2-doc <any path>` (`k2-count.mjs:50,199`) still lets a caller substitute a different day 0 and exclusion list.** That contradicts R3's "logged in K2.md, no override" rule. Fix: drop the flag from the CLI, keeping injection in the test-only helpers. Or refuse unless the file is the canonical `docs/p0/K2.md`. Or require that its Day 0 and exclusion sections equal the canonical file's. The path is printed, which only partly mitigates this. (SHOULD-FIX) |
+| F8 | SHOULD-FIX | **PARTIAL** | Stripping now works for backticks, `<…>`, `[..](mailto:..)`, a trailing period, `**bold**`, `"…"`, `'…'`, `~~…~~` and comma lists (§3). | (1) `_ital5@x.com_` parses as `_ital5@x.com` and silently misses. (2) `ünï13@x.com` parses as **`13@x.com`**, excluding the wrong address. (3) Unparseable bullets (`test10@localhost`, `matt at golfraven dot com`) are dropped silently, and the parsed list is **not echoed**; only the count is printed (`k2-count.mjs:234`). (4) **R3's "listed before day 0" rule is still not enforced.** An address added to K2.md after day 0 retroactively excludes signups, so the count does not match R3 literally. Fix: echo the list, fail on any non-blank bullet that does not yield exactly one clean address, and strip `_`. For the timing rule, read K2.md at the commit that logged Day 0 (`git log -S`), or refuse any exclusion line whose `git blame` date is after day 0. (SHOULD-FIX) |
+| F9 | SHOULD-FIX | **PARTIAL** | `apps/landing/src/main.js:83-87,156` calls `turnstile.reset()` in `.catch`. | The success path (`:143-151`) does `form.reset()` only, so a second submission after a success sends the spent token and gets a 400 plus "Something went wrong" before the error path resets the widget. This is exactly the impatient re-submit that triggers N1. Fix: call `resetTurnstileWidget()` in `.finally()`. (NIT) |
+| F10 | SHOULD-FIX | **PARTIAL** | 415, 411 and 413 are in place (`src/index.ts:109-140`). Probe: `text/plain` gives 415, a Content-Length that lies small gives 413, and no Content-Length gives 411. | (1) `Content-Type: text/plain; x=application/json` is accepted (**202**), because the check is `.includes("application/json")` (`:111`). That header is a CORS-safelisted "simple" type, so the cross-site simple-request path the finding meant to close is still open. Turnstile still blocks it in practice. Fix: compare the media-type essence, `ct.split(";")[0].trim().toLowerCase() === "application/json"`. (NIT) (2) `Content-Length: -1` gives 202, because the parse accepts it and `request.text()` still reads the whole body before the size check. See N5. |
+| F11 | SHOULD-FIX | **CLOSED** | Cron purge at `src/index.ts:425-444` and `wrangler.toml:47-48`. The notice at `apps/landing/src/index.html:142-146` now discloses the keyed IP hash, retention, and Cloudflare and Resend as processors. | The new cron has defects of its own (N2, N8). The "at most 48 hours" claim is loose (N12). |
+| F12 | NIT | **PARTIAL** | `src/turnstile.ts:257-262` checks `hostname` and `action` when they are present. | The landing page **never sets `data-action`** (`main.js:50-53` sets only `data-sitekey`), so the `action: "signup"` check is inert. Siteverify returns an empty or absent action, and the check is lenient when the field is missing `[inference; siteverify's no-action value not verified live]`. Fix: `setAttribute("data-action","signup")`. (NIT) |
+| F13 | NIT | **CLOSED** | `src/config.ts:290-307`, called first in `fetch` (`src/index.ts:450-454`). Tested in `test/router.test.ts:65,76`. | none |
+| F14 | NIT | **CLOSED** | `src/index.ts:207` logs only `{status}`, and `:195` logs only a fixed reason code. Probe log: `["confirmation email send failed",{"status":500}]`, with Resend's text (which contained an address) not logged. | none |
+| F15 | NIT | **PARTIAL** | Runbook steps 8 and 9 reordered, and a CSP console check was added (`README.md:125-141`). Deploy uses `npx wrangler@4`. | Steps 1–3, 9 and the K2 export still call bare `wrangler`, which is not a devDependency. `@4` pins only the major version. (NIT) |
+| F16 | NIT | **PARTIAL** | The migration comment now says `recordConfirmation()` (`migrations/0001_create_signups.sql:37-38`). K2.md METHOD step 2 now names Resend and the worker. | `docs/p0/K2.md:66-67` (STATUS) and `:72` (MEASURED VALUE) still say the page is "blocked on … SMTP, and the signup backend" and "no signup backend exists yet". (NIT) |
+| F17 | NIT | **CLOSED** | `src/k2-count.ts:95,116-120`. The CLI prints `WARNING: rows with an unparsable confirmed_at, skipped: 1` (§3). | none |
+
+**Tally:** CLOSED 10 (F1–F6, F11, F13, F14, F17). PARTIAL 7 (F7–F10, F12, F15, F16). NOT CLOSED 0.
+
+## 2. Repeated and new probes (handler level)
+
+All probes call `default.fetch` from `src/index.ts` with the repo's `FakeD1`/`FakeKV`. A fake `ctx.waitUntil`
+records promises rather than blocking on them, and a wrapper adds **40 ms to every D1 op**. Resend is
+stubbed at **300 ms**.
+
+**F2: timing, body and headers by address state** (3 repetitions):
+
+```
+new                      status=202 ms=107 bodyLen=111 hdrHash=201 sends=1   <- first request of the run (module warm-up)
+pending                  status=202 ms=44  bodyLen=111 hdrHash=201 sends=1
+confirmed-active         status=202 ms=45  bodyLen=111 hdrHash=201 sends=0
+confirmed-unsubscribed   status=202 ms=42  bodyLen=111 hdrHash=201 sends=1
+new                      status=202 ms=42  ...                    sends=1
+pending                  status=202 ms=41  ...
+confirmed-active         status=202 ms=42  ...                    sends=0
+confirmed-unsubscribed   status=202 ms=42  ...
+new                      status=202 ms=43  ... (rep 3 identical pattern)
+```
+
+Response time is about one D1 round-trip (the SELECT) in every state. The 300 ms Resend call and the
+2–3 writes no longer sit on the response path. Before the fix, the same probe measured `7 ms` vs `305 ms`.
+Status, body length and the full header set are identical. **The response is now the same regardless of
+address state.**
+
+**F2: error paths inside `waitUntil`.**
+
+- A failing INSERT returned 202 and was logged as `["signup side effects failed","<err.message>"]`.
+- A Resend 500 returned 202 and was logged as `{"status":500}`.
+- The response does not change on either error path.
+- Failures are logged, never swallowed silently.
+- The side-effects catch logs `err.message`. A real D1 error names the constraint, not the bound values
+  `[unverified — training knowledge]`, so no PII is expected.
+
+**Residual, not a finding.** On real D1 the backgrounded writes share the database's write queue. In
+theory, an attacker's next request could be a few milliseconds slower after a "new" or "pending" signup
+than after a "confirmed" one. The signal is tiny, it is mixed with every other user's writes, and each
+sample costs a Turnstile solve plus one of 5 per-email slots per day.
+
+**F3** results:
+
+- SELECT throws: `500 application/json {"status":"error","error":"internal error"}`, and nothing escapes
+  the router.
+- Concurrent new-address race: `202 202`, 1 row, 1 send.
+
+**F5** result: after 6 junk tokens, `rl:email` keys = 0, and the victim's own signup returned `202` with 1 send.
+
+**F10** results:
+
+```
+text/plain                     -> 415
+text/plain; x=application/json -> 202   (substring check; CORS-safelisted type)
+no Content-Length (stream)     -> 411
+CL 10, body 9000 bytes         -> 413
+CL -1                          -> 202
+```
+
+**N1: re-signup inside the cooldown.** Sign up, then re-submit within 10 min, then use the links from the
+only email that was sent:
+
+```
+second signup 202 | emails sent total 1 | confirm with emailed link -> 400 | one-click unsubscribe with emailed List-Unsubscribe -> 400 | row confirmed_at null
+```
+
+**N3: global cap.** With `GLOBAL_DAILY_SEND_CAP=5` and 5 junk signups, a legitimate signup got
+`status 202, sends 0`, and its pending row was created.
+
+**N2 / N8: retention cron and `K2_GATE_CLOSES_AT`.** One confirmed-then-unsubscribed row and one active
+row were run through each value:
+
+```
+undefined | "" | "garbage"        -> deletedUnsubscribed 0
+"2026"                            -> deletedUnsubscribed 1   (parses to 2026-01-01)
+"1"                               -> deletedUnsubscribed 1   (V8 parses to 2001-01-01)
+"2026-10-10" (day 0 typed by mistake) -> 0 today, deletes inside the K2 window once that date passes
+pending row created 31d ago, token re-issued today (valid 47h) -> deletedUnconfirmed 1
+```
+
+**IPv6 /64 keying** (`rateLimitIpKeyMaterial`):
+
+- `2001:db8:1:2:3:4:5:6` and `2001:db8:1:2::9` both map to `2001:db8:1:2::/64` (correct).
+- `2001:DB8:1:2::9` gives `2001:DB8:1:2::/64`, and `2001:0db8:0001:0002::9` gives
+  `2001:0db8:0001:0002::/64`. These are the same /64 as above but land in different buckets.
+- `::ffff:198.51.100.7` and `::ffff:203.0.113.9` both map to `0:0:0:0::/64`, so every IPv4-mapped
+  address collapses into one bucket.
+
+The send cooldown is keyed per email hash, not per IP, so the /64 change does not affect it.
+
+**SQL on real SQLite** (the migration applied with python `sqlite3`):
+
+- The `ON CONFLICT DO NOTHING` insert gives rowcount 1, then 0.
+- `recordConfirmation` gives `[('T1', None)]`, with COALESCE kept and the token cleared.
+
+## 3. K2 count CLI against R3
+
+| run | result |
+|---|---|
+| real `docs/p0/K2.md` via absolute path, `scripts/…` relative, `./scripts/…`, and `pnpm run k2-count` | "K2 day 0 is not set … Refusing to run", **exit 1** in all four cases ✅ |
+| real K2.md via a **symlinked** checkout path | **no output, exit 0** (N7) |
+| Day 0 `2026-10-10`, `**2026-10-10**`, `` `2026-10-10` ``, "Day 0 is 2026-10-10 (UTC)." | day 0 = `2026-10-10T00:00:00.000Z` ✅ |
+| "logged 2026-10-12: day 0 is 2026-10-10" | refused, "more than one date", exit 1 ✅ |
+| `2026-10-10T09:30` / `2026-10-10T00:00Z` / `2026-02-30` | refused, exit 1 ✅ (both TZ=UTC and TZ=America/New_York) |
+| `2026/10/10` | refused as "not set", exit 1 (safe, though the message is misleading) |
+| Excluded heading renamed to "Exclusions" | refused, "missing an Excluded addresses heading", exit 1 ✅ |
+| `--day0 2026-10-01` | "unrecognized argument … no --day0 override", exit 1 ✅ |
+
+**Edge export** (day 0 = 2026-10-10; advisory cutoff `< 2026-10-24T00:00Z`; gate cutoff `< 2026-11-21T00:00Z`),
+run under TZ=UTC:
+
+```
+excluded addresses: 14 | export rows 28, confirmed (raw) 27 | WARNING unparsable confirmed_at: 1
+excluded rows matched 12 | distinct confirmed 12 | Advisory 9 | Gate 11
+```
+
+Each result checked by hand against R3:
+
+- **Case variants** `Dup@X.com`/`dup@x.com` collapse to one address, and the earliest `confirmed_at` is used ✅.
+- A case-variant pair split across the cutoff (10-23 and 10-25) counts as advisory, via the earliest date ✅.
+- **Exactly at the cutoff** (`…10-24T00:00:00.000Z`, `…11-21T00:00:00.000Z`) does not count; 1 ms earlier does ✅.
+- A **malformed `confirmed_at`** is skipped and reported ✅.
+- **Unsubscribed after confirming** still counts (R3 counts confirmations) ✅.
+- A **confirmation before day 0** counts. R3 sets no lower bound, so this is literal R3 ✅. See N13.
+- A `confirmed_at` **without a `Z`** is parsed as local time. The advisory count moved from 9 (UTC) to 8
+  (America/New_York). D1 rows are written with `toISOString()` (with a `Z`), so this only matters for a
+  hand-edited export. (NIT, folded into N12's table row.)
+
+**Conformance to R3:** the counting core matches R3 literally. It counts distinct lower-cased addresses,
+uses a strict `<` against day 0 + 14 and day 0 + 42 days in UTC, and counts rows unsubscribed after
+confirming. The **exclusion input** does not yet match R3: the "listed before day 0" rule is not enforced,
+decoration handling has gaps, and `--k2-doc` can override the list (F7 and F8 residuals).
+
+## 4. New findings
+
+| id | severity | file:line | finding | fix |
+|---|---|---|---|---|
+| N1 | **BLOCKING** | `src/index.ts:265-283` (rotate) runs before `:286` → `:189-197` (send-limit check); `src/index.ts:167-172` rotates the unsubscribe token | **A re-signup inside the cooldown, or past the per-email or global send cap, kills every link the person was sent.** Cases C and D rotate the confirm token **and** the unsubscribe token first, and only then ask `checkAndConsumeResendSendLimits`. When that denies the send (a 10-min cooldown, 3/day, or the global cap), no new email goes out, but the old links are already invalid. Probe: re-submit within 10 min; the emailed confirm link returns **400** and the emailed RFC 8058 one-click unsubscribe returns **400**. The trigger is ordinary user behaviour: re-submitting because the email is slow. F9's residual makes that exact path more likely. The page then says "submit the form again", which repeats the failure for the rest of the cooldown. The loss is silent and biases a pre-registered kill gate (N = 300) downward. It also breaks one-click unsubscribe for someone whose address a stranger typed in. The concurrent-race fallback (`:256-273`) has the same shape. The existing cooldown test (`test/signup-endpoint.test.ts:364`) counts sends but never checks that the emailed link still works, which is why this was missed. | Check and consume the send limits **before** any rotation. If the send is denied, return without touching the row. Do not rotate `unsubscribe_token_hash` on re-signup at all; keep it stable, since it is not a secret that needs rotating. Add a test: sign up, re-submit within the cooldown, then POST confirm with the first email's token and expect 200, and unsubscribe with the first email's header and expect 200. |
+| N2 | **BLOCKING** | `src/index.ts:435-440`; `wrangler.toml:66-70`; `README.md:66-72,139-141` | **The retention cron can delete rows the K2 verdict is read from.** R3 counts confirmed-then-unsubscribed addresses. Once `K2_GATE_CLOSES_AT` is in the past, the cron deletes every row with `unsubscribed_at < now − 30 d`. Runbook step 9 says to set the variable to **day 0 + 42 days**, so deletion starts at 09:00 UTC **on the gate-close day**. K2.md puts the verdict at "≈ wk 7", after that. A count read at week 7 therefore loses early confirmers who unsubscribed early, and the loss cannot be undone. The commit message claims "gate closes + 30 days" and the README claims "only once the K2 verdict is safely recorded", but the code does neither. Parsing is also loose: `"2026"` or `"1"` enable deletion **immediately** (probe: `deletedUnsubscribed 1`). A day 0 typed by mistake (`"2026-10-10"`) enables it inside the window. No test covers `runRetentionCron` or `scheduled`. | Accept only a strict `^\d{4}-\d{2}-\d{2}$` (UTC, via `Date.UTC`), and delete only when `now ≥ gate + 30 days`, or better, only after a separate, explicit `K2_VERDICT_RECORDED_AT` is set. Have the runbook export the K2 table (and commit the count to K2.md) **before** that variable is set. Add cron tests for unset, malformed, partial (`"2026"`), and before and after the grace period. |
+| N3 | SHOULD-FIX | `src/ratelimit.ts:149-153`; `src/index.ts:194-196`; `README.md:28` | **The global daily send cap (500) is a cheap, silent lever for denying service during K2, and it is not documented.** About 500 Turnstile solves (commercial solvers cost a few dollars `[unverified — training knowledge]`) from 25 IPv4 addresses or /64s make every legitimate signup for the rest of that UTC day get a 202 "check your inbox" with **no email**. The probe showed `202, sends 0`. The only signal is a `console.error` for each skipped send. There is no alert, and the README still says every signup sends the email. Without the cap, the Resend plan quota would fail the same way, so the cap is an acceptable trade-off, but it has to be a visible one. | Document the trade-off in the README. Emit one distinct `GLOBAL_SEND_CAP_REACHED` log line (or a notification) the first time each day the cap trips, and add a runbook step to set a Workers Logs alert on it. Size the cap to the Resend plan. Consider a per-/24 or per-ASN attempt cap so one actor cannot reach 500 cheaply. |
+| N5 | SHOULD-FIX | `src/index.ts:118-133` | **The body-size cap depends on the Content-Length header rather than the bytes actually read.** (1) A missing header is a hard **411**. Browsers send Content-Length for a fixed-length string body, but whether Cloudflare always forwards it to the Worker on HTTP/2 and HTTP/3 is `[unverified — training knowledge]`. If it does not, those clients lose every signup behind a generic error. Runbook step 9 exercises only one browser. (2) A present but bogus value (`-1`) passes, and `request.text()` then buffers the whole body before the size check. The probe got 202. | Drop the 411. Read `request.body` with a reader, stop and return 413 at 8 KiB + 1 bytes, then `JSON.parse`. Use the header only as an early reject when it is present and larger than 8 KiB. |
+| N7 | NIT | `scripts/k2-count.mjs:259` | The main-module check compares `import.meta.url`, which is the realpath, with `process.argv[1]`, which is not. Run through a symlinked checkout path, the CLI **prints nothing and exits 0** (probe). A refusal that exits 0 can pass a wrapper script. | Compare `realpathSync(fileURLToPath(import.meta.url))` with `realpathSync(process.argv[1])`. |
+| N8 | NIT | `src/db.ts:173-178` | The unconfirmed purge keys on `created_at`, so a row re-signed-up near the 30-day mark is deleted while its fresh confirm link is valid (probe: token valid for 47 h, `deletedUnconfirmed 1`). | Add `AND (confirm_expires_at IS NULL OR confirm_expires_at < ?1)`. |
+| N9 | NIT | `src/ratelimit.ts:61-75` | The /64 key is not normalised. Case and leading zeros produce different buckets, and every IPv4-mapped `::ffff:a.b.c.d` address collapses into one shared `0:0:0:0::/64` bucket, which would 429 unrelated users after 20 per day. Whether `CF-Connecting-IP` ever emits these forms is `[unverified]`. | Lower-case the address and strip leading zeros. Treat `::ffff:` addresses as IPv4. |
+| N10 | NIT | `apps/signup-worker/README.md:28,30` | The README still says POST confirm is "Idempotent" (it is now single-use) and that signup always sends the email. The cooldown and caps are not described. | Update the Endpoints table. |
+| N11 | NIT | `src/index.ts:93-99,312-315` | The Turnstile hostname is pinned to `PUBLIC_BASE_URL`'s host. Serving the landing page on `www.` or on a `*.pages.dev` preview makes every signup fail closed with a generic error. | Add the constraint to runbook steps 5–6, or allow a small list of hostnames. |
+| N12 | NIT | `apps/landing/src/index.html:142`; `src/ratelimit.ts:92,106`; `src/k2-count.ts:115` | "Kept for at most 48 hours" is loose. The per-IP key is scoped to a day and its 48 h TTL resets on each write, so a key can live about 72 h from its first write. Separately, a `confirmed_at` without a zone is parsed in local time (§3). | Say "about 3 days", or use a TTL until the end of the next day. In `computeK2Counts`, reject any `confirmed_at` without `Z` or an offset and count it as malformed. |
+| N13 | NIT | `apps/signup-worker/README.md:133-141` | Runbook step 9's end-to-end test confirms a real address **before** day 0. Under literal R3 (no lower bound) that confirmation **counts** unless the address is listed in "Excluded addresses" before day 0 is logged. The runbook does not say so. | Add "add the test address to K2.md's Excluded addresses before logging day 0" to step 9. |
+
+**New tally:** BLOCKING 2 (N1, N2), SHOULD-FIX 2 (N3, N5), NIT 7 (N7–N13). The ids skip N4 and N6: the
+`--k2-doc` override and the Content-Type substring bypass are recorded as residuals of F7 and F10, not
+as new findings.
+
+## 5. Command results
+
+| command | result |
+|---|---|
+| `pnpm install --frozen-lockfile --config.engine-strict=false` | OK. "Lockfile is up to date", exit 0. |
+| `pnpm --config.engine-strict=false -r typecheck` | OK, exit 0. signup-worker `tsc --noEmit` is clean. |
+| `pnpm --config.engine-strict=false -r build` | OK, exit 0. |
+| `pnpm --config.engine-strict=false -r test` | OK, exit 0. signup-worker: **12 files, 115 tests passed**. The landing smoke checks and the other packages pass. |
+| `git status --short` after all runs | clean |
+
+## 6. Test meaningfulness (delta)
+
+The suite now covers the following:
+
+- the real K2.md;
+- the router's `return await`;
+- that the response does not wait on the backgrounded work;
+- single-use confirm;
+- the order of Turnstile and the per-email cap;
+- /64 keying;
+- the send limits;
+- the ON CONFLICT path, at the `db.ts` level.
+
+Still missing, and each gap hid a finding above:
+
+1. A re-signup inside the cooldown must leave the emailed confirm and unsubscribe links working (N1).
+2. `runRetentionCron` and `scheduled`, including the unset, malformed and partial-date handling of
+   `K2_GATE_CLOSES_AT` (N2).
+3. Real SQL semantics. The fake still re-implements every statement. SQLite checks in this review
+   confirmed the current SQL.
+4. The Content-Type essence check, and a lying or absent Content-Length (F10, N5).
+
+---
+
+signup-worker: FIX REQUIRED
