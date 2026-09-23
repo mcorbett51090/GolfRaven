@@ -65,3 +65,56 @@ chosen after the numbers are visible: **take the three most recent complete cale
 date, total organic clicks for each, and use the median of those three monthly totals.** Partial months are
 excluded. The keyword-volume check uses the lower bound of each Keyword Planner range, summed across the
 keyword list in `docs/owner/k3-seo-reads.md`.
+
+## Addendum B (2026-09-23, before any K3 data is read) — K3 keyword list and X7 measurement
+
+### K3 keyword list (closed, fixed before any data is read)
+
+The keyword list is **exactly these six terms**, and no others, in every K3 read:
+
+1. `golf trail`
+2. `golf trails`
+3. `robert trent jones golf trail`
+4. `tennessee golf trail`
+5. `vancouver island golf trail`
+6. `oklahoma golf trail`
+
+Rules, fixed now and not revisitable once any volume has been read:
+
+- **English only.** No French terms, regardless of Québec relevance.
+- **Exact-match volume only**, via Google Keyword Planner's **"Get search volume and forecasts"** tool (not
+  "Discover new keywords", which returns Google's own suggested/related terms rather than a volume for the
+  fixed list above).
+- **Each term's Avg. monthly searches uses the range's lower bound** (per Addendum A / O7), and the six lower
+  bounds are **summed** to get the combined golf-keyword volume figure compared to the ≥ 5,000/month bar.
+- **No additions after data is read.** The "Optionally any other trail names … worth checking" and "if
+  material" French-terms language in the plan draft and in `docs/owner/k3-seo-reads.md` is superseded by this
+  closed list — nothing may be added to reach the threshold once any number has been seen.
+- **Search Console search type is pinned to Web** (not Image, Video, News or Discover) for the SWC Part A read
+  in the same file, so that check is equally closed before data is read.
+
+This closes B1 in the P0 gate review (2026-09-23): the keyword list was open-ended and would have let whoever
+read the numbers add terms until the combined sum reached the bar.
+
+### X7 measurement (in-database p95, mixed hit/miss point set)
+
+Pre-registering, before any X7 run is treated as the recorded result:
+
+- **p95 is measured in-database**, as server-side execution time, not client round trip and not end-to-end
+  from the Edge Function region. Each of 1,000 point-in-polygon queries is timed with `clock_timestamp()`
+  inside a PL/pgSQL loop (equivalently, per-query `EXPLAIN ANALYZE` execution time), and p95 is computed with
+  `percentile_cont(0.95)` over the 1,000 timings.
+- **The query points are generated so that roughly half fall inside a polygon and half do not**: for half the
+  points, sample a random polygon and draw a point from its interior (e.g. `ST_PointOnSurface`, optionally
+  combined with `ST_GeneratePoints(geom, 1)`); for the other half, draw uniformly random points across the
+  overall bounds. This replaces the prior all-random-over-bbox generation, which produced a 0% hit rate and so
+  measured only the empty-index-probe path.
+- **The query point is bound once per iteration** (a parameter or a value materialised before the timed call),
+  never `random()` evaluated inside the predicate — so the query plan actually exercises the GiST index
+  (`course_polygon_gix`) the same way on every timed call, and the recorded `EXPLAIN` text matches what the
+  benchmark script itself runs.
+- **Pass bar stays p95 < 100 ms** (plan §10 P0, unchanged by this addendum).
+- **Report the hit rate (points that matched a polygon ÷ 1,000) alongside p95** in `x7-postgis-benchmark.md`,
+  so the recorded number is legible as "p95 over a realistic mixed workload", not "p95 over an empty probe".
+
+This closes S1 in the P0 gate review (2026-09-23).

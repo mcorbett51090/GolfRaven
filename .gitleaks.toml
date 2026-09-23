@@ -10,9 +10,8 @@ title = "golfraven gitleaks config"
 [extend]
 useDefault = true
 
-# Deliberately empty: nothing is allowlisted. Add an entry here only with
-# a comment naming the exact false positive it covers.
-[allowlist]
-description = "no exceptions"
-regexes = []
-paths = []
+# Deliberately no [allowlist] table: gitleaks 8.30.1 rejects an
+# [[allowlists]]/[allowlist] table with no regexes/paths/commits set
+# ("Failed to load config ... [[allowlists]] must contain at least one
+# check"). Add an [allowlist] table back only when there is a real entry
+# to put in it, with a comment naming the exact false positive it covers.

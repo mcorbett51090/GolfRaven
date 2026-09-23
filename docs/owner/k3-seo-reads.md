@@ -29,24 +29,26 @@ both fixed before the data is read (O7 DECIDED 2026-09-23: kept as written).
 1. Create (or sign in to) a [Google Ads](https://ads.google.com) account under Matt's own Google identity.
    **Do not enable billing or launch any campaign** — the check is explicitly run with **no active spend**
    (O23).
-2. Navigate to **Tools & Settings → Planning → Keyword Planner → Discover new keywords**.
-3. Enter the keyword list:
+2. Navigate to **Tools & Settings → Planning → Keyword Planner → Get search volume and forecasts** (not
+   "Discover new keywords" — that tool returns Google's own suggested/related terms, not a volume for a fixed
+   list, and is not used for this check).
+3. Enter **exactly** this closed keyword list — no additions, no substitutions (fixed in decision 0001,
+   Addendum B, before any data is read):
    - `golf trail`
-   - Each pilot-candidate trail name from the research files:
-     - Tennessee Golf Trail
-     - Vancouver Island Golf Trail
-     - Robert Trent Jones Golf Trail
-     - Oklahoma Golf Trail (reserve, O4)
-     - Optionally any other trail names from `docs/golf-trails/research/us-trails.md` and
-       `docs/golf-trails/research/canada-trails.md` worth checking for later-slate context
-4. Set location targeting to **US + CA** and language to English (and French for Québec-relevant terms, if
-   material).
+   - `golf trails`
+   - `robert trent jones golf trail`
+   - `tennessee golf trail`
+   - `vancouver island golf trail`
+   - `oklahoma golf trail`
+4. Set location targeting to **US + CA**, **language: English only** (no French terms — Addendum B), and
+   **Search Console search type = Web** for the Part A read above.
 5. Read the **Avg. monthly searches** column for each term. Without ad spend, Google Ads Keyword Planner
    typically shows a **range** (e.g. "1K–10K") rather than an exact number
    `[unverified — training knowledge; A79]`.
 6. **Use the range's lower bound** for every term (per the plan's explicit instruction), not the midpoint or
    upper bound.
-7. **Sum the lower bounds across all terms** to get the combined golf-keyword volume figure.
+7. **Sum the lower bounds across the six terms** to get the combined golf-keyword volume figure. Do not add
+   any other term after any number has been read.
 8. Compare to **≥ 5,000/month combined**.
 
 ## Recording the result
