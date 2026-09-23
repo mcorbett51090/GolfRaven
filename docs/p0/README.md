@@ -42,6 +42,7 @@ still blank.
 | Applications with dated receipts: GolfNow T1 + business form, Lightspeed, GHIN GPA, Arccos, Garmin waitlist + Golf API BD email, Supreme Golf (applicant = P0 legal entity) | Matt | PENDING — drafts ready in `docs/partners/applications.md`; none filed yet, no dated receipts |
 | Counsel brief L1–L7 and L-OSM | Matt (retains counsel) | PENDING — see `docs/owner/counsel-brief.md` |
 | SP10 — `passport_mark` event in SWC (~1 h build; needs owner approval before it ships) | Agent (build), Matt (approval) | PENDING — approval not yet given |
+| K2 signup backend (agent build, after domain + SMTP) — prerequisite for K2 day 0 | Matt | PENDING — not started; blocks K2's Day 0 (see `apps/landing/README.md` "How signups work" and `docs/p0/K2.md` "Day 0") |
 
 ## P0 exit rule (plan §10 P0 acceptance tests + §15 P0 DoD)
 

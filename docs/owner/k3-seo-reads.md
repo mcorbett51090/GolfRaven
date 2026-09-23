@@ -4,25 +4,27 @@ Covers plan §10 P0 check **K3**. Thresholds quoted verbatim in `docs/p0/K3.md` 
 M = 1,000 monthly organic clicks (90-day median) on SWC, **and** golf-keyword volume ≥ 5,000/month combined,
 both fixed before the data is read (O7 DECIDED 2026-09-23: kept as written).
 
-## Part A — southern-wine-country Search Console 90-day export (≈15 min, Matt)
+## Part A — southern-wine-country Search Console export (≈15 min, Matt)
 
 1. Sign in to [Google Search Console](https://search.google.com/search-console) with the account that owns
-   the `southern-wine-country` property.
+   the `southern-wine-country` property. Record the property's exact property id in `docs/p0/K3.md` ("SWC
+   Search Console property") before opening the report (decision 0001, Addendum D, R4).
 2. Select the SWC property → **Performance** → **Search results**.
-3. Set a **custom date range** covering the three most recent complete calendar months (not "compare"; see step 5).
-4. In the results table, switch the metric view to show **Clicks** by date (the chart above the table, or
+3. Set **search type = Web**, **all countries**, **all devices** (decision 0001, Addendum D, R4 — set this
+   before reading any number, not in Part B).
+4. Set a **custom date range** of **July 1, 2026 – September 30, 2026** — the three months are fixed
+   (decision 0001, Addendum D, R4), not "the three most recent complete calendar months before the read
+   date."
+5. In the results table, switch the metric view to show **Clicks** by date (the chart above the table, or
    export the full date-by-date breakdown).
-5. **Export**: use the "Export" button (top right of the Performance report) → **Google Sheets** or **CSV**,
-   to get the daily clicks series. **Set the date range to a custom range covering the three most recent
-   complete calendar months** (a plain "Last 3 months" window read early in a month contains only two complete
-   months).
-6. Group the daily clicks series by calendar month.
-   **Pinned method (decision 0001 addendum, fixed 2026-09-23 before any data is read):** take the **three most
-   recent complete calendar months** before the read date, sum organic clicks for each month, and use the
-   **median of those three monthly totals**. Partial months are excluded. Do not substitute a rolling-window
-   method; the choice was fixed in advance so it cannot be picked after seeing the numbers.
-7. Record the computed **median monthly organic clicks** figure.
-8. Compare to **M = 1,000**.
+6. **Export**: use the "Export" button (top right of the Performance report) → **Google Sheets** or **CSV**,
+   to get the daily clicks series for the fixed Jul–Sep 2026 range.
+7. Group the daily clicks series by calendar month (July, August, September 2026).
+   **Pinned method (decision 0001, Addendum A):** sum organic clicks for each of the three fixed months, and
+   use the **median of those three monthly totals**.
+8. Record the computed **median monthly organic clicks** figure. **The first complete read performed is the
+   recorded result — there are no re-reads** (decision 0001, Addendum D, R4).
+9. Compare to **M = 1,000**.
 
 ## Part B — Google Ads account with no spend → Keyword Planner (≈30 min, Matt)
 
@@ -40,15 +42,18 @@ both fixed before the data is read (O7 DECIDED 2026-09-23: kept as written).
    - `tennessee golf trail`
    - `vancouver island golf trail`
    - `oklahoma golf trail`
-4. Set location targeting to **US + CA**, **language: English only** (no French terms — Addendum B), and
-   **Search Console search type = Web** for the Part A read above.
+4. Set location targeting to **United States and Canada**, **language: English only** (no French terms —
+   Addendum B), and **date range: September 2025 – August 2026** (decision 0001, Addendum D, R5 — not the
+   Planner's default trailing-12-month average).
 5. Read the **Avg. monthly searches** column for each term. Without ad spend, Google Ads Keyword Planner
    typically shows a **range** (e.g. "1K–10K") rather than an exact number
    `[unverified — training knowledge; A79]`.
 6. **Use the range's lower bound** for every term (per the plan's explicit instruction), not the midpoint or
    upper bound.
-7. **Sum the lower bounds across the six terms** to get the combined golf-keyword volume figure. Do not add
-   any other term after any number has been read.
+7. **Sum the lower bounds across the six terms** to get the combined golf-keyword volume figure. **If two of
+   the six terms return the identical range, count that range once** (decision 0001, Addendum D, R5 — this
+   replaces Addendum B's "exact-match only" wording, since the Planner may report one combined volume for
+   close variants). Do not add any other term after any number has been read.
 8. Compare to **≥ 5,000/month combined**.
 
 ## Recording the result

@@ -12,8 +12,10 @@ Borrow, by **day 5**, from golfing friends, a local club, or a retailer demo poo
       and for X1's Garmin + Connect Mobile source)
 - [ ] **1 Apple Watch + 1 iPhone** (X1's Apple Watch Workout source)
 - [ ] **1 Android handset with Health Connect** (X1's Android pass)
-- [ ] Also needed for X1 but not device-borrowed: **one phone golf app** (18Birdies, Hole19, TheGrint,
-      Golfshot, or SwingU — any one, installed on either phone)
+- [ ] Also needed for X1 but not device-borrowed: **18Birdies** (the named phone golf app — decision 0001,
+      Addendum D, R6). If it cannot be installed, or offers no Apple Health / Health Connect write setting,
+      **Hole19** replaces it; log the reason in `docs/p0/X1.md` before the round. Any other app (TheGrint,
+      Golfshot, SwingU) tried alongside is supplementary data only, never the source verdict.
 
 ### Day-5 fallback rule (verbatim from plan §10 P0)
 
@@ -47,11 +49,13 @@ Apple Watch + phone with a golf app), so one round covers all three:
    `research/golf-app-sync.md` flags this as unverified]`.
 2. Keep the watch on-wrist for the round; end the workout afterward.
 
-### 2c. One phone golf app
+### 2c. One phone golf app — 18Birdies (Hole19 pre-round fallback)
 
-1. Start a round in any one of: 18Birdies, Hole19, TheGrint, Golfshot, SwingU (the plan names these as having
-   no public API — X1 is checking whether they at least write to platform Health, not whether they expose an
-   API).
+1. Start a round in **18Birdies** (decision 0001, Addendum D, R6 — the plan names it, alongside Hole19,
+   TheGrint, Golfshot and SwingU, as having no public API; X1 is checking whether it at least writes to
+   platform Health, not whether it exposes an API). If 18Birdies cannot be installed, or has no Apple Health
+   / Health Connect write setting, use **Hole19** instead and log the substitution and its reason in
+   `docs/p0/X1.md` before the round.
 2. Complete the round in the app; confirm (in the app's own settings) that it has HealthKit write permission
    enabled, if such a setting exists.
 
@@ -113,14 +117,19 @@ analogue of `HKSource.bundleIdentifier`).
 
 ## 4. Results table (fill in per source per OS — do not pre-fill values)
 
-| Source | OS | Workout/exercise written? | Route present? | Source id (`bundleIdentifier`/`dataOrigin`) | Verdict |
-|---|---|---|---|---|---|
-| Garmin watch + Connect Mobile | iOS | | | | |
-| Garmin watch + Connect Mobile | Android | | | | |
-| Apple Watch Workout | iOS | | | | |
-| Apple Watch Workout | Android | N/A | N/A | N/A | N/A (no Apple Watch on Android) |
-| Phone golf app | iOS | | | | |
-| Phone golf app | Android | | | | |
+The "CONSENT_REQUIRED + follow-up read" column (decision 0001, Addendum D, R6) applies only on Android: for a
+session Health Connect reports as `CONSENT_REQUIRED`, record whether a follow-up `requestExerciseRoute` call
+for that session's record id returned ≥ 1 point (**Y** — counts as "route present"), returned none (**N** —
+counts as "not present"), or the session never hit `CONSENT_REQUIRED` at all (**N/A**).
+
+| Source | OS | Workout/exercise written? | Route present? | CONSENT_REQUIRED + follow-up read | Source id (`bundleIdentifier`/`dataOrigin`) | Verdict |
+|---|---|---|---|---|---|---|
+| Garmin watch + Connect Mobile | iOS | | | N/A (iOS) | | |
+| Garmin watch + Connect Mobile | Android | | | | | |
+| Apple Watch Workout | iOS | | | N/A (iOS) | | |
+| Apple Watch Workout | Android | N/A | N/A | N/A | N/A | N/A (no Apple Watch on Android) |
+| Phone golf app (18Birdies, or Hole19 if substituted) | iOS | | | N/A (iOS) | | |
+| Phone golf app (18Birdies, or Hole19 if substituted) | Android | | | | | |
 
 | K4b | Watch model 1 | Watch model 2 |
 |---|---|---|

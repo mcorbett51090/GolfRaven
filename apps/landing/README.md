@@ -54,6 +54,27 @@ promotion, not paid, per O23/O24).
 3. Until that backend exists, `SIGNUP_ENDPOINT` stays `""` and the page
    correctly shows "Signups open soon" — this is deliberate, not a bug, but
    it also means **no signup can be recorded and K2 has not started**.
+4. **K2's clock (Day 0) is pinned in `docs/p0/K2.md`, not implied by this
+   README** (decision 0001, Addendum D, R3): Day 0 is the UTC date the
+   page is publicly reachable **and** this backend has delivered a
+   confirmation email end to end. It is logged in `docs/p0/K2.md`
+   *before* any promotion, and the clock is never restarted. The count
+   that matters is distinct lower-cased emails whose `confirmedAt` falls
+   before Day 0 + 14 days (advisory) and Day 0 + 42 days (the N = 300
+   gate); owner/test addresses are excluded only if listed in
+   `docs/p0/K2.md`'s "Excluded addresses" field before Day 0.
+
+## Before this page goes live
+
+Before deploying for real (setting `SIGNUP_ENDPOINT` and pointing the
+domain at this build), fill in the `[OPERATING ENTITY NAME — TBD]` and
+`[CONTACT EMAIL — TBD]` placeholders in `src/index.html`'s privacy
+section. `scripts/test.mjs` enforces this: when the `DEPLOY=1` environment
+variable is set, the smoke test **fails the build** if either placeholder
+is still present in the built `dist/index.html` (gate review S5). Local
+and CI builds that don't set `DEPLOY=1` are unaffected, so the
+still-placeholder page keeps building and testing green until the owner
+fills these in and a deploy is actually attempted.
 
 ## Deployment (owner step, not done in this P0 skeleton)
 

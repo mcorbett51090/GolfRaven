@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { EXERCISE_TYPE_GOLF, shapeGolfSessions } from "../src/health-connect/shape.js";
-import type { RawExerciseSessionRecord } from "../src/health-connect/types.js";
+import {
+  EXERCISE_TYPE_GOLF,
+  shapeGolfSessions,
+  shapeRouteFollowUp,
+} from "../src/health-connect/shape.js";
+import type { RawExerciseRoutePoint, RawExerciseSessionRecord } from "../src/health-connect/types.js";
 
 // This file imports only the pure shaping logic (shape.ts), never
 // reader.ts or the package's index.ts — those import
@@ -89,5 +93,24 @@ describe("shapeGolfSessions", () => {
     const result = shapeGolfSessions([golfRecord()], 14, NOW);
     expect(result.generatedAt).toBe(NOW.toISOString());
     expect(result.windowDays).toBe(14);
+  });
+});
+
+// CONSENT_REQUIRED follow-up read (decision 0001, Addendum D, R6): a
+// session reported as CONSENT_REQUIRED counts as "route present" only if
+// the follow-up requestExerciseRoute(recordId) call returns ≥ 1 point.
+describe("shapeRouteFollowUp", () => {
+  it("reports route-not-present for an empty follow-up read", () => {
+    const result = shapeRouteFollowUp([]);
+    expect(result).toEqual({ routePresent: false, routePointCount: 0 });
+  });
+
+  it("reports route-present with the point count when points come back", () => {
+    const points: RawExerciseRoutePoint[] = [
+      { latitude: 35.0, longitude: -86.0, time: "2026-09-20T14:01:00.000Z" },
+      { latitude: 35.001, longitude: -86.001, time: "2026-09-20T14:02:00.000Z" },
+    ];
+    const result = shapeRouteFollowUp(points);
+    expect(result).toEqual({ routePresent: true, routePointCount: 2 });
   });
 });
