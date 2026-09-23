@@ -109,6 +109,40 @@ describe("parseRoundWindows: malformed windows are rejected, not silently swallo
   });
 });
 
+describe("parseRoundWindows: a line that looks like a window attempt but doesn't parse the candidate shape is refused, not skipped (gate finding G-N2)", () => {
+  it("throws on a space instead of 'T' between date and time, even with a valid window present", () => {
+    const markdown =
+      "## Round windows\n\n" +
+      "- 2026-09-21 13:00:00Z to 2026-09-21T18:00:00Z\n" +
+      "- 2026-09-20T13:00:00Z to 2026-09-20T17:00:00Z\n\n" +
+      "## METHOD\n";
+    expect(() => parseRoundWindows(markdown)).toThrow(
+      /looks like an attempted window but does not parse/,
+    );
+  });
+
+  it("throws on 'until' instead of 'to'/a dash", () => {
+    const markdown =
+      "## Round windows\n\n" +
+      "- 2026-09-20T13:00:00Z until 2026-09-20T17:00:00Z\n\n" +
+      "## METHOD\n";
+    expect(() => parseRoundWindows(markdown)).toThrow(
+      /looks like an attempted window but does not parse/,
+    );
+  });
+
+  it("does NOT throw on the blank placeholder paragraph (no digit date tokens)", () => {
+    const markdown = `## Round windows
+
+_(blank — Matt logs the UTC start/end time of each round here, format YYYY-MM-DDThh:mm:ssZ to
+YYYY-MM-DDThh:mm:ssZ.)_
+
+## METHOD
+`;
+    expect(parseRoundWindows(markdown)).toEqual([]);
+  });
+});
+
 describe("isWithinRoundWindow", () => {
   const windows = [
     { startIso: "2026-09-20T13:00:00Z", endIso: "2026-09-20T18:00:00Z" },

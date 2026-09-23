@@ -268,16 +268,16 @@ function stripPairedEmphasisAroundTokens(text) {
 }
 
 /**
- * One line's worth of address extraction: strips the bullet prefix, paired
- * emphasis (both whole-line and per-token — gate finding A-8), and markdown
- * decoration, then extracts distinct lower-cased email addresses. Gate
- * finding F8 residual (3): if the line IS a bullet list item and its
- * cleaned content does not resolve to EXACTLY ONE distinct address, this
- * throws instead of silently dropping it (an unparseable bullet like "matt
- * at golfraven dot com" or "test10@localhost" used to vanish with no trace
- * but the total count).
+ * One line's worth of address extraction, WITHOUT the "exactly one address"
+ * rule: strips the bullet prefix, paired emphasis (both whole-line and
+ * per-token — gate finding A-8), and markdown decoration, then returns every
+ * distinct lower-cased email address found on the line (zero, one, or more).
+ * Also returns `wasBullet`/`withoutBullet` so a caller can apply its own
+ * exactly-one policy on top (see `extractAddressesFromLine`, the strict
+ * HEAD-only wrapper, and `parseExclusionSetLenientPerLine`, the lenient
+ * per-line historical wrapper — gate finding G-S1).
  */
-function extractAddressesFromLine(rawLine) {
+function extractAddressesFromLineLenient(rawLine) {
   const wasBullet = isBulletLine(rawLine);
   const withoutBullet = stripBulletPrefix(rawLine);
   const withoutEmphasis = stripPairedEmphasis(withoutBullet);
@@ -289,7 +289,25 @@ function extractAddressesFromLine(rawLine) {
       [...cleaned.matchAll(EMAIL_TOKEN_RE)].map((m) => m[0].toLowerCase()),
     ),
   ];
+  return { wasBullet, withoutBullet, matches };
+}
 
+/**
+ * Gate finding F8 residual (3): if the line IS a bullet list item and its
+ * cleaned content does not resolve to EXACTLY ONE distinct address, this
+ * throws instead of silently dropping it (an unparseable bullet like "matt
+ * at golfraven dot com" or "test10@localhost" used to vanish with no trace
+ * but the total count). This strict, throw-on-ambiguity behavior is used
+ * for the CURRENT (HEAD) K2.md only (`parseExcludedAddressEntriesFromK2Doc`,
+ * called directly by `main()`). Gate finding G-S1: a HISTORICAL revision
+ * uses the lenient `extractAddressesFromLineLenient` above instead, via
+ * `parseExclusionSetLenientPerLine`, so a malformed bullet somewhere in the
+ * repo's past skips only that one line rather than refusing to date the
+ * whole revision.
+ */
+function extractAddressesFromLine(rawLine) {
+  const { wasBullet, withoutBullet, matches } =
+    extractAddressesFromLineLenient(rawLine);
   if (wasBullet && withoutBullet.trim() !== "" && matches.length !== 1) {
     throw new Error(
       `K2 Excluded-addresses bullet does not contain exactly one parseable email address: "${rawLine.trim()}"`,
@@ -448,18 +466,63 @@ function getFileContentAtRevision(sha) {
   }
 }
 
-/** Parses a historical revision's "Excluded addresses" section with the
- * SAME address-extraction logic the count uses today (gate finding F-S3:
- * exact, whole-address, lower-cased identity — never a substring search).
- * Lenient: an early revision that predates the heading, or one this
- * script's stricter parser can't cleanly parse, contributes no addresses
- * for that revision rather than aborting the whole historical walk. */
-function parseExclusionSetLenient(markdown) {
-  try {
-    return new Set(parseExcludedAddressesFromK2Doc(markdown));
-  } catch {
-    return new Set();
+/**
+ * Gate finding G-S1: parses a historical revision's "Excluded addresses"
+ * section leniently PER LINE, not per document. The strict HEAD parser
+ * (`extractAddressesFromLine`, via `parseExcludedAddressEntriesFromK2Doc`)
+ * refuses to run on a bullet that doesn't hold exactly one address — that
+ * refusal is correct and stays in force for the CURRENT K2.md (main()
+ * calls the strict parser directly for `excludedEntries`). But applying
+ * that same all-or-nothing throw to a HISTORICAL revision is wrong: the
+ * CLI only ever runs after day 0, so fixing a malformed pre-day-0 bullet is
+ * necessarily a post-day-0 commit, and the previous behavior
+ * (`parseExclusionSetLenient`, deleted) caught the whole-document throw and
+ * returned an EMPTY set for that entire revision — silently re-dating every
+ * OTHER, well-formed address in that same bullet section to the later,
+ * fixed revision, un-excluding addresses that were genuinely listed before
+ * day 0.
+ *
+ * This finds the same "Excluded addresses" section (a missing heading —
+ * e.g. a revision that predates the heading entirely — still yields an
+ * empty set, matching every other caller's expectation for pre-heading
+ * revisions) and extracts addresses line by line. Per line, this collects
+ * EVERY email token found — deliberately WITHOUT
+ * the strict parser's "exactly one address" rule, using the same
+ * stripping/lower-casing (`extractAddressesFromLineLenient`). A bullet that
+ * holds more than one address (e.g. `- b@x.com, c@x.com (owner aliases)`)
+ * has ALL of its addresses collected and dated to that revision, not zero
+ * of them — dropping an over-full bullet's addresses entirely would be the
+ * same bug in miniature (re-dating them to whichever later revision
+ * eventually separates them onto their own lines). A line with NO email
+ * token at all (prose, a blank line) contributes nothing, silently — there
+ * is nothing there to warn about. A warning is recorded only for a line
+ * that a bullet-shaped, non-blank line failed the strict "exactly one"
+ * check (i.e. the one case that WOULD have thrown under the strict HEAD
+ * parser), so a reader knows some address's first-appearance date came
+ * from a line the strict parser would have refused.
+ *
+ * Returns `{ addresses: Set<string>, warnings: string[] }`.
+ */
+function parseExclusionSetLenientPerLine(markdown) {
+  const addresses = new Set();
+  const warnings = [];
+  const lines = markdown.split("\n");
+  const range = findSectionRange(lines, (text) =>
+    EXCLUDED_HEADING_RE.test(text),
+  );
+  if (range === null) return { addresses, warnings };
+  for (let i = range.bodyStart; i < range.bodyEnd; i += 1) {
+    const { wasBullet, withoutBullet, matches } =
+      extractAddressesFromLineLenient(lines[i]);
+    for (const address of matches) addresses.add(address);
+    if (wasBullet && withoutBullet.trim() !== "" && matches.length !== 1) {
+      warnings.push(
+        `line ${i + 1}: bullet does not hold exactly one address (holds ${matches.length}) — ` +
+          `all collected leniently for historical dating: "${lines[i].trim()}"`,
+      );
+    }
   }
+  return { addresses, warnings };
 }
 
 /**
@@ -481,11 +544,17 @@ function parseExclusionSetLenient(markdown) {
 function getFirstAppearanceByAddress() {
   const revisions = getK2DocRevisions();
   const firstSeen = new Map();
+  const historyWarnings = [];
   let previousSet = new Set();
   for (const { sha, committerTimeIso } of revisions) {
     const content = getFileContentAtRevision(sha);
-    const currentSet =
-      content === null ? new Set() : parseExclusionSetLenient(content);
+    const { addresses: currentSet, warnings } =
+      content === null
+        ? { addresses: new Set(), warnings: [] }
+        : parseExclusionSetLenientPerLine(content);
+    for (const warning of warnings) {
+      historyWarnings.push(`${sha.slice(0, 12)}: ${warning}`);
+    }
     for (const address of currentSet) {
       if (!previousSet.has(address) && !firstSeen.has(address)) {
         firstSeen.set(address, { committerTimeIso });
@@ -493,7 +562,7 @@ function getFirstAppearanceByAddress() {
     }
     previousSet = currentSet;
   }
-  return firstSeen;
+  return { firstSeen, historyWarnings };
 }
 
 async function main() {
@@ -534,7 +603,8 @@ async function main() {
   }
 
   const excludedEntries = parseExcludedAddressEntriesFromK2Doc(k2Doc);
-  const firstAppearanceByAddress = getFirstAppearanceByAddress();
+  const { firstSeen: firstAppearanceByAddress, historyWarnings } =
+    getFirstAppearanceByAddress();
 
   const distJsPath = join(packageRoot, "dist", "k2-count.js");
   const blameJsPath = join(packageRoot, "dist", "k2-blame.js");
@@ -559,6 +629,22 @@ async function main() {
     currentEntries: excludedEntries,
   });
   const excludedAddresses = exclusionResult.excluded;
+
+  // Gate finding G-S1: a malformed bullet in some HISTORICAL revision skips
+  // only that one line (its own addresses stay un-dated by that revision,
+  // picked up at a later well-formed revision if any), never the whole
+  // revision's exclusion set — but it's still worth surfacing, since it
+  // means some address's first-appearance date came from a later revision
+  // than the one that actually first listed it.
+  if (historyWarnings.length > 0) {
+    console.log(
+      `  WARNING: malformed exclusion-list line(s) in K2.md's history, skipped per-line (not per-revision) ` +
+        `(${historyWarnings.length}):`,
+    );
+    for (const warning of historyWarnings) {
+      console.log(`    ${warning}`);
+    }
+  }
 
   const rawExport = JSON.parse(
     await readFile(resolve(args.exportPath), "utf8"),

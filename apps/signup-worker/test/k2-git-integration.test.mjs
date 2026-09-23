@@ -293,6 +293,75 @@ describe.skipIf(!distBuilt)(
       expect(stdout).toMatch(/distinct confirmed \(post-exclusion\): 0/);
     });
 
+    it("G-S1: a malformed HISTORICAL two-address bullet skips only that line, not the whole revision — addresses on other well-formed lines in the SAME revision keep their pre-day-0 date, and a warning names the offending line", async () => {
+      const repoDir = mkdtempSync(path.join(tmpdir(), "golfraven-k2-git-"));
+      const { k2DocPath, scriptsDir } = scaffoldRepo(repoDir);
+
+      // Commit 1 (2026-10-05, before day 0): a@x.com is on its own,
+      // well-formed bullet; b@x.com and c@x.com are BOTH crammed onto one
+      // bullet — malformed under the strict "exactly one address per
+      // bullet" rule.
+      writeK2Doc(
+        k2DocPath,
+        "_(blank)_",
+        "- a@x.com\n- b@x.com, c@x.com (owner aliases)",
+      );
+      commitAll(repoDir, "add addresses, one malformed bullet", "2026-10-05T00:00:00Z");
+
+      // Commit 2 (2026-10-09): set day 0. Body unchanged — still malformed,
+      // so a run AT this revision (or any revision before the split) would
+      // correctly refuse under the strict HEAD parser. This test never runs
+      // the CLI at that revision, only at HEAD after the split below.
+      writeK2Doc(
+        k2DocPath,
+        "2026-10-10",
+        "- a@x.com\n- b@x.com, c@x.com (owner aliases)",
+      );
+      commitAll(repoDir, "set day 0", "2026-10-09T00:00:00Z");
+
+      // Commit 3 (2026-10-21, AFTER day 0): the owner fixes the malformed
+      // bullet by splitting it into two well-formed ones. This is the
+      // revision the strict HEAD parser now accepts, and the only one the
+      // CLI is ever run against.
+      writeK2Doc(
+        k2DocPath,
+        "2026-10-10",
+        "- a@x.com\n- b@x.com\n- c@x.com",
+      );
+      commitAll(repoDir, "split malformed bullet", "2026-10-21T00:00:00Z");
+
+      const exportPath = path.join(repoDir, "export.json");
+      writeFileSync(
+        exportPath,
+        JSON.stringify([
+          { email_lc: "a@x.com", confirmed_at: "2026-10-25T00:00:00.000Z" },
+          { email_lc: "b@x.com", confirmed_at: "2026-10-25T00:00:00.000Z" },
+          { email_lc: "c@x.com", confirmed_at: "2026-10-25T00:00:00.000Z" },
+        ]),
+      );
+
+      const { stdout } = await execFileAsync(
+        "node",
+        ["k2-count.mjs", "--export", exportPath],
+        { cwd: scriptsDir },
+      );
+
+      // All three addresses first appeared before day 0 (in commit 1) and
+      // must all be excluded — not re-dated to the post-day-0 split commit.
+      expect(stdout).toContain("excluded addresses (3)");
+      expect(stdout).toContain("a@x.com");
+      expect(stdout).toContain("b@x.com");
+      expect(stdout).toContain("c@x.com");
+      expect(stdout).toMatch(/distinct confirmed \(post-exclusion\): 0/);
+
+      // A warning names the historical malformed two-address bullet, not a
+      // silent drop.
+      expect(stdout).toContain(
+        "WARNING: malformed exclusion-list line(s) in K2.md's history",
+      );
+      expect(stdout).toContain("b@x.com, c@x.com (owner aliases)");
+    });
+
     it("A-5/A-6: refuses (non-zero exit) in a shallow clone", async () => {
       const repoDir = mkdtempSync(path.join(tmpdir(), "golfraven-k2-git-src-"));
       const { k2DocPath, scriptsDir: _unused } = scaffoldRepo(repoDir);

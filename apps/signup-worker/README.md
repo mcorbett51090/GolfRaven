@@ -128,10 +128,21 @@ previous-pepper derivation, moves that OLD hash into a second column
 never again depends on `TOKEN_PEPPER_PREVIOUS`), and writes the new
 current-pepper hash into `unsubscribe_token_hash`.
 `findByUnsubscribeTokenHash` (`src/db.ts`) matches an incoming token
-against EITHER column. Net effect: **every unsubscribe link ever emailed
-to a row keeps working, permanently, once that row has been through one
-resend after the rotation** — not just while `TOKEN_PEPPER_PREVIOUS`
-happens to still be set.
+against EITHER column.
+
+**Gate finding G-N1 (correction — this only survives ONE rotation, not
+"permanently"):** only one previous hash is kept
+(`unsubscribe_token_hash_prev`), so a *second* rotation's resend
+overwrites it. If a row resends again after a second rotation before the
+recipient of the email from *before the first rotation* has clicked
+unsubscribe, that first email's link 400s — it was never re-derived,
+because doing so would need the already-retired first pepper. The
+newest-emailed link for a row always keeps working; it's only an
+older-generation link that a second rotation can retire early. **Operational
+rule:** rotate `TOKEN_PEPPER` at most once per 12 months, and keep
+`TOKEN_PEPPER_PREVIOUS` set for at least 12 months after a rotation — that
+gives every row's most recent pre-rotation email time to resend (and thus
+migrate) or to be unsubscribed before a second rotation could retire it.
 
 This does **not** help the confirm token or the rate-limit IP hash — both
 those are unaffected by an unsubscribe-only concern, and a confirm link is

@@ -41,6 +41,17 @@ const STRICT_TIMESTAMP_RE =
 
 const MAX_WINDOW_HOURS = 8;
 
+// Gate finding G-N2: a line shaped like an attempted window but that
+// CANDIDATE_WINDOW_RE doesn't match (e.g. a space instead of "T", or "until"
+// instead of "to"/a dash) used to be silently skipped — dropping that round's
+// workouts with only a warnings-array count, never a refusal, even when it
+// was the only line. Any non-blank line containing a `YYYY-MM-DD`-shaped
+// date token is almost certainly an attempted window, so once such a line
+// fails to match the candidate shape, refuse loudly instead of continuing.
+// The blank placeholder paragraph (which spells the format as literal
+// "YYYY-MM-DD", not digits) has no such token and is unaffected.
+const DATE_LIKE_RE = /\d{4}-\d{2}-\d{2}/;
+
 function headingText(line: string): string | null {
   const m = HEADING_RE.exec(line.trim());
   return m ? m[1]! : null;
@@ -94,6 +105,15 @@ function parseStrictTimestamp(token: string, line: string): Date {
  * a non-existent calendar date, `end <= start`, or a window longer than 8
  * hours (a round of golf; anything longer signals a typo, not a long
  * round) are all rejected here, loudly, before any workout is filtered.
+ *
+ * Gate finding G-N2 (F-S6 residual): a line that merely LOOKS like a window
+ * attempt — it contains a `YYYY-MM-DD`-shaped date token — but does not
+ * even match the candidate `<START> to <END>` shape (a space instead of
+ * `T`, "until" instead of "to"/a dash, etc.) is ALSO thrown on, rather than
+ * silently skipped. Skipping it used to drop that round's workouts with
+ * only a `warnings` count, and refused only if no OTHER window happened to
+ * be present. A non-blank line with no such date token (e.g. the blank
+ * placeholder paragraph) is unaffected.
  */
 export function parseRoundWindows(markdown: string): RoundWindow[] {
   const lines = markdown.split("\n");
@@ -130,7 +150,16 @@ export function parseRoundWindows(markdown: string): RoundWindow[] {
       );
     }
     const m = CANDIDATE_WINDOW_RE.exec(line);
-    if (!m) continue;
+    if (!m) {
+      if (DATE_LIKE_RE.test(line)) {
+        throw new Error(
+          `docs/p0/X1.md "## Round windows" has a line that looks like an attempted window but does not ` +
+            `parse in the canonical "YYYY-MM-DDThh:mm:ssZ to YYYY-MM-DDThh:mm:ssZ" format: "${line.trim()}" — ` +
+            "fix or remove the line; a malformed window is never silently skipped.",
+        );
+      }
+      continue;
+    }
     const start = parseStrictTimestamp(m[1]!, line);
     const end = parseStrictTimestamp(m[2]!, line);
     if (end.getTime() <= start.getTime()) {
