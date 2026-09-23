@@ -1,0 +1,86 @@
+# Signup-worker gate: security and correctness review
+
+- **Scope:** `apps/signup-worker/**` and the landing-page changes in `apps/landing/**` at branch
+  `claude/golf-trails-golfnow-app-lumnqo`, HEAD `66a9b1f`.
+- **Reviewer:** an independent gate. The reviewer did not write this code.
+- **Reference module:** `raven-site-kit/secure-upload/worker/src/`.
+- **Counting rule:** decision 0001, Addendum D, R3.
+- **Date:** 2026-09-23.
+
+**Verdict: `signup-worker: FIX REQUIRED`.** Two findings are BLOCKING:
+
+- **F1:** as the repo stands today, the K2 count script ignores the pre-registered exclusion list.
+- **F2:** the "enumeration-safe" signup endpoint reveals, through response time, whether an address is an active confirmed subscriber.
+
+The rest of the implementation is solid. It verifies Turnstile fail-closed, uses 256-bit tokens that are stored only as hashes, never mutates on GET, gets RFC 8058 headers and handling right, and escapes its HTML. Its CORS policy is allow-list only, it stores no IP in D1, the `COALESCE` on `confirmed_at` is correct, and the K2 counting core matches R3.
+
+## Findings
+
+| id | severity | file:line | finding | concrete fix |
+|---|---|---|---|---|
+| F1 | **BLOCKING** | `apps/signup-worker/scripts/k2-count.mjs:51`, `:69`; `docs/p0/K2.md:52` | **The exclusion list is silently dropped for the real K2.md.** `sectionBody()` requires the heading line to equal `## Excluded addresses` exactly. The real heading is `## Excluded addresses (pre-Day-0 list)`, so the section resolves to `""` and the script returns `[]`. Run against the real file with addresses filled in, it printed `excluded (real headings): []`. Owner and test addresses would then inflate the K2 count, and the output still shows "excluded addresses: 0" as if that were correct. The CLI test (`test/k2-count-cli.test.ts`) uses a made-up heading that happens to match, so it passes. | Match the heading by prefix (`startsWith("## excluded addresses")`). **Throw** if the heading is missing, and never default to an empty list. Add a test that parses the real `docs/p0/K2.md`. |
+| F2 | **BLOCKING** | `apps/signup-worker/src/index.ts:102-104` vs `:106-168` | **Timing oracle for account enumeration.** For an active confirmed address (case B), the handler returns right after one SELECT. For every other case it first does 2–3 D1 writes and a blocking Resend API round-trip. A probe with Resend stubbed at 300 ms measured `active-confirmed 202 7ms` against `new 202 305ms`. Real Resend latency makes the gap one request wide and easy to read. The bodies are byte-identical (and tested), but the README's "no account enumeration" claim is false in practice. | Accept `ctx: ExecutionContext` in `fetch`. After Turnstile and the SELECT, run the case A/C/D writes and the send inside `ctx.waitUntil(...)`, then return `genericSignupAccepted` immediately on every branch. Handle and log send failures inside that `waitUntil` path. Add a test that case B and case A reach the response through the same awaited work, for example by asserting that Resend is not awaited before the response. |
+| F3 | SHOULD-FIX | `apps/signup-worker/src/index.ts:246-253` | **The router's `try/catch` does nothing for async errors.** `return handleX(...)` inside `try` returns the promise without awaiting it, so a rejected promise escapes the catch. A probe with a failing D1 printed `PROBE1 ESCAPED router try/catch: D1 down`. On Workers this becomes an uncaught exception, so the runtime's error page replaces the JSON 500. This also opens an **enumeration side channel:** send two concurrent signups for an unseen address and both pass `findByEmailLc`. The second `INSERT` then hits `UNIQUE constraint failed: signups.email_lc` (reproduced on SQLite) and returns a 500 instead of a 202. That happens only when the address was *new*. KV same-key write throttling under bursts may also throw `[unverified — training knowledge]`. | Use `return await handleX(...)` on every route. Make the insert race-safe with `INSERT ... ON CONFLICT(email_lc) DO NOTHING`, and if no row was inserted, re-read and fall through to the rotate path. Add a router-level test through `default.fetch`. |
+| F4 | SHOULD-FIX | `apps/signup-worker/src/index.ts:204`; `src/db.ts:115-125`; `src/email.ts` body ("works once") | **The confirm token is not single-use.** `confirm_token_hash` is never cleared on confirmation, so the same link keeps working for 48 h. The email says it "works once", and the commit message claims "hashed single-use tokens". The practical effect: if someone confirms, then unsubscribes (including through the one-click header) within 48 h, a later POST to the old confirm link clears `unsubscribed_at` and re-subscribes them. That is not the "fresh confirmation" the case-D comment requires. The test at `test/confirm-endpoint.test.ts:232` asserts the reuse instead of catching it. | In `recordConfirmation`, also set `confirm_token_hash = NULL, confirm_expires_at = NULL`. The idempotency test then becomes "second POST shows invalid/already-used and does not change state". A friendlier option is to render success without clearing `unsubscribed_at`. |
+| F5 | SHOULD-FIX | `apps/signup-worker/src/index.ts:84-92` | **Rate-limit slots are spent before Turnstile is checked.** Anyone can send 5 requests with a junk `turnstileToken` for a victim's address and use up that address's per-email cap. The victim then gets 429 for the rest of the UTC day, and the attacker never solves a challenge. | Check the per-IP cap before Turnstile, but read and consume the **per-email** slot only after `turnstile.success`. |
+| F6 | SHOULD-FIX | `apps/signup-worker/src/ratelimit.ts:59`; `src/config.ts:75-77` | **Email bombing and send-volume limits are thin.** (a) One attacker can make Resend send 5 emails to one victim in a few seconds, because there is no cooldown between resends. (b) The per-IP key is the full address, so IPv6 rotation inside a single /64 bypasses the 20/day cap. (c) There is no global daily send cap, so a paid Turnstile-solving service could spend the Resend quota. Confirmations for real users would then fail silently, since the response is still 202. | Add a per-email resend cooldown (for example, skip the send if the last confirm token was issued less than 10–15 min ago, still returning the generic 202). Key IPv6 by /64. Add a global daily send counter that fails closed with a logged alert. |
+| F7 | SHOULD-FIX | `apps/signup-worker/scripts/k2-count.mjs:58`, `:97` | **Day-0 parsing does not follow R3's "UTC date" exactly.** (a) `ISO_DATE_RE` accepts a date-time with no offset (`2026-10-10T09:30` or `2026-10-10 09:30`), which JS reads as **local time**. With `TZ=America/New_York` it parsed to `2026-10-10T13:30:00.000Z`, which shifts both cutoffs. (b) It takes the *first* date anywhere in the section, so "logged 2026-10-12: day 0 is 2026-10-10" gives the wrong day 0. (c) `--day0` overrides the logged value, which contradicts "logged in K2.md… never restarted". | Accept only a bare `YYYY-MM-DD` and build the date with `Date.UTC(y, m-1, d)`. Error if the section holds zero dates or more than one. Remove `--day0`, or refuse when it differs from K2.md. |
+| F8 | SHOULD-FIX | `apps/signup-worker/scripts/k2-count.mjs:59`, `:69` | **Formatting slips in the exclusion list quietly fail to match.** `EMAIL_RE` keeps surrounding markdown characters. Observed results: `` `a@b.com` `` becomes `` "`a@b.com`" ``, `[a@b.com](mailto:a@b.com)` becomes `"[a@b.com]"` plus `"mailto:a@b.com"`, and `a@b.com.` becomes `"a@b.com."`. None of these equals the stored `email_lc`, so no exclusion happens. The script also cannot enforce R3's "listed **before** Day 0" rule, because it reads the *current* file. | Use a tighter token (`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`), strip `mailto:`, echo the parsed list, and fail on any bullet that does not parse cleanly. For the timing rule, read K2.md at the commit that logged Day 0 (`git log -S` on the Day 0 line, then `git show <sha>:docs/p0/K2.md`), or print `git blame` dates for each excluded line and refuse any later than Day 0. |
+| F9 | SHOULD-FIX | `apps/landing/src/main.js:128-146` | **The spent Turnstile token is reused on retry.** Turnstile tokens are single-use, and `form.reset()` does not reset the widget, so the old `cf-turnstile-response` value stays. Any retry after an error (429, network, a 400) or a second signup resubmits a spent token. Siteverify rejects it (`timeout-or-duplicate`), and the user sees "Something went wrong" until they reload `[inference from Turnstile's documented single-use tokens; not run against a live widget]`. | Call `window.turnstile && window.turnstile.reset()` in `.finally()`. |
+| F10 | SHOULD-FIX | `apps/signup-worker/src/index.ts:72` | **No body-size cap, and any Content-Type is accepted.** `request.json()` parses the whole body before any field limits apply. A probe showed a `text/plain` body is accepted (`PROBE3 text/plain body status 202`), so the endpoint takes cross-site "simple" requests. Turnstile blocks those in practice. | Reject when `Content-Length` > 8 KiB or is absent, read with `request.text()`, check the length, then `JSON.parse`. Require `Content-Type: application/json` and return 415 otherwise. |
+| F11 | SHOULD-FIX | `apps/landing/src/index.html:142`; `apps/signup-worker/README.md:34-55` | **The privacy notice does not match what is stored.** Three differences: (a) unconfirmed rows, including email addresses someone else typed in, are kept **forever**, with no purge; (b) `unsubscribed_at` and a keyed IP hash kept in KV for up to 48 h are not mentioned; (c) Resend (email processor) and Cloudflare Turnstile siteverify (receives the IP via `remoteip`) are not named as processors. The "trail preference" is stored in `source`, which is consistent. | Add a scheduled purge of pending rows older than N days, for example 30, or disclose the retention. Add "unsubscribe time" and "a short-lived, keyed hash of your IP for abuse limits (≤48 h)". Name Resend and Cloudflare as processors. |
+| F12 | NIT | `apps/signup-worker/src/turnstile.ts:50` | The siteverify response's `hostname` and `action` are not checked. The site key is already hostname-restricted in the dashboard, so this is defense in depth only. The reference module doesn't check them either. | Require `data.hostname` to equal the host of `PUBLIC_BASE_URL`, and set and check a `data-action="signup"`. |
+| F13 | NIT | `apps/signup-worker/src/tokens.ts`, `src/index.ts:69` | A missing `TOKEN_PEPPER` or other secret is not detected. Hashing then runs over the literal `"undefined:"`, and the IP key becomes a plain SHA-256 of the IP, which can be brute-forced across IPv4. | Assert the secrets are present and a minimum length at the top of `fetch`, and return a 500 if not. |
+| F14 | NIT | `apps/signup-worker/src/index.ts:165` | The logged `reason` is Resend's free-text `message`, which may echo the recipient address `[unverified]`. | Log only the HTTP status or a fixed code. |
+| F15 | NIT | `apps/signup-worker/README.md:101-111` | Runbook order: step 8 ("submit the landing page's form for real") comes before step 9, where `SIGNUP_ENDPOINT` is set, so step 8 cannot be done as written. `wrangler` is not a devDependency. There is no step to check that Turnstile renders under the `_headers` CSP. `script-src` and `frame-src` `https://challenges.cloudflare.com` match Cloudflare's documented needs `[unverified — the Cloudflare docs host was blocked by egress this session]`. | Swap steps 8 and 9. Use `npx wrangler@<pin>`. Add "load the deployed page and check the console for no CSP violations". |
+| F16 | NIT | `apps/signup-worker/migrations/0001_create_signups.sql:38`; `docs/p0/K2.md` METHOD step 2, STATUS, MEASURED VALUE | The migration comment points to `markConfirmed()`, but the function is `recordConfirmation()`. K2.md still says "Postmark/SES" and "no signup backend exists yet". | Update both. |
+| F17 | NIT | `apps/signup-worker/src/k2-count.ts:109` | Confirmed rows with a malformed `confirmed_at` are skipped without being reported. | Count them and print the count, so a silent drop can be seen. |
+
+## What was checked and holds
+
+- **GET never mutates.** Both GET handlers render a POST form without touching D1.
+- **RFC 8058.** Each email carries `List-Unsubscribe: <https://…?token=…>` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. POST works with no body, returns 200, does not redirect, and is idempotent. DKIM coverage of these headers depends on Resend `[unverified]`.
+- **Tokens.** 32 bytes from `crypto.getRandomValues`, base64url-encoded, and stored only as `sha256(pepper:token)`. Lookup is by indexed hash, so constant-time comparison is not relevant. Expiry is checked with `<=`, and a malformed expiry counts as expired.
+- **Turnstile** fails closed on network errors, non-2xx responses, and malformed JSON. Siteverify enforces single use.
+- **Injection.** Tokens are URL-encoded and then HTML-escaped in form actions and the email. No email address or `source` is echoed into HTML or into email headers. `validate.ts` cannot produce two recipients, because the regex allows only one `@`.
+- **Redirects and CORS.** There are no redirects, so no open redirect. CORS reflects `Origin` only when it appears in `ALLOWED_DEV_ORIGINS`, which is empty in production.
+- **Security headers.** HTML pages send `default-src 'none'; form-action 'self'; base-uri 'none'`, `X-Frame-Options: DENY`, `nosniff`, `no-store`, and `no-referrer`.
+- **IP handling.** Taken from `CF-Connecting-IP`, used only as a peppered hash in KV with a TTL of ≤48 h, and never written to D1.
+- **D1 schema.** Applied to SQLite with no errors. `UNIQUE(email_lc)` holds (a duplicate insert is rejected). A second call to `COALESCE(confirmed_at, ?2)` kept the first value (`[('T1',)]`). Re-signup after an unsubscribe does not clear `unsubscribed_at` until a new confirmation.
+- **K2 counting core** (`src/k2-count.ts`):
+  - distinct, lower-cased, earliest `confirmed_at`;
+  - strictly `<` each cutoff;
+  - unsubscribed-but-confirmed rows still count;
+  - refuses without day 0.
+
+  Day 0 plus 14 or 42 days is computed in UTC milliseconds. Given a bare `YYYY-MM-DD`, that gives UTC midnight, which is correct. F7 covers the other forms.
+- **wrangler.toml.** It holds no secrets. `[[routes]]` has the right `pattern`/`zone_name` shape, the D1 and KV bindings match `Env`, and every account-specific value is `TODO(owner)`.
+
+## Command results
+
+| command | result |
+|---|---|
+| `pnpm install --frozen-lockfile --config.engine-strict=false` | OK. Lockfile up to date. Warning: engine wants node ≥24, current is v22.22.2. |
+| `pnpm --config.engine-strict=false -r typecheck` | OK, all 9 projects. |
+| `pnpm --config.engine-strict=false -r build` | OK. |
+| `pnpm --config.engine-strict=false -r test` | OK. signup-worker: **10 files, 64 tests passed**. Landing smoke checks passed. Other packages passed. Overall exit 0. |
+| K2 parser against the real `docs/p0/K2.md` (scratch script) | `excluded (real headings): []`. With the heading renamed: `` ['matt@…', '`test1@…`', '[t2@x.com]', 'mailto:t2@x.com', 't3@x.com.'] ``. Day 0 `2026-10-10T09:30` became `2026-10-10T13:30:00.000Z` under `TZ=America/New_York`. Supports F1, F7, F8. |
+| Router, timing and content-type probe (scratch vitest against `src/index.ts`) | `PROBE1 ESCAPED router try/catch: D1 down`, `PROBE2 active-confirmed 202 7ms` / `new 202 305ms`, `PROBE3 text/plain body status 202`. Supports F2, F3, F10. |
+| Migration on SQLite (python `sqlite3`) | Applies cleanly. The duplicate insert failed with `UNIQUE constraint failed: signups.email_lc`. `COALESCE` kept the first timestamp. |
+
+The scratch probes were run outside the repo, and no repo files other than this report were written.
+
+## Test meaningfulness
+
+The unit tests are real and would catch regressions in validation, fail-closed Turnstile, Resend's "no false success", the RFC 8058 headers, the per-IP 429, byte-identical 202 bodies, and the K2 cutoff and unsubscribe rules. Important paths they do **not** cover:
+
+1. **Parsing the real `docs/p0/K2.md`.** The CLI test's invented heading is exactly what hid F1.
+2. **The default-export router.** A test through it would have caught F3.
+3. **SQL semantics.** `FakeD1` re-implements `COALESCE` and has no UNIQUE constraint, so the SQL strings are never executed. Swapping the `COALESCE` SQL for a plain overwrite would still pass. Consider running the migration and queries on an in-process SQLite (for example `better-sqlite3`) or on Miniflare D1.
+4. **Single use of the confirm token.** The existing test asserts that reuse succeeds (F4).
+5. **Enumeration timing, and rate-limit consumption before Turnstile** (F2, F5).
+6. **Per-email cap through the handler, and the landing retry path** (F9).
+
+---
+
+signup-worker: FIX REQUIRED

@@ -95,6 +95,14 @@
               </label>
             </div>
 
+            <!--
+              Empty by default -- no third-party reference at all unless
+              main.js actually configures it (SIGNUP_ENDPOINT and
+              TURNSTILE_SITE_KEY both set). See main.js and
+              apps/signup-worker/README.md.
+            -->
+            <div id="turnstile-container" class="field"></div>
+
             <button type="submit">Notify me</button>
 
             <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
@@ -131,10 +139,12 @@
           </p>
           <ul>
             <li><strong>16+ only.</strong> GolfRaven is not directed at children, and we don't knowingly collect signups from anyone under 16. The signup form records your confirmation of this alongside your email.</li>
-            <li><strong>What we store.</strong> Your email address, your trail preference, when you signed up and when you confirmed, the wording of the consent you agreed to (including this age confirmation), and standard server/CDN access logs (which include IP address) kept for a limited retention period. Nothing is sold or shared with advertisers.</li>
+            <li><strong>What we store.</strong> Your email address, your trail preference, when you signed up and when you confirmed, the wording of the consent you agreed to (including this age confirmation), and a short-lived, keyed hash of your IP address (never the raw address) used only for abuse limits, kept for about 3 days. Nothing is sold or shared with advertisers.</li>
+            <li><strong>How long we keep it.</strong> If you never confirm, your signup is deleted automatically after 30 days. If you confirm and later unsubscribe, it's deleted about 30 days after the K2 test closes (or 30 days after you unsubscribe, whichever is later).</li>
             <li><strong>Double opt-in.</strong> You're added to the list only after you click the confirmation link we email you.</li>
             <li><strong>Unsubscribe any time.</strong> Every email includes a one-click unsubscribe link.</li>
-            <li><strong>No trackers.</strong> This page loads no third-party scripts, analytics, or cookies.</li>
+            <li><strong>Who processes this data.</strong> Cloudflare (hosting, storage, and the Turnstile bot check below) and Resend (delivers the confirmation email). Neither is used for advertising.</li>
+            <li><strong>No trackers, one spam-prevention exception.</strong> This page loads no analytics or advertising scripts of any kind. The one third party it loads, only once signups are open, is Cloudflare Turnstile — a challenge that confirms you're not a bot before your signup is accepted. It does not track you across other sites.</li>
           </ul>
         </div>
       </section>

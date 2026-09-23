@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Pilot Ridge Golf Course",
+    "lat": 36.0,
+    "lon": -87.0,
+    "trail": "TN",
+    "unit": "course"
+  },
+  {
+    "name": "No Match Golf Course",
+    "lat": 44.0,
+    "lon": -79.0,
+    "trail": "VI",
+    "unit": "course"
+  }
+]

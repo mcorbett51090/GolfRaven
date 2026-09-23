@@ -184,3 +184,48 @@ Otherwise it counts as "not present". The phone golf app is **18Birdies**. If, b
 cannot be installed or offers no Apple Health / Health Connect write setting, **Hole19** replaces it, and the
 reason is logged in `docs/p0/X1.md` before the round. Any other app tried is supplementary data, never the
 source verdict.
+
+## Addendum E (2026-09-23, before any X5 query is run) — X5 denominator for facility- and hole-unit trails
+
+`docs/p0/X5.md` pre-registers the match rule and the `course`-unit denominator (one entry per course, even when
+several courses share one facility polygon). It does not say how `facility`- and `hole`-unit trails enter the
+denominator. Fixed here, before any Overpass data is read:
+
+- **`completionUnit = facility`:** one denominator entry per facility (grouped by `facilityId` from X2). The entry
+  is covered if at least one course at that facility matched a `leisure=golf_course` polygon under X5.md's match
+  rule. A course with no `facilityId` is its own facility.
+- **`completionUnit = hole`:** one denominator entry per course, exactly as for `course`. `golf=hole` coverage is
+  recorded as a quality measurement only and never enters the pass/fail denominator.
+- The 60% bar is computed over the combined denominator across the pilot slate. These rules are implemented in
+  `tools/p0` (`x5-overpass`) and cited there.
+
+## Addendum F (2026-09-23, before any X1 round, X5 query or K2 count) — read rules found open by the round-3 gate
+
+`docs/p0/gate-round3.md` found reading rules that the tools had to choose on their own. Each is fixed here before
+its data exists. No pass bar changes.
+
+**X5 match rule, made exact.** A `leisure=golf_course` way **or relation** (outer-ring geometry) matches a
+pilot-candidate course when either (a) the course's known point lies inside the polygon, or (b) the names match
+**and** the shortest distance from the course's point to the polygon is ≤ 500 m, where a point inside the polygon
+has distance 0. Names match when, after normalisation (Unicode NFKD, diacritics removed, lower-cased, every
+character that is not a letter or digit replaced by a space, whitespace collapsed), the OSM name equals the course
+name, or contains the course name as a whole-word sequence. No other normalisation, abbreviation list or fuzzy
+matching is applied.
+
+**X5 run integrity.** An Overpass `remark` error, a missing or unparseable response for any course, or an empty
+course list stops the run with a non-zero exit. It never counts as "unmatched". Every live response is saved
+alongside the result so the verdict can be replayed offline.
+
+**X1 "on ≥ 1 OS".** X1 passes only if there is **one** operating system on which at least 2 of the 3 sources
+write golf workouts with routes. Sources that pass on different operating systems do not combine. (A user syncs
+from one phone, so this is the reading that predicts what a user gets.)
+
+**X1 round window.** Before the export is read, Matt logs in `docs/p0/X1.md` the start and end time (UTC) of each
+test round. Only workouts whose start time falls inside a logged round window, with 60 minutes of slack either
+side, count. Older workouts on the device are ignored.
+
+**K2 exclusion dating.** An address is excluded if it **first appeared** in `docs/p0/K2.md` in a commit whose
+**committer** time is before day 0 00:00 UTC, found from the file's full history (`git log -S`), so later
+reformatting or deletion does not change it. The count refuses to run in a shallow clone. Known limit: git
+timestamps can be set by whoever makes the commit; the protection is that exclusions are pushed to GitHub before
+day 0, which leaves a server-side record Matt can check.

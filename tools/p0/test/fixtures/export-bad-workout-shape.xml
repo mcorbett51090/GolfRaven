@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+  <!-- Simulates Apple changing the Workout element shape: no workoutActivityType attribute at all. -->
+  <Workout activityType="Golf" sourceName="Garmin Connect"
+    startDate="2026-09-20 09:00:00 -0400" endDate="2026-09-20 13:00:00 -0400"/>
+  <Workout activityType="Running" sourceName="Matt's Apple Watch"
+    startDate="2026-09-10 07:00:00 -0400" endDate="2026-09-10 07:30:00 -0400"/>
+</HealthData>
