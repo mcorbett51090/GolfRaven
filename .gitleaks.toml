@@ -1,0 +1,17 @@
+title = "golfraven gitleaks config"
+
+# Extend gitleaks' built-in default ruleset rather than redefining rules
+# here. No project-specific rules are added and no path/regex is
+# allowlisted — every finding gitleaks' default rules produce is a real
+# finding that must be fixed or, if it is a genuine false positive, added
+# to the allowlist below with a comment explaining why (build plan §15:
+# "Bundle secret scan + gitleaks — no service-role, Stripe or OAuth secret
+# in any bundle or commit").
+[extend]
+useDefault = true
+
+# Deliberately no [allowlist] table: gitleaks 8.30.1 rejects an
+# [[allowlists]]/[allowlist] table with no regexes/paths/commits set
+# ("Failed to load config ... [[allowlists]] must contain at least one
+# check"). Add an [allowlist] table back only when there is a real entry
+# to put in it, with a comment naming the exact false positive it covers.

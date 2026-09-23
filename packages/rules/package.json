@@ -1,0 +1,24 @@
+{
+  "name": "@golfraven/rules",
+  "private": true,
+  "version": "0.0.0",
+  "description": "GolfRaven scoring/eligibility rules: scorePlay (policyVersion), RuleExpr evaluation, eligibility. Placeholder until P1/§8 (build plan §3.1 row E).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}

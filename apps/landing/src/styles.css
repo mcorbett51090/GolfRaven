@@ -1,0 +1,237 @@
+/* GolfRaven landing page styles.
+   Mobile-first, no external fonts/icons, no third-party assets.
+   Colors are a working placeholder brand palette (P2 designs the real
+   mark, build plan §5.6) chosen to pass WCAG AA contrast at normal text
+   sizes against their paired backgrounds. */
+
+:root {
+  --gr-green-900: #0f3d2e; /* header/footer bg, body text on light bg */
+  --gr-green-700: #1f5c42; /* links, accents */
+  --gr-green-050: #eef6f1; /* section bg */
+  --gr-ink: #12201a; /* body text */
+  --gr-paper: #ffffff;
+  --gr-border: #cfe1d7;
+  --gr-focus: #0b5fff;
+  --gr-max-width: 40rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  color: var(--gr-ink);
+  background: var(--gr-paper);
+  line-height: 1.5;
+}
+
+.wrap {
+  max-width: var(--gr-max-width);
+  margin-inline: auto;
+  padding-inline: 1.25rem;
+}
+
+/* Skip link: visible on keyboard focus only */
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  background: var(--gr-paper);
+  color: var(--gr-green-900);
+  padding: 0.75rem 1rem;
+  z-index: 10;
+}
+
+.skip-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+}
+
+a {
+  color: var(--gr-green-700);
+}
+
+:focus-visible {
+  outline: 3px solid var(--gr-focus);
+  outline-offset: 2px;
+}
+
+.site-header {
+  background: var(--gr-green-900);
+  color: var(--gr-paper);
+  padding-block: 1rem;
+}
+
+.wordmark {
+  font-weight: 700;
+  font-size: 1.25rem;
+  letter-spacing: 0.01em;
+}
+
+.hero {
+  padding-block: 2.5rem 2rem;
+}
+
+.hero h1 {
+  font-size: clamp(1.5rem, 5vw, 2.25rem);
+  line-height: 1.2;
+  margin: 0 0 1rem;
+  color: var(--gr-green-900);
+}
+
+.subhead {
+  font-size: 1.0625rem;
+  margin: 0;
+}
+
+.signup {
+  background: var(--gr-green-050);
+  border-block: 1px solid var(--gr-border);
+  padding-block: 2rem;
+}
+
+.signup h2 {
+  margin-top: 0;
+  font-size: 1.375rem;
+}
+
+.double-opt-in-note {
+  font-size: 0.9375rem;
+  color: var(--gr-ink);
+  margin-bottom: 1.5rem;
+}
+
+.signup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 28rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.field label,
+fieldset.field legend {
+  font-weight: 600;
+}
+
+input[type="email"] {
+  font-size: 1rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--gr-border);
+  border-radius: 0.375rem;
+  background: var(--gr-paper);
+  color: var(--gr-ink);
+  min-height: 44px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #365446;
+}
+
+.radio-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-weight: 400;
+}
+
+.radio-row label,
+.checkbox-field label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 400;
+}
+
+input[type="radio"],
+input[type="checkbox"] {
+  width: 1.125rem;
+  height: 1.125rem;
+  flex-shrink: 0;
+}
+
+button[type="submit"] {
+  align-self: flex-start;
+  background: var(--gr-green-900);
+  color: var(--gr-paper);
+  border: none;
+  border-radius: 0.375rem;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+button[type="submit"]:hover {
+  background: var(--gr-green-700);
+}
+
+button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-status {
+  min-height: 1.25em;
+  font-size: 0.9375rem;
+  margin: 0;
+}
+
+.signups-closed {
+  background: var(--gr-paper);
+  border: 1px solid var(--gr-border);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  max-width: 28rem;
+}
+
+.privacy {
+  padding-block: 2rem;
+}
+
+.privacy h2 {
+  font-size: 1.25rem;
+}
+
+.privacy ul {
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.site-footer {
+  background: var(--gr-green-900);
+  color: var(--gr-paper);
+  padding-block: 1.25rem;
+  font-size: 0.875rem;
+}
+
+.site-footer a {
+  color: var(--gr-paper);
+}
+
+@media (min-width: 40rem) {
+  .hero {
+    padding-block: 4rem 3rem;
+  }
+}

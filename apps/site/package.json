@@ -1,0 +1,11 @@
+{
+  "name": "@golfraven/site",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Public site (Astro 5 static, build plan §3.1 row C). Placeholder until P2 ports southern-wine-country here (build plan §5).",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "echo \"@golfraven/site: no TypeScript yet (placeholder until P2, build plan §5)\"",
+    "test": "echo \"@golfraven/site: no tests yet (placeholder until P2, build plan §5)\""
+  }
+}
