@@ -1,0 +1,19 @@
+{
+  "name": "@golfraven/signup-worker",
+  "private": true,
+  "version": "0.0.0",
+  "description": "K2 double-opt-in email signup backend (Cloudflare Worker + D1) for apps/landing, plus the K2 signup-count script (build plan §10 P0, K2; decision 0001 Addendum D R3).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "k2-count": "node ./scripts/k2-count.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260923.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}
