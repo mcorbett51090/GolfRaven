@@ -102,6 +102,52 @@ const IdLikeSchema = z
   .max(MAX_ID_LENGTH, `must be at most ${MAX_ID_LENGTH} characters`)
   .regex(ID_LIKE_RE, "must be 1-128 characters from [A-Za-z0-9_.:-] only (no whitespace, punctuation, or non-ASCII characters, including bidi/zero-width/BOM characters)");
 
+/** Ninth gate, item 3: `fixId`'s encoding is now PINNED to exactly ONE
+ * scheme, not merely "whatever happens to survive `IdLikeSchema`'s wider
+ * id character class" — `IdLikeSchema` also allows `.`/`:`/`-` for
+ * human/DB-composed keys like `"course:2026-06-01"`; `fixId` is never
+ * that kind of value (this file's own doc, and `score-play.ts`'s trust
+ * table: "the challenge id, or a hash of the attestation assertion" — an
+ * ENTIRELY server-generated, opaque token, never a composed key), so it
+ * gets a NARROWER, more specific pin instead of quietly riding on the
+ * broader class.
+ *
+ * **The choice: unpadded base64url (RFC 4648 §5) — `[A-Za-z0-9_-]`, no
+ * `+`, `/`, or `=` padding.** Not hex, even though this same file uses
+ * hex elsewhere (`computeInputDigest`'s SHA-256, M5) — `fixId` is not
+ * always a hash digest (it can be the raw challenge-nonce id the
+ * attestation exchange issued, per the trust table), and mobile
+ * attestation ecosystems (App Attest / Play Integrity) already speak
+ * base64 natively for exactly this kind of opaque token; re-encoding
+ * their output as unpadded base64url (drop `=` padding, swap `+`/`/` for
+ * `-`/`_`) is the standard "make an opaque token URL- and JSON-safe"
+ * step and covers a raw random nonce and a hash digest equally well,
+ * where hex would be an awkward fit for a raw base64 token from an
+ * external SDK. This is a HARD REQUIREMENT on the Edge Function/token
+ * -verification layer that produces `fixId` (documented in the security
+ * doc and `score-play.ts`'s trust table) — this package only ENFORCES
+ * the shape, it cannot itself re-encode a caller's value.
+ *
+ * **This was already accidentally true before this gate**, in the sense
+ * that `+`/`/`/`=` (standard, PADDED base64's distinguishing characters)
+ * are not in `IdLikeSchema`'s allow-list either, so a standard-base64
+ * `fixId` was already quarantined as a side effect of the broader
+ * class. What's NEW here is making the choice DELIBERATE and DOCUMENTED
+ * (a real requirement the Edge layer must be built to, not an accident
+ * of a shared regex two fields happen to both currently satisfy) and
+ * giving `fixId` its own schema so a future widening of `IdLikeSchema`
+ * (e.g. to support a new kind of general id) can never silently loosen
+ * `fixId`'s pin along with it. */
+const BASE64URL_UNPADDED_RE = /^[A-Za-z0-9_-]+$/;
+const FixIdSchema = z
+  .string()
+  .min(1)
+  .max(MAX_ID_LENGTH, `must be at most ${MAX_ID_LENGTH} characters`)
+  .regex(
+    BASE64URL_UNPADDED_RE,
+    "must be unpadded base64url (RFC 4648 §5): [A-Za-z0-9_-] only — standard base64's '+', '/', and '=' padding are rejected",
+  );
+
 /** Seventh gate, item 5: "Never interpolate raw attacker strings into
  * reasons: truncate and escape them (JSON.stringify)." Used everywhere
  * this module builds a human-readable `reasons` entry that embeds a
@@ -158,7 +204,7 @@ const TokenStateSchema = z.union([
 ]);
 
 const AppFixSchema = z.strictObject({
-  fixId: IdLikeSchema,
+  fixId: FixIdSchema,
   facilityId: IdLikeSchema,
   fromApp: z.boolean(),
   simulated: z.boolean(),
@@ -217,17 +263,38 @@ const EvidenceSchema = z.discriminatedUnion("source", [
     presenceFix: AppFixSchema.optional(),
     paymentRef: NonEmptyStringSchema.optional(),
   }),
-  z.strictObject({
-    ...EvidenceCommonShape,
-    source: z.literal("receipt_green_fee"),
-    status: z.enum(["approved", "pending", "void"]),
-    coSignalFix: AppFixSchema.optional(),
-    paymentRef: NonEmptyStringSchema.optional(),
-    fingerprint: z.string().optional(),
-    // Eighth gate, item 1: allow-listed to the three known reasons — see
-    // `Evidence`'s own doc (`internal/classify.js`) for the semantics.
-    voidReason: z.enum(["duplicate", "reviewer", "fraud"]).optional(),
-  }),
+  z
+    .strictObject({
+      ...EvidenceCommonShape,
+      source: z.literal("receipt_green_fee"),
+      status: z.enum(["approved", "pending", "void"]),
+      coSignalFix: AppFixSchema.optional(),
+      paymentRef: NonEmptyStringSchema.optional(),
+      fingerprint: z.string().optional(),
+      // Eighth gate, item 1: allow-listed to the three known reasons — see
+      // `Evidence`'s own doc (`internal/classify.js`) for the semantics.
+      voidReason: z.enum(["duplicate", "reviewer", "fraud"]).optional(),
+    })
+    // Ninth gate, item 4: `voidReason` is only ever MEANINGFUL on a
+    // `status: "void"` row — `effectiveVoidReason`/`voidDuplicateFingerprints`
+    // (`score-play.ts`) never even LOOK at it on an approved/pending row.
+    // A row that sets it anyway (`status: "approved", voidReason: "fraud"`)
+    // is INTERNALLY INCONSISTENT: either the caller forgot to set
+    // `status: "void"` to match the reason it already knows, or it
+    // mislabeled the status — either way this package cannot tell which
+    // half is the truth, so it treats the whole row as a STRUCTURAL
+    // error (rejected here, at the schema) rather than silently ignoring
+    // the orphaned field and scoring the row as if it were clean. A
+    // caller-side mistake here is exactly the kind of thing that should
+    // surface loudly (quarantined, `heldReview` forced when on-play) —
+    // not vanish silently the way an ignored extra field would (this
+    // schema is already `strictObject`, so an ACTUALLY unrecognized key
+    // is rejected too; this refinement closes the narrower gap where the
+    // key IS recognized but its value contradicts a sibling field).
+    .refine((row) => row.status === "void" || row.voidReason === undefined, {
+      message: 'voidReason is only meaningful on a status: "void" row — present on a non-void row, it is a structural inconsistency, not scoreable evidence',
+      path: ["voidReason"],
+    }),
   z.strictObject({
     ...EvidenceCommonShape,
     source: z.literal("health_route"),

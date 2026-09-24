@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(96);
+SELECT plan(112);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -178,6 +178,7 @@ SELECT has_column('app', 'offer_code', 'policy_version', 'app.offer_code.policy_
 SELECT has_column('app', 'offer_code', 'basis', 'app.offer_code.basis exists');
 SELECT has_column('app', 'entitlement', 'play_id', 'app.entitlement.play_id exists');
 SELECT has_column('app', 'entitlement', 'policy_version', 'app.entitlement.policy_version exists');
+SELECT has_column('app', 'purchase_evidence', 'void_reason', 'app.purchase_evidence.void_reason exists (post-P3a re-gate: cross-user receipt-dedupe griefing fix)');
 
 -- ---------------------------------------------------------------------------
 -- 4. Offer budgets: CHECK, max_redemptions, locked reserve function.
@@ -255,23 +256,125 @@ SELECT lives_ok(
             'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')$$,
   'setup: a second purchase_evidence row (player B) to dedupe against player A''s seeded phash1'
 );
+-- ⛔ FIX (post-P3a re-gate, cross-user receipt griefing): this is a
+-- CROSS-USER match (player B''s new purchase vs player A''s seeded
+-- phash1, helpers.sql) -- must NOT auto-void either side any more (that
+-- was the griefing vector: whoever submits first, across two DIFFERENT
+-- people, used to void the other's legitimate upload). Instead: a
+-- review_item + a receipt_cross_user_match fraud_signal, both purchases
+-- left pending.
 SELECT is(
   app.dedupe_receipt_fingerprint(
     '91000000-0000-0000-0000-000000000099'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid,
     'phash1', 'fac_x', current_date
   ),
   false,
-  'dedupe_receipt_fingerprint returns false for a phash matching an EXISTING different purchase (helpers.sql seeds phash1 for player A''s purchase 90000000-...-1)'
+  'dedupe_receipt_fingerprint returns false for a CROSS-USER phash match (helpers.sql seeds phash1 for player A''s purchase 90000000-...-1, this call is player B''s)'
 );
 SELECT is(
   (SELECT status::text FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000099'),
+  'pending',
+  'CROSS-USER match: the NEW (player B) purchase is left pending, NOT voided'
+);
+SELECT is(
+  (SELECT status::text FROM app.purchase_evidence WHERE id = '90000000-0000-0000-0000-000000000001'),
+  'pending',
+  'CROSS-USER match: the EXISTING (player A) purchase is also moved to pending, NOT left silently valid'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_cross_user_match' AND user_id = '00000000-0000-0000-0000-00000000000b'),
+  1,
+  'a cross-user phash match writes exactly one fraud_signal row (kind=receipt_cross_user_match)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_phash_duplicate' AND user_id = '00000000-0000-0000-0000-00000000000b'),
+  0,
+  'a cross-user match does NOT write a receipt_phash_duplicate fraud_signal (that kind is same-user only)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id = '91000000-0000-0000-0000-000000000099'),
+  1,
+  'a cross-user phash match opens exactly one review_item (kind=receipt_cross_user_match)'
+);
+SELECT is(
+  (SELECT (detail->>'matched_user_id')::uuid FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id = '91000000-0000-0000-0000-000000000099'),
+  '00000000-0000-0000-0000-00000000000a'::uuid,
+  'the review_item''s detail names the OTHER (matched) user'
+);
+-- marker_credit b0000000-...-1 (helpers.sql) backs player A's purchase
+-- 90000000-...-1 and is already 'credited' (terminal) -- a cross-user
+-- match must not touch it at all (it isn't even in the same-user
+-- duplicate branch that does any marker_credit detaching).
+SELECT is(
+  (SELECT purchase_evidence_id FROM app.marker_credit WHERE id = 'b0000000-0000-0000-0000-000000000001'),
+  '90000000-0000-0000-0000-000000000001'::uuid,
+  'a cross-user match leaves an already-credited marker_credit''s purchase_evidence_id untouched'
+);
+-- Restore player A's purchase to 'valid' (this test file reuses
+-- 90000000-...-1's fingerprint identity in the H1 data test further down,
+-- and 'pending' is this SPECIFIC test's own transient assertion, not a
+-- state later sections should have to account for).
+SELECT lives_ok(
+  $$UPDATE app.purchase_evidence SET status = 'valid' WHERE id = '90000000-0000-0000-0000-000000000001'$$,
+  'cleanup: restore player A''s purchase_evidence to valid after the cross-user test above'
+);
+
+-- SAME-USER match (a genuine retry/duplicate submission): still
+-- auto-voids the NEWER one, now tagged void_reason='duplicate', and (M2-
+-- style belt-and-suspenders) detaches any non-terminal marker_credit.
+SELECT lives_ok(
+  $$INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+    VALUES ('91000000-0000-0000-0000-000000000096', '00000000-0000-0000-0000-00000000000b',
+            'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')$$,
+  'setup: a SECOND purchase_evidence row for player B (same user as the one seeded above), for the same-user dedupe test'
+);
+SELECT is(
+  app.dedupe_receipt_fingerprint(
+    '91000000-0000-0000-0000-000000000096'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid,
+    'phash-same-user-dupe', 'fac_x', current_date
+  ),
+  true,
+  'setup: first submission of phash-same-user-dupe (player B) records cleanly'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+    VALUES ('91000000-0000-0000-0000-000000000095', '00000000-0000-0000-0000-00000000000b',
+            'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')$$,
+  'setup: a THIRD purchase_evidence row for player B, the same-user RETRY of the same receipt'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.marker_credit (id, user_id, trail_id, facility_id, purchase_evidence_id, status)
+    VALUES ('b0000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000b',
+            'trl_t', 'fac_x', '91000000-0000-0000-0000-000000000095', 'pending')$$,
+  'setup: a PENDING (non-terminal) marker_credit backing the retry purchase, to prove it gets detached'
+);
+SELECT is(
+  app.dedupe_receipt_fingerprint(
+    '91000000-0000-0000-0000-000000000095'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid,
+    'phash-same-user-dupe', 'fac_x', current_date
+  ),
+  false,
+  'SAME-USER match: the retry submission is rejected (auto-voided), unlike the cross-user case above'
+);
+SELECT is(
+  (SELECT status::text FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000095'),
   'void',
-  'a phash-duplicate purchase is voided by dedupe_receipt_fingerprint'
+  'SAME-USER match: the retry purchase IS voided'
+);
+SELECT is(
+  (SELECT void_reason::text FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000095'),
+  'duplicate',
+  'SAME-USER match: void_reason is ''duplicate'' (not NULL/''reviewer'', not ''fraud'')'
+);
+SELECT is(
+  (SELECT purchase_evidence_id FROM app.marker_credit WHERE id = 'b0000000-0000-0000-0000-000000000099'),
+  NULL,
+  'SAME-USER match: the non-terminal (pending) marker_credit backing the voided retry is detached (purchase_evidence_id nulled)'
 );
 SELECT is(
   (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_phash_duplicate' AND user_id = '00000000-0000-0000-0000-00000000000b'),
   1,
-  'a phash-duplicate purchase writes exactly one fraud_signal row'
+  'SAME-USER match: exactly one receipt_phash_duplicate fraud_signal (the same-user kind, not the cross-user one)'
 );
 SELECT is(
   app.dedupe_receipt_fingerprint(
