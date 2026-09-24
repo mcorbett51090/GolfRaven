@@ -353,10 +353,11 @@ SELECT throws_ok(
   'M1: the MIRROR shape (hmac_id SET, player_pseudonym NULL) is also rejected at write time by the same pairing CHECK'
 );
 SELECT throws_ok(
-  $$UPDATE app.attestation_shift_log SET player_pseudonym_hmac_id = NULL WHERE id = 'a0000000-0000-0000-0000-000000000001'$$,
+  $$UPDATE app.attestation_shift_log SET player_pseudonym_hmac_id = NULL
+    WHERE player_pseudonym = encode(public.hmac('00000000-0000-0000-0000-00000000000a', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')$$,
   '23514',
   NULL,
-  'M1: the ORIGINAL repro itself -- UPDATE ... SET player_pseudonym_hmac_id = NULL on a row whose player_pseudonym is still set -- now fails at write time instead of silently succeeding and leaving the row unredactable'
+  'M1: the ORIGINAL repro itself -- UPDATE ... SET player_pseudonym_hmac_id = NULL on player A''s (v1-written) shift-log row, matched by its durable pseudonym (attestation_shift_log rows get no fixed fixture id) -- now fails at write time instead of silently succeeding and leaving the row unredactable'
 );
 SELECT throws_ok(
   $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)

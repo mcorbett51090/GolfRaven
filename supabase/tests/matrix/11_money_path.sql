@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(137);
+SELECT plan(146);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -657,6 +657,24 @@ SELECT throws_ok(
   'checkin_challenge rejects an over-long TTL (expires_at more than 24 hours past issued_at) -- a 30-day challenge is no longer accepted'
 );
 
+-- ⛔ FIX (should-fix 3, post-P3a re-gate): "a future issued_at sidesteps
+-- the 24h cap." A caller who is free to pick issued_at could satisfy the
+-- 24h-GAP CHECK above while pushing the whole challenge, and therefore
+-- private.consumed_nonce's expiry-anchored purge floor, arbitrarily far
+-- into the future (issued_at = now() + 10 days, expires_at = issued_at +
+-- 5 minutes -- well inside the 24h gap, but nowhere near "now"). The new
+-- checkin_challenge_issued_at_not_future CHECK closes this independently
+-- of the gap CHECK.
+SELECT throws_ok(
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, issued_at, expires_at)
+    VALUES ('a1000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a',
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-future-issued-at',
+            now() + interval '10 days', now() + interval '10 days' + interval '5 minutes')$$,
+  '23514',
+  NULL,
+  'checkin_challenge rejects a FUTURE issued_at, even though expires_at stays well within the 24h gap CHECK -- closes the "push the whole window out" sidestep (should-fix 3, post-P3a re-gate)'
+);
+
 -- ---------------------------------------------------------------------------
 -- H1 (post-P3a gate) data test: delete_my_data must succeed when
 -- offer_code.play_id or entitlement.play_id is set. Dedicated player C
@@ -852,6 +870,22 @@ SELECT lives_ok(
   $$DELETE FROM vault.secrets WHERE id = 'a0000000-1111-0000-0000-000000000098'$$,
   'cleanup: remove the throwaway key'
 );
+-- should-fix 2 (post-P3a re-gate): private.delete_my_data now iterates
+-- private.pseudonym_key_registry (0018), not a live scan of
+-- attestation_shift_log -- the write-time trigger registered this
+-- throwaway key id the moment the row above was inserted (before it was
+-- deleted from vault.secrets), and a registry row is NOT removed just
+-- because the shift-log row that first referenced it is gone (the
+-- registry is "every key id ever seen", not a live derived view).
+-- Without this cleanup, every LATER delete_my_data call in this same
+-- transaction (the rotation test right below) would find this now-
+-- permanently-unresolvable key still in the registry and raise on IT
+-- instead of completing normally -- service_role holds DELETE on the
+-- registry directly (0018) for exactly this kind of operational cleanup.
+SELECT lives_ok(
+  $$DELETE FROM private.pseudonym_key_registry WHERE key_id = 'a0000000-1111-0000-0000-000000000098'$$,
+  'cleanup: remove the throwaway key''s registry row too, so it does not block every later delete_my_data call in this file'
+);
 
 -- rotation: a row written with key 1 is still found after key 2 AND a
 -- brand-new key 3 are both active — id-based resolution means rotation
@@ -1010,6 +1044,53 @@ SELECT lives_ok(
 SELECT lives_ok(
   $$UPDATE app.entitlement SET state = 'void' WHERE id = '53000000-0000-0000-0000-000000000001'$$,
   'a HELD entitlement can be resolved straight to void by a reviewer (entitlement_state has no separate expired)'
+);
+
+-- ---------------------------------------------------------------------------
+-- ⛔ FIX (should-fix 4, post-P3a re-gate: "stale NEW guard"). Player F,
+-- dedicated, so this doesn't interact with any other player's fixture
+-- state. Repro shape: entitlement.play_id is explicitly SET (queues a
+-- deferred guard firing carrying THAT NEW.play_id), and in the SAME
+-- transaction, still BEFORE that firing ever runs, private.
+-- delete_my_data both detaches play_id back to NULL AND deletes the
+-- play row outright -- under the OLD (stale-NEW) code, the FIRST
+-- firing's own fresh `SELECT ... FROM app.play WHERE id = <the STALE
+-- captured play_id>` would find NOT FOUND (the row really is gone by
+-- then) and RAISE, failing an entirely legitimate deletion.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000f0000001', 'player-f@example.test')$$,
+  'setup: player F''s auth.users row (should-fix 4 test)'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
+    VALUES ('46000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000f0000001',
+            'crs_x1', 'fac_x', current_date - 1, 'v1', 'confirmed')$$,
+  'setup: a play row for player F, held_review=false'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.entitlement (id, user_id, kind, trail_id, state)
+    VALUES ('54000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000f0000001',
+            'special_marker', 'trl_t', 'redeemable')$$,
+  'setup: an entitlement for player F, play_id NOT YET set'
+);
+SELECT lives_ok(
+  $$UPDATE app.entitlement SET play_id = '46000000-0000-0000-0000-000000000001' WHERE id = '54000000-0000-0000-0000-000000000001'$$,
+  'should-fix 4 repro step 1: explicitly SET entitlement.play_id -- queues a DEFERRED guard firing carrying this exact NEW.play_id, which will go STALE the moment the row changes again'
+);
+SELECT lives_ok(
+  $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000f0000001'::uuid)$$,
+  'should-fix 4 repro step 2, SAME transaction: delete_my_data detaches play_id back to NULL AND deletes the play row outright -- the step 1 firing''s captured NEW.play_id is now stale relative to both'
+);
+SELECT lives_ok(
+  $$SET CONSTRAINTS app.offer_code_play_user_fk, app.entitlement_play_user_fk,
+      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg IMMEDIATE$$,
+  'should-fix 4 FIXED: forcing every deferred check to fire now (including step 1''s stale-NEW firing) raises NOTHING -- the guard re-reads the row by id and finds play_id already NULL, instead of trusting the stale captured NEW and raising "play not found" over a row that is legitimately gone'
+);
+SELECT is(
+  (SELECT state::text FROM app.entitlement WHERE id = '54000000-0000-0000-0000-000000000001'),
+  'void',
+  'player F''s entitlement (special_marker, was redeemable) is voided by delete_my_data as normal -- the stale-NEW fix did not change the deletion''s own outcome, only stopped it from spuriously raising'
 );
 
 SELECT tests.clear_actor();
