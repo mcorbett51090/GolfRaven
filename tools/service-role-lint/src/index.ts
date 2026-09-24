@@ -81,6 +81,27 @@ function readImportMapFile(path: string): Record<string, string> {
   }
 }
 
+// ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "a pinned allow-list of ...
+// exact target strings, kept as a committed fixture file compared by the
+// lint, so adding a dependency is a reviewed diff." Read once, relative
+// to this PACKAGE's own root (not the linted supabase/functions root, and
+// not baked into the compiled dist/ output) so it works identically
+// whether this runs from src/ (vitest/ts-node) or dist/ (the built CLI) —
+// both sit exactly one directory below the package root.
+const PINNED_IMPORT_TARGETS_PATH = resolve(import.meta.dirname, "..", "pinned-import-targets.json");
+
+function loadPinnedImportTargets(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(PINNED_IMPORT_TARGETS_PATH, "utf8"));
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    // Missing/malformed file fails CLOSED — an empty allow-list, not an
+    // unchecked one; every bare specifier then fails to resolve, which is
+    // the safe direction for this list to fail in.
+    return [];
+  }
+}
+
 const importMapCache = new Map<string, Record<string, string>>();
 
 function resolveImportMapForDir(dir: string, functionsRoot: string): Record<string, string> {
@@ -101,12 +122,13 @@ function resolveImportMapForDir(dir: string, functionsRoot: string): Record<stri
 
 export function lintDirectory(functionsRoot: string): LintResult[] {
   importMapCache.clear();
+  const pinnedImportTargets = loadPinnedImportTargets();
   const results: LintResult[] = [];
   for (const file of listFiles(functionsRoot)) {
     const source = readFileSync(file, "utf8");
     const relPath = relative(functionsRoot, file);
     const importMap = resolveImportMapForDir(dirname(file), functionsRoot);
-    const findings = lintSource(source, file, { importMap, functionsRoot: resolve(functionsRoot) });
+    const findings = lintSource(source, file, { importMap, functionsRoot: resolve(functionsRoot), pinnedImportTargets });
     if (findings.length > 0) {
       results.push({ filePath: relPath, findings });
     }
