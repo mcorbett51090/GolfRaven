@@ -8,12 +8,14 @@
  */
 import { describe, expect, it } from "vitest";
 import { classifyEvidenceRow } from "../src/internal/classify.js";
-import type { Evidence, ScorePlayContext } from "../src/score-play.js";
+import { parseScorePlayInput } from "../src/parse-evidence.js";
+import { scorePlay, type Evidence, type ScorePlayContext } from "../src/score-play.js";
 import {
   PLAY_FACILITY_ID,
   PLAY_FACILITY_TZ,
   PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
+  baseCtx,
   goodFix,
   scorePlayOrThrow,
 } from "./score-play-helpers.js";
@@ -83,9 +85,37 @@ describe("H3: classifyEvidenceRow's own course anchor (defence in depth)", () =>
     expect(c.hard).toBe(true);
   });
 
-  it("ctx.playCourseId undefined disables the check entirely (single-course facility / no course resolution wired yet)", () => {
+  it("ctx.playCourseId undefined disables the check entirely — but ONLY for a direct classifyEvidenceRow call (typed-but-raw, bypassing the parser)", () => {
     const row = staffRowAt(COURSE_B);
     const c = classifyEvidenceRow(row, { playFacilityId: PLAY_FACILITY_ID, playLocalDate: PLAY_LOCAL_DATE });
     expect(c.hard).toBe(true);
+  });
+});
+
+describe("H3 residual (sixth gate): ctx.playCourseId is REQUIRED at the public (parser-fronted) entry point", () => {
+  it("a row with courseId=crs_red scored against a play on crs_blue gets no money (the gate's own worded test)", () => {
+    const row: Evidence = {
+      id: "s1",
+      facilityId: PLAY_FACILITY_ID,
+      localDate: PLAY_LOCAL_DATE,
+      courseId: "crs_red",
+      source: "staff_presence",
+      scanAt: PLAY_LOCAL_DATE_MS,
+      coSignalFix: goodFix(),
+    };
+    const result = scorePlayOrThrow([row], { ...baseCtx(), playCourseId: "crs_blue" });
+    expect(result.money).toBe(false);
+  });
+
+  it("a missing ctx.playCourseId fails parseScorePlayInput outright (structural)", () => {
+    const { playCourseId, ...ctxWithoutCourse } = baseCtx();
+    const result = parseScorePlayInput({ evidence: [], ctx: ctxWithoutCourse });
+    expect(result.success).toBe(false);
+  });
+
+  it("a missing ctx.playCourseId fails scorePlay outright (ok: false), never throws", () => {
+    const { playCourseId, ...ctxWithoutCourse } = baseCtx();
+    const result = scorePlay([staffRowAt(COURSE_A)], ctxWithoutCourse as any);
+    expect(result.ok).toBe(false);
   });
 });

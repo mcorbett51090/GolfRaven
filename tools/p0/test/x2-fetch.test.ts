@@ -264,6 +264,180 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   });
 });
 
+describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => {
+  function okHtmlFetch(bodyByUrl: Record<string, string>) {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = bodyByUrl[url] ?? "<h1>fallback</h1>";
+      const res = new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    });
+  }
+
+  it("a run for trail B does not drop trail A's entries already in manifest.json", async () => {
+    const outDir = path.join(OUT_DIR, "merge-trails");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/tn": "<h1>TN page</h1>" }),
+    );
+    const manifestA = await runX2Fetch(
+      { TN: ["https://example.com/tn"] },
+      outDir,
+    );
+    expect(manifestA.trails.TN).toHaveLength(1);
+
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/vi": "<h1>VI page</h1>" }),
+    );
+    const manifestB = await runX2Fetch(
+      { VI: ["https://example.com/vi"] },
+      outDir,
+    );
+    // Trail TN, from the FIRST run, must still be present.
+    expect(manifestB.trails.TN).toHaveLength(1);
+    expect(manifestB.trails.TN?.[0]?.status).toBe("fetched");
+    expect(manifestB.trails.VI).toHaveLength(1);
+
+    // And the manifest actually written to disk reflects both trails too
+    // — not just the in-memory return value.
+    const onDisk = JSON.parse(
+      readFileSync(path.join(outDir, "manifest.json"), "utf8"),
+    );
+    expect(Object.keys(onDisk.trails).sort()).toEqual(["TN", "VI"]);
+  });
+
+  it("a second run for the SAME trail APPENDS new entries rather than replacing the old ones", async () => {
+    const outDir = path.join(OUT_DIR, "merge-append-same-trail");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/tn-1": "<h1>TN page one</h1>" }),
+    );
+    const manifestA = await runX2Fetch(
+      { TN: ["https://example.com/tn-1"] },
+      outDir,
+    );
+    expect(manifestA.trails.TN).toHaveLength(1);
+
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/tn-2": "<h1>TN page two</h1>" }),
+    );
+    const manifestB = await runX2Fetch(
+      { TN: ["https://example.com/tn-2"] },
+      outDir,
+    );
+    // Both the original and the new entry must be present — never replaced.
+    expect(manifestB.trails.TN).toHaveLength(2);
+    expect(manifestB.trails.TN?.map((e) => e.url)).toEqual([
+      "https://example.com/tn-1",
+      "https://example.com/tn-2",
+    ]);
+  });
+
+  it("generatedAt is preserved from the FIRST run, not overwritten by a later merge", async () => {
+    const outDir = path.join(OUT_DIR, "merge-generatedAt");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/tn": "<h1>TN</h1>" }),
+    );
+    const manifestA = await runX2Fetch({ TN: ["https://example.com/tn"] }, outDir);
+    const firstGeneratedAt = manifestA.generatedAt;
+
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/vi": "<h1>VI</h1>" }),
+    );
+    const manifestB = await runX2Fetch({ VI: ["https://example.com/vi"] }, outDir);
+    expect(manifestB.generatedAt).toBe(firstGeneratedAt);
+  });
+});
+
+describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capture-wins is NOT hard-coded)", () => {
+  function okHtmlFetch(bodyByUrl: Record<string, string>) {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = bodyByUrl[url] ?? "<h1>fallback</h1>";
+      const res = new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(res, "url", { value: url });
+      return res;
+    });
+  }
+
+  it("the first capture of a URL is recorded: true", async () => {
+    const outDir = path.join(OUT_DIR, "ledger-first");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/trail": "<h1>Trail page</h1>" }),
+    );
+    const manifest = await runX2Fetch(
+      { TN: ["https://example.com/trail"] },
+      outDir,
+    );
+    expect(manifest.trails.TN?.[0]?.recorded).toBe(true);
+  });
+
+  it("a later capture of a NORMALIZED-EQUAL URL (different run, same out-dir/ledger) comes back recorded: false — first-capture-wins actually enforced, not hard-coded", async () => {
+    const outDir = path.join(OUT_DIR, "ledger-duplicate");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/trail": "<h1>Trail page v1</h1>" }),
+    );
+    const manifestA = await runX2Fetch(
+      { TN: ["https://example.com/trail"] },
+      outDir,
+    );
+    expect(manifestA.trails.TN?.[0]?.recorded).toBe(true);
+
+    // A second run, same out-dir (same default ledger), for a
+    // *bypass-shaped* variant of the exact same URL (www. + trailing
+    // slash) — must NOT silently look like a fresh first capture.
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({
+        "https://www.example.com/trail/": "<h1>Trail page v2 (a later capture)</h1>",
+      }),
+    );
+    const manifestB = await runX2Fetch(
+      { TN: ["https://www.example.com/trail/"] },
+      outDir,
+    );
+    const secondEntry = manifestB.trails.TN?.[1];
+    expect(secondEntry?.status).toBe("fetched"); // stored as real evidence...
+    expect(secondEntry?.recorded).toBe(false); // ...but never the recorded one.
+  });
+
+  it("a shared --ledger path across two different out-dirs refuses a duplicate capture (the run FAILS loudly, not silently)", async () => {
+    const ledgerPath = path.join(OUT_DIR, "shared-ledger", "recorded-ledger.json");
+    const outDirA = path.join(OUT_DIR, "ledger-shared-a");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/shared-trail": "<h1>Shared trail</h1>" }),
+    );
+    await runX2Fetch({ TN: ["https://example.com/shared-trail"] }, outDirA, {
+      ledgerPath,
+    });
+
+    const outDirB = path.join(OUT_DIR, "ledger-shared-b");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/shared-trail": "<h1>Shared trail, again</h1>" }),
+    );
+    await expect(
+      runX2Fetch({ TN: ["https://example.com/shared-trail"] }, outDirB, {
+        ledgerPath,
+      }),
+    ).rejects.toThrow(/already exists in the ledger/);
+  });
+});
+
 /** A minimal PageLike that passes every request through unmodified — for
  * tests in THIS file that exercise `runX2Fetch`'s render plumbing, not
  * `x2-render.ts`'s own off-host/https/byte-cap/isolation logic (that logic
