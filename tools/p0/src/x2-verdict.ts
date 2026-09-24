@@ -46,6 +46,7 @@ import { collapseWhitespace } from "./text-extract.js";
 import { extractEvidenceText } from "./evidence-extract.js";
 import { SLATE_TRAILS } from "./slate.js";
 import type { X2FetchManifest, X2Method } from "./x2-fetch.js";
+import type { RecordedLedger } from "./x2-recorded-ledger.js";
 import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
@@ -142,6 +143,15 @@ function hostOf(url: string): string | null {
 export async function buildEvidenceByTrail(
   manifest: X2FetchManifest,
   readRaw: (relPath: string) => Promise<Buffer>,
+  opts: {
+    /** Gate finding 2c: when given, `recorded` is decided by whether this
+     * entry's SHA-256 is present in the LEDGER for its method — not by
+     * the manifest entry's own (potentially stale or hand-edited)
+     * `recorded` field. When omitted (the default, and the only option
+     * available to legacy callers), `recorded` falls back to the
+     * manifest entry's own field, as before. */
+    ledger?: RecordedLedger;
+  } = {},
 ): Promise<EvidenceByTrail> {
   const byTrail: EvidenceByTrail = {};
   for (const [trail, entries] of Object.entries(manifest.trails)) {
@@ -203,10 +213,16 @@ export async function buildEvidenceByTrail(
         );
       }
 
-      // Addendum J correction's first-capture-wins rule: a legacy entry
-      // with no `recorded` field is treated as recorded (it was the only
-      // capture that existed).
-      const recorded = (e as { recorded?: unknown }).recorded !== false;
+      // Addendum J correction's first-capture-wins rule. Gate finding 2c:
+      // when a LEDGER is supplied, it is authoritative — this entry is
+      // recorded only if its (recomputed) SHA is registered in the
+      // ledger for its own method, full stop, regardless of what the
+      // manifest entry's own `recorded` field claims. Without a ledger
+      // (legacy callers), fall back to the manifest field, defaulting a
+      // missing one to recorded (it was the only capture that existed).
+      const recorded = opts.ledger
+        ? opts.ledger.entries.some((le) => le.method === method && le.sha256 === recomputedSha)
+        : (e as { recorded?: unknown }).recorded !== false;
 
       // Gate S2: only count this evidence for ITS trail when the final URL
       // (after redirects) is still on the same host that trail's own
@@ -231,7 +247,22 @@ export async function buildEvidenceByTrail(
       // the manifest entry, not re-derived (except the legacy default
       // above) — `x2-fetch`/`x2-ingest` are the only places that ever
       // genuinely decide it.
-      bySha.set(recomputedSha, { text, method, methodDefaulted, recorded });
+      //
+      // Should-fix: same-SHA collision. Two entries for this trail CAN
+      // share a SHA-256 (byte-identical content captured twice — e.g. an
+      // `--additional` re-capture that happens to match the original
+      // verbatim). A plain `Map.set` would let whichever entry is
+      // iterated LAST silently overwrite the other, which could turn a
+      // genuinely recorded capture into a non-recorded one (or vice
+      // versa) depending on array order alone. Resolved by keying on
+      // (sha, recorded) in effect: a `recorded: true` entry for a given
+      // SHA is never overwritten by a `recorded: false` one for the SAME
+      // sha — if ANY capture with this content was ever the recorded
+      // one, citing this SHA reflects that, regardless of iteration order.
+      const existingForSha = bySha.get(recomputedSha);
+      if (!existingForSha || !existingForSha.recorded || recorded) {
+        bySha.set(recomputedSha, { text, method, methodDefaulted, recorded });
+      }
     }
     byTrail[trail] = { bySha, failedSources };
   }

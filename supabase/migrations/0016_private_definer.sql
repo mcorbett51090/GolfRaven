@@ -115,6 +115,20 @@ CREATE TABLE private.definer_policy_allowlist (
   command text NOT NULL,
   scoped boolean NOT NULL,
   note text NOT NULL,
+  -- M2(a), post-P3a gate: "Store and compare pg_get_expr(polqual) and
+  -- pg_get_expr(polwithcheck) in the allow-list, so a broadened USING
+  -- fails." Populated below, once every policy in this file has been
+  -- created, by copying pg_get_expr(...) DIRECTLY off the just-created
+  -- pg_policy rows -- not hand-transcribed here, so there is no risk of
+  -- this snapshot drifting from what Postgres will actually echo back on
+  -- introspection (whitespace/parenthesization Postgres's own expression
+  -- deparser normalizes are not something a hand-typed string could be
+  -- trusted to match byte-for-byte). This becomes the baseline: a LATER
+  -- CREATE OR REPLACE POLICY that broadens either clause changes what
+  -- pg_get_expr returns, and 10_function_inventory.sql's check then
+  -- fails on the mismatch.
+  using_expr text,
+  with_check_expr text,
   PRIMARY KEY (schema_name, table_name, policy_name)
 );
 
@@ -364,6 +378,19 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('storage', 'objects', 'pd_storage_objects_delete_r', 'SELECT', true, 'row-visibility companion to pd_storage_objects_delete (DELETE ... WHERE needs SELECT-level visibility, confirmed empirically)'),
   ('app', 'profile', 'pd_profile_select', 'SELECT', true, 'reads the target''s own handle before deleting the row (in addition to the delete_row policy''s own companion SELECT)'),
   ('app', 'audit_log', 'pd_audit_log_insert', 'INSERT', false, 'writes the delete_my_data audit-log entry itself (actor_user_id is NULL by design, not the target -- see 0015)');
+
+-- M2(a): capture each policy's actual USING/WITH CHECK expression text,
+-- as Postgres's own deparser renders it, off the pg_policy rows this
+-- file just created -- see the column comment on
+-- private.definer_policy_allowlist above for why this is a copy, not a
+-- hand-typed value.
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name;
 
 ALTER TABLE private.definer_policy_allowlist ENABLE ROW LEVEL SECURITY;
 ALTER TABLE private.definer_policy_allowlist FORCE ROW LEVEL SECURITY;
