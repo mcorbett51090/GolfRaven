@@ -121,6 +121,49 @@ export const X2_PASS_BAR_CONFIRMED = 2;
  * ever has to write anywhere else — it has to also show up in the one
  * place this project's own decision trail already lives, checkable by
  * anyone reading X2.md, not just by trusting the corroboration file.
+ *
+ * Gate finding 2 (re-gate, Addendum J re-gate at 1f6729d — "forged
+ * acceptance"): the free-text `id` above could be ANY string an agent
+ * chose, matched against X2.md by a loose "line contains both this id and
+ * this date" substring test — an agent could write BOTH the corroboration
+ * record AND a plausible-looking Log line naming its own made-up `id`,
+ * and the old check would pass. Fixed two ways:
+ *
+ *  1. **Structured row.** `id` is REMOVED; an `acceptance` record now
+ *     carries `fact` (a controlled identifier: `"completionUnit"`,
+ *     `"season"`, or `"roster:<name>"`) instead. The ONLY row that counts
+ *     is one matching, EXACTLY (after trimming), `ACCEPT <trail> <fact>
+ *     <full evidenceSha256> <YYYY-MM-DD> Matt` — found ONLY inside X2.md's
+ *     `## Log` section (bounded at the next `## ` heading,
+ *     `findAcceptRowLine`) — and the record's own `fact` is cross-checked
+ *     against the fact actually being resolved (`checkOwnerSavedCorroboration`'s
+ *     `factId` parameter), so a record cannot borrow a DIFFERENT fact's
+ *     accepted row.
+ *  2. **Git binding.** Matching text in X2.md is not enough on its own —
+ *     an agent can edit files. `git blame` (`blameAcceptRow`) finds the
+ *     commit that introduced the matched row's line, and the row counts
+ *     only when that commit is reachable from `origin/main` (i.e.
+ *     genuinely pushed, not merely sitting in a local working tree or an
+ *     unshared branch/stash). The commit hash, author, author date, and
+ *     `%G?` signature status are all carried into the resolved
+ *     corroboration entry and printed in the verdict output.
+ *
+ * **Honest limit, stated plainly (also in `docs/p0/X2.md` and this
+ * package's README):** every agent working in this environment acts with
+ * Matt's own GitHub credentials. No technical check run from inside this
+ * environment can distinguish a commit Matt made from one an agent made
+ * while impersonating his identity — `git blame`'s author field and even
+ * `%G?` (unless Matt's key/token signs commits, which this environment's
+ * credentials do not) cannot prove authorship in that adversarial sense.
+ * The git-binding check above raises the bar from "a string exists in a
+ * file" to "a commit reachable from the shared, pushed history says so,"
+ * which is real and auditable, but it is NOT identity verification. The
+ * REAL control is procedural, not technical: **agents must never write an
+ * `ACCEPT` row themselves — only Matt adds one, by hand.** This tool's
+ * job is to make that row's provenance checkable and visible (hash,
+ * author, date, signature status) so a human reviewing a verdict — or
+ * reviewing `git log` — can audit it, not to somehow prove identity a
+ * shared-credential environment structurally cannot prove.
  */
 export interface X2WaybackCorroboration {
   type: "wayback";
@@ -136,14 +179,18 @@ export interface X2WaybackCorroboration {
 }
 export interface X2AcceptanceCorroboration {
   type: "acceptance";
-  /** A short, stable identifier for this specific acceptance — the same
-   * string the CLI greps for, alongside `date`, in `docs/p0/X2.md`'s
-   * `## Log` section (e.g. `"TN-completionUnit-2026-09-24"`). */
-  id: string;
+  /** Gate finding 2 (re-gate): which fact this record backs — a
+   * controlled identifier, not free text: `"completionUnit"`, `"season"`,
+   * or `"roster:<name>"` for a roster entry (matching the roster entry's
+   * own `name`, verbatim). Must equal both the `<fact>` token of the
+   * matched X2.md Log row AND the `factId` the caller is actually
+   * resolving this record against — a record cannot borrow a different
+   * fact's accepted row. */
+  fact: string;
   /** Must be the literal string `"Matt"` — checked exactly, not just
    * truthy (gate finding 3, re-gate: any other value refuses). */
   acceptedBy: string;
-  /** `YYYY-MM-DD`. */
+  /** `YYYY-MM-DD` — must equal the matched Log row's own date exactly. */
   date: string;
 }
 export type X2CorroborationRecord = X2WaybackCorroboration | X2AcceptanceCorroboration;
@@ -156,19 +203,55 @@ export type X2CorroborationFile = Record<string, Record<string, X2CorroborationR
  * directly. Keyed by `"<trail>:<evidenceSha>"` (matching how
  * `computeX2Verdict` already looks a fact's corroboration record up).
  */
+/** Gate finding 2 (re-gate): the git provenance of the X2.md Log line that
+ * backs an `acceptance` corroboration record — printed in the verdict
+ * output so a human can audit it (see this file's own "Honest limit"
+ * doc above `X2AcceptanceCorroboration`; this is NOT identity proof). */
+export interface AcceptRowGitProvenance {
+  /** Full 40-char commit hash that `git blame` says introduced the
+   * matched Log line. */
+  commit: string;
+  author: string;
+  /** ISO-8601 author date (`git show --format=%aI`). */
+  authorDate: string;
+  /** `%G?` — one of `G`/`B`/`U`/`X`/`Y`/`R`/`E`/`N` (git's own codes;
+   * `N` means "no signature"), printed as-is, never interpreted as proof
+   * of identity. */
+  signatureStatus: string;
+  /** `true` only when `git merge-base --is-ancestor <commit> origin/main`
+   * succeeds — the commit is reachable from the shared, pushed history,
+   * not merely sitting in a local/unshared branch. */
+  reachableFromOriginMain: boolean;
+}
+
 export interface ResolvedCorroborationEntry {
-  /** `wayback` records only: `false` when the stored raw bytes' recomputed
-   * SHA-256 did not match `snapshotSha256` (tampered/missing evidence) —
-   * `waybackText` is only meaningful when this is `true`. */
+  /** `wayback` records only: `true` only once EVERY re-validation rule
+   * (gate finding 3, second re-gate) has passed: URL form, embedded-URL
+   * normalisation match, ±90-day timestamp tolerance, `rawFile` shape +
+   * containment, SHA differs from the owner-saved fact's own SHA, ledger
+   * registration under method `wayback`, AND the raw bytes recompute to
+   * `snapshotSha256`. `waybackText` is only meaningful when this is
+   * `true`. */
   waybackVerified?: boolean;
   /** `wayback` records only: text re-derived from the VERIFIED raw bytes,
    * with the SAME extractor every other evidence route uses. `null` when
    * extraction found no text, or verification failed. */
   waybackText?: string | null;
-  /** `acceptance` records only: `true` only when a row naming both this
-   * record's `id` and `date` was found in `docs/p0/X2.md`'s `## Log`
-   * section. */
+  /** `wayback` records only: which rule failed (or a plain confirmation),
+   * for the verdict output/reasons — never left implicit. */
+  waybackDetail?: string;
+  /** `acceptance` records only: `true` only when a matching structured
+   * `ACCEPT` row was found in `docs/p0/X2.md`'s `## Log` section AND the
+   * commit that introduced it is reachable from `origin/main` (gate
+   * finding 2, re-gate). */
   acceptanceLogged?: boolean;
+  /** `acceptance` records only: the git provenance of the matched row,
+   * when one was found (regardless of whether it was reachable from
+   * `origin/main` — printed either way so a reader can see why). */
+  acceptanceProvenance?: AcceptRowGitProvenance | null;
+  /** `acceptance` records only: why `acceptanceLogged` is `false`, or a
+   * plain confirmation — never left implicit. */
+  acceptanceDetail?: string;
 }
 export type X2ResolvedCorroboration = Map<string, ResolvedCorroborationEntry>;
 
@@ -199,6 +282,15 @@ export type TrailEvidenceMap = Map<
     method: X2Method;
     methodDefaulted: boolean;
     recorded: boolean;
+    /** Gate finding 3 (second re-gate): the manifest entry's own stated
+     * URL and (owner-saved entries only) `ownerSavedDate` — carried
+     * through so a Wayback corroboration record can be re-validated
+     * against THIS fact's own claims (its stated URL, its own recorded
+     * date) at verdict time, never against the corroboration record's own
+     * say-so. `ownerSavedDate` is `null` for a non-owner-saved entry, or
+     * a legacy owner-saved entry that predates the field. */
+    url: string;
+    ownerSavedDate: string | null;
   }
 >;
 
@@ -405,7 +497,14 @@ export async function buildEvidenceByTrail(
       // one, citing this SHA reflects that, regardless of iteration order.
       const existingForSha = bySha.get(recomputedSha);
       if (!existingForSha || !existingForSha.recorded || recorded) {
-        bySha.set(recomputedSha, { text, method, methodDefaulted, recorded });
+        bySha.set(recomputedSha, {
+          text,
+          method,
+          methodDefaulted,
+          recorded,
+          url: e.url,
+          ownerSavedDate: e.ownerSavedDate ?? null,
+        });
       }
     }
     byTrail[trail] = { bySha, failedSources };
@@ -533,6 +632,13 @@ function checkOwnerSavedCorroboration(
   resolved: X2ResolvedCorroboration,
   label: string,
   reasons: string[],
+  /** Gate finding 2 (re-gate): the controlled fact identifier THIS call
+   * site is checking — `"completionUnit"`, `"season"`, or
+   * `"roster:<name>"`. An acceptance record's own `fact` must equal this
+   * exactly, or it is rejected outright: a record backing a DIFFERENT
+   * fact (even a genuinely logged, git-reachable one) must never count
+   * for this one. */
+  factId: string,
 ): { ok: boolean; summary: string | null } {
   const entry = evidence.get(evidenceSha);
   const method = entry?.method;
@@ -550,9 +656,7 @@ function checkOwnerSavedCorroboration(
   }
   const resolution = resolved.get(corroborationResolutionKey(trail, evidenceSha));
   if (record.type === "acceptance") {
-    // Gate finding 3 (re-gate): `acceptedBy` must be EXACTLY "Matt", and
-    // the record's `id`+`date` must show up in docs/p0/X2.md's own Log —
-    // never just trusted because the JSON file says so.
+    // Gate finding 3 (re-gate): `acceptedBy` must be EXACTLY "Matt".
     if (record.acceptedBy !== "Matt") {
       reasons.push(
         `${label}: owner-attested, acceptance record rejected — acceptedBy must be exactly "Matt", got ` +
@@ -560,31 +664,51 @@ function checkOwnerSavedCorroboration(
       );
       return { ok: false, summary: "owner-attested, acceptance record rejected (acceptedBy is not Matt)" };
     }
+    // Gate finding 2 (re-gate, "forged acceptance"): the record must cite
+    // the SAME fact this call site is actually checking — a record for
+    // "season" can never back "completionUnit", even if it is otherwise
+    // valid and logged.
+    if (record.fact !== factId) {
+      reasons.push(
+        `${label}: owner-attested, acceptance record rejected — its fact (${JSON.stringify(record.fact)}) does ` +
+          `not match this fact (${JSON.stringify(factId)}) (gate finding 2, re-gate: an acceptance for one ` +
+          "fact must never back a different one).",
+      );
+      return { ok: false, summary: "owner-attested, acceptance record rejected (fact mismatch)" };
+    }
     if (!resolution?.acceptanceLogged) {
       reasons.push(
-        `${label}: owner-attested, acceptance record cited (id "${record.id}", ${record.date}) but no row ` +
-          'naming both was found in docs/p0/X2.md\'s "## Log" section — an acceptance not logged where this ' +
-          "project's own decision trail lives does not count (gate finding 3, re-gate).",
+        `${label}: owner-attested, acceptance record cited (fact "${record.fact}", ${record.date}) but no ` +
+          `structured "ACCEPT ${trail} ${record.fact} ${evidenceSha} ${record.date} Matt" row, on a commit ` +
+          'reachable from origin/main, was found in docs/p0/X2.md\'s "## Log" section' +
+          `${resolution?.acceptanceDetail ? ` (${resolution.acceptanceDetail})` : ""} — an acceptance not ` +
+          "logged and pushed where this project's own decision trail lives does not count (gate finding 2, " +
+          "re-gate).",
       );
       return {
         ok: false,
-        summary: `owner-attested, acceptance NOT FOUND in X2.md's Log (id "${record.id}")`,
+        summary: `owner-attested, acceptance NOT FOUND/NOT PUSHED in X2.md's Log (fact "${record.fact}")`,
       };
     }
-    const summary = `owner-attested, accepted by Matt on ${record.date} (logged in X2.md, id "${record.id}")`;
+    const prov = resolution.acceptanceProvenance;
+    const provSummary = prov
+      ? `commit ${prov.commit.slice(0, 12)}... by ${prov.author}, ${prov.authorDate}, sig:${prov.signatureStatus}`
+      : "commit unavailable";
+    const summary = `owner-attested, accepted by Matt on ${record.date} (X2.md Log row, ${provSummary})`;
     reasons.push(`${label}: ${summary}.`);
     return { ok: true, summary };
   }
-  // record.type === "wayback" — gate finding 3 (re-gate): the record
-  // cites only a SHA now; `resolution.waybackText` is what the CLI's own
-  // re-verification pass derived from the REAL fetched bytes, never
-  // free text from the file itself.
+  // record.type === "wayback" — gate finding 3 (second re-gate): the
+  // resolution pass has ALREADY re-validated every rule (URL form,
+  // embedded-URL match, timestamp tolerance, rawFile shape/containment,
+  // SHA differs from the owner-saved fact's own SHA, ledger registration)
+  // before ever setting `waybackVerified: true` — this function only acts
+  // on that verdict, it never re-derives the rules itself.
   if (!resolution?.waybackVerified) {
     reasons.push(
-      `${label}: owner-attested, Wayback corroboration record cited (${record.snapshotUrl}) but its stored ` +
-        `evidence (sha256 ${record.snapshotSha256.slice(0, 12)}...) could not be verified — the raw bytes at ` +
-        "its rawFile did not recompute to the cited SHA, or could not be read — corroboration fails (gate " +
-        "finding 3, re-gate).",
+      `${label}: owner-attested, Wayback corroboration record cited (${record.snapshotUrl}) but failed ` +
+        `re-validation${resolution?.waybackDetail ? `: ${resolution.waybackDetail}` : ""} — corroboration fails ` +
+        "(gate finding 3, re-gate).",
     );
     return { ok: false, summary: `owner-attested, Wayback corroboration UNVERIFIABLE (${record.snapshotUrl})` };
   }
@@ -737,6 +861,7 @@ export function computeX2Verdict(
               resolvedCorroboration,
               `Roster entry "${rosterEntry.name}"`,
               reasons,
+              `roster:${rosterEntry.name}`,
             );
             corroborationOk = result.ok;
             rosterCorroboration.set(rosterEntry.name, result.summary);
@@ -767,6 +892,7 @@ export function computeX2Verdict(
             resolvedCorroboration,
             "completionUnit",
             reasons,
+            "completionUnit",
           );
           corroborationOk = result.ok;
           completionUnitCorroboration = result.summary;
@@ -796,6 +922,7 @@ export function computeX2Verdict(
             resolvedCorroboration,
             "season",
             reasons,
+            "season",
           );
           corroborationOk = result.ok;
           seasonCorroboration = result.summary;

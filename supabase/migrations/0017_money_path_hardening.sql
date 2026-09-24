@@ -981,6 +981,84 @@ VALUES
   ('app', 'entitlement', 'entitlement_play_user_fk', 'app', 'play_deleted_detach_play_id_trg',
    'same as offer_code_play_user_fk above -- the same trigger detaches both tables in one pass');
 
+-- ⛔ FIX (should-fix, post-P3a re-gate, close-out): tightening the H1
+-- catalog test (removing its old "OR condeferrable" escape) surfaced 8
+-- MORE FKs referencing a delete_row table that were NEVER part of this
+-- round's own changes, but were only ever passing the OLD, looser test
+-- because they were merely deferrable -- exactly the gap the tightened
+-- test now exists to catch. Rather than allow-list all 8 as "has an
+-- explicit detach elsewhere" (most did not -- e.g. app.evidence.device_id
+-- had NO detach logic anywhere, deferred-NO-ACTION alone, silently
+-- relying on iteration order never hitting the bad case in practice),
+-- each is given the correct ON DELETE action directly on the FK itself --
+-- CASCADE for a NOT NULL column (the referencing row is meaningless
+-- without its parent and should go with it), SET NULL for a nullable one
+-- (the referencing row should survive, decoupled). This is the SAME
+-- design already used for offer_code_play_user_fk/entitlement_play_user_fk
+-- above, just without the "one FK can't do it because it's composite and
+-- would null the wrong column" complication these single-column FKs don't
+-- have -- so no allow-list registration is needed for any of the 8.
+--
+-- play_evidence_play_user_fk/play_evidence_evidence_user_fk (M1, this
+-- round's own composite FKs) get CASCADE, matching play_evidence's
+-- ORIGINAL single-column FKs (0003: `play_id ... REFERENCES app.play(id)
+-- ON DELETE CASCADE`, `evidence_id ... REFERENCES app.evidence(id) ON
+-- DELETE CASCADE`, both still present and unchanged) -- play_id/
+-- evidence_id are NOT NULL PRIMARY KEY columns, so SET NULL is not even
+-- syntactically an option; the junction row itself should simply go away
+-- when either side of the pair it links does.
+ALTER TABLE app.play_evidence DROP CONSTRAINT play_evidence_play_user_fk;
+ALTER TABLE app.play_evidence ADD CONSTRAINT play_evidence_play_user_fk
+  FOREIGN KEY (play_id, user_id) REFERENCES app.play (id, user_id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.play_evidence DROP CONSTRAINT play_evidence_evidence_user_fk;
+ALTER TABLE app.play_evidence ADD CONSTRAINT play_evidence_evidence_user_fk
+  FOREIGN KEY (evidence_id, user_id) REFERENCES app.evidence (id, user_id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+
+-- evidence.device_id, marker_credit.purchase_evidence_id,
+-- entitlement.activated_device_id, offer_code.activated_device_id: all
+-- nullable -- SET NULL decouples the row, which survives (matches
+-- 0015's OWN pre-existing, now belt-and-suspenders, explicit
+-- `UPDATE app.entitlement SET activated_device_id = NULL ...` -- that
+-- inline code stays; this closes the same gap structurally, at the FK
+-- itself, for the case that code's own comment already named as
+-- deliberately NOT handled: "offer_code.activated_device_id has the same
+-- RESTRICT shape ... no action needed" reasoned from a "devices are
+-- never shared" invariant that this FK now enforces itself rather than
+-- assumes).
+ALTER TABLE app.evidence DROP CONSTRAINT evidence_device_id_fkey;
+ALTER TABLE app.evidence ADD CONSTRAINT evidence_device_id_fkey
+  FOREIGN KEY (device_id) REFERENCES app.device (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.marker_credit DROP CONSTRAINT marker_credit_purchase_evidence_id_fkey;
+ALTER TABLE app.marker_credit ADD CONSTRAINT marker_credit_purchase_evidence_id_fkey
+  FOREIGN KEY (purchase_evidence_id) REFERENCES app.purchase_evidence (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.entitlement DROP CONSTRAINT entitlement_activated_device_id_fkey;
+ALTER TABLE app.entitlement ADD CONSTRAINT entitlement_activated_device_id_fkey
+  FOREIGN KEY (activated_device_id) REFERENCES app.device (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.offer_code DROP CONSTRAINT offer_code_activated_device_id_fkey;
+ALTER TABLE app.offer_code ADD CONSTRAINT offer_code_activated_device_id_fkey
+  FOREIGN KEY (activated_device_id) REFERENCES app.device (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+
+-- device_reward_ledger.device_id, checkin_challenge.device_id: both
+-- NOT NULL -- SET NULL is not an option; CASCADE is correct (both
+-- tables' own user_id is ALSO delete_row, so their rows are deleted
+-- either via this CASCADE or via the generic pass's own direct DELETE,
+-- whichever runs first -- the other then simply deletes zero rows, not
+-- an error).
+ALTER TABLE app.device_reward_ledger DROP CONSTRAINT device_reward_ledger_device_id_fkey;
+ALTER TABLE app.device_reward_ledger ADD CONSTRAINT device_reward_ledger_device_id_fkey
+  FOREIGN KEY (device_id) REFERENCES app.device (id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.checkin_challenge DROP CONSTRAINT checkin_challenge_device_id_fkey;
+ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_device_id_fkey
+  FOREIGN KEY (device_id) REFERENCES app.device (id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+
 -- ============================================================================
 -- S1 close-out follow-through: register the two new triggers' owning
 -- functions + app.reserve_offer_budget/app.dedupe_receipt_fingerprint in
