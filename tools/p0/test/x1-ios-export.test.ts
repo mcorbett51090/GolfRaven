@@ -139,10 +139,39 @@ describe("x1-ios-export: parsing a well-formed export.xml", () => {
       roundWindows: GOOD_ROUND_WINDOWS,
     });
     const md = renderSourceSummaryMarkdown(result);
-    expect(md).toContain("| Source | Counted workouts | Newest counted workout date |");
+    expect(md).toContain(
+      "| Source | Counted workouts | Newest counted workout date (with route) | Newest workout without a route |",
+    );
     const garminRow = md.split("\n").find((l) => l.startsWith("| Garmin Connect"));
     expect(garminRow).toBeDefined();
     expect(garminRow).toContain("2026-09-20");
+  });
+});
+
+describe("x1-ios-export: exportDate/exportSha256 binding (Opus-gate correction, post-d0de4b8)", () => {
+  it("parses the ExportDate from the fixture export.xml", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    expect(result.exportDate).toBe("2026-09-21 09:00:00 -0400");
+  });
+
+  it("computes a SHA-256 of export.xml", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    expect(result.exportSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("computeSourceSummaries: newestStartDate only considers route-present workouts", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    const garmin = result.sourceSummaries.find((s) => s.sourceName === "Garmin Connect");
+    expect(garmin).toBeDefined();
+    // The 2026-09-20 Garmin workout has a route (2 trackpoints); the older
+    // 2026-08-01 one has none — so it must not win "newest WITH a route".
+    expect(garmin!.newestStartDate).toBe("2026-09-20 09:00:00 -0400");
+    expect(garmin!.newestStartDateWithoutRoute).toBe("2026-08-01 09:00:00 -0400");
+    const appleWatch = result.sourceSummaries.find((s) => s.sourceName === "Matt's Apple Watch");
+    expect(appleWatch).toBeDefined();
+    // Apple Watch's only workout has no route at all.
+    expect(appleWatch!.newestStartDate).toBeNull();
+    expect(appleWatch!.newestStartDateWithoutRoute).toBe("2026-09-20 09:01:00 -0400");
   });
 });
 
