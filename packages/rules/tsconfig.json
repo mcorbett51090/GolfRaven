@@ -3,5 +3,13 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test"
+  ],
+  "references": [
+    {
+      "path": "../catalog/tsconfig.build.json"
+    }
+  ]
 }
