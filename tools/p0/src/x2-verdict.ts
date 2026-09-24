@@ -783,7 +783,7 @@ async function main(argv: string[]): Promise<void> {
   if (!evidenceDir || !confirmationPath) {
     throw new Error(
       "Usage: node dist/x2-verdict.js --evidence-dir <dir> --confirmation <file.json> [--out <prefix>] " +
-        "[--ledger <path>]",
+        "[--ledger <path>] [--corroboration <file.json>]",
     );
   }
   const manifest = JSON.parse(
@@ -805,7 +805,15 @@ async function main(argv: string[]): Promise<void> {
     (rel) => readFile(path.join(evidenceDir, rel)),
     { ledger },
   );
-  const result = computeX2Verdict(confirmation, evidenceByTrail);
+  // Gate finding 4: an optional corroboration file, keyed trail -> evidence
+  // sha256 -> corroboration record, backs every owner-saved fact. Missing
+  // flag -> `{}`, which `computeX2Verdict` treats as "no corroboration
+  // supplied for anything" (every owner-saved fact fails as uncorroborated,
+  // per the gate's rule — not silently skipped).
+  const corroboration: X2CorroborationFile = flags.corroboration
+    ? (JSON.parse(await readFile(flags.corroboration, "utf8")) as X2CorroborationFile)
+    : {};
+  const result = computeX2Verdict(confirmation, evidenceByTrail, X2_SLATE_TRAILS, corroboration);
   const outExplicit = Boolean(flags.out);
   const outPrefix =
     flags.out ||

@@ -192,6 +192,12 @@ VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-0000000
 INSERT INTO app.play_evidence (play_id, evidence_id)
 VALUES ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001');
 
+-- M5 (post-P3a gate): player A's opted-in public projection row, so
+-- delete_my_data's "public_profile_projection is removed" post-condition
+-- has something real to actually remove, not merely nothing to fail to
+-- find.
+INSERT INTO app.public_profile_projection (handle) VALUES ('player_a');
+
 INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version)
 VALUES ('ach_first_round', 'achievement', 'verified', 1);
 INSERT INTO app.catalog_achievement_def (id, trail_id, kind, min_confidence, catalog_version)
@@ -216,6 +222,11 @@ INSERT INTO app.partner_invite (id, org_id, role, invited_by, invitee_email, tok
    '00000000-0000-0000-0000-1000000000a3', 'player-a@example.test', 'th-y-invites-a', now() + interval '7 days');
 INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES
   ('00000000-0000-0000-0000-00000000000a', 'evidence.insert', 'app.evidence', '30000000-0000-0000-0000-000000000001');
+-- M5 (post-P3a gate): a fraud_signal row for player A, so
+-- delete_my_data's "fraud_signal.user_id is nulled" post-condition has
+-- something real to actually null.
+INSERT INTO app.fraud_signal (user_id, kind, detail) VALUES
+  ('00000000-0000-0000-0000-00000000000a', 'manual_review_seed', '{}'::jsonb);
 INSERT INTO storage.objects (bucket_id, name, owner) VALUES
   ('receipts', 'receipts/00000000-0000-0000-0000-00000000000a/r1.jpg', '00000000-0000-0000-0000-00000000000a');
 

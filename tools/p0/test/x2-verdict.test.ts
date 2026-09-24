@@ -6,6 +6,7 @@ import {
   sameConfiguredHost,
   type EvidenceByTrail,
   type X2ConfirmationFile,
+  type X2CorroborationFile,
 } from "../src/x2-verdict.js";
 import type { X2FetchEntry, X2FetchManifest } from "../src/x2-fetch.js";
 

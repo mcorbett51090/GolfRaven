@@ -232,6 +232,16 @@ CREATE UNIQUE INDEX receipt_fingerprint_ocr_facility_uniq
   ON app.receipt_fingerprint (receipt_number_ocr, facility_id)
   WHERE receipt_number_ocr IS NOT NULL;
 
+-- ⛔ FIX (M4, post-P3a gate) 2: UNIQUE(purchase_evidence_id) so a retry
+-- (the same ingestion call replayed) is idempotent instead of minting a
+-- second fingerprint row for the same purchase. Partial (WHERE NOT NULL)
+-- for the same reason as the OCR index: the column is nullable (ON
+-- DELETE SET NULL, 0003) once the purchase_evidence row it pointed at is
+-- gone, and multiple already-detached rows legitimately share NULL.
+CREATE UNIQUE INDEX receipt_fingerprint_purchase_evidence_uniq
+  ON app.receipt_fingerprint (purchase_evidence_id)
+  WHERE purchase_evidence_id IS NOT NULL;
+
 -- phash is deliberately NOT made a bare UNIQUE constraint (a perceptual
 -- hash is approximate by design — two independently legitimate receipts
 -- CAN collide on phash without being the same receipt, so a hard UNIQUE
@@ -243,6 +253,33 @@ CREATE UNIQUE INDEX receipt_fingerprint_ocr_facility_uniq
 -- SAME phash (released automatically at transaction end) so two
 -- simultaneous submissions of the same receipt image can't both read "no
 -- existing match" and both succeed.
+--
+-- ⛔ FIX (M4, post-P3a gate):
+--   1. Asserts transaction_isolation = 'read committed'. Under
+--      REPEATABLE READ, the lock alone is not enough: the calling
+--      transaction's snapshot is taken at its FIRST statement, before
+--      this function's own pg_advisory_xact_lock even runs, so a phash
+--      row committed by another session BETWEEN snapshot-start and lock-
+--      acquisition is invisible to the SELECT below regardless of the
+--      lock — the lock only serializes WRITERS against each other, it
+--      does not make an already-fixed snapshot see a later commit. READ
+--      COMMITTED re-takes its snapshot per-statement, so once the lock is
+--      held, this function's own SELECT genuinely sees every row
+--      committed before the lock was granted. Raising here, rather than
+--      silently under-protecting, matches this codebase's fail-closed
+--      convention (0015's own "classify it before this function can run"
+--      posture).
+--   3. An OCR-index collision (receipt_fingerprint_ocr_facility_uniq,
+--      unique_violation) is now caught and treated exactly like a phash
+--      duplicate — void + fraud_signal — instead of surfacing a raw
+--      23505 to the caller (an Edge Function 500, not a handled fraud
+--      case; every OTHER duplicate path here already resolves to a
+--      handled outcome, not an exception).
+--   4. p_user_id is checked against the purchase_evidence row's OWN
+--      user_id before anything else — a caller passing a p_user_id that
+--      does not match p_purchase_evidence_id's real owner would
+--      otherwise silently attribute a fraud_signal (or a void) to the
+--      wrong account.
 CREATE OR REPLACE FUNCTION app.dedupe_receipt_fingerprint(
   p_purchase_evidence_id uuid,
   p_user_id uuid,
@@ -255,7 +292,21 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_dupe_id uuid;
+  v_real_user_id uuid;
 BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'dedupe_receipt_fingerprint: requires transaction_isolation = read committed (got %) -- the advisory lock does not protect a REPEATABLE READ snapshot taken before it', current_setting('transaction_isolation');
+  END IF;
+
+  SELECT user_id INTO v_real_user_id FROM app.purchase_evidence WHERE id = p_purchase_evidence_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'dedupe_receipt_fingerprint: no such purchase_evidence %', p_purchase_evidence_id;
+  END IF;
+  IF v_real_user_id IS DISTINCT FROM p_user_id THEN
+    RAISE EXCEPTION 'dedupe_receipt_fingerprint: p_user_id (%) does not match purchase_evidence.user_id (%) for purchase_evidence_id=%',
+      p_user_id, v_real_user_id, p_purchase_evidence_id;
+  END IF;
+
   PERFORM pg_advisory_xact_lock(hashtext(p_phash));
 
   SELECT id INTO v_dupe_id
@@ -281,10 +332,30 @@ BEGIN
     RETURN false;
   END IF;
 
-  INSERT INTO app.receipt_fingerprint
-    (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
-  VALUES
-    (p_purchase_evidence_id, p_user_id, p_phash, p_receipt_number_ocr, p_facility_id, p_local_date);
+  BEGIN
+    INSERT INTO app.receipt_fingerprint
+      (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
+    VALUES
+      (p_purchase_evidence_id, p_user_id, p_phash, p_receipt_number_ocr, p_facility_id, p_local_date)
+    ON CONFLICT (purchase_evidence_id) WHERE purchase_evidence_id IS NOT NULL DO NOTHING;
+  EXCEPTION WHEN unique_violation THEN
+    -- receipt_fingerprint_ocr_facility_uniq: a DIFFERENT receipt already
+    -- claimed this (receipt_number_ocr, facility_id) pair. Same handled
+    -- outcome as a phash duplicate, not a raw exception to the caller.
+    UPDATE app.purchase_evidence SET status = 'void' WHERE id = p_purchase_evidence_id;
+    INSERT INTO app.fraud_signal (user_id, kind, detail)
+    VALUES (
+      p_user_id,
+      'receipt_ocr_duplicate',
+      jsonb_build_object(
+        'purchase_evidence_id', p_purchase_evidence_id,
+        'receipt_number_ocr', p_receipt_number_ocr,
+        'facility_id', p_facility_id,
+        'local_date', p_local_date
+      )
+    );
+    RETURN false;
+  END;
   RETURN true;
 END;
 $$;

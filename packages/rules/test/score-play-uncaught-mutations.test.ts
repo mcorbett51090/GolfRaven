@@ -88,13 +88,22 @@ describe("uncaught mutation: device-gate insideBuffer check removed", () => {
 });
 
 describe("uncaught mutation: fingerprint voiding disabled (non-tautological — distinct weights, not distinct classes)", () => {
-  it("a pending receipt (0.20) plus a LATER duplicate-fingerprint 'approved' receipt (would be 0.80) stays at 0.20", () => {
-    // Deliberately NOT two receipts of equal-or-lower weight (same-class
-    // dedup would mask voiding either way) — the second row's OWN weight
-    // (0.80, approved) is HIGHER than the first's (0.20, pending), so
-    // same-class dedup's max-pick would produce a DIFFERENT number (0.80)
-    // if voiding did not fire, and the correct, lower number (0.20) only
-    // when voiding actually suppresses the duplicate to 0.
+  // F2 (sixth gate): rewritten. The ORIGINAL version of this test pinned
+  // "whichever row comes LAST is voided, regardless of status" as the
+  // expected behaviour — which was itself F2's blocking bug (order
+  // dependence: `[pending, approved]` kept `pending`, `[approved, pending]`
+  // kept `approved`). The CORRECT, now-fixed behaviour keeps the BEST
+  // status deterministically (`approved` > `pending` > `void`), whatever
+  // order the rows arrive in — so a `pending` row followed by a
+  // duplicate-fingerprint `approved` row keeps the `approved` one (0.80),
+  // voiding the `pending` one, regardless of position. This still proves
+  // voiding fires at all (a THIRD, non-duplicate class establishes that):
+  // if voiding were disabled entirely, same-class dedup's max-pick would
+  // ALSO produce 0.80 here (coincidentally the same number), so a
+  // mutation-guard needs a case where voiding and "no voiding" diverge —
+  // see the permutation test below, which pins BOTH orders to the SAME
+  // number specifically, catching order-dependence directly.
+  it("a pending receipt + a LATER duplicate-fingerprint 'approved' receipt: the approved one wins (0.80), the pending one is voided", () => {
     const result = scorePlayOrThrow(
       [
         receipt({ id: "r1", status: "pending", fingerprint: "fp_dup" }),
@@ -102,8 +111,45 @@ describe("uncaught mutation: fingerprint voiding disabled (non-tautological — 
       ],
       baseCtx(),
     );
-    expect(result.score_badge).toBe(0.2);
-    expect(result.score_monetary).toBe(0);
+    expect(result.score_badge).toBe(0.8);
+  });
+
+  it("F2: the SAME pair, REVERSED order, gives the IDENTICAL result — approved still wins, never order-dependent", () => {
+    const forward = scorePlayOrThrow(
+      [
+        receipt({ id: "r1", status: "pending", fingerprint: "fp_dup2" }),
+        receipt({ id: "r2", status: "approved", fingerprint: "fp_dup2", coSignalFix: goodFix() }),
+      ],
+      baseCtx(),
+    );
+    const reversed = scorePlayOrThrow(
+      [
+        receipt({ id: "r2", status: "approved", fingerprint: "fp_dup2", coSignalFix: goodFix() }),
+        receipt({ id: "r1", status: "pending", fingerprint: "fp_dup2" }),
+      ],
+      baseCtx(),
+    );
+    expect(forward.score_badge).toBe(0.8);
+    expect(reversed.score_badge).toBe(0.8);
+    expect(forward.score_badge).toBe(reversed.score_badge);
+  });
+
+  it("the probe's exact exploit: [pending, approved, checkin] and [approved, pending, checkin] now give the SAME money decision", () => {
+    const ck = goodFix();
+    const mkForward = () => [
+      receipt({ id: "recA", status: "pending", fingerprint: "fp_exploit", coSignalFix: goodFix() }),
+      receipt({ id: "recB", status: "approved", fingerprint: "fp_exploit", coSignalFix: goodFix() }),
+      checkin({ fix: ck }),
+    ];
+    const mkReversed = () => [
+      receipt({ id: "recB", status: "approved", fingerprint: "fp_exploit", coSignalFix: goodFix() }),
+      receipt({ id: "recA", status: "pending", fingerprint: "fp_exploit", coSignalFix: goodFix() }),
+      checkin({ fix: ck }),
+    ];
+    const forward = scorePlayOrThrow(mkForward(), baseCtx());
+    const reversed = scorePlayOrThrow(mkReversed(), baseCtx());
+    expect(forward.money).toBe(reversed.money);
+    expect(forward.score_monetary).toBe(reversed.score_monetary);
   });
 });
 
