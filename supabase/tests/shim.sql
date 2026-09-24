@@ -128,6 +128,20 @@ BEGIN
   EXECUTE format('ALTER DATABASE %I OWNER TO migration_owner', current_database());
 END
 $$;
+-- migration_owner also needs to be able to `SET ROLE
+-- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
+-- runs supabase/tests/helpers.sql and
+-- tools/db/test-replay-concurrency.sh's own inserts under `SET ROLE
+-- service_role` on the connecting session, in EITHER harness mode (see
+-- those files' own comments) — and, under HARNESS_MODE=restricted, the
+-- pgTAP matrix itself connects AS migration_owner (not postgres), so
+-- every `tests.authenticate_as('anon'/'authenticated', ...)` call inside
+-- the matrix files (SET LOCAL ROLE, supabase/tests/shim.sql) needs
+-- migration_owner to be able to switch into those roles too. `WITH SET
+-- TRUE` is required explicitly: confirmed empirically this session that a
+-- plain membership grant alone (no SET TRUE) leaves `SET ROLE` itself
+-- denied even with ADMIN OPTION.
+GRANT service_role, anon, authenticated TO migration_owner WITH SET TRUE;
 
 -- [unverified — training knowledge of Supabase internals] Supabase's default
 -- grants: usage on `public` is broad, but we do NOT replicate that here,
@@ -191,8 +205,24 @@ AS $$
   SELECT auth.jwt() ->> 'email';
 $$;
 
-GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role, migration_owner;
+GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT SELECT, INSERT ON auth.users TO service_role;
+-- migration_owner gets its OWN, separate WITH GRANT OPTION grants (S1,
+-- gate round 3), not folded into the lines above, so only migration_owner
+-- (never anon/authenticated/service_role) can re-grant these onward. It
+-- needs to: 0016_private_definer.sql, running as migration_owner in
+-- restricted mode, itself GRANTs USAGE ON SCHEMA auth and SELECT ON
+-- auth.users to private_definer (a role that does not exist yet when THIS
+-- file runs, so the grant to it can only happen later, in the migration)
+-- — confirmed empirically this session that without GRANT OPTION here,
+-- that later GRANT silently no-ops with "WARNING: no privileges were
+-- granted for auth"/"users" (not an error — the migration appears to
+-- succeed while actually granting nothing), leaving private_definer's own
+-- functions (private.delete_my_data reading auth.users for the target's
+-- email) failing at RUNTIME with "permission denied for schema auth"
+-- instead of at migration time.
+GRANT USAGE ON SCHEMA auth TO migration_owner WITH GRANT OPTION;
+GRANT SELECT ON auth.users TO migration_owner WITH GRANT OPTION;
 -- INSERT (not UPDATE/DELETE — helpers.sql never does either): fixture
 -- account seeding in supabase/tests/helpers.sql now runs `SET ROLE
 -- service_role` first (tools/db/test.sh, S1 gate round 3), matching how a
@@ -292,7 +322,11 @@ CREATE POLICY migration_owner_seed_buckets ON storage.buckets
 CREATE POLICY migration_owner_seed_buckets_r ON storage.buckets
   FOR SELECT TO migration_owner USING (true);
 
-GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role, migration_owner;
+GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;
+-- WITH GRANT OPTION for migration_owner, same reasoning as schema auth
+-- above: 0016_private_definer.sql GRANTs USAGE ON SCHEMA storage onward to
+-- private_definer.
+GRANT USAGE ON SCHEMA storage TO migration_owner WITH GRANT OPTION;
 GRANT SELECT, INSERT, UPDATE, DELETE ON storage.buckets TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON storage.objects TO service_role;
 -- anon/authenticated get table-level SELECT/INSERT grants (matching real

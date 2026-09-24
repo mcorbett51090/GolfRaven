@@ -13,6 +13,17 @@
 BEGIN;
 SELECT plan(9);
 
+-- S1 restricted-mode fix: this file reads private.function_inventory and
+-- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
+-- SELECT granted to service_role only, 0014/0016) -- under
+-- HARNESS_MODE=restricted the pgTAP matrix itself connects as
+-- migration_owner (NOSUPERUSER NOBYPASSRLS, no policy on either table),
+-- so without this every row in both tables is invisible to the check
+-- itself, which is a data-integrity/inventory check needing full
+-- visibility, not an authorization boundary under test -- the same
+-- reasoning as 07_rate_limit.sql/09_delete_my_data.sql's own fix.
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
 -- (1) Every function in app/api/private has a private.function_inventory
 -- row. A new function with no row fails here immediately — this is the
 -- literal "CI fails if a function in the inventory has no matrix cells."
