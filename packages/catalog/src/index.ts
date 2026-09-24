@@ -5,11 +5,12 @@
  * plus the ID ledger (§3.5, §4.2, §4.3). It holds no data itself (data
  * lives in `data/`, §3.1 row B) and does no network fetch.
  *
- * P1a scope (this package): the full §4.1 schema except `AchievementDef`
- * and `OfferTerms` (part B, `packages/rules`'s `RuleExpr` — see
- * `schema.ts`'s module doc), plus the ID ledger and slug rule. `loadCatalog()`
- * and the directory-base-layer loader are not implemented here — see the
- * P1a report for why.
+ * P1a scope (this package): the full §4.1 schema, plus the ID ledger and
+ * slug rule. P1 build-plan part B (`RuleExpr`, `AchievementDef`) added the
+ * Zod type for both — see `rule-expr.ts`'s module doc; the static checker
+ * and evaluator live in `@golfraven/rules`. `loadCatalog()` and the
+ * directory-base-layer loader are not implemented here — see the P1a
+ * report for why.
  */
 import { z } from "zod";
 
@@ -24,6 +25,7 @@ export * from "./geo.js";
 export * from "./name-similarity.js";
 export * from "./schema.js";
 export * from "./ledger.js";
+export * from "./rule-expr.js";
 
 /** Retained from the P0 placeholder only so `CONTRACT_VERSION` stays
  * exercised by a real Zod parse in this package's own tests, independent

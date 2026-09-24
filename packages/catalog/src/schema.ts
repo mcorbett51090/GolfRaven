@@ -8,19 +8,19 @@
  * immutability, geometry/contact diffs, …) live in `tools/catalog`'s
  * `verify-catalog`, per §10 P1's own naming of that as a separate tool.
  *
- * **Scope note (see the P1a report for the full list; corrected post-e9b3ab0,
- * gate review S6).** `AchievementDef` is the one §4.1 top-level entity
- * *not* implemented here — it needs `RuleExpr` (`AchievementDef.rule`),
- * and the task's own out-of-scope list names "`packages/rules` (completion
- * and `RuleExpr`)" as part B. **`OfferTerms` IS implemented below** — the
- * original comment here wrongly grouped it with `AchievementDef` as also
- * needing `RuleExpr`. It doesn't: §4.1 states plainly that `OfferTerms` is
- * *"public, reviewed legal text only"* (`id, trailId, title, terms,
- * termsFr?, mode`) and that *"Offer INSTANCES and parameters (facility,
- * eligibility RuleExpr, budget, validity, maxRedemptions, funder) live in
- * the DB under operator scope"* — the `RuleExpr` lives on the DB-side offer
- * instance, never on `OfferTerms` itself. Every other §4.1 entity is
- * implemented.
+ * **Scope note (corrected post-e9b3ab0, gate review S6; updated for part B).**
+ * `AchievementDef` needs `RuleExpr` (`AchievementDef.rule`) and is now
+ * implemented in the sibling `rule-expr.ts` (part B), not in this file —
+ * kept separate so this file stays the pure §4.1 structural-record schema
+ * and `rule-expr.ts` owns the one recursive AST type. **`OfferTerms` IS
+ * implemented below** — the original comment here wrongly grouped it with
+ * `AchievementDef` as also needing `RuleExpr`. It doesn't: §4.1 states
+ * plainly that `OfferTerms` is *"public, reviewed legal text only"* (`id,
+ * trailId, title, terms, termsFr?, mode`) and that *"Offer INSTANCES and
+ * parameters (facility, eligibility RuleExpr, budget, validity,
+ * maxRedemptions, funder) live in the DB under operator scope"* — the
+ * `RuleExpr` lives on the DB-side offer instance, never on `OfferTerms`
+ * itself. Every other §4.1 entity is implemented.
  */
 import { z } from "zod";
 import {
