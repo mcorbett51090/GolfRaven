@@ -34,11 +34,7 @@ import {
   truncateEcho,
   MAX_INPUT_BYTES,
 } from "./safety.js";
-import {
-  parseStrictTimestamp,
-  localDateForTz,
-  type StrictTimestamp,
-} from "./timestamps.js";
+import { parseStrictTimestamp, localDateForTz, type StrictTimestamp } from "./timestamps.js";
 
 const DOCTYPE_RE = /<!DOCTYPE|<!ENTITY/i;
 
@@ -60,19 +56,13 @@ interface RawPoint {
   timestamp?: number;
 }
 
-export function parseGpxFile(
-  bytes: Uint8Array,
-  options: ParseGpxOptions = {},
-): ImportResult {
+export function parseGpxFile(bytes: Uint8Array, options: ParseGpxOptions = {}): ImportResult {
   const sizeError = checkInputSize(bytes.byteLength, MAX_INPUT_BYTES);
   if (sizeError) return { ok: false, error: finalizeError(sizeError) };
 
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   if (DOCTYPE_RE.test(text)) {
-    return {
-      ok: false,
-      error: "GPX file declares a DOCTYPE/ENTITY; refused (XXE policy)",
-    };
+    return { ok: false, error: "GPX file declares a DOCTYPE/ENTITY; refused (XXE policy)" };
   }
 
   const warnings: string[] = [];
@@ -89,9 +79,7 @@ export function parseGpxFile(
 
   const stack: string[] = [];
   let textBuf = "";
-  let current:
-    | { lat: number | undefined; lon: number | undefined; timeText?: string }
-    | undefined;
+  let current: { lat: number | undefined; lon: number | undefined; timeText?: string } | undefined;
 
   const p = sax.parser(true, { trim: true, lowercase: false, xmlns: false });
 
@@ -99,8 +87,7 @@ export function parseGpxFile(
     if (!firstError) firstError = err.message;
   };
   p.ondoctype = () => {
-    if (!firstError)
-      firstError = "GPX file declares a DOCTYPE; refused (XXE policy)";
+    if (!firstError) firstError = "GPX file declares a DOCTYPE; refused (XXE policy)";
   };
   // `xmlns: false` (set above) means sax always hands us the plain `Tag`
   // shape at runtime; the cast just matches the SDK's always-union
@@ -113,8 +100,7 @@ export function parseGpxFile(
       rootIsGpx = name === "gpx";
       if (rootIsGpx) {
         const creator = tag.attributes["creator"];
-        if (creator && creator.trim().length > 0)
-          device = sanitizeText(creator.trim());
+        if (creator && creator.trim().length > 0) device = sanitizeText(creator.trim());
       }
     }
     if (name === "trkpt" || name === "rtept") {
@@ -133,11 +119,7 @@ export function parseGpxFile(
     const name = localName(rawName);
     const parent = stack[stack.length - 2];
 
-    if (
-      name === "time" &&
-      current !== undefined &&
-      (parent === "trkpt" || parent === "rtept")
-    ) {
+    if (name === "time" && current !== undefined && (parent === "trkpt" || parent === "rtept")) {
       current.timeText = textBuf.trim();
     } else if (name === "time" && parent === "metadata") {
       metadataTime = parseStrictTimestamp(textBuf.trim());
@@ -155,21 +137,13 @@ export function parseGpxFile(
     } else if (name === "name" && parent === "gpx" && !trkNameSeen) {
       // GPX 1.0's top-level <name>, sibling of <trk>, not <trk>'s own name.
       const v = textBuf.trim();
-      if (v.length > 0 && courseNameHint === undefined)
-        courseNameHint = sanitizeText(v);
+      if (v.length > 0 && courseNameHint === undefined) courseNameHint = sanitizeText(v);
     }
 
     if ((name === "trkpt" || name === "rtept") && current !== undefined) {
       const { lat, lon, timeText } = current;
-      if (
-        lat === undefined ||
-        lon === undefined ||
-        !isValidLat(lat) ||
-        !isValidLon(lon)
-      ) {
-        warnings.push(
-          `a <${name}> had an invalid or missing lat/lon and was dropped`,
-        );
+      if (lat === undefined || lon === undefined || !isValidLat(lat) || !isValidLon(lon)) {
+        warnings.push(`a <${name}> had an invalid or missing lat/lon and was dropped`);
       } else {
         let timestamp: number | undefined;
         if (timeText && timeText.length > 0) {
@@ -177,16 +151,10 @@ export function parseGpxFile(
           if (parsedTime !== undefined) {
             timestamp = parsedTime.ms;
           } else {
-            warnings.push(
-              `a <${name}> had an unparseable <time> "${truncateEcho(timeText)}", timestamp dropped`,
-            );
+            warnings.push(`a <${name}> had an unparseable <time> "${truncateEcho(timeText)}", timestamp dropped`);
           }
         }
-        points.push({
-          lat,
-          lon,
-          ...(timestamp !== undefined ? { timestamp } : {}),
-        });
+        points.push({ lat, lon, ...(timestamp !== undefined ? { timestamp } : {}) });
       }
       current = undefined;
     }
@@ -199,35 +167,23 @@ export function parseGpxFile(
     p.write(text);
     p.close();
   } catch (err) {
-    if (!firstError)
-      firstError = err instanceof Error ? err.message : String(err);
+    if (!firstError) firstError = err instanceof Error ? err.message : String(err);
   }
 
   if (firstError) {
-    return {
-      ok: false,
-      error: finalizeError(`GPX parse error: ${firstError}`),
-    };
+    return { ok: false, error: finalizeError(`GPX parse error: ${firstError}`) };
   }
   if (!sawRoot || !rootIsGpx) {
     return { ok: false, error: "not a GPX file (root element is not <gpx>)" };
   }
 
-  const timed = points.filter(
-    (pt): pt is RawPoint & { timestamp: number } => pt.timestamp !== undefined,
-  );
+  const timed = points.filter((pt): pt is RawPoint & { timestamp: number } => pt.timestamp !== undefined);
   const untimedCount = points.length - timed.length;
   if (untimedCount > 0 && timed.length > 0) {
-    warnings.push(
-      `${untimedCount} track point(s) had no <time> and were dropped from the route`,
-    );
+    warnings.push(`${untimedCount} track point(s) had no <time> and were dropped from the route`);
   }
 
-  const fixesRaw: ImportedFix[] = timed.map((pt) => ({
-    lat: pt.lat,
-    lon: pt.lon,
-    timestamp: pt.timestamp,
-  }));
+  const fixesRaw: ImportedFix[] = timed.map((pt) => ({ lat: pt.lat, lon: pt.lon, timestamp: pt.timestamp }));
   const { fixes, warnings: capWarnings } = capAndSortFixes(fixesRaw);
   warnings.push(...capWarnings);
 
@@ -258,26 +214,18 @@ export function parseGpxFile(
       if (tzDate !== undefined) {
         round.localDate = tzDate;
       } else {
-        warnings.push(
-          `could not derive a local date using tz "${truncateEcho(options.tz)}"`,
-        );
+        warnings.push(`could not derive a local date using tz "${truncateEcho(options.tz)}"`);
       }
     } else if (options.tz !== undefined && fileLevel === undefined) {
-      warnings.push(
-        "no usable timestamp of any kind found; a tz option alone has nothing to convert",
-      );
+      warnings.push("no usable timestamp of any kind found; a tz option alone has nothing to convert");
     } else if (fileLevel !== undefined) {
       // Has a Z-normalized file-level time but no tz to project it
       // through, and no explicit offset to trust as-is.
-      warnings.push(
-        "file-level <time> is UTC (Z) with no facility tz option; local date left undefined",
-      );
+      warnings.push("file-level <time> is UTC (Z) with no facility tz option; local date left undefined");
     } else if (points.length === 0) {
       warnings.push("GPX file has no track/route points");
     } else {
-      warnings.push(
-        "no usable timestamp (per-point or file-level) found; local date left undefined",
-      );
+      warnings.push("no usable timestamp (per-point or file-level) found; local date left undefined");
     }
   }
 

@@ -27,12 +27,7 @@
  *   point value exactly as it does to a shared range. Refuses to run if
  *   any of the six terms has no range recorded at all.
  */
-import {
-  readK3Log,
-  resolveK3DocPath,
-  K3_KEYWORD_TERMS,
-  type K3Log,
-} from "./k3-log.js";
+import { readK3Log, resolveK3DocPath, K3_KEYWORD_TERMS, type K3Log } from "./k3-log.js";
 
 /** Decision 0001, Addendum A (default) / K3.md Pass bar. */
 export const K3_SEARCH_CONSOLE_BAR = 1000;
@@ -105,9 +100,7 @@ function median3(values: number[]): number {
 
 export function computeK3Verdict(log: K3Log, today: string): K3VerdictResult {
   if (!isRealCalendarDate(today)) {
-    throw new Error(
-      `computeK3Verdict: malformed today "${today}" — not a real ISO "YYYY-MM-DD" calendar date.`,
-    );
+    throw new Error(`computeK3Verdict: malformed today "${today}" — not a real ISO "YYYY-MM-DD" calendar date.`);
   }
 
   const propertyId = log.propertyId.trim();
@@ -151,25 +144,18 @@ export function computeK3Verdict(log: K3Log, today: string): K3VerdictResult {
     );
   }
 
-  const missingMonths = log.searchConsole
-    .filter((r) => r.clicks === null)
-    .map((r) => r.month);
+  const missingMonths = log.searchConsole.filter((r) => r.clicks === null).map((r) => r.month);
   if (missingMonths.length > 0) {
     throw new Error(
       `computeK3Verdict requires all three fixed months' organic-click totals — missing: ` +
         `${missingMonths.join(", ")}. Refusing rather than silently treating a blank cell as 0 clicks.`,
     );
   }
-  const monthlyTotals = log.searchConsole.map((r) => ({
-    month: r.month,
-    clicks: r.clicks!,
-  }));
+  const monthlyTotals = log.searchConsole.map((r) => ({ month: r.month, clicks: r.clicks! }));
   const median = median3(monthlyTotals.map((r) => r.clicks));
   const searchConsolePass = median >= K3_SEARCH_CONSOLE_BAR;
 
-  const missingTerms = log.keywords
-    .filter((r) => r.lowerBound === null)
-    .map((r) => r.term);
+  const missingTerms = log.keywords.filter((r) => r.lowerBound === null).map((r) => r.term);
   if (missingTerms.length > 0) {
     throw new Error(
       `computeK3Verdict requires a range (lower + upper bound) for all six closed-list terms — missing: ` +
@@ -181,21 +167,14 @@ export function computeK3Verdict(log: K3Log, today: string): K3VerdictResult {
   // the six terms return the identical range, count that range once" —
   // applied literally to every term, including a degenerate range
   // (lower === upper) that represents a point value.
-  const rangeGroups = new Map<
-    string,
-    { lower: number; upper: number; terms: string[] }
-  >();
+  const rangeGroups = new Map<string, { lower: number; upper: number; terms: string[] }>();
   for (const row of log.keywords) {
     const key = `${row.lowerBound}-${row.upperBound}`;
     const existing = rangeGroups.get(key);
     if (existing) {
       existing.terms.push(row.term);
     } else {
-      rangeGroups.set(key, {
-        lower: row.lowerBound!,
-        upper: row.upperBound!,
-        terms: [row.term],
-      });
+      rangeGroups.set(key, { lower: row.lowerBound!, upper: row.upperBound!, terms: [row.term] });
     }
   }
   const contributions: K3KeywordContribution[] = [];
@@ -213,19 +192,14 @@ export function computeK3Verdict(log: K3Log, today: string): K3VerdictResult {
     }
   }
   contributions.sort(
-    (a, b) =>
-      K3_KEYWORD_TERMS.indexOf(a.term as (typeof K3_KEYWORD_TERMS)[number]) -
+    (a, b) => K3_KEYWORD_TERMS.indexOf(a.term as (typeof K3_KEYWORD_TERMS)[number]) -
       K3_KEYWORD_TERMS.indexOf(b.term as (typeof K3_KEYWORD_TERMS)[number]),
   );
   const keywordPass = combinedVolume >= K3_KEYWORD_BAR;
 
   const bothMiss = !searchConsolePass && !keywordPass;
   const bothPass = searchConsolePass && keywordPass;
-  const combinedBranch: K3CombinedBranch = bothMiss
-    ? "both-miss"
-    : bothPass
-      ? "both-pass"
-      : "disagree";
+  const combinedBranch: K3CombinedBranch = bothMiss ? "both-miss" : bothPass ? "both-pass" : "disagree";
   const consequenceText =
     combinedBranch === "both-miss"
       ? K3_CONSEQUENCE_BOTH_MISS
@@ -243,12 +217,7 @@ export function computeK3Verdict(log: K3Log, today: string): K3VerdictResult {
       bar: K3_SEARCH_CONSOLE_BAR,
       pass: searchConsolePass,
     },
-    keyword: {
-      contributions,
-      combinedVolume,
-      bar: K3_KEYWORD_BAR,
-      pass: keywordPass,
-    },
+    keyword: { contributions, combinedVolume, bar: K3_KEYWORD_BAR, pass: keywordPass },
     combinedBranch,
     consequenceText,
     universalNote: K3_CONSEQUENCE_UNIVERSAL,
@@ -263,8 +232,7 @@ export function renderK3VerdictMarkdown(result: K3VerdictResult): string {
   lines.push("## Search Console");
   lines.push("| Month | Organic clicks |");
   lines.push("|---|---|");
-  for (const r of result.searchConsole.monthlyTotals)
-    lines.push(`| ${r.month} | ${r.clicks} |`);
+  for (const r of result.searchConsole.monthlyTotals) lines.push(`| ${r.month} | ${r.clicks} |`);
   lines.push("");
   lines.push(
     `Median: **${result.searchConsole.median}** vs bar ≥ ${result.searchConsole.bar} — ` +
@@ -310,10 +278,7 @@ function parseArgs(argv: string[]): CliArgs {
       i += 1;
     }
   }
-  return {
-    outPrefix: opts.out || "k3-verdict-result",
-    memoPath: opts.memo || undefined,
-  };
+  return { outPrefix: opts.out || "k3-verdict-result", memoPath: opts.memo || undefined };
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -329,9 +294,7 @@ async function main(argv: string[]): Promise<void> {
   const sourcePath = resolvePath(args.memoPath ?? repoPath);
   const source = {
     path: sourcePath,
-    sha256: createHash("sha256")
-      .update(await readSource(sourcePath))
-      .digest("hex"),
+    sha256: createHash("sha256").update(await readSource(sourcePath)).digest("hex"),
     isRepoLog: sourcePath === repoPath,
   };
   const banner = source.isRepoLog
@@ -340,11 +303,7 @@ async function main(argv: string[]): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
   const result = computeK3Verdict(log, today);
   const { writeFile } = await import("node:fs/promises");
-  await writeFile(
-    `${args.outPrefix}.json`,
-    `${JSON.stringify({ ...result, source }, null, 2)}\n`,
-    "utf8",
-  );
+  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify({ ...result, source }, null, 2)}\n`, "utf8");
   const md = banner + renderK3VerdictMarkdown(result);
   await writeFile(`${args.outPrefix}.md`, `${md}\n`, "utf8");
   process.stdout.write(`${md}\n`);

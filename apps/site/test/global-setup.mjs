@@ -54,8 +54,7 @@ function runBuild(name, { dist, indexability, env: extraEnv }) {
     GOLFRAVEN_BUILD_STARTED_MS: String(Date.now()),
     ...extraEnv,
   };
-  const run = (cmd, args) =>
-    execFileSync(cmd, args, { cwd: siteRoot, stdio: "inherit", env });
+  const run = (cmd, args) => execFileSync(cmd, args, { cwd: siteRoot, stdio: "inherit", env });
 
   console.log(`\n--- test build "${name}" -> ${dist} ---`);
   run("node", ["./scripts/verify-input.mjs"]);

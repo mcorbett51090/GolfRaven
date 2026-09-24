@@ -1,11 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync as fsWriteFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync as fsWriteFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,9 +135,7 @@ describe("x1-ios-export: parsing a well-formed export.xml", () => {
     expect(md).toContain("CONSENT_REQUIRED + follow-up read");
     expect(md).toContain("N/A (iOS)");
     // The recent (2026-09-20) Garmin workout is inside GOOD_ROUND_WINDOWS -> testRound Yes.
-    expect(md).toMatch(
-      /\| Garmin Connect \| iOS \| 2026-09-20[^|]*\| Yes \| Yes \| Yes \|/,
-    );
+    expect(md).toMatch(/\| Garmin Connect \| iOS \| 2026-09-20[^|]*\| Yes \| Yes \| Yes \|/);
   });
 
   it("renders the per-source newest-counted-workout-date table", async () => {
@@ -153,9 +146,7 @@ describe("x1-ios-export: parsing a well-formed export.xml", () => {
     expect(md).toContain(
       "| Source | Counted workouts | Newest counted workout date (with route) | Newest workout without a route |",
     );
-    const garminRow = md
-      .split("\n")
-      .find((l) => l.startsWith("| Garmin Connect"));
+    const garminRow = md.split("\n").find((l) => l.startsWith("| Garmin Connect"));
     expect(garminRow).toBeDefined();
     expect(garminRow).toContain("2026-09-20");
   });
@@ -163,42 +154,28 @@ describe("x1-ios-export: parsing a well-formed export.xml", () => {
 
 describe("x1-ios-export: exportDate/exportSha256 binding (Opus-gate correction, post-d0de4b8)", () => {
   it("parses the ExportDate from the fixture export.xml", async () => {
-    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
-      roundWindows: GOOD_ROUND_WINDOWS,
-    });
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
     expect(result.exportDate).toBe("2026-09-21 09:00:00 -0400");
   });
 
   it("computes a SHA-256 of export.xml", async () => {
-    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
-      roundWindows: GOOD_ROUND_WINDOWS,
-    });
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
     expect(result.exportSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("computeSourceSummaries: newestStartDate only considers route-present workouts", async () => {
-    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
-      roundWindows: GOOD_ROUND_WINDOWS,
-    });
-    const garmin = result.sourceSummaries.find(
-      (s) => s.sourceName === "Garmin Connect",
-    );
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    const garmin = result.sourceSummaries.find((s) => s.sourceName === "Garmin Connect");
     expect(garmin).toBeDefined();
     // The 2026-09-20 Garmin workout has a route (2 trackpoints); the older
     // 2026-08-01 one has none — so it must not win "newest WITH a route".
     expect(garmin!.newestStartDate).toBe("2026-09-20 09:00:00 -0400");
-    expect(garmin!.newestStartDateWithoutRoute).toBe(
-      "2026-08-01 09:00:00 -0400",
-    );
-    const appleWatch = result.sourceSummaries.find(
-      (s) => s.sourceName === "Matt's Apple Watch",
-    );
+    expect(garmin!.newestStartDateWithoutRoute).toBe("2026-08-01 09:00:00 -0400");
+    const appleWatch = result.sourceSummaries.find((s) => s.sourceName === "Matt's Apple Watch");
     expect(appleWatch).toBeDefined();
     // Apple Watch's only workout has no route at all.
     expect(appleWatch!.newestStartDate).toBeNull();
-    expect(appleWatch!.newestStartDateWithoutRoute).toBe(
-      "2026-09-20 09:01:00 -0400",
-    );
+    expect(appleWatch!.newestStartDateWithoutRoute).toBe("2026-09-20 09:01:00 -0400");
   });
 });
 
@@ -220,9 +197,7 @@ describe("x1-ios-export: round windows are labels, not a filter (decision 0005, 
     });
     // Decision 0005: nothing is excluded by date. All 5 golf workouts count.
     expect(result.golfWorkoutCount).toBe(5);
-    const old = result.workouts.find((w) =>
-      w.startDate?.startsWith("2026-08-01"),
-    );
+    const old = result.workouts.find((w) => w.startDate?.startsWith("2026-08-01"));
     expect(old).toBeDefined();
     expect(old!.testRound).toBe(false);
     const hole19 = result.workouts.find((w) => w.sourceName === "Hole19");
@@ -235,9 +210,7 @@ describe("x1-ios-export: round windows are labels, not a filter (decision 0005, 
       roundWindows: TIGHT_ROUND_WINDOWS,
     });
     const garminRecent = result.workouts.find(
-      (w) =>
-        w.sourceName === "Garmin Connect" &&
-        w.startDate?.startsWith("2026-09-20"),
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
     );
     expect(garminRecent).toBeDefined();
     expect(garminRecent!.testRound).toBe(true);
@@ -252,9 +225,7 @@ describe("x1-ios-export: round windows are labels, not a filter (decision 0005, 
       ],
     });
     const w = result.workouts.find(
-      (w) =>
-        w.sourceName === "Garmin Connect" &&
-        w.startDate?.startsWith("2026-09-20"),
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
     );
     expect(w).toBeDefined();
     expect(w!.testRound).toBe(true);
@@ -267,9 +238,7 @@ describe("x1-ios-export: round windows are labels, not a filter (decision 0005, 
       ],
     });
     const w = result.workouts.find(
-      (w) =>
-        w.sourceName === "Garmin Connect" &&
-        w.startDate?.startsWith("2026-09-20"),
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
     );
     expect(w).toBeDefined();
     expect(w!.testRound).toBe(false);
@@ -431,18 +400,10 @@ describe("countGpxTrackpoints", () => {
   });
 });
 
-const GIT_TEST_IDENTITY = [
-  "-c",
-  "user.name=Test",
-  "-c",
-  "user.email=test@example.com",
-];
+const GIT_TEST_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], {
-    cwd,
-    encoding: "utf8",
-  });
+  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], { cwd, encoding: "utf8" });
 }
 
 /** A fresh temp git repo with `X1.md` written and committed — the
@@ -453,11 +414,7 @@ function tmpGitX1Doc(body: string): string {
   const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-cli-"));
   git(dir, ["init", "-q"]);
   const file = path.join(dir, "X1.md");
-  fsWriteFileSync(
-    file,
-    `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`,
-    "utf8",
-  );
+  fsWriteFileSync(file, `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`, "utf8");
   git(dir, ["add", "X1.md"]);
   git(dir, ["commit", "-q", "-m", "init"]);
   return file;
@@ -466,9 +423,7 @@ function tmpGitX1Doc(body: string): string {
 describe("runX1IosExportCli (round-4 Opus-gate correction, post-4279773) — 'a binding run binds and prints no verdict'", () => {
   let stdoutSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
-    stdoutSpy = vi
-      .spyOn(process.stdout, "write")
-      .mockImplementation(() => true);
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   });
   afterEach(() => {
     stdoutSpy.mockRestore();
@@ -478,27 +433,16 @@ describe("runX1IosExportCli (round-4 Opus-gate correction, post-4279773) — 'a 
     // The fixture export.xml's <ExportDate> is 2026-09-21 09:00:00 -0400,
     // whose UTC calendar date is 2026-09-21 — must match what's logged.
     const x1DocPath = tmpGitX1Doc("- iOS: 2026-09-21\n- Android: \n");
-    const outDir = mkdtempSync(
-      path.join(tmpdir(), "golfraven-x1-ios-export-out-"),
-    );
+    const outDir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-out-"));
     const outPrefix = path.join(outDir, "result");
 
     await runX1IosExportCli(
-      {
-        exportDir: GOOD_EXPORT_DIR,
-        outPrefix,
-        os: "ios",
-        informational: false,
-      },
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
       x1DocPath,
     );
 
-    const printed = stdoutSpy.mock.calls
-      .map((c: unknown[]) => String(c[0]))
-      .join("");
-    expect(printed).toContain(
-      "bound: commit and push docs/p0/X1.md, then re-run",
-    );
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    expect(printed).toContain("bound: commit and push docs/p0/X1.md, then re-run");
     // No verdict/per-source detail was ever computed or printed.
     expect(printed).not.toMatch(/golf workout\(s\) found/);
     expect(printed).not.toContain("recorded=");
@@ -513,19 +457,12 @@ describe("runX1IosExportCli (round-4 Opus-gate correction, post-4279773) — 'a 
 
   it("a later run against the now-committed bind DOES print the recorded verdict", async () => {
     const x1DocPath = tmpGitX1Doc("- iOS: 2026-09-21\n- Android: \n");
-    const outDir = mkdtempSync(
-      path.join(tmpdir(), "golfraven-x1-ios-export-out-"),
-    );
+    const outDir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-out-"));
     const outPrefix = path.join(outDir, "result");
 
     // First run: binds, prints no verdict (as above).
     await runX1IosExportCli(
-      {
-        exportDir: GOOD_EXPORT_DIR,
-        outPrefix,
-        os: "ios",
-        informational: false,
-      },
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
       x1DocPath,
     );
     // Commit the bind — the real "commit and push docs/p0/X1.md now" step.
@@ -536,17 +473,10 @@ describe("runX1IosExportCli (round-4 Opus-gate correction, post-4279773) — 'a 
     // Second run: the hash already matches — this run recomputes and
     // prints the actual result.
     await runX1IosExportCli(
-      {
-        exportDir: GOOD_EXPORT_DIR,
-        outPrefix,
-        os: "ios",
-        informational: false,
-      },
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
       x1DocPath,
     );
-    const printed = stdoutSpy.mock.calls
-      .map((c: unknown[]) => String(c[0]))
-      .join("");
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
     expect(printed).toMatch(/golf workout\(s\) found/);
     expect(printed).not.toContain("bound: commit and push");
     expect(existsSync(`${outPrefix}.json`)).toBe(true);

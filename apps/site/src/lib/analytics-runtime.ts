@@ -51,13 +51,7 @@ export type EventRules = Record<string, FieldRule>;
 const REQUEST_TYPES = ["correction", "new-listing", "feedback"] as const;
 const RELATIONSHIPS = ["owner", "staff", "visitor", "other"] as const;
 const TOPICS = ["general", "problem", "idea", "listing", "other"] as const;
-const BOOKING_PROVIDERS = [
-  "golfnow",
-  "chronogolf",
-  "teeon",
-  "club-prophet",
-  "course-native",
-] as const;
+const BOOKING_PROVIDERS = ["golfnow", "chronogolf", "teeon", "club-prophet", "course-native"] as const;
 const CSP_DIRECTIVES = [
   "default-src",
   "script-src",
@@ -124,12 +118,8 @@ export function assertSchemaAgreement(): void {
   const schemaEvents = Object.keys(schema).filter((k) => k !== "_comment");
   const runtimeEvents = Object.keys(RULES);
 
-  const missingInRuntime = schemaEvents.filter(
-    (e) => !runtimeEvents.includes(e),
-  );
-  const missingInSchema = runtimeEvents.filter(
-    (e) => !schemaEvents.includes(e),
-  );
+  const missingInRuntime = schemaEvents.filter((e) => !runtimeEvents.includes(e));
+  const missingInSchema = runtimeEvents.filter((e) => !schemaEvents.includes(e));
   if (missingInRuntime.length || missingInSchema.length) {
     throw new Error(
       `analytics-schema.json/RULES event-name drift: missing in RULES=[${missingInRuntime}], ` +
@@ -160,8 +150,7 @@ export function assertSchemaAgreement(): void {
 
 const COORDINATE_RE = /^-?\d{1,3}\.\d{4,}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX_ID_RE = /^[0-9a-f]{16,}$/i;
 const BASE64_ID_RE = /^[A-Za-z0-9+/_-]{16,}={0,2}$/;
 // A legitimate catalog slug (`trail_slug`, `contact_method`, …) is
@@ -212,10 +201,7 @@ export type DataLayerEvent = { event: string; [key: string]: unknown };
  * unknown, OR when any admitted value fails the PII shape guard (the
  * WHOLE event is dropped in that case, not just the offending field).
  */
-export function project(
-  name: string,
-  raw: Record<string, unknown> = {},
-): Record<string, unknown> | null {
+export function project(name: string, raw: Record<string, unknown> = {}): Record<string, unknown> | null {
   const spec = RULES[name];
   if (!spec) return null;
   const out: Record<string, unknown> = {};
@@ -227,8 +213,7 @@ export function project(
       if (!rule.values.includes(raw[key] as string)) continue; // omitted, never defaulted
       value = raw[key];
     } else if (rule.type === "pattern") {
-      if (typeof raw[key] !== "string" || !rule.value.test(raw[key] as string))
-        continue;
+      if (typeof raw[key] !== "string" || !rule.value.test(raw[key] as string)) continue;
       value = raw[key];
     } else {
       continue;
@@ -289,11 +274,7 @@ export function installAnalytics(win: Window & AnalyticsWindow = window): void {
         const a = target?.closest?.("a[href]") as HTMLAnchorElement | null;
         if (!a) return;
         const href = a.getAttribute("href") ?? "";
-        const method = href.startsWith("tel:")
-          ? "tel"
-          : href.startsWith("mailto:")
-            ? "mailto"
-            : null;
+        const method = href.startsWith("tel:") ? "tel" : href.startsWith("mailto:") ? "mailto" : null;
         if (method) {
           handle.track("contact_click", { contact_method: method });
           return;
@@ -314,8 +295,7 @@ export function installAnalytics(win: Window & AnalyticsWindow = window): void {
   win.addEventListener("securitypolicyviolation", (ev) => {
     try {
       handle.track("csp_violation", {
-        effective_directive: (ev as SecurityPolicyViolationEvent)
-          .effectiveDirective,
+        effective_directive: (ev as SecurityPolicyViolationEvent).effectiveDirective,
       });
     } catch {
       /* ignore */

@@ -7,17 +7,12 @@
  * "what this evidence's text is."
  */
 import { stripHtmlToText } from "./text-extract.js";
-import {
-  extractPdfText,
-  looksLikePdf,
-  PDF_EXTRACTOR_ID,
-} from "./pdf-extract.js";
+import { extractPdfText, looksLikePdf, PDF_EXTRACTOR_ID } from "./pdf-extract.js";
 
 export type EvidenceKind = "pdf" | "html" | "bin";
 
 const CHARSET_FROM_CONTENT_TYPE_RE = /charset\s*=\s*"?([a-zA-Z0-9_-]+)"?/i;
-const CHARSET_FROM_META_RE =
-  /<meta[^>]+charset\s*=\s*["']?([a-zA-Z0-9_-]+)["']?[^>]*>/i;
+const CHARSET_FROM_META_RE = /<meta[^>]+charset\s*=\s*["']?([a-zA-Z0-9_-]+)["']?[^>]*>/i;
 
 /** Gate finding N4: the HTTP `content-type` header's `charset` wins; failing
  * that, sniff a `<meta charset>`/`<meta http-equiv="Content-Type" ...>` tag
@@ -25,13 +20,8 @@ const CHARSET_FROM_META_RE =
  * ASCII-range markup bytes are identical across single-byte encodings);
  * default to UTF-8 only when neither says otherwise. Previously every
  * response was decoded as UTF-8 regardless of `charset`. */
-export function detectHtmlCharset(
-  buf: Uint8Array,
-  contentType: string | null,
-): string {
-  const fromHeader = contentType
-    ? CHARSET_FROM_CONTENT_TYPE_RE.exec(contentType)?.[1]
-    : null;
+export function detectHtmlCharset(buf: Uint8Array, contentType: string | null): string {
+  const fromHeader = contentType ? CHARSET_FROM_CONTENT_TYPE_RE.exec(contentType)?.[1] : null;
   if (fromHeader) return fromHeader.toLowerCase();
   const sniffWindow = Buffer.from(buf.subarray(0, 1024)).toString("latin1");
   const fromMeta = CHARSET_FROM_META_RE.exec(sniffWindow)?.[1];
@@ -41,10 +31,7 @@ export function detectHtmlCharset(
 
 /** Decodes HTML bytes using the detected charset, falling back to UTF-8 for
  * an unrecognized/unsupported charset label rather than throwing. */
-export function decodeHtmlBytes(
-  buf: Uint8Array,
-  contentType: string | null,
-): string {
+export function decodeHtmlBytes(buf: Uint8Array, contentType: string | null): string {
   const charset = detectHtmlCharset(buf, contentType);
   try {
     return new TextDecoder(charset, { fatal: false }).decode(buf);

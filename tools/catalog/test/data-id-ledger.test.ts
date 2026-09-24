@@ -11,12 +11,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { IdLedgerSchema } from "@golfraven/catalog";
 
-const REPO_ROOT = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const LEDGER_PATH = join(REPO_ROOT, "data", "id-ledger.json");
 
 describe("data/id-ledger.json", () => {

@@ -13,10 +13,7 @@ const BASE_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store",
 };
 
-export function corsHeadersFor(
-  request: Request,
-  env: Env,
-): Record<string, string> {
+export function corsHeadersFor(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get("Origin");
   if (!origin) return {};
   const allowed = (env.ALLOWED_DEV_ORIGINS ?? "")
@@ -57,8 +54,7 @@ export function htmlResponse(
     status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy":
-        "default-src 'none'; form-action 'self'; base-uri 'none'",
+      "Content-Security-Policy": "default-src 'none'; form-action 'self'; base-uri 'none'",
       "X-Frame-Options": "DENY",
       ...BASE_HEADERS,
       ...extraHeaders,
@@ -76,11 +72,7 @@ export function htmlResponse(
 export function genericSignupAccepted(request: Request, env: Env): Response {
   return jsonResponse(
     202,
-    {
-      status: "ok",
-      message:
-        "If that address isn't already confirmed, check your inbox for a confirmation email.",
-    },
+    { status: "ok", message: "If that address isn't already confirmed, check your inbox for a confirmation email." },
     corsHeadersFor(request, env),
   );
 }

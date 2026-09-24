@@ -51,11 +51,7 @@ import {
   type Trail,
 } from "@golfraven/catalog";
 import { checkRuleExpr } from "@golfraven/rules";
-import {
-  parseCatalogBundle,
-  type CatalogBundle,
-  type OsmContent,
-} from "./bundle.js";
+import { parseCatalogBundle, type CatalogBundle, type OsmContent } from "./bundle.js";
 import { loadBookingHostAllowList } from "./config.js";
 
 export interface CatalogIssue {
@@ -148,18 +144,11 @@ function checkIds(
 
   bundle.facilities.forEach((f, i) => record(f.id, `facilities[${i}].id`));
   courses.forEach(({ course, facilityIndex, courseIndex }) =>
-    record(
-      course.id,
-      `facilities[${facilityIndex}].courses[${courseIndex}].id`,
-    ),
+    record(course.id, `facilities[${facilityIndex}].courses[${courseIndex}].id`),
   );
   bundle.trails.forEach((t, i) => record(t.id, `trails[${i}].id`));
-  (bundle.designers ?? []).forEach((d, i) =>
-    record(d.id, `designers[${i}].id`),
-  );
-  (bundle.achievements ?? []).forEach((a, i) =>
-    record(a.id, `achievements[${i}].id`),
-  );
+  (bundle.designers ?? []).forEach((d, i) => record(d.id, `designers[${i}].id`));
+  (bundle.achievements ?? []).forEach((a, i) => record(a.id, `achievements[${i}].id`));
 
   for (const [id, paths] of seenAt) {
     if (paths.length > 1) {
@@ -198,10 +187,7 @@ function checkIds(
  */
 function checkMergeCycles(bundle: CatalogBundle, issues: CatalogIssue[]): void {
   for (const [id, entry] of Object.entries(bundle.idLedger.entries)) {
-    if (
-      entry.mergedInto !== undefined &&
-      detectMergeCycle(bundle.idLedger, id)
-    ) {
+    if (entry.mergedInto !== undefined && detectMergeCycle(bundle.idLedger, id)) {
       issues.push(
         issue(
           "LEDGER_MERGE_CYCLE",
@@ -230,12 +216,7 @@ function checkCrossReferences(
   // Every catalog id (facility/course/trail/designer) should be minted in
   // the ledger, and its curated slug should match the ledger's recorded
   // (first-come, immutable) slug.
-  const checkLedgerBacked = (
-    id: string,
-    slug: string | undefined,
-    path: string,
-    label: string,
-  ) => {
+  const checkLedgerBacked = (id: string, slug: string | undefined, path: string, label: string) => {
     const entry = bundle.idLedger.entries[id];
     if (!entry) {
       issues.push(
@@ -259,12 +240,7 @@ function checkCrossReferences(
   };
 
   bundle.facilities.forEach((facility, facilityIndex) => {
-    checkLedgerBacked(
-      facility.id,
-      facility.slug,
-      `facilities[${facilityIndex}]`,
-      "facility",
-    );
+    checkLedgerBacked(facility.id, facility.slug, `facilities[${facilityIndex}]`, "facility");
   });
   courses.forEach(({ course, facilityIndex, courseIndex }) => {
     checkLedgerBacked(
@@ -278,12 +254,7 @@ function checkCrossReferences(
     checkLedgerBacked(trail.id, trail.slug, `trails[${trailIndex}]`, "trail");
   });
   (bundle.designers ?? []).forEach((designer, designerIndex) => {
-    checkLedgerBacked(
-      designer.id,
-      undefined,
-      `designers[${designerIndex}]`,
-      "designer",
-    );
+    checkLedgerBacked(designer.id, undefined, `designers[${designerIndex}]`, "designer");
   });
   (bundle.achievements ?? []).forEach((achievement, achievementIndex) => {
     checkLedgerBacked(
@@ -350,12 +321,8 @@ function checkCrossReferences(
       version.members.forEach((member, memberIndex) => {
         const memberPath = `${versionPath}.members[${memberIndex}]`;
         if (member.unit === "hole") {
-          const resolvedCourseId = resolveMergedId(
-            bundle.idLedger,
-            member.courseId,
-          );
-          const entry =
-            courseById.get(resolvedCourseId) ?? courseById.get(member.courseId);
+          const resolvedCourseId = resolveMergedId(bundle.idLedger, member.courseId);
+          const entry = courseById.get(resolvedCourseId) ?? courseById.get(member.courseId);
           if (entry) {
             const holeExists = (entry.course.holesDetail ?? []).some(
               (h) => h.id === member.holeId,
@@ -412,10 +379,7 @@ interface CatalogIndex {
   courseById: Map<string, CourseWithFacility>;
 }
 
-function buildIndex(
-  bundle: CatalogBundle,
-  courses: CourseWithFacility[],
-): CatalogIndex {
+function buildIndex(bundle: CatalogBundle, courses: CourseWithFacility[]): CatalogIndex {
   const facilityById = new Map(bundle.facilities.map((f) => [f.id, f]));
   const courseById: Map<string, CourseWithFacility> = new Map(
     courses.map((c) => [c.course.id, c]),
@@ -439,10 +403,7 @@ function resolveMemberFacility(
   switch (member.unit) {
     case "facility": {
       const resolved = resolveMergedId(ledger, member.facilityId);
-      return (
-        index.facilityById.get(resolved) ??
-        index.facilityById.get(member.facilityId)
-      );
+      return index.facilityById.get(resolved) ?? index.facilityById.get(member.facilityId);
     }
     case "course": {
       if ("courseId" in member) {
@@ -473,10 +434,7 @@ function memberMissing(
   switch (member.unit) {
     case "facility": {
       const resolved = resolveMergedId(ledger, member.facilityId);
-      return !(
-        index.facilityById.has(resolved) ||
-        index.facilityById.has(member.facilityId)
-      );
+      return !(index.facilityById.has(resolved) || index.facilityById.has(member.facilityId));
     }
     case "course": {
       if ("courseId" in member) return !resolveCourse(member.courseId);
@@ -542,15 +500,10 @@ function checkRosters(
 
       // A latest roster version containing a closed course.
       const isLatest =
-        version.version ===
-        Math.max(...trail.rosterVersions.map((v) => v.version));
+        version.version === Math.max(...trail.rosterVersions.map((v) => v.version));
       if (isLatest) {
         version.members.forEach((member, memberIndex) => {
-          const closedCourseIds = closedCourseIdsOf(
-            member,
-            index,
-            bundle.idLedger,
-          );
+          const closedCourseIds = closedCourseIdsOf(member, index, bundle.idLedger);
           for (const courseId of closedCourseIds) {
             issues.push(
               issue(
@@ -566,11 +519,7 @@ function checkRosters(
           // facility can close entirely (not just one of its courses), and
           // a roster that still lists it (whatever unit the member uses)
           // is stale the same way.
-          const facility = resolveMemberFacility(
-            member,
-            index,
-            bundle.idLedger,
-          );
+          const facility = resolveMemberFacility(member, index, bundle.idLedger);
           if (facility?.closed === true) {
             issues.push(
               issue(
@@ -593,12 +542,10 @@ function closedCourseIdsOf(
 ): string[] {
   const check = (courseId: string): string[] => {
     const resolved = resolveMergedId(ledger, courseId);
-    const entry =
-      index.courseById.get(resolved) ?? index.courseById.get(courseId);
+    const entry = index.courseById.get(resolved) ?? index.courseById.get(courseId);
     return entry?.course.closed === true ? [entry.course.id] : [];
   };
-  if (member.unit === "course" && "courseId" in member)
-    return check(member.courseId);
+  if (member.unit === "course" && "courseId" in member) return check(member.courseId);
   if (member.unit === "course" && "anyOf" in member) {
     return member.anyOf.flatMap(check);
   }
@@ -634,9 +581,7 @@ function checkRosterVersionImmutability(
   bundle.trails.forEach((trail, trailIndex) => {
     const baseTrail = baseTrailById.get(trail.id);
     if (!baseTrail) return; // a brand-new trail has no published versions yet
-    const baseVersionByNumber = new Map(
-      baseTrail.rosterVersions.map((v) => [v.version, v]),
-    );
+    const baseVersionByNumber = new Map(baseTrail.rosterVersions.map((v) => [v.version, v]));
     trail.rosterVersions.forEach((version, versionIndex) => {
       const baseVersion = baseVersionByNumber.get(version.version);
       if (!baseVersion) return; // a new version number — nothing published yet to compare
@@ -651,9 +596,7 @@ function checkRosterVersionImmutability(
       }
     });
     baseTrail.rosterVersions.forEach((baseVersion) => {
-      const stillPresent = trail.rosterVersions.some(
-        (v) => v.version === baseVersion.version,
-      );
+      const stillPresent = trail.rosterVersions.some((v) => v.version === baseVersion.version);
       if (!stillPresent) {
         issues.push(
           issue(
@@ -831,10 +774,7 @@ function facilityCoordinates(
   return undefined;
 }
 
-function checkVerificationTiers(
-  bundle: CatalogBundle,
-  issues: CatalogIssue[],
-): void {
+function checkVerificationTiers(bundle: CatalogBundle, issues: CatalogIssue[]): void {
   bundle.facilities.forEach((facility, facilityIndex) => {
     const path = `facilities[${facilityIndex}]`;
     const verified = facility.verification.status !== "unverified";
@@ -896,10 +836,7 @@ function checkVerificationTiers(
       );
     }
 
-    if (
-      facility.verification.basis === "course-claim" &&
-      !facility.verification.claimProof
-    ) {
+    if (facility.verification.basis === "course-claim" && !facility.verification.claimProof) {
       // Structurally unreachable (schema.ts's superRefine already rejects
       // this at parse time) — kept as a defence-in-depth assertion, not a
       // fixture target.
@@ -961,11 +898,7 @@ function checkProvenance(
     }
     if (facility.derivedFrom) {
       for (const key of Object.keys(facility.derivedFrom)) {
-        if (
-          !(FACILITY_DERIVED_FROM_ALLOWED_KEYS as readonly string[]).includes(
-            key,
-          )
-        ) {
+        if (!(FACILITY_DERIVED_FROM_ALLOWED_KEYS as readonly string[]).includes(key)) {
           issues.push(
             issue(
               "DERIVED_FROM_INVALID_KEY",
@@ -1013,9 +946,7 @@ function checkProvenance(
     }
     if (course.derivedFrom) {
       for (const key of Object.keys(course.derivedFrom)) {
-        if (
-          !(COURSE_DERIVED_FROM_ALLOWED_KEYS as readonly string[]).includes(key)
-        ) {
+        if (!(COURSE_DERIVED_FROM_ALLOWED_KEYS as readonly string[]).includes(key)) {
           issues.push(
             issue(
               "DERIVED_FROM_INVALID_KEY",
@@ -1093,24 +1024,14 @@ function checkAchievements(
   issues: CatalogIssue[],
 ): void {
   const trailIds = new Set<string>(bundle.trails.map((t) => t.id));
-  const designerIds = new Set<string>(
-    (bundle.designers ?? []).map((d) => d.id),
-  );
+  const designerIds = new Set<string>((bundle.designers ?? []).map((d) => d.id));
   const facilityIds = new Set<string>(bundle.facilities.map((f) => f.id));
 
   (bundle.achievements ?? []).forEach((achievement: AchievementDef, i) => {
     const path = `achievements[${i}]`;
 
-    for (const checkerIssue of checkRuleExpr(achievement.rule, {
-      mode: "badge",
-    })) {
-      issues.push(
-        issue(
-          checkerIssue.code,
-          `${path}.${checkerIssue.path}`,
-          checkerIssue.message,
-        ),
-      );
+    for (const checkerIssue of checkRuleExpr(achievement.rule, { mode: "badge" })) {
+      issues.push(issue(checkerIssue.code, `${path}.${checkerIssue.path}`, checkerIssue.message));
     }
 
     walkRuleExprRefs(achievement.rule, (ref) => {
@@ -1157,10 +1078,7 @@ function checkAchievements(
   });
 }
 
-type RuleExprRef = {
-  kind: "trail" | "course" | "designer" | "facility";
-  id: string;
-};
+type RuleExprRef = { kind: "trail" | "course" | "designer" | "facility"; id: string };
 
 /**
  * Walks a `RuleExpr` tree, calling `visit` for every id it references that
@@ -1172,8 +1090,7 @@ type RuleExprRef = {
  * trail id, not only `countWhere(\"designer\")`").
  */
 function walkRuleExprRefs(
-  expr:
-    import("@golfraven/catalog").RuleExpr | import("@golfraven/catalog").NotArg,
+  expr: import("@golfraven/catalog").RuleExpr | import("@golfraven/catalog").NotArg,
   visit: (ref: RuleExprRef) => void,
 ): void {
   switch (expr.kind) {
@@ -1205,9 +1122,7 @@ function walkNumericOperandRefs(
  * catalog id kinds (checked here); `region`/`country` are closed enums
  * already fully validated at the schema layer (`fieldValueShapeIssue`) —
  * no catalog id to cross-reference. */
-function fieldRefKind(
-  field: import("@golfraven/catalog").Field,
-): RuleExprRef["kind"] | undefined {
+function fieldRefKind(field: import("@golfraven/catalog").Field): RuleExprRef["kind"] | undefined {
   switch (field) {
     case "designer":
       return "designer";
@@ -1267,19 +1182,12 @@ function walkAggregateRefs(
  * check, so — the same split this file already uses everywhere else —
  * that comparison lives here.
  */
-function checkNOfMBounds(
-  bundle: CatalogBundle,
-  index: CatalogIndex,
-  issues: CatalogIssue[],
-): void {
+function checkNOfMBounds(bundle: CatalogBundle, index: CatalogIndex, issues: CatalogIssue[]): void {
   bundle.trails.forEach((trail, trailIndex) => {
     trail.rosterVersions.forEach((version, versionIndex) => {
       const versionPath = `trails[${trailIndex}].rosterVersions[${versionIndex}]`;
       const memberCount = version.members.length;
-      if (
-        version.completionRule.kind === "n-of-m" &&
-        version.completionRule.n > memberCount
-      ) {
+      if (version.completionRule.kind === "n-of-m" && version.completionRule.n > memberCount) {
         issues.push(
           issue(
             "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT",
@@ -1371,10 +1279,7 @@ function checkDiffs(
     facility.courses.forEach((course, courseIndex) => {
       const baseCourse = baseCourseById.get(course.id);
       if (!baseCourse) return; // new course, nothing to diff
-      if (
-        !deepEqual(course.geometry, baseCourse.geometry) &&
-        !labels.has("geometry-reviewed")
-      ) {
+      if (!deepEqual(course.geometry, baseCourse.geometry) && !labels.has("geometry-reviewed")) {
         issues.push(
           issue(
             "GEOMETRY_DIFF_UNREVIEWED",
@@ -1404,10 +1309,7 @@ function checkDiffs(
   });
 }
 
-function haversineForDiff(
-  a: { lat: number; lng: number },
-  b: { lat: number; lng: number },
-): number {
+function haversineForDiff(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   const R = 6_371_000;
   const toRad = (d: number) => (d * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
@@ -1415,8 +1317,7 @@ function haversineForDiff(
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
   const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return R * (2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
 }
 
@@ -1467,9 +1368,7 @@ export function verifyCatalogRaw(
   if (!parsed.ok) {
     return {
       ok: false,
-      issues: parsed.schemaIssues.map((i) =>
-        issue("SCHEMA_INVALID", i.path, i.message),
-      ),
+      issues: parsed.schemaIssues.map((i) => issue("SCHEMA_INVALID", i.path, i.message)),
     };
   }
   return verifyCatalog(parsed.bundle, options);
@@ -1494,16 +1393,12 @@ export function validateAchievementFile(raw: unknown): VerifyCatalogResult {
     return {
       ok: false,
       issues: parsed.error.issues.map((i) =>
-        issue(
-          "SCHEMA_INVALID",
-          i.path.length === 0 ? "<root>" : i.path.join("."),
-          i.message,
-        ),
+        issue("SCHEMA_INVALID", i.path.length === 0 ? "<root>" : i.path.join("."), i.message),
       ),
     };
   }
-  const checkerIssues = checkRuleExpr(parsed.data.rule, { mode: "badge" }).map(
-    (ci) => issue(ci.code, `rule.${ci.path}`, ci.message),
+  const checkerIssues = checkRuleExpr(parsed.data.rule, { mode: "badge" }).map((ci) =>
+    issue(ci.code, `rule.${ci.path}`, ci.message),
   );
   return { ok: checkerIssues.length === 0, issues: checkerIssues };
 }
@@ -1549,9 +1444,7 @@ function parseArgs(argv: string[]): CliArgs {
     ...(seen.has("labels")
       ? { labels: (opts["labels"] ?? "").split(",").filter(Boolean) }
       : {}),
-    ...(opts["booking-hosts"]
-      ? { bookingHostsPath: opts["booking-hosts"] }
-      : {}),
+    ...(opts["booking-hosts"] ? { bookingHostsPath: opts["booking-hosts"] } : {}),
   };
 }
 
@@ -1578,9 +1471,7 @@ async function main(argv: string[]): Promise<void> {
     base = parsedBase.bundle;
   }
 
-  const bookingHostAllowList = await loadBookingHostAllowList(
-    args.bookingHostsPath,
-  );
+  const bookingHostAllowList = await loadBookingHostAllowList(args.bookingHostsPath);
 
   const result = verifyCatalogRaw(bundleRaw, {
     ...(base ? { base } : {}),
@@ -1592,9 +1483,7 @@ async function main(argv: string[]): Promise<void> {
     process.stdout.write("verify-catalog: PASS (0 issues)\n");
     return;
   }
-  process.stdout.write(
-    `verify-catalog: FAIL (${result.issues.length} issue(s))\n`,
-  );
+  process.stdout.write(`verify-catalog: FAIL (${result.issues.length} issue(s))\n`);
   for (const i of result.issues) {
     process.stdout.write(`  [${i.code}] ${i.path}: ${i.message}\n`);
   }

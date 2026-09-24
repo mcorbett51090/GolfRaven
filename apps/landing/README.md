@@ -52,7 +52,7 @@ actually open (see "How signups work" below and `_headers`'s CSP).
    README** (decision 0001, Addendum D, R3): Day 0 is the UTC date the
    page is publicly reachable **and** the backend has delivered a
    confirmation email end to end. It is logged in `docs/p0/K2.md`
-   _before_ any promotion, and the clock is never restarted. The count
+   *before* any promotion, and the clock is never restarted. The count
    that matters is distinct lower-cased emails whose `confirmedAt` falls
    before Day 0 + 14 days (advisory) and Day 0 + 42 days (the N = 300
    gate); owner/test addresses are excluded only if listed in

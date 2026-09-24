@@ -25,7 +25,7 @@ hostile file meets them:
    replaces `fit-file-parser`'s `includeUnmappedMessages` option (which
    retains full raw field data per unmapped message) by tallying which
    global message numbers occur itself.
-3. **`csv-rows.ts`'s row cap** (`MAX_CSV_ROWS`, checked _during_
+3. **`csv-rows.ts`'s row cap** (`MAX_CSV_ROWS`, checked *during*
    tokenization) stops a CSV file of millions of tiny rows early — a
    19.9 MB file of ~9.9M empty rows took 17.8 s to tokenize before this;
    0.3 s after.
@@ -50,20 +50,20 @@ and the fix are entirely on this package's untrusted-input boundary.
 
 ## Modules
 
-| File                     | What it does                                                                                                                                  |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `types.ts`               | `ImportedRound` and the `ImportResult` discriminated union every parser returns.                                                              |
-| `safety.ts`              | Size caps (general 20 MB, FIT 5 MB), the CSV row cap, the fix cap, warning/echo bounding, strict-decimal parsing, accuracy/text sanitization. |
-| `timestamps.ts`          | Strict ISO 8601 (`Z`/offset required, year ≥ 2000) timestamp parsing shared by GPX and CSV — never `Date.parse`.                              |
-| `fit-prescan.ts`         | The header-only FIT walker: message/field-count caps, CRC verification, unmapped-message tallying — all before the real decode.               |
-| `csv-rows.ts`            | A minimal RFC 4180 CSV tokenizer (no external dependency), with an early-exit row cap.                                                        |
-| `parse-csv.ts`           | The minimal CSV format: `timestamp,lat,lon[,accuracy]` or `date,course,holes,score`, detected from the header, not guessed.                   |
-| `parse-gpx.ts`           | GPX 1.0/1.1 `trkpt`/`rtept` import via `sax` (strict mode), with a pre-parse `<!DOCTYPE`/`<!ENTITY` refusal (XXE policy).                     |
-| `parse-fit.ts`           | FIT import via `fit-file-parser`, gated by `fit-prescan.ts`.                                                                                  |
-| `parse-fit-scorecard.ts` | The isolated, currently-`[unverified]` Garmin golf-scorecard extraction hook — see its doc comment.                                           |
-| `parse-round.ts`         | `parseRound`: a single dispatch entry point over the three parsers, carrying `tz`/`signal` through.                                           |
-| `to-matcher-input.ts`    | `toMatcherInput`: adapts an `ImportedRound` into `@golfraven/matching`'s `MatchRouteInput`.                                                   |
-| `correlation.ts`         | `correlationKey`: the ±15 min / same-facility bucket _set_ for the `health_route` × `file_import` `max`-combination pair (§4.5).              |
+| File | What it does |
+|---|---|
+| `types.ts` | `ImportedRound` and the `ImportResult` discriminated union every parser returns. |
+| `safety.ts` | Size caps (general 20 MB, FIT 5 MB), the CSV row cap, the fix cap, warning/echo bounding, strict-decimal parsing, accuracy/text sanitization. |
+| `timestamps.ts` | Strict ISO 8601 (`Z`/offset required, year ≥ 2000) timestamp parsing shared by GPX and CSV — never `Date.parse`. |
+| `fit-prescan.ts` | The header-only FIT walker: message/field-count caps, CRC verification, unmapped-message tallying — all before the real decode. |
+| `csv-rows.ts` | A minimal RFC 4180 CSV tokenizer (no external dependency), with an early-exit row cap. |
+| `parse-csv.ts` | The minimal CSV format: `timestamp,lat,lon[,accuracy]` or `date,course,holes,score`, detected from the header, not guessed. |
+| `parse-gpx.ts` | GPX 1.0/1.1 `trkpt`/`rtept` import via `sax` (strict mode), with a pre-parse `<!DOCTYPE`/`<!ENTITY` refusal (XXE policy). |
+| `parse-fit.ts` | FIT import via `fit-file-parser`, gated by `fit-prescan.ts`. |
+| `parse-fit-scorecard.ts` | The isolated, currently-`[unverified]` Garmin golf-scorecard extraction hook — see its doc comment. |
+| `parse-round.ts` | `parseRound`: a single dispatch entry point over the three parsers, carrying `tz`/`signal` through. |
+| `to-matcher-input.ts` | `toMatcherInput`: adapts an `ImportedRound` into `@golfraven/matching`'s `MatchRouteInput`. |
+| `correlation.ts` | `correlationKey`: the ±15 min / same-facility bucket *set* for the `health_route` × `file_import` `max`-combination pair (§4.5). |
 
 ## Why `fit-file-parser`
 
@@ -83,7 +83,7 @@ Two options were evaluated for decoding FIT files:
 - **`fit-file-parser` (MIT, `jimmykane/fit-parser`).** Chosen. Confirmed
   MIT via `npm view fit-file-parser license` and the package's own
   `LICENSE` file. It also happens to be a better fit mechanically: it
-  ships both a full profile-aware parser (`FitParser`/`parseAsync`) _and_
+  ships both a full profile-aware parser (`FitParser`/`parseAsync`) *and*
   a standalone binary `FitEncoder` (`fit-file-parser` re-exports both from
   its main entry), which is what `test/fixtures/fit-helpers.ts` uses to
   build synthetic FIT files for the tests — no separate hand-written
@@ -151,11 +151,11 @@ is worse than a documented one.
    `localDate`, and only from a source that's genuinely local:
    - FIT: `activity.local_timestamp` (the FIT-native local-wall-time
      field) if present.
-   - GPX: a file-level `<metadata><time>`/top-level `<time>` _if it
-     carries its own explicit numeric offset_ (its literal written date is
+   - GPX: a file-level `<metadata><time>`/top-level `<time>` *if it
+     carries its own explicit numeric offset* (its literal written date is
      used as-is, per the instruction that an offset-bearing source
      timestamp is authoritative for its own date) — a bare `Z` timestamp
-     is _not_ trusted as "local" on its own, since `Z` only means
+     is *not* trusted as "local" on its own, since `Z` only means
      "normalized to UTC", not "known to be facility-local".
    - Otherwise, an optional caller-supplied `tz` (IANA timezone, the
      facility's own `tz`, build plan §4.1) converts whatever UTC instant
@@ -181,7 +181,7 @@ is worse than a documented one.
 9. **A file-imported fix's `simulated` is left unset, never asserted
    `false`.** `@golfraven/matching`'s `RouteFix.simulated` models a
    live-location mock-provider signal; a file this package imports isn't
-   a live capture, so it genuinely doesn't know whether the _original_
+   a live capture, so it genuinely doesn't know whether the *original*
    device's GPS was mocked at capture time, and asserting `false` would
    overclaim that it checked. `matchCheckIn`'s foreground check-in path
    specifically requires `simulated === false` to accept a fix as a
@@ -210,3 +210,20 @@ call (the app/server wires `toMatcherInput`'s output into
 `@golfraven/matching` with real candidate courses), and the server-side
 `health_route` × `file_import` `max`-combination logic that
 `correlationKey` feeds are all out of scope here.
+
+## Real-device findings (2026-09-24, one Garmin Approach S62 activity file)
+
+The owner supplied one real S62 golf activity (`<id>_ACTIVITY.fit`, as exported from Garmin Connect →
+"Export Original"). The raw file is **not** committed (it carries the owner's location and device data).
+It settled these points:
+
+- `session.sport` is `golf` (sport 25), `sub_sport` `generic`. The earlier `[unverified]` sport-mapping
+  note is now verified against a real capture.
+- The activity file carries a full GPS track (2,855 `record` fixes over ~3 h 40 min, ~12 km walked), so a
+  Garmin Connect "Export Original" of a golf activity is **route evidence** (`file_import` with a route,
+  §4.5 = 0.40), not a date-only scorecard.
+- `activity.local_timestamp` is present (the device's local wall time). Routed imports keep exact
+  timestamps and leave the local date to the facility's `tz` downstream, as designed.
+- The activity file does **not** contain the per-hole scorecard. Undocumented message numbers seen:
+  7, 13, 22, 79, 104, 140, 141, 216, 233 (13k+ records), 288. The scorecard lives in a separate file on the
+  watch (`GARMIN/SCORE/SCORECARD`), which is still unseen, so `parse-fit-scorecard.ts` stays a hook.

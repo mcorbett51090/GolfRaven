@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  deriveUnsubscribeToken,
-  generateToken,
-  hashWithPepper,
-  isExpired,
-  isoTimeFromNow,
-} from "../src/tokens";
+import { deriveUnsubscribeToken, generateToken, hashWithPepper, isExpired, isoTimeFromNow } from "../src/tokens";
 
 describe("tokens", () => {
   it("generates unique, URL-safe tokens with no padding", () => {
@@ -44,14 +38,8 @@ describe("deriveUnsubscribeToken (gate-round3 finding A-2)", () => {
   });
 
   it("differs across addresses under the same pepper", async () => {
-    const a = await deriveUnsubscribeToken(
-      "pepper-a",
-      "player-one@example.com",
-    );
-    const b = await deriveUnsubscribeToken(
-      "pepper-a",
-      "player-two@example.com",
-    );
+    const a = await deriveUnsubscribeToken("pepper-a", "player-one@example.com");
+    const b = await deriveUnsubscribeToken("pepper-a", "player-two@example.com");
     expect(a).not.toBe(b);
   });
 

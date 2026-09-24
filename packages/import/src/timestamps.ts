@@ -27,11 +27,7 @@ const MIN_YEAR = 2000;
  * them back) is what actually catches it. */
 function isRealCalendarDate(year: number, month: number, day: number): boolean {
   const dt = new Date(Date.UTC(year, month - 1, day));
-  return (
-    dt.getUTCFullYear() === year &&
-    dt.getUTCMonth() === month - 1 &&
-    dt.getUTCDate() === day
-  );
+  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day;
 }
 
 export interface StrictTimestamp {

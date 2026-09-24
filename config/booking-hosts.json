@@ -1,5 +1,7 @@
 {
   "_comment": "SYNTHETIC / TEST ONLY (P1a). The real booking-host allow-list waits on X4/X6 (build plan \u00a710 P1, decision 0003 S2's carve-out). Every host below is a placeholder used only by tools/catalog's own fixtures \u2014 none is a real booking provider's production host list, and none should be treated as one.",
   "synthetic": true,
-  "hosts": ["www.golfnow.com"]
+  "hosts": [
+    "www.golfnow.com"
+  ]
 }

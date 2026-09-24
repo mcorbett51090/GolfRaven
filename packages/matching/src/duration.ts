@@ -24,10 +24,7 @@ export function computeDurationHours(fixes: readonly RouteFix[]): number {
  * (see `CandidateCourse.holes` doc comment). Rounds both sides of the
  * comparison to the same fixed precision as `computeDurationHours`
  * (build plan gate fix: determinism at exact thresholds). */
-export function isWithinDurationWindow(
-  durationHours: number,
-  holes: number | undefined,
-): boolean {
+export function isWithinDurationWindow(durationHours: number, holes: number | undefined): boolean {
   const hours = roundTo(durationHours, 9);
   if ((holes ?? 18) === 9) {
     return hours >= roundTo(0.75, 9);

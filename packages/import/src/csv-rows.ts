@@ -24,10 +24,7 @@ export interface CsvRowsResult {
   truncated: boolean;
 }
 
-export function parseCsvRows(
-  text: string,
-  maxRows: number = Infinity,
-): CsvRowsResult {
+export function parseCsvRows(text: string, maxRows: number = Infinity): CsvRowsResult {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";

@@ -35,8 +35,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR =
-  process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
+const DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
 const REDIRECTS_JSON_PATH = join(DATA_DIR, "redirects.json");
 
 /** Every character `from`/`to` may contain, and the overall shape: always
@@ -54,9 +53,7 @@ function rejectsDoubleSlashPrefix(path) {
  */
 function validatePathShape(path, field, i) {
   if (typeof path !== "string") {
-    throw new Error(
-      `data/redirects.json: redirects[${i}].${field} must be a string`,
-    );
+    throw new Error(`data/redirects.json: redirects[${i}].${field} must be a string`);
   }
   if (rejectsDoubleSlashPrefix(path)) {
     throw new Error(
@@ -79,19 +76,12 @@ export function parseRedirects(raw) {
   const list = Array.isArray(parsed?.redirects) ? parsed.redirects : [];
   return list.map((entry, i) => {
     if (typeof entry !== "object" || entry === null) {
-      throw new Error(
-        `data/redirects.json: redirects[${i}] must be {"from": "/…/", "to": "/…/"}`,
-      );
+      throw new Error(`data/redirects.json: redirects[${i}] must be {"from": "/…/", "to": "/…/"}`);
     }
-    const { from, to } = /** @type {{ from?: unknown; to?: unknown }} */ (
-      entry
-    );
+    const { from, to } = /** @type {{ from?: unknown; to?: unknown }} */ (entry);
     validatePathShape(/** @type {string} */ (from), "from", i);
     validatePathShape(/** @type {string} */ (to), "to", i);
-    return {
-      from: /** @type {string} */ (from),
-      to: /** @type {string} */ (to),
-    };
+    return { from: /** @type {string} */ (from), to: /** @type {string} */ (to) };
   });
 }
 
@@ -156,8 +146,7 @@ export function renderRedirectsFile(rules) {
 }
 
 async function main() {
-  const distDir =
-    process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
+  const distDir = process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
   let raw = { redirects: [] };
   try {
     raw = JSON.parse(await readFile(REDIRECTS_JSON_PATH, "utf8"));
@@ -176,6 +165,5 @@ async function main() {
   console.log(`gen-redirects: wrote ${rules.length} rule(s) to ${outPath}`);
 }
 
-const isMain =
-  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) await main();

@@ -201,8 +201,7 @@ export async function readBodyCapped(
 ): Promise<Buffer> {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const abortRejection = new Promise<never>((_, reject) => {
-    const onAbort = (): void =>
-      reject(new Error("response body read aborted (timeout)"));
+    const onAbort = (): void => reject(new Error("response body read aborted (timeout)"));
     if (opts.signal.aborted) {
       onAbort();
       return;
@@ -215,9 +214,7 @@ export async function readBodyCapped(
     if (!body) {
       const buf = Buffer.from(await response.arrayBuffer());
       if (buf.byteLength > maxBytes) {
-        throw new ResponseTooLargeError(
-          `response body exceeds ${maxBytes} bytes`,
-        );
+        throw new ResponseTooLargeError(`response body exceeds ${maxBytes} bytes`);
       }
       return buf;
     }

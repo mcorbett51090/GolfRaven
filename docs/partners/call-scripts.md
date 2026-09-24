@@ -16,7 +16,6 @@ hand-over, before any of this is built. This is a dry run of the checklist in bu
 sales pitch — the goal is to find out what breaks.
 
 **Questions (8):**
-
 1. Does the shop have a device (tablet, laptop, or phone) at or near the till that could stay signed in
    to a web portal during business hours?
 2. Is there reliable Wi-Fi or cellular data at the counter, or is connectivity spotty/none? (Decides
@@ -33,7 +32,6 @@ sales pitch — the goal is to find out what breaks.
 8. Would you be open to being one of the first shops we test this with, once it's built?
 
 **What a yes/no means for the plan:**
-
 - **Yes on device + connectivity (Q1/Q2)** at ≥ 2 of 3 shops → the rotating-QR (Q1) method is viable as
   the primary method; a "no" at any shop routes that shop to the printed-QR + daily-PIN fallback (§9.2
   Q2), which is weaker but still supported.
@@ -48,10 +46,10 @@ sales pitch — the goal is to find out what breaks.
 **Notes table (fill in during/after each call):**
 
 | Shop / course | Call date | Device at till? | Connectivity | Weekly marker volume (approx) | Will stock special marker? | Objections | Overall fit |
-| ------------- | --------- | --------------- | ------------ | ----------------------------- | -------------------------- | ---------- | ----------- |
-| Pro shop 1    |           |                 |              |                               |                            |            |             |
-| Pro shop 2    |           |                 |              |                               |                            |            |             |
-| Pro shop 3    |           |                 |              |                               |                            |            |             |
+|---|---|---|---|---|---|---|---|
+| Pro shop 1 | | | | | | | |
+| Pro shop 2 | | | | | | | |
+| Pro shop 3 | | | | | | | |
 
 ---
 
@@ -64,7 +62,6 @@ codes"). This decides whether that course can use the strongest offer-redemption
 `portal-verify`.
 
 **Questions (6):**
-
 1. What tee-sheet or POS system does the course use (name/vendor)?
 2. Can that system import a list of unique, single-use discount or promo codes from a CSV or similar
    file?
@@ -76,7 +73,6 @@ codes"). This decides whether that course can use the strongest offer-redemption
    size the code batch)?
 
 **What a yes/no means for the plan:**
-
 - **Yes, self-service import** → that course/trail can run the `code-pool` mode described in §9.5,
   which needs no app-side redemption UI beyond generating and handing off the code list.
 - **Yes, but only via the vendor** → still usable, but adds lead time and a per-batch coordination cost;
@@ -87,10 +83,10 @@ codes"). This decides whether that course can use the strongest offer-redemption
 
 **Notes table:**
 
-| Course   | Call date | Tee-sheet/POS vendor | Can import unique codes? | Who manages import | Redemption confirmation method | Notes |
-| -------- | --------- | -------------------- | ------------------------ | ------------------ | ------------------------------ | ----- |
-| Course 1 |           |                      |                          |                    |                                |       |
-| Course 2 |           |                      |                          |                    |                                |       |
+| Course | Call date | Tee-sheet/POS vendor | Can import unique codes? | Who manages import | Redemption confirmation method | Notes |
+|---|---|---|---|---|---|---|
+| Course 1 | | | | | | |
+| Course 2 | | | | | | |
 
 ---
 
@@ -125,7 +121,6 @@ Matt [Last Name]
 ```
 
 **What a yes/no means for the plan:**
-
 - **A response naming a licensing/procurement process** → confirms TN can be pursued as a normal
   operator target; route into the K1 outreach sequence (`k1-outreach.md`).
 - **No response, or a response saying discounts/third-party programmes aren't permitted** → TN Golf Trail
@@ -136,8 +131,8 @@ Matt [Last Name]
 **Notes table:**
 
 | Sent date | Reply (Y/N/date) | Who replied / role | Licensing process named? | Pro shops: state-run or concessionaire? | Next step |
-| --------- | ---------------- | ------------------ | ------------------------ | --------------------------------------- | --------- |
-|           |                  |                    |                          |                                         |           |
+|---|---|---|---|---|---|
+| | | | | | |
 
 ---
 
@@ -148,7 +143,6 @@ Card (not a competitor), cover logo licensing, discount-board approval, who runs
 the special-marker programme would attach to Card-holder benefits.
 
 **Questions (8):**
-
 1. Is there interest in a completion tracker that shows a golfer's progress toward playing all 26 RTJ
    courses, positioned as a Trail Card companion, not a competing product?
 2. Who at RSA/RTJ approves a change like this — is there a board or committee that reviews third-party
@@ -164,7 +158,6 @@ the special-marker programme would attach to Card-holder benefits.
 8. Is a 20-minute follow-up call, or a written one-pager, the better next step?
 
 **What a yes/no means for the plan:**
-
 - **Interest confirmed, no objection to Card-companion framing** → proceed to LOI outreach
   (`k1-outreach.md`); RTJ stays in the slate per O4.
 - **Concern about cannibalizing Trail Card sales** → do not push past this call; note it as evidence for
@@ -177,8 +170,8 @@ the special-marker programme would attach to Card-holder benefits.
 **Notes table:**
 
 | Call date | Contacted (name/role) | Interest (Y/N) | Cannibalization concern raised? | Pro-shop ownership model | Next step |
-| --------- | --------------------- | -------------- | ------------------------------- | ------------------------ | --------- |
-|           |                       |                |                                 |                          |           |
+|---|---|---|---|---|---|
+| | | | | | |
 
 ---
 
@@ -193,7 +186,6 @@ these apps replies with interest** — this call's job is to produce that P8 tri
 inbound round data from the app.
 
 **Questions (6):**
-
 1. Does your app currently support any form of "trail" or multi-course challenge concept, or would this
    be new for you?
 2. Would you be open to displaying a golfer's GolfRaven trail-completion progress inside your app by
@@ -209,7 +201,6 @@ inbound round data from the app.
    is a nice-to-have, not what we're asking for today.
 
 **What a yes/no means for the plan:**
-
 - **Replied with interest (Y)** → this is the P8 trigger (build plan §7.3/P8): the read-only Trails API
   is built in P8 for this integration.
 - **No reply / not interested (N)** → no change to the plan; GolfRaven's own HealthKit/Health Connect +
@@ -218,10 +209,10 @@ inbound round data from the app.
 
 **Notes table:**
 
-| App       | Call date | Contact (name/role) | Replied with interest (Y/N) — P8 trigger | Next step |
-| --------- | --------- | ------------------- | ---------------------------------------- | --------- |
-| 18Birdies |           |                     |                                          |           |
-| Hole19    |           |                     |                                          |           |
-| TheGrint  |           |                     |                                          |           |
-| Golfshot  |           |                     |                                          |           |
-| SwingU    |           |                     |                                          |           |
+| App | Call date | Contact (name/role) | Replied with interest (Y/N) — P8 trigger | Next step |
+|---|---|---|---|---|
+| 18Birdies | | | | |
+| Hole19 | | | | |
+| TheGrint | | | | |
+| Golfshot | | | | |
+| SwingU | | | | |

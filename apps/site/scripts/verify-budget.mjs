@@ -77,18 +77,14 @@ export async function verifyBudget(distDir, opts = {}) {
   for (const file of files) {
     const s = await stat(file);
     totalBytes += s.size;
-    if (s.size > largest.bytes)
-      largest = { path: relative(distDir, file), bytes: s.size };
+    if (s.size > largest.bytes) largest = { path: relative(distDir, file), bytes: s.size };
     if (s.size > GATES.maxFileBytes) {
       issues.push(
         `${relative(distDir, file)} is ${(s.size / MiB).toFixed(2)} MiB, exceeds the ${GATES.maxFileBytes / MiB} MiB largest-file gate`,
       );
     }
     const relPath = relative(distDir, file).split(sep).join("/");
-    if (
-      /(^|\/)geometry\//.test(relPath) &&
-      s.size > GATES.maxGeometryShardBytes
-    ) {
+    if (/(^|\/)geometry\//.test(relPath) && s.size > GATES.maxGeometryShardBytes) {
       geometryOffenders.push(relPath);
       issues.push(
         `${relPath} is ${(s.size / MiB).toFixed(2)} MiB, exceeds the ${GATES.maxGeometryShardBytes / MiB} MiB geometry-shard gate`,
@@ -97,9 +93,7 @@ export async function verifyBudget(distDir, opts = {}) {
   }
 
   if (files.length > GATES.maxFiles) {
-    issues.push(
-      `dist/ has ${files.length} files, exceeds the ${GATES.maxFiles}-file gate`,
-    );
+    issues.push(`dist/ has ${files.length} files, exceeds the ${GATES.maxFiles}-file gate`);
   }
   if (totalBytes > GATES.distSizeBytes) {
     issues.push(
@@ -153,8 +147,7 @@ export async function verifyBudget(distDir, opts = {}) {
   };
 }
 
-const isMain =
-  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const distDir =
     process.env.DIST_DIR ??
@@ -163,12 +156,9 @@ if (isMain) {
   const result = await verifyBudget(distDir);
 
   if (result.warmBuildMs !== null) {
-    console.log(
-      `verify-budget: warm build took ~${(result.warmBuildMs / MIN).toFixed(1)} min`,
-    );
+    console.log(`verify-budget: warm build took ~${(result.warmBuildMs / MIN).toFixed(1)} min`);
   }
-  for (const warning of result.warnings)
-    console.warn(`verify-budget: WARN — ${warning}`);
+  for (const warning of result.warnings) console.warn(`verify-budget: WARN — ${warning}`);
 
   if (result.ok) {
     console.log(

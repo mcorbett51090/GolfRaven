@@ -20,11 +20,18 @@
           "$ref": "__shared#/$defs/schema0"
         },
         "scope": {
-          "enum": ["verified-only"],
+          "enum": [
+            "verified-only"
+          ],
           "type": "string"
         },
         "tier": {
-          "enum": ["bronze", "silver", "gold", "special"],
+          "enum": [
+            "bronze",
+            "silver",
+            "gold",
+            "special"
+          ],
           "type": "string"
         },
         "title": {
@@ -117,7 +124,10 @@
               "type": "string"
             },
             "layer": {
-              "enum": ["osm", "own"],
+              "enum": [
+                "osm",
+                "own"
+              ],
               "type": "string"
             },
             "ref": {
@@ -178,23 +188,48 @@
           "additionalProperties": false,
           "properties": {
             "designers": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "holes": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "name": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "opened": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "par": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             }
           },
@@ -208,7 +243,9 @@
               "type": "string"
             }
           },
-          "required": ["osmRef"],
+          "required": [
+            "osmRef"
+          ],
           "type": "object"
         },
         "slug": {
@@ -222,7 +259,10 @@
           "type": "array"
         }
       },
-      "required": ["id", "slug"],
+      "required": [
+        "id",
+        "slug"
+      ],
       "type": "object"
     },
     "Designer": {
@@ -251,7 +291,11 @@
           "type": "array"
         }
       },
-      "required": ["id", "name", "sources"],
+      "required": [
+        "id",
+        "name",
+        "sources"
+      ],
       "type": "object"
     },
     "Facility": {
@@ -259,7 +303,13 @@
       "additionalProperties": false,
       "properties": {
         "access": {
-          "enum": ["public", "semi-private", "resort", "municipal", "private"],
+          "enum": [
+            "public",
+            "semi-private",
+            "resort",
+            "municipal",
+            "private"
+          ],
           "type": "string"
         },
         "amenities": {
@@ -277,7 +327,11 @@
                 "type": "boolean"
               }
             },
-            "required": ["key", "value", "source"],
+            "required": [
+              "key",
+              "value",
+              "source"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -321,7 +375,12 @@
                 "type": "string"
               }
             },
-            "required": ["provider", "url", "source", "checkedAt"],
+            "required": [
+              "provider",
+              "url",
+              "source",
+              "checkedAt"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -390,27 +449,57 @@
           "additionalProperties": false,
           "properties": {
             "blurb": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "blurbFr": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "coord": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "name": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "nameFr": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             },
             "town": {
-              "enum": ["editor", "operator", "claim", "primary-source"],
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
               "type": "string"
             }
           },
@@ -423,7 +512,11 @@
           "additionalProperties": false,
           "properties": {
             "origin": {
-              "enum": ["osm", "manual", "trail-roster"],
+              "enum": [
+                "osm",
+                "manual",
+                "trail-roster"
+              ],
               "type": "string"
             },
             "osmRef": {
@@ -431,7 +524,9 @@
               "type": "string"
             }
           },
-          "required": ["origin"],
+          "required": [
+            "origin"
+          ],
           "type": "object"
         },
         "slug": {
@@ -462,14 +557,21 @@
               "type": "string"
             },
             "claimProof": {
-              "enum": ["domain-email", "dns-txt"],
+              "enum": [
+                "domain-email",
+                "dns-txt"
+              ],
               "type": "string"
             },
             "source": {
               "$ref": "Source"
             },
             "status": {
-              "enum": ["unverified", "listed-verified", "play-verified"],
+              "enum": [
+                "unverified",
+                "listed-verified",
+                "play-verified"
+              ],
               "type": "string"
             },
             "verifiedAt": {
@@ -478,7 +580,9 @@
               "type": "string"
             }
           },
-          "required": ["status"],
+          "required": [
+            "status"
+          ],
           "type": "object"
         }
       },
@@ -514,7 +618,10 @@
           "type": "boolean"
         }
       },
-      "required": ["id", "number"],
+      "required": [
+        "id",
+        "number"
+      ],
       "type": "object"
     },
     "OfferTerms": {
@@ -526,7 +633,10 @@
           "type": "string"
         },
         "mode": {
-          "enum": ["portal-verify", "code-pool"],
+          "enum": [
+            "portal-verify",
+            "code-pool"
+          ],
           "type": "string"
         },
         "terms": {
@@ -546,7 +656,13 @@
           "type": "string"
         }
       },
-      "required": ["id", "trailId", "title", "terms", "mode"],
+      "required": [
+        "id",
+        "trailId",
+        "title",
+        "terms",
+        "mode"
+      ],
       "type": "object"
     },
     "Region": {
@@ -557,7 +673,10 @@
           "type": "string"
         },
         "country": {
-          "enum": ["US", "CA"],
+          "enum": [
+            "US",
+            "CA"
+          ],
           "type": "string"
         },
         "name": {
@@ -576,7 +695,13 @@
           "type": "string"
         }
       },
-      "required": ["code", "country", "slug", "name", "polygonFile"],
+      "required": [
+        "code",
+        "country",
+        "slug",
+        "name",
+        "polygonFile"
+      ],
       "type": "object"
     },
     "RosterVersion": {
@@ -593,7 +718,9 @@
                   "type": "string"
                 }
               },
-              "required": ["kind"],
+              "required": [
+                "kind"
+              ],
               "type": "object"
             },
             {
@@ -612,13 +739,21 @@
                   "$ref": "Source"
                 }
               },
-              "required": ["kind", "n", "ruleSource"],
+              "required": [
+                "kind",
+                "n",
+                "ruleSource"
+              ],
               "type": "object"
             }
           ]
         },
         "completionUnit": {
-          "enum": ["course", "facility", "hole"],
+          "enum": [
+            "course",
+            "facility",
+            "hole"
+          ],
           "type": "string"
         },
         "effectiveFrom": {
@@ -641,7 +776,9 @@
                   "type": "string"
                 }
               },
-              "required": ["kind"],
+              "required": [
+                "kind"
+              ],
               "type": "object"
             },
             {
@@ -660,13 +797,19 @@
                   "$ref": "Source"
                 }
               },
-              "required": ["kind", "n", "ruleSource"],
+              "required": [
+                "kind",
+                "n",
+                "ruleSource"
+              ],
               "type": "object"
             }
           ]
         },
         "markerUnit": {
-          "enum": ["facility"],
+          "enum": [
+            "facility"
+          ],
           "type": "string"
         },
         "members": {
@@ -689,7 +832,10 @@
                     "type": "string"
                   }
                 },
-                "required": ["unit", "courseId"],
+                "required": [
+                  "unit",
+                  "courseId"
+                ],
                 "type": "object"
               },
               {
@@ -713,7 +859,10 @@
                     "type": "string"
                   }
                 },
-                "required": ["unit", "anyOf"],
+                "required": [
+                  "unit",
+                  "anyOf"
+                ],
                 "type": "object"
               },
               {
@@ -733,7 +882,10 @@
                     "type": "string"
                   }
                 },
-                "required": ["unit", "facilityId"],
+                "required": [
+                  "unit",
+                  "facilityId"
+                ],
                 "type": "object"
               },
               {
@@ -757,7 +909,11 @@
                     "type": "string"
                   }
                 },
-                "required": ["unit", "holeId", "courseId"],
+                "required": [
+                  "unit",
+                  "holeId",
+                  "courseId"
+                ],
                 "type": "object"
               }
             ]
@@ -814,7 +970,10 @@
           "type": "string"
         }
       },
-      "required": ["url", "retrieved"],
+      "required": [
+        "url",
+        "retrieved"
+      ],
       "type": "object"
     },
     "Tee": {
@@ -827,7 +986,11 @@
           "type": "string"
         },
         "gender": {
-          "enum": ["M", "F", "X"],
+          "enum": [
+            "M",
+            "F",
+            "X"
+          ],
           "type": "string"
         },
         "meters": {
@@ -854,7 +1017,11 @@
           "type": "number"
         }
       },
-      "required": ["name", "source", "checkedAt"],
+      "required": [
+        "name",
+        "source",
+        "checkedAt"
+      ],
       "type": "object"
     },
     "Trail": {
@@ -869,7 +1036,10 @@
         },
         "countries": {
           "items": {
-            "enum": ["US", "CA"],
+            "enum": [
+              "US",
+              "CA"
+            ],
             "type": "string"
           },
           "minItems": 1,
@@ -923,7 +1093,11 @@
               "type": "string"
             }
           },
-          "required": ["name", "url", "type"],
+          "required": [
+            "name",
+            "url",
+            "type"
+          ],
           "type": "object"
         },
         "regions": {
@@ -934,7 +1108,11 @@
           "type": "array"
         },
         "rosterStatus": {
-          "enum": ["verified", "conflicting", "unverified"],
+          "enum": [
+            "verified",
+            "conflicting",
+            "unverified"
+          ],
           "type": "string"
         },
         "rosterVersions": {
@@ -956,7 +1134,11 @@
           "type": "array"
         },
         "status": {
-          "enum": ["active", "developing", "defunct"],
+          "enum": [
+            "active",
+            "developing",
+            "defunct"
+          ],
           "type": "string"
         }
       },
@@ -996,7 +1178,10 @@
                   "type": "string"
                 }
               },
-              "required": ["kind", "args"],
+              "required": [
+                "kind",
+                "args"
+              ],
               "type": "object"
             },
             {
@@ -1014,7 +1199,10 @@
                   "type": "string"
                 }
               },
-              "required": ["kind", "args"],
+              "required": [
+                "kind",
+                "args"
+              ],
               "type": "object"
             },
             {
@@ -1040,7 +1228,10 @@
                           "type": "number"
                         }
                       },
-                      "required": ["kind", "value"],
+                      "required": [
+                        "kind",
+                        "value"
+                      ],
                       "type": "object"
                     },
                     {
@@ -1061,7 +1252,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "courseId"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "courseId"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1080,7 +1275,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "trailId"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "trailId"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1095,7 +1294,10 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name"],
+                          "required": [
+                            "kind",
+                            "name"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1131,11 +1333,17 @@
                                   "type": "array"
                                 }
                               },
-                              "required": ["in"],
+                              "required": [
+                                "in"
+                              ],
                               "type": "object"
                             }
                           },
-                          "required": ["kind", "name", "field"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "field"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1160,7 +1368,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "field"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "field"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1189,7 +1401,12 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "field", "value"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "field",
+                            "value"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1208,7 +1425,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "trailId"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "trailId"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1223,7 +1444,10 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name"],
+                          "required": [
+                            "kind",
+                            "name"
+                          ],
                           "type": "object"
                         }
                       ]
@@ -1231,7 +1455,14 @@
                   ]
                 },
                 "op": {
-                  "enum": [">=", ">", "<=", "<", "==", "!="],
+                  "enum": [
+                    ">=",
+                    ">",
+                    "<=",
+                    "<",
+                    "==",
+                    "!="
+                  ],
                   "type": "string"
                 },
                 "right": {
@@ -1247,7 +1478,10 @@
                           "type": "number"
                         }
                       },
-                      "required": ["kind", "value"],
+                      "required": [
+                        "kind",
+                        "value"
+                      ],
                       "type": "object"
                     },
                     {
@@ -1268,7 +1502,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "courseId"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "courseId"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1287,7 +1525,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "trailId"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "trailId"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1302,7 +1544,10 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name"],
+                          "required": [
+                            "kind",
+                            "name"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1338,11 +1583,17 @@
                                   "type": "array"
                                 }
                               },
-                              "required": ["in"],
+                              "required": [
+                                "in"
+                              ],
                               "type": "object"
                             }
                           },
-                          "required": ["kind", "name", "field"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "field"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1367,7 +1618,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "field"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "field"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1396,7 +1651,12 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "field", "value"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "field",
+                            "value"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1415,7 +1675,11 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name", "trailId"],
+                          "required": [
+                            "kind",
+                            "name",
+                            "trailId"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1430,7 +1694,10 @@
                               "type": "string"
                             }
                           },
-                          "required": ["kind", "name"],
+                          "required": [
+                            "kind",
+                            "name"
+                          ],
                           "type": "object"
                         }
                       ]
@@ -1438,7 +1705,12 @@
                   ]
                 }
               },
-              "required": ["kind", "op", "left", "right"],
+              "required": [
+                "kind",
+                "op",
+                "left",
+                "right"
+              ],
               "type": "object"
             },
             {
@@ -1459,7 +1731,11 @@
                       "type": "string"
                     }
                   },
-                  "required": ["kind", "name", "trailId"],
+                  "required": [
+                    "kind",
+                    "name",
+                    "trailId"
+                  ],
                   "type": "object"
                 },
                 {
@@ -1483,7 +1759,12 @@
                       "type": "string"
                     }
                   },
-                  "required": ["kind", "name", "trailId", "days"],
+                  "required": [
+                    "kind",
+                    "name",
+                    "trailId",
+                    "days"
+                  ],
                   "type": "object"
                 },
                 {
@@ -1502,7 +1783,11 @@
                       "type": "string"
                     }
                   },
-                  "required": ["kind", "name", "trailId"],
+                  "required": [
+                    "kind",
+                    "name",
+                    "trailId"
+                  ],
                   "type": "object"
                 },
                 {
@@ -1521,7 +1806,11 @@
                       "type": "string"
                     }
                   },
-                  "required": ["kind", "name", "trailId"],
+                  "required": [
+                    "kind",
+                    "name",
+                    "trailId"
+                  ],
                   "type": "object"
                 }
               ]
@@ -1548,7 +1837,10 @@
                       "type": "string"
                     }
                   },
-                  "required": ["kind", "args"],
+                  "required": [
+                    "kind",
+                    "args"
+                  ],
                   "type": "object"
                 },
                 {
@@ -1566,7 +1858,10 @@
                       "type": "string"
                     }
                   },
-                  "required": ["kind", "args"],
+                  "required": [
+                    "kind",
+                    "args"
+                  ],
                   "type": "object"
                 },
                 {
@@ -1592,7 +1887,10 @@
                               "type": "number"
                             }
                           },
-                          "required": ["kind", "value"],
+                          "required": [
+                            "kind",
+                            "value"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1613,7 +1911,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "courseId"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "courseId"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1632,7 +1934,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "trailId"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1647,7 +1953,10 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name"],
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1683,11 +1992,17 @@
                                       "type": "array"
                                     }
                                   },
-                                  "required": ["in"],
+                                  "required": [
+                                    "in"
+                                  ],
                                   "type": "object"
                                 }
                               },
-                              "required": ["kind", "name", "field"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1712,7 +2027,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "field"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1741,7 +2060,12 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "field", "value"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "field",
+                                "value"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1760,7 +2084,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "trailId"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1775,7 +2103,10 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name"],
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
                               "type": "object"
                             }
                           ]
@@ -1783,7 +2114,14 @@
                       ]
                     },
                     "op": {
-                      "enum": [">=", ">", "<=", "<", "==", "!="],
+                      "enum": [
+                        ">=",
+                        ">",
+                        "<=",
+                        "<",
+                        "==",
+                        "!="
+                      ],
                       "type": "string"
                     },
                     "right": {
@@ -1799,7 +2137,10 @@
                               "type": "number"
                             }
                           },
-                          "required": ["kind", "value"],
+                          "required": [
+                            "kind",
+                            "value"
+                          ],
                           "type": "object"
                         },
                         {
@@ -1820,7 +2161,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "courseId"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "courseId"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1839,7 +2184,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "trailId"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1854,7 +2203,10 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name"],
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1890,11 +2242,17 @@
                                       "type": "array"
                                     }
                                   },
-                                  "required": ["in"],
+                                  "required": [
+                                    "in"
+                                  ],
                                   "type": "object"
                                 }
                               },
-                              "required": ["kind", "name", "field"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1919,7 +2277,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "field"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1948,7 +2310,12 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "field", "value"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "field",
+                                "value"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1967,7 +2334,11 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name", "trailId"],
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
                               "type": "object"
                             },
                             {
@@ -1982,7 +2353,10 @@
                                   "type": "string"
                                 }
                               },
-                              "required": ["kind", "name"],
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
                               "type": "object"
                             }
                           ]
@@ -1990,7 +2364,12 @@
                       ]
                     }
                   },
-                  "required": ["kind", "op", "left", "right"],
+                  "required": [
+                    "kind",
+                    "op",
+                    "left",
+                    "right"
+                  ],
                   "type": "object"
                 },
                 {
@@ -2011,7 +2390,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "courseId"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "courseId"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2030,7 +2413,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "trailId"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2045,7 +2432,10 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name"],
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2081,11 +2471,17 @@
                               "type": "array"
                             }
                           },
-                          "required": ["in"],
+                          "required": [
+                            "in"
+                          ],
                           "type": "object"
                         }
                       },
-                      "required": ["kind", "name", "field"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "field"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2110,7 +2506,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "field"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "field"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2139,7 +2539,12 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "field", "value"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "field",
+                        "value"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2158,7 +2563,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "trailId"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2173,7 +2582,10 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name"],
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2192,7 +2604,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "trailId"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2216,7 +2632,12 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "trailId", "days"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId",
+                        "days"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2235,7 +2656,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "trailId"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
                       "type": "object"
                     },
                     {
@@ -2254,7 +2679,11 @@
                           "type": "string"
                         }
                       },
-                      "required": ["kind", "name", "trailId"],
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
                       "type": "object"
                     }
                   ]
@@ -2266,7 +2695,10 @@
               "type": "string"
             }
           },
-          "required": ["kind", "arg"],
+          "required": [
+            "kind",
+            "arg"
+          ],
           "type": "object"
         }
       }

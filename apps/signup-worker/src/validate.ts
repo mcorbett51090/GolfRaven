@@ -25,7 +25,8 @@ export interface ValidSignupInput {
 }
 
 export type ValidationResult =
-  { ok: true; value: ValidSignupInput } | { ok: false; error: string };
+  | { ok: true; value: ValidSignupInput }
+  | { ok: false; error: string };
 
 function fail(error: string): ValidationResult {
   return { ok: false, error };
@@ -56,19 +57,11 @@ export function validateSignupPayload(body: unknown): ValidationResult {
     return fail("ageConfirmed must be true");
   }
 
-  if (
-    typeof obj.consentVersion !== "string" ||
-    !ALLOWED_CONSENT_VERSIONS.includes(obj.consentVersion)
-  ) {
-    return fail(
-      `consentVersion must be one of: ${ALLOWED_CONSENT_VERSIONS.join(", ")}`,
-    );
+  if (typeof obj.consentVersion !== "string" || !ALLOWED_CONSENT_VERSIONS.includes(obj.consentVersion)) {
+    return fail(`consentVersion must be one of: ${ALLOWED_CONSENT_VERSIONS.join(", ")}`);
   }
 
-  if (
-    typeof obj.turnstileToken !== "string" ||
-    obj.turnstileToken.length === 0
-  ) {
+  if (typeof obj.turnstileToken !== "string" || obj.turnstileToken.length === 0) {
     return fail("turnstileToken is required");
   }
   if (obj.turnstileToken.length > MAX_TURNSTILE_TOKEN_LENGTH) {

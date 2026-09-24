@@ -31,20 +31,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  isCatalogEmpty,
-  isIndexable,
-  loadCatalog,
-  loadCatalogFromBundle,
-} from "@golfraven/catalog";
+import { isCatalogEmpty, isIndexable, loadCatalog, loadCatalogFromBundle } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
 import { isProductionEnv } from "../src/lib/env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const REAL_DATA_DIR =
-  process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
-const OUT_DIR =
-  process.env.MAP_DATA_OUT_DIR ?? join(here, "..", "public", "data", "map");
+const REAL_DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
+const OUT_DIR = process.env.MAP_DATA_OUT_DIR ?? join(here, "..", "public", "data", "map");
 
 async function loadSiteCatalog() {
   const isProduction = isProductionEnv(process.env);
@@ -52,14 +45,9 @@ async function loadSiteCatalog() {
 
   if (demoRequested) {
     if (isProduction) {
-      throw new Error(
-        "GOLFRAVEN_ENV=production refuses demo data (GOLFRAVEN_DEMO=1 was set).",
-      );
+      throw new Error("GOLFRAVEN_ENV=production refuses demo data (GOLFRAVEN_DEMO=1 was set).");
     }
-    return {
-      catalog: loadCatalogFromBundle(demoBundleForSite()),
-      usedDemoData: true,
-    };
+    return { catalog: loadCatalogFromBundle(demoBundleForSite()), usedDemoData: true };
   }
 
   const real = await loadCatalog({ dataDir: REAL_DATA_DIR });
@@ -99,8 +87,7 @@ const { catalog, usedDemoData } = await loadSiteCatalog();
 
 const byCountry = new Map();
 for (const facility of catalog.facilities) {
-  if (typeof facility.lat !== "number" || typeof facility.lng !== "number")
-    continue;
+  if (typeof facility.lat !== "number" || typeof facility.lng !== "number") continue;
   const country = facility.region.split("-")[0]?.toLowerCase();
   if (!country) continue;
   if (!byCountry.has(country)) byCountry.set(country, []);

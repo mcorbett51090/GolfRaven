@@ -39,16 +39,10 @@ const BUCKET_MS = 15 * 60 * 1000;
  * `startedAt` (build plan A2-17 — it's `localDate`-only evidence), so it
  * always returns `undefined` here too.
  */
-export function correlationKey(
-  round: ImportedRound,
-  facilityId: string,
-): string[] | undefined {
+export function correlationKey(round: ImportedRound, facilityId: string): string[] | undefined {
   if (round.fixes.length === 0) return undefined;
-  if (round.startedAt === undefined || !Number.isFinite(round.startedAt))
-    return undefined;
+  if (round.startedAt === undefined || !Number.isFinite(round.startedAt)) return undefined;
 
   const floor = Math.floor(round.startedAt / BUCKET_MS);
-  return [floor - 1, floor, floor + 1].map(
-    (bucket) => `${facilityId}:${bucket}`,
-  );
+  return [floor - 1, floor, floor + 1].map((bucket) => `${facilityId}:${bucket}`);
 }

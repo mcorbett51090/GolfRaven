@@ -4,10 +4,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": [
-    "src",
-    "test",
-    "src/tzdb-backward-links.json",
-    "src/region-codes.json"
-  ]
+  "include": ["src", "test", "src/tzdb-backward-links.json", "src/region-codes.json"]
 }

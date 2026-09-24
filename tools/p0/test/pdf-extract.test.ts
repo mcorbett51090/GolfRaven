@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  extractPdfText,
-  looksLikePdf,
-  PDF_EXTRACTOR_ID,
-} from "../src/pdf-extract.js";
+import { extractPdfText, looksLikePdf, PDF_EXTRACTOR_ID } from "../src/pdf-extract.js";
 import { buildMinimalPdf } from "./fixtures/pdf/build-mini-pdf.js";
 
 describe("pdf-extract: looksLikePdf (gate finding N5 — magic bytes, not content-type/suffix)", () => {
@@ -32,8 +28,6 @@ describe("pdf-extract: extractPdfText (gate finding S3 — pinned pure-JS extrac
   });
 
   it("throws on bytes that are not a real PDF", async () => {
-    await expect(
-      extractPdfText(Buffer.from("not a pdf at all")),
-    ).rejects.toThrow();
+    await expect(extractPdfText(Buffer.from("not a pdf at all"))).rejects.toThrow();
   });
 });

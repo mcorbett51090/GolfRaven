@@ -37,21 +37,13 @@ function utcDateKey(): string {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
-async function readCount(
-  kv: Env["RATE_LIMIT_KV"],
-  key: string,
-): Promise<number> {
+async function readCount(kv: Env["RATE_LIMIT_KV"], key: string): Promise<number> {
   const raw = await kv.get(key);
   const n = raw ? parseInt(raw, 10) : 0;
   return Number.isFinite(n) ? n : 0;
 }
 
-async function bumpCount(
-  kv: Env["RATE_LIMIT_KV"],
-  key: string,
-  current: number,
-  ttlSeconds: number,
-): Promise<void> {
+async function bumpCount(kv: Env["RATE_LIMIT_KV"], key: string, current: number, ttlSeconds: number): Promise<void> {
   // expirationTtl resets on every write; callers scope the key to today's
   // UTC date (or a fixed window), so a stale TTL just means it survives a
   // little past the window boundary before the next key takes over.
@@ -82,9 +74,7 @@ export function rateLimitIpKeyMaterial(ip: string): string {
   const withoutZone = ip.split("%")[0] ?? ip;
   const lower = withoutZone.toLowerCase();
 
-  const ipv4Mapped = lower.match(
-    /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/,
-  );
+  const ipv4Mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
   if (ipv4Mapped) return ipv4Mapped[1]!;
 
   const parts = lower.split(":");
@@ -93,15 +83,11 @@ export function rateLimitIpKeyMaterial(ip: string): string {
   if (collapseIdx !== -1) {
     const nonEmpty = parts.filter((p) => p !== "");
     const zerosNeeded = Math.max(8 - nonEmpty.length, 0);
-    hextets = [
-      ...parts.slice(0, collapseIdx),
-      ...Array(zerosNeeded).fill("0"),
-      ...parts.slice(collapseIdx + 1),
-    ].filter((p) => p !== "");
+    hextets = [...parts.slice(0, collapseIdx), ...Array(zerosNeeded).fill("0"), ...parts.slice(collapseIdx + 1)].filter(
+      (p) => p !== "",
+    );
   }
-  const normalized = hextets
-    .slice(0, 4)
-    .map((h) => h.replace(/^0+(?=.)/, "") || "0");
+  const normalized = hextets.slice(0, 4).map((h) => h.replace(/^0+(?=.)/, "") || "0");
   return `${normalized.join(":")}::/64`;
 }
 
@@ -111,16 +97,9 @@ export interface RateLimitResult {
 }
 
 /** Checks-and-consumes one slot against the per-IP-key (IPv6 /64-scoped) daily cap. */
-export async function checkAndConsumeIpRateLimit(
-  env: Env,
-  ip: string,
-  ipDailyCap: number,
-): Promise<RateLimitResult> {
+export async function checkAndConsumeIpRateLimit(env: Env, ip: string, ipDailyCap: number): Promise<RateLimitResult> {
   const day = utcDateKey();
-  const ipHash = await hashWithPepper(
-    env.TOKEN_PEPPER,
-    `ip:${rateLimitIpKeyMaterial(ip)}`,
-  );
+  const ipHash = await hashWithPepper(env.TOKEN_PEPPER, `ip:${rateLimitIpKeyMaterial(ip)}`);
   const ipKey = `rl:ip:${day}:${ipHash}`;
 
   const ipCount = await readCount(env.RATE_LIMIT_KV, ipKey);
@@ -132,11 +111,7 @@ export async function checkAndConsumeIpRateLimit(
 }
 
 /** Checks-and-consumes one slot against the per-email daily cap. Call ONLY after Turnstile succeeds (F5). */
-export async function checkAndConsumeEmailRateLimit(
-  env: Env,
-  emailLc: string,
-  emailDailyCap: number,
-): Promise<RateLimitResult> {
+export async function checkAndConsumeEmailRateLimit(env: Env, emailLc: string, emailDailyCap: number): Promise<RateLimitResult> {
   const day = utcDateKey();
   const emailHash = await hashWithPepper(env.TOKEN_PEPPER, `email:${emailLc}`);
   const emailKey = `rl:email:${day}:${emailHash}`;
@@ -171,11 +146,7 @@ export interface SendLimitResult {
 export async function checkAndConsumeResendSendLimits(
   env: Env,
   emailLc: string,
-  opts: {
-    cooldownSeconds: number;
-    emailDailyCap: number;
-    globalDailyCap: number;
-  },
+  opts: { cooldownSeconds: number; emailDailyCap: number; globalDailyCap: number },
 ): Promise<SendLimitResult> {
   const day = utcDateKey();
   const emailHash = await hashWithPepper(env.TOKEN_PEPPER, `email:${emailLc}`);
@@ -198,20 +169,8 @@ export async function checkAndConsumeResendSendLimits(
     return { allowed: false, reason: "global-send-daily-cap" };
   }
 
-  await env.RATE_LIMIT_KV.put(cooldownKey, "1", {
-    expirationTtl: opts.cooldownSeconds,
-  });
-  await bumpCount(
-    env.RATE_LIMIT_KV,
-    emailDailyKey,
-    emailDailyCount,
-    DAY_SECONDS * 2,
-  );
-  await bumpCount(
-    env.RATE_LIMIT_KV,
-    globalDailyKey,
-    globalDailyCount,
-    DAY_SECONDS * 2,
-  );
+  await env.RATE_LIMIT_KV.put(cooldownKey, "1", { expirationTtl: opts.cooldownSeconds });
+  await bumpCount(env.RATE_LIMIT_KV, emailDailyKey, emailDailyCount, DAY_SECONDS * 2);
+  await bumpCount(env.RATE_LIMIT_KV, globalDailyKey, globalDailyCount, DAY_SECONDS * 2);
   return { allowed: true };
 }

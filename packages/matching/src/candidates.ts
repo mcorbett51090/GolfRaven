@@ -1,8 +1,5 @@
 import { haversineMeters } from "./geo.js";
-import {
-  isWithinDistanceOfPrepared,
-  preparePolygonGeometry,
-} from "./polygon.js";
+import { isWithinDistanceOfPrepared, preparePolygonGeometry } from "./polygon.js";
 import type { CandidateCourse, LatLng } from "./types.js";
 
 /** True if any of `points` is within `radiusMeters` of `candidate`'s
@@ -30,8 +27,7 @@ export function isCandidateWithinRadius(
   if (candidate.radiusFallback) {
     const { center, radiusMeters: circleRadius } = candidate.radiusFallback;
     for (const p of points) {
-      if (haversineMeters(p, center) - circleRadius <= radiusMeters)
-        return true;
+      if (haversineMeters(p, center) - circleRadius <= radiusMeters) return true;
     }
     return false;
   }
@@ -48,7 +44,5 @@ export function candidatesWithinRadius(
   candidates: readonly CandidateCourse[],
   radiusMeters: number,
 ): CandidateCourse[] {
-  return candidates.filter((c) =>
-    isCandidateWithinRadius(points, c, radiusMeters),
-  );
+  return candidates.filter((c) => isCandidateWithinRadius(points, c, radiusMeters));
 }

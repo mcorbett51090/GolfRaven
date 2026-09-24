@@ -58,16 +58,7 @@ function baseSixRows(): string[] {
 }
 
 function buildTable(header: string, rows: string[]): string {
-  return [
-    "## (g) K1 tracking table",
-    "",
-    "Note line.",
-    "",
-    header,
-    SEP,
-    ...rows,
-    "",
-  ].join("\n");
+  return ["## (g) K1 tracking table", "", "Note line.", "", header, SEP, ...rows, ""].join("\n");
 }
 
 describe("parseK1Table", () => {
@@ -109,9 +100,7 @@ describe("parseK1Table", () => {
     expect(tn.callAcceptedDate).toBe("2026-10-10");
     expect(tn.loiDate).toBe("2026-11-20");
     expect(tn.feeWillingness).toBe("Y");
-    const sponsor = parsed.find(
-      (r) => r.target === "Alabama Tourism Department",
-    )!;
+    const sponsor = parsed.find((r) => r.target === "Alabama Tourism Department")!;
     expect(sponsor.sponsorDecisionMakerNamed).toBe("Y");
     expect(sponsor.sponsorConversationDate).toBe("2026-11-01");
   });
@@ -126,17 +115,13 @@ describe("parseK1Table", () => {
       opRow("Canadian Rockies Golf Consortium", "Operator (co-op reserve)"),
     ];
     const parsed = parseK1Table(buildTable(HEADER, rows));
-    expect(
-      parsed.find((r) => r.target === "Hammock Coast Golf Trail"),
-    ).toBeDefined();
+    expect(parsed.find((r) => r.target === "Hammock Coast Golf Trail")).toBeDefined();
     expect(parsed.find((r) => r.target === "Hammock Coast")).toBeUndefined();
   });
 
   it("throws on an unexpected column layout", () => {
     const badHeader = HEADER.replace("Notes", "Comments");
-    expect(() => parseK1Table(buildTable(badHeader, baseSixRows()))).toThrow(
-      /unexpected column layout/,
-    );
+    expect(() => parseK1Table(buildTable(badHeader, baseSixRows()))).toThrow(/unexpected column layout/);
   });
 
   it("throws on an unknown operator name", () => {
@@ -148,32 +133,24 @@ describe("parseK1Table", () => {
       opRow("Hammock Coast Golf Trail", "Operator (co-op reserve)"),
       opRow("Canadian Rockies Golf Consortium", "Operator (co-op reserve)"),
     ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /unknown operator name/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/unknown operator name/);
   });
 
   it("throws when a sponsor row's target matches a known operator name", () => {
     const rows = [...baseSixRows(), opRow("Tennessee Golf Trail", "Sponsor")];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /matches a known operator name/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/matches a known operator name/);
   });
 
   it("throws on a malformed date", () => {
     const rows = [
-      opRow("Tennessee Golf Trail", "Operator (slate)", {
-        callAccepted: "10/20/2026",
-      }),
+      opRow("Tennessee Golf Trail", "Operator (slate)", { callAccepted: "10/20/2026" }),
       opRow("Vancouver Island Golf Trail", "Operator (slate)"),
       opRow("Robert Trent Jones Golf Trail", "Operator (slate)"),
       opRow("Oklahoma Golf Trail", "Operator (reserve)"),
       opRow("Hammock Coast Golf Trail", "Operator (co-op reserve)"),
       opRow("Canadian Rockies Golf Consortium", "Operator (co-op reserve)"),
     ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /malformed date/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/malformed date/);
   });
 
   it("throws on a malformed Y/N cell", () => {
@@ -185,25 +162,19 @@ describe("parseK1Table", () => {
       opRow("Hammock Coast Golf Trail", "Operator (co-op reserve)"),
       opRow("Canadian Rockies Golf Consortium", "Operator (co-op reserve)"),
     ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /malformed value/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/malformed value/);
   });
 
   it("throws when 'OK swap replaces' is set on a non-Oklahoma row", () => {
     const rows = [
       opRow("Tennessee Golf Trail", "Operator (slate)"),
-      opRow("Vancouver Island Golf Trail", "Operator (slate)", {
-        okSwap: "Tennessee Golf Trail",
-      }),
+      opRow("Vancouver Island Golf Trail", "Operator (slate)", { okSwap: "Tennessee Golf Trail" }),
       opRow("Robert Trent Jones Golf Trail", "Operator (slate)"),
       opRow("Oklahoma Golf Trail", "Operator (reserve)"),
       opRow("Hammock Coast Golf Trail", "Operator (co-op reserve)"),
       opRow("Canadian Rockies Golf Consortium", "Operator (co-op reserve)"),
     ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /only applies to the "Oklahoma Golf Trail" row/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/only applies to the "Oklahoma Golf Trail" row/);
   });
 
   it("throws when 'OK swap replaces' isn't one of the 3 slate trail names", () => {
@@ -211,15 +182,11 @@ describe("parseK1Table", () => {
       opRow("Tennessee Golf Trail", "Operator (slate)"),
       opRow("Vancouver Island Golf Trail", "Operator (slate)"),
       opRow("Robert Trent Jones Golf Trail", "Operator (slate)"),
-      opRow("Oklahoma Golf Trail", "Operator (reserve)", {
-        okSwap: "Hammock Coast Golf Trail",
-      }),
+      opRow("Oklahoma Golf Trail", "Operator (reserve)", { okSwap: "Hammock Coast Golf Trail" }),
       opRow("Hammock Coast Golf Trail", "Operator (co-op reserve)"),
       opRow("Canadian Rockies Golf Consortium", "Operator (co-op reserve)"),
     ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /not one of the 3 slate trail names/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/not one of the 3 slate trail names/);
   });
 
   it("throws when a required operator row is missing", () => {
@@ -231,30 +198,16 @@ describe("parseK1Table", () => {
       opRow("Hammock Coast Golf Trail", "Operator (co-op reserve)"),
       // Canadian Rockies Golf Consortium row dropped
     ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /missing the required operator row/,
-    );
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/missing the required operator row/);
   });
 
   it("throws on a duplicate operator row", () => {
-    const rows = [
-      ...baseSixRows(),
-      opRow("Tennessee Golf Trail", "Operator (slate)"),
-    ];
-    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(
-      /duplicate operator row/,
-    );
+    const rows = [...baseSixRows(), opRow("Tennessee Golf Trail", "Operator (slate)")];
+    expect(() => parseK1Table(buildTable(HEADER, rows))).toThrow(/duplicate operator row/);
   });
 
   it("throws when the '(g)' heading is missing", () => {
-    const markdown = [
-      "## Not the right heading",
-      "",
-      HEADER,
-      SEP,
-      ...baseSixRows(),
-      "",
-    ].join("\n");
+    const markdown = ["## Not the right heading", "", HEADER, SEP, ...baseSixRows(), ""].join("\n");
     expect(() => parseK1Table(markdown)).toThrow(/\(g\)/);
   });
 
@@ -268,15 +221,9 @@ describe("parseK1Table", () => {
       SEP,
       ...baseSixRows(),
       "",
-      opRow("Alabama Tourism Department", "Sponsor", {
-        dm: "Y",
-        budget: "Y",
-        attribution: "Y",
-      }),
+      opRow("Alabama Tourism Department", "Sponsor", { dm: "Y", budget: "Y", attribution: "Y" }),
       "",
     ].join("\n");
-    expect(() => parseK1Table(markdown)).toThrow(
-      /separated from the table by a blank line/,
-    );
+    expect(() => parseK1Table(markdown)).toThrow(/separated from the table by a blank line/);
   });
 });

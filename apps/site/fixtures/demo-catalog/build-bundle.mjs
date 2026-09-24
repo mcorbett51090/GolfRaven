@@ -32,12 +32,7 @@ const facilities = [
     lat: 36.1,
     lng: -86.7,
     approx: false,
-    prov: {
-      name: "operator",
-      town: "operator",
-      coord: "operator",
-      blurb: "operator",
-    },
+    prov: { name: "operator", town: "operator", coord: "operator", blurb: "operator" },
     blurb:
       "A synthetic demo parkland course used to exercise GolfRaven's course-page template — fictional, not a real place.",
     access: "public",
@@ -78,11 +73,7 @@ const facilities = [
     lat: 36.2,
     lng: -86.85,
     approx: false,
-    prov: {
-      name: "primary-source",
-      town: "primary-source",
-      coord: "primary-source",
-    },
+    prov: { name: "primary-source", town: "primary-source", coord: "primary-source" },
     access: "public",
     verification: {
       status: "listed-verified",
@@ -99,11 +90,7 @@ const facilities = [
         name: "Blue Heron Links",
         holes: 18,
         designers: ["dsg_01M39Y9Q74E0DZPY87SZ5J3S2B"],
-        prov: {
-          name: "primary-source",
-          holes: "primary-source",
-          designers: "primary-source",
-        },
+        prov: { name: "primary-source", holes: "primary-source", designers: "primary-source" },
       },
     ],
   },
@@ -205,10 +192,7 @@ const facilities = [
           {
             name: "Blue",
             yards: 6750,
-            source: source(
-              "https://highland-meadows.example.ca/tees",
-              "2026-09-04",
-            ),
+            source: source("https://highland-meadows.example.ca/tees", "2026-09-04"),
             checkedAt: "2026-09-04",
           },
         ],
@@ -301,12 +285,7 @@ const designers = [
   {
     id: "dsg_01M39Y9Q74E0DZPY87SZ5J3S2B",
     name: "A. Fictional Designer",
-    sources: [
-      source(
-        "https://example.org/designers/a-fictional-designer",
-        "2026-09-02",
-      ),
-    ],
+    sources: [source("https://example.org/designers/a-fictional-designer", "2026-09-02")],
   },
 ];
 
@@ -334,40 +313,23 @@ const trails = [
       {
         version: 1,
         effectiveFrom: "2026-01-01",
-        source: source(
-          "https://example.org/fictional-ridge-golf-trail",
-          "2026-09-01",
-        ),
+        source: source("https://example.org/fictional-ridge-golf-trail", "2026-09-01"),
         verifiedAt: "2026-09-01",
         completionUnit: "course",
         markerUnit: "facility",
         completionRule: { kind: "all" },
         markerRule: { kind: "all" },
         members: [
-          {
-            unit: "course",
-            courseId: "crs_01M39X3D54EH17VDCQ3JKN8VYP",
-            stopOrder: 0,
-          },
-          {
-            unit: "course",
-            courseId: "crs_01M39X3D54D8MBDYC2XE85WCY8",
-            stopOrder: 1,
-          },
-          {
-            unit: "course",
-            courseId: "crs_01M39X3D54JNRAD66XBVVQRGZ8",
-            stopOrder: 2,
-          },
+          { unit: "course", courseId: "crs_01M39X3D54EH17VDCQ3JKN8VYP", stopOrder: 0 },
+          { unit: "course", courseId: "crs_01M39X3D54D8MBDYC2XE85WCY8", stopOrder: 1 },
+          { unit: "course", courseId: "crs_01M39X3D54JNRAD66XBVVQRGZ8", stopOrder: 2 },
         ],
       },
     ],
     blurb:
       "A synthetic demo trail linking three fictional Tennessee courses, one of them a private club playable only as a member's guest.",
     lastReviewed: "2026-09-24",
-    sources: [
-      source("https://example.org/fictional-ridge-golf-trail", "2026-09-01"),
-    ],
+    sources: [source("https://example.org/fictional-ridge-golf-trail", "2026-09-01")],
   },
   {
     id: "trl_01M39X3D556JS2FS05AJDP25H2",
@@ -388,31 +350,16 @@ const trails = [
       {
         version: 1,
         effectiveFrom: "2026-02-01",
-        source: source(
-          "https://example.ca/somewhere-coastal-golf-trail",
-          "2026-09-04",
-        ),
+        source: source("https://example.ca/somewhere-coastal-golf-trail", "2026-09-04"),
         verifiedAt: "2026-09-04",
         completionUnit: "facility",
         markerUnit: "facility",
         completionRule: { kind: "all" },
         markerRule: { kind: "all" },
         members: [
-          {
-            unit: "facility",
-            facilityId: "fac_01M39X3D54QJ6XGVFM705SHC09",
-            stopOrder: 0,
-          },
-          {
-            unit: "facility",
-            facilityId: "fac_01M39X3D54VM1YZ6PVEEQM7Q17",
-            stopOrder: 1,
-          },
-          {
-            unit: "facility",
-            facilityId: "fac_01M39X3D54R7ST7J3SQWD4A34V",
-            stopOrder: 2,
-          },
+          { unit: "facility", facilityId: "fac_01M39X3D54QJ6XGVFM705SHC09", stopOrder: 0 },
+          { unit: "facility", facilityId: "fac_01M39X3D54VM1YZ6PVEEQM7Q17", stopOrder: 1 },
+          { unit: "facility", facilityId: "fac_01M39X3D54R7ST7J3SQWD4A34V", stopOrder: 2 },
         ],
       },
     ],
@@ -431,13 +378,7 @@ const trails = [
 // ---------------------------------------------------------------------
 
 const regions = [
-  {
-    code: "US-TN",
-    country: "US",
-    slug: "tn",
-    name: "Tennessee",
-    polygonFile: "regions/us-tn.geojson",
-  },
+  { code: "US-TN", country: "US", slug: "tn", name: "Tennessee", polygonFile: "regions/us-tn.geojson" },
   {
     code: "CA-BC",
     country: "CA",
@@ -455,9 +396,7 @@ const regions = [
 
 function buildLedger() {
   const entries = {};
-  const minted = (catalogVersion, date) => [
-    { type: "minted", catalogVersion, date },
-  ];
+  const minted = (catalogVersion, date) => [{ type: "minted", catalogVersion, date }];
   const verified = (catalogVersion, date) => [
     { type: "minted", catalogVersion, date },
     { type: "verified", catalogVersion, date },
@@ -471,9 +410,7 @@ function buildLedger() {
       kind: "fac",
       slug: facility.slug,
       status: isVerified ? "verified" : "stub",
-      transitions: isVerified
-        ? verified("demo-v1", date)
-        : minted("demo-v1", date),
+      transitions: isVerified ? verified("demo-v1", date) : minted("demo-v1", date),
     };
     for (const course of facility.courses) {
       entries[course.id] = {
@@ -481,9 +418,7 @@ function buildLedger() {
         kind: "crs",
         slug: course.slug,
         status: isVerified ? "verified" : "stub",
-        transitions: isVerified
-          ? verified("demo-v1", date)
-          : minted("demo-v1", date),
+        transitions: isVerified ? verified("demo-v1", date) : minted("demo-v1", date),
         facilityId: facility.id,
       };
     }

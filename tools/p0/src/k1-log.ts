@@ -138,7 +138,9 @@ function parseIsoDateOrNull(raw: string, context: string): string | null {
   }
   const d = new Date(`${cell}T00:00:00Z`);
   if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== cell) {
-    throw new Error(`${context}: "${cell}" is not a valid calendar date.`);
+    throw new Error(
+      `${context}: "${cell}" is not a valid calendar date.`,
+    );
   }
   return cell;
 }
@@ -158,11 +160,7 @@ function parseYNOrNull(raw: string, context: string): "Y" | "N" | null {
  * and throw if any further line starts with "|". A pipe row separated from
  * the table by a blank line (or anything else) is a data-loss bug in the
  * document, not a legitimate end of table. */
-function assertNoStrayRowsAfterTable(
-  lines: string[],
-  fromIdx: number,
-  label: string,
-): void {
+function assertNoStrayRowsAfterTable(lines: string[], fromIdx: number, label: string): void {
   for (let i = fromIdx; i < lines.length; i += 1) {
     const line = lines[i]!;
     if (headingText(line) !== null) return;
@@ -211,7 +209,7 @@ export function parseK1Table(markdown: string): K1Row[] {
   }
   if (tableStart === -1) {
     throw new Error(
-      "docs/partners/k1-outreach.md §(g) has no markdown table under its heading.",
+      'docs/partners/k1-outreach.md §(g) has no markdown table under its heading.',
     );
   }
   const headerCells = splitRow(lines[tableStart]!);
@@ -226,10 +224,7 @@ export function parseK1Table(markdown: string): K1Row[] {
     );
   }
   let dataStart = tableStart + 1;
-  if (
-    dataStart < lines.length &&
-    SEPARATOR_ROW_RE.test(lines[dataStart]!.trim())
-  ) {
+  if (dataStart < lines.length && SEPARATOR_ROW_RE.test(lines[dataStart]!.trim())) {
     dataStart += 1;
   }
   const rows: K1Row[] = [];
@@ -256,24 +251,11 @@ export function parseK1Table(markdown: string): K1Row[] {
       sponsorConversationRaw,
       notes,
     ] = cells as [
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
+      string, string, string, string, string, string, string, string, string, string, string, string,
     ];
     const target = canonicalizeTarget(targetRaw);
     if (target === "") {
-      throw new Error(
-        `docs/partners/k1-outreach.md §(g) has a row with a blank Target.`,
-      );
+      throw new Error(`docs/partners/k1-outreach.md §(g) has a row with a blank Target.`);
     }
     if (!K1_KNOWN_TYPES.includes(typeRaw as K1RowType)) {
       throw new Error(
@@ -283,37 +265,21 @@ export function parseK1Table(markdown: string): K1Row[] {
     }
     const type = typeRaw as K1RowType;
     const isOperatorType = type !== "Sponsor";
-    if (
-      isOperatorType &&
-      !K1_KNOWN_OPERATOR_NAMES.includes(
-        target as (typeof K1_KNOWN_OPERATOR_NAMES)[number],
-      )
-    ) {
+    if (isOperatorType && !K1_KNOWN_OPERATOR_NAMES.includes(target as (typeof K1_KNOWN_OPERATOR_NAMES)[number])) {
       throw new Error(
         `docs/partners/k1-outreach.md §(g) has an unknown operator name "${target}" — ` +
           `expected one of the 5 named operators (decision 0001, Addendum D, R2) or "Oklahoma Golf Trail": ` +
           `${K1_KNOWN_OPERATOR_NAMES.join(", ")}.`,
       );
     }
-    if (
-      !isOperatorType &&
-      K1_KNOWN_OPERATOR_NAMES.includes(
-        target as (typeof K1_KNOWN_OPERATOR_NAMES)[number],
-      )
-    ) {
+    if (!isOperatorType && K1_KNOWN_OPERATOR_NAMES.includes(target as (typeof K1_KNOWN_OPERATOR_NAMES)[number])) {
       throw new Error(
         `docs/partners/k1-outreach.md §(g) has a Sponsor row named "${target}", which matches a known ` +
           "operator name — sponsor and operator rows must use distinct names.",
       );
     }
-    const contactedDate = parseIsoDateOrNull(
-      contactedRaw,
-      `${target}: Contacted date`,
-    );
-    const callAcceptedDate = parseIsoDateOrNull(
-      callAcceptedRaw,
-      `${target}: Call accepted date`,
-    );
+    const contactedDate = parseIsoDateOrNull(contactedRaw, `${target}: Contacted date`);
+    const callAcceptedDate = parseIsoDateOrNull(callAcceptedRaw, `${target}: Call accepted date`);
     const loiDate = parseIsoDateOrNull(loiDateRaw, `${target}: LOI date`);
     const feeWillingness = parseYNOrNull(feeRaw, `${target}: Fee willingness`);
     const okSwapCell = okSwapRaw.trim();
@@ -325,11 +291,7 @@ export function parseK1Table(markdown: string): K1Row[] {
             `("${okSwapCell}"), but that column only applies to the "Oklahoma Golf Trail" row.`,
         );
       }
-      if (
-        !K1_SLATE_TRAIL_NAMES.includes(
-          okSwapCell as (typeof K1_SLATE_TRAIL_NAMES)[number],
-        )
-      ) {
+      if (!K1_SLATE_TRAIL_NAMES.includes(okSwapCell as (typeof K1_SLATE_TRAIL_NAMES)[number])) {
         throw new Error(
           `docs/partners/k1-outreach.md §(g) "Oklahoma Golf Trail"'s "OK swap replaces" value "${okSwapCell}" ` +
             `is not one of the 3 slate trail names: ${K1_SLATE_TRAIL_NAMES.join(", ")}.`,
@@ -337,18 +299,9 @@ export function parseK1Table(markdown: string): K1Row[] {
       }
       okSwapReplaces = okSwapCell;
     }
-    const sponsorDecisionMakerNamed = parseYNOrNull(
-      dmRaw,
-      `${target}: Sponsor decision-maker named`,
-    );
-    const sponsorBudgetStated = parseYNOrNull(
-      budgetRaw,
-      `${target}: Sponsor budget range stated`,
-    );
-    const sponsorAttributionInterest = parseYNOrNull(
-      attributionRaw,
-      `${target}: Sponsor attribution interest`,
-    );
+    const sponsorDecisionMakerNamed = parseYNOrNull(dmRaw, `${target}: Sponsor decision-maker named`);
+    const sponsorBudgetStated = parseYNOrNull(budgetRaw, `${target}: Sponsor budget range stated`);
+    const sponsorAttributionInterest = parseYNOrNull(attributionRaw, `${target}: Sponsor attribution interest`);
     const sponsorConversationDate = parseIsoDateOrNull(
       sponsorConversationRaw,
       `${target}: Sponsor conversation date`,
@@ -369,14 +322,14 @@ export function parseK1Table(markdown: string): K1Row[] {
     });
     i += 1;
   }
-  assertNoStrayRowsAfterTable(lines, i, "docs/partners/k1-outreach.md §(g)");
+  assertNoStrayRowsAfterTable(lines, i, 'docs/partners/k1-outreach.md §(g)');
   const seen = new Set<string>();
   for (const row of rows) {
     if (row.type === "Sponsor") continue;
     if (seen.has(row.target)) {
       throw new Error(
         `docs/partners/k1-outreach.md §(g) has a duplicate operator row for "${row.target}" — this also ` +
-          "catches logging the same operator under both its name and its alias (decision 0001, Addendum I: " +
+          'catches logging the same operator under both its name and its alias (decision 0001, Addendum I: ' +
           '"Name alias" — logging it under both names is an error).',
       );
     }
@@ -400,9 +353,7 @@ export function resolveK1LogPath(): string {
 /** Reads and parses the repo's own K1 log. No override flag — same
  * philosophy as `round-windows.ts`'s `readLoggedRoundWindows`: the K1 log
  * lives at exactly one pre-registered path. */
-export async function readK1Log(
-  k1LogPath: string = resolveK1LogPath(),
-): Promise<K1Row[]> {
+export async function readK1Log(k1LogPath: string = resolveK1LogPath()): Promise<K1Row[]> {
   const markdown = await readFile(k1LogPath, "utf8");
   return parseK1Table(markdown);
 }

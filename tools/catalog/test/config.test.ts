@@ -3,10 +3,7 @@
  * comes only from the committed `config/booking-hosts.json`.
  */
 import { describe, expect, it } from "vitest";
-import {
-  defaultBookingHostsConfigPath,
-  loadBookingHostAllowList,
-} from "../src/config.js";
+import { defaultBookingHostsConfigPath, loadBookingHostAllowList } from "../src/config.js";
 import { existsSync } from "node:fs";
 
 describe("loadBookingHostAllowList", () => {

@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  MATCHER_VERSION,
-  matchCheckIn,
-  matchRoute,
-  resolveAskUser,
-} from "../src/index.js";
+import { MATCHER_VERSION, matchCheckIn, matchRoute, resolveAskUser } from "../src/index.js";
 
 describe("@golfraven/matching", () => {
   it("exports MATCHER_VERSION = 1 (build plan §7.4 v1)", () => {

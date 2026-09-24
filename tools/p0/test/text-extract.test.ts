@@ -48,8 +48,7 @@ describe("text-extract: stripHtmlToText (Addendum G: tags stripped, whitespace c
   });
 
   it("removes <script>/<style>/<noscript>/<template> blocks entirely, including their text content", () => {
-    const html =
-      `<p>Real prose.</p><script>var x = "not prose, ignore me";</script>` +
+    const html = `<p>Real prose.</p><script>var x = "not prose, ignore me";</script>` +
       `<style>.a { color: red; /* not prose */ }</style>` +
       `<noscript>Enable JS to read this fallback text.</noscript>`;
     const text = stripHtmlToText(html);
@@ -78,9 +77,9 @@ describe("text-extract: stripHtmlToText (Addendum G: tags stripped, whitespace c
       "Bear Trace, Fall Creek.",
     );
     expect(stripHtmlToText("Sea<b>son</b>")).toBe("Season");
-    expect(
-      stripHtmlToText("The trail: Bear Trace<span>, </span>Fall Creek"),
-    ).toBe("The trail: Bear Trace, Fall Creek");
+    expect(stripHtmlToText("The trail: Bear Trace<span>, </span>Fall Creek")).toBe(
+      "The trail: Bear Trace, Fall Creek",
+    );
     expect(stripHtmlToText("caf<sup>1</sup>e")).toBe("caf1e");
   });
 
@@ -96,7 +95,7 @@ describe("text-extract: stripHtmlToText (Addendum G: tags stripped, whitespace c
     const html = `<p>Before <img alt="a > b" src="x.png"> After</p>`;
     const text = stripHtmlToText(html);
     expect(text).toBe("Before After");
-    expect(text).not.toContain('b" src');
+    expect(text).not.toContain("b\" src");
   });
 
   it("gate finding N3: an UNCLOSED <script> drops its source to the end of the document instead of leaking it", () => {

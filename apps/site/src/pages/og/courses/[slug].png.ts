@@ -19,21 +19,9 @@
 import type { APIRoute } from "astro";
 import { primaryTrailOf } from "@golfraven/catalog";
 import type { Facility } from "@golfraven/catalog";
-import {
-  loadPrimaryTrailOverrides,
-  loadSiteCatalog,
-  verifiedFacilities,
-} from "../../../lib/derive";
-import {
-  ogContentHash,
-  renderCourseCard,
-  renderTemplateCard,
-} from "../../../lib/og-card";
-import {
-  readCachedCard,
-  storeAvailable,
-  writeCachedCard,
-} from "../../../lib/og-store";
+import { loadPrimaryTrailOverrides, loadSiteCatalog, verifiedFacilities } from "../../../lib/derive";
+import { ogContentHash, renderCourseCard, renderTemplateCard } from "../../../lib/og-card";
+import { readCachedCard, storeAvailable, writeCachedCard } from "../../../lib/og-store";
 import { recordRenderTime, shouldRenderFresh } from "../../../lib/og-budget";
 
 export async function getStaticPaths() {
@@ -74,11 +62,7 @@ export const GET: APIRoute = async ({ props }) => {
       buffer = await renderTemplateCard(primaryTrail);
     } else {
       const startedAt = performance.now();
-      buffer = await renderCourseCard(facility, {
-        trail: primaryTrail,
-        holes,
-        par,
-      });
+      buffer = await renderCourseCard(facility, { trail: primaryTrail, holes, par });
       recordRenderTime(performance.now() - startedAt);
       await writeCachedCard(hash, buffer);
     }

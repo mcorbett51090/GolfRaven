@@ -5,12 +5,7 @@
   "rule": {
     "kind": "compare",
     "op": ">=",
-    "left": {
-      "kind": "agg",
-      "name": "countWhere",
-      "field": "designer",
-      "value": "dsg_01M39RCEWZCZZSJ5JW68VK0W9J"
-    },
+    "left": { "kind": "agg", "name": "countWhere", "field": "designer", "value": "dsg_01M39RCEWZCZZSJ5JW68VK0W9J" },
     "right": { "kind": "literal", "value": 5 }
   },
   "minConfidence": 0.5,

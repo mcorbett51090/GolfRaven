@@ -27,9 +27,7 @@ interface ExpectedIssue {
   path: string;
 }
 
-function sortIssues(
-  issues: { code: string; path: string }[],
-): { code: string; path: string }[] {
+function sortIssues(issues: { code: string; path: string }[]): { code: string; path: string }[] {
   return [...issues]
     .map((i) => ({ code: i.code, path: i.path }))
     .sort((a, b) => (a.code + a.path).localeCompare(b.code + b.path));
@@ -38,11 +36,7 @@ function sortIssues(
 async function expectExactFail(
   name: string,
   expected: ExpectedIssue[],
-  options: {
-    base?: string;
-    bookingHostAllowList?: string[];
-    labels?: string[];
-  } = {},
+  options: { base?: string; bookingHostAllowList?: string[]; labels?: string[] } = {},
 ) {
   const bundle = await loadFixture(name);
   const base = options.base ? await loadFixture(options.base) : undefined;
@@ -52,15 +46,10 @@ async function expectExactFail(
     labels: options.labels ?? [],
   });
   expect(result.ok).toBe(false);
-  expect(sortIssues(result.issues as CatalogIssue[])).toEqual(
-    sortIssues(expected),
-  );
+  expect(sortIssues(result.issues as CatalogIssue[])).toEqual(sortIssues(expected));
 }
 
-async function expectPasses(
-  name: string,
-  options: { bookingHostAllowList?: string[] } = {},
-) {
+async function expectPasses(name: string, options: { bookingHostAllowList?: string[] } = {}) {
   const bundle = await loadFixture(name);
   const result = verifyCatalogRaw(bundle, {
     bookingHostAllowList: options.bookingHostAllowList ?? BOOKING_HOSTS,
@@ -113,10 +102,7 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("missing member (dangling reference)", () =>
     expectExactFail("mf-missing-member", [
-      {
-        code: "ROSTER_MISSING_MEMBER",
-        path: "trails[0].rosterVersions[0].members[1]",
-      },
+      { code: "ROSTER_MISSING_MEMBER", path: "trails[0].rosterVersions[0].members[1]" },
     ]));
 
   it("roster without a source (structurally required, §4.1)", () =>
@@ -126,21 +112,13 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("unit/member-type mismatch within a version", () =>
     expectExactFail("mf-unit-member-mismatch", [
-      {
-        code: "ROSTER_UNIT_MEMBER_MISMATCH",
-        path: "trails[0].rosterVersions[0].members[0]",
-      },
+      { code: "ROSTER_UNIT_MEMBER_MISMATCH", path: "trails[0].rosterVersions[0].members[0]" },
     ]));
 
   it("a published RosterVersion changed (A2-02)", () =>
     expectExactFail(
       "mf-roster-version-changed",
-      [
-        {
-          code: "ROSTER_VERSION_IMMUTABLE_CHANGE",
-          path: "trails[0].rosterVersions[0]",
-        },
-      ],
+      [{ code: "ROSTER_VERSION_IMMUTABLE_CHANGE", path: "trails[0].rosterVersions[0]" }],
       { base: "mf-roster-version-changed.base" },
     ));
 
@@ -161,10 +139,7 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("course-native host != facility domain", () =>
     expectExactFail("mf-course-native-host-mismatch", [
-      {
-        code: "BOOKING_COURSE_NATIVE_HOST_MISMATCH",
-        path: "facilities[0].booking[1]",
-      },
+      { code: "BOOKING_COURSE_NATIVE_HOST_MISMATCH", path: "facilities[0].booking[1]" },
     ]));
 
   it("play-verified facility without a polygon", () =>
@@ -178,19 +153,13 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
     ]));
 
   it("missing tz", () =>
-    expectExactFail("mf-tz-missing", [
-      { code: "SCHEMA_INVALID", path: "facilities[0].tz" },
-    ]));
+    expectExactFail("mf-tz-missing", [{ code: "SCHEMA_INVALID", path: "facilities[0].tz" }]));
 
   it("non-IANA tz", () =>
-    expectExactFail("mf-tz-not-iana", [
-      { code: "SCHEMA_INVALID", path: "facilities[0].tz" },
-    ]));
+    expectExactFail("mf-tz-not-iana", [{ code: "SCHEMA_INVALID", path: "facilities[0].tz" }]));
 
   it("wrong-zone tz (G-P0-11) — tz-lookup pinned dataset", () =>
-    expectExactFail("mf-tz-wrong-zone", [
-      { code: "TZ_WRONG_ZONE", path: "facilities[0].tz" },
-    ]));
+    expectExactFail("mf-tz-wrong-zone", [{ code: "TZ_WRONG_ZONE", path: "facilities[0].tz" }]));
 
   it("coordinate moved > 150 m without the geometry-reviewed label", () =>
     expectExactFail(
@@ -202,12 +171,7 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
   it("S1: a course's geometry FIELDS changed (not a coordinate move) without the label", () =>
     expectExactFail(
       "mf-geometry-field-diff-unreviewed",
-      [
-        {
-          code: "GEOMETRY_DIFF_UNREVIEWED",
-          path: "facilities[0].courses[0].geometry",
-        },
-      ],
+      [{ code: "GEOMETRY_DIFF_UNREVIEWED", path: "facilities[0].courses[0].geometry" }],
       { base: "mf-geometry-field-diff-unreviewed.base" },
     ));
 
@@ -240,26 +204,17 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("completionRule n-of-m with no ruleSource (v6, O15)", () =>
     expectExactFail("mf-nofm-no-rulesource", [
-      {
-        code: "SCHEMA_INVALID",
-        path: "trails[0].rosterVersions[0].completionRule.ruleSource",
-      },
+      { code: "SCHEMA_INVALID", path: "trails[0].rosterVersions[0].completionRule.ruleSource" },
     ]));
 
   it("S6: markerRule n-of-m with no ruleSource", () =>
     expectExactFail("mf-markerrule-nofm-no-rulesource", [
-      {
-        code: "SCHEMA_INVALID",
-        path: "trails[0].rosterVersions[0].markerRule.ruleSource",
-      },
+      { code: "SCHEMA_INVALID", path: "trails[0].rosterVersions[0].markerRule.ruleSource" },
     ]));
 
   it("a listed-verified+ roster member with no access value (v6, O8)", () =>
     expectExactFail("mf-roster-member-missing-access", [
-      {
-        code: "ROSTER_MEMBER_MISSING_ACCESS",
-        path: "trails[0].rosterVersions[0].members[0]",
-      },
+      { code: "ROSTER_MEMBER_MISSING_ACCESS", path: "trails[0].rosterVersions[0].members[0]" },
     ]));
 
   it("an access: 'private' facility with a booking[] entry (v6, O8)", () =>
@@ -274,10 +229,7 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("a curated Course whose name has NO prov at all fails (AT(8))", () =>
     expectExactFail("mf-course-name-no-prov", [
-      {
-        code: "PROV_MISSING_OR_OSM",
-        path: "facilities[0].courses[0].prov.name",
-      },
+      { code: "PROV_MISSING_OR_OSM", path: "facilities[0].courses[0].prov.name" },
     ]));
 
   it("S2: facility nameFr with no prov stamp", () =>
@@ -310,18 +262,12 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("S4: composite pointing at a non-existent course", () =>
     expectExactFail("mf-composite-dangling", [
-      {
-        code: "CROSS_REF_COMPOSITE_DANGLING",
-        path: "facilities[0].courses[0].composite[1]",
-      },
+      { code: "CROSS_REF_COMPOSITE_DANGLING", path: "facilities[0].courses[0].composite[1]" },
     ]));
 
   it("S4: a designer id not in designers[] (plan 611)", () =>
     expectExactFail("mf-unknown-designer", [
-      {
-        code: "CROSS_REF_UNKNOWN_DESIGNER",
-        path: "facilities[0].courses[0].designers",
-      },
+      { code: "CROSS_REF_UNKNOWN_DESIGNER", path: "facilities[0].courses[0].designers" },
     ]));
 
   it("S4: a catalog id missing from the ledger", () =>
@@ -344,10 +290,7 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
 
   it("S4: duplicate roster version numbers", () =>
     expectExactFail("mf-duplicate-roster-version", [
-      {
-        code: "ROSTER_DUPLICATE_VERSION_NUMBER",
-        path: "trails[0].rosterVersions",
-      },
+      { code: "ROSTER_DUPLICATE_VERSION_NUMBER", path: "trails[0].rosterVersions" },
     ]));
 
   it("S4: a published trail deleted relative to --base", () =>
@@ -373,10 +316,7 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
     expectExactFail(
       "mf-ledger-entry-removed",
       [
-        {
-          code: "CROSS_REF_ID_NOT_IN_LEDGER",
-          path: "facilities[0].courses[0]",
-        },
+        { code: "CROSS_REF_ID_NOT_IN_LEDGER", path: "facilities[0].courses[0]" },
         {
           code: "LEDGER_ENTRY_REMOVED",
           path: "idLedger.entries.crs_01M39GMFJZ2P89V3ZZXPPH671T",
@@ -497,25 +437,19 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
       { code: "RULE_UNSATISFIABLE", path: "achievements[0].rule" },
     ]));
 
-  it('S6: an achievement rule\'s countWhere("facility", …) referencing an unknown facility', () =>
+  it("S6: an achievement rule's countWhere(\"facility\", …) referencing an unknown facility", () =>
     expectExactFail("mf-achievement-unknown-facility", [
-      {
-        code: "ACHIEVEMENT_RULE_UNKNOWN_FACILITY",
-        path: "achievements[0].rule",
-      },
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_FACILITY", path: "achievements[0].rule" },
     ]));
 
-  it('S6: an achievement rule\'s countDistinct("trail", {in}) referencing an unknown trail', () =>
+  it("S6: an achievement rule's countDistinct(\"trail\", {in}) referencing an unknown trail", () =>
     expectExactFail("mf-achievement-unknown-trail-countdistinct", [
       { code: "ACHIEVEMENT_RULE_UNKNOWN_TRAIL", path: "achievements[0].rule" },
     ]));
 
   it("N5: completionRule n-of-m with n greater than the member count", () =>
     expectExactFail("mf-nofm-exceeds-member-count", [
-      {
-        code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT",
-        path: "trails[0].rosterVersions[0].completionRule.n",
-      },
+      { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].completionRule.n" },
     ]));
 
   // Re-gate item 3: pins the marker n-of-m gate to markerRosterSize (distinct
@@ -525,9 +459,6 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
   // compares against memberCount instead would wrongly let this pass.
   it("N-gate: markerRule n-of-m with n greater than the DISTINCT-FACILITY marker roster (but not the raw member count)", () =>
     expectExactFail("mf-nofm-exceeds-marker-roster", [
-      {
-        code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT",
-        path: "trails[0].rosterVersions[0].markerRule.n",
-      },
+      { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].markerRule.n" },
     ]));
 });

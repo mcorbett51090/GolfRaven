@@ -132,9 +132,9 @@ against EITHER column.
 
 **Gate finding G-N1 (correction — this only survives ONE rotation, not
 "permanently"):** only one previous hash is kept
-(`unsubscribe_token_hash_prev`), so a _second_ rotation's resend
+(`unsubscribe_token_hash_prev`), so a *second* rotation's resend
 overwrites it. If a row resends again after a second rotation before the
-recipient of the email from _before the first rotation_ has clicked
+recipient of the email from *before the first rotation* has clicked
 unsubscribe, that first email's link 400s — it was never re-derived,
 because doing so would need the already-retired first pepper. The
 newest-emailed link for a row always keeps working; it's only an

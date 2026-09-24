@@ -22,9 +22,7 @@ const DESIGNER_ID = "dsg_01M39GMFJZ21RFA7G11961JMQC";
  * `osm/` shard path is exercised). Every field only carries what its
  * `verification.status: "unverified"` allows to stay minimal (content
  * fields are optional pre-`listed-verified`, §4.1). */
-export function minimalBundleRaw(
-  overrides: Record<string, unknown> = {},
-): unknown {
+export function minimalBundleRaw(overrides: Record<string, unknown> = {}): unknown {
   return {
     contractVersion: 0,
     facilities: [
@@ -58,21 +56,14 @@ export function minimalBundleRaw(
         regions: ["US-TN"],
         kind: "state-agency",
         status: "active",
-        operator: {
-          name: "Test Operator",
-          url: "https://example.com/operator",
-          type: "state-agency",
-        },
+        operator: { name: "Test Operator", url: "https://example.com/operator", type: "state-agency" },
         officialUrl: "https://example.com/trail",
         rosterStatus: "verified",
         rosterVersions: [
           {
             version: 1,
             effectiveFrom: "2026-01-01",
-            source: {
-              url: "https://example.com/source",
-              retrieved: "2026-01-01",
-            },
+            source: { url: "https://example.com/source", retrieved: "2026-01-01" },
             verifiedAt: "2026-01-01",
             completionUnit: "course",
             markerUnit: "facility",
@@ -82,29 +73,19 @@ export function minimalBundleRaw(
           },
         ],
         lastReviewed: "2026-01-01",
-        sources: [
-          { url: "https://example.com/source", retrieved: "2026-01-01" },
-        ],
+        sources: [{ url: "https://example.com/source", retrieved: "2026-01-01" }],
       },
     ],
     designers: [
       {
         id: DESIGNER_ID,
         name: "Test Designer",
-        sources: [
-          { url: "https://example.com/source", retrieved: "2026-01-01" },
-        ],
+        sources: [{ url: "https://example.com/source", retrieved: "2026-01-01" }],
       },
     ],
     idLedger: {
       entries: {
-        [FACILITY_ID]: {
-          id: FACILITY_ID,
-          kind: "fac",
-          slug: "test-facility-one",
-          status: "stub",
-          transitions: [],
-        },
+        [FACILITY_ID]: { id: FACILITY_ID, kind: "fac", slug: "test-facility-one", status: "stub", transitions: [] },
         [COURSE_ID]: {
           id: COURSE_ID,
           kind: "crs",
@@ -126,30 +107,18 @@ export function minimalBundleRaw(
           facilityId: FACILITY_ID_2,
           transitions: [],
         },
-        [TRAIL_ID]: {
-          id: TRAIL_ID,
-          kind: "trl",
-          slug: "test-trail",
-          transitions: [],
-        },
+        [TRAIL_ID]: { id: TRAIL_ID, kind: "trl", slug: "test-trail", transitions: [] },
         [DESIGNER_ID]: { id: DESIGNER_ID, kind: "dsg", transitions: [] },
       },
     },
     osm: {
-      "way/1001": {
-        lat: 36.16,
-        lng: -86.78,
-        name: "Test Facility One (OSM)",
-        holes: 18,
-      },
+      "way/1001": { lat: 36.16, lng: -86.78, name: "Test Facility One (OSM)", holes: 18 },
     },
     ...overrides,
   };
 }
 
-export function minimalBundle(
-  overrides: Record<string, unknown> = {},
-): CatalogBundle {
+export function minimalBundle(overrides: Record<string, unknown> = {}): CatalogBundle {
   const parsed = parseCatalogBundle(minimalBundleRaw(overrides));
   if (!parsed.ok) {
     throw new Error(

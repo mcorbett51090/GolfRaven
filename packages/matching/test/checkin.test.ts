@@ -84,12 +84,7 @@ describe("matchCheckIn (build plan §7.4 step 5)", () => {
     // The rectangle spans ±200 m east-west from ORIGIN; put the fix 30 m past that edge.
     const justOutside = offset(ORIGIN, 230, 0);
     const result = matchCheckIn(
-      {
-        point: justOutside,
-        accuracyMeters: 5,
-        simulated: false,
-        timestamp: 1000,
-      },
+      { point: justOutside, accuracyMeters: 5, simulated: false, timestamp: 1000 },
       polygonCourse,
     );
     expect(result.accepted).toBe(true);
@@ -100,11 +95,7 @@ describe("matchCheckIn (build plan §7.4 step 5)", () => {
       { point: ORIGIN, accuracyMeters: 10, simulated: false, timestamp: 1000 },
       radiusCourse,
     );
-    expect(result).toMatchObject({
-      accepted: true,
-      geometryKind: "radius",
-      courseId: "crs_checkin_radius",
-    });
+    expect(result).toMatchObject({ accepted: true, geometryKind: "radius", courseId: "crs_checkin_radius" });
   });
 
   it("reports no_geometry for a candidate with neither a polygon nor a radius circle", () => {

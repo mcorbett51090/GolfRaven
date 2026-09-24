@@ -70,9 +70,7 @@ function sortAndValidate(value: unknown): unknown {
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
-      throw new Error(
-        `canonicalStringify: refusing a non-finite number (${value})`,
-      );
+      throw new Error(`canonicalStringify: refusing a non-finite number (${value})`);
     }
     if (Object.is(value, -0)) {
       throw new Error("canonicalStringify: refusing -0 (negative zero)");
@@ -116,30 +114,21 @@ const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
  * PARSE time, over every string `parseStrictJson` ever builds — including
  * ones a looser schema might one day forget to constrain.
  */
-function assertNoLoneSurrogatesOrControls(
-  s: string,
-  fail: (msg: string) => never,
-): void {
+function assertNoLoneSurrogatesOrControls(s: string, fail: (msg: string) => never): void {
   for (let idx = 0; idx < s.length; idx += 1) {
     const code = s.charCodeAt(idx);
     if (code < 0x20 || code === 0x7f) {
-      fail(
-        `string contains a control character (U+${code.toString(16).padStart(4, "0")})`,
-      );
+      fail(`string contains a control character (U+${code.toString(16).padStart(4, "0")})`);
     }
     if (code >= 0xd800 && code <= 0xdbff) {
       const next = s.charCodeAt(idx + 1);
       if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) {
-        fail(
-          `string contains a lone (unpaired) high surrogate U+${code.toString(16)}`,
-        );
+        fail(`string contains a lone (unpaired) high surrogate U+${code.toString(16)}`);
       } else {
         idx += 1; // consumed as a valid surrogate pair
       }
     } else if (code >= 0xdc00 && code <= 0xdfff) {
-      fail(
-        `string contains a lone (unpaired) low surrogate U+${code.toString(16)}`,
-      );
+      fail(`string contains a lone (unpaired) low surrogate U+${code.toString(16)}`);
     }
   }
 }
@@ -183,22 +172,17 @@ export function parseStrictJson(text: string): unknown {
     if (c === "t") return parseLiteral("true", true);
     if (c === "f") return parseLiteral("false", false);
     if (c === "n") return parseLiteral("null", null);
-    if (c === "-" || (c !== undefined && c >= "0" && c <= "9"))
-      return parseNumber();
+    if (c === "-" || (c !== undefined && c >= "0" && c <= "9")) return parseNumber();
     fail(`unexpected character ${JSON.stringify(c)}`);
   }
   function parseLiteral(lit: string, val: unknown): unknown {
-    if (text.slice(i, i + lit.length) !== lit)
-      fail(`expected literal "${lit}"`);
+    if (text.slice(i, i + lit.length) !== lit) fail(`expected literal "${lit}"`);
     i += lit.length;
     return val;
   }
   function parseObject(): Record<string, unknown> {
     i += 1; // "{"
-    const obj: Record<string, unknown> = Object.create(null) as Record<
-      string,
-      unknown
-    >;
+    const obj: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     const seen = new Set<string>();
     skipWs();
     if (text[i] === "}") {
@@ -327,16 +311,14 @@ export function parseStrictJson(text: string): unknown {
     }
     if (text[i] === ".") {
       i += 1;
-      if (!(i < n && text[i]! >= "0" && text[i]! <= "9"))
-        fail("invalid number (fraction)");
+      if (!(i < n && text[i]! >= "0" && text[i]! <= "9")) fail("invalid number (fraction)");
       while (i < n && text[i]! >= "0" && text[i]! <= "9") i += 1;
     }
     if (text[i] === "e" || text[i] === "E") {
       i += 1;
       const sign = text[i];
       if (sign === "+" || sign === "-") i += 1;
-      if (!(i < n && text[i]! >= "0" && text[i]! <= "9"))
-        fail("invalid number (exponent)");
+      if (!(i < n && text[i]! >= "0" && text[i]! <= "9")) fail("invalid number (exponent)");
       while (i < n && text[i]! >= "0" && text[i]! <= "9") i += 1;
     }
     const literal = text.slice(start, i);
@@ -356,9 +338,7 @@ export function parseStrictJson(text: string): unknown {
 /* Schemas                                                              */
 /* ------------------------------------------------------------------ */
 
-export const Sha256HexSchema = z
-  .string()
-  .regex(/^[0-9a-f]{64}$/, "must be a lowercase hex sha256");
+export const Sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/, "must be a lowercase hex sha256");
 
 /** `yyyymmdd-gitsha7` (§3.5). */
 export const CatalogVersionSchema = z
@@ -373,9 +353,7 @@ export const SemverSchema = z
   );
 
 /** A key id: lower-case letters, digits and hyphens only, 1–64 chars. */
-export const KidSchema = z
-  .string()
-  .regex(/^[a-z0-9-]{1,64}$/, "must match ^[a-z0-9-]{1,64}$");
+export const KidSchema = z.string().regex(/^[a-z0-9-]{1,64}$/, "must match ^[a-z0-9-]{1,64}$");
 
 /**
  * A strict, UTC-only ISO-8601 datetime with millisecond precision —
@@ -401,12 +379,8 @@ export const ShardPathSchema = z
   .string()
   .min(1)
   .regex(/^[a-z0-9][a-z0-9/_.-]*\.(json|txt)$/, "invalid shard path")
-  .refine((p) => !p.split("/").includes(".."), {
-    message: "shard path must not contain ..",
-  })
-  .refine((p) => !p.startsWith("/"), {
-    message: "shard path must not be absolute",
-  });
+  .refine((p) => !p.split("/").includes(".."), { message: "shard path must not contain .." })
+  .refine((p) => !p.startsWith("/"), { message: "shard path must not be absolute" });
 
 export const ShardEntrySchema = z.strictObject({
   path: ShardPathSchema,
@@ -488,8 +462,7 @@ export function versionsStatementBytes(statement: VersionsStatement): Buffer {
 /* than throwing a TypeError")                                          */
 /* ------------------------------------------------------------------ */
 
-export type StrictParseResult<T> =
-  { ok: true; value: T } | { ok: false; issues: string[] };
+export type StrictParseResult<T> = { ok: true; value: T } | { ok: false; issues: string[] };
 
 export function strictParseAndValidate<T>(
   raw: Buffer,
@@ -500,18 +473,13 @@ export function strictParseAndValidate<T>(
   try {
     parsed = parseStrictJson(raw.toString("utf8"));
   } catch (err) {
-    return {
-      ok: false,
-      issues: [`${label}: ${err instanceof Error ? err.message : String(err)}`],
-    };
+    return { ok: false, issues: [`${label}: ${err instanceof Error ? err.message : String(err)}`] };
   }
   const result = schema.safeParse(parsed);
   if (!result.success) {
     return {
       ok: false,
-      issues: result.error.issues.map(
-        (i) => `${label}: ${formatZodPath(i.path)}: ${i.message}`,
-      ),
+      issues: result.error.issues.map((i) => `${label}: ${formatZodPath(i.path)}: ${i.message}`),
     };
   }
   return { ok: true, value: result.data };
@@ -527,9 +495,7 @@ function formatZodPath(path: readonly PropertyKey[]): string {
 /* refusal)                                                             */
 /* ------------------------------------------------------------------ */
 
-export function parseCatalogVersion(
-  v: string,
-): { date: string; sha: string } | undefined {
+export function parseCatalogVersion(v: string): { date: string; sha: string } | undefined {
   const m = /^(\d{8})-([0-9a-f]{7})$/.exec(v);
   if (!m) return undefined;
   return { date: m[1]!, sha: m[2]! };

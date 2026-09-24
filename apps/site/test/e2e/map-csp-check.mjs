@@ -53,11 +53,7 @@ async function checkPage(browser, baseUrl, path) {
   // blocked never reaches this route handler at all; it would show up as
   // a securitypolicyviolation instead, which the assertion below catches).
   await page.route(`${FAKE_STYLE_URL}**`, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(MINIMAL_STYLE),
-    }),
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MINIMAL_STYLE) }),
   );
   await page.route(`https://${FAKE_TILE_HOST}/**`, (route) =>
     route.fulfill({ status: 404, body: "not stubbed" }),
@@ -120,9 +116,7 @@ export async function runMapCspTest(browser, baseUrl, paths) {
     for (const r of withViolations) {
       console.error(`\n[e2e] FAIL ${r.kind} (${r.path}) — CSP violations:`);
       for (const v of r.violations) {
-        console.error(
-          `  - ${v.directive} blocked ${v.blockedURI} (${v.sourceFile}:${v.lineNumber})`,
-        );
+        console.error(`  - ${v.directive} blocked ${v.blockedURI} (${v.sourceFile}:${v.lineNumber})`);
       }
     }
     throw new Error(
@@ -138,9 +132,7 @@ export async function runMapCspTest(browser, baseUrl, paths) {
     );
   }
 
-  console.log(
-    `\n[e2e] PASS — ${results.length} page(s), 0 CSP violations, map booted on ${hubOrTrailOrCourseWithMap.length} of them.`,
-  );
+  console.log(`\n[e2e] PASS — ${results.length} page(s), 0 CSP violations, map booted on ${hubOrTrailOrCourseWithMap.length} of them.`);
   return results;
 }
 
@@ -166,10 +158,7 @@ export async function checkSearch(browser, baseUrl, path, query) {
   await page.addInitScript(() => {
     window.__cspViolations = [];
     window.addEventListener("securitypolicyviolation", (ev) => {
-      window.__cspViolations.push({
-        directive: ev.violatedDirective,
-        blockedURI: ev.blockedURI,
-      });
+      window.__cspViolations.push({ directive: ev.violatedDirective, blockedURI: ev.blockedURI });
     });
   });
 
@@ -200,20 +189,14 @@ export async function checkSearch(browser, baseUrl, path, query) {
   if (violations.length > 0) {
     throw new Error(
       `search e2e: ${violations.length} CSP violation(s) while searching — ` +
-        violations
-          .map((v) => `${v.directive} blocked ${v.blockedURI}`)
-          .join("; "),
+        violations.map((v) => `${v.directive} blocked ${v.blockedURI}`).join("; "),
     );
   }
   if (resultCount === 0) {
-    throw new Error(
-      `search e2e: 0 results for "${query}" — the assertion needs a query that actually matches`,
-    );
+    throw new Error(`search e2e: 0 results for "${query}" — the assertion needs a query that actually matches`);
   }
 
-  console.log(
-    `  [e2e] search "${query}" on ${path}: ${resultCount} result(s), 0 CSP violations (first: "${firstResultText}")`,
-  );
+  console.log(`  [e2e] search "${query}" on ${path}: ${resultCount} result(s), 0 CSP violations (first: "${firstResultText}")`);
   return { resultCount, violations };
 }
 

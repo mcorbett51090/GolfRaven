@@ -11,10 +11,7 @@ function toBase64Url(bytes: Uint8Array): string {
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** A 256-bit random, URL-safe token — used for confirm and unsubscribe links. */
@@ -25,16 +22,11 @@ export function generateToken(): string {
 }
 
 /** SHA-256 hex digest of `pepper + ":" + value`. */
-export async function hashWithPepper(
-  pepper: string,
-  value: string,
-): Promise<string> {
+export async function hashWithPepper(pepper: string, value: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(`${pepper}:${value}`);
   const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -62,23 +54,12 @@ export async function hashWithPepper(
  * and README.md "Rotating TOKEN_PEPPER" for the transition path (accept
  * either pepper for a lookup window) before rotating it in production.
  */
-export async function deriveUnsubscribeToken(
-  pepper: string,
-  emailLc: string,
-): Promise<string> {
+export async function deriveUnsubscribeToken(pepper: string, emailLc: string): Promise<string> {
   const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(pepper),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(`golfraven-unsubscribe-v1:${emailLc}`),
-  );
+  const key = await crypto.subtle.importKey("raw", encoder.encode(pepper), { name: "HMAC", hash: "SHA-256" }, false, [
+    "sign",
+  ]);
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`golfraven-unsubscribe-v1:${emailLc}`));
   return toBase64Url(new Uint8Array(signature));
 }
 

@@ -43,9 +43,7 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       }),
     );
 
-    const config: X2SourceConfig = {
-      TN: ["https://www.tnstateparks.com/golf"],
-    };
+    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
     const outDir = path.join(OUT_DIR, "html-run");
     const manifest = await runX2Fetch(config, outDir);
 
@@ -75,8 +73,7 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   });
 
   it("gate S3: stores a REAL PDF's bytes and auto-extracts its text with the pinned extractor — never 'manual'", async () => {
-    const quote =
-      "The Trail Pass unit is the facility. Season runs year-round.";
+    const quote = "The Trail Pass unit is the facility. Season runs year-round.";
     const pdfBytes = buildMinimalPdf(quote);
     vi.stubGlobal(
       "fetch",
@@ -117,17 +114,12 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   it("gate N5: a .pdf URL that actually serves an HTML error page is stored as binary, not mis-read as PDF text or HTML", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(
-        async () =>
-          new Response("<html>404 Not Found</html>", {
-            status: 200,
-            headers: { "content-type": "application/pdf" },
-          }),
-      ),
+      vi.fn(async () => new Response("<html>404 Not Found</html>", {
+        status: 200,
+        headers: { "content-type": "application/pdf" },
+      })),
     );
-    const config: X2SourceConfig = {
-      VI: ["https://golfvancouverisland.ca/missing.pdf"],
-    };
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/missing.pdf"] };
     const outDir = path.join(OUT_DIR, "fake-pdf-run");
     const manifest = await runX2Fetch(config, outDir);
     const entry = manifest.trails.VI?.[0];
@@ -161,10 +153,7 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   it("records a non-blocked HTTP failure (e.g. 404) as FAILED too, distinct from a network-policy block", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(
-        async () =>
-          new Response("not found", { status: 404, statusText: "Not Found" }),
-      ),
+      vi.fn(async () => new Response("not found", { status: 404, statusText: "Not Found" })),
     );
     const config: X2SourceConfig = { TN: ["https://tngolftrail.net/missing"] };
     const outDir = path.join(OUT_DIR, "404-run");
@@ -213,15 +202,11 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
           status: 200,
           headers: { "content-type": "text/html" },
         });
-        Object.defineProperty(res, "url", {
-          value: "https://www.tnstateparks.com/golf",
-        });
+        Object.defineProperty(res, "url", { value: "https://www.tnstateparks.com/golf" });
         return res;
       }),
     );
-    const config: X2SourceConfig = {
-      TN: ["https://www.tnstateparks.com/golf"],
-    };
+    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
     const outDir = path.join(OUT_DIR, "oversized-run");
     const manifest = await runX2Fetch(config, outDir);
     const entry = manifest.trails.TN?.[0];
@@ -252,9 +237,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       "fetched",
     ]);
 
-    await expect(
-      runX2Fetch({}, path.join(OUT_DIR, "empty-run")),
-    ).rejects.toThrow(/empty source list/);
+    await expect(runX2Fetch({}, path.join(OUT_DIR, "empty-run"))).rejects.toThrow(
+      /empty source list/,
+    );
   });
 });
 
@@ -262,13 +247,10 @@ describe("x2-fetch: renderManifestSummary", () => {
   it("labels the candidate list DRAFT and never as a confirmation", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(
-        async () =>
-          new Response("<h1>Some Trail</h1>", {
-            status: 200,
-            headers: { "content-type": "text/html" },
-          }),
-      ),
+      vi.fn(async () => new Response("<h1>Some Trail</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      })),
     );
     const manifest = await runX2Fetch(
       { TN: ["https://www.tnstateparks.com/golf"] },

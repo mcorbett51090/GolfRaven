@@ -57,8 +57,7 @@ const DEFAULT_ATTRIBUTION = "© OpenStreetMap contributors";
  * @returns {TileConfig}
  */
 export function tileConfig(env = process.env) {
-  const attribution =
-    env.GOLFRAVEN_TILE_ATTRIBUTION?.trim() || DEFAULT_ATTRIBUTION;
+  const attribution = env.GOLFRAVEN_TILE_ATTRIBUTION?.trim() || DEFAULT_ATTRIBUTION;
   const raw = env.GOLFRAVEN_TILE_STYLE_URL?.trim();
   if (!raw) {
     return { configured: false, attribution, hosts: [] };

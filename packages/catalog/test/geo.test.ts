@@ -21,9 +21,7 @@ describe("haversineDistanceMeters", () => {
   it("returns a large distance for two far-apart points", () => {
     const nashville = { lat: 36.16, lng: -86.78 };
     const tokyo = { lat: 35.68, lng: 139.65 };
-    expect(haversineDistanceMeters(nashville, tokyo)).toBeGreaterThan(
-      1_000_000,
-    );
+    expect(haversineDistanceMeters(nashville, tokyo)).toBeGreaterThan(1_000_000);
   });
 });
 
@@ -36,42 +34,27 @@ describe("tzLikelyContainsCoordinates", () => {
   describe("must FAIL (wrong zone)", () => {
     it("Seattle tagged America/New_York", () => {
       expect(
-        tzLikelyContainsCoordinates("America/New_York", {
-          lat: 47.6,
-          lng: -122.3,
-        }),
+        tzLikelyContainsCoordinates("America/New_York", { lat: 47.6, lng: -122.3 }),
       ).toBe(false);
     });
     it("Knoxville TN tagged America/Chicago (true: America/New_York)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Chicago", {
-          lat: 35.96,
-          lng: -83.92,
-        }),
+        tzLikelyContainsCoordinates("America/Chicago", { lat: 35.96, lng: -83.92 }),
       ).toBe(false);
     });
     it("Phoenix AZ tagged America/Denver (true: America/Phoenix)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Denver", {
-          lat: 33.45,
-          lng: -112.07,
-        }),
+        tzLikelyContainsCoordinates("America/Denver", { lat: 33.45, lng: -112.07 }),
       ).toBe(false);
     });
     it("Kenora ON tagged America/Toronto (true: America/Winnipeg)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Toronto", {
-          lat: 49.77,
-          lng: -94.49,
-        }),
+        tzLikelyContainsCoordinates("America/Toronto", { lat: 49.77, lng: -94.49 }),
       ).toBe(false);
     });
     it("Indianapolis tagged America/Chicago (true: America/Indiana/Indianapolis)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Chicago", {
-          lat: 39.77,
-          lng: -86.16,
-        }),
+        tzLikelyContainsCoordinates("America/Chicago", { lat: 39.77, lng: -86.16 }),
       ).toBe(false);
     });
   });
@@ -79,10 +62,7 @@ describe("tzLikelyContainsCoordinates", () => {
   describe("must PASS (correct zone, including tricky real cases)", () => {
     it("Phoenix AZ tagged America/Phoenix", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Phoenix", {
-          lat: 33.45,
-          lng: -112.07,
-        }),
+        tzLikelyContainsCoordinates("America/Phoenix", { lat: 33.45, lng: -112.07 }),
       ).toBe(true);
     });
     it("Indianapolis tagged America/Indiana/Indianapolis", () => {
@@ -95,18 +75,12 @@ describe("tzLikelyContainsCoordinates", () => {
     });
     it("a Saskatchewan course tagged America/Regina", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Regina", {
-          lat: 50.45,
-          lng: -104.6,
-        }),
+        tzLikelyContainsCoordinates("America/Regina", { lat: 50.45, lng: -104.6 }),
       ).toBe(true);
     });
     it("Nashville TN tagged America/Chicago", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Chicago", {
-          lat: 36.16,
-          lng: -86.78,
-        }),
+        tzLikelyContainsCoordinates("America/Chicago", { lat: 36.16, lng: -86.78 }),
       ).toBe(true);
     });
   });
@@ -119,26 +93,17 @@ describe("tzLikelyContainsCoordinates", () => {
   describe("round 2: tzdb link-table canonicalization", () => {
     it("Thunder Bay ON tagged America/Toronto (tz-lookup's 2019 data still says America/Thunder_Bay)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Toronto", {
-          lat: 48.38,
-          lng: -89.25,
-        }),
+        tzLikelyContainsCoordinates("America/Toronto", { lat: 48.38, lng: -89.25 }),
       ).toBe(true);
     });
     it("Pangnirtung NU tagged America/Iqaluit (tz-lookup's 2019 data still says America/Pangnirtung)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Iqaluit", {
-          lat: 66.15,
-          lng: -65.7,
-        }),
+        tzLikelyContainsCoordinates("America/Iqaluit", { lat: 66.15, lng: -65.7 }),
       ).toBe(true);
     });
     it("Indianapolis tagged with the LEGACY alias America/Indianapolis", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Indianapolis", {
-          lat: 39.77,
-          lng: -86.16,
-        }),
+        tzLikelyContainsCoordinates("America/Indianapolis", { lat: 39.77, lng: -86.16 }),
       ).toBe(true);
     });
   });
@@ -146,10 +111,7 @@ describe("tzLikelyContainsCoordinates", () => {
   describe("round 2: ~5 km border tolerance", () => {
     it("Rainy River ON tagged America/Winnipeg (tz-lookup's simplified polygon reads the center point as America/Chicago)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Winnipeg", {
-          lat: 48.72,
-          lng: -94.57,
-        }),
+        tzLikelyContainsCoordinates("America/Winnipeg", { lat: 48.72, lng: -94.57 }),
       ).toBe(true);
     });
   });
@@ -157,42 +119,27 @@ describe("tzLikelyContainsCoordinates", () => {
   describe("round 2: link table + border tolerance never widen a genuinely wrong zone", () => {
     it("Seattle tagged America/New_York still fails (not a link, not within 5 km)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/New_York", {
-          lat: 47.6,
-          lng: -122.3,
-        }),
+        tzLikelyContainsCoordinates("America/New_York", { lat: 47.6, lng: -122.3 }),
       ).toBe(false);
     });
     it("Knoxville tagged America/Chicago still fails", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Chicago", {
-          lat: 35.96,
-          lng: -83.92,
-        }),
+        tzLikelyContainsCoordinates("America/Chicago", { lat: 35.96, lng: -83.92 }),
       ).toBe(false);
     });
     it("Phoenix tagged America/Denver still fails", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Denver", {
-          lat: 33.45,
-          lng: -112.07,
-        }),
+        tzLikelyContainsCoordinates("America/Denver", { lat: 33.45, lng: -112.07 }),
       ).toBe(false);
     });
     it("Kenora tagged America/Toronto still fails (Kenora is genuinely Winnipeg, not a Toronto-linked name)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Toronto", {
-          lat: 49.77,
-          lng: -94.49,
-        }),
+        tzLikelyContainsCoordinates("America/Toronto", { lat: 49.77, lng: -94.49 }),
       ).toBe(false);
     });
     it("Indianapolis tagged America/Chicago still fails (Indianapolis links to Indiana/Indianapolis, not Chicago)", () => {
       expect(
-        tzLikelyContainsCoordinates("America/Chicago", {
-          lat: 39.77,
-          lng: -86.16,
-        }),
+        tzLikelyContainsCoordinates("America/Chicago", { lat: 39.77, lng: -86.16 }),
       ).toBe(false);
     });
   });

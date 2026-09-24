@@ -95,9 +95,7 @@ describe("parseStrictJson", () => {
 
   it("PROBE: rejects a duplicate key (e.g. a duplicate minAppVersion)", () => {
     const text = '{"minAppVersion":"1.0.0","kid":"k1","minAppVersion":"9.9.9"}';
-    expect(() => parseStrictJson(text)).toThrow(
-      /duplicate object key "minAppVersion"/,
-    );
+    expect(() => parseStrictJson(text)).toThrow(/duplicate object key "minAppVersion"/);
   });
 
   it("PROBE: rejects an injected __proto__ key", () => {
@@ -107,12 +105,8 @@ describe("parseStrictJson", () => {
   });
 
   it("rejects constructor and prototype keys too", () => {
-    expect(() => parseStrictJson('{"constructor":1}')).toThrow(
-      /forbidden object key "constructor"/,
-    );
-    expect(() => parseStrictJson('{"prototype":1}')).toThrow(
-      /forbidden object key "prototype"/,
-    );
+    expect(() => parseStrictJson('{"constructor":1}')).toThrow(/forbidden object key "constructor"/);
+    expect(() => parseStrictJson('{"prototype":1}')).toThrow(/forbidden object key "prototype"/);
   });
 
   it("built objects have no inherited prototype (Object.create(null))", () => {
@@ -122,9 +116,7 @@ describe("parseStrictJson", () => {
 
   it("PROBE: rejects -0.0e0 (and other spellings of negative zero)", () => {
     for (const literal of ["-0", "-0.0", "-0.0e0", "-0e0", "-0E0"]) {
-      expect(() => parseStrictJson(`{"a":${literal}}`), literal).toThrow(
-        /negative zero/,
-      );
+      expect(() => parseStrictJson(`{"a":${literal}}`), literal).toThrow(/negative zero/);
     }
   });
 
@@ -147,20 +139,12 @@ describe("strictParseAndValidate", () => {
   const Schema = z.strictObject({ a: z.number() });
 
   it("returns ok:true with the validated value on success", () => {
-    const result = strictParseAndValidate(
-      Buffer.from('{"a":1}'),
-      Schema,
-      "test",
-    );
+    const result = strictParseAndValidate(Buffer.from('{"a":1}'), Schema, "test");
     expect(result).toEqual({ ok: true, value: { a: 1 } });
   });
 
   it("returns ok:false with issues (never throws) on a strict-parse failure", () => {
-    const result = strictParseAndValidate(
-      Buffer.from('{"a":1,"a":2}'),
-      Schema,
-      "test",
-    );
+    const result = strictParseAndValidate(Buffer.from('{"a":1,"a":2}'), Schema, "test");
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.issues[0]).toContain("test:");
@@ -169,11 +153,7 @@ describe("strictParseAndValidate", () => {
   });
 
   it("returns ok:false with issues (never throws) on a schema-validation failure", () => {
-    const result = strictParseAndValidate(
-      Buffer.from('{"a":"not a number"}'),
-      Schema,
-      "test",
-    );
+    const result = strictParseAndValidate(Buffer.from('{"a":"not a number"}'), Schema, "test");
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.issues[0]).toContain("test: a:");
@@ -183,33 +163,22 @@ describe("strictParseAndValidate", () => {
 
 describe("compareCatalogVersions", () => {
   it("orders by date first", () => {
-    expect(
-      compareCatalogVersions("20260101-abc0001", "20260102-abc0001"),
-    ).toBeLessThan(0);
-    expect(
-      compareCatalogVersions("20260102-abc0001", "20260101-abc0001"),
-    ).toBeGreaterThan(0);
+    expect(compareCatalogVersions("20260101-abc0001", "20260102-abc0001")).toBeLessThan(0);
+    expect(compareCatalogVersions("20260102-abc0001", "20260101-abc0001")).toBeGreaterThan(0);
   });
 
   it("falls back to the sha suffix within the same date", () => {
-    expect(
-      compareCatalogVersions("20260101-aaa0000", "20260101-bbb0000"),
-    ).toBeLessThan(0);
+    expect(compareCatalogVersions("20260101-aaa0000", "20260101-bbb0000")).toBeLessThan(0);
   });
 
   it("is 0 for an identical version", () => {
-    expect(compareCatalogVersions("20260101-abc0001", "20260101-abc0001")).toBe(
-      0,
-    );
+    expect(compareCatalogVersions("20260101-abc0001", "20260101-abc0001")).toBe(0);
   });
 });
 
 describe("parseCatalogVersion", () => {
   it("parses a well-formed version", () => {
-    expect(parseCatalogVersion("20260101-abc0001")).toEqual({
-      date: "20260101",
-      sha: "abc0001",
-    });
+    expect(parseCatalogVersion("20260101-abc0001")).toEqual({ date: "20260101", sha: "abc0001" });
   });
 
   it("returns undefined for a malformed version", () => {
@@ -233,10 +202,7 @@ describe("VersionEntrySchema", () => {
   });
 
   it("rejects a catalogVersion-shaped field that doesn't match yyyymmdd-gitsha7", () => {
-    expect(
-      VersionEntrySchema.safeParse(version({ version: "not-a-version" }))
-        .success,
-    ).toBe(false);
+    expect(VersionEntrySchema.safeParse(version({ version: "not-a-version" })).success).toBe(false);
   });
 });
 
@@ -250,48 +216,27 @@ describe("assertVersionsAppendOnly", () => {
   it("throws when an earlier entry is dropped", () => {
     const previous = [version(), version({ version: "20260102-abc0002" })];
     const next = [version({ version: "20260102-abc0002" })];
-    expect(() => assertVersionsAppendOnly(previous, next)).toThrow(
-      /append-only violation/,
-    );
+    expect(() => assertVersionsAppendOnly(previous, next)).toThrow(/append-only violation/);
   });
 
   it("throws when an earlier entry's content is changed", () => {
     const previous = [version()];
     const next = [version({ sha256: "b".repeat(64) })];
-    expect(() => assertVersionsAppendOnly(previous, next)).toThrow(
-      /append-only violation/,
-    );
+    expect(() => assertVersionsAppendOnly(previous, next)).toThrow(/append-only violation/);
   });
 
   it("throws when an earlier entry is reordered", () => {
-    const previous = [
-      version({ version: "20260101-aaa0001" }),
-      version({ version: "20260102-aaa0002" }),
-    ];
-    const next = [
-      version({ version: "20260102-aaa0002" }),
-      version({ version: "20260101-aaa0001" }),
-    ];
-    expect(() => assertVersionsAppendOnly(previous, next)).toThrow(
-      /append-only violation/,
-    );
+    const previous = [version({ version: "20260101-aaa0001" }), version({ version: "20260102-aaa0002" })];
+    const next = [version({ version: "20260102-aaa0002" }), version({ version: "20260101-aaa0001" })];
+    expect(() => assertVersionsAppendOnly(previous, next)).toThrow(/append-only violation/);
   });
 });
 
 describe("appendVersion", () => {
   it("appends a genuinely new, strictly-later version", () => {
     const previous = [version()];
-    const next = appendVersion(
-      previous,
-      version({
-        version: "20260102-abc0002",
-        publishedAt: "2026-01-02T00:00:00.000Z",
-      }),
-    );
-    expect(next.map((v) => v.version)).toEqual([
-      "20260101-abc0001",
-      "20260102-abc0002",
-    ]);
+    const next = appendVersion(previous, version({ version: "20260102-abc0002", publishedAt: "2026-01-02T00:00:00.000Z" }));
+    expect(next.map((v) => v.version)).toEqual(["20260101-abc0001", "20260102-abc0002"]);
   });
 
   it("is idempotent for an identical republish of the CURRENT LAST version", () => {
@@ -302,31 +247,22 @@ describe("appendVersion", () => {
 
   it("refuses a republish of the last version under different content", () => {
     const previous = [version()];
-    expect(() =>
-      appendVersion(previous, version({ sha256: "c".repeat(64) })),
-    ).toThrow(/already published with different content/);
+    expect(() => appendVersion(previous, version({ sha256: "c".repeat(64) }))).toThrow(
+      /already published with different content/,
+    );
   });
 
   it("refuses a version string equal to an EARLIER (non-last) entry", () => {
-    const previous = [
-      version({ version: "20260101-aaa0001" }),
-      version({ version: "20260102-aaa0002" }),
-    ];
-    expect(() =>
-      appendVersion(previous, version({ version: "20260101-aaa0001" })),
-    ).toThrow(/not as the last entry/);
+    const previous = [version({ version: "20260101-aaa0001" }), version({ version: "20260102-aaa0002" })];
+    expect(() => appendVersion(previous, version({ version: "20260101-aaa0001" }))).toThrow(
+      /not as the last entry/,
+    );
   });
 
   it("PROBE (finding #5): refuses a new version that is not strictly greater than the last", () => {
     const previous = [version({ version: "20260102-aaa0002" })];
     expect(() =>
-      appendVersion(
-        previous,
-        version({
-          version: "20260101-aaa0001",
-          publishedAt: "2026-01-03T00:00:00.000Z",
-        }),
-      ),
+      appendVersion(previous, version({ version: "20260101-aaa0001", publishedAt: "2026-01-03T00:00:00.000Z" })),
     ).toThrow(/must be strictly greater/);
   });
 
@@ -335,10 +271,7 @@ describe("appendVersion", () => {
     expect(() =>
       appendVersion(
         previous,
-        version({
-          version: "20260102-abc0002",
-          publishedAt: "2026-01-01T00:00:00.000Z",
-        }),
+        version({ version: "20260102-abc0002", publishedAt: "2026-01-01T00:00:00.000Z" }),
       ),
     ).toThrow(/must be strictly after/);
   });
@@ -346,12 +279,9 @@ describe("appendVersion", () => {
 
 describe("finding #2: strict formats for signed strings", () => {
   describe("KidSchema", () => {
-    it.each(["a", "k1", "pre-p3-key-1", "a".repeat(64)])(
-      "accepts %s",
-      (kid) => {
-        expect(KidSchema.safeParse(kid).success).toBe(true);
-      },
-    );
+    it.each(["a", "k1", "pre-p3-key-1", "a".repeat(64)])("accepts %s", (kid) => {
+      expect(KidSchema.safeParse(kid).success).toBe(true);
+    });
 
     it.each([
       ["", "empty"],
@@ -368,11 +298,9 @@ describe("finding #2: strict formats for signed strings", () => {
 
   describe("IsoDateTimeSchema", () => {
     it("accepts exactly what Date#toISOString() produces", () => {
-      expect(
-        IsoDateTimeSchema.safeParse(
-          new Date("2026-01-01T00:00:00.000Z").toISOString(),
-        ).success,
-      ).toBe(true);
+      expect(IsoDateTimeSchema.safeParse(new Date("2026-01-01T00:00:00.000Z").toISOString()).success).toBe(
+        true,
+      );
     });
 
     it("PROBE: rejects an extended-year datetime (year outside 0000-9999)", () => {
@@ -382,38 +310,26 @@ describe("finding #2: strict formats for signed strings", () => {
     });
 
     it("rejects a form with a timezone OFFSET instead of Z", () => {
-      expect(
-        IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.000+05:00").success,
-      ).toBe(false);
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.000+05:00").success).toBe(false);
     });
 
     it("rejects a form missing the Z suffix (local time)", () => {
-      expect(
-        IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.000").success,
-      ).toBe(false);
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.000").success).toBe(false);
     });
 
     it("rejects a form with the wrong fractional-second precision", () => {
-      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00Z").success).toBe(
-        false,
-      ); // no ms
-      expect(
-        IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.00Z").success,
-      ).toBe(false); // 2 digits
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00Z").success).toBe(false); // no ms
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.00Z").success).toBe(false); // 2 digits
     });
   });
 
   describe("parseStrictJson: lone surrogates and control characters", () => {
     it("PROBE: rejects a lone (unpaired) high surrogate", () => {
-      expect(() => parseStrictJson('"\\ud800"')).toThrow(
-        /lone \(unpaired\) high surrogate/,
-      );
+      expect(() => parseStrictJson('"\\ud800"')).toThrow(/lone \(unpaired\) high surrogate/);
     });
 
     it("PROBE: rejects a lone (unpaired) low surrogate", () => {
-      expect(() => parseStrictJson('"\\udc00"')).toThrow(
-        /lone \(unpaired\) low surrogate/,
-      );
+      expect(() => parseStrictJson('"\\udc00"')).toThrow(/lone \(unpaired\) low surrogate/);
     });
 
     it("accepts a properly paired surrogate (a real astral character)", () => {
@@ -447,9 +363,7 @@ describe("finding #2: strict formats for signed strings", () => {
     });
 
     it("accepts ordinary printable text with no control characters", () => {
-      expect(parseStrictJson('"hello world 123-abc"')).toBe(
-        "hello world 123-abc",
-      );
+      expect(parseStrictJson('"hello world 123-abc"')).toBe("hello world 123-abc");
     });
   });
 });

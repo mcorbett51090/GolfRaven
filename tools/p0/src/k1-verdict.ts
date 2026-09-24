@@ -39,12 +39,7 @@
  *   acceptance or LOI dated before its own row's contacted date is an
  *   error. Dates are plain calendar dates — no timezone conversion.
  */
-import {
-  readK1Log,
-  resolveK1LogPath,
-  K1_BASE_FIVE_NAMES,
-  type K1Row,
-} from "./k1-log.js";
+import { readK1Log, resolveK1LogPath, K1_BASE_FIVE_NAMES, type K1Row } from "./k1-log.js";
 
 /** Decision 0001, Addendum D, R1: "P0 start 2026-10-05 + 14 days" — dated
  * on or before this counts toward the early read. */
@@ -99,14 +94,10 @@ function isRealCalendarDate(value: string): boolean {
  * it explicitly. */
 function assertValidAsOf(asOf: string, today: string): void {
   if (!isRealCalendarDate(asOf)) {
-    throw new Error(
-      `computeK1Verdict: malformed --as-of "${asOf}" — not a real ISO "YYYY-MM-DD" calendar date.`,
-    );
+    throw new Error(`computeK1Verdict: malformed --as-of "${asOf}" — not a real ISO "YYYY-MM-DD" calendar date.`);
   }
   if (!isRealCalendarDate(today)) {
-    throw new Error(
-      `computeK1Verdict: malformed today "${today}" — not a real ISO "YYYY-MM-DD" calendar date.`,
-    );
+    throw new Error(`computeK1Verdict: malformed today "${today}" — not a real ISO "YYYY-MM-DD" calendar date.`);
   }
   if (asOf > today) {
     throw new Error(
@@ -153,10 +144,7 @@ function assertRowDatesSane(row: K1Row, asOf: string): void {
     }
   }
   if (row.contactedDate !== null) {
-    if (
-      row.callAcceptedDate !== null &&
-      row.callAcceptedDate < row.contactedDate
-    ) {
+    if (row.callAcceptedDate !== null && row.callAcceptedDate < row.contactedDate) {
       throw new Error(
         `${row.target}: Call accepted date "${row.callAcceptedDate}" is before Contacted date ` +
           `"${row.contactedDate}" (decision 0001, Addendum I).`,
@@ -168,10 +156,7 @@ function assertRowDatesSane(row: K1Row, asOf: string): void {
           "(decision 0001, Addendum I).",
       );
     }
-    if (
-      row.sponsorConversationDate !== null &&
-      row.sponsorConversationDate < row.contactedDate
-    ) {
+    if (row.sponsorConversationDate !== null && row.sponsorConversationDate < row.contactedDate) {
       throw new Error(
         `${row.target}: Sponsor conversation date "${row.sponsorConversationDate}" is before Contacted date ` +
           `"${row.contactedDate}" (decision 0001, Addendum I: "sponsor dates").`,
@@ -190,8 +175,7 @@ export interface K1SponsorPartial {
 }
 
 export type K1EarlyReadState = "pending" | "miss" | "pass";
-export type K1FullGateState =
-  "pending" | "operator-miss" | "sponsor-miss" | "pass";
+export type K1FullGateState = "pending" | "operator-miss" | "sponsor-miss" | "pass";
 
 export interface K1EarlyReadResult {
   passBar: number;
@@ -238,25 +222,17 @@ export interface K1VerdictResult {
   warnings: string[];
 }
 
-export function computeK1Verdict(
-  rows: K1Row[],
-  asOf: string,
-  today: string,
-): K1VerdictResult {
+export function computeK1Verdict(rows: K1Row[], asOf: string, today: string): K1VerdictResult {
   assertValidAsOf(asOf, today);
 
   const byTarget = new Map(rows.map((r) => [r.target, r]));
   const okRow = byTarget.get("Oklahoma Golf Trail");
   if (!okRow) {
-    throw new Error(
-      'computeK1Verdict: missing required "Oklahoma Golf Trail" row.',
-    );
+    throw new Error('computeK1Verdict: missing required "Oklahoma Golf Trail" row.');
   }
   for (const name of K1_BASE_FIVE_NAMES) {
     if (!byTarget.has(name)) {
-      throw new Error(
-        `computeK1Verdict: missing required operator row "${name}".`,
-      );
+      throw new Error(`computeK1Verdict: missing required operator row "${name}".`);
     }
   }
 
@@ -267,9 +243,7 @@ export function computeK1Verdict(
   const replaces = okRow.okSwapReplaces;
   const activated = replaces !== null;
   const effectiveFive: string[] = activated
-    ? K1_BASE_FIVE_NAMES.map((n) =>
-        n === replaces ? "Oklahoma Golf Trail" : n,
-      )
+    ? K1_BASE_FIVE_NAMES.map((n) => (n === replaces ? "Oklahoma Golf Trail" : n))
     : [...K1_BASE_FIVE_NAMES];
 
   const warnings: string[] = [];
@@ -314,11 +288,7 @@ export function computeK1Verdict(
     }
   }
   const earlyReadPending = asOf < K1_EARLY_READ_WINDOW_CLOSES;
-  const earlyState: K1EarlyReadState = earlyReadPending
-    ? "pending"
-    : accepted.length >= 2
-      ? "pass"
-      : "miss";
+  const earlyState: K1EarlyReadState = earlyReadPending ? "pending" : accepted.length >= 2 ? "pass" : "miss";
   const earlyConsequenceText = earlyReadPending
     ? `Pending (${accepted.length} so far) — through ${K1_EARLY_READ_CUTOFF}; readable from ` +
       `${K1_EARLY_READ_WINDOW_CLOSES}. As of ${asOf}, no consequence branch applies yet.`
@@ -353,22 +323,15 @@ export function computeK1Verdict(
   for (const row of rows) {
     if (row.type !== "Sponsor") continue;
     const missing: string[] = [];
-    if (row.sponsorDecisionMakerNamed !== "Y")
-      missing.push("named decision-maker");
-    if (row.sponsorBudgetStated !== "Y")
-      missing.push("stated season budget range");
-    if (row.sponsorAttributionInterest !== "Y")
-      missing.push("interest in special-marker attribution");
-    if (row.sponsorConversationDate === null)
-      missing.push("a recorded sponsor conversation date");
+    if (row.sponsorDecisionMakerNamed !== "Y") missing.push("named decision-maker");
+    if (row.sponsorBudgetStated !== "Y") missing.push("stated season budget range");
+    if (row.sponsorAttributionInterest !== "Y") missing.push("interest in special-marker attribution");
+    if (row.sponsorConversationDate === null) missing.push("a recorded sponsor conversation date");
     if (missing.length === 0) {
       if (row.sponsorConversationDate! <= K1_FULL_GATE_CUTOFF) {
         sponsorQualified.push(row.target);
       } else {
-        sponsorLate.push({
-          target: row.target,
-          date: row.sponsorConversationDate!,
-        });
+        sponsorLate.push({ target: row.target, date: row.sponsorConversationDate! });
       }
     } else if (missing.length < 4) {
       sponsorPartial.push({ target: row.target, missing });
@@ -425,9 +388,7 @@ export function computeK1Verdict(
   if (sponsorPartial.length > 0) {
     warnings.push(
       `${sponsorPartial.length} sponsor row(s) have at least one but not all qualifiers recorded: ` +
-        sponsorPartial
-          .map((s) => `${s.target} (missing: ${s.missing.join("; ")})`)
-          .join(", ") +
+        sponsorPartial.map((s) => `${s.target} (missing: ${s.missing.join("; ")})`).join(", ") +
         ".",
     );
   }
@@ -489,14 +450,10 @@ export function renderK1VerdictMarkdown(result: K1VerdictResult): string {
       `**${result.earlyRead.state === "pending" ? `${result.earlyRead.count} so far` : result.earlyRead.state.toUpperCase()}**.`,
   );
   if (result.earlyRead.accepted.length > 0) {
-    lines.push(
-      `Accepted: ${result.earlyRead.accepted.map((e) => `${e.target} (${e.date})`).join(", ")}`,
-    );
+    lines.push(`Accepted: ${result.earlyRead.accepted.map((e) => `${e.target} (${e.date})`).join(", ")}`);
   }
   if (result.earlyRead.late.length > 0) {
-    lines.push(
-      `Late (do not count): ${result.earlyRead.late.map((e) => `${e.target} (${e.date})`).join(", ")}`,
-    );
+    lines.push(`Late (do not count): ${result.earlyRead.late.map((e) => `${e.target} (${e.date})`).join(", ")}`);
   }
   lines.push(`> ${result.earlyRead.consequenceText}`);
   const pending = result.fullGate.state === "pending";
@@ -559,11 +516,7 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
   const today = todayUtc();
-  return {
-    outPrefix: opts.out || "k1-verdict-result",
-    asOf: opts["as-of"] || today,
-    logPath: opts.log || undefined,
-  };
+  return { outPrefix: opts.out || "k1-verdict-result", asOf: opts["as-of"] || today, logPath: opts.log || undefined };
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -579,9 +532,7 @@ async function main(argv: string[]): Promise<void> {
   const sourcePath = resolvePath(args.logPath ?? repoPath);
   const source = {
     path: sourcePath,
-    sha256: createHash("sha256")
-      .update(await readSource(sourcePath))
-      .digest("hex"),
+    sha256: createHash("sha256").update(await readSource(sourcePath)).digest("hex"),
     isRepoLog: sourcePath === repoPath,
   };
   const banner = source.isRepoLog
@@ -589,11 +540,7 @@ async function main(argv: string[]): Promise<void> {
     : `> **NOT THE RECORDED K1 LOG.** Computed from \`${sourcePath}\`, not the repo's own K1 log. This output is not a P0 verdict.\n\n`;
   const result = computeK1Verdict(rows, args.asOf, todayUtc());
   const { writeFile } = await import("node:fs/promises");
-  await writeFile(
-    `${args.outPrefix}.json`,
-    `${JSON.stringify({ ...result, source }, null, 2)}\n`,
-    "utf8",
-  );
+  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify({ ...result, source }, null, 2)}\n`, "utf8");
   const md = banner + renderK1VerdictMarkdown(result);
   await writeFile(`${args.outPrefix}.md`, `${md}\n`, "utf8");
   process.stdout.write(`${md}\n`);

@@ -72,11 +72,7 @@ export interface K2CountResult {
  * to compute otherwise).
  */
 export function computeK2Counts(params: K2CountParams): K2CountResult {
-  if (
-    !params.day0 ||
-    typeof params.day0 !== "string" ||
-    params.day0.trim() === ""
-  ) {
+  if (!params.day0 || typeof params.day0 !== "string" || params.day0.trim() === "") {
     throw new Error(
       "K2 day 0 is not set — refusing to compute a count (decision 0001 Addendum D R3: " +
         "day 0 must be logged in docs/p0/K2.md before any count is read).",
@@ -84,21 +80,15 @@ export function computeK2Counts(params: K2CountParams): K2CountResult {
   }
   const day0Date = new Date(params.day0);
   if (Number.isNaN(day0Date.getTime())) {
-    throw new Error(
-      `K2 day 0 is not a valid ISO-8601 date/time: ${JSON.stringify(params.day0)}`,
-    );
+    throw new Error(`K2 day 0 is not a valid ISO-8601 date/time: ${JSON.stringify(params.day0)}`);
   }
 
   const dayMs = 24 * 60 * 60 * 1000;
-  const advisoryCutoff = new Date(
-    day0Date.getTime() + ADVISORY_WINDOW_DAYS * dayMs,
-  );
+  const advisoryCutoff = new Date(day0Date.getTime() + ADVISORY_WINDOW_DAYS * dayMs);
   const gateCutoff = new Date(day0Date.getTime() + GATE_WINDOW_DAYS * dayMs);
 
   const excludedSet = new Set(
-    (params.excludedAddresses ?? [])
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean),
+    (params.excludedAddresses ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean),
   );
 
   let totalConfirmedRaw = 0;
@@ -129,10 +119,7 @@ export function computeK2Counts(params: K2CountParams): K2CountResult {
     // (always has a `Z`), so this only matters for a hand-edited export —
     // but rather than silently vary by the machine running this script,
     // treat it as malformed the same as an unparsable date (F17).
-    if (
-      typeof row.confirmed_at !== "string" ||
-      !/(Z|[+-]\d{2}:?\d{2})$/.test(row.confirmed_at)
-    ) {
+    if (typeof row.confirmed_at !== "string" || !/(Z|[+-]\d{2}:?\d{2})$/.test(row.confirmed_at)) {
       malformedConfirmedAtCount += 1;
       continue;
     }

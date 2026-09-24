@@ -398,10 +398,7 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 
   ```json
   {
-    "Grand National": {
-      "trail": "RTJ",
-      "golfnowFacilityUrl": "https://www.golfnow.com/tee-times/facility/2360-grand-national/search"
-    },
+    "Grand National": { "trail": "RTJ", "golfnowFacilityUrl": "https://www.golfnow.com/tee-times/facility/2360-grand-national/search" },
     "Some TN Course": { "trail": "TN", "golfnowFacilityUrl": null }
   }
   ```
@@ -426,7 +423,7 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 old two-way live/not-live read):
 
 - **live** — HTTP 200, the final URL's **host is exactly `www.golfnow.com`**, its **path** contains
-  `/tee-times/facility/<id>-` for the **SAME `<id>`** parsed from the _configured_ URL (gate B2 — a
+  `/tee-times/facility/<id>-` for the **SAME `<id>`** parsed from the *configured* URL (gate B2 — a
   match in the query string, or for a different id, does NOT count), and the page text contains the
   course's name under Addendum F's normalisation (`namesMatch`, reused verbatim from
   `overpass-geo.ts`).
@@ -469,15 +466,15 @@ ran, `x4-verify/`.
 
 Prints a status board, one row per check, with `state`:
 
-| State                | Meaning                                                                                                                                                                                                                                        |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ran`                | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail).                                                                                                                                  |
-| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`.                                                                                                                |
-| `verdict`            | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate).                                                                                                              |
-| `partial-blocked`    | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`.                                        |
-| `skipped`            | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure).                                                                                                                                                      |
-| `blocked`            | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
-| `error`              | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc).                                                                                                                                            |
+| State | Meaning |
+|---|---|
+| `ran` | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail). |
+| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`. |
+| `verdict` | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate). |
+| `partial-blocked` | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`. |
+| `skipped` | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure). |
+| `blocked` | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
+| `error` | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc). |
 
 **Exits non-zero if any check's state is `blocked`, `partial-blocked` or `error`** — a legitimately
 `skipped` check (no course-map file yet) is not treated as a failure to run. `status.json` in the
@@ -613,7 +610,7 @@ accepted as an alias of the table's own "Hammock Coast Golf Trail" row (decision
 
 - **Early read** (Addendum D, R1): count of the 5 named operators whose acceptance of an exploratory
   call is dated on or before **2026-10-19**. Pass ≥ 2. **Before 2026-10-20** this reads `pending (n so
-far)` regardless of the count — the window hasn't closed. The markdown output never prints MISS or
+  far)` regardless of the count — the window hasn't closed. The markdown output never prints MISS or
   PASS while pending; it prints the count so far instead.
 - **Full gate** (Addendum C, cutoff **2026-11-30**): count of the same 5 with a signed non-binding
   LOI (fee willingness recorded) dated on or before the cutoff — pass needs ≥ 2 — **and** ≥ 1 sponsor

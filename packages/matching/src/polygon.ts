@@ -23,13 +23,7 @@ import {
   roundTo,
   type XY,
 } from "./geo.js";
-import type {
-  LatLng,
-  MultiPolygon,
-  PolygonInput,
-  PolygonWithHoles,
-  Ring,
-} from "./types.js";
+import type { LatLng, MultiPolygon, PolygonInput, PolygonWithHoles, Ring } from "./types.js";
 
 function isLatLng(value: unknown): value is LatLng {
   return (
@@ -107,17 +101,13 @@ export interface PreparedPolygonGeometry {
  * outer ring's first vertex — any stable, geometry-local point works,
  * since this projector is reused consistently for every point tested
  * against it) and computes its bounding box. */
-export function preparePolygonGeometry(
-  input: PolygonInput,
-): PreparedPolygonGeometry | undefined {
+export function preparePolygonGeometry(input: PolygonInput): PreparedPolygonGeometry | undefined {
   const multiLatLng = normalizePolygon(input);
   const firstRing = multiLatLng[0]?.[0];
   if (!firstRing || firstRing.length < 3) return undefined;
   const origin = firstRing[0]!;
   const projector = makeProjector(origin);
-  const multi = multiLatLng.map((rings) =>
-    rings.map((ring) => ring.map((p) => projector.toXY(p))),
-  );
+  const multi = multiLatLng.map((rings) => rings.map((ring) => ring.map((p) => projector.toXY(p))));
   let bbox: BBox | undefined;
   for (const rings of multi) {
     const outerBBox = ringBBox(rings[0]!);
@@ -129,10 +119,7 @@ export function preparePolygonGeometry(
 
 /** True if `point` is inside the polygon's outer ring and not inside any
  * of its holes, for at least one polygon in the multipolygon. */
-function isInsidePreparedNoBuffer(
-  pointXY: XY,
-  prepared: PreparedPolygonGeometry,
-): boolean {
+function isInsidePreparedNoBuffer(pointXY: XY, prepared: PreparedPolygonGeometry): boolean {
   for (const rings of prepared.multi) {
     const outer = rings[0]!;
     if (!pointInPolygonXY(pointXY, outer)) continue;
@@ -148,10 +135,7 @@ function isInsidePreparedNoBuffer(
   return false;
 }
 
-function minDistanceToAnyRingXY(
-  pointXY: XY,
-  prepared: PreparedPolygonGeometry,
-): number {
+function minDistanceToAnyRingXY(pointXY: XY, prepared: PreparedPolygonGeometry): number {
   let min = Infinity;
   for (const rings of prepared.multi) {
     for (const ring of rings) {
@@ -190,9 +174,7 @@ export function isInsidePreparedWithBuffer(
   }
   if (isInsidePreparedNoBuffer(pointXY, prepared)) return true;
   if (buffer === 0) return false;
-  return (
-    roundTo(minDistanceToAnyRingXY(pointXY, prepared), 2) <= roundTo(buffer, 2)
-  );
+  return roundTo(minDistanceToAnyRingXY(pointXY, prepared), 2) <= roundTo(buffer, 2);
 }
 
 function bboxDistanceXY(point: XY, bbox: BBox): number {
@@ -222,20 +204,14 @@ export function isWithinDistanceOfPrepared(
   // is farther than the threshold, the polygon certainly is too.
   if (bboxDistanceXY(pointXY, prepared.bbox) > threshold) return false;
   if (isInsidePreparedNoBuffer(pointXY, prepared)) return true;
-  return (
-    roundTo(minDistanceToAnyRingXY(pointXY, prepared), 2) <=
-    roundTo(threshold, 2)
-  );
+  return roundTo(minDistanceToAnyRingXY(pointXY, prepared), 2) <= roundTo(threshold, 2);
 }
 
 /** Distance in meters from `point` to the prepared geometry: 0 if inside
  * (per `isInsidePreparedNoBuffer`), otherwise the distance to the nearest
  * ring edge across every polygon (used for the 3 km candidate search, not
  * for the buffered inside test). */
-export function distanceToPreparedMeters(
-  point: LatLng,
-  prepared: PreparedPolygonGeometry,
-): number {
+export function distanceToPreparedMeters(point: LatLng, prepared: PreparedPolygonGeometry): number {
   const projector = makeProjector(prepared.origin);
   const pointXY = projector.toXY(point);
   if (isInsidePreparedNoBuffer(pointXY, prepared)) return 0;

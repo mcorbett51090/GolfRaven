@@ -68,20 +68,11 @@ function scoreCandidate(
   if (candidate.polygon) {
     const prepared = preparePolygonGeometry(candidate.polygon);
     if (!prepared) return undefined;
-    const insideRatio = computeTimeWeightedInsideRatio(
-      sortedTimestampedPoints,
-      prepared,
-      bufferMeters,
-    );
-    const qualifiesRatio =
-      roundTo(insideRatio, 9) >= roundTo(acceptInsideRatio, 9);
-    const qualifiesCoverage =
-      roundTo(observedCoverage, 9) >= roundTo(minObservedCoverage, 9);
+    const insideRatio = computeTimeWeightedInsideRatio(sortedTimestampedPoints, prepared, bufferMeters);
+    const qualifiesRatio = roundTo(insideRatio, 9) >= roundTo(acceptInsideRatio, 9);
+    const qualifiesCoverage = roundTo(observedCoverage, 9) >= roundTo(minObservedCoverage, 9);
     const qualifiesGeometrically = qualifiesRatio && qualifiesCoverage;
-    const qualifiesDuration = isWithinDurationWindow(
-      durationHours,
-      candidate.holes,
-    );
+    const qualifiesDuration = isWithinDurationWindow(durationHours, candidate.holes);
     return {
       candidate,
       geometryKind: "polygon",
@@ -94,15 +85,10 @@ function scoreCandidate(
   }
   if (candidate.radiusFallback) {
     const { center, radiusMeters } = candidate.radiusFallback;
-    const startInside =
-      roundTo(haversineMeters(start, center), 2) <= roundTo(radiusMeters, 2);
-    const endInside =
-      roundTo(haversineMeters(end, center), 2) <= roundTo(radiusMeters, 2);
+    const startInside = roundTo(haversineMeters(start, center), 2) <= roundTo(radiusMeters, 2);
+    const endInside = roundTo(haversineMeters(end, center), 2) <= roundTo(radiusMeters, 2);
     const qualifiesGeometrically = startInside && endInside;
-    const qualifiesDuration = isWithinDurationWindow(
-      durationHours,
-      candidate.holes,
-    );
+    const qualifiesDuration = isWithinDurationWindow(durationHours, candidate.holes);
     return {
       candidate,
       geometryKind: "radius",
@@ -123,9 +109,7 @@ function toTiedSummary(s: ScoredCandidate): TiedCandidateSummary {
     verificationTier: s.candidate.verificationTier,
     geometryKind: s.geometryKind,
     insideRatio: s.insideRatio,
-    ...(s.geometryKind === "radius"
-      ? { radiusStartEndInside: true as const }
-      : {}),
+    ...(s.geometryKind === "radius" ? { radiusStartEndInside: true as const } : {}),
     sharedGeometry: s.candidate.sharedGeometry === true,
   };
 }
@@ -193,11 +177,7 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
     observedCoverage,
   };
 
-  const nearby = candidatesWithinRadius(
-    simplifiedPoints,
-    candidates,
-    candidateRadiusMeters,
-  );
+  const nearby = candidatesWithinRadius(simplifiedPoints, candidates, candidateRadiusMeters);
 
   const scored = nearby
     .map((c) =>
@@ -219,14 +199,9 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
   // radius candidate. Radius candidates are only even considered when no
   // polygon candidate qualifies — never compared on the same numeric
   // scale.
-  const qualifyingPolygon = scored.filter(
-    (s) => s.geometryKind === "polygon" && s.qualifies,
-  );
-  const qualifyingRadius = scored.filter(
-    (s) => s.geometryKind === "radius" && s.qualifies,
-  );
-  const activeTier =
-    qualifyingPolygon.length > 0 ? qualifyingPolygon : qualifyingRadius;
+  const qualifyingPolygon = scored.filter((s) => s.geometryKind === "polygon" && s.qualifies);
+  const qualifyingRadius = scored.filter((s) => s.geometryKind === "radius" && s.qualifies);
+  const activeTier = qualifyingPolygon.length > 0 ? qualifyingPolygon : qualifyingRadius;
 
   if (activeTier.length === 0) {
     return {
@@ -238,26 +213,18 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
 
   const ranked = activeTier.slice().sort(byScoreThenId);
   const top = ranked[0]!;
-  let tied = ranked.filter(
-    (s) => roundTo(top.score - s.score, 9) <= roundTo(tieThreshold, 9),
-  );
+  let tied = ranked.filter((s) => roundTo(top.score - s.score, 9) <= roundTo(tieThreshold, 9));
 
   // Should-fix 4: if the sole surviving candidate is itself flagged
   // `sharedGeometry`, geometry alone cannot vouch for it even though no
   // sibling is present in this call (e.g. a sibling was filtered out by
   // the duration window) — route to ask_user rather than auto-accepting.
-  const soloShared =
-    tied.length === 1 && tied[0]!.candidate.sharedGeometry === true;
+  const soloShared = tied.length === 1 && tied[0]!.candidate.sharedGeometry === true;
 
   if (tied.length > 1 || soloShared) {
-    const sameFacility = tied.every(
-      (s) => s.candidate.facilityId === tied[0]!.candidate.facilityId,
-    );
-    const anySharedGeometry = tied.some(
-      (s) => s.candidate.sharedGeometry === true,
-    );
-    const reason: AskUserReason =
-      sameFacility && anySharedGeometry ? "shared_geometry" : "close_scores";
+    const sameFacility = tied.every((s) => s.candidate.facilityId === tied[0]!.candidate.facilityId);
+    const anySharedGeometry = tied.some((s) => s.candidate.sharedGeometry === true);
+    const reason: AskUserReason = sameFacility && anySharedGeometry ? "shared_geometry" : "close_scores";
     return {
       kind: "ask_user",
       reason,
@@ -275,9 +242,7 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
       verificationTier: winner.candidate.verificationTier as VerificationTier,
       geometryKind: winner.geometryKind,
       insideRatio: winner.insideRatio,
-      ...(winner.geometryKind === "radius"
-        ? { radiusStartEndInside: true as const }
-        : {}),
+      ...(winner.geometryKind === "radius" ? { radiusStartEndInside: true as const } : {}),
       courseDisambiguatedBy: "geometry",
       holes: winner.candidate.holes ?? 18,
     },
@@ -337,15 +302,10 @@ export function resolveAskUser(
       verificationTier: pick.verificationTier,
       geometryKind: pick.geometryKind,
       insideRatio: pick.insideRatio,
-      ...(pick.geometryKind === "radius"
-        ? { radiusStartEndInside: true as const }
-        : {}),
+      ...(pick.geometryKind === "radius" ? { radiusStartEndInside: true as const } : {}),
       courseDisambiguatedBy: "user",
     },
     updatedPicks,
-    replacedCourseId:
-      replaced && replaced.courseId !== pick.courseId
-        ? replaced.courseId
-        : undefined,
+    replacedCourseId: replaced && replaced.courseId !== pick.courseId ? replaced.courseId : undefined,
   };
 }

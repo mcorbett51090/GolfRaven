@@ -62,13 +62,7 @@ import { RegionCodeSchema } from "./common.js";
  * ..., `facility`, and `trail`" (§4.1 line 608). Used by `countDistinct`,
  * `maxCountBy` and `countWhere`.
  */
-export const FieldSchema = z.enum([
-  "region",
-  "country",
-  "designer",
-  "facility",
-  "trail",
-]);
+export const FieldSchema = z.enum(["region", "country", "designer", "facility", "trail"]);
 export type Field = z.infer<typeof FieldSchema>;
 
 /**
@@ -82,10 +76,7 @@ export type Field = z.infer<typeof FieldSchema>;
  * `verify-catalog`, the same split `schema.ts` already uses for every
  * other id reference in this package.
  */
-export function fieldValueShapeIssue(
-  field: Field,
-  value: string,
-): string | undefined {
+export function fieldValueShapeIssue(field: Field, value: string): string | undefined {
   switch (field) {
     case "region":
       return RegionCodeSchema.safeParse(value).success
@@ -156,11 +147,7 @@ export const CountDistinctCallSchema = z
     value.where.in.forEach((v, i) => {
       const msg = fieldValueShapeIssue(value.field, v);
       if (msg) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["where", "in", i],
-          message: msg,
-        });
+        ctx.addIssue({ code: "custom", path: ["where", "in", i], message: msg });
       }
     });
   });
@@ -232,9 +219,7 @@ export const TrailCompleteWithinCallSchema = z.strictObject({
   trailId: TrailIdSchema,
   days: z.int().positive(),
 });
-export type TrailCompleteWithinCall = z.infer<
-  typeof TrailCompleteWithinCallSchema
->;
+export type TrailCompleteWithinCall = z.infer<typeof TrailCompleteWithinCallSchema>;
 
 export const InOrderCallSchema = z.strictObject({
   kind: z.literal("agg"),
@@ -315,8 +300,7 @@ export const BOOLEAN_AGGREGATE_NAMES = [
 /* RuleExpr — the recursive boolean tree                               */
 /* ------------------------------------------------------------------ */
 
-export type NumericOperand =
-  { kind: "literal"; value: number } | NumericAggregateCall;
+export type NumericOperand = { kind: "literal"; value: number } | NumericAggregateCall;
 
 export interface AndNode {
   kind: "and";
@@ -352,13 +336,9 @@ export interface CompareNode {
  * is narrowed to `BooleanAggregateCall` only (not the full 12-name union)
  * — see `NotArg`'s doc: a bare NUMERIC aggregate is legal only directly
  * under `not`, never as a free-standing node or an `and`/`or` argument. */
-export type RuleExpr =
-  AndNode | OrNode | NotNode | CompareNode | BooleanAggregateCall;
+export type RuleExpr = AndNode | OrNode | NotNode | CompareNode | BooleanAggregateCall;
 
-const NumberLiteralSchema = z.strictObject({
-  kind: z.literal("literal"),
-  value: z.number(),
-});
+const NumberLiteralSchema = z.strictObject({ kind: z.literal("literal"), value: z.number() });
 
 /** `left`/`right` of a `compare` node: a number literal or a number-
  * returning aggregate call. A plain `z.union` (not `discriminatedUnion`,
@@ -368,10 +348,7 @@ const NumberLiteralSchema = z.strictObject({
  * "matches neither shape", so the simpler `z.union` is kept here). Needs
  * no `z.lazy`: it never refers back to `RuleExprSchema`, so there is no
  * cycle to break. */
-export const NumericOperandSchema = z.union([
-  NumberLiteralSchema,
-  NumericAggregateCallSchema,
-]);
+export const NumericOperandSchema = z.union([NumberLiteralSchema, NumericAggregateCallSchema]);
 
 /** A `compare` node's operands are `NumericOperand`, never `RuleExpr`
  * itself — also no cycle, also no `z.lazy` needed. Deliberately not
@@ -453,28 +430,20 @@ export const NotArgSchema: z.ZodType<NotArg> = z.discriminatedUnion("kind", [
  * inside `NotArgSchema`, never as a free-standing rule or an `and`/`or`
  * argument.
  */
-export const RuleExprSchema: z.ZodType<RuleExpr> = z.discriminatedUnion(
-  "kind",
-  [
-    AndNodeSchema,
-    OrNodeSchema,
-    NotNodeSchema,
-    CompareNodeSchema,
-    BooleanAggregateCallSchema,
-  ],
-);
+export const RuleExprSchema: z.ZodType<RuleExpr> = z.discriminatedUnion("kind", [
+  AndNodeSchema,
+  OrNodeSchema,
+  NotNodeSchema,
+  CompareNodeSchema,
+  BooleanAggregateCallSchema,
+]);
 
 /* ------------------------------------------------------------------ */
 /* AchievementDef (§4.1 line 523-524)                                   */
 /* ------------------------------------------------------------------ */
 
 /** `tier: 'bronze'|'silver'|'gold'|'special'` (§4.1). */
-export const AchievementTierSchema = z.enum([
-  "bronze",
-  "silver",
-  "gold",
-  "special",
-]);
+export const AchievementTierSchema = z.enum(["bronze", "silver", "gold", "special"]);
 export type AchievementTier = z.infer<typeof AchievementTierSchema>;
 
 /**

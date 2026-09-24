@@ -60,8 +60,7 @@ export interface RadiusFallbackCircle {
   radiusMeters: number;
 }
 
-export type VerificationTier =
-  "unverified" | "listed-verified" | "play-verified";
+export type VerificationTier = "unverified" | "listed-verified" | "play-verified";
 
 /**
  * The minimal candidate-course shape this package needs (design
@@ -313,10 +312,5 @@ export type CheckInResult =
     }
   | {
       accepted: false;
-      reason:
-        | "simulated"
-        | "inaccurate"
-        | "outside_polygon"
-        | "no_geometry"
-        | "invalid_fix";
+      reason: "simulated" | "inaccurate" | "outside_polygon" | "no_geometry" | "invalid_fix";
     };

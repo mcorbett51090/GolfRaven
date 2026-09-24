@@ -53,12 +53,9 @@ export type Source = z.infer<typeof SourceSchema>;
  * review) without duplicating or re-deriving the pinned list. */
 export const REGION_CODES = new Set<string>(regionCodesData.codes);
 
-export const RegionCodeSchema = z
-  .string()
-  .refine((value) => REGION_CODES.has(value), {
-    error:
-      "must be a real ISO 3166-2 US/CA subdivision code (see region-codes.json)",
-  });
+export const RegionCodeSchema = z.string().refine((value) => REGION_CODES.has(value), {
+  error: "must be a real ISO 3166-2 US/CA subdivision code (see region-codes.json)",
+});
 export type RegionCode = z.infer<typeof RegionCodeSchema>;
 
 /**

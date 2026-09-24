@@ -43,11 +43,7 @@ beforeAll(async () => {
 
   await writeFixtureDataDir(dataDir);
 
-  const facPath = join(
-    dataDir,
-    "facilities",
-    "highland-meadows-golf-course.json",
-  );
+  const facPath = join(dataDir, "facilities", "highland-meadows-golf-course.json");
   const facility = JSON.parse(await readFile(facPath, "utf8"));
   const allowedEntry = facility.booking[0]; // real fixture: www.golfnow.com, allow-listed
   const disallowedEntry = {
@@ -63,11 +59,7 @@ beforeAll(async () => {
   execFileSync("./node_modules/.bin/astro", ["build", "--outDir", dist], {
     cwd: siteRoot,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      ASTRO_TELEMETRY_DISABLED: "1",
-      GOLFRAVEN_DATA_DIR: dataDir,
-    },
+    env: { ...process.env, ASTRO_TELEMETRY_DISABLED: "1", GOLFRAVEN_DATA_DIR: dataDir },
   });
 }, 120_000);
 
@@ -89,15 +81,8 @@ describe("AT(4) HTML-level regression guard: courses/[slug].astro never renders 
     // data at all) — this is exactly the shape a bypass (rendering
     // `facility.booking` directly instead of `allowedBookingEntries(...)`)
     // would flip to `.toContain(disallowedUrl)`.
-    const facPath = join(
-      scratch,
-      "data",
-      "facilities",
-      "highland-meadows-golf-course.json",
-    );
+    const facPath = join(scratch, "data", "facilities", "highland-meadows-golf-course.json");
     const facility = JSON.parse(await readFile(facPath, "utf8"));
-    expect(
-      facility.booking.some((b: { url: string }) => b.url === disallowedUrl),
-    ).toBe(true);
+    expect(facility.booking.some((b: { url: string }) => b.url === disallowedUrl)).toBe(true);
   });
 });

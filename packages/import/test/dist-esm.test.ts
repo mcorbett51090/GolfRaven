@@ -36,10 +36,7 @@ beforeAll(() => {
   // recorded state) — remove it so this is always a real, from-scratch
   // build, not a build that trusts stale state and emits nothing.
   if (existsSync(tsBuildInfo)) rmSync(tsBuildInfo);
-  execFileSync(tscBin, ["-b", "tsconfig.build.json"], {
-    cwd: packageRoot,
-    stdio: "pipe",
-  });
+  execFileSync(tscBin, ["-b", "tsconfig.build.json"], { cwd: packageRoot, stdio: "pipe" });
   builtByThisTest = true;
 }, 60_000);
 
@@ -51,9 +48,7 @@ afterAll(() => {
   // build`/inspecting `dist/` right after a test run.
   if (builtByThisTest) {
     // eslint-disable-next-line no-console
-    console.log(
-      "dist-esm.test.ts: built dist/ because it was missing (this is normal for a bare `pnpm test`).",
-    );
+    console.log("dist-esm.test.ts: built dist/ because it was missing (this is normal for a bare `pnpm test`).");
   }
 });
 
@@ -76,13 +71,9 @@ describe("dist/index.js under plain Node ESM", () => {
       if (!result.ok || result.round.fixes.length !== 1) throw new Error("parseGpxFile didn't work under plain Node ESM");
       console.log("OK");
     `;
-    const out = execFileSync(
-      process.execPath,
-      ["--input-type=module", "-e", script],
-      {
-        encoding: "utf8",
-      },
-    );
+    const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+    });
     expect(out.trim()).toBe("OK");
   });
 });

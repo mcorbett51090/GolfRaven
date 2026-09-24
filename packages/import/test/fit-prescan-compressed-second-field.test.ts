@@ -36,11 +36,7 @@ function wrap(data: Uint8Array): Uint8Array {
 /** Walks the file with `fit-file-parser`'s own `readRecord`, the same
  * way `parse-fit.ts`'s real decode eventually will, counting messages
  * and confirming it lands exactly on `crcStart` with no desync. */
-function countViaFitFileParser(blob: Uint8Array): {
-  count: number;
-  end: number;
-  crcStart: number;
-} {
+function countViaFitFileParser(blob: Uint8Array): { count: number; end: number; crcStart: number } {
   const crcStart = 14 + new DataView(blob.buffer).getUint32(4, true);
   const messageTypes: never[] = [];
   const developerFields: never[] = [];
@@ -59,18 +55,7 @@ function countViaFitFileParser(blob: Uint8Array): {
   let i = 14;
   let count = 0;
   while (i < crcStart) {
-    const r = readRecord(
-      blob,
-      messageTypes,
-      developerFields,
-      i,
-      options,
-      undefined,
-      0,
-      dataView,
-      decoderState,
-      crcStart,
-    );
+    const r = readRecord(blob, messageTypes, developerFields, i, options, undefined, 0, dataView, decoderState, crcStart);
     if (r.nextIndex <= i) throw new Error("no progress");
     i = r.nextIndex;
     count++;

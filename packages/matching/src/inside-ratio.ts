@@ -1,8 +1,5 @@
 import { roundTo } from "./geo.js";
-import {
-  isInsidePreparedWithBuffer,
-  type PreparedPolygonGeometry,
-} from "./polygon.js";
+import { isInsidePreparedWithBuffer, type PreparedPolygonGeometry } from "./polygon.js";
 import type { LatLng } from "./types.js";
 
 export interface TimestampedPoint {
@@ -57,9 +54,7 @@ function cappedGapsMs(sortedFixes: readonly { timestamp: number }[]): number[] {
  * has zero wall-clock span to miss anything from, so it is defined as
  * fully observed (`1`) rather than dividing by zero.
  */
-export function computeObservedCoverage(
-  sortedFixes: readonly { timestamp: number }[],
-): number {
+export function computeObservedCoverage(sortedFixes: readonly { timestamp: number }[]): number {
   const n = sortedFixes.length;
   if (n < 2) return 1;
   const rawDuration = sortedFixes[n - 1]!.timestamp - sortedFixes[0]!.timestamp;
@@ -101,8 +96,7 @@ export function computeTimeWeightedInsideRatio(
   const n = sortedFixes.length;
   if (n === 0) return 0;
 
-  const rawDuration =
-    n >= 2 ? sortedFixes[n - 1]!.timestamp - sortedFixes[0]!.timestamp : 0;
+  const rawDuration = n >= 2 ? sortedFixes[n - 1]!.timestamp - sortedFixes[0]!.timestamp : 0;
 
   if (rawDuration <= 0) {
     // n === 1, or every fix shares one timestamp: no gap is even
@@ -112,8 +106,7 @@ export function computeTimeWeightedInsideRatio(
     // normal path, for the same determinism reasons — see `version.ts`).
     let insideCount = 0;
     for (const f of sortedFixes) {
-      if (isInsidePreparedWithBuffer(f.point, prepared, bufferMeters))
-        insideCount += 1;
+      if (isInsidePreparedWithBuffer(f.point, prepared, bufferMeters)) insideCount += 1;
     }
     return roundTo(insideCount / n, 9);
   }
@@ -129,9 +122,7 @@ export function computeTimeWeightedInsideRatio(
         ? (prevCapped + nextCapped) / 2
         : (prevCapped ?? nextCapped ?? 0) / 2;
     totalWeight += weight;
-    if (
-      isInsidePreparedWithBuffer(sortedFixes[i]!.point, prepared, bufferMeters)
-    ) {
+    if (isInsidePreparedWithBuffer(sortedFixes[i]!.point, prepared, bufferMeters)) {
       insideWeight += weight;
     }
   }

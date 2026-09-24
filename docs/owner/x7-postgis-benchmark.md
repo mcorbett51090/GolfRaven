@@ -16,7 +16,7 @@ uniform-random over the bbox), and each point is bound once per iteration before
 A Supabase project must exist first — either local (`supabase start`, fastest, no account needed) or the real
 P0/staging project (see `docs/owner/accounts-and-domain-checklist.md`). This check can and should be run
 **locally first** (free, immediate) and then re-run against the real chosen tier once that project exists,
-since the pass bar is about the _chosen Supabase tier_ specifically.
+since the pass bar is about the *chosen Supabase tier* specifically.
 
 ## Running it
 

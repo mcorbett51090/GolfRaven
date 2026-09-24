@@ -60,10 +60,7 @@ export const MAX_ECHO_CHARS = 64;
  * comfortably fits any real course or device name. */
 export const MAX_TEXT_FIELD_CHARS = 120;
 
-export function checkInputSize(
-  byteLength: number,
-  cap: number = MAX_INPUT_BYTES,
-): string | undefined {
+export function checkInputSize(byteLength: number, cap: number = MAX_INPUT_BYTES): string | undefined {
   if (byteLength > cap) {
     return `input is ${byteLength} bytes, over the ${cap}-byte cap`;
   }
@@ -123,20 +120,14 @@ export function sanitizeAccuracy(raw: number | undefined): number | undefined {
  * formula-injection guard (leading `=`/`+`/`-`/`@`) at the point it
  * writes a CSV/XLSX cell; that's the exporter's job, not this parser's,
  * since the right guard depends on the destination format. */
-export function sanitizeText(
-  raw: string,
-  maxLen: number = MAX_TEXT_FIELD_CHARS,
-): string {
+export function sanitizeText(raw: string, maxLen: number = MAX_TEXT_FIELD_CHARS): string {
   // eslint-disable-next-line no-control-regex
   const stripped = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
   return stripped.length > maxLen ? stripped.slice(0, maxLen) : stripped;
 }
 
 /** Truncates a value before it's embedded in a warning or error message. */
-export function truncateEcho(
-  value: string,
-  max: number = MAX_ECHO_CHARS,
-): string {
+export function truncateEcho(value: string, max: number = MAX_ECHO_CHARS): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
@@ -169,9 +160,7 @@ export interface FixLike {
  * the caller — this only caps count and orders what's left, and reports
  * what it did via the returned warnings.
  */
-export function capAndSortFixes<T extends FixLike>(
-  fixes: T[],
-): { fixes: T[]; warnings: string[] } {
+export function capAndSortFixes<T extends FixLike>(fixes: T[]): { fixes: T[]; warnings: string[] } {
   const warnings: string[] = [];
   let capped = fixes;
   if (fixes.length > MAX_FIXES) {

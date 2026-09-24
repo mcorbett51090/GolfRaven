@@ -1,12 +1,5 @@
 import { useState } from "react";
-import {
-  Button,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { Button, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { runX1HealthConnectCheck } from "./src/health-connect/index.js";
 
 /**
@@ -36,16 +29,13 @@ export default function App() {
     <View style={styles.container}>
       <Text style={styles.title}>GolfRaven — P0 skeleton</Text>
       <Text style={styles.body}>
-        This is a placeholder screen. The real app's screens land from P4 (build
-        plan §7.2).
+        This is a placeholder screen. The real app's screens land from P4
+        (build plan §7.2).
       </Text>
 
       {Platform.OS === "android" ? (
         <>
-          <Button
-            title="Run X1 Health Connect check"
-            onPress={handleRunCheck}
-          />
+          <Button title="Run X1 Health Connect check" onPress={handleRunCheck} />
           {error ? <Text style={styles.error}>{error}</Text> : null}
           {output ? (
             <ScrollView style={styles.output}>
@@ -57,8 +47,8 @@ export default function App() {
         </>
       ) : (
         <Text style={styles.body}>
-          The Health Connect reader is Android-only (build plan §10 P0, row X1:
-          iOS uses Apple Health's export.xml export instead).
+          The Health Connect reader is Android-only (build plan §10 P0, row
+          X1: iOS uses Apple Health's export.xml export instead).
         </Text>
       )}
     </View>
@@ -91,11 +81,7 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   outputText: {
-    fontFamily: Platform.select({
-      ios: "Menlo",
-      android: "monospace",
-      default: "monospace",
-    }),
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     fontSize: 12,
   },
 });

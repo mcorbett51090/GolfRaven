@@ -502,48 +502,24 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   // from the SAME (unfiltered) input arrays as the verdicts above.
   const countedEntries = {
     garmin: [
-      ...iosCountedEntries(
-        input.ios.workouts,
-        input.sourceMap.garmin.iosSourceNames,
-        roundWindows,
-      ),
-      ...androidCountedEntries(
-        input.android.sessions,
-        input.sourceMap.garmin.androidDataOrigins,
-        roundWindows,
-      ),
+      ...iosCountedEntries(input.ios.workouts, input.sourceMap.garmin.iosSourceNames, roundWindows),
+      ...androidCountedEntries(input.android.sessions, input.sourceMap.garmin.androidDataOrigins, roundWindows),
     ],
-    appleWatch: iosCountedEntries(
-      input.ios.workouts,
-      input.sourceMap.appleWatch.iosSourceNames,
-      roundWindows,
-    ),
+    appleWatch: iosCountedEntries(input.ios.workouts, input.sourceMap.appleWatch.iosSourceNames, roundWindows),
     phoneApp: [
-      ...iosCountedEntries(
-        input.ios.workouts,
-        input.sourceMap.phoneApp.iosSourceNames,
-        roundWindows,
-      ),
-      ...androidCountedEntries(
-        input.android.sessions,
-        input.sourceMap.phoneApp.androidDataOrigins,
-        roundWindows,
-      ),
+      ...iosCountedEntries(input.ios.workouts, input.sourceMap.phoneApp.iosSourceNames, roundWindows),
+      ...androidCountedEntries(input.android.sessions, input.sourceMap.phoneApp.androidDataOrigins, roundWindows),
     ],
   };
-  const iosOf = (entries: X1CountedEntry[]) =>
-    entries.filter((e) => e.os === "ios");
-  const androidOf = (entries: X1CountedEntry[]) =>
-    entries.filter((e) => e.os === "android");
+  const iosOf = (entries: X1CountedEntry[]) => entries.filter((e) => e.os === "ios");
+  const androidOf = (entries: X1CountedEntry[]) => entries.filter((e) => e.os === "android");
   // Should-fix (Opus gate, post-d0de4b8): "newest counted workout date"
   // covers only entries that count TOWARD THE VERDICT — golf, allow-listed
   // source (both already true of everything in `countedEntries`), AND
   // route present. A route-less entry's date is tracked separately below,
   // never allowed to pull the verdict-bearing date forward.
-  const withRoute = (entries: X1CountedEntry[]) =>
-    entries.filter((e) => e.routePresent);
-  const withoutRoute = (entries: X1CountedEntry[]) =>
-    entries.filter((e) => !e.routePresent);
+  const withRoute = (entries: X1CountedEntry[]) => entries.filter((e) => e.routePresent);
+  const withoutRoute = (entries: X1CountedEntry[]) => entries.filter((e) => !e.routePresent);
   const newestCountedWorkoutDateBySource = {
     garmin: {
       ios: newestStart(withRoute(iosOf(countedEntries.garmin))),
@@ -612,10 +588,7 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   // decided entirely by the CLI (`main()`), from real, independently
   // verified hash binding — see the module doc.
   const recordedVerdicts: X1VerdictResult["recordedVerdicts"] = {
-    ios: {
-      sourcesPassing: sourcesPassingByOs.ios,
-      verdict: sourcesPassingByOs.ios >= 2 ? "pass" : "kill",
-    },
+    ios: { sourcesPassing: sourcesPassingByOs.ios, verdict: sourcesPassingByOs.ios >= 2 ? "pass" : "kill" },
     android: {
       sourcesPassing: sourcesPassingByOs.android,
       verdict: sourcesPassingByOs.android >= 2 ? "pass" : "kill",
@@ -625,10 +598,7 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   // INFORMATIONAL (this call's two inputs only) — "pass if either OS's own
   // verdict is pass" (Addendum F's bar, applied within each OS's data).
   const overallVerdict: "pass" | "kill" =
-    recordedVerdicts.ios.verdict === "pass" ||
-    recordedVerdicts.android.verdict === "pass"
-      ? "pass"
-      : "kill";
+    recordedVerdicts.ios.verdict === "pass" || recordedVerdicts.android.verdict === "pass" ? "pass" : "kill";
 
   // docs/p0/K4.md: "if ... X1's Garmin source specifically fails (even
   // while X1 passes overall on the other two sources)" the written
@@ -696,9 +666,7 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
 
   // Decision 0005: newest counted workout date, per source per OS.
   lines.push("");
-  lines.push(
-    "### Newest counted workout date, per source (route present only)",
-  );
+  lines.push("### Newest counted workout date, per source (route present only)");
   lines.push("| Source | Newest iOS date | Newest Android date |");
   lines.push("|---|---|---|");
   for (const [label, key] of [
@@ -707,15 +675,11 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
     [`Phone app (${result.perSource.phoneApp.appUsed})`, "phoneApp"],
   ] as const) {
     const d = result.newestCountedWorkoutDateBySource[key];
-    lines.push(
-      `| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`,
-    );
+    lines.push(`| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`);
   }
 
   lines.push("");
-  lines.push(
-    "### Newest workout WITHOUT a route, per source (does not count toward the verdict)",
-  );
+  lines.push("### Newest workout WITHOUT a route, per source (does not count toward the verdict)");
   lines.push("| Source | Newest iOS date | Newest Android date |");
   lines.push("|---|---|---|");
   for (const [label, key] of [
@@ -724,28 +688,18 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
     [`Phone app (${result.perSource.phoneApp.appUsed})`, "phoneApp"],
   ] as const) {
     const d = result.newestRouteLessWorkoutDateBySource[key];
-    lines.push(
-      `| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`,
-    );
+    lines.push(`| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`);
   }
 
   // Decision 0005 "every counted workout is listed" — the per-workout
   // listing, one row per counted entry across all 3 sources.
   lines.push("");
   lines.push("### Counted workouts/sessions");
-  lines.push(
-    "| Source | OS | Start | Source id | Source version | Device | Route present? | Test round? |",
-  );
+  lines.push("| Source | OS | Start | Source id | Source version | Device | Route present? | Test round? |");
   lines.push("|---|---|---|---|---|---|---|---|");
   const allEntries: [string, X1CountedEntry][] = [
-    ...result.countedEntries.garmin.map((e): [string, X1CountedEntry] => [
-      "Garmin watch + Connect Mobile",
-      e,
-    ]),
-    ...result.countedEntries.appleWatch.map((e): [string, X1CountedEntry] => [
-      "Apple Watch Workout",
-      e,
-    ]),
+    ...result.countedEntries.garmin.map((e): [string, X1CountedEntry] => ["Garmin watch + Connect Mobile", e]),
+    ...result.countedEntries.appleWatch.map((e): [string, X1CountedEntry] => ["Apple Watch Workout", e]),
     ...result.countedEntries.phoneApp.map((e): [string, X1CountedEntry] => [
       `Phone app (${result.perSource.phoneApp.appUsed})`,
       e,
@@ -825,9 +779,7 @@ function osLabel(os: X1Os): string {
  * holds 0, 1, or 2 entries (`main()` refuses a recorded run with 0 before
  * this is ever called).
  */
-export function computeOverallFromBoundResults(
-  boundResults: Partial<Record<X1Os, "pass" | "kill">>,
-): "pass" | "kill" {
+export function computeOverallFromBoundResults(boundResults: Partial<Record<X1Os, "pass" | "kill">>): "pass" | "kill" {
   return Object.values(boundResults).includes("pass") ? "pass" : "kill";
 }
 
@@ -863,10 +815,7 @@ const EMPTY_ANDROID: X1VerdictInput["android"] = {
  * calls this with `resolveX1DocPath()`; only tests call it directly with a
  * different path.
  */
-export async function runX1VerdictCli(
-  args: X1VerdictCliArgs,
-  x1DocPath: string,
-): Promise<void> {
+export async function runX1VerdictCli(args: X1VerdictCliArgs, x1DocPath: string): Promise<void> {
   const { resolve, join } = await import("node:path");
   const { runX1IosExport } = await import("./x1-ios-export.js");
 
@@ -874,14 +823,14 @@ export async function runX1VerdictCli(
   const sourceMap = JSON.parse(sourceMapRaw) as SourceMap;
   let followUpsRaw: string | undefined;
   const androidRouteFollowUps = args.followUpsPath
-    ? (JSON.parse(
-        (followUpsRaw = await readFile(args.followUpsPath, "utf8")),
-      ) as Record<string, AndroidRouteFollowUp>)
+    ? (JSON.parse((followUpsRaw = await readFile(args.followUpsPath, "utf8"))) as Record<
+        string,
+        AndroidRouteFollowUp
+      >)
     : undefined;
 
   const roundWindows = await readLoggedRoundWindows();
-  const { dates: recordedExportDates, source: x1DocSource } =
-    await readRecordedExportDates(x1DocPath);
+  const { dates: recordedExportDates, source: x1DocSource } = await readRecordedExportDates(x1DocPath);
   const recorded = !args.informational;
   if (recorded) {
     // Round-4 Opus-gate correction (post-4279773): a recorded run — a bind
@@ -907,18 +856,11 @@ export async function runX1VerdictCli(
     if (!recorded) {
       // No informational runs on real data while iOS is unbound (whether
       // its UTC date is blank or logged) — fixtures only.
-      assertInformationalInputAllowed(
-        recordedExportDates,
-        "ios",
-        args.iosExportDir,
-      );
+      assertInformationalInputAllowed(recordedExportDates, "ios", args.iosExportDir);
     }
     const freshIos = await runX1IosExport(args.iosExportDir, { roundWindows });
     iosData = freshIos;
-    exportXmlProvenance = {
-      path: join(args.iosExportDir, "export.xml"),
-      sha256: freshIos.exportSha256,
-    };
+    exportXmlProvenance = { path: join(args.iosExportDir, "export.xml"), sha256: freshIos.exportSha256 };
 
     if (recorded) {
       assertRecordedExportDateLogged(recordedExportDates, "ios");
@@ -931,28 +873,15 @@ export async function runX1VerdictCli(
       }
       // Re-hash export.xml and check it against the bound SHA-256, THEN
       // (only once that's confirmed) use its re-parsed workouts.
-      assertExportDateMatches(
-        recordedExportDates,
-        "ios",
-        extractCalendarDate(freshIos.exportDate),
-      );
-      const { written } = await bindExportHash(
-        x1DocSource.path,
-        "ios",
-        freshIos.exportSha256,
-      );
+      assertExportDateMatches(recordedExportDates, "ios", extractCalendarDate(freshIos.exportDate));
+      const { written } = await bindExportHash(x1DocSource.path, "ios", freshIos.exportSha256);
       iosBoundThisRun = written;
       // Round-4 Opus-gate correction (post-4279773): the run that performs
       // the FIRST bind never computes a verdict from it — see the
       // early-return below. Only a run against an ALREADY-bound (and
       // freshly re-verified) hash recomputes iOS's verdict.
       if (!written) {
-        const r = computeX1Verdict({
-          ios: freshIos,
-          android: EMPTY_ANDROID,
-          sourceMap,
-          roundWindows,
-        });
+        const r = computeX1Verdict({ ios: freshIos, android: EMPTY_ANDROID, sourceMap, roundWindows });
         boundResults.ios = r.recordedVerdicts.ios.verdict;
       }
     }
@@ -981,11 +910,7 @@ export async function runX1VerdictCli(
       );
     }
     if (!recorded) {
-      assertInformationalInputAllowed(
-        recordedExportDates,
-        "android",
-        args.androidPath,
-      );
+      assertInformationalInputAllowed(recordedExportDates, "android", args.androidPath);
     }
     androidData = androidParsed;
 
@@ -993,26 +918,13 @@ export async function runX1VerdictCli(
       assertRecordedExportDateLogged(recordedExportDates, "android");
       // Re-hash the reader-output JSON and check it against the bound
       // SHA-256, THEN (only once that's confirmed) use its parsed sessions.
-      assertExportDateMatches(
-        recordedExportDates,
-        "android",
-        extractCalendarDate(androidParsed.generatedAt),
-      );
-      const { written } = await bindExportHash(
-        x1DocSource.path,
-        "android",
-        sha256Of(androidRaw),
-      );
+      assertExportDateMatches(recordedExportDates, "android", extractCalendarDate(androidParsed.generatedAt));
+      const { written } = await bindExportHash(x1DocSource.path, "android", sha256Of(androidRaw));
       androidBoundThisRun = written;
       // Round-4 Opus-gate correction (post-4279773): same as iOS above —
       // a fresh first bind never computes a verdict this run.
       if (!written) {
-        const r = computeX1Verdict({
-          ios: EMPTY_IOS,
-          android: androidParsed,
-          sourceMap,
-          roundWindows,
-        });
+        const r = computeX1Verdict({ ios: EMPTY_IOS, android: androidParsed, sourceMap, roundWindows });
         boundResults.android = r.recordedVerdicts.android.verdict;
       }
     }
@@ -1020,15 +932,10 @@ export async function runX1VerdictCli(
     assertBoundInputProvided(recordedExportDates, "android", false);
   }
 
-  if (
-    recorded &&
-    Object.keys(boundResults).length === 0 &&
-    !iosBoundThisRun &&
-    !androidBoundThisRun
-  ) {
+  if (recorded && Object.keys(boundResults).length === 0 && !iosBoundThisRun && !androidBoundThisRun) {
     throw new Error(
       "Nothing to record: no OS has both a logged UTC date and its input supplied this run. Log a UTC date " +
-        "in docs/p0/X1.md's \"## Recorded export\" section for the OS you're binding, and pass its " +
+        'in docs/p0/X1.md\'s "## Recorded export" section for the OS you\'re binding, and pass its ' +
         "--ios-export/--android input.",
     );
   }
@@ -1040,10 +947,9 @@ export async function runX1VerdictCli(
   // pushed yet. A later run, once docs/p0/X1.md is committed and pushed,
   // re-verifies the (now-matching) hash and produces the actual result.
   if (recorded && (iosBoundThisRun || androidBoundThisRun)) {
-    const boundLabels = [
-      iosBoundThisRun ? "iOS" : null,
-      androidBoundThisRun ? "Android" : null,
-    ].filter((l): l is string => l !== null);
+    const boundLabels = [iosBoundThisRun ? "iOS" : null, androidBoundThisRun ? "Android" : null].filter(
+      (l): l is string => l !== null,
+    );
     process.stdout.write(
       `x1-verdict: bound a new SHA-256 for ${boundLabels.join(" and ")} into docs/p0/X1.md.\n` +
         "bound: commit and push docs/p0/X1.md, then re-run.\n",
@@ -1099,25 +1005,14 @@ export async function runX1VerdictCli(
       args.androidPath && androidRaw !== null
         ? { path: resolve(args.androidPath), sha256: sha256Of(androidRaw) }
         : null,
-    sourceMapJson: {
-      path: resolve(args.sourceMapPath),
-      sha256: sha256Of(sourceMapRaw),
-    },
+    sourceMapJson: { path: resolve(args.sourceMapPath), sha256: sha256Of(sourceMapRaw) },
     followUpsJson:
       args.followUpsPath && followUpsRaw !== undefined
         ? { path: resolve(args.followUpsPath), sha256: sha256Of(followUpsRaw) }
         : null,
   };
-  const recordedOverall: "pass" | "kill" | null = recorded
-    ? computeOverallFromBoundResults(boundResults)
-    : null;
-  const output = {
-    ...result,
-    recorded,
-    boundResults,
-    recordedOverall,
-    provenance,
-  };
+  const recordedOverall: "pass" | "kill" | null = recorded ? computeOverallFromBoundResults(boundResults) : null;
+  const output = { ...result, recorded, boundResults, recordedOverall, provenance };
 
   const { writeFile } = await import("node:fs/promises");
   await writeFile(

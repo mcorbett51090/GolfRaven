@@ -25,9 +25,7 @@ const EXERCISE_ROUTE_RESULT_CONSENT_REQUIRED = 2;
 function shapeOneSession(record: RawExerciseSessionRecord): GolfSessionSummary {
   const route = record.exerciseRoute;
   const routePresent = Boolean(
-    route &&
-    route.type === EXERCISE_ROUTE_RESULT_DATA &&
-    route.route.length > 0,
+    route && route.type === EXERCISE_ROUTE_RESULT_DATA && route.route.length > 0,
   );
   const routeRequiresConsent = Boolean(
     route && route.type === EXERCISE_ROUTE_RESULT_CONSENT_REQUIRED,

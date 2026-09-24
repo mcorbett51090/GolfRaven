@@ -76,9 +76,9 @@ describe("net: isPolicyBlockedResponse", () => {
   });
   it("false for a 403 that is just the destination site's own access-denied page", () => {
     const headers = new Headers({ "content-type": "text/html" });
-    expect(
-      isPolicyBlockedResponse(403, headers, "<html>Access Denied</html>"),
-    ).toBe(false);
+    expect(isPolicyBlockedResponse(403, headers, "<html>Access Denied</html>")).toBe(
+      false,
+    );
   });
   it("false for a non-403/407 status", () => {
     const headers = new Headers({ "x-deny-reason": "host_not_allowed" });
@@ -110,9 +110,7 @@ describe("net: classifyFetchRejection", () => {
   });
 
   it("does NOT classify a generic network error (e.g. DNS failure) as a policy block", () => {
-    const result = classifyFetchRejection(
-      new Error("getaddrinfo ENOTFOUND example.invalid"),
-    );
+    const result = classifyFetchRejection(new Error("getaddrinfo ENOTFOUND example.invalid"));
     expect(result.blocked).toBe(false);
   });
 
@@ -169,10 +167,7 @@ describe("net: fetchWithBlockDetection", () => {
         throw new Error("CONNECT tunnel failed, response 403");
       }),
     );
-    const outcome = await fetchWithBlockDetection(
-      "https://overpass-api.de/api/interpreter",
-      {},
-    );
+    const outcome = await fetchWithBlockDetection("https://overpass-api.de/api/interpreter", {});
     expect(outcome.kind).toBe("blocked");
     if (outcome.kind === "blocked") {
       expect(outcome.host).toBe("overpass-api.de");
@@ -183,7 +178,8 @@ describe("net: fetchWithBlockDetection", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(
-        async () => new Response("<html>Access Denied</html>", { status: 403 }),
+        async () =>
+          new Response("<html>Access Denied</html>", { status: 403 }),
       ),
     );
     const outcome = await fetchWithBlockDetection("https://example.com/", {});
@@ -200,10 +196,7 @@ describe("net: fetchWithBlockDetection", () => {
         throw new Error("getaddrinfo ENOTFOUND example.invalid");
       }),
     );
-    const outcome = await fetchWithBlockDetection(
-      "https://example.invalid/",
-      {},
-    );
+    const outcome = await fetchWithBlockDetection("https://example.invalid/", {});
     expect(outcome.kind).toBe("error");
   });
 
@@ -218,10 +211,7 @@ describe("net: fetchWithBlockDetection", () => {
           }),
       ),
     );
-    const outcome = await fetchWithBlockDetection(
-      "https://www.rtjgolf.com/",
-      {},
-    );
+    const outcome = await fetchWithBlockDetection("https://www.rtjgolf.com/", {});
     expect(outcome.kind).toBe("blocked");
   });
 });
@@ -230,10 +220,7 @@ describe("net: readBodyCapped (gate finding S6)", () => {
   it("reads a normal body fully under the cap", async () => {
     const res = new Response("hello world");
     const controller = new AbortController();
-    const buf = await readBodyCapped(res, {
-      signal: controller.signal,
-      maxBytes: 1024,
-    });
+    const buf = await readBodyCapped(res, { signal: controller.signal, maxBytes: 1024 });
     expect(buf.toString("utf8")).toBe("hello world");
   });
 
@@ -262,10 +249,7 @@ describe("net: readBodyCapped (gate finding S6)", () => {
     });
     const res = new Response(stream);
     const controller = new AbortController();
-    const readPromise = readBodyCapped(res, {
-      signal: controller.signal,
-      maxBytes: 1024,
-    });
+    const readPromise = readBodyCapped(res, { signal: controller.signal, maxBytes: 1024 });
     setTimeout(() => controller.abort(), 20);
     await expect(readPromise).rejects.toThrow(/aborted/i);
   });

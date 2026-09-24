@@ -47,9 +47,7 @@ export function haversineMeters(a: LatLng, b: LatLng): number {
   const dLon = toRadians(b.lon - a.lon);
   const lat1 = toRadians(a.lat);
   const lat2 = toRadians(b.lat);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
@@ -67,8 +65,7 @@ export interface Projector {
 export function makeProjector(origin: LatLng): Projector {
   const lat0 = toRadians(origin.lat);
   const metersPerDegreeLat = EARTH_RADIUS_METERS * (Math.PI / 180);
-  const metersPerDegreeLon =
-    EARTH_RADIUS_METERS * (Math.PI / 180) * Math.cos(lat0);
+  const metersPerDegreeLon = EARTH_RADIUS_METERS * (Math.PI / 180) * Math.cos(lat0);
   return {
     toXY(point: LatLng): XY {
       return {
@@ -139,10 +136,7 @@ export function distancePointToSegment(point: XY, a: XY, b: XY): number {
  * returns 0 for an inside point.) Used for hole rings, where "inside the
  * hole ring" does not mean "distance 0" the way it does for an outer
  * ring. */
-export function distanceToRingBoundaryXY(
-  point: XY,
-  ring: readonly XY[],
-): number {
+export function distanceToRingBoundaryXY(point: XY, ring: readonly XY[]): number {
   let min = Infinity;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const d = distancePointToSegment(point, ring[j]!, ring[i]!);
@@ -156,10 +150,7 @@ export function distanceToRingBoundaryXY(
  * vertices. This is the single-ring primitive (no hole awareness — for a
  * candidate's full polygon-with-holes/multipolygon geometry, see
  * `polygon.ts`). */
-export function distanceToPolygonMeters(
-  point: LatLng,
-  polygon: readonly LatLng[],
-): number {
+export function distanceToPolygonMeters(point: LatLng, polygon: readonly LatLng[]): number {
   if (polygon.length < 3) return Infinity;
   const origin = centroid(polygon);
   const proj = makeProjector(origin);
@@ -179,10 +170,7 @@ export function isInsidePolygonWithBuffer(
   polygon: readonly LatLng[],
   bufferMeters: number,
 ): boolean {
-  return (
-    roundTo(distanceToPolygonMeters(point, polygon), 2) <=
-    roundTo(Math.max(0, bufferMeters), 2)
-  );
+  return roundTo(distanceToPolygonMeters(point, polygon), 2) <= roundTo(Math.max(0, bufferMeters), 2);
 }
 
 /** Fraction of `points` that fall inside `polygon` (+ `bufferMeters`),

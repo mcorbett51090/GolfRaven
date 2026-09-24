@@ -65,8 +65,8 @@ export function canonicalJsonString(value: unknown): string {
 function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
     );
     return Object.fromEntries(entries.map(([k, v]) => [k, sortKeys(v)]));
   }
@@ -80,9 +80,7 @@ export interface ContractCheckResult {
   committed?: string;
 }
 
-export async function checkContract(
-  contractPath: string,
-): Promise<ContractCheckResult> {
+export async function checkContract(contractPath: string): Promise<ContractCheckResult> {
   const generated = canonicalJsonString(generateContractSchema());
   let committed: string | undefined;
   try {
@@ -144,9 +142,7 @@ async function main(argv: string[]): Promise<void> {
 
   const result = await checkContract(args.contractPath);
   if (!result.stale) {
-    process.stdout.write(
-      "verify-contract: PASS (contract/catalog.schema.json is up to date)\n",
-    );
+    process.stdout.write("verify-contract: PASS (contract/catalog.schema.json is up to date)\n");
     return;
   }
   if (result.reason === "missing") {

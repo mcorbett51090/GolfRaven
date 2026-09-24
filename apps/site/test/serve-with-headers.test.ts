@@ -26,11 +26,7 @@ describe("parseHeadersFile", () => {
       {
         path: "/*",
         ops: [
-          {
-            type: "set",
-            name: "Content-Security-Policy",
-            value: "default-src 'self'",
-          },
+          { type: "set", name: "Content-Security-Policy", value: "default-src 'self'" },
           { type: "set", name: "X-Content-Type-Options", value: "nosniff" },
         ],
       },
@@ -49,9 +45,7 @@ describe("parseHeadersFile", () => {
   });
 
   it("ignores comments and blank lines", () => {
-    const blocks = parseHeadersFile(
-      ["# a comment", "", "/*", "  X-Foo: bar"].join("\n"),
-    );
+    const blocks = parseHeadersFile(["# a comment", "", "/*", "  X-Foo: bar"].join("\n"));
     expect(blocks).toHaveLength(1);
     expect(blocks[0]!.path).toBe("/*");
   });
@@ -60,13 +54,9 @@ describe("parseHeadersFile", () => {
 describe("resolveHeaders: real Cloudflare Pages semantics", () => {
   it("REGRESSION (the actual bug): two matching blocks with NO detach comma-join the same header, they never override", () => {
     const blocks = parseHeadersFile(
-      [
-        "/*",
-        "  Content-Security-Policy: default-src 'self'",
-        "",
-        "/pagefind/*",
-        "  Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'",
-      ].join("\n"),
+      ["/*", "  Content-Security-Policy: default-src 'self'", "", "/pagefind/*", "  Content-Security-Policy: script-src 'self' 'wasm-unsafe-eval'"].join(
+        "\n",
+      ),
     );
     const headers = resolveHeaders(blocks, "/pagefind/pagefind.js");
     expect(headers["Content-Security-Policy"]).toBe(
@@ -87,33 +77,21 @@ describe("resolveHeaders: real Cloudflare Pages semantics", () => {
         "  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'",
       ].join("\n"),
     );
-    expect(
-      resolveHeaders(blocks, "/pagefind/pagefind.js")[
-        "Content-Security-Policy"
-      ],
-    ).toBe("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'");
+    expect(resolveHeaders(blocks, "/pagefind/pagefind.js")["Content-Security-Policy"]).toBe(
+      "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'",
+    );
     // The /* -only path is completely unaffected by the /pagefind/* block.
-    expect(
-      resolveHeaders(blocks, "/index.html")["Content-Security-Policy"],
-    ).toBe("default-src 'self'");
+    expect(resolveHeaders(blocks, "/index.html")["Content-Security-Policy"]).toBe("default-src 'self'");
   });
 
   it("a bare detach with nothing after it removes the header entirely for that path", () => {
-    const blocks = parseHeadersFile(
-      ["/*", "  X-Foo: bar", "", "/no-foo/*", "  ! X-Foo"].join("\n"),
-    );
+    const blocks = parseHeadersFile(["/*", "  X-Foo: bar", "", "/no-foo/*", "  ! X-Foo"].join("\n"));
     expect(resolveHeaders(blocks, "/no-foo/thing")["X-Foo"]).toBeUndefined();
     expect(resolveHeaders(blocks, "/other/thing")["X-Foo"]).toBe("bar");
   });
 
   it("non-CSP headers (no duplication) still resolve normally", () => {
-    const blocks = parseHeadersFile(
-      [
-        "/*",
-        "  X-Content-Type-Options: nosniff",
-        "  Referrer-Policy: strict-origin-when-cross-origin",
-      ].join("\n"),
-    );
+    const blocks = parseHeadersFile(["/*", "  X-Content-Type-Options: nosniff", "  Referrer-Policy: strict-origin-when-cross-origin"].join("\n"));
     const headers = resolveHeaders(blocks, "/anything");
     expect(headers["X-Content-Type-Options"]).toBe("nosniff");
     expect(headers["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
@@ -121,28 +99,11 @@ describe("resolveHeaders: real Cloudflare Pages semantics", () => {
 
   it("path matching: exact, prefix (/x/*) and catch-all (/*)", () => {
     const blocks = parseHeadersFile(
-      [
-        "/*",
-        "  X-A: 1",
-        "",
-        "/catalog/v1/*",
-        "  X-Robots-Tag: noindex",
-        "",
-        "/exact/",
-        "  X-Exact: yes",
-      ].join("\n"),
+      ["/*", "  X-A: 1", "", "/catalog/v1/*", "  X-Robots-Tag: noindex", "", "/exact/", "  X-Exact: yes"].join("\n"),
     );
-    expect(resolveHeaders(blocks, "/catalog/v1/foo.json")).toMatchObject({
-      "X-A": "1",
-      "X-Robots-Tag": "noindex",
-    });
-    expect(resolveHeaders(blocks, "/catalog/v2/foo.json")).toEqual({
-      "X-A": "1",
-    });
-    expect(resolveHeaders(blocks, "/exact/")).toMatchObject({
-      "X-A": "1",
-      "X-Exact": "yes",
-    });
+    expect(resolveHeaders(blocks, "/catalog/v1/foo.json")).toMatchObject({ "X-A": "1", "X-Robots-Tag": "noindex" });
+    expect(resolveHeaders(blocks, "/catalog/v2/foo.json")).toEqual({ "X-A": "1" });
+    expect(resolveHeaders(blocks, "/exact/")).toMatchObject({ "X-A": "1", "X-Exact": "yes" });
     expect(resolveHeaders(blocks, "/exact/nested/")).toEqual({ "X-A": "1" });
   });
 });
@@ -152,14 +113,10 @@ describe("resolveHeaders against gen-headers.mjs's REAL generated output", () =>
     const { buildHeaders } = await import("../scripts/gen-headers.mjs");
     const text = buildHeaders({});
     const blocks = parseHeadersFile(text);
-    const pagefindCsp = resolveHeaders(blocks, "/pagefind/pagefind.js")[
-      "Content-Security-Policy"
-    ];
+    const pagefindCsp = resolveHeaders(blocks, "/pagefind/pagefind.js")["Content-Security-Policy"];
     expect(pagefindCsp).toContain("wasm-unsafe-eval");
     expect(pagefindCsp?.includes(",")).toBe(false); // a single policy, not two joined
-    const rootCsp = resolveHeaders(blocks, "/index.html")[
-      "Content-Security-Policy"
-    ];
+    const rootCsp = resolveHeaders(blocks, "/index.html")["Content-Security-Policy"];
     expect(rootCsp).not.toContain("wasm-unsafe-eval");
   });
 });

@@ -60,32 +60,18 @@ async function sendViaResend(env: Env, msg: EmailMessage): Promise<SendResult> {
       body: JSON.stringify(resendBody(msg)),
     });
   } catch {
-    return {
-      ok: false,
-      error: "network-error-calling-resend",
-      status: "network-error",
-    };
+    return { ok: false, error: "network-error-calling-resend", status: "network-error" };
   }
 
-  const data = (await res.json().catch(() => null)) as {
-    id?: string;
-    message?: string;
-  } | null;
+  const data = (await res.json().catch(() => null)) as { id?: string; message?: string } | null;
   if (res.ok && data && typeof data.id === "string" && data.id.length > 0) {
     return { ok: true, providerId: data.id };
   }
-  return {
-    ok: false,
-    error: data?.message ?? `resend-http-${res.status}`,
-    status: res.status,
-  };
+  return { ok: false, error: data?.message ?? `resend-http-${res.status}`, status: res.status };
 }
 
 /** Sends through Resend (the only configured provider — see README). */
-export async function sendEmail(
-  env: Env,
-  msg: EmailMessage,
-): Promise<SendResult> {
+export async function sendEmail(env: Env, msg: EmailMessage): Promise<SendResult> {
   return sendViaResend(env, msg);
 }
 
@@ -138,9 +124,6 @@ export async function sendConfirmationEmail(
   env: Env,
   params: { to: string; confirmUrl: string; unsubscribeUrl: string },
 ): Promise<SendResult> {
-  const msg = buildConfirmationEmail({
-    fromEmail: env.RESEND_FROM_EMAIL,
-    ...params,
-  });
+  const msg = buildConfirmationEmail({ fromEmail: env.RESEND_FROM_EMAIL, ...params });
   return sendEmail(env, msg);
 }

@@ -14,11 +14,7 @@ import type { K1Row, K1RowType } from "../src/k1-log.js";
 // specifically about the pending state.
 const PAST_BOTH_WINDOWS = "2026-12-01";
 
-function row(
-  target: string,
-  type: K1RowType,
-  overrides: Partial<K1Row> = {},
-): K1Row {
+function row(target: string, type: K1RowType, overrides: Partial<K1Row> = {}): K1Row {
   return {
     target,
     type,
@@ -36,9 +32,7 @@ function row(
   };
 }
 
-function baseOperatorRows(
-  overrides: Record<string, Partial<K1Row>> = {},
-): K1Row[] {
+function baseOperatorRows(overrides: Record<string, Partial<K1Row>> = {}): K1Row[] {
   const names: [string, K1RowType][] = [
     ["Tennessee Golf Trail", "Operator (slate)"],
     ["Vancouver Island Golf Trail", "Operator (slate)"],
@@ -50,10 +44,7 @@ function baseOperatorRows(
   return names.map(([n, t]) => row(n, t, overrides[n] ?? {}));
 }
 
-function qualifiedSponsor(
-  target = "Alabama Tourism Department",
-  conversationDate = "2026-11-01",
-): K1Row {
+function qualifiedSponsor(target = "Alabama Tourism Department", conversationDate = "2026-11-01"): K1Row {
   return row(target, "Sponsor", {
     sponsorDecisionMakerNamed: "Y",
     sponsorBudgetStated: "Y",
@@ -65,11 +56,7 @@ function qualifiedSponsor(
 // `today` defaults to `asOf` — the common case (a read dated as of the day
 // it's actually run). Tests about the as-of-vs-today relationship itself
 // pass `today` explicitly.
-function verdict(
-  rows: K1Row[],
-  asOf: string,
-  today: string = asOf,
-): ReturnType<typeof computeK1Verdict> {
+function verdict(rows: K1Row[], asOf: string, today: string = asOf): ReturnType<typeof computeK1Verdict> {
   return computeK1Verdict(rows, asOf, today);
 }
 
@@ -104,9 +91,7 @@ describe("computeK1Verdict: early read (decision 0001 Addendum D R1, cutoff 2026
     expect(result.earlyRead.state).toBe("pass");
     // No LOIs logged -> full gate operators miss, evaluated independently.
     expect(result.fullGate.state).toBe("operator-miss");
-    expect(result.fullGate.consequenceText).toBe(
-      K1_CONSEQUENCE_OPERATOR_FULL_MISS,
-    );
+    expect(result.fullGate.consequenceText).toBe(K1_CONSEQUENCE_OPERATOR_FULL_MISS);
   });
 
   it("5 acceptances -> early pass with count 5", () => {
@@ -145,9 +130,7 @@ describe("computeK1Verdict: early read (decision 0001 Addendum D R1, cutoff 2026
       PAST_BOTH_WINDOWS,
     );
     expect(result.earlyRead.count).toBe(1);
-    expect(result.earlyRead.late).toEqual([
-      { target: "Vancouver Island Golf Trail", date: "2026-10-20" },
-    ]);
+    expect(result.earlyRead.late).toEqual([{ target: "Vancouver Island Golf Trail", date: "2026-10-20" }]);
   });
 
   it("a 6th contact (Oklahoma) does not count when the swap is not activated", () => {
@@ -162,9 +145,7 @@ describe("computeK1Verdict: early read (decision 0001 Addendum D R1, cutoff 2026
     expect(result.effectiveFive).not.toContain("Oklahoma Golf Trail");
     expect(result.earlyRead.count).toBe(2); // TN + VI only, OK ignored
     expect(result.okSwap.activated).toBe(false);
-    expect(result.warnings.some((w) => w.includes("Oklahoma Golf Trail"))).toBe(
-      true,
-    );
+    expect(result.warnings.some((w) => w.includes("Oklahoma Golf Trail"))).toBe(true);
   });
 });
 
@@ -199,21 +180,17 @@ describe("computeK1Verdict: as-of pending states (decision 0001 Addendum I)", ()
   });
 
   it("refuses an --as-of that is not a real calendar date (2026-13-45)", () => {
-    expect(() => verdict(baseOperatorRows(), "2026-13-45")).toThrow(
-      /not a real/,
-    );
+    expect(() => verdict(baseOperatorRows(), "2026-13-45")).toThrow(/not a real/);
   });
 
   it("refuses an --as-of of tomorrow (later than today)", () => {
-    expect(() =>
-      computeK1Verdict(baseOperatorRows(), "2026-09-25", "2026-09-24"),
-    ).toThrow(/later than today/);
+    expect(() => computeK1Verdict(baseOperatorRows(), "2026-09-25", "2026-09-24")).toThrow(
+      /later than today/,
+    );
   });
 
   it("accepts an --as-of equal to today", () => {
-    expect(() =>
-      computeK1Verdict(baseOperatorRows(), "2026-09-24", "2026-09-24"),
-    ).not.toThrow();
+    expect(() => computeK1Verdict(baseOperatorRows(), "2026-09-24", "2026-09-24")).not.toThrow();
   });
 });
 
@@ -239,10 +216,7 @@ describe("computeK1Verdict: probe — an early-read miss never hides a passing f
     const rows = [
       ...baseOperatorRows({
         "Tennessee Golf Trail": { loiDate: "2026-11-10", feeWillingness: "Y" }, // no call accepted
-        "Vancouver Island Golf Trail": {
-          loiDate: "2026-11-10",
-          feeWillingness: "Y",
-        },
+        "Vancouver Island Golf Trail": { loiDate: "2026-11-10", feeWillingness: "Y" },
       }),
       qualifiedSponsor(),
     ];
@@ -260,28 +234,18 @@ describe("computeK1Verdict: Oklahoma Golf Trail swap activation (K1.md METHOD st
     const result = verdict(
       baseOperatorRows({
         "Tennessee Golf Trail": { callAcceptedDate: "2026-10-06" },
-        "Oklahoma Golf Trail": {
-          callAcceptedDate: "2026-10-07",
-          okSwapReplaces: "Tennessee Golf Trail",
-        },
+        "Oklahoma Golf Trail": { callAcceptedDate: "2026-10-07", okSwapReplaces: "Tennessee Golf Trail" },
         "Vancouver Island Golf Trail": { callAcceptedDate: "2026-10-08" },
       }),
       PAST_BOTH_WINDOWS,
     );
-    expect(result.okSwap).toEqual({
-      activated: true,
-      replaces: "Tennessee Golf Trail",
-    });
+    expect(result.okSwap).toEqual({ activated: true, replaces: "Tennessee Golf Trail" });
     expect(result.effectiveFive).toContain("Oklahoma Golf Trail");
     expect(result.effectiveFive).not.toContain("Tennessee Golf Trail");
     expect(result.effectiveFive).toHaveLength(5);
     expect(result.earlyRead.count).toBe(2);
     expect(result.earlyRead.state).toBe("pass");
-    expect(
-      result.warnings.some((w) =>
-        w.includes('replaces "Tennessee Golf Trail"'),
-      ),
-    ).toBe(true);
+    expect(result.warnings.some((w) => w.includes('replaces "Tennessee Golf Trail"'))).toBe(true);
   });
 
   it("when NOT activated, OK is excluded and the base 5 is used", () => {
@@ -301,10 +265,7 @@ describe("computeK1Verdict: full gate — operators (decision 0001 Addendum C, c
   it("an LOI without recorded fee willingness does not count", () => {
     const result = verdict(
       baseOperatorRows({
-        "Tennessee Golf Trail": {
-          callAcceptedDate: "2026-10-06",
-          loiDate: "2026-11-10",
-        }, // no feeWillingness
+        "Tennessee Golf Trail": { callAcceptedDate: "2026-10-06", loiDate: "2026-11-10" }, // no feeWillingness
         "Vancouver Island Golf Trail": {
           callAcceptedDate: "2026-10-07",
           loiDate: "2026-11-10",
@@ -323,11 +284,7 @@ describe("computeK1Verdict: full gate — operators (decision 0001 Addendum C, c
   it("2 qualifying LOIs (fee willingness Y, on or before 2026-11-30) pass the operator full gate", () => {
     const result = verdict(
       baseOperatorRows({
-        "Tennessee Golf Trail": {
-          callAcceptedDate: "2026-10-06",
-          loiDate: "2026-11-20",
-          feeWillingness: "Y",
-        },
+        "Tennessee Golf Trail": { callAcceptedDate: "2026-10-06", loiDate: "2026-11-20", feeWillingness: "Y" },
         "Vancouver Island Golf Trail": {
           callAcceptedDate: "2026-10-07",
           loiDate: "2026-11-30", // boundary: exactly the cutoff, still counts
@@ -374,9 +331,7 @@ describe("computeK1Verdict: full gate — sponsors (all 3 qualifiers + conversat
     ];
     const result = verdict(rows, PAST_BOTH_WINDOWS);
     expect(result.fullGate.sponsors.count).toBe(0);
-    expect(result.fullGate.sponsors.partial[0]!.missing).toContain(
-      "a recorded sponsor conversation date",
-    );
+    expect(result.fullGate.sponsors.partial[0]!.missing).toContain("a recorded sponsor conversation date");
   });
 
   it("a sponsor row with all qualifiers and a conversation date on or before 2026-11-30 counts", () => {
@@ -384,16 +339,11 @@ describe("computeK1Verdict: full gate — sponsors (all 3 qualifiers + conversat
     const result = verdict(rows, PAST_BOTH_WINDOWS);
     expect(result.fullGate.sponsors.count).toBe(1);
     expect(result.fullGate.sponsors.pass).toBe(true);
-    expect(result.fullGate.sponsors.qualified).toEqual([
-      "Alabama Tourism Department",
-    ]);
+    expect(result.fullGate.sponsors.qualified).toEqual(["Alabama Tourism Department"]);
   });
 
   it("a sponsor conversation dated after 2026-11-30 does not count", () => {
-    const rows = [
-      ...baseOperatorRows(),
-      qualifiedSponsor("Alabama Tourism Department", "2026-12-01"),
-    ];
+    const rows = [...baseOperatorRows(), qualifiedSponsor("Alabama Tourism Department", "2026-12-01")];
     const result = verdict(rows, PAST_BOTH_WINDOWS);
     expect(result.fullGate.sponsors.count).toBe(0);
     expect(result.fullGate.sponsors.late).toEqual([
@@ -405,16 +355,8 @@ describe("computeK1Verdict: full gate — sponsors (all 3 qualifiers + conversat
 describe("computeK1Verdict: full-gate state priority — operator miss before sponsor miss (decision 0001 Addendum I)", () => {
   it("sponsor miss, operators pass", () => {
     const rows = baseOperatorRows({
-      "Tennessee Golf Trail": {
-        callAcceptedDate: "2026-10-06",
-        loiDate: "2026-11-10",
-        feeWillingness: "Y",
-      },
-      "Vancouver Island Golf Trail": {
-        callAcceptedDate: "2026-10-07",
-        loiDate: "2026-11-10",
-        feeWillingness: "Y",
-      },
+      "Tennessee Golf Trail": { callAcceptedDate: "2026-10-06", loiDate: "2026-11-10", feeWillingness: "Y" },
+      "Vancouver Island Golf Trail": { callAcceptedDate: "2026-10-07", loiDate: "2026-11-10", feeWillingness: "Y" },
     });
     const result = verdict(rows, PAST_BOTH_WINDOWS); // no sponsor rows at all
     expect(result.earlyRead.state).toBe("pass");
@@ -430,19 +372,13 @@ describe("computeK1Verdict: full-gate state priority — operator miss before sp
     expect(result.fullGate.operators.pass).toBe(false);
     expect(result.fullGate.sponsors.pass).toBe(false);
     expect(result.fullGate.state).toBe("operator-miss");
-    expect(result.fullGate.consequenceText).toBe(
-      K1_CONSEQUENCE_OPERATOR_FULL_MISS,
-    );
+    expect(result.fullGate.consequenceText).toBe(K1_CONSEQUENCE_OPERATOR_FULL_MISS);
   });
 
   it("full pass: operators pass and >= 1 sponsor qualified", () => {
     const rows = [
       ...baseOperatorRows({
-        "Tennessee Golf Trail": {
-          callAcceptedDate: "2026-10-06",
-          loiDate: "2026-11-10",
-          feeWillingness: "Y",
-        },
+        "Tennessee Golf Trail": { callAcceptedDate: "2026-10-06", loiDate: "2026-11-10", feeWillingness: "Y" },
         "Vancouver Island Golf Trail": {
           callAcceptedDate: "2026-10-07",
           loiDate: "2026-11-10",
@@ -453,9 +389,7 @@ describe("computeK1Verdict: full-gate state priority — operator miss before sp
     ];
     const result = verdict(rows, PAST_BOTH_WINDOWS);
     expect(result.fullGate.state).toBe("pass");
-    expect(result.fullGate.consequenceText).toBe(
-      K1_CONSEQUENCE_FULL_GATE_PASS_NOTE,
-    );
+    expect(result.fullGate.consequenceText).toBe(K1_CONSEQUENCE_FULL_GATE_PASS_NOTE);
   });
 });
 
@@ -476,23 +410,14 @@ describe("computeK1Verdict: date sanity (decision 0001 Addendum I)", () => {
 
   it("throws when an LOI is dated before its row's contacted date", () => {
     const rows = baseOperatorRows({
-      "Tennessee Golf Trail": {
-        contactedDate: "2026-10-10",
-        loiDate: "2026-10-05",
-        feeWillingness: "Y",
-      },
+      "Tennessee Golf Trail": { contactedDate: "2026-10-10", loiDate: "2026-10-05", feeWillingness: "Y" },
     });
-    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(
-      /LOI date .* is before Contacted date/,
-    );
+    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(/LOI date .* is before Contacted date/);
   });
 
   it("throws when an acceptance is dated before its row's contacted date", () => {
     const rows = baseOperatorRows({
-      "Tennessee Golf Trail": {
-        contactedDate: "2026-10-10",
-        callAcceptedDate: "2026-10-05",
-      },
+      "Tennessee Golf Trail": { contactedDate: "2026-10-10", callAcceptedDate: "2026-10-05" },
     });
     expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(
       /Call accepted date .* is before Contacted date/,
@@ -503,9 +428,7 @@ describe("computeK1Verdict: date sanity (decision 0001 Addendum I)", () => {
     const rows = baseOperatorRows({
       "Tennessee Golf Trail": { contactedDate: "2026-02-30" }, // no Feb 30
     });
-    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(
-      /not a real calendar date/,
-    );
+    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(/not a real calendar date/);
   });
 
   it("throws when a sponsor conversation is dated before that sponsor's own contacted date", () => {
@@ -527,20 +450,12 @@ describe("computeK1Verdict: date sanity (decision 0001 Addendum I)", () => {
 
 describe("computeK1Verdict: required rows", () => {
   it("throws when a required operator row is missing from the input", () => {
-    const rows = baseOperatorRows().filter(
-      (r) => r.target !== "Canadian Rockies Golf Consortium",
-    );
-    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(
-      /missing required operator row/,
-    );
+    const rows = baseOperatorRows().filter((r) => r.target !== "Canadian Rockies Golf Consortium");
+    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(/missing required operator row/);
   });
 
   it("throws when the Oklahoma Golf Trail row is missing", () => {
-    const rows = baseOperatorRows().filter(
-      (r) => r.target !== "Oklahoma Golf Trail",
-    );
-    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(
-      /Oklahoma Golf Trail/,
-    );
+    const rows = baseOperatorRows().filter((r) => r.target !== "Oklahoma Golf Trail");
+    expect(() => verdict(rows, PAST_BOTH_WINDOWS)).toThrow(/Oklahoma Golf Trail/);
   });
 });

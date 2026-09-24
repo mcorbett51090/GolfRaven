@@ -29,22 +29,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  isCatalogEmpty,
-  isIndexable,
-  loadCatalog,
-  loadCatalogFromBundle,
-} from "@golfraven/catalog";
+import { isCatalogEmpty, isIndexable, loadCatalog, loadCatalogFromBundle } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
 import { isProductionEnv } from "../src/lib/env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Overridable via GOLFRAVEN_DATA_DIR — see derive.ts's realDataDir() doc.
-const REAL_DATA_DIR =
-  process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
-const OUT_PATH =
-  process.env.INDEXABILITY_OUT_PATH ??
-  join(here, "..", "build", "indexability.json");
+const REAL_DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
+const OUT_PATH = process.env.INDEXABILITY_OUT_PATH ?? join(here, "..", "build", "indexability.json");
 
 async function loadSiteCatalog() {
   const isProduction = isProductionEnv(process.env);
@@ -56,10 +48,7 @@ async function loadSiteCatalog() {
         "GOLFRAVEN_ENV=production refuses demo data (GOLFRAVEN_DEMO=1 was set).",
       );
     }
-    return {
-      catalog: loadCatalogFromBundle(demoBundleForSite()),
-      usedDemoData: true,
-    };
+    return { catalog: loadCatalogFromBundle(demoBundleForSite()), usedDemoData: true };
   }
 
   const real = await loadCatalog({ dataDir: REAL_DATA_DIR });
@@ -82,8 +71,7 @@ if (!usedDemoData) {
   }
   for (const regionCode of new Set(catalog.facilities.map((f) => f.region))) {
     const authored = catalog.regions.find((r) => r.code === regionCode);
-    const [countryFromCode = "", subdivisionFromCode = ""] =
-      regionCode.split("-");
+    const [countryFromCode = "", subdivisionFromCode = ""] = regionCode.split("-");
     const country = (authored?.country ?? countryFromCode).toLowerCase();
     const regionSlug = authored?.slug ?? subdivisionFromCode.toLowerCase();
     paths.add(`/${country}/${regionSlug}/`);

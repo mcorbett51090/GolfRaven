@@ -7,12 +7,7 @@ import {
   K3_CONSEQUENCE_DISAGREE,
   K3_CONSEQUENCE_UNIVERSAL,
 } from "../src/k3-verdict.js";
-import {
-  K3_KEYWORD_TERMS,
-  K3_SEARCH_CONSOLE_MONTHS,
-  type K3Log,
-  type K3KeywordRow,
-} from "../src/k3-log.js";
+import { K3_KEYWORD_TERMS, K3_SEARCH_CONSOLE_MONTHS, type K3Log, type K3KeywordRow } from "../src/k3-log.js";
 
 const VALID_PROPERTY_ID = "sc-domain:southernwinecountry.com";
 const VALID_READ_DATE = "2026-10-05";
@@ -20,17 +15,11 @@ const VALID_READ_DATE = "2026-10-05";
 const TODAY = "2026-12-01";
 
 function scRows(clicks: [number | null, number | null, number | null]) {
-  return K3_SEARCH_CONSOLE_MONTHS.map((month, i) => ({
-    month,
-    clicks: clicks[i]!,
-  }));
+  return K3_SEARCH_CONSOLE_MONTHS.map((month, i) => ({ month, clicks: clicks[i]! }));
 }
 
 function kwRows(
-  values: Record<
-    string,
-    { lowerBound?: number | null; upperBound?: number | null }
-  >,
+  values: Record<string, { lowerBound?: number | null; upperBound?: number | null }>,
 ): K3KeywordRow[] {
   return K3_KEYWORD_TERMS.map((term) => {
     const v = values[term] ?? {};
@@ -42,12 +31,9 @@ function kwRows(
   });
 }
 
-function allEqualBounds(
-  value: number,
-): Record<string, { lowerBound: number; upperBound: number }> {
+function allEqualBounds(value: number): Record<string, { lowerBound: number; upperBound: number }> {
   const out: Record<string, { lowerBound: number; upperBound: number }> = {};
-  for (const t of K3_KEYWORD_TERMS)
-    out[t] = { lowerBound: value, upperBound: value };
+  for (const t of K3_KEYWORD_TERMS) out[t] = { lowerBound: value, upperBound: value };
   return out;
 }
 
@@ -56,10 +42,7 @@ function buildLog(
     propertyId: string;
     readDate: string | null;
     clicks: [number | null, number | null, number | null];
-    keywords: Record<
-      string,
-      { lowerBound?: number | null; upperBound?: number | null }
-    >;
+    keywords: Record<string, { lowerBound?: number | null; upperBound?: number | null }>;
   }>,
 ): K3Log {
   const {
@@ -68,20 +51,12 @@ function buildLog(
     clicks = [1000, 1000, 1000],
     keywords = allEqualBounds(1000),
   } = opts;
-  return {
-    propertyId,
-    readDate,
-    searchConsole: scRows(clicks),
-    keywords: kwRows(keywords),
-  };
+  return { propertyId, readDate, searchConsole: scRows(clicks), keywords: kwRows(keywords) };
 }
 
 // `today` defaults to TODAY (comfortably after any readDate these tests
 // use); tests about the read-date-vs-today relationship pass it explicitly.
-function verdict(
-  log: K3Log,
-  today: string = TODAY,
-): ReturnType<typeof computeK3Verdict> {
+function verdict(log: K3Log, today: string = TODAY): ReturnType<typeof computeK3Verdict> {
   return computeK3Verdict(log, today);
 }
 
@@ -91,22 +66,16 @@ describe("computeK3Verdict: refusals", () => {
   });
 
   it("refuses when the property id doesn't look like a real property (e.g. 'TBD')", () => {
-    expect(() => verdict(buildLog({ propertyId: "TBD" }))).toThrow(
-      /doesn't look like a Search Console/,
-    );
+    expect(() => verdict(buildLog({ propertyId: "TBD" }))).toThrow(/doesn't look like a Search Console/);
   });
 
   it("accepts an https:// URL-prefix property id", () => {
-    const result = verdict(
-      buildLog({ propertyId: "https://www.southernwinecountry.com/" }),
-    );
+    const result = verdict(buildLog({ propertyId: "https://www.southernwinecountry.com/" }));
     expect(result.propertyId).toBe("https://www.southernwinecountry.com/");
   });
 
   it("accepts an http:// URL-prefix property id", () => {
-    const result = verdict(
-      buildLog({ propertyId: "http://www.southernwinecountry.com/" }),
-    );
+    const result = verdict(buildLog({ propertyId: "http://www.southernwinecountry.com/" }));
     expect(result.propertyId).toBe("http://www.southernwinecountry.com/");
   });
 
@@ -115,35 +84,25 @@ describe("computeK3Verdict: refusals", () => {
   });
 
   it("refuses when the read date is before 2026-10-01 (e.g. 2026-09-30)", () => {
-    expect(() =>
-      verdict(buildLog({ readDate: "2026-09-30" }), "2026-12-01"),
-    ).toThrow(/before 2026-10-01/);
+    expect(() => verdict(buildLog({ readDate: "2026-09-30" }), "2026-12-01")).toThrow(/before 2026-10-01/);
   });
 
   it("refuses when the read date is not a real calendar date", () => {
-    expect(() => verdict(buildLog({ readDate: "2026-13-45" }))).toThrow(
-      /not a real calendar date/,
-    );
+    expect(() => verdict(buildLog({ readDate: "2026-13-45" }))).toThrow(/not a real calendar date/);
   });
 
   it("refuses when the read date is later than today", () => {
-    expect(() =>
-      verdict(buildLog({ readDate: "2026-10-05" }), "2026-10-01"),
-    ).toThrow(/later than today/);
+    expect(() => verdict(buildLog({ readDate: "2026-10-05" }), "2026-10-01")).toThrow(/later than today/);
   });
 
   it("refuses when a month's clicks total is blank", () => {
-    expect(() => verdict(buildLog({ clicks: [1000, null, 1000] }))).toThrow(
-      /missing: 2026-08/,
-    );
+    expect(() => verdict(buildLog({ clicks: [1000, null, 1000] }))).toThrow(/missing: 2026-08/);
   });
 
   it("refuses when a keyword term has no range recorded", () => {
     const keywords = allEqualBounds(1000);
     delete (keywords as Record<string, unknown>)["golf trail"];
-    expect(() => verdict(buildLog({ keywords }))).toThrow(
-      /missing: golf trail/,
-    );
+    expect(() => verdict(buildLog({ keywords }))).toThrow(/missing: golf trail/);
   });
 });
 
@@ -180,12 +139,8 @@ describe("computeK3Verdict: Keyword Planner — decision 0001 Addendum D R5 dupl
     );
     // 1000 (once, not 2000) + 100 + 200 + 300 + 400 = 2000
     expect(result.keyword.combinedVolume).toBe(2000);
-    const golfTrail = result.keyword.contributions.find(
-      (c) => c.term === "golf trail",
-    )!;
-    const golfTrails = result.keyword.contributions.find(
-      (c) => c.term === "golf trails",
-    )!;
+    const golfTrail = result.keyword.contributions.find((c) => c.term === "golf trail")!;
+    const golfTrails = result.keyword.contributions.find((c) => c.term === "golf trails")!;
     expect(golfTrail.dedupedWith).toEqual(["golf trails"]);
     expect(golfTrails.dedupedWith).toEqual(["golf trail"]);
   });
@@ -247,9 +202,7 @@ describe("computeK3Verdict: keyword sum boundary (bar >= 5000)", () => {
 
 describe("computeK3Verdict: combined branch and consequence text", () => {
   it("both miss", () => {
-    const result = verdict(
-      buildLog({ clicks: [100, 150, 200], keywords: allEqualBounds(100) }),
-    );
+    const result = verdict(buildLog({ clicks: [100, 150, 200], keywords: allEqualBounds(100) }));
     expect(result.searchConsole.pass).toBe(false);
     expect(result.keyword.pass).toBe(false);
     expect(result.combinedBranch).toBe("both-miss");
@@ -257,9 +210,7 @@ describe("computeK3Verdict: combined branch and consequence text", () => {
   });
 
   it("disagree — search console passes, keyword misses", () => {
-    const result = verdict(
-      buildLog({ clicks: [1200, 1100, 1300], keywords: allEqualBounds(100) }),
-    );
+    const result = verdict(buildLog({ clicks: [1200, 1100, 1300], keywords: allEqualBounds(100) }));
     expect(result.searchConsole.pass).toBe(true);
     expect(result.keyword.pass).toBe(false);
     expect(result.combinedBranch).toBe("disagree");
@@ -269,8 +220,7 @@ describe("computeK3Verdict: combined branch and consequence text", () => {
   it("disagree — keyword passes, search console misses", () => {
     // Distinct point values (not allEqualBounds) so R5's dedup doesn't
     // collapse all six into a single ~1000 contribution.
-    const keywords: Record<string, { lowerBound: number; upperBound: number }> =
-      {};
+    const keywords: Record<string, { lowerBound: number; upperBound: number }> = {};
     K3_KEYWORD_TERMS.forEach((t, i) => {
       keywords[t] = { lowerBound: 1000 + i, upperBound: 1000 + i };
     });

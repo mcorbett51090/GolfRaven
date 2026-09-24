@@ -18,13 +18,9 @@
   }
 
   var endpoint =
-    typeof window.SIGNUP_ENDPOINT === "string"
-      ? window.SIGNUP_ENDPOINT.trim()
-      : "";
+    typeof window.SIGNUP_ENDPOINT === "string" ? window.SIGNUP_ENDPOINT.trim() : "";
   var turnstileSiteKey =
-    typeof window.TURNSTILE_SITE_KEY === "string"
-      ? window.TURNSTILE_SITE_KEY.trim()
-      : "";
+    typeof window.TURNSTILE_SITE_KEY === "string" ? window.TURNSTILE_SITE_KEY.trim() : "";
 
   var form = document.getElementById("signup-form");
   var closedNotice = document.getElementById("signups-closed");

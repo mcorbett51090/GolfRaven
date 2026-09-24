@@ -21,25 +21,19 @@ afterEach(() => {
 describe("x4-verify: parseFacilityId (gate finding B2)", () => {
   it("parses the numeric id from a well-formed configured URL", () => {
     expect(
-      parseFacilityId(
-        "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
-      ),
+      parseFacilityId("https://www.golfnow.com/tee-times/facility/2360-grand-national/search"),
     ).toBe("2360");
   });
 
   it("refuses (throws) on http instead of https", () => {
     expect(() =>
-      parseFacilityId(
-        "http://www.golfnow.com/tee-times/facility/2360-grand-national/search",
-      ),
+      parseFacilityId("http://www.golfnow.com/tee-times/facility/2360-grand-national/search"),
     ).toThrow(/does not match/);
   });
 
   it("refuses (throws) on a foreign host", () => {
     expect(() =>
-      parseFacilityId(
-        "https://evil.example/tee-times/facility/2360-grand-national/search",
-      ),
+      parseFacilityId("https://evil.example/tee-times/facility/2360-grand-national/search"),
     ).toThrow(/does not match/);
   });
 
@@ -110,69 +104,33 @@ describe("x4-verify: isLiveFacilityPage (decision 0001 Addendum H's three-way ou
   });
 
   it("not-live (definitive): HTTP 404", () => {
-    const result = isLiveFacilityPage(
-      404,
-      "https://www.golfnow.com/x",
-      "x",
-      "Grand National",
-      "2360",
-    );
+    const result = isLiveFacilityPage(404, "https://www.golfnow.com/x", "x", "Grand National", "2360");
     expect(result.status).toBe("not-live");
     expect(result.reason).toContain("HTTP 404");
   });
 
   it("not-live (definitive): HTTP 410", () => {
-    const result = isLiveFacilityPage(
-      410,
-      "https://www.golfnow.com/x",
-      "x",
-      "Grand National",
-      "2360",
-    );
+    const result = isLiveFacilityPage(410, "https://www.golfnow.com/x", "x", "Grand National", "2360");
     expect(result.status).toBe("not-live");
   });
 
   it("indeterminate (Addendum H, never 'not covered'): HTTP 403", () => {
-    const result = isLiveFacilityPage(
-      403,
-      "https://www.golfnow.com/x",
-      "x",
-      "Grand National",
-      "2360",
-    );
+    const result = isLiveFacilityPage(403, "https://www.golfnow.com/x", "x", "Grand National", "2360");
     expect(result.status).toBe("indeterminate");
   });
 
   it("indeterminate: HTTP 429", () => {
-    const result = isLiveFacilityPage(
-      429,
-      "https://www.golfnow.com/x",
-      "x",
-      "Grand National",
-      "2360",
-    );
+    const result = isLiveFacilityPage(429, "https://www.golfnow.com/x", "x", "Grand National", "2360");
     expect(result.status).toBe("indeterminate");
   });
 
   it("indeterminate: HTTP 503 (any 5xx)", () => {
-    const result = isLiveFacilityPage(
-      503,
-      "https://www.golfnow.com/x",
-      "x",
-      "Grand National",
-      "2360",
-    );
+    const result = isLiveFacilityPage(503, "https://www.golfnow.com/x", "x", "Grand National", "2360");
     expect(result.status).toBe("indeterminate");
   });
 
   it("indeterminate: an unlisted status (e.g. 400)", () => {
-    const result = isLiveFacilityPage(
-      400,
-      "https://www.golfnow.com/x",
-      "x",
-      "Grand National",
-      "2360",
-    );
+    const result = isLiveFacilityPage(400, "https://www.golfnow.com/x", "x", "Grand National", "2360");
     expect(result.status).toBe("indeterminate");
   });
 
@@ -226,9 +184,7 @@ describe("x4-verify: computeX4Coverage — per-trail 80% boundary (decision 0001
     const perTrail = computeX4Coverage(perCourse);
     expect(perTrail.VI?.pct).toBe(75);
     expect(perTrail.VI?.verdict).toBe("kill");
-    expect(perTrail.VI?.consequence).toContain(
-      "Course-native link becomes primary for VI",
-    );
+    expect(perTrail.VI?.consequence).toContain("Course-native link becomes primary for VI");
   });
 
   it("a null URL counts as not covered, same as a non-live page", () => {
@@ -277,16 +233,12 @@ describe("x4-verify: runX4Verify — live mode", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        const res = new Response(
-          "Grand National Golf Club tee times available now.",
-          {
-            status: 200,
-            headers: { "content-type": "text/html" },
-          },
-        );
+        const res = new Response("Grand National Golf Club tee times available now.", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
         Object.defineProperty(res, "url", {
-          value:
-            "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+          value: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
         });
         return res;
       }),
@@ -300,9 +252,7 @@ describe("x4-verify: runX4Verify — live mode", () => {
       "No Page Course": { trail: "RTJ", golfnowFacilityUrl: null },
     };
     const outDir = path.join(OUT_DIR, "live-run");
-    const result = await runX4Verify(courseMap, outDir, {
-      slateTrails: ["RTJ"],
-    });
+    const result = await runX4Verify(courseMap, outDir, { slateTrails: ["RTJ"] });
 
     expect(result.perTrail.RTJ?.liveCount).toBe(1);
     expect(result.perTrail.RTJ?.rosterSize).toBe(2);
@@ -312,9 +262,7 @@ describe("x4-verify: runX4Verify — live mode", () => {
       readFileSync(path.join(outDir, "responses.json"), "utf8"),
     ) as Record<string, X4SavedEnvelope>;
     expect(saved["Grand National"]?.response.status).toBe(200);
-    expect(saved["Grand National"]?.response.finalUrl).toContain(
-      "2360-grand-national",
-    );
+    expect(saved["Grand National"]?.response.finalUrl).toContain("2360-grand-national");
     expect(typeof saved["Grand National"]?.fetchedAt).toBe("string");
   });
 
@@ -328,17 +276,12 @@ describe("x4-verify: runX4Verify — live mode", () => {
     const courseMap: X4CourseMap = {
       "Grand National": {
         trail: "RTJ",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
       },
     };
-    const result = await runX4Verify(
-      courseMap,
-      path.join(OUT_DIR, "blocked-run"),
-      {
-        slateTrails: ["RTJ"],
-      },
-    );
+    const result = await runX4Verify(courseMap, path.join(OUT_DIR, "blocked-run"), {
+      slateTrails: ["RTJ"],
+    });
     expect(result.perCourse[0]?.status).toBe("indeterminate");
     expect(result.perCourse[0]?.blocked).toBe(true);
     expect(result.warnings[0]).toContain("BLOCKED — network policy");
@@ -352,28 +295,20 @@ describe("x4-verify: runX4Verify — live mode", () => {
       vi.fn(
         () =>
           new Promise((_resolve, reject) => {
-            setTimeout(
-              () => reject(new Error("The operation was aborted")),
-              10,
-            );
+            setTimeout(() => reject(new Error("The operation was aborted")), 10);
           }),
       ),
     );
     const courseMap: X4CourseMap = {
       "Grand National": {
         trail: "RTJ",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
       },
     };
-    const result = await runX4Verify(
-      courseMap,
-      path.join(OUT_DIR, "timeout-run"),
-      {
-        slateTrails: ["RTJ"],
-        timeoutMs: 5,
-      },
-    );
+    const result = await runX4Verify(courseMap, path.join(OUT_DIR, "timeout-run"), {
+      slateTrails: ["RTJ"],
+      timeoutMs: 5,
+    });
     expect(result.perCourse[0]?.status).toBe("indeterminate");
     expect(result.perTrail.RTJ?.verdict).toBe("not-run");
   });
@@ -386,8 +321,7 @@ describe("x4-verify: runX4Verify — live mode", () => {
     const courseMap: X4CourseMap = {
       "Grand National": {
         trail: "RTJ",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
       },
     };
     const result = await runX4Verify(courseMap, path.join(OUT_DIR, "429-run"), {
@@ -404,8 +338,7 @@ describe("x4-verify: runX4Verify — live mode", () => {
     const courseMap: X4CourseMap = {
       "Grand National": {
         trail: "RTJ",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
       },
     };
     const result = await runX4Verify(courseMap, path.join(OUT_DIR, "404-run"), {
@@ -426,8 +359,7 @@ describe("x4-verify: runX4Verify — live mode", () => {
     const courseMap: X4CourseMap = {
       "Grand National": {
         trail: "RTJ",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
       },
     };
     await expect(
@@ -444,8 +376,7 @@ describe("x4-verify: runX4Verify — live mode", () => {
           headers: { "content-type": "text/html" },
         });
         Object.defineProperty(res, "url", {
-          value:
-            "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+          value: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
         });
         return res;
       }),
@@ -453,31 +384,21 @@ describe("x4-verify: runX4Verify — live mode", () => {
     const courseMap: X4CourseMap = {
       "Grand National": {
         trail: "RTJ",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
       },
     };
-    const result = await runX4Verify(
-      courseMap,
-      path.join(OUT_DIR, "explicit-slate-run"),
-      {
-        slateTrails: ["RTJ"],
-      },
-    );
+    const result = await runX4Verify(courseMap, path.join(OUT_DIR, "explicit-slate-run"), {
+      slateTrails: ["RTJ"],
+    });
     expect(result.perTrail.RTJ?.verdict).toBe("pass");
   });
 
   it("gate B2: refuses (throws) when a course map entry's configured URL is malformed", async () => {
     const courseMap: X4CourseMap = {
-      "Grand National": {
-        trail: "RTJ",
-        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/search",
-      },
+      "Grand National": { trail: "RTJ", golfnowFacilityUrl: "https://www.golfnow.com/tee-times/search" },
     };
     await expect(
-      runX4Verify(courseMap, path.join(OUT_DIR, "bad-url-run"), {
-        slateTrails: ["RTJ"],
-      }),
+      runX4Verify(courseMap, path.join(OUT_DIR, "bad-url-run"), { slateTrails: ["RTJ"] }),
     ).rejects.toThrow(/does not match/);
   });
 });
@@ -492,8 +413,7 @@ describe("x4-verify: runX4Verify — replay mode", () => {
           headers: { "content-type": "text/html" },
         });
         Object.defineProperty(res, "url", {
-          value:
-            "https://www.golfnow.com/tee-times/facility/2353-oxmoor-valley/search",
+          value: "https://www.golfnow.com/tee-times/facility/2353-oxmoor-valley/search",
         });
         return res;
       }),
@@ -506,9 +426,7 @@ describe("x4-verify: runX4Verify — replay mode", () => {
       },
     };
     const livePrefix = path.join(OUT_DIR, "roundtrip-live");
-    const liveResult = await runX4Verify(courseMap, livePrefix, {
-      slateTrails: ["RTJ"],
-    });
+    const liveResult = await runX4Verify(courseMap, livePrefix, { slateTrails: ["RTJ"] });
 
     vi.unstubAllGlobals();
     const responses = JSON.parse(
@@ -528,8 +446,7 @@ describe("x4-verify: runX4Verify — replay mode", () => {
     const courseMap: X4CourseMap = {
       "Missing Response Course": {
         trail: "TN",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/1-x/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/1-x/search",
       },
     };
     await expect(
@@ -544,20 +461,16 @@ describe("x4-verify: runX4Verify — replay mode", () => {
     const courseMap: X4CourseMap = {
       "Some Course": {
         trail: "TN",
-        golfnowFacilityUrl:
-          "https://www.golfnow.com/tee-times/facility/2222-some-course/search",
+        golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2222-some-course/search",
       },
     };
     const responses: Record<string, X4SavedEnvelope> = {
       "Some Course": {
-        request: {
-          url: "https://www.golfnow.com/tee-times/facility/1111-some-course/search",
-        },
+        request: { url: "https://www.golfnow.com/tee-times/facility/1111-some-course/search" },
         fetchedAt: new Date().toISOString(),
         response: {
           status: 200,
-          finalUrl:
-            "https://www.golfnow.com/tee-times/facility/1111-some-course/search",
+          finalUrl: "https://www.golfnow.com/tee-times/facility/1111-some-course/search",
           bodyText: "Some Course tee times.",
         },
       },

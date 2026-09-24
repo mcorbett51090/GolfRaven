@@ -11,9 +11,7 @@ describe("normalizeName", () => {
 
 describe("diceCoefficient", () => {
   it("is 1 for identical names", () => {
-    expect(
-      diceCoefficient("Pebble Hills Golf Club", "Pebble Hills Golf Club"),
-    ).toBe(1);
+    expect(diceCoefficient("Pebble Hills Golf Club", "Pebble Hills Golf Club")).toBe(1);
   });
 
   it("is >= 0.8 for a minor rewording (G-P1-12 threshold)", () => {
@@ -23,8 +21,8 @@ describe("diceCoefficient", () => {
   });
 
   it("is low for unrelated names", () => {
-    expect(
-      diceCoefficient("Pebble Hills Golf Club", "Riverside Municipal"),
-    ).toBeLessThan(0.3);
+    expect(diceCoefficient("Pebble Hills Golf Club", "Riverside Municipal")).toBeLessThan(
+      0.3,
+    );
   });
 });

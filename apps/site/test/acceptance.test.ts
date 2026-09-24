@@ -4,23 +4,13 @@
  * the three real `dist/` trees `test/global-setup.mjs` builds — see
  * `test/paths.mjs`'s doc for why there are three, not one.
  */
-import {
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { verifySitemap } from "../scripts/verify-sitemap.mjs";
-import {
-  findSetHtmlOccurrences,
-  isSanctionedSetHtml,
-} from "./scan-set-html.mjs";
+import { findSetHtmlOccurrences, isSanctionedSetHtml } from "./scan-set-html.mjs";
 import { BUILDS } from "./paths.mjs";
 
 const siteRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -42,11 +32,8 @@ async function walk(dir: string): Promise<string[]> {
 }
 
 async function readIndexability(indexabilityPath: string): Promise<string[]> {
-  return (
-    JSON.parse(await readFile(indexabilityPath, "utf8")) as {
-      indexablePaths: string[];
-    }
-  ).indexablePaths;
+  return (JSON.parse(await readFile(indexabilityPath, "utf8")) as { indexablePaths: string[] })
+    .indexablePaths;
 }
 
 // ---------------------------------------------------------------------
@@ -63,9 +50,7 @@ describe("AT(1)/B2: sitemap <loc> set = indexable set (real build)", () => {
     expect(indexablePaths).toContain("/");
     expect(indexablePaths).toContain("/fr/");
     expect(indexablePaths.some((p) => p.startsWith("/trails/"))).toBe(true);
-    expect(
-      indexablePaths.some((p) => p.startsWith("/us/") || p.startsWith("/ca/")),
-    ).toBe(true);
+    expect(indexablePaths.some((p) => p.startsWith("/us/") || p.startsWith("/ca/"))).toBe(true);
     expect(indexablePaths.some((p) => p.startsWith("/courses/"))).toBe(true);
   });
 
@@ -88,9 +73,7 @@ describe("AT(1)/B2: REGION_PAGE_SIZE=1 — pagination is excluded from the sitem
   });
 
   it("page/2/ and beyond exist on disk but are noindex and NOT in indexability.json or the sitemap", async () => {
-    const indexablePaths = await readIndexability(
-      BUILDS.paginated.indexability,
-    );
+    const indexablePaths = await readIndexability(BUILDS.paginated.indexability);
     for (const p of indexablePaths) {
       expect(p).not.toMatch(/\/page\//);
     }
@@ -98,19 +81,14 @@ describe("AT(1)/B2: REGION_PAGE_SIZE=1 — pagination is excluded from the sitem
     await expect(
       stat(join(BUILDS.paginated.dist, "us", "tn", "page", "2", "index.html")),
     ).resolves.toBeTruthy();
-    const page2 = await readIn(
-      BUILDS.paginated.dist,
-      "us/tn/page/2/index.html",
-    );
+    const page2 = await readIn(BUILDS.paginated.dist, "us/tn/page/2/index.html");
     expect(page2).toMatch(/<meta\s+name="robots"\s+content="noindex/);
     const sitemap = await readIn(BUILDS.paginated.dist, "sitemap-0.xml");
     expect(sitemap).not.toMatch(/\/page\//);
   });
 
   it("page 1 of a paginated region is still indexable", async () => {
-    const indexablePaths = await readIndexability(
-      BUILDS.paginated.indexability,
-    );
+    const indexablePaths = await readIndexability(BUILDS.paginated.indexability);
     expect(indexablePaths).toContain("/us/tn/");
     expect(indexablePaths).toContain("/ca/bc/");
   });
@@ -134,17 +112,15 @@ describe("AT(3): hub HTML < 300 KB", () => {
 
 describe("AT(6)/S4: JS off — every verified facility's course page is reachable from its region page", () => {
   it("every built /courses/*/ page (i.e. every verified facility) is linked from a region page", async () => {
-    const courseFiles = (await walk(join(BUILDS.real.dist, "courses"))).filter(
-      (f) => f.endsWith("index.html"),
+    const courseFiles = (await walk(join(BUILDS.real.dist, "courses"))).filter((f) =>
+      f.endsWith("index.html"),
     );
     const courseSlugs = courseFiles.map((f) => f.split("/").slice(-2, -1)[0]);
     expect(courseSlugs).toContain("thinfield-muni"); // the verified-but-thin one
 
     const regionHtml = (
       await Promise.all(
-        ["us/tn/index.html", "ca/bc/index.html"].map((p) =>
-          readIn(BUILDS.real.dist, p),
-        ),
+        ["us/tn/index.html", "ca/bc/index.html"].map((p) => readIn(BUILDS.real.dist, p)),
       )
     ).join("\n");
     for (const slug of courseSlugs) {
@@ -164,8 +140,7 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
     for (const file of files) {
       const content = await readFile(file, "utf8");
       for (const occ of findSetHtmlOccurrences(content)) {
-        const sanctioned =
-          file.endsWith("BaseLayout.astro") && isSanctionedSetHtml(occ);
+        const sanctioned = file.endsWith("BaseLayout.astro") && isSanctionedSetHtml(occ);
         if (!sanctioned) offenders.push(`${file}: [${occ.form}] ${occ.full}`);
       }
     }
@@ -173,23 +148,13 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
   });
 
   it("BaseLayout's ldScript is built from schema.ts's jsonLdScript()", async () => {
-    const layout = await readFile(
-      join(srcDir, "layouts", "BaseLayout.astro"),
-      "utf8",
-    );
-    expect(layout).toMatch(
-      /const ldScript = jsonLd\.length \? jsonLdScript\(jsonLd\) : ""/,
-    );
+    const layout = await readFile(join(srcDir, "layouts", "BaseLayout.astro"), "utf8");
+    expect(layout).toMatch(/const ldScript = jsonLd\.length \? jsonLdScript\(jsonLd\) : ""/);
   });
 
   it("PROOF: the detector actually catches a string-literal set:html in a scratch mutated copy (not just that none exist today)", async () => {
-    const original = await readFile(
-      join(srcDir, "layouts", "BaseLayout.astro"),
-      "utf8",
-    );
-    const scratchDir = await mkdtemp(
-      join(tmpdir(), "golfraven-set-html-proof-"),
-    );
+    const original = await readFile(join(srcDir, "layouts", "BaseLayout.astro"), "utf8");
+    const scratchDir = await mkdtemp(join(tmpdir(), "golfraven-set-html-proof-"));
     try {
       const injected = original.replace(
         "<slot />",
@@ -212,9 +177,7 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
 
   it("PROOF: the detector also catches a spread-embedded set:html key", () => {
     const injected = `<div {...{ "set:html": dangerous }} />`;
-    const offenders = findSetHtmlOccurrences(injected).filter(
-      (o) => !isSanctionedSetHtml(o),
-    );
+    const offenders = findSetHtmlOccurrences(injected).filter((o) => !isSanctionedSetHtml(o));
     expect(offenders).toHaveLength(1);
     expect(offenders[0]!.form).toBe("spread-key");
   });
@@ -231,39 +194,25 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
       "islands now, so 'no other script tag at all' becomes 'no INLINE script content ever " +
       "reaches the page' — the same property AT(7) exists to guarantee)",
     async () => {
-      const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) =>
-        f.endsWith(".html"),
-      );
+      const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) => f.endsWith(".html"));
       let sawExternalModule = false;
       for (const file of htmlFiles) {
         const html = await readFile(file, "utf8");
-        const scriptTags = [
-          ...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi),
-        ];
-        const ldJsonCount = scriptTags.filter(([, attrs]) =>
-          /type="application\/ld\+json"/.test(attrs),
-        ).length;
+        const scriptTags = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+        const ldJsonCount = scriptTags.filter(([, attrs]) => /type="application\/ld\+json"/.test(attrs)).length;
         expect(ldJsonCount).toBeLessThanOrEqual(1);
         for (const [full, attrs, body] of scriptTags) {
           const isLdJson = /type="application\/ld\+json"/.test(attrs);
           if (isLdJson) continue;
-          const isExternalModule =
-            /type="module"/.test(attrs) &&
-            /\ssrc="\/_astro\/[^"]+"/.test(attrs);
-          expect(
-            isExternalModule,
-            `unexpected <script> shape: ${full.slice(0, 120)}`,
-          ).toBe(true);
+          const isExternalModule = /type="module"/.test(attrs) && /\ssrc="\/_astro\/[^"]+"/.test(attrs);
+          expect(isExternalModule, `unexpected <script> shape: ${full.slice(0, 120)}`).toBe(true);
           // The defining property: NOTHING between the tags. Astro hoists
           // every non-`is:inline` <script> block's actual code into the
           // external file the `src=` attribute points at — the tag Astro
           // emits in the HTML itself carries no executable content, so
           // there is nothing here `set:html` (or any other injection path)
           // could have put a payload into.
-          expect(
-            body.trim(),
-            `external module script had inline body: ${full.slice(0, 120)}`,
-          ).toBe("");
+          expect(body.trim(), `external module script had inline body: ${full.slice(0, 120)}`).toBe("");
           sawExternalModule = true;
         }
       }
@@ -280,9 +229,7 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
 
 describe("B1: every page has no <style>, no style= attribute, and CSS is external (CSP default-src 'self')", () => {
   it("no built page contains an inline <style> tag or a style= attribute", async () => {
-    const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) =>
-      f.endsWith(".html"),
-    );
+    const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) => f.endsWith(".html"));
     for (const file of htmlFiles) {
       const html = await readFile(file, "utf8");
       expect(html).not.toMatch(/<style[\s>]/i);
@@ -308,9 +255,7 @@ describe("AT(10)/S2: unverified rows render no page link and show the claim CTA"
   });
 
   it("no page is built at /courses/foggy-pines-golf-resort/ at all", async () => {
-    await expect(
-      readIn(BUILDS.real.dist, "courses/foggy-pines-golf-resort/index.html"),
-    ).rejects.toThrow();
+    await expect(readIn(BUILDS.real.dist, "courses/foggy-pines-golf-resort/index.html")).rejects.toThrow();
   });
 
   it("S2: every /courses/ link on every stop-listing page (regions + trails) points at a page that actually exists in dist", async () => {
@@ -322,25 +267,17 @@ describe("AT(10)/S2: unverified rows render no page link and show the claim CTA"
     ];
     for (const page of stopListingPages) {
       const html = await readIn(BUILDS.real.dist, page);
-      const hrefs = [...html.matchAll(/href="(\/courses\/[a-z0-9-]+\/)"/g)].map(
-        (m) => m[1]!,
-      );
+      const hrefs = [...html.matchAll(/href="(\/courses\/[a-z0-9-]+\/)"/g)].map((m) => m[1]!);
       for (const href of hrefs) {
         await expect(
-          readIn(
-            BUILDS.real.dist,
-            `${href.replace(/^\/|\/$/g, "")}/index.html`,
-          ),
+          readIn(BUILDS.real.dist, `${href.replace(/^\/|\/$/g, "")}/index.html`),
         ).resolves.toBeTruthy();
       }
     }
   });
 
   it("S2: the unverified facility is never linked from the trail page that rosters it", async () => {
-    const html = await readIn(
-      BUILDS.real.dist,
-      "trails/somewhere-coastal-golf-trail/index.html",
-    );
+    const html = await readIn(BUILDS.real.dist, "trails/somewhere-coastal-golf-trail/index.html");
     expect(html).not.toContain('href="/courses/foggy-pines-golf-resort/"');
     expect(html).toContain('href="/claim/?facility=foggy-pines-golf-resort"');
   });
@@ -352,27 +289,18 @@ describe("AT(10)/S2: unverified rows render no page link and show the claim CTA"
 
 describe("AT(13) (O8): private club has no booking rail and shows the guest note (but DOES show the official-site link); a trail with a private member shows the private-stops note", () => {
   it("the private demo facility (Cedar Hollow) shows the guest note and no booking link", async () => {
-    const html = await readIn(
-      BUILDS.real.dist,
-      "courses/cedar-hollow-country-club/index.html",
-    );
+    const html = await readIn(BUILDS.real.dist, "courses/cedar-hollow-country-club/index.html");
     expect(html).toContain("play as a member's guest");
     expect(html).not.toMatch(/Book via/);
   });
 
   it("the trail with a private member (Fictional Ridge) shows the private-stops note", async () => {
-    const html = await readIn(
-      BUILDS.real.dist,
-      "trails/fictional-ridge-golf-trail/index.html",
-    );
+    const html = await readIn(BUILDS.real.dist, "trails/fictional-ridge-golf-trail/index.html");
     expect(html).toMatch(/private club/);
   });
 
   it("a public facility's page DOES show a booking link", async () => {
-    const html = await readIn(
-      BUILDS.real.dist,
-      "courses/ridge-overlook-golf-club/index.html",
-    );
+    const html = await readIn(BUILDS.real.dist, "courses/ridge-overlook-golf-club/index.html");
     expect(html).toMatch(/Book via/);
   });
 });
@@ -383,9 +311,7 @@ describe("AT(13) (O8): private club has no booking rail and shows the guest note
 
 describe("B3: a demo build is noindex on every page, has an empty sitemap, and shows the DEMO DATA banner", () => {
   it("every page in the demo build carries noindex", async () => {
-    const htmlFiles = (await walk(BUILDS.demo.dist)).filter((f) =>
-      f.endsWith("index.html"),
-    );
+    const htmlFiles = (await walk(BUILDS.demo.dist)).filter((f) => f.endsWith("index.html"));
     expect(htmlFiles.length).toBeGreaterThan(0);
     for (const file of htmlFiles) {
       const html = await readFile(file, "utf8");
@@ -394,9 +320,7 @@ describe("B3: a demo build is noindex on every page, has an empty sitemap, and s
   });
 
   it("every page in the demo build shows the DEMO DATA banner", async () => {
-    const htmlFiles = (await walk(BUILDS.demo.dist)).filter((f) =>
-      f.endsWith("index.html"),
-    );
+    const htmlFiles = (await walk(BUILDS.demo.dist)).filter((f) => f.endsWith("index.html"));
     for (const file of htmlFiles) {
       const html = await readFile(file, "utf8");
       expect(html).toMatch(/DEMO DATA/);
@@ -428,12 +352,8 @@ describe("B3: a demo build is noindex on every page, has an empty sitemap, and s
 describe("S1: JSON-LD ItemList lists only indexable facilities", () => {
   it("the region page's ItemList excludes the unverified facility", async () => {
     const html = await readIn(BUILDS.real.dist, "ca/bc/index.html");
-    const ldJson = html.match(
-      /<script type="application\/ld\+json">([^<]+)<\/script>/,
-    )![1]!;
-    const graph = JSON.parse(ldJson)["@graph"] as Array<
-      Record<string, unknown>
-    >;
+    const ldJson = html.match(/<script type="application\/ld\+json">([^<]+)<\/script>/)![1]!;
+    const graph = JSON.parse(ldJson)["@graph"] as Array<Record<string, unknown>>;
     const collection = graph.find((n) => n["@type"] === "CollectionPage") as {
       mainEntity: { itemListElement: Array<{ item: { url: string } }> };
     };
@@ -447,16 +367,9 @@ describe("S1: JSON-LD ItemList lists only indexable facilities", () => {
     // negative on the other trail's roster facilities instead: every
     // listed facility on Fictional Ridge is indexable (all 3 are), and
     // the ItemList count matches exactly the indexable subset size.
-    const html = await readIn(
-      BUILDS.real.dist,
-      "trails/fictional-ridge-golf-trail/index.html",
-    );
-    const ldJson = html.match(
-      /<script type="application\/ld\+json">([^<]+)<\/script>/,
-    )![1]!;
-    const graph = JSON.parse(ldJson)["@graph"] as Array<
-      Record<string, unknown>
-    >;
+    const html = await readIn(BUILDS.real.dist, "trails/fictional-ridge-golf-trail/index.html");
+    const ldJson = html.match(/<script type="application\/ld\+json">([^<]+)<\/script>/)![1]!;
+    const graph = JSON.parse(ldJson)["@graph"] as Array<Record<string, unknown>>;
     const collection = graph.find((n) => n["@type"] === "CollectionPage") as {
       mainEntity: { numberOfItems: number };
     };

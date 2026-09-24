@@ -135,11 +135,9 @@ self.addEventListener("fetch", (event) => {
 `;
 }
 
-const isMain =
-  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  const distDir =
-    process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
+  const distDir = process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
   const outPath = join(distDir, "sw.js");
   await mkdir(distDir, { recursive: true });
   await writeFile(outPath, buildSwSource());

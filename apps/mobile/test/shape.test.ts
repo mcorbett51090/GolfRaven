@@ -4,10 +4,7 @@ import {
   shapeGolfSessions,
   shapeRouteFollowUp,
 } from "../src/health-connect/shape.js";
-import type {
-  RawExerciseRoutePoint,
-  RawExerciseSessionRecord,
-} from "../src/health-connect/types.js";
+import type { RawExerciseRoutePoint, RawExerciseSessionRecord } from "../src/health-connect/types.js";
 
 // This file imports only the pure shaping logic (shape.ts), never
 // reader.ts or the package's index.ts — those import
@@ -17,14 +14,9 @@ import type {
 
 const NOW = new Date("2026-09-23T12:00:00.000Z");
 
-function golfRecord(
-  overrides: Partial<RawExerciseSessionRecord> = {},
-): RawExerciseSessionRecord {
+function golfRecord(overrides: Partial<RawExerciseSessionRecord> = {}): RawExerciseSessionRecord {
   return {
-    metadata: {
-      id: "rec-1",
-      dataOrigin: "com.garmin.android.apps.connectmobile",
-    },
+    metadata: { id: "rec-1", dataOrigin: "com.garmin.android.apps.connectmobile" },
     startTime: "2026-09-20T14:00:00.000Z",
     endTime: "2026-09-20T18:00:00.000Z",
     exerciseType: EXERCISE_TYPE_GOLF,
@@ -62,21 +54,9 @@ describe("shapeGolfSessions", () => {
       exerciseRoute: {
         type: 0, // ExerciseRouteResultType.DATA
         route: [
-          {
-            latitude: 35.0,
-            longitude: -86.0,
-            time: "2026-09-20T14:01:00.000Z",
-          },
-          {
-            latitude: 35.001,
-            longitude: -86.001,
-            time: "2026-09-20T14:02:00.000Z",
-          },
-          {
-            latitude: 35.002,
-            longitude: -86.002,
-            time: "2026-09-20T14:03:00.000Z",
-          },
+          { latitude: 35.0, longitude: -86.0, time: "2026-09-20T14:01:00.000Z" },
+          { latitude: 35.001, longitude: -86.001, time: "2026-09-20T14:02:00.000Z" },
+          { latitude: 35.002, longitude: -86.002, time: "2026-09-20T14:03:00.000Z" },
         ],
       },
     });
@@ -106,10 +86,7 @@ describe("shapeGolfSessions", () => {
       exerciseType: EXERCISE_TYPE_GOLF,
     };
     const result = shapeGolfSessions([record], 30, NOW);
-    expect(result.sessions[0]).toMatchObject({
-      recordId: "",
-      dataOrigin: "unknown",
-    });
+    expect(result.sessions[0]).toMatchObject({ recordId: "", dataOrigin: "unknown" });
   });
 
   it("records generatedAt and windowDays on the result", () => {
@@ -136,11 +113,7 @@ describe("shapeRouteFollowUp", () => {
   it("reports route-present with the point count when points come back", () => {
     const points: RawExerciseRoutePoint[] = [
       { latitude: 35.0, longitude: -86.0, time: "2026-09-20T14:01:00.000Z" },
-      {
-        latitude: 35.001,
-        longitude: -86.001,
-        time: "2026-09-20T14:02:00.000Z",
-      },
+      { latitude: 35.001, longitude: -86.001, time: "2026-09-20T14:02:00.000Z" },
     ];
     const result = shapeRouteFollowUp(points);
     expect(result).toEqual({ routePresent: true, routePointCount: 2 });

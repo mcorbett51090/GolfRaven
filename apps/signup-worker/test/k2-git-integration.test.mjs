@@ -306,11 +306,7 @@ describe.skipIf(!distBuilt)(
         "_(blank)_",
         "- a@x.com\n- b@x.com, c@x.com (owner aliases)",
       );
-      commitAll(
-        repoDir,
-        "add addresses, one malformed bullet",
-        "2026-10-05T00:00:00Z",
-      );
+      commitAll(repoDir, "add addresses, one malformed bullet", "2026-10-05T00:00:00Z");
 
       // Commit 2 (2026-10-09): set day 0. Body unchanged — still malformed,
       // so a run AT this revision (or any revision before the split) would
@@ -327,7 +323,11 @@ describe.skipIf(!distBuilt)(
       // bullet by splitting it into two well-formed ones. This is the
       // revision the strict HEAD parser now accepts, and the only one the
       // CLI is ever run against.
-      writeK2Doc(k2DocPath, "2026-10-10", "- a@x.com\n- b@x.com\n- c@x.com");
+      writeK2Doc(
+        k2DocPath,
+        "2026-10-10",
+        "- a@x.com\n- b@x.com\n- c@x.com",
+      );
       commitAll(repoDir, "split malformed bullet", "2026-10-21T00:00:00Z");
 
       const exportPath = path.join(repoDir, "export.json");

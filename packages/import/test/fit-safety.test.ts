@@ -13,11 +13,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { parseFitFile } from "../src/parse-fit.js";
-import {
-  prescanFit,
-  MAX_FIT_MESSAGES,
-  MAX_FIT_DEFINITION_FIELDS,
-} from "../src/fit-prescan.js";
+import { prescanFit, MAX_FIT_MESSAGES, MAX_FIT_DEFINITION_FIELDS } from "../src/fit-prescan.js";
 
 function header(dataLen: number): Uint8Array {
   const h = new Uint8Array(14);
@@ -96,8 +92,7 @@ describe("FIT safety: field-count (large-definition) flood", () => {
     const result = prescanFit(bytes);
     const elapsedMs = performance.now() - t0;
     expect(result.ok).toBe(false);
-    if (!result.ok)
-      expect(result.error).toContain(String(MAX_FIT_DEFINITION_FIELDS));
+    if (!result.ok) expect(result.error).toContain(String(MAX_FIT_DEFINITION_FIELDS));
     expect(elapsedMs).toBeLessThan(500);
   });
 
@@ -153,22 +148,8 @@ describe("FIT safety: the compressed-timestamp bypass (round 2 security-gate fin
   // byte instead) — so a prescan that (wrongly) counted those bytes
   // would advance far more per record than the real decoder does,
   // undercounting the message count by orders of magnitude.
-  function compressedTimestampBypass(
-    fieldSize: number,
-    global = 20,
-    byteCount = 1_000_000,
-  ): Uint8Array {
-    const def = [
-      0x40,
-      0,
-      0,
-      global & 0xff,
-      (global >> 8) & 0xff,
-      1,
-      253,
-      fieldSize,
-      0x86,
-    ];
+  function compressedTimestampBypass(fieldSize: number, global = 20, byteCount = 1_000_000): Uint8Array {
+    const def = [0x40, 0, 0, global & 0xff, (global >> 8) & 0xff, 1, 253, fieldSize, 0x86];
     const data = new Uint8Array(def.length + byteCount);
     data.set(def);
     data.fill(0x80, def.length); // compressed-timestamp header bytes, local type 0
@@ -244,7 +225,6 @@ describe("FIT safety: the compressed-timestamp bypass (round 2 security-gate fin
 
     const parseResult = await parseFitFile(file);
     expect(parseResult.ok).toBe(true);
-    if (parseResult.ok)
-      expect(parseResult.round.warnings.join(" ")).not.toContain("truncated");
+    if (parseResult.ok) expect(parseResult.round.warnings.join(" ")).not.toContain("truncated");
   });
 });

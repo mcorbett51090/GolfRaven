@@ -113,18 +113,16 @@ describe("CourseSchema", () => {
   });
 
   it("rejects a composite of one course (must be a pair)", () => {
-    const result = CompositeSchema.safeParse([
-      "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    ]);
+    const result = CompositeSchema.safeParse(["crs_01ARZ3NDEKTSV4RRFFQ69G5FAV"]);
     expect(result.success).toBe(false);
   });
 });
 
 describe("CompletionOrMarkerRuleSchema (discriminated union)", () => {
   it("accepts { kind: 'all' } with no other fields", () => {
-    expect(
-      CompletionOrMarkerRuleSchema.safeParse({ kind: "all" }).success,
-    ).toBe(true);
+    expect(CompletionOrMarkerRuleSchema.safeParse({ kind: "all" }).success).toBe(
+      true,
+    );
   });
 
   it("accepts n-of-m with n and ruleSource", () => {
@@ -227,11 +225,7 @@ describe("TrailSchema", () => {
       regions: ["US-TN"],
       kind: "state-agency",
       status: "active",
-      operator: {
-        name: "TN Dept. of Tourism",
-        url: "https://example.com",
-        type: "state-agency",
-      },
+      operator: { name: "TN Dept. of Tourism", url: "https://example.com", type: "state-agency" },
       officialUrl: "https://example.com",
       rosterStatus: "verified",
       rosterVersions: [
@@ -263,11 +257,7 @@ describe("TrailSchema", () => {
     regions: ["US-TN"],
     kind: "state-agency",
     status: "active",
-    operator: {
-      name: "TN Dept. of Tourism",
-      url: "https://example.com",
-      type: "state-agency",
-    },
+    operator: { name: "TN Dept. of Tourism", url: "https://example.com", type: "state-agency" },
     officialUrl: "https://example.com",
     rosterStatus: "verified",
     rosterVersions: [
@@ -280,9 +270,7 @@ describe("TrailSchema", () => {
         markerUnit: "facility",
         completionRule: { kind: "all" },
         markerRule: { kind: "all" },
-        members: [
-          { unit: "course", courseId: "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
-        ],
+        members: [{ unit: "course", courseId: "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
       },
     ],
     lastReviewed: "2026-09-24",
@@ -290,10 +278,7 @@ describe("TrailSchema", () => {
   };
 
   it("rejects a http: officialUrl (gate review: https:-only, same S7 rule as Facility.url)", () => {
-    const result = TrailSchema.safeParse({
-      ...minimalTrail,
-      officialUrl: "http://example.com",
-    });
+    const result = TrailSchema.safeParse({ ...minimalTrail, officialUrl: "http://example.com" });
     expect(result.success).toBe(false);
   });
 
@@ -313,20 +298,14 @@ describe("TrailSchema", () => {
 describe("OperatorSchema — https:-only url (gate review nit)", () => {
   it("accepts a https: url", () => {
     expect(
-      OperatorSchema.safeParse({
-        name: "TN Dept. of Tourism",
-        url: "https://example.com",
-        type: "state-agency",
-      }).success,
+      OperatorSchema.safeParse({ name: "TN Dept. of Tourism", url: "https://example.com", type: "state-agency" })
+        .success,
     ).toBe(true);
   });
   it("rejects a http: url", () => {
     expect(
-      OperatorSchema.safeParse({
-        name: "TN Dept. of Tourism",
-        url: "http://example.com",
-        type: "state-agency",
-      }).success,
+      OperatorSchema.safeParse({ name: "TN Dept. of Tourism", url: "http://example.com", type: "state-agency" })
+        .success,
     ).toBe(false);
   });
   it("rejects a javascript: url", () => {
@@ -349,12 +328,7 @@ describe("S2: FacilityProvSchema.nameFr (gate review post-e9b3ab0)", () => {
       town: "Nashville",
       lat: 36.16,
       lng: -86.78,
-      prov: {
-        name: "operator",
-        nameFr: "operator",
-        town: "operator",
-        coord: "operator",
-      },
+      prov: { name: "operator", nameFr: "operator", town: "operator", coord: "operator" },
       verification: {
         status: "listed-verified",
         basis: "operator",
@@ -383,19 +357,17 @@ describe("S3: VerificationSchema requires basis/verifiedAt/source once verified 
 
 describe("S7: https-only URLs", () => {
   it("rejects a facility url that is not https:", () => {
+    expect(FacilitySchema.shape.url.unwrap().safeParse("http://example.com").success).toBe(
+      false,
+    );
     expect(
-      FacilitySchema.shape.url.unwrap().safeParse("http://example.com").success,
-    ).toBe(false);
-    expect(
-      FacilitySchema.shape.url.unwrap().safeParse("javascript:alert(1)")
-        .success,
+      FacilitySchema.shape.url.unwrap().safeParse("javascript:alert(1)").success,
     ).toBe(false);
   });
   it("accepts an https facility url", () => {
-    expect(
-      FacilitySchema.shape.url.unwrap().safeParse("https://example.com")
-        .success,
-    ).toBe(true);
+    expect(FacilitySchema.shape.url.unwrap().safeParse("https://example.com").success).toBe(
+      true,
+    );
   });
 });
 

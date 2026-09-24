@@ -11,8 +11,7 @@
  * the per-IP-key and per-email caps that actually bound signup volume.
  */
 
-const SITEVERIFY_URL =
-  "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+const SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 export interface TurnstileResult {
   success: boolean;
@@ -55,23 +54,13 @@ export async function verifyTurnstileToken(
     return { success: false, errorCodes: [`siteverify-http-${res.status}`] };
   }
 
-  const data = (await res.json().catch(() => null)) as {
-    success?: boolean;
-    "error-codes"?: string[];
-    hostname?: string;
-    action?: string;
-  } | null;
+  const data = (await res.json().catch(() => null)) as
+    | { success?: boolean; "error-codes"?: string[]; hostname?: string; action?: string }
+    | null;
   if (!data || data.success !== true) {
-    return {
-      success: false,
-      errorCodes: data?.["error-codes"] ?? ["siteverify-malformed-response"],
-    };
+    return { success: false, errorCodes: data?.["error-codes"] ?? ["siteverify-malformed-response"] };
   }
-  if (
-    expected?.hostname &&
-    data.hostname &&
-    data.hostname !== expected.hostname
-  ) {
+  if (expected?.hostname && data.hostname && data.hostname !== expected.hostname) {
     return { success: false, errorCodes: ["hostname-mismatch"] };
   }
   if (expected?.action && data.action && data.action !== expected.action) {

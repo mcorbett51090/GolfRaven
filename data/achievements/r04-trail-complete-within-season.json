@@ -2,12 +2,7 @@
   "id": "ach_01M39RCEVHZFGFCBMZR31X60RZ",
   "title": "Completed the trail in one season",
   "tier": "special",
-  "rule": {
-    "kind": "agg",
-    "name": "trailCompleteWithin",
-    "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM",
-    "days": 180
-  },
+  "rule": { "kind": "agg", "name": "trailCompleteWithin", "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM", "days": 180 },
   "minConfidence": 0.5,
   "scope": "verified-only",
   "active": true

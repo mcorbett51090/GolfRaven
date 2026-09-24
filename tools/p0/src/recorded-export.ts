@@ -161,9 +161,7 @@ function parseValue(raw: string, osLabel: string): RecordedExportEntry {
  * either OS's line is missing; an OS's line appears more than once; or a
  * non-blank value doesn't match the blank/date[/hash] shape.
  */
-export function parseRecordedExportDates(
-  markdown: string,
-): RecordedExportDates {
+export function parseRecordedExportDates(markdown: string): RecordedExportDates {
   const lines = markdown.split("\n");
   const startIdx = lines.findIndex((l) => {
     const text = headingText(l);
@@ -203,14 +201,10 @@ export function parseRecordedExportDates(
     dates[os] = parseValue(m[2]!.trim(), osLabel);
   }
   if (!seen.has("ios")) {
-    throw new Error(
-      'docs/p0/X1.md "## Recorded export" is missing its "iOS:" line.',
-    );
+    throw new Error('docs/p0/X1.md "## Recorded export" is missing its "iOS:" line.');
   }
   if (!seen.has("android")) {
-    throw new Error(
-      'docs/p0/X1.md "## Recorded export" is missing its "Android:" line.',
-    );
+    throw new Error('docs/p0/X1.md "## Recorded export" is missing its "Android:" line.');
   }
   return dates;
 }
@@ -236,10 +230,7 @@ export async function readRecordedExportDates(
  * when `--informational` was passed — see `assertInformationalInputAllowed`
  * for what gates that path instead.
  */
-export function assertRecordedExportDateLogged(
-  dates: RecordedExportDates,
-  os: X1Os,
-): void {
+export function assertRecordedExportDateLogged(dates: RecordedExportDates, os: X1Os): void {
   if (dates[os].date === null) {
     const osLabel = osLabelOf(os);
     throw new Error(
@@ -283,9 +274,7 @@ function realOrResolved(candidatePath: string): string {
 export function isUnderFixturesDir(candidatePath: string): boolean {
   const fixturesDir = realOrResolved(resolveFixturesDir());
   const resolved = realOrResolved(candidatePath);
-  return (
-    resolved === fixturesDir || resolved.startsWith(fixturesDir + path.sep)
-  );
+  return resolved === fixturesDir || resolved.startsWith(fixturesDir + path.sep);
 }
 
 /**
@@ -349,17 +338,12 @@ export async function assertDocCommitted(x1DocPath: string): Promise<void> {
  * (possibly different) export is an owner decision, not this tool's to
  * make silently.
  */
-async function assertNotPreviouslyBound(
-  x1DocPath: string,
-  os: X1Os,
-): Promise<void> {
+async function assertNotPreviouslyBound(x1DocPath: string, os: X1Os): Promise<void> {
   const osLabel = osLabelOf(os);
   const cwd = path.dirname(x1DocPath);
   // Round-5 gate: a shallow clone can hide an earlier bind commit beyond its
   // depth, so the history scan below would miss it. Refuse to bind there.
-  const shallow = (
-    await runGit(["rev-parse", "--is-shallow-repository"], cwd)
-  ).trim();
+  const shallow = (await runGit(["rev-parse", "--is-shallow-repository"], cwd)).trim();
   if (shallow !== "false") {
     throw new Error(
       `refusing to bind ${osLabel}'s export in a shallow clone (git rev-parse --is-shallow-repository → ` +
@@ -367,10 +351,7 @@ async function assertNotPreviouslyBound(
     );
   }
   const pattern = `^- ${osLabel}:.*sha256:`;
-  const stdout = await runGit(
-    ["log", "-G", pattern, "--format=%H", "--", x1DocPath],
-    cwd,
-  );
+  const stdout = await runGit(["log", "-G", pattern, "--format=%H", "--", x1DocPath], cwd);
   const commits = stdout
     .split("\n")
     .map((l) => l.trim())
@@ -422,11 +403,7 @@ export function assertInformationalInputAllowed(
  * partial picture. A no-op when `os` isn't bound (nothing to recompute) or
  * when its input WAS supplied.
  */
-export function assertBoundInputProvided(
-  dates: RecordedExportDates,
-  os: X1Os,
-  inputProvided: boolean,
-): void {
+export function assertBoundInputProvided(dates: RecordedExportDates, os: X1Os, inputProvided: boolean): void {
   if (!inputProvided && dates[os].sha256 !== null) {
     const osLabel = osLabelOf(os);
     throw new Error(
@@ -444,9 +421,7 @@ export function assertBoundInputProvided(
 export function extractCalendarDate(raw: string): string {
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) {
-    throw new Error(
-      `Cannot parse "${raw}" as a date to extract its UTC calendar date from.`,
-    );
+    throw new Error(`Cannot parse "${raw}" as a date to extract its UTC calendar date from.`);
   }
   return d.toISOString().slice(0, 10);
 }
@@ -521,11 +496,7 @@ export async function bindExportHash(
  * (a hash can only ever be bound to an already-logged date) — this is
  * only ever called right after a fresh read confirmed the date exists, so
  * either case means the file changed underneath the run. */
-async function updateRecordedExportEntry(
-  x1DocPath: string,
-  os: X1Os,
-  sha256: string,
-): Promise<void> {
+async function updateRecordedExportEntry(x1DocPath: string, os: X1Os, sha256: string): Promise<void> {
   const raw = await readFile(x1DocPath, "utf8");
   const lines = raw.split("\n");
   const osLabel = osLabelOf(os);
@@ -534,9 +505,7 @@ async function updateRecordedExportEntry(
     return text !== null && RECORDED_EXPORT_HEADING_RE.test(text);
   });
   if (startIdx === -1) {
-    throw new Error(
-      'docs/p0/X1.md is missing its "## Recorded export" heading — cannot write to it.',
-    );
+    throw new Error('docs/p0/X1.md is missing its "## Recorded export" heading — cannot write to it.');
   }
   let bodyEnd = lines.length;
   for (let i = startIdx + 1; i < lines.length; i += 1) {
@@ -556,14 +525,10 @@ async function updateRecordedExportEntry(
     }
   }
   if (lineIdx === -1) {
-    throw new Error(
-      `docs/p0/X1.md "## Recorded export" is missing its "${osLabel}:" line — cannot write to it.`,
-    );
+    throw new Error(`docs/p0/X1.md "## Recorded export" is missing its "${osLabel}:" line — cannot write to it.`);
   }
   if (current.date === null) {
-    throw new Error(
-      `docs/p0/X1.md "## Recorded export" has no UTC date logged for ${osLabel} — cannot bind to it.`,
-    );
+    throw new Error(`docs/p0/X1.md "## Recorded export" has no UTC date logged for ${osLabel} — cannot bind to it.`);
   }
   lines[lineIdx] = `- ${osLabel}: ${current.date} sha256:${sha256}`;
   await writeFile(x1DocPath, lines.join("\n"), "utf8");

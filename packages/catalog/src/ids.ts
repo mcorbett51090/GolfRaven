@@ -23,15 +23,7 @@ const ULID_PATTERN = "[0-9A-HJKMNP-TV-Z]{26}";
  * review post-e9b3ab0): `OfferTerms` itself carries no `RuleExpr` field at
  * all — only offer *instances*, which live in the DB under operator scope
  * (§4.1), do. */
-export const ID_KINDS = [
-  "trl",
-  "fac",
-  "crs",
-  "hol",
-  "dsg",
-  "oft",
-  "ach",
-] as const;
+export const ID_KINDS = ["trl", "fac", "crs", "hol", "dsg", "oft", "ach"] as const;
 export type IdKind = (typeof ID_KINDS)[number];
 
 function idSchema<P extends string>(prefix: P) {

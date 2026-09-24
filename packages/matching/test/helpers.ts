@@ -18,14 +18,9 @@ export const ORIGIN: LatLng = { lat: 35.9, lon: -84.3 };
 /** Offsets `origin` by `dxMeters` east and `dyMeters` north, using the
  * cos(lat) longitude correction so the offset is accurate regardless of
  * latitude. */
-export function offset(
-  origin: LatLng,
-  dxMeters: number,
-  dyMeters: number,
-): LatLng {
+export function offset(origin: LatLng, dxMeters: number, dyMeters: number): LatLng {
   const lat0 = (origin.lat * Math.PI) / 180;
-  const dLon =
-    (dxMeters / (EARTH_RADIUS_METERS * Math.cos(lat0))) * (180 / Math.PI);
+  const dLon = (dxMeters / (EARTH_RADIUS_METERS * Math.cos(lat0))) * (180 / Math.PI);
   const dLat = (dyMeters / EARTH_RADIUS_METERS) * (180 / Math.PI);
   return { lat: origin.lat + dLat, lon: origin.lon + dLon };
 }
@@ -50,11 +45,7 @@ export function rectangle(
 /** Builds `count` fixes evenly spaced in time between `startMs` and
  * `endMs`, at the given points (points.length may differ from count —
  * points are sampled/repeated as needed by index). */
-export function fixesAlong(
-  points: readonly LatLng[],
-  startMs: number,
-  endMs: number,
-): RouteFix[] {
+export function fixesAlong(points: readonly LatLng[], startMs: number, endMs: number): RouteFix[] {
   if (points.length === 1) {
     return [{ point: points[0]!, timestamp: startMs }];
   }
@@ -69,17 +60,9 @@ export function fixesAlong(
  * consistently outward regardless of which side of a polygon it started
  * near (a fixed-axis offset would push a point on the near edge deeper
  * inside instead of further out). */
-export function perturbOutward(
-  center: LatLng,
-  point: LatLng,
-  extraMeters: number,
-): LatLng {
+export function perturbOutward(center: LatLng, point: LatLng, extraMeters: number): LatLng {
   const lat0 = (center.lat * Math.PI) / 180;
-  const dx =
-    (point.lon - center.lon) *
-    Math.cos(lat0) *
-    (Math.PI / 180) *
-    EARTH_RADIUS_METERS;
+  const dx = (point.lon - center.lon) * Math.cos(lat0) * (Math.PI / 180) * EARTH_RADIUS_METERS;
   const dy = (point.lat - center.lat) * (Math.PI / 180) * EARTH_RADIUS_METERS;
   const length = Math.hypot(dx, dy) || 1;
   const unitX = dx / length;

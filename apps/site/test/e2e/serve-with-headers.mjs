@@ -100,10 +100,7 @@ export function resolveHeaders(blocks, pathname) {
       }
       const existing = acc.get(key);
       if (existing) {
-        acc.set(key, {
-          name: existing.name,
-          value: `${existing.value}, ${op.value}`,
-        });
+        acc.set(key, { name: existing.name, value: `${existing.value}, ${op.value}` });
       } else {
         acc.set(key, { name: op.name, value: op.value });
       }
@@ -117,9 +114,7 @@ export function resolveHeaders(blocks, pathname) {
 
 export async function serveDistWithHeaders(distDir, port) {
   const headersPath = join(distDir, "_headers");
-  const blocks = existsSync(headersPath)
-    ? parseHeadersFile(await readFile(headersPath, "utf8"))
-    : [];
+  const blocks = existsSync(headersPath) ? parseHeadersFile(await readFile(headersPath, "utf8")) : [];
 
   const server = createServer(async (req, res) => {
     try {
@@ -132,17 +127,12 @@ export async function serveDistWithHeaders(distDir, port) {
       const body = await readFile(target);
 
       const applied = resolveHeaders(blocks, url.pathname);
-      res.writeHead(200, {
-        "Content-Type": MIME[extname(target)] ?? "application/octet-stream",
-        ...applied,
-      });
+      res.writeHead(200, { "Content-Type": MIME[extname(target)] ?? "application/octet-stream", ...applied });
       res.end(body);
     } catch {
       res.writeHead(404);
       res.end("not found");
     }
   });
-  return new Promise((resolve) =>
-    server.listen(port, "127.0.0.1", () => resolve(server)),
-  );
+  return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server)));
 }

@@ -59,9 +59,7 @@ async function main() {
   // favicon.svg — vector, scales natively; no rasterization needed.
   await writeFile(join(OUT_DIR, "favicon.svg"), iconSvg(64));
 
-  console.log(
-    `gen-app-icons: wrote ${targets.length + 1} icon file(s) to ${OUT_DIR}`,
-  );
+  console.log(`gen-app-icons: wrote ${targets.length + 1} icon file(s) to ${OUT_DIR}`);
 }
 
 await main();

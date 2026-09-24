@@ -11,13 +11,7 @@ import {
   preparePolygonGeometry,
   type CandidateCourse,
 } from "../src/index.js";
-import {
-  fixesAlong,
-  loopInsideRectangle,
-  ORIGIN,
-  offset,
-  rectangle,
-} from "./helpers.js";
+import { fixesAlong, loopInsideRectangle, ORIGIN, offset, rectangle } from "./helpers.js";
 
 const HOUR = 3_600_000;
 const MIN = 60_000;
@@ -32,19 +26,12 @@ describe("blocking: cap the gaps in the time-weighting", () => {
   };
 
   it("fixture G1: 1,800 fixes at 1 Hz 2 km off-course, then one fix inside, a 3 h gap, then one more inside — must NOT match", () => {
-    const fixes: { point: { lat: number; lon: number }; timestamp: number }[] =
-      [];
+    const fixes: { point: { lat: number; lon: number }; timestamp: number }[] = [];
     for (let i = 0; i < 1800; i++) {
-      fixes.push({
-        point: offset(ORIGIN, 2000 + (i % 30), 0),
-        timestamp: i * 1000,
-      });
+      fixes.push({ point: offset(ORIGIN, 2000 + (i % 30), 0), timestamp: i * 1000 });
     }
     fixes.push({ point: ORIGIN, timestamp: 1800 * 1000 });
-    fixes.push({
-      point: offset(ORIGIN, 10, 10),
-      timestamp: 1800 * 1000 + 3 * HOUR,
-    });
+    fixes.push({ point: offset(ORIGIN, 10, 10), timestamp: 1800 * 1000 + 3 * HOUR });
 
     const outcome = matchRoute({ fixes, candidates: [A] });
     expect(outcome.kind).toBe("typeahead");
@@ -60,9 +47,7 @@ describe("blocking: cap the gaps in the time-weighting", () => {
     const splitAt = 30;
     const gapMs = 4 * MIN;
     const before = fixes.slice(0, splitAt);
-    const after = fixes
-      .slice(splitAt)
-      .map((f) => ({ ...f, timestamp: f.timestamp + gapMs }));
+    const after = fixes.slice(splitAt).map((f) => ({ ...f, timestamp: f.timestamp + gapMs }));
     const withDropout = [...before, ...after];
 
     const outcome = matchRoute({ fixes: withDropout, candidates: [A] });
@@ -75,10 +60,7 @@ describe("blocking: cap the gaps in the time-weighting", () => {
 
   it("reports observedCoverage on every outcome, including a clean, fully-observed route", () => {
     const loop = loopInsideRectangle(ORIGIN, 400, 400, 20, 60);
-    const outcome = matchRoute({
-      fixes: fixesAlong(loop, T0, T0 + 4 * HOUR),
-      candidates: [A],
-    });
+    const outcome = matchRoute({ fixes: fixesAlong(loop, T0, T0 + 4 * HOUR), candidates: [A] });
     expect(outcome.summary.observedCoverage).toBeCloseTo(1, 6);
   });
 });
@@ -100,9 +82,7 @@ describe("should-fix 1 (pinning): time-weighting vs. per-point ratio disagree", 
     // while the 200 densely-packed outside points barely register any
     // time at all — so the time-weighted ratio comes out **above** 0.6.
     const insideCluster = Array.from({ length: 20 }, () => ORIGIN); // deep inside
-    const outsideCluster = Array.from({ length: 200 }, (_, i) =>
-      offset(ORIGIN, 1000 + i, 0),
-    ); // deep outside
+    const outsideCluster = Array.from({ length: 200 }, (_, i) => offset(ORIGIN, 1000 + i, 0)); // deep outside
     const points = [...insideCluster, ...outsideCluster];
     const GAP = 300_000; // exactly MAX_GAP_SECONDS, in ms — no cap loss
     const fixes = [
@@ -145,15 +125,10 @@ describe("should-fix 2 (pinning): check-in fail-closed edges", () => {
   };
 
   it("rejects a fix with `simulated` omitted entirely — fails if the check becomes `=== true`", () => {
-    const fix = {
-      point: ORIGIN,
-      accuracyMeters: 10,
-      timestamp: 1000,
-    } as unknown as Parameters<typeof matchCheckIn>[0];
-    expect(matchCheckIn(fix, polygonCourse)).toEqual({
-      accepted: false,
-      reason: "simulated",
-    });
+    const fix = { point: ORIGIN, accuracyMeters: 10, timestamp: 1000 } as unknown as Parameters<
+      typeof matchCheckIn
+    >[0];
+    expect(matchCheckIn(fix, polygonCourse)).toEqual({ accepted: false, reason: "simulated" });
   });
 
   it("rejects a fix with `simulated: null` — fails if the check becomes `=== true`", () => {
@@ -163,10 +138,7 @@ describe("should-fix 2 (pinning): check-in fail-closed edges", () => {
       simulated: null,
       timestamp: 1000,
     } as unknown as Parameters<typeof matchCheckIn>[0];
-    expect(matchCheckIn(fix, polygonCourse)).toEqual({
-      accepted: false,
-      reason: "simulated",
-    });
+    expect(matchCheckIn(fix, polygonCourse)).toEqual({ accepted: false, reason: "simulated" });
   });
 
   it("rejects a negative accuracy", () => {
@@ -265,10 +237,7 @@ describe("should-fix 4 (pinning): sameFacility gates the shared_geometry reason"
     };
     // Confined to the overlap band x ∈ [-150, -50], inside both.
     const points = loopInsideRectangle(overlapCenter, 60, 200, 5, 40);
-    const outcome = matchRoute({
-      fixes: fixesAlong(points, T0, T0 + 4 * HOUR),
-      candidates: [A, B],
-    });
+    const outcome = matchRoute({ fixes: fixesAlong(points, T0, T0 + 4 * HOUR), candidates: [A, B] });
     expect(outcome.kind).toBe("ask_user");
     if (outcome.kind === "ask_user") {
       expect(outcome.reason).toBe("close_scores");

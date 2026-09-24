@@ -35,9 +35,7 @@ export function facilityMetaDescription(
   const parts: string[] = [];
 
   parts.push(
-    facility.town
-      ? `${name} is a golf facility in ${facility.town}`
-      : `${name} is a golf facility`,
+    facility.town ? `${name} is a golf facility in ${facility.town}` : `${name} is a golf facility`,
   );
 
   if (opts.trail) {
@@ -93,10 +91,7 @@ export function facilityMetaDescriptionFr(
     parts.push("(privé — accessible en tant qu'invité d'un membre)");
   }
 
-  const close =
-    facility.access === "private"
-      ? "Répertorié sur GolfRaven."
-      : "Voir sur GolfRaven.";
+  const close = facility.access === "private" ? "Répertorié sur GolfRaven." : "Voir sur GolfRaven.";
 
   const raw = `${parts.join(" ")}. ${close}`;
   return truncateAtWord(raw, META_MAX);
