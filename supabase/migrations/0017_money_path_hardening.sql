@@ -237,8 +237,15 @@ BEGIN
     RAISE EXCEPTION 'offer_code: play_id % (user_id %) was not found in app.play at constraint-check time', NEW.play_id, NEW.user_id
       USING ERRCODE = '23514';
   END IF;
-  IF v_play_held AND NEW.state <> 'held_review' THEN
-    RAISE EXCEPTION 'offer_code: play_id % is held_review, so this offer_code must be state=held_review too (got %)', NEW.play_id, NEW.state
+  -- should-fix (post-P3a re-gate): "a reviewer cannot set offer_code/
+  -- entitlement to void or expired while it is held." A held play's
+  -- backing offer_code may ALSO resolve straight to a terminal state
+  -- (void/expired) without first round-tripping through held_review --
+  -- those are exactly the outcomes a reviewer clearing a held item picks
+  -- between, and blocking them here made a genuine reviewer action
+  -- impossible, not just a bypass.
+  IF v_play_held AND NEW.state NOT IN ('held_review', 'void', 'expired') THEN
+    RAISE EXCEPTION 'offer_code: play_id % is held_review, so this offer_code must be state=held_review (pending review) or a terminal void/expired (resolved by review) -- got %', NEW.play_id, NEW.state
       USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
@@ -264,8 +271,11 @@ BEGIN
     RAISE EXCEPTION 'entitlement: play_id % (user_id %) was not found in app.play at constraint-check time', NEW.play_id, NEW.user_id
       USING ERRCODE = '23514';
   END IF;
-  IF v_play_held AND NEW.state <> 'held_review' THEN
-    RAISE EXCEPTION 'entitlement: play_id % is held_review, so this entitlement must be state=held_review too (got %)', NEW.play_id, NEW.state
+  -- should-fix (post-P3a re-gate): same reasoning as offer_code_play_guard
+  -- above -- app.entitlement_state has no separate 'expired' (only
+  -- 'void'), so only that terminal is added.
+  IF v_play_held AND NEW.state NOT IN ('held_review', 'void') THEN
+    RAISE EXCEPTION 'entitlement: play_id % is held_review, so this entitlement must be state=held_review (pending review) or terminal void (resolved by review) -- got %', NEW.play_id, NEW.state
       USING ERRCODE = '23514';
   END IF;
   RETURN NEW;

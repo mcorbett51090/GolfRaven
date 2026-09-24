@@ -83,14 +83,19 @@ for (const row of grantRows) {
 // M2(c) widening) sets search_path, excluding functions owned by an
 // ALLOW-LISTED extension only (postgis/pgtap/pgcrypto — should-fix,
 // post-P3a re-gate: a function from any OTHER extension is no longer
-// exempted at all).
+// exempted at all) AND pinned to a specific, empty-by-default allow-list
+// of (extension, schema, function, args) tuples — should-fix, post-P3a
+// re-gate: "ALTER EXTENSION pgcrypto ADD FUNCTION public.evil4() passes
+// both checks", since mere pg_depend extension-membership is forgeable
+// via that exact DDL command. See 10_function_inventory.sql's own,
+// longer comment on this same pin for the full reasoning.
 const missingSearchPath = psql(`
   SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE p.prokind IN ('f', 'p') AND p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto'))
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto') AND (e.extname, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) IN (SELECT NULL::text, NULL::text, NULL::text, NULL::text WHERE false))
     AND NOT EXISTS (SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}'::text[])) cfg WHERE cfg LIKE 'search_path=%')
 `);
 for (const [fn] of missingSearchPath) {
@@ -109,7 +114,7 @@ const misplacedOrMisowned = psql(`
   LEFT JOIN pg_roles r ON r.oid = p.proowner
   WHERE p.prokind IN ('f', 'p') AND p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto'))
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto') AND (e.extname, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) IN (SELECT NULL::text, NULL::text, NULL::text, NULL::text WHERE false))
     AND (n.nspname <> 'private' OR r.rolname IS DISTINCT FROM 'private_definer')
 `);
 for (const [fn, schema, owner] of misplacedOrMisowned) {

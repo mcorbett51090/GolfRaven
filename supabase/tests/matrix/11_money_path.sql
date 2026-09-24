@@ -739,6 +739,15 @@ SELECT throws_ok(
 );
 SELECT tests.clear_actor();
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+-- should-fix (post-P3a re-gate): "vault grant contradiction" -- pin the
+-- resolution (no grant to service_role; access only via private_definer)
+-- so a future shim.sql edit that re-adds it fails this test immediately.
+SELECT throws_ok(
+  $$SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'pseudonym_hmac_v1'$$,
+  NULL,
+  NULL,
+  'service_role ALSO cannot read vault.decrypted_secrets directly (access is only ever through private_definer, e.g. inside private.delete_my_data)'
+);
 
 -- SET LOCAL has no effect on the result: delete_my_data no longer reads
 -- ANY GUC for the key (confirmed by grep -- there is no
@@ -962,6 +971,20 @@ SELECT throws_ok(
   '23503',
   NULL,
   'M2 bypass (d) CLOSED: re-owning play.user_id while offer_code AND entitlement still reference it is rejected (composite FK ON UPDATE)'
+);
+
+-- should-fix (post-P3a re-gate): "a reviewer cannot set offer_code/
+-- entitlement to void or expired while it is held." Both rows are still
+-- held_review at this point (every bypass attempt above failed). A
+-- reviewer resolving the review must be able to move them straight to a
+-- terminal state.
+SELECT lives_ok(
+  $$UPDATE app.offer_code SET state = 'expired' WHERE id = '73000000-0000-0000-0000-000000000001'$$,
+  'a HELD offer_code can be resolved straight to expired by a reviewer (was previously blocked, only held_review itself was accepted)'
+);
+SELECT lives_ok(
+  $$UPDATE app.entitlement SET state = 'void' WHERE id = '53000000-0000-0000-0000-000000000001'$$,
+  'a HELD entitlement can be resolved straight to void by a reviewer (entitlement_state has no separate expired)'
 );
 
 SELECT tests.clear_actor();

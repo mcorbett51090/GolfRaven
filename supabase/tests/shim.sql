@@ -241,7 +241,19 @@ GRANT USAGE ON SCHEMA vault TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO migration_owner;
 GRANT SELECT ON vault.decrypted_secrets TO migration_owner;
 GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO service_role;
-GRANT SELECT ON vault.decrypted_secrets TO service_role;
+-- ⛔ FIX (should-fix, post-P3a re-gate: "vault grant contradiction"): this
+-- used to ALSO grant service_role SELECT on vault.decrypted_secrets (the
+-- DECRYPTED view) — directly contradicting 0018_pseudonym_vault.sql's own
+-- comment ("the ONLY grant anyone but postgres/migration_owner ever gets
+-- on it"). Resolved in favor of the 0018 comment: service_role keeps
+-- SELECT/INSERT/UPDATE/DELETE on the RAW vault.secrets table (needed
+-- ONLY for this harness's own test manipulation — renaming/rotating/
+-- removing test keys, never a real production grant either), but gets NO
+-- access to the DECRYPTED view at all. Reading a plaintext key stays
+-- reachable ONLY through private_definer (0018's narrow, column-level
+-- grant), which private.delete_my_data (SECURITY DEFINER) uses — never a
+-- direct read by whatever role happens to be calling it.
+
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
 -- runs supabase/tests/helpers.sql and

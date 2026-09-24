@@ -247,8 +247,9 @@ BEGIN
   END LOOP;
   -- Legacy fallback: a row logged before player_pseudonym/
   -- player_pseudonym_hmac_id existed at all has neither set — matched by
-  -- the pre-deletion handle instead, same as always.
-  PERFORM set_config('app.delete_my_data.target_pseudonym', '', true);
+  -- the pre-deletion handle instead, same as always (0016's own RLS
+  -- policy already has a SEPARATE branch for exactly this shape, keyed
+  -- on target_handle, not target_pseudonym).
   UPDATE app.attestation_shift_log
   SET player_handle_snapshot = 'deleted player'
   WHERE player_pseudonym IS NULL AND player_pseudonym_hmac_id IS NULL

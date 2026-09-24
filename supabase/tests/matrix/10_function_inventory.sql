@@ -180,6 +180,26 @@ SELECT is(
         SELECT 1 FROM pg_depend d
         JOIN pg_extension e ON e.oid = d.refobjid
         WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto')
+          AND (e.extname, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) IN (
+          -- should-fix (post-P3a re-gate): "ALTER EXTENSION pgcrypto ADD
+          -- FUNCTION public.evil4() passes both checks. Pin the
+          -- definer-function set inside allow-listed extensions." Merely
+          -- checking "is pg_depend deptype='e' for an allow-listed
+          -- extension" is itself forgeable -- ALTER EXTENSION ... ADD
+          -- FUNCTION attaches ANY existing function (created by anyone
+          -- with the right privilege) to an extension's own dependency
+          -- record, making it look genuinely extension-shipped to a check
+          -- that only asks "which extension owns this". Pinned instead to
+          -- the SPECIFIC (extension, schema, function, identity_args)
+          -- tuples verified to be genuinely part of that extension's own
+          -- install script -- currently EMPTY (confirmed empirically this
+          -- session: postgis/pgtap/pgcrypto ship ZERO SECURITY DEFINER
+          -- functions between them, in this project's installed
+          -- versions), so NOTHING is exempted by extension membership
+          -- alone any more; add a real row here only when a specific one
+          -- is confirmed to exist in a real install.
+          SELECT NULL::text, NULL::text, NULL::text, NULL::text WHERE false
+        )
       )
       AND (n.nspname <> 'private' OR r.rolname IS DISTINCT FROM 'private_definer')
   ),
@@ -202,6 +222,26 @@ SELECT is(
         SELECT 1 FROM pg_depend d
         JOIN pg_extension e ON e.oid = d.refobjid
         WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto')
+          AND (e.extname, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) IN (
+          -- should-fix (post-P3a re-gate): "ALTER EXTENSION pgcrypto ADD
+          -- FUNCTION public.evil4() passes both checks. Pin the
+          -- definer-function set inside allow-listed extensions." Merely
+          -- checking "is pg_depend deptype='e' for an allow-listed
+          -- extension" is itself forgeable -- ALTER EXTENSION ... ADD
+          -- FUNCTION attaches ANY existing function (created by anyone
+          -- with the right privilege) to an extension's own dependency
+          -- record, making it look genuinely extension-shipped to a check
+          -- that only asks "which extension owns this". Pinned instead to
+          -- the SPECIFIC (extension, schema, function, identity_args)
+          -- tuples verified to be genuinely part of that extension's own
+          -- install script -- currently EMPTY (confirmed empirically this
+          -- session: postgis/pgtap/pgcrypto ship ZERO SECURITY DEFINER
+          -- functions between them, in this project's installed
+          -- versions), so NOTHING is exempted by extension membership
+          -- alone any more; add a real row here only when a specific one
+          -- is confirmed to exist in a real install.
+          SELECT NULL::text, NULL::text, NULL::text, NULL::text WHERE false
+        )
       )
       AND NOT EXISTS (
         SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}'::text[])) cfg WHERE cfg LIKE 'search_path=%'
