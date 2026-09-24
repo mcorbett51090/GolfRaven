@@ -1,0 +1,199 @@
+{
+  "contractVersion": 0,
+  "facilities": [
+    {
+      "id": "fac_01M39GMFJZYF7W9HXMEC5V7FJ8",
+      "slug": "pebble-hills-golf-club",
+      "region": "US-TN",
+      "tz": "America/Chicago",
+      "name": "Pebble Hills Golf Club",
+      "town": "Nashville",
+      "lat": 36.16,
+      "lng": -86.78,
+      "approx": false,
+      "prov": {
+        "name": "operator",
+        "town": "operator",
+        "coord": "primary-source"
+      },
+      "access": "public",
+      "url": "https://pebblehills.example.com",
+      "phone": "+1-615-555-0100",
+      "verification": {
+        "status": "play-verified",
+        "basis": "operator",
+        "verifiedAt": "2026-01-01",
+        "source": {
+          "url": "https://example.com/source",
+          "retrieved": "2026-01-01"
+        }
+      },
+      "seed": {
+        "origin": "manual"
+      },
+      "booking": [
+        {
+          "provider": "golfnow",
+          "url": "https://www.golfnow.com/pebble-hills",
+          "source": {
+            "url": "https://example.com/source",
+            "retrieved": "2026-01-01"
+          },
+          "checkedAt": "2026-01-01"
+        },
+        {
+          "provider": "course-native",
+          "url": "https://pebblehills.example.com/book",
+          "source": {
+            "url": "https://example.com/source",
+            "retrieved": "2026-01-01"
+          },
+          "checkedAt": "2026-01-01"
+        }
+      ],
+      "courses": [
+        {
+          "id": "crs_01M39GMFJZ2P89V3ZZXPPH671T",
+          "slug": "pebble-hills",
+          "name": "Pebble Hills",
+          "holes": 18,
+          "par": 72,
+          "designers": [
+            "dsg_01M39GMFJZ21RFA7G11961JMQC"
+          ],
+          "opened": 1985,
+          "prov": {
+            "name": "operator",
+            "holes": "operator",
+            "par": "operator",
+            "designers": "operator",
+            "opened": "operator"
+          },
+          "geometry": {
+            "layer": "own",
+            "ref": "manual",
+            "file": "data/osm/geometry/pebble-hills.geojson",
+            "checkedAt": "2026-01-01",
+            "sharedWithFacility": false
+          }
+        }
+      ]
+    }
+  ],
+  "trails": [
+    {
+      "id": "trl_01M39GMFJZQN74WV3R6HA63H0F",
+      "slug": "synthetic-golf-trail",
+      "name": "Synthetic Golf Trail",
+      "countries": [
+        "US"
+      ],
+      "regions": [
+        "US-TN"
+      ],
+      "kind": "state-agency",
+      "status": "active",
+      "operator": {
+        "name": "Synthetic Operator",
+        "url": "https://example.com/operator",
+        "type": "state-agency"
+      },
+      "officialUrl": "https://example.com/trail",
+      "rosterStatus": "verified",
+      "rosterVersions": [
+        {
+          "version": 1,
+          "effectiveFrom": "2026-01-01",
+          "source": {
+            "url": "https://example.com/source",
+            "retrieved": "2026-01-01"
+          },
+          "verifiedAt": "2026-01-01",
+          "completionUnit": "course",
+          "markerUnit": "facility",
+          "completionRule": {
+            "kind": "all"
+          },
+          "markerRule": {
+            "kind": "all"
+          },
+          "members": [
+            {
+              "unit": "course",
+              "courseId": "crs_01M39GMFJZ2P89V3ZZXPPH671T"
+            }
+          ]
+        }
+      ],
+      "lastReviewed": "2026-01-01",
+      "sources": [
+        {
+          "url": "https://example.com/source",
+          "retrieved": "2026-01-01"
+        }
+      ]
+    }
+  ],
+  "designers": [
+    {
+      "id": "dsg_01M39GMFJZ21RFA7G11961JMQC",
+      "name": "Alice Placeholder",
+      "sources": [
+        {
+          "url": "https://example.com/source",
+          "retrieved": "2026-01-01"
+        }
+      ]
+    }
+  ],
+  "idLedger": {
+    "entries": {
+      "fac_01M39GMFJZYF7W9HXMEC5V7FJ8": {
+        "id": "fac_01M39GMFJZYF7W9HXMEC5V7FJ8",
+        "kind": "fac",
+        "slug": "pebble-hills-golf-club",
+        "status": "verified",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "verified",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "tombstoned": true,
+        "mergedInto": "fac_01M39GMFJZKQJPMYN2SY8MBSFW"
+      },
+      "crs_01M39GMFJZ2P89V3ZZXPPH671T": {
+        "id": "crs_01M39GMFJZ2P89V3ZZXPPH671T",
+        "kind": "crs",
+        "status": "verified",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "verified",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ]
+      },
+      "trl_01M39GMFJZQN74WV3R6HA63H0F": {
+        "id": "trl_01M39GMFJZQN74WV3R6HA63H0F",
+        "kind": "trl",
+        "slug": "synthetic-golf-trail",
+        "transitions": []
+      }
+    }
+  },
+  "bookingHostAllowList": [
+    "www.golfnow.com"
+  ]
+}

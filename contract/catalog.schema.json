@@ -1,0 +1,1039 @@
+{
+  "schemas": {
+    "Course": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "closed": {
+          "type": "boolean"
+        },
+        "composite": {
+          "items": false,
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          ],
+          "type": "array"
+        },
+        "derivedFrom": {
+          "additionalProperties": false,
+          "properties": {
+            "slug": {
+              "const": "osm",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "designers": {
+          "items": {
+            "pattern": "^dsg_[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "externalIds": {
+          "additionalProperties": false,
+          "properties": {
+            "arccos": {
+              "type": "string"
+            },
+            "garmin": {
+              "type": "string"
+            },
+            "ghin": {
+              "type": "string"
+            },
+            "golfnow": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "geometry": {
+          "additionalProperties": false,
+          "properties": {
+            "checkedAt": {
+              "format": "date",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+              "type": "string"
+            },
+            "file": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "layer": {
+              "enum": [
+                "osm",
+                "own"
+              ],
+              "type": "string"
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "pattern": "^(node|way|relation)\\/\\d+$",
+                  "type": "string"
+                },
+                {
+                  "const": "manual",
+                  "type": "string"
+                }
+              ]
+            },
+            "sharedWithFacility": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "layer",
+            "ref",
+            "file",
+            "checkedAt",
+            "sharedWithFacility"
+          ],
+          "type": "object"
+        },
+        "holes": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "holesDetail": {
+          "items": {
+            "$ref": "Hole"
+          },
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "opened": {
+          "maximum": 9007199254740991,
+          "minimum": 1600,
+          "type": "integer"
+        },
+        "par": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "prov": {
+          "additionalProperties": false,
+          "properties": {
+            "designers": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "holes": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "opened": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "par": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "seed": {
+          "additionalProperties": false,
+          "properties": {
+            "osmRef": {
+              "pattern": "^(node|way|relation)\\/\\d+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "osmRef"
+          ],
+          "type": "object"
+        },
+        "slug": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tees": {
+          "items": {
+            "$ref": "Tee"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "slug"
+      ],
+      "type": "object"
+    },
+    "Designer": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "aliases": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^dsg_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "Source"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "Facility": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "enum": [
+            "public",
+            "semi-private",
+            "resort",
+            "municipal",
+            "private"
+          ],
+          "type": "string"
+        },
+        "amenities": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "source": {
+                "$ref": "Source"
+              },
+              "value": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "key",
+              "value",
+              "source"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "approx": {
+          "type": "boolean"
+        },
+        "booking": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "checkedAt": {
+                "format": "date",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+                "type": "string"
+              },
+              "externalId": {
+                "type": "string"
+              },
+              "provider": {
+                "enum": [
+                  "golfnow",
+                  "chronogolf",
+                  "teeon",
+                  "club-prophet",
+                  "course-native"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "$ref": "Source"
+              },
+              "url": {
+                "format": "uri",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "url",
+              "source",
+              "checkedAt"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "coordSource": {
+          "$ref": "Source"
+        },
+        "courses": {
+          "items": {
+            "$ref": "Course"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "derivedFrom": {
+          "additionalProperties": false,
+          "properties": {
+            "region": {
+              "const": "osm",
+              "type": "string"
+            },
+            "slug": {
+              "const": "osm",
+              "type": "string"
+            },
+            "tz": {
+              "const": "osm",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "factsCheckedAt": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^fac_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "lat": {
+          "maximum": 90,
+          "minimum": -90,
+          "type": "number"
+        },
+        "lng": {
+          "maximum": 180,
+          "minimum": -180,
+          "type": "number"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "nameFr": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "prov": {
+          "additionalProperties": false,
+          "properties": {
+            "coord": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "town": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "region": {
+          "pattern": "^(US|CA)-[A-Z]{2,3}$",
+          "type": "string"
+        },
+        "seed": {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "enum": [
+                "osm",
+                "manual",
+                "trail-roster"
+              ],
+              "type": "string"
+            },
+            "osmRef": {
+              "pattern": "^(node|way|relation)\\/\\d+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin"
+          ],
+          "type": "object"
+        },
+        "slug": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "town": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tz": {
+          "type": "string"
+        },
+        "url": {
+          "format": "uri",
+          "type": "string"
+        },
+        "verification": {
+          "additionalProperties": false,
+          "properties": {
+            "basis": {
+              "enum": [
+                "operator",
+                "primary-source",
+                "course-claim",
+                "two-source-match"
+              ],
+              "type": "string"
+            },
+            "claimProof": {
+              "enum": [
+                "domain-email",
+                "dns-txt"
+              ],
+              "type": "string"
+            },
+            "source": {
+              "$ref": "Source"
+            },
+            "status": {
+              "enum": [
+                "unverified",
+                "listed-verified",
+                "play-verified"
+              ],
+              "type": "string"
+            },
+            "verifiedAt": {
+              "format": "date",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "region",
+        "tz",
+        "verification",
+        "seed",
+        "booking",
+        "courses"
+      ],
+      "type": "object"
+    },
+    "Hole": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^hol_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "number": {
+          "maximum": 36,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "signature": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "number"
+      ],
+      "type": "object"
+    },
+    "Region": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "pattern": "^(US|CA)-[A-Z]{2,3}$",
+          "type": "string"
+        },
+        "country": {
+          "enum": [
+            "US",
+            "CA"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "nameFr": {
+          "type": "string"
+        },
+        "polygonFile": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "slug": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "country",
+        "slug",
+        "name",
+        "polygonFile"
+      ],
+      "type": "object"
+    },
+    "RosterVersion": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "completionRule": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "all",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "n-of-m",
+                  "type": "string"
+                },
+                "n": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "ruleSource": {
+                  "$ref": "Source"
+                }
+              },
+              "required": [
+                "kind",
+                "n",
+                "ruleSource"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "completionUnit": {
+          "enum": [
+            "course",
+            "facility",
+            "hole"
+          ],
+          "type": "string"
+        },
+        "effectiveFrom": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "effectiveTo": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "markerRule": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "all",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "n-of-m",
+                  "type": "string"
+                },
+                "n": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "ruleSource": {
+                  "$ref": "Source"
+                }
+              },
+              "required": [
+                "kind",
+                "n",
+                "ruleSource"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "markerUnit": {
+          "enum": [
+            "facility"
+          ],
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "courseId": {
+                    "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "type": "string"
+                  },
+                  "stopOrder": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "unit": {
+                    "const": "course",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "unit",
+                  "courseId"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "anyOf": {
+                    "items": {
+                      "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+                      "type": "string"
+                    },
+                    "minItems": 2,
+                    "type": "array"
+                  },
+                  "stopOrder": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "unit": {
+                    "const": "course",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "unit",
+                  "anyOf"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "facilityId": {
+                    "pattern": "^fac_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "type": "string"
+                  },
+                  "stopOrder": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "unit": {
+                    "const": "facility",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "unit",
+                  "facilityId"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "courseId": {
+                    "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "type": "string"
+                  },
+                  "holeId": {
+                    "pattern": "^hol_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "type": "string"
+                  },
+                  "stopOrder": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "unit": {
+                    "const": "hole",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "unit",
+                  "holeId",
+                  "courseId"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "source": {
+          "$ref": "Source"
+        },
+        "trackingStartsOn": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "verifiedAt": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "version": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "effectiveFrom",
+        "source",
+        "verifiedAt",
+        "completionUnit",
+        "markerUnit",
+        "completionRule",
+        "markerRule",
+        "members"
+      ],
+      "type": "object"
+    },
+    "Source": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "retrieved": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "url": {
+          "format": "uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "retrieved"
+      ],
+      "type": "object"
+    },
+    "Tee": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "checkedAt": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "gender": {
+          "enum": [
+            "M",
+            "F",
+            "X"
+          ],
+          "type": "string"
+        },
+        "meters": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "rating": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "slope": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "source": {
+          "$ref": "Source"
+        },
+        "yards": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "checkedAt"
+      ],
+      "type": "object"
+    },
+    "Trail": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "blurb": {
+          "type": "string"
+        },
+        "blurbFr": {
+          "type": "string"
+        },
+        "countries": {
+          "items": {
+            "enum": [
+              "US",
+              "CA"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "state-agency",
+            "statutory-commission",
+            "dmo",
+            "co-op",
+            "commercial-network",
+            "pass-programme",
+            "resort-portfolio"
+          ],
+          "type": "string"
+        },
+        "lastReviewed": {
+          "format": "date",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "nameFr": {
+          "type": "string"
+        },
+        "officialUrl": {
+          "format": "uri",
+          "type": "string"
+        },
+        "operator": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "url": {
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "url",
+            "type"
+          ],
+          "type": "object"
+        },
+        "regions": {
+          "items": {
+            "pattern": "^(US|CA)-[A-Z]{2,3}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "rosterStatus": {
+          "enum": [
+            "verified",
+            "conflicting",
+            "unverified"
+          ],
+          "type": "string"
+        },
+        "rosterVersions": {
+          "items": {
+            "$ref": "RosterVersion"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "slug": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "Source"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "developing",
+            "defunct"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "name",
+        "countries",
+        "regions",
+        "kind",
+        "status",
+        "operator",
+        "officialUrl",
+        "rosterStatus",
+        "rosterVersions",
+        "lastReviewed",
+        "sources"
+      ],
+      "type": "object"
+    }
+  }
+}

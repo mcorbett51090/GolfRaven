@@ -45,6 +45,9 @@ jobs:
       - name: Test
         run: pnpm -r test
 
+      - name: verify-contract (contract/catalog.schema.json must match packages/catalog's Zod schema)
+        run: node tools/catalog/dist/verify-contract.js
+
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
     runs-on: ubuntu-latest

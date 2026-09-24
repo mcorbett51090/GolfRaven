@@ -1,28 +1,33 @@
+/**
+ * `@golfraven/catalog` — the catalog *shape* SSOT (build plan §3.1 row A):
+ * the §4.1 Zod schema, generating both `contract/catalog.schema.json`
+ * (via `tools/catalog`'s `verify-contract`, §3.5) and the TS types below,
+ * plus the ID ledger (§3.5, §4.2, §4.3). It holds no data itself (data
+ * lives in `data/`, §3.1 row B) and does no network fetch.
+ *
+ * P1a scope (this package): the full §4.1 schema except `AchievementDef`
+ * and `OfferTerms` (part B, `packages/rules`'s `RuleExpr` — see
+ * `schema.ts`'s module doc), plus the ID ledger and slug rule. `loadCatalog()`
+ * and the directory-base-layer loader are not implemented here — see the
+ * P1a report for why.
+ */
 import { z } from "zod";
 
-/**
- * P0 placeholder.
- *
- * `@golfraven/catalog` is the catalog *shape* SSOT (build plan §3.1 row A):
- * a Zod schema that generates both `contract/catalog.schema.json` and the
- * TS types, plus `loadCatalog()` and the one enrichment function. It holds
- * no data itself (data lives in `data/`, build plan §3.1 row B).
- *
- * None of that exists yet. P1 defines the real schema (build plan §4.1) and
- * `verify-contract.mjs` (build plan §15) regenerates the committed JSON
- * Schema from it. This module only proves the package builds, typechecks
- * and can depend on zod, so the P1 work has a workspace to land in.
- */
-
-/** Bumped on any breaking change to the catalog contract (semver MAJOR). */
+/** Bumped on any breaking change to the catalog contract (semver MAJOR).
+ * Stays 0 through P1a — the contract freeze (`contractVersion 1`) is a
+ * later, owner-visible step (build plan §10 P1 "M-freeze"). */
 export const CONTRACT_VERSION = 0;
 
-/**
- * Placeholder schema so the zod dependency is exercised by a real check.
- * Replaced by the real catalog schema in P1 (build plan §4.1).
- */
-export const PlaceholderCatalogSchema = z.object({
+export * from "./ids.js";
+export * from "./common.js";
+export * from "./geo.js";
+export * from "./name-similarity.js";
+export * from "./schema.js";
+export * from "./ledger.js";
+
+/** Retained from the P0 placeholder only so `CONTRACT_VERSION` stays
+ * exercised by a real Zod parse in this package's own tests, independent
+ * of the (much larger) §4.1 schema. Not used by anything else. */
+export const ContractVersionSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),
 });
-
-export type PlaceholderCatalog = z.infer<typeof PlaceholderCatalogSchema>;

@@ -1,0 +1,65 @@
+{
+  "ledgerBefore": {
+    "entries": {
+      "fac_01M39GT4MJV8BT6R4VK9ECBVGP": {
+        "id": "fac_01M39GT4MJV8BT6R4VK9ECBVGP",
+        "kind": "fac",
+        "slug": "cedar-creek",
+        "status": "verified",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "verified",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/9100"
+        ]
+      },
+      "crs_01M39GT4MJFHEZFT2NZA39CCSG": {
+        "id": "crs_01M39GT4MJFHEZFT2NZA39CCSG",
+        "kind": "crs",
+        "status": "verified",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "verified",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/9100"
+        ]
+      }
+    }
+  },
+  "candidates": [
+    {
+      "facilityId": "fac_01M39GT4MJV8BT6R4VK9ECBVGP",
+      "courseId": "crs_01M39GT4MJFHEZFT2NZA39CCSG",
+      "name": "Cedar Creek Golf Course",
+      "lat": 35.9,
+      "lng": -83.9
+    }
+  ],
+  "incoming": {
+    "osmRef": "way/9300",
+    "name": "Cedar Creek Golf Course",
+    "lat": 35.9001,
+    "lng": -83.9,
+    "desiredSlug": "cedar-creek",
+    "catalogVersion": "20260101-abc0001",
+    "date": "2026-01-01"
+  }
+}
