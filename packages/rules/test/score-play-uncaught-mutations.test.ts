@@ -132,10 +132,26 @@ describe("uncaught mutation: receipt row-date anchor removed", () => {
 });
 
 describe("uncaught mutation: hard-group collapse disabled", () => {
-  it("a hard staff scan is never ALSO separately scored as its own foreground_checkin (A2-20d) — stays at 0.95, not ~0.965", () => {
-    const fix = goodFix();
-    const result = scorePlay([staffPresence({ coSignalFix: fix }), checkin({ id: "same_fix_checkin", fix })], baseCtx());
+  it("staff with NO inline fix, absorbing an external check-in, resolves HARD (0.95) — not a max-pick 0.80", () => {
+    // Deliberately uses the ABSORPTION path (staff carries no inline fix
+    // at all) rather than a shared-fixId inline case: if `classify` alone
+    // already produced a hard contribution (an inline fix would do that),
+    // `combine`'s own ordinary max-pick would coincidentally reproduce the
+    // right number even with the explicit `resolveGroups` collapse
+    // disabled, making that shape a bad discriminator. Here, `classify`'s
+    // OWN per-row pass gives staff `staff_presence_soft` (0.80, not hard,
+    // not money-eligible) — ONLY the collapse step in `resolveGroups` can
+    // turn this into `staff_presence_hard` (0.95). Without it: max(0.80
+    // soft, 0.18 unattestable check-in) = 0.80, money 0.18 < 0.85.
+    const result = scorePlay(
+      [
+        staffPresence({}),
+        checkin({ fix: goodFix({ token: { present: true, grade: "unattestable" }, capturedAt: PLAY_LOCAL_DATE_MS + 3 * 60_000 }) }),
+      ],
+      baseCtx(),
+    );
     expect(result.score_badge).toBe(0.95);
     expect(result.score_monetary).toBe(0.95);
+    expect(result.money).toBe(true);
   });
 });
