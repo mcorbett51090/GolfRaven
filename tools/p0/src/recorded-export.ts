@@ -33,12 +33,13 @@
  *   before its hash is bound, `--informational` is refused too — that gap
  *   is exactly the window a not-yet-committed "recorded" run could be
  *   quietly previewed and then walked back from.
- * - **Git-history + working-tree integrity**, decision 0001 Addendum F's
- *   own precedent (`git log -S` for K2's exclusion dates): before binding,
- *   the tool checks this file is fully committed (not just staged/dirty),
- *   scans full git history (`git log -S"sha256:"`) for the OS's hash ever
- *   changing after being set, and refuses in a shallow clone (that scan
- *   needs full history).
+ * - **Git-history + working-tree integrity**, in the spirit of decision
+ *   0001 Addendum F's own precedent (`git log -S` for K2's exclusion
+ *   dates — this uses `-G` instead, see `assertHashHistoryIntact`'s doc
+ *   for why `-S` alone would miss a value SWAP): before binding, the tool
+ *   checks this file is fully committed (not just staged/dirty), scans
+ *   full git history for the OS's hash ever changing after being set, and
+ *   refuses in a shallow clone (that scan needs full history).
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -507,7 +508,17 @@ export async function assertHashHistoryIntact(x1DocPath: string, os: X1Os): Prom
   const relPath = path.relative(repoRoot, x1DocPath).split(path.sep).join("/");
   let logOut: string;
   try {
-    logOut = await runGit(["log", "--format=%H", "--reverse", "-S", "sha256:", "--", relPath], repoRoot);
+    // `-G` (matches any commit whose diff ADDS OR REMOVES a line matching
+    // the regex), not `-S` (which only fires on a CHANGE IN OCCURRENCE
+    // COUNT of a literal string): the substring "sha256:" itself is
+    // present, unchanged, before and after a value swap, so `-S"sha256:"`
+    // would silently miss exactly the tampering this check exists to
+    // catch. `-G` matches because the WHOLE line (including the hex
+    // value) differs, so it shows as one line removed + one line added.
+    logOut = await runGit(
+      ["log", "--format=%H", "--reverse", "-G", "sha256:[0-9a-f]{64}", "--", relPath],
+      repoRoot,
+    );
   } catch (err) {
     throw new Error(
       `Could not read docs/p0/X1.md's git history (${err instanceof Error ? err.message : String(err)}) — ` +

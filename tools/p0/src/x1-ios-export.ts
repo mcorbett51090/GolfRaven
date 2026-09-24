@@ -459,22 +459,31 @@ async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const roundWindows = await readLoggedRoundWindows();
   const { dates: recordedExportDates, source } = await readRecordedExportDates();
-  if (!args.informational) {
-    assertRecordedExportDateLogged(recordedExportDates, args.os);
-  }
   const recorded = !args.informational;
+  if (recorded) {
+    assertRecordedExportDateLogged(recordedExportDates, args.os);
+  } else {
+    // Round-2 Opus-gate correction: --informational is refused too, in the
+    // window between the UTC date being logged and its hash being bound.
+    assertNoInformationalPeeking(recordedExportDates, args.os);
+  }
 
   const result = await runX1IosExport(args.exportDir, {
     roundWindows,
     ...(args.since !== undefined ? { since: args.since } : {}),
   });
 
-  // Opus-gate correction (post-d0de4b8), decision 0005 "Bind the recorded
-  // run to one specific export": a recorded run is refused if export.xml
-  // has no ExportDate at all (nothing to bind against), if that date
-  // doesn't match what's logged, or if its SHA-256 doesn't match what was
-  // already bound there. --informational skips all of this — it is never
-  // checked or bound.
+  // Decision 0005 "Bind the recorded run to one specific export": a
+  // recorded run is refused if export.xml has no ExportDate at all
+  // (nothing to bind against), if that UTC date doesn't match what's
+  // logged, or if its SHA-256 doesn't match what was already bound there.
+  // --informational skips all of this — it is never checked or bound.
+  // Round-2 Opus-gate correction: also refuse in a shallow clone, when
+  // docs/p0/X1.md has uncommitted changes, or when its git history shows
+  // the bound hash was ever changed or removed (decision 0005's
+  // hash-history integrity check, git log -S — same technique K2's
+  // exclusion dating uses).
+  let boundSomething = false;
   if (recorded) {
     if (result.exportDate === null) {
       throw new Error(
@@ -485,7 +494,9 @@ async function main(argv: string[]): Promise<void> {
     }
     const exportCalendarDate = extractCalendarDate(result.exportDate);
     assertExportDateMatches(recordedExportDates, args.os, exportCalendarDate);
-    await bindExportHash(source.path, recordedExportDates, args.os, result.exportSha256);
+    await assertGitIntegrity(source.path, args.os);
+    const { written } = await bindExportHash(source.path, args.os, result.exportSha256);
+    boundSomething = written;
   }
 
   const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
@@ -506,7 +517,8 @@ async function main(argv: string[]): Promise<void> {
   process.stdout.write(
     `x1-ios-export: ${result.golfWorkoutCount} golf workout(s) found (of ${result.totalWorkoutElementsSeen} total <Workout> elements). ` +
       `recorded=${recorded}\n` +
-      `Wrote ${jsonPath} and ${mdPath}.\n`,
+      `Wrote ${jsonPath} and ${mdPath}.\n` +
+      (boundSomething ? "This run bound a new SHA-256 into docs/p0/X1.md — commit docs/p0/X1.md now.\n" : ""),
   );
   if (result.warnings.length > 0) {
     process.stderr.write(

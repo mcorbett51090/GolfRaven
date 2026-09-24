@@ -161,7 +161,13 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   );
   writeFileSync(
     minimalAndroidJson,
-    JSON.stringify({ generatedAt: "2026-09-20T09:00:00Z", windowDays: 7, sessionCount: 0, sessions: [] }),
+    JSON.stringify({
+      generatedAt: "2026-09-20T09:00:00Z",
+      windowDays: 7,
+      sessionCount: 0,
+      sessions: [],
+      os: "android",
+    }),
   );
   writeFileSync(
     minimalSourceMapJson,
@@ -206,6 +212,33 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
         path.join(OUT_DIR, "x1-verdict-refuse-android-result"),
       ]),
     ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
+  });
+
+  // Round-2 Opus-gate correction: "The Android reader output must carry os
+  // and generatedAt" — a basic shape check, refused unconditionally (even
+  // for --informational, and even before the real X1.md is consulted).
+  it("x1-verdict CLI refuses when --android's JSON has no os field", async () => {
+    const badAndroidJson = path.join(OUT_DIR, "x1-verdict-android-no-os.json");
+    writeFileSync(
+      badAndroidJson,
+      JSON.stringify({ generatedAt: "2026-09-20T09:00:00Z", windowDays: 7, sessionCount: 0, sessions: [] }),
+    );
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--ios",
+        minimalIosJson,
+        "--android",
+        badAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--os",
+        "ios",
+        "--informational",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-bad-android-os-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining('not "android"') });
   });
 
   it("x1-verdict CLI --informational runs against the real, blank recorded-export date and marks recorded: false", async () => {

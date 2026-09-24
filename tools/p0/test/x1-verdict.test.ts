@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { computeX1Verdict, type AndroidGolfSessionReadResult, type SourceMap, type X1VerdictInput } from "../src/x1-verdict.js";
+import {
+  assertIosWorkoutDataNotTampered,
+  computeX1Verdict,
+  type AndroidGolfSessionReadResult,
+  type SourceMap,
+  type X1VerdictInput,
+} from "../src/x1-verdict.js";
 import type { X1IosWorkoutRecord } from "../src/x1-ios-export.js";
 import type { RoundWindow } from "../src/round-windows.js";
-import type { X1Os } from "../src/recorded-export.js";
 
 function iosWorkout(overrides: Partial<X1IosWorkoutRecord>): X1IosWorkoutRecord {
   return {
@@ -23,20 +28,14 @@ function iosWorkout(overrides: Partial<X1IosWorkoutRecord>): X1IosWorkoutRecord 
   };
 }
 
-/** Opus-gate correction (post-d0de4b8): stamps to pass as the 3rd arg when
- * a test needs an OS's input to be ELIGIBLE for a recorded verdict — a
- * plain `iosResult(...)`/`androidResult(...)` with no stamp is always
- * ineligible (as a real unstamped/informational file would be), which is
- * deliberate: most tests below only check the INFORMATIONAL fields
- * (`perSource`, `sourcesPassingByOs`, `countedEntries`), which don't need
- * a stamp at all. */
-const RECORDED_IOS_STAMP = { recorded: true as const, os: "ios" as const };
-const RECORDED_ANDROID_STAMP = { recorded: true as const, os: "android" as const };
-
-function iosResult(
-  workouts: X1IosWorkoutRecord[],
-  stamp: Partial<{ os: X1Os; recorded: boolean }> = {},
-): X1VerdictInput["ios"] {
+/** Round-2 Opus-gate correction (post-67bdb27): `computeX1Verdict` has no
+ * "eligible"/trust concept any more — it cannot verify anything (no
+ * filesystem/git access), so `recordedVerdicts` is always computed purely
+ * from data. These helpers reflect that: no `recorded`/`os` stamp param on
+ * `iosResult` at all (it would mean nothing); `androidResult`'s `os` is
+ * REQUIRED (a basic shape field the real Android reader output must carry
+ * — see the module doc) but likewise carries no eligibility weight. */
+function iosResult(workouts: X1IosWorkoutRecord[]): X1VerdictInput["ios"] {
   return {
     generatedAt: new Date().toISOString(),
     exportDir: "/fake",
@@ -49,20 +48,19 @@ function iosResult(
     exportDate: "2026-09-20 09:00:00 -0400",
     exportSha256: "e".repeat(64),
     warnings: [],
-    ...stamp,
   };
 }
 
 function androidResult(
   sessions: AndroidGolfSessionReadResult["sessions"],
-  stamp: Partial<{ os: X1Os; recorded: boolean }> = {},
+  os: "ios" | "android" = "android",
 ): X1VerdictInput["android"] {
   return {
     generatedAt: new Date().toISOString(),
     windowDays: 7,
     sessionCount: sessions.length,
     sessions,
-    ...stamp,
+    os,
   };
 }
 
@@ -85,14 +83,11 @@ const BASE_SOURCE_MAP: SourceMap = {
 
 describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decision 0001 Addendum F)", () => {
   it("passes when all 3 sources write golf workouts with routes on iOS", () => {
-    const ios = iosResult(
-      [
-        iosWorkout({ sourceName: "Garmin Connect" }),
-        iosWorkout({ sourceName: "Matt's Apple Watch" }),
-        iosWorkout({ sourceName: "18Birdies" }),
-      ],
-      RECORDED_IOS_STAMP,
-    );
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Garmin Connect" }),
+      iosWorkout({ sourceName: "Matt's Apple Watch" }),
+      iosWorkout({ sourceName: "18Birdies" }),
+    ]);
     const android = androidResult([]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.garmin.passesOnAnyOS).toBe(true);
@@ -104,14 +99,11 @@ describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decisi
   });
 
   it("BOUNDARY: exactly 2 of 3 sources passing on the SAME OS is a pass", () => {
-    const ios = iosResult(
-      [
-        iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" }), // Garmin fails
-        iosWorkout({ sourceName: "Matt's Apple Watch" }),
-        iosWorkout({ sourceName: "18Birdies" }),
-      ],
-      RECORDED_IOS_STAMP,
-    );
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" }), // Garmin fails
+      iosWorkout({ sourceName: "Matt's Apple Watch" }),
+      iosWorkout({ sourceName: "18Birdies" }),
+    ]);
     const android = androidResult([]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.sourcesPassingByOs).toEqual({ ios: 2, android: 0 });
@@ -121,14 +113,11 @@ describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decisi
   });
 
   it("BOUNDARY: exactly 1 of 3 sources passing is a kill", () => {
-    const ios = iosResult(
-      [
-        iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" }),
-        iosWorkout({ sourceName: "Matt's Apple Watch", routePresent: false, verdict: "fail" }),
-        iosWorkout({ sourceName: "18Birdies" }),
-      ],
-      RECORDED_IOS_STAMP,
-    );
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" }),
+      iosWorkout({ sourceName: "Matt's Apple Watch", routePresent: false, verdict: "fail" }),
+      iosWorkout({ sourceName: "18Birdies" }),
+    ]);
     const android = androidResult([]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.sourcesPassingByOs).toEqual({ ios: 1, android: 0 });
@@ -140,29 +129,21 @@ describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decisi
     // iOS, Garmin routes only on Android. Under the old ('any OS') reading
     // this was a pass (2 of 3 pass somewhere); Addendum F pins the reading
     // that predicts what a user actually gets — a kill, since no ONE OS has
-    // 2 of 3 passing. Both OSes stamped recorded here so overallVerdict is
-    // actually "kill" (not "not-recorded") — this test is about the
-    // cross-OS combination rule, not the Opus-gate recorded/os stamps.
-    const ios = iosResult(
-      [
-        iosWorkout({ sourceName: "Matt's Apple Watch" }), // Apple Watch passes on iOS only
-      ],
-      RECORDED_IOS_STAMP,
-    );
-    const android = androidResult(
-      [
-        {
-          recordId: "r1",
-          start: "2026-09-21T09:00:00Z",
-          end: "2026-09-21T13:00:00Z",
-          dataOrigin: "com.garmin.android.apps.connectmobile",
-          routePresent: true,
-          routePointCount: 50,
-          routeRequiresConsent: false,
-        },
-      ],
-      RECORDED_ANDROID_STAMP,
-    );
+    // 2 of 3 passing.
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Matt's Apple Watch" }), // Apple Watch passes on iOS only
+    ]);
+    const android = androidResult([
+      {
+        recordId: "r1",
+        start: "2026-09-21T09:00:00Z",
+        end: "2026-09-21T13:00:00Z",
+        dataOrigin: "com.garmin.android.apps.connectmobile",
+        routePresent: true,
+        routePointCount: 50,
+        routeRequiresConsent: false,
+      },
+    ]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.perSource.appleWatch.passesOnAnyOS).toBe(true);
     expect(result.perSource.garmin.passesOnAnyOS).toBe(true);
@@ -464,76 +445,62 @@ function twoOfThreePassingAndroidSessions(): AndroidGolfSessionReadResult["sessi
   ];
 }
 
-describe("x1-verdict: per-OS recorded verdicts (Opus-gate correction, post-d0de4b8)", () => {
-  it("overallVerdict is not-recorded when NEITHER input is stamped recorded, even though the data would pass", () => {
+describe("x1-verdict: recordedVerdicts is purely data-driven — stamps are IGNORED entirely (round-2 Opus-gate correction, post-67bdb27, reflects x1probe2.mjs)", () => {
+  it("recordedVerdicts and overallVerdict are the SAME regardless of any recorded/os field the inputs carry", () => {
+    // The exact shape of x1probe2.mjs's 3 scenarios: identical underlying
+    // data, only the (now-irrelevant) recorded/os stamps differ.
+    const iosData = [
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2019-05-01 10:00:00 +0000", routePresent: true, verdict: "pass" }),
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2026-09-20 10:00:00 +0000", routePresent: false, verdict: "fail" }),
+    ];
+    const androidData = twoOfThreePassingAndroidSessions();
+
+    const scenarios: Array<[string, X1VerdictInput["ios"], X1VerdictInput["android"]]> = [
+      ["no stamps at all", iosResult(iosData), androidResult(androidData)],
+      [
+        "hand-stamped recorded:true on both (as JSON someone could edit by hand)",
+        { ...iosResult(iosData), recorded: true, os: "ios" } as X1VerdictInput["ios"],
+        { ...androidResult(androidData), recorded: true } as X1VerdictInput["android"],
+      ],
+      [
+        "hand-stamped recorded:true, no os field",
+        { ...iosResult(iosData), recorded: true } as X1VerdictInput["ios"],
+        androidResult(androidData),
+      ],
+    ];
+
+    const results = scenarios.map(([, ios, android]) =>
+      computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS }),
+    );
+    // All 3 must agree — proving the stamps have ZERO effect.
+    for (const r of results) {
+      expect(r.recordedVerdicts.ios.verdict).toBe(results[0]!.recordedVerdicts.ios.verdict);
+      expect(r.recordedVerdicts.android.verdict).toBe(results[0]!.recordedVerdicts.android.verdict);
+      expect(r.overallVerdict).toBe(results[0]!.overallVerdict);
+    }
+    // And the actual values are purely data-driven: garmin passes on iOS
+    // (the old 2019 workout has a route), garmin+phoneApp pass on Android.
+    expect(results[0]!.recordedVerdicts.ios.verdict).toBe("kill"); // only garmin (1/3) on iOS
+    expect(results[0]!.recordedVerdicts.android.verdict).toBe("pass"); // 2/3 on Android
+    expect(results[0]!.overallVerdict).toBe("pass");
+  });
+
+  it("recordedVerdicts has no eligible/ineligibleReason field — verdict is always populated", () => {
+    const ios = iosResult(THREE_PASSING_IOS_WORKOUTS);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.recordedVerdicts.ios).not.toHaveProperty("eligible");
+    expect(result.recordedVerdicts.ios).not.toHaveProperty("ineligibleReason");
+    expect(result.recordedVerdicts.ios.verdict).toBe("pass");
+    expect(result.recordedVerdicts.android.verdict).toBe("kill");
+  });
+
+  it("recordedVerdicts[os].sourcesPassing mirrors sourcesPassingByOs[os]", () => {
     const ios = iosResult(THREE_PASSING_IOS_WORKOUTS);
     const android = androidResult(twoOfThreePassingAndroidSessions());
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.recordedVerdicts.ios.eligible).toBe(false);
-    expect(result.recordedVerdicts.android.eligible).toBe(false);
-    // Informational data still shows both OSes passing 2-3 of 3 — but that
-    // must NOT leak into overallVerdict (this is exactly the probe's bug).
-    expect(result.sourcesPassingByOs.ios).toBe(3);
-    expect(result.sourcesPassingByOs.android).toBe(2);
-    expect(result.overallVerdict).toBe("not-recorded");
-  });
-
-  it("recorded: false on the ios input makes iOS ineligible, even though the DATA would pass", () => {
-    const ios = iosResult(THREE_PASSING_IOS_WORKOUTS, { recorded: false, os: "ios" });
-    const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.recordedVerdicts.ios.eligible).toBe(false);
-    expect(result.recordedVerdicts.ios.ineligibleReason).toMatch(/recorded/);
-    expect(result.recordedVerdicts.ios.verdict).toBeNull();
-    expect(result.overallVerdict).toBe("not-recorded");
-  });
-
-  it("an os stamp mismatch makes that OS ineligible even when recorded: true", () => {
-    const ios = iosResult(THREE_PASSING_IOS_WORKOUTS, { recorded: true, os: "android" });
-    const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.recordedVerdicts.ios.eligible).toBe(false);
-    expect(result.recordedVerdicts.ios.ineligibleReason).toMatch(/different OS/);
-  });
-
-  it("a properly recorded, passing iOS input yields overallVerdict pass", () => {
-    const ios = iosResult(THREE_PASSING_IOS_WORKOUTS, RECORDED_IOS_STAMP);
-    const android = androidResult([]);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.recordedVerdicts.ios.eligible).toBe(true);
-    expect(result.recordedVerdicts.ios.verdict).toBe("pass");
-    expect(result.overallVerdict).toBe("pass");
-  });
-
-  it("cross-OS leak (the failing probe's exact shape): a recorded iOS run where iOS itself fails must not report an iOS pass, even though Android's raw unstamped data passes", () => {
-    const ios = iosResult(
-      [iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" })], // only 1 of 3 written, and it fails
-      RECORDED_IOS_STAMP,
-    );
-    const android = androidResult(twoOfThreePassingAndroidSessions()); // 2 of 3 pass, UNSTAMPED
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    // Informational: android's raw data DOES pass 2 of 3.
-    expect(result.sourcesPassingByOs.android).toBe(2);
-    // But it is not eligible, so it must not be stamped as a recorded pass.
-    expect(result.recordedVerdicts.android.eligible).toBe(false);
-    expect(result.recordedVerdicts.android.verdict).toBeNull();
-    // And iOS — the OS this run actually claims — must report its own failure, not a leaked pass.
-    expect(result.recordedVerdicts.ios.eligible).toBe(true);
-    expect(result.recordedVerdicts.ios.verdict).toBe("kill");
-    expect(result.overallVerdict).not.toBe("pass");
-    expect(result.overallVerdict).toBe("kill");
-  });
-
-  it("both OSes properly recorded and eligible: overall pass if EITHER OS's own recorded verdict passes", () => {
-    const ios = iosResult(
-      [iosWorkout({ sourceName: "Garmin Connect", routePresent: false, verdict: "fail" })],
-      RECORDED_IOS_STAMP,
-    );
-    const android = androidResult(twoOfThreePassingAndroidSessions(), RECORDED_ANDROID_STAMP);
-    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.recordedVerdicts.ios.verdict).toBe("kill");
-    expect(result.recordedVerdicts.android.verdict).toBe("pass");
-    expect(result.overallVerdict).toBe("pass");
+    expect(result.recordedVerdicts.ios.sourcesPassing).toBe(result.sourcesPassingByOs.ios);
+    expect(result.recordedVerdicts.android.sourcesPassing).toBe(result.sourcesPassingByOs.android);
   });
 });
 
@@ -574,5 +541,21 @@ describe("x1-verdict: newest-date excludes route-less workouts (should-fix, Opus
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
     expect(result.newestCountedWorkoutDateBySource.phoneApp.ios).toBeNull();
     expect(result.newestRouteLessWorkoutDateBySource.phoneApp.ios).toBe("2026-09-20 09:00:00 -0400");
+  });
+});
+
+describe("assertIosWorkoutDataNotTampered (should-fix 4, round-2 Opus-gate correction) — 'a JSON edited to recorded:true with the bound hash but different workout data is refused'", () => {
+  it("does not throw when the claimed and fresh verdicts agree", () => {
+    expect(() => assertIosWorkoutDataNotTampered("pass", "pass")).not.toThrow();
+    expect(() => assertIosWorkoutDataNotTampered("kill", "kill")).not.toThrow();
+  });
+
+  it("throws when the --ios JSON's claimed verdict disagrees with a fresh re-parse of its bound export.xml", () => {
+    // This is main()'s actual check: the --ios JSON's own `workouts` claim
+    // "pass" while re-parsing the SAME (hash-verified) export.xml — which
+    // the SHA-256 binding alone does not protect, since it covers
+    // export.xml, a different file from the --ios JSON — says "kill".
+    expect(() => assertIosWorkoutDataNotTampered("pass", "kill")).toThrow(/disagrees with a fresh re-parse/);
+    expect(() => assertIosWorkoutDataNotTampered("kill", "pass")).toThrow(/disagrees with a fresh re-parse/);
   });
 });

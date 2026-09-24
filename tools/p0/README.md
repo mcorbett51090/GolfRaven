@@ -58,18 +58,28 @@ date.
 
 **Recorded-export rule (decision 0005) — REQUIRED, this is what now gates the CLI.** Before
 running (without `--informational`), the CLI reads `docs/p0/X1.md`'s "## Recorded export" section
-and **refuses to run if the `iOS:` line is still blank** — the first export actually read, with its
-date logged there BEFORE it's read, is the recorded one; a later export is informational only. Log
-that date in `docs/p0/X1.md` before reading the export, or pass `--informational` to dry-run
-without it (see above). The output stamps the source `docs/p0/X1.md` file's path and SHA-256
-(`source`), plus `os` and `recorded`, mirroring `k1-verdict`'s provenance stamp.
+and **refuses to run if the `iOS:` line has no UTC date logged** — the first export actually read,
+with its UTC date logged there BEFORE it's read, is the recorded one; a later export is
+informational only. Log that UTC date in `docs/p0/X1.md` before reading the export, or pass
+`--informational` to dry-run without it. **`--informational` is itself refused** in the window
+between the UTC date being logged and its hash being bound (round-2 Opus-gate correction, post-67bdb27,
+"no informational peeking before binding") — use a synthetic test fixture for a dry run in that
+window, or run before the date is logged. The output stamps the source `docs/p0/X1.md` file's path
+and SHA-256 (`source`), plus `os` and `recorded`, mirroring `k1-verdict`'s provenance stamp.
 
 **Bound to one specific export (post-d0de4b8 Opus-gate correction).** A recorded run also refuses if
-`export.xml`'s own `<ExportDate>` doesn't fall on the SAME calendar date as the one logged in
+`export.xml`'s own `<ExportDate>` doesn't fall on the SAME UTC calendar date as the one logged in
 `docs/p0/X1.md`, or if `export.xml`'s SHA-256 (`exportSha256` in the output) doesn't match the hash
 already bound there. On the FIRST recorded run, that hash is written into `docs/p0/X1.md` next to
-the date automatically. `--informational` skips all of this. `exportDate`/`exportSha256` are always
-in the JSON output, recorded or not.
+the date automatically, and the CLI prints **"commit docs/p0/X1.md now"**. `--informational` skips
+all of this. `exportDate`/`exportSha256` are always in the JSON output, recorded or not.
+
+**Git-history + working-tree integrity (should-fix, post-67bdb27 Opus-gate correction).** Before
+binding, a recorded run also refuses in a shallow git clone, when `docs/p0/X1.md` has uncommitted
+changes, or when its full git history (`git log -G"sha256:[0-9a-f]{64}"`) shows the bound hash for
+iOS was ever changed or removed after being set — the same integrity discipline decision 0001
+Addendum F applies to K2's exclusion dating (`git log -S`), adapted here to `-G` since a value SWAP
+(not just an add/remove of the literal substring) is exactly what this needs to catch.
 
 **Feeds:** the JSON is one of `x1-verdict`'s two inputs. The markdown table's columns match
 `docs/owner/x1-k4b-device-protocol.md` §4's results table (Source / OS / Start date / Test round? /
@@ -134,11 +144,12 @@ node dist/x1-verdict.js \
   from a follow-up `requestExerciseRoute(recordId)` call (R6). A `CONSENT_REQUIRED` session with no
   entry here defaults to "not present," per R6.
 - `--os ios|android` (**required**) — names which OS this run claims to produce THE RECORDED result
-  for. **(Opus-gate correction, post-d0de4b8 — supersedes the previous paragraph here, which said
-  the verdict "always combines both OSes' input data": it does not, any more.)**
+  for. A recorded run evaluates and binds **only** that OS (round-2 Opus-gate correction, post-67bdb27
+  — supersedes an earlier paragraph here about stamping `recorded: true` by hand; see below).
 - `--informational` (optional) — runs even if that OS's recorded-export date is blank, and skips
   every check below. The output is then marked `recorded: false`, with a loud "INFORMATIONAL — NOT
-  THE RECORDED X1 RESULT" banner — never the recorded P0 result.
+  THE RECORDED X1 RESULT" banner — never the recorded P0 result. **Refused** in the specific window
+  where a UTC date is logged but its hash isn't bound yet ("no informational peeking before binding").
 
 **Decision 0005 — round windows are LABELS, not a filter; every workout/session counts.** The CLI
 no longer refuses to run when no round window is logged, and no longer excludes any workout/session
@@ -146,52 +157,62 @@ by date — every one counts toward the INFORMATIONAL per-source view, whenever 
 `docs/p0/X1.md`'s logged round window(s) tag each counted entry `testRound: true`/`false` in the
 result's `countedEntries`.
 
-**Recorded verdicts are PER OS, decided from that OS's own data alone (post-d0de4b8 Opus-gate
-correction).** `result.recordedVerdicts.ios` / `.android` are each `eligible` only when that OS's
-own input (`--ios` / `--android` JSON) is itself stamped `recorded: true` (and, if it states one, a
-matching `os`) — i.e. it is what a recorded `x1-ios-export --os ios` run (or an equivalently-stamped
-Android reader run — apps/mobile doesn't stamp this itself, so stamp `recorded: true, os: "android"`
-onto that JSON by hand before a recorded run) produced. An ineligible OS's data still shows in the
-INFORMATIONAL sections (`perSource`, `sourcesPassingByOs`, `countedEntries`) but is **never** folded
-into `recordedVerdicts` or `overallVerdict` — this is the fix for the leak commit d0de4b8 shipped:
-an `--os ios` run backed by an unrecorded `ios` JSON could previously still report an overall PASS
-purely from `android`'s raw, unstamped sessions. `overallVerdict` (`"pass" | "kill" | "not-recorded"`)
-is now derived ONLY from `recordedVerdicts`: pass if either eligible OS's own verdict is "pass";
-kill if at least one OS is eligible and neither passed; **"not-recorded" if NEITHER OS is eligible**
-— a genuinely new state, distinct from "kill".
+**Round-2 Opus-gate correction (post-67bdb27) — a recorded run evaluates ONLY its own OS, verified
+independently, never from a stamp.** `computeX1Verdict` (the pure function) has no "eligible"/trust
+concept at all any more — it can't verify anything (no filesystem/git access), so `recordedVerdicts.ios`
+/ `.android` are always computed purely from that OS's own data, ignoring any `recorded`/`os` field an
+input might carry (a hand-edited JSON claiming `recorded: true` has **zero** effect — this is what
+closes the leak the previous design still had). The CLI (`main()`) is what actually decides what's
+recorded, and it does so per OS: for `--os ios`, it re-reads `export.xml` from the `--ios` JSON's
+`exportDir` completely fresh — both to bind its date/hash (see below) **and** to recompute the iOS
+verdict itself, discarding the `--ios` JSON's own `workouts` field entirely (a JSON edited to claim a
+different result than a fresh re-parse of its own bound `export.xml` produces is **refused**, not
+silently corrected). For `--os android`, the whole `--android` JSON file is what's hashed and bound,
+so any tampering of its `sessions` is already caught by the hash check on a re-run. The `--android`
+input must carry `os: "android"` (a basic shape/operator-error check, not a trust mechanism — the
+apps/mobile reader doesn't stamp this itself, so add it by hand the same lightweight way
+`x1-ios-export` stamps `os: "ios"` onto its own output).
 
-**The CLI refuses (throws) a recorded run when `--os`'s OS isn't eligible** — i.e. when its input
-JSON's `recorded`/`os` stamp doesn't check out. Pass `--informational` to see the (non-recorded)
-result anyway.
+**The recorded result is written PER OS into `docs/p0/X1.md`, so two separate runs combine without
+ever sharing data.** After binding, `x1-verdict --os ios` writes iOS's own verdict as `result:pass` or
+`result:kill` on iOS's "## Recorded export" line (refusing to silently overwrite a different value
+later). The CLI's own `recordedOverall` output field then reads BOTH OSes' `result:` fields back out
+of `docs/p0/X1.md` — never from this call's two inputs — and reports `"pass"` if either is `"pass"`,
+`"kill"` if both are recorded and neither passed, `"pending"` if the other OS hasn't run yet. This
+module's own `overallVerdict` field stays purely informational (this call's two inputs only); don't
+confuse it with the CLI's `recordedOverall`.
 
-**Recorded-export rule (decision 0005), plus binding to one specific export (post-d0de4b8 Opus-gate
-correction) — REQUIRED, this is what else gates the CLI.** Before running (without
-`--informational`), the CLI reads `docs/p0/X1.md`'s "## Recorded export" section and refuses if the
-line for `--os`'s OS is still blank. It then also refuses if that OS's export date (Apple's
-`ExportDate`, re-read from the `--ios` JSON's own `exportDate` field, for iOS; the Android reader's
-`generatedAt` for Android) doesn't fall on the logged calendar date, or if its SHA-256 (the `--ios`
-JSON's `exportSha256` field for iOS; a fresh hash of the `--android` JSON file's bytes for Android)
-doesn't match what's already bound in `docs/p0/X1.md` — writing that hash there on the first
-recorded run. **Every input file is now stamped into the output's `provenance`** (path + SHA-256):
-`x1Doc`, `iosJson`, `androidJson`, `sourceMapJson`, `followUpsJson`, and `exportXml` (as recorded in
-the `--ios` JSON) — not just `docs/p0/X1.md` as before.
+**Git-history + working-tree integrity (should-fix, post-67bdb27).** Before binding, the CLI also
+refuses in a shallow clone, when `docs/p0/X1.md` has uncommitted changes, or when its full git history
+(`git log -G"sha256:[0-9a-f]{64}"`) shows the bound hash for that OS was ever changed or removed after
+being set. On the run that performs the first bind, the CLI prints **"commit docs/p0/X1.md now"**.
+
+**Recorded-export rule (decision 0005), plus binding to one specific export — REQUIRED, this is what
+else gates the CLI.** Before running (without `--informational`), the CLI reads `docs/p0/X1.md`'s "##
+Recorded export" section and refuses if the line for `--os`'s OS has no UTC date logged. It then also
+refuses if that OS's export's own UTC date (Apple's `ExportDate`, freshly re-read from `export.xml`
+for iOS; the Android reader's `generatedAt` for Android) doesn't fall on the logged date, or if its
+SHA-256 (freshly re-hashed — `export.xml`'s bytes for iOS, the `--android` JSON file's bytes for
+Android; **never** a self-reported field) doesn't match what's already bound — writing it on the first
+recorded run. **Every input file is stamped into the output's `provenance`** (path + SHA-256):
+`x1Doc`, `iosJson`, `androidJson`, `sourceMapJson`, `followUpsJson`, and `exportXml`.
 
 **The "≥ 1 OS" bar, made exact (decision 0001 Addendum F, gate finding B-6).** Within one OS's data,
 X1 passes only when **≥ 2 of the 3 sources** pass. Sources that pass on _different_ OSes (e.g. Apple
 Watch only on iOS, Garmin only on Android) do **not** combine — that reading predicts what a user
 actually gets, since a user syncs from one phone. The INFORMATIONAL `sourcesPassingByOs: { ios,
-android }` shows both counts explicitly; `recordedVerdicts` is what actually decides `overallVerdict`.
+android }` shows both counts explicitly.
 
-**Newest counted workout date, route-present only (should-fix, post-d0de4b8 Opus-gate correction).**
-`newestCountedWorkoutDateBySource` only considers workouts/sessions WITH a route (the verdict-bearing
-ones); a route-less one's date is tracked separately in `newestRouteLessWorkoutDateBySource`, never
-pulling the verdict-bearing date forward.
+**Newest counted workout date, route-present only (should-fix).** `newestCountedWorkoutDateBySource`
+only considers workouts/sessions WITH a route (the verdict-bearing ones); a route-less one's date is
+tracked separately in `newestRouteLessWorkoutDateBySource`, never pulling the verdict-bearing date
+forward.
 
-**Feeds:** `overallVerdict` → `docs/p0/X1.md` VERDICT; `perSource` (informational) → the per-source
-column of `docs/owner/x1-k4b-device-protocol.md` §4 and `docs/p0/X1.md`'s A2-14 requirement;
-`garminWrittenStatementTriggeredByX1` (informational) → the first half of `docs/p0/K4.md`'s "written
-statement" requirement (K4b failing independently also triggers it — this tool has no K4b data and
-does not assess that half).
+**Feeds:** the CLI's `recordedOverall` → `docs/p0/X1.md` VERDICT; `perSource` (informational) → the
+per-source column of `docs/owner/x1-k4b-device-protocol.md` §4 and `docs/p0/X1.md`'s A2-14
+requirement; `garminWrittenStatementTriggeredByX1` (informational) → the first half of
+`docs/p0/K4.md`'s "written statement" requirement (K4b failing independently also triggers it — this
+tool has no K4b data and does not assess that half).
 
 ## 3. `x2-fetch` — pilot-slate roster/rules direct-fetch, evidence gathering
 

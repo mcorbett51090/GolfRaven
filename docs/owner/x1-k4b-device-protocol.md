@@ -42,12 +42,20 @@ tagged `testRound: false`. Do this once per round (iOS pass and Android pass eac
 window/bullet if they happen on different days) if you want the tagging; skipping it just means every
 workout reads `testRound: false`.
 
-**Log the "Recorded export" date FIRST instead (decision 0005) — this is what now gates the tools.**
-Before reading either OS's export, add that OS's date to `docs/p0/X1.md`'s "## Recorded export"
-section. `x1-ios-export --os ios` and `x1-verdict --os ios|android` both refuse to produce the
+**Log the "Recorded export" UTC date FIRST instead (decision 0005) — this is what now gates the
+tools.** Before reading either OS's export, add that OS's UTC date to `docs/p0/X1.md`'s "## Recorded
+export" section. `x1-ios-export --os ios` and `x1-verdict --os ios|android` both refuse to produce the
 RECORDED X1 result for an OS whose date there is still blank; pass `--informational` to run anyway
 (the output is then marked `recorded: false` with a loud banner — useful for a dry run against real
-data before the recorded round, never the P0 verdict itself).
+data before the recorded round, never the P0 verdict itself) — **except in the window between logging
+the date and the tools binding a SHA-256 to it**, where `--informational` is refused too (round-2
+Opus-gate correction, post-67bdb27: "no informational peeking before binding" — use a synthetic
+fixture instead if a dry run is genuinely needed then). Each tool binds ITS OWN os's export by a fresh
+UTC date + SHA-256 match, and refuses in a shallow git clone, an uncommitted `docs/p0/X1.md`, or if git
+history shows a bound hash ever changed. **A recorded X1 verdict is decided per OS, never combined
+across a single `x1-verdict` call's two inputs** — run `x1-verdict --os ios` after the iOS pass and
+`x1-verdict --os android` after the Android pass; each writes its OWN os's `result:pass`/`result:kill`
+into `docs/p0/X1.md`, and the overall X1 result reads both back from there (pass if either passed).
 
 Play **one real round (~4 h)** carrying all three iOS sources simultaneously where possible (Garmin watch +
 Apple Watch + phone with a golf app), so one round covers all three:
