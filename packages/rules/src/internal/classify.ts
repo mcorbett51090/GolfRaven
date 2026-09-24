@@ -397,8 +397,22 @@ export interface ScorePlayContext {
    * `play_evidence UNIQUE(evidence_id)` constraint (preventing the SAME
    * evidence row from being attributed to two plays) is a separate,
    * P3a-scope guarantee — this is the money-path-visible half: even
-   * absent that DB constraint, a WRONG-course row must never contribute. */
-  playCourseId?: string;
+   * absent that DB constraint, a WRONG-course row must never contribute.
+   *
+   * **Seventh gate, item 8: REQUIRED at the type level, not just the
+   * parser's `ScorePlayContextSchema`.** Every REAL caller goes through
+   * `scorePlay`'s parser, which has enforced this since H3/H3-residual —
+   * the type now says so too, so a caller building a `ScorePlayContext`
+   * directly (bypassing the parser — a direct `classifyEvidenceRow` test,
+   * the same "tests reach it directly" path this file's own doc
+   * describes elsewhere) gets a compile error instead of silently
+   * constructing an under-specified context. `courseOk`'s own `undefined`
+   * -disables-the-check branch (below) is UNCHANGED — it is now reachable
+   * only via an explicit type-system bypass (`as any`/`as
+   * ScorePlayContext`), the same category as this module's other
+   * defence-in-depth checks (a null token, a malformed fix, …), which all
+   * stay safe against a caller that ignores the type contract entirely. */
+  playCourseId: string;
   purchases?: PurchaseCorroboration[];
   /** H2 (fifth gate): the play's facility's IANA timezone, used ONLY by
    * `parseScorePlayInput`'s (`../parse-evidence.js`) capturedAt/localDate
@@ -406,11 +420,11 @@ export interface ScorePlayContext {
    * themselves, which trust each fix's own pre-validated `localDate`
    * string throughout (this module's own doc: "every date check is
    * anchored to ctx.playLocalDate, never re-derived from an epoch").
-   * Defaults to `"UTC"` when omitted, which is also what every existing
-   * fixture in this package's own test suite is implicitly authored
-   * against (`capturedAt` epochs chosen so their UTC calendar date equals
-   * the fixture's own `localDate` string). */
-  facilityTz?: string;
+   * **Seventh gate, item 8: REQUIRED at the type level** — see
+   * `playCourseId`'s own doc just above for why; F1 (sixth gate) already
+   * made it required at the parser/schema level, closing the "defaults to
+   * UTC" exploit — this closes the matching type-level gap. */
+  facilityTz: string;
 }
 
 /* ------------------------------------------------------------------ */
