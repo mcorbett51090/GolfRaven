@@ -30,6 +30,16 @@ function lintFixtureWithRoot(relPath: string) {
   return lintSource(source, full, { functionsRoot: FUNCTIONS_ROOT });
 }
 
+// M2 (post-P3a re-gate): the same as lintFixtureWithRoot, plus an
+// explicit importMap/pinnedImportTargets — needed for the new
+// exact-key-plus-pinned-target model, whose whole point is that a bare
+// specifier resolves to nothing without one.
+function lintFixtureWithMap(relPath: string, importMap: Record<string, string>, pinnedImportTargets: string[] = []) {
+  const full = join(FIXTURES_ROOT, relPath);
+  const source = readFileSync(full, "utf8");
+  return lintSource(source, full, { functionsRoot: FUNCTIONS_ROOT, importMap, pinnedImportTargets });
+}
+
 describe("bad fixtures (must fail) — original five", () => {
   it("flags a service-role .update() call outside withOwnership", () => {
     const findings = lintFixture("bad/direct-update.ts");
