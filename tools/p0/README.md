@@ -471,8 +471,28 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   `docs/p0/X2.md`'s own text are both read with `git show <ref>:<path>` INSIDE that disposable repo
   — never the local working tree — so content authority is GitHub's real `main`, full stop. A
   network failure or a fetch error gives UNOFFICIAL, never OFFICIAL — never silently treated as
-  "assume it checks out." See `docs/p0/X2.md`'s own "Scope statement (fifth re-gate, round 6)" for
-  exactly what this does and does not defend against.
+  "assume it checks out." **Sixth re-gate, round 7 ("an agent that controls the verdict process's
+  runtime environment still gets OFFICIAL with a forged acceptance"):** round 6's fix still resolved
+  the literal string `"git"` through PATH — a fake `git` shim placed earlier on PATH, or PATH itself
+  rewritten, was silently trusted — and ran inside the SAME Node process the caller launched, so
+  `NODE_OPTIONS="--require evil.cjs"`, `LD_PRELOAD`, or any comparable mechanism that injects code
+  into that process (this round's own gate fixture, `evil.cjs`, patches `child_process.execFile`
+  this way) could make every "scrubbed" git invocation transparently run through attacker code
+  regardless of what env/args this module built for it. Closed three ways: `git` is now resolved to
+  a verified ABSOLUTE path (`/usr/bin/git`, falling back to `/bin/git`), refused outright unless
+  owned by root and not group-/world-writable; every child git process's own `PATH` is fixed to
+  `/usr/bin:/bin`, never the caller's; and the run refuses (UNOFFICIAL) when the verdict process's
+  OWN original environment shows `LD_PRELOAD`/`LD_LIBRARY_PATH`/`GIT_EXEC_PATH`/any `DYLD_*`
+  variable set at all, `NODE_OPTIONS` carrying a code-loading flag (`--require`/`-r`/`--loader`/
+  `--experimental-loader`/`--import` — **not** a blanket "NODE_OPTIONS is set" refusal, since this
+  environment's own ordinary shell sets a benign `--max-old-space-size` NODE_OPTIONS, confirmed live
+  this round), or `process.execArgv` being non-empty (empty for a plain `node dist/x2-verdict.js`
+  file invocation, confirmed live this round). **This is a denylist, not a sandbox — it is not
+  exhaustive**, and does not defend against an agent with enough privilege to defeat the git-binary
+  check itself, a concurrent same-user process racing to write into the disposable repo between its
+  creation and use, or an agent editing the toolkit's own source. See `docs/p0/X2.md`'s own "Scope
+  statement (sixth re-gate, round 7)" for the full, current list of what this does and does not
+  defend against — treat any statement here that goes further as stale.
   If the ledger simply isn't on GitHub's real `main` yet (a ledger never pushed), that specific case
   does NOT hard-refuse — the run proceeds and the output is marked UNOFFICIAL with the reason,
   without needing `--allow-dirty-ledger`. Any other dirtiness (an uncommitted edit, or content that
@@ -499,9 +519,14 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   uses (`verifyAgainstGitHub`) — reachability is true BY CONSTRUCTION there (fifth re-gate, round
   6), so there is no separate ancestor check left to subvert — printing the commit hash, author,
   date and `%G?` signature status in its output for a human to audit. **A row hidden inside a raw
-  HTML block** (CommonMark's own block-tag rule — `<details>`, `<div>`, `<table>`, etc., ending at
-  the next blank line) **or carrying a `hidden`/`style` attribute does not count either** (should-fix,
-  round 6 — the same class of forgery the fence/comment/indented-code rules already closed).
+  HTML block** (CommonMark's own block-tag rule — `<div>`, `<table>`, etc., ending at the next blank
+  line) **or carrying a `hidden`/`style` attribute does not count either** (should-fix, round 6 — the
+  same class of forgery the fence/comment/indented-code rules already closed). **`<details>` gets a
+  STRICTER rule than the generic one** (round 7 follow-up): it stays hidden from its opening tag all
+  the way to its OWN closing `</details>`, even across blank lines — GitHub's own renderer keeps a
+  `<details>` section collapsed across internal blank lines/paragraph breaks, so the generic
+  "ends at the first blank line" rule would have let a forged row placed after such a blank line
+  read as "visible" here while still being inside the collapsed section on GitHub.
   Should-fix: the acceptance date must be on/after the evidence's own `ownerSavedDate`, and no more
   than 1 day after the commit's own date. **A Wayback corroboration additionally requires THIS
   RUN's own ledger to be OFFICIAL** (should-fix, round 6) — a self-authored `wayback`-method ledger
