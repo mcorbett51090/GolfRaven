@@ -475,24 +475,44 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   runtime environment still gets OFFICIAL with a forged acceptance"):** round 6's fix still resolved
   the literal string `"git"` through PATH — a fake `git` shim placed earlier on PATH, or PATH itself
   rewritten, was silently trusted — and ran inside the SAME Node process the caller launched, so
-  `NODE_OPTIONS="--require evil.cjs"`, `LD_PRELOAD`, or any comparable mechanism that injects code
-  into that process (this round's own gate fixture, `evil.cjs`, patches `child_process.execFile`
-  this way) could make every "scrubbed" git invocation transparently run through attacker code
-  regardless of what env/args this module built for it. Closed three ways: `git` is now resolved to
-  a verified ABSOLUTE path (`/usr/bin/git`, falling back to `/bin/git`), refused outright unless
-  owned by root and not group-/world-writable; every child git process's own `PATH` is fixed to
-  `/usr/bin:/bin`, never the caller's; and the run refuses (UNOFFICIAL) when the verdict process's
-  OWN original environment shows `LD_PRELOAD`/`LD_LIBRARY_PATH`/`GIT_EXEC_PATH`/any `DYLD_*`
-  variable set at all, `NODE_OPTIONS` carrying a code-loading flag (`--require`/`-r`/`--loader`/
-  `--experimental-loader`/`--import` — **not** a blanket "NODE_OPTIONS is set" refusal, since this
-  environment's own ordinary shell sets a benign `--max-old-space-size` NODE_OPTIONS, confirmed live
-  this round), or `process.execArgv` being non-empty (empty for a plain `node dist/x2-verdict.js`
-  file invocation, confirmed live this round). **This is a denylist, not a sandbox — it is not
-  exhaustive**, and does not defend against an agent with enough privilege to defeat the git-binary
-  check itself, a concurrent same-user process racing to write into the disposable repo between its
-  creation and use, or an agent editing the toolkit's own source. See `docs/p0/X2.md`'s own "Scope
-  statement (sixth re-gate, round 7)" for the full, current list of what this does and does not
-  defend against — treat any statement here that goes further as stale.
+  code injected into that process could make every "scrubbed" git invocation transparently run
+  through attacker code regardless of what env/args this module built for it. Closed two ways that
+  still hold: `git` is now resolved to a verified ABSOLUTE path (`/usr/bin/git`, falling back to
+  `/bin/git`), refused outright unless owned by root and not group-/world-writable; and every child
+  git process's own `PATH` is fixed to `/usr/bin:/bin`, never the caller's. Round 7 ALSO added
+  `detectRuntimeTamper`, refusing (UNOFFICIAL) when the verdict process's OWN original environment
+  shows `LD_PRELOAD`/`LD_LIBRARY_PATH`/`GIT_EXEC_PATH`/`DYLD_*`/a `NODE_OPTIONS` loader flag/
+  non-empty `execArgv` — and CLAIMED this defended against those. **Seventh re-gate, round 8's own
+  correction: that claim was false, and no code change can make it true.** The round-8 gate fixture
+  extended its NODE_OPTIONS-preload payload with `delete process.env.NODE_OPTIONS;
+  process.execArgv.length = 0;` at its very top — preload code runs before a single line of this
+  module's own code, including before `detectRuntimeTamper` itself, so it erased the evidence before
+  the check could look. Live-confirmed this round: the verdict came back OFFICIAL with TN confirmed,
+  identically to no attack at all. `detectRuntimeTamper` is downgraded, honestly, to **a TRIPWIRE FOR
+  NAIVE, NON-SELF-HIDING injection only** — kept in place as defense in depth against an attempt that
+  doesn't bother erasing its own tracks (confirmed this round: the SAME payload, without the
+  self-erasing line, is still refused), never claimed as a defense against a deliberate one. Round 8
+  also widened the tripwire itself, cheaply, while it's honestly only a tripwire: `LD_*` is now a
+  PREFIX check (was a fixed `LD_PRELOAD`/`LD_LIBRARY_PATH` list that missed `LD_AUDIT`, which the
+  gate's own probe used to load native code — live-confirmed this round, the library genuinely
+  loaded); `NODE_OPTIONS` moved from a denylist of known-dangerous flags to an ALLOW-LIST of
+  known-benign ones (`--max-*`/`--stack-size`/`--unhandled-rejections=*`/`--no-warnings`/
+  `--enable-source-maps`/`--trace-warnings`, via a proper tokenizer handling quoted values and both
+  `--flag=value`/`--flag value` forms) — refusing every flag not explicitly vetted, including
+  `--inspect*`/`--env-file`/`--conditions`/`--openssl-config`/`--preserve-symlinks*`/any
+  `--experimental-*` flag, none of which round 7's denylist had named. This environment's own
+  ambient `--max-old-space-size=8192` NODE_OPTIONS still passes, confirmed live this round. **None of
+  this is a sandbox**, and it does not defend against an agent with enough privilege to defeat the
+  git-binary check itself, a concurrent same-user process racing to write into the disposable repo
+  between its creation and use, an agent editing the toolkit's own source, or — the round-8 finding,
+  now residual #1's own explicit scope — any code injected into the verdict process at all, including
+  through the very variables `detectRuntimeTamper` checks, since injected code runs first and can
+  erase what it would have found. `NODE_EXTRA_CA_CERTS` (a TLS-trust residual: it's on this module's
+  own proxy/CA allow-list for legitimate reasons, but controls a trust anchor for the fetch) and
+  `NODE_PATH` (a module-resolution-hijack residual, the same class as `NODE_OPTIONS`/`--require` via
+  a different mechanism) belong to this same residual, named explicitly. See `docs/p0/X2.md`'s own
+  "Scope statement (seventh re-gate, round 8)" for the full, current list of what this does and does
+  not defend against — treat any statement here that goes further as stale.
   If the ledger simply isn't on GitHub's real `main` yet (a ledger never pushed), that specific case
   does NOT hard-refuse — the run proceeds and the output is marked UNOFFICIAL with the reason,
   without needing `--allow-dirty-ledger`. Any other dirtiness (an uncommitted edit, or content that
