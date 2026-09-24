@@ -25,26 +25,44 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 -- ---------------------------------------------------------------------------
 -- 1. play_evidence: UNIQUE(evidence_id) + play.user_id = evidence.user_id.
 -- ---------------------------------------------------------------------------
--- Legitimate row succeeds (evidence 1 backing its own play 1).
+-- helpers.sql already seeds (play 40000000-...-1, evidence 30000000-...-1)
+-- for player A, so a NEW evidence row is used here to isolate each
+-- assertion cleanly rather than colliding with that existing pair.
+SELECT lives_ok(
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
+    VALUES ('32000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
+            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a2', 'accepted', 1)$$,
+  'setup: a second evidence row owned by player A'
+);
 SELECT lives_ok(
   $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
-    ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001')$$,
+    ('40000000-0000-0000-0000-000000000001', '32000000-0000-0000-0000-000000000099')$$,
   'play_evidence: evidence backing its OWN owner''s play succeeds'
 );
 
--- A second play for player B trying to reuse the SAME evidence row.
+-- A SECOND play for player A (same owner, so the UNIQUE(evidence_id)
+-- violation below is isolated from the user-match trigger -- both plays
+-- are player A's own).
+SELECT lives_ok(
+  $$INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
+    VALUES ('42000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
+            'crs_x1', 'fac_x', current_date - 1, 'v1', 'confirmed')$$,
+  'setup: a second play row, also for player A'
+);
+SELECT throws_ok(
+  $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
+    ('42000000-0000-0000-0000-000000000099', '32000000-0000-0000-0000-000000000099')$$,
+  '23505',
+  NULL,
+  'play_evidence: the SAME evidence_id cannot back a second play, even the SAME owner''s own second play (UNIQUE(evidence_id))'
+);
+
+-- A second play for player B (used by the user-match assertions below).
 SELECT lives_ok(
   $$INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
     VALUES ('41000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000b',
             'crs_x1', 'fac_x', current_date - 1, 'v1', 'confirmed')$$,
-  'setup: a second play row for player B'
-);
-SELECT throws_ok(
-  $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
-    ('41000000-0000-0000-0000-000000000099', '30000000-0000-0000-0000-000000000001')$$,
-  '23505',
-  NULL,
-  'play_evidence: the SAME evidence_id cannot back a second play (UNIQUE(evidence_id))'
+  'setup: a play row for player B'
 );
 
 -- A play for player B, evidence for player A: ownership-mismatch trigger.

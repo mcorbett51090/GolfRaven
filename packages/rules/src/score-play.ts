@@ -3,10 +3,18 @@
  * Pure TS, no I/O (build plan §3.1 row E): takes one play's evidence rows
  * (`app.evidence`, §4.4) plus a small amount of context and returns
  * `{score_badge, score_monetary, presence_signal, money, heldReview,
- * policyVersion, contributions[]}`. Money-path code (build plan §4.5
- * "Money rule", A2-05/A2-06/A2-07/A2-20) — correctness here gates a
- * marketing incentive, so every rule below cites the exact plan line it
- * implements.
+ * policyVersion, contributions[], reasons?, inputDigest?}`. Money-path code
+ * (build plan §4.5 "Money rule", A2-05/A2-06/A2-07/A2-20) — correctness
+ * here gates a marketing incentive, so every rule below cites the exact
+ * plan line it implements.
+ *
+ * **Fifth gate (H2): `scorePlay` runs `parseScorePlayInput`
+ * (`./parse-evidence.js`) FIRST, always** — see the `scorePlay` function's
+ * OWN doc comment (below) for the full TRUST TABLE (which fields are
+ * server-derived, and by what server path) that parser enforces the shape
+ * of. A parse failure returns a fail-closed result (`money: false`,
+ * `reasons: [...]`) and never reaches the scoring logic in this file with
+ * unvalidated data.
  *
  * **Fourth re-gate (commit 68d9139), blocking finding 1: the per-row
  * classifier moved to `./internal/classify.js`.** It used to be exported
@@ -644,12 +652,120 @@ export interface ScorePlayResult {
   heldReview: boolean;
   policyVersion: number;
   contributions: ScorePlayContribution[];
+  /** H2 (fifth gate): present ONLY on a fail-closed result — `parseScorePlayInput`
+   * rejected the raw `{evidence, ctx}` input before any scoring ran. Every
+   * other field still holds its safe "nothing happened" default
+   * (`money: false`, empty `contributions`, …), so a caller that doesn't
+   * check `reasons` still gets a conservative, non-throwing result. */
+  reasons?: string[];
+  /** M5 (fifth gate): SHA-256 (hex) over the canonicalized, ALREADY-PARSED
+   * `{evidence, ctx}` this result was computed from — present only when
+   * parsing succeeded (a failed parse has no "parsed input" to digest).
+   * Lets a caller (or an audit trail) prove exactly which validated input
+   * produced a given money decision, independent of the raw/pre-parse
+   * bytes that arrived over the wire. */
+  inputDigest?: string;
 }
 
 /**
  * §4.5's scorer, policy v1. Pure, deterministic, no I/O.
+ *
+ * **H2 (fifth gate) — the TRUST TABLE.** `parseScorePlayInput`
+ * (`./parse-evidence.js`) runs FIRST, always, before a single byte of
+ * `evidenceIn`/`ctx` is trusted — this table is what that parser enforces,
+ * field by field, so a reader can see at a glance what is (and isn't)
+ * server-derived, and where. "server-derived" means the FIELD's value is
+ * meant to be produced by server-side code the client cannot forge (a
+ * token/attestation service, the matching pipeline, the booking/payment
+ * ledger, staff tooling) — the parser can only enforce SHAPE (type, enum
+ * membership, finiteness, non-empty strings); it cannot itself verify
+ * PROVENANCE, which is why every field below still names the server path
+ * that is trusted to have produced it honestly.
+ *
+ * | Field | Server-derived? | Produced by |
+ * |---|---|---|
+ * | `token.grade` (attestation) | Yes | the device-attestation verification service (App Attest / Play Integrity) — never trust a client-reported grade string directly |
+ * | `hardwareSupportsAttestation` | Yes | the same attestation service's device-capability report |
+ * | `challenge` | Yes | the server-issued challenge nonce record (`live`/`prefetched`) — a fix is only ever `"live"`/`"prefetched"` if the server itself issued and later matched that challenge |
+ * | `facilityId` (on a fix or a row) | Partially | the client reports which facility it THINKS it's at; `@golfraven/matching`'s geometry match is what actually confirms it (`insideBuffer`/`geometryKind`/`verificationTier` below) |
+ * | `verificationTier` | Yes | `@golfraven/matching`'s facility-verification pipeline (never client-set) |
+ * | `geometryKind` | Yes | `@golfraven/matching`'s own polygon/radius-fallback determination |
+ * | `insideBuffer` | Yes | `@golfraven/matching`'s point-in-polygon (or -circle) containment check against the fix's device-reported coordinates |
+ * | `accuracyMeters` | No (device-reported) | the device's own GPS accuracy claim — trusted only as a QUALITY signal (capped, never a proof of anything), never as an identity/location proof by itself |
+ * | `localDate` | Partially | derived server-side from `capturedAt` in the facility's tz (H2's own cross-check, this parser) — a fix whose client-labelled `localDate` disagrees with that derivation is rejected outright |
+ * | `capturedAt` | No (device clock) | the device's own clock — never trusted alone; corroborated via the `localDate` cross-check and the co-signal/hard-window comparisons throughout `internal/classify.ts` |
+ * | `fixId` | Yes | the challenge id or assertion hash the attestation exchange itself produced — never a client-invented string (M1) |
+ * | `paymentRef` | Yes | the booking/payment ledger's own reference id (M1) |
+ * | `vendorCourseMapped` / `sensorProvenance` | Yes | the vendor-sync pipeline's own course-matching and device-provenance checks (Garmin/Arccos) — never client-set |
+ * | receipt `status` | Yes | the green-fee receipt/POS integration, never the app client |
+ * | `courseDisambiguatedBy` | Yes | whichever server-side step actually resolved the course ambiguity (`geometry`/`staff`); `"user"` specifically marks a PLAYER's own pick, which is exactly why it's money-capped (A2-01) |
+ * | staff `scanAt` | Yes | the staff-facing scan tool's own server timestamp, not the player's device |
+ *
+ * **Scope boundary (stated once, so it isn't re-litigated per class).**
+ * `scorePlay` computes the two scores, `presence_signal`, `money` and a
+ * `heldReview` routing flag (§7.5 row 3: an `unattestable` co-signal routes
+ * a reward to `held_review`, never refused) — it never touches
+ * `play.status` (`disputed` via event-time velocity) or writes
+ * `fraud_signal` rows; those are DB-side effects of a different function.
+ * A `failed`-grade fix is still zeroed here (§4.5 G3-08: "nothing can be
+ * earned on it") — that IS a scoring effect — but the accompanying
+ * `fraud_signal` is not.
  */
 export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
+  // H2 (fifth gate): the parser runs FIRST, always — see this function's
+  // own TRUST TABLE doc for exactly what it closes. A parse failure
+  // returns the safe "nothing happened" default (`money: false`, empty
+  // `contributions`) plus `reasons`, and NEVER throws — the scoring logic
+  // below never runs on unparsed/untrusted data.
+  const parsed = parseScorePlayInput({ evidence: evidenceIn, ctx });
+  if (!parsed.success) {
+    return {
+      score_badge: 0,
+      score_monetary: 0,
+      presence_signal: false,
+      money: false,
+      heldReview: false,
+      policyVersion: SCORE_PLAY_POLICY_VERSION,
+      contributions: [],
+      reasons: parsed.reasons,
+    };
+  }
+  const result = scorePlayOnParsedInput(parsed.evidence, parsed.ctx);
+  return { ...result, inputDigest: computeInputDigest(parsed.evidence, parsed.ctx) };
+}
+
+/** Canonical (sorted-key) JSON serialization — the same value serializes
+ * identically regardless of the source object's own key insertion order,
+ * which `JSON.stringify` alone does not guarantee. */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalize((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/** M5 (fifth gate): SHA-256 (hex) over the canonicalized, ALREADY-PARSED
+ * `{evidence, ctx}` — computed AFTER `parseScorePlayInput` has already
+ * validated it, so this digest is over trusted, shape-checked data, never
+ * the raw pre-parse bytes. */
+function computeInputDigest(evidence: Evidence[], ctx: ScorePlayContext): string {
+  const canonical = JSON.stringify(canonicalize({ evidence, ctx }));
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/**
+ * The actual scorer, run on ALREADY-PARSED (`parseScorePlayInput`) input —
+ * every other doc comment on `scorePlay` (the money rule, the trust table,
+ * the scope boundary) describes this function's behaviour; it's split out
+ * only so `scorePlay` itself can wrap it with the parse-first/fail-closed
+ * step and the `inputDigest` computation above.
+ */
+function scorePlayOnParsedInput(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
   // Finding 3 + blocking finding 2 (second re-gate): drop any row whose OWN
   // facility OR OWN date disagrees with the play being scored, before
   // anything else runs — this is what stops a vendor round or a staff scan
