@@ -21,6 +21,8 @@
 // Exit 1: at least one mismatch — printed to stderr.
 
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 function psql(sql) {
   const result = spawnSync("psql", ["-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "\t", "-c", sql], {
@@ -155,6 +157,80 @@ const staleAllowlistRows = psql(`
 `);
 for (const [row] of staleAllowlistRows) {
   failures.push(`private.definer_policy_allowlist row names no real policy applying to private_definer (stale or mismatched expression): ${row}`);
+}
+
+// 6. should-fix (post-P3a re-gate): "test 9's companion" — a checked-in
+// fixture of the expected pg_get_expr() text for every
+// private.definer_policy_allowlist row (supabase/tests/fixtures/
+// definer_policy_exprs.txt), so a migration that changes a
+// private_definer-scoped policy TOGETHER WITH its own allow-list row
+// (self-consistent, so checks 5 above pass unchanged either way) still
+// produces a VISIBLE diff in review: this file must be hand-regenerated
+// and its diff reviewed whenever a real policy expression changes.
+//
+// This comparison lives HERE, not inside 10_function_inventory.sql's own
+// pgTAP suite: reading an external file from plain SQL needs either
+// `COPY ... FROM '<path>'` (server-side, requires superuser or
+// pg_read_server_files — migration_owner has neither under
+// HARNESS_MODE=restricted) or psql's own `\copy` meta-command (not
+// reliably available through pg_prove's default TAP driver, which this
+// harness uses when present). A plain Node script has ordinary
+// filesystem access with neither constraint.
+const fixturePath = join(import.meta.dirname, "..", "..", "supabase", "tests", "fixtures", "definer_policy_exprs.txt");
+let fixtureRows;
+try {
+  fixtureRows = readFileSync(fixturePath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((line) => JSON.parse(line));
+} catch (err) {
+  failures.push(`could not read/parse ${fixturePath}: ${err.message}`);
+  fixtureRows = [];
+}
+
+const keyOf = (r) => `${r.schema_name}\u0000${r.table_name}\u0000${r.policy_name}\u0000${r.command}`;
+const fixtureByKey = new Map(fixtureRows.map((r) => [keyOf(r), r]));
+
+// psql -A -t prints an empty field for a SQL NULL; a SQL boolean/USING
+// expression is never itself an empty string, so treating "" as null
+// here is unambiguous for this specific column's domain.
+const liveRows = psql(`
+  SELECT schema_name, table_name, policy_name, command, using_expr, with_check_expr
+  FROM private.definer_policy_allowlist
+  ORDER BY schema_name, table_name, policy_name, command
+`).map(([schema_name, table_name, policy_name, command, using_expr, with_check_expr]) => ({
+  schema_name,
+  table_name,
+  policy_name,
+  command,
+  using_expr: using_expr === "" ? null : using_expr,
+  with_check_expr: with_check_expr === "" ? null : with_check_expr,
+}));
+const liveByKey = new Map(liveRows.map((r) => [keyOf(r), r]));
+
+if (fixtureRows.length > 0 || liveRows.length > 0) {
+  for (const live of liveRows) {
+    const k = keyOf(live);
+    const fx = fixtureByKey.get(k);
+    if (!fx) {
+      failures.push(
+        `private.definer_policy_allowlist row ${live.schema_name}.${live.table_name}.${live.policy_name} (${live.command}) has no entry in supabase/tests/fixtures/definer_policy_exprs.txt — regenerate the fixture (see its own header comment)`,
+      );
+    } else if (fx.using_expr !== live.using_expr || fx.with_check_expr !== live.with_check_expr) {
+      failures.push(
+        `private.definer_policy_allowlist row ${live.schema_name}.${live.table_name}.${live.policy_name} (${live.command}) does not match supabase/tests/fixtures/definer_policy_exprs.txt — expected using_expr=${JSON.stringify(fx.using_expr)}/with_check_expr=${JSON.stringify(fx.with_check_expr)}, got using_expr=${JSON.stringify(live.using_expr)}/with_check_expr=${JSON.stringify(live.with_check_expr)}`,
+      );
+    }
+  }
+  for (const fx of fixtureRows) {
+    const k = keyOf(fx);
+    if (!liveByKey.has(k)) {
+      failures.push(
+        `supabase/tests/fixtures/definer_policy_exprs.txt names a row with no live match in private.definer_policy_allowlist: ${fx.schema_name}.${fx.table_name}.${fx.policy_name} (${fx.command}) — stale fixture entry, regenerate`,
+      );
+    }
+  }
 }
 
 if (failures.length > 0) {
