@@ -90,12 +90,29 @@ ALTER TABLE app.play ADD COLUMN input_digest text;
 
 -- offer_code: had none of the three. entitlement: already has `basis
 -- jsonb` (0005) — only play_id/policy_version are new there.
-ALTER TABLE app.offer_code ADD COLUMN play_id uuid REFERENCES app.play (id);
+--
+-- ⛔ FIX (H1, post-P3a gate): the ADD COLUMN ... REFERENCES app.play (id)
+-- form (no ON DELETE, not deferrable) defaults to NO ACTION,
+-- non-deferrable — reproduced empirically: `private.delete_my_data`
+-- deleting app.play for a user with a play_id-linked offer_code/
+-- entitlement row failed at 0015:99 ("DELETE FROM app.%I WHERE %I = $1"
+-- against app.play) with an FK violation, even though 0014's own
+-- DEFERRABLE-INITIALLY-DEFERRED pass (§3) runs on every app-internal FK
+-- that existed AT THAT TIME — these two didn't exist yet (0017 postdates
+-- 0014). ON DELETE SET NULL closes the gap structurally (a deleted play
+-- detaches, not blocks, the offer_code/entitlement it backed); DEFERRABLE
+-- INITIALLY DEFERRED matches every other app-internal FK's contract so
+-- delete_my_data's own multi-table deletes keep working in any statement
+-- order, not just this one. delete_my_data also nulls both explicitly,
+-- belt-and-suspenders (0015).
+ALTER TABLE app.offer_code ADD COLUMN play_id uuid REFERENCES app.play (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE app.offer_code ADD COLUMN policy_version text;
 ALTER TABLE app.offer_code ADD COLUMN basis jsonb NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX offer_code_play_idx ON app.offer_code (play_id);
 
-ALTER TABLE app.entitlement ADD COLUMN play_id uuid REFERENCES app.play (id);
+ALTER TABLE app.entitlement ADD COLUMN play_id uuid REFERENCES app.play (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE app.entitlement ADD COLUMN policy_version text;
 CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
 

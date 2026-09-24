@@ -121,6 +121,15 @@ BEGIN
   -- activated_device_id" finding.
   UPDATE app.entitlement SET activated_device_id = NULL, devicecheck_token_hash = NULL
     WHERE user_id = p_user_id;
+  -- entitlement.play_id / offer_code.play_id (H1, post-P3a gate): also
+  -- references app.play, which the generic pass below deletes (play.user_id
+  -- = delete_row) — the FK itself is now ON DELETE SET NULL DEFERRABLE
+  -- INITIALLY DEFERRED (0017), so this is belt-and-suspenders, not load-
+  -- bearing, but detaching explicitly here matches activated_device_id's
+  -- own pattern immediately above and keeps the intent visible at the
+  -- call site rather than only in the FK definition.
+  UPDATE app.entitlement SET play_id = NULL WHERE user_id = p_user_id;
+  UPDATE app.offer_code SET play_id = NULL WHERE user_id = p_user_id;
   -- Then, per line 2759 / O9-O10: void any UNREDEEMED entitlement or stock
   -- voucher (redeemed stays redeemed — terminal, kept for the stock ledger).
   UPDATE app.entitlement
