@@ -15,12 +15,14 @@ import {
 } from "../src/parse-evidence.js";
 import { scorePlay } from "../src/score-play.js";
 import {
+  PLAY_COURSE_ID,
   PLAY_FACILITY_ID,
   PLAY_FACILITY_TZ,
   PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
   baseCtx,
   goodFix,
+  receipt,
   scorePlayOrThrow,
   staffPresence,
 } from "./score-play-helpers.js";
