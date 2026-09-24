@@ -67,10 +67,13 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#4: P7 booking alone + its own prepay receipt (no co-signal): a correlated pair", () => {
+    // Finding 1(b): correlation is derived from the DATA — a shared
+    // `paymentRef` (the same booking/prepay id), never a caller-asserted
+    // `correlationId`.
     const result = scorePlay(
       [
-        booking({ correlationId: "pair4" }),
-        receipt({ status: "approved", correlationId: "pair4" }),
+        booking({ paymentRef: "pay_4" }),
+        receipt({ status: "approved", paymentRef: "pay_4" }),
       ],
       baseCtx(),
     );

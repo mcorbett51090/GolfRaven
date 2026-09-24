@@ -9,16 +9,27 @@
  *   × challenge {live, prefetched, none} (3)
  *   × {simulated, not} (2)
  *   × position {inside, the 50 m edge, outside, radius circle} (4)
- *   × time {same date, ±1 day across a tz boundary, the ±10 min edge} (3)
+ *   × time {same date, ±1 day across a tz boundary, the ±10 min edge,
+ *     ±10 min + 1 ms (just OUTSIDE the window, test-adequacy item)} (4)
  *
- * = 16 × 5 × 3 × 2 × 4 × 3 = 5,760 generated cases, each asserted against
- * all three properties. Not every axis is meaningful for every class (e.g.
- * `ghin` carries no fix at all, so `grade`/`challenge`/`position`/`time`
- * are no-ops for it) — the full cross product is still iterated per the
- * task's "enumerate it fully; don't sample" instruction; a no-op axis just
- * means several of the 360 combinations for that class collapse to
- * identical evidence, which is harmless (the properties must still hold on
- * every one of them).
+ * = 16 × 5 × 3 × 2 × 4 × 4 = 7,680 generated cases, each asserted against
+ * properties 1 (money⇒oracle) and 2 (device-only score_monetary < 0.85).
+ * Not every axis is meaningful for every class (e.g. `ghin` carries no fix
+ * at all, so `grade`/`challenge`/`position`/`time` are no-ops for it) — the
+ * full cross product is still iterated per "enumerate it fully; don't
+ * sample"; a no-op axis just means several combinations for that class
+ * collapse to identical evidence, which is harmless.
+ *
+ * Property 3 ("a class label without a qualifying fix ⇒ ¬money") is
+ * DELIBERATELY not computed as this generator's contrapositive (that would
+ * just be property 1 read backwards, over the same fix-bearing evidence) —
+ * see the dedicated "class label, no fix at all" block below, which
+ * asserts `money === false` directly for the seven class shapes that
+ * structurally carry no `AppFix` at all (as opposed to a low-quality one).
+ *
+ * `geometryKind`/`verificationTier` are decoupled per-fix (a `radius`-kind
+ * fix at an otherwise `play-verified` facility must still fail on
+ * `geometryKind` alone) — see `buildFix`.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -38,6 +49,7 @@ import {
   dwell,
   fileImport,
   ghin,
+  goodFix,
   healthRoute,
   healthWorkout,
   receipt,
@@ -60,7 +72,7 @@ const CHALLENGES: ChallengeKind[] = ["live", "prefetched", "none"];
 const SIMULATED = [false, true];
 const POSITIONS = ["inside", "edge", "outside", "radius"] as const;
 type PositionAxis = (typeof POSITIONS)[number];
-const TIMES = ["same", "tz_boundary", "minute_edge"] as const;
+const TIMES = ["same", "tz_boundary", "minute_edge", "minute_edge_plus_1ms"] as const;
 type TimeAxis = (typeof TIMES)[number];
 
 function tokenFor(grade: GradeAxis): TokenState {
@@ -90,6 +102,8 @@ function tokenFor(grade: GradeAxis): TokenState {
  * ±10 min boundary (inclusive, per staff-scan window's own "±10 min"
  * wording).
  */
+let nextGenFixId = 0;
+
 function buildFix(
   grade: GradeAxis,
   challenge: ChallengeKind,
@@ -97,21 +111,31 @@ function buildFix(
   position: PositionAxis,
   time: TimeAxis,
 ): AppFix {
+  // Decoupled (test-adequacy item): `geometryKind`/`insideBuffer` come from
+  // `position`; `verificationTier` is fixed at `play-verified` REGARDLESS
+  // of geometry kind — a `radius`-kind fix at an otherwise play-verified
+  // facility must still fail the co-signal gate on `geometryKind` alone,
+  // proving the two checks are independent or `deriveGroups`/`classify`
+  // would wrongly pass a radius fix whose facility happens to be verified.
   const geometryKind = position === "radius" ? "radius" : "polygon";
   const insideBuffer =
     position === "inside" || position === "edge" || position === "radius";
   const accuracyMeters = position === "edge" ? 50 : 10;
-  const verificationTier =
-    position === "radius" ? "listed-verified" : "play-verified";
+  const verificationTier = "play-verified";
   let localDate = PLAY_LOCAL_DATE;
   let capturedAt = PLAY_LOCAL_DATE_MS;
   if (time === "tz_boundary") {
     localDate = "2026-06-02"; // the day after PLAY_LOCAL_DATE
     capturedAt = PLAY_LOCAL_DATE_MS + 24 * 60 * 60 * 1000;
   } else if (time === "minute_edge") {
-    capturedAt = PLAY_LOCAL_DATE_MS + 10 * 60 * 1000; // exactly the ±10 min boundary
+    capturedAt = PLAY_LOCAL_DATE_MS + 10 * 60 * 1000; // exactly the ±10 min boundary (inclusive)
+  } else if (time === "minute_edge_plus_1ms") {
+    capturedAt = PLAY_LOCAL_DATE_MS + 10 * 60 * 1000 + 1; // one ms OUTSIDE the window
   }
+  nextGenFixId += 1;
   return {
+    fixId: `gen_fix_${nextGenFixId}`,
+    facilityId: PLAY_FACILITY_ID,
     fromApp: true,
     simulated,
     foreground: true,
@@ -223,8 +247,11 @@ function buildCase(
         deviceOnly: true,
       };
     case "foreground_dwell": {
+      // A distinct `fixId` from the check-in fix — they are two DIFFERENT
+      // physical captures (open/close), never the same fix reused.
       const checkoutFix: AppFix = {
         ...fix,
+        fixId: `${fix.fixId}_close`,
         capturedAt: fix.capturedAt + 95 * 60_000,
       };
       return {
@@ -314,9 +341,9 @@ function* generate(): Generator<GeneratedCase> {
 describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", () => {
   const cases = [...generate()];
 
-  it("enumerates the full 16 × 5 × 3 × 2 × 4 × 3 = 5,760-case space", () => {
-    expect(cases.length).toBe(16 * 5 * 3 * 2 * 4 * 3);
-    expect(cases.length).toBe(5760);
+  it("enumerates the full 16 × 5 × 3 × 2 × 4 × 4 = 7,680-case space", () => {
+    expect(cases.length).toBe(16 * 5 * 3 * 2 * 4 * 4);
+    expect(cases.length).toBe(7680);
   });
 
   it("money(E) ⇒ oracle(E), for every generated case (§10 P3 AT(4))", () => {
@@ -340,26 +367,173 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
       const result = scorePlay(c.evidence, ctx);
       if (result.score_monetary >= 0.85) {
-        violations.push(
-          `${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`,
-        );
+        violations.push(`${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`);
       }
     }
     expect(violations).toEqual([]);
   });
 
-  it("a class label without a qualifying fix ⇒ ¬money, for every generated case", () => {
+  // Retained as a secondary cross-check (the contrapositive of property 1
+  // over the SAME fix-bearing generator), but the primary, literal reading
+  // of "a class label without a qualifying fix ⇒ ¬money" lives in the
+  // "class label, no fix at all" block below — this one alone would be
+  // indistinguishable from property 1 (test-adequacy: "make property 3
+  // genuinely different from property 1").
+  it("[contrapositive cross-check] no oracle-qualifying fix anywhere in the case ⇒ ¬money", () => {
     const violations: string[] = [];
     for (const c of cases) {
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
-      if (oracle(c.evidence, ctx)) continue; // this case DOES carry a qualifying fix — not in scope for this property
+      if (oracle(c.evidence, ctx)) continue;
       const result = scorePlay(c.evidence, ctx);
       if (result.money) {
-        violations.push(
-          `${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`,
-        );
+        violations.push(`${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`);
       }
     }
     expect(violations).toEqual([]);
   });
+});
+
+/* ------------------------------------------------------------------ */
+/* Property 3, literally: a class label present with NO fix at all      */
+/* ------------------------------------------------------------------ */
+
+describe("scorePlay — a class label present with NO fix at all ⇒ ¬money (property 3, literal)", () => {
+  // Every one of these classes/variants structurally carries ZERO
+  // `AppFix` objects — not a poor-quality one, none at all — yet several
+  // of them (`vendor_sensor`, `booking_alone`, an approved receipt with no
+  // `coSignalFix`) still reach a `score_monetary >= MONEY_MIN` on weight
+  // alone (fixture #7 is exactly this). `money` must still be `false` in
+  // every case, because `presence_signal` is computed only from fixes.
+  const noFixCases: { label: string; evidence: Evidence[] }[] = [
+    { label: "vendor_sensor alone (fixture #7 shape)", evidence: [vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true })] },
+    { label: "ghin alone", evidence: [ghin({})] },
+    { label: "booking_alone (no presenceFix field at all)", evidence: [booking({})] },
+    { label: "staff_presence_soft (no coSignalFix field at all)", evidence: [staffPresence({})] },
+    { label: "approved receipt, no coSignalFix field at all", evidence: [receipt({ status: "approved" })] },
+    { label: "health_workout alone", evidence: [healthWorkout({})] },
+    { label: "self_report alone", evidence: [selfReport({})] },
+  ];
+
+  for (const { label, evidence } of noFixCases) {
+    it(`${label} ⇒ money === false`, () => {
+      const result = scorePlay(evidence, baseCtx());
+      expect(result.presence_signal).toBe(false);
+      expect(result.money).toBe(false);
+    });
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Blocking findings 3 & 4 — targeted regressions                       */
+/* ------------------------------------------------------------------ */
+
+describe("scorePlay — facility and date anchoring (blocking findings 3, 4)", () => {
+  it("finding 3: staff_presence with a co-signal at a DIFFERENT facility ⇒ no money", () => {
+    const otherFacility = "fac_other";
+    const result = scorePlay(
+      [
+        staffPresence({
+          facilityId: otherFacility,
+          coSignalFix: goodFix({ facilityId: otherFacility }),
+        }),
+      ],
+      baseCtx(),
+    );
+    expect(result.score_badge).toBe(0);
+    expect(result.score_monetary).toBe(0);
+    expect(result.presence_signal).toBe(false);
+    expect(result.money).toBe(false);
+  });
+
+  it("finding 3: a co-signal fix whose OWN facilityId disagrees with the row's facility is never a co-signal", () => {
+    // The row is at the play's facility, but the embedded fix claims a
+    // DIFFERENT facility — must not be trusted either way.
+    const result = scorePlay([staffPresence({ coSignalFix: goodFix({ facilityId: "fac_other" }) })], baseCtx());
+    expect(result.presence_signal).toBe(false);
+    expect(result.money).toBe(false);
+  });
+
+  it("finding 4: a booking plus a fix on D+1, with a separate check-in on D ⇒ 0.79, no money", () => {
+    const result = scorePlay(
+      [
+        booking({ presenceFix: goodFix({ localDate: "2026-06-02", capturedAt: PLAY_LOCAL_DATE_MS + 24 * 60 * 60 * 1000 }) }),
+        checkin({ fix: goodFix() }),
+      ],
+      baseCtx(),
+    );
+    expect(result.score_badge).toBe(0.79);
+    expect(result.score_monetary).toBe(0.79);
+    expect(result.money).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Test adequacy: fromApp / foreground / accuracy > 50 / NaN            */
+/* ------------------------------------------------------------------ */
+
+describe("scorePlay — device-row fix-quality gate (finding 2 / test adequacy)", () => {
+  it("fromApp: false on a check-in's fix ⇒ excluded entirely (weight 0, no money)", () => {
+    const result = scorePlay([checkin({ fix: goodFix({ fromApp: false }) })], baseCtx());
+    expect(result.score_badge).toBe(0);
+    expect(result.money).toBe(false);
+  });
+
+  it("foreground: false on a check-in's fix ⇒ excluded entirely", () => {
+    const result = scorePlay([checkin({ fix: goodFix({ foreground: false }) })], baseCtx());
+    expect(result.score_badge).toBe(0);
+    expect(result.money).toBe(false);
+  });
+
+  it("accuracyMeters > 50 on a check-in's fix ⇒ excluded entirely", () => {
+    const result = scorePlay([checkin({ fix: goodFix({ accuracyMeters: 51 }) })], baseCtx());
+    expect(result.score_badge).toBe(0);
+    expect(result.money).toBe(false);
+  });
+
+  it("accuracyMeters negative or NaN ⇒ never qualifies", () => {
+    const neg = scorePlay([checkin({ fix: goodFix({ accuracyMeters: -1 }) })], baseCtx());
+    expect(neg.score_badge).toBe(0);
+    const nan = scorePlay([checkin({ fix: goodFix({ accuracyMeters: Number.NaN }) })], baseCtx());
+    expect(nan.score_badge).toBe(0);
+  });
+
+  it("a dwell with a `none` challenge on either fix is fully ineligible, not ×0.6 (plan line 1000)", () => {
+    const result = scorePlay(
+      [dwell({ checkinFix: goodFix({ challenge: "none" }), checkoutFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + 95 * 60_000 }) })],
+      baseCtx(),
+    );
+    expect(result.score_badge).toBe(0);
+  });
+
+  it("foreground_dwell apartMinutes = NaN ⇒ never qualifies (the !(x >= threshold) fix)", () => {
+    const result = scorePlay([dwell({ apartMinutes: Number.NaN })], baseCtx());
+    expect(result.score_badge).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Test adequacy: multi-row pairs across the device-only classes        */
+/* ------------------------------------------------------------------ */
+
+describe("scorePlay — device-only class pairs never reach MONEY_MIN (noisy-OR cap)", () => {
+  const deviceOnlyBuilders: { label: string; build: () => Evidence }[] = [
+    { label: "health_route", build: () => healthRoute({ insideRatio: 0.95 }) },
+    { label: "connect_iq_route", build: () => connectIq({ variant: "route" }) },
+    { label: "connect_iq_checkin", build: () => connectIq({ variant: "checkin" }) },
+    { label: "foreground_dwell", build: () => dwell({}) },
+    { label: "file_import", build: () => fileImport({ matchedRoute: true }) },
+    { label: "foreground_checkin", build: () => checkin({}) },
+  ];
+
+  for (let a = 0; a < deviceOnlyBuilders.length; a += 1) {
+    for (let b = a + 1; b < deviceOnlyBuilders.length; b += 1) {
+      const A = deviceOnlyBuilders[a]!;
+      const B = deviceOnlyBuilders[b]!;
+      it(`${A.label} + ${B.label} ⇒ score_monetary < 0.85`, () => {
+        const result = scorePlay([A.build(), B.build()], baseCtx());
+        expect(result.score_monetary).toBeLessThan(0.85);
+        expect(result.money).toBe(false);
+      });
+    }
+  }
 });

@@ -27,13 +27,21 @@ export function baseCtx(
   };
 }
 
+let nextFixId = 0;
+
 /** A fix that satisfies the §4.5 co-signal quality gate in full: from our
  * app, non-simulated, foreground, against a live challenge, `attested`,
- * inside a play-verified facility's polygon+50m buffer, captured on the
- * play's own facility-local date. Every golden fixture below starts from
+ * at the play's own facility, inside a play-verified facility's
+ * polygon+50m buffer, captured on the play's own facility-local date.
+ * `fixId` defaults to a fresh, unique id every call — pass one explicitly
+ * (or reuse a fix object) when a test needs two rows to provably reuse the
+ * SAME physical fix (finding 1(b)). Every golden fixture below starts from
  * this and overrides only what the fixture needs to differ. */
 export function goodFix(overrides: Partial<AppFix> = {}): AppFix {
+  nextFixId += 1;
   return {
+    fixId: `fix_${nextFixId}`,
+    facilityId: PLAY_FACILITY_ID,
     fromApp: true,
     simulated: false,
     foreground: true,
@@ -60,8 +68,8 @@ export function noToken(hardwareSupportsAttestation: boolean): TokenState {
 }
 
 let nextId = 0;
-/** A fresh evidence-row id, unique within a test run (readable, stable
- * ordering — not used for anything semantic). */
+/** A fresh evidence-row (or fix) id, unique within a test run (readable,
+ * stable ordering — not used for anything semantic). */
 export function evId(label: string): string {
   nextId += 1;
   return `${label}_${nextId}`;
@@ -130,7 +138,7 @@ export function ghin(opts: EvidenceCommon = {}): Evidence {
 }
 
 export function booking(
-  opts: EvidenceCommon & { presenceFix?: AppFix },
+  opts: EvidenceCommon & { presenceFix?: AppFix; paymentRef?: string },
 ): Evidence {
   return {
     ...common("booking", opts),
@@ -138,13 +146,16 @@ export function booking(
     ...(opts.presenceFix !== undefined
       ? { presenceFix: opts.presenceFix }
       : {}),
+    ...(opts.paymentRef !== undefined ? { paymentRef: opts.paymentRef } : {}),
   };
 }
 
 export function receipt(
   opts: EvidenceCommon & {
-    status: "approved" | "pending";
+    status: "approved" | "pending" | "void";
     coSignalFix?: AppFix;
+    paymentRef?: string;
+    fingerprint?: string;
   },
 ): Evidence {
   return {
@@ -153,6 +164,10 @@ export function receipt(
     status: opts.status,
     ...(opts.coSignalFix !== undefined
       ? { coSignalFix: opts.coSignalFix }
+      : {}),
+    ...(opts.paymentRef !== undefined ? { paymentRef: opts.paymentRef } : {}),
+    ...(opts.fingerprint !== undefined
+      ? { fingerprint: opts.fingerprint }
       : {}),
   };
 }
@@ -163,6 +178,7 @@ export function healthRoute(
     insideRatio?: number;
     simulated?: boolean;
     geometryKind?: "polygon" | "radius";
+    startedAt?: number;
   },
 ): Evidence {
   return {
@@ -172,6 +188,7 @@ export function healthRoute(
     insideRatio: opts.insideRatio ?? 0.9,
     simulated: opts.simulated ?? false,
     geometryKind: opts.geometryKind ?? "polygon",
+    ...(opts.startedAt !== undefined ? { startedAt: opts.startedAt } : {}),
   };
 }
 
@@ -221,6 +238,7 @@ export function fileImport(
   opts: EvidenceCommon & {
     matchedRoute: boolean;
     geometryKind?: "polygon" | "radius";
+    startedAt?: number;
   },
 ): Evidence {
   return {
@@ -230,6 +248,7 @@ export function fileImport(
     ...(opts.geometryKind !== undefined
       ? { geometryKind: opts.geometryKind }
       : {}),
+    ...(opts.startedAt !== undefined ? { startedAt: opts.startedAt } : {}),
   };
 }
 
