@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildConfigIndex, stripJsonComments } from "../src/config.js";
+import { buildConfigIndex, deriveRepoRoot, stripJsonComments } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
 
 // ⛔ M2 BLOCKING (post-P3a re-gate): "the lint's import-map model
@@ -263,6 +263,42 @@ describe("config.ts / index.ts — symlink loop protection (follow-up, post-P3a 
     }).not.toThrow();
     const messages = (results ?? []).flatMap((r) => r.findings.map((f) => f.message));
     expect(messages.some((m) => m.includes("already-visited real path"))).toBe(true);
+  });
+});
+
+// ⛔ FIX (should-fix, post-P3a re-gate round 3): "deriveRepoRoot fails
+// open when there's no `.git`. It must throw unless `repoRoot` is passed
+// explicitly." SUPERSEDES the old fail-open fallback (silently returning
+// startDir with no ancestor-config scan at all, and no error telling
+// anyone that had happened) -- see config.ts's own note on this, right
+// above the function.
+describe("deriveRepoRoot — should-fix (post-P3a re-gate round 3): throws instead of failing open", () => {
+  let tmpRoot: string | undefined;
+
+  afterEach(() => {
+    if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+    tmpRoot = undefined;
+  });
+
+  it("throws when no .git ancestor exists anywhere above startDir", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-derive-repo-root-"));
+    // mkdtemp()'d directories live under the OS temp dir, which has no
+    // `.git` ancestor in any normal environment -- this is exactly the
+    // "checkout/cache layout lost .git" shape the fix targets.
+    expect(() => deriveRepoRoot(tmpRoot!)).toThrow(/no ".git" ancestor/);
+  });
+
+  it("still returns the ancestor directory normally when a .git IS found (no regression to the happy path)", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-derive-repo-root-git-"));
+    mkdirSync(join(tmpRoot, ".git"), { recursive: true });
+    const nested = join(tmpRoot, "supabase", "functions");
+    mkdirSync(nested, { recursive: true });
+    expect(deriveRepoRoot(nested)).toBe(tmpRoot);
+  });
+
+  it("lintDirectory(functionsRoot) with NO explicit repoRoot now throws the same way, end to end, when functionsRoot has no .git ancestor", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-derive-repo-root-e2e-"));
+    expect(() => lintDirectory(tmpRoot!)).toThrow(/no ".git" ancestor/);
   });
 });
 

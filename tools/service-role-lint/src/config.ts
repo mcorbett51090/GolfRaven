@@ -479,18 +479,42 @@ function scanAncestors(functionsRoot: string, repoRoot: string): ConfigProblem[]
  * repoRoot option, so tests can build /tmp trees, and the CLI derives the
  * root." Walks up from `startDir` looking for a directory containing
  * `.git` (a file for a worktree, a directory for a normal checkout --
- * existence alone is checked either way). Falls back to `startDir` itself
- * (no ancestor ever scanned) if none is found by the filesystem root --
- * fail-safe in the sense that it never THROWS, but note this fallback
- * means no ancestor-config protection at all in that case; a real repo
- * checkout always has `.git` somewhere above `supabase/functions`.
+ * existence alone is checked either way).
+ *
+ * ⛔ FIX (should-fix, post-P3a re-gate round 3): "deriveRepoRoot fails open
+ * when there's no `.git`. It must throw unless `repoRoot` is passed
+ * explicitly." SUPERSEDES the prior fallback documented above (which used
+ * to silently return `startDir` itself, with "no ancestor-config
+ * protection at all in that case" left as an accepted gap) -- that
+ * fallback meant a caller of `lintDirectory(functionsRoot)` (no explicit
+ * repoRoot) got NO warning at all if the ancestor-config ceiling this
+ * function exists to establish silently collapsed to functionsRoot
+ * itself, e.g. a repo checkout tool, CI cache layout, or Docker COPY step
+ * that ever loses the `.git` directory (a plausible real accident, not
+ * even an attack) would make `buildConfigIndex`'s own ancestor-scan
+ * (`scanAncestorsForDisallowedConfig`, this file, above) walk from
+ * functionsRoot to functionsRoot -- i.e. scan NOTHING -- with no error
+ * telling anyone that had happened. Now it throws instead: this is ONLY
+ * ever reached when the caller omitted `repoRoot` explicitly (index.ts's
+ * `lintDirectory` only calls this as `repoRoot ?? deriveRepoRoot(root)`),
+ * so a caller who legitimately wants a rootless /tmp tree (most of this
+ * package's own tests) passes `repoRoot` explicitly instead -- see
+ * index.test.ts's and config.test.ts's own `lintDirectory(tmpRoot,
+ * tmpRoot)` calls.
  */
 export function deriveRepoRoot(startDir: string): string {
   let dir = resolve(startDir);
   for (;;) {
     if (existsSync(join(dir, ".git"))) return dir;
     const parent = dirname(dir);
-    if (parent === dir) return resolve(startDir);
+    if (parent === dir) {
+      throw new Error(
+        `deriveRepoRoot: no ".git" ancestor found walking up from "${resolve(startDir)}" to the filesystem root. ` +
+          `This used to fail open (silently returning startDir, with no ancestor-config scan at all) -- now it throws, ` +
+          `so a missing ".git" (e.g. a checkout/cache layout that dropped it) is a loud error, not a silent security gap. ` +
+          `Pass repoRoot explicitly (to lintDirectory/buildConfigIndex) if this is intentionally a rootless tree, e.g. a test fixture.`,
+      );
+    }
     dir = parent;
   }
 }
