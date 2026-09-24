@@ -11,7 +11,12 @@ import type {
   RuleExpr,
   TrailId,
 } from "@golfraven/catalog";
-import { validateOfferEligibility } from "../src/offer-eligibility.js";
+import {
+  validateOfferEligibility,
+  validateOfferEligibilityAtApproval,
+  validateOfferEligibilityAtIssuance,
+  validateOfferEligibilityAtSave,
+} from "../src/offer-eligibility.js";
 import {
   evaluateRuleExpr,
   type RuleExprEvalContext,
@@ -98,5 +103,27 @@ describe("validateOfferEligibility (A2-05)", () => {
     // the money-mode gate is real (not just always-false).
     ctx.plays[0]!.moneyQualifies = true;
     expect(evaluateRuleExpr(rule, ctx, "money")).toBe(true);
+  });
+
+  it("save, approval and issuance are the IDENTICAL check (should-fix: no drift between steps)", () => {
+    expect(validateOfferEligibilityAtSave).toBe(validateOfferEligibility);
+    expect(validateOfferEligibilityAtApproval).toBe(validateOfferEligibility);
+    expect(validateOfferEligibilityAtIssuance).toBe(validateOfferEligibility);
+
+    const malformed = { kind: "agg", name: "minConfidence", value: 0.5 };
+    expect(validateOfferEligibilityAtSave(malformed).valid).toBe(false);
+    expect(validateOfferEligibilityAtApproval(malformed).valid).toBe(false);
+    expect(validateOfferEligibilityAtIssuance(malformed).valid).toBe(false);
+
+    const courseId = nextId("crs") as CourseId;
+    const clean = {
+      kind: "compare",
+      op: ">=",
+      left: { kind: "agg", name: "played", courseId },
+      right: { kind: "literal", value: 1 },
+    };
+    expect(validateOfferEligibilityAtSave(clean).valid).toBe(true);
+    expect(validateOfferEligibilityAtApproval(clean).valid).toBe(true);
+    expect(validateOfferEligibilityAtIssuance(clean).valid).toBe(true);
   });
 });

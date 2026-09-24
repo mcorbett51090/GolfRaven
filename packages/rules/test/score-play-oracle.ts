@@ -17,7 +17,9 @@
  * attributes and requires one fix that is: from our app; against a live or
  * prefetched challenge; `simulated = false`; foreground; graded anything
  * other than `failed`; inside the polygon+50m of a `play-verified`
- * facility; on the play's facility-local date.
+ * facility THAT IS THE PLAY'S OWN FACILITY; on the play's facility-local
+ * date. (Gate finding 3: the facility clause is load-bearing, not
+ * implicit — see `oracleFixQualifies`.)
  */
 import type {
   AppFix,
@@ -54,10 +56,17 @@ function oracleFixesOf(evidence: Evidence[]): AppFix[] {
   return fixes;
 }
 
-/** The oracle's single fix predicate — the six conditions §10 P3 AT(4)
- * states, and nothing else. */
-function oracleFixQualifies(fix: AppFix, playLocalDate: string): boolean {
+/** The oracle's single fix predicate — the six AT(4) conditions, PLUS the
+ * facility anchor (gate finding 3: "Update the oracle too, independently:
+ * its facility check is missing" — an earlier revision of this file
+ * incorrectly argued the check away as redundant with "one call = one
+ * play"; that argument was wrong precisely because `evidence[]` can
+ * legitimately contain a row/fix for a DIFFERENT facility, which
+ * `scorePlay` must reject and this independent oracle must reject too, on
+ * its own logic, not by assuming the input is already clean). */
+function oracleFixQualifies(fix: AppFix, playFacilityId: string, playLocalDate: string): boolean {
   return (
+    fix.facilityId === playFacilityId &&
     fix.fromApp === true &&
     (fix.challenge === "live" || fix.challenge === "prefetched") &&
     fix.simulated === false &&
@@ -71,15 +80,8 @@ function oracleFixQualifies(fix: AppFix, playLocalDate: string): boolean {
 }
 
 /** `oracle(E)` — true iff SOME fix in `evidence` satisfies every AT(4)
- * condition on the play's own facility-local date. Facility identity is
- * not separately checked here: every fixture/generator case in this suite
- * builds evidence for exactly one play (module doc's "one call = one
- * play" contract in `score-play.ts`), so a fix's `localDate` match against
- * `ctx.playLocalDate` is the only date/place anchor the oracle needs — the
- * same simplification `computePresenceSignal` documents on the scorer
- * side, arrived at independently here from the AT(4) wording itself. */
+ * condition at the play's own facility, on the play's own facility-local
+ * date. */
 export function oracle(evidence: Evidence[], ctx: ScorePlayContext): boolean {
-  return oracleFixesOf(evidence).some((fix) =>
-    oracleFixQualifies(fix, ctx.playLocalDate),
-  );
+  return oracleFixesOf(evidence).some((fix) => oracleFixQualifies(fix, ctx.playFacilityId, ctx.playLocalDate));
 }

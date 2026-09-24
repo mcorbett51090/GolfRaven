@@ -63,3 +63,23 @@ export function validateOfferEligibility(raw: unknown): OfferEligibilityCheck {
 export function isOfferEligibilityValid(raw: unknown): boolean {
   return validateOfferEligibility(raw).valid;
 }
+
+/**
+ * Should-fix: named exports for each of A2-05's three call sites —
+ * `offers-admin`'s save, `offers-admin`'s admin-approval step, and the
+ * issuance/activation/redemption functions' re-evaluation. There are no
+ * real call sites for any of these yet (that DB-side code is P5 scope,
+ * outside `packages/rules`); these three names exist so that, when it IS
+ * built, each call site imports the specific name for ITS OWN step rather
+ * than reaching for the generic `validateOfferEligibility` and leaving the
+ * other two steps to be remembered separately. All three are the exact
+ * SAME function — see `identicalAcrossCallSites.test` in
+ * `offer-eligibility.test.ts`, which asserts this by reference AND by
+ * behaviour, so a future edit that special-cases one of them (e.g.
+ * "issuance re-evaluates, but save is more lenient") is caught immediately
+ * rather than discovered as a live gap between what was checked at save
+ * and what is enforced at issuance.
+ */
+export const validateOfferEligibilityAtSave = validateOfferEligibility;
+export const validateOfferEligibilityAtApproval = validateOfferEligibility;
+export const validateOfferEligibilityAtIssuance = validateOfferEligibility;

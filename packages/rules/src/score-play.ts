@@ -690,16 +690,27 @@ function voidDuplicateFingerprints(evidence: Evidence[]): Evidence[] {
 /* Derived correlation (finding 1) + hard-class absorption (should-fix) */
 /* ------------------------------------------------------------------ */
 
-function fixIdsOfRow(row: Evidence): string[] {
+/**
+ * The fix ids eligible for finding-1(b)'s "same fix reused" correlation —
+ * SCOPED EXACTLY to the plan's two fix-identity pairs: "a staff scan and a
+ * check-in that reuse the same fix" and "a dwell and the check-in that
+ * OPENED it" (`checkinFix` only, never `checkoutFix` — the check-out is a
+ * different physical capture). `receipt_green_fee.coSignalFix` and
+ * `booking.presenceFix` are DELIBERATELY excluded: neither pair is in the
+ * plan's list (a booking correlates with a RECEIPT via `paymentRef`, never
+ * via fix reuse), and A2-20b explicitly requires the opposite behaviour for
+ * a receipt: "A receipt whose co-signal is the QR-session fix... scores
+ * EXACTLY LIKE a receipt with a separate check-in" — i.e. noisy-OR, not
+ * `max` — money golden fixture #9 (0.86) is the regression test for this;
+ * an earlier, over-generalized version of this function (every fix-carrying
+ * row, unconditionally) would have wrongly collapsed #9 to `max(0.80,
+ * 0.30) = 0.80`. */
+function correlationFixIdsOfRow(row: Evidence): string[] {
   switch (row.source) {
     case "staff_presence":
       return row.coSignalFix ? [row.coSignalFix.fixId] : [];
-    case "booking":
-      return row.presenceFix ? [row.presenceFix.fixId] : [];
-    case "receipt_green_fee":
-      return row.coSignalFix ? [row.coSignalFix.fixId] : [];
     case "foreground_dwell":
-      return [row.checkinFix.fixId, row.checkoutFix.fixId];
+      return [row.checkinFix.fixId];
     case "foreground_checkin":
       return [row.fix.fixId];
     default:
@@ -776,7 +787,7 @@ function deriveGroups(evidence: Evidence[], contributions: ScorePlayContribution
 
   const byFixId = new Map<string, number[]>();
   evidence.forEach((row, i) => {
-    for (const fixId of fixIdsOfRow(row)) {
+    for (const fixId of correlationFixIdsOfRow(row)) {
       const arr = byFixId.get(fixId) ?? [];
       arr.push(i);
       byFixId.set(fixId, arr);
@@ -864,12 +875,25 @@ function deriveGroups(evidence: Evidence[], contributions: ScorePlayContribution
  * pipeline: max over the money-eligible subset only, or nothing if none
  * are money-eligible).
  */
+interface ResolvedContribution {
+  contribution: ScorePlayContribution;
+  /** The group this contribution still belongs to — carried through so
+   * `combine` can correctly pick the max-weight member PER PIPELINE for a
+   * non-hard group (a hard winner is already alone in its own group by
+   * construction, since it replaces every other member). Regression note:
+   * an earlier revision discarded this (recomputing trivial per-index
+   * groups downstream), which silently undid finding-1's own fix by
+   * letting a `paymentRef`-correlated pair noisy-OR together again instead
+   * of taking their max — money golden fixture #4 is the regression test. */
+  groupId: number;
+}
+
 function resolveGroups(
   evidence: Evidence[],
   contributions: ScorePlayContribution[],
   groups: number[],
   ctx: ScorePlayContext,
-): ScorePlayContribution[] {
+): ResolvedContribution[] {
   const byGroup = new Map<number, number[]>();
   groups.forEach((g, i) => {
     const arr = byGroup.get(g) ?? [];
@@ -877,7 +901,7 @@ function resolveGroups(
     byGroup.set(g, arr);
   });
 
-  const resolved: ScorePlayContribution[] = [];
+  const resolved: ResolvedContribution[] = [];
   for (const idxs of byGroup.values()) {
     // Hard absorption: does this group contain a `booking` row whose
     // hard-window is satisfied by SOME fix among the group's own rows
@@ -906,25 +930,30 @@ function resolveGroups(
         if (satisfied) hardWinner = { row, contribution };
       }
     }
+    // Every group gets its own fresh id in the OUTPUT (`resolved`'s own
+    // index space), distinct from the input `groups` numbering — a hard
+    // winner collapses a whole group into one item, so its identity here
+    // doesn't matter (nothing else shares it); a non-hard group's members
+    // all share THIS SAME id so `combine` can pick a max per pipeline.
+    const outputGroupId = resolved.length;
     if (hardWinner) {
       const classId: EvidenceClassId = hardWinner.row.source === "staff_presence" ? "staff_presence_hard" : "booking_hard";
-      resolved.push(
-        finish(hardWinner.row, {
+      resolved.push({
+        contribution: finish(hardWinner.row, {
           classId,
           group: GROUP[classId],
           hard: true,
           badgeWeight: WEIGHT[classId],
           moneyEligible: true,
         }),
-      );
+        groupId: outputGroupId,
+      });
       continue;
     }
-    // No hard winner: the group becomes its own max-weight member — badge
-    // and money use the SAME grouping, so both are handled by `combine`
-    // filtering to the money-eligible subset before picking a max within
-    // each pipeline; here we just keep every member and let `combine`
-    // pick.
-    for (const i of idxs) resolved.push(contributions[i]!);
+    // No hard winner: the group's members all carry the SAME `groupId` so
+    // `combine` can pick a max-weight member per pipeline (badge over
+    // every member; money over the money-eligible subset only).
+    for (const i of idxs) resolved.push({ contribution: contributions[i]!, groupId: outputGroupId });
   }
   return resolved;
 }
@@ -1067,13 +1096,9 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
 
   const rawContributions = evidence.map((row) => classify(row, ctx));
   const groups = deriveGroups(evidence, rawContributions, ctx);
-  const playContributions = resolveGroups(evidence, rawContributions, groups, ctx);
-  // `resolveGroups` already reduced each group to its final member(s); the
-  // remaining "group id" for `combine`'s own (now-redundant) grouping step
-  // is therefore just each contribution's own index — every entry in
-  // `playContributions` is already a fully-resolved, standalone
-  // contribution with no further same-group sibling to compare against.
-  const playGroups = playContributions.map((_, i) => i);
+  const resolved = resolveGroups(evidence, rawContributions, groups, ctx);
+  const playContributions = resolved.map((r) => r.contribution);
+  const playGroups = resolved.map((r) => r.groupId);
 
   const playClassesBadge = combine(playContributions, playGroups, "badge");
   const hasPlayClass = playContributions.length > 0;
