@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chownSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { promisify } from "node:util";
@@ -1935,9 +1935,12 @@ describe("x2-verdict: computeMarkdownLineVisibility / findAcceptRowLine (gate fi
       false, // hidden
       true, // (blank line ends the block for <div>, per the generic rule)
       true, // visible again after the blank line
-      true, // </div> — no longer inside any tracked block, so visible
-      true, // after
-      true, // trailing
+      // `</div>` itself re-matches the generic open/close block-tag
+      // regex (pre-existing behaviour, unchanged by this round — errs
+      // toward hiding MORE), re-opening tracking through the next line:
+      false, // </div>
+      false, // after (still "inside" per the re-opened tracking)
+      true, // trailing (blank — ends it again)
     ]);
   });
 
@@ -3223,7 +3226,11 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
       it("refuses a group/world-writable git path, via the seam", () => {
         const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gitbin-mode-"));
         const fakeGit = nodePath.join(dir, "git");
-        writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o777 }); // world-writable
+        writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o777 });
+        // writeFileSync's mode is subject to the process umask (0022
+        // here), which would silently strip the write bits being tested
+        // — chmodSync bypasses umask and sets the exact mode.
+        chmodSync(fakeGit, 0o777); // world-writable
         const res = resolveGitBinary(fakeGit);
         expect(res.ok).toBe(false);
         expect(res.detail).toMatch(/group- or world-writable/);
