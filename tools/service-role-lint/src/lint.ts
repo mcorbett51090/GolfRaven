@@ -70,7 +70,13 @@ export type RuleId =
   | "reexport-of-privileged-symbol"
   | "raw-fetch-with-secret"
   | "dynamic-code-execution"
-  | "parse-error";
+  | "parse-error"
+  // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): "the mere presence of any
+  // node_modules directory under the functions root [is] a finding."
+  // Emitted by index.ts's own directory walker (listFiles), not by this
+  // module's own AST-level rules -- structural, not source-shaped, same
+  // category as the pre-existing symlink-loop finding.
+  | "vendored-dependency-tree";
 
 export interface Finding {
   rule: RuleId;

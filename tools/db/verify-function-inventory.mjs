@@ -37,6 +37,33 @@ function psql(sql) {
     .map((line) => line.split("\t"));
 }
 
+// ⛔ FIX (BLOCKING follow-up, post-P3a re-gate round 4): `psql()` above
+// (tab-per-column, newline-per-ROW) silently corrupts any column whose
+// OWN value contains a literal newline -- every prior check only ever
+// selected identifiers/booleans/short deparsed expressions, none of
+// which do, so this never surfaced before. `pg_proc.prosrc` (check 7b,
+// below) is a real function BODY and routinely spans multiple lines
+// (both this project's real functions and this fix's own probe
+// functions) -- confirmed empirically on a scratch cluster that pulling
+// a multi-line prosrc through the plain `psql()` helper splits ONE
+// logical row into several, silently breaking the 7b check (it looked
+// like it was working against single-line SQL bodies in isolation, but
+// failed to find the SAME probe row once its body spanned multiple
+// lines). Used only where a column can legitimately contain embedded
+// newlines: each output line is one JSON object (`row_to_json`), so an
+// embedded newline is escaped `\n` inside the JSON string, never a
+// literal line break in psql's own output.
+function psqlJsonRows(sql) {
+  const result = spawnSync("psql", ["-v", "ON_ERROR_STOP=1", "-A", "-t", "-c", sql], { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`psql failed (exit ${result.status}): ${result.stderr}`);
+  }
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line));
+}
+
 const failures = [];
 
 // 1. Every function/procedure in app/api/private is inventoried.
@@ -262,10 +289,50 @@ if (fixtureRows.length > 0 || liveRows.length > 0) {
 // (no rows visible with no real target set) is unchanged -- only the
 // ERROR is gone. Scans pg_policies system-wide (not just private_definer
 // policies), since ANY role's policy carrying this shape is the same
-// live bug waiting to happen. Case-insensitive "NULLIF(" match: pg_get_
-// expr's own deparser (which is what populates pg_policies.qual/
-// with_check) always prints NULLIF in upper case, confirmed empirically
-// this session, even though the migration source itself is lower case.
+// live bug waiting to happen.
+//
+// ⛔ FIX (BLOCKING follow-up, post-P3a re-gate round 4): "require the
+// EXACT deparsed form ... flag any current_setting( that is not in
+// exactly that shape, including a wrong sentinel or a missing
+// missing_ok." The prior version of this check only looked 7 characters
+// back for a case-insensitive "NULLIF(" prefix -- it would have PASSED
+// nullif(current_setting('x', true), 'zz') (a wrong sentinel: masks
+// every non-'zz' leftover value as well as the real '' placeholder, a
+// silent over-broad match) and nullif(current_setting('x'), '') (missing
+// the `, true` missing_ok argument: current_setting with ONE argument
+// RAISES if the GUC has never been set at all in this session, rather
+// than returning NULL -- a different, also-live failure mode this
+// column was never checking for). Both are now required to match this
+// EXACT substring, byte for byte:
+//   NULLIF(current_setting('<any-guc-name>'::text, true), ''::text)
+// -- confirmed empirically (probe policies on a throwaway scratch
+// cluster, this round) that this is pg_get_expr's own canonical
+// deparsed form for every CORRECTLY wrapped occurrence in this project's
+// real migrations (the `::text` cast on the literal, the single space
+// after each comma, and NULLIF rendered upper-case while current_setting
+// stays lower-case are all pg_get_expr's own deparser behaviour, not
+// this project's SQL source formatting -- confirmed the deparser
+// produces this same shape regardless of how the source SQL itself was
+// spaced/cased). A current_setting( occurrence whose surrounding text
+// does not match this exact pattern -- wrong sentinel, missing
+// missing_ok, wrong case, extra/missing whitespace, or no wrapping at
+// all -- is flagged.
+function findUnwrappedCurrentSetting(expr) {
+  const exactFormRe = /NULLIF\(current_setting\('[^']*'::text, true\), ''::text\)/g;
+  const validStarts = new Set();
+  let m;
+  while ((m = exactFormRe.exec(expr)) !== null) {
+    validStarts.add(m.index + "NULLIF(".length); // start index of THIS match's "current_setting("
+  }
+  const needle = "current_setting(";
+  let idx = 0;
+  for (;;) {
+    const found = expr.indexOf(needle, idx);
+    if (found === -1) return false;
+    if (!validStarts.has(found)) return true;
+    idx = found + needle.length;
+  }
+}
 const policyExprRows = psql(`
   SELECT schemaname || '.' || tablename || '.' || policyname,
          COALESCE(qual, ''), COALESCE(with_check, '')
@@ -273,23 +340,92 @@ const policyExprRows = psql(`
   WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
     AND (COALESCE(qual, '') LIKE '%current_setting(%' OR COALESCE(with_check, '') LIKE '%current_setting(%')
 `);
-function findUnwrappedCurrentSetting(expr) {
-  const needle = "current_setting(";
-  let idx = 0;
-  for (;;) {
-    const found = expr.indexOf(needle, idx);
-    if (found === -1) return false;
-    const before = expr.slice(Math.max(0, found - 7), found);
-    if (before.toUpperCase() !== "NULLIF(") return true;
-    idx = found + needle.length;
-  }
-}
 for (const [policy, qual, withCheck] of policyExprRows) {
   if (findUnwrappedCurrentSetting(qual)) {
-    failures.push(`RLS policy ${policy}: USING expression contains a current_setting( not wrapped in nullif(...,'') — HIGH-1 regression, post-P3a re-gate round 3: ${qual}`);
+    failures.push(`RLS policy ${policy}: USING expression contains a current_setting( not in the exact required form NULLIF(current_setting('...'::text, true), ''::text) — HIGH-1 regression, post-P3a re-gate round 3/4: ${qual}`);
   }
   if (findUnwrappedCurrentSetting(withCheck)) {
-    failures.push(`RLS policy ${policy}: WITH CHECK expression contains a current_setting( not wrapped in nullif(...,'') — HIGH-1 regression, post-P3a re-gate round 3: ${withCheck}`);
+    failures.push(`RLS policy ${policy}: WITH CHECK expression contains a current_setting( not in the exact required form NULLIF(current_setting('...'::text, true), ''::text) — HIGH-1 regression, post-P3a re-gate round 3/4: ${withCheck}`);
+  }
+}
+
+// 7b. ⛔ FIX (BLOCKING follow-up, post-P3a re-gate round 4): "wrapper
+// functions. Extend #7 to find functions referenced from policy
+// expressions ... and apply the same exact-form rule to their bodies."
+// Check 7 above only ever looked at a policy's OWN qual/with_check TEXT
+// -- a policy that reads the GUC indirectly, by calling a wrapper
+// function (e.g. `USING (user_id = private.guc_uid())`), never contains
+// the literal substring "current_setting(" in its own qual at all, so it
+// was invisible to check 7 regardless of what that wrapper's body
+// actually does. Closes that gap by finding every function each policy
+// DEPENDS ON (via pg_depend, recorded when the policy was created against
+// its USING/WITH CHECK expression -- precise, not a name-matching
+// heuristic that could mismatch on an overloaded/shadowed name) and
+// applying the SAME exact-form rule to that function's body (pg_proc.
+// prosrc).
+//
+// ⛔ LIMIT (documented per the fix's own instruction -- also recorded in
+// docs/security/p3-money-path-requirements.md): this follows ONE level
+// of indirection only -- a policy calling function A is checked against
+// A's own body, but if A's body itself calls a function B that reads the
+// GUC, B is NOT checked. A second (or deeper) hop of indirection is a
+// known, accepted gap, not silently unhandled -- there is no wrapper
+// function in this project's own migrations more than one level deep
+// today (confirmed by grep), so this is a documented residual risk for a
+// FUTURE wrapper-of-a-wrapper, not a live bug.
+//
+// ⛔ DELIBERATE DIVERGENCE from check 7's own matcher, found empirically
+// (probe policies + a probe WRAPPER FUNCTION on a scratch cluster, this
+// round) before landing this: `pg_proc.prosrc` is the function body
+// EXACTLY as the author wrote it in the CREATE FUNCTION statement --
+// Postgres never runs it through pg_get_expr's deparser the way it does
+// a policy's qual/with_check (which is why check 7's regex can safely
+// require literal upper-case "NULLIF" and an inserted "::text" cast: that
+// is pg_get_expr's own canonical rendering, confirmed empirically, not
+// this project's source style). Reusing check 7's EXACT regex here
+// verifiably FALSE-POSITIVES on a perfectly correct, lower-case,
+// no-explicit-cast `nullif(current_setting('x', true), '')` function
+// body -- confirmed on the scratch probe before this comment was
+// written. `findUnwrappedCurrentSettingInSource` below enforces the same
+// SEMANTIC shape (missing_ok literally `true`, sentinel literally `''`)
+// but is case-insensitive and tolerates an optional `::text` cast either
+// author may or may not have written, since that is the correct
+// requirement for raw, un-deparsed source text.
+function findUnwrappedCurrentSettingInSource(expr) {
+  const exactFormRe = /nullif\s*\(\s*current_setting\s*\(\s*'[^']*'(?:\s*::\s*text)?\s*,\s*true\s*\)\s*,\s*''(?:\s*::\s*text)?\s*\)/gi;
+  const validStarts = new Set();
+  let m;
+  while ((m = exactFormRe.exec(expr)) !== null) {
+    const inner = /current_setting\s*\(/i.exec(m[0]);
+    if (inner) validStarts.add(m.index + inner.index);
+  }
+  const needleRe = /current_setting\s*\(/gi;
+  let mm;
+  while ((mm = needleRe.exec(expr)) !== null) {
+    if (!validStarts.has(mm.index)) return true;
+  }
+  return false;
+}
+const policyFunctionRows = psqlJsonRows(`
+  SELECT row_to_json(t) FROM (
+    SELECT pn.nspname || '.' || pc.relname || '.' || pol.polname AS policy,
+           fn.nspname || '.' || fp.proname AS function_name,
+           fp.prosrc AS prosrc
+    FROM pg_policy pol
+    JOIN pg_class pc ON pc.oid = pol.polrelid
+    JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+    JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = pol.oid AND d.refclassid = 'pg_proc'::regclass
+    JOIN pg_proc fp ON fp.oid = d.refobjid
+    JOIN pg_namespace fn ON fn.oid = fp.pronamespace
+    WHERE pn.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND fp.prosrc ILIKE '%current_setting(%'
+  ) t
+`);
+for (const { policy, function_name: functionName, prosrc } of policyFunctionRows) {
+  if (findUnwrappedCurrentSettingInSource(prosrc)) {
+    failures.push(
+      `RLS policy ${policy} depends on function ${functionName}(), whose body contains a current_setting( not in the required shape nullif(current_setting('...', true), '') (case-insensitive, ::text cast optional — this is raw function source, never deparsed) — HIGH-1 regression, post-P3a re-gate round 4 (wrapper-function follow-up, one level deep): ${prosrc}`,
+    );
   }
 }
 

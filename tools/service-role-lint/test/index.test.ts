@@ -109,14 +109,50 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
   });
 
-  it("still excludes node_modules", () => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "srl-nm-"));
-    const nm = join(tmpRoot, "node_modules", "some-pkg");
-    mkdirSync(nm, { recursive: true });
-    writeFileSync(join(nm, "index.js"), BAD_SOURCE);
+  // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): SUPERSEDES the prior
+  // version of this test, which asserted the OPPOSITE -- that
+  // `node_modules` was excluded by basename and a file inside it was
+  // invisible to the lint. That was itself the bug (repro N1/N2: a real
+  // function importing a sibling inside node_modules that reads
+  // SUPABASE_SERVICE_ROLE_KEY, and the lint exited 0). Deno Edge
+  // Functions have no npm-install step, so there is no legitimate
+  // node_modules tree this exclusion was ever protecting -- removed
+  // entirely, same as `dist`/`__fixtures__` before it (M3/MEDIUM-2).
+  it("N1: LINTS a node_modules directory NESTED inside a function directory -- both the presence AND the file's own content are flagged", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-nm-n1-"));
+    const fnDir = join(tmpRoot, "fn");
+    const nmDir = join(fnDir, "node_modules", "x");
+    mkdirSync(nmDir, { recursive: true });
+    writeFileSync(join(nmDir, "admin.ts"), BAD_SOURCE);
+    writeFileSync(join(fnDir, "index.ts"), `import { admin } from "./node_modules/x/admin.ts"; export const handler = () => admin;`);
 
     const results = lintDirectory(tmpRoot, tmpRoot);
-    expect(results.length).toBe(0);
+
+    const presence = results.find((r) => r.filePath === join("fn", "node_modules"));
+    expect(presence).toBeDefined();
+    expect(presence?.findings.some((f) => f.rule === "vendored-dependency-tree")).toBe(true);
+
+    const adminResult = results.find((r) => r.filePath.endsWith(join("node_modules", "x", "admin.ts")));
+    expect(adminResult).toBeDefined();
+    expect(adminResult?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
+  });
+
+  it("N2: LINTS a node_modules directory at the TOP LEVEL of the functions root the same way", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-nm-n2-"));
+    const nmDir = join(tmpRoot, "node_modules", "y");
+    mkdirSync(nmDir, { recursive: true });
+    writeFileSync(join(nmDir, "a.ts"), BAD_SOURCE);
+    writeFileSync(join(tmpRoot, "index.ts"), `import { admin } from "./node_modules/y/a.ts"; export const handler = () => admin;`);
+
+    const results = lintDirectory(tmpRoot, tmpRoot);
+
+    const presence = results.find((r) => r.filePath === "node_modules");
+    expect(presence).toBeDefined();
+    expect(presence?.findings.some((f) => f.rule === "vendored-dependency-tree")).toBe(true);
+
+    const aResult = results.find((r) => r.filePath.endsWith(join("node_modules", "y", "a.ts")));
+    expect(aResult).toBeDefined();
+    expect(aResult?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
   });
 });
 

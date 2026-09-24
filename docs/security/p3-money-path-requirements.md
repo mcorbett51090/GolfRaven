@@ -258,6 +258,46 @@ and earlier: catch an accidental or unreviewed privileged-access shape in Edge F
 code *before* it ships, as a second, in-loop signal alongside code review — not to be
 the boundary review substitutes for.
 
+### `private_definer` GUC-read policies: exact-form requirement, and its known limit (post-P3a re-gate round 3/4)
+
+Every `private_definer`-scoped RLS policy that reads a `delete_my_data`-family GUC
+(`current_setting('app.delete_my_data.target_*', true)`, `0016_private_definer.sql`)
+must wrap that read in exactly `nullif(current_setting('<name>', true), '')`. Why:
+`set_config(name, value, true)` ("is_local") only reverts at the end of the ENCLOSING
+transaction, not at `RESET`/the calling function's own return — once that transaction
+commits, the GUC keeps reading `''` (Postgres's own placeholder for a custom GUC that
+has ever been `SET LOCAL` in the session, never `NULL`) for the rest of the session, and
+PostgREST/Supavisor reuse connections across unrelated requests. A bare
+`current_setting(...)::uuid` then raises on the very next unrelated query that touches a
+table carrying that policy, on the same connection — and because Postgres OR's together
+every candidate policy for a role without short-circuiting past one that errors, ONE
+unwrapped policy anywhere on a table breaks every later query against it (round 3's
+concrete repro: `private.offer_code_play_guard`'s own re-read broke because of an
+unrelated, older policy's unwrapped cast). `nullif(x, '')` turns the leftover `''` into a
+genuine SQL `NULL` before any cast runs — `NULL::uuid` is simply `NULL`, never an error,
+and fail-closed behaviour (no rows visible with no real target set) is unchanged.
+
+**Enforced by `tools/db/verify-function-inventory.mjs` check #7**, which requires the
+EXACT deparsed form `NULLIF(current_setting('<name>'::text, true), ''::text)` —
+tightened (round 4) after the original, looser "is there a `NULLIF(` immediately before
+this `current_setting(`" check was confirmed (probe policies on a scratch cluster) to
+pass a wrong sentinel (`nullif(current_setting('x', true), 'zz')`) and a missing
+`missing_ok` argument (`nullif(current_setting('x'), '')`, which raises outright if the
+GUC was never set in this session at all) — both are distinct, also-live failure shapes
+the loose check would have silently accepted.
+
+**Known, accepted limit — one level of indirection only (round 4 follow-up).** Check #7
+also follows a policy to any function it depends on (via `pg_depend` on the policy
+object, not a name-matching heuristic) and applies the same exact-form rule to that
+function's body — this catches a policy that reads the GUC through a wrapper function
+(e.g. `USING (user_id = private.guc_uid())`) rather than inline. It follows **exactly one
+hop**: if that wrapper function's own body calls a SECOND function which is the one that
+actually reads the GUC, the second function is never inspected. There is no
+wrapper-of-a-wrapper in this project's migrations today (confirmed by grep) — this is a
+documented residual for a future one, not a live bug, and the same class of "no bound on
+how many hops a static check can chase" limitation named for the dynamic-code-key check
+just below.
+
 **A named, accepted residual (should-fix 3, post-P3a re-gate): the dynamic-code-key
 checks stop at one hop.** The lint flags a computed member access whose key is built
 directly from a string-building expression (`obj["constr" + "uctor"]`), and — should-fix

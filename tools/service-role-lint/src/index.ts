@@ -20,8 +20,7 @@ const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts",
 // silently skipped, a real bypass: privileged code hidden in
 // `supabase/functions/some-fn/dist/` (a plausible real build-output
 // path, not even an attack) or `supabase/functions/some-fn/__fixtures__/`
-// was never linted at all. Only `node_modules` (legitimate: vendored
-// third-party code, never product code) is still excluded by basename.
+// was never linted at all.
 //
 // ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): "importing from
 // __fixtures__ bypasses the lint." The lint's OWN fixtures directory used
@@ -39,7 +38,23 @@ const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts",
 // fixtures/**, this round) — nothing under supabase/functions is EVER
 // excluded here now, closing this class of gap structurally rather than
 // by carving out one more special case.
-const EXCLUDED_BASENAMES = new Set(["node_modules"]);
+//
+// ⛔ FIX (BLOCKING, post-P3a re-gate round 4): "node_modules is still
+// excluded from the lint, but a function can import from it." The
+// remaining `node_modules` basename exclusion (this round's OWN prior
+// text above claimed it was "legitimate: vendored third-party code,
+// never product code" -- wrong, exactly the same shape of bug M3/
+// MEDIUM-2 already fixed for `dist`/`__fixtures__`) was a THIRD live
+// bypass: `supabase/functions/some-fn/node_modules/x/admin.ts` (or a
+// top-level `supabase/functions/node_modules/y/a.ts`) reading the
+// service-role key was never walked, never read, never flagged --
+// confirmed repro this round (N1, N2). Deno Edge Functions have no
+// legitimate reason to ship a node_modules tree at all (no npm install
+// step in the deploy path), so there is no "legitimate vendored code"
+// case this exclusion was ever protecting -- removed entirely, same as
+// `dist`/`__fixtures__` before it. Nothing under a linted functions root
+// is excluded by basename any more (the check below is GONE; see the
+// node_modules-presence finding inside listFiles's own walk instead).
 
 // ⛔ FIX (follow-up, post-P3a re-gate round 2): "the lint walker must
 // track visited real paths. A symlink loop should produce a clear
@@ -72,7 +87,27 @@ function listFiles(root: string): { files: string[]; findings: LintResult[] } {
         continue;
       }
       if (st.isDirectory()) {
-        if (EXCLUDED_BASENAMES.has(entry)) continue;
+        // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): the mere presence
+        // of a `node_modules` directory ANYWHERE under the linted
+        // functions root is itself a finding -- a Deno Edge Function
+        // deploy has no npm-install step, so there is no legitimate
+        // reason for one to exist here at all; this catches a
+        // force-added vendored tree even if some future change re-adds a
+        // name-based exclusion (this one, or a new one, would silently
+        // reopen the N1/N2 bypass). Reported, but NOT skipped -- the walk
+        // continues into it below, same as any other directory, so a
+        // privileged file living inside it is still discovered and
+        // flagged on its own content too (that is the actual N1/N2 fix;
+        // this finding is belt-and-braces on top of it).
+        if (entry === "node_modules") {
+          const finding: Finding = {
+            rule: "vendored-dependency-tree",
+            message: `directory "${relative(root, full)}" is a node_modules tree -- Deno Edge Functions have no npm-install step and should never ship one; its mere presence is flagged regardless of contents (a force-added vendored tree, or a hiding place for privileged code, either way)`,
+            line: 0,
+            column: 0,
+          };
+          problems.push({ filePath: relative(root, full), findings: [finding] });
+        }
         let real: string;
         try {
           real = realpathSync(full);

@@ -110,7 +110,18 @@ const ALLOWED_TOP_LEVEL_KEYS = new Set(["imports", "compilerOptions", "lint", "f
 /** deno.lock's own allowed top-level keys (round 2, "Lockfile" requirement). */
 const LOCK_ALLOWED_TOP_LEVEL_KEYS = new Set(["version", "remote", "specifiers", "redirects", "workspace"]);
 
-const EXCLUDED_BASENAMES = new Set(["node_modules"]);
+// ⛔ FIX (BLOCKING, post-P3a re-gate round 4): the `node_modules`
+// exclusion that used to live here (mirroring index.ts's own, now also
+// removed) is GONE -- see index.ts's note on this for the full reasoning
+// (N1/N2 repro, no legitimate reason for a node_modules tree to exist in
+// a Deno Edge Function deploy at all). Config discovery ("M2: config
+// files anywhere, regardless of importers") now walks into a
+// node_modules directory the same as any other -- a deno.json/
+// import_map.json/deno.lock hidden inside one is validated (or flagged
+// as an ancestor-config violation) exactly like anywhere else. The
+// node_modules-PRESENCE finding itself lives only in index.ts's listFiles
+// walk, not duplicated here, so a single node_modules directory produces
+// one finding, not two.
 
 /**
  * Strip `//` and `/* ... *‍/` comments from JSONC text, respecting string
@@ -416,7 +427,6 @@ function listDirectories(root: string): { dirs: string[]; problems: ConfigProble
         continue;
       }
       if (!st.isDirectory()) continue;
-      if (EXCLUDED_BASENAMES.has(entry)) continue;
       let real: string;
       try {
         real = realpathSync(full);
