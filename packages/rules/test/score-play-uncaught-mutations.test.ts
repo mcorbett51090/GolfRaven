@@ -173,11 +173,27 @@ describe("uncaught mutation (third re-gate): the fix-date check inside deviceRow
 
 describe("uncaught mutation (third re-gate): the fix-date clause of the staff window", () => {
   it("a staff co-signal within ±10 min NUMERICALLY, but whose fix.localDate disagrees with the play's date, stays soft", () => {
+    // Fifth gate, H2: `goodFix({localDate: OFF_DATE, capturedAt: <same-UTC-day
+    // as PLAY_LOCAL_DATE>})` is now itself an internally INCONSISTENT fix —
+    // its own `localDate` disagrees with what its `capturedAt` resolves to
+    // in the (default UTC) facility tz — and `parseScorePlayInput`'s own
+    // cross-check rejects it at the PARSER, before `classifyEvidenceRow`
+    // ever runs, which would trivially (and uninterestingly) also produce
+    // `score_badge: 0`. To keep isolating the ORIGINAL invariant this test
+    // was written for — the STRING check inside `staffFixSatisfiesHardWindow`
+    // (`fix.localDate === ctx.playLocalDate`), not a numeric window alone —
+    // the fix here is constructed to be SELF-consistent (its `localDate`
+    // genuinely matches its own `capturedAt`'s UTC calendar date, so it
+    // passes the parser) while still landing within ±10 min of `scanAt`
+    // NUMERICALLY: both timestamps sit either side of a UTC midnight
+    // boundary.
+    const scanAt = Date.parse("2026-06-01T23:58:00.000Z"); // 2 min before UTC midnight
+    const fixCapturedAt = scanAt + 3 * 60_000; // 2026-06-02T00:01:00Z — 3 min later, but a DIFFERENT UTC calendar day
     const result = scorePlay(
       [
         staffPresence({
-          scanAt: PLAY_LOCAL_DATE_MS,
-          coSignalFix: goodFix({ localDate: OFF_DATE, capturedAt: PLAY_LOCAL_DATE_MS + 3 * 60_000 }),
+          scanAt,
+          coSignalFix: goodFix({ localDate: "2026-06-02", capturedAt: fixCapturedAt }),
         }),
       ],
       baseCtx(),
