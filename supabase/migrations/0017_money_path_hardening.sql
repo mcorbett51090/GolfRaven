@@ -290,14 +290,31 @@ DECLARE
   v_row app.offer_code%ROWTYPE;
   v_play_held boolean;
 BEGIN
+  -- ⛔ FIX (follow-up, post-P3a re-gate round 2): "narrow the three
+  -- guard-read policies using the GUC pattern." The prior `USING (true)`
+  -- policy made every row of app.offer_code visible to private_definer
+  -- unconditionally -- correct for THIS re-read (which already scopes
+  -- itself to exactly NEW.id via its own WHERE clause) but wider than it
+  -- needed to be at the RLS layer itself: private_definer could read
+  -- EVERY row through this policy from anywhere, not just from inside
+  -- this one guarded lookup. The GUC is set to the SPECIFIC id being
+  -- checked immediately before the read, and cleared immediately after
+  -- -- the policy (below) only ever admits a row whose id matches the
+  -- current value of that GUC, so private_definer has NO visibility into
+  -- this table at all outside the narrow window this function itself
+  -- controls.
+  PERFORM set_config('app.guard.offer_code_id', NEW.id::text, true);
   SELECT * INTO v_row FROM app.offer_code WHERE id = NEW.id;
+  PERFORM set_config('app.guard.offer_code_id', '', true);
   IF NOT FOUND THEN
     RETURN NULL; -- definer-level read confirms the row is genuinely gone, not merely invisible to the committing role
   END IF;
   IF v_row.play_id IS NULL THEN
     RETURN NULL;
   END IF;
+  PERFORM set_config('app.guard.play_id', v_row.play_id::text, true);
   SELECT held_review INTO v_play_held FROM app.play WHERE id = v_row.play_id AND user_id = v_row.user_id;
+  PERFORM set_config('app.guard.play_id', '', true);
   IF NOT FOUND THEN
     RAISE EXCEPTION 'offer_code: play_id % (user_id %) was not found in app.play at constraint-check time', v_row.play_id, v_row.user_id
       USING ERRCODE = '23514';
@@ -358,14 +375,20 @@ BEGIN
   -- M3 BLOCKING (post-P3a re-gate): SECURITY DEFINER, same reasoning as
   -- private.offer_code_play_guard above -- the re-read must run as
   -- private_definer, not as whichever role happens to be committing.
+  -- Follow-up (round 2): same GUC-scoped narrow-read pattern as
+  -- private.offer_code_play_guard above.
+  PERFORM set_config('app.guard.entitlement_id', NEW.id::text, true);
   SELECT * INTO v_row FROM app.entitlement WHERE id = NEW.id;
+  PERFORM set_config('app.guard.entitlement_id', '', true);
   IF NOT FOUND THEN
     RETURN NULL;
   END IF;
   IF v_row.play_id IS NULL THEN
     RETURN NULL;
   END IF;
+  PERFORM set_config('app.guard.play_id', v_row.play_id::text, true);
   SELECT held_review INTO v_play_held FROM app.play WHERE id = v_row.play_id AND user_id = v_row.user_id;
+  PERFORM set_config('app.guard.play_id', '', true);
   IF NOT FOUND THEN
     RAISE EXCEPTION 'entitlement: play_id % (user_id %) was not found in app.play at constraint-check time', v_row.play_id, v_row.user_id
       USING ERRCODE = '23514';
