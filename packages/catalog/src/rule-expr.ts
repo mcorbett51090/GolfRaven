@@ -190,7 +190,10 @@ export type MonthlyStreakCall = z.infer<typeof MonthlyStreakCallSchema>;
 
 /** The number-returning aggregates (§4.1's table "Returns" column) — valid
  * wherever a `NumericOperand` (a comparator's `left`/`right`) is expected,
- * and also valid as a bare boolean node (R-14; numeric truthiness). */
+ * and also valid as a bare boolean node (R-14; numeric truthiness). Kept as
+ * its own flat `discriminatedUnion` (not composed later from smaller
+ * pieces) purely for the error-path quality documented on
+ * `AggregateCallSchema` below. */
 export const NumericAggregateCallSchema = z.discriminatedUnion("name", [
   PlayedCallSchema,
   TrailProgressCallSchema,
@@ -241,15 +244,36 @@ export const BooleanAggregateCallSchema = z.discriminatedUnion("name", [
 ]);
 export type BooleanAggregateCall = z.infer<typeof BooleanAggregateCallSchema>;
 
-/** Every aggregate call, either return type — a plain `z.union` (not a
- * `z.discriminatedUnion`) of the two typed sub-unions above, so an unknown
- * `name` (R-F1: `holesInOne()`; R-F7: `minConfidence`/`score_badge`, which
- * the offer grammar has no operand for at all, §4.1 line 633-634) fails
- * the same way any of the 12 real names' own argument-shape mismatches
- * would: there is no grammar production for it. */
-export const AggregateCallSchema = z.union([
-  NumericAggregateCallSchema,
-  BooleanAggregateCallSchema,
+/**
+ * Every aggregate call, either return type. **Not** composed from the two
+ * typed sub-unions above via `z.union` — Zod v4's `discriminatedUnion`
+ * cannot see through a plain nested `z.union` to find a consistent
+ * discriminator value, so that composition throws at schema-construction
+ * time ("Invalid discriminated union option"), confirmed against this
+ * Zod version directly. This is instead its own single flat
+ * `discriminatedUnion("name", [...all 12...])`, which Zod v4 handles
+ * cleanly (including nested inside the outer `kind`-discriminated
+ * `RuleExprSchema` below) and gives the precise, path-pointing error this
+ * package's fixtures need: an unknown `name` (R-F1: `holesInOne()`; R-F7:
+ * `minConfidence`/`score_badge`, which the offer grammar has no operand
+ * for at all, §4.1 line 633-634) fails with `path: ["name"]` and Zod's own
+ * "Invalid discriminator value" message — there is no grammar production
+ * for it, the same as any of the 12 real names' own argument-shape
+ * mismatches.
+ */
+export const AggregateCallSchema = z.discriminatedUnion("name", [
+  PlayedCallSchema,
+  TrailProgressCallSchema,
+  UniqueCoursesCallSchema,
+  CountDistinctCallSchema,
+  MaxCountByCallSchema,
+  CountWhereCallSchema,
+  MarkerCreditsCallSchema,
+  MonthlyStreakCallSchema,
+  TrailCompleteCallSchema,
+  TrailCompleteWithinCallSchema,
+  InOrderCallSchema,
+  MarkerSetCompleteCallSchema,
 ]);
 export type AggregateCall = z.infer<typeof AggregateCallSchema>;
 
@@ -302,37 +326,79 @@ export type RuleExpr = AndNode | OrNode | NotNode | CompareNode | AggregateCall;
 
 const NumberLiteralSchema = z.strictObject({ kind: z.literal("literal"), value: z.number() });
 
-export const NumericOperandSchema: z.ZodType<NumericOperand> = z.lazy(() =>
-  z.union([NumberLiteralSchema, NumericAggregateCallSchema]),
-);
+/** `left`/`right` of a `compare` node: a number literal or a number-
+ * returning aggregate call. A plain `z.union` (not `discriminatedUnion`,
+ * since `NumberLiteralSchema.kind === "literal"` while every aggregate's
+ * `kind === "agg"` — that pair IS a valid 2-way discriminant on `kind`,
+ * but there is no fixture that needs its error path to be sharper than
+ * "matches neither shape", so the simpler `z.union` is kept here). Needs
+ * no `z.lazy`: it never refers back to `RuleExprSchema`, so there is no
+ * cycle to break. */
+export const NumericOperandSchema: z.ZodType<NumericOperand> = z.union([
+  NumberLiteralSchema,
+  NumericAggregateCallSchema,
+]);
 
-export const CompareNodeSchema: z.ZodType<CompareNode> = z.lazy(() =>
-  z.strictObject({
-    kind: z.literal("compare"),
-    op: CompareOpSchema,
-    left: NumericOperandSchema,
-    right: NumericOperandSchema,
-  }),
-);
+/** A `compare` node's operands are `NumericOperand`, never `RuleExpr`
+ * itself — also no cycle, also no `z.lazy` needed. */
+export const CompareNodeSchema: z.ZodType<CompareNode> = z.strictObject({
+  kind: z.literal("compare"),
+  op: CompareOpSchema,
+  left: NumericOperandSchema,
+  right: NumericOperandSchema,
+});
 
-/** The top-level `RuleExpr` schema. Recursive via `z.lazy` (the standard
- * Zod pattern for a self-referential AST) — `AndNodeSchema`/`OrNodeSchema`/
- * `NotNodeSchema` below reference `RuleExprSchema` by name inside their own
- * `z.lazy` callbacks, which only run at parse time, by when every
- * module-level `const` here has been initialised. */
-export const RuleExprSchema: z.ZodType<RuleExpr> = z.lazy(() =>
-  z.union([AndNodeSchema, OrNodeSchema, NotNodeSchema, CompareNodeSchema, AggregateCallSchema]),
-);
+/**
+ * `and`/`or`/`not` are the only three node shapes that recurse into
+ * `RuleExpr` itself. Only the recursive PROPERTY (`args`'s element type,
+ * `arg`) is wrapped in `z.lazy` — each node schema itself stays a plain,
+ * concrete `strictObject`, which is what lets `RuleExprSchema` below
+ * compose all five node schemas into one `discriminatedUnion` on `kind`
+ * and still type-check as `z.ZodType<RuleExpr>`. (Wrapping an entire node
+ * schema, or the whole top-level union, in `z.lazy` instead was tried
+ * first and does not type-check under this `tsconfig`'s
+ * `exactOptionalPropertyTypes` — confirmed against this Zod version
+ * directly: a `z.lazy`-wrapped schema does not statically expose the
+ * `propValues` a `discriminatedUnion` needs from each of its members, so
+ * the *member* being lazy is fine, but the *union itself*, or a member
+ * that is lazy all the way down, is not.) `RuleExprSchema` is referenced
+ * here before its own declaration below — legal because it carries an
+ * explicit type annotation (TS resolves a `const`'s *declared* type
+ * module-wide) and is only ever reached at parse time inside `z.lazy`'s
+ * deferred callback (legal for the same reason `verify-catalog`'s own
+ * mutually-recursive helpers are legal — the callback body runs after the
+ * whole module has finished evaluating, past any `const` TDZ).
+ */
+export const AndNodeSchema: z.ZodType<AndNode> = z.strictObject({
+  kind: z.literal("and"),
+  args: z.array(z.lazy(() => RuleExprSchema)).min(2),
+});
+export const OrNodeSchema: z.ZodType<OrNode> = z.strictObject({
+  kind: z.literal("or"),
+  args: z.array(z.lazy(() => RuleExprSchema)).min(2),
+});
+export const NotNodeSchema: z.ZodType<NotNode> = z.strictObject({
+  kind: z.literal("not"),
+  arg: z.lazy(() => RuleExprSchema),
+});
 
-export const AndNodeSchema: z.ZodType<AndNode> = z.lazy(() =>
-  z.strictObject({ kind: z.literal("and"), args: z.array(RuleExprSchema).min(2) }),
-);
-export const OrNodeSchema: z.ZodType<OrNode> = z.lazy(() =>
-  z.strictObject({ kind: z.literal("or"), args: z.array(RuleExprSchema).min(2) }),
-);
-export const NotNodeSchema: z.ZodType<NotNode> = z.lazy(() =>
-  z.strictObject({ kind: z.literal("not"), arg: RuleExprSchema }),
-);
+/**
+ * The top-level `RuleExpr` schema — a `discriminatedUnion` on `kind` (not
+ * a plain `z.union`), confirmed against this Zod version to nest cleanly
+ * with `AggregateCallSchema` (itself a `discriminatedUnion` on `name`) as
+ * one of its five branches: Zod resolves the two-level discriminator
+ * correctly (`kind: "agg"` at this level, `name: <...>` one level in),
+ * which is what gives R-F1/R-F7 their precise `path: ["name"]` "Invalid
+ * discriminator value" error instead of a bare, path-less "no union
+ * member matched".
+ */
+export const RuleExprSchema: z.ZodType<RuleExpr> = z.discriminatedUnion("kind", [
+  AndNodeSchema,
+  OrNodeSchema,
+  NotNodeSchema,
+  CompareNodeSchema,
+  AggregateCallSchema,
+]);
 
 /* ------------------------------------------------------------------ */
 /* AchievementDef (§4.1 line 523-524)                                   */
