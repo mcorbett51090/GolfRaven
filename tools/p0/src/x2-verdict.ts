@@ -1149,16 +1149,6 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
  */
 export const GOLFRAVEN_CANONICAL_REPO_URL = "https://github.com/mcorbett51090/GolfRaven";
 
-/** The local ref a fresh fetch from `GOLFRAVEN_CANONICAL_REPO_URL` writes
- * `main` to (`fetchVerifiedMainRef`). Deliberately its OWN namespace —
- * not `refs/remotes/origin/main`, an ordinary remote-tracking ref anyone
- * with write access to a checkout can set with a bare `git update-ref`
- * — so nothing else's normal git usage collides with or shadows it, and
- * a forged leftover ref from a prior run is always deleted before this
- * tool ever reads it again (`fetchVerifiedMainRef` deletes first, then
- * fetches, every time it runs). */
-export const GOLFRAVEN_VERIFIED_MAIN_REF = "refs/x2-verdict/verified-main";
-
 /** The toolkit's OWN checkout root — resolved from `import.meta.url`
  * (THIS module's own on-disk location), never from a caller-supplied
  * path. This is the ONE source of truth for "the real golfraven
