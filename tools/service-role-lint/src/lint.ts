@@ -516,6 +516,66 @@ export function lintSource(source: string, filePath: string): Finding[] {
     }
   });
 
+  // Pass 2b: populate secretEnvValueIdentifiers — every variable assigned
+  // DIRECTLY from a non-allowlisted env read, in any of the same shapes
+  // Pass 2 just scanned for. Feeds Pass 5's "fetch() using a service key
+  // read from env" check (M3(4)). A dedicated declarator-shaped pass
+  // (rather than reusing Pass 2's per-node hits) sidesteps needing parent
+  // pointers, which typescript-estree's plain-object AST does not carry.
+  walk(ast, (node) => {
+    if (node.type !== AST_NODE_TYPES.VariableDeclarator || node.id.type !== AST_NODE_TYPES.Identifier || !node.init) return;
+    const init = node.init;
+    let literalKey: string | undefined;
+    let isEnvRead = false;
+    if (
+      init.type === AST_NODE_TYPES.CallExpression &&
+      init.callee.type === AST_NODE_TYPES.MemberExpression &&
+      init.callee.property.type === AST_NODE_TYPES.Identifier &&
+      init.callee.property.name === "get" &&
+      init.callee.object.type === AST_NODE_TYPES.MemberExpression &&
+      init.callee.object.property.type === AST_NODE_TYPES.Identifier &&
+      init.callee.object.property.name === "env" &&
+      init.callee.object.object.type === AST_NODE_TYPES.Identifier &&
+      envObjectLocalNames.has(init.callee.object.object.name)
+    ) {
+      isEnvRead = true;
+      const arg = init.arguments[0];
+      literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
+    } else if (
+      init.type === AST_NODE_TYPES.CallExpression &&
+      init.callee.type === AST_NODE_TYPES.Identifier &&
+      destructuredEnvGetterNames.has(init.callee.name)
+    ) {
+      isEnvRead = true;
+      const arg = init.arguments[0];
+      literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
+    } else if (
+      init.type === AST_NODE_TYPES.MemberExpression &&
+      !init.computed &&
+      init.property.type === AST_NODE_TYPES.Identifier &&
+      init.object.type === AST_NODE_TYPES.MemberExpression &&
+      init.object.property.type === AST_NODE_TYPES.Identifier &&
+      init.object.property.name === "env" &&
+      init.object.object.type === AST_NODE_TYPES.Identifier &&
+      envObjectLocalNames.has(init.object.object.name)
+    ) {
+      isEnvRead = true;
+      literalKey = init.property.name;
+    } else if (
+      init.type === AST_NODE_TYPES.MemberExpression &&
+      !init.computed &&
+      init.property.type === AST_NODE_TYPES.Identifier &&
+      init.object.type === AST_NODE_TYPES.Identifier &&
+      envAliasIsDirectEnvObject.has(init.object.name)
+    ) {
+      isEnvRead = true;
+      literalKey = init.property.name;
+    }
+    if (isEnvRead && (literalKey === undefined || !isPublicEnvVar(literalKey))) {
+      secretEnvValueIdentifiers.add(node.id.name);
+    }
+  });
+
   // ---------------------------------------------------------------------
   // Pass 3: service-role client construction (createClient / new
   // SupabaseClient), with alias-taint propagated transitively.
