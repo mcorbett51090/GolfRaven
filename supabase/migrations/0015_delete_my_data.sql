@@ -118,8 +118,10 @@ BEGIN
 
   -- attestation.player_user_id (special): nulled, not deleted (line 841).
   UPDATE app.attestation SET player_user_id = NULL WHERE player_user_id = p_user_id;
-  -- attestation.staff_user_id: TODO, deliberately NOT redacted — see the
-  -- private.pii_retention_policy row's reason.
+  -- attestation.staff_user_id is handled by the generic pass above (it is
+  -- now a plain `set_null` policy row, gate round 2 fix) — no bespoke code
+  -- needed here; staff_pseudonym (populated at attest time, out of this
+  -- stage's scope) survives so the row stays verifiable as "staff-attested".
 
   -- audit_log.actor_user_id (special): redacted via the trigger's one
   -- narrow exception (0006) — covers every historical row matching, "older

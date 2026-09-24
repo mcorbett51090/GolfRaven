@@ -71,6 +71,7 @@ INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, 
 -- survive for someone else's legitimate purpose (stock reconciliation,
 -- fraud review, invite provenance) — the row is kept, the actor redacted.
 INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, action, reason) VALUES
+  ('app', 'attestation', 'staff_user_id', 'set_null', 'gate round 2 fix: staff_user_id is now nullable, ON DELETE SET NULL — the attestation row survives (kind + cosignal_ok + staff_pseudonym intact, so it stays verifiable as "staff-attested"); only the staff identity is redacted, the same treatment player_user_id already gets'),
   ('app', 'entitlement', 'redeemed_by_staff', 'set_null', 'redemption record survives for the trail''s stock audit trail; only the staff identity is redacted'),
   ('app', 'fraud_signal', 'cleared_by', 'set_null', 'the fraud decision itself is an admin record independent of who cleared it'),
   ('app', 'marker_code', 'activated_by_staff', 'set_null', 'code lifecycle record survives (programme_marker supply chain); staff identity redacted'),
@@ -80,16 +81,17 @@ INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, 
   ('app', 'review_item', 'resolved_by', 'set_null', 'the review decision is an admin record independent of who resolved it'),
   ('app', 'special_marker_stock_movement', 'by_member', 'set_null', 'inventory ledger row survives for reconciliation (nightly check asserts on_hand = sum(movements), line 850); only the staff identity is redacted');
 
--- special: bespoke code in private.delete_my_data (0014) — either the
--- match key isn't the FK column itself (pseudonym/email matching), or the
+-- special: bespoke code in private.delete_my_data (0014) — the match key
+-- isn't the FK column itself (pseudonym/email matching), or the
 -- redaction needs an exception to another invariant (audit_log's
--- insert-only trigger), or it is DELIBERATELY left untouched with a
--- stated reason (attestation.staff_user_id).
+-- insert-only trigger). No row in this table carries an open TODO — every
+-- FK-to-auth.users column in `app` has a real, implemented redaction path
+-- (09_delete_my_data.sql asserts this: it fails on any `reason` containing
+-- the text "TODO").
 INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, action, reason) VALUES
   ('app', 'attestation', 'player_user_id', 'special', 'nulled in delete_my_data (line 841: "nulled on account deletion"); player_pseudonym (HMAC of user_id) is kept for audit'),
   ('app', 'entitlement', 'user_id', 'special', 'never a plain delete_row: activated_device_id is detached first (the RESTRICT FK B3 flagged), then unredeemed/vouchered states are voided in place (O9/O10, line 2759) while `redeemed` stays terminal — the row is never deleted outright'),
   ('app', 'fraud_signal', 'user_id', 'special', 'nulled (ON DELETE SET NULL already on the column), not deleted — an admin fraud record about a deleted account is still a record admin needs'),
-  ('app', 'attestation', 'staff_user_id', 'special', 'TODO(out of scope this stage): NOT NULL, no redaction path exists yet — a staff member''s account deletion does NOT scrub their identity from past attestation rows they performed. auth.users itself is never deleted by this function (real Auth deletion is a separate, out-of-scope Admin API call), so this is not an FK-integrity gap, only an unaddressed privacy gap, called out explicitly rather than silently left'),
   ('app', 'audit_log', 'actor_user_id', 'special', 'redacted via the one narrow exception in audit_log_no_mutation()''s insert-only trigger (0006) — covers every historical row matching, not only new ones'),
   ('app', 'partner_invite', 'invited_by', 'special', 'partner_invite rows are deleted in delete_my_data by EITHER invited_by = the deleted user OR invitee_email = their verified email (task instruction: "Cover ... partner_invite.invitee_email")'),
   ('app', 'receipt_fingerprint', 'user_id', 'special', 'nulled, not deleted — the 24-month cross-account fraud-fingerprint retention (line 835) must survive account deletion');

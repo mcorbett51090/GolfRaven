@@ -49,7 +49,6 @@ import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-di
 import { renderUrl, type ChromiumLauncher } from "./x2-render.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
-export const X2_RENDER_DEFAULT_TIMEOUT_MS = 30_000;
 
 /** Decision 0001 Addendum J(a): which route these bytes reached the tool
  * by — `"direct"` (the original `fetch()` path), `"rendered"` (headless

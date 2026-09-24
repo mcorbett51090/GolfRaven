@@ -8,6 +8,7 @@ import {
   runX2Fetch,
   type X2SourceConfig,
 } from "../src/x2-fetch.js";
+import type { BrowserLike, ChromiumLauncher, PageLike } from "../src/x2-render.js";
 import { buildMinimalPdf } from "./fixtures/pdf/build-mini-pdf.js";
 
 const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-x2-test-"));
@@ -240,6 +241,143 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
     await expect(runX2Fetch({}, path.join(OUT_DIR, "empty-run"))).rejects.toThrow(
       /empty source list/,
     );
+  });
+});
+
+function fakeRenderLauncher(opts: {
+  status?: number;
+  finalUrl: string;
+  html: string;
+}): { launch: ChromiumLauncher; userAgentSeen: string | null } {
+  const state = { userAgentSeen: null as string | null };
+  const page: PageLike = {
+    async setExtraHTTPHeaders(headers) {
+      state.userAgentSeen = headers["User-Agent"] ?? null;
+    },
+    async goto() {
+      return { status: () => opts.status ?? 200, url: () => opts.finalUrl };
+    },
+    async content() {
+      return opts.html;
+    },
+    async close() {},
+  };
+  const browser: BrowserLike = {
+    async newPage() {
+      return page;
+    },
+    async close() {},
+  };
+  const launch: ChromiumLauncher = async () => browser;
+  return { launch, userAgentSeen: state.userAgentSeen };
+}
+
+describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", () => {
+  it("stores the rendered page.content() bytes and extracted text, with method 'rendered', via an injected launcher (no real browser)", async () => {
+    const html =
+      "<html><body><div id=\"app\">" +
+      "<h1>Vancouver Island Golf Trail</h1><p>Rendered after JS ran.</p></div></body></html>";
+    const { launch } = fakeRenderLauncher({ finalUrl: "https://golfvancouverisland.ca/", html });
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
+    const outDir = path.join(OUT_DIR, "render-run");
+    const manifest = await runX2Fetch(config, outDir, { render: true, renderLaunch: launch });
+
+    const entry = manifest.trails.VI?.[0];
+    expect(entry?.status).toBe("fetched");
+    expect(entry?.method).toBe("rendered");
+    expect(entry?.httpStatus).toBe(200);
+    expect(entry?.finalUrl).toBe("https://golfvancouverisland.ca/");
+    expect(entry?.sha256).toMatch(/^[0-9a-f]{64}$/);
+
+    const rawBytes = readFileSync(path.join(outDir, entry!.rawFile!), "utf8");
+    expect(rawBytes).toBe(html);
+    const text = readFileSync(path.join(outDir, entry!.textFile!), "utf8");
+    expect(text).toContain("Vancouver Island Golf Trail");
+    expect(text).toContain("Rendered after JS ran.");
+  });
+
+  it("keeps the tool's own bot-identifying User-Agent when rendering, never a browser UA", async () => {
+    const state = { userAgentSeen: null as string | null };
+    const page: PageLike = {
+      async setExtraHTTPHeaders(headers) {
+        state.userAgentSeen = headers["User-Agent"] ?? null;
+      },
+      async goto() {
+        return { status: () => 200, url: () => "https://golfvancouverisland.ca/" };
+      },
+      async content() {
+        return "<p>x</p>";
+      },
+      async close() {},
+    };
+    const browser: BrowserLike = {
+      async newPage() {
+        return page;
+      },
+      async close() {},
+    };
+    const launch: ChromiumLauncher = async () => browser;
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
+    await runX2Fetch(config, path.join(OUT_DIR, "render-ua-run"), {
+      render: true,
+      renderLaunch: launch,
+    });
+    expect(state.userAgentSeen).toMatch(/^GolfRaven-P0-X2\/0\.1/);
+    expect(state.userAgentSeen).not.toMatch(/Mozilla|Chrome|Safari/);
+  });
+
+  it("gate N6: refuses to render a non-https configured URL, never launching a browser", async () => {
+    const launchSpy = vi.fn<ChromiumLauncher>();
+    const config: X2SourceConfig = { TN: ["http://www.tnstateparks.com/golf"] };
+    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-http-run"), {
+      render: true,
+      renderLaunch: launchSpy,
+    });
+    const entry = manifest.trails.TN?.[0];
+    expect(entry?.status).toBe("failed");
+    expect(entry?.error).toContain("gate N6");
+    expect(launchSpy).not.toHaveBeenCalled();
+  });
+
+  it("records a render failure (e.g. navigation error) as FAILED with method 'rendered', never silently skipped", async () => {
+    const browser: BrowserLike = {
+      async newPage() {
+        return {
+          async setExtraHTTPHeaders() {},
+          async goto() {
+            throw new Error("net::ERR_CONNECTION_REFUSED");
+          },
+          async content() {
+            return "";
+          },
+          async close() {},
+        };
+      },
+      async close() {},
+    };
+    const launch: ChromiumLauncher = async () => browser;
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
+    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-fail-run"), {
+      render: true,
+      renderLaunch: launch,
+    });
+    const entry = manifest.trails.VI?.[0];
+    expect(entry?.status).toBe("failed");
+    expect(entry?.method).toBe("rendered");
+    expect(entry?.error).toContain("ERR_CONNECTION_REFUSED");
+  });
+
+  it("a direct (non-render) run still stamps method 'direct' on every entry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<h1>Tennessee Golf Trail</h1>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      })),
+    );
+    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
+    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "direct-method-run"));
+    expect(manifest.trails.TN?.[0]?.method).toBe("direct");
   });
 });
 

@@ -415,13 +415,31 @@ function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challeng
   return m;
 }
 
-/** Finding 2's "not simulated for money": a simulated fix is never a
+/**
+ * Finding 2's "not simulated for money": a simulated fix is never a
  * co-signal (§4.5 line 1010-1011) — `foreground_checkin`/`foreground_dwell`
  * are money-eligible only because they otherwise act as a co-signal, so a
  * simulated one is excluded from money OUTRIGHT, not merely weight-reduced
- * (weight-reduction alone still applies to `score_badge`). */
+ * (weight-reduction alone still applies to `score_badge`).
+ *
+ * Third re-gate, should-fix: ALSO require `verificationTier ===
+ * 'play-verified'` here, strictly — never derive money-eligibility from
+ * `geometryKind` alone. Build plan §4.2's own tier table: "`play-verified`
+ * | `listed-verified` + a polygon... | Everything, including route
+ * matching at full weight and **money** (every programme facility must be
+ * `play-verified`)." `play-verified` is DEFINED as `listed-verified` PLUS
+ * a polygon — so a fix reporting `verificationTier: 'listed-verified'`
+ * with `geometryKind: 'polygon'` is an inconsistent/adversarial
+ * combination that should never occur in honest data (a facility with a
+ * matchable polygon is, by that definition, already `play-verified`).
+ * Without this check, `applyCourseCaps`'s radius cap (keyed on
+ * `geometryKind`, not `verificationTier`) would wave it through at full
+ * weight and full money-eligibility purely because `geometryKind` says
+ * `'polygon'` — the exact gap the third re-gate found (fixture #14 + a
+ * `listed-verified`/`polygon` check-in reached 0.86 with `money: true`).
+ */
 function deviceRowMoneyEligible(fix: AppFix): boolean {
-  return !fix.simulated;
+  return !fix.simulated && fix.verificationTier === "play-verified";
 }
 
 /** §4.5's radius-fallback cap and the §4.3/A2-01 user-pick cap. Applied
@@ -507,7 +525,20 @@ function finish(
   };
 }
 
-function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
+/**
+ * Exported (third re-gate, should-fix) so the CLASS-LEVEL date/facility
+ * anchors inside each `case` below (e.g. `foreground_checkin`'s own
+ * `row.localDate === ctx.playLocalDate` check) can be unit-tested
+ * DIRECTLY, bypassing `scorePlay`'s top-level row filter. Those anchors
+ * are otherwise unreachable from `scorePlay`'s own entry point (the
+ * top-level filter already drops an off-date/off-facility row before
+ * `classify` ever sees it) — kept anyway as defence in depth (a future
+ * change to the top-level filter, or a caller that invokes `classify`
+ * some other way, should not silently lose this protection), which only
+ * has real meaning if something actually exercises them. Not part of
+ * `scorePlay`'s own contract — a normal caller uses `scorePlay`, not this.
+ */
+export function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
   switch (row.source) {
     case "staff_presence": {
       // §4.5 line 990: "a co-signal within ±10 min", now including the
@@ -1038,8 +1069,21 @@ function resolveGroups(
     // all share THIS SAME id so `combine` can pick a max per pipeline.
     const outputGroupId = resolved.length;
     if (candidates.length > 0) {
+      // Should-fix: apply the §4.3 A2-01 user-pick exclusion BEFORE
+      // picking a winner, not after. `finish()` (below) strips
+      // `hard`/`moneyEligible` from a user-picked row's contribution — but
+      // the winner-selection comparison ran on the RAW class weight
+      // (0.95/0.90), so a user-picked staff-scan candidate could win over
+      // a non-user-picked booking candidate on raw weight, then get
+      // reduced to non-hard/non-money by `finish()`, DISCARDING the
+      // legitimate booking candidate along with it (each group produces
+      // exactly one contribution). A user-picked candidate's effective
+      // weight is treated as below every real weight (never `0` — two
+      // user-picked candidates still need to compare against each other
+      // for the `hard: false` fallthrough to at least be deterministic).
+      const effectiveWeight = (c: HardCandidate) => (c.row.courseDisambiguatedBy === "user" ? -1 : WEIGHT[c.classId]);
       let winner = candidates[0]!;
-      for (const c of candidates) if (WEIGHT[c.classId] > WEIGHT[winner.classId]) winner = c;
+      for (const c of candidates) if (effectiveWeight(c) > effectiveWeight(winner)) winner = c;
       resolved.push({
         contribution: finish(winner.row, {
           classId: winner.classId,
@@ -1141,11 +1185,19 @@ function collectFixes(evidence: Evidence[]): AppFix[] {
   return fixes;
 }
 
-/** "`presence_signal` = a co-signal exists at that facility on the play's
- * facility-local date" (§4.5 lines 933-935) — anchored to `ctx.playFacilityId`
- * / `ctx.playLocalDate` directly (findings 3/4), never to a row's own copies. */
-function computePresenceSignal(evidence: Evidence[], ctx: ScorePlayContext): boolean {
-  return collectFixes(evidence).some(
+/** Every fix in `evidence` that satisfies the co-signal quality gate on the
+ * play's own facility/date — i.e. every fix `presence_signal` itself
+ * accepts as ITS proof (`presence_signal = qualifyingPresenceFixes(...)
+ * .length > 0`, computed inline in `scorePlay`). Also used by (third
+ * re-gate, finding 1) `computeHeldReview`, which needs the SAME set:
+ * `money` requires `presence_signal` unconditionally, so the grade of
+ * whichever fix(es) establish presence is just as load-bearing for
+ * held_review as the grade of whichever fix establishes the score/hard
+ * path — a row that is neither hard nor money-eligible (soft
+ * `staff_presence`, a user-picked check-in) can still be presence's ONLY
+ * proof. */
+function qualifyingPresenceFixes(evidence: Evidence[], ctx: ScorePlayContext): AppFix[] {
+  return collectFixes(evidence).filter(
     (fix) => isQualityCoSignalFix(fix, ctx.playFacilityId) && fix.localDate === ctx.playLocalDate,
   );
 }
@@ -1170,20 +1222,58 @@ function computePresenceSignal(evidence: Evidence[], ctx: ScorePlayContext): boo
  * later that has nothing to do with why this play reached `money`) must
  * never cancel this — that was the exact bug the gate found.
  */
+/**
+ * Third re-gate, finding 1: `money = presence_signal && (hardSignal ||
+ * score_monetary >= MONEY_MIN)` — `presence_signal` is an UNCONDITIONAL
+ * requirement of `money`, not merely an optional booster, so whichever
+ * fix(es) establish IT are just as load-bearing for held_review as
+ * whichever fix(es) establish the hard/score path. A row that is neither
+ * `hard` nor money-eligible (a soft `staff_presence` outside its own ±10
+ * min window; a user-picked check-in, money-capped to 0 but still
+ * presence-eligible per A2-06/line 933) can still be presence's ONLY
+ * proof — reading `governingGrade` from only the hard winner or only
+ * `moneyMerged` misses this entirely (the gate's own failing cases: a
+ * Garmin sensor round alone reaches 0.85, and an UNRELATED unattestable
+ * fix elsewhere is the only thing making `presence_signal` true).
+ *
+ * Order-independence (should-fix): both legs below are computed with
+ * `.some(...)` over an unordered SET condition (does ANY contributing
+ * fix/contribution grade unattestable, and does NONE grade attested) —
+ * neither leg picks "the first" or "the last" of anything, so the result
+ * cannot depend on `evidence[]`'s row order or `playContributions`' own
+ * order. See `test/score-play-regate3.test.ts`'s permutation test.
+ */
 function computeHeldReview(
   playContributions: ScorePlayContribution[],
   moneyMerged: ScorePlayContribution[],
+  presenceFixes: AppFix[],
   hardSignal: boolean,
   money: boolean,
 ): boolean {
   if (!money) return false;
+
+  const presenceHasAttested = presenceFixes.some((fix) => resolveFixGrade(fix.token) === "attested");
+  const presenceHasUnattestable = presenceFixes.some((fix) => resolveFixGrade(fix.token) === "unattestable");
+  const presenceHeld = !presenceHasAttested && presenceHasUnattestable;
+
   if (hardSignal) {
-    const hardOne = playContributions.find((c) => c.hard);
-    return hardOne?.governingGrade === "unattestable";
+    // Should-fix (order independence): `.filter` + `.some` over the SET of
+    // hard contributions — not `.find`, which picked whichever hard
+    // contribution happened to come FIRST in `evidence[]`'s own order.
+    // Two independent hard contributions (e.g. an unattestable staff-hard
+    // AND an attested booking-hard, neither correlated with the other) are
+    // now judged together: an attested one ANYWHERE in the hard set is
+    // enough to not hold, regardless of array order.
+    const hardOnes = playContributions.filter((c) => c.hard);
+    const hardHasAttested = hardOnes.some((c) => c.governingGrade === "attested");
+    const hardHasUnattestable = hardOnes.some((c) => c.governingGrade === "unattestable");
+    const hardHeld = !hardHasAttested && hardHasUnattestable;
+    return hardHeld || presenceHeld;
   }
   const hasAttested = moneyMerged.some((c) => c.governingGrade === "attested");
   const hasUnattestable = moneyMerged.some((c) => c.governingGrade === "unattestable");
-  return !hasAttested && hasUnattestable;
+  const scoreHeld = !hasAttested && hasUnattestable;
+  return scoreHeld || presenceHeld;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1264,10 +1354,11 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
   const moneyCombined = combine(playContributions, playGroups, "money");
   const scoreMonetary = moneyCombined.score;
 
-  const presenceSignal = computePresenceSignal(evidence, ctx);
+  const presenceFixes = qualifyingPresenceFixes(evidence, ctx);
+  const presenceSignal = presenceFixes.length > 0;
   const hardSignal = playContributions.some((c) => c.hard);
   const money = presenceSignal && (hardSignal || scoreMonetary >= MONEY_MIN);
-  const heldReview = computeHeldReview(playContributions, moneyCombined.merged, hardSignal, money);
+  const heldReview = computeHeldReview(playContributions, moneyCombined.merged, presenceFixes, hardSignal, money);
 
   return {
     score_badge: round2(scoreBadge),

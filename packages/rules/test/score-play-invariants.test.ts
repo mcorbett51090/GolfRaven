@@ -537,3 +537,36 @@ describe("scorePlay — device-only class pairs never reach MONEY_MIN (noisy-OR 
     }
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* Test adequacy (third re-gate): vendor/sensor + device-row two-row     */
+/* sets — the exact PAIR SHAPE finding 2 (b95bbfc third re-gate) was     */
+/* found in: a money-eligible-but-presence-less class (vendor_sensor)    */
+/* combined with a presence-only device row whose fix varies, including  */
+/* a user-picked variant. Held at grade × position (10 = 5×2 combos,     */
+/* userPicked × 2), challenge/simulated/time fixed at their "good"       */
+/* value — the single-row generator above already exhausts THOSE axes    */
+/* independently; this block's whole point is the CROSS-CLASS pairing,   */
+/* not re-covering axes the single-row space already covers.             */
+/* ------------------------------------------------------------------ */
+
+describe("scorePlay — vendor + device-row two-row sets (money(E) ⇒ oracle(E), including user-picked)", () => {
+  for (const grade of GRADES) {
+    for (const position of POSITIONS) {
+      for (const userPicked of [false, true]) {
+        it(`garmin + checkin(grade=${grade}, position=${position}, userPicked=${userPicked})`, () => {
+          const fix = buildFix(grade, "live", false, position, "same");
+          const evidence: Evidence[] = [
+            vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true }),
+            checkin({ ...(userPicked ? { courseDisambiguatedBy: "user" as const } : {}), fix }),
+          ];
+          const ctx = baseCtx();
+          const result = scorePlay(evidence, ctx);
+          if (result.money) {
+            expect(oracle(evidence, ctx)).toBe(true);
+          }
+        });
+      }
+    }
+  }
+});

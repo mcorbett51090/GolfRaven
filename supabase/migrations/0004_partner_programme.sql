@@ -120,7 +120,23 @@ CREATE TYPE app.attestation_kind AS ENUM (
 CREATE TABLE app.attestation (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   facility_id text NOT NULL REFERENCES app.catalog_facility (id),
-  staff_user_id uuid NOT NULL REFERENCES auth.users (id),
+  -- Nullable, ON DELETE SET NULL (gate round 2 fix — was NOT NULL with no
+  -- redaction path at all): a deleted staff member's identity must be
+  -- removable the same way a deleted player's is (line 841 already says
+  -- this for player_user_id; the same privacy obligation applies to
+  -- whichever party performed the attestation). `staff_pseudonym` below
+  -- keeps the row verifiable as "staff-attested" after this is nulled —
+  -- mirrors `player_pseudonym`'s exact role for the player leg.
+  staff_user_id uuid REFERENCES auth.users (id) ON DELETE SET NULL,
+  -- HMAC of staff_user_id, written at attest time (out-of-scope Edge
+  -- Function business logic) and kept even after staff_user_id is nulled.
+  -- Its existence is itself the "this row is staff-attested" proof: a
+  -- kind alone (e.g. 'presence') says an attestation of that TYPE
+  -- happened, but only a populated staff_pseudonym — set once, at write
+  -- time, never by delete_my_data — proves a specific staff identity (now
+  -- possibly redacted) stood behind it, as opposed to a row some other
+  -- path fabricated after the fact.
+  staff_pseudonym text NOT NULL,
   -- nulled on account deletion (private.delete_my_data, §10 AT(6)).
   player_user_id uuid REFERENCES auth.users (id) ON DELETE SET NULL,
   -- HMAC of user_id, kept for audit even after player_user_id is nulled.
@@ -131,8 +147,11 @@ CREATE TABLE app.attestation (
   created_at timestamptz NOT NULL DEFAULT now(),
   -- "A staff member can never attest their own player account" (§4.5) —
   -- enforced again here as a hard DB invariant, not just an Edge Function
-  -- check (defence in depth for the 422 must-fail cells, §4.7.7).
-  CHECK (player_user_id IS NULL OR player_user_id <> staff_user_id)
+  -- check (defence in depth for the 422 must-fail cells, §4.7.7). Holds
+  -- vacuously true (NULL <> x is NULL, never FALSE, so the CHECK is never
+  -- violated) once staff_user_id has been redacted — by then the row is
+  -- already about a deleted account and the self-attest question is moot.
+  CHECK (player_user_id IS NULL OR staff_user_id IS NULL OR player_user_id <> staff_user_id)
 );
 CREATE INDEX attestation_facility_idx ON app.attestation (facility_id, created_at);
 CREATE INDEX attestation_player_idx ON app.attestation (player_user_id);

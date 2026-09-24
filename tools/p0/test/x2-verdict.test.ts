@@ -73,6 +73,33 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
     expect(result.perTrail.TN?.rosterSize).toBe(1);
   });
 
+  it("decision 0001 Addendum J: carries the evidence's `method` through to the facts output", () => {
+    const confirmation: X2ConfirmationFile = { TN: tnConfirmation() };
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    expect(result.perTrail.TN?.facts.roster[0]?.method).toBe("direct");
+    expect(result.perTrail.TN?.facts.completionUnit?.method).toBe("direct");
+    expect(result.perTrail.TN?.facts.season?.method).toBe("direct");
+  });
+
+  it("decision 0001 Addendum J: a `rendered` evidence method is echoed, not silently normalised to direct", () => {
+    const bytes = "Rendered SPA text. Arbutus Ridge is a member course. It counts a facility. Plays year-round.";
+    const evidenceByTrail: EvidenceByTrail = {
+      VI: { bySha: new Map([[sha(bytes), { text: bytes, method: "rendered" }]]), failedSources: [] },
+    };
+    const confirmation: X2ConfirmationFile = {
+      VI: {
+        roster: [{ name: "Arbutus Ridge", quote: "Arbutus Ridge is a member course.", evidenceSha: sha(bytes) }],
+        completionUnit: { value: "facility", quote: "It counts a facility.", evidenceSha: sha(bytes) },
+        season: { value: "year-round", quote: "Plays year-round.", evidenceSha: sha(bytes) },
+      },
+    };
+    const result = computeX2Verdict(confirmation, evidenceByTrail, ["VI"]);
+    expect(result.perTrail.VI?.confirmed).toBe(true);
+    expect(result.perTrail.VI?.facts.roster[0]?.method).toBe("rendered");
+    expect(result.perTrail.VI?.facts.completionUnit?.method).toBe("rendered");
+    expect(result.perTrail.VI?.facts.season?.method).toBe("rendered");
+  });
+
   it("a whitespace-variant quote (extra spaces/newlines) still matches, after collapsing", () => {
     const confirmation: X2ConfirmationFile = {
       TN: tnConfirmation({
@@ -336,6 +363,29 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
     const text = byTrail.TN?.bySha.get(realSha)?.text ?? "";
     expect(text).toContain("Tennessee Golf Trail");
     expect(text).not.toContain("Fabricated");
+  });
+
+  it("decision 0001 Addendum J: carries a manifest entry's `method` (e.g. rendered) through into the evidence map", async () => {
+    const rawBytes = Buffer.from("<h1>Vancouver Island Golf Trail</h1><p>Rendered SPA content.</p>");
+    const realSha = sha(rawBytes.toString("utf8"));
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-render-evidence",
+      trails: {
+        VI: [
+          fetchedEntry({
+            trail: "VI",
+            url: "https://golfvancouverisland.ca/",
+            sha256: realSha,
+            rawFile: "raw/vi-rendered.html",
+            method: "rendered",
+          }),
+        ],
+      },
+      draftCandidateNames: { VI: [] },
+    };
+    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
+    expect(byTrail.VI?.bySha.get(realSha)?.method).toBe("rendered");
   });
 
   it("gate S1: refuses (throws) when the raw bytes' recomputed SHA does not match the manifest's recorded SHA", async () => {

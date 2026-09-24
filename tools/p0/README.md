@@ -7,7 +7,7 @@ confirmation file first, and the **K1** (operator + sponsor signal) and **K3** (
 tools. See `docs/p0/X1.md`, `docs/p0/X2.md`, `docs/p0/X4.md`, `docs/p0/X5.md`, `docs/p0/K1.md`,
 `docs/p0/K3.md`, `docs/partners/k1-outreach.md`, `docs/owner/x1-k4b-device-protocol.md`,
 `docs/p0/K4.md`, and decision `docs/decisions/0001-owner-decisions-and-p0-thresholds.md` Addenda A, B,
-C, D (R1, R2, R4, R5, R6), E, F, G and H for the checks these implement — this README only covers
+C, D (R1, R2, R4, R5, R6), E, F, G, H and J for the checks these implement — this README only covers
 running the tools.
 
 ## Build
@@ -16,10 +16,11 @@ running the tools.
 pnpm --filter @golfraven/p0-tools build
 ```
 
-Produces `dist/x1-ios-export.js`, `dist/x1-verdict.js`, `dist/x2-fetch.js`, `dist/x2-verdict.js`,
-`dist/x4-verify.js`, `dist/x5-overpass.js`, `dist/p0-desk.js`, `dist/k1-verdict.js`,
-`dist/k3-verdict.js` (plus `dist/index.js`, the library entry point re-exporting every tool's pure
-functions/types).
+Produces `dist/x1-ios-export.js`, `dist/x1-verdict.js`, `dist/x2-fetch.js`, `dist/x2-ingest.js`,
+`dist/x2-verdict.js`, `dist/x4-verify.js`, `dist/x5-overpass.js`, `dist/p0-desk.js`,
+`dist/k1-verdict.js`, `dist/k3-verdict.js` (plus `dist/index.js`, the library entry point
+re-exporting every tool's pure functions/types, and `dist/x2-render.js`, imported by `x2-fetch.js`
+rather than run directly).
 
 ## 1. `x1-ios-export` — iOS Health export reader
 
@@ -311,9 +312,66 @@ text are extracted into a per-trail, deduplicated list, printed to stdout clearl
 the confirmation file below — **never itself a confirmation**; only `x2-verdict`, checking a
 human-written confirmation file against the stored evidence text, confirms a roster.
 
-**Feeds:** the evidence dir (raw + text + `manifest.json`) is `x2-verdict`'s first input.
+**Every evidence entry now also carries a `method`** (decision 0001 Addendum J(a), 2026-09-24,
+written AFTER the first X2 run showed TN blocked by the site's WAF and VI a JS-only SPA with no
+extractable static text): `"direct"` for this section's own fetch path, `"rendered"` for `--render`
+below, or `"owner-saved"` for `x2-ingest`. The verbatim-quote rule is unchanged for every method —
+only the ROUTE the bytes arrived by widens; what counts as a confirmed fact does not.
 
-## 4. `x2-verdict` — X2 pass/kill verdict from a human-written confirmation
+**`--render` (decision 0001 Addendum J(a)(i)).**
+
+```shell
+node dist/x2-fetch.js --render --config config/x2-sources.json --out-dir x2-render-evidence
+```
+
+For a page whose static HTML carries no body text (VI's case), `--render` boots headless Chromium
+(`x2-render.ts`, `playwright-core`, pinned at the exact same version as `apps/site`'s
+`@playwright/test`) at `executablePath: "/opt/pw-browsers/chromium"` (this environment's own
+pre-installed pin — `PLAYWRIGHT_BROWSERS_PATH` is already set; **never run `playwright install`**)
+instead of a direct `fetch()`, for every URL in the SAME `--config`. It stores the rendered
+`page.content()` bytes plus their extracted text through the identical `storeEvidenceBytes` helper
+the direct-fetch path uses (same sha256/text/DRAFT-name handling), with `method: "rendered"`. It
+keeps the tool's own bot-identifying User-Agent (`buildX2UserAgent()`, never a browser UA — a site's
+WAF block is not something this tool evades) and the same https-only rule (gate N6); it never
+navigates anywhere outside that trail's own configured URL list — the "host allow-list" Addendum
+J(a) refers to is exactly that config, the same one the direct-fetch path already reads.
+
+## 4. `x2-ingest` — owner-saved evidence (decision 0001 Addendum J(a)(ii))
+
+```shell
+node dist/x2-ingest.js --trail TN --file /path/to/owner-saved.html \
+  --url https://www.tnstateparks.com/golf --date 2026-09-24 \
+  --config config/x2-sources.json --out-dir x2-evidence
+```
+
+For a page a direct fetch cannot reach at all (TN's WAF 403s the tool's own polite User-Agent),
+Matt saves the page from his own browser ("Save Page As", HTML) and this tool ingests it as
+evidence with `method: "owner-saved"`. It never fetches anything itself and never spoofs a browser
+User-Agent — the owner's browser already did the fetching, entirely outside this tool.
+
+- `--trail` — which slate trail this evidence belongs to.
+- `--file` — the local owner-saved HTML file.
+- `--url` — the URL the OWNER states the page came from. Must be `https:` (gate N6) and its host
+  must be on that trail's OWN configured host list in `--config`/`config/x2-sources.json` (decision
+  0001 Addendum J(a)'s host allow-list — same same-host equivalence `x2-verdict`'s
+  `sameConfiguredHost` already uses: exact match or a `www.` prefix difference only). A stated URL on
+  a host that trail's config never named is refused outright.
+- `--date` — the date the OWNER states they saved the page, a real `YYYY-MM-DD` calendar date.
+  Stored as `ownerSavedDate`, distinct from `fetchedAt` (this tool's own ingestion time).
+- `--out-dir` (default: a fresh directory under the OS temp dir, gate S7) — writing into an EXISTING
+  `x2-fetch`/`x2-fetch --render` evidence dir MERGES this entry into that trail's array and rewrites
+  `manifest.json` in place, so a confirmation file can cite an owner-saved SHA exactly like a
+  direct-fetch or rendered one.
+
+The stored record keeps everything Addendum G already requires: raw bytes, the final URL (the
+stated URL itself — there is no redirect to follow), the HTTP status (the literal string
+`"owner-saved"`, since there is no real HTTP exchange this tool witnessed), the retrieval time in
+UTC, and a SHA-256.
+
+**Feeds:** the evidence dir (raw + text + `manifest.json`, from any mix of `x2-fetch`, `x2-fetch
+--render` and `x2-ingest`) is `x2-verdict`'s first input.
+
+## 5. `x2-verdict` — X2 pass/kill verdict from a human-written confirmation
 
 ```shell
 node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmation.json --out x2-verdict-result
@@ -382,7 +440,7 @@ CLI also exits non-zero when a trail is unconfirmed while one of its sources fai
 **Feeds:** `overallVerdict` → `docs/p0/X2.md` VERDICT; `perTrail` reasons → the log entry explaining
 each trail's confirmed/unconfirmed status.
 
-## 5. `x4-verify` — GolfNow facility-page coverage, per trail
+## 6. `x4-verify` — GolfNow facility-page coverage, per trail
 
 ```shell
 # Live
@@ -398,7 +456,10 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 
   ```json
   {
-    "Grand National": { "trail": "RTJ", "golfnowFacilityUrl": "https://www.golfnow.com/tee-times/facility/2360-grand-national/search" },
+    "Grand National": {
+      "trail": "RTJ",
+      "golfnowFacilityUrl": "https://www.golfnow.com/tee-times/facility/2360-grand-national/search"
+    },
     "Some TN Course": { "trail": "TN", "golfnowFacilityUrl": null }
   }
   ```
@@ -423,10 +484,12 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 old two-way live/not-live read):
 
 - **live** — HTTP 200, the final URL's **host is exactly `www.golfnow.com`**, its **path** contains
-  `/tee-times/facility/<id>-` for the **SAME `<id>`** parsed from the *configured* URL (gate B2 — a
-  match in the query string, or for a different id, does NOT count), and the page text contains the
-  course's name under Addendum F's normalisation (`namesMatch`, reused verbatim from
-  `overpass-geo.ts`).
+  `/tee-times/facility/<id>-` (Addendum G/H) **or starts with `/courses/<id>-`** (decision 0001
+  Addendum J(b), 2026-09-24, written AFTER the first X4 run found every RTJ facility URL
+  301-redirecting to this new shape — GolfNow's current course-details page) — either way for the
+  **SAME `<id>`** parsed from the _configured_ URL (gate B2 — a match in the query string, or for a
+  different id, does NOT count, under EITHER shape), and the page text contains the course's name
+  under Addendum F's normalisation (`namesMatch`, reused verbatim from `overpass-geo.ts`).
 - **not covered (definitive)** — no URL configured, HTTP 404/410, or a resolved HTTP 200 page that
   fails the live test above (wrong id, generic search page, foreign host, name absent).
 - **indeterminate** — a network-policy block, timeout, connection error, HTTP 403/429/any 5xx, or
@@ -448,7 +511,7 @@ consequence ("course-native link becomes primary for `<trail>`").
 combined figure). A `"not-run"` trail is not a verdict at all — re-run once its indeterminate
 course(s) resolve.
 
-## 6. `p0-desk` — one-command desk check + status board
+## 7. `p0-desk` — one-command desk check + status board
 
 ```shell
 node dist/p0-desk.js
@@ -466,21 +529,21 @@ ran, `x4-verify/`.
 
 Prints a status board, one row per check, with `state`:
 
-| State | Meaning |
-|---|---|
-| `ran` | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail). |
-| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`. |
-| `verdict` | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate). |
-| `partial-blocked` | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`. |
-| `skipped` | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure). |
-| `blocked` | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
-| `error` | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc). |
+| State                | Meaning                                                                                                                                                                                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ran`                | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail).                                                                                                                                  |
+| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`.                                                                                                                |
+| `verdict`            | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate).                                                                                                              |
+| `partial-blocked`    | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`.                                        |
+| `skipped`            | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure).                                                                                                                                                      |
+| `blocked`            | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
+| `error`              | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc).                                                                                                                                            |
 
 **Exits non-zero if any check's state is `blocked`, `partial-blocked` or `error`** — a legitimately
 `skipped` check (no course-map file yet) is not treated as a failure to run. `status.json` in the
 run dir carries the same rows machine-readably.
 
-## 7. `x5-overpass` — Overpass OSM coverage
+## 8. `x5-overpass` — Overpass OSM coverage
 
 ```shell
 # N_osm (pace measurement, not pass/fail)
@@ -587,7 +650,7 @@ running `node dist/x5-overpass.js n-osm` against the real default endpoint was e
 this environment's proxy. See the task report for the exact error text this session got — it was
 not worked around, per the task's own instruction.
 
-## 8. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdicts
+## 9. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdicts
 
 ```shell
 node dist/k1-verdict.js
@@ -610,7 +673,7 @@ accepted as an alias of the table's own "Hammock Coast Golf Trail" row (decision
 
 - **Early read** (Addendum D, R1): count of the 5 named operators whose acceptance of an exploratory
   call is dated on or before **2026-10-19**. Pass ≥ 2. **Before 2026-10-20** this reads `pending (n so
-  far)` regardless of the count — the window hasn't closed. The markdown output never prints MISS or
+far)` regardless of the count — the window hasn't closed. The markdown output never prints MISS or
   PASS while pending; it prints the count so far instead.
 - **Full gate** (Addendum C, cutoff **2026-11-30**): count of the same 5 with a signed non-binding
   LOI (fee willingness recorded) dated on or before the cutoff — pass needs ≥ 2 — **and** ≥ 1 sponsor
@@ -641,7 +704,7 @@ the tool says so rather than inventing any).
 
 **Feeds:** `earlyRead`/`fullGate` → `docs/p0/K1.md` MEASURED VALUE and VERDICT (as two distinct reads).
 
-## 9. `k3-verdict` — K3 SEO-signal verdict
+## 10. `k3-verdict` — K3 SEO-signal verdict
 
 ```shell
 node dist/k3-verdict.js
@@ -716,11 +779,31 @@ trail boundary; X4's three-way live/not-live/indeterminate outcome (decision 000
 a redirect to a different facility id, a match only in the query string, a foreign host, a 200 page
 missing the course name (all NOT live); a block/timeout/403/429/5xx (all indeterminate, never not
 covered, gate B1); a stale replay refused (gate N1) — and its 80%-per-trail boundary (exactly 80%
-passes, just under fails), never computed while any course is indeterminate; and `p0-desk`'s status
-board, including the BLOCKED row for a fake fetch that throws a `"CONNECT tunnel failed, response
-403"`-shaped error (`net.test.ts` also covers the other observed shape — a resolved 403 response
-that IS the proxy's own denial page, vs. one that's the destination site's own 403) and the
-PARTIAL-BLOCKED row for a partial failure/indeterminate result (gate S5).
+passes, just under fails), never computed while any course is indeterminate; **decision 0001
+Addendum J(b)'s `/courses/<id>-` shape** — a same-id redirect to it counts as live, a different-id
+redirect and a name-missing page under it do not, and the OLD `/tee-times/facility/<id>-` shape
+still counts, unchanged; and `p0-desk`'s status board, including the BLOCKED row for a fake fetch
+that throws a `"CONNECT tunnel failed, response 403"`-shaped error (`net.test.ts` also covers the
+other observed shape — a resolved 403 response that IS the proxy's own denial page, vs. one that's
+the destination site's own 403) and the PARTIAL-BLOCKED row for a partial failure/indeterminate
+result (gate S5).
+
+**`x2-fetch --render` / `x2-ingest` coverage (decision 0001 Addendum J(a), `x2-render.test.ts` /
+`x2-fetch.test.ts` / `x2-ingest.test.ts`):** `renderUrl` launched against an INJECTED fake Chromium
+launcher (`BrowserLike`/`PageLike`, never a real browser) — the pinned default `executablePath`, a
+custom one, the tool's own User-Agent header reaching `setExtraHTTPHeaders` (never a browser UA),
+gate N6's https-only refusal before ever launching, a navigation producing no response, and the
+page/browser still closing when navigation throws; `x2-fetch --render` storing the rendered
+`page.content()` bytes and extracted text with `method: "rendered"`, its own https-only refusal, and
+a render failure recorded FAILED (never skipped) with `method: "rendered"` still set; a direct
+(non-`--render`) run stamping `method: "direct"` on every entry; `x2-ingest`'s host allow-list
+(`trailConfiguredHosts`/`statedHostAllowed`) accepting an exact or `www.`-prefix host match and
+refusing a foreign host, gate N6's https-only refusal, a malformed or calendar-impossible stated
+date, an unknown trail, a missing file, and — merging into an EXISTING `x2-fetch` evidence dir's
+`manifest.json` rather than overwriting it, so a `direct` and an `owner-saved` entry for the same
+trail coexist; and `x2-verdict` carrying a fact's evidence `method` through into its `facts` output
+unchanged, for both a `direct` and a `rendered` entry, plus `buildEvidenceByTrail` carrying a
+manifest entry's `method` into the evidence map it builds.
 
 **K1/K3 coverage:** `k1-verdict` — 0/1/2/5 acceptance counts, the early-read cutoff boundary (2026-10-19
 counts, 2026-10-20 doesn't), a 6th contact (Oklahoma Golf Trail) NOT counting while its swap is

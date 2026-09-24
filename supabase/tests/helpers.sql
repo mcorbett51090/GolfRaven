@@ -147,8 +147,9 @@ VALUES ('80000000-0000-0000-0000-000000000001', '90000000-0000-0000-0000-0000000
 -- it must stay derivable from user_id alone so delete_my_data can find it
 -- without depending on a handle that may have since changed (B3, gate
 -- round 2).
-INSERT INTO app.attestation (id, facility_id, staff_user_id, player_user_id, player_pseudonym, kind, token_jti, cosignal_ok)
+INSERT INTO app.attestation (id, facility_id, staff_user_id, staff_pseudonym, player_user_id, player_pseudonym, kind, token_jti, cosignal_ok)
 VALUES ('a0000000-0000-0000-0000-000000000001', 'fac_x', '00000000-0000-0000-0000-1000000000a1',
+        encode(digest('00000000-0000-0000-0000-1000000000a1', 'sha256'), 'hex'),
         '00000000-0000-0000-0000-00000000000a',
         encode(digest('00000000-0000-0000-0000-00000000000a', 'sha256'), 'hex'),
         'presence', 'jti-1', true);

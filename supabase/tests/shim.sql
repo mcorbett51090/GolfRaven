@@ -50,6 +50,48 @@ GRANT anon TO authenticator;
 GRANT authenticated TO authenticator;
 GRANT service_role TO authenticator;
 
+-- ----------------------------------------------------------------------------
+-- 1a. The MIGRATION-OWNER role attribute this shim assumes (S1, gate
+-- round 2) — separate from the four PostgREST-facing roles above.
+-- ----------------------------------------------------------------------------
+-- [unverified — training knowledge of Supabase internals] On a real hosted
+-- Supabase project, migrations run as the project's `postgres` role, which
+-- is widely documented/believed NOT to be a true Postgres superuser —
+-- Supabase reserves actual cluster superuser for its own control plane and
+-- grants the project's `postgres` role a large but bounded privilege set
+-- instead. `tools/db/test.sh`'s default mode does NOT reproduce this: it
+-- connects as the cluster bootstrap role, which IS a true superuser
+-- (BYPASSRLS-equivalent for every table, always, regardless of FORCE ROW
+-- LEVEL SECURITY) — a strictly more permissive stand-in than the real
+-- thing. Its `restricted` mode (`HARNESS_MODE=restricted`) creates and
+-- migrates as a role with LOGIN, CREATEDB, CREATEROLE, and explicitly
+-- NOSUPERUSER NOBYPASSRLS, closing that gap — see tools/db/test.sh's own
+-- comments for exactly what that role can and cannot do, and
+-- docs/known-gaps.md-equivalent note below on the one thing it could not
+-- close.
+--
+-- ⛔ ONE VERIFIED, UNRESOLVED GAP (this session): PostgreSQL hard-forbids
+-- changing the `role` GUC from inside a SECURITY DEFINER function body —
+-- `SET LOCAL ROLE x` inside one raises "cannot set parameter 'role' within
+-- security-definer function", and a function-level `SET role = 'x'`
+-- clause (the only other place a role switch could live) raises
+-- "permission denied" even for a superuser at CREATE FUNCTION time. Both
+-- reproduced this session. This means a SECURITY DEFINER function (every
+-- `private.*` helper, all owned by the migration-owner role) can NEVER
+-- switch to `service_role` internally to reach a table with `FORCE ROW
+-- LEVEL SECURITY` and no policy for its own owner — under a genuinely
+-- NOSUPERUSER NOBYPASSRLS owner, every such function becomes inoperable on
+-- every table it was forced against, including `private.delete_my_data`
+-- itself. The only structural fix is dropping FORCE ROW LEVEL SECURITY
+-- (keeping plain ENABLE) on the tables these functions touch — SECURITY
+-- DEFINER functions get their access from OWNING the table, the
+-- conventional Postgres pattern, and FORCE defeats exactly that. This
+-- changes nothing for anon/authenticated/service_role (none of them is
+-- ever the table owner, in either mode) and nothing under the default
+-- superuser mode (superuser already ignores FORCE). That specific,
+-- evidence-backed schema change needs sign-off before landing — see the
+-- handback report.
+
 -- [unverified — training knowledge of Supabase internals] Supabase's default
 -- grants: usage on `public` is broad, but we do NOT replicate that here,
 -- because build plan §4.4/§4.7 puts nothing client-relevant in `public` —

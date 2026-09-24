@@ -15,9 +15,10 @@
  * literal before/after `pnpm vitest run` output.
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay } from "../src/score-play.js";
+import { scorePlay, type Evidence } from "../src/score-play.js";
 import {
   PLAY_FACILITY_ID,
+  PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
   baseCtx,
   booking,
@@ -26,6 +27,7 @@ import {
   healthRoute,
   receipt,
   staffPresence,
+  tokenState,
 } from "./score-play-helpers.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -153,5 +155,60 @@ describe("uncaught mutation: hard-group collapse disabled", () => {
     expect(result.score_badge).toBe(0.95);
     expect(result.score_monetary).toBe(0.95);
     expect(result.money).toBe(true);
+  });
+});
+
+describe("uncaught mutation (third re-gate): the fix-date check inside deviceRowFixGateOk", () => {
+  it("a check-in whose fix.localDate disagrees with the play's date contributes nothing, even though the ROW itself is on-date", () => {
+    // The row is dated correctly (so it survives scorePlay's top-level
+    // filter and reaches deviceRowFixGateOk at all) — only the FIX's own
+    // `localDate` is off, isolating that ONE check specifically.
+    const result = scorePlay(
+      [checkin({ fix: goodFix({ localDate: OFF_DATE }) })],
+      baseCtx(),
+    );
+    expect(result.score_badge).toBe(0);
+  });
+});
+
+describe("uncaught mutation (third re-gate): the fix-date clause of the staff window", () => {
+  it("a staff co-signal within ±10 min NUMERICALLY, but whose fix.localDate disagrees with the play's date, stays soft", () => {
+    const result = scorePlay(
+      [
+        staffPresence({
+          scanAt: PLAY_LOCAL_DATE_MS,
+          coSignalFix: goodFix({ localDate: OFF_DATE, capturedAt: PLAY_LOCAL_DATE_MS + 3 * 60_000 }),
+        }),
+      ],
+      baseCtx(),
+    );
+    expect(result.score_badge).toBe(0.8); // staff_presence_soft, not hard (0.95)
+    expect(result.contributions.every((c) => !c.hard)).toBe(true);
+  });
+});
+
+describe("uncaught mutation (third re-gate): the non-hard heldReview branch forced to false", () => {
+  it("scoreHeld (unattestable-only money-merged set) alone, with an independent attested presence fix, still yields heldReview=true", () => {
+    // Presence is covered by an INDEPENDENT attested fix (a user-picked,
+    // money-excluded check-in), so `presenceHeld` alone is `false` — ONLY
+    // the score-path's `scoreHeld` computation (an unattestable-only
+    // money-merged set reaching MONEY_MIN) can produce `heldReview: true`
+    // here. Forcing `scoreHeld` to `false` unconditionally flips this
+    // test's own assertion (proven for real below).
+    const evidence: Evidence[] = [
+      {
+        id: "receipt_unatt_mut",
+        facilityId: PLAY_FACILITY_ID,
+        localDate: PLAY_LOCAL_DATE,
+        source: "receipt_green_fee",
+        status: "approved",
+        coSignalFix: goodFix({ token: tokenState("unattestable") }),
+      },
+      booking({ presenceFix: goodFix({ simulated: true }) }), // bad inline fix — stays booking_alone, no absorption
+      checkin({ courseDisambiguatedBy: "user", fix: goodFix() }), // attested, presence-only, money-excluded
+    ];
+    const result = scorePlay(evidence, baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.heldReview).toBe(true);
   });
 });

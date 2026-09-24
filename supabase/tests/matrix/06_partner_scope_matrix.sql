@@ -165,8 +165,8 @@ SELECT ok(
 -- attestation self-attest guard — "a staff member can never attest their
 -- own player account" (§4.5, line 990) enforced as a hard CHECK.
 SELECT throws_ok(
-  $$INSERT INTO app.attestation (facility_id, staff_user_id, player_user_id, player_pseudonym, kind, token_jti)
-    VALUES ('fac_x', '00000000-0000-0000-0000-1000000000a1', '00000000-0000-0000-0000-1000000000a1', 'x', 'presence', 'jti-self')$$,
+  $$INSERT INTO app.attestation (facility_id, staff_user_id, staff_pseudonym, player_user_id, player_pseudonym, kind, token_jti)
+    VALUES ('fac_x', '00000000-0000-0000-0000-1000000000a1', 'x', '00000000-0000-0000-0000-1000000000a1', 'x', 'presence', 'jti-self')$$,
   '23514',
   NULL,
   'a staff member cannot be recorded attesting their own player account (CHECK, line 990/1360/1385)'

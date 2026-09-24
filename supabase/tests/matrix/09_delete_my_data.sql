@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(9);
+SELECT plan(13);
 
 -- Every FK-to-auth.users column in `app` must be classified — this is the
 -- same check `delete_my_data` itself makes at call time, asserted here
@@ -31,6 +31,15 @@ SELECT is(
   ),
   0,
   'every FK-to-auth.users column in app is classified in private.pii_retention_policy'
+);
+
+-- No row is left with an open TODO (gate round 2, item 2: "The 09 test
+-- must fail on any TODO or unclassified entry"). Every classification
+-- must be a real, implemented redaction path.
+SELECT is(
+  (SELECT count(*)::int FROM private.pii_retention_policy WHERE reason ILIKE '%TODO%'),
+  0,
+  'no private.pii_retention_policy row has a TODO in its reason'
 );
 
 -- Precondition: player A's seeded rows exist (activated + redeemed
@@ -89,6 +98,30 @@ SELECT is(
 SELECT is(
   (SELECT count(*)::int FROM storage.objects WHERE bucket_id = 'receipts' AND name LIKE 'receipts/00000000-0000-0000-0000-00000000000a/%'),
   0, 'the player''s receipt objects in storage.objects are removed'
+);
+
+-- ---------------------------------------------------------------------------
+-- attestation.staff_user_id (gate round 2, item 2): deleting the STAFF
+-- member's own data must redact their identity too — closes the gap the
+-- first gate-round-2 pass left as a TODO. Same transaction, same
+-- attestation row ('a0000000-...-001') — its staff_user_id currently
+-- points at staff@X.
+-- ---------------------------------------------------------------------------
+SELECT is(
+  (SELECT count(*)::int FROM app.attestation WHERE id = 'a0000000-0000-0000-0000-000000000001' AND staff_user_id = '00000000-0000-0000-0000-1000000000a1'),
+  1, 'precondition: the attestation row''s staff_user_id still points at staff@X before their own deletion'
+);
+
+SELECT private.delete_my_data('00000000-0000-0000-0000-1000000000a1'::uuid);
+
+SELECT is(
+  (SELECT count(*)::int FROM app.attestation WHERE id = 'a0000000-0000-0000-0000-000000000001' AND staff_user_id IS NULL),
+  1, 'deleting the staff member redacts attestation.staff_user_id to NULL (the row survives)'
+);
+SELECT is(
+  (SELECT staff_pseudonym IS NOT NULL AND kind = 'presence' AND cosignal_ok = true FROM app.attestation WHERE id = 'a0000000-0000-0000-0000-000000000001'),
+  true,
+  'the attestation stays verifiable as "staff-attested" after redaction: staff_pseudonym, kind and cosignal_ok all survive'
 );
 
 SELECT * FROM finish();
