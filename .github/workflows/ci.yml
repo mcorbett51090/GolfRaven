@@ -107,36 +107,44 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install PostgreSQL 16 + PostGIS 3 + pgTAP (apt, pinned)
-        # Matches this repo's build-plan-cited local dev setup (build plan
-        # §10 P3, docs/golf-trails/02-build-plan.md:2758): Postgres 16,
-        # PostGIS 3.4, pgTAP, all from Ubuntu's own apt repos — no Docker,
-        # no Supabase CLI (neither is available in this environment either;
-        # supabase/tests/shim.sql is the local stand-in both places).
-        # apt.postgresql.org's PGDG repo is NOT added here: ubuntu-latest's
-        # default apt sources already carry postgresql-16 + the matching
-        # postgis/pgtap packages for that release, confirmed this session
-        # against the exact package set installed in this dev environment.
+      - name: Install PostgreSQL 16 + PostGIS 3 + pgTAP (PGDG apt, key-checked)
+        # Postgres 16, PostGIS 3.4, pgTAP (build plan §10 P3,
+        # docs/golf-trails/02-build-plan.md:2758). No Docker, no Supabase
+        # CLI: supabase/tests/shim.sql is the local stand-in in both places.
         #
-        # S4 (gate round 2): versions pinned via `pkg=version`, not a bare
-        # `apt-get install pkg`, so a runner-image apt-source bump can't
-        # silently change which PostgreSQL/PostGIS/pgTAP build this job
-        # tests against. Pinned to the exact versions available in this
-        # session's own devcontainer (24.04 noble). If ubuntu-latest's
-        # mirror ever ages these out (older versions are periodically
-        # pruned from Ubuntu's archive, unlike Debian snapshots), this
-        # step starts failing with "Version 'X' … not found" — bump the
-        # pins to the new `apt-cache policy postgresql-16` candidate
-        # rather than removing them.
+        # S4 (gate round 2), revised after the first CI run: exact
+        # `pkg=version` pins to this devcontainer's Ubuntu builds failed on
+        # the runner ("Package postgresql-16 is not available"). The
+        # ubuntu-24.04 runner image ships PostgreSQL 16 preinstalled from
+        # the PGDG repo (actions/runner-images install-postgresql.sh), so
+        # this step installs PostGIS/pgTAP from that same PGDG repo, with
+        # the repo signing key checked against its published fingerprint.
+        # PGDG prunes superseded builds from its pool, so versions are
+        # pinned to the major line (PostgreSQL 16, PostGIS 3) and the exact
+        # installed builds are printed below for the record, rather than
+        # pinned exactly (an exact pin here would break on every PGDG patch
+        # release).
         run: |
           set -euo pipefail
+          PGDG_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/pgdg.asc
+          got=$(gpg --show-keys --with-colons /tmp/pgdg.asc | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ "$got" != "$PGDG_FPR" ]; then
+            echo "PGDG key fingerprint mismatch: $got" >&2
+            exit 1
+          fi
+          gpg --dearmor < /tmp/pgdg.asc | sudo tee /usr/share/keyrings/pgdg.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            postgresql-16=16.13-0ubuntu0.24.04.1 \
-            postgresql-16-postgis-3=3.4.2+dfsg-1ubuntu3 \
-            postgresql-16-postgis-3-scripts=3.4.2+dfsg-1ubuntu3 \
-            postgresql-16-pgtap=1.3.2-2 \
-            libtap-parser-sourcehandler-pgtap-perl=3.36-2
+            postgresql-16 \
+            postgresql-16-postgis-3 \
+            postgresql-16-postgis-3-scripts \
+            postgresql-16-pgtap \
+            libtap-parser-sourcehandler-pgtap-perl
+          dpkg-query -W -f='${Package} ${Version}\n' \
+            postgresql-16 postgresql-16-postgis-3 postgresql-16-pgtap libtap-parser-sourcehandler-pgtap-perl
 
       - name: Set up pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
