@@ -44,18 +44,24 @@ workout reads `testRound: false`.
 
 **Log the "Recorded export" UTC date FIRST instead (decision 0005) — this is what now gates the
 tools.** Before reading either OS's export, add that OS's UTC date to `docs/p0/X1.md`'s "## Recorded
-export" section. `x1-ios-export --os ios` and `x1-verdict --os ios|android` both refuse to produce the
-RECORDED X1 result for an OS whose date there is still blank; pass `--informational` to run anyway
-(the output is then marked `recorded: false` with a loud banner — useful for a dry run against real
-data before the recorded round, never the P0 verdict itself) — **except in the window between logging
-the date and the tools binding a SHA-256 to it**, where `--informational` is refused too (round-2
-Opus-gate correction, post-67bdb27: "no informational peeking before binding" — use a synthetic
-fixture instead if a dry run is genuinely needed then). Each tool binds ITS OWN os's export by a fresh
-UTC date + SHA-256 match, and refuses in a shallow git clone, an uncommitted `docs/p0/X1.md`, or if git
-history shows a bound hash ever changed. **A recorded X1 verdict is decided per OS, never combined
-across a single `x1-verdict` call's two inputs** — run `x1-verdict --os ios` after the iOS pass and
-`x1-verdict --os android` after the Android pass; each writes its OWN os's `result:pass`/`result:kill`
-into `docs/p0/X1.md`, and the overall X1 result reads both back from there (pass if either passed).
+export" section. `x1-ios-export --os ios` and `x1-verdict` (which now takes `--ios-export <dir>`
+and/or `--android <json>` — no `--os` flag any more) both refuse to produce the RECORDED X1 result for
+an OS whose date there is still blank; pass `--informational` to run anyway, but **only against a
+synthetic fixture under `tools/p0/test/fixtures/`, never real device data, while that OS is unbound**
+(round-3 Opus-gate correction, post-8e5a29b, superseding round 2's narrower "only in the logged-but-
+unbound gap" — now it's "no informational runs on real data while unbound," full stop; once an OS is
+bound, `--informational` may run against any path). Each tool binds ITS OWN OS's export by a fresh UTC
+date + SHA-256 match. **A recorded X1 verdict is decided per OS, RECOMPUTED FRESH from that OS's bound
+file every single time `x1-verdict` runs — nothing about the result is ever stored in
+`docs/p0/X1.md` or read back from it** (round-3 Opus-gate correction, post-8e5a29b, simplifying round
+2's `result:pass`/`result:kill`-line design and its accompanying git-history tampering scan, per the
+gate's explicit "fix by simplifying" instruction). Run `x1-verdict --ios-export <dir>` after the iOS
+pass and `x1-verdict --android <json>` after the Android pass (or both together, once both are
+bound) — each call verifies and recomputes whichever OS(es) it's given, and the overall result is
+"pass if any of them recomputed to pass." **The real protection against a rewritten local git history
+is procedural, not automatic:** commit AND PUSH `docs/p0/X1.md` to GitHub immediately after any run
+that binds a new hash (the tool prints "commit and push docs/p0/X1.md now" when it does) — the same
+discipline decision 0001 Addendum F relies on for K2's exclusion dating.
 
 Play **one real round (~4 h)** carrying all three iOS sources simultaneously where possible (Garmin watch +
 Apple Watch + phone with a golf app), so one round covers all three:

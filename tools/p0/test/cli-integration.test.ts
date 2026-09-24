@@ -223,6 +223,29 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     ).rejects.toMatchObject({ stderr: expect.stringContaining('not "android"') });
   });
 
+  // Round-3 Opus-gate correction: same shape check, the other required
+  // field — "os and generatedAt" (Tests item: "Android JSON without os/
+  // generatedAt fields is refused").
+  it("x1-verdict CLI refuses when --android's JSON has no generatedAt field", async () => {
+    const badAndroidJson = path.join(OUT_DIR, "x1-verdict-android-no-generated-at.json");
+    writeFileSync(
+      badAndroidJson,
+      JSON.stringify({ os: "android", windowDays: 7, sessionCount: 0, sessions: [] }),
+    );
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--android",
+        badAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--informational",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-bad-android-generated-at-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("no generatedAt") });
+  });
+
   // Round-3 Opus-gate correction: "No informational runs on real data while
   // an OS is unbound" — minimalAndroidJson is a real (non-fixture) path,
   // and Android has no bound hash in the real, blank docs/p0/X1.md.
