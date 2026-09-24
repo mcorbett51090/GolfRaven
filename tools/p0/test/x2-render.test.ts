@@ -450,30 +450,31 @@ describe("x2-render: renderUrl — main-frame navigation control (gate finding)"
     );
   });
 
-  it("does NOT block a sub-frame (iframe) navigation to a SAME host", async () => {
-    const { context } = makeFakeContext({
-      requests: [
-        SAME_HOST_NAV,
-        { url: "https://golfvancouverisland.ca/iframe-widget", isNavigation: true, mainFrame: false },
-      ],
+  it("does NOT block a sub-frame (iframe) navigation to a SAME host — it is CONTINUED, not aborted", async () => {
+    const iframeUrl = "https://golfvancouverisland.ca/iframe-widget";
+    const { context, abortedUrls, continuedUrls } = makeFakeContext({
+      requests: [SAME_HOST_NAV, { url: iframeUrl, isNavigation: true, mainFrame: false }],
     });
     const { launch } = fakeLauncher(context);
     const result = await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
     expect(result.finalUrl).toBe(SAME_HOST_URL);
+    expect(continuedUrls()).toContain(iframeUrl);
+    expect(abortedUrls()).not.toContain(iframeUrl);
   });
 
-  it("gate finding: an off-host iframe navigation is aborted (falls through to the off-host block, same as a subresource)", async () => {
-    const { context } = makeFakeContext({
-      requests: [
-        SAME_HOST_NAV,
-        { url: "https://127.0.0.1:8443/tp.html", isNavigation: true, mainFrame: false },
-      ],
+  it("gate finding: an off-host iframe navigation IS ABORTED (falls through to the off-host block, same as a subresource) — asserted directly, not just inferred from a non-throw", async () => {
+    const iframeUrl = "https://127.0.0.1:8443/tp.html";
+    const { context, abortedUrls, continuedUrls } = makeFakeContext({
+      requests: [SAME_HOST_NAV, { url: iframeUrl, isNavigation: true, mainFrame: false }],
     });
     const { launch } = fakeLauncher(context);
-    // Does not throw — an off-host IFRAME is silently aborted like any
-    // other off-host subresource, it does not fail the whole capture.
+    // Does not throw — an off-host IFRAME is aborted like any other
+    // off-host subresource, it does not fail the whole capture — but the
+    // abort itself is asserted directly here, not just inferred.
     const result = await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
     expect(result.finalUrl).toBe(SAME_HOST_URL);
+    expect(abortedUrls()).toContain(iframeUrl);
+    expect(continuedUrls()).not.toContain(iframeUrl);
   });
 
   it("treats a navigation request whose frame() throws as the main frame (Playwright's own documented early-navigation case)", async () => {

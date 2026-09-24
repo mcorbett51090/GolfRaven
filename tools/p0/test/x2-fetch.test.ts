@@ -11,6 +11,7 @@ import {
 import type {
   BrowserLike,
   ChromiumLauncher,
+  ContextLike,
   PageLike,
 } from "../src/x2-render.js";
 import { buildMinimalPdf } from "./fixtures/pdf/build-mini-pdf.js";
@@ -265,35 +266,18 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
 
 /** A minimal PageLike that passes every request through unmodified — for
  * tests in THIS file that exercise `runX2Fetch`'s render plumbing, not
- * `x2-render.ts`'s own off-host/https/byte-cap logic (that logic has its
- * own dedicated, thorough coverage in `x2-render.test.ts`). */
-function passthroughPage(opts: {
-  status?: number;
-  finalUrl: string;
-  html: string;
-  onHeaders?: (headers: Record<string, string>) => void;
-}): PageLike {
+ * `x2-render.ts`'s own off-host/https/byte-cap/isolation logic (that logic
+ * has its own dedicated, thorough coverage in `x2-render.test.ts`). */
+function passthroughPage(opts: { status?: number; finalUrl: string; html: string }): PageLike {
   return {
-    async setExtraHTTPHeaders(headers) {
-      opts.onHeaders?.(headers);
-    },
-    async route(_pattern, _handler) {
-      // No-op: every request this fake page "sees" is implicitly allowed,
-      // since it never actually feeds anything through the handler.
-    },
-    on() {},
-    mainFrame() {
-      return {};
-    },
     url() {
       return opts.finalUrl;
     },
+    mainFrame() {
+      return {};
+    },
     async goto() {
-      return {
-        status: () => opts.status ?? 200,
-        url: () => opts.finalUrl,
-        headers: () => ({}),
-      };
+      return { status: () => opts.status ?? 200, url: () => opts.finalUrl, headers: () => ({}) };
     },
     async content() {
       return opts.html;
@@ -302,26 +286,36 @@ function passthroughPage(opts: {
   };
 }
 
+/** A minimal ContextLike matching the passthrough page above — routing/
+ * websocket/popup handlers are all no-ops, since this file exercises
+ * `runX2Fetch`'s plumbing, not `x2-render.ts`'s own isolation logic. */
+function passthroughContext(page: PageLike): ContextLike {
+  return {
+    async newPage() {
+      return page;
+    },
+    async route() {},
+    async routeWebSocket() {},
+    on() {},
+    async close() {},
+  };
+}
+
 function fakeRenderLauncher(opts: {
   status?: number;
   finalUrl: string;
   html: string;
-}): { launch: ChromiumLauncher; userAgentSeen: string | null } {
-  const state = { userAgentSeen: null as string | null };
-  const page = passthroughPage({
-    ...opts,
-    onHeaders: (h) => {
-      state.userAgentSeen = h["User-Agent"] ?? null;
-    },
-  });
+}): { launch: ChromiumLauncher } {
+  const page = passthroughPage(opts);
+  const context = passthroughContext(page);
   const browser: BrowserLike = {
-    async newPage() {
-      return page;
+    async newContext() {
+      return context;
     },
     async close() {},
   };
   const launch: ChromiumLauncher = async () => browser;
-  return { launch, userAgentSeen: state.userAgentSeen };
+  return { launch };
 }
 
 describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", () => {
