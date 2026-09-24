@@ -117,6 +117,19 @@ export interface X2FetchEntry {
    * date the OWNER states they saved the page — `null` for `"direct"`/
    * `"rendered"` entries, where `fetchedAt` already is that date. */
   ownerSavedDate: string | null;
+  /** `"rendered"` entries only: the Chromium args actually used for this
+   * render (`validateRenderExtraArgs`-checked — see `x2-render.ts`), so a
+   * manifest reader can see exactly what ran, including any SPKI pin, for
+   * every render — `null` for `"direct"`/`"owner-saved"` entries, and `[]`
+   * (not `null`) for a render that used no extra args at all. */
+  renderArgs: string[] | null;
+  /** Addendum J correction (first-capture-wins): true when this is the
+   * recorded capture of this URL+method pair — the only one a confirmation
+   * file may cite (`x2-verdict` refuses otherwise). `x2-fetch`'s own
+   * `direct`/`rendered` entries are always the sole capture within one
+   * manifest and so are always `true`; `x2-ingest` is what can produce a
+   * `false` one (a second owner-saved capture, `--additional`). */
+  recorded: boolean;
 }
 
 export interface X2FetchManifest {
@@ -138,6 +151,10 @@ function failedEntry(
     blocked?: boolean;
     httpStatus?: number | "owner-saved" | null;
     finalUrl?: string | null;
+    /** `method: "rendered"` failures only — the args that were IN USE
+     * (validated or not) when the render failed, so even a failed capture
+     * shows what Chromium args were attempted. */
+    renderArgs?: string[];
   },
 ): X2FetchEntry {
   return {
@@ -158,6 +175,8 @@ function failedEntry(
     draftCandidateNames: [],
     method: opts.method,
     ownerSavedDate: null,
+    renderArgs: opts.method === "rendered" ? (opts.renderArgs ?? []) : null,
+    recorded: true,
   };
 }
 
@@ -355,6 +374,8 @@ async function fetchOne(
       draftCandidateNames,
       method: "direct",
       ownerSavedDate: null,
+      renderArgs: null,
+      recorded: true,
     };
   } finally {
     // Gate S6: the timer stays live through the ENTIRE fetch — including
@@ -382,6 +403,7 @@ async function fetchOneRendered(
   } = {},
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
+  const attemptedArgs = renderOpts.extraArgs ?? [];
 
   let parsedUrl: URL;
   try {
@@ -392,7 +414,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `not a valid URL: "${url}" (gate N6)`,
-      { method: "rendered" },
+      { method: "rendered", renderArgs: attemptedArgs },
     );
   }
   if (parsedUrl.protocol !== "https:") {
@@ -401,7 +423,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `refusing to render non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
-      { method: "rendered" },
+      { method: "rendered", renderArgs: attemptedArgs },
     );
   }
 
@@ -423,7 +445,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `render failed: ${err instanceof Error ? err.message : String(err)}`,
-      { method: "rendered" },
+      { method: "rendered", renderArgs: attemptedArgs },
     );
   }
 
@@ -435,7 +457,7 @@ async function fetchOneRendered(
         url,
         fetchedAt,
         `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
-        { httpStatus: status, finalUrl, method: "rendered" },
+        { httpStatus: status, finalUrl, method: "rendered", renderArgs: attemptedArgs },
       );
     }
   } catch {
@@ -448,7 +470,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `render navigation returned HTTP ${status}`,
-      { httpStatus: status, finalUrl, method: "rendered" },
+      { httpStatus: status, finalUrl, method: "rendered", renderArgs: attemptedArgs },
     );
   }
 
@@ -459,7 +481,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `rendered content exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes (gate S6)`,
-      { httpStatus: status, finalUrl, method: "rendered" },
+      { httpStatus: status, finalUrl, method: "rendered", renderArgs: attemptedArgs },
     );
   }
 
@@ -491,6 +513,8 @@ async function fetchOneRendered(
     draftCandidateNames,
     method: "rendered",
     ownerSavedDate: null,
+    renderArgs: attemptedArgs,
+    recorded: true,
   };
 }
 
