@@ -294,8 +294,24 @@ CREATE POLICY pd_public_profile_delete ON app.public_profile_projection FOR DELE
 CREATE POLICY pd_public_profile_delete_r ON app.public_profile_projection FOR SELECT TO private_definer USING (handle = nullif(current_setting('app.delete_my_data.target_handle', true), ''));
 CREATE POLICY pd_receipt_fingerprint_update ON app.receipt_fingerprint FOR UPDATE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (user_id IS NULL);
 CREATE POLICY pd_receipt_fingerprint_update_r ON app.receipt_fingerprint FOR SELECT TO private_definer USING ((user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (user_id IS NULL));
-CREATE POLICY pd_storage_objects_delete ON storage.objects FOR DELETE TO private_definer USING (bucket_id = 'receipts' AND (owner = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR name LIKE 'receipts/' || current_setting('app.delete_my_data.target_user_id', true) || '/%'));
-CREATE POLICY pd_storage_objects_delete_r ON storage.objects FOR SELECT TO private_definer USING (bucket_id = 'receipts' AND (owner = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR name LIKE 'receipts/' || current_setting('app.delete_my_data.target_user_id', true) || '/%'));
+-- ⛔ FIX (HIGH-1 regression, post-P3a re-gate round 3, follow-up): the
+-- FIRST current_setting( in each of these two policies (the ::uuid-cast
+-- owner comparison) was wrapped in an earlier pass; the SECOND
+-- current_setting( (the LIKE-pattern text concatenation below) was
+-- deliberately left bare at the time, since concatenating '' into a text
+-- LIKE pattern never itself RAISES (unlike ''::uuid) -- it just matches
+-- nothing, which is fail-closed already. Wrapped anyway now: the fix
+-- requirement is "wrap EVERY GUC cast in EVERY private_definer policy...
+-- grep the migrations for current_setting( to find every one", and the
+-- new verify-function-inventory.mjs check #7 (deliberately blanket, not
+-- limited to ::cast sites, for exactly this reason) correctly caught this
+-- one as a live gap. nullif(x, '') on a bare text comparison is a no-op
+-- change in observable behaviour (a LIKE pattern built from '' already
+-- matched nothing; one built from NULL matches nothing too, since `LIKE
+-- NULL` is NULL, never true) -- this is uniformity with the rest of the
+-- file, not a behavioural fix.
+CREATE POLICY pd_storage_objects_delete ON storage.objects FOR DELETE TO private_definer USING (bucket_id = 'receipts' AND (owner = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR name LIKE 'receipts/' || nullif(current_setting('app.delete_my_data.target_user_id', true), '') || '/%'));
+CREATE POLICY pd_storage_objects_delete_r ON storage.objects FOR SELECT TO private_definer USING (bucket_id = 'receipts' AND (owner = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR name LIKE 'receipts/' || nullif(current_setting('app.delete_my_data.target_user_id', true), '') || '/%'));
 CREATE POLICY pd_profile_select ON app.profile FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
 
 -- ============================================================================
