@@ -555,6 +555,68 @@ SELECT throws_ok(
   'checkin_challenge: a DELETEd-then-re-INSERTed nonce_hash is still rejected by the consumed-nonce tombstone ledger, not just the table''s own UNIQUE constraint'
 );
 
+-- should-fix (post-P3a re-gate): nonce_hash/token_jti immutability closes
+-- the UPDATE-revive gap the tombstone-on-INSERT triggers alone leave open
+-- (an UPDATE changing an EXISTING row's nonce_hash/token_jti was never
+-- checked against private.consumed_nonce at all).
+SELECT throws_ok(
+  $$UPDATE app.checkin_challenge SET nonce_hash = 'nonce-money-path-1-revive-attempt' WHERE id = 'a1000000-0000-0000-0000-000000000003'$$,
+  '23514',
+  NULL,
+  'checkin_challenge.nonce_hash is immutable after insert (UPDATE-revive gap closed)'
+);
+SELECT throws_ok(
+  $$UPDATE app.attestation SET token_jti = 'jti-1-revive-attempt' WHERE id = 'a0000000-0000-0000-0000-000000000001'$$,
+  '23514',
+  NULL,
+  'attestation.token_jti is immutable after insert (UPDATE-revive gap closed)'
+);
+-- A no-op UPDATE (new value IS NOT DISTINCT FROM old) must still succeed
+-- -- the trigger checks for an actual CHANGE, not merely that the column
+-- was named in the UPDATE's SET clause.
+SELECT lives_ok(
+  $$UPDATE app.checkin_challenge SET nonce_hash = nonce_hash WHERE id = 'a1000000-0000-0000-0000-000000000003'$$,
+  'checkin_challenge.nonce_hash: a no-op UPDATE (same value) is allowed'
+);
+
+-- should-fix (post-P3a re-gate): private.purge_consumed_nonce TTL purge.
+SELECT lives_ok(
+  $$INSERT INTO private.consumed_nonce (nonce_hash, source, consumed_at)
+    VALUES ('purge-test-old-nonce', 'checkin_challenge', now() - interval '30 days')$$,
+  'setup: a consumed_nonce row backdated 30 days (older than the 7-day default retention)'
+);
+SELECT lives_ok(
+  $$INSERT INTO private.consumed_nonce (nonce_hash, source, consumed_at)
+    VALUES ('purge-test-recent-nonce', 'checkin_challenge', now() - interval '1 hour')$$,
+  'setup: a consumed_nonce row from 1 hour ago (well within the 7-day default retention)'
+);
+SELECT throws_ok(
+  $$SELECT private.purge_consumed_nonce(interval '1 hour')$$,
+  NULL,
+  NULL,
+  'purge_consumed_nonce rejects a retention shorter than the 1-day floor'
+);
+SELECT is(
+  (SELECT private.purge_consumed_nonce(interval '7 days')),
+  1::bigint,
+  'purge_consumed_nonce(7 days) deletes exactly the one row older than 7 days'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.consumed_nonce WHERE nonce_hash = 'purge-test-old-nonce'),
+  0,
+  'the 30-day-old consumed_nonce row is gone after purge'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.consumed_nonce WHERE nonce_hash = 'purge-test-recent-nonce'),
+  1,
+  'the 1-hour-old consumed_nonce row survives purge (within retention)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.consumed_nonce WHERE nonce_hash = 'nonce-money-path-1'),
+  1,
+  'a REAL (non-test-seeded) consumed_nonce row from this file''s own earlier tests also survives purge (well within retention)'
+);
+
 -- ---------------------------------------------------------------------------
 -- H1 (post-P3a gate) data test: delete_my_data must succeed when
 -- offer_code.play_id or entitlement.play_id is set. Dedicated player C

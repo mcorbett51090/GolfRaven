@@ -861,6 +861,83 @@ CREATE TRIGGER attestation_tombstone_nonce_trg
 BEFORE INSERT ON app.attestation
 FOR EACH ROW EXECUTE FUNCTION app.attestation_tombstone_nonce();
 
+-- ⛔ FIX (should-fix, post-P3a re-gate): "make checkin_challenge.nonce_hash
+-- and attestation.token_jti immutable after insert, with a BEFORE UPDATE
+-- trigger that raises if they change. This closes the UPDATE revive."
+-- The tombstone-on-insert triggers above only run at INSERT time — an
+-- UPDATE that changes an EXISTING row's nonce_hash/token_jti to some
+-- other value (including a previously-tombstoned one) was never checked
+-- against private.consumed_nonce at all, since no UPDATE trigger ever
+-- looked. Rather than duplicate the tombstone-check logic for UPDATE too
+-- (two places to keep in sync), these columns are simply made immutable
+-- once set: if the value can never change after INSERT, there is no
+-- UPDATE path left that could revive or relocate a consumed nonce/jti
+-- onto a different row.
+CREATE OR REPLACE FUNCTION app.checkin_challenge_nonce_hash_immutable() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.nonce_hash IS DISTINCT FROM OLD.nonce_hash THEN
+    RAISE EXCEPTION 'checkin_challenge: nonce_hash is immutable after insert (id=%, old=%, attempted new=%)', OLD.id, OLD.nonce_hash, NEW.nonce_hash
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER checkin_challenge_nonce_hash_immutable_trg
+BEFORE UPDATE ON app.checkin_challenge
+FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_nonce_hash_immutable();
+
+CREATE OR REPLACE FUNCTION app.attestation_token_jti_immutable() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.token_jti IS DISTINCT FROM OLD.token_jti THEN
+    RAISE EXCEPTION 'attestation: token_jti is immutable after insert (id=%, old=%, attempted new=%)', OLD.id, OLD.token_jti, NEW.token_jti
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER attestation_token_jti_immutable_trg
+BEFORE UPDATE ON app.attestation
+FOR EACH ROW EXECUTE FUNCTION app.attestation_token_jti_immutable();
+
+-- ⛔ FIX (should-fix, post-P3a re-gate): "add a TTL purge function; keep
+-- tombstones at least as long as the maximum challenge validity plus a
+-- margin, and document the value." Neither checkin_challenge nor
+-- attestation documents an explicit maximum validity window anywhere in
+-- this repo (grepped docs/ and every migration this session) — the one
+-- comparable documented window is course_qr_token.expires_at, "issued_at
+-- + 120s" (0005). Rather than assume checkin_challenge/attestation share
+-- that exact number `[unverified]`, RETENTION_DAYS below is set far
+-- larger than any plausible challenge validity (minutes to low hours,
+-- going by that analog) so it is safely "max validity plus a margin"
+-- under any reasonable real value, while still bounding this
+-- append-only table's growth. Re-tune down once a real validity window
+-- is documented — this is a deliberately conservative default, not a
+-- verified figure.
+CREATE OR REPLACE FUNCTION private.purge_consumed_nonce(p_retention interval DEFAULT interval '7 days')
+RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_deleted bigint;
+BEGIN
+  IF p_retention < interval '1 day' THEN
+    RAISE EXCEPTION 'purge_consumed_nonce: p_retention (%) is less than the 1-day floor — this table exists specifically to outlive any single challenge/attestation''s validity window', p_retention;
+  END IF;
+  DELETE FROM private.consumed_nonce WHERE consumed_at < now() - p_retention;
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN v_deleted;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce(interval) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce(interval) TO service_role;
+
 -- ============================================================================
 -- S1 close-out follow-through: register the two new triggers' owning
 -- functions + app.reserve_offer_budget/app.dedupe_receipt_fingerprint in
@@ -903,7 +980,10 @@ VALUES
   ('app', 'checkin_challenge_used_at_once', '', false, false, false, 'trigger function (app.checkin_challenge_used_at_once_trg) -- never EXECUTEd directly by any role'),
   ('app', 'checkin_challenge_tombstone_nonce', '', false, false, false, 'trigger function (app.checkin_challenge_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
   ('app', 'attestation_tombstone_nonce', '', false, false, false, 'trigger function (app.attestation_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'checkin_challenge_nonce_hash_immutable', '', false, false, false, 'trigger function (app.checkin_challenge_nonce_hash_immutable_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'attestation_token_jti_immutable', '', false, false, false, 'trigger function (app.attestation_token_jti_immutable_trg) -- never EXECUTEd directly by any role'),
   ('app', 'reserve_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + reserves offer budget (checks status/validity window too); called by the (out-of-scope-this-stage) scorer/redemption Edge Function as service_role'),
   ('app', 'release_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + releases an unconsumed reservation; service_role-only'),
   ('app', 'consume_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + moves a reservation into budget_used; service_role-only'),
-  ('app', 'dedupe_receipt_fingerprint', 'p_purchase_evidence_id uuid, p_user_id uuid, p_phash text, p_facility_id text, p_local_date date, p_receipt_number_ocr text', false, false, true, 'serialized receipt-phash dedupe; called by the (out-of-scope-this-stage) receipt-ingestion Edge Function as service_role');
+  ('app', 'dedupe_receipt_fingerprint', 'p_purchase_evidence_id uuid, p_user_id uuid, p_phash text, p_facility_id text, p_local_date date, p_receipt_number_ocr text', false, false, true, 'serialized receipt-phash dedupe; called by the (out-of-scope-this-stage) receipt-ingestion Edge Function as service_role'),
+  ('private', 'purge_consumed_nonce', 'p_retention interval', false, false, true, 'TTL purge for private.consumed_nonce (should-fix, post-P3a re-gate); called by an (out-of-scope-this-stage) scheduled job as service_role');

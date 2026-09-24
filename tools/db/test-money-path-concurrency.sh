@@ -160,6 +160,46 @@ else
 fi
 "${PSQL[@]}" -c "DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG_XU'; DELETE FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_3', '$PE_4'); DELETE FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4');" >/dev/null
 
+echo "tools/db/test-money-path-concurrency.sh: receipt OCR dedupe race, CROSS user (post-P3a re-gate correction)"
+# ⛔ FIX (post-P3a re-gate, correction): an OCR collision is the SAME
+# griefing vector as a phash collision when it's the SAME physical
+# receipt (both the phash AND the OCR number match) -- this race proves
+# the OCR path is ALSO race-safe under two real concurrent sessions,
+# same as the phash path above. Different phashes on purpose (so this
+# exercises the OCR unique-index/EXCEPTION path specifically, not the
+# phash SELECT path).
+TAG_OCR_XU="OCR-${TAG}-xu"
+"${PSQL[@]}" -c "DELETE FROM app.purchase_evidence WHERE id::text LIKE 'c1a00005%'; DELETE FROM app.receipt_fingerprint WHERE receipt_number_ocr = '$TAG_OCR_XU'; DELETE FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id::text LIKE 'c1a00005%';" >/dev/null 2>&1 || true
+PE_5="c1a00005-0000-0000-0000-000000000001"
+PE_6="c1a00005-0000-0000-0000-000000000002"
+"${PSQL[@]}" -c "
+  INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+  VALUES ('$PE_5'::uuid, '00000000-0000-0000-0000-00000000000a', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid'),
+         ('$PE_6'::uuid, '00000000-0000-0000-0000-00000000000b', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')
+  ON CONFLICT (id) DO NOTHING;
+" >/dev/null
+
+DEDUPE_5="SELECT app.dedupe_receipt_fingerprint('$PE_5'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, '${TAG}-ocr-xu-a', 'fac_x', current_date, '$TAG_OCR_XU');"
+DEDUPE_6="SELECT app.dedupe_receipt_fingerprint('$PE_6'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid, '${TAG}-ocr-xu-b', 'fac_x', current_date, '$TAG_OCR_XU');"
+"${PSQL[@]}" -c "$DEDUPE_5" >/tmp/mpconc-d5.out 2>/tmp/mpconc-d5.err &
+PID9=$!
+"${PSQL[@]}" -c "$DEDUPE_6" >/tmp/mpconc-d6.out 2>/tmp/mpconc-d6.err &
+PID10=$!
+wait "$PID9" "$PID10" || true
+
+FP_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.receipt_fingerprint WHERE receipt_number_ocr = '$TAG_OCR_XU'")
+VOID_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_5', '$PE_6') AND status = 'void'")
+PENDING_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_5', '$PE_6') AND status = 'pending'")
+REVIEW_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_5', '$PE_6')")
+if [ "$FP_COUNT_OCR_XU" != "1" ] || [ "$VOID_COUNT_OCR_XU" != "0" ] || [ "$PENDING_COUNT_OCR_XU" != "2" ] || [ "$REVIEW_COUNT_OCR_XU" -lt "1" ]; then
+  echo "FAIL: concurrent CROSS-USER OCR dedupe race: fp=$FP_COUNT_OCR_XU void=$VOID_COUNT_OCR_XU pending=$PENDING_COUNT_OCR_XU review=$REVIEW_COUNT_OCR_XU (expected fp=1 void=0 pending=2 review>=1)" >&2
+  cat /tmp/mpconc-d5.out /tmp/mpconc-d6.out /tmp/mpconc-d5.err /tmp/mpconc-d6.err >&2 || true
+  FAILED=1
+else
+  echo "PASS: concurrent CROSS-USER OCR dedupe race -> exactly 1 fingerprint row, ZERO voided, both left pending, review_item opened (no griefing)"
+fi
+"${PSQL[@]}" -c "DELETE FROM app.receipt_fingerprint WHERE receipt_number_ocr = '$TAG_OCR_XU'; DELETE FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_5', '$PE_6'); DELETE FROM app.purchase_evidence WHERE id IN ('$PE_5', '$PE_6');" >/dev/null
+
 echo "tools/db/test-money-path-concurrency.sh: dedupe_receipt_fingerprint isolation-level guard (M4)"
 # M4 fix 1: dedupe_receipt_fingerprint asserts transaction_isolation =
 # read committed and raises otherwise -- pgTAP cannot exercise this (its
