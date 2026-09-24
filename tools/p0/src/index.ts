@@ -15,3 +15,7 @@ export * from "./x2-fetch.js";
 export * from "./x2-verdict.js";
 export * from "./x4-verify.js";
 export * from "./p0-desk.js";
+export * from "./k1-log.js";
+export * from "./k1-verdict.js";
+export * from "./k3-log.js";
+export * from "./k3-verdict.js";

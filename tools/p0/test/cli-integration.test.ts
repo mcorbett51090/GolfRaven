@@ -8,7 +8,7 @@
  * needing a build).
  */
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,4 +73,59 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   // exercised here (task requirement: no network calls in tests). That is
   // done once, manually, outside the test suite — see the task report and
   // README "Known risk" / STATUS notes.
+
+  // k1-verdict / k3-verdict: each CLI test reads a FROZEN copy of the log
+  // (test/fixtures/k1-log-empty.md, test/fixtures/k3-memo-blank.md, copied
+  // from the repo docs before any data was logged), passed with --log /
+  // --memo. Reading the live repo docs would make these tests change result
+  // as the calendar moves past 2026-10-20 or as soon as Matt logs real data.
+  // Pinned as-of 2026-09-24 is before both K1 windows close, so the read is
+  // pending ("n so far"), never MISS/PASS (decision 0001, Addendum I).
+  it("k1-verdict CLI: empty log, as-of 2026-09-24 → pending, no MISS/PASS", async () => {
+    const outPrefix = path.join(OUT_DIR, "k1-verdict-result");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "k1-verdict.js"),
+      "--log", path.join(FIXTURES, "k1-log-empty.md"),
+      "--as-of", "2026-09-24",
+      "--out", outPrefix,
+    ]);
+    expect(stdout).toContain("so far");
+    expect(stdout).toContain("Full gate state: pending");
+    expect(stdout).not.toMatch(/\bMISS\b/);
+    expect(stdout).not.toMatch(/\bPASS\b/);
+    // A --log run is stamped as NOT the recorded log (provenance, gate round 3).
+    expect(stdout).toContain("NOT THE RECORDED K1 LOG");
+    const json = JSON.parse(readFileSync(`${outPrefix}.json`, "utf8"));
+    expect(json.source.isRepoLog).toBe(false);
+    expect(json.source.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  // Decision 0001, Addendum I ("the read date is real"): a --as-of later than
+  // today (UTC, the real system clock) is refused. "Tomorrow" is computed at
+  // run time so the test never goes stale.
+  it("k1-verdict CLI refuses a --as-of later than today", async () => {
+    const outPrefix = path.join(OUT_DIR, "k1-verdict-result-future");
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "k1-verdict.js"),
+        "--log", path.join(FIXTURES, "k1-log-empty.md"),
+        "--as-of", tomorrow,
+        "--out", outPrefix,
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("later than today") });
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
+  });
+
+  it("k3-verdict CLI refuses (non-zero exit) on a memo with a blank property id", async () => {
+    const outPrefix = path.join(OUT_DIR, "k3-verdict-result");
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "k3-verdict.js"),
+        "--memo", path.join(FIXTURES, "k3-memo-blank.md"),
+        "--out", outPrefix,
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("property id") });
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
+  });
 });

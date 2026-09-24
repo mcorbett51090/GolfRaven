@@ -14,7 +14,10 @@ both fixed before the data is read (O7 DECIDED 2026-09-23: kept as written).
    before reading any number, not in Part B).
 4. Set a **custom date range** of **July 1, 2026 – September 30, 2026** — the three months are fixed
    (decision 0001, Addendum D, R4), not "the three most recent complete calendar months before the read
-   date."
+   date." **Do not open this report before 2026-10-01** (decision 0001, Addendum I) — reading any earlier
+   would lock in a partial September 2026. Record the date you actually read it in `docs/p0/K3.md`'s
+   Search Console table (one "Read date" cell, any of the three rows); `k3-verdict` refuses to run if that
+   date is blank or earlier than 2026-10-01.
 5. In the results table, switch the metric view to show **Clicks** by date (the chart above the table, or
    export the full date-by-date breakdown).
 6. **Export**: use the "Export" button (top right of the Performance report) → **Google Sheets** or **CSV**,
@@ -49,7 +52,9 @@ both fixed before the data is read (O7 DECIDED 2026-09-23: kept as written).
    typically shows a **range** (e.g. "1K–10K") rather than an exact number
    `[unverified — training knowledge; A79]`.
 6. **Use the range's lower bound** for every term (per the plan's explicit instruction), not the midpoint or
-   upper bound.
+   upper bound. If the Planner reports an exact point figure for a term instead of a range, record it in
+   `docs/p0/K3.md` as `Lower bound = Upper bound = that figure` — there is no separate "Point value" column
+   (decision 0001, Addendum I).
 7. **Sum the lower bounds across the six terms** to get the combined golf-keyword volume figure. **If two of
    the six terms return the identical range, count that range once** (decision 0001, Addendum D, R5 — this
    replaces Addendum B's "exact-match only" wording, since the Planner may report one combined volume for
