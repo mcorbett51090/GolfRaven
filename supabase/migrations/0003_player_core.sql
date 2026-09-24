@@ -135,8 +135,19 @@ CREATE INDEX purchase_evidence_facility_idx ON app.purchase_evidence (facility_i
 -- receipt_fingerprint — build plan line 835. "kept 24 months (no image)".
 CREATE TABLE app.receipt_fingerprint (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  purchase_evidence_id uuid NOT NULL REFERENCES app.purchase_evidence (id) ON DELETE CASCADE,
-  user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  -- Nullable, ON DELETE SET NULL (not CASCADE): private.delete_my_data()
+  -- deletes the player's app.purchase_evidence rows outright (§10 AT(6),
+  -- "removes all personal rows"), but this row's own columns
+  -- (phash/facility_id/local_date/receipt_number_ocr) already carry
+  -- everything the 24-month cross-account fraud match (line 835) needs —
+  -- a CASCADE here would silently defeat that retention the moment an
+  -- account (honest or fraudulent) deletes itself.
+  purchase_evidence_id uuid REFERENCES app.purchase_evidence (id) ON DELETE SET NULL,
+  -- Nullable (not "NOT NULL"): private.delete_my_data() nulls this on
+  -- account deletion rather than deleting the row, so the 24-month
+  -- fraud-fingerprint retention (line 835) survives account deletion while
+  -- the row stops being a "personal row" of the deleted account (§10 AT(6)).
+  user_id uuid REFERENCES auth.users (id) ON DELETE SET NULL,
   phash text NOT NULL,
   receipt_number_ocr text,
   facility_id text NOT NULL REFERENCES app.catalog_facility (id),
