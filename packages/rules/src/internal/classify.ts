@@ -529,7 +529,7 @@ export function finish(
  * now a real, supported (if narrow) path: direct unit tests.
  */
 export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
-  const rowOk = row.facilityId === ctx.playFacilityId; // MUTATED: row-date check removed from rowOk (date clause dropped)
+  const rowOk = row.facilityId === ctx.playFacilityId && row.localDate === ctx.playLocalDate;
   switch (row.source) {
     case "staff_presence": {
       // §4.5 line 990: "a co-signal within ±10 min", now including the
