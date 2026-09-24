@@ -100,6 +100,24 @@ SELECT pass('precondition confirmed: app.delete_my_data.target_user_id reads '''
 -- other matrix file.
 -- ---------------------------------------------------------------------------
 BEGIN;
+
+-- ⛔ FIX (this file, HARNESS_MODE=restricted failure): tests.authenticate_as
+-- (supabase/tests/shim.sql) does `SET LOCAL ROLE <p_role>` -- is_local,
+-- the EXACT SAME "reverts at the enclosing transaction's COMMIT, not at
+-- RESET" semantics this whole file exists to test for the
+-- delete_my_data GUC. The first BEGIN block's own `tests.authenticate_as
+-- ('service_role', ...)` call (above) therefore reverted at THIS file's
+-- own mid-file COMMIT, back to whatever role the session actually
+-- connected as -- harmless under HARNESS_MODE=superuser (that's
+-- `postgres`, a real superuser, which bypasses RLS/grants regardless of
+-- the active ROLE), but under HARNESS_MODE=restricted that is
+-- `migration_owner` (NOSUPERUSER NOBYPASSRLS), so every INSERT/UPDATE
+-- below correctly started failing RLS/grants once the actor silently
+-- reverted -- confirmed empirically this round. Re-authenticate as
+-- service_role for THIS (fresh, still-open) transaction explicitly,
+-- rather than relying on the first block's now-expired grant.
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
 SELECT lives_ok(
   $$SET CONSTRAINTS app.offer_code_play_guard_trg, app.entitlement_play_guard_trg IMMEDIATE$$,
   'setup: check the play guards immediately for the rest of this file, so each write below actually exercises private.offer_code_play_guard/entitlement_play_guard''s own re-read at statement time, not at a commit this file never reaches'
