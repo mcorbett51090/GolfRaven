@@ -219,6 +219,9 @@ echo "tools/db/test.sh: all pgTAP matrix files passed"
 echo "tools/db/test.sh: replay/idempotency concurrency check (B4, AT(3), as $DBUSER)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-replay-concurrency.sh'"
 
+echo "tools/db/test.sh: money-path concurrency checks (H3 + should-fix, as $DBUSER)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-money-path-concurrency.sh'"
+
 echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
 PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \
   node "$ROOT_DIR/tools/db/verify-function-inventory.mjs"

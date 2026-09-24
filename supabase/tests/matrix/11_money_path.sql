@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(40);
+SELECT plan(52);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -294,6 +294,65 @@ SELECT throws_ok(
   '23514',
   NULL,
   'checkin_challenge.used_at cannot be changed once set (replay-protection trigger)'
+);
+
+-- M4/should-fix: attestation.token_jti and checkin_challenge.nonce_hash
+-- go through the SAME consumed-nonce tombstone ledger (private.
+-- consumed_nonce) -- a DELETE then re-INSERT of the identical nonce/jti
+-- must still be rejected, not just a plain duplicate while the original
+-- row exists (which the table's own UNIQUE constraint already covered).
+SELECT lives_ok(
+  $$DELETE FROM app.checkin_challenge WHERE id = 'a1000000-0000-0000-0000-000000000001'$$,
+  'setup: delete the checkin_challenge row seeded above (freeing its nonce_hash from the table''s own UNIQUE constraint)'
+);
+SELECT throws_ok(
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+    VALUES ('a1000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a',
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes')$$,
+  '23514',
+  NULL,
+  'checkin_challenge: a DELETEd-then-re-INSERTed nonce_hash is still rejected by the consumed-nonce tombstone ledger, not just the table''s own UNIQUE constraint'
+);
+
+-- ---------------------------------------------------------------------------
+-- H1 (post-P3a gate) data test: delete_my_data must succeed when
+-- offer_code.play_id or entitlement.play_id is set. Dedicated player C
+-- (a fresh auth.users row, not player A/B) so this doesn't interact with
+-- 09_delete_my_data.sql's own player A/staff@X flow.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000c0000001', 'player-c@example.test')$$,
+  'setup: player C''s auth.users row'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
+    VALUES ('43000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000c0000001',
+            'crs_x1', 'fac_x', current_date - 2, 'v1', 'confirmed')$$,
+  'setup: a play row for player C'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
+    VALUES ('72000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000001',
+            '00000000-0000-0000-0000-0000c0000001', 'fac_x', 'earned', '43000000-0000-0000-0000-000000000001')$$,
+  'setup: an offer_code for player C with play_id SET (H1''s exact reproduction shape)'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, play_id)
+    VALUES ('52000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000c0000001',
+            'special_marker', 'trl_t', 'redeemable', '43000000-0000-0000-0000-000000000001')$$,
+  'setup: an entitlement for player C with play_id SET (H1''s exact reproduction shape)'
+);
+SELECT lives_ok(
+  $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000c0000001'::uuid)$$,
+  'H1: delete_my_data succeeds when offer_code.play_id/entitlement.play_id are set (FK is deferrable + ON DELETE SET NULL, and delete_my_data nulls both explicitly too)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000001'),
+  0, 'the offer_code row (offer_code.user_id = delete_row) is deleted outright, play_id and all'
+);
+SELECT is(
+  (SELECT play_id FROM app.entitlement WHERE id = '52000000-0000-0000-0000-000000000001'),
+  NULL, 'the surviving entitlement row (entitlement.user_id = special, never deleted) has play_id nulled'
 );
 
 SELECT tests.clear_actor();
