@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCEW0G6DNBGDGCEHTQRDG",
+  "title": "100 unique courses",
+  "tier": "special",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "uniqueCourses" },
+    "right": { "kind": "literal", "value": 100 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

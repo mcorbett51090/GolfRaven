@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCEWP990WTDQ7C8JATJTG",
+  "title": "3 consecutive months",
+  "tier": "special",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "monthlyStreak" },
+    "right": { "kind": "literal", "value": 3 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": false
+}

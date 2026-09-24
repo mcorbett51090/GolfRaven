@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCEWF6X8FC6C0ZDVQCH88",
+  "title": "Both countries",
+  "tier": "special",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "countDistinct", "field": "country" },
+    "right": { "kind": "literal", "value": 2 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

@@ -79,6 +79,10 @@ describe("verify-catalog — must-pass fixtures", () => {
   it("mp-offer-terms-qc-with-fr: a QC-linked offerTerms WITH termsFr passes (S6 must-pass)", async () => {
     await expectPasses("mp-offer-terms-qc-with-fr");
   });
+
+  it("mp-achievement-good: two AchievementDefs referencing real trail/course/designer ids (part B must-pass)", async () => {
+    await expectPasses("mp-achievement-good");
+  });
 });
 
 describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)", () => {
@@ -419,5 +423,17 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
   it("item 4: a stub with no coordinates and no OSM join fails closed (TZ_UNVERIFIABLE)", () =>
     expectExactFail("mf-tz-unverifiable", [
       { code: "TZ_UNVERIFIABLE", path: "facilities[0].tz" },
+    ]));
+
+  // --- Part B: AchievementDef / RuleExpr wiring ---
+
+  it("part B: an achievement rule referencing an unknown trail id", () =>
+    expectExactFail("mf-achievement-unknown-trail", [
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_TRAIL", path: "achievements[0].rule" },
+    ]));
+
+  it("part B: an achievement rule that is statically unsatisfiable (R-F4-shaped)", () =>
+    expectExactFail("mf-achievement-unsatisfiable", [
+      { code: "RULE_UNSATISFIABLE", path: "achievements[0].rule" },
     ]));
 });

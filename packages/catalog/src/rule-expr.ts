@@ -334,14 +334,15 @@ const NumberLiteralSchema = z.strictObject({ kind: z.literal("literal"), value: 
  * "matches neither shape", so the simpler `z.union` is kept here). Needs
  * no `z.lazy`: it never refers back to `RuleExprSchema`, so there is no
  * cycle to break. */
-export const NumericOperandSchema: z.ZodType<NumericOperand> = z.union([
-  NumberLiteralSchema,
-  NumericAggregateCallSchema,
-]);
+export const NumericOperandSchema = z.union([NumberLiteralSchema, NumericAggregateCallSchema]);
 
 /** A `compare` node's operands are `NumericOperand`, never `RuleExpr`
- * itself — also no cycle, also no `z.lazy` needed. */
-export const CompareNodeSchema: z.ZodType<CompareNode> = z.strictObject({
+ * itself — also no cycle, also no `z.lazy` needed. Deliberately not
+ * annotated `: z.ZodType<CompareNode>` — see `AndNodeSchema`'s doc: an
+ * explicit `z.ZodType<X>` annotation on a `discriminatedUnion` MEMBER
+ * erases the static `propValues` Zod needs from it, confirmed against
+ * this Zod version directly (every member below is left for TS to infer). */
+export const CompareNodeSchema = z.strictObject({
   kind: z.literal("compare"),
   op: CompareOpSchema,
   left: NumericOperandSchema,
@@ -369,17 +370,17 @@ export const CompareNodeSchema: z.ZodType<CompareNode> = z.strictObject({
  * mutually-recursive helpers are legal — the callback body runs after the
  * whole module has finished evaluating, past any `const` TDZ).
  */
-export const AndNodeSchema: z.ZodType<AndNode> = z.strictObject({
+export const AndNodeSchema = z.strictObject({
   kind: z.literal("and"),
-  args: z.array(z.lazy(() => RuleExprSchema)).min(2),
+  args: z.array(z.lazy((): z.ZodType<RuleExpr> => RuleExprSchema)).min(2),
 });
-export const OrNodeSchema: z.ZodType<OrNode> = z.strictObject({
+export const OrNodeSchema = z.strictObject({
   kind: z.literal("or"),
-  args: z.array(z.lazy(() => RuleExprSchema)).min(2),
+  args: z.array(z.lazy((): z.ZodType<RuleExpr> => RuleExprSchema)).min(2),
 });
-export const NotNodeSchema: z.ZodType<NotNode> = z.strictObject({
+export const NotNodeSchema = z.strictObject({
   kind: z.literal("not"),
-  arg: z.lazy(() => RuleExprSchema),
+  arg: z.lazy((): z.ZodType<RuleExpr> => RuleExprSchema),
 });
 
 /**

@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCETZRFWPJJJMQG5MT15H",
+  "title": "First tee at Synthetic Golf Club",
+  "tier": "bronze",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "played", "courseId": "crs_01M39RCEWWQH25N81WMTW4Q52N" },
+    "right": { "kind": "literal", "value": 1 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

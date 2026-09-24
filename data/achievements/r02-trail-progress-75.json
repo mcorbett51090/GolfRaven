@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCEVAR81BA621MEFGV24F",
+  "title": "Trail 75% Complete",
+  "tier": "gold",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "trailProgress", "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM" },
+    "right": { "kind": "literal", "value": 0.75 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

@@ -32,6 +32,7 @@ import { readFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
+  AchievementDefSchema,
   COURSE_CONTENT_FIELDS,
   COURSE_DERIVED_FROM_ALLOWED_KEYS,
   FACILITY_CONTENT_FIELDS,
@@ -40,6 +41,7 @@ import {
   detectMergeCycle,
   resolveMergedId,
   tzLikelyContainsCoordinates,
+  type AchievementDef,
   type Course,
   type Facility,
   type IdLedger,
@@ -48,6 +50,7 @@ import {
   type RosterVersion,
   type Trail,
 } from "@golfraven/catalog";
+import { checkRuleExpr } from "@golfraven/rules";
 import { parseCatalogBundle, type CatalogBundle, type OsmContent } from "./bundle.js";
 import { loadBookingHostAllowList } from "./config.js";
 
@@ -145,6 +148,7 @@ function checkIds(
   );
   bundle.trails.forEach((t, i) => record(t.id, `trails[${i}].id`));
   (bundle.designers ?? []).forEach((d, i) => record(d.id, `designers[${i}].id`));
+  (bundle.achievements ?? []).forEach((a, i) => record(a.id, `achievements[${i}].id`));
 
   for (const [id, paths] of seenAt) {
     if (paths.length > 1) {
@@ -251,6 +255,14 @@ function checkCrossReferences(
   });
   (bundle.designers ?? []).forEach((designer, designerIndex) => {
     checkLedgerBacked(designer.id, undefined, `designers[${designerIndex}]`, "designer");
+  });
+  (bundle.achievements ?? []).forEach((achievement, achievementIndex) => {
+    checkLedgerBacked(
+      achievement.id,
+      undefined,
+      `achievements[${achievementIndex}]`,
+      "achievement",
+    );
   });
 
   // A ledger entry whose map key differs from its own `id` field.
@@ -984,6 +996,138 @@ function checkOfferTerms(bundle: CatalogBundle, issues: CatalogIssue[]): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* Part B: AchievementDef / RuleExpr (§8.1, §10 P1 AT(1))               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Every `AchievementDef.rule` is already schema-valid by the time this
+ * runs (`AchievementDefSchema` — embedded in `CatalogBundleSchema` — would
+ * have failed the whole bundle parse with `SCHEMA_INVALID` otherwise, the
+ * same split every other cross-record check in this file relies on). This
+ * function runs the two things a single Zod parse cannot check (§4.1's
+ * "static checker" — `@golfraven/rules`'s `checkRuleExpr`) and the id
+ * cross-references a `RuleExpr` makes into the rest of THIS catalog
+ * (a `trailId`/`courseId` a schema parse cannot know is real).
+ *
+ * **Every `AchievementDef` runs in `badge` mode (§4.1 line 630: "Achievements
+ * evaluate in badge mode... where polarity makes no difference")** — the
+ * task's own item 2 ("every definition `scope: 'verified-only'`") and
+ * §8.1's table header both name every §8.1 badge this way; `mode: 'money'`
+ * is exercised directly by `rule-expr-fixtures.test.ts` (R-14/R-F6/R-F7,
+ * none of which are `AchievementDef`s — R-14 is explicitly the §9.5 OFFER
+ * example, and an offer's `RuleExpr` lives on the DB-side offer instance,
+ * never in `data/achievements/*.json`, per `schema.ts`'s module doc).
+ */
+function checkAchievements(
+  bundle: CatalogBundle,
+  index: CatalogIndex,
+  issues: CatalogIssue[],
+): void {
+  const trailIds = new Set<string>(bundle.trails.map((t) => t.id));
+  const designerIds = new Set<string>((bundle.designers ?? []).map((d) => d.id));
+
+  (bundle.achievements ?? []).forEach((achievement: AchievementDef, i) => {
+    const path = `achievements[${i}]`;
+
+    for (const checkerIssue of checkRuleExpr(achievement.rule, { mode: "badge" })) {
+      issues.push(issue(checkerIssue.code, `${path}.${checkerIssue.path}`, checkerIssue.message));
+    }
+
+    walkRuleExprRefs(achievement.rule, (ref) => {
+      if (ref.kind === "trail" && !trailIds.has(ref.id)) {
+        issues.push(
+          issue(
+            "ACHIEVEMENT_RULE_UNKNOWN_TRAIL",
+            `${path}.rule`,
+            `achievement "${achievement.id}"'s rule references trail "${ref.id}", which is not in this catalog`,
+          ),
+        );
+      }
+      if (ref.kind === "course") {
+        const resolved = resolveMergedId(bundle.idLedger, ref.id);
+        if (!index.courseById.has(resolved) && !index.courseById.has(ref.id)) {
+          issues.push(
+            issue(
+              "ACHIEVEMENT_RULE_UNKNOWN_COURSE",
+              `${path}.rule`,
+              `achievement "${achievement.id}"'s rule references course "${ref.id}", which is not in this catalog`,
+            ),
+          );
+        }
+      }
+      if (ref.kind === "designer" && !designerIds.has(ref.id)) {
+        issues.push(
+          issue(
+            "ACHIEVEMENT_RULE_UNKNOWN_DESIGNER",
+            `${path}.rule`,
+            `achievement "${achievement.id}"'s rule references designer "${ref.id}", which is not in designers[] (§4.1 line 611)`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+/** Walks a `RuleExpr` tree, calling `visit` for every `trailId`/`courseId`
+ * and every `countWhere("designer", …)` value it references — the ids a
+ * schema parse cannot cross-check against the rest of the catalog. */
+function walkRuleExprRefs(
+  expr: import("@golfraven/catalog").RuleExpr,
+  visit: (ref: { kind: "trail" | "course" | "designer"; id: string }) => void,
+): void {
+  switch (expr.kind) {
+    case "and":
+    case "or":
+      expr.args.forEach((a) => walkRuleExprRefs(a, visit));
+      return;
+    case "not":
+      walkRuleExprRefs(expr.arg, visit);
+      return;
+    case "compare":
+      walkNumericOperandRefs(expr.left, visit);
+      walkNumericOperandRefs(expr.right, visit);
+      return;
+    default:
+      walkAggregateRefs(expr, visit);
+  }
+}
+
+function walkNumericOperandRefs(
+  operand: import("@golfraven/catalog").NumericOperand,
+  visit: (ref: { kind: "trail" | "course" | "designer"; id: string }) => void,
+): void {
+  if (operand.kind === "literal") return;
+  walkAggregateRefs(operand, visit);
+}
+
+function walkAggregateRefs(
+  agg: import("@golfraven/catalog").AggregateCall,
+  visit: (ref: { kind: "trail" | "course" | "designer"; id: string }) => void,
+): void {
+  switch (agg.name) {
+    case "played":
+      visit({ kind: "course", id: agg.courseId });
+      return;
+    case "trailProgress":
+    case "trailComplete":
+    case "trailCompleteWithin":
+    case "inOrder":
+    case "markerCredits":
+    case "markerSetComplete":
+      visit({ kind: "trail", id: agg.trailId });
+      return;
+    case "countWhere":
+      if (agg.field === "designer") visit({ kind: "designer", id: agg.value });
+      return;
+    case "uniqueCourses":
+    case "countDistinct":
+    case "maxCountBy":
+    case "monthlyStreak":
+      return;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* S1: geometry-diff (coordinate-move + field-change) / contact-field  */
 /* diff (need --base and labels)                                       */
 /* ------------------------------------------------------------------ */
@@ -1105,6 +1249,7 @@ export function verifyCatalog(
   checkVerificationTiers(bundle, issues);
   checkProvenance(bundle, courses, issues);
   checkOfferTerms(bundle, issues);
+  checkAchievements(bundle, index, issues);
 
   if (options.base) {
     checkRosterVersionImmutability(bundle, options.base, issues);
@@ -1134,6 +1279,35 @@ export function verifyCatalogRaw(
     };
   }
   return verifyCatalog(parsed.bundle, options);
+}
+
+/**
+ * Validates one `data/achievements/*.json` file on its own (task item 2:
+ * "`verify-catalog` validates every file") — schema (`AchievementDefSchema`)
+ * plus the static checker (`badge` mode, every §8.1 badge's mode), WITHOUT
+ * requiring a full `CatalogBundle`/ID ledger. `data/` carries no real
+ * facility/trail/ledger content yet (`data/id-ledger.json` "stays
+ * genuinely empty", `data/README.md`) — every id-ledger-backed and
+ * cross-record check (`checkCrossReferences`'s ledger lookup,
+ * `ACHIEVEMENT_RULE_UNKNOWN_TRAIL`/`_COURSE`/`_DESIGNER`) needs a real
+ * catalog to check against and stays scoped to the bundle-level
+ * `verifyCatalog`/`verifyCatalogRaw` path (exercised by
+ * `tools/catalog/test/fixtures/`'s synthetic bundles), not this one.
+ */
+export function validateAchievementFile(raw: unknown): VerifyCatalogResult {
+  const parsed = AchievementDefSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      issues: parsed.error.issues.map((i) =>
+        issue("SCHEMA_INVALID", i.path.length === 0 ? "<root>" : i.path.join("."), i.message),
+      ),
+    };
+  }
+  const checkerIssues = checkRuleExpr(parsed.data.rule, { mode: "badge" }).map((ci) =>
+    issue(ci.code, `rule.${ci.path}`, ci.message),
+  );
+  return { ok: checkerIssues.length === 0, issues: checkerIssues };
 }
 
 /* ------------------------------------------------------------------ */
