@@ -2231,14 +2231,13 @@ export interface LedgerGitCheck {
    * (a) — never a caller-supplied path's own repo toplevel), the file
    * is tracked cleanly (no uncommitted/untracked changes, no
    * assume-unchanged/skip-worktree flag), AND its content is
-   * byte-identical to what a FRESHLY FETCHED `GOLFRAVEN_VERIFIED_MAIN_REF`
-   * already has at that path (gate finding, third re-gate, fix (b) —
-   * fetched from the pinned GitHub URL this same run, never the
-   * editable local `origin` remote) — `verifiedMainUnavailable` is a
-   * DELIBERATE exception: a ledger never yet on GitHub main (or a fetch
-   * that itself failed) is not "dirty" in the same sense, so it fails
-   * `clean` here but does not hard-refuse the CLI on its own (see
-   * `main()`). */
+   * byte-identical to what `verifyAgainstGitHub` read from GitHub's real
+   * `main` (gate finding, fourth re-gate — inside a disposable, scrubbed
+   * repo, never the toolkit checkout's own local git state) —
+   * `verifiedMainUnavailable` is a DELIBERATE exception: a ledger never
+   * yet on GitHub main (or a verification that itself failed) is not
+   * "dirty" in the same sense, so it fails `clean` here but does not
+   * hard-refuse the CLI on its own (see `main()`). */
   clean: boolean;
   /** Human-readable reason for `clean: false`, or a plain "clean"
    * confirmation. */
@@ -2249,19 +2248,20 @@ export interface LedgerGitCheck {
    * --show-toplevel` run from the ledger's own (potentially
    * caller-controlled, e.g. a scratch repo's) directory. */
   pathIsCanonical: boolean;
-  /** Gate finding, third re-gate, fix (b): `git hash-object <ledgerPath>`
-   * equals `git rev-parse <verified-main ref>:docs/p0/x2-recorded-ledger.json`,
-   * where that ref was FRESHLY FETCHED, this same run, from the pinned
-   * canonical GitHub URL — proves the ledger's content is actually on
-   * GitHub's real `main`, not merely committed to some local/forged ref
-   * of a similar name. */
+  /** Gate finding, fourth re-gate: `git hash-object <ledgerPath>` equals
+   * the `ledgerBlobHash` a SUCCESSFUL `verifyAgainstGitHub` read from
+   * GitHub's real `main` — proves the ledger's content is actually on
+   * GitHub's real main, not merely committed to some local/forged ref
+   * of a similar name, and not merely "whatever the toolkit checkout's
+   * own local git state happens to say." */
   verifiedAgainstGithub: boolean;
-  /** Gate finding, third re-gate, fix (b): true when the freshly-fetched
-   * verified-main ref has no such path at all yet (a brand-new ledger),
-   * OR the fetch itself failed this run (network failure, unreachable
-   * host — "must give UNOFFICIAL, never OFFICIAL") — the specific,
-   * NON-hard-refusing case: mark UNOFFICIAL and say why, rather than
-   * treat it as ordinary dirtiness. */
+  /** Gate finding, fourth re-gate: true when `verifyAgainstGitHub` did
+   * not succeed this run (network failure, redirected/refused URL,
+   * shallow history, unexpected grafts/replace refs — "must give
+   * UNOFFICIAL, never OFFICIAL") OR GitHub main simply doesn't have this
+   * path yet (a brand-new ledger) — the specific, NON-hard-refusing
+   * case: mark UNOFFICIAL and say why, rather than treat it as ordinary
+   * dirtiness. */
   verifiedMainUnavailable: boolean;
   /** Gate finding 4: `git ls-files -v -- <ledgerPath>` showed the
    * lowercase `h` (assume-unchanged) or `S` (skip-worktree) flag — a way
@@ -2277,17 +2277,22 @@ export interface LedgerGitCheck {
 }
 
 /**
- * Gate finding 2d/4/third re-gate: `docs/p0/x2-recorded-ledger.json` is
- * the CANONICAL ledger. This checks that the ledger a verdict run is
+ * Gate finding 2d/4/third+fourth re-gate: `docs/p0/x2-recorded-ledger.json`
+ * is the CANONICAL ledger. This checks that the ledger a verdict run is
  * ABOUT TO USE is: at the TOOLKIT'S OWN canonical path (fix (a) — never
  * merely "some repo's own toplevel + the same relative path," which a
  * caller-controlled scratch repo trivially satisfies for itself);
  * tracked cleanly by git (no uncommitted/untracked/hidden-by-flag edit
- * could have snuck in a bogus entry); and byte-identical to what a
- * FRESHLY FETCHED `GOLFRAVEN_VERIFIED_MAIN_REF` already has there (fix
- * (b) — fetched from the pinned GitHub URL, this same run, never the
- * editable local `origin` remote a caller can point anywhere or forge
- * outright with `git update-ref`). Reports the blob hash and the last
+ * could have snuck in a bogus entry); and byte-identical to what
+ * `verification` (a `verifyAgainstGitHub` result the CALLER computed
+ * ONCE, this same run, in a disposable+scrubbed repo — see that
+ * function's own doc) says GitHub's real `main` has there. This
+ * function itself runs NO GitHub-touching git commands at all — it only
+ * compares against the ALREADY-COMPUTED `verification`, and only ever
+ * touches the LOCAL ledger file's own git state (diff/status/ls-files/
+ * log), which is a different, narrower question ("is this file clean in
+ * the caller's own checkout") than "does this match GitHub" (which
+ * `verification` alone answers). Reports the blob hash and the last
  * commit that touched the file, so the verdict output names EXACTLY
  * which ledger content it read and who last changed it — never "trust
  * me," always checkable against `git show <blobHash>` or `git log -p --
@@ -2296,20 +2301,8 @@ export interface LedgerGitCheck {
  * that hard-refuses the run or only marks it UNOFFICIAL (this repo's own
  * house style per `recorded-export.ts`'s `runGit`: a git-check failure is
  * never silently treated as "assume clean").
- *
- * `refName` is a TEST-ONLY seam (defaults to `GOLFRAVEN_VERIFIED_MAIN_REF`)
- * — `main()` never overrides it; the caller is responsible for having
- * fetched that ref FRESH, this same run, before calling this function
- * (`fetchVerifiedMainRef`) — this function itself does no fetching, so a
- * ref that was never fetched (or whose fetch failed and was deleted)
- * simply doesn't exist, and every git command against it fails closed
- * into `verifiedMainUnavailable: true`.
  */
 export interface CheckLedgerAgainstGitOptions {
-  /** TEST-ONLY seam — `main()` never overrides this; defaults to
-   * `GOLFRAVEN_VERIFIED_MAIN_REF`. The caller is responsible for having
-   * fetched this ref FRESH, this same run, before calling this function. */
-  refName?: string;
   /** TEST-ONLY seam — `main()` never overrides this; defaults to
    * `canonicalLedgerAbsPath()` (gate finding, third re-gate, fix (a)).
    * Exists so tests can exercise the canonical-path-match logic against
@@ -2320,9 +2313,9 @@ export interface CheckLedgerAgainstGitOptions {
 
 export async function checkLedgerAgainstGit(
   ledgerPath: string,
+  verification: GitHubVerification,
   opts: CheckLedgerAgainstGitOptions = {},
 ): Promise<LedgerGitCheck> {
-  const refName = opts.refName ?? GOLFRAVEN_VERIFIED_MAIN_REF;
   const canonicalPath = opts.canonicalPath ?? canonicalLedgerAbsPath();
   const resolvedLedgerPath = path.resolve(ledgerPath);
   const cwd = path.dirname(resolvedLedgerPath);
@@ -2452,47 +2445,55 @@ export async function checkLedgerAgainstGit(
     lastCommit = null;
   }
 
-  // Gate finding, third re-gate, fix (b): proves the ledger's content is
-  // actually on GitHub's real `main` — `git rev-parse <verified-main
-  // ref>:<path>` reads the blob that FRESHLY FETCHED ref has at that
-  // path right now. The ref not existing at all (fetch never ran, or
-  // failed and was deleted) fails this the SAME way as "doesn't have
-  // this path yet" — both are UNOFFICIAL, never a hard refusal, and
-  // network failure specifically must never read as OFFICIAL.
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["rev-parse", `${refName}:${CANONICAL_LEDGER_REPO_RELATIVE_PATH}`],
-      { cwd },
-    );
-    const verifiedBlobHash = stdout.trim();
-    if (blobHash === null || verifiedBlobHash !== blobHash) {
-      return {
-        blobHash,
-        clean: false,
-        detail:
-          `the ledger's content (blob ${blobHash ?? "unavailable"}) does not match what a freshly-fetched ` +
-          `${refName} already has at "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" (blob ${verifiedBlobHash}) — ` +
-          "locally diverged from GitHub's own main; pass --allow-dirty-ledger to proceed anyway (result " +
-          "marked UNOFFICIAL) (gate finding, third re-gate).",
-        pathIsCanonical: true,
-        verifiedAgainstGithub: false,
-        verifiedMainUnavailable: false,
-        hiddenByGitFlag: false,
-        lastCommit,
-      };
-    }
-  } catch {
+  // Gate finding, fourth re-gate: proves the ledger's content is
+  // actually on GitHub's real `main` — using the ALREADY-COMPUTED
+  // `verification` (a disposable-repo, scrubbed-env fetch the CALLER ran
+  // once, this same run) rather than running any GitHub-touching git
+  // command here. `verification.ok === false` (network failure,
+  // redirected/refused URL, shallow history, unexpected grafts/replace)
+  // fails this the SAME way as "GitHub main doesn't have this path yet"
+  // — both are UNOFFICIAL, never a hard refusal, and a failed
+  // verification specifically must never read as OFFICIAL.
+  if (!verification.ok) {
+    return {
+      blobHash,
+      clean: false,
+      detail: `GitHub verification did not succeed this run: ${verification.detail} — marking UNOFFICIAL ` +
+        "rather than refusing (gate finding, fourth re-gate: a failed verification must give UNOFFICIAL, " +
+        "never OFFICIAL).",
+      pathIsCanonical: true,
+      verifiedAgainstGithub: false,
+      verifiedMainUnavailable: true,
+      hiddenByGitFlag: false,
+      lastCommit,
+    };
+  }
+  if (verification.ledgerBlobHash === null) {
     return {
       blobHash,
       clean: false,
       detail:
-        `${refName} does not yet have "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" (or the ref itself is absent — ` +
-        "the fetch from GitHub either was never run or failed this run) — marking UNOFFICIAL rather than " +
-        "refusing (gate finding, third re-gate: a network/fetch failure must give UNOFFICIAL, never OFFICIAL).",
+        `GitHub main does not yet have "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" — marking UNOFFICIAL rather ` +
+        "than refusing (gate finding, fourth re-gate).",
       pathIsCanonical: true,
       verifiedAgainstGithub: false,
       verifiedMainUnavailable: true,
+      hiddenByGitFlag: false,
+      lastCommit,
+    };
+  }
+  if (blobHash === null || verification.ledgerBlobHash !== blobHash) {
+    return {
+      blobHash,
+      clean: false,
+      detail:
+        `the ledger's content (blob ${blobHash ?? "unavailable"}) does not match what GitHub's real main ` +
+        `already has at "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" (blob ${verification.ledgerBlobHash}) — ` +
+        "locally diverged from GitHub's own main; pass --allow-dirty-ledger to proceed anyway (result " +
+        "marked UNOFFICIAL) (gate finding, fourth re-gate).",
+      pathIsCanonical: true,
+      verifiedAgainstGithub: false,
+      verifiedMainUnavailable: false,
       hiddenByGitFlag: false,
       lastCommit,
     };
@@ -2501,7 +2502,8 @@ export async function checkLedgerAgainstGit(
   return {
     blobHash,
     clean: true,
-    detail: `clean — committed, verified against a freshly-fetched ${refName} (${GOLFRAVEN_CANONICAL_REPO_URL}), canonical path, no hidden-edit flags.`,
+    detail: `clean — committed, verified against GitHub's real main (${GOLFRAVEN_CANONICAL_REPO_URL}, ` +
+      "disposable+scrubbed verification), canonical path, no hidden-edit flags.",
     pathIsCanonical: true,
     verifiedAgainstGithub: true,
     verifiedMainUnavailable: false,
