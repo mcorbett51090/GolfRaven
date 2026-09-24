@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(130);
+SELECT plan(131);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -558,9 +558,19 @@ SELECT throws_ok(
 -- should-fix (post-P3a re-gate): nonce_hash/token_jti immutability closes
 -- the UPDATE-revive gap the tombstone-on-INSERT triggers alone leave open
 -- (an UPDATE changing an EXISTING row's nonce_hash/token_jti was never
--- checked against private.consumed_nonce at all).
+-- checked against private.consumed_nonce at all). A DEDICATED, fresh row
+-- -- id a1000000-...-003 does NOT exist at this point (its own earlier
+-- INSERT attempt, above, was itself rejected/rolled back by the tombstone
+-- ledger, so an UPDATE targeting it would silently match zero rows and
+-- prove nothing).
+SELECT lives_ok(
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+    VALUES ('a1000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a',
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-immutable', now() + interval '5 minutes')$$,
+  'setup: a fresh checkin_challenge row for the immutability test'
+);
 SELECT throws_ok(
-  $$UPDATE app.checkin_challenge SET nonce_hash = 'nonce-money-path-1-revive-attempt' WHERE id = 'a1000000-0000-0000-0000-000000000003'$$,
+  $$UPDATE app.checkin_challenge SET nonce_hash = 'nonce-money-path-immutable-revive-attempt' WHERE id = 'a1000000-0000-0000-0000-000000000004'$$,
   '23514',
   NULL,
   'checkin_challenge.nonce_hash is immutable after insert (UPDATE-revive gap closed)'
@@ -575,7 +585,7 @@ SELECT throws_ok(
 -- -- the trigger checks for an actual CHANGE, not merely that the column
 -- was named in the UPDATE's SET clause.
 SELECT lives_ok(
-  $$UPDATE app.checkin_challenge SET nonce_hash = nonce_hash WHERE id = 'a1000000-0000-0000-0000-000000000003'$$,
+  $$UPDATE app.checkin_challenge SET nonce_hash = nonce_hash WHERE id = 'a1000000-0000-0000-0000-000000000004'$$,
   'checkin_challenge.nonce_hash: a no-op UPDATE (same value) is allowed'
 );
 
