@@ -28,13 +28,13 @@ function baseEvidenceByTrail(): EvidenceByTrail {
   return {
     TN: {
       bySha: new Map([
-        [SHA_TN, { text: TN_BYTES, method: "direct" as const }],
-        [SHA_PDF, { text: null, method: "direct" as const }],
+        [SHA_TN, { text: TN_BYTES, method: "direct" as const, methodDefaulted: false, recorded: true }],
+        [SHA_PDF, { text: null, method: "direct" as const, methodDefaulted: false, recorded: true }],
       ]),
       failedSources: [],
     },
     VI: {
-      bySha: new Map([[SHA_VI, { text: VI_BYTES, method: "direct" as const }]]),
+      bySha: new Map([[SHA_VI, { text: VI_BYTES, method: "direct" as const, methodDefaulted: false, recorded: true }]]),
       failedSources: [],
     },
     RTJ: { bySha: new Map(), failedSources: [] },
@@ -90,7 +90,7 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
       "Rendered SPA text. Arbutus Ridge is a member course. It counts a facility. Plays year-round.";
     const evidenceByTrail: EvidenceByTrail = {
       VI: {
-        bySha: new Map([[sha(bytes), { text: bytes, method: "rendered" }]]),
+        bySha: new Map([[sha(bytes), { text: bytes, method: "rendered" as const, methodDefaulted: false, recorded: true }]]),
         failedSources: [],
       },
     };
@@ -197,7 +197,7 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
         bySha: new Map([
-          [sha(bytes), { text: bytes, method: "direct" as const }],
+          [sha(bytes), { text: bytes, method: "direct" as const, methodDefaulted: false, recorded: true }],
         ]),
         failedSources: [],
       },
@@ -316,7 +316,7 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
         bySha: new Map([
-          [SHA_TN, { text: TN_BYTES, method: "direct" as const }],
+          [SHA_TN, { text: TN_BYTES, method: "direct" as const, methodDefaulted: false, recorded: true }],
         ]),
         failedSources: [
           { url: "https://tn.gov/", blocked: false, error: "404" },
@@ -362,13 +362,13 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
     return {
       TN: {
         bySha: new Map([
-          [sha(tnBytes), { text: tnBytes, method: "direct" as const }],
+          [sha(tnBytes), { text: tnBytes, method: "direct" as const, methodDefaulted: false, recorded: true }],
         ]),
         failedSources: [],
       },
       VI: {
         bySha: new Map([
-          [sha(viBytes), { text: viBytes, method: "direct" as const }],
+          [sha(viBytes), { text: viBytes, method: "direct" as const, methodDefaulted: false, recorded: true }],
         ]),
         failedSources: [],
       },
@@ -439,6 +439,8 @@ function fetchedEntry(
     draftCandidateNames: [],
     method: "direct",
     ownerSavedDate: null,
+    renderArgs: null,
+    recorded: true,
     ...overrides,
   };
 }
