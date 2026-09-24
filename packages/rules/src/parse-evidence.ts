@@ -237,7 +237,7 @@ const ScorePlayContextSchema = z.strictObject({
   // `courseOk`).
   playCourseId: NonEmptyStringSchema,
   purchases: z.array(PurchaseCorroborationSchema).optional(),
-  facilityTz: FacilityTzSchema,
+  facilityTz: FacilityTzSchema.optional(), // MUTATED: F1 exploit reintroduced
 });
 
 /* ------------------------------------------------------------------ */

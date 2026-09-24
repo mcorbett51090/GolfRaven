@@ -128,6 +128,18 @@ BEGIN
   EXECUTE format('ALTER DATABASE %I OWNER TO migration_owner', current_database());
 END
 $$;
+
+-- should-fix (post-P3a gate): a test-only HMAC key for
+-- private.delete_my_data's player_pseudonym/staff_pseudonym computation
+-- (0015) — ALTER DATABASE ... SET (not a session-level SET) so every
+-- later session in the harness (a fresh psql connection per migration
+-- file, per tools/db/test.sh) sees it, not just this one. A real deploy
+-- sets `app.pseudonym_key` from a proper secret store, never this value.
+DO $$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I SET app.pseudonym_key = %L', current_database(), 'shim-test-only-pseudonym-hmac-key-do-not-use-in-prod');
+END
+$$;
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
 -- runs supabase/tests/helpers.sql and

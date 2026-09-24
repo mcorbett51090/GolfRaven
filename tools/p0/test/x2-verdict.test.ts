@@ -1012,6 +1012,173 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
   });
 });
 
+describe("x2-verdict: gate finding 2c — buildEvidenceByTrail's `recorded` is LEDGER-authoritative when a ledger is supplied", () => {
+  function baseManifestEntry(
+    overrides: Partial<X2FetchEntry> = {},
+  ): X2FetchEntry {
+    return {
+      trail: "TN",
+      url: "https://www.tnstateparks.com/golf",
+      status: "fetched",
+      httpStatus: 200,
+      finalUrl: "https://www.tnstateparks.com/golf",
+      contentType: "text/html",
+      fetchedAt: new Date().toISOString(),
+      sha256: null,
+      rawFile: null,
+      textFile: null,
+      textExtraction: "auto",
+      extractor: null,
+      blocked: false,
+      error: null,
+      draftCandidateNames: [],
+      method: "direct",
+      ownerSavedDate: null,
+      renderArgs: null,
+      recorded: true,
+      ...overrides,
+    };
+  }
+
+  it("a manifest entry hand-edited (or stale) to say recorded: true is overridden to false when the ledger does NOT contain its SHA — the ledger wins, not the manifest field", async () => {
+    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const rawSha = sha(bytes);
+    const entry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+      recorded: true, // the manifest's OWN claim — must be ignored
+    });
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: { TN: [entry] },
+      draftCandidateNames: { TN: [] },
+    };
+    const emptyLedger: RecordedLedger = { entries: [] };
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger: emptyLedger },
+    );
+    expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(false);
+  });
+
+  it("a manifest entry saying recorded: false is overridden to true when the ledger DOES contain its (method, SHA) pair", async () => {
+    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const rawSha = sha(bytes);
+    const entry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+      method: "direct",
+      recorded: false, // the manifest's OWN (stale) claim — must be ignored
+    });
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: { TN: [entry] },
+      draftCandidateNames: { TN: [] },
+    };
+    const ledger: RecordedLedger = {
+      entries: [
+        {
+          method: "direct",
+          normalizedUrl: "www.tnstateparks.com/golf",
+          url: "https://www.tnstateparks.com/golf",
+          sha256: rawSha,
+          recordedAt: new Date().toISOString(),
+        },
+      ],
+    };
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger },
+    );
+    expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(true);
+  });
+
+  it("the ledger match is scoped by METHOD too — a ledger entry for the SHA under a different method does not make this entry recorded", async () => {
+    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const rawSha = sha(bytes);
+    const entry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+      method: "rendered",
+    });
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: { TN: [entry] },
+      draftCandidateNames: { TN: [] },
+    };
+    // The ledger has this exact SHA recorded, but for "direct", not
+    // "rendered" — must NOT match.
+    const ledger: RecordedLedger = {
+      entries: [
+        {
+          method: "direct",
+          normalizedUrl: "www.tnstateparks.com/golf",
+          url: "https://www.tnstateparks.com/golf",
+          sha256: rawSha,
+          recordedAt: new Date().toISOString(),
+        },
+      ],
+    };
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger },
+    );
+    expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(false);
+  });
+
+  it("end to end: a confirmation citing the non-ledger-recorded SHA is refused (throws), even though the manifest entry itself claims recorded: true", async () => {
+    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const rawSha = sha(bytes);
+    const entry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+      recorded: true,
+    });
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: { TN: [entry] },
+      draftCandidateNames: { TN: [] },
+    };
+    const emptyLedger: RecordedLedger = { entries: [] };
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger: emptyLedger },
+    );
+    const confirmation: X2ConfirmationFile = {
+      TN: {
+        roster: [
+          {
+            name: "Nine courses make up",
+            quote: "Nine courses make up the Trail.",
+            evidenceSha: rawSha,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "It counts a course.",
+          evidenceSha: rawSha,
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: rawSha,
+        },
+      },
+    };
+    expect(() => computeX2Verdict(confirmation, byTrail, ["TN"])).toThrow(
+      /NON-RECORDED capture/,
+    );
+  });
+});
+
 describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration", () => {
   const OWNER_BYTES =
     "North Carolina Golf Trail. Pinehurst Creek is a member course. " +
