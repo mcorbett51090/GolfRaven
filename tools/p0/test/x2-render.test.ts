@@ -248,6 +248,9 @@ function makeFakeContext(opts: {
       if (event === "page") pageHandler = handler as (page: PageLike) => void;
       if (event === "response") responseHandler = handler as (response: ResponseLike) => void;
     },
+    async addInitScript() {
+      initScriptCount += 1;
+    },
     async close() {
       closed = true;
     },
@@ -256,6 +259,7 @@ function makeFakeContext(opts: {
   return {
     context,
     isClosed: () => closed,
+    initScriptCount: () => initScriptCount,
     wsClosedUrls: () => wsClosed,
     wsSeenUrls: () => wsSeen,
     wsConnectedToServerUrls: () => wsConnectedToServer,

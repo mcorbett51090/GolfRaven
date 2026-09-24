@@ -16,7 +16,19 @@ The DB-side items are tracked in the P3a queue.
 | `facilityId`, `verificationTier`, `geometryKind`, `insideBuffer`, `accuracyMeters` | Re-running the matcher (`packages/matching`) on the raw coordinates against the signed catalog |
 | `capturedAt` | For live challenges, clamped to `[challenge.issued_at, issued_at + TTL]`. Otherwise a skew check against server `now`, with a `fraud_signal` above 24 h |
 | `localDate` | Derived from the server-trusted `capturedAt` and the facility `tz` |
-| `fixId` | The challenge id, or a hash of the attestation assertion |
+| `fixId` | The challenge id, or a hash of the attestation assertion. **Item 3 of the ninth gate: PINNED to unpadded base64url (RFC 4648 §5) — `[A-Za-z0-9_-]`, no `+`/`/`/`=`.** |
+
+**Why base64url, not hex, for `fixId` (item 3, ninth gate).** `packages/rules` already uses hex
+elsewhere (`inputDigest`, a SHA-256 digest) but `fixId` is not always a digest — the trust table above
+allows it to be either a raw challenge-nonce id OR a hash of the attestation assertion, and the mobile
+attestation ecosystems this system integrates with (App Attest, Play Integrity) already emit base64
+tokens natively. Re-encoding that output as UNPADDED base64url — swap `+`/`/` for `-`/`_`, drop `=`
+padding — is the standard "make an opaque server token URL- and JSON-safe" step, and it covers a raw
+random nonce and a hash digest equally well; hex would be an awkward re-encoding of a base64 SDK
+output for no benefit. **This is a hard requirement on whichever Edge Function issues/derives `fixId`:
+never emit standard, padded base64 (`+`, `/`, or `=` will be rejected and the row quarantined — see
+`packages/rules`' `FixIdSchema`), and never emit a raw hex string with unnecessary padding either —
+base64url, unpadded, is the one accepted encoding.**
 
 ## 2. Each row type comes only from its own server path
 
@@ -29,6 +41,20 @@ The DB-side items are tracked in the P3a queue.
 | `courseDisambiguatedBy` | The matcher or the portal |
 
 `POST /v1/evidence` rejects every field in these two tables.
+
+**A SQL `NULL` maps to an OMITTED JSON field, never to a literal `null` (item 2, ninth gate).**
+`packages/rules`' parser treats an omitted `courseId` and a present `courseId: null` as two
+COMPLETELY DIFFERENT things on purpose: omitted means "no course anchor at all — facility-level
+evidence, always allowed" (the seventh gate's H3 residual rule); a present `null` is a MALFORMED
+value (not a string), which the parser can only treat as ambiguous and quarantine. Any endpoint or
+ORM layer that serializes a DB row to JSON MUST drop a `NULL` column from the payload entirely rather
+than emitting it as `null` — this applies to `courseId` specifically (the anchor field this gate's
+own finding concerns) and, as a general rule, to every OPTIONAL field `packages/rules`' schema
+declares with `.optional()` (never `.nullable()`) for exactly this reason. A framework/ORM default
+that emits `null` for every absent column (a common Postgres-client default) will silently turn every
+facility-level evidence row into an unnecessary quarantine candidate — this is a real, addressable
+integration bug class, not merely a theoretical one, and must be checked explicitly wherever
+`app.evidence` rows are serialized for `scorePlay`'s input.
 
 ## 3. Per-play limits and fraud signals
 
