@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(52);
+SELECT plan(53);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -91,8 +91,12 @@ SELECT lives_ok(
 -- so delete_my_data's OWN reliance on deferred checking elsewhere in
 -- this same file, H1's test below, is unaffected) makes every violation
 -- from here on raise at the statement itself, where throws_ok can see it.
+-- SET CONSTRAINTS needs the constraint names SCHEMA-QUALIFIED here
+-- (confirmed empirically this session: the bare names, though correct
+-- and visible in pg_constraint, raised "constraint ... does not exist" —
+-- `app` is not on this session's search_path).
 SELECT lives_ok(
-  $$SET CONSTRAINTS play_evidence_play_user_fk, play_evidence_evidence_user_fk IMMEDIATE$$,
+  $$SET CONSTRAINTS app.play_evidence_play_user_fk, app.play_evidence_evidence_user_fk IMMEDIATE$$,
   'setup: check the play_evidence composite FKs immediately for the M1 tests below'
 );
 
@@ -346,9 +350,13 @@ SELECT lives_ok(
             'crs_x1', 'fac_x', current_date - 2, 'v1', 'confirmed')$$,
   'setup: a play row for player C'
 );
+-- offer #1 (60000000-...-1) was capped at max_redemptions=1 by the H3
+-- test earlier in this same file and already holds its one redemption —
+-- offer #2 (60000000-...-2, trl_u/fac_x) is untouched, so it's used here
+-- instead.
 SELECT lives_ok(
   $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
-    VALUES ('72000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000001',
+    VALUES ('72000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002',
             '00000000-0000-0000-0000-0000c0000001', 'fac_x', 'earned', '43000000-0000-0000-0000-000000000001')$$,
   'setup: an offer_code for player C with play_id SET (H1''s exact reproduction shape)'
 );
