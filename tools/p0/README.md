@@ -442,23 +442,29 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
 
 - `--evidence-dir <dir>` — an `x2-fetch` output dir (reads its `manifest.json`).
 - `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate) — the same ledger `x2-fetch`/
-  `x2-ingest` wrote the captures being verified against, and it must be at the CANONICAL path
-  `docs/p0/x2-recorded-ledger.json`, resolved from this repo's own toplevel — any other path is
-  refused outright, never silently treated as if it were the canonical record (gate finding 4,
-  second re-gate). `x2-verdict` checks the ledger against git four ways: it must be tracked
-  cleanly (no uncommitted or untracked edit — `git diff --quiet` / `git status --porcelain`); it
-  must carry no `git ls-files -v` assume-unchanged/skip-worktree flag (either can hide a local
-  edit from the two checks just named, so this is refused regardless of `--allow-dirty-ledger`);
-  its content must be byte-identical to what `origin/main` already has at that path
-  (`git hash-object` vs. `git rev-parse origin/main:docs/p0/x2-recorded-ledger.json` — proves
-  PUSHED, not merely committed); and if `origin/main` simply doesn't have the path yet (a ledger
-  never pushed), that specific case does NOT hard-refuse — the run proceeds and the output is
-  marked UNOFFICIAL with the reason, without needing `--allow-dirty-ledger`. Any other dirtiness
-  (an uncommitted edit, or content that diverged from what's already pushed) still refuses unless
-  `--allow-dirty-ledger` is passed, in which case the output is marked UNOFFICIAL. The verdict's
-  own JSON/markdown output names the ledger's git blob hash and the last commit that touched it
-  either way, so a reader always knows exactly which ledger content produced it and who last
-  changed it.
+  `x2-ingest` wrote the captures being verified against, and for an OFFICIAL run it must resolve
+  (`realpath`) to EXACTLY this toolkit's OWN checkout's `docs/p0/x2-recorded-ledger.json` — pinned
+  via this module's own `import.meta.url`, never derived from wherever `--ledger` happens to
+  point. **Third re-gate, "trust root is the caller's repo plus local refs":** a prior round pinned
+  the canonical path via `git rev-parse --show-toplevel` run FROM THE LEDGER'S OWN DIRECTORY —
+  trivially satisfied by a caller's own scratch repo, for itself. `x2-verdict` checks the ledger
+  four ways: it must resolve to that ONE real path; it must be tracked cleanly (no uncommitted or
+  untracked edit — `git diff --quiet` / `git status --porcelain`); it must carry no
+  `git ls-files -v` assume-unchanged/skip-worktree flag (either can hide a local edit from the two
+  checks just named, so this is refused regardless of `--allow-dirty-ledger`); and its content must
+  be byte-identical to what a FRESHLY FETCHED `main` already has at that path. That fetch is the
+  other half of the fix: every run deletes then re-fetches `refs/x2-verdict/verified-main` from the
+  hard-coded canonical URL `https://github.com/mcorbett51090/GolfRaven` (`git fetch --no-tags <url>
+  +refs/heads/main:refs/x2-verdict/verified-main`) — never the local, editable `origin` remote a
+  caller can point anywhere, or forge outright with a bare `git update-ref`. A network failure or a
+  fetch error gives UNOFFICIAL, never OFFICIAL — never silently treated as "assume it checks out."
+  If the ledger simply isn't on GitHub's real `main` yet (a ledger never pushed), that specific case
+  does NOT hard-refuse — the run proceeds and the output is marked UNOFFICIAL with the reason,
+  without needing `--allow-dirty-ledger`. Any other dirtiness (an uncommitted edit, or content that
+  diverged from what's already on GitHub) still refuses unless `--allow-dirty-ledger` is passed, in
+  which case the output is marked UNOFFICIAL. The verdict's own JSON/markdown output names the
+  ledger's git blob hash and the last commit that touched it either way, so a reader always knows
+  exactly which ledger content produced it and who last changed it.
 - `--corroboration <file>` — optional; a JSON file backing owner-saved facts (gate finding 4, see
   below), keyed `trail -> evidenceSha -> [corroboration record, ...]` — a LIST, since one
   owner-saved capture can back several DIFFERENT facts (a roster name, a completionUnit, a
@@ -467,14 +473,24 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   closes). An `acceptance` record now carries `fact` (`"completionUnit"`, `"season"`, or
   `"roster:<name>"`) instead of a free-text `id`, and must be backed by an EXACT structured row —
   `ACCEPT <trail> <fact> <full evidenceSha256> <YYYY-MM-DD> Matt` — in `--x2-log`'s (default: this
-  checkout's own `docs/p0/X2.md`) `## Log` section (bounded at the next `## ` heading). Finding
-  that row is not enough on its own: `x2-verdict` runs `git blame` to find the commit that
-  introduced it and REQUIRES that commit to be reachable from `origin/main`, printing the commit
-  hash, author, date and `%G?` signature status in its output for a human to audit. **Honest
-  limit:** agents in this environment act with Matt's own GitHub credentials, so none of this can
-  actually prove a commit is Matt's rather than an agent's — the real control is procedural:
-  **agents must never write an `ACCEPT` row; only Matt adds one, by hand.** See
-  `docs/p0/X2.md`'s own statement of this.
+  checkout's own `docs/p0/X2.md`) `## Log` section (bounded at the next `## ` heading). **A row
+  hidden inside a fenced code block, an HTML comment, or an indented code block does not count**
+  (third re-gate, fix (c) — a gate review found both silently accepted before this existed).
+  **`--x2-log` is pinned the SAME way `--ledger` is:** an acceptance is only ever trusted when
+  `--x2-log` resolves to this toolkit's OWN canonical `docs/p0/X2.md` — a well-formed row in any
+  other file, however git-reachable, is never counted, no matter how convincing it looks. Finding
+  a visible row at the right path is not enough on its own: `x2-verdict` runs `git blame` to find
+  the commit that introduced it and REQUIRES that commit reachable from the same freshly-fetched
+  `refs/x2-verdict/verified-main` the ledger check uses, printing the commit hash, author, date and
+  `%G?` signature status in its output for a human to audit. Should-fix: the acceptance date must
+  be on/after the evidence's own `ownerSavedDate`, and no more than 1 day after the commit's own
+  date. **Honest limit, corrected at the third re-gate:** agents in this environment act with
+  Matt's own GitHub credentials, and even an API-made commit is GitHub-signed — so neither
+  `git blame`'s author field nor `%G?` proves a commit is Matt's rather than an agent's; a prior
+  round overstated this. What the fix genuinely buys: a forgery now has to land in GitHub's own
+  shared, public history for `main`, not a disposable local repo nobody else ever sees. The real
+  control remains procedural: **agents must never write an `ACCEPT` row; only Matt adds one, by
+  hand.** See `docs/p0/X2.md`'s own statement of this.
 - `--confirmation <file>` — a JSON object, **per trail** (`"TN"`/`"VI"`/`"RTJ"`):
 
   ```json

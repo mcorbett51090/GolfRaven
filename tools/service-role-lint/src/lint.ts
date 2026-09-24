@@ -94,6 +94,20 @@ export interface LintOptions {
    * (e.g. in a unit test) may omit it, which simply skips that one check.
    */
   functionsRoot?: string;
+  /**
+   * ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "the lint trusts hosts and
+   * registries, not modules ... switch to an explicit module allow-list;
+   * drop host trust entirely ... a pinned allow-list of exact target
+   * strings, kept as a committed fixture file." The exact set of
+   * import-map TARGET strings a bare specifier is ever allowed to resolve
+   * to — index.ts reads this from the committed
+   * tools/service-role-lint/pinned-import-targets.json and always
+   * supplies it for a real directory-walk run; a standalone
+   * `lintSource(source, path)` call that omits it simply has an empty
+   * allow-list (every bare specifier fails to resolve, fail-closed, not
+   * fail-open).
+   */
+  pinnedImportTargets?: string[];
 }
 
 /** The one exact file allowed to do any of this (build plan line 1189). */
@@ -194,24 +208,22 @@ function isBannedSpecifier(spec: string): boolean {
   return normalized.endsWith("supabase-js");
 }
 
-// Requirement (4): resolve a specifier through a deno.json/import_map.json
-// `imports` table (index.ts loads and passes this in). Import-map
-// resolution rules: an EXACT key match wins outright; otherwise the
-// LONGEST prefix key ending in "/" that the specifier starts with is used,
-// with that prefix replaced by its target (the standard import-map
-// "packages within a scope" shape, e.g. `"@supabase/": "npm:@supabase/"`).
+// ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "switch to an explicit MODULE
+// allow-list; drop host trust entirely." The prior version resolved a
+// PREFIX key ending in "/" (the standard import-map "packages within a
+// scope" shape) as well as an exact key — that prefix-resolution path was
+// itself a confirmed bypass this round: an import-map entry like
+// `"lib/": "../../../outside/"` let `import "lib/admin.ts"` walk outside
+// supabase/functions through the SAME mechanism meant for legitimate
+// scoped packages. M2's decision is explicit: "bare specifiers that are
+// EXACT KEYS in a reviewed import map" — prefix/scope resolution is gone
+// entirely, not just made stricter. A specifier that doesn't literally
+// equal an import-map key resolves to nothing and falls through to "not
+// an exact key" below, regardless of what prefix keys exist.
 function resolveImportMapAlias(spec: string, importMap: Record<string, string> | undefined): string | undefined {
   if (!importMap) return undefined;
   if (Object.prototype.hasOwnProperty.call(importMap, spec)) return importMap[spec];
-  let bestPrefix = "";
-  let bestTarget: string | undefined;
-  for (const [key, target] of Object.entries(importMap)) {
-    if (key.endsWith("/") && spec.startsWith(key) && key.length > bestPrefix.length) {
-      bestPrefix = key;
-      bestTarget = target + spec.slice(key.length);
-    }
-  }
-  return bestTarget;
+  return undefined;
 }
 
 // ⛔ FIX (post-P3a re-gate M1): "reject any specifier containing
@@ -231,27 +243,28 @@ function containsSupabaseSubstring(spec: string): boolean {
   return upper.includes("@SUPABASE/") || upper.includes("SUPABASE-JS");
 }
 
-// ⛔ FIX (post-P3a re-gate M1, requirement: "switch remote imports to an
-// allow-list of hosts and package names. No more deny-list."): a URL
-// specifier's host must be on this list, or it is banned outright —
-// independent of whether the PACKAGE it names looks dangerous by name
-// (g6: https://example.com/evil/mod.ts is not @supabase/anything and not
-// a named Postgres driver, so the old deny-list-only model never even
-// looked at the host and let it straight through). This governs only
-// specifiers that are themselves a URL (http/https) — a bare package
-// name or an `npm:`/`jsr:` scheme specifier has no "host" and is instead
-// governed by the banned-package-name/raw-substring checks above.
-const ALLOWED_REMOTE_HOSTS = new Set(["esm.sh", "cdn.skypack.dev", "cdn.jsdelivr.net", "unpkg.com", "deno.land", "jsr.io"]);
-
-function remoteHostOf(spec: string): string | undefined {
-  const m = /^https?:\/\/([^/]+)/i.exec(spec);
-  const host = m?.[1];
-  return host ? host.toLowerCase() : undefined;
-}
-
-function isDisallowedRemoteHost(spec: string): boolean {
-  const host = remoteHostOf(spec);
-  return host !== undefined && !ALLOWED_REMOTE_HOSTS.has(host);
+// ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "the lint trusts hosts and
+// registries, not modules." The PRIOR model (a HOST allow-list for any
+// http(s):// specifier) still let straight through every one of this
+// round's confirmed repros that used an ALLOW-LISTED host with an
+// unreviewed package: `https://esm.sh/gh/attacker/...`,
+// `https://cdn.jsdelivr.net/gh/attacker/...`,
+// `https://deno.land/x/attacker_admin@v1/mod.ts`,
+// `https://esm.sh/attacker-admin-client@1` — esm.sh/cdn.jsdelivr.net/
+// deno.land were all on that allow-list, so trusting the HOST said
+// nothing about whether THIS specific module had ever been reviewed.
+// M2's decision: host trust is dropped entirely. ANY specifier that is
+// itself a literal `http(s):`/`npm:`/`jsr:`/`file:` scheme, or an
+// absolute filesystem path, is banned OUTRIGHT — unconditionally, no
+// host/package-name exception — because a specifier written directly in
+// the source was never routed through import-map review at all. The
+// ONLY way a non-relative import is ever legitimate is as a bare
+// specifier that is an EXACT KEY in a reviewed import map whose TARGET is
+// on the pinned allow-list (isBannedSpecifierOrAlias, below) — so a real
+// dependency still gets imported, just never as a raw literal specifier
+// in application code.
+function isDirectRawSpecifier(spec: string): boolean {
+  return /^(https?|npm|jsr|file):/i.test(spec) || spec.startsWith("/");
 }
 
 // ⛔ FIX (post-P3a re-gate M1, g4): `data:`/`blob:` specifiers can smuggle
@@ -297,24 +310,83 @@ function resolvesOutsideFunctionsRoot(spec: string, filePath: string, functionsR
   return false;
 }
 
+// ⛔ REWRITE (M2 BLOCKING, post-P3a re-gate): explicit MODULE allow-list,
+// host trust dropped entirely (this migration's own decision, verbatim):
+// "Only two kinds of import are allowed: relative imports that resolve
+// inside supabase/functions (after realpath); bare specifiers that are
+// exact keys in a reviewed import map ... whose targets are exact,
+// pinned, versioned URLs, or npm:/jsr: with exact versions ... a pinned
+// allow-list of those exact target strings, kept as a committed fixture
+// file compared by the lint, so adding a dependency is a reviewed diff."
 function isBannedSpecifierOrAlias(
   spec: string,
   importMap: Record<string, string> | undefined,
+  pinnedImportTargets: Set<string>,
   filePath: string,
   functionsRoot: string | undefined,
 ): { banned: boolean; reason?: string; resolvedVia?: string } {
-  if (containsSupabaseSubstring(spec)) return { banned: true, reason: "contains '@supabase/' or 'supabase-js'" };
-  if (isBannedSpecifier(spec)) return { banned: true };
-  if (isDataOrBlobSpecifier(spec)) return { banned: true, reason: "data:/blob: specifier" };
-  if (isDisallowedRemoteHost(spec)) return { banned: true, reason: `host "${remoteHostOf(spec)}" is not on the allow-list` };
-  if (resolvesOutsideFunctionsRoot(spec, filePath, functionsRoot)) {
-    return { banned: true, reason: "relative import resolves outside supabase/functions" };
+  // Kind 1: a relative import. The ONLY non-import-map path that's ever
+  // legitimate, and only if it stays inside supabase/functions.
+  if (spec.startsWith("./") || spec.startsWith("../")) {
+    if (resolvesOutsideFunctionsRoot(spec, filePath, functionsRoot)) {
+      return { banned: true, reason: "relative import resolves outside supabase/functions" };
+    }
+    return { banned: false };
   }
+
+  if (containsSupabaseSubstring(spec)) return { banned: true, reason: "contains '@supabase/' or 'supabase-js'" };
+  if (isDataOrBlobSpecifier(spec)) return { banned: true, reason: "data:/blob: specifier" };
+  // Every direct URL/npm:/jsr:/file: import, and every absolute path, is
+  // banned OUTRIGHT — unconditionally, independent of host or package
+  // name — because it was never routed through a reviewed import map at
+  // all (also closes `gh/` passthrough paths on an otherwise-trusted
+  // host, e.g. esm.sh/gh/attacker/..., which a host-only allow-list let
+  // straight through).
+  if (isDirectRawSpecifier(spec)) {
+    return {
+      banned: true,
+      reason: "a direct URL/npm:/jsr:/file:/absolute-path specifier outside a reviewed import map -- only an exact import-map key whose target is on the pinned allow-list is permitted",
+    };
+  }
+
+  // Kind 2: a bare specifier. The ONLY remaining legitimate path: an
+  // EXACT key in the reviewed import map (resolveImportMapAlias no
+  // longer does prefix/scope resolution at all -- see its own note),
+  // whose target is itself clean AND appears verbatim on the committed
+  // pinned-target allow-list.
   const resolved = resolveImportMapAlias(spec, importMap);
-  if (resolved !== undefined) {
-    if (containsSupabaseSubstring(resolved)) return { banned: true, reason: "alias resolves to a specifier containing '@supabase/' or 'supabase-js'", resolvedVia: resolved };
-    if (isBannedSpecifier(resolved)) return { banned: true, resolvedVia: resolved };
-    if (isDisallowedRemoteHost(resolved)) return { banned: true, reason: `alias resolves to a host not on the allow-list`, resolvedVia: resolved };
+  if (resolved === undefined) {
+    return {
+      banned: true,
+      reason: "not a relative import and not an exact key in a reviewed import map (supabase/functions/deno.json or import_map.json)",
+    };
+  }
+  if (containsSupabaseSubstring(resolved)) {
+    return { banned: true, reason: "alias resolves to a specifier containing '@supabase/' or 'supabase-js'", resolvedVia: resolved };
+  }
+  if (isBannedSpecifier(resolved)) return { banned: true, reason: "alias resolves to a banned Supabase/Postgres-driver package", resolvedVia: resolved };
+  if (resolved.startsWith("./") || resolved.startsWith("../")) {
+    // A relative-path TARGET (e.g. a locally vendored shim) is checked
+    // for the same root-escape, M2's own text: "run the escape check on
+    // the resolved import-map target too."
+    if (resolvesOutsideFunctionsRoot(resolved, filePath, functionsRoot)) {
+      return { banned: true, reason: "alias resolves to a relative path outside supabase/functions", resolvedVia: resolved };
+    }
+    return { banned: false };
+  }
+  if (resolved.endsWith("/")) {
+    // M2's own text: "a prefix mapping (trailing '/') onto a remote host
+    // fails." A scope/prefix-SHAPED target can never be a single "exact,
+    // pinned, versioned" string by construction, independent of whether
+    // it happens to collide with a pinned entry.
+    return { banned: true, reason: "alias target is a prefix mapping (trailing '/'), not a single exact pinned target", resolvedVia: resolved };
+  }
+  if (!pinnedImportTargets.has(resolved)) {
+    return {
+      banned: true,
+      reason: `alias target "${resolved}" is not on the committed pinned-import-targets allow-list -- add it there as its own reviewed diff`,
+      resolvedVia: resolved,
+    };
   }
   return { banned: false };
 }
@@ -324,6 +396,34 @@ function isAllowedFile(filePath: string): boolean {
   if (segments.length < EXEMPT_SEGMENTS.length) return false;
   const tail = segments.slice(-EXEMPT_SEGMENTS.length);
   return tail.every((seg, i) => seg === EXEMPT_SEGMENTS[i]);
+}
+
+// ⛔ FIX (M2 BLOCKING, post-P3a re-gate): a computed member-access KEY
+// built from an expression, rather than named as a literal/identifier —
+// see the pass below that uses this. Deliberately narrow to the shapes
+// the requirement names (binary `+` concatenation, a template literal
+// with at least one interpolated expression, `.concat()`/`.join()`,
+// `String.fromCharCode()`) so an ordinary `arr[i]` / `obj[key]` (an
+// Identifier property) or `obj["literal"]` (a plain string Literal
+// property — already covered by the dedicated `.constructor` check
+// above where that literal IS "constructor") is never flagged.
+function isStringBuildingExpression(node: TSESTree.Node): boolean {
+  if (node.type === AST_NODE_TYPES.BinaryExpression && node.operator === "+") return true;
+  if (node.type === AST_NODE_TYPES.TemplateLiteral && node.expressions.length > 0) return true;
+  if (node.type === AST_NODE_TYPES.CallExpression) {
+    const callee = node.callee;
+    if (callee.type === AST_NODE_TYPES.MemberExpression && !callee.computed && callee.property.type === AST_NODE_TYPES.Identifier) {
+      if (callee.property.name === "concat" || callee.property.name === "join") return true;
+      if (
+        callee.property.name === "fromCharCode" &&
+        callee.object.type === AST_NODE_TYPES.Identifier &&
+        callee.object.name === "String"
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function nodeLoc(node: TSESTree.Node): { line: number; column: number } {
@@ -536,6 +636,84 @@ export function lintSource(source: string, filePath: string, options: LintOption
     }
   });
 
+  // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "flag computed member access
+  // whose key is a string-building expression (a binary +, a template
+  // literal with expressions, .concat, .join, String.fromCharCode, etc).
+  // Do NOT flag ordinary arr[i] / obj[key]." Confirmed bypass:
+  // `(() => {})["constr" + "uctor"]` — the EXISTING `.constructor` check
+  // above only matches a bare identifier property or a plain STRING
+  // LITERAL computed key (`obj["constructor"]`); a computed key built at
+  // parse-time from an expression (any expression, not just the literal
+  // string "constructor" — the whole POINT of this gadget class is that
+  // the resulting property name is never a static string this or any
+  // other rule could grep for) was invisible to it. This is
+  // content-agnostic by design: it flags the SHAPE (a computed access
+  // whose key is built, not named), not any particular resulting string,
+  // which is what makes it resistant to the next renamed variant.
+  walk(ast, (node) => {
+    if (node.type !== AST_NODE_TYPES.MemberExpression || !node.computed) return;
+    if (!isStringBuildingExpression(node.property)) return;
+    const loc = nodeLoc(node);
+    findings.push({
+      rule: "dynamic-code-execution",
+      message:
+        "computed member access whose key is built from an expression (concatenation/template/.concat()/.join()/String.fromCharCode()) outside supabase/functions/_shared/privileged.ts — the resulting property name is never a static string, which is exactly how a `.constructor`-style gadget hides from a name-based check",
+      ...loc,
+    });
+  });
+
+  // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "Also flag
+  // Object.getOwnPropertyDescriptor(s), Reflect.get/getOwnPropertyDescriptor
+  // and Object.getPrototypeOf calls whose key argument is not a string
+  // literal." Confirmed bypass:
+  // `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(() => {}),
+  // "constr" + "uctor").value` — walks the prototype chain and reads a
+  // property descriptor's VALUE without ever writing a `.constructor` (or
+  // `["constructor"]`) member-access token anywhere in the source, so
+  // neither the bare-member-access check above nor the computed-key
+  // check just above (its key argument here is a plain CALL argument, not
+  // a MemberExpression property) ever sees it. `Object.getPrototypeOf` is
+  // flagged unconditionally (it takes no "key" argument at all, and
+  // walking to a prototype is itself the first step of this exact
+  // gadget); the others are flagged only when their key argument is
+  // anything other than a literal string, since a literal key is
+  // statically readable by a human reviewer the same way a plain
+  // `.propName` access is.
+  walk(ast, (node) => {
+    if (node.type !== AST_NODE_TYPES.CallExpression) return;
+    const callee = node.callee;
+    if (callee.type !== AST_NODE_TYPES.MemberExpression || callee.computed) return;
+    if (callee.object.type !== AST_NODE_TYPES.Identifier || callee.property.type !== AST_NODE_TYPES.Identifier) return;
+    const objectName = callee.object.name;
+    const methodName = callee.property.name;
+    const isStringLiteralArg = (n: TSESTree.Node | undefined): boolean => !!n && n.type === AST_NODE_TYPES.Literal && typeof n.value === "string";
+
+    let flagged = false;
+    let why = "";
+    if (objectName === "Object" && methodName === "getPrototypeOf") {
+      flagged = true;
+      why = "Object.getPrototypeOf(...) walks the prototype chain -- the first step of the same gadget that reaches Function via .constructor";
+    } else if (objectName === "Object" && (methodName === "getOwnPropertyDescriptor" || methodName === "getOwnPropertyDescriptors")) {
+      if (!isStringLiteralArg(node.arguments[1])) {
+        flagged = true;
+        why = "Object.getOwnPropertyDescriptor(s)(...) with a non-literal (or absent) key reads an arbitrary property descriptor, including .constructor, without a static property name to review";
+      }
+    } else if (objectName === "Reflect" && (methodName === "get" || methodName === "getOwnPropertyDescriptor")) {
+      if (!isStringLiteralArg(node.arguments[1])) {
+        flagged = true;
+        why = `Reflect.${methodName}(...) with a non-literal key reads an arbitrary property, including .constructor, without a static property name to review`;
+      }
+    }
+    if (flagged) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "dynamic-code-execution",
+        message: `${why} — outside supabase/functions/_shared/privileged.ts`,
+        ...loc,
+      });
+    }
+  });
+
   // ---------------------------------------------------------------------
   // Pass 2 (requirement 2): any string literal OR template chunk
   // containing SERVICE_ROLE or DB_URL is an error, everywhere in the
@@ -575,8 +753,10 @@ export function lintSource(source: string, filePath: string, options: LintOption
   const supabaseClientLocalNames = new Set<string>(); // `SupabaseClient` class import, aliased or not
   const namespaceImportNames = new Set<string>(); // `import * as x from "<supabase-js>"`
 
+  const pinnedImportTargetsSet = new Set(options.pinnedImportTargets ?? []);
+
   function reportBannedSpecifier(node: TSESTree.Node, spec: string, kind: "import" | "dynamic import" | "require" | "re-export"): void {
-    const { banned, reason, resolvedVia } = isBannedSpecifierOrAlias(spec, options.importMap, filePath, options.functionsRoot);
+    const { banned, reason, resolvedVia } = isBannedSpecifierOrAlias(spec, options.importMap, pinnedImportTargetsSet, filePath, options.functionsRoot);
     if (!banned) return;
     const loc = nodeLoc(node);
     const viaNote = resolvedVia ? ` (alias resolves via deno.json/import_map.json to "${resolvedVia}")` : "";

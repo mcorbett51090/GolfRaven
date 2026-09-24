@@ -1162,11 +1162,12 @@ export const GOLFRAVEN_VERIFIED_MAIN_REF = "refs/x2-verdict/verified-main";
  * (THIS module's own on-disk location), never from a caller-supplied
  * path. This is the ONE source of truth for "the real golfraven
  * checkout"; works from `src/` under vitest and from the built `dist/`
- * (both sit two levels under the repo root), the same technique
- * `resolveDefaultX2MdPath` already used for its own default. */
+ * (both sit THREE levels under the repo root: repo root -> tools -> p0
+ * -> {src,dist}), the same technique `resolveDefaultX2MdPath` already
+ * used for its own default. */
 export function resolveToolkitRepoRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.join(here, "..", ".."); // tools/p0/{src,dist} -> tools/p0 -> repo root
+  return path.join(here, "..", "..", ".."); // tools/p0/{src,dist} -> tools/p0 -> tools -> repo root
 }
 
 /** The ONE absolute path an OFFICIAL run's `--ledger` must resolve to
