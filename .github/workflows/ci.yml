@@ -12,6 +12,17 @@ on:
 permissions:
   contents: read
 
+env:
+  # S5: telemetry stays off in CI, same as any other non-interactive build.
+  ASTRO_TELEMETRY_DISABLED: "1"
+  # B3: apps/site's fail-closed demo guard refuses to build with an empty
+  # data/ unless this is set explicitly — data/ carries no real
+  # facility/trail content yet (data/README.md), so CI opts into the
+  # synthetic demo dataset on purpose. This is never set in a real
+  # production deploy (see apps/site/src/lib/derive.ts's loadSiteCatalog,
+  # which also refuses GOLFRAVEN_DEMO=1 outright when GOLFRAVEN_ENV=production).
+  GOLFRAVEN_DEMO: "1"
+
 jobs:
   verify:
     name: install / typecheck / build / test

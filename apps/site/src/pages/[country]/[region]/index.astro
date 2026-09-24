@@ -5,6 +5,7 @@
 // (shared render: `../../../components/RegionDirectory.astro`).
 import BaseLayout from "../../../layouts/BaseLayout.astro";
 import RegionDirectory from "../../../components/RegionDirectory.astro";
+import { isIndexable } from "@golfraven/catalog";
 import { loadSiteCatalog, regionCodesInUse, regionInfo, regionPages } from "../../../lib/derive";
 import { siteOrigin, breadcrumbNode, collectionNode, regionUrl } from "../../../lib/schema";
 
@@ -21,7 +22,7 @@ export async function getStaticPaths() {
 }
 
 const { code, facilities, totalPages } = Astro.props;
-const { catalog } = await loadSiteCatalog();
+const { catalog, usedDemoData } = await loadSiteCatalog();
 const info = regionInfo(catalog, code);
 const totalCount = catalog.facilities.filter((f) => f.region === code).length;
 
@@ -30,16 +31,24 @@ const url = regionUrl(origin, info.country, info.slug);
 const path = `/${info.country}/${info.slug}/`;
 const title = `${info.name} Golf Courses — ${totalCount} to explore | GolfRaven`;
 const description = `Every golf course GolfRaven has found in ${info.name} — ${totalCount} in all — mapped and linked.`;
+// S1: the ItemList lists only facilities that actually have a page worth
+// indexing (the R1-indexable subset), not every row on this page.
 const jsonLd = [
   breadcrumbNode([
     { name: "GolfRaven", url: `${origin}/` },
     { name: info.name, url },
   ]),
-  collectionNode(origin, `${info.name} Golf Courses`, description, facilities, url),
+  collectionNode(
+    origin,
+    `${info.name} Golf Courses`,
+    description,
+    facilities.filter((f) => isIndexable(f)),
+    url,
+  ),
 ];
 ---
 
-<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd} demo={usedDemoData}>
   <main class="wrap" id="main-content" tabindex="-1">
     <header>
       <p class="eyebrow">Region</p>

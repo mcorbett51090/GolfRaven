@@ -26,6 +26,17 @@ body {
   line-height: 1.5;
 }
 
+.demo-banner {
+  margin: 0;
+  padding: 0.6rem 1.25rem;
+  background: #b23a3a;
+  color: #fff;
+  font-weight: 700;
+  text-align: center;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+}
+
 .skip-link {
   position: absolute;
   left: -999px;

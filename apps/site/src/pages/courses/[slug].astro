@@ -6,28 +6,31 @@
 // which shows 'Private — play as a member's guest' instead; O8) · region ·
 // courses `<dl>` (sourced tees only)").
 import BaseLayout from "../../layouts/BaseLayout.astro";
-import { primaryTrailOf, trailsOfFacility } from "@golfraven/catalog";
-import { loadSiteCatalog, indexableFacilities } from "../../lib/derive";
+import { isIndexable, primaryTrailOf, trailsOfFacility } from "@golfraven/catalog";
+import { loadPrimaryTrailOverrides, loadSiteCatalog, verifiedFacilities } from "../../lib/derive";
 import { withBase } from "../../lib/nav";
 import { facilityMetaDescription } from "../../lib/facility-copy";
 import { siteOrigin, breadcrumbNode, facilityPageNode } from "../../lib/schema";
 
 export async function getStaticPaths() {
   const { catalog } = await loadSiteCatalog();
-  // "verified facilities only" — the R1 predicate (§4.2: "'verified' with
-  // no qualifier means listed-verified or better"), same gate the sitemap
-  // and region-page linking use (AT(6), AT(10)) — never a second formula.
-  return indexableFacilities(catalog).map((facility) => ({
+  // S4: "Every verified facility gets a page, and R1 decides noindex for
+  // thin ones" — every VERIFIED facility gets a page here; whether it's
+  // indexed is decided per-page below (R1's isIndexable), not by which
+  // pages get built.
+  return verifiedFacilities(catalog).map((facility) => ({
     params: { slug: facility.slug },
     props: { facility },
   }));
 }
 
 const { facility } = Astro.props;
-const { catalog } = await loadSiteCatalog();
+const { catalog, usedDemoData } = await loadSiteCatalog();
 
+const overrides = await loadPrimaryTrailOverrides();
 const trails = trailsOfFacility(catalog, facility.id);
-const primaryTrail = primaryTrailOf(catalog, facility.id);
+const primaryTrail = primaryTrailOf(catalog, facility.id, overrides);
+const thin = !isIndexable(facility);
 
 const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
 const path = `/courses/${facility.slug}/`;
@@ -46,9 +49,18 @@ const crumbs = [
 const jsonLd = [breadcrumbNode(crumbs), facilityPageNode(origin, facility)];
 
 const isPrivate = facility.access === "private";
+const appDeepLink = primaryTrail ? `golfraven://trail/${primaryTrail.id}` : undefined;
+const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryTrail.id}` : undefined;
 ---
 
-<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  jsonLd={jsonLd}
+  noindex={thin}
+  demo={usedDemoData}
+>
   <main class="wrap" id="main-content" tabindex="-1">
     <header>
       <p class="eyebrow">
@@ -57,6 +69,8 @@ const isPrivate = facility.access === "private";
       </p>
       <h1>{name}</h1>
     </header>
+
+    {facility.blurb && <p class="wp__blurb">{facility.blurb}</p>}
 
     {facility.access && (
       <p>
@@ -78,7 +92,20 @@ const isPrivate = facility.access === "private";
       )
     }
 
-    {/* O8: a private club gets NO booking rail — a guest note instead. */}
+    {
+      appDeepLink && universalLink && (
+        <p class="app-cta">
+          <a class="btn btn--ghost" href={appDeepLink}>Track this trail in the app →</a>
+          <span class="app-cta__fallback">
+            (or open <a href={universalLink}>{universalLink}</a> if the app isn't installed)
+          </span>
+        </p>
+      )
+    }
+
+    {/* O8: a private club gets NO booking rail — a guest note instead.
+        The official-site link is NOT part of the booking rail and still
+        shows for a private club (gate review nit). */}
     {
       isPrivate ? (
         <p class="note" role="note">
@@ -89,7 +116,7 @@ const isPrivate = facility.access === "private";
           <p class="wp__actions">
             {facility.booking.map((b) => (
               <a class="btn" href={b.url} target="_blank" rel="noopener">
-                Book on {b.provider === "course-native" ? "the course site" : b.provider} →
+                Book via {b.provider === "course-native" ? "the course" : "GolfNow"} →
               </a>
             ))}
           </p>
@@ -97,7 +124,7 @@ const isPrivate = facility.access === "private";
       )
     }
 
-    {facility.url && !isPrivate && (
+    {facility.url && (
       <p>
         <a href={facility.url} target="_blank" rel="noopener">Visit the official website →</a>
       </p>
@@ -129,7 +156,16 @@ const isPrivate = facility.access === "private";
     </dl>
 
     <p class="wp__claim">
-      Own or know {name}? <a href={withBase(`/claim/?facility=${encodeURIComponent(facility.slug)}`)}>Claim or correct this listing →</a>
+      Own or know {name}? <a href={withBase(`/claim/?facility=${encodeURIComponent(facility.slug)}`)}>Suggest a correction →</a>
     </p>
   </main>
 </BaseLayout>
+
+<style>
+  .app-cta {
+    font-size: 0.9rem;
+  }
+  .app-cta__fallback {
+    color: var(--ink-soft, #4b5b52);
+  }
+</style>

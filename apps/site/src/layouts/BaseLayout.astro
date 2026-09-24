@@ -19,6 +19,11 @@ interface Props {
   jsonLd?: object[];
   /** `<meta name="robots" content="noindex, follow">` for utility / thin pages. */
   noindex?: boolean;
+  /** B3: true when this page was built from the synthetic demo catalog.
+   *  Forces `noindex` (whatever `noindex` says) and renders a visible
+   *  "DEMO DATA" banner — "A demo build is noindex on every page ... and
+   *  shows a visible 'DEMO DATA — not real courses' banner." */
+  demo?: boolean;
   /** The page's own locale (`en` default; `fr` for `/fr/...` pages). */
   locale?: "en" | "fr";
   /** Other locales this exact page exists in (hreflang alternates). Omit or
@@ -34,12 +39,15 @@ const {
   path = "",
   jsonLd = [],
   noindex = false,
+  demo = false,
   locale = "en",
   alternates = [],
 } = Astro.props;
 
 const canonical = new URL(withBase(path), Astro.site).href;
 const ogLocale = locale === "fr" ? "fr_CA" : "en_US";
+// B3: a demo build is noindex on EVERY page, whatever the page itself asked for.
+const effectiveNoindex = noindex || demo;
 
 const ldScript = jsonLd.length ? jsonLdScript(jsonLd) : "";
 
@@ -55,8 +63,10 @@ const hreflangEntries: { hreflang: string; href: string }[] = [
     href: new URL(withBase(a.path), Astro.site).href,
   })),
 ];
+// S6: x-default is always an ABSOLUTE URL, whichever branch produces it.
+const enAlternate = alternates.find((a) => a.locale === "en");
 const xDefaultHref =
-  locale === "en" ? canonical : (alternates.find((a) => a.locale === "en")?.path ?? null);
+  locale === "en" ? canonical : enAlternate ? new URL(withBase(enAlternate.path), Astro.site).href : null;
 ---
 
 <!doctype html>
@@ -82,7 +92,7 @@ const xDefaultHref =
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
-    {noindex && <meta name="robots" content="noindex, follow" />}
+    {effectiveNoindex && <meta name="robots" content="noindex, follow" />}
 
     {hreflangEntries.map((e) => <link rel="alternate" hreflang={e.hreflang} href={e.href} />)}
     {xDefaultHref && <link rel="alternate" hreflang="x-default" href={xDefaultHref} />}
@@ -108,6 +118,14 @@ const xDefaultHref =
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to main content</a>
+    {
+      demo && (
+        <p class="demo-banner" role="alert">
+          DEMO DATA — not real courses. Every trail and facility on this page is fictional
+          (see `apps/site/fixtures/demo-catalog/README.md`).
+        </p>
+      )
+    }
     <header class="site-header">
       <a class="brand" href={withBase("/")}>GolfRaven</a>
       <nav aria-label="Primary">

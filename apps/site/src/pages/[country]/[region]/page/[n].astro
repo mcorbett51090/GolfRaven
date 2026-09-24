@@ -1,12 +1,14 @@
 ---
 // Page 2+ of a region's directory — see `../index.astro`'s doc. Only
-// generated for a region whose row count exceeds `REGION_PAGE_SIZE`
-// (200); the demo dataset is far below that, so `getStaticPaths` returns
-// `[]` in stage 1 and this route builds no pages yet — it exists so the
-// pagination code path is real and testable the day a region crosses 200
-// rows (build plan §5.1 `states/*`: "paginated at 200").
+// generated for a region whose row count exceeds the page size (200 by
+// default, overridable via `REGION_PAGE_SIZE` — B2: "Run [AT1] with
+// REGION_PAGE_SIZE=1 too, to exercise pagination"). This route is
+// ALWAYS `noindex` and never appears in `build/indexability.json`'s set
+// (build plan §5.1 `states/*`: "paginated at 200"; §5.4: "later pages
+// noindex,follow").
 import BaseLayout from "../../../../layouts/BaseLayout.astro";
 import RegionDirectory from "../../../../components/RegionDirectory.astro";
+import { isIndexable } from "@golfraven/catalog";
 import { loadSiteCatalog, regionCodesInUse, regionInfo, regionPages } from "../../../../lib/derive";
 import { siteOrigin, breadcrumbNode, collectionNode, regionUrl } from "../../../../lib/schema";
 
@@ -30,7 +32,7 @@ export async function getStaticPaths() {
 }
 
 const { code, facilities, pageNumber, totalPages } = Astro.props;
-const { catalog } = await loadSiteCatalog();
+const { catalog, usedDemoData } = await loadSiteCatalog();
 const info = regionInfo(catalog, code);
 const totalCount = catalog.facilities.filter((f) => f.region === code).length;
 
@@ -44,11 +46,24 @@ const jsonLd = [
     { name: "GolfRaven", url: `${origin}/` },
     { name: info.name, url },
   ]),
-  collectionNode(origin, `${info.name} Golf Courses`, description, facilities, url),
+  collectionNode(
+    origin,
+    `${info.name} Golf Courses`,
+    description,
+    facilities.filter((f) => isIndexable(f)),
+    url,
+  ),
 ];
 ---
 
-<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd} noindex={true}>
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  jsonLd={jsonLd}
+  noindex={true}
+  demo={usedDemoData}
+>
   <main class="wrap" id="main-content" tabindex="-1">
     <header>
       <p class="eyebrow">Region · page {pageNumber} of {totalPages}</p>

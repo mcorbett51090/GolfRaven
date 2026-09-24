@@ -53,8 +53,8 @@ export function facilityMetaDescription(
   const close =
     facility.access === "private"
       ? "Listed on GolfRaven."
-      : facility.url
-        ? "See details and book on GolfRaven."
+      : facility.url || facility.booking.length > 0
+        ? "Book via the course or GolfNow."
         : "Listed in the GolfRaven directory.";
 
   const raw = `${parts.join(" ")}. ${close}`;

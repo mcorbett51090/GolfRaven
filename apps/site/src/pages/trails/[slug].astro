@@ -6,6 +6,9 @@
 // a private-stops note when any member is `access: private`").
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import {
+  distinctStopFacilityCount,
+  isIndexable,
+  isVerified,
   latestRosterVersion,
   privateStopCount,
   rosterStops,
@@ -13,7 +16,6 @@ import {
 import { loadSiteCatalog } from "../../lib/derive";
 import { withBase } from "../../lib/nav";
 import { siteOrigin, breadcrumbNode, collectionNode, trailUrl } from "../../lib/schema";
-import { isIndexable } from "@golfraven/catalog";
 
 export async function getStaticPaths() {
   const { catalog } = await loadSiteCatalog();
@@ -21,11 +23,12 @@ export async function getStaticPaths() {
 }
 
 const { trail } = Astro.props;
-const { catalog } = await loadSiteCatalog();
+const { catalog, usedDemoData } = await loadSiteCatalog();
 
 const version = latestRosterVersion(trail);
 const stops = rosterStops(catalog, trail, version);
 const privateCount = privateStopCount(stops);
+const stopFacilityCount = distinctStopFacilityCount(stops);
 
 const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
 const url = trailUrl(origin, trail.slug);
@@ -35,8 +38,11 @@ const description =
   trail.blurb?.slice(0, 155) ||
   `The ${trail.name}: ${version.members.length} stops across ${trail.regions.join(", ")}. Track your progress with GolfRaven.`;
 
-const indexableFacilities = stops
+// S1: the JSON-LD ItemList lists only facilities that actually HAVE a page
+// worth indexing — the R1-indexable subset, distinct by facility id.
+const indexableStopFacilities = stops
   .map((s) => s.facility)
+  .filter((f) => isIndexable(f))
   .filter((f, i, arr) => arr.findIndex((x) => x.id === f.id) === i);
 
 const jsonLd = [
@@ -44,16 +50,20 @@ const jsonLd = [
     { name: "GolfRaven", url: `${origin}/` },
     { name: trail.name, url },
   ]),
-  collectionNode(origin, trail.name, description, indexableFacilities, url),
+  collectionNode(origin, trail.name, description, indexableStopFacilities, url),
 ];
 
 const completionRuleLabel =
   version.completionRule.kind === "all"
     ? "Every stop"
     : `${version.completionRule.n} of ${version.members.length} stops`;
+
+// O3: no web tracker — "Track this trail in the app" instead.
+const appDeepLink = `golfraven://trail/${trail.id}`;
+const universalLink = `https://golfraven.example/trail/${trail.id}`;
 ---
 
-<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd} demo={usedDemoData}>
   <main class="wrap" id="main-content" tabindex="-1">
     <header>
       <p class="eyebrow">Golf trail · {trail.regions.join(" & ")}</p>
@@ -63,6 +73,12 @@ const completionRuleLabel =
         <strong>{version.completionUnit}</strong> · to complete: <strong>{completionRuleLabel}</strong>
       </p>
       <p>Roster last verified {version.verifiedAt}.</p>
+      <p class="app-cta">
+        <a class="btn btn--ghost" href={appDeepLink}>Track this trail in the app →</a>
+        <span class="app-cta__fallback">
+          (or open <a href={universalLink}>{universalLink}</a> if the app isn't installed)
+        </span>
+      </p>
     </header>
 
     {
@@ -77,7 +93,7 @@ const completionRuleLabel =
     {
       privateCount > 0 && (
         <p class="note" role="note">
-          {privateCount} of {version.members.length} stops {privateCount === 1 ? "is a" : "are"} private
+          {privateCount} of {stopFacilityCount} stops {privateCount === 1 ? "is a" : "are"} private
           club{privateCount === 1 ? "" : "s"}: completing this trail needs a member's invitation at each.
         </p>
       )
@@ -89,19 +105,21 @@ const completionRuleLabel =
     <ul class="row-list" role="list">
       {
         stops.map((stop) => {
-          const indexable = isIndexable(stop.facility);
+          // S4: every VERIFIED facility has a page (noindex if thin) —
+          // only an UNVERIFIED facility has no page to link to.
+          const hasPage = isVerified(stop.facility);
           const label = stop.facility.name ?? stop.facility.slug;
           return (
             <li class="row">
               <span>
-                {indexable ? (
+                {hasPage ? (
                   <a href={withBase(`/courses/${stop.facility.slug}/`)}>{label}</a>
                 ) : (
                   <strong>{label}</strong>
                 )}
                 {stop.facility.access === "private" && <span class="cta"> · Private</span>}
               </span>
-              {!indexable && (
+              {!hasPage && (
                 <a class="cta" href={withBase(`/claim/?facility=${encodeURIComponent(stop.facility.slug)}`)}>
                   Help verify this course →
                 </a>
@@ -113,3 +131,12 @@ const completionRuleLabel =
     </ul>
   </main>
 </BaseLayout>
+
+<style>
+  .app-cta {
+    font-size: 0.9rem;
+  }
+  .app-cta__fallback {
+    color: var(--ink-soft, #4b5b52);
+  }
+</style>

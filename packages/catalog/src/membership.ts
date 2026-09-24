@@ -197,20 +197,24 @@ export interface RosterStop {
 /** Unit-aware resolution of every roster member in `version` (default: the
  * trail's latest) down to the `Facility` (and, where the member names one,
  * `Course`) it points at, sorted by `stopOrder` (members without one sort
- * after those with one, in encounter order). Members whose target id is not
- * in `catalog.facilities`/`.courses` (a dangling reference — a gate-rule
- * concern for `verify-catalog`, not this package) are skipped rather than
- * throwing. */
+ * after those with one, in encounter order). Member ids are resolved
+ * through the ID ledger's `mergedInto` closure first (A2-04, S3): a roster
+ * published before a merge still names the tombstoned id, and must still
+ * resolve to the live survivor. Members whose target id is not in
+ * `catalog.facilities`/`.courses`, even after ledger resolution (a
+ * dangling reference — a gate-rule concern for `verify-catalog`, not this
+ * package) are skipped rather than throwing. */
 export function rosterStops(
   catalog: Catalog,
   trail: Trail,
   version: RosterVersion = latestRosterVersion(trail),
 ): RosterStop[] {
-  const facilityById = new Map(catalog.facilities.map((f) => [f.id, f]));
+  const ledger = catalog.idLedger;
+  const facilityById = new Map(catalog.facilities.map((f) => [resolveId(f.id, ledger), f]));
   const courseById = new Map<CourseId, Course>();
   for (const facility of catalog.facilities) {
     for (const course of facility.courses) {
-      courseById.set(course.id, course);
+      courseById.set(resolveId(course.id, ledger) as CourseId, course);
     }
   }
   const courseFacility = buildCourseFacilityIndex(catalog);
@@ -226,7 +230,7 @@ export function rosterStops(
   const stops: InternalStop[] = [];
   version.members.forEach((member, seq) => {
     if (member.unit === "facility") {
-      const facility = facilityById.get(member.facilityId);
+      const facility = facilityById.get(resolveId(member.facilityId, ledger));
       if (facility) {
         stops.push({ member, facility, course: undefined, stopOrder: member.stopOrder, seq });
       }
@@ -235,18 +239,20 @@ export function rosterStops(
     if (member.unit === "course") {
       const [firstId] = courseMemberIds(member);
       if (firstId === undefined) return;
-      const facilityId = courseFacility.get(firstId);
-      const facility = facilityId ? facilityById.get(facilityId) : undefined;
-      const course = courseById.get(firstId);
+      const resolvedCourseId = resolveId(firstId, ledger) as CourseId;
+      const facilityId = courseFacility.get(resolvedCourseId);
+      const facility = facilityId ? facilityById.get(resolveId(facilityId, ledger)) : undefined;
+      const course = courseById.get(resolvedCourseId);
       if (facility) {
         stops.push({ member, facility, course, stopOrder: member.stopOrder, seq });
       }
       return;
     }
     // unit === 'hole'
-    const facilityId = courseFacility.get(member.courseId);
-    const facility = facilityId ? facilityById.get(facilityId) : undefined;
-    const course = courseById.get(member.courseId);
+    const resolvedCourseId = resolveId(member.courseId, ledger) as CourseId;
+    const facilityId = courseFacility.get(resolvedCourseId);
+    const facility = facilityId ? facilityById.get(resolveId(facilityId, ledger)) : undefined;
+    const course = courseById.get(resolvedCourseId);
     if (facility) {
       stops.push({ member, facility, course, stopOrder: member.stopOrder, seq });
     }
@@ -264,10 +270,18 @@ export function rosterStops(
     );
 }
 
+/** Distinct facilities among the resolved stops — the "n" a private-stops
+ * note counts against (S3): a course-unit trail with several members at
+ * one facility counts that facility once. */
+export function distinctStopFacilityCount(stops: readonly RosterStop[]): number {
+  return new Set(stops.map((s) => s.facility.id)).size;
+}
+
 /** How many resolved stops are private clubs (O8: "a trail with a private
- * member shows the private-stops note"). Counts distinct facilities, so a
- * course-unit trail with several members at one private facility counts
- * that facility once. */
+ * member shows the private-stops note") — the "k" of the k/n. Counts
+ * distinct facilities the same way `distinctStopFacilityCount` does (S3),
+ * so a course-unit trail with several members at one private facility
+ * counts that facility once. */
 export function privateStopCount(stops: readonly RosterStop[]): number {
   const privateFacilityIds = new Set(
     stops.filter((s) => s.facility.access === "private").map((s) => s.facility.id),

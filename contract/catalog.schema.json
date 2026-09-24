@@ -339,6 +339,12 @@
         "approx": {
           "type": "boolean"
         },
+        "blurb": {
+          "type": "string"
+        },
+        "blurbFr": {
+          "type": "string"
+        },
         "booking": {
           "items": {
             "additionalProperties": false,
@@ -442,6 +448,24 @@
         "prov": {
           "additionalProperties": false,
           "properties": {
+            "blurb": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
+            "blurbFr": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
             "coord": {
               "enum": [
                 "editor",

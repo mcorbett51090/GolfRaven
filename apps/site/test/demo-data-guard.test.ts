@@ -1,37 +1,81 @@
 /**
- * "Never publish demo data" (stage-1 scope item 3): `GOLFRAVEN_ENV=production`
- * plus a demo-data fallback must be a hard build failure. Tested directly
- * against `loadSiteCatalog()`, not through a full `astro build` (that path
- * is exercised by `test/global-setup.mjs` + `acceptance.test.ts`, always
- * with `GOLFRAVEN_ENV` unset).
+ * B3 (fail-closed demo guard): "Demo data is allowed only when
+ * GOLFRAVEN_DEMO=1. An empty data/ without it fails the build, with a
+ * clear message. ... GOLFRAVEN_ENV=production requires real data and
+ * refuses demo mode." Tested directly against `loadSiteCatalog()`
+ * (the full-build behavior — noindex-everywhere, empty sitemap, the
+ * banner — is covered by `test/paths.mjs`'s `BUILDS.demo`,
+ * asserted in `acceptance.test.ts`).
  */
-import { describe, expect, it } from "vitest";
-import { isCatalogEmpty } from "@golfraven/catalog";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { loadSiteCatalog } from "../src/lib/derive";
+import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
+import { writeFixtureDataDir } from "./write-fixture-data-dir.mjs";
 
-describe("loadSiteCatalog — demo-data production guard", () => {
-  it("refuses GOLFRAVEN_ENV=production + GOLFRAVEN_DEMO=1", async () => {
-    await expect(
-      loadSiteCatalog({ GOLFRAVEN_ENV: "production", GOLFRAVEN_DEMO: "1" }),
-    ).rejects.toThrow(/production/i);
+describe("loadSiteCatalog — the 4 GOLFRAVEN_DEMO × GOLFRAVEN_ENV combinations (empty real data/)", () => {
+  it("empty data/ + no GOLFRAVEN_DEMO -> throws (fail-closed, not a silent empty site)", async () => {
+    await expect(loadSiteCatalog({})).rejects.toThrow(/GOLFRAVEN_DEMO/);
   });
 
-  it("refuses GOLFRAVEN_ENV=production when the real data/ dir is simply empty", async () => {
-    // The real data/ dir has no facility/trail content today (data/README.md),
-    // so an unset GOLFRAVEN_DEMO still falls back to the demo catalog — and
-    // that fallback must still be refused in production.
-    await expect(loadSiteCatalog({ GOLFRAVEN_ENV: "production" })).rejects.toThrow(/production/i);
+  it("empty data/ + no GOLFRAVEN_DEMO + GOLFRAVEN_ENV=production -> STILL throws the empty-data message (never silently 'succeeds' into demo)", async () => {
+    await expect(loadSiteCatalog({ GOLFRAVEN_ENV: "production" })).rejects.toThrow(
+      /GOLFRAVEN_DEMO/,
+    );
   });
 
-  it("loads the demo catalog outside production when forced", async () => {
+  it("GOLFRAVEN_DEMO=1, no production -> uses the demo catalog", async () => {
     const { catalog, usedDemoData } = await loadSiteCatalog({ GOLFRAVEN_DEMO: "1" });
     expect(usedDemoData).toBe(true);
-    expect(isCatalogEmpty(catalog)).toBe(false);
     expect(catalog.trails.length).toBeGreaterThan(0);
   });
 
-  it("loads the demo catalog outside production even when not forced (real data/ is empty)", async () => {
-    const { usedDemoData } = await loadSiteCatalog({});
+  it("GOLFRAVEN_DEMO=1 + GOLFRAVEN_ENV=production -> throws, refusing demo data in production", async () => {
+    await expect(
+      loadSiteCatalog({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_ENV: "production" }),
+    ).rejects.toThrow(/production/i);
+  });
+});
+
+describe("loadSiteCatalog — populated real data/ (GOLFRAVEN_DATA_DIR override)", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  it("uses real data when data/ is populated, no GOLFRAVEN_DEMO needed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "golfraven-site-derive-"));
+    dirs.push(dir);
+    await writeFixtureDataDir(dir);
+    const { catalog, usedDemoData } = await loadSiteCatalog({ GOLFRAVEN_DATA_DIR: dir });
+    expect(usedDemoData).toBe(false);
+    expect(catalog.facilities.length).toBe(demoBundleForSite().facilities.length);
+  });
+
+  it("uses real data in production too, when data/ is genuinely populated", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "golfraven-site-derive-"));
+    dirs.push(dir);
+    await writeFixtureDataDir(dir);
+    const { usedDemoData } = await loadSiteCatalog({
+      GOLFRAVEN_DATA_DIR: dir,
+      GOLFRAVEN_ENV: "production",
+    });
+    expect(usedDemoData).toBe(false);
+  });
+
+  it("GOLFRAVEN_DEMO=1 still wins over populated real data (explicit request honoured)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "golfraven-site-derive-"));
+    dirs.push(dir);
+    await writeFixtureDataDir(dir);
+    // Sabotage a required field so "real" would fail if it were loaded —
+    // proves GOLFRAVEN_DEMO=1 really did skip the real data/ dir entirely.
+    await writeFile(join(dir, "designers.json"), "not json");
+    const { usedDemoData } = await loadSiteCatalog({
+      GOLFRAVEN_DATA_DIR: dir,
+      GOLFRAVEN_DEMO: "1",
+    });
     expect(usedDemoData).toBe(true);
   });
 });

@@ -130,11 +130,22 @@ export function facilityPageNode(origin: string, f: Facility) {
 /**
  * Serialize nodes to one `<script type="application/ld+json">` string.
  * Escapes `<` so a literal `</script>` in any value can't close the tag
- * early. AT(7): the ONLY `set:html` use in this app is `BaseLayout`
- * rendering this function's output.
+ * early, and U+2028/U+2029 (LINE/PARAGRAPH SEPARATOR — valid JSON string
+ * content, but legacy JS-string-literal parsers treat them as line
+ * terminators, which has bitten inline `<script>` payloads before; this
+ * script's type is `application/ld+json`, not executable JS, but the
+ * escape costs nothing and removes the ambiguity entirely). AT(7): the
+ * ONLY `set:html` use in this app is `BaseLayout` rendering this
+ * function's output.
  */
 export function jsonLdScript(nodes: object[]): string {
   const graph = { "@context": "https://schema.org", "@graph": nodes };
-  const json = JSON.stringify(graph).split("<").join("\\u003c");
+  const json = JSON.stringify(graph)
+    .split("<")
+    .join("\\u003c")
+    .split(" ")
+    .join("\\u2028")
+    .split(" ")
+    .join("\\u2029");
   return `<script type="application/ld+json">${json}</script>`;
 }

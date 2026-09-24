@@ -11,7 +11,7 @@ import { loadSiteCatalog } from "../lib/derive";
 import { withBase } from "../lib/nav";
 import { siteOrigin } from "../lib/schema";
 
-const { catalog } = await loadSiteCatalog();
+const { catalog, usedDemoData } = await loadSiteCatalog();
 
 const trails = [...catalog.trails].sort(
   (a, b) =>
@@ -34,6 +34,7 @@ const jsonLd = [{ "@type": "WebSite", name: "GolfRaven", url: `${origin}/` }];
   description={description}
   path="/"
   jsonLd={jsonLd}
+  demo={usedDemoData}
   alternates={[{ locale: "fr", path: "/fr/" }]}
 >
   <main class="wrap" id="main-content" tabindex="-1">

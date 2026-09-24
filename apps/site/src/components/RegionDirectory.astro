@@ -4,7 +4,7 @@
 // route files can never drift (build plan §5.1 `states/*`: "Directory of
 // all entries — verified rows link to pages, unverified rows link to the
 // claim form, paginated at 200").
-import { isIndexable } from "@golfraven/catalog";
+import { isVerified } from "@golfraven/catalog";
 import type { Facility } from "@golfraven/catalog";
 import { withBase } from "../lib/nav";
 import type { RegionInfo } from "../lib/derive";
@@ -31,18 +31,20 @@ function pageHref(n: number): string {
 <ul class="row-list" role="list">
   {
     facilities.map((f) => {
-      const indexable = isIndexable(f);
+      // S4: every VERIFIED facility has a page (R1 decides only whether
+      // it's INDEXED) — only an UNVERIFIED row has no page to link to.
+      const hasPage = isVerified(f);
       const label = f.name ?? f.slug;
       return (
         <li class="row">
-          {indexable ? (
+          {hasPage ? (
             <a href={withBase(`/courses/${f.slug}/`)}>{label}</a>
           ) : (
             <span>
               <strong>{label}</strong> <span class="cta">— unverified</span>
             </span>
           )}
-          {!indexable && (
+          {!hasPage && (
             <a class="cta" href={withBase(`/claim/?facility=${encodeURIComponent(f.slug)}`)}>
               Help verify this course →
             </a>

@@ -5,10 +5,12 @@
   "type": "module",
   "description": "Public site (Astro 5 static, build plan §3.1 row C). P2 stage 1 port from southern-wine-country @ 572ff7e (build plan §5).",
   "scripts": {
-    "dev": "astro dev",
+    "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
+    "verify-input": "node ./scripts/verify-input.mjs",
     "emit-indexability": "node ./scripts/emit-indexability.mjs",
-    "build": "pnpm run emit-indexability && astro build",
-    "typecheck": "astro check",
+    "verify-sitemap": "node ./scripts/verify-sitemap.mjs",
+    "build": "pnpm run verify-input && pnpm run emit-indexability && ASTRO_TELEMETRY_DISABLED=1 astro build && pnpm run verify-sitemap",
+    "typecheck": "ASTRO_TELEMETRY_DISABLED=1 astro check",
     "test": "vitest run"
   },
   "dependencies": {
@@ -18,6 +20,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",
+    "@golfraven/catalog-tools": "workspace:*",
     "typescript": "5.9.3",
     "vitest": "5.0.1"
   }

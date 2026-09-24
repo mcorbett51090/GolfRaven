@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mintId } from "../src/ids.js";
 import { emptyLedger, mergeIntoSurvivor } from "../src/ledger.js";
 import {
+  distinctStopFacilityCount,
   latestRosterVersion,
   primaryTrailOf,
   privateStopCount,
@@ -314,6 +315,37 @@ describe("rosterStops", () => {
     expect(stops.map((s) => s.facility.id)).toEqual([facA, facB]);
   });
 
+  it("resolves a tombstoned/merged member id to its live survivor (S3, A2-04)", () => {
+    const oldFacilityId = mintId("fac");
+    const survivorFacilityId = mintId("fac");
+    const trailId = mintId("trl");
+    let ledger = emptyLedger();
+    ledger = {
+      entries: {
+        [oldFacilityId]: { id: oldFacilityId, kind: "fac", transitions: [] },
+        [survivorFacilityId]: { id: survivorFacilityId, kind: "fac", transitions: [] },
+      },
+    } as unknown as typeof ledger;
+    ledger = mergeIntoSurvivor(ledger, [oldFacilityId], survivorFacilityId, {
+      catalogVersion: "v1",
+      date: "2026-09-24",
+    });
+    const catalog: Catalog = {
+      regions: [],
+      facilities: [facility(survivorFacilityId, [mintId("crs")])],
+      trails: [
+        trailWithMembers(trailId, [
+          { unit: "facility", facilityId: oldFacilityId as Facility["id"] },
+        ]),
+      ],
+      designers: [],
+      achievements: [],
+      idLedger: ledger,
+    };
+    const stops = rosterStops(catalog, catalog.trails[0]!);
+    expect(stops.map((s) => s.facility.id)).toEqual([survivorFacilityId]);
+  });
+
   it("skips a dangling member reference rather than throwing", () => {
     const trailId = mintId("trl");
     const catalog: Catalog = {
@@ -332,8 +364,8 @@ describe("rosterStops", () => {
   });
 });
 
-describe("privateStopCount (O8)", () => {
-  it("counts distinct private-access facilities among the resolved stops", () => {
+describe("privateStopCount / distinctStopFacilityCount (O8, S3)", () => {
+  it("counts distinct private-access facilities among the resolved stops (k), and all distinct facilities (n)", () => {
     const facilityId = mintId("fac");
     const trailId = mintId("trl");
     const catalog: Catalog = {
@@ -350,6 +382,30 @@ describe("privateStopCount (O8)", () => {
     };
     const stops = rosterStops(catalog, catalog.trails[0]!);
     expect(privateStopCount(stops)).toBe(1);
+    expect(distinctStopFacilityCount(stops)).toBe(1);
+  });
+
+  it("a course-unit trail with several members at ONE private facility counts k and n each once", () => {
+    const facilityId = mintId("fac");
+    const courseA = mintId("crs");
+    const courseB = mintId("crs");
+    const trailId = mintId("trl");
+    const catalog: Catalog = {
+      regions: [],
+      facilities: [facility(facilityId, [courseA, courseB], { access: "private" })],
+      trails: [
+        trailWithMembers(trailId, [
+          { unit: "course", courseId: courseA as Facility["courses"][number]["id"] },
+          { unit: "course", courseId: courseB as Facility["courses"][number]["id"] },
+        ]),
+      ],
+      designers: [],
+      achievements: [],
+      idLedger: emptyLedger(),
+    };
+    const stops = rosterStops(catalog, catalog.trails[0]!);
+    expect(privateStopCount(stops)).toBe(1);
+    expect(distinctStopFacilityCount(stops)).toBe(1);
   });
 
   it("is 0 when no resolved stop is private", () => {

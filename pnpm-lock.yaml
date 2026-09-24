@@ -69,6 +69,9 @@ importers:
       '@astrojs/check':
         specifier: 0.9.10
         version: 0.9.10(@emnapi/runtime@1.11.3)(prettier@3.9.9)(typescript@5.9.3)
+      '@golfraven/catalog-tools':
+        specifier: workspace:*
+        version: link:../../tools/catalog
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -91,6 +94,28 @@ importers:
       '@types/tz-lookup':
         specifier: 6.1.2
         version: 6.1.2
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 5.0.1
+        version: 5.0.1(@types/node@26.6.2)(vite@8.3.0(@types/node@26.6.2)(esbuild@0.27.7)(terser@5.51.2)(yaml@2.9.1))
+
+  packages/import:
+    dependencies:
+      '@golfraven/matching':
+        specifier: workspace:*
+        version: link:../matching
+      fit-file-parser:
+        specifier: 6.1.2
+        version: 6.1.2
+      sax:
+        specifier: 1.4.1
+        version: 1.4.1
+    devDependencies:
+      '@types/sax':
+        specifier: 1.2.7
+        version: 1.2.7
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -2047,6 +2072,9 @@ packages:
   buffer-from@1.1.2:
     resolution: {integrity: sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==}
 
+  buffer@6.0.3:
+    resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
+
   bytes@3.1.2:
     resolution: {integrity: sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg==}
     engines: {node: '>= 0.8'}
@@ -2558,6 +2586,9 @@ packages:
     resolution: {integrity: sha512-aAWcW57uxVNrQZqFXjITpW3sIUQmHGG3qSb9mUah9MgMC4NeWhNOlNjXEYq3HjRAvL6arUviZGGJsBg6z0zsWA==}
     engines: {node: '>= 0.8'}
 
+  fit-file-parser@6.1.2:
+    resolution: {integrity: sha512-HFPRiFvXyvrU9ujEr5IEIJtvC+Mi0db9JR/zYA0tcBq7+AjgFkPZ58oScU+9Q9k8vMOjOwGQiA8DMpJuGzg79g==}
+
   flattie@1.1.1:
     resolution: {integrity: sha512-9UbaD6XdAL97+k/n+N7JwX46K/M6Zc6KcFYskrYL8wbBV/Uyk0CTAMY0VT+qiK5PM7AIc9aTWYtq65U7T+aCNQ==}
     engines: {node: '>=8'}
@@ -2699,6 +2730,9 @@ packages:
   https-proxy-agent@7.0.6:
     resolution: {integrity: sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==}
     engines: {node: '>= 14'}
+
+  ieee754@1.2.1:
+    resolution: {integrity: sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==}
 
   ignore@5.3.2:
     resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
@@ -6493,6 +6527,11 @@ snapshots:
 
   buffer-from@1.1.2: {}
 
+  buffer@6.0.3:
+    dependencies:
+      base64-js: 1.5.1
+      ieee754: 1.2.1
+
   bytes@3.1.2: {}
 
   camelcase@6.3.0: {}
@@ -7008,6 +7047,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  fit-file-parser@6.1.2:
+    dependencies:
+      buffer: 6.0.3
+
   flattie@1.1.1: {}
 
   flow-enums-runtime@0.0.6: {}
@@ -7198,6 +7241,8 @@ snapshots:
       debug: 4.4.3
     transitivePeerDependencies:
       - supports-color
+
+  ieee754@1.2.1: {}
 
   ignore@5.3.2: {}
 
