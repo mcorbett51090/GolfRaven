@@ -193,8 +193,10 @@ VALUES ('00000000-0000-0000-0000-00000000000a', 'apple', '\xdeadbeef'::bytea, '\
 INSERT INTO app.push_token (user_id, device_id, expo_token)
 VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'ExponentPushToken[test]');
 
-INSERT INTO app.play_evidence (play_id, evidence_id)
-VALUES ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001');
+-- user_id (M1, post-P3a gate: composite-FK design, 0017) must match both
+-- play.user_id and evidence.user_id -- both are player A here.
+INSERT INTO app.play_evidence (play_id, evidence_id, user_id)
+VALUES ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a');
 
 -- M5 (post-P3a gate): player A's opted-in public projection row, so
 -- delete_my_data's "public_profile_projection is removed" post-condition

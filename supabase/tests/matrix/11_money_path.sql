@@ -35,8 +35,8 @@ SELECT lives_ok(
   'setup: a second evidence row owned by player A'
 );
 SELECT lives_ok(
-  $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
-    ('40000000-0000-0000-0000-000000000001', '32000000-0000-0000-0000-000000000099')$$,
+  $$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES
+    ('40000000-0000-0000-0000-000000000001', '32000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a')$$,
   'play_evidence: evidence backing its OWN owner''s play succeeds'
 );
 
@@ -50,8 +50,8 @@ SELECT lives_ok(
   'setup: a second play row, also for player A'
 );
 SELECT throws_ok(
-  $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
-    ('42000000-0000-0000-0000-000000000099', '32000000-0000-0000-0000-000000000099')$$,
+  $$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES
+    ('42000000-0000-0000-0000-000000000099', '32000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a')$$,
   '23505',
   NULL,
   'play_evidence: the SAME evidence_id cannot back a second play, even the SAME owner''s own second play (UNIQUE(evidence_id))'
@@ -72,6 +72,30 @@ SELECT lives_ok(
             NULL, 'self_report', 'money-path-seed-b', 'accepted', 1)$$,
   'setup: an evidence row owned by player B'
 );
+-- A THIRD evidence row for player A, not yet linked to anything (30000000-
+-- ...-1 and 32000000-...-99 are both already linked by this point, which
+-- would trip the UNIQUE(evidence_id) constraint first and mask the FK
+-- violation these two tests are isolating).
+SELECT lives_ok(
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
+    VALUES ('33000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
+            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a3', 'accepted', 1)$$,
+  'setup: a THIRD evidence row owned by player A, not yet linked'
+);
+
+-- Both play_evidence composite FKs are DEFERRABLE INITIALLY DEFERRED
+-- (matching every other app-internal FK, 0014 §3 / 0017), so a violating
+-- INSERT/UPDATE would not raise until COMMIT by default -- which this
+-- test file's outer transaction never reaches (it ROLLBACKs). Switching
+-- JUST these two constraints to IMMEDIATE checking (not ALL constraints,
+-- so delete_my_data's OWN reliance on deferred checking elsewhere in
+-- this same file, H1's test below, is unaffected) makes every violation
+-- from here on raise at the statement itself, where throws_ok can see it.
+SELECT lives_ok(
+  $$SET CONSTRAINTS play_evidence_play_user_fk, play_evidence_evidence_user_fk IMMEDIATE$$,
+  'setup: check the play_evidence composite FKs immediately for the M1 tests below'
+);
+
 -- ⛔ FIX (M1, post-P3a gate): the OLD plpgsql trigger silently PASSED this
 -- exact case when the trigger's own two independent SELECTs raced a
 -- deferred-FK-ordering NULL lookup (both sides NULL -> `IS DISTINCT FROM`
@@ -84,7 +108,7 @@ SELECT lives_ok(
 -- — none of play_evidence's are.
 SELECT throws_ok(
   $$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES
-    ('41000000-0000-0000-0000-000000000099', '30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000b')$$,
+    ('41000000-0000-0000-0000-000000000099', '33000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000b')$$,
   '23503',
   NULL,
   'play_evidence: player B''s play cannot be backed by player A''s evidence (composite FK to app.evidence(id,user_id) rejects it)'
@@ -95,19 +119,6 @@ SELECT throws_ok(
   '23503',
   NULL,
   'play_evidence: player A''s play cannot be backed by player B''s evidence (composite FK to app.evidence(id,user_id) rejects it, reverse direction)'
-);
-
--- Both play_evidence composite FKs are DEFERRABLE INITIALLY DEFERRED
--- (matching every other app-internal FK, 0014 §3 / 0017), so a violation
--- from an UPDATE alone would not raise until COMMIT -- which this test
--- file's outer transaction never reaches (it ROLLBACKs). Switching JUST
--- these two constraints to IMMEDIATE checking (not ALL constraints, so
--- delete_my_data's OWN reliance on deferred checking elsewhere in this
--- same file, H1's test below, is unaffected) makes the re-own violation
--- raise at the UPDATE statement itself, where throws_ok can see it.
-SELECT lives_ok(
-  $$SET CONSTRAINTS play_evidence_play_user_fk, play_evidence_evidence_user_fk IMMEDIATE$$,
-  'setup: check the play_evidence composite FKs immediately for the M1 re-own tests below'
 );
 
 -- M1 bypass 2 (post-P3a gate): re-owning AFTER a valid link exists. The
@@ -277,13 +288,18 @@ SELECT lives_ok(
             '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes')$$,
   'setup: seed one checkin_challenge row'
 );
+-- The consumed-nonce tombstone trigger (should-fix, added below) fires
+-- BEFORE the table's own UNIQUE constraint is even reached, so a repeat
+-- insert of an already-consumed nonce now raises 23514 (tombstoned), not
+-- 23505 -- this still proves the same thing (global uniqueness, not
+-- per-user), just via the stricter of the two mechanisms.
 SELECT throws_ok(
   $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
     VALUES ('a1000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000b',
             '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes')$$,
-  '23505',
+  '23514',
   NULL,
-  'checkin_challenge.nonce_hash is globally unique across users (already a plain table-wide UNIQUE, not per-user)'
+  'checkin_challenge.nonce_hash is globally unique across users (tombstone ledger + the table''s own UNIQUE both agree, not per-user)'
 );
 SELECT lives_ok(
   $$UPDATE app.checkin_challenge SET used_at = now() WHERE id = 'a1000000-0000-0000-0000-000000000001'$$,

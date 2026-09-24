@@ -146,13 +146,22 @@ done
 PSQL=("$PG_BIN_DIR/psql" -h "$PGSOCK" -p "$PGPORT" -U postgres -v ON_ERROR_STOP=1 -q)
 
 # H2 (post-P3a gate) static check: no migration file may reference the
-# harness-only `migration_owner` role by name — a real deploy's own
-# migration role is never literally called that, and 0016/0017 both did
-# this before the fix (GRANT ... TO migration_owner), failing outright on
-# a real deploy. `migration_owner` belongs ONLY in supabase/tests/shim.sql
-# (the harness's own bootstrap); grep every migration file for it.
-if grep -l 'migration_owner' "$SUPABASE_DIR"/migrations/*.sql 2>/dev/null; then
-  echo "tools/db/test.sh: FAILED (H2) — the migration file(s) above reference 'migration_owner' by name; a real deploy has no such role (use CURRENT_USER instead)" >&2
+# harness-only `migration_owner` role by name in ACTIVE SQL — a real
+# deploy's own migration role is never literally called that, and
+# 0016/0017 both did this before the fix (GRANT ... TO migration_owner),
+# failing outright on a real deploy. `migration_owner` belongs ONLY in
+# supabase/tests/shim.sql (the harness's own bootstrap). Strips `--`
+# comment lines first (this fix's own explanatory prose legitimately
+# names `migration_owner` when describing the bug it fixed) — a real
+# reference is one that survives the strip.
+H2_HITS=""
+for f in "$SUPABASE_DIR"/migrations/*.sql; do
+  if grep -v '^\s*--' "$f" | grep -q 'migration_owner'; then
+    H2_HITS="$H2_HITS $f"
+  fi
+done
+if [ -n "$H2_HITS" ]; then
+  echo "tools/db/test.sh: FAILED (H2) — the migration file(s) below reference 'migration_owner' by name outside a comment; a real deploy has no such role (use CURRENT_USER instead):$H2_HITS" >&2
   exit 1
 fi
 

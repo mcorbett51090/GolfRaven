@@ -623,7 +623,7 @@ FOR EACH ROW EXECUTE FUNCTION app.attestation_tombstone_nonce();
 -- data, not user data -- the same reasoning as storage.buckets' own
 -- WITH CHECK (true).
 GRANT INSERT ON private.function_inventory TO CURRENT_USER;
-CREATE POLICY migration_owner_seed_function_inventory ON private.function_inventory
+CREATE POLICY current_user_seed_function_inventory ON private.function_inventory
   FOR INSERT TO CURRENT_USER WITH CHECK (true);
 
 INSERT INTO private.function_inventory
