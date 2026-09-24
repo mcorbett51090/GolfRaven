@@ -63,21 +63,44 @@ const LocalDateSchema = z
  * array), and `.min(1)` rejects the empty string. */
 const NonEmptyStringSchema = z.string().min(1);
 
-/** Seventh gate, item 5: "Cap `fixId` and id lengths (e.g. 128) and
- * restrict them to printable, non-control characters." An unbounded id
- * is a DoS vector (a megabyte-long string flowing into every downstream
- * comparison/grouping key this package computes) and a control character
- * (a raw newline, a bell, an escape sequence) is an injection vector into
- * any log line or reasons array that ever echoes it back — `evidence[3]:
- * fix evil\nINJECTED<script>: ...` is not just ugly, it's a fake extra log
- * LINE if the string is ever printed unescaped. */
+/** Seventh gate, item 5, TIGHTENED by eighth gate item 4: the seventh
+ * gate's "printable, non-control characters" allow-list (`^[^\x00-\x1F\x7F-\x9F]+$`)
+ * was still far too permissive — it happily accepted a right-to-left
+ * override (U+202E, `‮`), zero-width characters (U+200B
+ * zero-width space, U+FEFF zero-width no-break space / BOM), and any
+ * other Unicode "printable" code point, none of which are control
+ * characters in the ASCII/Latin-1 sense this regex checked but every one
+ * of which is a real attack on anything that ever DISPLAYS an id
+ * (a bidi override can make `evidence_evil.exe` render as
+ * `evidence_txe.live`; a zero-width character can make two visually
+ * IDENTICAL ids compare as different strings, or two visually DIFFERENT
+ * ids compare as equal once stripped by some downstream renderer) or
+ * relies on it as an exact, stable comparison/grouping key the way this
+ * package does everywhere (`voidDuplicateFingerprints`'s `row.id ===
+ * winnerId`, `computeInputDigest`'s sort-by-id, the duplicate-id check
+ * below). The fix is a hard ALLOW-list, not a wider deny-list: a real id
+ * this package or any caller has ever needed is ASCII letters, digits,
+ * and the four separator characters `_ . : -` — nothing else has a
+ * legitimate reason to appear in an id, and every one of the exploit
+ * characters above (bidi override, zero-width space/BOM, any
+ * non-ASCII code point at all) is simply not in the class.
+ *
+ * Also used (this same gate, closing the item-2 quarantine-bypass gap —
+ * see `looseRowMatchesPlay`'s own doc) for `facilityId`/`courseId`: a
+ * value like `"fac_A "` (a trailing space) used to sail through the old
+ * `NonEmptyStringSchema` unchanged, so a row carrying it could parse
+ * SUCCESSFULLY with the padded value intact rather than being caught as
+ * malformed — applying this same strict, whitespace-free character class
+ * to facility/course anchor ids closes that off at the schema itself,
+ * rather than requiring every reader of these fields to separately
+ * remember to `.trim()`. */
 const MAX_ID_LENGTH = 128;
-const PRINTABLE_NO_CONTROL_RE = /^[^\x00-\x1F\x7F-\x9F]+$/;
-const IdSchema = z
+const ID_LIKE_RE = /^[A-Za-z0-9_.:-]+$/;
+const IdLikeSchema = z
   .string()
   .min(1)
   .max(MAX_ID_LENGTH, `must be at most ${MAX_ID_LENGTH} characters`)
-  .regex(PRINTABLE_NO_CONTROL_RE, "must be printable, non-control characters (no newlines, escapes, or other control characters)");
+  .regex(ID_LIKE_RE, "must be 1-128 characters from [A-Za-z0-9_.:-] only (no whitespace, punctuation, or non-ASCII characters, including bidi/zero-width/BOM characters)");
 
 /** Seventh gate, item 5: "Never interpolate raw attacker strings into
  * reasons: truncate and escape them (JSON.stringify)." Used everywhere
@@ -135,8 +158,8 @@ const TokenStateSchema = z.union([
 ]);
 
 const AppFixSchema = z.strictObject({
-  fixId: IdSchema,
-  facilityId: NonEmptyStringSchema,
+  fixId: IdLikeSchema,
+  facilityId: IdLikeSchema,
   fromApp: z.boolean(),
   simulated: z.boolean(),
   foreground: z.boolean(),
@@ -154,9 +177,9 @@ const AppFixSchema = z.strictObject({
 });
 
 const EvidenceCommonShape = {
-  id: IdSchema,
-  facilityId: NonEmptyStringSchema,
-  courseId: NonEmptyStringSchema.optional(),
+  id: IdLikeSchema,
+  facilityId: IdLikeSchema,
+  courseId: IdLikeSchema.optional(),
   localDate: LocalDateSchema,
   courseDisambiguatedBy: CourseDisambiguatedBySchema.optional(),
   correlationId: z.string().optional(),
@@ -244,7 +267,7 @@ const EvidenceSchema = z.discriminatedUnion("source", [
 ]);
 
 const PurchaseCorroborationSchema = z.strictObject({
-  facilityId: NonEmptyStringSchema,
+  facilityId: IdLikeSchema,
   localDate: LocalDateSchema,
 });
 
@@ -332,13 +355,13 @@ const FacilityTzSchema = NonEmptyStringSchema.refine(isValidFacilityTimeZone, {
 }).transform(canonicalizeFacilityTimeZone);
 
 const ScorePlayContextSchema = z.strictObject({
-  playFacilityId: NonEmptyStringSchema,
+  playFacilityId: IdLikeSchema,
   playLocalDate: LocalDateSchema,
   // H3 residual (sixth gate): REQUIRED — see this schema's own callers
   // for the "a row without its own courseId is facility-level and stays
   // allowed" rule this does NOT disable (`internal/classify.ts`'s
   // `courseOk`).
-  playCourseId: NonEmptyStringSchema,
+  playCourseId: IdLikeSchema,
   purchases: z.array(PurchaseCorroborationSchema).optional(),
   facilityTz: FacilityTzSchema,
 });

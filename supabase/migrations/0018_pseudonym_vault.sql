@@ -60,6 +60,19 @@ AS $$
   WHERE name LIKE 'pseudonym_key%';
 $$;
 
+-- ⛔ FIX (post-P3a re-gate, found while regression-testing under
+-- HARNESS_MODE=restricted): REVOKE/GRANT EXECUTE must run BEFORE the
+-- OWNER TO transfer below, not after — once ownership moves to
+-- private_definer, migration_owner (who just CREATEd the function) is no
+-- longer its owner and holds no GRANT OPTION on it either, so a REVOKE/
+-- GRANT issued afterward 42501s ("permission denied for function
+-- pseudonym_key_status"), confirmed empirically this session. 0015/0016
+-- avoid this by doing delete_my_data's own REVOKE/GRANT EXECUTE at the
+-- END of 0015, entirely before 0016 transfers ITS ownership in a later
+-- migration — same ordering constraint, different file layout.
+REVOKE EXECUTE ON FUNCTION private.pseudonym_key_status() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.pseudonym_key_status() TO service_role;
+
 -- 0016 REVOKEd CREATE ON SCHEMA private FROM private_definer once its own
 -- ownership transfers were done -- this function's transfer needs it
 -- again, briefly, for the same reason (Postgres checks the new owner has
@@ -68,8 +81,6 @@ $$;
 GRANT CREATE ON SCHEMA private TO private_definer;
 ALTER FUNCTION private.pseudonym_key_status() OWNER TO private_definer;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
-REVOKE EXECUTE ON FUNCTION private.pseudonym_key_status() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.pseudonym_key_status() TO service_role;
 
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)

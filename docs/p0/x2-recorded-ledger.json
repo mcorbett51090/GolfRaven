@@ -1,0 +1,81 @@
+{
+  "entries": [
+    {
+      "method": "direct",
+      "normalizedUrl": "tn.gov/",
+      "url": "https://www.tn.gov/",
+      "sha256": "7270893e3f0188f0ded07ee11ac292aadbeab41d34d28909156c73cb70554a0a",
+      "recordedAt": "2026-09-24T18:13:38.178Z"
+    },
+    {
+      "method": "direct",
+      "normalizedUrl": "golfvancouverisland.ca/",
+      "url": "https://golfvancouverisland.ca/",
+      "sha256": "efe829bc5301405bce35c7112c09aa51ea279865d2fe57a94ce0e4819513821d",
+      "recordedAt": "2026-09-24T18:13:39.750Z"
+    },
+    {
+      "method": "direct",
+      "normalizedUrl": "golfvancouverisland.ca/about-us/golf-trail-pass",
+      "url": "https://golfvancouverisland.ca/about-us/golf-trail-pass/",
+      "sha256": "679670f8291d7afcab1b59f8b71bb4e9aa586da2429e2f3462326c4692d41f31",
+      "recordedAt": "2026-09-24T18:13:40.067Z"
+    },
+    {
+      "method": "direct",
+      "normalizedUrl": "rtjgolf.com/",
+      "url": "https://www.rtjgolf.com/",
+      "sha256": "e294c864cdd53fdd8d194ba7f3fef046b05ab1b278c4d62d58b42bfcc9a0616a",
+      "recordedAt": "2026-09-24T18:13:40.798Z"
+    },
+    {
+      "method": "direct",
+      "normalizedUrl": "rtjgolf.com/trail",
+      "url": "https://www.rtjgolf.com/trail/",
+      "sha256": "085d2103aac2fa520b3c1d52c518934845725465cb34dbd06861e44d772b34d8",
+      "recordedAt": "2026-09-24T18:19:00.016Z"
+    },
+    {
+      "method": "rendered",
+      "normalizedUrl": "golfvancouverisland.ca/",
+      "url": "https://golfvancouverisland.ca/",
+      "sha256": "731ca853fcab032374de0ca367869dff005905d60fb597fdc46d8966d71b3fbc",
+      "recordedAt": "2026-09-24T18:57:14.555Z"
+    },
+    {
+      "method": "rendered",
+      "normalizedUrl": "golfvancouverisland.ca/about-us/golf-trail-pass",
+      "url": "https://golfvancouverisland.ca/about-us/golf-trail-pass/",
+      "sha256": "5869018ffb2edb3a4f0c80e5fbb6cb2b6be2d053e41e35f3db4bff2a073f5ae4",
+      "recordedAt": "2026-09-24T18:57:26.575Z"
+    },
+    {
+      "method": "rendered",
+      "normalizedUrl": "rtjgolf.com/",
+      "url": "https://www.rtjgolf.com/",
+      "sha256": "dbc7914fa4a67f2e137f4789d7f2e44390cd1799a1bbf987bede03c098099984",
+      "recordedAt": "2026-09-24T19:32:09.462Z"
+    },
+    {
+      "method": "rendered",
+      "normalizedUrl": "rtjgolf.com/trail",
+      "url": "https://www.rtjgolf.com/trail/",
+      "sha256": "cc0754225103557e48af99e02cce8664b99d264d863d7a6af664bb538c64ce7c",
+      "recordedAt": "2026-09-24T19:32:12.951Z"
+    },
+    {
+      "method": "rendered",
+      "normalizedUrl": "rtjgolf.com/faq",
+      "url": "https://www.rtjgolf.com/faq/",
+      "sha256": "1a48f3517dc709be4680382555eb173f0563ff6b59f1840448905fb9a63c0e17",
+      "recordedAt": "2026-09-24T19:32:16.081Z"
+    },
+    {
+      "method": "rendered",
+      "normalizedUrl": "rtjgolf.com/terms",
+      "url": "https://www.rtjgolf.com/terms/",
+      "sha256": "e6f8f1cd35ed0c738620be1c7320da365db5b9ada44beafc32d4c1b05767235f",
+      "recordedAt": "2026-09-24T19:32:18.298Z"
+    }
+  ]
+}
