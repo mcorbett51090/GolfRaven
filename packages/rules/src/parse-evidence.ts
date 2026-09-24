@@ -360,15 +360,16 @@ function zodIssuesToReasons(issues: readonly { path: PropertyKey[]; message: str
  * `ScorePlayContextSchema` check.
  */
 export function parseEvidence(raw: unknown, tz: string): EvidenceParseResult {
-  if (!isValidIanaTimeZone(tz)) {
+  if (!isValidFacilityTimeZone(tz)) {
     return { success: false, reasons: [`facilityTz "${tz}" is not a real IANA Area/Location timezone name`] };
   }
+  const canonicalTz = canonicalizeFacilityTimeZone(tz);
   const parsed = EvidenceSchema.safeParse(raw);
   if (!parsed.success) {
     return { success: false, reasons: zodIssuesToReasons(parsed.error.issues) };
   }
   const row = parsed.data as Evidence;
-  const tzIssues = tzCrossCheckIssues(row, tz);
+  const tzIssues = tzCrossCheckIssues(row, canonicalTz);
   if (tzIssues.length > 0) {
     return { success: false, reasons: tzIssues };
   }

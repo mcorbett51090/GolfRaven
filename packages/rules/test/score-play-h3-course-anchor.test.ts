@@ -85,9 +85,9 @@ describe("H3: classifyEvidenceRow's own course anchor (defence in depth)", () =>
     expect(c.hard).toBe(true);
   });
 
-  it("ctx.playCourseId undefined disables the check entirely — but ONLY for a direct classifyEvidenceRow call (typed-but-raw, bypassing the parser)", () => {
+  it("ctx.playCourseId undefined disables the check entirely — but ONLY for a direct classifyEvidenceRow call that bypasses the TYPE SYSTEM too (seventh gate item 8 made both fields required in the type; this deliberately casts past that, the same way this suite's other defence-in-depth tests cast past a null/malformed field)", () => {
     const row = staffRowAt(COURSE_B);
-    const c = classifyEvidenceRow(row, { playFacilityId: PLAY_FACILITY_ID, playLocalDate: PLAY_LOCAL_DATE });
+    const c = classifyEvidenceRow(row, { playFacilityId: PLAY_FACILITY_ID, playLocalDate: PLAY_LOCAL_DATE } as unknown as ScorePlayContext);
     expect(c.hard).toBe(true);
   });
 });
