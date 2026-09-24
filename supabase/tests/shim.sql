@@ -129,17 +129,75 @@ BEGIN
 END
 $$;
 
--- should-fix (post-P3a gate): a test-only HMAC key for
--- private.delete_my_data's player_pseudonym/staff_pseudonym computation
--- (0015) — ALTER DATABASE ... SET (not a session-level SET) so every
--- later session in the harness (a fresh psql connection per migration
--- file, per tools/db/test.sh) sees it, not just this one. A real deploy
--- sets `app.pseudonym_key` from a proper secret store, never this value.
-DO $$
-BEGIN
-  EXECUTE format('ALTER DATABASE %I SET app.pseudonym_key = %L', current_database(), 'shim-test-only-pseudonym-hmac-key-do-not-use-in-prod');
-END
-$$;
+-- ============================================================================
+-- 1b. `vault` schema stand-in (M1, post-P3a re-gate — replaces the GUC
+--     the previous round used for the pseudonym HMAC key).
+-- ============================================================================
+-- ⛔ WHY THE GUC WAS WRONG (M1, post-P3a re-gate, all four confirmed
+-- empirically against the pre-fix code this round):
+--   - `current_setting('app.pseudonym_key')` and `pg_db_role_setting` are
+--     both readable by ANY role with USAGE on the function/catalog —
+--     there is no privilege boundary around a GUC the way there is
+--     around a table/view grant; anon/authenticated could read it.
+--   - `SET LOCAL app.pseudonym_key = ...` from ANY session silently
+--     overrides the value delete_my_data reads, for that caller's own
+--     transaction — a GUC has no notion of "only the definer may set
+--     this".
+--   - An empty string satisfies `current_setting(...)` (no exception —
+--     missing_ok wasn't even needed for that), so a misconfigured
+--     cluster would compute `hmac(uid, '', 'sha256')` silently and
+--     delete_my_data would then fail to find PRE-EXISTING rows keyed by
+--     the REAL pseudonym, leaving them (and their PII, e.g.
+--     `player_handle_snapshot` staying `player_a`) behind with no error
+--     at all.
+--   - A real deploy never sets `app.pseudonym_key` in the first place —
+--     nothing in a real Supabase project's config sets arbitrary `app.*`
+--     GUCs; that was always going to be a silent no-op in production.
+--
+-- Supabase Vault is the real mechanism ([docs-verified 2026-09-24 —
+-- github.com/supabase/vault README, WebSearch since supabase.com's own
+-- docs domain is blocked by this environment's egress proxy]:
+-- `vault.secrets` holds `id uuid, name text, description text,
+-- secret text, key_id uuid, nonce bytea, created_at, updated_at`, and
+-- `vault.decrypted_secrets` is a VIEW over it with the same columns plus
+-- `decrypted_secret text`). This shim reproduces the SHAPE only, not the
+-- real encryption — `vault.secrets.secret` here is stored in PLAINTEXT
+-- (no pgsodium in a plain initdb cluster) and `decrypted_secrets` just
+-- echoes it back as `decrypted_secret`; a real Supabase project's Vault
+-- extension does genuine encryption-at-rest underneath the same two
+-- object names, so private.delete_my_data (which only ever reads
+-- `decrypted_secrets`) behaves identically against either.
+CREATE SCHEMA IF NOT EXISTS vault;
+CREATE TABLE IF NOT EXISTS vault.secrets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text UNIQUE,
+  description text NOT NULL DEFAULT '',
+  secret text NOT NULL,
+  key_id uuid,
+  nonce bytea,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE OR REPLACE VIEW vault.decrypted_secrets AS
+  SELECT id, name, description, secret, secret AS decrypted_secret, key_id, nonce, created_at, updated_at
+  FROM vault.secrets;
+-- Deliberately NO grant to anon/authenticated/PUBLIC on either object —
+-- 0018_pseudonym_vault.sql (a real migration) grants private_definer a
+-- narrow, column-level SELECT on decrypted_secrets; nothing else ever
+-- gets any access, in either mode. Only postgres/migration_owner (the
+-- bootstrap/migration roles) can seed it, which is exactly the shape a
+-- real deploy has too (Vault rows are provisioned by the project owner,
+-- never by client roles).
+--
+-- Seeded with TWO active keys (>= 32 bytes each), not one, so the
+-- rotation requirement ("a row written with key 1 is still found after
+-- key 2 is added") has something real to exercise — 11_money_path.sql's
+-- rotation test adds a THIRD key at test time to prove a genuinely LATER
+-- addition doesn't break lookups against rows keyed by an earlier one.
+INSERT INTO vault.secrets (id, name, secret) VALUES
+  ('a0000000-1111-0000-0000-000000000001', 'pseudonym_key_1', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx'),
+  ('a0000000-1111-0000-0000-000000000002', 'pseudonym_key_2', 'shim-test-only-pseudonym-key-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy')
+ON CONFLICT (name) DO NOTHING;
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
 -- runs supabase/tests/helpers.sql and

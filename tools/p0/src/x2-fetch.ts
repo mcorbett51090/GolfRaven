@@ -619,14 +619,22 @@ export async function runX2Fetch(
      * `renderUrl`'s own doc for why this exists (an environment-specific
      * TLS-trust escape hatch, never proxy-specific code in this file). */
     renderExtraArgs?: string[];
-    /** Gate finding 2: the recorded-captures ledger path — defaults to
-     * `<outDir>/recorded-ledger.json`; pass an explicit shared path when
-     * running several `--out-dir`s against the same logical URL set (see
-     * `x2-recorded-ledger.ts`'s own doc for why first-capture-wins cannot
-     * be scoped to one evidence directory). */
-    ledgerPath?: string;
-  } = {},
+    /** Gate finding 2c (re-gate): REQUIRED — the recorded-captures ledger
+     * path. There is no more automatic `<outDir>/recorded-ledger.json`
+     * default (`x2-recorded-ledger.ts`'s own doc explains why the default
+     * was itself a bypass); pass the SAME explicit path across every run
+     * that captures evidence for the same logical URL set, whatever
+     * `--out-dir` each individual run happens to use. */
+    ledgerPath: string;
+  },
 ): Promise<X2FetchManifest> {
+  if (!opts.ledgerPath) {
+    throw new Error(
+      "runX2Fetch: `ledgerPath` is required (gate finding 2c, re-gate) — the per-directory default ledger " +
+        "was removed; pass an explicit `--ledger <path>` (or `ledgerPath` option) shared across every run " +
+        "that captures evidence for the same URL set.",
+    );
+  }
   const timeoutMs = opts.timeoutMs ?? X2_DEFAULT_TIMEOUT_MS;
   if (Object.keys(config).length === 0) {
     throw new Error(
@@ -634,7 +642,7 @@ export async function runX2Fetch(
     );
   }
   await mkdir(outDir, { recursive: true });
-  const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(outDir);
+  const ledgerPath = opts.ledgerPath;
 
   // Gate finding 2b: MERGE into an existing manifest.json rather than
   // overwriting it wholesale — a prior run's OTHER trails' entries (e.g.
@@ -754,6 +762,13 @@ async function main(argv: string[]): Promise<void> {
   // happened to follow `--render` on the command line.
   const render = argv.includes("--render");
   const flags = parseFlags(argv.filter((a) => a !== "--render"));
+  if (!flags.ledger) {
+    throw new Error(
+      "Usage: node dist/x2-fetch.js --ledger <path> [--render] [--config <x2-sources.json>] " +
+        "[--out-dir <dir>] — `--ledger` is REQUIRED (gate finding 2c, re-gate): the per-directory default " +
+        "ledger was removed, so a run must always name the ledger it counts its captures against.",
+    );
+  }
   const configPath = flags.config || resolveDefaultX2ConfigPath();
   const outDirExplicit = Boolean(flags["out-dir"]);
   const outDir =
@@ -775,10 +790,10 @@ async function main(argv: string[]): Promise<void> {
   validateRenderExtraArgs(renderExtraArgs ?? []);
   const manifest = await runX2Fetch(config, outDir, {
     render,
+    ledgerPath: flags.ledger,
     ...(renderExtraArgs && renderExtraArgs.length > 0
       ? { renderExtraArgs }
       : {}),
-    ...(flags.ledger ? { ledgerPath: flags.ledger } : {}),
   });
   process.stdout.write(`${renderManifestSummary(manifest)}\n`);
   process.stdout.write(
