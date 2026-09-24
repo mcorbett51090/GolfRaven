@@ -134,6 +134,52 @@ describe("x4-verify: isLiveFacilityPage (decision 0001 Addendum H's three-way ou
     expect(result.status).toBe("indeterminate");
   });
 
+  it("decision 0001 Addendum J(b): a same-id redirect to the NEW /courses/<id>- shape counts as live", () => {
+    const result = isLiveFacilityPage(
+      200,
+      "https://www.golfnow.com/courses/2360-grand-national-details",
+      "Grand National Golf Club course details and tee times.",
+      "Grand National",
+      "2360",
+    );
+    expect(result.status).toBe("live");
+  });
+
+  it("decision 0001 Addendum J(b): a DIFFERENT id in the /courses/ redirect is not covered", () => {
+    const result = isLiveFacilityPage(
+      200,
+      "https://www.golfnow.com/courses/9999-nearby-course-details",
+      "Nearby Course details, also mentions Grand National nearby.",
+      "Grand National",
+      "2360",
+    );
+    expect(result.status).toBe("not-live");
+    expect(result.reason).toContain("SAME id");
+  });
+
+  it("decision 0001 Addendum J(b): a /courses/<id>- URL missing the course name is not covered", () => {
+    const result = isLiveFacilityPage(
+      200,
+      "https://www.golfnow.com/courses/2360-grand-national-details",
+      "This page does not mention the course by name.",
+      "Grand National",
+      "2360",
+    );
+    expect(result.status).toBe("not-live");
+    expect(result.reason).toContain("was not found on the page text");
+  });
+
+  it("decision 0001 Addendum J(b): the OLD /tee-times/facility/<id>- shape still counts as live, unchanged", () => {
+    const result = isLiveFacilityPage(
+      200,
+      "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+      "Grand National tee times available now.",
+      "Grand National",
+      "2360",
+    );
+    expect(result.status).toBe("live");
+  });
+
   it("name match applies Addendum F normalisation (case/punctuation-insensitive whole-word match)", () => {
     const result = isLiveFacilityPage(
       200,

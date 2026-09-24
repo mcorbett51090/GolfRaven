@@ -10,7 +10,7 @@
 -- (§4.7 item 4, line 1292-1294), and the api views/RLS built on them.
 
 BEGIN;
-SELECT plan(20);
+SELECT plan(27);
 
 -- Actor uuids (see supabase/tests/helpers.sql).
 -- staff_x        = 00000000-0000-0000-0000-1000000000a1
@@ -69,16 +69,16 @@ SELECT ok(
 -- attestation: "staff@X reads attestation rows (any, incl. their own
 -- attests) through any view -> 0 rows" (line 1365, G3-06).
 -- ---------------------------------------------------------------------------
--- `app` is not even USAGE-granted to authenticated (line 814: "not exposed
--- through PostgREST"), so this is denied before RLS is even reached — a
--- stronger guarantee than "0 rows" (staff genuinely cannot read the
--- attestation table through any interface, own attests included).
+-- authenticated has USAGE on schema `app` (0001, S2 fix — SECURITY
+-- INVOKER RPC functions need it) and a SELECT grant on app.attestation
+-- (0009), so the denial here is RLS alone, not a schema/table-privilege
+-- error: `attestation_select_own_player` only matches
+-- `player_user_id = auth.uid()`, which staff@X's own uid never satisfies.
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
-SELECT throws_ok(
-  'SELECT count(*) FROM app.attestation',
-  '42501',
-  NULL,
-  'staff@X cannot read app.attestation at all (no schema USAGE grant, let alone a row policy)'
+SELECT is(
+  (SELECT count(*)::int FROM app.attestation),
+  0,
+  'staff@X reads app.attestation -> 0 rows (RLS: no policy matches a non-owner, not even their own attests)'
 );
 SELECT tests.clear_actor();
 
@@ -171,6 +171,82 @@ SELECT throws_ok(
   NULL,
   'a staff member cannot be recorded attesting their own player account (CHECK, line 990/1360/1385)'
 );
+
+-- ---------------------------------------------------------------------------
+-- B1 (gate round 2): PUBLIC has EXECUTE on nothing in app/api/private —
+-- the exact defect the default-privilege fix in 0001_schemas.sql closes.
+-- ---------------------------------------------------------------------------
+SELECT is(
+  (
+    SELECT count(*)::int FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('public', p.oid, 'EXECUTE')
+  ),
+  0,
+  'PUBLIC has EXECUTE on no function in app/api/private (B1)'
+);
+
+-- ---------------------------------------------------------------------------
+-- B7 (gate round 2): the two must-fail cells the gate named explicitly.
+-- ---------------------------------------------------------------------------
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-3000000000c1'::uuid));
+SELECT is(
+  (SELECT count(*)::int FROM api.staff_shift_log),
+  0,
+  'operator@T reads api.staff_shift_log -> 0 rows (B7: it is player-identifying; operator must never see it)'
+);
+SELECT tests.clear_actor();
+
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
+SELECT is(
+  (SELECT count(*)::int FROM api.staff_activity),
+  0,
+  'staff@X reads api.staff_activity -> 0 rows (B7: reader is manager/operator only, not staff)'
+);
+SELECT tests.clear_actor();
+
+-- ---------------------------------------------------------------------------
+-- S5 additions.
+-- ---------------------------------------------------------------------------
+-- anon calling any private.* function is denied outright.
+SELECT tests.authenticate_as('anon', '{}'::jsonb);
+SELECT throws_ok(
+  $$SELECT private.is_admin('00000000-0000-0000-0000-00000000000a'::uuid)$$,
+  '42501',
+  NULL,
+  'anon cannot EXECUTE private.is_admin (or any private.* function)'
+);
+SELECT tests.clear_actor();
+
+-- a user_metadata write attempt: authenticated has no UPDATE grant on
+-- auth.users at all (§4.7 item 4: roles never come from user_metadata,
+-- which "the user can write via auth.updateUser" — the DB-level backstop
+-- is that no client role can write auth.users directly through this
+-- schema regardless).
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000a'::uuid));
+SELECT throws_ok(
+  $$UPDATE auth.users SET raw_user_meta_data = '{"role":"admin"}'::jsonb WHERE id = auth.uid()$$,
+  '42501',
+  NULL,
+  'authenticated cannot write auth.users.raw_user_meta_data (no grant) — role can never be self-elevated via user_metadata'
+);
+SELECT tests.clear_actor();
+
+-- private.rate_limit_bucket: RLS enabled+forced, no client policy.
+SELECT ok(
+  (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class c
+   JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'private' AND c.relname = 'rate_limit_bucket'),
+  'private.rate_limit_bucket has RLS enabled and forced'
+);
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000a'::uuid));
+SELECT throws_ok(
+  'SELECT count(*) FROM private.rate_limit_bucket',
+  '42501',
+  NULL,
+  'authenticated cannot read private.rate_limit_bucket at all (has USAGE on schema private, but no table grant and no RLS policy)'
+);
+SELECT tests.clear_actor();
 
 SELECT * FROM finish();
 ROLLBACK;

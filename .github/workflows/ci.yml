@@ -107,7 +107,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install PostgreSQL 16 + PostGIS 3 + pgTAP (apt)
+      - name: Install PostgreSQL 16 + PostGIS 3 + pgTAP (apt, pinned)
         # Matches this repo's build-plan-cited local dev setup (build plan
         # §10 P3, docs/golf-trails/02-build-plan.md:2758): Postgres 16,
         # PostGIS 3.4, pgTAP, all from Ubuntu's own apt repos — no Docker,
@@ -117,24 +117,57 @@ jobs:
         # default apt sources already carry postgresql-16 + the matching
         # postgis/pgtap packages for that release, confirmed this session
         # against the exact package set installed in this dev environment.
+        #
+        # S4 (gate round 2): versions pinned via `pkg=version`, not a bare
+        # `apt-get install pkg`, so a runner-image apt-source bump can't
+        # silently change which PostgreSQL/PostGIS/pgTAP build this job
+        # tests against. Pinned to the exact versions available in this
+        # session's own devcontainer (24.04 noble). If ubuntu-latest's
+        # mirror ever ages these out (older versions are periodically
+        # pruned from Ubuntu's archive, unlike Debian snapshots), this
+        # step starts failing with "Version 'X' … not found" — bump the
+        # pins to the new `apt-cache policy postgresql-16` candidate
+        # rather than removing them.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            postgresql-16 \
-            postgresql-16-postgis-3 \
-            postgresql-16-postgis-3-scripts \
-            postgresql-16-pgtap \
-            libtap-parser-sourcehandler-pgtap-perl
+            postgresql-16=16.13-0ubuntu0.24.04.1 \
+            postgresql-16-postgis-3=3.4.2+dfsg-1ubuntu3 \
+            postgresql-16-postgis-3-scripts=3.4.2+dfsg-1ubuntu3 \
+            postgresql-16-pgtap=1.3.2-2 \
+            libtap-parser-sourcehandler-pgtap-perl=3.36-2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @golfraven/service-role-lint
+        # tools/db/test.sh's last step runs this package's built CLI (B5)
+        # over supabase/functions — build it before the harness needs it.
+        # Scoped to just this package (not the whole-repo `pnpm -r build`
+        # the `verify` job runs) since nothing else in this job needs it.
+        run: pnpm --filter @golfraven/service-role-lint build
 
       - name: Run tools/db/test.sh
         # The harness owns its own throwaway cluster end to end (initdb,
-        # start, shim, migrations, seed fixtures, pgTAP, teardown) — see
-        # its header comment for the exact sequence. Non-zero exit here
-        # fails the job; no `paths:` filter on this workflow's trigger
-        # (AGENTS.md "Required status checks — never add paths: to a
-        # required workflow"), so this job always evaluates once it is
-        # made required, same as `verify` and `gitleaks`.
+        # start, shim, migrations, seed fixtures, pgTAP matrix, B4 replay/
+        # concurrency check, B2 function-inventory check, B5 service-role
+        # lint, teardown) — see its header comment for the exact sequence.
+        # Non-zero exit here fails the job; no `paths:` filter on this
+        # workflow's trigger (AGENTS.md "Required status checks — never
+        # add paths: to a required workflow"), so this job always
+        # evaluates once it is made required, same as `verify` and
+        # `gitleaks`.
         run: bash tools/db/test.sh
 
   gitleaks:

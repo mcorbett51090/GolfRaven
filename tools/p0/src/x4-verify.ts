@@ -17,7 +17,13 @@
  *    `/tee-times/facility/<id>-` for the SAME `<id>` the configured URL
  *    named (gate B2 — the old check matched the pattern ANYWHERE in the
  *    URL string, including the query string, against ANY id); course name
- *    present under Addendum F normalisation.
+ *    present under Addendum F normalisation. **Decision 0001 Addendum J(b)
+ *    (2026-09-24, written AFTER the first X4 run showed every RTJ facility
+ *    URL 301-redirecting to this new shape) also counts a final URL PATH
+ *    that STARTS WITH `/courses/<id>-` for the SAME `<id>`** — GolfNow's
+ *    current course-details page — with the same host and course-name
+ *    requirements; the old `/tee-times/facility/<id>-` shape still counts
+ *    too, unchanged.
  *  - NOT COVERED (definitive) — no URL configured, HTTP 404/410, or a
  *    resolved HTTP 200 page that fails the live test (wrong id, generic
  *    search page, foreign host, name absent).
@@ -86,7 +92,8 @@ export type X4Classification = "live" | "not-live" | "indeterminate";
 /** Decision 0001 Addendum H's three-way per-course outcome, applied
  * literally. `facilityId` is the id parsed from the CONFIGURED url (gate
  * B2) — the final URL's path must contain `/tee-times/facility/<that same
- * id>-`, not just any id. */
+ * id>-` (Addendum G/H) OR start with `/courses/<that same id>-` (Addendum
+ * J(b)), not just any id. */
 export function isLiveFacilityPage(
   status: number,
   finalUrl: string,
@@ -121,13 +128,19 @@ export function isLiveFacilityPage(
       reason: `final host "${final.hostname}" is not exactly "${REQUIRED_HOST}" (gate B2)`,
     };
   }
-  if (!final.pathname.includes(`/tee-times/facility/${facilityId}-`)) {
+  // Decision 0001 Addendum G/H's original shape, OR Addendum J(b)'s
+  // GolfNow-restructure shape — either is "live" for the SAME id. Gate B2
+  // still applies to both: a match elsewhere in the URL (e.g. the query
+  // string) or for a DIFFERENT id does not count for either shape.
+  const oldShape = final.pathname.includes(`/tee-times/facility/${facilityId}-`);
+  const newShape = final.pathname.startsWith(`/courses/${facilityId}-`);
+  if (!oldShape && !newShape) {
     return {
       status: "not-live",
       reason:
-        `final URL path "${final.pathname}" does not contain /tee-times/facility/${facilityId}- for the ` +
-        "SAME id that was requested — a match elsewhere in the URL (e.g. the query string) or for a " +
-        "different id does not count (gate B2)",
+        `final URL path "${final.pathname}" does not contain /tee-times/facility/${facilityId}- (Addendum G/H) ` +
+        `and does not start with /courses/${facilityId}- (Addendum J(b)) for the SAME id that was requested — ` +
+        "a match elsewhere in the URL (e.g. the query string) or for a different id does not count (gate B2)",
     };
   }
   if (!namesMatch(pageText, courseName)) {

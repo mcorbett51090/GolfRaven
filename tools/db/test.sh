@@ -141,3 +141,17 @@ else
 fi
 
 echo "tools/db/test.sh: all pgTAP matrix files passed"
+
+echo "tools/db/test.sh: replay/idempotency concurrency check (B4, AT(3))"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-replay-concurrency.sh'"
+
+echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
+PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \
+  node "$ROOT_DIR/tools/db/verify-function-inventory.mjs"
+
+if command -v node >/dev/null 2>&1 && [ -f "$ROOT_DIR/tools/service-role-lint/dist/cli.js" ]; then
+  echo "tools/db/test.sh: service-role lint over supabase/functions (B5)"
+  node "$ROOT_DIR/tools/service-role-lint/dist/cli.js" "$SUPABASE_DIR/functions"
+else
+  echo "tools/db/test.sh: tools/service-role-lint/dist/cli.js not built — run 'pnpm --filter @golfraven/service-role-lint build' first; skipping this step" >&2
+fi

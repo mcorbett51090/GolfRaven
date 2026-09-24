@@ -8,7 +8,7 @@
 -- removed, line 1303-1304, must-fail cell line 1363).
 
 BEGIN;
-SELECT plan(6);
+SELECT plan(9);
 
 -- Extension-owned views (postgis' geometry_columns/geography_columns,
 -- pgtap's tap_funky, etc.) are excluded: they live in `public` as a side
@@ -79,6 +79,36 @@ SELECT is(
   0,
   'api.request_checkin_token() does not exist (removed v2 -> v3)'
 );
+
+-- ---------------------------------------------------------------------------
+-- S2 (gate round 2): actual CALLS as authenticated, not only a privilege
+-- check. Both RPCs used to fail outright with "permission denied for
+-- schema app" for EVERY caller (0001's missing `GRANT USAGE ON SCHEMA app
+-- TO authenticated` — fixed) — has_function_privilege alone would never
+-- have caught that, since EXECUTE was granted correctly; the function
+-- just couldn't run its own body.
+-- ---------------------------------------------------------------------------
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000a'::uuid));
+SELECT lives_ok(
+  $$SELECT * FROM api.my_progress('trl_t')$$,
+  'authenticated can actually CALL api.my_progress(trail_id), not just hold the EXECUTE grant'
+);
+SELECT lives_ok(
+  $$SELECT * FROM api.my_offers()$$,
+  'authenticated can actually CALL api.my_offers()'
+);
+SELECT tests.clear_actor();
+
+-- api.my_offers() masks budget/eligibility for a non-staff caller (S3).
+-- Player B (not player A — the B3 fixtures make player A staff@fac_x, so
+-- player A legitimately sees an fac_x offer's eligibility).
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000b'::uuid));
+SELECT is(
+  (SELECT eligibility FROM api.my_offers() WHERE id = '60000000-0000-0000-0000-000000000001'),
+  NULL,
+  'api.my_offers() masks eligibility for a player (B) with no facility/trail scope on that offer'
+);
+SELECT tests.clear_actor();
 
 SELECT * FROM finish();
 ROLLBACK;

@@ -305,3 +305,63 @@ None of the pass bars change. Each rule below closes a reading that was still op
 
 Drafted by an agent, working on unblocked items at the owner's instruction (2026-09-24), before any K1 or K3 data exists. Matt may
 amend any of these **before** the first K1 log entry or K3 read. After that point they are fixed.
+
+## Addendum J (2026-09-24, AFTER the first X2 and X4 results were read) — X2 evidence sources and X4 "live" definition
+
+**This addendum was written after the first X2 and X4 results were read.** Both were read on 2026-09-24 (see
+`docs/p0/X2.md` and `docs/p0/X4.md` STATUS/MEASURED VALUE for that first run): X2 came back **0 of 3 confirmed
+(mechanical KILL)** — TN blocked by the site's WAF (403 to the tool's own polite, non-browser User-Agent), VI a
+JavaScript single-page app whose static HTML holds only the `<title>`, RTJ's roster confirmed but
+`completionUnit` and `season` found nowhere on the site — and X4 came back **RTJ 0/11**, because every
+`https://www.golfnow.com/tee-times/facility/<id>-<slug>/search` URL now 301-redirects to
+`https://www.golfnow.com/courses/<id>-<slug>-details`, GolfNow's correct live course page under a URL shape
+Addendum G/H did not anticipate. Both are unchanged on the record above and in `docs/p0/X2.md` / `docs/p0/X4.md`
+— this addendum does not edit either memo's first-run entry, it only fixes the reading rules for the re-checks
+that follow. Both changes below were decided by Matt, the owner, only after seeing those two results — that
+order matters and is disclosed here plainly rather than folded into the earlier "before any data is read"
+addenda above. **No pass bar changes anywhere in this addendum.**
+
+### (a) X2 evidence sources
+
+Addendum G's "X2 'confirmed from a direct fetch'" required every page used as evidence to be fetched directly,
+because a direct fetch was, at the time, the only way to guard against a fabricated or search-snippet-sourced
+quote. The first X2 run showed that rule cannot even be **applied** to two of the three slate trails: a direct
+fetch of TN is blocked by the site's own WAF, and VI's static HTML is a JavaScript shell with no body text for
+any fetch method to read. A page may therefore also be stored as evidence when it is either:
+
+  (i) **rendered in headless Chromium by the tool**, for a page whose static HTML carries no body text
+      (VI's case exactly), or
+  (ii) **saved by the owner from their own browser** ("Save Page As", HTML) and ingested by the tool.
+
+Either way, the stored record keeps **everything Addendum G already requires**: the raw bytes, the final URL,
+the HTTP status (for an owner-saved page: `"owner-saved"`, plus the URL the owner states and the date saved),
+the retrieval time in UTC, and a SHA-256. It additionally records its `method`: `direct`, `rendered` or
+`owner-saved`. **The verbatim-quote rule is unchanged**: every quote must still appear, after whitespace
+collapsing, in the stored evidence text — a rendered or owner-saved page is checked exactly as strictly as a
+directly-fetched one, it is only the route the bytes took to become "stored evidence" that widens.
+
+**Why this is not moving the goalposts.** The change fixes a measuring instrument that could not read two of
+the three trails at all — a WAF block and a client-rendered SPA are properties of the sites, not of what the
+plan asked X2 to measure. It does not change the bar: X2 still passes at ≥ 2 of 3 slate trails confirmed, and a
+confirmation still needs all three facts (roster, `completionUnit`, season) backed by a verbatim quote in
+stored evidence. The same bar is applied to all three slate trails alike, and an RTJ fact that is genuinely
+missing from `rtjgolf.com` — `completionUnit` and `season`, per the first run — stays missing: rendering or an
+owner-saved page cannot manufacture a fact that was never on the page to begin with, they only let the tool
+read pages a direct fetch structurally could not.
+
+### (b) X4 "live"
+
+A facility page is **also** live when the GET of `https://www.golfnow.com/tee-times/facility/<id>-<slug>/search`
+returns HTTP 200 after redirects, the final URL's path starts with `/courses/<id>-`, the `<id>` is the **SAME**
+one that was requested, the host is exactly `www.golfnow.com`, and the course name is present under Addendum
+F's name normalisation. **The old pattern still counts** — a final URL path containing
+`/tee-times/facility/<id>-` for the same id, as Addendum G/H already defined, is still live. Everything else
+Addendum H already said about "not covered (definitive)" and "indeterminate" is unchanged: a different id, a
+generic search page, a foreign host, or a page missing the course name remains "not covered", exactly as
+before — this addendum only widens which final URL *shape* counts as reaching a live page, not what counts as
+the course actually being findable on it.
+
+### (c) Decision attribution
+
+Both (a) and (b) above are Matt's decisions, as owner, given via the question prompt that opened this task,
+2026-09-24.
