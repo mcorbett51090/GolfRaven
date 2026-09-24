@@ -37,3 +37,6 @@ Thumbs.db
 
 # Test scratch output (tests write to the OS temp dir; this guards against regressions)
 .tmp-test-*
+
+# P0 desk-check run output (evidence belongs in a run dir outside the source tree)
+p0-desk-run-*/

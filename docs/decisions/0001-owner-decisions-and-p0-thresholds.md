@@ -247,3 +247,19 @@ booking link). The X4 row records every trail's result; no combined figure decid
 final URL after redirects still contains `/tee-times/facility/<id>-`, and the page text contains the course's
 name under Addendum F's name normalisation. Facility ids are looked up by hand on golfnow.com (the X4 memo's
 method); no tool automates GolfNow search while the X6 terms read is outstanding.
+
+## Addendum H (2026-09-24, before any X4 fetch) — X4 indeterminate results
+
+A GolfNow facility-page check has three outcomes, not two:
+
+- **Live** — as Addendum G defines it (HTTP 200; host `www.golfnow.com`; the final URL's path contains
+  `/tee-times/facility/<id>-` for the **same** `<id>` that was requested; course name present under Addendum F).
+- **Not covered (definitive)** — the course has no facility URL recorded, or the request returns HTTP 404 or
+  410, or it resolves (HTTP 200) to a page that is not live: a different facility id, a generic search page, a
+  foreign host, or the course name absent.
+- **Indeterminate** — a network-policy block, a timeout, a connection error, HTTP 403, 429 or any 5xx, or any
+  other status not listed above.
+
+A trail's X4 verdict is computed only when **none** of its courses is indeterminate. Otherwise the trail's
+result is "not run — indeterminate (n courses)" and the check is retried; an indeterminate course is never
+counted as not covered. The runner exits non-zero whenever any trail is indeterminate.
