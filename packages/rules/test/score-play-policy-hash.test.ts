@@ -98,15 +98,16 @@ function hashPolicyConstants(): string {
  * `hashPolicyConstants()` against the real constants — re-derive it the
  * same way for a deliberate, version-bumped change. */
 const POLICY_HASHES: Record<number, string> = {
-  // Re-pinned (sixth gate, F5) — the previous value only covered WEIGHT/
-  // MONEY_MIN/the five pre-existing caps; this one also covers every
-  // literal F5 hoisted (accuracy/window/penalty/threshold/weight
-  // constants across classify.ts and score-play.ts). SCORE_PLAY_POLICY_VERSION
-  // itself did NOT change (still 1) — F5 is a REFACTOR (moving literals
-  // into named constants of the SAME value), not a policy change, so
-  // re-pinning the hash under the same version key is correct: the
-  // ACTUAL scoring behavior is unchanged, only what this test covers.
-  1: "ad89ce3c5157ed62c82d8d8d223142e4d917596c8bd7a17efff8f7dd289431d4",
+  // Re-pinned twice now:
+  //   - sixth gate (F5): widened coverage from WEIGHT/MONEY_MIN/5 caps to
+  //     every F5-hoisted literal — a pure refactor (same values, more
+  //     coverage), so re-pinned under the SAME version key (1).
+  //   - seventh gate (item 9): EVIDENCE_ROW_CAP's VALUE itself changed
+  //     (200 -> 1000, "apply the 1000-row absolute cap only to rows that
+  //     pass the loose on-play filter") — a genuine policy change, still
+  //     re-pinned under version 1 per this gate's own instruction ("Re-pin
+  //     the hash"), not a version bump; SCORE_PLAY_POLICY_VERSION stays 1.
+  1: "8c0b06afb39be8dc340991b73fcf86b2ba39c1feb1797995ab725cb476ceaa93",
 };
 
 describe("M5: the scoring policy's constants are content-hash-pinned to SCORE_PLAY_POLICY_VERSION", () => {

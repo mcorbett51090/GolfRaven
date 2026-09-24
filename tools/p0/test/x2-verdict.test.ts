@@ -693,7 +693,9 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       },
       draftCandidateNames: { VI: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
+    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes, {
+      ledger: ledgerFromManifest(manifest),
+    });
     expect(byTrail.VI?.bySha.has(realSha)).toBe(true);
     expect(byTrail.VI?.failedSources).toHaveLength(0);
   });
@@ -748,8 +750,10 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       },
       draftCandidateNames: { VI: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () =>
-      Buffer.from(""),
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(""),
+      { ledger: ledgerFromManifest(manifest) },
     );
     expect(byTrail.VI?.failedSources).toEqual([
       {
@@ -807,8 +811,10 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [legacyEntry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () =>
-      Buffer.from(bytes),
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger: ledgerFromManifest(manifest) },
     );
     expect(byTrail.TN?.bySha.get(rawSha)?.method).toBe("direct");
     expect(byTrail.TN?.bySha.get(rawSha)?.methodDefaulted).toBe(true);
@@ -862,7 +868,9 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       draftCandidateNames: { TN: [] },
     };
     await expect(
-      buildEvidenceByTrail(manifest, async () => Buffer.from(bytes)),
+      buildEvidenceByTrail(manifest, async () => Buffer.from(bytes), {
+        ledger: ledgerFromManifest(manifest),
+      }),
     ).rejects.toThrow(/inconsistent/);
   });
 
@@ -882,7 +890,9 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       draftCandidateNames: { TN: [] },
     };
     await expect(
-      buildEvidenceByTrail(manifest, async () => Buffer.from(bytes)),
+      buildEvidenceByTrail(manifest, async () => Buffer.from(bytes), {
+        ledger: ledgerFromManifest(manifest),
+      }),
     ).rejects.toThrow(/inconsistent/);
   });
 
@@ -903,8 +913,10 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [entry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () =>
-      Buffer.from(bytes),
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger: ledgerFromManifest(manifest) },
     );
     const confirmation: X2ConfirmationFile = {
       TN: {
@@ -960,8 +972,10 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [entry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () =>
-      Buffer.from(bytes),
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger: ledgerFromManifest(manifest) },
     );
     const confirmation: X2ConfirmationFile = {
       TN: {
