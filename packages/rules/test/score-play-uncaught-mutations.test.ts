@@ -15,8 +15,9 @@
  * literal before/after `pnpm vitest run` output.
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay, type Evidence } from "../src/score-play.js";
+import { type Evidence } from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
@@ -35,7 +36,7 @@ const OFF_DATE = "2026-05-31";
 
 describe("uncaught mutation: simulated fixes allowed into money", () => {
   it("a perfect check-in, simulated=true, is never money-eligible even alone", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ simulated: true }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ simulated: true }) })], baseCtx());
     // badgeWeight = 0.30 × 0.3 = 0.09 > 0, so this isn't the gate — it's
     // specifically the money exclusion under test.
     expect(result.score_badge).toBeGreaterThan(0);
@@ -48,7 +49,7 @@ describe("uncaught mutation: simulated fixes allowed into money", () => {
 describe("uncaught mutation: fix-id correlation removed", () => {
   it("a staff scan and a check-in sharing the SAME fixId combine by max (0.95), not noisy-OR (would be ~0.965)", () => {
     const sharedFix = goodFix();
-    const result = scorePlay([staffPresence({ coSignalFix: sharedFix }), checkin({ fix: sharedFix })], baseCtx());
+    const result = scorePlayOrThrow([staffPresence({ coSignalFix: sharedFix }), checkin({ fix: sharedFix })], baseCtx());
     // With fix-id correlation: the group collapses to staff_presence_hard
     // alone (0.95). Without it: noisyOr(0.95, 0.30) = 1-(0.05*0.70) = 0.965.
     expect(result.score_badge).toBe(0.95);
@@ -58,7 +59,7 @@ describe("uncaught mutation: fix-id correlation removed", () => {
 describe("uncaught mutation: same-round correlation removed", () => {
   it("a health_route and a file_import of the SAME round combine by max, not noisy-OR", () => {
     const startedAt = PLAY_LOCAL_DATE_MS;
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         healthRoute({ insideRatio: 0.9, startedAt }),
         { id: "fi_round", facilityId: PLAY_FACILITY_ID, localDate: baseCtx().playLocalDate, source: "file_import", matchedRoute: true, startedAt: startedAt + 5 * 60_000 },
@@ -74,14 +75,14 @@ describe("uncaught mutation: same-round correlation removed", () => {
 
 describe("uncaught mutation: device-row fix facility check removed", () => {
   it("a check-in fix at a DIFFERENT facility contributes nothing", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ facilityId: "fac_other" }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ facilityId: "fac_other" }) })], baseCtx());
     expect(result.score_badge).toBe(0);
   });
 });
 
 describe("uncaught mutation: device-gate insideBuffer check removed", () => {
   it("a check-in fix outside the buffer (insideBuffer=false) contributes nothing", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ insideBuffer: false }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ insideBuffer: false }) })], baseCtx());
     expect(result.score_badge).toBe(0);
   });
 });
@@ -94,7 +95,7 @@ describe("uncaught mutation: fingerprint voiding disabled (non-tautological — 
     // same-class dedup's max-pick would produce a DIFFERENT number (0.80)
     // if voiding did not fire, and the correct, lower number (0.20) only
     // when voiding actually suppresses the duplicate to 0.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         receipt({ id: "r1", status: "pending", fingerprint: "fp_dup" }),
         receipt({ id: "r2", status: "approved", fingerprint: "fp_dup", coSignalFix: goodFix() }),
@@ -108,7 +109,7 @@ describe("uncaught mutation: fingerprint voiding disabled (non-tautological — 
 
 describe("uncaught mutation: booking row-date anchor removed", () => {
   it("a booking row dated off-play is dropped entirely, even with an otherwise-perfect inline presence fix", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         booking({
           localDate: OFF_DATE,
@@ -124,7 +125,7 @@ describe("uncaught mutation: booking row-date anchor removed", () => {
 
 describe("uncaught mutation: receipt row-date anchor removed", () => {
   it("a receipt row dated off-play is dropped entirely, even with an approved status and a perfect co-signal", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [receipt({ localDate: OFF_DATE, status: "approved", coSignalFix: goodFix({ localDate: OFF_DATE, capturedAt: PLAY_LOCAL_DATE_MS - DAY_MS }) })],
       baseCtx(),
     );
@@ -145,7 +146,7 @@ describe("uncaught mutation: hard-group collapse disabled", () => {
     // not money-eligible) — ONLY the collapse step in `resolveGroups` can
     // turn this into `staff_presence_hard` (0.95). Without it: max(0.80
     // soft, 0.18 unattestable check-in) = 0.80, money 0.18 < 0.85.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({}),
         checkin({ fix: goodFix({ token: { present: true, grade: "unattestable" }, capturedAt: PLAY_LOCAL_DATE_MS + 3 * 60_000 }) }),
@@ -163,7 +164,7 @@ describe("uncaught mutation (third re-gate): the fix-date check inside deviceRow
     // The row is dated correctly (so it survives scorePlay's top-level
     // filter and reaches deviceRowFixGateOk at all) — only the FIX's own
     // `localDate` is off, isolating that ONE check specifically.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [checkin({ fix: goodFix({ localDate: OFF_DATE }) })],
       baseCtx(),
     );
@@ -189,7 +190,7 @@ describe("uncaught mutation (third re-gate): the fix-date clause of the staff wi
     // boundary.
     const scanAt = Date.parse("2026-06-01T23:58:00.000Z"); // 2 min before UTC midnight
     const fixCapturedAt = scanAt + 3 * 60_000; // 2026-06-02T00:01:00Z — 3 min later, but a DIFFERENT UTC calendar day
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({
           scanAt,
@@ -223,7 +224,7 @@ describe("uncaught mutation (third re-gate): the non-hard heldReview branch forc
       booking({ presenceFix: goodFix({ simulated: true }) }), // bad inline fix — stays booking_alone, no absorption
       checkin({ courseDisambiguatedBy: "user", fix: goodFix() }), // attested, presence-only, money-excluded
     ];
-    const result = scorePlay(evidence, baseCtx());
+    const result = scorePlayOrThrow(evidence, baseCtx());
     expect(result.money).toBe(true);
     expect(result.heldReview).toBe(true);
   });

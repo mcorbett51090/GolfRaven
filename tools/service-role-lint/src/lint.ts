@@ -772,5 +772,57 @@ export function lintSource(source: string, filePath: string): Finding[] {
     }
   });
 
+  // ---------------------------------------------------------------------
+  // Pass 6 (M3(4), post-P3a gate): "a raw fetch using a service key read
+  // from env." Flags any `fetch(...)` call whose argument tree references
+  // a secretEnvValueIdentifiers-tainted variable, OR inlines an env
+  // secret read directly as an argument — a privileged HTTP call built by
+  // hand instead of going through privileged.ts's own client.
+  // ---------------------------------------------------------------------
+  walk(ast, (node) => {
+    if (
+      !(node.type === AST_NODE_TYPES.CallExpression && node.callee.type === AST_NODE_TYPES.Identifier && node.callee.name === "fetch")
+    ) {
+      return;
+    }
+    let usesSecret = false;
+    for (const arg of node.arguments) {
+      walk(arg, (n) => {
+        if (usesSecret) return;
+        if (n.type === AST_NODE_TYPES.Identifier && secretEnvValueIdentifiers.has(n.name)) {
+          usesSecret = true;
+          return;
+        }
+        // An inline env read as a direct fetch() argument (no intermediate
+        // variable): `fetch(url, { headers: { Authorization: `Bearer
+        // ${Deno.env.get("SERVICE_ROLE_KEY")}` } })`.
+        if (
+          n.type === AST_NODE_TYPES.CallExpression &&
+          n.callee.type === AST_NODE_TYPES.MemberExpression &&
+          n.callee.property.type === AST_NODE_TYPES.Identifier &&
+          n.callee.property.name === "get" &&
+          n.callee.object.type === AST_NODE_TYPES.MemberExpression &&
+          n.callee.object.property.type === AST_NODE_TYPES.Identifier &&
+          n.callee.object.property.name === "env" &&
+          n.callee.object.object.type === AST_NODE_TYPES.Identifier &&
+          envObjectLocalNames.has(n.callee.object.object.name)
+        ) {
+          const a = n.arguments[0];
+          const literalKey = a && a.type === AST_NODE_TYPES.Literal && typeof a.value === "string" ? a.value : undefined;
+          if (literalKey === undefined || !isPublicEnvVar(literalKey)) usesSecret = true;
+        }
+      });
+      if (usesSecret) break;
+    }
+    if (usesSecret) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "raw-fetch-with-secret",
+        message: "fetch(...) call references a service-role/secret env value directly — build privileged HTTP calls through supabase/functions/_shared/privileged.ts instead",
+        ...loc,
+      });
+    }
+  });
+
   return findings;
 }

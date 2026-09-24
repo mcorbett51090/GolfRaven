@@ -8,8 +8,9 @@
  * by `offer-eligibility.test.ts`.)
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay } from "../src/score-play.js";
+import {} from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   baseCtx,
   goodFix,
   healthRoute,
@@ -19,7 +20,7 @@ import {
 
 describe("scorePlay — user-pick cap applies to EVERY class (plan line 956)", () => {
   it("a user-picked vendor_sensor round is capped at 0.50 in score_badge and 0 in score_monetary", () => {
-    const picked = scorePlay(
+    const picked = scorePlayOrThrow(
       [
         vendorRound("garmin", {
           vendorCourseMapped: true,
@@ -32,7 +33,7 @@ describe("scorePlay — user-pick cap applies to EVERY class (plan line 956)", (
     expect(picked.score_badge).toBe(0.5);
     expect(picked.score_monetary).toBe(0);
 
-    const notPicked = scorePlay(
+    const notPicked = scorePlayOrThrow(
       [vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true })],
       baseCtx(),
     );
@@ -40,7 +41,7 @@ describe("scorePlay — user-pick cap applies to EVERY class (plan line 956)", (
   });
 
   it("a user-picked approved receipt is capped at 0.50 in score_badge and excluded from score_monetary", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [receipt({ status: "approved", coSignalFix: goodFix(), courseDisambiguatedBy: "user" })],
       baseCtx(),
     );
@@ -51,14 +52,14 @@ describe("scorePlay — user-pick cap applies to EVERY class (plan line 956)", (
 
 describe("scorePlay — health_route insideRatio floor (should-fix)", () => {
   it("insideRatio below 0.6 scores 0", () => {
-    const result = scorePlay([healthRoute({ insideRatio: 0.59 })], baseCtx());
+    const result = scorePlayOrThrow([healthRoute({ insideRatio: 0.59 })], baseCtx());
     expect(result.score_badge).toBe(0);
   });
 
   it("a non-finite insideRatio (NaN/Infinity) scores 0", () => {
-    const nan = scorePlay([healthRoute({ insideRatio: Number.NaN })], baseCtx());
+    const nan = scorePlayOrThrow([healthRoute({ insideRatio: Number.NaN })], baseCtx());
     expect(nan.score_badge).toBe(0);
-    const inf = scorePlay([healthRoute({ insideRatio: Number.POSITIVE_INFINITY })], baseCtx());
+    const inf = scorePlayOrThrow([healthRoute({ insideRatio: Number.POSITIVE_INFINITY })], baseCtx());
     // Infinity >= 0.8 is technically true, but is not FINITE, so it must
     // still be rejected — a route matcher bug should never silently grant
     // the top band.
@@ -68,7 +69,7 @@ describe("scorePlay — health_route insideRatio floor (should-fix)", () => {
 
 describe("scorePlay — receipt fingerprint voiding (should-fix, §4.4/§4.5 line 996)", () => {
   it("a second receipt sharing a fingerprint with an earlier one is void", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         receipt({ id: "r1", status: "approved", fingerprint: "fp_1" }),
         receipt({ id: "r2", status: "approved", fingerprint: "fp_1" }),
@@ -81,7 +82,7 @@ describe("scorePlay — receipt fingerprint voiding (should-fix, §4.4/§4.5 lin
   });
 
   it("two receipts with DIFFERENT fingerprints are unaffected", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         receipt({ id: "r1", status: "approved", fingerprint: "fp_1" }),
         receipt({ id: "r2", status: "approved", fingerprint: "fp_2" }),
@@ -95,7 +96,7 @@ describe("scorePlay — receipt fingerprint voiding (should-fix, §4.4/§4.5 lin
   });
 
   it("an explicitly void receipt never contributes, even with a co-signal", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [receipt({ status: "void", coSignalFix: goodFix() })],
       baseCtx(),
     );

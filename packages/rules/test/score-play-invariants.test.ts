@@ -33,12 +33,12 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  scorePlay,
   type ChallengeKind,
   type Evidence,
   type TokenState,
 } from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
@@ -350,7 +350,7 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
     const violations: string[] = [];
     for (const c of cases) {
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
-      const result = scorePlay(c.evidence, ctx);
+      const result = scorePlayOrThrow(c.evidence, ctx);
       if (result.money && !oracle(c.evidence, ctx)) {
         violations.push(
           `${c.classId} grade=${c.grade} challenge=${c.challenge} simulated=${c.simulated} position=${c.position} time=${c.time}`,
@@ -365,7 +365,7 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
     for (const c of cases) {
       if (!c.deviceOnly) continue;
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
-      const result = scorePlay(c.evidence, ctx);
+      const result = scorePlayOrThrow(c.evidence, ctx);
       if (result.score_monetary >= 0.85) {
         violations.push(`${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`);
       }
@@ -384,7 +384,7 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
     for (const c of cases) {
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
       if (oracle(c.evidence, ctx)) continue;
-      const result = scorePlay(c.evidence, ctx);
+      const result = scorePlayOrThrow(c.evidence, ctx);
       if (result.money) {
         violations.push(`${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`);
       }
@@ -416,7 +416,7 @@ describe("scorePlay — a class label present with NO fix at all ⇒ ¬money (pr
 
   for (const { label, evidence } of noFixCases) {
     it(`${label} ⇒ money === false`, () => {
-      const result = scorePlay(evidence, baseCtx());
+      const result = scorePlayOrThrow(evidence, baseCtx());
       expect(result.presence_signal).toBe(false);
       expect(result.money).toBe(false);
     });
@@ -430,7 +430,7 @@ describe("scorePlay — a class label present with NO fix at all ⇒ ¬money (pr
 describe("scorePlay — facility and date anchoring (blocking findings 3, 4)", () => {
   it("finding 3: staff_presence with a co-signal at a DIFFERENT facility ⇒ no money", () => {
     const otherFacility = "fac_other";
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({
           facilityId: otherFacility,
@@ -448,13 +448,13 @@ describe("scorePlay — facility and date anchoring (blocking findings 3, 4)", (
   it("finding 3: a co-signal fix whose OWN facilityId disagrees with the row's facility is never a co-signal", () => {
     // The row is at the play's facility, but the embedded fix claims a
     // DIFFERENT facility — must not be trusted either way.
-    const result = scorePlay([staffPresence({ coSignalFix: goodFix({ facilityId: "fac_other" }) })], baseCtx());
+    const result = scorePlayOrThrow([staffPresence({ coSignalFix: goodFix({ facilityId: "fac_other" }) })], baseCtx());
     expect(result.presence_signal).toBe(false);
     expect(result.money).toBe(false);
   });
 
   it("finding 4: a booking plus a fix on D+1, with a separate check-in on D ⇒ 0.79, no money", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         booking({ presenceFix: goodFix({ localDate: "2026-06-02", capturedAt: PLAY_LOCAL_DATE_MS + 24 * 60 * 60 * 1000 }) }),
         checkin({ fix: goodFix() }),
@@ -473,32 +473,32 @@ describe("scorePlay — facility and date anchoring (blocking findings 3, 4)", (
 
 describe("scorePlay — device-row fix-quality gate (finding 2 / test adequacy)", () => {
   it("fromApp: false on a check-in's fix ⇒ excluded entirely (weight 0, no money)", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ fromApp: false }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ fromApp: false }) })], baseCtx());
     expect(result.score_badge).toBe(0);
     expect(result.money).toBe(false);
   });
 
   it("foreground: false on a check-in's fix ⇒ excluded entirely", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ foreground: false }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ foreground: false }) })], baseCtx());
     expect(result.score_badge).toBe(0);
     expect(result.money).toBe(false);
   });
 
   it("accuracyMeters > 50 on a check-in's fix ⇒ excluded entirely", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ accuracyMeters: 51 }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ accuracyMeters: 51 }) })], baseCtx());
     expect(result.score_badge).toBe(0);
     expect(result.money).toBe(false);
   });
 
   it("accuracyMeters negative or NaN ⇒ never qualifies", () => {
-    const neg = scorePlay([checkin({ fix: goodFix({ accuracyMeters: -1 }) })], baseCtx());
+    const neg = scorePlayOrThrow([checkin({ fix: goodFix({ accuracyMeters: -1 }) })], baseCtx());
     expect(neg.score_badge).toBe(0);
-    const nan = scorePlay([checkin({ fix: goodFix({ accuracyMeters: Number.NaN }) })], baseCtx());
+    const nan = scorePlayOrThrow([checkin({ fix: goodFix({ accuracyMeters: Number.NaN }) })], baseCtx());
     expect(nan.score_badge).toBe(0);
   });
 
   it("a dwell with a `none` challenge on either fix is fully ineligible, not ×0.6 (plan line 1000)", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [dwell({ checkinFix: goodFix({ challenge: "none" }), checkoutFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + 95 * 60_000 }) })],
       baseCtx(),
     );
@@ -506,7 +506,7 @@ describe("scorePlay — device-row fix-quality gate (finding 2 / test adequacy)"
   });
 
   it("foreground_dwell apartMinutes = NaN ⇒ never qualifies (the !(x >= threshold) fix)", () => {
-    const result = scorePlay([dwell({ apartMinutes: Number.NaN })], baseCtx());
+    const result = scorePlayOrThrow([dwell({ apartMinutes: Number.NaN })], baseCtx());
     expect(result.score_badge).toBe(0);
   });
 });
@@ -530,7 +530,7 @@ describe("scorePlay — device-only class pairs never reach MONEY_MIN (noisy-OR 
       const A = deviceOnlyBuilders[a]!;
       const B = deviceOnlyBuilders[b]!;
       it(`${A.label} + ${B.label} ⇒ score_monetary < 0.85`, () => {
-        const result = scorePlay([A.build(), B.build()], baseCtx());
+        const result = scorePlayOrThrow([A.build(), B.build()], baseCtx());
         expect(result.score_monetary).toBeLessThan(0.85);
         expect(result.money).toBe(false);
       });
@@ -561,7 +561,7 @@ describe("scorePlay — vendor + device-row two-row sets (money(E) ⇒ oracle(E)
             checkin({ ...(userPicked ? { courseDisambiguatedBy: "user" as const } : {}), fix }),
           ];
           const ctx = baseCtx();
-          const result = scorePlay(evidence, ctx);
+          const result = scorePlayOrThrow(evidence, ctx);
           if (result.money) {
             expect(oracle(evidence, ctx)).toBe(true);
           }

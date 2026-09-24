@@ -3,8 +3,9 @@
  * `score-play-internal-classify.test.ts` (blocking finding 1's fix).
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay, type Evidence } from "../src/score-play.js";
+import { type Evidence } from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   PLAY_LOCAL_DATE_MS,
   baseCtx,
   booking,
@@ -27,8 +28,8 @@ describe("Should-fix: the hard winner's SATISFYING FIX is order-independent (pre
     });
     const staffRow: Evidence = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS }); // no inline fix — absorbs
 
-    const forward = scorePlay([staffRow, unattestedCheckin, attestedCheckin], baseCtx());
-    const reversed = scorePlay([staffRow, attestedCheckin, unattestedCheckin], baseCtx());
+    const forward = scorePlayOrThrow([staffRow, unattestedCheckin, attestedCheckin], baseCtx());
+    const reversed = scorePlayOrThrow([staffRow, attestedCheckin, unattestedCheckin], baseCtx());
 
     expect(forward.score_badge).toBe(0.95);
     expect(reversed.score_badge).toBe(0.95);
@@ -55,8 +56,8 @@ describe("Should-fix: the hard winner's SATISFYING FIX is order-independent (pre
     });
     const bookingRow: Evidence = booking({}); // no inline fix — absorbs (same-day window)
 
-    const forward = scorePlay([bookingRow, unattestedDwell, attestedCheckin], baseCtx());
-    const reversed = scorePlay([bookingRow, attestedCheckin, unattestedDwell], baseCtx());
+    const forward = scorePlayOrThrow([bookingRow, unattestedDwell, attestedCheckin], baseCtx());
+    const reversed = scorePlayOrThrow([bookingRow, attestedCheckin, unattestedDwell], baseCtx());
 
     expect(forward.score_badge).toBe(0.9);
     expect(reversed.score_badge).toBe(0.9);

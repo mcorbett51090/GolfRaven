@@ -4,8 +4,9 @@
  * fixes themselves live in `src/score-play.ts`, cited inline below).
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay } from "../src/score-play.js";
+import {} from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE_MS,
   baseCtx,
@@ -24,7 +25,7 @@ const OFF_DATE = "2026-05-31"; // the day before PLAY_LOCAL_DATE
 
 describe("Blocking 1: check-ins/dwells from another date must not count toward money", () => {
   it("fixture #14 + an off-date check-in stays at 0.84, no money (the off-date row contributes nothing)", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         checkin({ fix: goodFix({ token: tokenState("unattestable") }) }),
         receipt({ status: "approved", coSignalFix: goodFix({ token: tokenState("unattestable") }) }),
@@ -38,7 +39,7 @@ describe("Blocking 1: check-ins/dwells from another date must not count toward m
   });
 
   it("a dwell from the previous day contributes nothing", () => {
-    const priorDayDwell = scorePlay(
+    const priorDayDwell = scorePlayOrThrow(
       [
         dwell({
           localDate: OFF_DATE,
@@ -55,7 +56,7 @@ describe("Blocking 1: check-ins/dwells from another date must not count toward m
 
 describe("Blocking 2: staff-scan and vendor rows must be checked against the play date", () => {
   it("a Garmin sensor round dated off-play plus an unattestable check-in on the play date is NOT 0.88/money (P8 AT(6))", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true, localDate: "2026-06-02" }),
         checkin({ fix: goodFix({ token: tokenState("unattestable") }) }),
@@ -71,7 +72,7 @@ describe("Blocking 2: staff-scan and vendor rows must be checked against the pla
 
   it("a staff scan whose scan/co-signal/row are all on D+1, plus a check-in on D, is NOT hard/money", () => {
     const nextDayMs = PLAY_LOCAL_DATE_MS + DAY_MS;
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({
           localDate: "2026-06-02",
@@ -92,14 +93,14 @@ describe("Blocking 2: staff-scan and vendor rows must be checked against the pla
 
 describe("Blocking 3: a user-picked course must never reach money through a hard class", () => {
   it("staffPresence user-picked, otherwise a perfect hard co-signal: money must be false", () => {
-    const result = scorePlay([staffPresence({ courseDisambiguatedBy: "user", coSignalFix: goodFix() })], baseCtx());
+    const result = scorePlayOrThrow([staffPresence({ courseDisambiguatedBy: "user", coSignalFix: goodFix() })], baseCtx());
     expect(result.score_monetary).toBe(0);
     expect(result.contributions.every((c) => !c.hard)).toBe(true);
     expect(result.money).toBe(false);
   });
 
   it("booking user-picked + a same-day check-in: money must be false", () => {
-    const result = scorePlay([booking({ courseDisambiguatedBy: "user" }), checkin({})], baseCtx());
+    const result = scorePlayOrThrow([booking({ courseDisambiguatedBy: "user" }), checkin({})], baseCtx());
     expect(result.score_monetary).toBe(0);
     expect(result.money).toBe(false);
   });
@@ -108,7 +109,7 @@ describe("Blocking 3: a user-picked course must never reach money through a hard
 describe("Blocking 4: heldReview must reflect the fix that actually established the winning result", () => {
   it("staff scan with an unattestable co-signal, plus an UNRELATED attested check-in 5h later — heldReview stays true", () => {
     const fiveHoursLater = PLAY_LOCAL_DATE_MS + 5 * 60 * 60_000;
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({ coSignalFix: goodFix({ token: tokenState("unattestable") }) }),
         checkin({ fix: goodFix({ token: tokenState("attested"), capturedAt: fiveHoursLater }) }),
@@ -122,7 +123,7 @@ describe("Blocking 4: heldReview must reflect the fix that actually established 
 
 describe("Should-fix: staff-scan absorption from an external fix", () => {
   it("staffPresence({}) + an unattestable check-in at +3 min is hard, 0.95, heldReview", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({}),
         checkin({ fix: goodFix({ token: tokenState("unattestable"), capturedAt: PLAY_LOCAL_DATE_MS + 3 * 60_000 }) }),
@@ -139,7 +140,7 @@ describe("Should-fix: staff-scan absorption from an external fix", () => {
 
 describe("Should-fix: a booking with a BAD inline fix still becomes hard through a same-day receipt co-signal (plan line 967)", () => {
   it("booking's own inline fix fails, but a paymentRef-correlated receipt's co-signal qualifies", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         booking({
           paymentRef: "pay_bad_inline",
@@ -167,8 +168,8 @@ describe("Should-fix: order independence — a hard result must not depend on ro
     const bookingRow = booking({});
     const linkingCheckin = checkin({ fix: sharedFix });
 
-    const forward = scorePlay([staffRow, bookingRow, linkingCheckin], baseCtx());
-    const reversed = scorePlay([bookingRow, staffRow, linkingCheckin], baseCtx());
+    const forward = scorePlayOrThrow([staffRow, bookingRow, linkingCheckin], baseCtx());
+    const reversed = scorePlayOrThrow([bookingRow, staffRow, linkingCheckin], baseCtx());
 
     expect(forward.score_badge).toBe(reversed.score_badge);
     expect(forward.score_monetary).toBe(reversed.score_monetary);
@@ -182,12 +183,12 @@ describe("Should-fix: order independence — a hard result must not depend on ro
 
 describe("Should-fix: deviceRowFixGateOk fails closed on an unverified facility", () => {
   it("a check-in fix at an unverified facility contributes nothing", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ verificationTier: "unverified" }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ verificationTier: "unverified" }) })], baseCtx());
     expect(result.score_badge).toBe(0);
   });
 
   it("a check-in fix at a listed-verified (radius) facility still contributes, capped", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [checkin({ fix: goodFix({ verificationTier: "listed-verified", geometryKind: "radius" }) })],
       baseCtx(),
     );
@@ -198,7 +199,7 @@ describe("Should-fix: deviceRowFixGateOk fails closed on an unverified facility"
 
 describe("Should-fix: apartMinutes is derived from the two fixes, not trusted from the stored field", () => {
   it("a stored apartMinutes of 95 is overridden by a derived 45 (the fixes actually disagree) — dwell scores 0", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         dwell({
           apartMinutes: 95, // claims 95, but the fixes below are only 45 min apart
@@ -213,7 +214,7 @@ describe("Should-fix: apartMinutes is derived from the two fixes, not trusted fr
   });
 
   it("a stored apartMinutes of 10 is overridden by a derived 95 (the fixes actually agree with reality) — dwell qualifies", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         dwell({
           apartMinutes: 10, // wrong on paper

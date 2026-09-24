@@ -4,8 +4,9 @@
  * fix in `src/score-play.ts` / `test/score-play-oracle.ts`.
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay, type Evidence } from "../src/score-play.js";
+import { type Evidence } from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
@@ -22,7 +23,7 @@ const OFF_DATE = "2026-05-31";
 
 describe("Blocking 1: heldReview must consider the presence fix, not only the money-merged set", () => {
   it("Garmin sensor round (0.85) + staff scan whose unattestable co-signal is OUTSIDE its own window (soft) — held true", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true }),
         {
@@ -46,7 +47,7 @@ describe("Blocking 1: heldReview must consider the presence fix, not only the mo
   });
 
   it("Garmin sensor round + a user-picked unattestable check-in — held true", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true }),
         checkin({ courseDisambiguatedBy: "user", fix: goodFix({ token: tokenState("unattestable") }) }),
@@ -62,7 +63,7 @@ describe("Blocking 1: heldReview must consider the presence fix, not only the mo
     // AND reaches money, while an INDEPENDENT attested fix (on a
     // user-picked, money-excluded row) covers presence — isolates the
     // score-leg computation specifically (see should-fix mutation #3).
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         {
           id: "receipt_unatt",
@@ -91,7 +92,7 @@ describe("Blocking 2: the oracle is fix-attributes-only — no row-level or user
       checkin({ courseDisambiguatedBy: "user", fix: goodFix() }),
     ];
     const ctx = baseCtx();
-    const result = scorePlay(evidence, ctx);
+    const result = scorePlayOrThrow(evidence, ctx);
     expect(result.money).toBe(true);
     expect(oracle(evidence, ctx)).toBe(true);
   });
@@ -115,8 +116,8 @@ describe("Should-fix: heldReview is order-independent across TWO INDEPENDENT har
     };
     const bookingHard: Evidence = booking({ presenceFix: goodFix({ token: tokenState("attested") }) });
 
-    const forward = scorePlay([staffHard, bookingHard], baseCtx());
-    const reversed = scorePlay([bookingHard, staffHard], baseCtx());
+    const forward = scorePlayOrThrow([staffHard, bookingHard], baseCtx());
+    const reversed = scorePlayOrThrow([bookingHard, staffHard], baseCtx());
 
     expect(forward.money).toBe(true);
     expect(reversed.money).toBe(true);
@@ -130,7 +131,7 @@ describe("Should-fix: heldReview is order-independent across TWO INDEPENDENT har
 
 describe("Should-fix: verificationTier must be strictly play-verified for money (build plan §4.2's own tier table)", () => {
   it("#14 + a check-in whose fix reports listed-verified/polygon (an inconsistent combination) never reaches money", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         checkin({ fix: goodFix({ token: tokenState("unattestable") }) }),
         {
@@ -152,7 +153,7 @@ describe("Should-fix: verificationTier must be strictly play-verified for money 
   });
 
   it("a bare listed-verified/polygon check-in alone is never money-eligible", () => {
-    const result = scorePlay([checkin({ fix: goodFix({ verificationTier: "listed-verified", geometryKind: "polygon" }) })], baseCtx());
+    const result = scorePlayOrThrow([checkin({ fix: goodFix({ verificationTier: "listed-verified", geometryKind: "polygon" }) })], baseCtx());
     expect(result.score_monetary).toBe(0);
     expect(result.money).toBe(false);
   });
@@ -173,7 +174,7 @@ describe("Should-fix: the hard winner is chosen AFTER the user-pick cap, not bef
     const bookingRow: Evidence = booking({}); // no inline fix, not user-picked — also absorbs
     const linkingCheckin = checkin({ fix: sharedFix });
 
-    const result = scorePlay([staffRow, bookingRow, linkingCheckin], baseCtx());
+    const result = scorePlayOrThrow([staffRow, bookingRow, linkingCheckin], baseCtx());
     // Without the fix: the raw-weight comparison picks staff (0.95 > 0.90)
     // as the group's hard winner, THEN the user-pick cap strips it to
     // `hard: false, moneyEligible: false` — discarding the whole group

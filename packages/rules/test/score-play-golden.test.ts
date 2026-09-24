@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { MONEY_MIN, scorePlay } from "../src/score-play.js";
 import {
+  scorePlayOrThrow,
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE,
   PLAY_LOCAL_DATE_MS,
@@ -30,7 +31,7 @@ import {
 
 describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   it("#1: Approved receipt (no co-signal) + forged GPX file_import", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [receipt({ status: "approved" }), fileImport({ matchedRoute: true })],
       baseCtx(),
     );
@@ -41,7 +42,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#2: Relayed staff scan without co-signal + forged GPX", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [staffPresence({}), fileImport({ matchedRoute: true })],
       baseCtx(),
     );
@@ -61,7 +62,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
     // outside the window, while every other quality attribute (and the
     // 95 min apart-duration) is unchanged.
     const dwellStart = PLAY_LOCAL_DATE_MS + 30 * 60_000;
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({}),
         healthRoute({ insideRatio: 0.85 }),
@@ -84,7 +85,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
     // Finding 1(b): correlation is derived from the DATA — a shared
     // `paymentRef` (the same booking/prepay id), never a caller-asserted
     // `correlationId`.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         booking({ paymentRef: "pay_4" }),
         receipt({ status: "approved", paymentRef: "pay_4" }),
@@ -98,7 +99,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#5: Health route + Connect IQ trace + file import (device-only)", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         healthRoute({ insideRatio: 0.9 }),
         connectIq({ variant: "route" }),
@@ -113,7 +114,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#6: P8 GHIN-posted round alone", () => {
-    const result = scorePlay([ghin({})], baseCtx());
+    const result = scorePlayOrThrow([ghin({})], baseCtx());
     expect(result.score_badge).toBe(0.4);
     expect(result.score_monetary).toBe(0.0);
     expect(result.presence_signal).toBe(false);
@@ -121,7 +122,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#7: P8 Garmin sensor round alone, no app fix — no presence fact", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         vendorRound("garmin", {
           vendorCourseMapped: true,
@@ -137,7 +138,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#8: Marker scratch code + its same-date co-signal check-in — corroboration cannot cross 0.50", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [checkin({ fix: goodFix() })],
       baseCtx({
         purchases: [
@@ -152,7 +153,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#9: Approved receipt + co-signal from the QR session (no separate check-in)", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         receipt({ status: "approved", coSignalFix: goodFix() }),
         checkin({ fix: goodFix() }),
@@ -166,7 +167,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#10 [alternative encoding]: a single booking row carrying its presence fix inline", () => {
-    const result = scorePlay([booking({ presenceFix: goodFix() })], baseCtx());
+    const result = scorePlayOrThrow([booking({ presenceFix: goodFix() })], baseCtx());
     expect(result.score_badge).toBe(0.9);
     expect(result.score_monetary).toBe(0.9);
     expect(result.presence_signal).toBe(true);
@@ -183,7 +184,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
     // and the whole group collapses to `booking_hard` alone — never
     // double-scored as booking 0.70 + dwell 0.50 (A2-20d), and never
     // landing on exactly 0.85 (the should-fix item's own stated risk).
-    const result = scorePlay([booking({}), dwell({})], baseCtx());
+    const result = scorePlayOrThrow([booking({}), dwell({})], baseCtx());
     expect(result.score_badge).toBe(0.9);
     expect(result.score_monetary).toBe(0.9);
     expect(result.presence_signal).toBe(true);
@@ -193,7 +194,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#11: Offline-code staff scan + a prefetched-challenge fix 6 min later", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({
           scanAt: PLAY_LOCAL_DATE_MS,
@@ -212,7 +213,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#12 [alternative encoding]: no fix at all", () => {
-    const result = scorePlay([staffPresence({})], baseCtx());
+    const result = scorePlayOrThrow([staffPresence({})], baseCtx());
     expect(result.score_badge).toBe(0.8);
     expect(result.score_monetary).toBe(0.0);
     expect(result.presence_signal).toBe(false);
@@ -227,7 +228,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
     // independent of any one class's window) — but staff_presence still
     // stays SOFT (its own ±10 min window failed) and no other class is
     // money-eligible, so `money` is still `false` overall.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({
           scanAt: PLAY_LOCAL_DATE_MS,
@@ -243,7 +244,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#13: Check-in whose attestation failed + approved receipt", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         checkin({ fix: goodFix({ token: tokenState("failed") }) }),
         receipt({ status: "approved" }),
@@ -257,7 +258,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#14: `unattestable` check-in (0.30 × 0.6) + approved receipt — below 0.85", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         checkin({ fix: goodFix({ token: tokenState("unattestable") }) }),
         receipt({
@@ -274,7 +275,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#15: Staff scan + `unattestable` co-signal — hard class, routed to held_review", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         staffPresence({
           coSignalFix: goodFix({ token: tokenState("unattestable") }),
@@ -292,7 +293,7 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#16: 36-hole site, shared polygon, dwell, course-unit trail, user pick", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [dwell({ courseDisambiguatedBy: "user", apartMinutes: 95, holes: 18 })],
       baseCtx(),
     );
@@ -309,7 +310,7 @@ describe("scorePlay — MONEY_MIN is a literal code constant (A2-05)", () => {
   });
 
   it("a fixture landing in [0.84, 0.85) is genuinely below the floor (fixture #14)", () => {
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         checkin({ fix: goodFix({ token: tokenState("unattestable") }) }),
         receipt({ status: "approved", coSignalFix: goodFix({ token: tokenState("unattestable") }) }),
@@ -327,7 +328,7 @@ describe("scorePlay — finding 1: same-class dedup and derived (not caller-asse
     // "Two rows of the same class do not stack" (§4.5 line 890) — a
     // SECOND `foreground_checkin` row must not push the score past the
     // single-check-in fixture #14 result, however it's tagged.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         checkin({ id: "checkin_a", fix: goodFix({ token: tokenState("unattestable") }) }),
         checkin({ id: "checkin_b", fix: goodFix({ token: tokenState("unattestable") }) }),
@@ -341,8 +342,8 @@ describe("scorePlay — finding 1: same-class dedup and derived (not caller-asse
   });
 
   it("two receipts with co-signals under DISTINCT ids ⇒ no double count (same-class dedup, not noisy-OR)", () => {
-    const withOneReceipt = scorePlay([receipt({ status: "approved", coSignalFix: goodFix() })], baseCtx());
-    const withTwoReceipts = scorePlay(
+    const withOneReceipt = scorePlayOrThrow([receipt({ status: "approved", coSignalFix: goodFix() })], baseCtx());
+    const withTwoReceipts = scorePlayOrThrow(
       [
         receipt({ id: "receipt_a", status: "approved", coSignalFix: goodFix() }),
         receipt({ id: "receipt_b", status: "approved", coSignalFix: goodFix() }),
@@ -360,7 +361,7 @@ describe("scorePlay — finding 1: same-class dedup and derived (not caller-asse
     // Two rows tagged with the SAME correlationId but sharing neither a
     // fixId, a paymentRef nor a round — must combine ordinarily (noisy-OR),
     // proving `correlationId` has no effect on combination.
-    const result = scorePlay(
+    const result = scorePlayOrThrow(
       [
         booking({ correlationId: "bogus" }),
         receipt({ status: "approved", correlationId: "bogus" }),

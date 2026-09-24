@@ -5,17 +5,29 @@
  * exact same `Evidence`/`AppFix` construction as the generator without
  * importing a `.test.ts` file.
  */
-import type {
-  AppFix,
-  ChallengeKind,
-  Evidence,
-  ScorePlayContext,
-  TokenState,
+import {
+  scorePlay,
+  type AppFix,
+  type ChallengeKind,
+  type Evidence,
+  type ScorePlayContext,
+  type ScorePlayOutcome,
+  type ScorePlayResult,
+  type TokenState,
 } from "../src/score-play.js";
 
 export const PLAY_FACILITY_ID = "fac_test";
 export const PLAY_LOCAL_DATE = "2026-06-01";
 export const PLAY_LOCAL_DATE_MS = Date.parse("2026-06-01T12:00:00.000Z");
+export const PLAY_COURSE_ID = "course_test";
+/** F1 (sixth gate): a REAL IANA Area/Location timezone — Iceland observes
+ * NO daylight saving and sits at UTC+0 year-round, so every existing
+ * fixture's UTC-epoch arithmetic (`PLAY_LOCAL_DATE_MS` and friends) stays
+ * numerically consistent under this tz with zero changes, while still
+ * exercising the REAL `facilityTz` validator (this is not a magic
+ * "UTC"-equivalent bypass string — it's a genuine, `Intl.supportedValuesOf`
+ * -listed zone). */
+export const PLAY_FACILITY_TZ = "Atlantic/Reykjavik";
 
 export function baseCtx(
   overrides: Partial<ScorePlayContext> = {},
@@ -23,8 +35,25 @@ export function baseCtx(
   return {
     playFacilityId: PLAY_FACILITY_ID,
     playLocalDate: PLAY_LOCAL_DATE,
+    playCourseId: PLAY_COURSE_ID,
+    facilityTz: PLAY_FACILITY_TZ,
     ...overrides,
   };
+}
+
+/** Test-only convenience: unwraps a SUCCESSFUL `scorePlay` outcome,
+ * throwing (with every reason) if it was instead a parse failure. The vast
+ * majority of this suite's fixtures are meant to parse cleanly and score —
+ * a test that specifically wants to exercise a parse FAILURE calls the
+ * real `scorePlay` directly and checks `.ok` itself (see
+ * `parse-evidence.test.ts`/`score-play-h1-allowlist.test.ts`), rather than
+ * using this wrapper. */
+export function scorePlayOrThrow(evidence: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
+  const result: ScorePlayOutcome = scorePlay(evidence, ctx);
+  if (!result.ok) {
+    throw new Error(`scorePlay unexpectedly failed to parse: ${result.reasons.join("; ")}`);
+  }
+  return result;
 }
 
 let nextFixId = 0;

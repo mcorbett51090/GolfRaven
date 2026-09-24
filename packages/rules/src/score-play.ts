@@ -859,23 +859,27 @@ function computeInputDigest(evidence: Evidence[], ctx: ScorePlayContext): string
  * every other doc comment on `scorePlay` (the money rule, the trust table,
  * the scope boundary) describes this function's behaviour; it's split out
  * only so `scorePlay` itself can wrap it with the parse-first/fail-closed
- * step and the `inputDigest` computation above.
+ * step and the `inputDigest`/`excludedRows` fields above. Returns
+ * everything `ScorePlayResult` needs EXCEPT `inputDigest`/`excludedRows`
+ * themselves — `scorePlay` adds those (the digest needs the parsed
+ * `{evidence, ctx}` this function doesn't return; `excludedRows` comes
+ * straight from `parseScorePlayInput`, not from anything this function
+ * computes).
  */
-function scorePlayOnParsedInput(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
+function scorePlayOnParsedInput(
+  evidenceIn: Evidence[],
+  ctx: ScorePlayContext,
+): Omit<ScorePlayResult, "inputDigest" | "excludedRows"> {
   // Finding 3 + blocking finding 2 (second re-gate): drop any row whose OWN
   // facility OR OWN date disagrees with the play being scored, before
-  // anything else runs — this is what stops a vendor round or a staff scan
-  // dated on a DIFFERENT day from contributing to this play at all. Every
-  // class-specific date check elsewhere (booking's same-day presence, a
-  // receipt's same-date co-signal, a device row's own fix date, and now
-  // `classifyEvidenceRow`'s own `rowOk` defence-in-depth check) is
-  // additional, narrower anchoring on top of this blanket row-level filter
-  // — not a substitute for it.
-  // H3 (fifth gate): the course anchor — see `ScorePlayContext.playCourseId`'s
-  // own doc (`internal/classify.js`). Applied at this SAME top-level filter
-  // as the facility/date drop, for the same reason: a wrong-course row must
-  // never reach `deriveGroups`/`resolveGroups` at all, not merely be zeroed
-  // downstream.
+  // anything else runs. F3 (sixth gate): `evidenceIn` here is ALREADY
+  // `parseScorePlayInput`'s own filtered `parsed.evidence` — every row in
+  // it already passed the loose facility/date/course match AND the strict
+  // per-row parse, so this filter is now REDUNDANT by construction. Kept
+  // anyway, as defence in depth (the same layered pattern this module uses
+  // throughout — `classifyEvidenceRow`'s own `rowOk` is the same idea one
+  // layer down): if this function is ever called some OTHER way, it stays
+  // safe on its own.
   const evidence = voidDuplicateFingerprints(evidenceIn).filter(
     (row) =>
       row.facilityId === ctx.playFacilityId &&
