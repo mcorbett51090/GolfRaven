@@ -60,17 +60,28 @@ SUPABASE_DIR="$ROOT_DIR/supabase"
 
 PG_BIN_DIR="${PG_BIN_DIR:-}"
 if [ -z "$PG_BIN_DIR" ]; then
-  if command -v pg_config >/dev/null 2>&1 && [ -x "$(pg_config --bindir 2>/dev/null)/initdb" ]; then
+  # should-fix (post-P3a re-gate): PostgreSQL 17 is the pinned major
+  # version (supabase/config.toml `[db] major_version`) — prefer it
+  # explicitly over whatever `pg_config` happens to resolve to (a host
+  # can have multiple PG majors installed side by side, and pg_config
+  # reflects the FIRST one on PATH, not necessarily the pinned one).
+  # Falls back to `pg_config`, then a bare PostgreSQL 16 install, so this
+  # still works on a host that only has 16 (verified locally this session
+  # against PostgreSQL 17.11 from PGDG; the 16 fallback is the harness's
+  # prior, still-supported behaviour).
+  if [ -d /usr/lib/postgresql/17/bin ]; then
+    PG_BIN_DIR="/usr/lib/postgresql/17/bin"
+  elif command -v pg_config >/dev/null 2>&1 && [ -x "$(pg_config --bindir 2>/dev/null)/initdb" ]; then
     # `pg_config` itself commonly lives in /usr/bin as a thin wrapper, NOT
     # alongside initdb/pg_ctl/psql — always ask it for --bindir rather than
     # dirname-ing pg_config's own path (confirmed this session: on this
     # Debian/Ubuntu-style layout, pg_config is in /usr/bin while
-    # initdb/pg_ctl live in /usr/lib/postgresql/16/bin).
+    # initdb/pg_ctl live in /usr/lib/postgresql/<major>/bin).
     PG_BIN_DIR="$(pg_config --bindir)"
   elif [ -d /usr/lib/postgresql/16/bin ]; then
     PG_BIN_DIR="/usr/lib/postgresql/16/bin"
   else
-    echo "tools/db/test.sh: cannot find a PostgreSQL 16 bin directory (set PG_BIN_DIR)" >&2
+    echo "tools/db/test.sh: cannot find a PostgreSQL bin directory (set PG_BIN_DIR)" >&2
     exit 1
   fi
 fi

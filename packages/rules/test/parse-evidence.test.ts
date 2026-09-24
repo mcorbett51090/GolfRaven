@@ -795,3 +795,156 @@ describe("item 4 (eighth gate): id/fixId restricted to [A-Za-z0-9_.:-]{1,128} �
     expect(parseEvidence(row, tz).success).toBe(true);
   });
 });
+
+describe("item 2 (ninth gate): a WELL-FORMED anchor mismatch is decisive off-play, even when ANOTHER anchor on the same row is malformed", () => {
+  it("facilityId: another well-formed facility + courseId: null (malformed) is off-play, NOT quarantined (the gate's own exploit shape)", () => {
+    const badRow = { id: "other_facility_null_course", facilityId: "fac_OTHER", localDate: PLAY_LOCAL_DATE, courseId: null, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("off-play");
+    }
+  });
+
+  it("localDate: another well-formed date + courseId: 123 (malformed) is off-play, not quarantined", () => {
+    const badRow = { id: "other_date_bad_course", facilityId: PLAY_FACILITY_ID, localDate: "2026-05-01", courseId: 123, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("off-play");
+    }
+  });
+
+  it("courseId: another well-formed course + facilityId: '' (malformed/empty) is off-play, not quarantined", () => {
+    const badRow = { id: "other_course_bad_facility", facilityId: "", localDate: PLAY_LOCAL_DATE, courseId: "crs_other", source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("off-play");
+    }
+  });
+
+  it("the DoS exploit: 1001 rows carrying a well-formed OTHER facility + a malformed courseId no longer trip EVIDENCE_ROW_CAP", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const otherPlayRows = Array.from({ length: 1001 }, (_, i) => ({
+      id: `other_${i}`,
+      facilityId: "fac_OTHER",
+      localDate: PLAY_LOCAL_DATE,
+      courseId: null,
+      source: "self_report",
+    }));
+    const result = parseScorePlayInput({ evidence: [hardRow, ...otherPlayRows], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.evidence.length).toBe(1);
+      expect(result.excludedRows.length).toBe(1001);
+      expect(result.excludedRows.every((r) => r.kind === "off-play")).toBe(true);
+    }
+  });
+
+  it("scorePlay for the same 1001-row batch: the legitimate play still scores money and is NOT held (the actual DoS this closes)", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const otherPlayRows = Array.from({ length: 1001 }, (_, i) => ({
+      id: `other2_${i}`,
+      facilityId: "fac_OTHER",
+      localDate: PLAY_LOCAL_DATE,
+      courseId: null,
+      source: "self_report",
+    }));
+    const result = scorePlayOrThrow([hardRow, ...otherPlayRows] as any, baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.heldReview).toBe(false);
+  });
+
+  it("regression guard: the eighth gate's own quarantine case (well-formed, MATCHING facility/date + malformed courseId) is STILL quarantined, not off-play", () => {
+    const badRow = { id: "still_quarantined", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, courseId: null, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("quarantined");
+    }
+  });
+});
+
+describe("item 3 (ninth gate): fixId is pinned to unpadded base64url — standard, padded base64 is rejected with a clear reason", () => {
+  it("rejects a fixId containing '+' (a standard-base64 character not in base64url)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "q83vEjRWeJA+" } as any });
+    const result = parseEvidence(row, tz);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.reasons.some((r) => /base64url/i.test(r))).toBe(true);
+    }
+  });
+
+  it("rejects a fixId containing '/' (a standard-base64 character not in base64url)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "ab/cd+ef" } as any });
+    const result = parseEvidence(row, tz);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.reasons.some((r) => /base64url/i.test(r))).toBe(true);
+    }
+  });
+
+  it("rejects a fixId with '=' padding (standard base64's padding character)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "q83vEjRWeJA=" } as any });
+    const result = parseEvidence(row, tz);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.reasons.some((r) => /base64url/i.test(r))).toBe(true);
+    }
+  });
+
+  it("accepts an unpadded base64url fixId (letters and digits only)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "q83vEjRWeJA" } as any });
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+
+  it("accepts a base64url fixId that uses '-' and '_' (the url-safe substitutes for '+' and '/')", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "ab-cd_ef09" } as any });
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+
+  it("a fixId using IdLikeSchema-only characters ('.', ':') that are NOT in base64url is rejected — the fixId pin is narrower than the general id class", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "fix:2026-06-01.a" } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+});
+
+describe("item 4 (ninth gate): voidReason on a non-void receipt row is a structural error — quarantined, never silently scored", () => {
+  it("an approved receipt with voidReason set is rejected by parseEvidence with a clear reason", () => {
+    const row = receipt({ status: "approved", voidReason: "fraud" });
+    const result = parseEvidence(row, tz);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.reasons.some((r) => /voidReason/i.test(r))).toBe(true);
+    }
+  });
+
+  it("a pending receipt with voidReason set is likewise rejected", () => {
+    const row = receipt({ status: "pending", voidReason: "duplicate" });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("a void receipt WITH voidReason set is still accepted (the normal, intended case)", () => {
+    const row = receipt({ status: "void", voidReason: "reviewer" });
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+
+  it("a void receipt with NO voidReason at all is still accepted (defaults to reviewer downstream, item 1 eighth gate)", () => {
+    const row = receipt({ status: "void" });
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+
+  it("scorePlay: an inconsistent approved+voidReason row alongside a legitimate play is quarantined, not silently scored", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const inconsistentRow = receipt({ status: "approved", voidReason: "fraud", fingerprint: "fp_incon" });
+    const result = scorePlayOrThrow([hardRow, inconsistentRow], baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.excludedRows.length).toBe(1);
+    expect(result.excludedRows[0]?.kind).toBe("quarantined");
+  });
+});

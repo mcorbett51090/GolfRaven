@@ -117,23 +117,34 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install PostgreSQL 16 + PostGIS 3 + pgTAP (PGDG apt, key-checked)
-        # Postgres 16, PostGIS 3.4, pgTAP (build plan §10 P3,
+      - name: Install PostgreSQL 17 + PostGIS 3 + pgTAP (PGDG apt, key-checked)
+        # Postgres 17, PostGIS 3, pgTAP (build plan §10 P3,
         # docs/golf-trails/02-build-plan.md:2758). No Docker, no Supabase
         # CLI: supabase/tests/shim.sql is the local stand-in in both places.
         #
-        # S4 (gate round 2), revised after the first CI run: exact
-        # `pkg=version` pins to this devcontainer's Ubuntu builds failed on
-        # the runner ("Package postgresql-16 is not available"). The
-        # ubuntu-24.04 runner image ships PostgreSQL 16 preinstalled from
-        # the PGDG repo (actions/runner-images install-postgresql.sh), so
-        # this step installs PostGIS/pgTAP from that same PGDG repo, with
-        # the repo signing key checked against its published fingerprint.
-        # PGDG prunes superseded builds from its pool, so versions are
-        # pinned to the major line (PostgreSQL 16, PostGIS 3) and the exact
-        # installed builds are printed below for the record, rather than
-        # pinned exactly (an exact pin here would break on every PGDG patch
-        # release).
+        # ⛔ FIX (should-fix, post-P3a re-gate): switched from PostgreSQL 16
+        # to 17 — `GRANT ... WITH INHERIT/SET` (0016_private_definer.sql,
+        # H2's fix) is PG16+ syntax, and the pinned major
+        # (supabase/config.toml `[db] major_version = 17`) is what a real
+        # `supabase db push`/`supabase start` targets: Supabase Cloud has
+        # defaulted new projects to PostgreSQL 17 for some time before
+        # 2026-09-24, and self-hosted Supabase moved to PG17-by-default on
+        # 2026-06-17 [docs-verified 2026-09-24 via WebSearch — see
+        # config.toml's own note on why this is corroborated rather than
+        # cited to supabase.com directly]. Verified locally this session
+        # against PostgreSQL 17.11 (PGDG), both HARNESS_MODE=superuser and
+        # HARNESS_MODE=restricted, full green — this step mirrors that
+        # exact install.
+        #
+        # S4 (gate round 2), still the reason this installs from PGDG
+        # directly rather than pinning an exact `pkg=version`: the runner
+        # image's own preinstalled PostgreSQL build changes over time and
+        # an exact version pin fails outright the moment it's superseded
+        # ("Package postgresql-16 is not available" on the first CI run of
+        # that gate round). PGDG prunes superseded builds from its pool,
+        # so versions stay pinned to the MAJOR line (PostgreSQL 17,
+        # PostGIS 3) and the exact installed builds are printed below for
+        # the record, rather than pinned exactly.
         run: |
           set -euo pipefail
           PGDG_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
@@ -148,13 +159,13 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            postgresql-16 \
-            postgresql-16-postgis-3 \
-            postgresql-16-postgis-3-scripts \
-            postgresql-16-pgtap \
+            postgresql-17 \
+            postgresql-17-postgis-3 \
+            postgresql-17-postgis-3-scripts \
+            postgresql-17-pgtap \
             libtap-parser-sourcehandler-pgtap-perl
           dpkg-query -W -f='${Package} ${Version}\n' \
-            postgresql-16 postgresql-16-postgis-3 postgresql-16-pgtap libtap-parser-sourcehandler-pgtap-perl
+            postgresql-17 postgresql-17-postgis-3 postgresql-17-pgtap libtap-parser-sourcehandler-pgtap-perl
 
       - name: Set up pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0

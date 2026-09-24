@@ -269,7 +269,34 @@ let cachedLauncher: ChromiumLauncher | null = null;
 async function defaultLauncher(): Promise<ChromiumLauncher> {
   if (cachedLauncher) return cachedLauncher;
   const { chromium } = await import("playwright-core");
-  cachedLauncher = (opts) => chromium.launch(opts);
+  cachedLauncher = async (opts) => {
+    const browser = await chromium.launch(opts);
+    // Gate finding 1 (re-re-gate): real Playwright's `CDPSession.on` has a
+    // narrower, generically-constrained signature (`event: keyof Events |
+    // symbol`) than this module's own minimal `CDPSessionLike` (`event:
+    // string`) — structurally incompatible for a direct assignment, so
+    // `newBrowserCDPSession` is wrapped here; `newContext`/`close` are
+    // passed straight through to the real `Browser`, completely
+    // unchanged, since only the CDP surface needed adapting.
+    const wrapped: BrowserLike = {
+      newContext: (contextOpts) => browser.newContext(contextOpts) as unknown as Promise<ContextLike>,
+      close: () => browser.close(),
+      newBrowserCDPSession: async () => {
+        const cdp = await browser.newBrowserCDPSession();
+        const anyCdp = cdp as unknown as {
+          on: (event: string, handler: (payload: unknown) => void) => void;
+          send: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+          detach: () => Promise<void>;
+        };
+        return {
+          on: (event: string, handler: (payload: unknown) => void) => anyCdp.on(event, handler),
+          send: (method: string, params?: Record<string, unknown>) => anyCdp.send(method, params),
+          detach: () => anyCdp.detach(),
+        };
+      },
+    };
+    return wrapped;
+  };
   return cachedLauncher;
 }
 

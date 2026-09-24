@@ -542,7 +542,22 @@ function passthroughContext(page: PageLike): ContextLike {
     async route() {},
     async routeWebSocket() {},
     on() {},
+    async addInitScript() {},
     async close() {},
+  };
+}
+
+/** A no-op CDPSessionLike — for tests in THIS file that exercise
+ * `runX2Fetch`'s render plumbing, not `x2-render.ts`'s own gate-finding-1
+ * CDP-level worker watch (that has its own dedicated coverage in
+ * `x2-render.test.ts`). */
+function passthroughCDPSession() {
+  return {
+    on() {},
+    async send() {
+      return {};
+    },
+    async detach() {},
   };
 }
 
@@ -556,6 +571,9 @@ function fakeRenderLauncher(opts: {
   const browser: BrowserLike = {
     async newContext() {
       return context;
+    },
+    async newBrowserCDPSession() {
+      return passthroughCDPSession();
     },
     async close() {},
   };
@@ -603,6 +621,9 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
         state.userAgentSeen = contextOpts.userAgent;
         state.serviceWorkersSeen = contextOpts.serviceWorkers ?? null;
         return context;
+      },
+      async newBrowserCDPSession() {
+        return passthroughCDPSession();
       },
       async close() {},
     };
@@ -722,6 +743,9 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     const browser: BrowserLike = {
       async newContext() {
         return context;
+      },
+      async newBrowserCDPSession() {
+        return passthroughCDPSession();
       },
       async close() {},
     };

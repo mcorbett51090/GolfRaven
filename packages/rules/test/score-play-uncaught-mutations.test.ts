@@ -434,3 +434,74 @@ describe("uncaught mutation (third re-gate): the non-hard heldReview branch forc
     expect(result.heldReview).toBe(true);
   });
 });
+
+function permutations<T>(arr: T[]): T[][] {
+  if (arr.length <= 1) return [arr];
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i++) {
+    const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+    for (const p of permutations(rest)) result.push([arr[i]!, ...p]);
+  }
+  return result;
+}
+
+describe("item 1 (ninth gate): the fingerprint-group winner comparison is a TRANSITIVE total order — no order-dependent cycle", () => {
+  it("the gate's own 3-row cycle — A(fix, earlier, id 'z'), B(no fix, id 'm'), C(fix, later, id 'a') — every one of the 6 orders gives the SAME money/score/digest", () => {
+    const A = receipt({ id: "z", status: "approved", fingerprint: "fq", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 2000 }) });
+    const B = receipt({ id: "m", status: "approved", fingerprint: "fq" });
+    const C = receipt({ id: "a", status: "approved", fingerprint: "fq", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 1000 }) });
+    const ck = checkin({});
+    const results = permutations([A, B, C]).map((p) => scorePlayOrThrow([...p, ck], baseCtx()));
+    const [first, ...rest] = results;
+    for (const r of rest) {
+      expect(r.money).toBe(first!.money);
+      expect(r.score_monetary).toBe(first!.score_monetary);
+      expect(r.score_badge).toBe(first!.score_badge);
+      expect(r.inputDigest).toBe(first!.inputDigest);
+    }
+  });
+
+  it("the winner is deterministically the earliest-captured, fix-carrying row (id 'z') regardless of array order", () => {
+    const A = receipt({ id: "z", status: "approved", fingerprint: "fq2", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 2000 }) });
+    const B = receipt({ id: "m", status: "approved", fingerprint: "fq2" });
+    const C = receipt({ id: "a", status: "approved", fingerprint: "fq2", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 1000 }) });
+    for (const p of permutations([A, B, C])) {
+      const result = scorePlayOrThrow(p, baseCtx());
+      const winner = result.contributions.find((c) => c.classId === "receipt_green_fee" && c.badgeWeight > 0);
+      expect(winner?.evidenceId).toBe("z");
+    }
+  });
+
+  it("random group #1 (4 rows: approved+fix, pending+no-fix, approved+no-fix, pending+fix) is order-independent across all 24 permutations", () => {
+    const rows = [
+      receipt({ id: "r1", status: "approved", fingerprint: "rg1", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 500 }) }),
+      receipt({ id: "r2", status: "pending", fingerprint: "rg1" }),
+      receipt({ id: "r3", status: "approved", fingerprint: "rg1" }),
+      receipt({ id: "r4", status: "pending", fingerprint: "rg1", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 100 }) }),
+    ];
+    const results = permutations(rows).map((p) => scorePlayOrThrow(p, baseCtx()));
+    const [first, ...rest] = results;
+    for (const r of rest) {
+      expect(r.money).toBe(first!.money);
+      expect(r.score_monetary).toBe(first!.score_monetary);
+      expect(r.inputDigest).toBe(first!.inputDigest);
+    }
+  });
+
+  it("random group #2 (5 rows, same fix/no-fix crossing pattern as the gate's own cycle, tested at scale — all 120 permutations)", () => {
+    const rows = [
+      receipt({ id: "zz", status: "approved", fingerprint: "rg2", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 9000 }) }),
+      receipt({ id: "aa", status: "approved", fingerprint: "rg2" }),
+      receipt({ id: "mm", status: "approved", fingerprint: "rg2", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 8000 }) }),
+      receipt({ id: "bb", status: "approved", fingerprint: "rg2" }),
+      receipt({ id: "cc", status: "approved", fingerprint: "rg2", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 7000 }) }),
+    ];
+    const results = permutations(rows).map((p) => scorePlayOrThrow(p, baseCtx()));
+    const [first, ...rest] = results;
+    for (const r of rest) {
+      expect(r.money).toBe(first!.money);
+      expect(r.score_monetary).toBe(first!.score_monetary);
+      expect(r.inputDigest).toBe(first!.inputDigest);
+    }
+  });
+});

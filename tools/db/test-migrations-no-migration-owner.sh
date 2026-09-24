@@ -47,12 +47,17 @@ SUPABASE_DIR="$ROOT_DIR/supabase"
 
 PG_BIN_DIR="${PG_BIN_DIR:-}"
 if [ -z "$PG_BIN_DIR" ]; then
-  if command -v pg_config >/dev/null 2>&1 && [ -x "$(pg_config --bindir 2>/dev/null)/initdb" ]; then
+  # should-fix (post-P3a re-gate): prefer the pinned PostgreSQL 17 major
+  # (supabase/config.toml `[db] major_version`) — see tools/db/test.sh's
+  # own comment on this same preference order.
+  if [ -d /usr/lib/postgresql/17/bin ]; then
+    PG_BIN_DIR="/usr/lib/postgresql/17/bin"
+  elif command -v pg_config >/dev/null 2>&1 && [ -x "$(pg_config --bindir 2>/dev/null)/initdb" ]; then
     PG_BIN_DIR="$(pg_config --bindir)"
   elif [ -d /usr/lib/postgresql/16/bin ]; then
     PG_BIN_DIR="/usr/lib/postgresql/16/bin"
   else
-    echo "tools/db/test-migrations-no-migration-owner.sh: cannot find a PostgreSQL 16 bin directory (set PG_BIN_DIR)" >&2
+    echo "tools/db/test-migrations-no-migration-owner.sh: cannot find a PostgreSQL bin directory (set PG_BIN_DIR)" >&2
     exit 1
   fi
 fi
