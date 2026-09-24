@@ -588,6 +588,17 @@ function looseRowMatchesPlay(raw: unknown, ctx: ScorePlayContext): boolean {
 
   const facilityWellFormed = isWellFormedIdLike(r.facilityId);
   const dateWellFormed = isWellFormedLooseLocalDate(r.localDate);
+  // `undefined` (the KEY ITSELF is absent) and `null` (the key is
+  // present, holding JSON null) are deliberately NOT the same thing here
+  // — `undefined` means "no course anchor at all, facility-level
+  // evidence, always a candidate" (H3's residual rule); `null` is a
+  // PRESENT but malformed value (not a string at all) and is quarantined
+  // like any other malformed courseId. This is exactly why the security
+  // doc requires the DB/Edge layer to map a SQL NULL `course_id` column
+  // to an OMITTED `courseId` JSON key, never to a literal `null` — see
+  // `docs/security/p3-money-path-requirements.md` §2 and this module's
+  // own `ScorePlayContextSchema`/trust-table doc for the same rule
+  // stated at the ctx/DB boundary.
   const courseIdPresent = r.courseId !== undefined;
   const courseWellFormed = !courseIdPresent || isWellFormedIdLike(r.courseId);
 
