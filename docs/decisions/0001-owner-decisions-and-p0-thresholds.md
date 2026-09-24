@@ -263,3 +263,33 @@ A GolfNow facility-page check has three outcomes, not two:
 A trail's X4 verdict is computed only when **none** of its courses is indeterminate. Otherwise the trail's
 result is "not run — indeterminate (n courses)" and the check is retried; an indeterminate course is never
 counted as not covered. The runner exits non-zero whenever any trail is indeterminate.
+
+## Addendum I (2026-09-24, before any K1 outreach is sent or any K3 read) — K1/K3 read rules found open by the verdict-tool gate
+
+None of the pass bars change. Each rule below closes a reading that was still open.
+
+- **Two K1 verdicts, never one.** The early read (R1) and the full gate (Addendum C) are separate verdicts with
+  separate consequences, read at separate times.
+  - Neither is a miss before its window closes. Before 2026-10-20 the early read is "pending (n so far)", and
+    before 2026-12-01 the full gate is.
+  - A full-gate result is never hidden by an early-read miss, and the reverse is also true.
+  - Within the full gate, "operator miss" is evaluated before "sponsor miss", because the sponsor branch applies
+    only when the operators pass.
+- **K1 dates.**
+  - A date in the log is the calendar date written on it, in the writer's local time, with no timezone
+    conversion.
+  - Only dates from 2026-09-23 up to the date of the read count. A date before 2026-09-23 is an error ("nothing
+    had been sent").
+  - An acceptance or LOI dated before its row's contacted date is an error.
+- **Sponsor conversation cutoff.** A sponsor conversation counts toward the full gate only if it is dated on or
+  before **2026-11-30**, the same 8-week window as the LOIs. The log records each sponsor conversation's date.
+  This follows the plan's reading that the full gate is one read "within 8 wk".
+- **K3 read date.** The Search Console read (R4) is taken **no earlier than 2026-10-01**, so that September
+  2026 is complete. The read date is recorded, and a read dated earlier is not a read: under "the first read
+  performed is the recorded one", an early read would lock in a partial month.
+- **K3 keyword values.** Every term is entered as a range, with a lower bound and an upper bound. A point value
+  is entered as lower = upper. R5's identical-range rule then applies literally, to points as well as to
+  ranges. A lower bound above the upper bound is an error.
+
+Drafted by an agent, working on unblocked items at the owner's instruction (2026-09-24), before any K1 or K3 data exists. Matt may
+amend any of these **before** the first K1 log entry or K3 read. After that point they are fixed.

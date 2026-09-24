@@ -46,11 +46,11 @@ These findings were applied to the unsent Gmail drafts. Each draft opens with a 
 | Target | Finding | Confidence | Verify before sending |
 |---|---|---|---|
 | Tennessee Golf Trail | Mike Nixon, Director of Golf Operations, TDEC / TN State Parks; a TNgolf.org bio covers 2011–2022 | Low (possibly stale) | TN State Parks leadership page (tn.gov/environment/parks-conservation/leadership.html) |
-| Vancouver Island Golf Trail | Chris Elder, Director of Marketing, **corroborated** by 2 sources; phone 250-889-0973 | Med | Email via golfvancouverisland.ca/about-us/media-room/ |
+| Vancouver Island Golf Trail | Chris Elder, Director of Marketing, found in 2 independent snippets (snippet-level corroboration only); phone 250-889-0973 | Med | Email via golfvancouverisland.ca/about-us/media-room/ |
 | Robert Trent Jones Golf Trail | No named partnerships contact. A data-broker list names Landon Shelby, Allie Higgins and Ashelynn Falkenburg, **without titles**, so they are not relied on | Low | rtjgolf.com/partners (Corporate Partners page) |
 | Hammock Coast | Clayton Stairs, Tourism Manager, Georgetown County Chamber, 843-546-8436 x107; alternate: Mark A. Stevens, Director of Tourism Development | Med | visitgeorge.com Staff page for the email |
 | Canadian Rockies Golf Consortium | Gord Schultz, Executive Director; the only source is an old Globe and Mail article | Low–Med (possibly stale) | 1-877-323-3633 / the site's contact form |
-| Alabama Tourism Department | "Kerry Teague, Golf Marketing Director" **refuted**: listed as Director, Financial Services. No golf-marketing person found | High (on the refutation) | tourism.alabama.gov/contact-us |
+| Alabama Tourism Department | "Kerry Teague, Golf Marketing Director" **refuted**: listed as Director, Financial Services. No golf-marketing person found | Med (the refutation rests on one snippet; fetch the staff page to confirm) | tourism.alabama.gov/contact-us |
 | Tourism Vancouver Island | Not found | — | tourismvi.ca |
 | Callaway Brands | Nick McInally, VP Global Marketing (no email found); PR contact Jeff Newton, jeff.newton@callawaygolf.com, visible in a snippet — for routing only; Rodney Ferrell, VP Partnerships, Topgolf Media | Med | Ask PR who owns sponsorships |
 | Bushnell Golf | No named US contact | Low | bushnellgolf.com/contact, (844) 875-0045 |
