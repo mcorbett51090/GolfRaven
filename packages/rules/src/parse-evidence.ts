@@ -201,6 +201,9 @@ const EvidenceSchema = z.discriminatedUnion("source", [
     coSignalFix: AppFixSchema.optional(),
     paymentRef: NonEmptyStringSchema.optional(),
     fingerprint: z.string().optional(),
+    // Eighth gate, item 1: allow-listed to the three known reasons — see
+    // `Evidence`'s own doc (`internal/classify.js`) for the semantics.
+    voidReason: z.enum(["duplicate", "reviewer", "fraud"]).optional(),
   }),
   z.strictObject({
     ...EvidenceCommonShape,

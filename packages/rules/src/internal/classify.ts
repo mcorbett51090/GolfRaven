@@ -335,6 +335,18 @@ export type Evidence =
        * one is treated as void (§4.4: "duplicate-fingerprint receipts are
        * void", §4.5 line 996), regardless of its own `status`. */
       fingerprint?: string;
+      /** Eighth gate, item 1: WHY a `status: "void"` row is void — only
+       * meaningful when `status === "void"`, ignored otherwise. `"duplicate"`
+       * = intake's own dedup determined this is a re-upload of an
+       * already-present receipt (a re-photographed copy, a client retry) —
+       * this row is simply IGNORED for fingerprint-group voiding, never
+       * poisons the group. `"reviewer"` / `"fraud"` = a human reviewer or a
+       * fraud check flagged the CLAIM itself (the booking/payment this
+       * fingerprint represents) — either POISONS the whole fingerprint
+       * group (`voidDuplicateFingerprints`, `score-play.ts`). Omitted on a
+       * void row defaults to `"reviewer"` (fail-safe: an unlabeled void is
+       * treated as the MORE cautious case, not the more lenient one). */
+      voidReason?: "duplicate" | "reviewer" | "fraud";
     })
   | (EvidenceBase & {
       source: "health_route";

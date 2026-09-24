@@ -157,10 +157,34 @@ CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
 -- (composite FKs support ON DELETE SET NULL fine, but a bare SET NULL on
 -- a two-column FK nulls BOTH columns together, including user_id — never
 -- what we want here; only play_id should null out when the play is
--- deleted). An AFTER DELETE trigger on app.play does the equivalent,
--- narrowly: null play_id only. delete_my_data's own explicit
--- `UPDATE ... SET play_id = NULL` (0015) stays as belt-and-suspenders,
--- unchanged.
+-- deleted). A trigger on app.play does the equivalent, narrowly: null
+-- play_id only. delete_my_data's own explicit `UPDATE ... SET play_id =
+-- NULL` (0015) stays as belt-and-suspenders, unchanged.
+--
+-- ⛔ FIX (post-P3a re-gate, found while regression-testing M2): this MUST
+-- be a plain BEFORE DELETE trigger, not an AFTER ... DEFERRABLE
+-- CONSTRAINT TRIGGER as first written. Reasoning, confirmed empirically
+-- this session: Postgres fires same-timing AFTER ROW triggers on one
+-- event in ALPHABETICAL trigger-name order, and queues deferred events in
+-- that same order for whenever they're later checked (COMMIT or SET
+-- CONSTRAINTS IMMEDIATE) — the composite FK's own auto-generated
+-- delete-side enforcement trigger is named `RI_ConstraintTrigger_a_...`,
+-- which sorts BEFORE any lowercase name (byte/ASCII comparison: 'R' <
+-- 'p'). So an AFTER DEFERRABLE version of this trigger would always fire
+-- AFTER the FK's own "is it still referenced" check — which finds it
+-- STILL referenced (this trigger hasn't nulled anything out yet) and
+-- raises, even though this trigger's own job is to make that check
+-- unnecessary. This isn't a test-only ordering quirk: it would raise at
+-- real COMMIT time too, for every real delete_my_data(user) call whose
+-- user has a play with a live offer_code/entitlement still attached.
+-- A plain BEFORE DELETE trigger sidesteps trigger-firing-order entirely:
+-- it nulls play_id out of every referencing row BEFORE the DELETE of
+-- app.play itself proceeds, so by the time the FK's own delete-side check
+-- runs (immediately or deferred, doesn't matter), nothing references the
+-- row being deleted any more. Non-deferrable and always-immediate is
+-- correct here — this trigger enforces no external contract a caller
+-- might need to defer past; it is pure bookkeeping tied to the DELETE
+-- statement itself.
 CREATE OR REPLACE FUNCTION app.play_deleted_detach_play_id() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -171,9 +195,8 @@ BEGIN
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER play_deleted_detach_play_id_trg
-AFTER DELETE ON app.play
-DEFERRABLE INITIALLY DEFERRED
+CREATE TRIGGER play_deleted_detach_play_id_trg
+BEFORE DELETE ON app.play
 FOR EACH ROW EXECUTE FUNCTION app.play_deleted_detach_play_id();
 
 -- should-fix (post-P3a gate): "offer_code.play_id and entitlement.play_id
