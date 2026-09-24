@@ -13,7 +13,7 @@ GRANT USAGE ON SCHEMA vault TO private_definer;
 GRANT SELECT (id, name, decrypted_secret) ON vault.decrypted_secrets TO private_definer;
 
 -- ============================================================================
--- 2. pseudonym_key_id columns "beside each pseudonym" — which active vault
+-- 2. pseudonym_hmac_id columns "beside each pseudonym" — which active vault
 --    key actually computed the value stored next to it. private.
 --    delete_my_data (0015) does not need this to MATCH a row (it tries
 --    every active key, which is correct regardless of rotation state and
@@ -21,19 +21,19 @@ GRANT SELECT (id, name, decrypted_secret) ON vault.decrypted_secrets TO private_
 --    provenance metadata: given a pseudonym value, which key produced it,
 --    without recomputing against every active key to find out.
 -- ============================================================================
-ALTER TABLE app.attestation ADD COLUMN player_pseudonym_key_id uuid REFERENCES vault.secrets (id);
-ALTER TABLE app.attestation ADD COLUMN staff_pseudonym_key_id uuid REFERENCES vault.secrets (id);
-ALTER TABLE app.attestation_shift_log ADD COLUMN player_pseudonym_key_id uuid REFERENCES vault.secrets (id);
+ALTER TABLE app.attestation ADD COLUMN player_pseudonym_hmac_id uuid REFERENCES vault.secrets (id);
+ALTER TABLE app.attestation ADD COLUMN staff_pseudonym_hmac_id uuid REFERENCES vault.secrets (id);
+ALTER TABLE app.attestation_shift_log ADD COLUMN player_pseudonym_hmac_id uuid REFERENCES vault.secrets (id);
 
-COMMENT ON COLUMN app.attestation.player_pseudonym_key_id IS
-  'Which vault.secrets row (name LIKE ''pseudonym_key%'') computed player_pseudonym, at write time. Written by the (out-of-scope-this-stage) attest Edge Function alongside player_pseudonym itself. Audit/provenance only -- private.delete_my_data does not need it to find a row (it tries every currently-active key).';
-COMMENT ON COLUMN app.attestation.staff_pseudonym_key_id IS
-  'Same as player_pseudonym_key_id, for staff_pseudonym.';
-COMMENT ON COLUMN app.attestation_shift_log.player_pseudonym_key_id IS
-  'Same as app.attestation.player_pseudonym_key_id.';
+COMMENT ON COLUMN app.attestation.player_pseudonym_hmac_id IS
+  'Which vault.secrets row (name LIKE ''pseudonym_hmac%'') computed player_pseudonym, at write time. Written by the (out-of-scope-this-stage) attest Edge Function alongside player_pseudonym itself. Audit/provenance only -- private.delete_my_data does not need it to find a row (it tries every currently-active key).';
+COMMENT ON COLUMN app.attestation.staff_pseudonym_hmac_id IS
+  'Same as player_pseudonym_hmac_id, for staff_pseudonym.';
+COMMENT ON COLUMN app.attestation_shift_log.player_pseudonym_hmac_id IS
+  'Same as app.attestation.player_pseudonym_hmac_id.';
 
 -- ============================================================================
--- 3. Deploy check (should-fix): a real deploy with no pseudonym_key in
+-- 3. Deploy check (should-fix): a real deploy with no pseudonym_hmac in
 --    Vault must fail loudly, not silently leave PII behind the first time
 --    someone calls delete_my_data. private.delete_my_data itself already
 --    RAISEs at CALL time if the vault has no active key (0015) -- this
@@ -50,14 +50,14 @@ COMMENT ON COLUMN app.attestation_shift_log.player_pseudonym_key_id IS
 --    other function that reaches the vault, sidesteps that: it runs with
 --    private_definer's own rights regardless of who calls it.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION private.pseudonym_key_status()
+CREATE OR REPLACE FUNCTION private.pseudonym_hmac_status()
 RETURNS TABLE (active_key_count int, all_keys_valid boolean)
 LANGUAGE sql SECURITY DEFINER
 SET search_path = ''
 AS $$
   SELECT count(*)::int, bool_and(decrypted_secret IS NOT NULL AND length(decrypted_secret) >= 32)
   FROM vault.decrypted_secrets
-  WHERE name LIKE 'pseudonym_key%';
+  WHERE name LIKE 'pseudonym_hmac%';
 $$;
 
 -- ⛔ FIX (post-P3a re-gate, found while regression-testing under
@@ -66,12 +66,12 @@ $$;
 -- private_definer, migration_owner (who just CREATEd the function) is no
 -- longer its owner and holds no GRANT OPTION on it either, so a REVOKE/
 -- GRANT issued afterward 42501s ("permission denied for function
--- pseudonym_key_status"), confirmed empirically this session. 0015/0016
+-- pseudonym_hmac_status"), confirmed empirically this session. 0015/0016
 -- avoid this by doing delete_my_data's own REVOKE/GRANT EXECUTE at the
 -- END of 0015, entirely before 0016 transfers ITS ownership in a later
 -- migration — same ordering constraint, different file layout.
-REVOKE EXECUTE ON FUNCTION private.pseudonym_key_status() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.pseudonym_key_status() TO service_role;
+REVOKE EXECUTE ON FUNCTION private.pseudonym_hmac_status() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.pseudonym_hmac_status() TO service_role;
 
 -- 0016 REVOKEd CREATE ON SCHEMA private FROM private_definer once its own
 -- ownership transfers were done -- this function's transfer needs it
@@ -79,10 +79,10 @@ GRANT EXECUTE ON FUNCTION private.pseudonym_key_status() TO service_role;
 -- CREATE in the object's schema for an ownership transfer). Re-revoked
 -- immediately after, same discipline as 0016.
 GRANT CREATE ON SCHEMA private TO private_definer;
-ALTER FUNCTION private.pseudonym_key_status() OWNER TO private_definer;
+ALTER FUNCTION private.pseudonym_hmac_status() OWNER TO private_definer;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
 
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
 VALUES
-  ('private', 'pseudonym_key_status', '', false, false, true, 'deploy-check helper (M1, post-P3a re-gate): fails a deploy check if no valid pseudonym_key exists in Vault');
+  ('private', 'pseudonym_hmac_status', '', false, false, true, 'deploy-check helper (M1, post-P3a re-gate): fails a deploy check if no valid pseudonym_hmac exists in Vault');

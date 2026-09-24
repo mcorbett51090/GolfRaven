@@ -181,7 +181,7 @@ SELECT is(
   1, 'attestation.player_user_id is nulled for the deleted player (line 841)'
 );
 SELECT is(
-  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE facility_id = 'fac_x' AND kind = 'presence' AND player_pseudonym = encode(public.hmac('00000000-0000-0000-0000-00000000000a', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
+  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE facility_id = 'fac_x' AND kind = 'presence' AND player_pseudonym = encode(public.hmac('00000000-0000-0000-0000-00000000000a', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
   'deleted player',
   'attestation_shift_log.player_handle_snapshot is rewritten to ''deleted player'', matched by the durable pseudonym'
 );

@@ -135,11 +135,11 @@ $$;
 -- ============================================================================
 -- ⛔ WHY THE GUC WAS WRONG (M1, post-P3a re-gate, all four confirmed
 -- empirically against the pre-fix code this round):
---   - `current_setting('app.pseudonym_key')` and `pg_db_role_setting` are
+--   - `current_setting('app.pseudonym_hmac')` and `pg_db_role_setting` are
 --     both readable by ANY role with USAGE on the function/catalog —
 --     there is no privilege boundary around a GUC the way there is
 --     around a table/view grant; anon/authenticated could read it.
---   - `SET LOCAL app.pseudonym_key = ...` from ANY session silently
+--   - `SET LOCAL app.pseudonym_hmac = ...` from ANY session silently
 --     overrides the value delete_my_data reads, for that caller's own
 --     transaction — a GUC has no notion of "only the definer may set
 --     this".
@@ -150,7 +150,7 @@ $$;
 --     the REAL pseudonym, leaving them (and their PII, e.g.
 --     `player_handle_snapshot` staying `player_a`) behind with no error
 --     at all.
---   - A real deploy never sets `app.pseudonym_key` in the first place —
+--   - A real deploy never sets `app.pseudonym_hmac` in the first place —
 --     nothing in a real Supabase project's config sets arbitrary `app.*`
 --     GUCs; that was always going to be a silent no-op in production.
 --
@@ -214,8 +214,8 @@ GRANT ALL ON vault.decrypted_secrets TO migration_owner WITH GRANT OPTION;
 -- rotation test adds a THIRD key at test time to prove a genuinely LATER
 -- addition doesn't break lookups against rows keyed by an earlier one.
 INSERT INTO vault.secrets (id, name, secret) VALUES
-  ('a0000000-1111-0000-0000-000000000001', 'pseudonym_key_1', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx'),
-  ('a0000000-1111-0000-0000-000000000002', 'pseudonym_key_2', 'shim-test-only-pseudonym-key-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy')
+  ('a0000000-1111-0000-0000-000000000001', 'pseudonym_hmac_v1', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx'),
+  ('a0000000-1111-0000-0000-000000000002', 'pseudonym_hmac_v2', 'shim-test-only-pseudonym-hmac-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy')
 ON CONFLICT (name) DO NOTHING;
 
 -- migration_owner (the pgTAP matrix's own connecting role under

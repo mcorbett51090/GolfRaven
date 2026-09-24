@@ -868,6 +868,27 @@ export type ScorePlayOutcome = ScorePlaySuccess | ScorePlayFailure;
  * | `ctx.facilityTz` | Yes (F1, sixth gate: now REQUIRED; corrected, seventh gate item 1: validated via `@golfraven/catalog`'s `isValidIanaTimeZoneName` — an `Intl.DateTimeFormat` try/catch — PLUS an Area/Location shape rule, never `Intl.supportedValuesOf('timeZone')`, which wrongly excludes several genuine, still-current zone names — see `parse-evidence.ts`'s own doc for the exact regression) | the FACILITY'S OWN catalog row (`@golfraven/catalog`'s facility timezone field, itself typically `tz-lookup`-derived) — never derived from a fix, a device, or a client-supplied guess |
  * | `ctx.purchases` | Yes | the `purchase_evidence` table (§4.6) — a DIFFERENT table than `app.evidence`, joined in server-side before this call |
  *
+ * **Policy-pin immutability (item 3, eighth gate).** `SCORE_PLAY_POLICY_VERSION`
+ * (below) is pinned to a content hash of every named SCORING-policy
+ * constant (`WEIGHT`, `MONEY_MIN`, the caps, penalty multipliers,
+ * thresholds, windows — `test/score-play-policy-hash.test.ts`'s own
+ * `policyConstants()`, which is the single source of truth for what
+ * counts). **Once any production play has been scored under a given
+ * version, that version's pinned hash is IMMUTABLE** — re-pinning the
+ * SAME version key after real plays exist would silently rewrite, after
+ * the fact, what "version N" is claimed to have meant for plays already
+ * scored under it, indistinguishable from backdating a policy change.
+ * Any change to a pinned constant — for ANY reason, deliberate or a bug
+ * fix — MUST bump `SCORE_PLAY_POLICY_VERSION` to a NEW key with its own
+ * new `POLICY_HASHES` entry once that point is reached; before it (this
+ * pre-launch gate cycle, no production play yet), re-pinning the current
+ * version in place is how the constant set is allowed to stabilize
+ * without spawning a new version on every iteration. `EVIDENCE_ROW_CAP`/
+ * `ABSOLUTE_ROW_CAP` are deliberately EXCLUDED from the pinned set
+ * (item 3): they are input-validation/DoS limits (`parse-evidence.ts`),
+ * not scoring policy — see the policy-hash test's own module doc for
+ * why conflating the two made the pin's history harder to read.
+ *
  * **Open owner question (item 11, seventh gate): composite courses.**
  * `ctx.playCourseId`/a row's own `courseId` are compared with STRICT
  * equality (`internal/classify.js`'s `courseOk`) — a row whose `courseId`

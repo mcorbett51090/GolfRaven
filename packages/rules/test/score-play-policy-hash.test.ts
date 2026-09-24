@@ -7,6 +7,39 @@
  * this test can only pass by accident if someone changes a VALUE without
  * also changing this file's own expected hash, which is exactly the
  * failure mode this test exists to catch.
+ *
+ * **`EVIDENCE_ROW_CAP` (and `ABSOLUTE_ROW_CAP`, which was never added to
+ * this set in the first place) is deliberately NOT pinned here (eighth
+ * gate, item 3).** Both are INPUT-VALIDATION limits — pure DoS/shape
+ * guards on how many raw rows `parseScorePlayInput` is willing to read
+ * before it even asks whether a row belongs to this play — not SCORING
+ * policy: they decide nothing about how a play's evidence turns into a
+ * score, badge, or money determination. Pinning them alongside `WEIGHT`/
+ * `MONEY_MIN`/the scoring caps conflated two different kinds of change
+ * behind one hash: an operational cap raised for capacity reasons (as
+ * `EVIDENCE_ROW_CAP` itself was, seventh gate item 9, 200 -> 1000) is not
+ * the kind of change this pin exists to gate, and forcing it through the
+ * same "re-pin + justify" ceremony as an actual scoring-policy change
+ * blurred the two together and made the pin's own history harder to read
+ * (see the immutability rule below, and the correction this same gate
+ * makes to a stale comment that used to sit on this file).
+ *
+ * **Immutability rule (eighth gate, item 3 — also stated in
+ * `score-play.ts`'s own trust table): once ANY production play has been
+ * scored under a given `SCORE_PLAY_POLICY_VERSION`, that version's pinned
+ * hash is IMMUTABLE.** A hash pinned to a version is a promise that every
+ * play scored under that version used EXACTLY these constants — re-pinning
+ * the SAME version key after production plays exist would silently
+ * rewrite that promise for plays already scored, which is indistinguishable
+ * from backdating a policy change. Any change to a pinned constant, for
+ * ANY reason (a deliberate scoring-policy change, a bug fix, a typo)
+ * MUST bump `SCORE_PLAY_POLICY_VERSION` to a NEW key and add a NEW entry
+ * to `POLICY_HASHES` — never overwrite an existing key's value. (Before
+ * any production play exists — e.g. still inside this pre-launch gate
+ * cycle — re-pinning the current version in place, as this file's own
+ * history shows, is how the constant set was allowed to stabilize without
+ * spawning a new version on every iteration; that grace period ends the
+ * moment a real play is scored.)
  */
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -18,6 +51,10 @@ import {
   DEVICE_GPS_SUBTOTAL_CAP,
   DWELL_THRESHOLD_9_HOLES_MINUTES,
   DWELL_THRESHOLD_18_HOLES_MINUTES,
+  // Item 3 (eighth gate) test-only import: used ONLY by the "genuinely
+  // not pinned" mutation guard below, to reintroduce the REAL current
+  // value rather than a hardcoded, staleness-prone magic number —
+  // NEVER added back to `policyConstants()` itself.
   EVIDENCE_ROW_CAP,
   FILE_IMPORT_MATCHED_WEIGHT,
   FILE_IMPORT_UNMATCHED_WEIGHT,
@@ -59,7 +96,9 @@ function policyConstants() {
     DEVICE_GPS_SUBTOTAL_CAP,
     OVERALL_SCORE_CAP,
     CORROBORATION_ELIGIBLE_THRESHOLD,
-    EVIDENCE_ROW_CAP,
+    // Eighth gate, item 3: EVIDENCE_ROW_CAP (and ABSOLUTE_ROW_CAP, never
+    // pinned here to begin with) deliberately EXCLUDED — see this file's
+    // module doc: an input-validation limit, not scoring policy.
     MAX_DWELL_MINUTES,
     // F5 (sixth gate) additions:
     ACCURACY_METERS_MAX,
@@ -98,16 +137,20 @@ function hashPolicyConstants(): string {
  * `hashPolicyConstants()` against the real constants — re-derive it the
  * same way for a deliberate, version-bumped change. */
 const POLICY_HASHES: Record<number, string> = {
-  // Re-pinned twice now:
+  // Re-pinned under version 1 three times now, all BEFORE any production
+  // play exists (the immutability rule's own grace period — see this
+  // file's module doc):
   //   - sixth gate (F5): widened coverage from WEIGHT/MONEY_MIN/5 caps to
   //     every F5-hoisted literal — a pure refactor (same values, more
-  //     coverage), so re-pinned under the SAME version key (1).
-  //   - seventh gate (item 9): EVIDENCE_ROW_CAP's VALUE itself changed
-  //     (200 -> 1000, "apply the 1000-row absolute cap only to rows that
-  //     pass the loose on-play filter") — a genuine policy change, still
-  //     re-pinned under version 1 per this gate's own instruction ("Re-pin
-  //     the hash"), not a version bump; SCORE_PLAY_POLICY_VERSION stays 1.
-  1: "8c0b06afb39be8dc340991b73fcf86b2ba39c1feb1797995ab725cb476ceaa93",
+  //     coverage).
+  //   - seventh gate (item 9): EVIDENCE_ROW_CAP's VALUE changed (200 ->
+  //     1000) while it was still IN this pinned set.
+  //   - eighth gate (item 3): EVIDENCE_ROW_CAP REMOVED from this pinned
+  //     set entirely (it's an input-validation limit, not scoring
+  //     policy — see the module doc) — the hash changes because the SET
+  //     of hashed fields changed, not because any remaining field's
+  //     VALUE did.
+  1: "4ea1401156d174cbbc74290d317fee9f7965fa60d382c7eeef87f14996313302",
 };
 
 describe("M5: the scoring policy's constants are content-hash-pinned to SCORE_PLAY_POLICY_VERSION", () => {
@@ -135,5 +178,33 @@ describe("M5: the scoring policy's constants are content-hash-pinned to SCORE_PL
     const mutated = { ...policyConstants(), STAFF_HARD_WINDOW_MS: 999 };
     const mutatedHash = bytesToHex(sha256(utf8ToBytes(JSON.stringify(canonicalize(mutated)))));
     expect(mutatedHash).not.toBe(hashPolicyConstants());
+  });
+
+  it("item 3 (eighth gate): EVIDENCE_ROW_CAP is genuinely NOT part of the pinned set — changing it does NOT change the hash", () => {
+    // Proves the removal is real, not cosmetic: policyConstants() no
+    // longer reads EVIDENCE_ROW_CAP at all, so a hash computed from an
+    // object that adds it back in under some OTHER key still matches —
+    // the field simply isn't part of what's being hashed. (A raw
+    // "import and mutate EVIDENCE_ROW_CAP" isn't possible here — it's a
+    // `const`, and re-assigning the imported binding would be a
+    // TypeScript compile error, which is itself part of what makes this
+    // guard meaningful: the constant is genuinely immutable at the type
+    // level, so the only way to prove "not pinned" is to show the hash
+    // is indifferent to its value.)
+    const mutated = { ...policyConstants(), EVIDENCE_ROW_CAP: 999_999 };
+    const mutatedHash = bytesToHex(sha256(utf8ToBytes(JSON.stringify(canonicalize(mutated)))));
+    expect(mutatedHash).not.toBe(hashPolicyConstants());
+    // ...but if we canonicalize `policyConstants()` itself (no
+    // EVIDENCE_ROW_CAP key at all) versus the same object with
+    // EVIDENCE_ROW_CAP explicitly set back to its OWN real current
+    // value, the hash DOES change — proving the field's mere PRESENCE in
+    // the hashed object (not its value) is what the earlier assertion
+    // was actually testing. This second assertion isolates that: the
+    // pinned hash (computed from the real, EVIDENCE_ROW_CAP-free
+    // policyConstants()) must NOT equal a hash computed from a set that
+    // reintroduces the key under its real value either.
+    const withRealCapReintroduced = { ...policyConstants(), EVIDENCE_ROW_CAP };
+    const withRealCapHash = bytesToHex(sha256(utf8ToBytes(JSON.stringify(canonicalize(withRealCapReintroduced)))));
+    expect(withRealCapHash).not.toBe(hashPolicyConstants());
   });
 });

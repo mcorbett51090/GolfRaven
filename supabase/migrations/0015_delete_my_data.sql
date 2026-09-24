@@ -61,7 +61,7 @@ BEGIN
   -- is present.
   --
   -- ⛔ FIX (M1, post-P3a re-gate): the pseudonym key is NEVER read from a
-  -- GUC any more (0015/0016's prior `current_setting('app.pseudonym_key')`
+  -- GUC any more (0015/0016's prior `current_setting('app.pseudonym_hmac')`
   -- design had four confirmed problems: readable by anon/authenticated,
   -- overridable by any caller's own `SET LOCAL`, silently accepted an
   -- empty value with no error, and production never sets an `app.*` GUC
@@ -72,7 +72,7 @@ BEGIN
   -- can do (private_definer's own narrow, column-level grant on that
   -- view, 0018_pseudonym_vault.sql — anon/authenticated get none).
   --
-  -- Rotation: EVERY row named `pseudonym_key%` in the vault is an
+  -- Rotation: EVERY row named `pseudonym_hmac%` in the vault is an
   -- "active" key (0018's own deploy-check note explains the naming
   -- convention). A pseudonym was computed, at WRITE time, with WHATEVER
   -- key was active then — so finding it again means trying every
@@ -219,10 +219,10 @@ BEGIN
   -- loop already updated no longer matches ANY key's WHERE clause on a
   -- later pass, because its own player_pseudonym column is never
   -- rewritten by this loop.
-  IF NOT EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_key%') THEN
-    RAISE EXCEPTION 'delete_my_data: no active pseudonym_key found in vault.decrypted_secrets';
+  IF NOT EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_hmac%') THEN
+    RAISE EXCEPTION 'delete_my_data: no active pseudonym_hmac found in vault.decrypted_secrets';
   END IF;
-  FOR v_key IN SELECT id, decrypted_secret FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_key%' LOOP
+  FOR v_key IN SELECT id, decrypted_secret FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_hmac%' LOOP
     IF v_key.decrypted_secret IS NULL OR length(v_key.decrypted_secret) < 32 THEN
       RAISE EXCEPTION 'delete_my_data: pseudonym key % in vault.decrypted_secrets is NULL or shorter than 32 bytes', v_key.id;
     END IF;

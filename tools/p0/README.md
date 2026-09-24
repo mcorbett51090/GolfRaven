@@ -268,10 +268,15 @@ tool has no K4b data and does not assess that half).
 ## 3. `x2-fetch` — pilot-slate roster/rules direct-fetch, evidence gathering
 
 ```shell
-node dist/x2-fetch.js
-node dist/x2-fetch.js --config config/x2-sources.json --out-dir x2-evidence
+node dist/x2-fetch.js --ledger docs/p0/x2-recorded-ledger.json
+node dist/x2-fetch.js --config config/x2-sources.json --out-dir x2-evidence --ledger docs/p0/x2-recorded-ledger.json
 ```
 
+- `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate): the recorded-captures ledger every
+  capture is checked against for first-capture-wins. There is no more per-directory default — the
+  canonical ledger for TN/VI/RTJ's own captures is `docs/p0/x2-recorded-ledger.json` (gate finding
+  2d — committed to the repo so any edit shows in `git log`); pass the SAME explicit path across
+  every run that captures evidence for the same URL set, whatever `--out-dir` each run uses.
 - `--config <file>` (default: this package's own `config/x2-sources.json`) — trail name → list of
   official URLs to fetch (seeded from the URL table in `docs/p0/X2.md`: TN tries
   `tnstateparks.com/golf`, `tngolftrail.net` and `tn.gov` candidates — the exact `tngolftrail.net`/
@@ -321,8 +326,14 @@ only the ROUTE the bytes arrived by widens; what counts as a confirmed fact does
 **`--render` (decision 0001 Addendum J(a)(i)).**
 
 ```shell
-node dist/x2-fetch.js --render --config config/x2-sources.json --out-dir x2-render-evidence
+node dist/x2-fetch.js --render --config config/x2-sources.json --out-dir x2-render-evidence --ledger docs/p0/x2-recorded-ledger.json
 ```
+
+**Rendered evidence is VI-only by default (should-fix, re-gate).** The rendered route was adopted
+for VI's own static-HTML-has-no-body-text problem, never as a blanket option — `x2-verdict`'s
+`buildEvidenceByTrail` refuses (throws) a `"rendered"` entry for any trail not on its
+`renderedAllowedTrails` allow-list (default `["VI"]`); a deliberate, documented exception passes
+that option explicitly.
 
 For a page whose static HTML carries no body text (VI's case), `--render` boots headless Chromium
 (`x2-render.ts`, `playwright-core`, pinned at the exact same version as `apps/site`'s
@@ -341,7 +352,8 @@ J(a) refers to is exactly that config, the same one the direct-fetch path alread
 ```shell
 node dist/x2-ingest.js --trail TN --file /path/to/owner-saved.html \
   --url https://www.tnstateparks.com/golf --date 2026-09-24 \
-  --config config/x2-sources.json --out-dir x2-evidence
+  --config config/x2-sources.json --out-dir x2-evidence \
+  --ledger docs/p0/x2-recorded-ledger.json
 ```
 
 For a page a direct fetch cannot reach at all (TN's WAF 403s the tool's own polite User-Agent),
@@ -351,13 +363,19 @@ User-Agent — the owner's browser already did the fetching, entirely outside th
 
 - `--trail` — which slate trail this evidence belongs to.
 - `--file` — the local owner-saved HTML file.
-- `--url` — the URL the OWNER states the page came from. Must be `https:` (gate N6) and its host
-  must be on that trail's OWN configured host list in `--config`/`config/x2-sources.json` (decision
-  0001 Addendum J(a)'s host allow-list — same same-host equivalence `x2-verdict`'s
-  `sameConfiguredHost` already uses: exact match or a `www.` prefix difference only). A stated URL on
-  a host that trail's config never named is refused outright.
+- `--url` — the URL the OWNER states the page came from. Must be `https:` (gate N6) and must
+  EXACTLY match (after normalisation) one of that trail's OWN configured URLs in
+  `--config`/`config/x2-sources.json` (decision 0001 Addendum J(a)'s allow-list; gate finding 2a,
+  re-gate — a host-only check used to let a stated URL name ANY path on an allowed host; it must now
+  be one of the trail's own configured URLs, not merely share a host). Normalisation (shared with
+  first-capture-wins — `x2-recorded-ledger.ts`'s `normalizeUrlForFirstCapture`) lowercases the host,
+  drops a leading `www.`, a non-default port aside, drops the fragment/query, decodes unreserved
+  percent-encoding, collapses doubled path slashes, and drops `;param` segments — but leaves path
+  CASE untouched, so `/GOLF` is a genuinely different (refused) URL from `/golf`.
 - `--date` — the date the OWNER states they saved the page, a real `YYYY-MM-DD` calendar date.
   Stored as `ownerSavedDate`, distinct from `fetchedAt` (this tool's own ingestion time).
+- `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate) — same as `x2-fetch`'s own `--ledger`;
+  see there for why the per-directory default was removed.
 - `--out-dir` (default: a fresh directory under the OS temp dir, gate S7) — writing into an EXISTING
   `x2-fetch`/`x2-fetch --render` evidence dir MERGES this entry into that trail's array and rewrites
   `manifest.json` in place, so a confirmation file can cite an owner-saved SHA exactly like a
@@ -371,13 +389,50 @@ UTC, and a SHA-256.
 **Feeds:** the evidence dir (raw + text + `manifest.json`, from any mix of `x2-fetch`, `x2-fetch
 --render` and `x2-ingest`) is `x2-verdict`'s first input.
 
+## 4b. `x2-corroborate-wayback` — the ONLY way to make a `wayback` corroboration record (gate finding 3, re-gate)
+
+```shell
+node dist/x2-corroborate-wayback.js \
+  --url "https://web.archive.org/web/20260615120000/https://example.com/golf" \
+  --stated-url https://example.com/golf --owner-saved-date 2026-06-15 \
+  --trail TN --evidence-sha <the owner-saved fact's evidenceSha> \
+  --out-dir x2-wayback-evidence --corroboration-file corroboration.json
+```
+
+A gate review found the corroboration file's `wayback` record type forgeable outright — its
+`snapshotText` used to be free text a human typed directly into JSON, never checked against
+anything real. This tool closes that: it is the ONLY thing that produces a `wayback` record. It
+requires `--url` in the EXACT form `https://web.archive.org/web/<14-digit timestamp>/<url>`;
+requires the embedded `<url>` to normalise to the same thing as `--stated-url` (a snapshot of a
+DIFFERENT page can never corroborate this fact); requires the timestamp within ±90 days of
+`--owner-saved-date`; then ACTUALLY FETCHES the snapshot (an injectable fetcher — see
+`x2-corroborate-wayback.ts`'s own doc — real invocations use `global.fetch`, which may need
+`NODE_USE_ENV_PROXY=1` depending on this environment's proxy policy; **web.archive.org was
+confirmed NOT reachable from this session's own environment** — a connect timeout/reset through
+the agent proxy, checked directly, not assumed); stores the fetched bytes as real evidence
+(`raw/wayback-<sha>.html`, SHA-256 computed from ONLY those bytes); and writes a corroboration
+record citing ONLY that SHA and the raw file's path — never inline text. `x2-verdict` later
+RE-VERIFIES this record itself before trusting it (re-reads the raw bytes, recomputes the SHA,
+re-derives the text with the same extractor every other evidence route uses) — this tool's own
+output is not the trust boundary, that re-verification is.
+
 ## 5. `x2-verdict` — X2 pass/kill verdict from a human-written confirmation
 
 ```shell
-node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmation.json --out x2-verdict-result
+node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmation.json \
+  --ledger docs/p0/x2-recorded-ledger.json --out x2-verdict-result
 ```
 
 - `--evidence-dir <dir>` — an `x2-fetch` output dir (reads its `manifest.json`).
+- `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate) — the same ledger `x2-fetch`/
+  `x2-ingest` wrote the captures being verified against. `x2-verdict` also checks the ledger's own
+  git cleanliness (gate finding 2d): `git diff --quiet -- <ledger>` must report no uncommitted
+  changes, or the run refuses unless `--allow-dirty-ledger` is passed, in which case the output is
+  marked UNOFFICIAL. The verdict's own JSON/markdown output names the ledger's git blob hash
+  (`git hash-object`) either way, so a reader always knows exactly which ledger content produced it.
+- `--corroboration <file>` — optional; a JSON file backing owner-saved facts (gate finding 4/3, see
+  below). `--x2-log <path>` (default: this checkout's own `docs/p0/X2.md`) is where an `acceptance`
+  corroboration record's `id`+`date` must be found, in that file's own `## Log` section.
 - `--confirmation <file>` — a JSON object, **per trail** (`"TN"`/`"VI"`/`"RTJ"`):
 
   ```json

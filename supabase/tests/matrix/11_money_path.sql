@@ -474,7 +474,7 @@ SELECT is(
 -- anon and authenticated cannot obtain the key.
 SELECT tests.authenticate_as('anon', '{}'::jsonb);
 SELECT throws_ok(
-  $$SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'pseudonym_key_1'$$,
+  $$SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'pseudonym_hmac_v1'$$,
   NULL,
   NULL,
   'anon cannot read vault.decrypted_secrets at all'
@@ -482,7 +482,7 @@ SELECT throws_ok(
 SELECT tests.clear_actor();
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000a'::uuid));
 SELECT throws_ok(
-  $$SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'pseudonym_key_1'$$,
+  $$SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'pseudonym_hmac_v1'$$,
   NULL,
   NULL,
   'authenticated cannot read vault.decrypted_secrets at all'
@@ -492,7 +492,7 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 -- SET LOCAL has no effect on the result: delete_my_data no longer reads
 -- ANY GUC for the key (confirmed by grep -- there is no
--- `current_setting('app.pseudonym_key' ...)` left in 0015 at all), so
+-- `current_setting('app.pseudonym_hmac' ...)` left in 0015 at all), so
 -- setting one, even to a plausible-looking name, changes nothing about
 -- what gets computed/matched. Player D, dedicated, so this doesn't
 -- interact with A/B/C's own fixture state.
@@ -501,22 +501,22 @@ SELECT lives_ok(
   'setup: player D''s auth.users row'
 );
 SELECT lives_ok(
-  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_key_id, staff_handle)
+  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
     VALUES ('fac_x', 'presence', 'player_d',
-            encode(hmac('00000000-0000-0000-0000-0000d0000001', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+            encode(hmac('00000000-0000-0000-0000-0000d0000001', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
             'a0000000-1111-0000-0000-000000000001', 'staff_x_handle')$$,
-  'setup: an attestation_shift_log row for player D, keyed with pseudonym_key_1'
+  'setup: an attestation_shift_log row for player D, keyed with pseudonym_hmac_v1'
 );
 SELECT lives_ok(
-  $$SET LOCAL app.pseudonym_key = 'attacker-controlled-value-that-should-be-completely-ignored'$$,
-  'setup: set a rogue app.pseudonym_key GUC (SET LOCAL) before calling delete_my_data'
+  $$SET LOCAL app.pseudonym_hmac = 'attacker-controlled-value-that-should-be-completely-ignored'$$,
+  'setup: set a rogue app.pseudonym_hmac GUC (SET LOCAL) before calling delete_my_data'
 );
 SELECT lives_ok(
   $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000001'::uuid)$$,
-  'delete_my_data succeeds despite the rogue SET LOCAL app.pseudonym_key'
+  'delete_my_data succeeds despite the rogue SET LOCAL app.pseudonym_hmac'
 );
 SELECT is(
-  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE player_pseudonym = encode(hmac('00000000-0000-0000-0000-0000d0000001', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
+  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE player_pseudonym = encode(hmac('00000000-0000-0000-0000-0000d0000001', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
   'deleted player',
   'the SET LOCAL GUC had NO effect: the row was still found and updated using the REAL vault key, not the rogue GUC value'
 );
@@ -526,64 +526,64 @@ SELECT lives_ok(
   $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000d0000002', 'player-d2@example.test')$$,
   'setup: player D2''s auth.users row'
 );
--- RENAME out of the pseudonym_key% match, not DELETE: app.attestation's
--- player_pseudonym_key_id/staff_pseudonym_key_id (0018) FK to
+-- RENAME out of the pseudonym_hmac% match, not DELETE: app.attestation's
+-- player_pseudonym_hmac_id/staff_pseudonym_hmac_id (0018) FK to
 -- vault.secrets(id), and helpers.sql's seeded attestation row references
 -- key 1 — a real DELETE here hits a 23503, not the "no active key"
 -- 23514/fail-closed path this test wants (confirmed empirically this
 -- session). Renaming makes delete_my_data's own `name LIKE
--- 'pseudonym_key%'` lookup find nothing, without touching referential
+-- 'pseudonym_hmac%'` lookup find nothing, without touching referential
 -- integrity at all.
 -- PREFIX the name (not suffix — `name || '_suffix'` still starts with
--- 'pseudonym_key' and so still matches the SAME `LIKE 'pseudonym_key%'`
+-- 'pseudonym_hmac' and so still matches the SAME `LIKE 'pseudonym_hmac%'`
 -- prefix pattern delete_my_data itself uses, confirmed empirically this
 -- session: the first version of this fix left the rows matching after
 -- all).
 SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = 'hidden_for_test_' || name WHERE name LIKE 'pseudonym_key%'$$,
-  'setup: hide every pseudonym_key from the vault (renamed, not deleted)'
+  $$UPDATE vault.secrets SET name = 'hidden_for_test_' || name WHERE name LIKE 'pseudonym_hmac%'$$,
+  'setup: hide every pseudonym_hmac from the vault (renamed, not deleted)'
 );
 SELECT throws_ok(
   $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000002'::uuid)$$,
   NULL,
-  'delete_my_data: no active pseudonym_key found in vault.decrypted_secrets',
-  'delete_my_data raises when the vault has NO active pseudonym_key (fail-closed, not a silent leave-PII-behind)'
+  'delete_my_data: no active pseudonym_hmac found in vault.decrypted_secrets',
+  'delete_my_data raises when the vault has NO active pseudonym_hmac (fail-closed, not a silent leave-PII-behind)'
 );
 
 -- a short key raises an error.
 SELECT lives_ok(
-  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000099', 'pseudonym_key_short', 'too-short')$$,
-  'setup: seed a pseudonym_key shorter than 32 bytes'
+  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000099', 'pseudonym_hmac_short', 'too-short')$$,
+  'setup: seed a pseudonym_hmac shorter than 32 bytes'
 );
 SELECT throws_ok(
   $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000002'::uuid)$$,
   NULL,
   NULL,
-  'delete_my_data raises when a pseudonym_key in the vault is shorter than 32 bytes'
+  'delete_my_data raises when a pseudonym_hmac in the vault is shorter than 32 bytes'
 );
 SELECT lives_ok(
-  $$DELETE FROM vault.secrets WHERE name = 'pseudonym_key_short'$$,
+  $$DELETE FROM vault.secrets WHERE name = 'pseudonym_hmac_short'$$,
   'cleanup: remove the short key'
 );
 SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = 'pseudonym_key_1' WHERE id = 'a0000000-1111-0000-0000-000000000001'$$,
-  'cleanup: restore pseudonym_key_1''s name (hidden above for the missing-key test)'
+  $$UPDATE vault.secrets SET name = 'pseudonym_hmac_v1' WHERE id = 'a0000000-1111-0000-0000-000000000001'$$,
+  'cleanup: restore pseudonym_hmac_v1''s name (hidden above for the missing-key test)'
 );
 SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = 'pseudonym_key_2' WHERE id = 'a0000000-1111-0000-0000-000000000002'$$,
-  'cleanup: restore pseudonym_key_2''s name'
+  $$UPDATE vault.secrets SET name = 'pseudonym_hmac_v2' WHERE id = 'a0000000-1111-0000-0000-000000000002'$$,
+  'cleanup: restore pseudonym_hmac_v2''s name'
 );
 
 -- rotation: a row written with key 1 is still found after key 2 (already
 -- restored above) AND a brand-new key 3 are both active.
 SELECT lives_ok(
-  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000003', 'pseudonym_key_3', 'shim-test-only-pseudonym-key-three-32bytes-minimum-zzzzzzzzzzzzzzzzzzz')$$,
-  'setup: rotate in a THIRD active pseudonym_key (key 1 never stops being active -- rotation adds, this design never retires a key on its own)'
+  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000003', 'pseudonym_hmac_v3', 'shim-test-only-pseudonym-hmac-three-32bytes-minimum-zzzzzzzzzzzzzzzzzzz')$$,
+  'setup: rotate in a THIRD active pseudonym_hmac (key 1 never stops being active -- rotation adds, this design never retires a key on its own)'
 );
 SELECT lives_ok(
-  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_key_id, staff_handle)
+  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
     VALUES ('fac_x', 'presence', 'player_d2',
-            encode(hmac('00000000-0000-0000-0000-0000d0000002', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+            encode(hmac('00000000-0000-0000-0000-0000d0000002', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
             'a0000000-1111-0000-0000-000000000001', 'staff_x_handle')$$,
   'setup: an attestation_shift_log row for player D2, written under key 1 -- BEFORE key 3 existed'
 );
@@ -592,12 +592,12 @@ SELECT lives_ok(
   'delete_my_data succeeds with 3 active keys (1, 2, 3) in the vault'
 );
 SELECT is(
-  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE player_pseudonym = encode(hmac('00000000-0000-0000-0000-0000d0000002', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
+  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE player_pseudonym = encode(hmac('00000000-0000-0000-0000-0000d0000002', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
   'deleted player',
   'ROTATION: the row written under key 1 is still found and updated after key 2 AND key 3 were added later -- delete_my_data tried every active key, not just the newest'
 );
 SELECT lives_ok(
-  $$DELETE FROM vault.secrets WHERE name = 'pseudonym_key_3'$$,
+  $$DELETE FROM vault.secrets WHERE name = 'pseudonym_hmac_v3'$$,
   'cleanup: remove the rotation test''s key 3'
 );
 
