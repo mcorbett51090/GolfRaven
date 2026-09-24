@@ -1787,15 +1787,35 @@ async function main(argv: string[]): Promise<void> {
     await readFile(confirmationPath, "utf8"),
   ) as X2ConfirmationFile;
   const ledgerPath = flags.ledger;
-  // Gate finding 2d: the ledger must be exactly what git already has on
-  // record — an uncommitted (or untracked) edit could otherwise slip a
-  // bogus entry into a verdict run with no trace in `git log`. A dirty or
-  // unverifiable ledger REFUSES the run outright unless
-  // `--allow-dirty-ledger` is passed, in which case the run proceeds but
-  // the output is marked UNOFFICIAL — never silently treated as if the
-  // ledger were the committed, auditable one.
+  // Gate finding 2d/4: the ledger must be at the canonical path, tracked
+  // cleanly by git (no uncommitted/untracked/hidden-by-flag edit), and
+  // its content must match what origin/main already has (proven PUSHED,
+  // not merely committed). Two of these are ALWAYS a hard refusal,
+  // regardless of --allow-dirty-ledger: the wrong path (a caller mistake,
+  // not content dirtiness) and a `git ls-files` assume-unchanged/skip-
+  // worktree flag (which exists specifically to hide a local edit from
+  // the very diff/status checks --allow-dirty-ledger is meant to
+  // override — bypassing the flag-check too would defeat the point of
+  // having it at all). A ledger simply not yet pushed to origin/main is
+  // NOT treated as a hard-refusing "dirty" case (finding 4's own
+  // carve-out) — it proceeds even without the flag, marked UNOFFICIAL.
+  // Everything else dirty (local uncommitted edit, or content that
+  // DIVERGED from what origin/main has) still requires the flag.
   const ledgerGitCheck = await checkLedgerAgainstGit(ledgerPath);
-  if (!ledgerGitCheck.clean && !allowDirtyLedger) {
+  if (!ledgerGitCheck.pathIsCanonical) {
+    throw new Error(
+      `Refusing: the ledger "${ledgerPath}" is not the canonical ledger path — ${ledgerGitCheck.detail} This ` +
+        "is never bypassable via --allow-dirty-ledger (gate finding 4, re-gate).",
+    );
+  }
+  if (ledgerGitCheck.hiddenByGitFlag) {
+    throw new Error(
+      `Refusing: the ledger "${ledgerPath}" — ${ledgerGitCheck.detail} This is never bypassable via ` +
+        "--allow-dirty-ledger (gate finding 4, re-gate): the flag exists specifically to hide a local edit " +
+        "from the checks --allow-dirty-ledger is meant to override.",
+    );
+  }
+  if (!ledgerGitCheck.clean && !ledgerGitCheck.originMainMissingPath && !allowDirtyLedger) {
     throw new Error(
       `Refusing: the ledger "${ledgerPath}" is not clean in git — ${ledgerGitCheck.detail} Pass ` +
         "--allow-dirty-ledger to proceed anyway; the output will be marked UNOFFICIAL, and this is never " +
@@ -1817,26 +1837,30 @@ async function main(argv: string[]): Promise<void> {
   const corroboration: X2CorroborationFile = flags.corroboration
     ? (JSON.parse(await readFile(flags.corroboration, "utf8")) as X2CorroborationFile)
     : {};
-  // Gate finding 3 (re-gate): resolve (verify) that corroboration file
-  // BEFORE computeX2Verdict ever sees it — re-reading `wayback` evidence
-  // from THIS evidence dir (a `wayback` record's `rawFile` is relative to
-  // it, same as any trail evidence) and checking `acceptance` records
-  // against `docs/p0/X2.md`'s own Log section. A missing/unreadable
-  // X2.md is not a hard refusal (an --evidence-dir far from a golfraven
-  // checkout is a legitimate use), but every `acceptance` record then
-  // resolves to "not logged" — the safe default.
+  // Gate finding 3/2 (both re-gate): resolve (verify) that corroboration
+  // file BEFORE computeX2Verdict ever sees it — re-reading `wayback`
+  // evidence from THIS evidence dir and re-validating every one of its
+  // rules against the owner-saved fact's OWN claims and the canonical
+  // ledger; checking `acceptance` records against a structured row in
+  // `docs/p0/X2.md`'s own Log section AND its git provenance. A
+  // missing/unreadable X2.md is not a hard refusal (an --evidence-dir far
+  // from a golfraven checkout is a legitimate use), but every
+  // `acceptance` record then resolves to "not logged" — the safe
+  // default.
   const x2MdPath = flags["x2-log"] || resolveDefaultX2MdPath();
-  let x2MdLogText: string | null = null;
+  let x2Md: { fullText: string; path: string } | null = null;
   try {
-    x2MdLogText = extractX2MdLogSection(await readFile(x2MdPath, "utf8"));
+    x2Md = { fullText: await readFile(x2MdPath, "utf8"), path: x2MdPath };
   } catch {
-    x2MdLogText = null;
+    x2Md = null;
   }
-  const resolvedCorroboration = await resolveCorroboration(
-    corroboration,
-    (rel) => readFile(path.join(evidenceDir, rel)),
-    x2MdLogText,
-  );
+  const resolvedCorroboration = await resolveCorroboration(corroboration, {
+    evidenceByTrail,
+    readRaw: (rel) => readFile(path.join(evidenceDir, rel)),
+    evidenceDir,
+    ledger,
+    x2Md,
+  });
   const result = computeX2Verdict(
     confirmation,
     evidenceByTrail,

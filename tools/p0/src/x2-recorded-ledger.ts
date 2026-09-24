@@ -45,7 +45,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export type X2LedgerMethod = "direct" | "rendered" | "owner-saved";
+export type X2LedgerMethod = "direct" | "rendered" | "owner-saved" | "wayback";
 
 const UNRESERVED_PERCENT_ENCODED_RE = /%[0-9A-Fa-f]{2}/g;
 /** RFC 3986 2.3 "unreserved" characters — the only ones this function will
