@@ -23,6 +23,9 @@ apps/site/public/data/map/
 # Local stand-in for the §5.2 R2 OG-card object store (apps/site/src/lib/og-store.ts)
 apps/site/.og-store/
 
+# scripts/lighthouse-audit.mjs's raw report output
+apps/site/.lighthouse-*.json
+
 # Test / coverage
 coverage/
 

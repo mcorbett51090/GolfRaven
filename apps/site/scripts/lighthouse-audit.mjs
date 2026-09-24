@@ -81,11 +81,14 @@ async function auditOne(chrome, port, path, label) {
         "--only-categories=performance,accessibility",
         "--form-factor=mobile",
         "--screenEmulation.mobile",
-        `--chrome-path=${chrome}`,
-        '--chrome-flags=--headless=new --no-sandbox --disable-gpu',
+        "--chrome-flags=--headless=new --no-sandbox --disable-gpu",
         "--quiet",
       ],
-      { cwd: join(here, ".."), timeout: 120_000 },
+      // Lighthouse's CLI reads CHROME_PATH from the environment, NOT a
+      // --chrome-path flag (confirmed this session: the flag is silently
+      // ignored and chrome-launcher then fails with "The CHROME_PATH
+      // environment variable must be set").
+      { cwd: join(here, ".."), timeout: 120_000, env: { ...process.env, CHROME_PATH: chrome } },
     );
     const report = JSON.parse(await readFile(outFile, "utf8"));
     const perf = Math.round((report.categories?.performance?.score ?? 0) * 100);
