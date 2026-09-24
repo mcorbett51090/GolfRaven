@@ -51,10 +51,38 @@ export type TokenState =
   | { present: true; grade: FixGrade }
   | { present: false; hardwareSupportsAttestation: boolean };
 
-/** G3-08's intake-grading rule, applied verbatim. */
+/**
+ * G3-08's intake-grading rule — rewritten as an ALLOW-LIST (fifth gate,
+ * H1): a deny-list version of this exact function (`if (token.present)
+ * return token.grade;`) is what let `token:{present:true}` with no
+ * `grade`, `grade:"bogus"`, and `present:"false"` (a truthy STRING, not
+ * the boolean `false`) all fail OPEN — `if (token.present)` treats any
+ * truthy value as "present", and an unchecked `token.grade` passes
+ * whatever string (or `undefined`) was given straight through as a
+ * `FixGrade`, which every money-path caller then trusts. This function
+ * now accepts `token` as fundamentally UNTRUSTED at runtime (never mind
+ * what `TokenState` claims at the type level — a caller reaching this
+ * directly, or a schema/parser bug upstream, can hand it anything): every
+ * boolean is compared with `=== true`/`=== false`, `grade` is allow-listed
+ * to exactly `{attested, unattestable}`, and anything else — a malformed
+ * shape, `null`, a non-object, an unrecognized grade string, a `present`
+ * that is truthy-but-not-`true` — resolves to `"failed"`, never throws.
+ */
 export function resolveFixGrade(token: TokenState): FixGrade {
-  if (token.present) return token.grade;
-  return token.hardwareSupportsAttestation ? "failed" : "unattestable";
+  const t: unknown = token;
+  if (t !== null && typeof t === "object") {
+    const rec = t as Record<string, unknown>;
+    if (rec.present === true) {
+      return rec.grade === "attested" || rec.grade === "unattestable" ? rec.grade : "failed";
+    }
+    if (rec.present === false && rec.hardwareSupportsAttestation === false) {
+      return "unattestable";
+    }
+  }
+  // Fail closed: `present === false && hardwareSupportsAttestation ===
+  // true` (a device that COULD attest but didn't), any other malformed
+  // shape, or a non-object entirely.
+  return "failed";
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,16 +150,27 @@ function finiteInRange(x: number, min: number, max: number): boolean {
  * value all fail closed rather than silently passing a `<=` comparison.
  */
 export function isQualityCoSignalFix(fix: AppFix, playFacilityId: string): boolean {
+  // Fifth gate, H1: `fix` is treated as untrusted at runtime — a `null`/
+  // non-object reaching here (M4: a malformed `coSignalFix`/`presenceFix`/
+  // `fix`) must never throw on the property reads below.
+  if (fix === null || typeof fix !== "object") return false;
   return (
     fix.facilityId === playFacilityId &&
-    fix.fromApp &&
-    !fix.simulated &&
-    fix.foreground &&
-    fix.challenge !== "none" &&
+    // Every boolean below is an ALLOW-LIST (`=== true`/`=== false`), never
+    // truthiness — `simulated: undefined`/`fromApp: "yes"`/`insideBuffer:
+    // "true"` (a string) all used to pass a deny-list check (`!x`/bare
+    // `x`) and no longer do.
+    fix.fromApp === true &&
+    fix.simulated === false &&
+    fix.foreground === true &&
+    // `challenge` is allow-listed to the two REAL challenge kinds — not
+    // merely "not none" (which let `challenge: undefined`, or any other
+    // non-`"none"` garbage string, through as if it were a real challenge).
+    (fix.challenge === "live" || fix.challenge === "prefetched") &&
     finiteInRange(fix.accuracyMeters, 0, 50) &&
     fix.geometryKind === "polygon" &&
     fix.verificationTier === "play-verified" &&
-    fix.insideBuffer &&
+    fix.insideBuffer === true &&
     resolveFixGrade(fix.token) !== "failed"
   );
 }
@@ -381,33 +420,48 @@ function deviceRowFixGateOk(
   playLocalDate: string,
   requireChallenge: boolean,
 ): boolean {
+  // Fifth gate, M4: a `null`/non-object `fix` (a malformed or missing
+  // `checkinFix`/`checkoutFix`/`fix`) fails the gate rather than throwing
+  // on the property reads below.
+  if (fix === null || typeof fix !== "object") return false;
   if (fix.facilityId !== playFacilityId) return false;
   // Re-gate finding 1: the fix's own date must match the play's date — a
   // check-in/dwell fix from another day is not evidence for THIS play,
   // however good its other attributes are.
   if (fix.localDate !== playLocalDate) return false;
-  // Should-fix: fail closed on an unverified facility. `listed-verified`
-  // (the radius-fallback tier) is deliberately still allowed THROUGH the
-  // gate — a radius-matched check-in/dwell is a legitimate, reduced-weight
-  // contribution (capped separately, by `geometryKind`, in `classifyEvidenceRow`);
-  // only `unverified` is a hard exclusion here.
-  if (fix.verificationTier === "unverified") return false;
-  if (!fix.fromApp) return false;
-  if (!fix.foreground) return false;
+  // Should-fix: fail closed on an unverified facility — rewritten as an
+  // ALLOW-LIST (fifth gate, H1): only the two REAL verified tiers pass,
+  // rather than merely excluding the one known-bad value (`"unverified"`),
+  // which let any OTHER garbage `verificationTier` string through.
+  if (fix.verificationTier !== "listed-verified" && fix.verificationTier !== "play-verified") return false;
+  // Every boolean below is an allow-list (fifth gate, H1).
+  if (fix.fromApp !== true) return false;
+  if (fix.foreground !== true) return false;
   if (!finiteInRange(fix.accuracyMeters, 0, 50)) return false;
-  if (!fix.insideBuffer) return false;
-  if (requireChallenge && fix.challenge === "none") return false;
+  if (fix.insideBuffer !== true) return false;
+  // `challenge` allow-listed to the two real kinds when required — not
+  // merely "not none" (`undefined`/a bogus string previously passed).
+  if (requireChallenge && fix.challenge !== "live" && fix.challenge !== "prefetched") return false;
   if (resolveFixGrade(fix.token) === "failed") return false;
   return true;
 }
 
 /** The `simulated`×0.3 and `unattestable`/no-challenge×0.6 penalties,
- * applied only AFTER `deviceRowFixGateOk` has already passed. */
+ * applied only AFTER `deviceRowFixGateOk` has already passed.
+ *
+ * Fifth gate, H1: both penalties are now fail-SAFE, not merely fail-open
+ * deny-lists. `simulated !== false` (rather than bare `simulated`) means
+ * anything that isn't STRICTLY `false` — `undefined`, a truthy string,
+ * `true` — is treated as "possibly simulated" and gets the reduction,
+ * never the opposite mistake of treating an ambiguous value as "safe."
+ * `challenge` is allow-listed to the two real kinds — `challenge:
+ * undefined` (H1's own exploit case) no longer skips the penalty by
+ * failing to equal the single denied literal `"none"`. */
 function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challenge">): number {
   let m = 1;
-  if (fix.simulated) m *= 0.3;
+  if (fix.simulated !== false) m *= 0.3;
   const grade = resolveFixGrade(fix.token);
-  if (grade === "unattestable" || fix.challenge === "none") m *= 0.6;
+  if (grade === "unattestable" || (fix.challenge !== "live" && fix.challenge !== "prefetched")) m *= 0.6;
   return m;
 }
 
@@ -430,8 +484,28 @@ function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challeng
  * matchable polygon is, by that definition, already `play-verified`).
  */
 function deviceRowMoneyEligible(fix: AppFix): boolean {
-  return !fix.simulated && fix.verificationTier === "play-verified";
+  // Fifth gate, H1: strict equality, not truthiness — `simulated:
+  // undefined` no longer counts as "not simulated."
+  return fix.simulated === false && fix.verificationTier === "play-verified";
 }
+
+/** §4.5's radius-fallback cap. */
+export const RADIUS_CAP = 0.5;
+/** §4.3/A2-01's user-pick cap. Kept as its own named constant even though
+ * it currently shares `RADIUS_CAP`'s value — they are conceptually
+ * distinct caps, and M5's policy hash (`score-play.ts`) pins them
+ * separately so either one drifting is caught on its own. */
+export const USER_PICK_CAP = 0.5;
+/** M4 (fifth gate): the hard row-count ceiling `parseScorePlayInput`
+ * enforces before `scorePlay` ever runs — kept here, beside the other
+ * policy constants, so `SCORE_PLAY_POLICY_VERSION`'s hash pin covers it
+ * too. */
+export const EVIDENCE_ROW_CAP = 200;
+/** M2 (fifth gate): a `foreground_dwell` whose two fixes are more than 12h
+ * apart (or, via a signed rather than absolute delta, apart in the WRONG
+ * direction — checkout before checkin) is ineligible outright, never
+ * merely a large multiplier input. */
+export const MAX_DWELL_MINUTES = 12 * 60;
 
 /** §4.5's radius-fallback cap and the §4.3/A2-01 user-pick cap. Applied
  * uniformly to every class now (should-fix): `courseDisambiguatedBy` lives
@@ -446,14 +520,26 @@ function applyCourseCaps(
   let w = badgeWeight;
   let money = moneyEligible;
   if (geometryKind === "radius") {
-    w = Math.min(w, 0.5);
+    w = Math.min(w, RADIUS_CAP);
     money = false;
   }
   if (courseDisambiguatedBy === "user") {
-    w = Math.min(w, 0.5);
+    w = Math.min(w, USER_PICK_CAP);
     money = false;
   }
   return { badgeWeight: w, moneyEligible: money };
+}
+
+/** Runtime object-shape guard for an `AppFix`-typed field that may, at
+ * runtime, be `null`/non-object despite the type saying otherwise (fifth
+ * gate, M4: "a null or undefined token/coSignalFix/fix contributes 0 and
+ * never throws"). Deliberately permissive on the fix's OWN internal
+ * shape — every field-level check downstream (`isQualityCoSignalFix`,
+ * `deviceRowFixGateOk`, `resolveFixGrade`) is itself an allow-list that
+ * fails closed on a missing/malformed field, so this only needs to stop a
+ * `null`/`undefined`/primitive from reaching a `.property` read. */
+function hasFix(x: unknown): x is AppFix {
+  return x !== null && x !== undefined && typeof x === "object";
 }
 
 /* ------------------------------------------------------------------ */
@@ -540,7 +626,10 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       // fix's OWN date matching `ctx.playLocalDate` (finding 1/re-gate) —
       // see `staffFixSatisfiesHardWindow`, shared with `resolveGroups`.
       const hasCoSignal =
-        rowOk && row.coSignalFix !== undefined && staffFixSatisfiesHardWindow(row.coSignalFix, row.scanAt, ctx);
+        rowOk &&
+        Number.isFinite(row.scanAt) &&
+        hasFix(row.coSignalFix) &&
+        staffFixSatisfiesHardWindow(row.coSignalFix, row.scanAt, ctx);
       const classId: EvidenceClassId = hasCoSignal ? "staff_presence_hard" : "staff_presence_soft";
       const badgeWeight = rowOk ? WEIGHT[classId] : 0;
       return finish(row, {
@@ -578,8 +667,7 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       // Finding 4: anchored to `ctx.playLocalDate`, never to `row.localDate`
       // compared against the fix — see `bookingFixSatisfiesHardWindow`,
       // shared with `resolveGroups`.
-      const hasPresence =
-        rowOk && row.presenceFix !== undefined && bookingFixSatisfiesHardWindow(row.presenceFix, ctx);
+      const hasPresence = rowOk && hasFix(row.presenceFix) && bookingFixSatisfiesHardWindow(row.presenceFix, ctx);
       const classId: EvidenceClassId = hasPresence ? "booking_hard" : "booking_alone";
       const badgeWeight = rowOk ? WEIGHT[classId] : 0;
       return finish(row, {
@@ -598,7 +686,7 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       const moneyEligible =
         rowOk &&
         row.status !== "void" &&
-        row.coSignalFix !== undefined &&
+        hasFix(row.coSignalFix) &&
         isQualityCoSignalFix(row.coSignalFix, ctx.playFacilityId) &&
         row.coSignalFix.localDate === ctx.playLocalDate;
       return finish(row, {
@@ -622,8 +710,12 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
           moneyEligible: false,
         });
       }
-      const base = !row.sourceAllowListed ? 0.1 : row.insideRatio >= 0.8 ? 0.6 : 0.4;
-      const badgeWeight0 = row.simulated ? base * 0.3 : base;
+      // H1 (fifth gate): `sourceAllowListed`/`simulated` are allow-listed
+      // (`=== true`/`!== false`), not deny-listed — an ambiguous value
+      // (e.g. `simulated: undefined`) must never be read as "definitely
+      // not simulated."
+      const base = row.sourceAllowListed !== true ? 0.1 : row.insideRatio >= 0.8 ? 0.6 : 0.4;
+      const badgeWeight0 = row.simulated !== false ? base * 0.3 : base;
       const capped = applyCourseCaps(badgeWeight0, row.geometryKind, row.courseDisambiguatedBy, false);
       return finish(row, {
         classId,
@@ -640,14 +732,18 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       }
       let badgeWeight: number;
       if (row.variant === "route") {
+        // H1 (fifth gate): allow-listed booleans.
         badgeWeight =
-          row.k4bPassed && row.insidePolygon && Number.isFinite(row.durationMinutes) && row.durationMinutes >= 90
+          row.k4bPassed === true &&
+          row.insidePolygon === true &&
+          Number.isFinite(row.durationMinutes) &&
+          row.durationMinutes >= 90
             ? WEIGHT[classId]
             : 0;
       } else {
         badgeWeight = WEIGHT[classId];
       }
-      if (row.simulated) badgeWeight *= 0.3;
+      if (row.simulated !== false) badgeWeight *= 0.3;
       const capped = applyCourseCaps(badgeWeight, undefined, row.courseDisambiguatedBy, false);
       return finish(row, {
         classId,
@@ -659,6 +755,12 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
     }
     case "foreground_dwell": {
       const classId: EvidenceClassId = "foreground_dwell";
+      // M4: a null/undefined `checkinFix`/`checkoutFix` (violating the
+      // required type at runtime) must not throw on the `.capturedAt`
+      // reads below.
+      if (!hasFix(row.checkinFix) || !hasFix(row.checkoutFix)) {
+        return finish(row, { classId, group: GROUP[classId], hard: false, badgeWeight: 0, moneyEligible: false });
+      }
       const threshold = row.holes === 9 ? 50 : 90; // line 1000
       // Should-fix: derive `apartMinutes` from the two fixes' OWN
       // `capturedAt` rather than trusting the stored field — if they
@@ -667,11 +769,16 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       // a client-computed `apartMinutes` that doesn't match the fixes it
       // was supposedly computed from is exactly the kind of stored-value
       // drift this guards against).
-      const derivedApart = Math.abs(row.checkoutFix.capturedAt - row.checkinFix.capturedAt) / 60_000;
-      // Finding 2: `!(apart >= threshold)` so a NaN derived duration fails
-      // (`NaN >= threshold` is false, so a NaIVE `apart < threshold` guard
-      // would have let NaN silently pass).
-      const durationOk = !(!(derivedApart >= threshold));
+      //
+      // M2 (fifth gate): SIGNED, not `Math.abs` — a checkout that comes
+      // BEFORE checkin (a negative delta) is a physically impossible/
+      // fabricated ordering and must be REJECTED, not silently folded
+      // into "apart enough" by the absolute value. Also capped at
+      // `MAX_DWELL_MINUTES` (12h): the probe's `capturedAt: Infinity`/
+      // `1e300` cases derive an astronomically large (or non-finite)
+      // delta that must never be treated as a valid, eligible dwell.
+      const derivedApart = (row.checkoutFix.capturedAt - row.checkinFix.capturedAt) / 60_000;
+      const durationOk = Number.isFinite(derivedApart) && derivedApart >= threshold && derivedApart <= MAX_DWELL_MINUTES;
       const openOk = deviceRowFixGateOk(row.checkinFix, ctx.playFacilityId, ctx.playLocalDate, true);
       const closeOk = deviceRowFixGateOk(row.checkoutFix, ctx.playFacilityId, ctx.playLocalDate, true);
       if (!rowOk || !durationOk || !openOk || !closeOk) {
@@ -731,7 +838,11 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
     }
     case "foreground_checkin": {
       const classId: EvidenceClassId = "foreground_checkin";
-      const gateOk = rowOk && deviceRowFixGateOk(row.fix, ctx.playFacilityId, ctx.playLocalDate, false);
+      // M4: `deviceRowFixGateOk` already fails closed on a null/undefined
+      // `row.fix` (violating the required type at runtime) — `hasFix` here
+      // is belt-and-suspenders so the intent reads the same as every other
+      // branch's guard.
+      const gateOk = rowOk && hasFix(row.fix) && deviceRowFixGateOk(row.fix, ctx.playFacilityId, ctx.playLocalDate, false);
       if (!gateOk) {
         return finish(row, {
           classId,

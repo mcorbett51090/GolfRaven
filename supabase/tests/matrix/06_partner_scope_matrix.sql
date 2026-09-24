@@ -151,7 +151,13 @@ SELECT tests.clear_actor();
 -- ---------------------------------------------------------------------------
 -- k-anonymity: "no row is written when cohort_n < 10" is a hard CHECK, so
 -- even a service-role bulk write can't create a sub-10 rollup row.
+-- S1 restricted-mode fix: the comment always said "service-role", but no
+-- role switch actually preceded these INSERTs -- they must run as
+-- service_role for real (it has full DML + BYPASSRLS, 0009/shim) so that
+-- RLS never enters into it and the CHECK constraint is genuinely what's
+-- under test, not whatever policy migration_owner may or may not have.
 -- ---------------------------------------------------------------------------
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT throws_ok(
   $$INSERT INTO app.operator_rollup (trail_id, month, metric, value, cohort_n) VALUES ('trl_t', current_date, 'x', 1, 9)$$,
   '23514',

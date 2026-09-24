@@ -100,7 +100,11 @@ jobs:
     # existing required check's identity.
     name: player-plane DB (migrations + pgTAP authorization matrix)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Bumped from 15 (S1, gate round 3): the harness now runs twice —
+    # HARNESS_MODE=superuser and HARNESS_MODE=restricted, each a full
+    # initdb/migrate/seed/pgTAP/teardown cycle — so the old single-run
+    # budget is too tight.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -166,7 +170,7 @@ jobs:
         # the `verify` job runs) since nothing else in this job needs it.
         run: pnpm --filter @golfraven/service-role-lint build
 
-      - name: Run tools/db/test.sh
+      - name: Run tools/db/test.sh (HARNESS_MODE=superuser)
         # The harness owns its own throwaway cluster end to end (initdb,
         # start, shim, migrations, seed fixtures, pgTAP matrix, B4 replay/
         # concurrency check, B2 function-inventory check, B5 service-role
@@ -175,8 +179,27 @@ jobs:
         # workflow's trigger (AGENTS.md "Required status checks — never
         # add paths: to a required workflow"), so this job always
         # evaluates once it is made required, same as `verify` and
-        # `gitleaks`.
+        # `gitleaks`. This run connects as the cluster bootstrap role (a
+        # true Postgres superuser) — the harness's original behaviour,
+        # unchanged; HARNESS_MODE defaults to `superuser` when unset.
         run: bash tools/db/test.sh
+        env:
+          HARNESS_MODE: superuser
+
+      - name: Run tools/db/test.sh (HARNESS_MODE=restricted)
+        # S1 close-out (gate round 3): "add a harness mode where tests run
+        # as a NOSUPERUSER NOBYPASSRLS owner/test role ... An RLS test
+        # that only passes under superuser is a false pass." This second,
+        # independent run of the SAME harness against a FRESH throwaway
+        # cluster (tools/db/test.sh tears its own cluster down on exit, so
+        # the two runs never share state) connects migrations/fixtures/
+        # pgTAP as `migration_owner` instead — LOGIN, CREATEDB, CREATEROLE,
+        # explicitly NOSUPERUSER NOBYPASSRLS (supabase/tests/shim.sql).
+        # Extension installation stays on the step above (bootstrap-as-
+        # superuser in either mode, per the harness's own header comment).
+        run: bash tools/db/test.sh
+        env:
+          HARNESS_MODE: restricted
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
