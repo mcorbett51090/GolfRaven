@@ -24,7 +24,13 @@
 -- ============================================================================
 -- 1. The role
 -- ============================================================================
-CREATE ROLE private_definer NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'private_definer') THEN
+    CREATE ROLE private_definer NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+  END IF;
+END
+$$;
 GRANT USAGE ON SCHEMA app, private TO private_definer;
 
 -- ============================================================================
