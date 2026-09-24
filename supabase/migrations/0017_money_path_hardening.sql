@@ -984,14 +984,21 @@ BEGIN
 END;
 $$;
 
+-- REVOKE/GRANT EXECUTE must run BEFORE the OWNER TO transfer below, not
+-- after — confirmed (again) empirically this session: once ownership
+-- moves to private_definer, the connecting migration role no longer owns
+-- this function and holds no GRANT OPTION on it either, so a REVOKE/
+-- GRANT issued afterward 42501s (see 0018_pseudonym_vault.sql's own note
+-- on this exact ordering bug, hit and fixed there earlier this round).
+REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce() TO service_role;
+
 -- Ownership transfer needs CREATE on schema private briefly, same
 -- discipline as every other private_definer-owned function in this file
 -- (see 0016's own note on why).
 GRANT CREATE ON SCHEMA private TO private_definer;
 ALTER FUNCTION private.purge_consumed_nonce() OWNER TO private_definer;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
-REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce() TO service_role;
 
 -- The narrow policy itself: private_definer may DELETE a
 -- private.consumed_nonce row ONLY if it is more than 7 days past its own

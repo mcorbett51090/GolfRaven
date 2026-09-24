@@ -172,3 +172,29 @@ column itself (`COMMENT ON COLUMN`, 0017) so it survives independently of this d
 the P3 scoring Edge Function is built, add the enum's fourth value in its own migration,
 backfill existing `'unattestable'` rows only where they are KNOWN never-graded (not
 by assumption), and update `packages/rules`' consumers of this column accordingly.
+
+## `[unverified]` — H2 approximation mode's vault grants (post-P3a re-gate)
+
+`tools/db/test-migrations-no-migration-owner.sh`'s `H2_MODE=approximation` run grants
+its freshly-created, NOSUPERUSER-but-database-owning role (`h2_approx_postgres`)
+`GRANT ALL ON SCHEMA vault ... WITH GRANT OPTION`, `GRANT ALL ON vault.secrets ... WITH
+GRANT OPTION`, and `GRANT ALL ON vault.decrypted_secrets ... WITH GRANT OPTION`, done as
+the cluster bootstrap superuser (mirroring what `supabase/tests/shim.sql` already grants
+`migration_owner`, both by fiat, in a local Postgres cluster this harness controls
+completely).
+
+**`[unverified]`:** this local grant shape is an assumption about what a real Supabase
+project's own non-superuser `postgres` role actually holds on `vault.secrets`/`vault.
+decrypted_secrets` — it has NOT been confirmed against a real Supabase project or
+branch. If the real role's grants on Vault are narrower (e.g. SELECT only, no `WITH
+GRANT OPTION`, or scoped differently), then `0018_pseudonym_vault.sql`'s own `GRANT
+USAGE ON SCHEMA vault TO private_definer` / `GRANT SELECT (...) ON vault.
+decrypted_secrets TO private_definer` step — which needs the connecting migration role
+to itself hold grantable privilege on those objects — could fail on a real deploy even
+though it passes in both harness modes locally. **Must be verified on a real Supabase
+branch (or an equivalent hosted staging project) before this migration set is deployed
+for real** — check what `GRANT`s the project's own `postgres` role actually holds on
+`vault.secrets`/`vault.decrypted_secrets` (e.g. `\dp vault.secrets` connected as that
+role, or `information_schema.role_table_grants`), and narrow both `shim.sql` and
+`test-migrations-no-migration-owner.sh` to match reality once confirmed, rather than
+leaving the WITH-GRANT-OPTION-by-fiat assumption as the only evidence this path works.
