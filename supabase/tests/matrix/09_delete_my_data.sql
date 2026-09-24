@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(22);
+SELECT plan(26);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -248,23 +248,44 @@ SELECT is(
 -- matched_receipt_fingerprint_id, are enough to look a match up without
 -- ever putting a raw user uuid in a jsonb payload). This test is the
 -- CATALOG-DRIVEN safety net that generalizes past that one call site: it
--- scans EVERY jsonb column in schema app (derived from
+-- scans EVERY jsonb/text/uuid column in schema app (derived from
 -- information_schema.columns, not a hand-maintained list — the same
 -- "derived, not maintained" discipline as private.pii_retention_policy's
 -- own generic pass above) for the literal deleted-user uuid appearing
--- ANYWHERE in its text form, so a FUTURE jsonb column that starts
--- embedding a raw user id fails here immediately, before anyone notices
--- by hand.
--- Exception (documented, narrow): app.audit_log's OWN completion record
--- of the delete_my_data call itself (action='delete_my_data') legitimately
--- names the deleted user in its jsonb detail (`user_id`) — the SAME
--- information already lives, permanently, in that exact row's own
--- subject_id column (a plain text column, not jsonb, so out of scope for
--- THIS scan either way; "user X was deleted" is the audit trail's whole
--- purpose, unlike the dedupe_receipt_fingerprint leak this test exists to
--- catch, which put ANOTHER user's id into a record that outlives and is
--- unrelated to their own deletion). Every OTHER audit_log row (any OTHER
--- action) is still scanned normally.
+-- ANYWHERE in its text form, so a FUTURE column that starts embedding a
+-- raw user id fails here immediately, before anyone notices by hand.
+--
+-- ⛔ FIX (should-fix 5, post-P3a re-gate): "extend it from jsonb columns
+-- to text and uuid columns in app, beyond FK'd columns, with documented
+-- exemptions." Widened from `data_type = 'jsonb'` alone to `data_type IN
+-- ('jsonb', 'text', 'uuid')` — a column that ISN'T a declared FK to
+-- auth.users can still end up holding a raw user uuid as plain data (a
+-- polymorphic subject_id, a hand-built text field, …), and the ORIGINAL
+-- scan only ever looked at jsonb. A column that IS a declared FK to
+-- auth.users is excluded here (`NOT EXISTS` against pg_constraint) — it
+-- is already asserted zero-rows by the generic, catalog-driven
+-- delete_row/set_null pass earlier in this file, so re-scanning it here
+-- would be redundant, not a wider net ("beyond FK'd columns" is this
+-- scan's whole point).
+--
+-- Exception (documented, narrow — should-fix 1, post-P3a re-gate):
+-- app.audit_log's OWN completion record of the delete_my_data call itself
+-- legitimately names the deleted user, in BOTH its jsonb `detail`
+-- (`user_id`) and its text `subject_id` — the audit trail's whole
+-- purpose ("user X was deleted"), unlike the dedupe_receipt_fingerprint
+-- leak this test exists to catch, which put ANOTHER user's id into a
+-- record that outlives and is unrelated to their own deletion.
+-- ⛔ FIX (should-fix 1, post-P3a re-gate): "restrict it to rows with
+-- subject_id = the deleted uuid and detail keys exactly {user_id,
+-- deleted_at}." The PRIOR version exempted EVERY row with
+-- action = 'delete_my_data', full stop — a hypothetical future row that
+-- reuses that same action name but smuggles some OTHER user's id
+-- alongside (in an extra detail key, or as a DIFFERENT subject_id) would
+-- have sailed through unexamined. Narrowed to EXACTLY the one legitimate
+-- shape: this row's own subject_id must equal the deleted user, AND
+-- detail's key set must be EXACTLY {deleted_at, user_id} — nothing more,
+-- nothing less. See docs/security/p3-money-path-requirements.md's own
+-- note on this retention exception.
 DO $$
 DECLARE
   v_col record;
@@ -273,12 +294,23 @@ DECLARE
   v_exclude_sql text;
 BEGIN
   FOR v_col IN
-    SELECT table_name, column_name
-    FROM information_schema.columns
-    WHERE table_schema = 'app' AND data_type = 'jsonb'
+    SELECT c.table_name, c.column_name
+    FROM information_schema.columns c
+    WHERE c.table_schema = 'app' AND c.data_type IN ('jsonb', 'text', 'uuid')
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint con
+        JOIN pg_class cl ON cl.oid = con.conrelid
+        JOIN pg_namespace n ON n.oid = cl.relnamespace
+        JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
+        WHERE con.contype = 'f' AND con.confrelid = 'auth.users'::regclass
+          AND n.nspname = 'app' AND cl.relname = c.table_name AND a.attname = c.column_name
+      )
   LOOP
-    IF v_col.table_name = 'audit_log' AND v_col.column_name = 'detail' THEN
-      v_exclude_sql := ' AND action <> ''delete_my_data''';
+    IF v_col.table_name = 'audit_log' AND v_col.column_name IN ('detail', 'subject_id') THEN
+      v_exclude_sql := format(
+        ' AND NOT (action = ''delete_my_data'' AND subject_id = %L AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(detail) k) = ARRAY[''deleted_at'',''user_id''])',
+        v_uuid
+      );
     ELSE
       v_exclude_sql := '';
     END IF;
@@ -286,12 +318,55 @@ BEGIN
       'SELECT count(*) FROM app.%I WHERE %I::text ILIKE $1%s', v_col.table_name, v_col.column_name, v_exclude_sql
     ) INTO v_count USING '%' || v_uuid || '%';
     IF v_count <> 0 THEN
-      RAISE EXCEPTION 'the deleted user''s uuid (%) still appears in app.%.% (jsonb) after delete_my_data — % row(s)', v_uuid, v_col.table_name, v_col.column_name, v_count;
+      RAISE EXCEPTION 'the deleted user''s uuid (%) still appears in app.%.% (%) after delete_my_data — % row(s)', v_uuid, v_col.table_name, v_col.column_name, v_col.data_type, v_count;
     END IF;
   END LOOP;
 END
 $$;
-SELECT pass('no jsonb column anywhere in schema app contains the deleted user''s uuid, as text, after delete_my_data (catalog-driven over information_schema.columns)');
+SELECT pass('no jsonb/text/uuid column anywhere in schema app (excluding declared FKs-to-auth.users, already covered above) contains the deleted user''s uuid, as text, after delete_my_data (catalog-driven over information_schema.columns; should-fix 5, post-P3a re-gate)');
+
+-- ---------------------------------------------------------------------------
+-- M1 BLOCKING (post-P3a re-gate): "delete_my_data silently leaves PII
+-- behind when a shift-log row has a pseudonym but a NULL key id." Two
+-- write-time rejections (0018): the NULL-key-id shape itself (the pairing
+-- CHECK), and an hmac id that never resolves in Vault at all (the
+-- write-time validation trigger). Both proven directly against
+-- app.attestation_shift_log (this repro's own table); the same CHECK/
+-- trigger pair also applies to app.attestation (player + staff), not
+-- separately re-proven here since the mechanism is identical.
+-- ---------------------------------------------------------------------------
+SELECT throws_ok(
+  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
+    VALUES ('fac_x', 'presence', 'player_m1',
+            encode(hmac('m1-null-key-id-repro', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+            NULL, 'staff_x_handle')$$,
+  '23514',
+  NULL,
+  'M1: a shift-log row with player_pseudonym SET but player_pseudonym_hmac_id NULL is rejected at WRITE time (pairing CHECK) -- the exact shape the repro constructed by UPDATE is now unwritable in the first place'
+);
+SELECT throws_ok(
+  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
+    VALUES ('fac_x', 'presence', 'player_m1b', NULL,
+            'a0000000-1111-0000-0000-000000000001', 'staff_x_handle')$$,
+  '23514',
+  NULL,
+  'M1: the MIRROR shape (hmac_id SET, player_pseudonym NULL) is also rejected at write time by the same pairing CHECK'
+);
+SELECT throws_ok(
+  $$UPDATE app.attestation_shift_log SET player_pseudonym_hmac_id = NULL WHERE id = 'a0000000-0000-0000-0000-000000000001'$$,
+  '23514',
+  NULL,
+  'M1: the ORIGINAL repro itself -- UPDATE ... SET player_pseudonym_hmac_id = NULL on a row whose player_pseudonym is still set -- now fails at write time instead of silently succeeding and leaving the row unredactable'
+);
+SELECT throws_ok(
+  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
+    VALUES ('fac_x', 'presence', 'player_m1c',
+            encode(hmac('m1-unresolvable-key-repro', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+            'ffffffff-ffff-ffff-ffff-ffffffffffff', 'staff_x_handle')$$,
+  '23514',
+  NULL,
+  'M1: an hmac_id that does not resolve to any real vault.decrypted_secrets row is rejected at write time (the write-time validation trigger, 0018) -- a bad/unknown key id can never be written in the first place'
+);
 
 SELECT * FROM finish();
 ROLLBACK;
