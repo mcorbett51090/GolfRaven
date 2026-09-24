@@ -574,14 +574,18 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async (rel) => {
-      if (rel === "raw/x.html") return rawBytes;
-      // An operator hand-edited the STORED TEXT FILE, but the raw bytes are
-      // unchanged — the verdict must ignore this file entirely.
-      return Buffer.from(
-        "Fabricated roster: Bear Trace, Arbutus Ridge, some invented course.",
-      );
-    });
+    const byTrail = await buildEvidenceByTrail(
+      manifest,
+      async (rel) => {
+        if (rel === "raw/x.html") return rawBytes;
+        // An operator hand-edited the STORED TEXT FILE, but the raw bytes
+        // are unchanged — the verdict must ignore this file entirely.
+        return Buffer.from(
+          "Fabricated roster: Bear Trace, Arbutus Ridge, some invented course.",
+        );
+      },
+      { ledger: ledgerFromManifest(manifest) },
+    );
     const text = byTrail.TN?.bySha.get(realSha)?.text ?? "";
     expect(text).toContain("Tennessee Golf Trail");
     expect(text).not.toContain("Fabricated");
@@ -999,8 +1003,13 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [entry] },
       draftCandidateNames: { TN: [] },
     };
+    // Gate finding 2c (re-gate): this entry's OWN `recorded: false` field
+    // is no longer what decides anything — an EMPTY ledger (nothing ever
+    // registered this SHA as the recorded capture) is what correctly
+    // produces `recorded: false` here now; the manifest field is inert.
     const byTrail = await buildEvidenceByTrail(manifest, async () =>
       Buffer.from(bytes),
+      { ledger: { entries: [] } },
     );
     expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(false);
     const confirmation: X2ConfirmationFile = {
@@ -1029,7 +1038,7 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     );
   });
 
-  it("a legacy entry with no `recorded` field at all defaults to recorded: true", async () => {
+  it("gate finding 2c (re-gate): a legacy entry with no `method` field defaults method to \"direct\" — but `recorded` is now PURELY ledger-derived, never assumed from the (now-ignored) manifest field, present or absent", async () => {
     const bytes =
       "Nine courses make up the Trail. It counts a course. The season runs year-round.";
     const rawSha = sha(bytes);
@@ -1038,16 +1047,46 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       rawFile: "raw/x.html",
     });
     delete (legacyEntry as { recorded?: unknown }).recorded;
+    delete (legacyEntry as { method?: unknown }).method;
     const manifest: X2FetchManifest = {
       generatedAt: new Date().toISOString(),
       outDir: "x2-evidence",
       trails: { TN: [legacyEntry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () =>
-      Buffer.from(bytes),
+
+    // With NOTHING in the ledger, this legacy entry is NOT recorded —
+    // there is no more "missing field defaults to true" fallback.
+    const byTrailEmpty = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      { ledger: { entries: [] } },
     );
-    expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(true);
+    expect(byTrailEmpty.TN?.bySha.get(rawSha)?.method).toBe("direct");
+    expect(byTrailEmpty.TN?.bySha.get(rawSha)?.methodDefaulted).toBe(true);
+    expect(byTrailEmpty.TN?.bySha.get(rawSha)?.recorded).toBe(false);
+
+    // With a MATCHING ledger row (method "direct" — the defaulted value,
+    // since that's what a real ledger entry for a legacy capture would
+    // have been registered under), it IS recorded.
+    const byTrailWithLedger = await buildEvidenceByTrail(
+      manifest,
+      async () => Buffer.from(bytes),
+      {
+        ledger: {
+          entries: [
+            {
+              method: "direct",
+              normalizedUrl: normalizeUrlForFirstCapture(legacyEntry.url),
+              url: legacyEntry.url,
+              sha256: rawSha,
+              recordedAt: new Date().toISOString(),
+            },
+          ],
+        },
+      },
+    );
+    expect(byTrailWithLedger.TN?.bySha.get(rawSha)?.recorded).toBe(true);
   });
 });
 

@@ -515,7 +515,7 @@ describe("F4: inputDigest is independent of the evidence ARRAY'S OWN ORDER", () 
 describe("item 4 (seventh gate): duplicate evidence ids are rejected STRUCTURALLY, not quarantined", () => {
   it("two rows sharing the same id fail the whole parseScorePlayInput call", () => {
     const rowA = staffPresence({ id: "dup_id", coSignalFix: goodFix() });
-    const rowB = { ...staffPresence({ id: "dup_id" }), source: "self_report" as const };
+    const rowB = { id: "dup_id", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
     const result = parseScorePlayInput({ evidence: [rowA, rowB], ctx: baseCtx() });
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -525,7 +525,7 @@ describe("item 4 (seventh gate): duplicate evidence ids are rejected STRUCTURALL
 
   it("scorePlay itself fails closed (ok:false) on duplicate ids, never throws", () => {
     const rowA = staffPresence({ id: "dup_id2", coSignalFix: goodFix() });
-    const rowB = { ...staffPresence({ id: "dup_id2" }), source: "self_report" as const };
+    const rowB = { id: "dup_id2", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
     expect(() => {
       const result = scorePlay([rowA, rowB] as any, baseCtx());
       expect(result.ok).toBe(false);
