@@ -1,0 +1,19 @@
+{
+  "id": "ach_01M39RCEW9GSP7GR5E7W5DCCN0",
+  "title": "Every Atlantic province",
+  "tier": "gold",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": {
+      "kind": "agg",
+      "name": "countDistinct",
+      "field": "region",
+      "where": { "in": ["CA-NB", "CA-NS", "CA-PE", "CA-NL"] }
+    },
+    "right": { "kind": "literal", "value": 4 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

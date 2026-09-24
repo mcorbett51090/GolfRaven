@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCEWC3732MXG81BDR4B25",
+  "title": "10 states or provinces",
+  "tier": "gold",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "countDistinct", "field": "region" },
+    "right": { "kind": "literal", "value": 10 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

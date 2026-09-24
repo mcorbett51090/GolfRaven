@@ -79,6 +79,10 @@ describe("verify-catalog — must-pass fixtures", () => {
   it("mp-offer-terms-qc-with-fr: a QC-linked offerTerms WITH termsFr passes (S6 must-pass)", async () => {
     await expectPasses("mp-offer-terms-qc-with-fr");
   });
+
+  it("mp-achievement-good: two AchievementDefs referencing real trail/course/designer ids (part B must-pass)", async () => {
+    await expectPasses("mp-achievement-good");
+  });
 });
 
 describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)", () => {
@@ -419,5 +423,42 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
   it("item 4: a stub with no coordinates and no OSM join fails closed (TZ_UNVERIFIABLE)", () =>
     expectExactFail("mf-tz-unverifiable", [
       { code: "TZ_UNVERIFIABLE", path: "facilities[0].tz" },
+    ]));
+
+  // --- Part B: AchievementDef / RuleExpr wiring ---
+
+  it("part B: an achievement rule referencing an unknown trail id", () =>
+    expectExactFail("mf-achievement-unknown-trail", [
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_TRAIL", path: "achievements[0].rule" },
+    ]));
+
+  it("part B: an achievement rule that is statically unsatisfiable (R-F4-shaped)", () =>
+    expectExactFail("mf-achievement-unsatisfiable", [
+      { code: "RULE_UNSATISFIABLE", path: "achievements[0].rule" },
+    ]));
+
+  it("S6: an achievement rule's countWhere(\"facility\", …) referencing an unknown facility", () =>
+    expectExactFail("mf-achievement-unknown-facility", [
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_FACILITY", path: "achievements[0].rule" },
+    ]));
+
+  it("S6: an achievement rule's countDistinct(\"trail\", {in}) referencing an unknown trail", () =>
+    expectExactFail("mf-achievement-unknown-trail-countdistinct", [
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_TRAIL", path: "achievements[0].rule" },
+    ]));
+
+  it("N5: completionRule n-of-m with n greater than the member count", () =>
+    expectExactFail("mf-nofm-exceeds-member-count", [
+      { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].completionRule.n" },
+    ]));
+
+  // Re-gate item 3: pins the marker n-of-m gate to markerRosterSize (distinct
+  // FACILITIES), not the raw member count. Two course members share ONE
+  // facility here (markerRosterSize=1, memberCount=2) with markerRule.n=2 —
+  // n exceeds markerRosterSize but NOT memberCount, so a mutation that
+  // compares against memberCount instead would wrongly let this pass.
+  it("N-gate: markerRule n-of-m with n greater than the DISTINCT-FACILITY marker roster (but not the raw member count)", () =>
+    expectExactFail("mf-nofm-exceeds-marker-roster", [
+      { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].markerRule.n" },
     ]));
 });

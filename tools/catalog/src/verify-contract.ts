@@ -13,20 +13,21 @@
  *
  * **What's in the generated document.** A Zod v4 "registry" export
  * (`{ schemas: { <Name>: <JSON Schema>, ... } }`), one entry per top-level
- * §4.1 entity this P1a implements: `Region`, `Source`, `Designer`, `Hole`,
+ * §4.1 entity this repo implements: `Region`, `Source`, `Designer`, `Hole`,
  * `Tee`, `Facility`, `Course`, `Trail`, `RosterVersion`, `OfferTerms` (S6,
  * gate review post-e9b3ab0 — `OfferTerms` needs no `RuleExpr`, see
- * `schema.ts`'s module doc, so it's in scope and in this registry). A
- * shared nested schema (e.g. `Course` inside `Facility.courses`) becomes a
- * `$ref` between entries rather than being inlined twice — Zod's own
- * registry behaviour, not a choice made here. `AchievementDef` is the one
- * entity still not in this registry (it needs `RuleExpr`, part B).
+ * `schema.ts`'s module doc, so it's in scope and in this registry), and
+ * `AchievementDef` (part B — needs `RuleExpr`, `rule-expr.ts`, now
+ * implemented). A shared nested schema (e.g. `Course` inside
+ * `Facility.courses`) becomes a `$ref` between entries rather than being
+ * inlined twice — Zod's own registry behaviour, not a choice made here.
  */
 import { readFile, writeFile, realpath as fsRealpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
+  AchievementDefSchema,
   DesignerSchema,
   FacilitySchema,
   CourseSchema,
@@ -51,6 +52,7 @@ export function generateContractSchema(): unknown {
   registry.add(RosterVersionSchema, { id: "RosterVersion" });
   registry.add(TrailSchema, { id: "Trail" });
   registry.add(OfferTermsSchema, { id: "OfferTerms" });
+  registry.add(AchievementDefSchema, { id: "AchievementDef" });
   return z.toJSONSchema(registry);
 }
 

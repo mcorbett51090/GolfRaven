@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@golfraven/catalog": "workspace:*",
+    "@golfraven/rules": "workspace:*",
     "zod": "4.6.5"
   },
   "devDependencies": {

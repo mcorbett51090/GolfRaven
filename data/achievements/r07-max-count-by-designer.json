@@ -1,0 +1,14 @@
+{
+  "id": "ach_01M39RCEW3ZX84GZSM02S1EQYY",
+  "title": "5 courses by one designer",
+  "tier": "silver",
+  "rule": {
+    "kind": "compare",
+    "op": ">=",
+    "left": { "kind": "agg", "name": "maxCountBy", "field": "designer" },
+    "right": { "kind": "literal", "value": 5 }
+  },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": true
+}

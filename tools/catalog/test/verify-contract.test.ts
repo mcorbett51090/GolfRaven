@@ -5,10 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 describe("generateContractSchema", () => {
-  it("produces a registry with every P1a-scoped top-level entity", () => {
+  it("produces a registry with every implemented top-level entity, including AchievementDef (part B)", () => {
     const generated = generateContractSchema() as { schemas: Record<string, unknown> };
+    // "__shared" is Zod's own JSON-Schema-generator bucket for the
+    // recursive RuleExpr type's $defs (AchievementDef.rule) — not a
+    // top-level §4.1 entity, but part of what z.toJSONSchema emits once a
+    // registered schema recurses. Present since AchievementDef joined the
+    // registry (part B); asserted here so its appearance is intentional,
+    // not silently ignored.
     expect(Object.keys(generated.schemas).sort()).toEqual(
       [
+        "AchievementDef",
         "Course",
         "Designer",
         "Facility",
@@ -19,13 +26,9 @@ describe("generateContractSchema", () => {
         "Source",
         "Tee",
         "Trail",
+        "__shared",
       ].sort(),
     );
-  });
-
-  it("does NOT include AchievementDef (needs RuleExpr, part B)", () => {
-    const generated = generateContractSchema() as { schemas: Record<string, unknown> };
-    expect(generated.schemas["AchievementDef"]).toBeUndefined();
   });
 });
 

@@ -1,0 +1,9 @@
+{
+  "id": "ach_01M39RCEWJP140XPR8BRANGBYH",
+  "title": "Full set",
+  "tier": "special",
+  "rule": { "kind": "agg", "name": "markerSetComplete", "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM" },
+  "minConfidence": 0.5,
+  "scope": "verified-only",
+  "active": false
+}

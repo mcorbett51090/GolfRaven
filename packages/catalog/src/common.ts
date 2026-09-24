@@ -48,7 +48,10 @@ export type Source = z.infer<typeof SourceSchema>;
  * inhabited territories + 13 Canadian provinces/territories); see that
  * file's `_comment` for the exact source.
  */
-const REGION_CODES = new Set<string>(regionCodesData.codes);
+/** Exported (not just used internally) so `@golfraven/rules`'s static
+ * checker can bound `countDistinct("region")`'s domain size (S5, gate
+ * review) without duplicating or re-deriving the pinned list. */
+export const REGION_CODES = new Set<string>(regionCodesData.codes);
 
 export const RegionCodeSchema = z.string().refine((value) => REGION_CODES.has(value), {
   error: "must be a real ISO 3166-2 US/CA subdivision code (see region-codes.json)",

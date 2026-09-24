@@ -22,6 +22,7 @@
  */
 import { z } from "zod";
 import {
+  AchievementDefSchema,
   CONTRACT_VERSION,
   DesignerSchema,
   FacilitySchema,
@@ -71,6 +72,10 @@ export const CatalogBundleSchema = z.strictObject({
   designers: z.array(DesignerSchema).optional(),
   /** S6 (gate review post-e9b3ab0): `OfferTerms` is in scope. */
   offerTerms: z.array(OfferTermsSchema).optional(),
+  /** Part B: every §8.1 badge (`data/achievements/*.json`). Optional so
+   * every pre-existing fixture (none of which carry achievements) keeps
+   * parsing unchanged. */
+  achievements: z.array(AchievementDefSchema).optional(),
   idLedger: IdLedgerSchema,
   /** Keyed by `OsmRefId` string — see `OsmContentSchema`'s doc. */
   osm: z.record(z.string(), OsmContentSchema).optional(),
