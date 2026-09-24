@@ -221,26 +221,15 @@ INSERT INTO storage.objects (bucket_id, name, owner) VALUES
 
 COMMIT;
 
--- ---------------------------------------------------------------------------
--- Claim builders — one JSON claims blob per actor row in the §4.7.7 matrix.
--- Tests call: SELECT tests.authenticate_as('authenticated',
--- tests.claims('00000000-0000-0000-0000-00000000000a')); then run a query;
--- then SELECT tests.clear_actor();
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION tests.claims(p_uid uuid, p_role text DEFAULT 'authenticated')
-RETURNS jsonb
-LANGUAGE sql IMMUTABLE
-AS $$
-  SELECT jsonb_build_object('sub', p_uid::text, 'role', p_role);
-$$;
--- S1 restricted-mode fix: this file runs AFTER 0001_schemas.sql's global
--- `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`
--- (role-scoped to whoever ran the migrations, not schema-scoped -- see
--- that migration's own B1 comment), so this function -- unlike
--- tests.authenticate_as/tests.clear_actor in shim.sql, which predate that
--- revoke -- gets no PUBLIC EXECUTE by default. It is a pure, stateless
--- helper with no table access, meant to be called by whichever role a
--- test has just switched to (matrix/06's pre-authenticated-block calls
--- this from inside an already-non-superuser role), so PUBLIC execute here
--- is correct, not a broadening of anything real.
-GRANT EXECUTE ON FUNCTION tests.claims(uuid, text) TO PUBLIC;
+-- Claim builder (tests.claims) moved to supabase/tests/shim.sql, next to
+-- tests.authenticate_as/tests.clear_actor (S1, gate round 3): this file
+-- now runs its fixture INSERTs as service_role (tools/db/test.sh, via
+-- `SET ROLE`, not `SET LOCAL ROLE`, so it persists for this whole psql
+-- session/connection, past this file's own COMMIT above) — a CREATE
+-- FUNCTION here would need CREATE on schema `tests`, which only the
+-- bootstrap role (schema owner) has, and would also miss the PUBLIC
+-- EXECUTE that tests.authenticate_as/tests.clear_actor already get by
+-- being created (in shim.sql) before 0001_schemas.sql's global
+-- `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` ever
+-- runs. Grouping all three in shim.sql keeps that property for all of
+-- them, not just two.

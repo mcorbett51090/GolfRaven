@@ -328,3 +328,21 @@ BEGIN
   RESET ROLE;
 END;
 $$;
+
+-- Claim builder — one JSON claims blob per actor row in the §4.7.7 matrix.
+-- Tests call: SELECT tests.authenticate_as('authenticated',
+-- tests.claims('00000000-0000-0000-0000-00000000000a')); then run a
+-- query; then SELECT tests.clear_actor(). Lives here (not
+-- supabase/tests/helpers.sql, where it originally shipped) so it is
+-- created, like authenticate_as/clear_actor above, BEFORE
+-- 0001_schemas.sql's global `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON
+-- FUNCTIONS FROM PUBLIC` runs — it keeps its default PUBLIC EXECUTE that
+-- way, needed because it can be called from inside an already-non-
+-- superuser role (matrix/06's pre-authenticated-block calls it from
+-- 'authenticated', not the top-level connecting role).
+CREATE OR REPLACE FUNCTION tests.claims(p_uid uuid, p_role text DEFAULT 'authenticated')
+RETURNS jsonb
+LANGUAGE sql IMMUTABLE
+AS $$
+  SELECT jsonb_build_object('sub', p_uid::text, 'role', p_role);
+$$;
