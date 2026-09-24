@@ -128,19 +128,57 @@ export const CORROBORATION_WINDOW_DAYS = 7;
 /* Receipt fingerprint voiding (should-fix, §4.4/§4.5 line 996)         */
 /* ------------------------------------------------------------------ */
 
-/** A second (or later) receipt row sharing a non-empty `fingerprint` with
+/** F2 (sixth gate): status rank for the deterministic fingerprint-dup
+ * winner below — higher wins. `void` is included (rank 0) only so the
+ * comparison is total; a `void` row can still "win" a group where every
+ * member is `void`, which is a no-op either way. */
+const RECEIPT_STATUS_RANK: Record<"approved" | "pending" | "void", number> = {
+  approved: 2,
+  pending: 1,
+  void: 0,
+};
+
+/**
+ * A second (or later) receipt row sharing a non-empty `fingerprint` with
  * an earlier one, WITHIN the same `scorePlay` call, is void — mirrors
  * `receipt_fingerprint`'s cross-user dedupe (§4.4), applied here at the
- * narrower scope this package can see (one call's own evidence). */
+ * narrower scope this package can see (one call's own evidence).
+ *
+ * **F2 (sixth gate): order-independent.** The previous version kept
+ * whichever row of a duplicate-fingerprint group came FIRST in the input
+ * array and voided every later one — so `[pending, approved, checkin]`
+ * kept the `pending` row (voiding `approved`) while
+ * `[approved, pending, checkin]` kept `approved` (voiding `pending`),
+ * changing `money` on array order alone. The winner is now picked
+ * DETERMINISTICALLY, independent of position: highest status rank
+ * (`approved` > `pending` > `void`), tie-broken by the smallest `id`
+ * (lexicographic) — every other member of the group is voided, whatever
+ * order the caller passed them in. */
 function voidDuplicateFingerprints(evidence: Evidence[]): Evidence[] {
-  const seen = new Set<string>();
+  const byFingerprint = new Map<string, Extract<Evidence, { source: "receipt_green_fee" }>[]>();
+  for (const row of evidence) {
+    if (row.source === "receipt_green_fee" && row.fingerprint) {
+      const arr = byFingerprint.get(row.fingerprint) ?? [];
+      arr.push(row);
+      byFingerprint.set(row.fingerprint, arr);
+    }
+  }
+  const winnerIdByFingerprint = new Map<string, string>();
+  for (const [fingerprint, rows] of byFingerprint) {
+    if (rows.length < 2) continue; // not actually a duplicate group
+    let winner = rows[0]!;
+    for (const row of rows) {
+      const rowRank = RECEIPT_STATUS_RANK[row.status];
+      const winnerRank = RECEIPT_STATUS_RANK[winner.status];
+      if (rowRank > winnerRank || (rowRank === winnerRank && row.id < winner.id)) winner = row;
+    }
+    winnerIdByFingerprint.set(fingerprint, winner.id);
+  }
   return evidence.map((row) => {
     if (row.source !== "receipt_green_fee" || !row.fingerprint) return row;
-    if (seen.has(row.fingerprint)) {
-      return { ...row, status: "void" as const };
-    }
-    seen.add(row.fingerprint);
-    return row;
+    const winnerId = winnerIdByFingerprint.get(row.fingerprint);
+    if (winnerId === undefined || row.id === winnerId) return row;
+    return { ...row, status: "void" as const };
   });
 }
 
