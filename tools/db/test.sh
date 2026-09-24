@@ -161,6 +161,16 @@ run_as_pg "'$PG_BIN_DIR/createdb' -h '$PGSOCK' -p '$PGPORT' -U postgres '${DBNAM
 
 echo "tools/db/test.sh: creating extensions (postgis, pgtap, pgcrypto)"
 run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -c \"CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS pgtap; CREATE EXTENSION IF NOT EXISTS pgcrypto;\""
+run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '${DBNAME}_no_owner' -c \"CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS pgtap; CREATE EXTENSION IF NOT EXISTS pgcrypto;\""
+
+# H2 (post-P3a gate) dynamic check: run once, on its OWN throwaway
+# database within this same cluster (its script drops the migration_owner
+# role entirely, which would break the main HARNESS_MODE run below if
+# done against $DBNAME) — proves every migration applies as a superuser
+# with `migration_owner` genuinely absent from the cluster, the real-
+# deploy shape H2's failure reproduced.
+echo "tools/db/test.sh: H2 check — migrations with no migration_owner role in the cluster"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='${DBNAME}_no_owner' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-migrations-no-migration-owner.sh'"
 
 echo "tools/db/test.sh: applying supabase/tests/shim.sql"
 run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -f '$SUPABASE_DIR/tests/shim.sql'"

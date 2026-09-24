@@ -262,9 +262,26 @@ export async function ingestOwnerSavedPage(opts: {
     );
   }
 
-  // Gate finding: first-capture-wins is checked (and the manifest loaded)
+  // Gate finding 2: first-capture-wins is checked against the shared
+  // LEDGER (not by scanning this one manifest's own entries — a capture
+  // ingested into a DIFFERENT `--out-dir` for the same URL still counts),
   // BEFORE any bytes are read or written, so a refusal never leaves an
-  // orphaned raw/text file on disk.
+  // orphaned raw/text file on disk. URL matching is normalised (gate
+  // finding 2a — case/`www.`/trailing-slash/fragment/query insensitive).
+  const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(outDir);
+  const existingLedgerEntry = findLedgerEntry(await loadLedger(ledgerPath), "owner-saved", statedUrl);
+  if (existingLedgerEntry && !opts.additional) {
+    throw new Error(
+      `A recorded owner-saved capture of "${statedUrl}" (normalised: "${existingLedgerEntry.normalizedUrl}") ` +
+        `already exists in the ledger (sha256 ${existingLedgerEntry.sha256.slice(0, 12)}..., recorded ` +
+        `${existingLedgerEntry.recordedAt}) — first-capture-wins (Addendum J correction). Pass --additional ` +
+        "to ingest a further, non-recorded capture; the recorded one is never replaced.",
+    );
+  }
+
+  // The manifest itself is loaded separately from the ledger — it is
+  // where this entry's full evidence record is stored/merged; the ledger
+  // is only "which SHA is the recorded one for this URL+method."
   const manifestPath = path.join(outDir, "manifest.json");
   let manifest: X2FetchManifest;
   const manifestExists = await stat(manifestPath).catch(() => null);
@@ -279,20 +296,6 @@ export async function ingestOwnerSavedPage(opts: {
       trails: {},
       draftCandidateNames: {},
     };
-  }
-  const priorCaptures = (manifest.trails[trail] ?? []).filter(
-    (e) => e.url === statedUrl && e.method === "owner-saved",
-  );
-  // A legacy entry with no `recorded` field at all (from before this fix)
-  // is treated as recorded — it was the only capture that existed, so it
-  // was implicitly "the" one.
-  const hasRecordedPrior = priorCaptures.some((e) => e.recorded !== false);
-  if (hasRecordedPrior && !opts.additional) {
-    throw new Error(
-      `A recorded owner-saved capture of "${statedUrl}" already exists for trail "${trail}" — first-capture-` +
-        "wins (Addendum J correction). Pass --additional to ingest a further, non-recorded capture; the " +
-        "recorded one is never replaced.",
-    );
   }
 
   let buf: Buffer;
