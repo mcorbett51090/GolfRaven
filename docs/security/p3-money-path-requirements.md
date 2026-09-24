@@ -51,5 +51,37 @@ The DB-side items are tracked in the P3a queue.
 | Item | Where | Status |
 |---|---|---|
 | 1, 2, 3, 4 | P3 Edge Functions | Not started (P3 Edge Functions are not built yet) |
-| `play_evidence UNIQUE(evidence_id)`, grade column, budget CHECKs, decision columns, receipt dedupe, global nonces | P3a migrations | Queued |
+| `play_evidence UNIQUE(evidence_id)`, grade column, budget CHECKs, decision columns, receipt dedupe, global nonces | P3a migrations | Done — `supabase/migrations/0017_money_path_hardening.sql` |
 | Allow-lists, parser, trust table, course anchor, caps, tautology rejection | `packages/rules` | In progress |
+
+## Addendum (post-P3a gate): `evidence.attestation_grade` — "never graded" vs "unattestable"
+
+`app.evidence.attestation_grade app.attestation_grade NOT NULL DEFAULT 'unattestable'`
+(0017) reuses the existing three-value enum from 0003 (`'attested'`, `'unattestable'`,
+`'failed'`). That enum has no fourth, "not yet graded" value, so every row defaults to
+`'unattestable'` at INSERT time whether it was genuinely graded unattestable by server
+verification (§1 above — the matcher/scorer ran and found no attestable signal) or has
+simply never been graded at all (the P3 Edge Functions that would grade it don't exist
+yet, per the Status table above).
+
+**Decision (documented here per the gate's own instruction — "if adding it is
+disruptive, document it" — rather than widening the enum now):** adding a fourth enum
+value (`'pending'` or similar) is deferred to when the scoring Edge Function is actually
+built, for two reasons:
+
+1. `ALTER TYPE ... ADD VALUE` cannot run inside the same transaction as other DDL that
+   uses the new value (a hard Postgres restriction, not a style choice), so it would
+   force `0017_money_path_hardening.sql` to split into two migrations for one column —
+   disproportionate for a value nothing yet reads or writes.
+2. Nothing in this stage (P3a: schema + RLS only, no Edge Functions) actually
+   DISTINGUISHES "never graded" from "graded unattestable" — the distinction only
+   matters once a grading process exists to eventually revisit "never graded" rows and
+   promote them, which is exactly the P3 Edge Function work the Status table already
+   marks "Not started".
+
+**Requirement carried forward, not dropped:** `attestation_grade` MUST be written from
+server-side verification only (never client-supplied) — this is now stated on the
+column itself (`COMMENT ON COLUMN`, 0017) so it survives independently of this doc. When
+the P3 scoring Edge Function is built, add the enum's fourth value in its own migration,
+backfill existing `'unattestable'` rows only where they are KNOWN never-graded (not
+by assumption), and update `packages/rules`' consumers of this column accordingly.

@@ -128,6 +128,15 @@ export interface X2FetchEntry {
    * every render — `null` for `"direct"`/`"owner-saved"` entries, and `[]`
    * (not `null`) for a render that used no extra args at all. */
   renderArgs: string[] | null;
+  /** Should-fix (Addendum J re-gate): `"rendered"` entries only — the HOST
+   * (never credentials, and never the scheme or path) of `HTTPS_PROXY` /
+   * `https_proxy` that was in effect for this render, so a manifest reader
+   * can see which network path a render actually went out over, alongside
+   * `renderArgs`. `null` for `"direct"`/`"owner-saved"` entries, and also
+   * `null` for a `"rendered"` entry captured with no proxy env var set at
+   * all — never a guess, never the raw env var value (which could carry
+   * embedded credentials). */
+  renderProxyHost: string | null;
   /** Addendum J correction (first-capture-wins): true when this is the
    * recorded capture of this URL+method pair — the only one a confirmation
    * file may cite (`x2-verdict` refuses otherwise). `x2-fetch`'s own
@@ -160,6 +169,8 @@ function failedEntry(
      * (validated or not) when the render failed, so even a failed capture
      * shows what Chromium args were attempted. */
     renderArgs?: string[];
+    /** `method: "rendered"` failures only — see `X2FetchEntry.renderProxyHost`. */
+    renderProxyHost?: string | null;
   },
 ): X2FetchEntry {
   return {
@@ -181,8 +192,31 @@ function failedEntry(
     method: opts.method,
     ownerSavedDate: null,
     renderArgs: opts.method === "rendered" ? (opts.renderArgs ?? []) : null,
+    renderProxyHost:
+      opts.method === "rendered" ? (opts.renderProxyHost ?? null) : null,
     recorded: true,
   };
+}
+
+/** Should-fix (Addendum J re-gate): the HOST of `HTTPS_PROXY` / `https_proxy`
+ * currently in effect, with credentials/scheme/path stripped — for
+ * recording alongside `renderArgs` in a `"rendered"` manifest entry.
+ * Returns `null` when neither env var is set, or is set but not a parseable
+ * URL (never guesses, never throws — a proxy-host record is informational,
+ * not load-bearing for the render itself, which already ran through
+ * whatever the environment's real network stack does). Deliberately never
+ * returns the raw env var value: an env-configured proxy URL can carry
+ * embedded `user:pass@` credentials, which must never land in a manifest
+ * file that is committed/shared as evidence. */
+function currentHttpsProxyHost(): string | null {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.port ? `${u.hostname}:${u.port}` : u.hostname;
+  } catch {
+    return null;
+  }
 }
 
 /** Stores raw bytes as evidence (sha256, raw/text files, DRAFT candidate
@@ -394,6 +428,7 @@ async function fetchOne(
       method: "direct",
       ownerSavedDate: null,
       renderArgs: null,
+      renderProxyHost: null,
       recorded,
     };
   } finally {
@@ -424,6 +459,10 @@ async function fetchOneRendered(
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
   const attemptedArgs = renderOpts.extraArgs ?? [];
+  // Should-fix (Addendum J re-gate): recorded once per render attempt so
+  // every entry this call can produce — failed or fetched — carries the
+  // SAME proxy-host snapshot, alongside `renderArgs`.
+  const attemptedProxyHost = currentHttpsProxyHost();
 
   let parsedUrl: URL;
   try {
@@ -434,7 +473,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `not a valid URL: "${url}" (gate N6)`,
-      { method: "rendered", renderArgs: attemptedArgs },
+      { method: "rendered", renderArgs: attemptedArgs, renderProxyHost: attemptedProxyHost },
     );
   }
   if (parsedUrl.protocol !== "https:") {
@@ -443,7 +482,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `refusing to render non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
-      { method: "rendered", renderArgs: attemptedArgs },
+      { method: "rendered", renderArgs: attemptedArgs, renderProxyHost: attemptedProxyHost },
     );
   }
 
@@ -465,7 +504,7 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `render failed: ${err instanceof Error ? err.message : String(err)}`,
-      { method: "rendered", renderArgs: attemptedArgs },
+      { method: "rendered", renderArgs: attemptedArgs, renderProxyHost: attemptedProxyHost },
     );
   }
 
@@ -482,6 +521,7 @@ async function fetchOneRendered(
           finalUrl,
           method: "rendered",
           renderArgs: attemptedArgs,
+          renderProxyHost: attemptedProxyHost,
         },
       );
     }
@@ -500,6 +540,7 @@ async function fetchOneRendered(
         finalUrl,
         method: "rendered",
         renderArgs: attemptedArgs,
+        renderProxyHost: attemptedProxyHost,
       },
     );
   }
@@ -516,6 +557,7 @@ async function fetchOneRendered(
         finalUrl,
         method: "rendered",
         renderArgs: attemptedArgs,
+        renderProxyHost: attemptedProxyHost,
       },
     );
   }
@@ -555,6 +597,7 @@ async function fetchOneRendered(
     method: "rendered",
     ownerSavedDate: null,
     renderArgs: attemptedArgs,
+    renderProxyHost: attemptedProxyHost,
     recorded,
   };
 }

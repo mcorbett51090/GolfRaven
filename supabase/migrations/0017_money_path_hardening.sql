@@ -90,7 +90,7 @@ ALTER TABLE app.play_evidence
 -- with nothing to catch it; a typed column can't.
 ALTER TABLE app.evidence ADD COLUMN attestation_grade app.attestation_grade NOT NULL DEFAULT 'unattestable';
 COMMENT ON COLUMN app.evidence.attestation_grade IS
-  'Typed replacement for storing the attestation grade inside integrity jsonb (money-path security review). integrity jsonb may still carry other, non-grade integrity signals.';
+  'Typed replacement for storing the attestation grade inside integrity jsonb (money-path security review). integrity jsonb may still carry other, non-grade integrity signals. MUST be written from server-side verification only, never client-supplied. The enum has no explicit "pending/never graded" state distinct from unattestable -- see docs/security/p3-money-path-requirements.md addendum for why, and what to do when the P3 scoring Edge Function is built.';
 CREATE INDEX evidence_attestation_grade_idx ON app.evidence (attestation_grade);
 
 -- ============================================================================

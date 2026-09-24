@@ -510,6 +510,7 @@ function fetchedEntry(
     method: "direct",
     ownerSavedDate: null,
     renderArgs: null,
+    renderProxyHost: null,
     recorded: true,
     ...overrides,
   };
@@ -694,6 +695,7 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
             method: "direct",
             ownerSavedDate: null,
             renderArgs: null,
+            renderProxyHost: null,
             recorded: true,
           },
         ],
@@ -736,6 +738,7 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       method: "direct",
       ownerSavedDate: null,
       renderArgs: null,
+      renderProxyHost: null,
       recorded: true,
       ...overrides,
     };
@@ -1035,6 +1038,7 @@ describe("x2-verdict: gate finding 2c — buildEvidenceByTrail's `recorded` is L
       method: "direct",
       ownerSavedDate: null,
       renderArgs: null,
+      renderProxyHost: null,
       recorded: true,
       ...overrides,
     };

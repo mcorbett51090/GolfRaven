@@ -1,0 +1,26 @@
+# supabase/config.toml
+#
+# should-fix (post-P3a gate): "Add supabase/config.toml pinning the
+# exposed schemas to `api`." Everything client-facing lives in schema
+# `api` by design (build plan §4.4/§4.7 — see AGENTS.md/CLAUDE.md's own
+# note on this, and 0001_schemas.sql's comment on why no blanket grant
+# exists on `public`). PostgREST's own `db-schemas` setting is what
+# actually controls which schemas it exposes over the REST API on a real
+# Supabase project; this repo has no Supabase CLI / `supabase start` to
+# read it from (supabase/tests/shim.sql's own header), so this file is
+# the source of truth a real `supabase db push`/`supabase start` would
+# read, matching what the RLS/grant design here already assumes.
+#
+# [unverified — training knowledge of the Supabase CLI's config.toml
+# schema] only the one setting this repo's authorization design actually
+# depends on is set here; a real project's full config.toml (ports,
+# auth providers, storage limits, etc.) is out of this stage's scope.
+
+[api]
+enabled = true
+# The ONLY schema PostgREST exposes to anon/authenticated over the REST
+# API. `app`/`private` are never exposed — every client-facing read/write
+# goes through an `api.*` view or RPC (0010/0011), each already
+# `security_invoker = true` (03_views_and_rpc.sql's own check).
+schemas = ["api"]
+extra_search_path = ["public"]

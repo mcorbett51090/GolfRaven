@@ -266,7 +266,7 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
 
 describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => {
   function okHtmlFetch(bodyByUrl: Record<string, string>) {
-    return vi.fn(async (input: RequestInfo | URL) => {
+    return vi.fn(async (input: string | URL) => {
       const url = String(input);
       const body = bodyByUrl[url] ?? "<h1>fallback</h1>";
       const res = new Response(body, {
@@ -359,7 +359,7 @@ describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => 
 
 describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capture-wins is NOT hard-coded)", () => {
   function okHtmlFetch(bodyByUrl: Record<string, string>) {
-    return vi.fn(async (input: RequestInfo | URL) => {
+    return vi.fn(async (input: string | URL) => {
       const url = String(input);
       const body = bodyByUrl[url] ?? "<h1>fallback</h1>";
       const res = new Response(body, {
@@ -568,6 +568,68 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     expect(state.userAgentSeen).toMatch(/^GolfRaven-P0-X2\/0\.1/);
     expect(state.userAgentSeen).not.toMatch(/Mozilla|Chrome|Safari/);
     expect(state.serviceWorkersSeen).toBe("block");
+  });
+
+  it("should-fix: records the HTTPS_PROXY host (never credentials) in the manifest entry alongside renderArgs, for a rendered capture", async () => {
+    vi.stubEnv("HTTPS_PROXY", "http://local_proxy:secret-token@127.0.0.1:41831");
+    const html = "<html><body><h1>Vancouver Island Golf Trail</h1></body></html>";
+    const { launch } = fakeRenderLauncher({
+      finalUrl: "https://golfvancouverisland.ca/",
+      html,
+    });
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
+    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-proxy-run"), {
+      render: true,
+      renderLaunch: launch,
+    });
+    const entry = manifest.trails.VI?.[0];
+    expect(entry?.renderProxyHost).toBe("127.0.0.1:41831");
+    // Never the raw env var value — that would leak the embedded credential.
+    const onDisk = readFileSync(
+      path.join(OUT_DIR, "render-proxy-run", "manifest.json"),
+      "utf8",
+    );
+    expect(onDisk).not.toContain("secret-token");
+    expect(onDisk).not.toContain("local_proxy");
+    vi.unstubAllEnvs();
+  });
+
+  it("should-fix: renderProxyHost is null when no HTTPS_PROXY/https_proxy env var is set", async () => {
+    vi.stubEnv("HTTPS_PROXY", undefined);
+    vi.stubEnv("https_proxy", undefined);
+    const html = "<html><body><h1>No proxy in effect</h1></body></html>";
+    const { launch } = fakeRenderLauncher({
+      finalUrl: "https://golfvancouverisland.ca/",
+      html,
+    });
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
+    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-no-proxy-run"), {
+      render: true,
+      renderLaunch: launch,
+    });
+    expect(manifest.trails.VI?.[0]?.renderProxyHost).toBeNull();
+    vi.unstubAllEnvs();
+  });
+
+  it("should-fix: a DIRECT (non-render) entry always has renderProxyHost: null, even with HTTPS_PROXY set", async () => {
+    vi.stubEnv("HTTPS_PROXY", "http://127.0.0.1:9999");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const res = new Response("<h1>OK</h1>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+        Object.defineProperty(res, "url", { value: "https://example.com/tn" });
+        return res;
+      }),
+    );
+    const manifest = await runX2Fetch(
+      { TN: ["https://example.com/tn"] },
+      path.join(OUT_DIR, "direct-proxy-noop-run"),
+    );
+    expect(manifest.trails.TN?.[0]?.renderProxyHost).toBeNull();
+    vi.unstubAllEnvs();
   });
 
   it("gate N6: refuses to render a non-https configured URL, never launching a browser", async () => {

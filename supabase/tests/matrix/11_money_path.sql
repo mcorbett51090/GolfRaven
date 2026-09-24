@@ -65,29 +65,70 @@ SELECT lives_ok(
   'setup: a play row for player B'
 );
 
--- A play for player B, evidence for player A: ownership-mismatch trigger.
+-- A play for player B, evidence for player A: ownership mismatch.
 SELECT lives_ok(
   $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
     VALUES ('31000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000b',
             NULL, 'self_report', 'money-path-seed-b', 'accepted', 1)$$,
   'setup: an evidence row owned by player B'
 );
+-- ⛔ FIX (M1, post-P3a gate): the OLD plpgsql trigger silently PASSED this
+-- exact case when the trigger's own two independent SELECTs raced a
+-- deferred-FK-ordering NULL lookup (both sides NULL -> `IS DISTINCT FROM`
+-- is false) — confirmed empirically this session by reproducing it
+-- against the pre-fix code. The composite-FK design has no such gap: a
+-- caller building this row has to pick SOME user_id, and whichever parent
+-- it does NOT match rejects it outright as a plain foreign-key violation
+-- (23503), deferred-FK ordering or not, because MATCH SIMPLE's NULL
+-- exemption only applies when one of THIS row's own key columns is NULL
+-- — none of play_evidence's are.
 SELECT throws_ok(
-  $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
-    ('41000000-0000-0000-0000-000000000099', '30000000-0000-0000-0000-000000000001')$$,
-  '23514',
+  $$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES
+    ('41000000-0000-0000-0000-000000000099', '30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000b')$$,
+  '23503',
   NULL,
-  'play_evidence: player B''s play cannot be backed by player A''s evidence (user-match trigger)'
+  'play_evidence: player B''s play cannot be backed by player A''s evidence (composite FK to app.evidence(id,user_id) rejects it)'
 );
--- (the row above was already rejected by the UNIQUE constraint test two
--- assertions up — re-asserted here against player B's OWN evidence id to
--- isolate the user-match trigger specifically, independent of UNIQUE.)
 SELECT throws_ok(
-  $$INSERT INTO app.play_evidence (play_id, evidence_id) VALUES
-    ('40000000-0000-0000-0000-000000000001', '31000000-0000-0000-0000-000000000099')$$,
-  '23514',
+  $$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES
+    ('40000000-0000-0000-0000-000000000001', '31000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a')$$,
+  '23503',
   NULL,
-  'play_evidence: player A''s play cannot be backed by player B''s evidence (user-match trigger, reverse direction)'
+  'play_evidence: player A''s play cannot be backed by player B''s evidence (composite FK to app.evidence(id,user_id) rejects it, reverse direction)'
+);
+
+-- Both play_evidence composite FKs are DEFERRABLE INITIALLY DEFERRED
+-- (matching every other app-internal FK, 0014 §3 / 0017), so a violation
+-- from an UPDATE alone would not raise until COMMIT -- which this test
+-- file's outer transaction never reaches (it ROLLBACKs). Switching JUST
+-- these two constraints to IMMEDIATE checking (not ALL constraints, so
+-- delete_my_data's OWN reliance on deferred checking elsewhere in this
+-- same file, H1's test below, is unaffected) makes the re-own violation
+-- raise at the UPDATE statement itself, where throws_ok can see it.
+SELECT lives_ok(
+  $$SET CONSTRAINTS play_evidence_play_user_fk, play_evidence_evidence_user_fk IMMEDIATE$$,
+  'setup: check the play_evidence composite FKs immediately for the M1 re-own tests below'
+);
+
+-- M1 bypass 2 (post-P3a gate): re-owning AFTER a valid link exists. The
+-- old trigger only checked ownership at LINK TIME — nothing stopped
+-- play.user_id being changed afterward, silently detaching the pair
+-- without ever re-checking (confirmed as the second named bypass). The
+-- composite FK blocks the re-own AT THE SOURCE: play_evidence (play A,
+-- evidence2 A) from test 2 above still references app.play(id=play A,
+-- user_id=A); changing play.user_id now hits the FK's default ON UPDATE
+-- NO ACTION.
+SELECT throws_ok(
+  $$UPDATE app.play SET user_id = '00000000-0000-0000-0000-00000000000b' WHERE id = '40000000-0000-0000-0000-000000000001'$$,
+  '23503',
+  NULL,
+  'play_evidence: re-owning a play that still has a linked play_evidence row is rejected (composite FK ON UPDATE)'
+);
+SELECT throws_ok(
+  $$UPDATE app.evidence SET user_id = '00000000-0000-0000-0000-00000000000b' WHERE id = '32000000-0000-0000-0000-000000000099'$$,
+  '23503',
+  NULL,
+  'play_evidence: re-owning evidence that still has a linked play_evidence row is rejected (composite FK ON UPDATE)'
 );
 
 -- ---------------------------------------------------------------------------

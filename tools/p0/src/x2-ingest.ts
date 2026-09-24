@@ -371,6 +371,7 @@ export async function ingestOwnerSavedPage(opts: {
     method: "owner-saved",
     ownerSavedDate: statedDate,
     renderArgs: null,
+    renderProxyHost: null,
     recorded,
   };
 

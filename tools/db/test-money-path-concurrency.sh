@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# tools/db/test-money-path-concurrency.sh
+#
+# H3 + should-fix (post-P3a gate): "Add a concurrent two-session test
+# (same approach as test-replay-concurrency.sh)" for max_redemptions, and
+# "Add money-path concurrency tests (max_redemptions, budget, dedupe) to
+# the harness." pgTAP tests run inside ONE transaction on ONE connection,
+# so — same reasoning as test-replay-concurrency.sh — a genuine two-
+# session race needs two REAL, concurrent psql connections, which this
+# script provides for all three money-path race conditions the gate
+# named.
+#
+# Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash
+#   tools/db/test-money-path-concurrency.sh
+# (tools/db/test.sh sets these and calls this script after
+# test-replay-concurrency.sh, against the same throwaway cluster/
+# database, before teardown.)
+
+set -euo pipefail
+
+# Same reasoning as test-replay-concurrency.sh's own fix: these
+# operations' real production identity is service_role, not whatever
+# PGUSER the harness connects as (migration_owner under
+# HARNESS_MODE=restricted — NOSUPERUSER NOBYPASSRLS, no grants on the
+# tables/functions this script touches).
+PSQL=(psql -v ON_ERROR_STOP=1 -A -t -q -c "SET ROLE service_role;")
+FAILED=0
+
+count() {
+  "${PSQL[@]}" -c "$1" | tr -d '[:space:]'
+}
+
+TAG="mpconc-$(date +%s%N)"
+
+echo "tools/db/test-money-path-concurrency.sh: max_redemptions race (H3)"
+OFFER_ID="c1a00000-0000-0000-0000-000000000001"
+"${PSQL[@]}" -c "
+  INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, max_redemptions, valid_from, valid_to, status)
+  VALUES ('$OFFER_ID'::uuid, 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 1000, 1, current_date, current_date + 30, 'live')
+  ON CONFLICT (id) DO UPDATE SET max_redemptions = 1, budget_cap = 1000, budget_used = 0, budget_reserved = 0, status = 'live', valid_from = current_date, valid_to = current_date + 30;
+" >/dev/null
+"${PSQL[@]}" -c "DELETE FROM app.offer_code WHERE offer_id = '$OFFER_ID';" >/dev/null
+
+INSERT_A="INSERT INTO app.offer_code (offer_id, user_id, facility_id, state)
+  VALUES ('$OFFER_ID', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned')
+  ON CONFLICT DO NOTHING;"
+INSERT_B="INSERT INTO app.offer_code (offer_id, user_id, facility_id, state)
+  VALUES ('$OFFER_ID', '00000000-0000-0000-0000-00000000000b', 'fac_x', 'earned')
+  ON CONFLICT DO NOTHING;"
+"${PSQL[@]}" -c "$INSERT_A" >/dev/null 2>/tmp/mpconc-a.err &
+PID1=$!
+"${PSQL[@]}" -c "$INSERT_B" >/dev/null 2>/tmp/mpconc-b.err &
+PID2=$!
+wait "$PID1" "$PID2" || true
+
+N=$(count "SELECT count(*) FROM app.offer_code WHERE offer_id = '$OFFER_ID'")
+if [ "$N" != "1" ]; then
+  echo "FAIL: max_redemptions=1 race allowed $N offer_code rows against the same offer (expected 1)" >&2
+  cat /tmp/mpconc-a.err /tmp/mpconc-b.err >&2 || true
+  FAILED=1
+else
+  echo "PASS: concurrent redemption race -> exactly 1 offer_code row (max_redemptions=1 held)"
+fi
+"${PSQL[@]}" -c "DELETE FROM app.offer_code WHERE offer_id = '$OFFER_ID'; DELETE FROM app.offer WHERE id = '$OFFER_ID';" >/dev/null
+
+echo "tools/db/test-money-path-concurrency.sh: offer budget reservation race (should-fix)"
+BUDGET_OFFER_ID="c1a00000-0000-0000-0000-000000000002"
+"${PSQL[@]}" -c "
+  INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, valid_from, valid_to, status)
+  VALUES ('$BUDGET_OFFER_ID'::uuid, 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 100, current_date, current_date + 30, 'live')
+  ON CONFLICT (id) DO UPDATE SET budget_cap = 100, budget_used = 0, budget_reserved = 0, status = 'live', valid_from = current_date, valid_to = current_date + 30;
+" >/dev/null
+
+RESERVE_60="SELECT app.reserve_offer_budget('$BUDGET_OFFER_ID'::uuid, 60);"
+"${PSQL[@]}" -c "$RESERVE_60" >/tmp/mpconc-r1.out 2>/tmp/mpconc-r1.err &
+PID3=$!
+"${PSQL[@]}" -c "$RESERVE_60" >/tmp/mpconc-r2.out 2>/tmp/mpconc-r2.err &
+PID4=$!
+wait "$PID3" "$PID4" || true
+
+RESERVED=$(count "SELECT budget_reserved FROM app.offer WHERE id = '$BUDGET_OFFER_ID'")
+# Two concurrent reservations of 60 against a cap of 100: at most ONE can
+# succeed (60 <= 100, but 60+60=120 > 100) -- budget_reserved must land at
+# exactly 60, never 120 (both succeeding) and never 0 (both failing when
+# one legitimately should have succeeded).
+if [ "$RESERVED" != "60" ]; then
+  echo "FAIL: concurrent reserve_offer_budget race left budget_reserved=$RESERVED, expected exactly 60 (one success, one rejection)" >&2
+  cat /tmp/mpconc-r1.out /tmp/mpconc-r2.out /tmp/mpconc-r1.err /tmp/mpconc-r2.err >&2 || true
+  FAILED=1
+else
+  echo "PASS: concurrent reserve_offer_budget race -> budget_reserved=60 exactly (row lock held)"
+fi
+"${PSQL[@]}" -c "DELETE FROM app.offer WHERE id = '$BUDGET_OFFER_ID';" >/dev/null
+
+echo "tools/db/test-money-path-concurrency.sh: receipt phash dedupe race (M4)"
+"${PSQL[@]}" -c "DELETE FROM app.purchase_evidence WHERE id::text LIKE 'c1a00002%'; DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG';" >/dev/null 2>&1 || true
+PE_1="c1a00002-0000-0000-0000-000000000001"
+PE_2="c1a00002-0000-0000-0000-000000000002"
+"${PSQL[@]}" -c "
+  INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+  VALUES ('$PE_1'::uuid, '00000000-0000-0000-0000-00000000000a', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid'),
+         ('$PE_2'::uuid, '00000000-0000-0000-0000-00000000000b', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')
+  ON CONFLICT (id) DO NOTHING;
+" >/dev/null
+
+DEDUPE_1="SELECT app.dedupe_receipt_fingerprint('$PE_1'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, '$TAG', 'fac_x', current_date);"
+DEDUPE_2="SELECT app.dedupe_receipt_fingerprint('$PE_2'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid, '$TAG', 'fac_x', current_date);"
+"${PSQL[@]}" -c "$DEDUPE_1" >/tmp/mpconc-d1.out 2>/tmp/mpconc-d1.err &
+PID5=$!
+"${PSQL[@]}" -c "$DEDUPE_2" >/tmp/mpconc-d2.out 2>/tmp/mpconc-d2.err &
+PID6=$!
+wait "$PID5" "$PID6" || true
+
+FP_COUNT=$(count "SELECT count(*) FROM app.receipt_fingerprint WHERE phash = '$TAG'")
+VOID_COUNT=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_1', '$PE_2') AND status = 'void'")
+if [ "$FP_COUNT" != "1" ] || [ "$VOID_COUNT" != "1" ]; then
+  echo "FAIL: concurrent dedupe_receipt_fingerprint race left $FP_COUNT fingerprint row(s) and $VOID_COUNT void purchase(s), expected exactly 1 and 1" >&2
+  cat /tmp/mpconc-d1.out /tmp/mpconc-d2.out /tmp/mpconc-d1.err /tmp/mpconc-d2.err >&2 || true
+  FAILED=1
+else
+  echo "PASS: concurrent receipt-phash dedupe race -> exactly 1 fingerprint row, exactly 1 purchase voided"
+fi
+"${PSQL[@]}" -c "DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG'; DELETE FROM app.purchase_evidence WHERE id IN ('$PE_1', '$PE_2');" >/dev/null
+
+rm -f /tmp/mpconc-*.out /tmp/mpconc-*.err 2>/dev/null || true
+
+if [ "$FAILED" -ne 0 ]; then
+  echo "tools/db/test-money-path-concurrency.sh: FAILED" >&2
+  exit 1
+fi
+echo "tools/db/test-money-path-concurrency.sh: all money-path concurrency checks passed"

@@ -37,7 +37,11 @@ function psql(sql) {
 
 const failures = [];
 
-// 1. Every function in app/api/private is inventoried.
+// 1. Every function/procedure in app/api/private is inventoried.
+// ⛔ FIX (should-fix, post-P3a gate): "Include procedures (prokind IN
+// ('f','p'))." — p.prokind = 'f' alone missed a CREATE PROCEDURE, which
+// carries the exact same EXECUTE-grant/search_path concerns as a
+// function but was invisible to this check entirely.
 const uninventoried = psql(`
   SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
   FROM pg_proc p
@@ -45,7 +49,7 @@ const uninventoried = psql(`
   LEFT JOIN private.function_inventory fi
     ON fi.schema_name = n.nspname AND fi.function_name = p.proname
     AND fi.identity_args = pg_get_function_identity_arguments(p.oid)
-  WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND fi.schema_name IS NULL
+  WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND fi.schema_name IS NULL
 `);
 for (const [fn] of uninventoried) {
   failures.push(`uninventoried function: ${fn} — add a row to private.function_inventory (supabase/migrations/0014_hardening.sql) before this can pass`);
@@ -72,16 +76,82 @@ for (const row of grantRows) {
   if (expSvc !== actSvc) failures.push(`${label}: service_role EXECUTE expected=${expSvc} actual=${actSvc}`);
 }
 
-// 3. Every SECURITY DEFINER function sets search_path.
+// 3. Every SECURITY DEFINER function/procedure ANYWHERE (not just
+// app/api/private — should-fix mirrors 10_function_inventory.sql's own
+// M2(c) widening) sets search_path, excluding extension-owned ones.
 const missingSearchPath = psql(`
   SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname IN ('app', 'api', 'private') AND p.prosecdef
+  WHERE p.prokind IN ('f', 'p') AND p.prosecdef
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
     AND NOT EXISTS (SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}'::text[])) cfg WHERE cfg LIKE 'search_path=%')
 `);
 for (const [fn] of missingSearchPath) {
   failures.push(`SECURITY DEFINER function with no search_path set: ${fn}`);
+}
+
+// 4. M2(c)/should-fix: every SECURITY DEFINER function/procedure
+// anywhere (non-extension) lives in schema `private` AND is owned by
+// `private_definer` — the standalone-CLI mirror of
+// 10_function_inventory.sql's own check.
+const misplacedOrMisowned = psql(`
+  SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
+         n.nspname, COALESCE(r.rolname, '<none>')
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  LEFT JOIN pg_roles r ON r.oid = p.proowner
+  WHERE p.prokind IN ('f', 'p') AND p.prosecdef
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    AND (n.nspname <> 'private' OR r.rolname IS DISTINCT FROM 'private_definer')
+`);
+for (const [fn, schema, owner] of misplacedOrMisowned) {
+  failures.push(`SECURITY DEFINER function outside private/not owned by private_definer: ${fn} (schema=${schema}, owner=${owner})`);
+}
+
+// 5. should-fix: every RLS policy applying to private_definer (direct
+// grant or PUBLIC) is registered in private.definer_policy_allowlist,
+// with a matching USING/WITH CHECK expression — the standalone-CLI
+// mirror of 10_function_inventory.sql's own allow-list checks (both
+// directions).
+const unregisteredPolicies = psql(`
+  SELECT n.nspname || '.' || cl.relname || '.' || pol.polname
+  FROM pg_policy pol
+  JOIN pg_class cl ON cl.oid = pol.polrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+  CROSS JOIN pg_roles pr
+  WHERE pr.rolname = 'private_definer'
+    AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+    AND NOT EXISTS (
+      SELECT 1 FROM private.definer_policy_allowlist al
+      WHERE al.schema_name = n.nspname AND al.table_name = cl.relname AND al.policy_name = pol.polname
+        AND al.command = CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' ELSE pol.polcmd::text END
+        AND al.using_expr IS NOT DISTINCT FROM pg_get_expr(pol.polqual, pol.polrelid)
+        AND al.with_check_expr IS NOT DISTINCT FROM pg_get_expr(pol.polwithcheck, pol.polrelid)
+    )
+`);
+for (const [p] of unregisteredPolicies) {
+  failures.push(`RLS policy applying to private_definer with no matching private.definer_policy_allowlist row (or a mismatched expression): ${p}`);
+}
+const staleAllowlistRows = psql(`
+  SELECT al.schema_name || '.' || al.table_name || '.' || al.policy_name
+  FROM private.definer_policy_allowlist al
+  WHERE NOT EXISTS (
+    SELECT 1 FROM pg_policy pol
+    JOIN pg_class cl ON cl.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    CROSS JOIN pg_roles pr
+    WHERE pr.rolname = 'private_definer'
+      AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+      AND n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+      AND al.using_expr IS NOT DISTINCT FROM pg_get_expr(pol.polqual, pol.polrelid)
+      AND al.with_check_expr IS NOT DISTINCT FROM pg_get_expr(pol.polwithcheck, pol.polrelid)
+  )
+`);
+for (const [row] of staleAllowlistRows) {
+  failures.push(`private.definer_policy_allowlist row names no real policy applying to private_definer (stale or mismatched expression): ${row}`);
 }
 
 if (failures.length > 0) {

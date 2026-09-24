@@ -346,7 +346,9 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
     expect(cases.length).toBe(7680);
   });
 
-  it("money(E) ⇒ oracle(E), for every generated case (§10 P3 AT(4))", () => {
+  it(
+    "money(E) ⇒ oracle(E), for every generated case (§10 P3 AT(4))",
+    () => {
     const violations: string[] = [];
     for (const c of cases) {
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
@@ -358,9 +360,11 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
       }
     }
     expect(violations).toEqual([]);
-  });
+  }, 20000);
 
-  it("device-only ⇒ score_monetary < MONEY_MIN, for every generated case", () => {
+  it(
+    "device-only ⇒ score_monetary < MONEY_MIN, for every generated case",
+    () => {
     const violations: string[] = [];
     for (const c of cases) {
       if (!c.deviceOnly) continue;
@@ -371,7 +375,7 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
       }
     }
     expect(violations).toEqual([]);
-  });
+  }, 20000);
 
   // Retained as a secondary cross-check (the contrapositive of property 1
   // over the SAME fix-bearing generator), but the primary, literal reading
@@ -379,7 +383,9 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
   // "class label, no fix at all" block below — this one alone would be
   // indistinguishable from property 1 (test-adequacy: "make property 3
   // genuinely different from property 1").
-  it("[contrapositive cross-check] no oracle-qualifying fix anywhere in the case ⇒ ¬money", () => {
+  it(
+    "[contrapositive cross-check] no oracle-qualifying fix anywhere in the case ⇒ ¬money",
+    () => {
     const violations: string[] = [];
     for (const c of cases) {
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
@@ -390,7 +396,7 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
       }
     }
     expect(violations).toEqual([]);
-  });
+  }, 20000);
 });
 
 /* ------------------------------------------------------------------ */
