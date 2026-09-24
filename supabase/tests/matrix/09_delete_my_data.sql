@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(21);
+SELECT plan(22);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -238,6 +238,44 @@ SELECT is(
   (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'manual_review_seed' AND user_id IS NULL),
   1, 'fraud_signal.user_id is nulled, the row survives (admin fraud record kept)'
 );
+
+-- ---------------------------------------------------------------------------
+-- M2 (post-P3a re-gate): "no jsonb detail or evidence column anywhere
+-- contains the deleted user's uuid." Repro was app.review_item.detail/
+-- app.fraud_signal.detail embedding 'user_id'/'matched_user_id' from
+-- app.dedupe_receipt_fingerprint's cross-user branch (0017) — fixed there
+-- by dropping those keys entirely (the row's own user_id column, plus
+-- matched_receipt_fingerprint_id, are enough to look a match up without
+-- ever putting a raw user uuid in a jsonb payload). This test is the
+-- CATALOG-DRIVEN safety net that generalizes past that one call site: it
+-- scans EVERY jsonb column in schema app (derived from
+-- information_schema.columns, not a hand-maintained list — the same
+-- "derived, not maintained" discipline as private.pii_retention_policy's
+-- own generic pass above) for the literal deleted-user uuid appearing
+-- ANYWHERE in its text form, so a FUTURE jsonb column that starts
+-- embedding a raw user id fails here immediately, before anyone notices
+-- by hand.
+DO $$
+DECLARE
+  v_col record;
+  v_count int;
+  v_uuid text := '00000000-0000-0000-0000-00000000000a';
+BEGIN
+  FOR v_col IN
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'app' AND data_type = 'jsonb'
+  LOOP
+    EXECUTE format(
+      'SELECT count(*) FROM app.%I WHERE %I::text ILIKE $1', v_col.table_name, v_col.column_name
+    ) INTO v_count USING '%' || v_uuid || '%';
+    IF v_count <> 0 THEN
+      RAISE EXCEPTION 'the deleted user''s uuid (%) still appears in app.%.% (jsonb) after delete_my_data — % row(s)', v_uuid, v_col.table_name, v_col.column_name, v_count;
+    END IF;
+  END LOOP;
+END
+$$;
+SELECT pass('no jsonb column anywhere in schema app contains the deleted user''s uuid, as text, after delete_my_data (catalog-driven over information_schema.columns)');
 
 SELECT * FROM finish();
 ROLLBACK;

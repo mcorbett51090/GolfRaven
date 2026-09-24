@@ -643,7 +643,13 @@ BEGIN
     -- reviewer/fraud void -- that verdict stands).
     UPDATE app.purchase_evidence SET status = 'pending' WHERE id = p_purchase_evidence_id AND status <> 'void';
     IF v_dupe_purchase_evidence_id IS NOT NULL THEN
-      UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status <> 'void';
+      -- should-fix (post-P3a re-gate): don't demote the EARLIER
+      -- purchase's own status once it's already resolved to 'valid'
+      -- (the cross-user review is about the NEW submission colliding
+      -- with something already-accepted, not a reason to un-accept the
+      -- earlier one -- it's still referenced by matched_purchase_evidence_id
+      -- in the review_item/fraud_signal above either way).
+      UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status NOT IN ('void', 'valid');
     END IF;
     INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
     VALUES (
@@ -652,9 +658,7 @@ BEGIN
       p_purchase_evidence_id,
       jsonb_build_object(
         'purchase_evidence_id', p_purchase_evidence_id,
-        'user_id', p_user_id,
         'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
-        'matched_user_id', v_dupe_user_id,
         'matched_receipt_fingerprint_id', v_dupe_id,
         'phash', p_phash,
         'facility_id', p_facility_id,
@@ -668,7 +672,6 @@ BEGIN
       jsonb_build_object(
         'purchase_evidence_id', p_purchase_evidence_id,
         'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
-        'matched_user_id', v_dupe_user_id,
         'phash', p_phash,
         'facility_id', p_facility_id,
         'local_date', p_local_date
@@ -723,7 +726,9 @@ BEGIN
       -- auto-void either side, review_item + fraud_signal, both pending.
       UPDATE app.purchase_evidence SET status = 'pending' WHERE id = p_purchase_evidence_id AND status <> 'void';
       IF v_dupe_purchase_evidence_id IS NOT NULL THEN
-        UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status <> 'void';
+        -- should-fix (post-P3a re-gate): same reasoning as the phash
+        -- branch above -- don't demote an already-valid earlier purchase.
+        UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status NOT IN ('void', 'valid');
       END IF;
       INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
       VALUES (
@@ -732,9 +737,7 @@ BEGIN
         p_purchase_evidence_id,
         jsonb_build_object(
           'purchase_evidence_id', p_purchase_evidence_id,
-          'user_id', p_user_id,
           'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
-          'matched_user_id', v_dupe_user_id,
           'matched_receipt_fingerprint_id', v_dupe_id,
           'match_basis', 'receipt_number_ocr',
           'receipt_number_ocr', p_receipt_number_ocr,
@@ -749,7 +752,6 @@ BEGIN
         jsonb_build_object(
           'purchase_evidence_id', p_purchase_evidence_id,
           'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
-          'matched_user_id', v_dupe_user_id,
           'match_basis', 'receipt_number_ocr',
           'receipt_number_ocr', p_receipt_number_ocr,
           'facility_id', p_facility_id,
@@ -815,20 +817,48 @@ FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_used_at_once();
 -- append-only ledger that nothing ever deletes from closes that: every
 -- nonce/jti that was EVER inserted stays blocked forever, row or no row.
 -- ============================================================================
+-- ⛔ FIX (should-fix, post-P3a re-gate): "add CHECK (expires_at <=
+-- issued_at + interval '24 hours') on the challenge ... right now a
+-- 30-day challenge is accepted." checkin_challenge (0005) has both
+-- issued_at (DEFAULT now()) and expires_at (NOT NULL) but nothing ever
+-- bounded the gap between them — a caller could issue one with an
+-- arbitrarily distant expires_at, and the consumed-nonce purge above (7
+-- days past THAT expiry) would then have to keep the tombstone around
+-- for just as long. 24 hours is generous for a proof-of-presence
+-- checkin challenge (every seeded fixture in this repo uses 5 minutes);
+-- re-tighten if a real, documented validity window is ever specified.
+ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_expires_at_bounded
+  CHECK (expires_at <= issued_at + interval '24 hours');
+
 CREATE TABLE private.consumed_nonce (
   nonce_hash text PRIMARY KEY,
   source text NOT NULL,
-  consumed_at timestamptz NOT NULL DEFAULT now()
+  consumed_at timestamptz NOT NULL DEFAULT now(),
+  -- should-fix (post-P3a re-gate, correction): the SOURCE row's own
+  -- expiry, captured at tombstone-insert time — checkin_challenge has a
+  -- real, bounded expires_at (see the new CHECK constraint on that table,
+  -- below); attestation has no stored expiry at all (its token_jti is a
+  -- JWT id whose validity window lives in the JWT itself, out of this
+  -- stage's scope), so attestation-sourced rows leave this NULL and
+  -- purge_consumed_nonce falls back to consumed_at for those specifically
+  -- — documented there, not a silent gap.
+  expires_at timestamptz
 );
 ALTER TABLE private.consumed_nonce ENABLE ROW LEVEL SECURITY;
 ALTER TABLE private.consumed_nonce FORCE ROW LEVEL SECURITY;
--- No client policy at all (nobody but the two trigger functions below
--- ever touches it) — service_role gets the table-level grants it needs
--- (it bypasses RLS entirely regardless, 0009/shim).
--- DELETE added (should-fix, post-P3a re-gate): private.purge_consumed_nonce
--- (below) DELETEs expired rows; it is not SECURITY DEFINER, so it runs
--- with the CALLER's own grants (service_role, its only EXECUTE grantee).
-GRANT INSERT, SELECT, DELETE ON private.consumed_nonce TO service_role;
+-- ⛔ FIX (should-fix, post-P3a re-gate: "consumed_nonce DELETE
+-- regression"): service_role must NOT have DELETE here — the whole point
+-- of this table is an append-only ledger nothing can shrink except a
+-- bounded, source-expiry-aware purge; a caller with DELETE could remove a
+-- consumed nonce and replay it (delete-then-replay), exactly defeating
+-- the ledger. service_role keeps INSERT (the two tombstone triggers
+-- below fire as whatever role is inserting into checkin_challenge/
+-- attestation, normally service_role) and SELECT (harness/observability
+-- needs); DELETE now belongs ONLY to private_definer, reached through
+-- private.purge_consumed_nonce (SECURITY DEFINER, below) and gated by
+-- that role's own narrow RLS policy — never a direct grant to any
+-- externally-callable role.
+GRANT INSERT, SELECT ON private.consumed_nonce TO service_role;
 
 CREATE OR REPLACE FUNCTION app.checkin_challenge_tombstone_nonce() RETURNS trigger
 LANGUAGE plpgsql
@@ -838,7 +868,7 @@ BEGIN
     RAISE EXCEPTION 'checkin_challenge: nonce_hash % was already consumed (tombstoned) and cannot be reused', NEW.nonce_hash
       USING ERRCODE = '23514';
   END IF;
-  INSERT INTO private.consumed_nonce (nonce_hash, source) VALUES (NEW.nonce_hash, 'checkin_challenge');
+  INSERT INTO private.consumed_nonce (nonce_hash, source, expires_at) VALUES (NEW.nonce_hash, 'checkin_challenge', NEW.expires_at);
   RETURN NEW;
 END;
 $$;
@@ -855,6 +885,9 @@ BEGIN
     RAISE EXCEPTION 'attestation: token_jti % was already consumed (tombstoned) and cannot be reused', NEW.token_jti
       USING ERRCODE = '23514';
   END IF;
+  -- No stored expiry to capture here (see the table's own column
+  -- comment) -- expires_at stays NULL; purge_consumed_nonce falls back
+  -- to consumed_at for attestation-sourced rows.
   INSERT INTO private.consumed_nonce (nonce_hash, source) VALUES (NEW.token_jti, 'attestation');
   RETURN NEW;
 END;
@@ -908,38 +941,85 @@ CREATE TRIGGER attestation_token_jti_immutable_trg
 BEFORE UPDATE ON app.attestation
 FOR EACH ROW EXECUTE FUNCTION app.attestation_token_jti_immutable();
 
--- ⛔ FIX (should-fix, post-P3a re-gate): "add a TTL purge function; keep
+-- ⛔ FIX (should-fix, post-P3a re-gate: "add a TTL purge function; keep
 -- tombstones at least as long as the maximum challenge validity plus a
--- margin, and document the value." Neither checkin_challenge nor
--- attestation documents an explicit maximum validity window anywhere in
--- this repo (grepped docs/ and every migration this session) — the one
--- comparable documented window is course_qr_token.expires_at, "issued_at
--- + 120s" (0005). Rather than assume checkin_challenge/attestation share
--- that exact number `[unverified]`, RETENTION_DAYS below is set far
--- larger than any plausible challenge validity (minutes to low hours,
--- going by that analog) so it is safely "max validity plus a margin"
--- under any reasonable real value, while still bounding this
--- append-only table's growth. Re-tune down once a real validity window
--- is documented — this is a deliberately conservative default, not a
--- verified figure.
-CREATE OR REPLACE FUNCTION private.purge_consumed_nonce(p_retention interval DEFAULT interval '7 days')
+-- margin" — CORRECTED after the re-gate: the margin is now measured from
+-- each row's own SOURCE EXPIRY (expires_at, above), not from consumed_at.
+-- Retention is now hardcoded at 7 days past that expiry (no longer a
+-- caller-supplied parameter — the whole point of the should-fix is that
+-- this floor must not be something a caller can shrink) and enforced
+-- TWICE, independently: once in the function body below, and once,
+-- structurally, by the RLS policy on private.consumed_nonce itself
+-- (pd_purge_consumed_nonce_expired, further below) — even if this
+-- function's own WHERE clause had a bug, DELETE FROM private.
+-- consumed_nonce as private_definer literally cannot touch a row that
+-- policy's USING clause doesn't independently agree is expired.
+--
+-- SECURITY DEFINER, owned by private_definer (should-fix, post-P3a
+-- re-gate): purge must NOT run as service_role's own broad grants —
+-- reaching consumed_nonce ONLY through this one, narrowly-policed path
+-- is what makes "revoke service_role's DELETE grant" (above) hold in
+-- practice, not just on paper.
+CREATE OR REPLACE FUNCTION private.purge_consumed_nonce()
 RETURNS bigint
-LANGUAGE plpgsql
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   v_deleted bigint;
 BEGIN
-  IF p_retention < interval '1 day' THEN
-    RAISE EXCEPTION 'purge_consumed_nonce: p_retention (%) is less than the 1-day floor — this table exists specifically to outlive any single challenge/attestation''s validity window', p_retention;
-  END IF;
-  DELETE FROM private.consumed_nonce WHERE consumed_at < now() - p_retention;
+  DELETE FROM private.consumed_nonce WHERE COALESCE(expires_at, consumed_at) < now() - interval '7 days';
   GET DIAGNOSTICS v_deleted = ROW_COUNT;
   RETURN v_deleted;
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce(interval) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce(interval) TO service_role;
+-- Ownership transfer needs CREATE on schema private briefly, same
+-- discipline as every other private_definer-owned function in this file
+-- (see 0016's own note on why).
+GRANT CREATE ON SCHEMA private TO private_definer;
+ALTER FUNCTION private.purge_consumed_nonce() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce() TO service_role;
+
+-- The narrow policy itself: private_definer may DELETE a
+-- private.consumed_nonce row ONLY if it is more than 7 days past its own
+-- source expiry (or consumed_at, for the attestation rows that have no
+-- stored expiry) — a hardcoded floor, not a parameter, so nothing calling
+-- through purge_consumed_nonce (or anything else running as
+-- private_definer, ever) can delete a tombstone sooner than that,
+-- regardless of what the calling code asks for.
+GRANT SELECT, DELETE ON private.consumed_nonce TO private_definer;
+CREATE POLICY pd_purge_consumed_nonce_expired ON private.consumed_nonce
+  FOR DELETE TO private_definer
+  USING (COALESCE(expires_at, consumed_at) < now() - interval '7 days');
+CREATE POLICY pd_purge_consumed_nonce_expired_r ON private.consumed_nonce
+  FOR SELECT TO private_definer
+  USING (COALESCE(expires_at, consumed_at) < now() - interval '7 days');
+
+-- Register both new policies in private.definer_policy_allowlist (0016) —
+-- that table is already FORCE-RLS'd with no INSERT policy for anyone by
+-- the time THIS migration runs (0016's own seeding happens BEFORE it
+-- turns RLS on for itself), so this migration needs its own narrow,
+-- self-revoked CURRENT_USER insert policy, same pattern already used for
+-- private.function_inventory/private.fk_explicit_detach_allowlist above.
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
+  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired', 'DELETE', true, 'purge_consumed_nonce (should-fix, post-P3a re-gate correction) -- hardcoded 7-days-past-source-expiry floor, independent of the function body'),
+  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired_r', 'SELECT', true, 'row-visibility companion to pd_purge_consumed_nonce_expired');
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+  AND al.schema_name = 'private' AND al.table_name = 'consumed_nonce';
+DROP POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 
 -- ============================================================================
 -- should-fix (post-P3a re-gate): "The H1 catalog test must require
@@ -1107,4 +1187,4 @@ VALUES
   ('app', 'release_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + releases an unconsumed reservation; service_role-only'),
   ('app', 'consume_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + moves a reservation into budget_used; service_role-only'),
   ('app', 'dedupe_receipt_fingerprint', 'p_purchase_evidence_id uuid, p_user_id uuid, p_phash text, p_facility_id text, p_local_date date, p_receipt_number_ocr text', false, false, true, 'serialized receipt-phash dedupe; called by the (out-of-scope-this-stage) receipt-ingestion Edge Function as service_role'),
-  ('private', 'purge_consumed_nonce', 'p_retention interval', false, false, true, 'TTL purge for private.consumed_nonce (should-fix, post-P3a re-gate); called by an (out-of-scope-this-stage) scheduled job as service_role');
+  ('private', 'purge_consumed_nonce', '', false, false, true, 'TTL purge for private.consumed_nonce, SECURITY DEFINER owned by private_definer, hardcoded 7-days-past-source-expiry floor (should-fix, post-P3a re-gate correction); called by an (out-of-scope-this-stage) scheduled job as service_role');

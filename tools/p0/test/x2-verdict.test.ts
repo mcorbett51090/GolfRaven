@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { promisify } from "node:util";
@@ -1696,7 +1696,7 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
     const nc = result.perTrail.NC;
     expect(nc?.confirmed).toBe(false);
     expect(nc?.facts.roster[0]?.corroboration).toMatch(/Wayback corroboration UNVERIFIABLE/);
-    expect(nc?.reasons.join("\n")).toMatch(/could not be verified/);
+    expect(nc?.reasons.join("\n")).toMatch(/failed re-validation/);
   });
 
 
@@ -1797,157 +1797,520 @@ describe("x2-verdict: extractX2MdLogSection (gate finding 3, re-gate)", () => {
   });
 });
 
-describe("x2-verdict: resolveCorroboration (gate finding 3, re-gate)", () => {
+describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / finding 2 re-gate)", () => {
   const SHA_OWNER_FOR_RESOLVE = sha("arbitrary evidence sha key for these tests");
+  const OWNER_STATED_URL = "https://example.com/x";
+  const OWNER_SAVED_DATE = "2026-01-01"; // within 90 days of the 2026-01-01... wayback timestamps below
 
-  it("wayback: verifies a record whose raw bytes recompute to the cited SHA, re-deriving text with the real extractor", async () => {
-    const html = "<html><body><p>Real snapshot content, fetched for real.</p></body></html>";
-    const buf = Buffer.from(html);
-    const shaOfBuf = sha(html);
-    const corroboration: X2CorroborationFile = {
+  function ownerEvidenceByTrail(): EvidenceByTrail {
+    return {
       NC: {
-        [SHA_OWNER_FOR_RESOLVE]: {
-          type: "wayback",
-          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
-          snapshotSha256: shaOfBuf,
-          rawFile: "raw/wayback-x.html",
-        },
+        bySha: new Map([
+          [
+            SHA_OWNER_FOR_RESOLVE,
+            {
+              text: "owner text",
+              method: "owner-saved",
+              methodDefaulted: false,
+              recorded: true,
+              url: OWNER_STATED_URL,
+              ownerSavedDate: OWNER_SAVED_DATE,
+            },
+          ],
+        ]),
+        failedSources: [],
       },
     };
-    const resolved = await resolveCorroboration(
-      corroboration,
-      async (rel) => {
-        expect(rel).toBe("raw/wayback-x.html");
-        return buf;
-      },
-      null,
-    );
-    const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
-    expect(entry?.waybackVerified).toBe(true);
-    expect(entry?.waybackText).toContain("Real snapshot content, fetched for real.");
+  }
+
+  const EVIDENCE_DIR = "/evidence-dir";
+
+  describe("wayback (gate finding 3, second re-gate — re-validates every rule itself)", () => {
+    it("verifies a record that passes every rule, re-deriving text with the real extractor", async () => {
+      const html = "<html><body><p>Real snapshot content, fetched for real.</p></body></html>";
+      const buf = Buffer.from(html);
+      const shaOfBuf = sha(html);
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: shaOfBuf,
+              rawFile: `raw/${shaOfBuf}.html`,
+            },
+          ],
+        },
+      };
+      const ledger: RecordedLedger = {
+        entries: [
+          {
+            method: "wayback",
+            normalizedUrl: "example.com/x",
+            url: OWNER_STATED_URL,
+            sha256: shaOfBuf,
+            recordedAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async (rel) => {
+          expect(rel).toBe(`raw/${shaOfBuf}.html`);
+          return buf;
+        },
+        evidenceDir: EVIDENCE_DIR,
+        ledger,
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(true);
+      expect(entry?.waybackText).toContain("Real snapshot content, fetched for real.");
+    });
+
+    it("refuses a snapshotUrl not in the required Wayback URL form", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://not-archive.example/x",
+              snapshotSha256: "e".repeat(64),
+              rawFile: `raw/${"e".repeat(64)}.html`,
+            },
+          ],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/required.*form/);
+    });
+
+    it("refuses when the embedded URL does not normalise to the owner-saved fact's OWN stated URL", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/completely-different",
+              snapshotSha256: "e".repeat(64),
+              rawFile: `raw/${"e".repeat(64)}.html`,
+            },
+          ],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/does not match the owner-saved fact's own stated URL/);
+    });
+
+    it("refuses a timestamp more than 90 days from the owner-saved fact's OWN ownerSavedDate", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              // OWNER_SAVED_DATE is 2026-01-01; this timestamp is wildly later.
+              snapshotUrl: "https://web.archive.org/web/20270101000000/https://example.com/x",
+              snapshotSha256: "e".repeat(64),
+              rawFile: `raw/${"e".repeat(64)}.html`,
+            },
+          ],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/90-day tolerance/);
+    });
+
+    it("gate finding 3 (second re-gate), probe C: refuses a rawFile path-escape attempt (e.g. ../../outside.html) outright — it can never match the required shape", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: "e".repeat(64),
+              rawFile: "../../outside.html",
+            },
+          ],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from("<p>The quote you want to see is right here.</p>"),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/raw\/<snapshotSha256>\.<ext>/);
+    });
+
+    it("gate finding 3 (second re-gate), probe B: refuses a snapshot SHA IDENTICAL to the owner-saved fact's own SHA (self-referential forgery)", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: SHA_OWNER_FOR_RESOLVE, // identical to the owner-saved fact's own SHA
+              rawFile: `raw/${SHA_OWNER_FOR_RESOLVE}.html`,
+            },
+          ],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from("owner text"),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: {
+          entries: [
+            {
+              method: "wayback",
+              normalizedUrl: "example.com/x",
+              url: OWNER_STATED_URL,
+              sha256: SHA_OWNER_FOR_RESOLVE,
+              recordedAt: new Date().toISOString(),
+            },
+          ],
+        },
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/IDENTICAL to the owner-saved fact's own SHA/);
+    });
+
+    it("refuses a snapshot that is otherwise well-formed but NOT registered in the ledger under method wayback — never produced by x2-corroborate-wayback", async () => {
+      const html = "<p>some snapshot text</p>";
+      const shaOfBuf = sha(html);
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: shaOfBuf,
+              rawFile: `raw/${shaOfBuf}.html`,
+            },
+          ],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from(html),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] }, // empty — never registered
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/no ledger entry registers this snapshot/);
+    });
+
+    it("a SHA mismatch (tampered/wrong raw bytes) resolves to unverified even after every other rule passes", async () => {
+      const claimedSha = "d".repeat(64);
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: claimedSha,
+              rawFile: `raw/${claimedSha}.html`,
+            },
+          ],
+        },
+      };
+      const ledger: RecordedLedger = {
+        entries: [
+          {
+            method: "wayback",
+            normalizedUrl: "example.com/x",
+            url: OWNER_STATED_URL,
+            sha256: claimedSha,
+            recordedAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => Buffer.from("<p>The quote you want to see is right here.</p>"),
+        evidenceDir: EVIDENCE_DIR,
+        ledger,
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackText).toBeUndefined();
+    });
+
+    it("a read failure (missing/unreadable raw file) resolves to unverified, never throws", async () => {
+      const claimedSha = "d".repeat(64);
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: claimedSha,
+              rawFile: `raw/${claimedSha}.html`,
+            },
+          ],
+        },
+      };
+      const ledger: RecordedLedger = {
+        entries: [
+          {
+            method: "wayback",
+            normalizedUrl: "example.com/x",
+            url: OWNER_STATED_URL,
+            sha256: claimedSha,
+            recordedAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => {
+          throw new Error("ENOENT");
+        },
+        evidenceDir: EVIDENCE_DIR,
+        ledger,
+        x2Md: null,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+    });
   });
 
-  it("wayback: a SHA mismatch (tampered/wrong raw bytes) resolves to unverified, regardless of what the bytes actually say", async () => {
-    const corroboration: X2CorroborationFile = {
-      NC: {
-        [SHA_OWNER_FOR_RESOLVE]: {
-          type: "wayback",
-          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
-          snapshotSha256: "d".repeat(64), // does not match the bytes below
-          rawFile: "raw/wayback-x.html",
-        },
-      },
-    };
-    const resolved = await resolveCorroboration(
-      corroboration,
-      async () => Buffer.from("<p>The quote you want to see is right here.</p>"),
-      null,
-    );
-    const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
-    expect(entry?.waybackVerified).toBe(false);
-    expect(entry?.waybackText).toBeUndefined();
-  });
+  describe("acceptance (gate finding 2, re-gate — structured row + git provenance)", () => {
+    async function initGitRepoWithOrigin(): Promise<{ dir: string; originDir: string }> {
+      const originDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2md-origin-"));
+      await execFileAsync("git", ["init", "-q", "--bare"], { cwd: originDir });
+      const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2md-work-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: dir });
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+      await execFileAsync("git", ["config", "user.name", "Test"], { cwd: dir });
+      await execFileAsync("git", ["remote", "add", "origin", originDir], { cwd: dir });
+      return { dir, originDir };
+    }
 
-  it("wayback: a read failure (missing/unreadable raw file) resolves to unverified, never throws", async () => {
-    const corroboration: X2CorroborationFile = {
-      NC: {
-        [SHA_OWNER_FOR_RESOLVE]: {
-          type: "wayback",
-          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
-          snapshotSha256: "d".repeat(64),
-          rawFile: "raw/does-not-exist.html",
-        },
-      },
-    };
-    const resolved = await resolveCorroboration(
-      corroboration,
-      async () => {
-        throw new Error("ENOENT");
-      },
-      null,
-    );
-    const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
-    expect(entry?.waybackVerified).toBe(false);
-  });
+    it("resolves logged: true only when a structured ACCEPT row exists in the Log section AND its commit is reachable from origin/main", async () => {
+      const { dir } = await initGitRepoWithOrigin();
+      const x2MdPath = nodePath.join(dir, "X2.md");
+      const fullText = `# X2\n\n## Log\n\nACCEPT NC roster:Pinehurst Creek ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+      writeFileSync(x2MdPath, fullText, "utf8");
+      await execFileAsync("git", ["add", "X2.md"], { cwd: dir });
+      await execFileAsync("git", ["commit", "-q", "-m", "accept"], { cwd: dir });
+      await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
 
-  it("acceptance: resolves logged: true only when a Log-section line names BOTH the id and the date", async () => {
-    const corroboration: X2CorroborationFile = {
-      NC: {
-        [SHA_OWNER_FOR_RESOLVE]: {
-          type: "acceptance",
-          id: "NC-my-record-id",
-          acceptedBy: "Matt",
-          date: "2026-09-20",
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            { type: "acceptance", fact: "roster:Pinehurst Creek", acceptedBy: "Matt", date: "2026-09-20" },
+          ],
         },
-      },
-    };
-    const logged = await resolveCorroboration(
-      corroboration,
-      async () => Buffer.from(""),
-      "## Log\n\n| Date | Entry |\n|---|---|\n| 2026-09-20 | Accepted NC-my-record-id per Matt's review. |\n",
-    );
-    expect(
-      logged.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
-    ).toBe(true);
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText, path: x2MdPath },
+      });
+      const entry = resolved.get(
+        corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "roster:Pinehurst Creek"),
+      );
+      expect(entry?.acceptanceLogged).toBe(true);
+      expect(entry?.acceptanceProvenance?.reachableFromOriginMain).toBe(true);
+      expect(entry?.acceptanceProvenance?.commit).toMatch(/^[0-9a-f]{40}$/);
+      expect(entry?.acceptanceProvenance?.author).toBe("Test");
+    });
 
-    const notLogged = await resolveCorroboration(
-      corroboration,
-      async () => Buffer.from(""),
-      "## Log\n\n| Date | Entry |\n|---|---|\n| 2026-09-21 | A different entry, wrong date. |\n",
-    );
-    expect(
-      notLogged.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
-    ).toBe(false);
-  });
+    it("resolves logged: false when the matching row exists but its commit is NOT reachable from origin/main (never pushed)", async () => {
+      const { dir } = await initGitRepoWithOrigin();
+      const x2MdPath = nodePath.join(dir, "X2.md");
+      const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+      writeFileSync(x2MdPath, fullText, "utf8");
+      await execFileAsync("git", ["add", "X2.md"], { cwd: dir });
+      await execFileAsync("git", ["commit", "-q", "-m", "accept, never pushed"], { cwd: dir });
+      // Deliberately never pushed to origin.
 
-  it("acceptance: a null x2MdLogText (X2.md unreadable) resolves logged: false, never throws", async () => {
-    const corroboration: X2CorroborationFile = {
-      NC: {
-        [SHA_OWNER_FOR_RESOLVE]: {
-          type: "acceptance",
-          id: "NC-my-record-id",
-          acceptedBy: "Matt",
-          date: "2026-09-20",
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
         },
-      },
-    };
-    const resolved = await resolveCorroboration(corroboration, async () => Buffer.from(""), null);
-    expect(
-      resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
-    ).toBe(false);
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText, path: x2MdPath },
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
+      expect(entry?.acceptanceLogged).toBe(false);
+      expect(entry?.acceptanceDetail).toMatch(/not reachable from origin\/main/);
+    });
+
+    it("resolves logged: false when no matching structured row exists at all", async () => {
+      const { dir } = await initGitRepoWithOrigin();
+      const x2MdPath = nodePath.join(dir, "X2.md");
+      const fullText = "# X2\n\n## Log\n\nsome unrelated line, not an ACCEPT row\n";
+      writeFileSync(x2MdPath, fullText, "utf8");
+      await execFileAsync("git", ["add", "X2.md"], { cwd: dir });
+      await execFileAsync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText, path: x2MdPath },
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
+      expect(entry?.acceptanceLogged).toBe(false);
+      expect(entry?.acceptanceDetail).toMatch(/no line reading exactly/);
+    });
+
+    it("gate finding 2 (re-gate), should-fix: a row matching everything but sitting AFTER the next '## ' heading (outside the bounded Log section) does not count", async () => {
+      const { dir } = await initGitRepoWithOrigin();
+      const x2MdPath = nodePath.join(dir, "X2.md");
+      const fullText =
+        "# X2\n\n## Log\n\nunrelated\n\n## Later Section\n\n" +
+        `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+      writeFileSync(x2MdPath, fullText, "utf8");
+      await execFileAsync("git", ["add", "X2.md"], { cwd: dir });
+      await execFileAsync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
+
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText, path: x2MdPath },
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
+      expect(entry?.acceptanceLogged).toBe(false);
+    });
+
+    it("a null x2Md (X2.md unreadable) resolves logged: false, never throws", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: null,
+      });
+      expect(
+        resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
+      ).toBe(false);
+    });
   });
 });
 
-describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d)", () => {
-  async function initGitRepo(): Promise<string> {
+describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4, re-gate)", () => {
+  /** Gate finding 4: a repo with a real `origin` (bare) remote, so
+   * "pushed to origin/main" is genuinely checkable — every probe in this
+   * describe block needs this now, not just an origin-less local repo. */
+  async function initGitRepoWithOrigin(): Promise<{ dir: string; ledgerPath: string }> {
+    const originDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-origin-"));
+    await execFileAsync("git", ["init", "-q", "--bare"], { cwd: originDir });
     const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-git-test-"));
     await execFileAsync("git", ["init", "-q"], { cwd: dir });
     await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
     await execFileAsync("git", ["config", "user.name", "Test"], { cwd: dir });
-    return dir;
+    await execFileAsync("git", ["remote", "add", "origin", originDir], { cwd: dir });
+    mkdirSync(nodePath.join(dir, "docs", "p0"), { recursive: true });
+    const ledgerPath = nodePath.join(dir, "docs", "p0", "x2-recorded-ledger.json");
+    return { dir, ledgerPath };
   }
 
-  it("a COMMITTED, unmodified ledger is reported clean, with its git blob hash", async () => {
-    const dir = await initGitRepo();
-    const ledgerPath = nodePath.join(dir, "recorded-ledger.json");
+  it("gate finding 4, probe A: a canonical-path, committed, PUSHED ledger is reported clean, with its git blob hash and last commit", async () => {
+    const { dir, ledgerPath } = await initGitRepoWithOrigin();
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
-    await execFileAsync("git", ["add", "recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
+    await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
 
     const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.pathIsCanonical).toBe(true);
+    expect(result.pushedToOriginMain).toBe(true);
+    expect(result.originMainMissingPath).toBe(false);
+    expect(result.hiddenByGitFlag).toBe(false);
     expect(result.clean).toBe(true);
     expect(result.blobHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.lastCommit?.hash).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.lastCommit?.author).toBe("Test");
 
-    const { stdout } = await execFileAsync("git", ["hash-object", "recorded-ledger.json"], { cwd: dir });
+    const { stdout } = await execFileAsync(
+      "git",
+      ["hash-object", "docs/p0/x2-recorded-ledger.json"],
+      { cwd: dir },
+    );
     expect(result.blobHash).toBe(stdout.trim());
   });
 
-  it("a committed ledger with an UNCOMMITTED edit is reported dirty, with a reason", async () => {
-    const dir = await initGitRepo();
-    const ledgerPath = nodePath.join(dir, "recorded-ledger.json");
+  it("gate finding 4: a WRONG-location ledger (right repo, right filename, wrong directory) is refused as not canonical, never treated as if it were", async () => {
+    const { dir } = await initGitRepoWithOrigin();
+    const wrongPath = nodePath.join(dir, "x2-recorded-ledger.json"); // repo root, not docs/p0/
+    writeFileSync(wrongPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "x2-recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "wrong location"], { cwd: dir });
+    await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
+
+    const result = await checkLedgerAgainstGit(wrongPath);
+    expect(result.pathIsCanonical).toBe(false);
+    expect(result.clean).toBe(false);
+    expect(result.detail).toMatch(/is not the canonical ledger path/);
+  });
+
+  it("a committed, canonical-path ledger with an UNCOMMITTED edit is reported dirty, with a reason", async () => {
+    const { dir, ledgerPath } = await initGitRepoWithOrigin();
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
-    await execFileAsync("git", ["add", "recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
+    await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
 
     // Edit it WITHOUT committing — simulates a hand-edited ledger row
     // (e.g. the gate's own `edited-ledger.json` bypass attempt) that
@@ -1961,6 +2324,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d)", () => {
     );
 
     const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.detail).toMatch(/uncommitted changes/);
     // The blob hash is still reported (of the CURRENT, dirty content) —
@@ -1969,14 +2333,83 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d)", () => {
   });
 
   it("an UNTRACKED ledger file (never git-added at all) is reported dirty — `git diff` alone would miss this", async () => {
-    const dir = await initGitRepo();
-    const ledgerPath = nodePath.join(dir, "recorded-ledger.json");
+    const { dir, ledgerPath } = await initGitRepoWithOrigin();
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
     // Deliberately never `git add`ed or committed.
 
     const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.detail).toMatch(/untracked/);
+  });
+
+  it("gate finding 4, probe D: a canonical, committed ledger that origin/main does NOT have yet is marked UNOFFICIAL (originMainMissingPath), never a plain dirty refusal", async () => {
+    const { dir, ledgerPath } = await initGitRepoWithOrigin();
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "add ledger, never pushed"], { cwd: dir });
+    // Deliberately never pushed — origin has no "main" ref at all yet.
+
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.pathIsCanonical).toBe(true);
+    expect(result.clean).toBe(false);
+    expect(result.pushedToOriginMain).toBe(false);
+    expect(result.originMainMissingPath).toBe(true);
+    expect(result.detail).toMatch(/has not been pushed yet/);
+  });
+
+  it("gate finding 4, probe D: a canonical, committed ledger whose content DIVERGED from what origin/main already has is refused as dirty (not the missing-path carve-out)", async () => {
+    const { dir, ledgerPath } = await initGitRepoWithOrigin();
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "v1"], { cwd: dir });
+    await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
+
+    // A second, LOCAL-ONLY commit changes the ledger's content without
+    // re-pushing — origin/main still has the OLD blob.
+    writeFileSync(
+      ledgerPath,
+      '{"entries": [{"method": "direct", "normalizedUrl": "x", "url": "x", "sha256": "' +
+        "b".repeat(64) +
+        '", "recordedAt": "2026-01-01T00:00:00Z"}]}\n',
+      "utf8",
+    );
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "v2, local only"], { cwd: dir });
+
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.pathIsCanonical).toBe(true);
+    expect(result.clean).toBe(false);
+    expect(result.pushedToOriginMain).toBe(false);
+    expect(result.originMainMissingPath).toBe(false);
+    expect(result.detail).toMatch(/locally diverged from the pushed record/);
+  });
+
+  it("gate finding 4, probe E: a ledger marked assume-unchanged in git is refused (hiddenByGitFlag), even though git diff/status report it clean", async () => {
+    const { dir, ledgerPath } = await initGitRepoWithOrigin();
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
+    await execFileAsync("git", ["push", "-q", "origin", "HEAD:main"], { cwd: dir });
+    await execFileAsync(
+      "git",
+      ["update-index", "--assume-unchanged", "docs/p0/x2-recorded-ledger.json"],
+      { cwd: dir },
+    );
+    // Edit the file AFTER marking it assume-unchanged — git diff/status
+    // will NOT see this edit at all (that is the whole point of the flag).
+    writeFileSync(
+      ledgerPath,
+      '{"entries": [{"method": "direct", "normalizedUrl": "hidden", "url": "hidden", "sha256": "' +
+        "c".repeat(64) +
+        '", "recordedAt": "2026-01-01T00:00:00Z"}]}\n',
+      "utf8",
+    );
+
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.hiddenByGitFlag).toBe(true);
+    expect(result.clean).toBe(false);
+    expect(result.detail).toMatch(/assume-unchanged or skip-worktree/);
   });
 
   it("a path outside any git repository (or a missing file) resolves to NOT clean, never silently 'clean'", async () => {
@@ -1985,5 +2418,6 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d)", () => {
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
     const result = await checkLedgerAgainstGit(ledgerPath);
     expect(result.clean).toBe(false);
+    expect(result.pathIsCanonical).toBe(false);
   });
 });

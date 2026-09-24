@@ -389,13 +389,14 @@ UTC, and a SHA-256.
 **Feeds:** the evidence dir (raw + text + `manifest.json`, from any mix of `x2-fetch`, `x2-fetch
 --render` and `x2-ingest`) is `x2-verdict`'s first input.
 
-## 4b. `x2-corroborate-wayback` — the ONLY way to make a `wayback` corroboration record (gate finding 3, re-gate)
+## 4b. `x2-corroborate-wayback` — the ONLY way to make a `wayback` corroboration record (gate finding 3, twice re-gated)
 
 ```shell
 node dist/x2-corroborate-wayback.js \
   --url "https://web.archive.org/web/20260615120000/https://example.com/golf" \
   --stated-url https://example.com/golf --owner-saved-date 2026-06-15 \
   --trail TN --evidence-sha <the owner-saved fact's evidenceSha> \
+  --ledger docs/p0/x2-recorded-ledger.json \
   --out-dir x2-wayback-evidence --corroboration-file corroboration.json
 ```
 
@@ -409,12 +410,28 @@ DIFFERENT page can never corroborate this fact); requires the timestamp within �
 `x2-corroborate-wayback.ts`'s own doc — real invocations use `global.fetch`, which may need
 `NODE_USE_ENV_PROXY=1` depending on this environment's proxy policy; **web.archive.org was
 confirmed NOT reachable from this session's own environment** — a connect timeout/reset through
-the agent proxy, checked directly, not assumed); stores the fetched bytes as real evidence
-(`raw/wayback-<sha>.html`, SHA-256 computed from ONLY those bytes); and writes a corroboration
-record citing ONLY that SHA and the raw file's path — never inline text. `x2-verdict` later
-RE-VERIFIES this record itself before trusting it (re-reads the raw bytes, recomputes the SHA,
-re-derives the text with the same extractor every other evidence route uses) — this tool's own
-output is not the trust boundary, that re-verification is.
+the agent proxy, checked directly on two separate gate rounds now, not assumed); stores the
+fetched bytes as real evidence (`raw/<sha256>.html` — no prefix; the plain shape `x2-verdict`'s
+re-validation requires, gate finding 3 second re-gate); registers the snapshot in `--ledger`
+(**REQUIRED**) under method `"wayback"`; and writes a corroboration record citing ONLY that SHA
+and the raw file's path — never inline text.
+
+**`x2-verdict` re-validates every one of this tool's own rules itself, from scratch, before
+trusting a `wayback` record for anything** (gate finding 3, second re-gate — a hand-crafted record
+that merely LOOKS like this tool's output is not enough): the URL form; the embedded URL
+normalises to the owner-saved fact's OWN stated URL (not just what the record claims); the
+timestamp is within ±90 days of that fact's OWN `ownerSavedDate`; `rawFile` resolves, INSIDE the
+evidence dir, to exactly `raw/<snapshotSha256>.<ext>` (any path-escape attempt, e.g.
+`../../outside.html`, can never match this shape and is refused outright); the snapshot's SHA
+DIFFERS from the owner-saved fact's own SHA (an identical SHA is the owner-saved bytes relabelled
+as their own corroboration, refused); the snapshot is registered in the canonical ledger under
+method `wayback` (never trusting a record nothing actually registered); and finally, the raw bytes
+recompute to the cited SHA and the text is re-derived with the same extractor every other evidence
+route uses. This tool's own output is not the trust boundary — that full re-validation is.
+
+**web.archive.org is unreachable from this environment.** No Wayback corroboration can currently
+be produced here at all — see `docs/p0/X2.md`'s own statement of this, and its two live paths for
+a TN owner-saved fact that needs corroborating.
 
 ## 5. `x2-verdict` — X2 pass/kill verdict from a human-written confirmation
 
@@ -425,14 +442,39 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
 
 - `--evidence-dir <dir>` — an `x2-fetch` output dir (reads its `manifest.json`).
 - `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate) — the same ledger `x2-fetch`/
-  `x2-ingest` wrote the captures being verified against. `x2-verdict` also checks the ledger's own
-  git cleanliness (gate finding 2d): `git diff --quiet -- <ledger>` must report no uncommitted
-  changes, or the run refuses unless `--allow-dirty-ledger` is passed, in which case the output is
-  marked UNOFFICIAL. The verdict's own JSON/markdown output names the ledger's git blob hash
-  (`git hash-object`) either way, so a reader always knows exactly which ledger content produced it.
-- `--corroboration <file>` — optional; a JSON file backing owner-saved facts (gate finding 4/3, see
-  below). `--x2-log <path>` (default: this checkout's own `docs/p0/X2.md`) is where an `acceptance`
-  corroboration record's `id`+`date` must be found, in that file's own `## Log` section.
+  `x2-ingest` wrote the captures being verified against, and it must be at the CANONICAL path
+  `docs/p0/x2-recorded-ledger.json`, resolved from this repo's own toplevel — any other path is
+  refused outright, never silently treated as if it were the canonical record (gate finding 4,
+  second re-gate). `x2-verdict` checks the ledger against git four ways: it must be tracked
+  cleanly (no uncommitted or untracked edit — `git diff --quiet` / `git status --porcelain`); it
+  must carry no `git ls-files -v` assume-unchanged/skip-worktree flag (either can hide a local
+  edit from the two checks just named, so this is refused regardless of `--allow-dirty-ledger`);
+  its content must be byte-identical to what `origin/main` already has at that path
+  (`git hash-object` vs. `git rev-parse origin/main:docs/p0/x2-recorded-ledger.json` — proves
+  PUSHED, not merely committed); and if `origin/main` simply doesn't have the path yet (a ledger
+  never pushed), that specific case does NOT hard-refuse — the run proceeds and the output is
+  marked UNOFFICIAL with the reason, without needing `--allow-dirty-ledger`. Any other dirtiness
+  (an uncommitted edit, or content that diverged from what's already pushed) still refuses unless
+  `--allow-dirty-ledger` is passed, in which case the output is marked UNOFFICIAL. The verdict's
+  own JSON/markdown output names the ledger's git blob hash and the last commit that touched it
+  either way, so a reader always knows exactly which ledger content produced it and who last
+  changed it.
+- `--corroboration <file>` — optional; a JSON file backing owner-saved facts (gate finding 4, see
+  below), keyed `trail -> evidenceSha -> [corroboration record, ...]` — a LIST, since one
+  owner-saved capture can back several DIFFERENT facts (a roster name, a completionUnit, a
+  season), each needing its OWN, fact-specific acceptance (gate finding 2, re-gate: a blanket
+  acceptance covering "whatever gets cited against this SHA" is exactly the forgery shape this
+  closes). An `acceptance` record now carries `fact` (`"completionUnit"`, `"season"`, or
+  `"roster:<name>"`) instead of a free-text `id`, and must be backed by an EXACT structured row —
+  `ACCEPT <trail> <fact> <full evidenceSha256> <YYYY-MM-DD> Matt` — in `--x2-log`'s (default: this
+  checkout's own `docs/p0/X2.md`) `## Log` section (bounded at the next `## ` heading). Finding
+  that row is not enough on its own: `x2-verdict` runs `git blame` to find the commit that
+  introduced it and REQUIRES that commit to be reachable from `origin/main`, printing the commit
+  hash, author, date and `%G?` signature status in its output for a human to audit. **Honest
+  limit:** agents in this environment act with Matt's own GitHub credentials, so none of this can
+  actually prove a commit is Matt's rather than an agent's — the real control is procedural:
+  **agents must never write an `ACCEPT` row; only Matt adds one, by hand.** See
+  `docs/p0/X2.md`'s own statement of this.
 - `--confirmation <file>` — a JSON object, **per trail** (`"TN"`/`"VI"`/`"RTJ"`):
 
   ```json

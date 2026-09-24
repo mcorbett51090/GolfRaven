@@ -87,6 +87,13 @@ export interface LintResult {
 /** Resolved import-map aliases (bare specifier -> target), per requirement (4). */
 export interface LintOptions {
   importMap?: Record<string, string>;
+  /**
+   * Absolute path of the supabase/functions root, for the relative-import
+   * escape check (post-P3a re-gate M1, g5). index.ts's directory walker
+   * always supplies this; a standalone `lintSource(source, path)` call
+   * (e.g. in a unit test) may omit it, which simply skips that one check.
+   */
+  functionsRoot?: string;
 }
 
 /** The one exact file allowed to do any of this (build plan line 1189). */
@@ -106,6 +113,13 @@ const BANNED_GLOBAL_IDENTIFIERS = new Set(["Deno", "process"]);
 // else global) without naming them as a bare identifier reference —
 // banned unconditionally, regardless of what they're used for.
 const INDIRECTION_IDENTIFIERS = new Set(["globalThis", "self", "window"]);
+// ⛔ FIX (post-P3a re-gate M1, g4): Worker/SharedWorker construct and run
+// arbitrary source (including a `data:`/`blob:` URL — see
+// isDataOrBlobSpecifier below), with no import specifier and no static
+// call shape this lint's other rules would otherwise see. Banned
+// unconditionally, no exemption — there is no legitimate reason for
+// supabase/functions product code to construct one.
+const BANNED_UNCONDITIONAL_IDENTIFIERS = new Set(["Worker", "SharedWorker"]);
 
 function mentionsSecretSubstring(text: string): boolean {
   const upper = text.toUpperCase();
@@ -231,7 +245,8 @@ const ALLOWED_REMOTE_HOSTS = new Set(["esm.sh", "cdn.skypack.dev", "cdn.jsdelivr
 
 function remoteHostOf(spec: string): string | undefined {
   const m = /^https?:\/\/([^/]+)/i.exec(spec);
-  return m ? m[1].toLowerCase() : undefined;
+  const host = m?.[1];
+  return host ? host.toLowerCase() : undefined;
 }
 
 function isDisallowedRemoteHost(spec: string): boolean {
@@ -472,6 +487,52 @@ export function lintSource(source: string, filePath: string, options: LintOption
         message: `reference to "${node.name}" outside supabase/functions/_shared/privileged.ts — can be used to reach Deno/process (or stash a privileged client) outside the normal import graph`,
         ...loc,
       });
+    } else if (BANNED_UNCONDITIONAL_IDENTIFIERS.has(node.name)) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "dynamic-code-execution",
+        message: `reference to "${node.name}" outside supabase/functions/_shared/privileged.ts — constructs and runs arbitrary source with no static import specifier to audit`,
+        ...loc,
+      });
+    }
+  });
+
+  // ⛔ FIX (post-P3a re-gate M1, g3): `.constructor` member access is the
+  // universal gateway to the Function constructor without ever calling
+  // something literally named `eval`/`Function`/`new Function` — e.g.
+  // `(() => {}).constructor` IS the Function constructor, then invoked
+  // through a local variable the eval/Function-name check (below) never
+  // sees. Banned as a bare member access, unconditionally: there is no
+  // legitimate reason for supabase/functions product code to read
+  // `.constructor` off anything.
+  walk(ast, (node) => {
+    if (
+      node.type === AST_NODE_TYPES.MemberExpression &&
+      ((!node.computed && node.property.type === AST_NODE_TYPES.Identifier && node.property.name === "constructor") ||
+        (node.computed && node.property.type === AST_NODE_TYPES.Literal && node.property.value === "constructor"))
+    ) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "dynamic-code-execution",
+        message: ".constructor member access outside supabase/functions/_shared/privileged.ts — the universal gateway to the Function constructor, bypassing any eval()/Function()-name check",
+        ...loc,
+      });
+    }
+  });
+
+  // ⛔ FIX (post-P3a re-gate M1, g4): a `data:`/`blob:` STRING LITERAL
+  // anywhere — the concatenation site in `new Worker("data:..." +
+  // encodeURIComponent(src))` is itself a plain Literal with this prefix,
+  // independent of whatever it is eventually passed to (Worker, a dynamic
+  // import, fetch, …).
+  walk(ast, (node) => {
+    if (node.type === AST_NODE_TYPES.Literal && typeof node.value === "string" && isDataOrBlobSpecifier(node.value)) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "dynamic-code-execution",
+        message: `data:/blob: string literal "${node.value}" outside supabase/functions/_shared/privileged.ts — can smuggle arbitrary source with no importable file or reviewable host`,
+        ...loc,
+      });
     }
   });
 
@@ -515,13 +576,14 @@ export function lintSource(source: string, filePath: string, options: LintOption
   const namespaceImportNames = new Set<string>(); // `import * as x from "<supabase-js>"`
 
   function reportBannedSpecifier(node: TSESTree.Node, spec: string, kind: "import" | "dynamic import" | "require" | "re-export"): void {
-    const { banned, resolvedVia } = isBannedSpecifierOrAlias(spec, options.importMap);
+    const { banned, reason, resolvedVia } = isBannedSpecifierOrAlias(spec, options.importMap, filePath, options.functionsRoot);
     if (!banned) return;
     const loc = nodeLoc(node);
     const viaNote = resolvedVia ? ` (alias resolves via deno.json/import_map.json to "${resolvedVia}")` : "";
+    const reasonNote = reason ? ` — ${reason}` : " (Supabase client scope or raw Postgres driver)";
     findings.push({
       rule: kind === "re-export" ? "reexport-of-privileged-symbol" : "banned-import-specifier",
-      message: `${kind} of a banned specifier "${spec}"${viaNote} (Supabase client scope or raw Postgres driver) outside supabase/functions/_shared/privileged.ts`,
+      message: `${kind} of a banned specifier "${spec}"${viaNote}${reasonNote} outside supabase/functions/_shared/privileged.ts`,
       ...loc,
     });
   }

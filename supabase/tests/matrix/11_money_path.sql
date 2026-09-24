@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(131);
+SELECT plan(132);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -276,10 +276,15 @@ SELECT is(
   'pending',
   'CROSS-USER match: the NEW (player B) purchase is left pending, NOT voided'
 );
+-- should-fix (post-P3a re-gate): the EARLIER purchase's status is left
+-- ALONE once it's already 'valid' — demoting an already-accepted purchase
+-- just because a LATER, different user's submission collided with it is
+-- its own griefing shape; it stays referenced via matched_purchase_
+-- evidence_id in the review_item/fraud_signal instead (asserted below).
 SELECT is(
   (SELECT status::text FROM app.purchase_evidence WHERE id = '90000000-0000-0000-0000-000000000001'),
-  'pending',
-  'CROSS-USER match: the EXISTING (player A) purchase is also moved to pending, NOT left silently valid'
+  'valid',
+  'CROSS-USER match: the EXISTING, already-VALID (player A) purchase is left alone, not demoted to pending'
 );
 SELECT is(
   (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_cross_user_match' AND user_id = '00000000-0000-0000-0000-00000000000b'),
@@ -589,42 +594,63 @@ SELECT lives_ok(
   'checkin_challenge.nonce_hash: a no-op UPDATE (same value) is allowed'
 );
 
--- should-fix (post-P3a re-gate): private.purge_consumed_nonce TTL purge.
-SELECT lives_ok(
-  $$INSERT INTO private.consumed_nonce (nonce_hash, source, consumed_at)
-    VALUES ('purge-test-old-nonce', 'checkin_challenge', now() - interval '30 days')$$,
-  'setup: a consumed_nonce row backdated 30 days (older than the 7-day default retention)'
-);
-SELECT lives_ok(
-  $$INSERT INTO private.consumed_nonce (nonce_hash, source, consumed_at)
-    VALUES ('purge-test-recent-nonce', 'checkin_challenge', now() - interval '1 hour')$$,
-  'setup: a consumed_nonce row from 1 hour ago (well within the 7-day default retention)'
-);
+-- ⛔ FIX (should-fix, post-P3a re-gate: "consumed_nonce DELETE
+-- regression"): service_role no longer has DELETE on private.
+-- consumed_nonce at all (revoked above) — the ONLY way to remove a
+-- tombstone is private.purge_consumed_nonce, a SECURITY DEFINER function
+-- owned by private_definer, gated by a narrow RLS policy hardcoding a
+-- floor of 7 days past each row's own source expiry (not a
+-- caller-suppliable parameter any more).
 SELECT throws_ok(
-  $$SELECT private.purge_consumed_nonce(interval '1 hour')$$,
+  $$DELETE FROM private.consumed_nonce WHERE nonce_hash = 'nonce-money-path-1'$$,
+  '42501',
   NULL,
-  NULL,
-  'purge_consumed_nonce rejects a retention shorter than the 1-day floor'
+  'delete-then-replay is refused at the grant level: service_role has NO DELETE on private.consumed_nonce (only purge_consumed_nonce, as private_definer, can ever remove a tombstone)'
+);
+
+-- private.purge_consumed_nonce TTL purge: cutoff is 7 days past each
+-- row's own expires_at (source expiry), COALESCEd to consumed_at only
+-- for rows with no stored expiry (attestation-sourced).
+SELECT lives_ok(
+  $$INSERT INTO private.consumed_nonce (nonce_hash, source, consumed_at, expires_at)
+    VALUES ('purge-test-old-nonce', 'checkin_challenge', now() - interval '31 days', now() - interval '8 days')$$,
+  'setup: a consumed_nonce row whose SOURCE EXPIRY was 8 days ago (older than the 7-day-past-expiry floor)'
+);
+SELECT lives_ok(
+  $$INSERT INTO private.consumed_nonce (nonce_hash, source, consumed_at, expires_at)
+    VALUES ('purge-test-recent-nonce', 'checkin_challenge', now() - interval '31 days', now() - interval '1 hour')$$,
+  'setup: a consumed_nonce row CONSUMED 31 days ago but whose SOURCE EXPIRY was only 1 hour ago -- proves the cutoff is expires_at-based, not consumed_at-based (the OLD design would have purged this)'
 );
 SELECT is(
-  (SELECT private.purge_consumed_nonce(interval '7 days')),
+  (SELECT private.purge_consumed_nonce()),
   1::bigint,
-  'purge_consumed_nonce(7 days) deletes exactly the one row older than 7 days'
+  'purge_consumed_nonce() deletes exactly the one row more than 7 days past its own source expiry'
 );
 SELECT is(
   (SELECT count(*)::int FROM private.consumed_nonce WHERE nonce_hash = 'purge-test-old-nonce'),
   0,
-  'the 30-day-old consumed_nonce row is gone after purge'
+  'the row 8 days past its source expiry is gone after purge'
 );
 SELECT is(
   (SELECT count(*)::int FROM private.consumed_nonce WHERE nonce_hash = 'purge-test-recent-nonce'),
   1,
-  'the 1-hour-old consumed_nonce row survives purge (within retention)'
+  'the row only 1 hour past its source expiry survives purge, DESPITE being consumed 31 days ago (expires_at-based, not consumed_at-based)'
 );
 SELECT is(
   (SELECT count(*)::int FROM private.consumed_nonce WHERE nonce_hash = 'nonce-money-path-1'),
   1,
-  'a REAL (non-test-seeded) consumed_nonce row from this file''s own earlier tests also survives purge (well within retention)'
+  'a REAL (non-test-seeded) consumed_nonce row from this file''s own earlier tests also survives purge (its source expires_at is minutes in the FUTURE)'
+);
+
+-- should-fix: "an over-long TTL is refused" — app.checkin_challenge's new
+-- CHECK constraint bounds expires_at to at most 24 hours past issued_at.
+SELECT throws_ok(
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+    VALUES ('a1000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000a',
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-overlong-ttl', now() + interval '30 days')$$,
+  '23514',
+  NULL,
+  'checkin_challenge rejects an over-long TTL (expires_at more than 24 hours past issued_at) -- a 30-day challenge is no longer accepted'
 );
 
 -- ---------------------------------------------------------------------------

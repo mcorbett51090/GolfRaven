@@ -13,11 +13,21 @@ import { lintSource } from "../src/lint.js";
 // must-fail fixture.
 
 const FIXTURES_ROOT = join(import.meta.dirname, "..", "..", "..", "supabase", "functions", "__fixtures__");
+const FUNCTIONS_ROOT = join(FIXTURES_ROOT, "..");
 
 function lintFixture(relPath: string) {
   const full = join(FIXTURES_ROOT, relPath);
   const source = readFileSync(full, "utf8");
   return lintSource(source, full);
+}
+
+// Same as lintFixture, but with the real supabase/functions root supplied
+// — needed for the relative-import-escape check (g5), which is a no-op
+// without a functionsRoot to escape.
+function lintFixtureWithRoot(relPath: string) {
+  const full = join(FIXTURES_ROOT, relPath);
+  const source = readFileSync(full, "utf8");
+  return lintSource(source, full, { functionsRoot: FUNCTIONS_ROOT });
 }
 
 describe("bad fixtures (must fail) — original five", () => {
@@ -267,6 +277,57 @@ describe("bad fixtures (must fail) — MEDIUM 3, post-P3a re-gate (allow-list re
     const source = "export const NOTE = `the SUPABASE_DB_URL var must never appear here`;";
     const findings = lintSource(source, "/repo/supabase/functions/note2/index.ts");
     expect(findings.some((f) => f.rule === "secret-substring-in-literal")).toBe(true);
+  });
+});
+
+describe("bad fixtures (must fail) — post-P3a re-gate M1 (7 confirmed bypasses)", () => {
+  it("g1: flags esm.sh's pinned-build URL (esm.sh/v135/@supabase/supabase-js@...)", () => {
+    const findings = lintFixture("bad/g1-pinned-build-esm-sh.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("@supabase/"))).toBe(true);
+  });
+
+  it("g2a: flags an unlisted host with an embedded npm: scheme (ga.jspm.io/npm:@supabase/...)", () => {
+    const findings = lintFixture("bad/g2a-jspm-io.ts");
+    // Caught by the raw-substring check (checked first, so it's the one
+    // reported) — the host allow-list would ALSO have caught this same
+    // specifier independently (ga.jspm.io isn't allow-listed either);
+    // only one finding is emitted per specifier, not both redundantly.
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("@supabase/"))).toBe(true);
+  });
+
+  it("g2b: flags esm.sh's `*` external-deps marker (esm.sh/*@supabase/supabase-js@2)", () => {
+    const findings = lintFixture("bad/g2b-esm-sh-star.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("@supabase/"))).toBe(true);
+  });
+
+  it("g3: flags `.constructor` member access (Function-constructor smuggle)", () => {
+    const findings = lintFixture("bad/g3-constructor-function.ts");
+    expect(findings.some((f) => f.rule === "dynamic-code-execution" && f.message.includes(".constructor"))).toBe(true);
+  });
+
+  it("g4: flags Worker construction AND the data: URL literal it's built from", () => {
+    const findings = lintFixture("bad/g4-worker-data-url.ts");
+    expect(findings.some((f) => f.rule === "dynamic-code-execution" && f.message.includes('"Worker"'))).toBe(true);
+    expect(findings.some((f) => f.rule === "dynamic-code-execution" && f.message.includes("data:/blob:"))).toBe(true);
+  });
+
+  it("g5: flags a relative import that escapes supabase/functions", () => {
+    const findings = lintFixtureWithRoot("bad/g5-relative-escape.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("resolves outside supabase/functions"))).toBe(true);
+  });
+
+  it("g5 (negative half): the SAME check does NOT fire without a functionsRoot configured (documents the opt-in, not a false negative in real use — index.ts always supplies one)", () => {
+    const findings = lintFixture("bad/g5-relative-escape.ts");
+    expect(findings.some((f) => f.message.includes("resolves outside supabase/functions"))).toBe(false);
+  });
+
+  it("g6: flags a remote import from a host with no banned package name (host allow-list, not a package deny-list)", () => {
+    const findings = lintFixture("bad/g6-untrusted-host.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not on the allow-list"))).toBe(true);
+  });
+
+  it("clean negative control: a legitimate esm.sh import of an unrelated package, an in-bounds relative import, and an allow-listed Deno.env.get read produce ZERO findings", () => {
+    expect(lintFixtureWithRoot("good/legit-remote-import.ts")).toEqual([]);
   });
 });
 

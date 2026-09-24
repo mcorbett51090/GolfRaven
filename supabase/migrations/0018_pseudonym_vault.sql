@@ -21,9 +21,22 @@ GRANT SELECT (id, name, decrypted_secret) ON vault.decrypted_secrets TO private_
 --    provenance metadata: given a pseudonym value, which key produced it,
 --    without recomputing against every active key to find out.
 -- ============================================================================
-ALTER TABLE app.attestation ADD COLUMN player_pseudonym_hmac_id uuid REFERENCES vault.secrets (id);
-ALTER TABLE app.attestation ADD COLUMN staff_pseudonym_hmac_id uuid REFERENCES vault.secrets (id);
-ALTER TABLE app.attestation_shift_log ADD COLUMN player_pseudonym_hmac_id uuid REFERENCES vault.secrets (id);
+-- ⛔ FIX (should-fix, post-P3a re-gate: "FK into vault.secrets ...
+-- fragile across Vault upgrades. Store the key name/version and validate
+-- it inside the definer instead of using the FK."): NO FOREIGN KEY to
+-- vault.secrets(id) -- Supabase Vault's own internal table shape is not
+-- this project's to depend on structurally (an upgrade could change its
+-- primary key, partition it, or move it, breaking every FK into it at
+-- once). The vault row's own id still serves as the "which key version
+-- wrote this" identifier (stored here as a plain, unconstrained uuid),
+-- but its VALIDITY is checked programmatically, at read time, inside
+-- private.delete_my_data (0015) -- a SECURITY DEFINER function, the only
+-- place that ever needs to resolve one of these ids back to a real vault
+-- key -- rather than by the database enforcing referential integrity
+-- against a table this project does not own the schema of.
+ALTER TABLE app.attestation ADD COLUMN player_pseudonym_hmac_id uuid;
+ALTER TABLE app.attestation ADD COLUMN staff_pseudonym_hmac_id uuid;
+ALTER TABLE app.attestation_shift_log ADD COLUMN player_pseudonym_hmac_id uuid;
 
 COMMENT ON COLUMN app.attestation.player_pseudonym_hmac_id IS
   'Which vault.secrets row (name LIKE ''pseudonym_hmac%'') computed player_pseudonym, at write time. Written by the (out-of-scope-this-stage) attest Edge Function alongside player_pseudonym itself. Audit/provenance only -- private.delete_my_data does not need it to find a row (it tries every currently-active key).';

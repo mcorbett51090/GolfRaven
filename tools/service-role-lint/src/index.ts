@@ -106,7 +106,7 @@ export function lintDirectory(functionsRoot: string): LintResult[] {
     const source = readFileSync(file, "utf8");
     const relPath = relative(functionsRoot, file);
     const importMap = resolveImportMapForDir(dirname(file), functionsRoot);
-    const findings = lintSource(source, file, { importMap });
+    const findings = lintSource(source, file, { importMap, functionsRoot: resolve(functionsRoot) });
     if (findings.length > 0) {
       results.push({ filePath: relPath, findings });
     }
