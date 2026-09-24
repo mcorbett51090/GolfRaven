@@ -301,10 +301,14 @@ SELECT is(
   1,
   'a cross-user phash match opens exactly one review_item (kind=receipt_cross_user_match)'
 );
+-- ⛔ FIX (M2, post-P3a re-gate): this used to assert detail->>'matched_
+-- user_id' equals player A's raw uuid — exactly the leak M2 closes.
+-- matched_receipt_fingerprint_id (asserted above) is what a reviewer
+-- follows to find the OTHER party now; no user uuid is ever embedded.
 SELECT is(
-  (SELECT (detail->>'matched_user_id')::uuid FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id = '91000000-0000-0000-0000-000000000099'),
-  '00000000-0000-0000-0000-00000000000a'::uuid,
-  'the review_item''s detail names the OTHER (matched) user'
+  (SELECT detail ? 'user_id' OR detail ? 'matched_user_id' FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id = '91000000-0000-0000-0000-000000000099'),
+  false,
+  'the review_item''s detail does NOT embed either party''s raw user uuid (M2 fix)'
 );
 -- marker_credit b0000000-...-1 (helpers.sql) backs player A's purchase
 -- 90000000-...-1 and is already 'credited' (terminal) -- a cross-user

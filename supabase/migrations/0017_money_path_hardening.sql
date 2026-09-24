@@ -1015,6 +1015,25 @@ CREATE POLICY pd_purge_consumed_nonce_expired_r ON private.consumed_nonce
   FOR SELECT TO private_definer
   USING (COALESCE(expires_at, consumed_at) < now() - interval '7 days');
 
+-- ⛔ FIX (should-fix 4, post-P3a re-gate: "key rotation ... match on each
+-- row's recorded hmac id"): private.delete_my_data's rewritten pseudonym
+-- loop (0015) must first DISCOVER which player_pseudonym_hmac_id values
+-- exist in app.attestation_shift_log at all, BEFORE it knows which
+-- target_pseudonym to compute — but 0016's existing pd_shift_log_
+-- update_r policy only makes a row visible once target_pseudonym (or
+-- target_handle) already matches it, a chicken-and-egg problem the
+-- discovery step can never satisfy on its own (confirmed empirically
+-- this session: without this, the discovery SELECT saw zero rows under
+-- RLS and the redaction silently matched nothing). A player_pseudonym_
+-- hmac_id value is not itself personally identifying — it only says
+-- WHICH vault key wrote a row, never WHO — so a broad, row-unscoped
+-- SELECT policy for private_definer on just this table is a safe,
+-- narrow exception, reachable only from inside a SECURITY DEFINER
+-- function in the first place (never a client-facing role).
+CREATE POLICY pd_shift_log_discover_hmac_id ON app.attestation_shift_log
+  FOR SELECT TO private_definer
+  USING (true);
+
 -- Register both new policies in private.definer_policy_allowlist (0016) —
 -- that table is already FORCE-RLS'd with no INSERT policy for anyone by
 -- the time THIS migration runs (0016's own seeding happens BEFORE it
@@ -1026,7 +1045,8 @@ CREATE POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
   ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired', 'DELETE', true, 'purge_consumed_nonce (should-fix, post-P3a re-gate correction) -- hardcoded 7-days-past-source-expiry floor, independent of the function body'),
-  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired_r', 'SELECT', true, 'row-visibility companion to pd_purge_consumed_nonce_expired');
+  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired_r', 'SELECT', true, 'row-visibility companion to pd_purge_consumed_nonce_expired'),
+  ('app', 'attestation_shift_log', 'pd_shift_log_discover_hmac_id', 'SELECT', false, 'should-fix 4 (post-P3a re-gate): broad, row-unscoped discovery read of player_pseudonym_hmac_id (not itself personally identifying) -- delete_my_data needs this BEFORE it knows which target_pseudonym to compute');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
@@ -1034,7 +1054,7 @@ FROM pg_policy pol
 JOIN pg_class cl ON cl.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = cl.relnamespace
 WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
-  AND al.schema_name = 'private' AND al.table_name = 'consumed_nonce';
+  AND al.policy_name IN ('pd_purge_consumed_nonce_expired', 'pd_purge_consumed_nonce_expired_r', 'pd_shift_log_discover_hmac_id');
 DROP POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist;
 REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 

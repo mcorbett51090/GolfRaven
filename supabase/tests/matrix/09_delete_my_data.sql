@@ -255,19 +255,35 @@ SELECT is(
 -- ANYWHERE in its text form, so a FUTURE jsonb column that starts
 -- embedding a raw user id fails here immediately, before anyone notices
 -- by hand.
+-- Exception (documented, narrow): app.audit_log's OWN completion record
+-- of the delete_my_data call itself (action='delete_my_data') legitimately
+-- names the deleted user in its jsonb detail (`user_id`) — the SAME
+-- information already lives, permanently, in that exact row's own
+-- subject_id column (a plain text column, not jsonb, so out of scope for
+-- THIS scan either way; "user X was deleted" is the audit trail's whole
+-- purpose, unlike the dedupe_receipt_fingerprint leak this test exists to
+-- catch, which put ANOTHER user's id into a record that outlives and is
+-- unrelated to their own deletion). Every OTHER audit_log row (any OTHER
+-- action) is still scanned normally.
 DO $$
 DECLARE
   v_col record;
   v_count int;
   v_uuid text := '00000000-0000-0000-0000-00000000000a';
+  v_exclude_sql text;
 BEGIN
   FOR v_col IN
     SELECT table_name, column_name
     FROM information_schema.columns
     WHERE table_schema = 'app' AND data_type = 'jsonb'
   LOOP
+    IF v_col.table_name = 'audit_log' AND v_col.column_name = 'detail' THEN
+      v_exclude_sql := ' AND action <> ''delete_my_data''';
+    ELSE
+      v_exclude_sql := '';
+    END IF;
     EXECUTE format(
-      'SELECT count(*) FROM app.%I WHERE %I::text ILIKE $1', v_col.table_name, v_col.column_name
+      'SELECT count(*) FROM app.%I WHERE %I::text ILIKE $1%s', v_col.table_name, v_col.column_name, v_exclude_sql
     ) INTO v_count USING '%' || v_uuid || '%';
     IF v_count <> 0 THEN
       RAISE EXCEPTION 'the deleted user''s uuid (%) still appears in app.%.% (jsonb) after delete_my_data — % row(s)', v_uuid, v_col.table_name, v_col.column_name, v_count;
