@@ -199,7 +199,16 @@ export async function ingestOwnerSavedPage(opts: {
   }
 
   const fetchedAt = new Date().toISOString();
-  const ingestionDate = fetchedAt.slice(0, 10); // YYYY-MM-DD, UTC
+  // Gate finding (should-fix): the "future" bound is the OWNER's stated
+  // date, and the owner could genuinely be anywhere on Earth — including
+  // UTC+14 (Kiribati / the Line Islands), the furthest-ahead timezone that
+  // exists. Comparing against plain UTC "today" would falsely refuse a
+  // real, honest date from someone already living tomorrow relative to
+  // UTC. The bound is therefore "today, anywhere on Earth" — UTC + 14h —
+  // not "today in UTC".
+  const latestPossibleTodayAnywhere = new Date(Date.now() + 14 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10); // YYYY-MM-DD
 
   // Gate finding: an owner-saved date has to be a real, sane claim — not
   // before P0 work started, and never later than the moment of ingestion
@@ -211,9 +220,10 @@ export async function ingestOwnerSavedPage(opts: {
       `--date "${statedDate}" is earlier than ${X2_INGEST_MIN_DATE} — refusing a date before this work began.`,
     );
   }
-  if (statedDate > ingestionDate) {
+  if (statedDate > latestPossibleTodayAnywhere) {
     throw new Error(
-      `--date "${statedDate}" is after the ingestion time (${ingestionDate} UTC) — refusing a date in the future.`,
+      `--date "${statedDate}" is after the latest possible "today" anywhere on Earth ` +
+        `(${latestPossibleTodayAnywhere}, UTC+14) — refusing a date in the future.`,
     );
   }
 

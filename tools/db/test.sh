@@ -145,7 +145,19 @@ done
 
 PSQL=("$PG_BIN_DIR/psql" -h "$PGSOCK" -p "$PGPORT" -U postgres -v ON_ERROR_STOP=1 -q)
 
+# H2 (post-P3a gate) static check: no migration file may reference the
+# harness-only `migration_owner` role by name — a real deploy's own
+# migration role is never literally called that, and 0016/0017 both did
+# this before the fix (GRANT ... TO migration_owner), failing outright on
+# a real deploy. `migration_owner` belongs ONLY in supabase/tests/shim.sql
+# (the harness's own bootstrap); grep every migration file for it.
+if grep -l 'migration_owner' "$SUPABASE_DIR"/migrations/*.sql 2>/dev/null; then
+  echo "tools/db/test.sh: FAILED (H2) — the migration file(s) above reference 'migration_owner' by name; a real deploy has no such role (use CURRENT_USER instead)" >&2
+  exit 1
+fi
+
 run_as_pg "'$PG_BIN_DIR/createdb' -h '$PGSOCK' -p '$PGPORT' -U postgres '$DBNAME'"
+run_as_pg "'$PG_BIN_DIR/createdb' -h '$PGSOCK' -p '$PGPORT' -U postgres '${DBNAME}_no_owner'"
 
 echo "tools/db/test.sh: creating extensions (postgis, pgtap, pgcrypto)"
 run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -c \"CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS pgtap; CREATE EXTENSION IF NOT EXISTS pgcrypto;\""
