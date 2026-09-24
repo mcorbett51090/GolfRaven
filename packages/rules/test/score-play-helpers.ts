@@ -185,6 +185,7 @@ export function receipt(
     coSignalFix?: AppFix;
     paymentRef?: string;
     fingerprint?: string;
+    voidReason?: "duplicate" | "reviewer" | "fraud";
   },
 ): Evidence {
   return {
@@ -198,6 +199,7 @@ export function receipt(
     ...(opts.fingerprint !== undefined
       ? { fingerprint: opts.fingerprint }
       : {}),
+    ...(opts.voidReason !== undefined ? { voidReason: opts.voidReason } : {}),
   };
 }
 

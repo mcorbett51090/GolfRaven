@@ -92,28 +92,90 @@ export const X2_PASS_BAR_CONFIRMED = 2;
  *    web.archive.org snapshot of the SAME stated URL. `snapshotText` is
  *    the text a human (or a future live-render helper) actually extracted
  *    from that snapshot — `x2-verdict` checks the SAME quote against it,
- *    with the SAME verbatim-after-whitespace-collapsing rule, rather than
- *    fetching the network itself (this stays a pure function, and never
- *    invents a quote it hasn't been handed).
- *  - `{ type: "acceptance", acceptedBy, date }` — Matt's own dated,
- *    written acceptance that this specific owner-attested fact counts
- *    without a Wayback snapshot (the Addendum J correction's own escape
- *    hatch for a page that was never archived).
+ *    with the SAME verbatim-after-whitespace-collapsing rule.
+ *  - `{ type: "acceptance", id, acceptedBy: "Matt", date }` — Matt's own
+ *    dated, written acceptance that this specific owner-attested fact
+ *    counts without a Wayback snapshot (the Addendum J correction's own
+ *    escape hatch for a page that was never archived).
+ *
+ * Gate finding 3 (re-gate): the OLD `wayback` shape carried its own
+ * `snapshotText` inline — free text a human (or a compromised agent)
+ * typed directly into this JSON file, never checked against anything
+ * real. `x2-verdict` trusted it verbatim, which is a forgery hole exactly
+ * the size of "type the quote you want to win into a text field." Fixed
+ * by removing `snapshotText` from the file schema entirely: a `wayback`
+ * record now cites ONLY `snapshotUrl` + `snapshotSha256` (+ `rawFile`,
+ * where the bytes those hashed to are actually stored) — bytes that
+ * `x2-corroborate-wayback.ts` ACTUALLY FETCHED from web.archive.org
+ * itself, never hand-typed. `computeX2Verdict` never reads `snapshotText`
+ * from the file at all any more; it takes an already-RESOLVED corroboration
+ * (`X2ResolvedCorroboration`, below) that the CLI builds by re-reading and
+ * re-verifying those stored bytes BEFORE this function ever runs — this
+ * function stays a pure, synchronous function (no network, no filesystem),
+ * it just no longer trusts a free-text field as its input.
+ *
+ * Gate finding 3 (re-gate): an `acceptance` record now also carries an
+ * `id` — the CLI's resolution pass greps `docs/p0/X2.md`'s own `## Log`
+ * section for a row naming BOTH this `id` and `date`, so "Matt accepted
+ * this" is not just a claim inside a corroboration JSON file nobody else
+ * ever has to write anywhere else — it has to also show up in the one
+ * place this project's own decision trail already lives, checkable by
+ * anyone reading X2.md, not just by trusting the corroboration file.
  */
 export interface X2WaybackCorroboration {
   type: "wayback";
+  /** The `https://web.archive.org/web/<14-digit timestamp>/<url>` this
+   * came from — for a human to click and independently check. */
   snapshotUrl: string;
+  /** SHA-256 `x2-corroborate-wayback.ts` computed over the bytes it
+   * actually fetched — the thing `x2-verdict` re-verifies. */
   snapshotSha256: string;
-  snapshotText: string;
+  /** Path (relative to the evidence dir `x2-verdict --evidence-dir`
+   * reads) to the raw bytes stored at `snapshotSha256`. */
+  rawFile: string;
 }
 export interface X2AcceptanceCorroboration {
   type: "acceptance";
+  /** A short, stable identifier for this specific acceptance — the same
+   * string the CLI greps for, alongside `date`, in `docs/p0/X2.md`'s
+   * `## Log` section (e.g. `"TN-completionUnit-2026-09-24"`). */
+  id: string;
+  /** Must be the literal string `"Matt"` — checked exactly, not just
+   * truthy (gate finding 3, re-gate: any other value refuses). */
   acceptedBy: string;
+  /** `YYYY-MM-DD`. */
   date: string;
 }
 export type X2CorroborationRecord = X2WaybackCorroboration | X2AcceptanceCorroboration;
 /** trail name -> evidenceSha -> its corroboration record, if any. */
 export type X2CorroborationFile = Record<string, Record<string, X2CorroborationRecord>>;
+
+/**
+ * The corroboration data ACTUALLY TRUSTED, after the CLI's own
+ * verification pass — never derived from the raw `X2CorroborationFile`
+ * directly. Keyed by `"<trail>:<evidenceSha>"` (matching how
+ * `computeX2Verdict` already looks a fact's corroboration record up).
+ */
+export interface ResolvedCorroborationEntry {
+  /** `wayback` records only: `false` when the stored raw bytes' recomputed
+   * SHA-256 did not match `snapshotSha256` (tampered/missing evidence) —
+   * `waybackText` is only meaningful when this is `true`. */
+  waybackVerified?: boolean;
+  /** `wayback` records only: text re-derived from the VERIFIED raw bytes,
+   * with the SAME extractor every other evidence route uses. `null` when
+   * extraction found no text, or verification failed. */
+  waybackText?: string | null;
+  /** `acceptance` records only: `true` only when a row naming both this
+   * record's `id` and `date` was found in `docs/p0/X2.md`'s `## Log`
+   * section. */
+  acceptanceLogged?: boolean;
+}
+export type X2ResolvedCorroboration = Map<string, ResolvedCorroborationEntry>;
+
+/** The key `X2ResolvedCorroboration` is keyed by, for one fact. */
+export function corroborationResolutionKey(trail: string, evidenceSha: string): string {
+  return `${trail}:${evidenceSha}`;
+}
 
 /** One trail's own evidence — never merged with another trail's. `text ===
  * null` means the evidence EXISTS but has no extracted text (should not
