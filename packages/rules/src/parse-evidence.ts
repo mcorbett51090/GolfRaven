@@ -330,10 +330,27 @@ export function parseEvidence(raw: unknown, tz: string): EvidenceParseResult {
   return { success: true, data: row };
 }
 
+/** F3 (sixth gate): one row that didn't make it into the scored evidence
+ * set — either because it plainly belongs to a DIFFERENT play (facility/
+ * date/course mismatch: not malformed, just not this play's evidence), or
+ * because it matched this play's facility/date/course but then failed the
+ * strict per-row parse (genuinely malformed). Either way it is EXCLUDED
+ * from scoring, never counted, and never fails the whole play by itself —
+ * `index` is its position in the ORIGINAL, unfiltered `evidence` array, so
+ * a caller can find it again. */
+export interface ExcludedRow {
+  index: number;
+  reasons: string[];
+}
+
 export interface ScorePlayInputParseSuccess {
   success: true;
   evidence: Evidence[];
   ctx: ScorePlayContext;
+  /** Every row that did not make it into `evidence` above — off-play rows
+   * and quarantined (malformed but on-play) rows alike. Empty when every
+   * raw row either matched and parsed cleanly. */
+  excludedRows: ExcludedRow[];
 }
 export interface ScorePlayInputParseFailure {
   success: false;
@@ -341,13 +358,55 @@ export interface ScorePlayInputParseFailure {
 }
 export type ScorePlayInputParseResult = ScorePlayInputParseSuccess | ScorePlayInputParseFailure;
 
+/** F3: the ABSOLUTE ceiling on the RAW `evidence` array length, checked
+ * BEFORE any filtering — a pure DoS guard, independent of how many rows
+ * actually belong to this play (a real `app.evidence` query can
+ * legitimately return many OTHER plays' rows alongside this one's; this
+ * cap exists only to bound the work done reading the raw array at all). */
+export const ABSOLUTE_ROW_CAP = 1000;
+
+/** F3: a LOOSE, tolerant read of a not-yet-validated row's `facilityId`/
+ * `localDate`/`courseId` — deliberately NOT the strict `EvidenceSchema`.
+ * This is what decides whether a row is even a CANDIDATE for this play
+ * (and therefore eligible for quarantine-on-malformed, rather than being
+ * silently excluded as someone else's evidence) — H3's residual rule
+ * applies here too: a row with no `courseId` at all is facility-level and
+ * always a candidate; a row whose `courseId` disagrees with
+ * `ctx.playCourseId` is not. */
+function looseRowMatchesPlay(raw: unknown, ctx: ScorePlayContext): boolean {
+  if (raw === null || typeof raw !== "object") return false;
+  const r = raw as Record<string, unknown>;
+  if (r.facilityId !== ctx.playFacilityId) return false;
+  if (r.localDate !== ctx.playLocalDate) return false;
+  if (r.courseId !== undefined && r.courseId !== ctx.playCourseId) return false;
+  return true;
+}
+
 /**
- * Parses `scorePlay`'s whole raw input — `{evidence, ctx}` — as ONE call:
- * the `ctx` shape (H3's `playCourseId`, H2's `facilityTz`, …), the
- * `evidence` array's own row cap (M4: 200 rows), and every row via
- * `parseEvidence` (including the tz cross-check, using `ctx.facilityTz`).
+ * Parses `scorePlay`'s whole raw input — `{evidence, ctx}`.
+ *
+ * **F3 (sixth gate): one bad row no longer fails the whole play.** The
+ * `ctx` shape, a non-array `evidence`, and the `evidence` array's own row
+ * counts are STRUCTURAL problems — those still fail the whole input
+ * (`success: false`), because there is no sound "which play is this for"
+ * to even filter against. Once `ctx` is valid, every raw row is first
+ * LOOSELY matched against `ctx.playFacilityId`/`playLocalDate`/
+ * `playCourseId` (`looseRowMatchesPlay`) — a row that plainly belongs to a
+ * DIFFERENT play is simply excluded, not an error. Only THEN does a
+ * matching row go through the full strict `parseEvidence` — if THAT
+ * fails, the row is QUARANTINED (excluded, with a reason) rather than
+ * failing the whole play: a single malformed row for this play must not
+ * zero out every OTHER, perfectly good row alongside it.
+ *
+ * Two independent row-count caps, checked in order: `ABSOLUTE_ROW_CAP`
+ * (1000) bounds the RAW array before any filtering (pure DoS guard);
+ * `EVIDENCE_ROW_CAP` (200, M4) bounds the count of rows that survived the
+ * LOOSE filter — i.e. rows that actually belong to this play — so a table
+ * scan returning many other plays' rows can never fail this one on count
+ * alone.
+ *
  * `scorePlay` (`score-play.ts`) calls this FIRST, always — see that
- * module's doc.
+ * module's doc for the TRUST TABLE.
  */
 export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
   if (raw === null || typeof raw !== "object") {
@@ -364,27 +423,50 @@ export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
   if (!Array.isArray(evidence)) {
     return { success: false, reasons: ["evidence must be an array"] };
   }
-  // M4: the row cap is checked BEFORE any per-row parsing — a >200-row
-  // payload is rejected outright, never partially processed (the whole
-  // point of a DoS cap is to bound the work done on an oversized input).
-  if (evidence.length > EVIDENCE_ROW_CAP) {
+  if (evidence.length > ABSOLUTE_ROW_CAP) {
     return {
       success: false,
-      reasons: [`evidence has ${evidence.length} rows, exceeding the ${EVIDENCE_ROW_CAP}-row cap`],
+      reasons: [`evidence has ${evidence.length} raw rows, exceeding the absolute ${ABSOLUTE_ROW_CAP}-row DoS cap`],
     };
   }
 
-  const tz = parsedCtx.facilityTz ?? "UTC";
-  const reasons: string[] = [];
-  const parsedEvidence: Evidence[] = [];
+  const excludedRows: ExcludedRow[] = [];
+  const matchingIndices: number[] = [];
   evidence.forEach((rawRow, i) => {
-    const result = parseEvidence(rawRow, tz);
+    if (looseRowMatchesPlay(rawRow, parsedCtx)) {
+      matchingIndices.push(i);
+    } else {
+      excludedRows.push({ index: i, reasons: ["different facility, date, or course than this play"] });
+    }
+  });
+
+  // M4 / F3: the 200-row cap counts only rows that survived the loose
+  // facility/date/course filter — a genuinely oversized evidence set FOR
+  // THIS PLAY is still a structural failure (the whole point of the cap:
+  // bound the classification/combination work below), but noise from
+  // OTHER plays never counts against it.
+  if (matchingIndices.length > EVIDENCE_ROW_CAP) {
+    return {
+      success: false,
+      reasons: [
+        `${matchingIndices.length} rows match this play's facility/date/course, exceeding the ${EVIDENCE_ROW_CAP}-row cap`,
+      ],
+    };
+  }
+
+  const tz = parsedCtx.facilityTz;
+  const parsedEvidence: Evidence[] = [];
+  for (const i of matchingIndices) {
+    const result = parseEvidence(evidence[i], tz);
     if (result.success) {
       parsedEvidence.push(result.data);
     } else {
-      reasons.push(...result.reasons.map((r) => `evidence[${i}]: ${r}`));
+      // F3: QUARANTINED, not a whole-input failure — this row matched the
+      // play's own facility/date/course but failed strict validation for
+      // some other reason (bad shape, tz-cross-check mismatch, …).
+      excludedRows.push({ index: i, reasons: result.reasons });
     }
-  });
-  if (reasons.length > 0) return { success: false, reasons };
-  return { success: true, evidence: parsedEvidence, ctx: parsedCtx };
+  }
+
+  return { success: true, evidence: parsedEvidence, ctx: parsedCtx, excludedRows };
 }

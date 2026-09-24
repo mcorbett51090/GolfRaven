@@ -408,6 +408,57 @@ function checkQuote(
   return true;
 }
 
+/**
+ * Gate finding 4: an owner-saved fact does not count toward confirmation
+ * unless corroborated (or Matt has accepted it uncorroborated, in
+ * writing). Only ever called for a fact whose `checkQuote` already
+ * succeeded, so `evidence.get(evidenceSha)` is guaranteed to exist. A
+ * `direct`/`rendered` fact needs no corroboration and always passes here
+ * with a `null` summary (nothing to name).
+ */
+function checkOwnerSavedCorroboration(
+  evidenceSha: string,
+  trail: string,
+  quote: string,
+  evidence: TrailEvidenceMap,
+  corroboration: X2CorroborationFile,
+  label: string,
+  reasons: string[],
+): { ok: boolean; summary: string | null } {
+  const entry = evidence.get(evidenceSha);
+  const method = entry?.method;
+  if (method !== "owner-saved") {
+    return { ok: true, summary: null };
+  }
+  const record = corroboration[trail]?.[evidenceSha];
+  if (!record) {
+    reasons.push(
+      `${label}: owner-attested, UNCORROBORATED (evidence ${evidenceSha.slice(0, 12)}... is an owner-saved ` +
+        "capture with no corroboration record supplied — a Wayback snapshot or Matt's dated acceptance is " +
+        "required for an owner-saved fact to count; Addendum J correction).",
+    );
+    return { ok: false, summary: "owner-attested, uncorroborated" };
+  }
+  if (record.type === "acceptance") {
+    const summary = `owner-attested, accepted uncorroborated by ${record.acceptedBy} on ${record.date}`;
+    reasons.push(`${label}: ${summary}.`);
+    return { ok: true, summary };
+  }
+  // record.type === "wayback"
+  const collapsedQuote = collapseWhitespace(quote);
+  const foundInSnapshot = collapseWhitespace(record.snapshotText).includes(collapsedQuote);
+  if (!foundInSnapshot) {
+    reasons.push(
+      `${label}: owner-attested, corroboration record cited (Wayback snapshot ${record.snapshotUrl}) but the ` +
+        "quote does NOT appear verbatim in the snapshot's own text — corroboration fails, this fact does not count.",
+    );
+    return { ok: false, summary: `owner-attested, Wayback corroboration FAILED (${record.snapshotUrl})` };
+  }
+  const summary = `owner-attested, corroborated by Wayback snapshot ${record.snapshotUrl} (sha256 ${record.snapshotSha256.slice(0, 12)}...)`;
+  reasons.push(`${label}: ${summary}.`);
+  return { ok: true, summary };
+}
+
 /** Decision 0001 Addendum J: looks up the `method` of the evidence a fact
  * cites, for echoing in the verdict output (`X2TrailVerdict.facts`). Only
  * ever called for a fact that `checkQuote` has already run over — which
