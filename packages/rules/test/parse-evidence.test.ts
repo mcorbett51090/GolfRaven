@@ -181,9 +181,12 @@ describe("F1: facilityTz is REQUIRED and allow-listed to real IANA Area/Location
     ["+05:00 (fixed offset)", "+05:00"],
     ["-07:00 (fixed offset)", "-07:00"],
     ["Etc/GMT+7 (fixed-offset-style zone)", "Etc/GMT+7"],
+    ["Etc/UTC (Etc-prefix legacy link)", "Etc/UTC"],
     ["US/Pacific (legacy link)", "US/Pacific"],
+    ["Canada/Eastern (legacy link)", "Canada/Eastern"],
     ["PST8PDT (abbreviation-style)", "PST8PDT"],
-    ["EST (abbreviation)", "EST"],
+    ["EST (abbreviation — Intl resolves it to America/Panama, but it's not a real Area/Location name)", "EST"],
+    ["UTC (no Area/Location shape at all)", "UTC"],
   ];
   for (const [label, badTz] of badTzCases) {
     it(`parseEvidence rejects facilityTz=${label}`, () => {
@@ -192,24 +195,49 @@ describe("F1: facilityTz is REQUIRED and allow-listed to real IANA Area/Location
     });
   }
 
-  it("a real IANA zone (Europe/Kiev) is accepted", () => {
-    // Kyiv is UTC+2/+3 (DST) — a fix genuinely captured there must carry
-    // the matching local date; this only checks the TZ NAME is accepted,
-    // not a specific date, so use a fix whose capturedAt/localDate the
-    // helper already keeps self-consistent under whatever tz is passed —
-    // here we just confirm the zone-name gate itself doesn't reject it by
-    // constructing a row/fix pair known to agree under Europe/Kiev's
-    // offset at this instant is out of scope; instead assert the PARSE
-    // reaches the tz cross-check at all (a bad zone name fails BEFORE
-    // ever reaching Zod's row parse).
-    const row = staffPresence({ coSignalFix: goodFix() });
-    const result = parseEvidence(row, "Europe/Kiev");
-    // Either succeeds (if the offset happens to agree) or fails on the
-    // CROSS-CHECK specifically (localDate mismatch) — never on the ZONE
-    // NAME itself being rejected.
-    if (!result.success) {
-      expect(result.reasons.some((r) => r.includes("not a real IANA"))).toBe(false);
-    }
+  // Seventh gate, item 1 (the HIGH regression): the sixth gate's own
+  // `Intl.supportedValuesOf('timeZone')` allow-list wrongly rejected every
+  // one of these — all genuine, current IANA Area/Location names; several
+  // (`America/Indiana/Indianapolis`, `America/Kentucky/Louisville`) are
+  // exactly what `@golfraven/catalog`'s own `tz-lookup`-derived facilityTz
+  // produces for real facilities in those counties, so EVERY play at such
+  // a facility failed outright under the old code. Each is proven here
+  // via the TZ NAME GATE specifically: `parseEvidence` must reach the
+  // capturedAt/localDate cross-check (never reject on the zone name
+  // itself) — a self-consistent fix under that exact tz confirms the
+  // whole path, not just the name check in isolation.
+  const requiredAcceptZones = [
+    "America/Indiana/Indianapolis",
+    "America/Kentucky/Louisville",
+    "America/Argentina/Buenos_Aires",
+    "Europe/Kyiv",
+    "America/Nuuk",
+    "America/Blanc-Sablon",
+    "America/Port-au-Prince",
+  ];
+  for (const zone of requiredAcceptZones) {
+    it(`accepts the real IANA zone ${zone} (regression case)`, () => {
+      // A fix genuinely self-consistent under THIS zone: derive its own
+      // calendar date from capturedAt in that tz, rather than assuming
+      // UTC, so the test passes regardless of the zone's current offset.
+      const capturedAt = PLAY_LOCAL_DATE_MS;
+      const derivedLocalDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date(capturedAt));
+      const row = staffPresence({
+        coSignalFix: { ...goodFix(), capturedAt, localDate: derivedLocalDate } as any,
+      });
+      const result = parseEvidence(row, zone);
+      expect(result.success).toBe(true);
+    });
+  }
+
+  it("parseScorePlayInput's ctx.facilityTz also accepts America/Indiana/Indianapolis (not just parseEvidence's own tz param)", () => {
+    const result = parseScorePlayInput({ evidence: [], ctx: { ...baseCtx(), facilityTz: "America/Indiana/Indianapolis" } });
+    expect(result.success).toBe(true);
   });
 
   it("ScorePlayContextSchema (via parseScorePlayInput) requires facilityTz — omitting it fails the whole parse", () => {
@@ -224,6 +252,63 @@ describe("F1: facilityTz is REQUIRED and allow-listed to real IANA Area/Location
       ctx: { ...baseCtx(), facilityTz: "-07:00" },
     });
     expect(result.success).toBe(false);
+  });
+
+  describe("behaves IDENTICALLY without Intl.supportedValuesOf (this implementation never uses it at all)", () => {
+    it("every required-accept zone still parses the same with supportedValuesOf deleted", () => {
+      const original = (Intl as any).supportedValuesOf;
+      delete (Intl as any).supportedValuesOf;
+      try {
+        for (const zone of requiredAcceptZones) {
+          const capturedAt = PLAY_LOCAL_DATE_MS;
+          const derivedLocalDate = new Intl.DateTimeFormat("en-CA", {
+            timeZone: zone,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }).format(new Date(capturedAt));
+          const row = staffPresence({ coSignalFix: { ...goodFix(), capturedAt, localDate: derivedLocalDate } as any });
+          expect(parseEvidence(row, zone).success).toBe(true);
+        }
+        for (const [, badTz] of badTzCases) {
+          const row = staffPresence({ coSignalFix: goodFix() });
+          expect(parseEvidence(row, badTz).success).toBe(false);
+        }
+      } finally {
+        (Intl as any).supportedValuesOf = original;
+      }
+    });
+  });
+
+  describe("never throws, even when Intl itself is missing entirely", () => {
+    it("parseEvidence returns a parse failure (not a throw) when globalThis.Intl is undefined", () => {
+      const g = globalThis as any;
+      const savedIntl = g.Intl;
+      g.Intl = undefined;
+      try {
+        const row = staffPresence({ coSignalFix: goodFix() });
+        expect(() => {
+          const result = parseEvidence(row, PLAY_FACILITY_TZ);
+          expect(result.success).toBe(false);
+        }).not.toThrow();
+      } finally {
+        g.Intl = savedIntl;
+      }
+    });
+
+    it("parseScorePlayInput also returns a parse failure (not a throw) when Intl is missing", () => {
+      const g = globalThis as any;
+      const savedIntl = g.Intl;
+      g.Intl = undefined;
+      try {
+        expect(() => {
+          const result = parseScorePlayInput({ evidence: [], ctx: baseCtx() });
+          expect(result.success).toBe(false);
+        }).not.toThrow();
+      } finally {
+        g.Intl = savedIntl;
+      }
+    });
   });
 });
 

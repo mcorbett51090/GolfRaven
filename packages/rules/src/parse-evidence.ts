@@ -500,12 +500,6 @@ export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
     };
   }
 
-  // `ScorePlayContext.facilityTz` is typed OPTIONAL on the interface (it's
-  // meaningless to `classifyEvidenceRow`/`scorePlay`'s own scoring logic,
-  // which never reads it — only this parser does) even though
-  // `ScorePlayContextSchema` REQUIRES it at runtime; read it from the
-  // zod-inferred (pre-cast) data, which correctly types it as `string`,
-  // rather than a non-null assertion on the interface-typed `parsedCtx`.
   const tz: string = ctxParsed.data.facilityTz;
   const parsedEvidence: Evidence[] = [];
   for (const i of matchingIndices) {
@@ -518,6 +512,27 @@ export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
       // some other reason (bad shape, tz-cross-check mismatch, …).
       excludedRows.push({ index: i, reasons: result.reasons });
     }
+  }
+
+  // Seventh gate, item 4: duplicate evidence `id`s are a STRUCTURAL
+  // problem, not a per-row quarantine — two rows sharing the same `id`
+  // would silently confuse BOTH `voidDuplicateFingerprints`'s winner
+  // lookup (F2, `score-play.ts`: `row.id === winnerId` could match either
+  // copy) AND `computeInputDigest`'s sort-by-id (F4: a tied `id` falls
+  // back to original array order, reintroducing exactly the
+  // order-dependence F4 closed). Checked over `parsedEvidence` — a row
+  // that shared an id but was ITSELF quarantined for some other reason
+  // never reaches this array, so it can't spuriously trip this check;
+  // only a genuine duplicate among rows that would otherwise BOTH score
+  // does.
+  const idCounts = new Map<string, number>();
+  for (const row of parsedEvidence) idCounts.set(row.id, (idCounts.get(row.id) ?? 0) + 1);
+  const duplicateIds = [...idCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id);
+  if (duplicateIds.length > 0) {
+    return {
+      success: false,
+      reasons: [`duplicate evidence id(s) within this play's evidence: ${duplicateIds.map((id) => safeQuote(id)).join(", ")}`],
+    };
   }
 
   return { success: true, evidence: parsedEvidence, ctx: parsedCtx, excludedRows };
