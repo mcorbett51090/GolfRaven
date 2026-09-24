@@ -341,7 +341,36 @@ export interface PurchaseCorroboration {
 export interface ScorePlayContext {
   playFacilityId: string;
   playLocalDate: string;
+  /** H3 (fifth gate): the play's own COURSE anchor, for a multi-course
+   * (e.g. 36-hole) facility. A row that carries a `courseId` of its own
+   * (§4.4's `courseDisambiguatedBy`-adjacent field — set when the source
+   * itself is course-specific, e.g. a staff scan at a particular course's
+   * booth) contributes NOTHING when that `courseId` disagrees with
+   * `playCourseId` — the SAME facility, SAME date, but the OTHER course's
+   * evidence must never count for this play. A row with NO `courseId` at
+   * all (most sources: booking, receipt, most device-GPS rows — the plan
+   * has no course-level granularity for them) stays allowed regardless,
+   * exactly as `undefined` means "facility-level, not course-scoped."
+   * `undefined` here (the field omitted entirely) disables the check —
+   * every row is course-unanchored — for a single-course facility or a
+   * caller that hasn't wired course resolution yet. The DB's
+   * `play_evidence UNIQUE(evidence_id)` constraint (preventing the SAME
+   * evidence row from being attributed to two plays) is a separate,
+   * P3a-scope guarantee — this is the money-path-visible half: even
+   * absent that DB constraint, a WRONG-course row must never contribute. */
+  playCourseId?: string;
   purchases?: PurchaseCorroboration[];
+  /** H2 (fifth gate): the play's facility's IANA timezone, used ONLY by
+   * `parseScorePlayInput`'s (`../parse-evidence.js`) capturedAt/localDate
+   * cross-check — never read by `classifyEvidenceRow`/`scorePlay`
+   * themselves, which trust each fix's own pre-validated `localDate`
+   * string throughout (this module's own doc: "every date check is
+   * anchored to ctx.playLocalDate, never re-derived from an epoch").
+   * Defaults to `"UTC"` when omitted, which is also what every existing
+   * fixture in this package's own test suite is implicitly authored
+   * against (`capturedAt` epochs chosen so their UTC calendar date equals
+   * the fixture's own `localDate` string). */
+  facilityTz?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -619,7 +648,15 @@ export function finish(
  * now a real, supported (if narrow) path: direct unit tests.
  */
 export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
-  const rowOk = row.facilityId === ctx.playFacilityId && row.localDate === ctx.playLocalDate;
+  // H3 (fifth gate): the course anchor — a row that names its OWN
+  // `courseId` contributes nothing when it disagrees with
+  // `ctx.playCourseId` (a same-facility, same-date, WRONG-course row at a
+  // multi-course facility); a row with no `courseId` at all is
+  // facility-level and stays allowed regardless (`ctx.playCourseId`
+  // undefined disables the check entirely, for a single-course facility).
+  const courseOk =
+    row.courseId === undefined || ctx.playCourseId === undefined || row.courseId === ctx.playCourseId;
+  const rowOk = row.facilityId === ctx.playFacilityId && row.localDate === ctx.playLocalDate && courseOk;
   switch (row.source) {
     case "staff_presence": {
       // §4.5 line 990: "a co-signal within ±10 min", now including the
@@ -883,6 +920,29 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
         badgeWeight: rowOk ? WEIGHT[classId] : 0,
         moneyEligible: false,
       });
+    }
+    default: {
+      // M4 (fifth gate): defence in depth. `Evidence["source"]` is a
+      // closed, exhaustive union at the type level — this branch is
+      // unreachable through any well-typed caller (`row` narrows to
+      // `never` here) — but `parseScorePlayInput`/`parseEvidence`
+      // (`../parse-evidence.js`) are meant to reject an unrecognized
+      // `source` LONG before it ever reaches this function; this is the
+      // second, independent layer for the case those are bypassed
+      // entirely (a direct `classifyEvidenceRow` call — the same "tests
+      // reach it directly" path this module's own doc describes — or a
+      // future schema/version drift). An unknown source contributes
+      // NOTHING and, critically, never throws.
+      const raw = row as unknown as { id?: unknown };
+      return {
+        evidenceId: typeof raw.id === "string" ? raw.id : "unknown",
+        classId: "self_report",
+        group: "self",
+        hard: false,
+        badgeWeight: 0,
+        moneyEligible: false,
+        moneyWeight: 0,
+      };
     }
   }
 }

@@ -575,9 +575,19 @@ function computeHeldReview(
 ): boolean {
   if (!money) return false;
 
+  // Fifth gate, H1: generalized from "exactly `unattestable`" to "any
+  // governing grade that isn't cleanly `attested`" — `resolveFixGrade`
+  // (fixed this round to allow-list `{attested, unattestable}` and treat
+  // everything else, including a malformed/adversarial grade, as
+  // `"failed"`) already stops a `"failed"`-graded fix from ever becoming a
+  // qualifying presence fix in the first place, so this is defence in
+  // depth: even if that upstream invariant were ever violated, a grade
+  // that is neither `"attested"` nor the specific literal `"unattestable"`
+  // still routes to held_review here, rather than silently falling
+  // through to `held: false` because it matched neither exact string.
   const presenceHasAttested = presenceFixes.some((fix) => resolveFixGrade(fix.token) === "attested");
-  const presenceHasUnattestable = presenceFixes.some((fix) => resolveFixGrade(fix.token) === "unattestable");
-  const presenceHeld = !presenceHasAttested && presenceHasUnattestable;
+  const presenceHasNonAttested = presenceFixes.some((fix) => resolveFixGrade(fix.token) !== "attested");
+  const presenceHeld = !presenceHasAttested && presenceHasNonAttested;
 
   if (hardSignal) {
     // Should-fix (order independence): `.filter` + `.some` over the SET of
@@ -588,14 +598,18 @@ function computeHeldReview(
     // now judged together: an attested one ANYWHERE in the hard set is
     // enough to not hold, regardless of array order.
     const hardOnes = playContributions.filter((c) => c.hard);
+    // H1: same generalization as `presenceHeld` above — any DEFINED,
+    // non-`"attested"` governing grade counts (not just the specific
+    // literal `"unattestable"`), fail-safe against a hypothetical
+    // malformed grade that got this far.
     const hardHasAttested = hardOnes.some((c) => c.governingGrade === "attested");
-    const hardHasUnattestable = hardOnes.some((c) => c.governingGrade === "unattestable");
-    const hardHeld = !hardHasAttested && hardHasUnattestable;
+    const hardHasNonAttested = hardOnes.some((c) => c.governingGrade !== undefined && c.governingGrade !== "attested");
+    const hardHeld = !hardHasAttested && hardHasNonAttested;
     return hardHeld || presenceHeld;
   }
   const hasAttested = moneyMerged.some((c) => c.governingGrade === "attested");
-  const hasUnattestable = moneyMerged.some((c) => c.governingGrade === "unattestable");
-  const scoreHeld = !hasAttested && hasUnattestable;
+  const hasNonAttested = moneyMerged.some((c) => c.governingGrade !== undefined && c.governingGrade !== "attested");
+  const scoreHeld = !hasAttested && hasNonAttested;
   return scoreHeld || presenceHeld;
 }
 
@@ -643,8 +657,16 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
   // `classifyEvidenceRow`'s own `rowOk` defence-in-depth check) is
   // additional, narrower anchoring on top of this blanket row-level filter
   // — not a substitute for it.
+  // H3 (fifth gate): the course anchor — see `ScorePlayContext.playCourseId`'s
+  // own doc (`internal/classify.js`). Applied at this SAME top-level filter
+  // as the facility/date drop, for the same reason: a wrong-course row must
+  // never reach `deriveGroups`/`resolveGroups` at all, not merely be zeroed
+  // downstream.
   const evidence = voidDuplicateFingerprints(evidenceIn).filter(
-    (row) => row.facilityId === ctx.playFacilityId && row.localDate === ctx.playLocalDate,
+    (row) =>
+      row.facilityId === ctx.playFacilityId &&
+      row.localDate === ctx.playLocalDate &&
+      (row.courseId === undefined || ctx.playCourseId === undefined || row.courseId === ctx.playCourseId),
   );
 
   const rawContributions = evidence.map((row) => classifyEvidenceRow(row, ctx));
