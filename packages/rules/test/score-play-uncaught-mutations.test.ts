@@ -153,24 +153,34 @@ describe("uncaught mutation: fingerprint voiding disabled (non-tautological — 
   });
 });
 
-describe("item 3 (seventh gate): a reviewer's void wins UNCONDITIONALLY — the whole fingerprint group goes void", () => {
-  it("the probe's own exploit: an OLDER reviewer-voided row + a NEWER approved duplicate — the approved one no longer overrides the void", () => {
-    const rVoidOld = receipt({ id: "a-old", status: "void", fingerprint: "fp2", coSignalFix: goodFix() });
+describe("item 1 (eighth gate): a REVIEWER or FRAUD void poisons the whole group — a DUPLICATE void does not", () => {
+  it("REVIEWER void (explicit voidReason) still poisons the group — an approved duplicate does not override it", () => {
+    const rVoidOld = receipt({ id: "a-old", status: "void", voidReason: "reviewer", fingerprint: "fp2", coSignalFix: goodFix() });
     const rApprNew = receipt({ id: "b-new", status: "approved", fingerprint: "fp2", coSignalFix: goodFix() });
     const ck = checkin({ fix: goodFix() });
     const result = scorePlayOrThrow([rVoidOld, rApprNew, ck], baseCtx());
-    // Both receipt copies are void (weight 0) — only the check-in (0.30)
-    // remains, money-eligible on its own but well under MONEY_MIN. Before
-    // this fix, the approved copy (0.80) would have won and both scores
-    // would have been 0.80.
     expect(result.score_badge).toBe(0.3);
     expect(result.score_monetary).toBe(0.3);
     expect(result.money).toBe(false);
   });
 
-  it("order-independent: [void, approved] and [approved, void] give the SAME (voided) result", () => {
+  it("FRAUD void also poisons the group", () => {
+    const rVoidOld = receipt({ id: "a-old2", status: "void", voidReason: "fraud", fingerprint: "fp2f", coSignalFix: goodFix() });
+    const rApprNew = receipt({ id: "b-new2", status: "approved", fingerprint: "fp2f", coSignalFix: goodFix() });
+    const result = scorePlayOrThrow([rVoidOld, rApprNew], baseCtx());
+    expect(result.score_badge).toBe(0);
+  });
+
+  it("a MISSING voidReason on a void row defaults to \"reviewer\" and STILL poisons the group (fails safe)", () => {
+    const rVoidOld = receipt({ id: "a-old3", status: "void", fingerprint: "fp2m", coSignalFix: goodFix() }); // no voidReason
+    const rApprNew = receipt({ id: "b-new3", status: "approved", fingerprint: "fp2m", coSignalFix: goodFix() });
+    const result = scorePlayOrThrow([rVoidOld, rApprNew], baseCtx());
+    expect(result.score_badge).toBe(0);
+  });
+
+  it("order-independent: [void(reviewer), approved] and [approved, void(reviewer)] give the SAME (voided) result", () => {
     const mk = (voidFirst: boolean) => {
-      const v = receipt({ id: "v1", status: "void", fingerprint: "fp3", coSignalFix: goodFix() });
+      const v = receipt({ id: "v1", status: "void", voidReason: "reviewer", fingerprint: "fp3", coSignalFix: goodFix() });
       const a = receipt({ id: "a1", status: "approved", fingerprint: "fp3", coSignalFix: goodFix() });
       return voidFirst ? [v, a] : [a, v];
     };
@@ -180,12 +190,62 @@ describe("item 3 (seventh gate): a reviewer's void wins UNCONDITIONALLY — the 
     expect(reversed.score_badge).toBe(0);
   });
 
-  it("a THREE-way group with one void member: the whole group is void, not just the void row itself", () => {
-    const v = receipt({ id: "v1", status: "void", fingerprint: "fp4", coSignalFix: goodFix() });
+  it("a THREE-way group with one reviewer-void member: the whole group is void, not just the void row itself", () => {
+    const v = receipt({ id: "v1", status: "void", voidReason: "reviewer", fingerprint: "fp4", coSignalFix: goodFix() });
     const p = receipt({ id: "p1", status: "pending", fingerprint: "fp4", coSignalFix: goodFix() });
     const a = receipt({ id: "a1", status: "approved", fingerprint: "fp4", coSignalFix: goodFix() });
     const result = scorePlayOrThrow([v, p, a], baseCtx());
     expect(result.score_badge).toBe(0);
+  });
+});
+
+describe("item 1 (eighth gate), Case A: a DUPLICATE-void (intake dedup) does NOT poison the group — the honest approved original survives", () => {
+  it("the gate's own Case A: an approved original + an intake-voided re-upload (same fingerprint) — the original keeps scoring at full weight", () => {
+    const original = receipt({ id: "r-orig", status: "approved", fingerprint: "fp", coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS - 3600_000 }) });
+    const dupVoid = receipt({ id: "r-dup", status: "void", voidReason: "duplicate", fingerprint: "fp", coSignalFix: goodFix() });
+    const ck = checkin({ fix: goodFix() });
+    const alone = scorePlayOrThrow([original, ck], baseCtx());
+    const withDup = scorePlayOrThrow([original, dupVoid, ck], baseCtx());
+    // The dedup-voided re-upload changes NOTHING — same result with or
+    // without it present. Before this fix, adding it would have poisoned
+    // the whole group (0.86 → dropping the receipt to 0, checkin-only).
+    expect(withDup.score_monetary).toBe(alone.score_monetary);
+    expect(withDup.money).toBe(alone.money);
+    expect(alone.score_monetary).toBeGreaterThanOrEqual(0.85);
+  });
+
+  it("permutation: the duplicate-void row's ARRAY POSITION doesn't matter", () => {
+    const original = receipt({ id: "r-orig2", status: "approved", fingerprint: "fp7", coSignalFix: goodFix() });
+    const dupVoid = receipt({ id: "r-dup2", status: "void", voidReason: "duplicate", fingerprint: "fp7", coSignalFix: goodFix() });
+    const ck = checkin({ fix: goodFix() });
+    const forward = scorePlayOrThrow([original, dupVoid, ck], baseCtx());
+    const reversed = scorePlayOrThrow([dupVoid, ck, original], baseCtx());
+    const shuffled = scorePlayOrThrow([ck, original, dupVoid], baseCtx());
+    expect(forward.score_monetary).toBe(reversed.score_monetary);
+    expect(forward.score_monetary).toBe(shuffled.score_monetary);
+  });
+
+  it("a duplicate-void row with NO coSignalFix at all is still correctly ignored (not poisoning, not competing)", () => {
+    const original = receipt({ id: "r-orig3", status: "approved", fingerprint: "fp8", coSignalFix: goodFix() });
+    const dupVoidNoFix = receipt({ id: "r-dup3", status: "void", voidReason: "duplicate", fingerprint: "fp8" });
+    const result = scorePlayOrThrow([original, dupVoidNoFix], baseCtx());
+    expect(result.score_badge).toBe(0.8);
+  });
+
+  it("TWO duplicate-void copies alongside one approved original: still just the original", () => {
+    const original = receipt({ id: "r-orig4", status: "approved", fingerprint: "fp9", coSignalFix: goodFix() });
+    const dup1 = receipt({ id: "r-dup4a", status: "void", voidReason: "duplicate", fingerprint: "fp9", coSignalFix: goodFix() });
+    const dup2 = receipt({ id: "r-dup4b", status: "void", voidReason: "duplicate", fingerprint: "fp9", coSignalFix: goodFix() });
+    const result = scorePlayOrThrow([dup1, original, dup2], baseCtx());
+    expect(result.score_badge).toBe(0.8);
+  });
+
+  it("ALL copies in a group are duplicate-void (no real original at all): the whole group stays void, but doesn't THROW or poison anything else", () => {
+    const dup1 = receipt({ id: "d1", status: "void", voidReason: "duplicate", fingerprint: "fp10", coSignalFix: goodFix() });
+    const dup2 = receipt({ id: "d2", status: "void", voidReason: "duplicate", fingerprint: "fp10", coSignalFix: goodFix() });
+    const ck = checkin({ fix: goodFix() });
+    const result = scorePlayOrThrow([dup1, dup2, ck], baseCtx());
+    expect(result.score_badge).toBe(0.3); // only the check-in
   });
 });
 

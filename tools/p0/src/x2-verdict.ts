@@ -899,6 +899,72 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
   return lines.join("\n");
 }
 
+/**
+ * Gate finding 3 (re-gate): the verification pass that makes a
+ * `X2CorroborationFile` trustworthy — run ONCE, before `computeX2Verdict`,
+ * never inside it (keeping that function pure/synchronous). For every
+ * `wayback` record, re-reads the raw bytes its `rawFile` names (via the
+ * SAME `readRaw` the caller already has for trail evidence — a wayback
+ * record's bytes live in the same evidence dir), recomputes the SHA-256,
+ * and — only if it matches `snapshotSha256` — re-derives the text with
+ * the SAME extractor every other evidence route uses. For every
+ * `acceptance` record, checks `x2MdLogText` (the text of `docs/p0/X2.md`'s
+ * own `## Log` section — the caller reads the file once and passes its
+ * text in, so this function itself does no I/O either) for a line naming
+ * both the record's `id` and `date`. Never throws on a per-record
+ * failure — a record that fails resolution just resolves to
+ * "unverified"/"not logged", which `checkOwnerSavedCorroboration` then
+ * correctly refuses to count.
+ */
+export async function resolveCorroboration(
+  corroboration: X2CorroborationFile,
+  readRaw: (relPath: string) => Promise<Buffer>,
+  x2MdLogText: string | null,
+): Promise<X2ResolvedCorroboration> {
+  const resolved: X2ResolvedCorroboration = new Map();
+  for (const [trail, trailRecords] of Object.entries(corroboration)) {
+    for (const [evidenceSha, record] of Object.entries(trailRecords)) {
+      const key = corroborationResolutionKey(trail, evidenceSha);
+      if (record.type === "wayback") {
+        try {
+          const raw = await readRaw(record.rawFile);
+          const recomputed = createHash("sha256").update(raw).digest("hex");
+          if (recomputed !== record.snapshotSha256) {
+            resolved.set(key, { waybackVerified: false });
+            continue;
+          }
+          const { text } = await extractEvidenceText(raw, "text/html", record.snapshotUrl);
+          resolved.set(key, { waybackVerified: true, waybackText: text });
+        } catch {
+          resolved.set(key, { waybackVerified: false });
+        }
+      } else {
+        // record.type === "acceptance"
+        const logged =
+          x2MdLogText !== null &&
+          x2MdLogText
+            .split("\n")
+            .some((line) => line.includes(record.id) && line.includes(record.date));
+        resolved.set(key, { acceptanceLogged: logged });
+      }
+    }
+  }
+  return resolved;
+}
+
+/** Gate finding 3 (re-gate): extracts just the `## Log` section's text
+ * from a full `docs/p0/X2.md` read — an acceptance record must be logged
+ * THERE specifically, not merely anywhere in the file (a stray mention of
+ * an id/date elsewhere in the document must not count). Returns the
+ * WHOLE file's text if no `## Log` heading is found, rather than silently
+ * treating "no Log section" as "nothing is logged" — a missing section
+ * is itself a shape worth surfacing as a search-scope difference, not
+ * hidden behind an empty-string match-nothing result. */
+export function extractX2MdLogSection(x2MdText: string): string {
+  const m = /^## Log\b[\s\S]*/m.exec(x2MdText);
+  return m ? m[0] : x2MdText;
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -1006,6 +1072,18 @@ function parseFlags(argv: string[]): Record<string, string> {
   return flags;
 }
 
+/** Repo-relative path to `docs/p0/X2.md` — resolved from THIS module's own
+ * location the same way `x2-fetch.ts`'s `resolveDefaultX2ConfigPath`
+ * resolves `config/x2-sources.json` (works from `src/` via vitest and
+ * from `dist/`, since both sit exactly one level under `tools/p0`, itself
+ * two levels under the repo root). */
+export function resolveDefaultX2MdPath(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const pkgRoot = path.join(here, ".."); // tools/p0
+  const repoRoot = path.join(pkgRoot, "..", "..");
+  return path.join(repoRoot, "docs", "p0", "X2.md");
+}
+
 async function main(argv: string[]): Promise<void> {
   // `--allow-dirty-ledger` is a bare boolean toggle (no value) — stripped
   // before `parseFlags` runs, same reasoning as `--render` in
@@ -1017,9 +1095,11 @@ async function main(argv: string[]): Promise<void> {
   if (!evidenceDir || !confirmationPath || !flags.ledger) {
     throw new Error(
       "Usage: node dist/x2-verdict.js --evidence-dir <dir> --confirmation <file.json> --ledger <path> " +
-        "[--out <prefix>] [--corroboration <file.json>] [--allow-dirty-ledger] — `--ledger` is REQUIRED " +
-        "(gate finding 2c, re-gate): the per-directory default ledger was removed. The canonical ledger is " +
-        "`docs/p0/x2-recorded-ledger.json` (gate finding 2d).",
+        "[--out <prefix>] [--corroboration <file.json>] [--x2-log <path to docs/p0/X2.md>] " +
+        "[--allow-dirty-ledger] — `--ledger` is REQUIRED (gate finding 2c, re-gate): the per-directory " +
+        "default ledger was removed. The canonical ledger is `docs/p0/x2-recorded-ledger.json` (gate " +
+        "finding 2d). `--x2-log` defaults to this checkout's own docs/p0/X2.md (gate finding 3, re-gate: " +
+        "an `acceptance` corroboration record must be logged there).",
     );
   }
   const manifest = JSON.parse(
@@ -1059,7 +1139,33 @@ async function main(argv: string[]): Promise<void> {
   const corroboration: X2CorroborationFile = flags.corroboration
     ? (JSON.parse(await readFile(flags.corroboration, "utf8")) as X2CorroborationFile)
     : {};
-  const result = computeX2Verdict(confirmation, evidenceByTrail, X2_SLATE_TRAILS, corroboration);
+  // Gate finding 3 (re-gate): resolve (verify) that corroboration file
+  // BEFORE computeX2Verdict ever sees it — re-reading `wayback` evidence
+  // from THIS evidence dir (a `wayback` record's `rawFile` is relative to
+  // it, same as any trail evidence) and checking `acceptance` records
+  // against `docs/p0/X2.md`'s own Log section. A missing/unreadable
+  // X2.md is not a hard refusal (an --evidence-dir far from a golfraven
+  // checkout is a legitimate use), but every `acceptance` record then
+  // resolves to "not logged" — the safe default.
+  const x2MdPath = flags["x2-log"] || resolveDefaultX2MdPath();
+  let x2MdLogText: string | null = null;
+  try {
+    x2MdLogText = extractX2MdLogSection(await readFile(x2MdPath, "utf8"));
+  } catch {
+    x2MdLogText = null;
+  }
+  const resolvedCorroboration = await resolveCorroboration(
+    corroboration,
+    (rel) => readFile(path.join(evidenceDir, rel)),
+    x2MdLogText,
+  );
+  const result = computeX2Verdict(
+    confirmation,
+    evidenceByTrail,
+    X2_SLATE_TRAILS,
+    corroboration,
+    resolvedCorroboration,
+  );
   const outExplicit = Boolean(flags.out);
   const outPrefix =
     flags.out ||

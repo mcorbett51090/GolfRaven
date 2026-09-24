@@ -3,10 +3,14 @@ import { createHash } from "node:crypto";
 import {
   buildEvidenceByTrail,
   computeX2Verdict,
+  corroborationResolutionKey,
+  extractX2MdLogSection,
+  resolveCorroboration,
   sameConfiguredHost,
   type EvidenceByTrail,
   type X2ConfirmationFile,
   type X2CorroborationFile,
+  type X2ResolvedCorroboration,
 } from "../src/x2-verdict.js";
 import type { X2FetchEntry, X2FetchManifest } from "../src/x2-fetch.js";
 import {
@@ -941,17 +945,22 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     };
     // Gate finding 4: an owner-saved fact needs a corroboration record to
     // count — without one it is "owner-attested, uncorroborated" and does
-    // not confirm the trail. Supplying Matt's dated acceptance is enough.
+    // not confirm the trail. Supplying Matt's dated, X2.md-logged
+    // acceptance is enough (gate finding 3, re-gate: the id+date must be
+    // resolved as logged — never just trusted because the JSON says so).
     const corroboration: X2CorroborationFile = {
       TN: {
-        [rawSha]: { type: "acceptance", acceptedBy: "Matt", date: "2026-09-24" },
+        [rawSha]: { type: "acceptance", id: "TN-season-2026-09-24", acceptedBy: "Matt", date: "2026-09-24" },
       },
     };
-    const result = computeX2Verdict(confirmation, byTrail, ["TN"], corroboration);
+    const resolved: X2ResolvedCorroboration = new Map([
+      [corroborationResolutionKey("TN", rawSha), { acceptanceLogged: true }],
+    ]);
+    const result = computeX2Verdict(confirmation, byTrail, ["TN"], corroboration, resolved);
     expect(result.perTrail.TN?.confirmed).toBe(true);
     expect(result.perTrail.TN?.facts.season?.method).toBe("owner-saved");
     expect(result.perTrail.TN?.facts.season?.corroboration).toBe(
-      "owner-attested, accepted uncorroborated by Matt on 2026-09-24",
+      'owner-attested, accepted by Matt on 2026-09-24 (logged in X2.md, id "TN-season-2026-09-24")',
     );
   });
 
