@@ -309,21 +309,26 @@ FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_used_at_once();
 -- ============================================================================
 -- private.function_inventory already has ENABLE+FORCE ROW LEVEL SECURITY
 -- (0014) and only a SELECT grant (to service_role) -- no INSERT policy
--- for anyone, including its own owner. Under HARNESS_MODE=superuser this
--- migration runs as postgres (bypasses RLS regardless); under
--- HARNESS_MODE=restricted it runs as migration_owner, which OWNS this
--- table (it created it, via 0014, also as migration_owner) but is
--- NOBYPASSRLS -- owner + FORCE + NOBYPASSRLS means RLS genuinely applies
--- to it too (confirmed empirically this session: the INSERT below failed
--- with "new row violates row-level security policy" without this). As
--- the table's OWNER, migration_owner can grant/police itself directly
--- here, no bootstrap-as-superuser step needed (unlike storage.buckets in
--- supabase/tests/shim.sql, which is bootstrap-owned). Governance/manifest
+-- for anyone, including its own owner. Whoever is RUNNING this migration
+-- OWNS this table (created it, via 0014) but if NOBYPASSRLS, owner +
+-- FORCE + NOBYPASSRLS means RLS genuinely applies to it too (confirmed
+-- empirically this session: the INSERT below failed with "new row
+-- violates row-level security policy" without this).
+--
+-- ⛔ FIX (H2, post-P3a gate): this used to name the harness-only role
+-- `migration_owner` explicitly, the same defect as 0016:64 -- a real
+-- deploy, run as its own migration role, has no role literally named
+-- `migration_owner` and this GRANT/POLICY failed outright. `CURRENT_USER`
+-- is self-referential and correct regardless of what the connecting role
+-- is actually called (harness or real deploy) -- the table's OWNER can
+-- grant/police itself directly, no bootstrap-as-superuser step needed
+-- (unlike storage.buckets in supabase/tests/shim.sql, which is
+-- bootstrap-owned, not owned by the migration role). Governance/manifest
 -- data, not user data -- the same reasoning as storage.buckets' own
 -- WITH CHECK (true).
-GRANT INSERT ON private.function_inventory TO migration_owner;
+GRANT INSERT ON private.function_inventory TO CURRENT_USER;
 CREATE POLICY migration_owner_seed_function_inventory ON private.function_inventory
-  FOR INSERT TO migration_owner WITH CHECK (true);
+  FOR INSERT TO CURRENT_USER WITH CHECK (true);
 
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)

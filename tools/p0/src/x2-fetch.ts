@@ -240,6 +240,7 @@ async function fetchOne(
   url: string,
   outDir: string,
   timeoutMs: number,
+  ledgerPath: string,
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
 
@@ -360,6 +361,19 @@ async function fetchOne(
       draftCandidateNames,
     } = await storeEvidenceBytes(outDir, buf, contentType, url);
 
+    // Gate finding 2: first-capture-wins is decided by the LEDGER, not
+    // hard-coded — a later capture of an already-recorded (normalised)
+    // URL is stored as real evidence but comes back `recorded: false`.
+    // `allowAdditional: true` because `x2-fetch` (direct/render) has no
+    // `--additional` concept of its own — re-running it to refresh
+    // evidence must never be a hard refusal, only `x2-ingest`'s owner-
+    // saved route refuses without an explicit flag.
+    const { recorded } = await registerCapture(
+      ledgerPath,
+      { method: "direct", url, sha256 },
+      { allowAdditional: true },
+    );
+
     return {
       trail,
       url,
@@ -379,7 +393,7 @@ async function fetchOne(
       method: "direct",
       ownerSavedDate: null,
       renderArgs: null,
-      recorded: true,
+      recorded,
     };
   } finally {
     // Gate S6: the timer stays live through the ENTIRE fetch — including
@@ -400,6 +414,7 @@ async function fetchOneRendered(
   url: string,
   outDir: string,
   timeoutMs: number,
+  ledgerPath: string,
   renderOpts: {
     executablePath?: string;
     launch?: ChromiumLauncher;

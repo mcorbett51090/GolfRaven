@@ -48,20 +48,29 @@ $$;
 GRANT USAGE ON SCHEMA app, private, auth, storage TO private_definer;
 GRANT SELECT ON auth.users TO private_definer;
 
--- migration_owner (S1, gate round 3, restricted-mode harness role -- see
--- supabase/tests/shim.sql 1a) must itself be able to `SET ROLE
+-- Whoever is RUNNING this migration must itself be able to `SET ROLE
 -- private_definer` for the `ALTER FUNCTION ... OWNER TO private_definer`
 -- statements below to succeed -- Postgres requires the current role to be
 -- able to become the new owner, not merely to be an admin-option member
 -- of it (confirmed empirically this session: CREATEROLE auto-grants
 -- admin_option on a role it creates, but NOT set_option, and PG16 checks
--- set_option specifically for "must be able to SET ROLE"). Under the
--- default (superuser) harness mode this is a no-op in practice --
--- postgres can SET ROLE to anything regardless. `migration_owner` always
--- exists by this point (supabase/tests/shim.sql creates it
--- unconditionally, in both harness modes), so this GRANT is safe to issue
--- unconditionally rather than branching on mode.
-GRANT private_definer TO migration_owner WITH SET TRUE;
+-- set_option specifically for "must be able to SET ROLE").
+--
+-- ⛔ FIX (H2, post-P3a gate): this used to name the harness-only role
+-- `migration_owner` explicitly (`GRANT private_definer TO migration_owner
+-- WITH SET TRUE`) -- fine in the test harness, where that role always
+-- exists (supabase/tests/shim.sql), but a real deploy runs migrations as
+-- ITS OWN role (e.g. Supabase's project `postgres`), which is never
+-- literally named `migration_owner` -- so this line failed outright on a
+-- real deploy with "role migration_owner does not exist", reproduced on a
+-- scratch cluster. `CURRENT_USER` is self-referential and correct under
+-- ANY connecting role -- the harness's `migration_owner`, a real deploy's
+-- own migration role, or a plain superuser (where this is a no-op:
+-- superuser can already SET ROLE to anything). `INHERIT FALSE` matches
+-- private_definer's own NOINHERIT posture -- the grant exists only so
+-- SET ROLE works, not so the connecting role's OWN queries implicitly
+-- pick up private_definer's privileges.
+GRANT private_definer TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
 
 -- CREATE on schema `private` (S1, gate round 3): confirmed empirically
 -- this session that `ALTER FUNCTION ... OWNER TO private_definer` fails
