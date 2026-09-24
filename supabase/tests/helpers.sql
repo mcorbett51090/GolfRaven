@@ -233,3 +233,14 @@ LANGUAGE sql IMMUTABLE
 AS $$
   SELECT jsonb_build_object('sub', p_uid::text, 'role', p_role);
 $$;
+-- S1 restricted-mode fix: this file runs AFTER 0001_schemas.sql's global
+-- `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`
+-- (role-scoped to whoever ran the migrations, not schema-scoped -- see
+-- that migration's own B1 comment), so this function -- unlike
+-- tests.authenticate_as/tests.clear_actor in shim.sql, which predate that
+-- revoke -- gets no PUBLIC EXECUTE by default. It is a pure, stateless
+-- helper with no table access, meant to be called by whichever role a
+-- test has just switched to (matrix/06's pre-authenticated-block calls
+-- this from inside an already-non-superuser role), so PUBLIC execute here
+-- is correct, not a broadening of anything real.
+GRANT EXECUTE ON FUNCTION tests.claims(uuid, text) TO PUBLIC;

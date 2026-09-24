@@ -51,8 +51,8 @@ GRANT authenticated TO authenticator;
 GRANT service_role TO authenticator;
 
 -- ----------------------------------------------------------------------------
--- 1a. The MIGRATION-OWNER role attribute this shim assumes (S1, gate
--- round 2) — separate from the four PostgREST-facing roles above.
+-- 1a. The MIGRATION-OWNER role this shim provisions (S1, gate round 3) —
+-- separate from the four PostgREST-facing roles above.
 -- ----------------------------------------------------------------------------
 -- [unverified — training knowledge of Supabase internals] On a real hosted
 -- Supabase project, migrations run as the project's `postgres` role, which
@@ -63,34 +63,71 @@ GRANT service_role TO authenticator;
 -- connects as the cluster bootstrap role, which IS a true superuser
 -- (BYPASSRLS-equivalent for every table, always, regardless of FORCE ROW
 -- LEVEL SECURITY) — a strictly more permissive stand-in than the real
--- thing. Its `restricted` mode (`HARNESS_MODE=restricted`) creates and
--- migrates as a role with LOGIN, CREATEDB, CREATEROLE, and explicitly
--- NOSUPERUSER NOBYPASSRLS, closing that gap — see tools/db/test.sh's own
--- comments for exactly what that role can and cannot do, and
--- docs/known-gaps.md-equivalent note below on the one thing it could not
--- close.
+-- thing. Its `restricted` mode (`HARNESS_MODE=restricted`) migrates and
+-- runs the pgTAP matrix as `migration_owner`, created below: LOGIN,
+-- CREATEDB, CREATEROLE, and explicitly NOSUPERUSER NOBYPASSRLS. It is
+-- made the OWNER of the test database itself (so it can CREATE SCHEMA/
+-- TABLE/POLICY without further grants) and CREATEROLE lets it run
+-- 0016_private_definer.sql's `CREATE ROLE private_definer ...` — the one
+-- piece of DDL a plain schema owner cannot do on its own.
 --
--- ⛔ ONE VERIFIED, UNRESOLVED GAP (this session): PostgreSQL hard-forbids
--- changing the `role` GUC from inside a SECURITY DEFINER function body —
--- `SET LOCAL ROLE x` inside one raises "cannot set parameter 'role' within
--- security-definer function", and a function-level `SET role = 'x'`
--- clause (the only other place a role switch could live) raises
--- "permission denied" even for a superuser at CREATE FUNCTION time. Both
--- reproduced this session. This means a SECURITY DEFINER function (every
--- `private.*` helper, all owned by the migration-owner role) can NEVER
--- switch to `service_role` internally to reach a table with `FORCE ROW
--- LEVEL SECURITY` and no policy for its own owner — under a genuinely
--- NOSUPERUSER NOBYPASSRLS owner, every such function becomes inoperable on
--- every table it was forced against, including `private.delete_my_data`
--- itself. The only structural fix is dropping FORCE ROW LEVEL SECURITY
--- (keeping plain ENABLE) on the tables these functions touch — SECURITY
--- DEFINER functions get their access from OWNING the table, the
--- conventional Postgres pattern, and FORCE defeats exactly that. This
--- changes nothing for anon/authenticated/service_role (none of them is
--- ever the table owner, in either mode) and nothing under the default
--- superuser mode (superuser already ignores FORCE). That specific,
--- evidence-backed schema change needs sign-off before landing — see the
--- handback report.
+-- ⛔ PRIOR GAP, RESOLVED THIS ROUND (2026, gate round 3): an earlier
+-- version of this note recorded a hard blocker — PostgreSQL forbids
+-- changing the `role` GUC from inside a SECURITY DEFINER function body (no
+-- `SET LOCAL ROLE`, no function-level `SET role = ...`), so a
+-- SECURITY DEFINER function owned by a plain NOSUPERUSER NOBYPASSRLS
+-- migration-owner could never reach a FORCE-ROW-LEVEL-SECURITY table with
+-- no policy for its own owner. The coordinator's directive was explicit:
+-- do not remove FORCE ROW LEVEL SECURITY anywhere. The actual fix
+-- (0016_private_definer.sql) sidesteps the blocker instead of working
+-- around it: every `private.*` SECURITY DEFINER function is owned by a
+-- DEDICATED role, `private_definer` (NOLOGIN NOSUPERUSER NOBYPASSRLS, NOT
+-- the table owner of anything), reaching each table it touches only
+-- through narrow, explicit RLS policies `TO private_definer` — the same
+-- mechanism anon/authenticated/service_role already use, not an
+-- ownership/FORCE exemption. `migration_owner` (this section) never owns
+-- those functions and is unaffected by any of this — it only needs
+-- CREATEROLE to create the `private_definer` role once, in 0016.
+--
+-- migration_owner's OWN interaction with FORCE ROW LEVEL SECURITY: once a
+-- migration file `ALTER TABLE ... ENABLE/FORCE ROW LEVEL SECURITY`s a
+-- table migration_owner just created (owner + FORCE + NOBYPASSRLS = RLS
+-- applies to the owner too, from that point on), migration_owner can no
+-- longer see/write that table's rows with a plain, unscoped statement —
+-- exactly the property S1 wants proven, not worked around. Two places in
+-- the pipeline need real data access to a FORCE'd table on migration_owner's
+-- own connection, so each gets a narrow, explicit, commented grant here
+-- (bootstrap-as-superuser provisioning, the same tier this file's other
+-- role setup already lives in) rather than a BYPASSRLS-shaped exemption:
+--   (i) 0012_storage.sql's two `INSERT INTO storage.buckets ... ON
+--       CONFLICT DO NOTHING` seed rows — storage.buckets is created and
+--       FORCE'd by THIS file (owned by the bootstrap role, not
+--       migration_owner), holds bucket CONFIG, not user data, and the
+--       insert is unconditional (every row, not a caller-scoped subset)
+--       — see the GRANT + POLICY below.
+--   (ii) supabase/tests/helpers.sql's fixture-seeding INSERTs into
+--       app.*/private.* tables migration_owner itself now owns — these
+--       are wide, cross-actor test fixtures with no natural per-row
+--       scope, so tools/db/test.sh runs helpers.sql (in EITHER harness
+--       mode) via `SET ROLE service_role` first: service_role already has
+--       full DML + BYPASSRLS (this file, below) for exactly this "server-
+--       side/administrative write" shape, matching how these same rows
+--       would really be written (Edge Functions running as service_role,
+--       0009's own comment). No new grant needed for this one.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'migration_owner') THEN
+    CREATE ROLE migration_owner
+      LOGIN NOSUPERUSER NOBYPASSRLS CREATEDB CREATEROLE
+      PASSWORD 'shim_only_not_for_prod';
+  END IF;
+END
+$$;
+DO $$
+BEGIN
+  EXECUTE format('ALTER DATABASE %I OWNER TO migration_owner', current_database());
+END
+$$;
 
 -- [unverified — training knowledge of Supabase internals] Supabase's default
 -- grants: usage on `public` is broad, but we do NOT replicate that here,

@@ -79,10 +79,22 @@ export const X2_PASS_BAR_CONFIRMED = 2;
  * (decision 0001 Addendum J(a)) is carried straight through from the
  * `x2-fetch` manifest entry that produced this evidence, into the
  * verdict's own output (see `X2TrailVerdict.facts`) — never re-derived or
- * guessed. */
+ * guessed, EXCEPT for a legacy manifest entry with no `method` field at
+ * all (from before this field existed), which defaults to `"direct"` —
+ * `methodDefaulted` records that this happened, so the verdict output can
+ * say so rather than silently presenting a guess as fact. `recorded`
+ * (Addendum J correction's first-capture-wins rule) is also carried
+ * through, defaulting to `true` for a legacy entry with no such field (it
+ * was the only capture that existed, so it was implicitly the recorded
+ * one). */
 export type TrailEvidenceMap = Map<
   string,
-  { text: string | null; method: X2Method }
+  {
+    text: string | null;
+    method: X2Method;
+    methodDefaulted: boolean;
+    recorded: boolean;
+  }
 >;
 
 export interface FailedSource {
@@ -155,6 +167,41 @@ export async function buildEvidenceByTrail(
             "recomputed at verdict time, are the only source of truth).",
         );
       }
+
+      // Gate finding: a legacy manifest entry (from before `method`
+      // existed) has no `method` field at runtime, whatever the TS type
+      // claims — default it to "direct" (the only route that existed back
+      // then) and remember that a default was applied, rather than
+      // silently trusting `undefined` or crashing on it.
+      const rawMethod = (e as { method?: unknown }).method;
+      const methodDefaulted = !(
+        rawMethod === "direct" ||
+        rawMethod === "rendered" ||
+        rawMethod === "owner-saved"
+      );
+      const method: X2Method = methodDefaulted ? "direct" : (rawMethod as X2Method);
+
+      // Gate finding: cross-check method against httpStatus — an
+      // "owner-saved" entry must carry the literal httpStatus "owner-saved"
+      // (there was no real HTTP exchange), and a "direct"/"rendered" entry
+      // must carry a NUMERIC httpStatus (a real HTTP exchange happened).
+      // A mismatch means a corrupted or hand-edited manifest — refused
+      // outright, the same hard-integrity style as gate S1's SHA check,
+      // never silently trusted.
+      if (method === "owner-saved" ? e.httpStatus !== "owner-saved" : typeof e.httpStatus !== "number") {
+        throw new Error(
+          `Evidence entry for trail "${trail}", url "${e.url}" has method "${method}" but httpStatus ` +
+            `${JSON.stringify(e.httpStatus)} — these are inconsistent ("owner-saved" must pair with the ` +
+            'literal httpStatus "owner-saved"; "direct"/"rendered" must pair with a numeric httpStatus). ' +
+            "Refusing rather than trusting a manifest entry that contradicts itself.",
+        );
+      }
+
+      // Addendum J correction's first-capture-wins rule: a legacy entry
+      // with no `recorded` field is treated as recorded (it was the only
+      // capture that existed).
+      const recorded = (e as { recorded?: unknown }).recorded !== false;
+
       // Gate S2: only count this evidence for ITS trail when the final URL
       // (after redirects) is still on the same host that trail's own
       // config asked for.
@@ -175,9 +222,10 @@ export async function buildEvidenceByTrail(
       }
       const { text } = await extractEvidenceText(raw, e.contentType, e.url);
       // Decision 0001 Addendum J: `method` is carried straight through from
-      // the manifest entry, not re-derived — `x2-fetch`/`x2-ingest` are the
-      // only places that ever decide it.
-      bySha.set(recomputedSha, { text, method: e.method });
+      // the manifest entry, not re-derived (except the legacy default
+      // above) — `x2-fetch`/`x2-ingest` are the only places that ever
+      // genuinely decide it.
+      bySha.set(recomputedSha, { text, method, methodDefaulted, recorded });
     }
     byTrail[trail] = { bySha, failedSources };
   }

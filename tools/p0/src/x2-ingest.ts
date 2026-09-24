@@ -3,11 +3,11 @@
  * `x2-ingest` — the third X2 evidence route (decision 0001 Addendum J(a)
  * (ii), 2026-09-24, written AFTER the first X2 run showed TN's site
  * returning HTTP 403 to the tool's own polite, non-browser User-Agent —
- * see `docs/decisions/0001-owner-decisions-and-p0-thresholds.md`). Takes a
- * page the OWNER saved from their own browser ("Save Page As", HTML), the
- * URL they state it came from, and the date they state they saved it, and
- * stores it as evidence into an `x2-fetch`-shaped evidence dir with
- * `method: "owner-saved"`.
+ * see `docs/decisions/0001-owner-decisions-and-p0-thresholds.md`, including
+ * its 2026-09-24 correction). Takes a page the OWNER saved from their own
+ * browser ("Save Page As", HTML), the URL they state it came from, and the
+ * date they state they saved it, and stores it as evidence into an
+ * `x2-fetch`-shaped evidence dir with `method: "owner-saved"`.
  *
  * This tool never fetches anything itself and never spoofs a browser User-
  * Agent to get past a site's own block — the owner's own browser already
@@ -18,6 +18,14 @@
  * in UTC (`fetchedAt` — the ingestion time, distinct from `ownerSavedDate`,
  * the date the OWNER states they saved it), and a SHA-256.
  *
+ * **Nothing here independently verifies the file's bytes ever touched the
+ * stated URL** (the Addendum J correction's own point) — that is what the
+ * correction's web.archive.org corroboration requirement, and Matt's
+ * written acceptance of an uncorroborated fact, are for; neither is
+ * mechanically enforced by this tool (they are `x2-verdict`/human-process
+ * concerns), but this tool's OWN safeguards are the ones a gate review
+ * found missing, fixed below.
+ *
  * **Host allow-list (Addendum J(a)):** the stated URL's host must be on
  * that trail's OWN configured host list (`config/x2-sources.json`'s URLs
  * for that trail) — the same same-host equivalence `x2-verdict.ts`'s
@@ -26,11 +34,21 @@
  * — an owner-saved page cannot smuggle in evidence for a host the trail's
  * own config never listed as official.
  *
+ * **First-capture-wins (Addendum J correction).** The first owner-saved
+ * capture of a given URL is the RECORDED one (`recorded: true`); ingesting
+ * a second owner-saved capture of the SAME url+trail refuses outright
+ * unless `--additional` is passed, in which case it is stored anyway —
+ * still real evidence, never discarded — but stamped `recorded: false`.
+ * `x2-verdict` refuses to let a confirmation file cite a non-recorded
+ * capture.
+ *
  * The output evidence dir is `x2-fetch`-shaped: writing into an EXISTING
  * evidence dir (from a prior `x2-fetch`/`x2-fetch --render` run) MERGES
  * this entry into that trail's array and rewrites `manifest.json` — the
  * same `manifest.json` `x2-verdict` already reads, so a confirmation file
  * can cite an owner-saved SHA exactly like a direct-fetch or rendered one.
+ * The merge never rewrites the manifest's own original `generatedAt` (gate
+ * finding — it used to be clobbered on every ingest).
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
@@ -54,6 +72,31 @@ import {
 } from "./run-dir.js";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Decision 0001 Addendum I precedent (K1/K3 date sanity), applied here:
+ * no owner-saved date earlier than the P0 work actually started. */
+export const X2_INGEST_MIN_DATE = "2026-09-01";
+
+/** 10 MB — same cap `net.ts`'s `DEFAULT_MAX_RESPONSE_BYTES` uses for a
+ * direct fetch's response body, applied here to the owner-saved file
+ * itself so a huge file can't be read into memory unbounded. Checked via
+ * `stat` BEFORE the file is read, not after. */
+export const X2_INGEST_MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+/** Gate finding: a `trail` (or any other string this tool uses as an
+ * object key) of `"__proto__"`, `"constructor"` or `"prototype"` can
+ * corrupt a plain object's prototype chain via bracket-notation assignment
+ * (`obj[trail] = …`) rather than creating an ordinary own property. Refused
+ * outright, cleanly, before any such assignment is attempted. */
+const DANGEROUS_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+export function assertSafeObjectKey(key: string, label: string): void {
+  if (DANGEROUS_OBJECT_KEYS.has(key)) {
+    throw new Error(
+      `${label} "${key}" is refused outright — it is a JavaScript object-prototype key name, not a real ` +
+        "value this tool will use as an object key.",
+    );
+  }
+}
 
 /** Every host that trail's own `config/x2-sources.json` entry names —
  * Addendum J(a)'s host allow-list for an owner-saved page. Malformed URLs
@@ -98,10 +141,14 @@ export interface X2IngestResult {
  * Ingests one owner-saved HTML file as X2 evidence. Refuses (throws) when:
  * the stated URL is not `https:` (gate N6, same rule as `x2-fetch`); the
  * stated URL's host is not on the trail's configured host list (Addendum
- * J(a)'s host allow-list); the stated date is not a real `YYYY-MM-DD`
- * calendar date; or the file cannot be read. Never fabricates a fact that
- * isn't in the bytes it was given — it only stores what the owner handed
- * it, honestly labelled.
+ * J(a)'s host allow-list); `trail` is a dangerous object-key name; the
+ * stated date is not a real `YYYY-MM-DD` calendar date, is earlier than
+ * `X2_INGEST_MIN_DATE`, or is later than the ingestion time; the file is
+ * larger than `X2_INGEST_MAX_FILE_BYTES`, cannot be read, or cannot be
+ * read at all; or a RECORDED owner-saved capture of this URL already
+ * exists for this trail and `opts.additional` was not set. Never fabricates
+ * a fact that isn't in the bytes it was given — it only stores what the
+ * owner handed it, honestly labelled.
  */
 export async function ingestOwnerSavedPage(opts: {
   trail: string;
@@ -110,8 +157,14 @@ export async function ingestOwnerSavedPage(opts: {
   statedDate: string;
   sourceConfig: X2SourceConfig;
   outDir: string;
+  /** First-capture-wins: without this, a second owner-saved capture of the
+   * same URL for the same trail is refused. With it, the capture proceeds
+   * and is stored with `recorded: false`. */
+  additional?: boolean;
 }): Promise<X2IngestResult> {
   const { trail, filePath, statedUrl, statedDate, sourceConfig, outDir } = opts;
+
+  assertSafeObjectKey(trail, "--trail");
 
   let parsedUrl: URL;
   try {
@@ -141,6 +194,25 @@ export async function ingestOwnerSavedPage(opts: {
     throw new Error(`--date "${statedDate}" is not a real calendar date.`);
   }
 
+  const fetchedAt = new Date().toISOString();
+  const ingestionDate = fetchedAt.slice(0, 10); // YYYY-MM-DD, UTC
+
+  // Gate finding: an owner-saved date has to be a real, sane claim — not
+  // before P0 work started, and never later than the moment of ingestion
+  // (a date in the future is not a date anything was actually saved on).
+  // String comparison is exact here because both sides are fixed-width
+  // YYYY-MM-DD, so lexical order equals chronological order.
+  if (statedDate < X2_INGEST_MIN_DATE) {
+    throw new Error(
+      `--date "${statedDate}" is earlier than ${X2_INGEST_MIN_DATE} — refusing a date before this work began.`,
+    );
+  }
+  if (statedDate > ingestionDate) {
+    throw new Error(
+      `--date "${statedDate}" is after the ingestion time (${ingestionDate} UTC) — refusing a date in the future.`,
+    );
+  }
+
   const trailUrls = sourceConfig[trail];
   if (!trailUrls) {
     throw new Error(
@@ -157,6 +229,58 @@ export async function ingestOwnerSavedPage(opts: {
     );
   }
 
+  // Gate finding: a 10 MB cap on the OWNER-SAVED FILE ITSELF, checked via
+  // `stat` before ever reading it into memory — this tool never streams,
+  // so the cap has to be a pre-check, not an enforced-while-reading one
+  // like `net.ts`'s direct-fetch cap.
+  let fileStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    fileStat = await stat(filePath);
+  } catch (err) {
+    throw new Error(
+      `could not read --file "${filePath}": ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (fileStat.size > X2_INGEST_MAX_FILE_BYTES) {
+    throw new Error(
+      `--file "${filePath}" is ${fileStat.size} bytes, over the ${X2_INGEST_MAX_FILE_BYTES}-byte cap — refusing ` +
+        "to read it into memory.",
+    );
+  }
+
+  // Gate finding: first-capture-wins is checked (and the manifest loaded)
+  // BEFORE any bytes are read or written, so a refusal never leaves an
+  // orphaned raw/text file on disk.
+  const manifestPath = path.join(outDir, "manifest.json");
+  let manifest: X2FetchManifest;
+  const manifestExists = await stat(manifestPath).catch(() => null);
+  if (manifestExists) {
+    manifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as X2FetchManifest;
+  } else {
+    manifest = {
+      generatedAt: fetchedAt,
+      outDir,
+      trails: {},
+      draftCandidateNames: {},
+    };
+  }
+  const priorCaptures = (manifest.trails[trail] ?? []).filter(
+    (e) => e.url === statedUrl && e.method === "owner-saved",
+  );
+  // A legacy entry with no `recorded` field at all (from before this fix)
+  // is treated as recorded — it was the only capture that existed, so it
+  // was implicitly "the" one.
+  const hasRecordedPrior = priorCaptures.some((e) => e.recorded !== false);
+  if (hasRecordedPrior && !opts.additional) {
+    throw new Error(
+      `A recorded owner-saved capture of "${statedUrl}" already exists for trail "${trail}" — first-capture-` +
+        "wins (Addendum J correction). Pass --additional to ingest a further, non-recorded capture; the " +
+        "recorded one is never replaced.",
+    );
+  }
+
   let buf: Buffer;
   try {
     buf = await readFile(filePath);
@@ -166,31 +290,32 @@ export async function ingestOwnerSavedPage(opts: {
     );
   }
 
-  const fetchedAt = new Date().toISOString();
   const contentType = "text/html";
   const sha256 = createHash("sha256").update(buf).digest("hex");
   const kind = classifyEvidenceBytes(buf, contentType, statedUrl);
   const ext = kind === "pdf" ? "pdf" : kind === "html" ? "html" : "bin";
-  const rawRelPath = path.join("raw", `${sha256}.${ext}`);
-  await mkdir(path.join(outDir, "raw"), { recursive: true });
-  await writeFile(path.join(outDir, rawRelPath), buf);
 
+  // Gate finding: extract text BEFORE writing the raw file, so a failure
+  // in extraction never leaves a raw file on disk with no corresponding
+  // text — the two are written together or not at all, raw-file-write last.
   const { text, textExtraction, extractor } = await extractEvidenceText(
     buf,
     contentType,
     statedUrl,
   );
+  const draftCandidateNames =
+    kind === "html" ? extractDraftCandidateNames(buf.toString("utf8")) : [];
+
+  const rawRelPath = path.join("raw", `${sha256}.${ext}`);
   let textFile: string | null = null;
-  let draftCandidateNames: string[] = [];
   if (text !== null) {
     const textRelPath = path.join("text", `${sha256}.txt`);
     await mkdir(path.join(outDir, "text"), { recursive: true });
     await writeFile(path.join(outDir, textRelPath), text, "utf8");
     textFile = textRelPath;
   }
-  if (kind === "html") {
-    draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
-  }
+  await mkdir(path.join(outDir, "raw"), { recursive: true });
+  await writeFile(path.join(outDir, rawRelPath), buf);
 
   const entry: X2FetchEntry = {
     trail,
@@ -210,23 +335,10 @@ export async function ingestOwnerSavedPage(opts: {
     draftCandidateNames,
     method: "owner-saved",
     ownerSavedDate: statedDate,
+    renderArgs: null,
+    recorded: !hasRecordedPrior,
   };
 
-  const manifestPath = path.join(outDir, "manifest.json");
-  let manifest: X2FetchManifest;
-  const exists = await stat(manifestPath).catch(() => null);
-  if (exists) {
-    manifest = JSON.parse(
-      await readFile(manifestPath, "utf8"),
-    ) as X2FetchManifest;
-  } else {
-    manifest = {
-      generatedAt: fetchedAt,
-      outDir,
-      trails: {},
-      draftCandidateNames: {},
-    };
-  }
   manifest.trails[trail] = [...(manifest.trails[trail] ?? []), entry];
   const seen = new Set(manifest.draftCandidateNames[trail] ?? []);
   const names = [...(manifest.draftCandidateNames[trail] ?? [])];
@@ -237,7 +349,10 @@ export async function ingestOwnerSavedPage(opts: {
     }
   }
   manifest.draftCandidateNames[trail] = names;
-  manifest.generatedAt = fetchedAt;
+  // Gate finding: do NOT rewrite `generatedAt` on a merge — that field is
+  // the manifest's own original creation time (from whichever tool made it
+  // first, `x2-fetch` or this one), not "the last time anything touched
+  // this file." Only the `else` branch above (a brand-new manifest) sets it.
   await writeFile(
     manifestPath,
     `${JSON.stringify(manifest, null, 2)}\n`,
@@ -264,12 +379,15 @@ function parseFlags(argv: string[]): Record<string, string> {
 }
 
 async function main(argv: string[]): Promise<void> {
-  const flags = parseFlags(argv);
+  // `--additional` is a bare boolean toggle (no value) — stripped before
+  // `parseFlags` runs, same reasoning as `--render` in `x2-fetch.ts`.
+  const additional = argv.includes("--additional");
+  const flags = parseFlags(argv.filter((a) => a !== "--additional"));
   const { trail, file, url, date } = flags;
   if (!trail || !file || !url || !date) {
     throw new Error(
       "Usage: node dist/x2-ingest.js --trail TN|VI|RTJ --file <owner-saved.html> --url <stated URL> " +
-        "--date YYYY-MM-DD [--config <x2-sources.json>] [--out-dir <dir>]",
+        "--date YYYY-MM-DD [--config <x2-sources.json>] [--out-dir <dir>] [--additional]",
     );
   }
   const configPath = flags.config || resolveDefaultX2ConfigPath();
@@ -287,10 +405,11 @@ async function main(argv: string[]): Promise<void> {
     statedDate: date,
     sourceConfig,
     outDir,
+    additional,
   });
   process.stdout.write(
     `Ingested owner-saved evidence for ${trail}: ${entry.url} (saved ${entry.ownerSavedDate}, sha256 ` +
-      `${entry.sha256?.slice(0, 12)}...)\n`,
+      `${entry.sha256?.slice(0, 12)}..., recorded: ${entry.recorded})\n`,
   );
   process.stdout.write(
     `Manifest written to ${path.join(outDir, "manifest.json")}\n`,
