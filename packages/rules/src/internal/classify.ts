@@ -177,7 +177,7 @@ function finiteInRange(x: number, min: number, max: number): boolean {
   // NaN-safe by construction: every comparison below is written so a NaN
   // input fails to satisfy it (Number.isFinite(NaN) === false short-circuits
   // before any `<=`/`>=` on NaN could silently pass).
-  return x >= min && x <= max; // MUTATED: Number.isFinite dropped
+  return Number.isFinite(x) && x >= min && x <= max;
 }
 
 /**

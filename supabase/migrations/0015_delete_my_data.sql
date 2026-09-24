@@ -36,7 +36,8 @@ DECLARE
   v_result jsonb := '{}'::jsonb;
   v_pol record;
   v_row_count int;
-  v_pseudonym text;
+  v_key record;
+  v_pseudonym_candidate text;
 BEGIN
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'delete_my_data: user_id is required';
@@ -84,19 +85,17 @@ BEGIN
   -- key — safe to repeat (idempotent: a row already updated on an
   -- earlier key's pass no longer matches ANY later key's WHERE clause,
   -- since its own player_pseudonym column never changes).
-  NULL; -- (the pseudonym-matching work itself now lives just above the
-        -- attestation_shift_log UPDATE below, not here — see that block)
-
   -- The two derived GUCs the "special" policies (partner_invite,
-  -- attestation_shift_log, public_profile_projection) match on — set once
-  -- either value is known; empty string (not NULL) when there is nothing
-  -- to match, so `current_setting(..., true)` never returns NULL into a
-  -- `column = NULL` comparison (which would be neither true nor false and
-  -- so would never permit a row — the intended, fail-closed behaviour when
-  -- e.g. the account has no email on file).
+  -- public_profile_projection) match on — set once either value is
+  -- known; empty string (not NULL) when there is nothing to match, so
+  -- `current_setting(..., true)` never returns NULL into a `column =
+  -- NULL` comparison (which would be neither true nor false and so
+  -- would never permit a row — the intended, fail-closed behaviour when
+  -- e.g. the account has no email on file). `target_pseudonym` is set
+  -- per-key, in the loop right above the attestation_shift_log UPDATE
+  -- below — see that block for why.
   PERFORM set_config('app.delete_my_data.target_email', COALESCE(v_email, ''), true);
   PERFORM set_config('app.delete_my_data.target_handle', COALESCE(v_handle, ''), true);
-  PERFORM set_config('app.delete_my_data.target_pseudonym', v_pseudonym, true);
 
   -- ==========================================================================
   -- Generic pass: every FK-to-auth.users column in `app`, driven by
@@ -205,10 +204,35 @@ BEGIN
   -- be reused after being freed; the projection never stores a user id at
   -- all, line 842). A row logged before this stage's pseudonym column
   -- existed falls back to matching the pre-deletion handle.
-  UPDATE app.attestation_shift_log
-  SET player_handle_snapshot = 'deleted player'
-  WHERE player_pseudonym = v_pseudonym
-     OR (player_pseudonym IS NULL AND v_handle IS NOT NULL AND player_handle_snapshot = v_handle);
+  --
+  -- M1 (post-P3a re-gate): the key that computed a given row's
+  -- player_pseudonym is whichever was active WHEN it was written, not
+  -- necessarily the newest one now — so every currently-active vault key
+  -- gets tried, not just one. Each key is validated (NOT NULL and >= 32
+  -- bytes — a NULL/short key raises, closing the "empty key silently
+  -- leaves PII behind" gap the old GUC design had) before use.
+  -- `app.delete_my_data.target_pseudonym` is re-set per key so
+  -- 0016_private_definer.sql's RLS policy (which independently checks
+  -- the same GUC, since private_definer reaches this table only through
+  -- that policy) agrees with this statement's own WHERE clause on each
+  -- pass. Repeating the whole UPDATE per key is idempotent: a row this
+  -- loop already updated no longer matches ANY key's WHERE clause on a
+  -- later pass, because its own player_pseudonym column is never
+  -- rewritten by this loop.
+  IF NOT EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_key%') THEN
+    RAISE EXCEPTION 'delete_my_data: no active pseudonym_key found in vault.decrypted_secrets';
+  END IF;
+  FOR v_key IN SELECT id, decrypted_secret FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_key%' LOOP
+    IF v_key.decrypted_secret IS NULL OR length(v_key.decrypted_secret) < 32 THEN
+      RAISE EXCEPTION 'delete_my_data: pseudonym key % in vault.decrypted_secrets is NULL or shorter than 32 bytes', v_key.id;
+    END IF;
+    v_pseudonym_candidate := encode(public.hmac(p_user_id::text, v_key.decrypted_secret, 'sha256'), 'hex');
+    PERFORM set_config('app.delete_my_data.target_pseudonym', v_pseudonym_candidate, true);
+    UPDATE app.attestation_shift_log
+    SET player_handle_snapshot = 'deleted player'
+    WHERE player_pseudonym = v_pseudonym_candidate
+       OR (player_pseudonym IS NULL AND v_handle IS NOT NULL AND player_handle_snapshot = v_handle);
+  END LOOP;
 
   -- receipt objects in storage.objects (task instruction: "receipt objects
   -- in storage.objects"). Matched by `owner` (set at upload time by the

@@ -66,7 +66,12 @@ import {
   type X2SourceConfig,
 } from "./x2-fetch.js";
 import { sameConfiguredHost } from "./x2-verdict.js";
-import { defaultLedgerPath, findLedgerEntry, loadLedger, registerCapture } from "./x2-recorded-ledger.js";
+import {
+  findLedgerEntry,
+  loadLedger,
+  normalizeUrlForFirstCapture,
+  registerCapture,
+} from "./x2-recorded-ledger.js";
 import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
@@ -123,7 +128,11 @@ export function trailConfiguredHosts(urls: readonly string[]): string[] {
 
 /** True when `statedUrl`'s host matches at least one of `configuredHosts`
  * under the same same-host equivalence `x2-verdict.ts` uses (exact match,
- * or differing only by a leading "www."). */
+ * or differing only by a leading "www."). Retained (and still tested) as
+ * a general host-level equivalence check; `statedUrlAllowed` below is the
+ * STRICTER, actually-enforced gate on an owner-saved stated URL — a
+ * matching host is necessary but, since gate finding 2a (re-gate), no
+ * longer sufficient. */
 export function statedHostAllowed(
   statedUrl: string,
   configuredHosts: readonly string[],
@@ -135,6 +144,45 @@ export function statedHostAllowed(
     return false;
   }
   return configuredHosts.some((h) => sameConfiguredHost(h, host));
+}
+
+/** Gate finding 2a (re-gate): an owner-saved stated URL must exactly
+ * match, after normalisation (`normalizeUrlForFirstCapture` — the SAME
+ * normalisation `registerCapture`'s first-capture-wins check uses, so
+ * "matches the config" and "matches an earlier capture" agree on what
+ * counts as the same URL), one of `trailUrls` — that trail's own
+ * `config/x2-sources.json` entry. A host-only check (the OLDER
+ * `statedHostAllowed`) let an owner-saved page smuggle in evidence for
+ * ANY OTHER PATH on an allowed host — a stated URL for
+ * `https://www.tnstateparks.com/anything-at-all` used to pass as long as
+ * the trail's config named `tnstateparks.com` for ANY page. This is
+ * stricter and supersedes it. */
+export function normalizedTrailUrls(urls: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const u of urls) {
+    try {
+      out.add(normalizeUrlForFirstCapture(u));
+    } catch {
+      // Skip an unparseable configured URL — not this function's job to
+      // validate the config file (matches `trailConfiguredHosts` above).
+    }
+  }
+  return out;
+}
+
+/** True when `statedUrl`, normalised, is EXACTLY one of `trailUrls`
+ * (normalised the same way) — not merely on an allowed host. */
+export function statedUrlAllowed(
+  statedUrl: string,
+  trailUrls: readonly string[],
+): boolean {
+  let normalized: string;
+  try {
+    normalized = normalizeUrlForFirstCapture(statedUrl);
+  } catch {
+    return false;
+  }
+  return normalizedTrailUrls(trailUrls).has(normalized);
 }
 
 export interface X2IngestResult {
@@ -166,15 +214,24 @@ export async function ingestOwnerSavedPage(opts: {
    * same URL for the same trail is refused. With it, the capture proceeds
    * and is stored with `recorded: false`. */
   additional?: boolean;
-  /** Gate finding 2: the recorded-captures ledger path — see
-   * `x2-recorded-ledger.ts`. Defaults to `<outDir>/recorded-ledger.json`;
-   * pass the SAME explicit path `x2-fetch --render`/`x2-fetch` used for
-   * TN/VI/RTJ's own evidence when ingesting into a different `--out-dir`
-   * for the same URL set, so first-capture-wins is enforced across all of
-   * them, not just within this one directory. */
-  ledgerPath?: string;
+  /** Gate finding 2c (re-gate): REQUIRED — the recorded-captures ledger
+   * path, see `x2-recorded-ledger.ts`. There is no more automatic
+   * `<outDir>/recorded-ledger.json` default; pass the SAME explicit path
+   * `x2-fetch --render`/`x2-fetch` used for TN/VI/RTJ's own evidence when
+   * ingesting into a different `--out-dir` for the same URL set, so
+   * first-capture-wins is enforced across all of them, not just within
+   * this one directory. */
+  ledgerPath: string;
 }): Promise<X2IngestResult> {
   const { trail, filePath, statedUrl, statedDate, sourceConfig, outDir } = opts;
+
+  if (!opts.ledgerPath) {
+    throw new Error(
+      "ingestOwnerSavedPage: `ledgerPath` is required (gate finding 2c, re-gate) — the per-directory default " +
+        "ledger was removed; pass an explicit `--ledger <path>` (or `ledgerPath` option) shared across every " +
+        "run that captures evidence for the same URL set.",
+    );
+  }
 
   assertSafeObjectKey(trail, "--trail");
 
@@ -242,12 +299,16 @@ export async function ingestOwnerSavedPage(opts: {
         "config doesn't even know about (decision 0001 Addendum J(a): the host allow-list is per trail).",
     );
   }
-  const configuredHosts = trailConfiguredHosts(trailUrls);
-  if (!statedHostAllowed(statedUrl, configuredHosts)) {
+  // Gate finding 2a (re-gate): the stated URL must exactly match — after
+  // normalisation — one of the trail's own configured URLs, not merely
+  // share an allowed HOST. A host-only check let a stated URL name ANY
+  // path on that host; this is what actually closes it.
+  if (!statedUrlAllowed(statedUrl, trailUrls)) {
     throw new Error(
-      `Stated URL "${statedUrl}" (host "${parsedUrl.hostname}") is not on trail "${trail}"'s configured host ` +
-        `list (${configuredHosts.join(", ") || "(none)"}) — decision 0001 Addendum J(a): an owner-saved page's ` +
-        "stated host must be on that trail's own configured host list.",
+      `Stated URL "${statedUrl}" does not exactly match (after normalisation) any URL in trail "${trail}"'s ` +
+        `configured list (${trailUrls.join(", ") || "(none)"}) — decision 0001 Addendum J(a) / gate finding ` +
+        "2a (re-gate): an owner-saved page's stated URL must be one of the trail's own configured URLs, not " +
+        "merely on an allowed host.",
     );
   }
 
@@ -276,7 +337,7 @@ export async function ingestOwnerSavedPage(opts: {
   // BEFORE any bytes are read or written, so a refusal never leaves an
   // orphaned raw/text file on disk. URL matching is normalised (gate
   // finding 2a — case/`www.`/trailing-slash/fragment/query insensitive).
-  const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(outDir);
+  const ledgerPath = opts.ledgerPath;
   const existingLedgerEntry = findLedgerEntry(await loadLedger(ledgerPath), "owner-saved", statedUrl);
   if (existingLedgerEntry && !opts.additional) {
     throw new Error(
@@ -420,10 +481,11 @@ async function main(argv: string[]): Promise<void> {
   const additional = argv.includes("--additional");
   const flags = parseFlags(argv.filter((a) => a !== "--additional"));
   const { trail, file, url, date } = flags;
-  if (!trail || !file || !url || !date) {
+  if (!trail || !file || !url || !date || !flags.ledger) {
     throw new Error(
       "Usage: node dist/x2-ingest.js --trail TN|VI|RTJ --file <owner-saved.html> --url <stated URL> " +
-        "--date YYYY-MM-DD [--config <x2-sources.json>] [--out-dir <dir>] [--additional] [--ledger <path>]",
+        "--date YYYY-MM-DD --ledger <path> [--config <x2-sources.json>] [--out-dir <dir>] [--additional] " +
+        "— `--ledger` is REQUIRED (gate finding 2c, re-gate): the per-directory default ledger was removed.",
     );
   }
   const configPath = flags.config || resolveDefaultX2ConfigPath();
@@ -442,7 +504,7 @@ async function main(argv: string[]): Promise<void> {
     sourceConfig,
     outDir,
     additional,
-    ...(flags.ledger ? { ledgerPath: flags.ledger } : {}),
+    ledgerPath: flags.ledger,
   });
   process.stdout.write(
     `Ingested owner-saved evidence for ${trail}: ${entry.url} (saved ${entry.ownerSavedDate}, sha256 ` +

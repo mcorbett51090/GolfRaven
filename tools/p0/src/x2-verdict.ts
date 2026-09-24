@@ -46,7 +46,11 @@ import { collapseWhitespace } from "./text-extract.js";
 import { extractEvidenceText } from "./evidence-extract.js";
 import { SLATE_TRAILS } from "./slate.js";
 import type { X2FetchManifest, X2Method } from "./x2-fetch.js";
-import { defaultLedgerPath, loadLedger, type RecordedLedger } from "./x2-recorded-ledger.js";
+import {
+  loadLedger,
+  normalizeUrlForFirstCapture,
+  type RecordedLedger,
+} from "./x2-recorded-ledger.js";
 import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
@@ -180,14 +184,16 @@ export async function buildEvidenceByTrail(
   manifest: X2FetchManifest,
   readRaw: (relPath: string) => Promise<Buffer>,
   opts: {
-    /** Gate finding 2c: when given, `recorded` is decided by whether this
-     * entry's SHA-256 is present in the LEDGER for its method — not by
-     * the manifest entry's own (potentially stale or hand-edited)
-     * `recorded` field. When omitted (the default, and the only option
-     * available to legacy callers), `recorded` falls back to the
-     * manifest entry's own field, as before. */
-    ledger?: RecordedLedger;
-  } = {},
+    /** Gate finding 2c (re-gate): REQUIRED — `recorded` is decided by
+     * whether this entry's (SHA-256, method, normalised URL) triple is
+     * registered in the LEDGER, never by the manifest entry's own
+     * (potentially stale or hand-edited) `recorded` field. The legacy
+     * "trust the manifest's own field when no ledger is given" fallback
+     * was REMOVED — that fallback was itself a bypass of finding 2c
+     * (any caller that omitted a ledger silently got the exact
+     * hard-coded-`recorded:true` trust the ledger exists to replace). */
+    ledger: RecordedLedger;
+  },
 ): Promise<EvidenceByTrail> {
   const byTrail: EvidenceByTrail = {};
   for (const [trail, entries] of Object.entries(manifest.trails)) {
@@ -249,16 +255,31 @@ export async function buildEvidenceByTrail(
         );
       }
 
-      // Addendum J correction's first-capture-wins rule. Gate finding 2c:
-      // when a LEDGER is supplied, it is authoritative — this entry is
-      // recorded only if its (recomputed) SHA is registered in the
-      // ledger for its own method, full stop, regardless of what the
-      // manifest entry's own `recorded` field claims. Without a ledger
-      // (legacy callers), fall back to the manifest field, defaulting a
-      // missing one to recorded (it was the only capture that existed).
-      const recorded = opts.ledger
-        ? opts.ledger.entries.some((le) => le.method === method && le.sha256 === recomputedSha)
-        : (e as { recorded?: unknown }).recorded !== false;
+      // Addendum J correction's first-capture-wins rule. The ledger is
+      // authoritative — this entry is recorded only if a ledger row
+      // matches it on ALL THREE of method, (recomputed) SHA, AND
+      // normalised URL, regardless of what the manifest entry's own
+      // `recorded` field claims. Gate finding 2b (re-gate): matching on
+      // method+SHA alone was found exploitable — a hand-edited ledger row
+      // with the RIGHT sha256/method but a bogus/unrelated
+      // `normalizedUrl` (one that was never actually checked) would
+      // still match and wrongly mark a non-recorded capture as recorded.
+      // Requiring the manifest entry's OWN normalised URL to equal the
+      // ledger row's `normalizedUrl` closes that: a ledger row can only
+      // vouch for the exact URL it claims to be about.
+      const entryNormalizedUrl = (() => {
+        try {
+          return normalizeUrlForFirstCapture(e.url);
+        } catch {
+          return null;
+        }
+      })();
+      const recorded = opts.ledger.entries.some(
+        (le) =>
+          le.method === method &&
+          le.sha256 === recomputedSha &&
+          le.normalizedUrl === entryNormalizedUrl,
+      );
 
       // Gate S2: only count this evidence for ITS trail when the final URL
       // (after redirects) is still on the same host that trail's own
