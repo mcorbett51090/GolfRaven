@@ -2331,6 +2331,18 @@ const HTML_BLOCK_TAG_NAMES =
   "param|section|summary|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|track|ul";
 const HTML_BLOCK_OPEN_RE = new RegExp(`^ {0,3}</?(${HTML_BLOCK_TAG_NAMES})(?:[ \\t>]|/>|$)`, "i");
 
+/** Round 7 follow-up: `<details>` gets its OWN, stricter tracking —
+ * hidden from its opening tag all the way to its OWN closing
+ * `</details>`, even across blank lines, unlike every other HTML block
+ * above (which CommonMark ends at the next blank line). GitHub's own
+ * renderer keeps a `<details>` section collapsed across internal blank
+ * lines/paragraph breaks, so ending the hidden-tracking at the first
+ * blank line (the generic rule) would let a forged row placed after
+ * such a blank line — but still visually inside the collapsed section
+ * on GitHub — read as "visible" here. */
+const DETAILS_OPEN_RE = /^ {0,3}<details(?:[ \t>]|\/>|$)/i;
+const DETAILS_CLOSE_RE = /<\/details\s*>/i;
+
 /** Should-fix, fourth re-gate: a `hidden` or `style` HTML attribute
  * anywhere on a line marks JUST THAT LINE invisible, independent of the
  * block-level state above (a one-line `<span hidden>ACCEPT ...</span>`
@@ -2375,9 +2387,18 @@ export function computeMarkdownLineVisibility(text: string): boolean[] {
   let fenceLen = 0;
   let inComment = false;
   let inHtmlBlock = false;
+  let inDetailsBlock = false;
   for (let i = 0; i < lines.length; i += 1) {
     const raw = lines[i] ?? "";
     const trimmed = raw.trim();
+
+    if (inDetailsBlock) {
+      // Round 7 follow-up: stays hidden across blank lines — only its
+      // OWN closing </details> ends it (see DETAILS_OPEN_RE's own doc).
+      visible[i] = false;
+      if (DETAILS_CLOSE_RE.test(raw)) inDetailsBlock = false;
+      continue;
+    }
 
     if (inHtmlBlock) {
       // CommonMark type-6 HTML blocks end at the next BLANK line — the
@@ -2430,9 +2451,20 @@ export function computeMarkdownLineVisibility(text: string): boolean[] {
       continue;
     }
 
-    // Should-fix, fourth re-gate: a raw HTML block (`<details>`, `<div>`,
+    // Round 7 follow-up: <details> opens here and stays hidden until
+    // its OWN closing tag, even across blank lines — checked BEFORE the
+    // generic HTML-block rule below, since <details> is also a member
+    // of HTML_BLOCK_TAG_NAMES and needs the stricter tracking instead.
+    if (DETAILS_OPEN_RE.test(raw)) {
+      visible[i] = false;
+      if (!DETAILS_CLOSE_RE.test(raw)) inDetailsBlock = true; // else opened+closed on one line
+      continue;
+    }
+
+    // Should-fix, fourth re-gate: any OTHER raw HTML block (`<div>`,
     // `<table>`, etc.) opens here and swallows this line plus every
-    // following line up to the next blank line.
+    // following line up to the next blank line (CommonMark's own rule
+    // — <details> is deliberately stricter, see above).
     if (HTML_BLOCK_OPEN_RE.test(raw)) {
       inHtmlBlock = true;
       visible[i] = false;
@@ -2602,6 +2634,11 @@ export interface CheckLedgerAgainstGitOptions {
    * an isolated scratch fixture, without writing into (or reading from)
    * this toolkit's own real checkout. */
   canonicalPath?: string;
+  /** TEST-ONLY seam (round 7 hardening) — `main()` never overrides this;
+   * passed straight through to `resolveGitBinary`. See that function's
+   * own doc for why a test needs it (the test environment's trusted
+   * `git` may not live at `/usr/bin/git`). */
+  gitBinary?: string;
 }
 
 export async function checkLedgerAgainstGit(
@@ -2622,9 +2659,33 @@ export async function checkLedgerAgainstGit(
     hiddenByGitFlag: false,
     lastCommit: null,
   });
+
+  // Round 7 hardening: these LOCAL git checks (hash-object/diff/status/
+  // ls-files/log) are just as spoofable by a fake "git" on PATH as the
+  // GitHub-verification commands are — a forged `git hash-object` could
+  // report a blob hash matching what's genuinely on GitHub while the
+  // real local file differs. Same fix: a resolved, root-owned absolute
+  // path, never the bare string "git", with the child's PATH fixed
+  // (never the caller's own).
+  const gitResolution = resolveGitBinary(opts.gitBinary);
+  if (!gitResolution.ok || !gitResolution.path) {
+    return {
+      blobHash: null,
+      clean: false,
+      detail: `could not resolve a trusted git binary for local checks: ${gitResolution.detail}`,
+      pathIsCanonical: false,
+      verifiedAgainstGithub: false,
+      verifiedMainUnavailable: false,
+      hiddenByGitFlag: false,
+      lastCommit: null,
+    };
+  }
+  const gitBinary = gitResolution.path;
+  const localGitEnv: NodeJS.ProcessEnv = { ...process.env, PATH: FIXED_CHILD_PATH };
+
   let blobHash: string | null = null;
   try {
-    const { stdout } = await execFileAsync("git", ["hash-object", ledgerPath]);
+    const { stdout } = await execFileAsync(gitBinary, ["hash-object", ledgerPath], { env: localGitEnv });
     blobHash = stdout.trim();
   } catch {
     blobHash = null;
@@ -2651,7 +2712,7 @@ export async function checkLedgerAgainstGit(
   // add`ed at all (an untracked file has no index entry for `git diff`
   // to compare against).
   try {
-    await execFileAsync("git", ["diff", "--quiet", "--", ledgerPath], { cwd });
+    await execFileAsync(gitBinary, ["diff", "--quiet", "--", ledgerPath], { cwd, env: localGitEnv });
   } catch (err) {
     const code = (err as { code?: number }).code;
     return {
@@ -2669,7 +2730,7 @@ export async function checkLedgerAgainstGit(
     };
   }
   try {
-    const { stdout } = await execFileAsync("git", ["status", "--porcelain", "--", ledgerPath], { cwd });
+    const { stdout } = await execFileAsync(gitBinary, ["status", "--porcelain", "--", ledgerPath], { cwd, env: localGitEnv });
     if (stdout.trim().length > 0) {
       return {
         blobHash,
@@ -2700,7 +2761,7 @@ export async function checkLedgerAgainstGit(
   // `git diff` and `git status`, i.e. exactly the checks just above —
   // always refused, regardless of --allow-dirty-ledger (see `main()`).
   try {
-    const { stdout } = await execFileAsync("git", ["ls-files", "-v", "--", ledgerPath], { cwd });
+    const { stdout } = await execFileAsync(gitBinary, ["ls-files", "-v", "--", ledgerPath], { cwd, env: localGitEnv });
     const line = stdout.trim();
     if (line && /^[hS] /.test(line)) {
       return {
@@ -2728,9 +2789,9 @@ export async function checkLedgerAgainstGit(
   let lastCommit: { hash: string; author: string; date: string } | null = null;
   try {
     const { stdout } = await execFileAsync(
-      "git",
+      gitBinary,
       ["log", "-1", "--format=%H%x1f%an%x1f%aI", "--", ledgerPath],
-      { cwd },
+      { cwd, env: localGitEnv },
     );
     const [hash, author, date] = stdout.trim().split("\x1f");
     if (hash) lastCommit = { hash, author: author ?? "", date: date ?? "" };
