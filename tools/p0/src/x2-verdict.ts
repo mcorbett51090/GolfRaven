@@ -40,6 +40,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1236,48 +1237,213 @@ async function isCanonicalPath(candidate: string, canonical: string): Promise<bo
 // matters for what is actually trusted.
 // ---------------------------------------------------------------------------
 
-/** Environment variables ALLOWED to pass through into a disposable
- * verification repo's git invocations — everything else in
- * `process.env` is dropped, specifically including every OTHER `GIT_*`
- * variable (GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_COUNT/KEY_n/VALUE_n,
- * GIT_ALTERNATE_OBJECT_DIRECTORIES, etc.) — a caller's env can carry any
- * of these, and none of them may reach a command this module treats as
- * "verified against GitHub". Proxy/CA variables are allow-listed because
- * this environment's outbound HTTPS goes through a TLS-intercepting
- * proxy the fetch genuinely needs to succeed through. */
-const GIT_ENV_ALLOWLIST = [
-  "PATH",
-  "HTTPS_PROXY",
-  "https_proxy",
-  "HTTP_PROXY",
-  "http_proxy",
-  "NO_PROXY",
-  "no_proxy",
-  "GIT_SSL_CAINFO",
-  "SSL_CERT_FILE",
-  "NODE_EXTRA_CA_CERTS",
-] as const;
+// ---------------------------------------------------------------------------
+// Addendum J re-gate round 7 ("an agent that controls the verdict
+// process's runtime environment still gets OFFICIAL with a forged
+// acceptance"): round 6's fix scrubbed process.env for the git commands
+// it built, but still (a) resolved the LITERAL STRING "git" through
+// PATH — a fake `git` shim placed earlier on PATH (or PATH itself
+// rewritten) is silently trusted, since `execFileAsync("git", …)` does a
+// PATH lookup every time; (b) passed the caller's own PATH straight
+// through the "allowed" list into the child's env; and (c) never
+// considered that round 6's fix runs INSIDE the same Node process the
+// caller launched — `NODE_OPTIONS="--require evil.cjs"`, `LD_PRELOAD`,
+// or any other mechanism that injects code into that process can patch
+// `child_process.execFile` itself before a single line of this module's
+// own code runs, making every "scrubbed" git invocation transparently
+// go through attacker code regardless of what env/args this module
+// constructs for it.
+//
+// Fix, three parts: (1) `resolveGitBinary` resolves an ABSOLUTE path
+// (never the bare string "git", never PATH-dependent) and requires it be
+// owned by root and not group-/world-writable, refusing otherwise —
+// `main()` never overrides the candidate paths; a `gitBinary` override is
+// a TEST-ONLY seam. (2) the child's own PATH is fixed to
+// `/usr/bin:/bin`, never the caller's — closes both a shim placed
+// elsewhere on PATH and PATH itself being rewritten. (3) `detectRuntimeTamper`
+// refuses (UNOFFICIAL) when the ORIGINAL process carries evidence its own
+// process, not just its git commands, may already be compromised:
+// `LD_PRELOAD`/`LD_LIBRARY_PATH`/`GIT_EXEC_PATH`/`DYLD_*` being set at
+// all, `NODE_OPTIONS` carrying a code-injecting flag (`--require`/`-r`/
+// `--loader`/`--experimental-loader`/`--import` — NOT a blanket
+// "NODE_OPTIONS is set" refusal: this environment's own ordinary shell
+// sets a benign `--max-old-space-size` NODE_OPTIONS, confirmed this
+// session, and a check that refused on that would make the live CLI
+// falsely UNOFFICIAL on every normal run here), or `process.execArgv`
+// being non-empty (a plain `node dist/x2-verdict.js` file invocation has
+// an empty `execArgv`, confirmed this session; it becomes non-empty only
+// when flags are passed directly to the `node` invocation itself, e.g.
+// `node --require=evil.cjs dist/x2-verdict.js` or `node -e "…"`).
+// `detectRuntimeTamper` is INJECTED (`env`/`execArgv` parameters), never
+// reading `process.env`/`process.execArgv` itself — `verifyAgainstGitHub`
+// passes the REAL ones by default and `main()` never overrides that; the
+// injection exists ONLY so unit tests can (a) exercise a clean baseline
+// unaffected by vitest's OWN ambient `execArgv` (vitest's worker process
+// carries a non-empty `execArgv` including its own `--require
+// suppress-warnings.cjs`, confirmed this session — every test not
+// specifically exercising this check passes an explicit clean override,
+// the seam `main()` never uses) and (b) attribute a specific vector
+// precisely, rather than "some ambient noise tripped it."
+// ---------------------------------------------------------------------------
 
-/** Builds the EXPLICIT, minimal environment every disposable-repo git
- * command runs under — constructed from an empty object, never
- * `{...process.env}`. `HOME` and `GIT_DIR` are both pinned to `tmpDir`
- * (the disposable bare repo itself), so no ambient `~/.gitconfig`, and
- * no caller-set `GIT_DIR`/`GIT_WORK_TREE`, can point these commands at
- * anything else. `GIT_NO_REPLACE_OBJECTS=1` defeats exploit R;
- * `GIT_CONFIG_NOSYSTEM=1` + `GIT_CONFIG_GLOBAL=/dev/null` defeat
- * SYSTEM/global `insteadOf` redirection (exploit I). */
-function scrubbedGitEnv(tmpDir: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of GIT_ENV_ALLOWLIST) {
-    const v = process.env[key];
-    if (v !== undefined) env[key] = v;
+/** Absolute paths `resolveGitBinary` tries, in order — never the bare
+ * string `"git"`, which would resolve through the (spoofable) PATH. */
+const GIT_BINARY_CANDIDATES = ["/usr/bin/git", "/bin/git"] as const;
+
+/** The fixed PATH every child git process gets (hardening (b), round 7)
+ * — the caller's own PATH is NEVER passed through, closing both "a fake
+ * git shim earlier on PATH" and "PATH itself rewritten". */
+const FIXED_CHILD_PATH = "/usr/bin:/bin";
+
+export interface GitBinaryResolution {
+  ok: boolean;
+  /** Absolute path to a verified `git` binary, or `null` on failure. */
+  path: string | null;
+  detail: string;
+}
+
+/**
+ * Round 7 hardening (1): resolves `git` to an ABSOLUTE path (trying
+ * `/usr/bin/git`, then `/bin/git`) and requires — via `fs.statSync`,
+ * never trusting a caller-controlled PATH lookup — that it be owned by
+ * root (`uid === 0`) and not group- or world-writable (mode bits `022`).
+ * A candidate that EXISTS but fails either check is a hard refusal, not
+ * a silent fall-through to the next candidate: a tampered binary sitting
+ * at the well-known path is itself exactly the attack this closes, and
+ * quietly trying somewhere else an attacker may equally control buys
+ * nothing. `gitBinaryOverride` is a TEST-ONLY seam (the shipped CLI's
+ * `main()` never passes it) — the real test environment's own trusted
+ * `git` may not live at `/usr/bin/git`, so tests point this at whatever
+ * `git` they can actually trust (e.g. resolved once via `command -v git`
+ * in the test file itself), never at a path a test wants proven UNSAFE
+ * (those tests point at a deliberately bad file/permission instead).
+ */
+export function resolveGitBinary(gitBinaryOverride?: string): GitBinaryResolution {
+  if (gitBinaryOverride !== undefined) {
+    return { ok: true, path: gitBinaryOverride, detail: `test-only override: "${gitBinaryOverride}".` };
   }
-  env.HOME = tmpDir;
-  env.GIT_DIR = tmpDir;
-  env.GIT_NO_REPLACE_OBJECTS = "1";
-  env.GIT_CONFIG_NOSYSTEM = "1";
-  env.GIT_CONFIG_GLOBAL = "/dev/null";
-  return env;
+  for (const candidate of GIT_BINARY_CANDIDATES) {
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(candidate);
+    } catch {
+      continue; // doesn't exist here — try the next candidate.
+    }
+    if (st.uid !== 0) {
+      return {
+        ok: false,
+        path: null,
+        detail: `refusing: "${candidate}" exists but is not owned by root (uid ${st.uid}) — will not trust ` +
+          "a git binary an unprivileged (or attacker) process could have written (round 7 hardening).",
+      };
+    }
+    if ((st.mode & 0o022) !== 0) {
+      return {
+        ok: false,
+        path: null,
+        detail: `refusing: "${candidate}" is group- or world-writable (mode ${(st.mode & 0o777).toString(8)}) ` +
+          "— will not trust a git binary that could be tampered with after this check (round 7 hardening).",
+      };
+    }
+    return { ok: true, path: candidate, detail: `resolved to "${candidate}" (root-owned, not group/world-writable).` };
+  }
+  return {
+    ok: false,
+    path: null,
+    detail:
+      `refusing: neither ${GIT_BINARY_CANDIDATES.join(" nor ")} exists — never falling back to a PATH-resolved ` +
+      '"git" (round 7 hardening).',
+  };
+}
+
+/** Environment variables whose mere PRESENCE in the process's original
+ * environment is grounds for refusal (round 7 hardening (3)) — none of
+ * these has a legitimate reason to be set for this CLI, and each is a
+ * known code-injection or binary-substitution vector for a *nix
+ * process. Checked against the ORIGINAL environment (never the scrubbed
+ * child env, which never carries these anyway) because the risk is that
+ * ALREADY-RUNNING PROCESS, not merely the child git commands. */
+const RUNTIME_TAMPER_BLANKET_VARS = [
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "GIT_EXEC_PATH",
+] as const;
+/** `DYLD_*` (macOS's dynamic-linker family — `DYLD_INSERT_LIBRARIES` is
+ * the LD_PRELOAD equivalent) is a prefix, not a fixed name. */
+const DYLD_PREFIX = "DYLD_";
+
+/** `NODE_OPTIONS` gets a NARROWER check than the blanket vars above: this
+ * environment's own ordinary shell sets a benign `--max-old-space-size=…`
+ * NODE_OPTIONS (confirmed this session — `node -e '...'` in a plain
+ * shell here already carries one), so "is NODE_OPTIONS set at all" would
+ * make the live CLI falsely UNOFFICIAL on every normal run in this
+ * environment. The actual attack (`evil.cjs`, this round's own gate
+ * fixture) needs a flag that makes Node LOAD CODE from an
+ * attacker-chosen file before this module runs: `--require`/`-r`,
+ * `--loader`/`--experimental-loader`, or `--import`. Only THOSE flags
+ * refuse. */
+const NODE_OPTIONS_DANGEROUS_RE = /(?:^|\s)(?:-r\b|--require\b|--loader\b|--experimental-loader\b|--import\b)/;
+
+export interface RuntimeTamperCheck {
+  tampered: boolean;
+  detail: string;
+}
+
+/**
+ * Round 7 hardening (3): looks for evidence the VERDICT PROCESS ITSELF —
+ * not merely the git commands it spawns — may already be running
+ * attacker-injected code, which would make any "scrubbed environment"
+ * this module builds for its own child processes meaningless (the
+ * injected code runs inside THIS process and can patch
+ * `child_process.execFile` before this module's own code ever executes;
+ * `evil.cjs`, the round-7 gate's own fixture, does exactly that).
+ * INJECTED, never reading `process.env`/`process.execArgv` directly —
+ * see this section's own banner comment for why (the test-only seam is
+ * `verifyAgainstGitHub`'s `runtimeEnv`/`runtimeExecArgv` options; `main()`
+ * never overrides them, so the live CLI always checks the REAL ones).
+ */
+export function detectRuntimeTamper(env: NodeJS.ProcessEnv, execArgv: readonly string[]): RuntimeTamperCheck {
+  for (const key of RUNTIME_TAMPER_BLANKET_VARS) {
+    if (env[key] !== undefined) {
+      return {
+        tampered: true,
+        detail: `refusing: ${key} is set in the verdict process's own environment — this can substitute or ` +
+          "inject code into any binary this process (or a child it spawns) loads, making a \"scrubbed git " +
+          "environment\" meaningless (round 7 hardening).",
+      };
+    }
+  }
+  for (const [key, value] of Object.entries(env)) {
+    if (key.startsWith(DYLD_PREFIX) && value !== undefined) {
+      return {
+        tampered: true,
+        detail: `refusing: ${key} is set in the verdict process's own environment — the DYLD_* family can ` +
+          "inject code into this process the same way LD_PRELOAD does on Linux (round 7 hardening).",
+      };
+    }
+  }
+  const nodeOptions = env.NODE_OPTIONS;
+  if (nodeOptions !== undefined && NODE_OPTIONS_DANGEROUS_RE.test(nodeOptions)) {
+    return {
+      tampered: true,
+      detail:
+        `refusing: NODE_OPTIONS ("${nodeOptions}") carries a code-loading flag (--require/-r/--loader/` +
+        "--experimental-loader/--import) — this can patch child_process.execFile before this module's own " +
+        "code ever runs, making a \"scrubbed git environment\" meaningless (round 7 hardening). (A benign " +
+        "NODE_OPTIONS with no such flag, e.g. a memory-limit setting, is NOT refused here.)",
+    };
+  }
+  if (execArgv.length > 0) {
+    return {
+      tampered: true,
+      detail:
+        `refusing: process.execArgv is non-empty (${JSON.stringify(execArgv)}) — a plain "node <script>.js" ` +
+        "invocation has an empty execArgv; flags passed directly to the node invocation itself (e.g. " +
+        "--require=evil.cjs, or -e/--eval) are the same code-injection class as NODE_OPTIONS (round 7 " +
+        "hardening).",
+    };
+  }
+  return { tampered: false, detail: "no runtime-tamper indicators found." };
 }
 
 /** Per-command `-c` flags every disposable-repo git invocation carries:
@@ -1300,12 +1466,55 @@ function gitSafeConfigArgs(allowFileProtocol: boolean): string[] {
   ];
 }
 
+/** Builds the EXPLICIT, minimal environment every disposable-repo git
+ * command runs under — constructed from an empty object, never
+ * `{...process.env}`. `HOME` and `GIT_DIR` are both pinned to `tmpDir`
+ * (the disposable bare repo itself), so no ambient `~/.gitconfig`, and
+ * no caller-set `GIT_DIR`/`GIT_WORK_TREE`, can point these commands at
+ * anything else. `GIT_NO_REPLACE_OBJECTS=1` defeats exploit R;
+ * `GIT_CONFIG_NOSYSTEM=1` + `GIT_CONFIG_GLOBAL=/dev/null` defeat
+ * SYSTEM/global `insteadOf` redirection (exploit I). Round 7 hardening
+ * (2): `PATH` is now the FIXED `FIXED_CHILD_PATH`, never taken from
+ * `process.env` — a fake `git`, or any other shim, placed earlier on the
+ * CALLER's own PATH can no longer reach these commands regardless of
+ * what `resolveGitBinary` itself resolves (defense in depth: this env's
+ * PATH is irrelevant once the binary is invoked by absolute path, but a
+ * git subprocess or hook — even under `core.hooksPath=/dev/null` — could
+ * still shell out to another PATH-resolved tool otherwise). */
+const GIT_ENV_ALLOWLIST = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "GIT_SSL_CAINFO",
+  "SSL_CERT_FILE",
+  "NODE_EXTRA_CA_CERTS",
+] as const;
+
+function scrubbedGitEnv(tmpDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of GIT_ENV_ALLOWLIST) {
+    const v = process.env[key];
+    if (v !== undefined) env[key] = v;
+  }
+  env.PATH = FIXED_CHILD_PATH;
+  env.HOME = tmpDir;
+  env.GIT_DIR = tmpDir;
+  env.GIT_NO_REPLACE_OBJECTS = "1";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  return env;
+}
+
 async function runDisposableGit(
+  gitBinary: string,
   tmpDir: string,
   allowFileProtocol: boolean,
   args: string[],
 ): Promise<{ stdout: string }> {
-  const { stdout } = await execFileAsync("git", [...gitSafeConfigArgs(allowFileProtocol), ...args], {
+  const { stdout } = await execFileAsync(gitBinary, [...gitSafeConfigArgs(allowFileProtocol), ...args], {
     cwd: tmpDir,
     env: scrubbedGitEnv(tmpDir),
   });
