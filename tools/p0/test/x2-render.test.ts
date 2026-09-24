@@ -60,6 +60,8 @@ function makeFakeContext(opts: {
   isClosed: () => boolean;
   wsClosedUrls: () => string[];
   wsSeenUrls: () => string[];
+  abortedUrls: () => string[];
+  continuedUrls: () => string[];
   newContextOpts: { userAgent?: string; serviceWorkers?: string };
 } {
   let routeHandler:
@@ -72,6 +74,8 @@ function makeFakeContext(opts: {
   let closed = false;
   const wsClosed: string[] = [];
   const wsSeen: string[] = [];
+  const abortedUrls: string[] = [];
+  const continuedUrls: string[] = [];
   const mainFrameToken = { main: true };
 
   function makeFakePopup(url: string): PageLike {
@@ -114,9 +118,11 @@ function makeFakeContext(opts: {
             const route: RouteLike = {
               async abort() {
                 aborted = true;
+                abortedUrls.push(spec.url);
               },
               async continue() {
                 aborted = false;
+                continuedUrls.push(spec.url);
               },
             };
             if (routeHandler) await routeHandler(route, request);
@@ -192,6 +198,8 @@ function makeFakeContext(opts: {
     isClosed: () => closed,
     wsClosedUrls: () => wsClosed,
     wsSeenUrls: () => wsSeen,
+    abortedUrls: () => abortedUrls,
+    continuedUrls: () => continuedUrls,
     newContextOpts: {},
   };
 }
