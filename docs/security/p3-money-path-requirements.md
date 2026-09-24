@@ -221,6 +221,21 @@ entirely; only a specific, pinned, reviewed target string is ever legitimate. Ad
 new dependency is therefore a reviewed diff against that one file, not a judgment call
 the lint makes about a host or a package name at import time.
 
+**Round 2 (post-P3a re-gate):** the model above still let five real bypasses through —
+an import-map **key** that is itself a relative path (remapping a specific in-tree
+import to an arbitrary target), a `deno.lock` `"redirects"` table swapping a pinned
+target's resolved URL, and a config file living ANYWHERE above `supabase/functions`
+(the repo root, or any directory between it and `supabase/functions`) whose own remap
+applies to everything inside. Closed by: every import-map key must be a bare specifier
+(no `./`, `../`, `/`, or `:`); every import-map target must be an exact pinned string —
+relative targets are banned outright, not merely escape-checked; every `deno.json`/
+`deno.jsonc`/`import_map.json`/`deno.lock` found anywhere between `supabase/functions`
+and the repo root (the nearest ancestor containing `.git`) is itself a finding,
+regardless of content; and every `deno.lock` under `supabase/functions` is validated —
+a non-empty `redirects` table is banned outright, and every `remote` key must itself be
+an exact pinned target. See `tools/service-role-lint/src/config.ts`'s own header
+comment for the full R1–R5 + lockfile model.
+
 **What it is not:** a static AST check over ONE file's syntax cannot see across a
 process boundary, cannot see what a legitimately-imported, pinned dependency's OWN code
 does once invoked, and cannot stop a sufficiently determined author from smuggling
@@ -260,6 +275,33 @@ real data-flow/points-to analysis runs out of syntactic shapes to enumerate. A
 sufficiently motivated single-file rewrite can still hide a built key from this (or
 almost any static AST) check; the DB-side controls in the paragraph above are what
 actually stop the resulting privileged action from succeeding regardless.
+
+### Edge-layer requirement: pin `--config` at deploy time `[unverified]` (BLOCKING round 2, post-P3a re-gate)
+
+The lint's config model (round 2) closes every confirmed live bypass by validating
+every `deno.json`/`deno.jsonc`/`import_map.json`/`deno.lock` under `supabase/functions`
+**and** by refusing to allow any config or lockfile to exist anywhere between
+`supabase/functions` and the repo root at all — see `tools/service-role-lint/src/
+config.ts`'s own header comment for the full model (R1–R5 plus the lockfile
+requirements). That closes what the lint can see.
+
+**`[unverified]`:** this lint reproduces `deno run`'s own directory-walk config
+resolution (confirmed against real Deno 2.5.2 by the reviewer) — it has **not** been
+confirmed that the Supabase CLI's `deploy` command, or the hosted Edge Runtime that
+actually executes a deployed function, resolves `deno.json`/`import_map.json` the
+identical way. If either resolves configs differently (a different search order, a
+different default config path, or an `--import-map`/`--config` flag defaulting to
+something this lint never inspects), a config file this lint never validates at all
+could still govern the real deployed function's imports.
+
+**Requirement, until that is verified:** the deploy command for every Edge Function in
+this project MUST explicitly pin `--config supabase/functions/deno.json` (the one
+config file this lint always treats as authoritative for the whole functions tree,
+absent a validated per-function override). Do not rely on Supabase CLI's own default
+config discovery. This is a deploy-tooling requirement, out of this stage's scope to
+implement (no deploy pipeline exists yet) — recorded here so it is not lost, and to be
+verified against the real Supabase CLI/Edge Runtime before this project's first real
+deploy.
 
 ## Ops note: a Vault key referenced by the pseudonym key registry must never be deleted (should-fix 2, post-P3a re-gate)
 
