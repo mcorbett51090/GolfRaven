@@ -76,6 +76,7 @@ function makeFakeContext(opts: {
 }): {
   context: ContextLike;
   isClosed: () => boolean;
+  initScriptCount: () => number;
   wsClosedUrls: () => string[];
   wsSeenUrls: () => string[];
   wsConnectedToServerUrls: () => string[];
@@ -92,6 +93,7 @@ function makeFakeContext(opts: {
   let responseHandler: ((response: ResponseLike) => void) | null = null;
   let currentUrl = "";
   let closed = false;
+  let initScriptCount = 0;
   const wsClosed: string[] = [];
   const wsSeen: string[] = [];
   const wsConnectedToServer: string[] = [];
@@ -269,15 +271,29 @@ function makeFakeContext(opts: {
   };
 }
 
-function fakeLauncher(context: ContextLike): {
+function fakeLauncher(
+  context: ContextLike,
+  /** Gate finding 1 (re-re-gate): when set, simulates CDP's own
+   * `Target.targetCreated` firing (with this `targetInfo`) the instant
+   * `Target.setDiscoverTargets` is sent — realistic, since discovery
+   * reports already-existing (and new) targets immediately. Lets a test
+   * exercise the BROWSER-level CDP watch specifically, independent of
+   * `page.on("worker")`/`context.on("page")`, which a SharedWorker or
+   * ServiceWorker target never fires at all. */
+  cdpOpts: { targetInfo?: { type: string; url?: string } } = {},
+): {
   launch: ChromiumLauncher;
   seenExecutablePath: string[];
   seenArgs: (string[] | undefined)[];
   seenTimeout: (number | undefined)[];
   seenContextOpts: { userAgent: string; serviceWorkers?: string }[];
   isClosed: () => boolean;
+  cdpDetached: () => boolean;
+  cdpMethodsCalled: () => string[];
 } {
   let closed = false;
+  let cdpDetached = false;
+  const cdpMethodsCalled: string[] = [];
   const state = {
     launch: (() => {}) as unknown as ChromiumLauncher,
     seenExecutablePath: [] as string[],
@@ -285,11 +301,31 @@ function fakeLauncher(context: ContextLike): {
     seenTimeout: [] as (number | undefined)[],
     seenContextOpts: [] as { userAgent: string; serviceWorkers?: string }[],
     isClosed: () => closed,
+    cdpDetached: () => cdpDetached,
+    cdpMethodsCalled: () => cdpMethodsCalled,
   };
   const browser: BrowserLike = {
     async newContext(contextOpts) {
       state.seenContextOpts.push(contextOpts);
       return context;
+    },
+    async newBrowserCDPSession() {
+      let targetHandler: ((payload: unknown) => void) | null = null;
+      return {
+        on(event, handler) {
+          if (event === "Target.targetCreated") targetHandler = handler;
+        },
+        async send(method) {
+          cdpMethodsCalled.push(method);
+          if (method === "Target.setDiscoverTargets" && cdpOpts.targetInfo && targetHandler) {
+            targetHandler({ targetInfo: cdpOpts.targetInfo });
+          }
+          return {};
+        },
+        async detach() {
+          cdpDetached = true;
+        },
+      };
     },
     async close() {
       closed = true;
@@ -794,6 +830,7 @@ describe("x2-render: renderUrl — popup (window.open) handling (gate finding, p
       on(event, handler) {
         if (event === "page") pageHandler = handler as (page: PageLike) => void;
       },
+      async addInitScript() {},
       async close() {},
     };
     const { launch } = fakeLauncher(context);
