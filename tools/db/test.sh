@@ -223,9 +223,24 @@ echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
 PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \
   node "$ROOT_DIR/tools/db/verify-function-inventory.mjs"
 
-if command -v node >/dev/null 2>&1 && [ -f "$ROOT_DIR/tools/service-role-lint/dist/cli.js" ]; then
-  echo "tools/db/test.sh: service-role lint over supabase/functions (B5)"
-  node "$ROOT_DIR/tools/service-role-lint/dist/cli.js" "$SUPABASE_DIR/functions"
-else
-  echo "tools/db/test.sh: tools/service-role-lint/dist/cli.js not built — run 'pnpm --filter @golfraven/service-role-lint build' first; skipping this step" >&2
+# ⛔ FIX (should-fix, post-P3a gate): "test.sh must fail, not soft-skip,
+# when the lint dist is missing." A missing/unbuilt dist/cli.js used to
+# just print a warning and move on with exit 0 — a lint that silently
+# never ran is indistinguishable, from this script's own exit code, from
+# one that ran clean; CI's build step normally builds it first
+# (.github/workflows/ci.yml), so hitting this path at all means
+# something upstream already broke, and papering over that with a
+# skip hides it. `command -v node` is still checked (a genuinely
+# node-less environment is a different, honestly-reported failure, not
+# this script's job to install Node), but a present Node with a missing
+# dist is now a hard failure.
+if ! command -v node >/dev/null 2>&1; then
+  echo "tools/db/test.sh: FAILED — node is not on PATH, cannot run service-role-lint" >&2
+  exit 1
 fi
+if [ ! -f "$ROOT_DIR/tools/service-role-lint/dist/cli.js" ]; then
+  echo "tools/db/test.sh: FAILED — tools/service-role-lint/dist/cli.js is not built; run 'pnpm --filter @golfraven/service-role-lint build' first" >&2
+  exit 1
+fi
+echo "tools/db/test.sh: service-role lint over supabase/functions (B5)"
+node "$ROOT_DIR/tools/service-role-lint/dist/cli.js" "$SUPABASE_DIR/functions"
