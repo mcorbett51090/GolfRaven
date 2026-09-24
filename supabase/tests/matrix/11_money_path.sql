@@ -534,8 +534,13 @@ SELECT lives_ok(
 -- session). Renaming makes delete_my_data's own `name LIKE
 -- 'pseudonym_key%'` lookup find nothing, without touching referential
 -- integrity at all.
+-- PREFIX the name (not suffix — `name || '_suffix'` still starts with
+-- 'pseudonym_key' and so still matches the SAME `LIKE 'pseudonym_key%'`
+-- prefix pattern delete_my_data itself uses, confirmed empirically this
+-- session: the first version of this fix left the rows matching after
+-- all).
 SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = name || '_hidden_for_test' WHERE name LIKE 'pseudonym_key%'$$,
+  $$UPDATE vault.secrets SET name = 'hidden_for_test_' || name WHERE name LIKE 'pseudonym_key%'$$,
   'setup: hide every pseudonym_key from the vault (renamed, not deleted)'
 );
 SELECT throws_ok(

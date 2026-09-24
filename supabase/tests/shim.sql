@@ -181,6 +181,25 @@ CREATE TABLE IF NOT EXISTS vault.secrets (
 CREATE OR REPLACE VIEW vault.decrypted_secrets AS
   SELECT id, name, description, secret, secret AS decrypted_secret, key_id, nonce, created_at, updated_at
   FROM vault.secrets;
+-- migration_owner (HARNESS_MODE=restricted's own migration-running
+-- identity, standing in for Supabase's real project `postgres` role) gets
+-- full privilege on the vault stand-in WITH GRANT OPTION, so a real
+-- migration (0018_pseudonym_vault.sql) can itself GRANT a narrow slice
+-- onward to private_definer, and can add a FK referencing vault.secrets
+-- (ALTER TABLE ... REFERENCES needs its own privilege on the referenced
+-- table) — confirmed empirically this session (both failed under
+-- HARNESS_MODE=restricted without this: "permission denied for table
+-- secrets"). This schema is created by the bootstrap role (`postgres`),
+-- same as real Supabase Vault is pre-provisioned by Supabase's own
+-- control plane, not by a project's own migrations — migration_owner
+-- doesn't OWN it, but Vault is documented as meant for a project's own
+-- migrations/functions to use, so its real `postgres` role is assumed
+-- to hold at least this much `[unverified — supabase.com's own docs
+-- domain is blocked by this environment's egress proxy; inferred from
+-- Vault's documented purpose, not confirmed against a grants list]`.
+GRANT ALL ON SCHEMA vault TO migration_owner WITH GRANT OPTION;
+GRANT ALL ON vault.secrets TO migration_owner WITH GRANT OPTION;
+GRANT ALL ON vault.decrypted_secrets TO migration_owner WITH GRANT OPTION;
 -- Deliberately NO grant to anon/authenticated/PUBLIC on either object —
 -- 0018_pseudonym_vault.sql (a real migration) grants private_definer a
 -- narrow, column-level SELECT on decrypted_secrets; nothing else ever

@@ -1248,7 +1248,11 @@ describe("x2-verdict: gate finding 2c — buildEvidenceByTrail's `recorded` is L
     const byTrail = await buildEvidenceByTrail(
       manifest,
       async () => Buffer.from(bytes),
-      { ledger },
+      // This test is about ledger method-scoping, not the rendered-route
+      // allow-list (should-fix, re-gate) — TN is explicitly allowed a
+      // "rendered" entry here so the two concerns stay independently
+      // testable.
+      { ledger, renderedAllowedTrails: ["VI", "TN"] },
     );
     expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(false);
   });
@@ -1297,6 +1301,140 @@ describe("x2-verdict: gate finding 2c — buildEvidenceByTrail's `recorded` is L
     expect(() => computeX2Verdict(confirmation, byTrail, ["TN"])).toThrow(
       /NON-RECORDED capture/,
     );
+  });
+});
+
+describe("x2-verdict: rendered-route allow-list is VI-only by default (should-fix, re-gate)", () => {
+  function renderedEntry(trail: string, sha256: string, url: string) {
+    return {
+      trail,
+      url,
+      status: "fetched" as const,
+      httpStatus: 200,
+      finalUrl: url,
+      contentType: "text/html",
+      fetchedAt: new Date().toISOString(),
+      sha256,
+      rawFile: "raw/x.html",
+      textFile: null,
+      textExtraction: "auto" as const,
+      extractor: null,
+      blocked: false,
+      error: null,
+      draftCandidateNames: [],
+      method: "rendered" as const,
+      ownerSavedDate: null,
+      renderArgs: [],
+      renderProxyHost: null,
+      recorded: true,
+    };
+  }
+
+  it("refuses (throws) a rendered entry for a trail OTHER than VI, with the default allow-list", async () => {
+    const bytes = "Some rendered content.";
+    const rawSha = sha(bytes);
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-render-evidence",
+      trails: { RTJ: [renderedEntry("RTJ", rawSha, "https://www.rtjgolf.com/")] },
+      draftCandidateNames: { RTJ: [] },
+    };
+    const ledger: RecordedLedger = {
+      entries: [
+        {
+          method: "rendered",
+          normalizedUrl: "rtjgolf.com/",
+          url: "https://www.rtjgolf.com/",
+          sha256: rawSha,
+          recordedAt: new Date().toISOString(),
+        },
+      ],
+    };
+    await expect(
+      buildEvidenceByTrail(manifest, async () => Buffer.from(bytes), { ledger }),
+    ).rejects.toThrow(/rendered-route allow-list/);
+  });
+
+  it("accepts a rendered entry for VI, with the default allow-list", async () => {
+    const bytes = "Some rendered VI content.";
+    const rawSha = sha(bytes);
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-render-evidence",
+      trails: { VI: [renderedEntry("VI", rawSha, "https://golfvancouverisland.ca/")] },
+      draftCandidateNames: { VI: [] },
+    };
+    const ledger: RecordedLedger = {
+      entries: [
+        {
+          method: "rendered",
+          normalizedUrl: "golfvancouverisland.ca/",
+          url: "https://golfvancouverisland.ca/",
+          sha256: rawSha,
+          recordedAt: new Date().toISOString(),
+        },
+      ],
+    };
+    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes), { ledger });
+    expect(byTrail.VI?.bySha.get(rawSha)?.method).toBe("rendered");
+  });
+
+  it("an explicit renderedAllowedTrails override widens the list for a deliberate, documented exception", async () => {
+    const bytes = "Some rendered TN content.";
+    const rawSha = sha(bytes);
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-render-evidence",
+      trails: { TN: [renderedEntry("TN", rawSha, "https://www.tnstateparks.com/golf")] },
+      draftCandidateNames: { TN: [] },
+    };
+    const ledger: RecordedLedger = {
+      entries: [
+        {
+          method: "rendered",
+          normalizedUrl: "tnstateparks.com/golf",
+          url: "https://www.tnstateparks.com/golf",
+          sha256: rawSha,
+          recordedAt: new Date().toISOString(),
+        },
+      ],
+    };
+    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes), {
+      ledger,
+      renderedAllowedTrails: ["VI", "TN"],
+    });
+    expect(byTrail.TN?.bySha.get(rawSha)?.method).toBe("rendered");
+  });
+
+  it("a DIRECT or owner-saved entry for a non-VI trail is unaffected — the allow-list only gates method 'rendered'", async () => {
+    const bytes = "Direct-fetched TN content.";
+    const rawSha = sha(bytes);
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: {
+        TN: [
+          {
+            ...renderedEntry("TN", rawSha, "https://www.tnstateparks.com/golf"),
+            method: "direct" as const,
+          },
+        ],
+      },
+      draftCandidateNames: { TN: [] },
+    };
+    const ledger: RecordedLedger = {
+      entries: [
+        {
+          method: "direct",
+          normalizedUrl: "tnstateparks.com/golf",
+          url: "https://www.tnstateparks.com/golf",
+          sha256: rawSha,
+          recordedAt: new Date().toISOString(),
+        },
+      ],
+    };
+    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes), { ledger });
+    expect(byTrail.TN?.bySha.get(rawSha)?.method).toBe("direct");
   });
 });
 
