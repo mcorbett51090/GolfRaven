@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  defaultLedgerPath,
   findLedgerEntry,
   loadLedger,
   normalizeUrlForFirstCapture,
@@ -12,6 +11,15 @@ import {
   RECORDED_LEDGER_FILENAME,
   type RecordedLedger,
 } from "../src/x2-recorded-ledger.js";
+
+/** Gate finding 2c (re-gate): `defaultLedgerPath` was REMOVED — every
+ * caller now builds an explicit ledger path. This is the one place tests
+ * in this file do that, so the removal reads as one deliberate helper, not
+ * as `path.join(dir, RECORDED_LEDGER_FILENAME)` repeated at every call
+ * site. */
+function ledgerPathFor(dir: string): string {
+  return path.join(dir, RECORDED_LEDGER_FILENAME);
+}
 
 const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-ledger-test-"));
 
@@ -80,6 +88,78 @@ describe("x2-recorded-ledger: normalizeUrlForFirstCapture (gate finding 2a)", ()
       normalizeUrlForFirstCapture("https://other-example.com/golf"),
     );
   });
+
+  it("gate finding 2a (re-gate): decodes UNRESERVED percent-encoding (%67 -> g)", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com/%67olf")).toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): does NOT decode a RESERVED percent-encoding (%2F, which encodes '/')", () => {
+    // %2F decoded would turn one path segment into two — decoding it
+    // would CHANGE the URL's structure, not just its spelling, so it must
+    // be left exactly as written and therefore NOT match the two-segment
+    // form.
+    expect(normalizeUrlForFirstCapture("https://example.com/golf%2Fcourses")).not.toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf/courses"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): collapses a doubled path slash", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com//golf")).toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): drops a ;param path segment parameter", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com/golf;x=1")).toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): a ;param on a NON-final segment is stripped too", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com/golf;x/courses")).toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf/courses"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): the DEFAULT https port (:443, explicit) normalizes the same as no port", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com:443/golf")).toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): a NON-default port is KEPT — a different port is a genuinely different resource", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com:8443/golf")).not.toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): path CASE is left untouched — /GOLF and /golf are genuinely different resources", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com/GOLF")).not.toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): a trailing dot on the hostname is NOT stripped — a different (if DNS-equivalent) hostname string is not silently collapsed", () => {
+    expect(normalizeUrlForFirstCapture("https://example.com./golf")).not.toBe(
+      normalizeUrlForFirstCapture("https://example.com/golf"),
+    );
+  });
+
+  it("gate finding 2a (re-gate): all the re-gate bypass variants together normalize to the exact same key as the first-round ones", () => {
+    const canonical = normalizeUrlForFirstCapture("https://example.com/golf");
+    const variants = [
+      "https://example.com/%67olf",
+      "https://example.com//golf",
+      "https://example.com/golf;x=1",
+      "https://example.com:443/golf",
+      "https://WWW.example.com:443//%67olf;p",
+    ];
+    for (const v of variants) {
+      expect(normalizeUrlForFirstCapture(v)).toBe(canonical);
+    }
+  });
 });
 
 describe("x2-recorded-ledger: loadLedger / saveLedger", () => {
@@ -123,10 +203,10 @@ describe("x2-recorded-ledger: loadLedger / saveLedger", () => {
     expect(loaded).toEqual(ledger);
   });
 
-  it("defaultLedgerPath joins the out dir with the standard filename", () => {
-    expect(defaultLedgerPath("/tmp/x2-evidence")).toBe(
-      path.join("/tmp/x2-evidence", RECORDED_LEDGER_FILENAME),
-    );
+  it("gate finding 2c (re-gate): there is no automatic per-directory default ledger path any more — RECORDED_LEDGER_FILENAME is only a naming constant a caller opts into explicitly", () => {
+    expect(RECORDED_LEDGER_FILENAME).toBe("recorded-ledger.json");
+    // (No `defaultLedgerPath` function exists to test here any more — its
+    // removal IS the point of this test's title.)
   });
 });
 
@@ -166,7 +246,7 @@ describe("x2-recorded-ledger: findLedgerEntry", () => {
 describe("x2-recorded-ledger: registerCapture (gate finding 2c)", () => {
   it("the first capture of a URL+method is recorded: true and persisted to the ledger file", async () => {
     const dir = mkdtempSync(path.join(OUT_DIR, "reg1-"));
-    const ledgerPath = defaultLedgerPath(dir);
+    const ledgerPath = ledgerPathFor(dir);
     const result = await registerCapture(ledgerPath, {
       method: "direct",
       url: "https://example.com/golf",
@@ -180,7 +260,7 @@ describe("x2-recorded-ledger: registerCapture (gate finding 2c)", () => {
 
   it("a second capture of the SAME normalized URL+method, allowAdditional=false (default), THROWS — never silently drops the first", async () => {
     const dir = mkdtempSync(path.join(OUT_DIR, "reg2-"));
-    const ledgerPath = defaultLedgerPath(dir);
+    const ledgerPath = ledgerPathFor(dir);
     await registerCapture(ledgerPath, {
       method: "direct",
       url: "https://example.com/golf",
@@ -201,7 +281,7 @@ describe("x2-recorded-ledger: registerCapture (gate finding 2c)", () => {
 
   it("a second capture of the SAME normalized URL+method, allowAdditional=true, returns recorded:false and does NOT modify the ledger", async () => {
     const dir = mkdtempSync(path.join(OUT_DIR, "reg3-"));
-    const ledgerPath = defaultLedgerPath(dir);
+    const ledgerPath = ledgerPathFor(dir);
     await registerCapture(ledgerPath, {
       method: "owner-saved",
       url: "https://example.com/golf",
@@ -224,7 +304,7 @@ describe("x2-recorded-ledger: registerCapture (gate finding 2c)", () => {
 
   it("captures of the same URL under DIFFERENT methods (direct vs rendered vs owner-saved) are independent — each gets its own recorded:true", async () => {
     const dir = mkdtempSync(path.join(OUT_DIR, "reg4-"));
-    const ledgerPath = defaultLedgerPath(dir);
+    const ledgerPath = ledgerPathFor(dir);
     const direct = await registerCapture(ledgerPath, {
       method: "direct",
       url: "https://example.com/golf",

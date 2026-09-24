@@ -19,31 +19,111 @@
  *
  * URL matching uses `normalizeUrlForFirstCapture` (below) — the SAME
  * effective URL reached via a different host-casing, a `www.` prefix, a
- * trailing slash, or a fragment/query is treated as one URL for this
- * purpose, per the gate's own finding that those were bypasses.
+ * trailing slash, a fragment/query, unreserved percent-encoding, a
+ * doubled path slash or a `;param` path segment is treated as one URL for
+ * this purpose, per the gate's own findings that those were bypasses
+ * (first round: host-casing/www./trailing-slash/fragment/query; re-gate
+ * round: percent-encoding/`//`/`;params` — see the function's own doc).
+ *
+ * **Re-gate finding 2c: there is no more per-directory DEFAULT ledger
+ * path.** `defaultLedgerPath`/`RECORDED_LEDGER_FILENAME`'s old role as an
+ * automatic, silent fallback (`opts.ledgerPath ?? defaultLedgerPath(outDir)`
+ * inside `x2-fetch`/`x2-ingest`/`x2-verdict`) is REMOVED — a caller that
+ * forgot to pass `--ledger` used to silently get a fresh, empty,
+ * `outDir`-scoped ledger, under which "first capture in THIS directory"
+ * trivially always succeeds — re-opening the exact cross-directory
+ * duplicate-capture hole finding 2c already existed to close, just one
+ * missed flag away. `ledgerPath` is now a REQUIRED argument everywhere
+ * evidence is captured or verified (`x2-fetch`, `x2-ingest`, `x2-verdict`)
+ * — every caller, CLI or test, makes an explicit, conscious choice of
+ * WHICH ledger a capture counts against. `RECORDED_LEDGER_FILENAME`
+ * remains exported as a plain naming convention (`path.join(dir,
+ * RECORDED_LEDGER_FILENAME)`) for a caller who deliberately wants one
+ * ledger per directory — that is now something a caller opts INTO, not
+ * something that happens whether they meant to or not.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type X2LedgerMethod = "direct" | "rendered" | "owner-saved";
 
+const UNRESERVED_PERCENT_ENCODED_RE = /%[0-9A-Fa-f]{2}/g;
+/** RFC 3986 2.3 "unreserved" characters — the only ones this function will
+ * decode out of a percent-encoding. Everything else (including `%2F`,
+ * which encodes `/` — decoding THAT would change how many path segments
+ * there are, not just how one is spelled) is left exactly as written. */
+function isUnreservedChar(ch: string): boolean {
+  return /^[A-Za-z0-9\-._~]$/.test(ch);
+}
+
+/** Gate finding 2a (re-gate): decodes ONLY unreserved-character percent
+ * escapes (e.g. `%67` -> `g`) — per RFC 3986 6.2.2.2, a percent-encoding
+ * of an unreserved character is defined to be equivalent to the character
+ * itself, so `/%67olf` and `/golf` are, by spec, the identical resource,
+ * not merely similar-looking ones. A reserved or unassigned escape (e.g.
+ * `%2F`, `%20`) is left untouched — decoding those WOULD change the URL's
+ * structure or introduce characters normalisation has to treat specially,
+ * which is a different, not-yet-needed problem this function does not
+ * attempt to solve. */
+function decodeUnreservedPercentEncoding(input: string): string {
+  return input.replace(UNRESERVED_PERCENT_ENCODED_RE, (match) => {
+    const ch = String.fromCharCode(Number.parseInt(match.slice(1), 16));
+    return isUnreservedChar(ch) ? ch : match;
+  });
+}
+
+/** Gate finding 2a (re-gate): strips a leading `;param` segment-parameter
+ * (RFC 3986 3.3 — `;` inside a path segment introduces segment-scoped
+ * parameters, e.g. `/golf;x` is the SAME resource as `/golf` with a `x`
+ * parameter attached, which this tool has no use for and must not let
+ * become a distinct, unrefused "different" URL) from EVERY path segment,
+ * not just the last one. */
+function stripPathParams(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((segment) => {
+      const i = segment.indexOf(";");
+      return i === -1 ? segment : segment.slice(0, i);
+    })
+    .join("/");
+}
+
 /**
  * Normalizes a URL for first-capture-wins matching: lowercases the host,
- * drops a leading "www.", drops the fragment and the query string
- * entirely (decision, documented in the task report: treating `?a=1` as
- * the SAME resource as the bare URL, the simpler of the two options the
- * gate finding offered — not the "flag distinct" alternative), and drops
- * ONE trailing slash from the path (except the bare root, which stays
- * `/`). Scheme is not part of the key — every URL this tool ever fetches
- * is already https-only (gate N6), enforced well before this function
- * runs. Throws on an unparseable URL — a caller should already have
- * validated the URL before reaching this point.
+ * drops a leading "www.", KEEPS a non-default port (the WHATWG `URL`
+ * parser already drops an explicit `:443` on an `https:` URL as
+ * redundant, since 443 IS the scheme's default — so `u.port` is only
+ * ever non-empty here for a genuinely different, non-default port, which
+ * this function deliberately does NOT treat as the same resource), drops
+ * the fragment and the query string entirely (decision, documented in the
+ * task report: treating `?a=1` as the SAME resource as the bare URL, the
+ * simpler of the two options the gate finding offered — not the "flag
+ * distinct" alternative; **this drop is why a query-string difference
+ * never distinguishes two captures for this tool's purposes — documented
+ * here, not just implied**), decodes unreserved percent-encoding in the
+ * path (`decodeUnreservedPercentEncoding`, gate finding 2a re-gate),
+ * collapses a run of 2+ consecutive path slashes into one (gate finding
+ * 2a re-gate — `//golf` and `/golf` read as the same path to a real HTTP
+ * server), strips a `;param` from every path segment (gate finding 2a
+ * re-gate, `stripPathParams`), and drops ONE trailing slash from the
+ * (already-processed) path (except the bare root, which stays `/`). Path
+ * CASE is deliberately left untouched (gate finding 2a re-gate: `/GOLF`
+ * and `/golf` are treated as genuinely DIFFERENT resources — most web
+ * servers' paths are case-sensitive, and normalising case away would blur
+ * a real distinction, not just a cosmetic one). Scheme is not part of the
+ * key — every URL this tool ever fetches is already https-only (gate N6),
+ * enforced well before this function runs. Throws on an unparseable URL —
+ * a caller should already have validated the URL before reaching this
+ * point.
  */
 export function normalizeUrlForFirstCapture(url: string): string {
   const u = new URL(url);
   let host = u.hostname.toLowerCase();
   if (host.startsWith("www.")) host = host.slice(4);
-  let pathname = u.pathname;
+  if (u.port) host += `:${u.port}`;
+  let pathname = decodeUnreservedPercentEncoding(u.pathname);
+  pathname = pathname.replace(/\/{2,}/g, "/");
+  pathname = stripPathParams(pathname);
   if (pathname.length > 1 && pathname.endsWith("/")) pathname = pathname.slice(0, -1);
   if (pathname === "") pathname = "/";
   return `${host}${pathname}`;
@@ -63,15 +143,16 @@ export interface RecordedLedger {
   entries: RecordedLedgerEntry[];
 }
 
+/** Gate finding 2c (re-gate): a plain naming convention, not an automatic
+ * default — `defaultLedgerPath(outDir)` (`path.join(outDir,
+ * RECORDED_LEDGER_FILENAME)`) was REMOVED because it let a caller who
+ * forgot `--ledger` silently get a private, `outDir`-scoped ledger instead
+ * of an error. A caller that genuinely wants one ledger per directory
+ * still can, by writing `path.join(dir, RECORDED_LEDGER_FILENAME)`
+ * explicitly at the call site — the difference is that it is now a
+ * decision the caller visibly makes, never a fallback the tool makes for
+ * them. */
 export const RECORDED_LEDGER_FILENAME = "recorded-ledger.json";
-
-/** Default ledger path for a given evidence/out directory — callers that
- * want ONE ledger shared across several `--out-dir`s (the realistic case
- * for a multi-session investigation, and required for the gate's own
- * finding 2c) pass an explicit `--ledger` path instead of relying on this. */
-export function defaultLedgerPath(outDir: string): string {
-  return path.join(outDir, RECORDED_LEDGER_FILENAME);
-}
 
 /** Loads a ledger file, or returns an empty one if it doesn't exist yet —
  * a missing ledger is not an error (the very first capture anywhere has

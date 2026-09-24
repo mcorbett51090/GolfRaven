@@ -22,6 +22,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Gate finding 2c (re-gate): the per-directory default ledger was removed
+ * — `ledgerPath` is now a required option on `runX2Fetch`. Most tests in
+ * this file don't care about cross-run ledger sharing at all; they just
+ * need SOME explicit ledger scoped to their own `outDir`, reproducing what
+ * the removed default used to compute automatically — this helper makes
+ * that a one-line, deliberate choice at each call site instead of an
+ * implicit fallback inside the tool itself. */
+function ledgerFor(dir: string): string {
+  return path.join(dir, "recorded-ledger.json");
+}
+
 describe("x2-fetch: resolveDefaultX2ConfigPath", () => {
   it("resolves to config/x2-sources.json under the package root, and that file exists", () => {
     const p = resolveDefaultX2ConfigPath();
@@ -53,7 +64,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       TN: ["https://www.tnstateparks.com/golf"],
     };
     const outDir = path.join(OUT_DIR, "html-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
 
     const entry = manifest.trails.TN?.[0];
     expect(entry?.status).toBe("fetched");
@@ -105,7 +118,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       ],
     };
     const outDir = path.join(OUT_DIR, "pdf-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
 
     const entry = manifest.trails.VI?.[0];
     expect(entry?.status).toBe("fetched");
@@ -135,7 +150,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       VI: ["https://golfvancouverisland.ca/missing.pdf"],
     };
     const outDir = path.join(OUT_DIR, "fake-pdf-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     const entry = manifest.trails.VI?.[0];
     expect(entry?.status).toBe("fetched");
     expect(entry?.textExtraction).toBe("n/a");
@@ -153,7 +170,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
 
     const config: X2SourceConfig = { RTJ: ["https://www.rtjgolf.com/"] };
     const outDir = path.join(OUT_DIR, "blocked-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
 
     const entry = manifest.trails.RTJ?.[0];
     expect(entry?.status).toBe("failed");
@@ -174,7 +193,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
     );
     const config: X2SourceConfig = { TN: ["https://tngolftrail.net/missing"] };
     const outDir = path.join(OUT_DIR, "404-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     const entry = manifest.trails.TN?.[0];
     expect(entry?.status).toBe("failed");
     expect(entry?.blocked).toBe(false);
@@ -186,7 +207,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
     vi.stubGlobal("fetch", fetchSpy);
     const config: X2SourceConfig = { TN: ["http://www.tnstateparks.com/golf"] };
     const outDir = path.join(OUT_DIR, "http-scheme-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     const entry = manifest.trails.TN?.[0];
     expect(entry?.status).toBe("failed");
     expect(entry?.error).toContain("gate N6");
@@ -198,7 +221,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
     vi.stubGlobal("fetch", fetchSpy);
     const config: X2SourceConfig = { TN: ["data:text/html,<h1>hi</h1>"] };
     const outDir = path.join(OUT_DIR, "data-url-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     const entry = manifest.trails.TN?.[0];
     expect(entry?.status).toBe("failed");
     expect(entry?.error).toContain("gate N6");
@@ -229,7 +254,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       TN: ["https://www.tnstateparks.com/golf"],
     };
     const outDir = path.join(OUT_DIR, "oversized-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     const entry = manifest.trails.TN?.[0];
     expect(entry?.status).toBe("failed");
     expect(entry?.error).toContain("size cap");
@@ -252,14 +279,18 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       TN: ["https://www.tnstateparks.com/golf", "https://tn.gov/"],
     };
     const outDir = path.join(OUT_DIR, "mixed-run");
-    const manifest = await runX2Fetch(config, outDir);
+    const manifest = await runX2Fetch(config, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     expect(manifest.trails.TN?.map((e) => e.status)).toEqual([
       "failed",
       "fetched",
     ]);
 
     await expect(
-      runX2Fetch({}, path.join(OUT_DIR, "empty-run")),
+      runX2Fetch({}, path.join(OUT_DIR, "empty-run"), {
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "empty-run")),
+      }),
     ).rejects.toThrow(/empty source list/);
   });
 });
@@ -287,6 +318,7 @@ describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => 
     const manifestA = await runX2Fetch(
       { TN: ["https://example.com/tn"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     expect(manifestA.trails.TN).toHaveLength(1);
 
@@ -297,6 +329,7 @@ describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => 
     const manifestB = await runX2Fetch(
       { VI: ["https://example.com/vi"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     // Trail TN, from the FIRST run, must still be present.
     expect(manifestB.trails.TN).toHaveLength(1);
@@ -320,6 +353,7 @@ describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => 
     const manifestA = await runX2Fetch(
       { TN: ["https://example.com/tn-1"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     expect(manifestA.trails.TN).toHaveLength(1);
 
@@ -330,6 +364,7 @@ describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => 
     const manifestB = await runX2Fetch(
       { TN: ["https://example.com/tn-2"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     // Both the original and the new entry must be present — never replaced.
     expect(manifestB.trails.TN).toHaveLength(2);
@@ -345,14 +380,18 @@ describe("x2-fetch: gate finding 2b — manifest MERGE, never overwrite", () => 
       "fetch",
       okHtmlFetch({ "https://example.com/tn": "<h1>TN</h1>" }),
     );
-    const manifestA = await runX2Fetch({ TN: ["https://example.com/tn"] }, outDir);
+    const manifestA = await runX2Fetch({ TN: ["https://example.com/tn"] }, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     const firstGeneratedAt = manifestA.generatedAt;
 
     vi.stubGlobal(
       "fetch",
       okHtmlFetch({ "https://example.com/vi": "<h1>VI</h1>" }),
     );
-    const manifestB = await runX2Fetch({ VI: ["https://example.com/vi"] }, outDir);
+    const manifestB = await runX2Fetch({ VI: ["https://example.com/vi"] }, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     expect(manifestB.generatedAt).toBe(firstGeneratedAt);
   });
 });
@@ -380,6 +419,7 @@ describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capt
     const manifest = await runX2Fetch(
       { TN: ["https://example.com/trail"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     expect(manifest.trails.TN?.[0]?.recorded).toBe(true);
   });
@@ -393,10 +433,12 @@ describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capt
     const manifestA = await runX2Fetch(
       { TN: ["https://example.com/trail"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     expect(manifestA.trails.TN?.[0]?.recorded).toBe(true);
 
-    // A second run, same out-dir (same default ledger), for a
+    // A second run, same out-dir (same EXPLICIT ledger — gate finding 2c
+    // re-gate: no more automatic per-directory default), for a
     // *bypass-shaped* variant of the exact same URL (www. + trailing
     // slash) — must NOT silently look like a fresh first capture.
     vi.stubGlobal(
@@ -408,6 +450,7 @@ describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capt
     const manifestB = await runX2Fetch(
       { TN: ["https://www.example.com/trail/"] },
       outDir,
+      { ledgerPath: ledgerFor(outDir) },
     );
     const secondEntry = manifestB.trails.TN?.[1];
     expect(secondEntry?.status).toBe("fetched"); // stored as real evidence...
@@ -444,11 +487,13 @@ describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capt
     // because it shares run A's ledger and can see run A's entry.
     expect(manifestB.trails.TN?.[0]?.recorded).toBe(false);
 
-    // Without a SHARED ledger (i.e. each out-dir using its own default
-    // ledger), the same scenario would wrongly mark BOTH as recorded:
-    // true — that is exactly the bug gate finding 2c called out. Prove
-    // the negative case too, so this test would fail if `ledgerPath`
-    // sharing were ever silently dropped.
+    // Without a SHARED ledger (i.e. each out-dir given its OWN separate,
+    // still-explicit ledger — gate finding 2c re-gate removed the implicit
+    // per-directory default entirely, so this is now `ledgerFor(outDirC)`,
+    // not an omitted argument), the same scenario would wrongly mark BOTH
+    // as recorded: true — that is exactly the bug gate finding 2c called
+    // out. Prove the negative case too, so this test would fail if
+    // `ledgerPath` sharing were ever silently dropped.
     const outDirC = path.join(OUT_DIR, "ledger-unshared-c");
     vi.stubGlobal(
       "fetch",
@@ -457,7 +502,7 @@ describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capt
     const manifestC = await runX2Fetch(
       { TN: ["https://example.com/unshared-trail"] },
       outDirC,
-      // no ledgerPath — falls back to outDirC's own default ledger
+      { ledgerPath: ledgerFor(outDirC) }, // its OWN ledger, not the shared one above
     );
     expect(manifestC.trails.TN?.[0]?.recorded).toBe(true);
   });
@@ -531,6 +576,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     const manifest = await runX2Fetch(config, outDir, {
       render: true,
       renderLaunch: launch,
+      ledgerPath: ledgerFor(outDir),
     });
 
     const entry = manifest.trails.VI?.[0];
@@ -564,6 +610,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     await runX2Fetch(config, path.join(OUT_DIR, "render-ua-run"), {
       render: true,
       renderLaunch: launch,
+      ledgerPath: ledgerFor(path.join(OUT_DIR, "render-ua-run")),
     });
     expect(state.userAgentSeen).toMatch(/^GolfRaven-P0-X2\/0\.1/);
     expect(state.userAgentSeen).not.toMatch(/Mozilla|Chrome|Safari/);
@@ -581,6 +628,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-proxy-run"), {
       render: true,
       renderLaunch: launch,
+      ledgerPath: ledgerFor(path.join(OUT_DIR, "render-proxy-run")),
     });
     const entry = manifest.trails.VI?.[0];
     expect(entry?.renderProxyHost).toBe("127.0.0.1:41831");
@@ -606,6 +654,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-no-proxy-run"), {
       render: true,
       renderLaunch: launch,
+      ledgerPath: ledgerFor(path.join(OUT_DIR, "render-no-proxy-run")),
     });
     expect(manifest.trails.VI?.[0]?.renderProxyHost).toBeNull();
     vi.unstubAllEnvs();
@@ -627,6 +676,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     const manifest = await runX2Fetch(
       { TN: ["https://example.com/tn"] },
       path.join(OUT_DIR, "direct-proxy-noop-run"),
+      { ledgerPath: ledgerFor(path.join(OUT_DIR, "direct-proxy-noop-run")) },
     );
     expect(manifest.trails.TN?.[0]?.renderProxyHost).toBeNull();
     vi.unstubAllEnvs();
@@ -641,6 +691,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
       {
         render: true,
         renderLaunch: launchSpy,
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "render-http-run")),
       },
     );
     const entry = manifest.trails.TN?.[0];
@@ -680,6 +731,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
       {
         render: true,
         renderLaunch: launch,
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "render-fail-run")),
       },
     );
     const entry = manifest.trails.VI?.[0];
@@ -705,6 +757,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     const manifest = await runX2Fetch(
       config,
       path.join(OUT_DIR, "direct-method-run"),
+      { ledgerPath: ledgerFor(path.join(OUT_DIR, "direct-method-run")) },
     );
     expect(manifest.trails.TN?.[0]?.method).toBe("direct");
   });
@@ -725,6 +778,7 @@ describe("x2-fetch: renderManifestSummary", () => {
     const manifest = await runX2Fetch(
       { TN: ["https://www.tnstateparks.com/golf"] },
       path.join(OUT_DIR, "summary-run"),
+      { ledgerPath: ledgerFor(path.join(OUT_DIR, "summary-run")) },
     );
     const summary = renderManifestSummary(manifest);
     expect(summary).toContain("DRAFT candidate names");

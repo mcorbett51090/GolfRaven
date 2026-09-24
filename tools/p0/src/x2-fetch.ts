@@ -62,7 +62,7 @@ import {
   validateRenderExtraArgs,
   type ChromiumLauncher,
 } from "./x2-render.js";
-import { defaultLedgerPath, registerCapture } from "./x2-recorded-ledger.js";
+import { registerCapture } from "./x2-recorded-ledger.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
 

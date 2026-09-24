@@ -442,6 +442,15 @@ export function parseEvidence(raw: unknown, tz: string): EvidenceParseResult {
 export interface ExcludedRow {
   index: number;
   reasons: string[];
+  /** Item 2 (seventh gate): distinguishes an OFF-PLAY row (`"off-play"` —
+   * different facility/date/course, simply not this play's evidence, no
+   * security significance) from a QUARANTINED one (`"quarantined"` — it
+   * matched this play's own facility/date/course but failed strict
+   * validation; `scorePlay` forces `heldReview: true` when `money` is
+   * true and any row here is `"quarantined"`, since a malformed row that
+   * otherwise belonged to this play is exactly the shape a manipulation
+   * attempt takes). */
+  kind: "off-play" | "quarantined";
 }
 
 export interface ScorePlayInputParseSuccess {
@@ -547,7 +556,7 @@ export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
     if (looseRowMatchesPlay(rawRow, parsedCtx)) {
       matchingIndices.push(i);
     } else {
-      excludedRows.push({ index: i, reasons: ["different facility, date, or course than this play"] });
+      excludedRows.push({ index: i, reasons: ["different facility, date, or course than this play"], kind: "off-play" });
     }
   });
 
@@ -575,7 +584,7 @@ export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
       // F3: QUARANTINED, not a whole-input failure — this row matched the
       // play's own facility/date/course but failed strict validation for
       // some other reason (bad shape, tz-cross-check mismatch, …).
-      excludedRows.push({ index: i, reasons: result.reasons });
+      excludedRows.push({ index: i, reasons: result.reasons, kind: "quarantined" });
     }
   }
 

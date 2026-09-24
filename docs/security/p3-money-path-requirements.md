@@ -32,11 +32,42 @@ The DB-side items are tracked in the P3a queue.
 
 ## 3. Per-play limits and fraud signals
 
-- Cap evidence rows at 200 per play. Catch scorer exceptions per play, so one bad row cannot block a
-  re-score batch.
+- Cap evidence rows matching a play at 1,000 (`packages/rules`' `EVIDENCE_ROW_CAP`, raised from 200 in the
+  seventh gate, item 9 — the cap now counts only rows the parser's loose facility/date/course filter kept, not
+  every row a raw, unfiltered query happened to return). Keep a much larger raw-query DoS cap (10,000,
+  `ABSOLUTE_ROW_CAP`) on the unfiltered result set itself. `scorePlay` scores one play per call — the caller
+  does not need to pre-filter before calling it.
+- Catch scorer exceptions per play, so one bad row cannot block a re-score batch. **This is now largely
+  superseded by `packages/rules`' own quarantine (seventh gate, item/finding F3): a single malformed
+  on-play row no longer fails `scorePlay` at all — it is excluded (`excludedRows`, `kind: "quarantined"`) and
+  the play still scores on its remaining evidence.** The DB/Edge-Function layer must still catch exceptions
+  defensively (a bug in the caller's own row assembly is not itself a `packages/rules` concern), but should not
+  rely on a single bad row as the reason a re-score batch would stall.
+- **Every ON-PLAY quarantine (item 2, seventh gate) must raise a `fraud_signal` or create a `review_item`.**
+  `packages/rules` already forces `heldReview: true` (and populates `heldReviewReasons: ["quarantined"]`)
+  whenever `money` is true and `excludedRows` contains a `kind: "quarantined"` entry — but `heldReview` alone
+  only stops AUTO-issuance; it does not itself create a durable, actionable record. The DB-side consumer of a
+  `scorePlay` result MUST, on every on-play quarantine (regardless of whether `money` ended up true — a
+  malformed on-play row is worth recording even on a play that doesn't qualify for money, since the SAME
+  malformed-row shape recurring across many plays is itself a fraud signal), raise a `fraud_signal` row or
+  create a `review_item` naming the play, the quarantined row's original index, and its (already
+  truncated/escaped — see the note below) reasons.
 - Event-time velocity check: a play is disputed above 200 km/h between consecutive fixes.
-- Clock skew over 24 h → `fraud_signal`.
-- A fix that grades `failed` → `fraud_signal(attestation_failed)`. The scorer only zeroes that fix.
+- Clock skew over 24 h → `fraud_signal`. `packages/rules` now also rejects `capturedAt`/`scanAt` outside
+  `[2020-01-01, 2100-01-01)` outright at the parser (seventh gate, item 6) — a plausibility floor/ceiling, not a
+  substitute for this DB-side skew-against-`now()` check, which is tighter and time-varying.
+- **A fix that grades `failed` MUST raise `fraud_signal(attestation_failed)` AT INTAKE** (item 2, seventh
+  gate) — i.e. at `POST /v1/evidence` / whatever server path first receives the row, not merely observed
+  later by a batch re-score. `packages/rules`' own scorer only ZEROES a `failed`-grade fix's contribution
+  (§4.5 G3-08: "nothing can be earned on it") — it is a pure function with no DB access, so it cannot itself
+  raise the signal; this has always been a DB-side obligation, restated here because the seventh gate's
+  quarantine work made it easy to lose sight of which layer owns it.
+- **`excludedRows` and `reasons` (both `packages/rules`' own types) are SERVER-SIDE DIAGNOSTIC DATA
+  ONLY** (item 5, seventh gate). Every value they embed is already truncated (128 chars) and
+  `JSON.stringify`-escaped before it reaches these arrays, but they still exist to help an operator or an
+  internal dashboard understand why a row didn't score — never echo them into a player-facing UI, even
+  escaped; a quarantine reason restates exactly which shape check rejected the input, which is more detail
+  than an end user needs and more than an adversary probing the validator should get back.
 
 ## 4. Persisting and issuing
 

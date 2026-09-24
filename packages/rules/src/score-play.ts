@@ -738,8 +738,21 @@ export interface ScorePlayResult {
   money: boolean;
   /** §7.5 row 3 (should-fix): true when `money` rests entirely on an
    * `unattestable`-grade co-signal — the reward this play backs must route
-   * to `held_review`, never auto-issue and never auto-refuse. */
+   * to `held_review`, never auto-issue and never auto-refuse. Item 2
+   * (seventh gate): ALSO true whenever `money` is true and at least one
+   * ON-PLAY row was quarantined (`excludedRows` below, `kind:
+   * "quarantined"`) — a malformed row that otherwise belonged to this
+   * play, present alongside a money-qualifying result, is exactly what a
+   * manipulation attempt or a genuine data problem both look like; either
+   * way this reward must not auto-issue on it. */
   heldReview: boolean;
+  /** Item 2 (seventh gate): populated with `"quarantined"` when
+   * `heldReview` was forced true by the quarantine rule just above — NOT
+   * a complete reason list for every hold (the pre-existing attestation
+   * -grade holds don't populate this; only the quarantine-forced case
+   * does, this gate's own scope). Always present; empty when not
+   * applicable. */
+  heldReviewReasons: string[];
   policyVersion: number;
   contributions: ScorePlayContribution[];
   /** M5 (fifth gate): SHA-256 (hex) over the canonicalized, ALREADY-PARSED
@@ -843,9 +856,16 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
     return { ok: false, reasons: parsed.reasons };
   }
   const result = scorePlayOnParsedInput(parsed.evidence, parsed.ctx);
+  // Item 2 (seventh gate): a money-qualifying result backed by evidence
+  // that ALSO includes an on-play quarantined row must route to review,
+  // never auto-issue — see `ScorePlayResult.heldReview`'s own doc.
+  const onPlayQuarantined = parsed.excludedRows.some((r) => r.kind === "quarantined");
+  const quarantineForcesHold = result.money && onPlayQuarantined && !result.heldReview;
   return {
     ok: true,
     ...result,
+    heldReview: result.heldReview || (result.money && onPlayQuarantined),
+    heldReviewReasons: quarantineForcesHold ? ["quarantined"] : [],
     excludedRows: parsed.excludedRows,
     inputDigest: computeInputDigest(parsed.evidence, parsed.ctx),
   };
@@ -901,17 +921,17 @@ function computeInputDigest(evidence: Evidence[], ctx: ScorePlayContext): string
  * every other doc comment on `scorePlay` (the money rule, the trust table,
  * the scope boundary) describes this function's behaviour; it's split out
  * only so `scorePlay` itself can wrap it with the parse-first/fail-closed
- * step and the `inputDigest`/`excludedRows` fields above. Returns
- * everything `ScorePlayResult` needs EXCEPT `inputDigest`/`excludedRows`
- * themselves — `scorePlay` adds those (the digest needs the parsed
- * `{evidence, ctx}` this function doesn't return; `excludedRows` comes
- * straight from `parseScorePlayInput`, not from anything this function
- * computes).
+ * step and the `inputDigest`/`excludedRows`/`heldReviewReasons` fields
+ * above. Returns everything `ScorePlayResult` needs EXCEPT those three —
+ * `scorePlay` adds them (the digest needs the parsed `{evidence, ctx}`
+ * this function doesn't return; `excludedRows` comes straight from
+ * `parseScorePlayInput`; `heldReviewReasons`/the quarantine-forced
+ * `heldReview` override, item 2, needs `excludedRows` to even exist yet).
  */
 function scorePlayOnParsedInput(
   evidenceIn: Evidence[],
   ctx: ScorePlayContext,
-): Omit<ScorePlayResult, "inputDigest" | "excludedRows"> {
+): Omit<ScorePlayResult, "inputDigest" | "excludedRows" | "heldReviewReasons"> {
   // Finding 3 + blocking finding 2 (second re-gate): drop any row whose OWN
   // facility OR OWN date disagrees with the play being scored, before
   // anything else runs. F3 (sixth gate): `evidenceIn` here is ALREADY
