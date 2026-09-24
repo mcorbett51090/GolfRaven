@@ -1293,6 +1293,15 @@ export interface ResolveCorroborationOptions {
    * be read — every `acceptance` record then resolves to "not logged",
    * the safe default (gate finding 2, re-gate). */
   x2Md: { fullText: string; path: string } | null;
+  /** TEST-ONLY seam (gate finding, third re-gate, fix (a)) — `main()`
+   * never overrides this; defaults to `canonicalX2MdAbsPath()`. An
+   * `acceptance` record's `x2Md.path` must resolve (`realpath`) to
+   * EXACTLY this for `acceptanceLogged` to ever be `true` — no matter
+   * how well-formed its content looks, an `ACCEPT` row is only ever
+   * trusted from the toolkit's own canonical X2.md. Exists so tests can
+   * exercise the canonical-path-match logic against an isolated scratch
+   * fixture. */
+  canonicalX2MdPath?: string;
 }
 
 async function resolveWaybackRecord(
@@ -1931,10 +1940,25 @@ export interface LedgerGitCheck {
  * simply doesn't exist, and every git command against it fails closed
  * into `verifiedMainUnavailable: true`.
  */
+export interface CheckLedgerAgainstGitOptions {
+  /** TEST-ONLY seam — `main()` never overrides this; defaults to
+   * `GOLFRAVEN_VERIFIED_MAIN_REF`. The caller is responsible for having
+   * fetched this ref FRESH, this same run, before calling this function. */
+  refName?: string;
+  /** TEST-ONLY seam — `main()` never overrides this; defaults to
+   * `canonicalLedgerAbsPath()` (gate finding, third re-gate, fix (a)).
+   * Exists so tests can exercise the canonical-path-match logic against
+   * an isolated scratch fixture, without writing into (or reading from)
+   * this toolkit's own real checkout. */
+  canonicalPath?: string;
+}
+
 export async function checkLedgerAgainstGit(
   ledgerPath: string,
-  refName: string = GOLFRAVEN_VERIFIED_MAIN_REF,
+  opts: CheckLedgerAgainstGitOptions = {},
 ): Promise<LedgerGitCheck> {
+  const refName = opts.refName ?? GOLFRAVEN_VERIFIED_MAIN_REF;
+  const canonicalPath = opts.canonicalPath ?? canonicalLedgerAbsPath();
   const resolvedLedgerPath = path.resolve(ledgerPath);
   const cwd = path.dirname(resolvedLedgerPath);
   const notCanonical = (detail: string): LedgerGitCheck => ({
@@ -1962,7 +1986,6 @@ export async function checkLedgerAgainstGit(
   // repo's own docs/p0/x2-recorded-ledger.json, which used to pass this
   // check by construction) is refused outright, never silently treated
   // as if it were the canonical record.
-  const canonicalPath = canonicalLedgerAbsPath();
   if (!(await isCanonicalPath(ledgerPath, canonicalPath))) {
     return notCanonical(
       `"${resolvedLedgerPath}" is not the canonical ledger path — expected exactly "${canonicalPath}" ` +
