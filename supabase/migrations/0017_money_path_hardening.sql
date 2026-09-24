@@ -482,6 +482,60 @@ CREATE UNIQUE INDEX receipt_fingerprint_purchase_evidence_uniq
   ON app.receipt_fingerprint (purchase_evidence_id)
   WHERE purchase_evidence_id IS NOT NULL;
 
+-- ⛔ FIX (post-P3a re-gate, cross-user receipt griefing): dedupe_receipt_
+-- fingerprint used to void the NEWER purchase on ANY phash match,
+-- regardless of whose purchase the EXISTING fingerprint belonged to.
+-- Across users that is a griefing vector: whoever uploads a photo of a
+-- SHARED receipt (a real scenario — e.g. two people on the same trip
+-- photographing the same paper receipt) first voids the rightful owner's
+-- later, legitimate upload. Only a SAME-USER match (a genuine retry/
+-- duplicate submission) is still auto-voided; a CROSS-USER match instead
+-- opens a review_item + fraud_signal (kind=receipt_cross_user_match) and
+-- leaves BOTH purchases pending, for a human to resolve.
+--
+-- void_reason distinguishes WHY a purchase_evidence row is void:
+--   - 'duplicate' — this function's own same-user auto-void. Does not by
+--     itself indicate fraud (an honest retry looks identical), so it
+--     never itself becomes the reason a LATER unrelated submission gets
+--     treated as suspicious.
+--   - 'reviewer' — a human voided it directly (out of this stage's scope
+--     — an ops/admin action). NULL on a void row means this: a void
+--     written before this column existed, or by any path that doesn't
+--     set it explicitly, is read as 'reviewer' (documented, not enforced
+--     by a DEFAULT, so an intentionally-NULL 'reviewer' void and an
+--     old/foreign void are indistinguishable on purpose — both mean
+--     "not this function's own automatic duplicate logic").
+--   - 'fraud' — voided as a confirmed fraud finding (out of this stage's
+--     scope — a fraud-review action).
+-- The (out-of-scope-this-stage) rules package tracks a matching
+-- `voidReason` field and treats only 'reviewer'/'fraud' as "poisoning" a
+-- fingerprint group (i.e. still treated as a live fraud signal for
+-- future matching) — 'duplicate' does not, since it is just this
+-- function's own bookkeeping, not an independent finding. This function
+-- does not need special-case logic for that distinction itself: a
+-- 'duplicate'-voided purchase never gets its OWN receipt_fingerprint row
+-- (see below — the newer, voided submission's INSERT never runs), so
+-- there is nothing on receipt_fingerprint for a 'duplicate' void to
+-- "poison" in the first place; a 'reviewer'/'fraud' void's existing
+-- fingerprint row is untouched by this function and so keeps matching
+-- normally, which already is the desired "still poisons" behaviour.
+CREATE TYPE app.purchase_void_reason AS ENUM ('duplicate', 'reviewer', 'fraud');
+ALTER TABLE app.purchase_evidence ADD COLUMN void_reason app.purchase_void_reason;
+COMMENT ON COLUMN app.purchase_evidence.void_reason IS
+  'Only meaningful when status = void. NULL on a void row is read as ''reviewer'' (see this migration''s own note above). Set by dedupe_receipt_fingerprint (''duplicate'') or by an out-of-scope-this-stage reviewer/fraud action.';
+
+-- app.purchase_evidence has NO relationship to app.play_evidence in this
+-- schema — play_evidence links (play_id, evidence_id) -> app.evidence
+-- (the self-report/device/staff-attestation evidence pathway), a
+-- COMPLETELY SEPARATE table from app.purchase_evidence (the receipt-
+-- purchase pathway); nothing ever links a purchase_evidence row to
+-- play_evidence, directly or otherwise (confirmed by grep over every
+-- migration this session). The one REAL "something was earned from this
+-- purchase" link in the schema is app.marker_credit.purchase_evidence_id
+-- (0005) — handled defensively below, same spirit as the instruction:
+-- a same-user duplicate void must not leave a live, non-terminal credit
+-- still pointing at a purchase now known to be a duplicate.
+
 -- phash is deliberately NOT made a bare UNIQUE constraint (a perceptual
 -- hash is approximate by design — two independently legitimate receipts
 -- CAN collide on phash without being the same receipt, so a hard UNIQUE

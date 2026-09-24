@@ -212,7 +212,26 @@ export interface ContextLike {
   ): Promise<void>;
   on(event: "page", handler: (page: PageLike) => void): void;
   on(event: "response", handler: (response: ResponseLike) => void): void;
+  /** Gate finding 1 (re-re-gate): an init script installed in EVERY frame
+   * (main + any iframe) of every page this context ever creates, BEFORE
+   * any page script runs. Used to delete/neutralise `window.SharedWorker`
+   * and `navigator.serviceWorker.register` at the JS-API level — a
+   * SECOND, independent layer against SharedWorker/ServiceWorker (the
+   * CDP-level target watch below is the first), since a script that never
+   * gets a working `SharedWorker` constructor at all can't create one no
+   * matter what CDP does or doesn't see. */
+  addInitScript(script: () => void): Promise<void>;
   close(): Promise<void>;
+}
+
+/** Gate finding 1 (re-re-gate): the minimal Chrome DevTools Protocol
+ * session surface this module needs — a raw `send`/`on`, not a typed
+ * wrapper, since this module only ever calls two `Target.*` methods and
+ * listens for one event. */
+export interface CDPSessionLike {
+  on(event: string, handler: (payload: unknown) => void): void;
+  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  detach(): Promise<void>;
 }
 
 export interface BrowserLike {
@@ -220,6 +239,19 @@ export interface BrowserLike {
     userAgent: string;
     serviceWorkers?: "allow" | "block";
   }): Promise<ContextLike>;
+  /** Gate finding 1 (re-re-gate): a BROWSER-level (not context/page-level)
+   * CDP session — `page.on("worker")` only ever fires for a DEDICATED
+   * Worker created by that one page; it does not fire for a SharedWorker
+   * (a target shared across same-origin pages, not owned by any one
+   * page) or a ServiceWorker, which is exactly the bypass a gate review
+   * found live (`/blobshared`, `/netshared` — a SharedWorker's own
+   * WebSocket/`fetch()` reached the page's rendered content, and neither
+   * page-level worker detection nor `route()` ever saw it). CDP's own
+   * `Target.targetCreated` event, watched at the browser level via
+   * `Target.setDiscoverTargets`/`Target.setAutoAttach`, sees EVERY
+   * target Chromium creates — `shared_worker`, `service_worker` and
+   * `worker` alike — regardless of which page (if any) "owns" it. */
+  newBrowserCDPSession(): Promise<CDPSessionLike>;
   close(): Promise<void>;
 }
 export type ChromiumLauncher = (opts: {
