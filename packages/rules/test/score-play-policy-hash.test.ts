@@ -56,14 +56,19 @@ function hashPolicyConstants(): string {
   return bytesToHex(sha256(utf8ToBytes(JSON.stringify(canonicalize(policyConstants())))));
 }
 
-/** The pin: one hash per `SCORE_PLAY_POLICY_VERSION`. Changing ANY value
- * `policyConstants()` reads — a weight, `MONEY_MIN`, a cap — without also
- * updating this map (and bumping `SCORE_PLAY_POLICY_VERSION` to a NEW key)
- * fails this test. Computed and pinned against the real constants at the
- * time this test was written (fifth gate); re-derive with
- * `hashPolicyConstants()` if a deliberate, version-bumped change is made. */
+/** The pin: one HARDCODED hash per `SCORE_PLAY_POLICY_VERSION` — a
+ * LITERAL string, deliberately NOT computed by calling
+ * `hashPolicyConstants()` here (that would make this test compare the
+ * live constants to themselves, passing unconditionally no matter what
+ * they are — exactly the vacuous-test failure mode this file's own doc
+ * warns about). Changing ANY value `policyConstants()` reads — a weight,
+ * `MONEY_MIN`, a cap — without ALSO updating this literal (and bumping
+ * `SCORE_PLAY_POLICY_VERSION` to a NEW key) fails this test. Computed
+ * once, at the time this test was written (fifth gate), via
+ * `hashPolicyConstants()` against the real constants — re-derive it the
+ * same way for a deliberate, version-bumped change. */
 const POLICY_HASHES: Record<number, string> = {
-  1: hashPolicyConstants(),
+  1: "b8d71eb9873f9113bbbfd7d115e2a0416449c09320b2f7724324ea89ad537845",
 };
 
 describe("M5: the scoring policy's constants are content-hash-pinned to SCORE_PLAY_POLICY_VERSION", () => {
