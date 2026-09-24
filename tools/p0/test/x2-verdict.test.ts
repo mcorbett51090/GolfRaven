@@ -951,3 +951,194 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(true);
   });
 });
+
+describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration", () => {
+  const OWNER_BYTES =
+    "North Carolina Golf Trail. Pinehurst Creek is a member course. " +
+    "The Trail counts a course as the completion unit. The season runs March-November.";
+  const SHA_OWNER = sha(OWNER_BYTES);
+
+  function ownerEvidenceByTrail(): EvidenceByTrail {
+    return {
+      NC: {
+        bySha: new Map([
+          [
+            SHA_OWNER,
+            {
+              text: OWNER_BYTES,
+              method: "owner-saved" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
+        ]),
+        failedSources: [],
+      },
+    };
+  }
+
+  function ncConfirmation(): X2ConfirmationFile {
+    return {
+      NC: {
+        roster: [
+          {
+            name: "Pinehurst Creek",
+            quote: "Pinehurst Creek is a member course.",
+            evidenceSha: SHA_OWNER,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "The Trail counts a course as the completion unit.",
+          evidenceSha: SHA_OWNER,
+        },
+        season: {
+          value: "March-November",
+          quote: "The season runs March-November.",
+          evidenceSha: SHA_OWNER,
+        },
+      },
+    };
+  }
+
+  it("an owner-saved fact with NO corroboration record is uncorroborated and does not confirm the trail", () => {
+    const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"]);
+    const nc = result.perTrail.NC;
+    expect(nc?.confirmed).toBe(false);
+    expect(nc?.reasons.join("\n")).toMatch(/owner-attested, UNCORROBORATED/);
+    expect(nc?.facts.roster[0]?.corroboration).toBe("owner-attested, uncorroborated");
+    expect(nc?.facts.completionUnit?.corroboration).toBe("owner-attested, uncorroborated");
+    expect(nc?.facts.season?.corroboration).toBe("owner-attested, uncorroborated");
+  });
+
+  it("an owner-saved fact backed by Matt's dated acceptance record passes, uncorroborated-by-source but named in output", () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER]: {
+          type: "acceptance",
+          acceptedBy: "Matt",
+          date: "2026-09-20",
+        },
+      },
+    };
+    const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration);
+    const nc = result.perTrail.NC;
+    expect(nc?.confirmed).toBe(true);
+    expect(nc?.facts.roster[0]?.corroboration).toBe(
+      "owner-attested, accepted uncorroborated by Matt on 2026-09-20",
+    );
+    expect(nc?.reasons.join("\n")).toMatch(/accepted uncorroborated by Matt on 2026-09-20/);
+  });
+
+  it("an owner-saved fact backed by a Wayback snapshot whose text contains the quote passes and names the snapshot", () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER]: {
+          type: "wayback",
+          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
+          snapshotSha256: "e".repeat(64),
+          snapshotText: "Pinehurst Creek is a member course of the North Carolina Golf Trail.",
+        },
+      },
+    };
+    const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration);
+    const nc = result.perTrail.NC;
+    // completionUnit/season quotes are NOT in the snapshot text, so the
+    // trail as a whole still does not confirm — but the roster entry
+    // itself, which IS corroborated, must say so.
+    expect(nc?.facts.roster[0]?.corroboration).toMatch(
+      /^owner-attested, corroborated by Wayback snapshot https:\/\/web\.archive\.org\/web\/20260101000000\/https:\/\/example\.com\/nc-trail \(sha256 eeeeeeeeeeee\.\.\.\)$/,
+    );
+    expect(nc?.reasons.join("\n")).toMatch(/corroborated by Wayback snapshot/);
+  });
+
+  it("an owner-saved fact backed by a Wayback snapshot whose text does NOT contain the quote fails corroboration", () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER]: {
+          type: "wayback",
+          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
+          snapshotSha256: "f".repeat(64),
+          snapshotText: "This snapshot says nothing about the roster at all.",
+        },
+      },
+    };
+    const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration);
+    const nc = result.perTrail.NC;
+    expect(nc?.confirmed).toBe(false);
+    expect(nc?.facts.roster[0]?.corroboration).toMatch(/Wayback corroboration FAILED/);
+    expect(nc?.reasons.join("\n")).toMatch(
+      /quote does NOT appear verbatim in the snapshot's own text/,
+    );
+  });
+
+  it("a direct/rendered fact needs no corroboration — corroboration is always null and never checked", () => {
+    const TN_BYTES2 =
+      "Tennessee Golf Trail. Bear Trace at Harrison Bay is a member course. " +
+      "The Trail counts a course as the completion unit. The season runs year-round.";
+    const shaTn = sha(TN_BYTES2);
+    const evidenceByTrail: EvidenceByTrail = {
+      TN: {
+        bySha: new Map([
+          [
+            shaTn,
+            {
+              text: TN_BYTES2,
+              method: "direct" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
+        ]),
+        failedSources: [],
+      },
+    };
+    const confirmation: X2ConfirmationFile = {
+      TN: {
+        roster: [
+          {
+            name: "Bear Trace at Harrison Bay",
+            quote: "Bear Trace at Harrison Bay is a member course.",
+            evidenceSha: shaTn,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "The Trail counts a course as the completion unit.",
+          evidenceSha: shaTn,
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: shaTn,
+        },
+      },
+    };
+    // No corroboration file supplied at all (4th arg omitted) — must still
+    // confirm, because none of this trail's facts are owner-saved.
+    const result = computeX2Verdict(confirmation, evidenceByTrail, ["TN"]);
+    const tn = result.perTrail.TN;
+    expect(tn?.confirmed).toBe(true);
+    expect(tn?.facts.roster[0]?.corroboration).toBeNull();
+    expect(tn?.facts.completionUnit?.corroboration).toBeNull();
+    expect(tn?.facts.season?.corroboration).toBeNull();
+  });
+
+  it("renderX2VerdictMarkdown prints the corroboration summary inline for an owner-saved fact", async () => {
+    const { renderX2VerdictMarkdown } = await import("../src/x2-verdict.js");
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER]: {
+          type: "acceptance",
+          acceptedBy: "Matt",
+          date: "2026-09-20",
+        },
+      },
+    };
+    const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration);
+    const md = renderX2VerdictMarkdown(result);
+    expect(md).toMatch(
+      /corroboration: owner-attested, accepted uncorroborated by Matt on 2026-09-20/,
+    );
+  });
+});

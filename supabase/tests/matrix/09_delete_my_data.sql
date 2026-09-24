@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(13);
+SELECT plan(23);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -43,6 +43,36 @@ SELECT is(
   ),
   0,
   'every FK-to-auth.users column in app is classified in private.pii_retention_policy'
+);
+
+-- H1 (post-P3a gate) catalog test: every FK that references a
+-- "delete_row table" (a table whose OWN rows get DELETEd by
+-- delete_my_data's generic pass, per private.pii_retention_policy) must
+-- be deferrable OR carry ON DELETE CASCADE/SET NULL — a plain NO ACTION,
+-- non-deferrable FK to such a table fails at whatever point in the
+-- generic loop's (arbitrary) iteration order the referenced table
+-- happens to be deleted, exactly H1's reproduction (offer_code.play_id/
+-- entitlement.play_id, added by 0017, were NO ACTION + non-deferrable
+-- until this same round fixed them). Independent of any specific data
+-- test below, so a FUTURE FK added to a delete_row table without the
+-- right shape fails here even before anyone seeds data that would
+-- trigger it.
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM pg_constraint con
+    JOIN pg_class cl ON cl.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    JOIN pg_class target ON target.oid = con.confrelid
+    JOIN pg_namespace tn ON tn.oid = target.relnamespace
+    JOIN private.pii_retention_policy pol
+      ON pol.schema_name = tn.nspname AND pol.table_name = target.relname AND pol.action = 'delete_row'
+    WHERE con.contype = 'f'
+      AND n.nspname = 'app'
+      AND NOT (con.condeferrable OR con.confdeltype IN ('c', 'n'))
+  ),
+  0,
+  'every FK referencing a delete_row table is deferrable or ON DELETE CASCADE/SET NULL (H1)'
 );
 
 -- No row is left with an open TODO (gate round 2, item 2: "The 09 test
