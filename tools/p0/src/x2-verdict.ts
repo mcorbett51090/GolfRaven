@@ -1110,6 +1110,146 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
   return lines.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Trust root (gate finding, third re-gate: "trust root is the caller's repo
+// plus local refs")
+//
+// Round 4's fix pinned the LEDGER's canonical path via `git rev-parse
+// --show-toplevel` run FROM THE LEDGER'S OWN DIRECTORY, and pinned
+// `ACCEPT` row provenance to the LOCAL, editable ref `origin/main`. A
+// caller who points `--ledger`/`--x2-log` at a throwaway scratch repo
+// trivially satisfies "is this the toplevel of SOME repo" for that
+// repo, and `origin/main` (or even a `refs/remotes/origin/main` with no
+// `origin` remote configured at all) is just a ref anyone with write
+// access to that repo can set with a bare `git update-ref` — no push,
+// no review, no GitHub visibility required. A scratch repo committing a
+// forged `ACCEPT` row "as Matt," then `git update-ref refs/remotes/
+// origin/main HEAD`, made every check in this file report OFFICIAL /
+// reachable / confirmed.
+//
+// The fix has three parts, all below: (a) pin the trust root to the
+// TOOLKIT'S OWN checkout, resolved from `import.meta.url` — never from
+// any caller-supplied path; (b) stop trusting local refs at all — fetch
+// `main` fresh, every run, from the hard-coded canonical GitHub URL,
+// into a ref this tool owns and always deletes-then-refetches; (c) only
+// count a VISIBLE `ACCEPT` row — one that is not hidden inside a fenced
+// code block, an HTML comment, or an indented code block.
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical GolfRaven repository — GitHub is case-insensitive, and
+ * this is the moved-to spelling. HARD-CODED, never read from the local,
+ * editable `origin` remote: a caller can point `origin` at anything, or
+ * forge a same-named local ref outright, and a check that trusted either
+ * would trust whatever the caller set up, not GitHub's own shared
+ * history. (Confirmed reachable from this environment directly —
+ * `git ls-remote https://github.com/mcorbett51090/GolfRaven
+ * refs/heads/main` returns a real SHA — this is a public repo.)
+ */
+export const GOLFRAVEN_CANONICAL_REPO_URL = "https://github.com/mcorbett51090/GolfRaven";
+
+/** The local ref a fresh fetch from `GOLFRAVEN_CANONICAL_REPO_URL` writes
+ * `main` to (`fetchVerifiedMainRef`). Deliberately its OWN namespace —
+ * not `refs/remotes/origin/main`, an ordinary remote-tracking ref anyone
+ * with write access to a checkout can set with a bare `git update-ref`
+ * — so nothing else's normal git usage collides with or shadows it, and
+ * a forged leftover ref from a prior run is always deleted before this
+ * tool ever reads it again (`fetchVerifiedMainRef` deletes first, then
+ * fetches, every time it runs). */
+export const GOLFRAVEN_VERIFIED_MAIN_REF = "refs/x2-verdict/verified-main";
+
+/** The toolkit's OWN checkout root — resolved from `import.meta.url`
+ * (THIS module's own on-disk location), never from a caller-supplied
+ * path. This is the ONE source of truth for "the real golfraven
+ * checkout"; works from `src/` under vitest and from the built `dist/`
+ * (both sit two levels under the repo root), the same technique
+ * `resolveDefaultX2MdPath` already used for its own default. */
+export function resolveToolkitRepoRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(here, "..", ".."); // tools/p0/{src,dist} -> tools/p0 -> repo root
+}
+
+/** The ONE absolute path an OFFICIAL run's `--ledger` must resolve to
+ * (gate finding, third re-gate, fix (a)). */
+export function canonicalLedgerAbsPath(): string {
+  return path.join(resolveToolkitRepoRoot(), ...CANONICAL_LEDGER_REPO_RELATIVE_PATH.split("/"));
+}
+
+/** The ONE absolute path an OFFICIAL run's `--x2-log` must resolve to
+ * (gate finding, third re-gate, fix (a)) — the same value
+ * `resolveDefaultX2MdPath` computes as its own default, named
+ * separately here because this is now a TRUST boundary, not merely a
+ * convenience default. */
+export function canonicalX2MdAbsPath(): string {
+  return resolveDefaultX2MdPath();
+}
+
+/** `realpath(candidate) === realpath(canonical)`, resolving symlinks on
+ * both sides (gate finding, third re-gate, fix (a): "require
+ * `realpath(--ledger)` to equal ..."). `false`, never throws, when
+ * either path does not exist or cannot be resolved — a caller pointing
+ * at a nonexistent file is "not canonical," not a crash. */
+async function isCanonicalPath(candidate: string, canonical: string): Promise<boolean> {
+  try {
+    const [realCandidate, realCanonical] = await Promise.all([
+      realpath(candidate),
+      realpath(canonical),
+    ]);
+    return realCandidate === realCanonical;
+  } catch {
+    return false;
+  }
+}
+
+export interface VerifiedMainFetchResult {
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Gate finding, third re-gate, fix (b): the ONLY function in this module
+ * that touches the network. Deletes `GOLFRAVEN_VERIFIED_MAIN_REF` FIRST —
+ * a stale ref from a prior run, or one a caller forged directly with
+ * `git update-ref`, must never be read without a fresh fetch in THIS
+ * same run — then fetches `main` from the pinned canonical URL into
+ * that ref. Never throws: a network failure, an unreachable host, or
+ * any other fetch error comes back as `{ok: false}` — the caller
+ * (`main()`) then treats the run as UNOFFICIAL, never OFFICIAL, and
+ * every downstream comparison against this ref naturally fails closed
+ * too (having just been deleted, an absent ref makes `git rev-parse`/
+ * `git merge-base --is-ancestor` against it fail with an ordinary
+ * "unknown revision" error — the SAME code path already used for "this
+ * ref doesn't have that content yet," no special-casing required).
+ *
+ * `repoUrl`/`refName` are a TEST-ONLY seam: `main()` NEVER passes them
+ * (no CLI flag exposes this — `--ledger`/`--x2-log`/etc. cannot reach
+ * this function's own arguments), so the only way to point this at
+ * something other than the real, pinned GitHub URL is to call it
+ * directly from test code, never through the shipped CLI.
+ */
+export async function fetchVerifiedMainRef(
+  cwd: string,
+  opts: { repoUrl?: string; refName?: string } = {},
+): Promise<VerifiedMainFetchResult> {
+  const repoUrl = opts.repoUrl ?? GOLFRAVEN_CANONICAL_REPO_URL;
+  const refName = opts.refName ?? GOLFRAVEN_VERIFIED_MAIN_REF;
+  try {
+    await execFileAsync("git", ["update-ref", "-d", refName], { cwd });
+  } catch {
+    // Fine if it didn't exist yet — deletion is best-effort, the point
+    // is only that nothing stale survives past this point.
+  }
+  try {
+    await execFileAsync("git", ["fetch", "--no-tags", repoUrl, `+refs/heads/main:${refName}`], { cwd });
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `fetching verified main from ${repoUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return { ok: true, detail: `fetched ${refName} from ${repoUrl}` };
+}
+
 /**
  * Gate finding 3 (re-gate): the verification pass that makes a
  * `X2CorroborationFile` trustworthy — run ONCE, before `computeX2Verdict`,
@@ -1323,6 +1463,20 @@ async function resolveWaybackRecord(
   }
 }
 
+/** `YYYY-MM-DD` -> a UTC-midnight `Date`, or `null` if not a real
+ * calendar date — used by both should-fix date rules below. */
+function parseYmdStrict(s: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  const [, yStr, moStr, dStr] = m;
+  const y = Number(yStr);
+  const mo = Number(moStr);
+  const d = Number(dStr);
+  const date = new Date(Date.UTC(y, mo - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== mo - 1 || date.getUTCDate() !== d) return null;
+  return date;
+}
+
 async function resolveAcceptanceRecord(
   trail: string,
   evidenceSha: string,
@@ -1332,32 +1486,98 @@ async function resolveAcceptanceRecord(
   if (!opts.x2Md) {
     return { acceptanceLogged: false, acceptanceDetail: "docs/p0/X2.md could not be read." };
   }
+  // Gate finding, third re-gate, fix (a): an `ACCEPT` row is only ever
+  // trusted from the TOOLKIT'S OWN canonical X2.md — never from a
+  // `--x2-log` pointed at a scratch/forged copy elsewhere, no matter how
+  // well-formed its content looks. This is a hard requirement, not a
+  // label: there is no legitimate reason for a real acceptance to live
+  // anywhere else.
+  const x2MdIsCanonical = await isCanonicalPath(opts.x2Md.path, canonicalX2MdAbsPath());
+  if (!x2MdIsCanonical) {
+    return {
+      acceptanceLogged: false,
+      acceptanceDetail:
+        `"${opts.x2Md.path}" is not this toolkit's own canonical docs/p0/X2.md (resolved: ` +
+        `"${canonicalX2MdAbsPath()}") — an acceptance is only ever trusted from there (gate finding, third ` +
+        "re-gate, fix (a)).",
+    };
+  }
+  // Gate finding, third re-gate, fix (c): only a VISIBLE row counts —
+  // `findAcceptRowLine` itself now skips fenced code blocks, HTML
+  // comments (including multi-line), and indented code blocks.
   const match = findAcceptRowLine(opts.x2Md.fullText, trail, record.fact, evidenceSha, record.date);
   if (!match) {
     return {
       acceptanceLogged: false,
       acceptanceDetail:
-        `no line reading exactly "${acceptRowLiteral(trail, record.fact, evidenceSha, record.date)}" was found ` +
-        'in the "## Log" section.',
+        `no VISIBLE line reading exactly "${acceptRowLiteral(trail, record.fact, evidenceSha, record.date)}" ` +
+        'was found in the "## Log" section (a row hidden inside a fenced code block, an HTML comment, or an ' +
+        "indented code block does not count).",
     };
   }
+  // Gate finding, third re-gate, fix (b): reachability is checked
+  // against `GOLFRAVEN_VERIFIED_MAIN_REF`, which the CALLER (`main()`)
+  // is responsible for having freshly fetched, THIS SAME RUN, from the
+  // pinned GitHub URL before ever reaching here — never the editable
+  // local `origin/main`.
   const blame = await blameAcceptRow(opts.x2Md.path, match.lineNumber);
   if (!blame.ok) {
     return { acceptanceLogged: false, acceptanceDetail: blame.detail };
   }
-  if (!blame.provenance.reachableFromOriginMain) {
+  if (!blame.provenance.reachableFromVerifiedMain) {
     return {
       acceptanceLogged: false,
       acceptanceProvenance: blame.provenance,
       acceptanceDetail:
         `commit ${blame.provenance.commit} (git blame's answer for who introduced this Log row) is not ` +
-        "reachable from origin/main — not yet pushed to the shared history.",
+        `reachable from a freshly-fetched ${GOLFRAVEN_VERIFIED_MAIN_REF} (${GOLFRAVEN_CANONICAL_REPO_URL}) — ` +
+        "not yet on GitHub's own main, or the fetch itself failed this run.",
     };
+  }
+  // Should-fix: the acceptance date must be on/after the evidence's own
+  // ownerSavedDate (an acceptance cannot predate the thing it accepts)
+  // and no more than 1 day after the commit that introduced the row (a
+  // forged future-dated acceptance, or a row whose commit postdates its
+  // own claimed date by more than a day, is suspicious rather than
+  // simply trusted).
+  const recordDate = parseYmdStrict(record.date);
+  if (!recordDate) {
+    return {
+      acceptanceLogged: false,
+      acceptanceProvenance: blame.provenance,
+      acceptanceDetail: `acceptance date "${record.date}" is not a real YYYY-MM-DD calendar date.`,
+    };
+  }
+  const ownerSavedDateRaw = opts.evidenceByTrail[trail]?.bySha.get(evidenceSha)?.ownerSavedDate ?? null;
+  if (ownerSavedDateRaw) {
+    const ownerSavedDate = parseYmdStrict(ownerSavedDateRaw);
+    if (ownerSavedDate && recordDate.getTime() < ownerSavedDate.getTime()) {
+      return {
+        acceptanceLogged: false,
+        acceptanceProvenance: blame.provenance,
+        acceptanceDetail:
+          `acceptance date ${record.date} is BEFORE the evidence's own ownerSavedDate ${ownerSavedDateRaw} — ` +
+          "an acceptance cannot predate the evidence it accepts (should-fix, third re-gate).",
+      };
+    }
+  }
+  const commitDate = new Date(blame.provenance.authorDate);
+  if (!Number.isNaN(commitDate.getTime())) {
+    const commitDatePlusOneDay = new Date(commitDate.getTime() + 24 * 60 * 60 * 1000);
+    if (recordDate.getTime() > commitDatePlusOneDay.getTime()) {
+      return {
+        acceptanceLogged: false,
+        acceptanceProvenance: blame.provenance,
+        acceptanceDetail:
+          `acceptance date ${record.date} is more than 1 day after the commit date (${blame.provenance.authorDate}) ` +
+          "that introduced this Log row (should-fix, third re-gate).",
+      };
+    }
   }
   return {
     acceptanceLogged: true,
     acceptanceProvenance: blame.provenance,
-    acceptanceDetail: "logged in X2.md's Log section, on a commit reachable from origin/main.",
+    acceptanceDetail: `logged in X2.md's Log section, on a commit reachable from a freshly-fetched ${GOLFRAVEN_VERIFIED_MAIN_REF}.`,
   };
 }
 
@@ -1429,10 +1649,86 @@ export interface AcceptRowMatch {
   line: string;
 }
 
+/** Gate finding, third re-gate, fix (c): marks each line of `text` as
+ * VISIBLE prose (`true`) or not. A line is NOT visible when it is inside
+ * a fenced code block (``` ` ``` or `~~~`, any length ≥ 3, closed only
+ * by a matching-or-longer fence of the SAME character — the fence lines
+ * themselves are also not visible, they're syntax, not content), inside
+ * an HTML comment (`<!-- ... -->`, tracked across as many lines as it
+ * takes to find the closing `-->` — a comment opened and closed on one
+ * line hides only that line), or an indented code block (4+ leading
+ * spaces, or a leading tab). Computed over the WHOLE text, never just a
+ * bounded section, so state that opens before the section in question
+ * and closes after it is still tracked correctly.
+ *
+ * Deliberately errs toward treating MORE as hidden, never less: a
+ * genuine row mis-classified as hidden merely fails to register (an
+ * inconvenience — unindent it, or move it out of the fence/comment); a
+ * HIDDEN, forged row mis-classified as visible would be the dangerous
+ * direction, and is exactly what this closes (a gate review found
+ * `ACCEPT` rows sitting inside an HTML comment, and inside a fenced
+ * code block, both silently counted as logged before this existed). */
+export function computeMarkdownLineVisibility(text: string): boolean[] {
+  const lines = text.split("\n");
+  const visible: boolean[] = new Array(lines.length).fill(true);
+  let fenceChar: string | null = null;
+  let fenceLen = 0;
+  let inComment = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i] ?? "";
+    const trimmed = raw.trim();
+
+    if (inComment) {
+      visible[i] = false;
+      if (trimmed.includes("-->")) inComment = false;
+      continue;
+    }
+
+    if (fenceChar) {
+      visible[i] = false; // hidden, including the closing fence line itself
+      const closeMatch = /^(`{3,}|~{3,})\s*$/.exec(trimmed);
+      if (closeMatch && closeMatch[1] && closeMatch[1][0] === fenceChar && closeMatch[1].length >= fenceLen) {
+        fenceChar = null;
+        fenceLen = 0;
+      }
+      continue;
+    }
+
+    const openMatch = /^(`{3,}|~{3,})/.exec(trimmed);
+    if (openMatch && openMatch[1]) {
+      fenceChar = openMatch[1][0] ?? null;
+      fenceLen = openMatch[1].length;
+      visible[i] = false; // the opening fence line itself
+      continue;
+    }
+
+    const commentOpen = trimmed.indexOf("<!--");
+    if (commentOpen !== -1) {
+      const commentCloseOnSameLine = trimmed.indexOf("-->", commentOpen + 4);
+      visible[i] = false;
+      if (commentCloseOnSameLine === -1) inComment = true;
+      continue;
+    }
+
+    if (/^( {4,}|\t)/.test(raw)) {
+      visible[i] = false;
+      continue;
+    }
+
+    visible[i] = true;
+  }
+  return visible;
+}
+
 /** Finds `acceptRowLiteral(trail, fact, evidenceSha, date)` as an EXACT,
- * trimmed-equal line — never a substring/loose match — ONLY inside
- * `x2MdFullText`'s `## Log` section, bounded the same way
- * `extractX2MdLogSection` now is (at the next top-level `## ` heading). */
+ * trimmed-equal, VISIBLE line — never a substring/loose match, and
+ * never a line inside a fenced code block/HTML comment/indented code
+ * block (`computeMarkdownLineVisibility`, gate finding third re-gate,
+ * fix (c)) — ONLY inside `x2MdFullText`'s `## Log` section, bounded the
+ * same way `extractX2MdLogSection` now is (at the next top-level `## `
+ * heading). The heading search itself also only considers VISIBLE
+ * lines, so a fake `## Log`/`## ` heading hidden inside a comment or
+ * fence can't shift where the real section is taken to start or end. */
 export function findAcceptRowLine(
   x2MdFullText: string,
   trail: string,
@@ -1441,9 +1737,11 @@ export function findAcceptRowLine(
   date: string,
 ): AcceptRowMatch | null {
   const lines = x2MdFullText.split("\n");
+  const visible = computeMarkdownLineVisibility(x2MdFullText);
   let logStart = -1;
   let logEnd = lines.length;
   for (let i = 0; i < lines.length; i += 1) {
+    if (!visible[i]) continue;
     if (logStart === -1 && /^## Log\b/.test(lines[i] ?? "")) {
       logStart = i;
       continue;
@@ -1456,6 +1754,7 @@ export function findAcceptRowLine(
   if (logStart === -1) return null;
   const wanted = acceptRowLiteral(trail, fact, evidenceSha, date);
   for (let i = logStart; i < logEnd; i += 1) {
+    if (!visible[i]) continue;
     if ((lines[i] ?? "").trim() === wanted) {
       return { lineNumber: i + 1, line: lines[i] ?? "" };
     }
@@ -1463,16 +1762,25 @@ export function findAcceptRowLine(
   return null;
 }
 
-/** Gate finding 2 (re-gate): finds the commit that introduced the given
- * line of `x2MdPath` (`git blame --porcelain`), then requires it
- * reachable from `origin/main` (`git merge-base --is-ancestor`) — never
- * throws; a git failure of any kind comes back as `{ok: false, detail}`,
- * the same house style as `checkLedgerAgainstGit`. Author/date/signature
- * come from `git show`; see `AcceptRowGitProvenance`'s own doc for what
- * this can and cannot prove. */
+/** Gate finding 2 (re-gate)/gate finding, third re-gate, fix (b): finds
+ * the commit that introduced the given line of `x2MdPath` (`git blame
+ * --porcelain`), then requires it reachable from `refName` — by
+ * default `GOLFRAVEN_VERIFIED_MAIN_REF`, which the CALLER is
+ * responsible for having freshly fetched (`fetchVerifiedMainRef`) in
+ * THIS SAME RUN before ever calling this function; never the editable
+ * local `origin/main`, which a caller can point anywhere or forge
+ * outright with `git update-ref`. Never throws; a git failure of any
+ * kind (including the ref simply not existing, e.g. because the fetch
+ * failed or was never run) comes back as `{ok: false, detail}` or
+ * `reachableFromVerifiedMain: false`, the same house style as
+ * `checkLedgerAgainstGit`. Author/date/signature come from `git show`;
+ * see `AcceptRowGitProvenance`'s own doc for what this can and cannot
+ * prove. `refName` is a TEST-ONLY seam — `main()`/`resolveAcceptanceRecord`
+ * never override it. */
 export async function blameAcceptRow(
   x2MdPath: string,
   lineNumber: number,
+  refName: string = GOLFRAVEN_VERIFIED_MAIN_REF,
 ): Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }> {
   const cwd = path.dirname(path.resolve(x2MdPath));
   let sha: string;
@@ -1513,16 +1821,16 @@ export async function blameAcceptRow(
       detail: `git show failed for commit ${sha}: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  let reachableFromOriginMain = false;
+  let reachableFromVerifiedMain = false;
   try {
-    await execFileAsync("git", ["merge-base", "--is-ancestor", sha, "origin/main"], { cwd });
-    reachableFromOriginMain = true;
+    await execFileAsync("git", ["merge-base", "--is-ancestor", sha, refName], { cwd });
+    reachableFromVerifiedMain = true;
   } catch {
-    reachableFromOriginMain = false;
+    reachableFromVerifiedMain = false;
   }
   return {
     ok: true,
-    provenance: { commit: sha, author, authorDate, signatureStatus, reachableFromOriginMain },
+    provenance: { commit: sha, author, authorDate, signatureStatus, reachableFromVerifiedMain },
   };
 }
 
