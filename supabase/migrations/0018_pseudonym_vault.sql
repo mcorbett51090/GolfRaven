@@ -39,11 +39,11 @@ ALTER TABLE app.attestation ADD COLUMN staff_pseudonym_hmac_id uuid;
 ALTER TABLE app.attestation_shift_log ADD COLUMN player_pseudonym_hmac_id uuid;
 
 COMMENT ON COLUMN app.attestation.player_pseudonym_hmac_id IS
-  'Which vault.secrets row (name LIKE ''pseudonym_hmac%'') computed player_pseudonym, at write time. Written by the (out-of-scope-this-stage) attest Edge Function alongside player_pseudonym itself. Audit/provenance only -- private.delete_my_data does not need it to find a row (it tries every currently-active key).';
+  'Which vault.secrets row computed player_pseudonym, at write time (id only -- NO foreign key, see this migration''s own note above; validated at read time by private.delete_my_data). Written by the (out-of-scope-this-stage) attest Edge Function alongside player_pseudonym itself. Load-bearing for app.attestation_shift_log''s own copy of this column (should-fix, post-P3a re-gate): delete_my_data resolves EXACTLY this recorded id, not every currently-active key by name, and raises if it cannot.';
 COMMENT ON COLUMN app.attestation.staff_pseudonym_hmac_id IS
   'Same as player_pseudonym_hmac_id, for staff_pseudonym.';
 COMMENT ON COLUMN app.attestation_shift_log.player_pseudonym_hmac_id IS
-  'Same as app.attestation.player_pseudonym_hmac_id.';
+  'Same as app.attestation.player_pseudonym_hmac_id -- this is the column private.delete_my_data actually reads to know which vault key to resolve for a given row (should-fix, post-P3a re-gate).';
 
 -- ============================================================================
 -- 3. Deploy check (should-fix): a real deploy with no pseudonym_hmac in

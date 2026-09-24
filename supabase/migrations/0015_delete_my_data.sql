@@ -36,7 +36,8 @@ DECLARE
   v_result jsonb := '{}'::jsonb;
   v_pol record;
   v_row_count int;
-  v_key record;
+  v_key_id uuid;
+  v_key_secret text;
   v_pseudonym_candidate text;
 BEGIN
   IF p_user_id IS NULL THEN
@@ -205,34 +206,53 @@ BEGIN
   -- all, line 842). A row logged before this stage's pseudonym column
   -- existed falls back to matching the pre-deletion handle.
   --
-  -- M1 (post-P3a re-gate): the key that computed a given row's
-  -- player_pseudonym is whichever was active WHEN it was written, not
-  -- necessarily the newest one now — so every currently-active vault key
-  -- gets tried, not just one. Each key is validated (NOT NULL and >= 32
-  -- bytes — a NULL/short key raises, closing the "empty key silently
-  -- leaves PII behind" gap the old GUC design had) before use.
-  -- `app.delete_my_data.target_pseudonym` is re-set per key so
-  -- 0016_private_definer.sql's RLS policy (which independently checks
-  -- the same GUC, since private_definer reaches this table only through
-  -- that policy) agrees with this statement's own WHERE clause on each
-  -- pass. Repeating the whole UPDATE per key is idempotent: a row this
-  -- loop already updated no longer matches ANY key's WHERE clause on a
-  -- later pass, because its own player_pseudonym column is never
-  -- rewritten by this loop.
-  IF NOT EXISTS (SELECT 1 FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_hmac%') THEN
-    RAISE EXCEPTION 'delete_my_data: no active pseudonym_hmac found in vault.decrypted_secrets';
-  END IF;
-  FOR v_key IN SELECT id, decrypted_secret FROM vault.decrypted_secrets WHERE name LIKE 'pseudonym_hmac%' LOOP
-    IF v_key.decrypted_secret IS NULL OR length(v_key.decrypted_secret) < 32 THEN
-      RAISE EXCEPTION 'delete_my_data: pseudonym key % in vault.decrypted_secrets is NULL or shorter than 32 bytes', v_key.id;
+  -- ⛔ FIX (should-fix, post-P3a re-gate: "key rotation ... match on each
+  -- row's recorded hmac id and raise if that key is missing"): the PRIOR
+  -- version tried every vault row whose NAME matched 'pseudonym_hmac%' —
+  -- renaming a retired key out of that naming convention (e.g.
+  -- 'pseudonym_hmac_v1' -> 'retired_v1') silently dropped it from this
+  -- loop even though rows still carry its id in their OWN
+  -- player_pseudonym_hmac_id column, "succeeding" while leaving that
+  -- key's rows unredacted. This version drives the loop from the DATA
+  -- instead of the vault's naming convention: every DISTINCT
+  -- player_pseudonym_hmac_id actually recorded on an attestation_shift_
+  -- log row is resolved BY ID (name-independent, so a rename never
+  -- matters), and a recorded id that no longer resolves in vault.
+  -- decrypted_secrets at all (deleted, not merely renamed — should-fix
+  -- "FK into vault.secrets", 0018, dropped the FK specifically so this
+  -- can be validated here instead of relying on referential integrity to
+  -- prevent it) RAISES rather than silently skipping that key's rows.
+  FOR v_key_id IN
+    SELECT DISTINCT player_pseudonym_hmac_id
+    FROM app.attestation_shift_log
+    WHERE player_pseudonym_hmac_id IS NOT NULL
+  LOOP
+    SELECT decrypted_secret INTO v_key_secret FROM vault.decrypted_secrets WHERE id = v_key_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'delete_my_data: attestation_shift_log references pseudonym key id % that no longer resolves in vault.decrypted_secrets (deleted or otherwise gone) — cannot safely determine whether it matches this user', v_key_id;
     END IF;
-    v_pseudonym_candidate := encode(public.hmac(p_user_id::text, v_key.decrypted_secret, 'sha256'), 'hex');
+    IF v_key_secret IS NULL OR length(v_key_secret) < 32 THEN
+      RAISE EXCEPTION 'delete_my_data: pseudonym key % in vault.decrypted_secrets is NULL or shorter than 32 bytes', v_key_id;
+    END IF;
+    v_pseudonym_candidate := encode(public.hmac(p_user_id::text, v_key_secret, 'sha256'), 'hex');
+    -- `app.delete_my_data.target_pseudonym` is re-set per key so
+    -- 0016_private_definer.sql's RLS policy (which independently checks
+    -- the same GUC, since private_definer reaches this table only
+    -- through that policy) agrees with this statement's own WHERE clause
+    -- on each pass.
     PERFORM set_config('app.delete_my_data.target_pseudonym', v_pseudonym_candidate, true);
     UPDATE app.attestation_shift_log
     SET player_handle_snapshot = 'deleted player'
-    WHERE player_pseudonym = v_pseudonym_candidate
-       OR (player_pseudonym IS NULL AND v_handle IS NOT NULL AND player_handle_snapshot = v_handle);
+    WHERE player_pseudonym_hmac_id = v_key_id AND player_pseudonym = v_pseudonym_candidate;
   END LOOP;
+  -- Legacy fallback: a row logged before player_pseudonym/
+  -- player_pseudonym_hmac_id existed at all has neither set — matched by
+  -- the pre-deletion handle instead, same as always.
+  PERFORM set_config('app.delete_my_data.target_pseudonym', '', true);
+  UPDATE app.attestation_shift_log
+  SET player_handle_snapshot = 'deleted player'
+  WHERE player_pseudonym IS NULL AND player_pseudonym_hmac_id IS NULL
+    AND v_handle IS NOT NULL AND player_handle_snapshot = v_handle;
 
   -- receipt objects in storage.objects (task instruction: "receipt objects
   -- in storage.objects"). Matched by `owner` (set at upload time by the
