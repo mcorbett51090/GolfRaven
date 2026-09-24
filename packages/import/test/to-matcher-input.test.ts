@@ -35,13 +35,14 @@ describe("toMatcherInput", () => {
     expect(toMatcherInput(round, { candidates: CANDIDATES })).toBeUndefined();
   });
 
-  it("maps fixes into the matcher's RouteFix shape, always unsimulated", () => {
+  it("maps fixes into the matcher's RouteFix shape, never asserting simulated", () => {
     const input = toMatcherInput(routeWithFixes(), { candidates: CANDIDATES });
     expect(input).toBeDefined();
     expect(input!.fixes).toEqual([
-      { point: { lat: 43.65, lon: -79.38 }, timestamp: 1_000, simulated: false },
-      { point: { lat: 43.651, lon: -79.379 }, timestamp: 2_000, simulated: false, accuracyMeters: 8 },
+      { point: { lat: 43.65, lon: -79.38 }, timestamp: 1_000 },
+      { point: { lat: 43.651, lon: -79.379 }, timestamp: 2_000, accuracyMeters: 8 },
     ]);
+    expect(input!.fixes.every((f) => !("simulated" in f))).toBe(true);
     expect(input!.candidates).toBe(CANDIDATES);
   });
 

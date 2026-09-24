@@ -34,13 +34,24 @@ export interface ImportedScoreHole {
  * The normalized shape every parser (`parseFitFile`, `parseGpxFile`,
  * `parseCsvFile`) returns on success.
  *
- * Exactly one of the time shapes is populated when the round is dated at
- * all: `startedAt`/`endedAt` (a route or a file with real timestamps), or
- * `localDate` (a scorecard-only file with no timestamps, build plan A2-17
- * "`local_date` for date-only evidence"). Both may be absent for a file
- * that carries neither — see each parser's doc comment for when that
- * happens; callers should treat that as an unusable round and surface the
- * `warnings`.
+ * **Invariant: `startedAt`/`endedAt` and `localDate` are mutually
+ * exclusive, and which one (if either) is set is decided entirely by
+ * whether `fixes` is non-empty** (build plan A2-17, §4.1, §4.5):
+ *  - `fixes.length > 0` → `startedAt`/`endedAt` are always set (from the
+ *    fixes' own timestamps), and `localDate` is never set.
+ *  - `fixes.length === 0` → `startedAt`/`endedAt` are never set, even
+ *    when the source file itself carries some other timestamp (a FIT
+ *    `session`'s start/end, say) — only `localDate` may be set, derived
+ *    from a source that's genuinely local (FIT `activity.local_timestamp`,
+ *    an explicit-offset GPX/CSV timestamp) or from a caller-supplied
+ *    facility `tz` option. With neither available, both are left
+ *    undefined and a warning says so — callers should treat that as an
+ *    unusable round.
+ *
+ * This exists so a routeless import can only ever be scored as
+ * `file_import` 0.10 / `local_date`-only evidence (build plan §4.5), and
+ * can never be mistaken for route evidence by a downstream reader that
+ * only checks "is `startedAt` set" without also checking `fixes.length`.
  */
 export interface ImportedRound {
   source: "file_import";

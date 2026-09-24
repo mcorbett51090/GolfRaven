@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { parseCsvFile } from "../src/parse-csv.js";
+import { MAX_INPUT_BYTES, MAX_WARNINGS } from "../src/safety.js";
 
 function bytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
 }
 
 describe("parseCsvFile: fixes format", () => {
-  it("parses timestamp,lat,lon,accuracy with ISO timestamps", () => {
+  it("parses timestamp,lat,lon,accuracy with strict ISO timestamps", () => {
     const csv =
       "timestamp,lat,lon,accuracy\n" +
       "2026-06-01T14:00:00Z,43.65,-79.38,5\n" +
@@ -16,19 +17,21 @@ describe("parseCsvFile: fixes format", () => {
     if (!result.ok) return;
     expect(result.round.format).toBe("csv");
     expect(result.round.fixes).toHaveLength(2);
+    // Mutation-pinning: exact values, not just "close enough".
+    expect(result.round.fixes[0]!.lat).toBe(43.65);
+    expect(result.round.fixes[0]!.lon).toBe(-79.38);
     expect(result.round.fixes[0]!.timestamp).toBe(Date.parse("2026-06-01T14:00:00Z"));
     expect(result.round.fixes[0]!.accuracyMeters).toBe(5);
     expect(result.round.startedAt).toBe(Date.parse("2026-06-01T14:00:00Z"));
     expect(result.round.endedAt).toBe(Date.parse("2026-06-01T14:05:00Z"));
   });
 
-  it("parses timestamp,lat,lon with bare epoch-millisecond timestamps and no accuracy column", () => {
-    const csv = "timestamp,lat,lon\n1780000000000,43.65,-79.38\n1780000300000,43.651,-79.379\n";
+  it("accepts a numeric UTC offset in place of Z", () => {
+    const csv = "timestamp,lat,lon\n2026-06-01T10:00:00-04:00,43.65,-79.38\n";
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.round.fixes).toHaveLength(2);
-    expect(result.round.fixes[0]!.accuracyMeters).toBeUndefined();
+    expect(result.round.fixes[0]!.timestamp).toBe(Date.parse("2026-06-01T14:00:00Z"));
   });
 
   it("sorts out-of-order rows by timestamp", () => {
@@ -53,6 +56,83 @@ describe("parseCsvFile: fixes format", () => {
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(1);
     expect(result.round.warnings).toHaveLength(2);
+  });
+
+  describe("strict timestamp rejection (should-fix: require ISO-8601 + Z/offset)", () => {
+    const badTimestamps = {
+      "a bare epoch-millisecond number": "1780000000000",
+      "a bare epoch-seconds number": "1780000000",
+      "a naive time (no Z/offset)": "2026-06-01T14:00:00",
+      "a US-style date": "06/01/2026 2:00 PM",
+      "a date with no time": "2026-06-01",
+      "a year before 2000": "1999-06-01T14:00:00Z",
+    };
+    for (const [label, value] of Object.entries(badTimestamps)) {
+      it(`rejects ${label}`, () => {
+        const csv = `timestamp,lat,lon\n${value},43.65,-79.38\n`;
+        const result = parseCsvFile(bytes(csv));
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        // The row is dropped (not the whole file — a header match is
+        // still a fixes-shaped file), leaving zero fixes.
+        expect(result.round.fixes).toEqual([]);
+      });
+    }
+  });
+
+  describe("coordinate safety (should-fix: decimal regex before Number())", () => {
+    it("never turns an empty lat/lon into 0 (null island)", () => {
+      const csv = "timestamp,lat,lon\n2026-06-01T14:00:00Z,,\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.round.fixes).toEqual([]);
+    });
+
+    it("rejects hex lat/lon", () => {
+      const csv = "timestamp,lat,lon\n2026-06-01T14:00:00Z,0x10,-79.38\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.round.fixes).toEqual([]);
+    });
+  });
+
+  describe("accuracy sanitization", () => {
+    it("turns 0 or negative accuracy into undefined rather than keeping it", () => {
+      const csv =
+        "timestamp,lat,lon,accuracy\n" +
+        "2026-06-01T14:00:00Z,43.65,-79.38,0\n" +
+        "2026-06-01T14:01:00Z,43.65,-79.38,-5\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.round.fixes).toHaveLength(2);
+      expect(result.round.fixes[0]!.accuracyMeters).toBeUndefined();
+      expect(result.round.fixes[1]!.accuracyMeters).toBeUndefined();
+    });
+  });
+
+  it("is routeless-only when every row is invalid: no startedAt/endedAt, warns", () => {
+    const csv = "timestamp,lat,lon\nnot-a-timestamp,43.65,-79.38\n";
+    const result = parseCsvFile(bytes(csv));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toEqual([]);
+    expect(result.round.startedAt).toBeUndefined();
+    expect(result.round.endedAt).toBeUndefined();
+    expect(result.round.localDate).toBeUndefined();
+    expect(result.round.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("bounds warnings at MAX_WARNINGS plus one summary entry", () => {
+    const rows = Array.from({ length: MAX_WARNINGS + 30 }, () => "not-a-timestamp,43.65,-79.38").join("\n");
+    const csv = `timestamp,lat,lon\n${rows}\n`;
+    const result = parseCsvFile(bytes(csv));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.warnings.length).toBeLessThanOrEqual(MAX_WARNINGS + 1);
+    expect(result.round.warnings[result.round.warnings.length - 1]).toContain("more");
   });
 });
 
@@ -86,10 +166,71 @@ describe("parseCsvFile: scorecard format", () => {
     expect(result.round.courseNameHint).toBe('The "Pines" Club');
   });
 
-  it("rejects a malformed date", () => {
+  it("rejects a non-calendar-shaped date", () => {
     const csv = "date,course,holes,score\n06/01/2026,Pinehill Links,18,84\n";
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(false);
+  });
+
+  it("rejects a date that isn't a real calendar date (should-fix)", () => {
+    const csv = "date,course,holes,score\n2026-13-45,Pinehill Links,18,84\n";
+    const result = parseCsvFile(bytes(csv));
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects Feb 30", () => {
+    const csv = "date,course,holes,score\n2026-02-30,Pinehill Links,18,84\n";
+    const result = parseCsvFile(bytes(csv));
+    expect(result.ok).toBe(false);
+  });
+
+  describe("holes (should-fix: 9, 18, or an integer up to 36)", () => {
+    it("accepts 9", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,9,40\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(true);
+    });
+    it("accepts 18", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,18,84\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(true);
+    });
+    it("accepts 27 (a composite) since it's an integer under the 36 ceiling", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,27,120\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(true);
+    });
+    it("rejects a non-integer (1e3)", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,1e3,72\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(false);
+    });
+    it("rejects a fractional value", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,18.5,72\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(false);
+    });
+    it("rejects over 36", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,72,150\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(false);
+    });
+    it("rejects 0 or negative", () => {
+      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,0,72\n")).ok).toBe(false);
+      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,-9,72\n")).ok).toBe(false);
+    });
+  });
+
+  describe("score (should-fix: positive integer)", () => {
+    it("rejects a fractional score", () => {
+      const csv = "date,course,holes,score\n2026-06-01,X,18,72.5\n";
+      const result = parseCsvFile(bytes(csv));
+      expect(result.ok).toBe(false);
+    });
+    it("rejects 0 or negative", () => {
+      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,18,0\n")).ok).toBe(false);
+      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,18,-1\n")).ok).toBe(false);
+    });
   });
 
   it("uses only the first row and warns about extras", () => {
@@ -120,5 +261,25 @@ describe("parseCsvFile: ambiguous / unrecognized headers", () => {
     const csv = "lat,lon,timestamp\n43.65,-79.38,2026-06-01T14:00:00Z\n";
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("parseCsvFile: many valid rows still work", () => {
+  it("parses 1000 valid fixes rows cleanly (well under the row cap)", () => {
+    const rows = Array.from({ length: 1000 }, () => "2026-06-01T14:00:00Z,43.65,-79.38").join("\n");
+    const csv = `timestamp,lat,lon\n${rows}\n`;
+    const result = parseCsvFile(bytes(csv));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toHaveLength(1000);
+  });
+});
+
+describe("parseCsvFile: size cap", () => {
+  it("refuses a file over the 20 MB cap", () => {
+    const oversized = new Uint8Array(MAX_INPUT_BYTES + 1);
+    const result = parseCsvFile(oversized);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("bytes");
   });
 });

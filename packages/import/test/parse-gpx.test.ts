@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseGpxFile } from "../src/parse-gpx.js";
+import { MAX_INPUT_BYTES } from "../src/safety.js";
 
 function bytes(xml: string): Uint8Array {
   return new TextEncoder().encode(xml);
@@ -39,9 +40,17 @@ const GPX_NO_TIME = `<?xml version="1.1"?>
   </trkseg></trk>
 </gpx>`;
 
-const GPX_NO_TIME_WITH_METADATA = `<?xml version="1.1"?>
+const GPX_NO_TIME_WITH_OFFSET_METADATA = `<?xml version="1.1"?>
 <gpx version="1.1" creator="NoTimeDevice" xmlns="http://www.topografix.com/GPX/1/1">
-  <metadata><time>2026-04-15T10:00:00Z</time></metadata>
+  <metadata><time>2026-04-15T22:00:00-04:00</time></metadata>
+  <trk><trkseg>
+    <trkpt lat="43.0" lon="-79.0"></trkpt>
+  </trkseg></trk>
+</gpx>`;
+
+const GPX_NO_TIME_WITH_Z_METADATA = `<?xml version="1.1"?>
+<gpx version="1.1" creator="NoTimeDevice" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><time>2026-04-16T02:00:00Z</time></metadata>
   <trk><trkseg>
     <trkpt lat="43.0" lon="-79.0"></trkpt>
   </trkseg></trk>
@@ -68,6 +77,10 @@ describe("parseGpxFile: GPX 1.1", () => {
     expect(result.round.startedAt).toBe(Date.parse("2026-06-01T14:05:00Z"));
     expect(result.round.endedAt).toBe(Date.parse("2026-06-01T14:15:00Z"));
     expect(result.round.localDate).toBeUndefined();
+
+    // Mutation-pinning: exact coordinates.
+    expect(result.round.fixes[0]!.lat).toBe(43.65);
+    expect(result.round.fixes[0]!.lon).toBe(-79.38);
   });
 });
 
@@ -95,11 +108,27 @@ describe("parseGpxFile: no <time> on any point", () => {
     expect(result.round.warnings.length).toBeGreaterThan(0);
   });
 
-  it("falls back to <metadata><time> for a date-only round when points have none", () => {
-    const result = parseGpxFile(bytes(GPX_NO_TIME_WITH_METADATA));
+  it("uses <metadata><time>'s own offset directly when it carries one", () => {
+    const result = parseGpxFile(bytes(GPX_NO_TIME_WITH_OFFSET_METADATA));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.fixes).toEqual([]);
+    expect(result.round.localDate).toBe("2026-04-15");
+  });
+
+  it("does NOT trust a bare-Z metadata time as a local date without a tz option", () => {
+    const result = parseGpxFile(bytes(GPX_NO_TIME_WITH_Z_METADATA));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.localDate).toBeUndefined();
+    expect(result.round.warnings.some((w) => w.toLowerCase().includes("tz"))).toBe(true);
+  });
+
+  it("uses a tz option to convert a bare-Z metadata time into a local date", () => {
+    const result = parseGpxFile(bytes(GPX_NO_TIME_WITH_Z_METADATA), { tz: "America/Toronto" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 2026-04-16T02:00:00Z is 2026-04-15T22:00 EDT (UTC-4).
     expect(result.round.localDate).toBe("2026-04-15");
   });
 });
@@ -129,7 +158,7 @@ describe("parseGpxFile: an XXE attempt", () => {
   });
 });
 
-describe("parseGpxFile: safety", () => {
+describe("parseGpxFile: coordinate safety (should-fix: decimal regex before Number())", () => {
   it("drops a trkpt with an out-of-range lat/lon", () => {
     const xml = `<?xml version="1.1"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
@@ -143,5 +172,68 @@ describe("parseGpxFile: safety", () => {
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(1);
     expect(result.round.warnings.some((w) => w.includes("invalid"))).toBe(true);
+  });
+
+  it("never turns an empty lat/lon into 0 (null island)", () => {
+    const xml = `<?xml version="1.1"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg><trkpt lat="" lon=" "><time>2026-01-01T00:00:00Z</time></trkpt></trkseg></trk>
+</gpx>`;
+    const result = parseGpxFile(bytes(xml));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toEqual([]);
+  });
+
+  it("rejects a hex lat", () => {
+    const xml = `<?xml version="1.1"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg><trkpt lat="0x10" lon="1e1"><time>2026-01-01T00:00:00Z</time></trkpt></trkseg></trk>
+</gpx>`;
+    const result = parseGpxFile(bytes(xml));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toEqual([]);
+  });
+});
+
+describe("parseGpxFile: strict timestamps (should-fix)", () => {
+  const badTimes = {
+    "a naive time (no Z/offset)": "2026-06-01T14:00:00",
+    "a non-ISO string": "June 1 2026 2:00 PM",
+    "a year before 2000": "1999-06-01T14:00:00Z",
+  };
+  for (const [label, value] of Object.entries(badTimes)) {
+    it(`drops a trkpt with ${label} rather than guessing`, () => {
+      const xml = `<?xml version="1.1"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg><trkpt lat="43.0" lon="-79.0"><time>${value}</time></trkpt></trkseg></trk>
+</gpx>`;
+      const result = parseGpxFile(bytes(xml));
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.round.fixes).toEqual([]);
+    });
+  }
+
+  it("accepts a numeric UTC offset", () => {
+    const xml = `<?xml version="1.1"?>
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg><trkpt lat="43.0" lon="-79.0"><time>2026-06-01T10:00:00-04:00</time></trkpt></trkseg></trk>
+</gpx>`;
+    const result = parseGpxFile(bytes(xml));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toHaveLength(1);
+    expect(result.round.fixes[0]!.timestamp).toBe(Date.parse("2026-06-01T14:00:00Z"));
+  });
+});
+
+describe("parseGpxFile: size cap", () => {
+  it("refuses a file over the 20 MB cap", () => {
+    const oversized = new Uint8Array(MAX_INPUT_BYTES + 1);
+    const result = parseGpxFile(oversized);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("bytes");
   });
 });

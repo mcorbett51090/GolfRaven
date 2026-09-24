@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FitEncoder, FitBaseType } from "fit-file-parser";
 import { parseFitFile } from "../src/parse-fit.js";
-import { MAX_INPUT_BYTES } from "../src/safety.js";
+import { MAX_FIT_INPUT_BYTES } from "../src/safety.js";
 import {
   buildGolfActivityFit,
   corruptFitRecordBytes,
@@ -45,6 +45,17 @@ describe("parseFitFile: golf activity with a GPS track", () => {
     expect(result.round.device).toContain("garmin");
     expect(result.round.device).toContain("Approach S62");
     expect(result.round.fixes[0]!.accuracyMeters).toBe(5);
+
+    // Mutation-pinning: exact lat/lon (to well within 1e-6°, the
+    // semicircle conversion's own precision floor) and exact timestamps
+    // — a ×1.001 mutation on the semicircle conversion constant, or any
+    // off-by-something in the timestamp math, must fail these.
+    expect(result.round.fixes[0]!.lat).toBeCloseTo(COURSE_LAT, 6);
+    expect(result.round.fixes[0]!.lon).toBeCloseTo(COURSE_LON, 6);
+    expect(result.round.fixes[1]!.lat).toBeCloseTo(COURSE_LAT + 0.0002, 6);
+    expect(result.round.fixes[1]!.lon).toBeCloseTo(COURSE_LON + 0.0002, 6);
+    expect(result.round.fixes[0]!.timestamp).toBe(startTime.getTime());
+    expect(result.round.fixes[1]!.timestamp).toBe(startTime.getTime() + 60_000);
   });
 
   it("sorts fixes even when the file's record order is out of order", async () => {
@@ -60,8 +71,8 @@ describe("parseFitFile: golf activity with a GPS track", () => {
   });
 });
 
-describe("parseFitFile: golf activity without a track", () => {
-  it("returns an empty fixes array and falls back to session start/end", async () => {
+describe("parseFitFile: golf activity without a track (routeless)", () => {
+  it("never sets startedAt/endedAt, even though the session carries times", async () => {
     const startTime = new Date("2026-06-02T13:00:00Z");
     const endTime = new Date("2026-06-02T16:45:00Z");
     const bytes = buildGolfActivityFit({ startTime, endTime, records: [] });
@@ -70,9 +81,42 @@ describe("parseFitFile: golf activity without a track", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.fixes).toEqual([]);
-    expect(result.round.startedAt).toBe(startTime.getTime());
-    expect(result.round.endedAt).toBe(endTime.getTime());
+    expect(result.round.startedAt).toBeUndefined();
+    expect(result.round.endedAt).toBeUndefined();
+  });
+
+  it("leaves localDate undefined and warns when there's no local_timestamp and no tz option", async () => {
+    const bytes = buildGolfActivityFit({ records: [] });
+    const result = await parseFitFile(bytes);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
     expect(result.round.localDate).toBeUndefined();
+    expect(result.round.warnings.some((w) => w.includes("tz"))).toBe(true);
+  });
+
+  it("derives localDate from activity.local_timestamp when present", async () => {
+    const bytes = buildGolfActivityFit({
+      records: [],
+      activityLocalTimestamp: new Date("2026-06-02T09:15:00Z"),
+    });
+    const result = await parseFitFile(bytes);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.localDate).toBe("2026-06-02");
+    expect(result.round.startedAt).toBeUndefined();
+  });
+
+  it("falls back to a tz option when there's no local_timestamp", async () => {
+    const bytes = buildGolfActivityFit({
+      records: [],
+      startTime: new Date("2026-06-02T23:30:00Z"),
+      endTime: new Date("2026-06-03T02:00:00Z"),
+    });
+    const result = await parseFitFile(bytes, { tz: "America/Toronto" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 23:30 UTC is 19:30 EDT the same calendar day.
+    expect(result.round.localDate).toBe("2026-06-02");
   });
 });
 
@@ -181,10 +225,24 @@ describe("parseFitFile: invalid record coordinates", () => {
 });
 
 describe("parseFitFile: oversized input", () => {
-  it("is refused before any parsing work", async () => {
-    const oversized = new Uint8Array(MAX_INPUT_BYTES + 1);
+  it("is refused before any parsing work, at the lowered 5 MB FIT cap", async () => {
+    const oversized = new Uint8Array(MAX_FIT_INPUT_BYTES + 1);
     const result = await parseFitFile(oversized);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("bytes");
+  });
+});
+
+describe("parseFitFile: CRC mismatch", () => {
+  it("warns but still parses (force: true tolerates it)", async () => {
+    const bytes = buildGolfActivityFit({
+      records: trackAround(2, new Date("2026-06-01T14:00:00Z")),
+      wrongFileCrc: true,
+    });
+    const result = await parseFitFile(bytes);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toHaveLength(2);
+    expect(result.round.warnings.some((w) => w.toLowerCase().includes("crc"))).toBe(true);
   });
 });

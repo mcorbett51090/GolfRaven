@@ -32,6 +32,13 @@ export interface BuildGolfFitOptions {
    * number, to exercise the "unknown FIT message" warning path (a stand-in
    * for the not-yet-decoded Garmin scorecard shape). */
   includeUnknownMessage?: boolean;
+  /** The `activity` message's `local_timestamp` field (FIT type
+   * `local_date_time`) — the device-local wall-clock time, used as the
+   * routeless-import `localDate` source (build plan A2-17). */
+  activityLocalTimestamp?: Date;
+  /** Deliberately writes a wrong trailing file CRC, to test the
+   * CRC-mismatch warning path. */
+  wrongFileCrc?: boolean;
 }
 
 /** Builds a synthetic golf-activity FIT file: `file_id`, `session`,
@@ -72,10 +79,19 @@ export function buildGolfActivityFit(options: BuildGolfFitOptions = {}): Uint8Ar
     enc.writeMessage(20, fields, 1);
   }
 
-  enc.writeMessage(34, [
+  const activityFields: Parameters<FitEncoder["writeMessage"]>[1] = [
     { number: 253, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(endTime) },
     { number: 1, size: 2, baseType: FitBaseType.Uint16, value: 1 },
-  ]);
+  ];
+  if (options.activityLocalTimestamp) {
+    activityFields.push({
+      number: 5,
+      size: 4,
+      baseType: FitBaseType.Uint32,
+      value: FitEncoder.toFitTimestamp(options.activityLocalTimestamp),
+    });
+  }
+  enc.writeMessage(34, activityFields);
 
   if (options.includeUnknownMessage) {
     // A stand-in for Garmin's undecoded golf-scorecard message shape
@@ -85,7 +101,12 @@ export function buildGolfActivityFit(options: BuildGolfFitOptions = {}): Uint8Ar
     enc.writeMessage(65280, [{ number: 0, size: 1, baseType: FitBaseType.Uint8, value: 42 }]);
   }
 
-  return enc.close();
+  const bytes = enc.close();
+  if (options.wrongFileCrc) {
+    bytes[bytes.length - 2] = bytes[bytes.length - 2]! ^ 0xff;
+    bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 0xff;
+  }
+  return bytes;
 }
 
 /** Corrupts a valid FIT buffer so the record stream no longer decodes,

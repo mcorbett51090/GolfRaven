@@ -4,9 +4,16 @@
  * The Approach S62 (and similar Garmin golf watches) writes a scorecard
  * FIT file distinct from the GPS-track activity FIT, stored on-device
  * under `GARMIN/SCORE/SCORECARD`. **Its message layout is
- * `[unverified]`** — `fit-file-parser`'s bundled profile (the same public
- * FIT SDK profile tables every FIT decoder ships) has no entries for it,
- * and no real sample has been available to reverse-engineer against.
+ * `[unverified]`** — no real sample has been available to reverse-
+ * engineer against, and this package no longer even asks
+ * `fit-file-parser` for its full profile-based "unmapped message" list
+ * (`includeUnmappedMessages`), because that option retains full raw
+ * field data for every such message — exactly the kind of per-message
+ * allocation the Opus security gate flagged. Instead, `parse-fit.ts`'s
+ * own cheap header walk (`fit-prescan.ts`) tallies which global message
+ * numbers occur, against a small curated "known" list
+ * (`KNOWN_FIT_MESSAGE_NUMBERS`), and this function turns that tally into
+ * warnings.
  *
  * This function is deliberately small and isolated, per the build plan's
  * own instruction ("design the scorecard extraction as a small isolated
@@ -14,13 +21,13 @@
  * place that needs to change once the owner supplies real S62 scorecard
  * files (`test/fixtures/real/README.md`). Today it does the one thing the
  * build plan requires even without real fixtures — reporting, never
- * silently dropping, every FIT message number the decoder's profile
- * didn't recognize, so a scorecard file at least produces visible
- * evidence that *something* undecoded is in there instead of an
- * empty-looking import.
+ * silently dropping, every FIT message number this package doesn't
+ * recognize, so a scorecard file at least produces visible evidence that
+ * *something* undecoded is in there instead of an empty-looking import.
  */
-import type { ParsedFit } from "fit-file-parser";
 import type { ImportedScoreHole } from "./types.js";
+import { KNOWN_FIT_MESSAGE_NUMBERS } from "./fit-prescan.js";
+import { truncateEcho } from "./safety.js";
 
 export interface FitScorecardData {
   courseNameHint?: string;
@@ -31,29 +38,30 @@ export interface FitScorecardData {
   warnings: string[];
 }
 
-export function extractGolfScorecard(parsed: ParsedFit): FitScorecardData {
+/** `counts` is the prescan's tally of global message number → occurrence
+ * count (`FitPrescanSuccess.globalMessageCounts`). */
+export function extractGolfScorecard(counts: ReadonlyMap<number, number>): FitScorecardData {
   const warnings: string[] = [];
-  const countByGlobalNumber = new Map<number, number>();
 
-  for (const msg of parsed.unmapped_messages ?? []) {
-    countByGlobalNumber.set(
-      msg.global_message_number,
-      (countByGlobalNumber.get(msg.global_message_number) ?? 0) + 1,
-    );
-  }
+  const unknown = [...counts.entries()]
+    .filter(([globalMessageNumber]) => !KNOWN_FIT_MESSAGE_NUMBERS.has(globalMessageNumber))
+    .sort((a, b) => a[0] - b[0]);
 
-  for (const [globalMessageNumber, count] of [...countByGlobalNumber.entries()].sort((a, b) => a[0] - b[0])) {
+  for (const [globalMessageNumber, count] of unknown) {
     warnings.push(
-      `FIT message ${globalMessageNumber} (${count}x) isn't decoded by this parser's profile — ` +
-        `possibly Garmin golf scorecard data (GARMIN/SCORE/SCORECARD on the Approach S62, ` +
-        `[unverified]); not extracted. See parse-fit-scorecard.ts.`,
+      truncateEcho(
+        `FIT message ${globalMessageNumber} (${count}x) isn't recognized by this package — ` +
+          `possibly Garmin golf scorecard data (GARMIN/SCORE/SCORECARD on the Approach S62, ` +
+          `[unverified]); not extracted. See parse-fit-scorecard.ts.`,
+        200,
+      ),
     );
   }
 
   // Nothing decoded yet — see the doc comment above. Update this function
-  // once a real scorecard FIT is available: read its message layout with
-  // `readFitMessages`/`includeUnmappedMessages`, add the confirmed field
-  // mapping here, and populate `courseNameHint`/`localDate`/`scores`/
-  // `totalScore` from it.
+  // once a real scorecard FIT is available: extend `fit-prescan.ts`'s
+  // walk (or a small dedicated follow-up scan) to read the confirmed
+  // field layout for the relevant global message number(s), and populate
+  // `courseNameHint`/`localDate`/`scores`/`totalScore` from it here.
   return { warnings };
 }

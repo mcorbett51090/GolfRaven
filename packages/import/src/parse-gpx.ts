@@ -4,18 +4,46 @@
  * carried into `ImportedFix` (the matcher has no use for elevation).
  *
  * Parsed with `sax` in strict mode — same pinned version (`1.4.1`) as
- * `tools/p0`. `sax` never performs any I/O of its own (it's a pure string
- * tokenizer), but a `<!DOCTYPE`/external-entity declaration is refused
- * outright before the file is handed to the parser at all, and again if
- * `sax` itself reports a doctype — belt and suspenders against XXE, and
- * "no DTD fetch" is trivially true because nothing in this package ever
- * makes a network or filesystem call.
+ * `tools/p0`, imported the same way (`import sax from "sax"`, per
+ * `tools/p0/src/health-export-xml.ts`). `sax` never performs any I/O of
+ * its own (it's a pure string tokenizer), but a `<!DOCTYPE`/external-
+ * entity declaration is refused outright before the file is handed to
+ * the parser at all, and again if `sax` itself reports a doctype — belt
+ * and suspenders against XXE, and "no DTD fetch" is trivially true
+ * because nothing in this package ever makes a network or filesystem
+ * call.
+ *
+ * Timestamps use `timestamps.ts`'s strict ISO 8601 (`Z`/offset required)
+ * parser, not `Date.parse` — see that module's doc comment for why.
+ * Lat/lon attributes are validated with a decimal-only regex
+ * (`safety.ts`'s `parseStrictDecimal`) before ever calling `Number()`, so
+ * an empty `lat=""` can never silently become `0`.
  */
-import { parser as createSaxParser, type Tag, type QualifiedTag } from "sax";
+import sax from "sax";
+import type { Tag, QualifiedTag } from "sax";
 import type { ImportedFix, ImportedRound, ImportResult } from "./types.js";
-import { checkInputSize, capAndSortFixes, isValidLat, isValidLon } from "./safety.js";
+import {
+  checkInputSize,
+  capAndSortFixes,
+  isValidLat,
+  isValidLon,
+  parseStrictDecimal,
+  sanitizeText,
+  finalizeWarnings,
+  finalizeError,
+  truncateEcho,
+  MAX_INPUT_BYTES,
+} from "./safety.js";
+import { parseStrictTimestamp, localDateForTz, type StrictTimestamp } from "./timestamps.js";
 
 const DOCTYPE_RE = /<!DOCTYPE|<!ENTITY/i;
+
+export interface ParseGpxOptions {
+  /** An IANA timezone — the facility's `tz` (build plan §4.1). Used only
+   * to derive `localDate` for a routeless import when no per-point or
+   * file-level timestamp carried its own explicit UTC offset. */
+  tz?: string;
+}
 
 function localName(tagName: string): string {
   const i = tagName.indexOf(":");
@@ -28,9 +56,9 @@ interface RawPoint {
   timestamp?: number;
 }
 
-export function parseGpxFile(bytes: Uint8Array): ImportResult {
-  const sizeError = checkInputSize(bytes.byteLength);
-  if (sizeError) return { ok: false, error: sizeError };
+export function parseGpxFile(bytes: Uint8Array, options: ParseGpxOptions = {}): ImportResult {
+  const sizeError = checkInputSize(bytes.byteLength, MAX_INPUT_BYTES);
+  if (sizeError) return { ok: false, error: finalizeError(sizeError) };
 
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   if (DOCTYPE_RE.test(text)) {
@@ -42,8 +70,8 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
   let device: string | undefined;
   let courseNameHint: string | undefined;
   let trkNameSeen = false;
-  let metadataTimeIso: string | undefined;
-  let rootTimeIso: string | undefined; // GPX 1.0's top-level <time>, outside <metadata>
+  let metadataTime: StrictTimestamp | undefined;
+  let rootTime: StrictTimestamp | undefined; // GPX 1.0's top-level <time>, outside <metadata>
 
   let sawRoot = false;
   let rootIsGpx = false;
@@ -51,9 +79,9 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
 
   const stack: string[] = [];
   let textBuf = "";
-  let current: { lat: number; lon: number; timeText?: string } | undefined;
+  let current: { lat: number | undefined; lon: number | undefined; timeText?: string } | undefined;
 
-  const p = createSaxParser(true, { trim: true, lowercase: false, xmlns: false });
+  const p = sax.parser(true, { trim: true, lowercase: false, xmlns: false });
 
   p.onerror = (err) => {
     if (!firstError) firstError = err.message;
@@ -61,7 +89,7 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
   p.ondoctype = () => {
     if (!firstError) firstError = "GPX file declares a DOCTYPE; refused (XXE policy)";
   };
-  // `xmlns: false` (set below) means sax always hands us the plain `Tag`
+  // `xmlns: false` (set above) means sax always hands us the plain `Tag`
   // shape at runtime; the cast just matches the SDK's always-union
   // callback signature.
   p.onopentag = (rawTag: Tag | QualifiedTag) => {
@@ -72,15 +100,14 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
       rootIsGpx = name === "gpx";
       if (rootIsGpx) {
         const creator = tag.attributes["creator"];
-        if (creator && creator.trim().length > 0) device = creator.trim();
+        if (creator && creator.trim().length > 0) device = sanitizeText(creator.trim());
       }
     }
     if (name === "trkpt" || name === "rtept") {
-      const latRaw = tag.attributes["lat"];
-      const lonRaw = tag.attributes["lon"];
-      const lat = latRaw !== undefined ? Number(latRaw) : NaN;
-      const lon = lonRaw !== undefined ? Number(lonRaw) : NaN;
-      current = { lat, lon };
+      current = {
+        lat: parseStrictDecimal(tag.attributes["lat"] ?? ""),
+        lon: parseStrictDecimal(tag.attributes["lon"] ?? ""),
+      };
     }
     textBuf = "";
     stack.push(name);
@@ -95,36 +122,36 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
     if (name === "time" && current !== undefined && (parent === "trkpt" || parent === "rtept")) {
       current.timeText = textBuf.trim();
     } else if (name === "time" && parent === "metadata") {
-      metadataTimeIso = textBuf.trim();
+      metadataTime = parseStrictTimestamp(textBuf.trim());
     } else if (name === "time" && parent === "gpx") {
-      rootTimeIso = textBuf.trim();
+      rootTime = parseStrictTimestamp(textBuf.trim());
     } else if (name === "name" && parent === "trk" && !trkNameSeen) {
       const v = textBuf.trim();
       if (v.length > 0) {
-        courseNameHint = v;
+        courseNameHint = sanitizeText(v);
         trkNameSeen = true;
       }
     } else if (name === "name" && parent === "metadata" && !trkNameSeen) {
       const v = textBuf.trim();
-      if (v.length > 0) courseNameHint = v;
+      if (v.length > 0) courseNameHint = sanitizeText(v);
     } else if (name === "name" && parent === "gpx" && !trkNameSeen) {
       // GPX 1.0's top-level <name>, sibling of <trk>, not <trk>'s own name.
       const v = textBuf.trim();
-      if (v.length > 0 && courseNameHint === undefined) courseNameHint = v;
+      if (v.length > 0 && courseNameHint === undefined) courseNameHint = sanitizeText(v);
     }
 
     if ((name === "trkpt" || name === "rtept") && current !== undefined) {
       const { lat, lon, timeText } = current;
-      if (!isValidLat(lat) || !isValidLon(lon)) {
+      if (lat === undefined || lon === undefined || !isValidLat(lat) || !isValidLon(lon)) {
         warnings.push(`a <${name}> had an invalid or missing lat/lon and was dropped`);
       } else {
         let timestamp: number | undefined;
         if (timeText && timeText.length > 0) {
-          const parsed = Date.parse(timeText);
-          if (Number.isFinite(parsed)) {
-            timestamp = parsed;
+          const parsedTime = parseStrictTimestamp(timeText);
+          if (parsedTime !== undefined) {
+            timestamp = parsedTime.ms;
           } else {
-            warnings.push(`a <${name}> had an unparseable <time> "${timeText}", timestamp dropped`);
+            warnings.push(`a <${name}> had an unparseable <time> "${truncateEcho(timeText)}", timestamp dropped`);
           }
         }
         points.push({ lat, lon, ...(timestamp !== undefined ? { timestamp } : {}) });
@@ -144,7 +171,7 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
   }
 
   if (firstError) {
-    return { ok: false, error: `GPX parse error: ${firstError}` };
+    return { ok: false, error: finalizeError(`GPX parse error: ${firstError}`) };
   }
   if (!sawRoot || !rootIsGpx) {
     return { ok: false, error: "not a GPX file (root element is not <gpx>)" };
@@ -170,22 +197,38 @@ export function parseGpxFile(bytes: Uint8Array): ImportResult {
   };
 
   if (fixes.length > 0) {
+    // Routed: real timestamps only, never a derived date (A2-17).
     round.startedAt = fixes[0]!.timestamp;
     round.endedAt = fixes[fixes.length - 1]!.timestamp;
   } else {
-    // No usable route. Fall back to a file-level timestamp for a
-    // date-only round (build plan A2-17), preferring GPX 1.1's
-    // <metadata><time> then GPX 1.0's top-level <time>.
-    const fallbackIso = metadataTimeIso || rootTimeIso;
-    const fallbackMs = fallbackIso ? Date.parse(fallbackIso) : NaN;
-    if (Number.isFinite(fallbackMs)) {
-      round.localDate = new Date(fallbackMs).toISOString().slice(0, 10);
+    // Routeless: `localDate` only (build plan A2-17/§4.5), preferring a
+    // file-level timestamp that carries its own explicit offset (used
+    // as-is, per the build task's instruction that an offset-bearing
+    // source timestamp is authoritative for its own date), then a `tz`
+    // option, then nothing.
+    const fileLevel = metadataTime ?? rootTime;
+    if (fileLevel !== undefined && fileLevel.hasExplicitOffset) {
+      round.localDate = fileLevel.literalDate;
+    } else if (options.tz !== undefined && fileLevel !== undefined) {
+      const tzDate = localDateForTz(fileLevel.ms, options.tz);
+      if (tzDate !== undefined) {
+        round.localDate = tzDate;
+      } else {
+        warnings.push(`could not derive a local date using tz "${truncateEcho(options.tz)}"`);
+      }
+    } else if (options.tz !== undefined && fileLevel === undefined) {
+      warnings.push("no usable timestamp of any kind found; a tz option alone has nothing to convert");
+    } else if (fileLevel !== undefined) {
+      // Has a Z-normalized file-level time but no tz to project it
+      // through, and no explicit offset to trust as-is.
+      warnings.push("file-level <time> is UTC (Z) with no facility tz option; local date left undefined");
     } else if (points.length === 0) {
       warnings.push("GPX file has no track/route points");
     } else {
-      warnings.push("no usable timestamp (per-point or file-level) found; round has no date");
+      warnings.push("no usable timestamp (per-point or file-level) found; local date left undefined");
     }
   }
 
+  round.warnings = finalizeWarnings(warnings);
   return { ok: true, round };
 }

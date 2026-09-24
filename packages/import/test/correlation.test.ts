@@ -66,6 +66,19 @@ describe("correlationKey", () => {
     expect(shareKey(a, b)).toBe(false);
   });
 
+  it("mutation-pinning: shares no key 90 minutes apart — catches a 60-minute-bucket mutation", () => {
+    // With the correct 15-minute grid, 90 minutes = 6 buckets apart, well
+    // outside the ±1-neighbor overlap. A mutant that widened the bucket
+    // to 60 minutes would put these only 1 (60-minute) bucket apart,
+    // which *would* overlap under the ±1-neighbor scheme — so this test
+    // fails under that mutation and passes under the real 15-minute one.
+    // Clock-aligned timestamps (both grids share epoch-0 alignment) keep
+    // the bucket arithmetic exact rather than alignment-dependent.
+    const a = correlationKey(routeRound(Date.parse("2026-06-01T10:00:00Z")), "fac_1");
+    const b = correlationKey(routeRound(Date.parse("2026-06-01T11:30:00Z")), "fac_1");
+    expect(shareKey(a, b)).toBe(false);
+  });
+
   describe("boundary cases", () => {
     it("shares a key 2 seconds apart, straddling a 15-minute grid line (10:07:29 vs 10:07:31)", () => {
       const a = correlationKey(routeRound(Date.parse("2026-06-01T10:07:29Z")), "fac_1");
