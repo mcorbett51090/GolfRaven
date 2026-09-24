@@ -1388,32 +1388,105 @@ export function resolveGitBinary(gitBinaryOverride?: string): GitBinaryResolutio
 }
 
 /** Environment variables whose mere PRESENCE in the process's original
- * environment is grounds for refusal (round 7 hardening (3)) — none of
- * these has a legitimate reason to be set for this CLI, and each is a
- * known code-injection or binary-substitution vector for a *nix
- * process. Checked against the ORIGINAL environment (never the scrubbed
- * child env, which never carries these anyway) because the risk is that
- * ALREADY-RUNNING PROCESS, not merely the child git commands. */
-const RUNTIME_TAMPER_BLANKET_VARS = [
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "GIT_EXEC_PATH",
-] as const;
-/** `DYLD_*` (macOS's dynamic-linker family — `DYLD_INSERT_LIBRARIES` is
- * the LD_PRELOAD equivalent) is a prefix, not a fixed name. */
-const DYLD_PREFIX = "DYLD_";
+ * environment is grounds for refusal — none of these has a legitimate
+ * reason to be set for this CLI, and each is a known code-injection or
+ * binary-substitution vector for a *nix process. Checked against the
+ * ORIGINAL environment (never the scrubbed child env, which never
+ * carries these anyway) because the risk is that ALREADY-RUNNING
+ * PROCESS, not merely the child git commands. `GIT_EXEC_PATH` is a fixed
+ * name; `LD_*` (round 8 follow-up: was a fixed two-name list —
+ * `LD_PRELOAD`/`LD_LIBRARY_PATH` — the gate's own round-8 probe used
+ * `LD_AUDIT` to load native code, which that list missed entirely) and
+ * `DYLD_*` (macOS's dynamic-linker family — `DYLD_INSERT_LIBRARIES` is
+ * the LD_PRELOAD equivalent) are both PREFIXES now, not fixed names. */
+const RUNTIME_TAMPER_BLANKET_VARS = ["GIT_EXEC_PATH"] as const;
+const RUNTIME_TAMPER_PREFIXES = ["LD_", "DYLD_"] as const;
 
-/** `NODE_OPTIONS` gets a NARROWER check than the blanket vars above: this
- * environment's own ordinary shell sets a benign `--max-old-space-size=…`
- * NODE_OPTIONS (confirmed this session — `node -e '...'` in a plain
- * shell here already carries one), so "is NODE_OPTIONS set at all" would
- * make the live CLI falsely UNOFFICIAL on every normal run in this
- * environment. The actual attack (`evil.cjs`, this round's own gate
- * fixture) needs a flag that makes Node LOAD CODE from an
- * attacker-chosen file before this module runs: `--require`/`-r`,
- * `--loader`/`--experimental-loader`, or `--import`. Only THOSE flags
- * refuse. */
-const NODE_OPTIONS_DANGEROUS_RE = /(?:^|\s)(?:-r\b|--require\b|--loader\b|--experimental-loader\b|--import\b)/;
+/**
+ * Round 8: `NODE_OPTIONS` is checked with an ALLOW-LIST of known-benign
+ * flags, never a denylist of known-dangerous ones — round 7's denylist
+ * (`--require`/`-r`/`--loader`/`--experimental-loader`/`--import`) missed
+ * every other Node flag capable of doing something this tool should
+ * refuse on (`--inspect*` opens a debugger port; `--env-file` reads
+ * arbitrary attacker-chosen config into `process.env`; `--conditions`
+ * changes package resolution; `--openssl-config`/`--use-openssl-ca`
+ * changes TLS trust; `--preserve-symlinks*` changes module resolution;
+ * any `--experimental-*` flag is by definition not vetted for this use).
+ * A denylist can only ever be a list of what somebody already thought
+ * of; an allow-list refuses everything not explicitly vetted, including
+ * flags nobody has named an attack for yet. Every OTHER, non-flag token
+ * (a bare value following a space-separated flag, e.g. the `8192` in
+ * `--stack-size 8192`) is passed through untouched — it is not itself a
+ * vector, and rejecting it would make legitimate space-separated flags
+ * unusable. This environment's own ordinary shell sets a benign
+ * `--max-old-space-size=8192` NODE_OPTIONS (confirmed this session),
+ * which the allow-list below is built to pass. */
+const NODE_OPTIONS_ALLOWED_EXACT = new Set<string>([
+  "--no-warnings",
+  "--enable-source-maps",
+  "--trace-warnings",
+]);
+/** A token is allowed if its flag name (before any `=value`) is exactly
+ * one of `NODE_OPTIONS_ALLOWED_EXACT`, OR starts with one of these
+ * prefixes — covers `--max-old-space-size`, `--max-semi-space-size`, any
+ * OTHER `--max-*` memory-limit flag, `--stack-size`, and
+ * `--unhandled-rejections=<any value>`. */
+const NODE_OPTIONS_ALLOWED_PREFIXES = ["--max-", "--stack-size", "--unhandled-rejections"] as const;
+
+/** Splits a NODE_OPTIONS string into tokens the way Node itself does:
+ * whitespace-separated, with single- or double-quoted spans kept intact
+ * (so a quoted value containing a space is one token, quote characters
+ * stripped). Good enough for THIS module's purpose — identifying flag
+ * NAMES to check against the allow-list — without depending on Node's
+ * own (unexported) parser. An unterminated quote simply consumes to the
+ * end of the string as part of that token, which is a safe (more
+ * restrictive, not less) default. */
+export function tokenizeNodeOptions(nodeOptions: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+  const n = nodeOptions.length;
+  while (i < n) {
+    while (i < n && /\s/.test(nodeOptions[i] ?? "")) i += 1;
+    if (i >= n) break;
+    let token = "";
+    let quote: string | null = null;
+    while (i < n) {
+      const c = nodeOptions[i] ?? "";
+      if (quote) {
+        if (c === quote) {
+          quote = null;
+          i += 1;
+          continue;
+        }
+        token += c;
+        i += 1;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        i += 1;
+        continue;
+      }
+      if (/\s/.test(c)) break;
+      token += c;
+      i += 1;
+    }
+    tokens.push(token);
+  }
+  return tokens;
+}
+
+/** `true` when `token` is either not a flag at all (doesn't start with
+ * `-` — a bare value following a space-separated flag, always passed
+ * through) or a flag on the allow-list above. Everything else — every
+ * flag NOT explicitly vetted, named or not — is refused. */
+export function isNodeOptionTokenAllowed(token: string): boolean {
+  if (!token.startsWith("-")) return true; // a value, not a flag — not itself a vector
+  const eqIdx = token.indexOf("=");
+  const flagName = eqIdx === -1 ? token : token.slice(0, eqIdx);
+  if (NODE_OPTIONS_ALLOWED_EXACT.has(flagName)) return true;
+  return NODE_OPTIONS_ALLOWED_PREFIXES.some((prefix) => flagName.startsWith(prefix));
+}
 
 export interface RuntimeTamperCheck {
   tampered: boolean;
@@ -1421,17 +1494,23 @@ export interface RuntimeTamperCheck {
 }
 
 /**
- * Round 7 hardening (3): looks for evidence the VERDICT PROCESS ITSELF —
- * not merely the git commands it spawns — may already be running
- * attacker-injected code, which would make any "scrubbed environment"
- * this module builds for its own child processes meaningless (the
- * injected code runs inside THIS process and can patch
- * `child_process.execFile` before this module's own code ever executes;
- * `evil.cjs`, the round-7 gate's own fixture, does exactly that).
- * INJECTED, never reading `process.env`/`process.execArgv` directly —
- * see this section's own banner comment for why (the test-only seam is
- * `verifyAgainstGitHub`'s `runtimeEnv`/`runtimeExecArgv` options; `main()`
- * never overrides them, so the live CLI always checks the REAL ones).
+ * ⛔ Round 8 correction — read this section's own banner comment above
+ * FIRST: this is a TRIPWIRE FOR NAIVE, NON-SELF-HIDING INJECTION ONLY,
+ * not a security boundary. It looks for evidence the VERDICT PROCESS
+ * ITSELF — not merely the git commands it spawns — may already be
+ * running attacker-injected code, which would make any "scrubbed
+ * environment" this module builds for its own child processes
+ * meaningless (the injected code runs inside THIS process and can patch
+ * `child_process.execFile` before this module's own code ever executes).
+ * A preload sophisticated enough to ALSO erase the very env vars/execArgv
+ * this function reads (round 8's own gate fixture does exactly that,
+ * confirmed this round) defeats it completely and unavoidably — see the
+ * banner comment for why no in-process fix exists. INJECTED, never
+ * reading `process.env`/`process.execArgv` directly — see the banner
+ * comment for why (the test-only seam is `verifyAgainstGitHub`'s
+ * `runtimeEnv`/`runtimeExecArgv` options; `main()` never overrides them,
+ * so the live CLI always checks the REAL ones — for whatever that is
+ * worth against a naive attempt).
  */
 export function detectRuntimeTamper(env: NodeJS.ProcessEnv, execArgv: readonly string[]): RuntimeTamperCheck {
   for (const key of RUNTIME_TAMPER_BLANKET_VARS) {
@@ -1440,29 +1519,37 @@ export function detectRuntimeTamper(env: NodeJS.ProcessEnv, execArgv: readonly s
         tampered: true,
         detail: `refusing: ${key} is set in the verdict process's own environment — this can substitute or ` +
           "inject code into any binary this process (or a child it spawns) loads, making a \"scrubbed git " +
-          "environment\" meaningless (round 7 hardening).",
+          "environment\" meaningless (tripwire only — see this module's own round 8 correction).",
       };
     }
   }
   for (const [key, value] of Object.entries(env)) {
-    if (key.startsWith(DYLD_PREFIX) && value !== undefined) {
+    if (value === undefined) continue;
+    const matchedPrefix = RUNTIME_TAMPER_PREFIXES.find((prefix) => key.startsWith(prefix));
+    if (matchedPrefix) {
       return {
         tampered: true,
-        detail: `refusing: ${key} is set in the verdict process's own environment — the DYLD_* family can ` +
-          "inject code into this process the same way LD_PRELOAD does on Linux (round 7 hardening).",
+        detail:
+          `refusing: ${key} is set in the verdict process's own environment — the ${matchedPrefix}* family can ` +
+          "inject code into this process (LD_PRELOAD/LD_AUDIT and their macOS DYLD_* equivalents) the same way " +
+          "on Linux/macOS (tripwire only — see this module's own round 8 correction).",
       };
     }
   }
   const nodeOptions = env.NODE_OPTIONS;
-  if (nodeOptions !== undefined && NODE_OPTIONS_DANGEROUS_RE.test(nodeOptions)) {
-    return {
-      tampered: true,
-      detail:
-        `refusing: NODE_OPTIONS ("${nodeOptions}") carries a code-loading flag (--require/-r/--loader/` +
-        "--experimental-loader/--import) — this can patch child_process.execFile before this module's own " +
-        "code ever runs, making a \"scrubbed git environment\" meaningless (round 7 hardening). (A benign " +
-        "NODE_OPTIONS with no such flag, e.g. a memory-limit setting, is NOT refused here.)",
-    };
+  if (nodeOptions !== undefined) {
+    const tokens = tokenizeNodeOptions(nodeOptions);
+    const badToken = tokens.find((t) => !isNodeOptionTokenAllowed(t));
+    if (badToken !== undefined) {
+      return {
+        tampered: true,
+        detail:
+          `refusing: NODE_OPTIONS ("${nodeOptions}") carries "${badToken}", which is not on this tool's narrow ` +
+          "allow-list of known-benign flags (--max-*/--stack-size/--unhandled-rejections/--no-warnings/" +
+          "--enable-source-maps/--trace-warnings) — refusing by default rather than denylisting only the " +
+          "flags already known to be dangerous (tripwire only — see this module's own round 8 correction).",
+      };
+    }
   }
   if (execArgv.length > 0) {
     return {
@@ -1470,11 +1557,11 @@ export function detectRuntimeTamper(env: NodeJS.ProcessEnv, execArgv: readonly s
       detail:
         `refusing: process.execArgv is non-empty (${JSON.stringify(execArgv)}) — a plain "node <script>.js" ` +
         "invocation has an empty execArgv; flags passed directly to the node invocation itself (e.g. " +
-        "--require=evil.cjs, or -e/--eval) are the same code-injection class as NODE_OPTIONS (round 7 " +
-        "hardening).",
+        "--require=evil.cjs, or -e/--eval) are the same code-injection class as NODE_OPTIONS (tripwire only " +
+        "— see this module's own round 8 correction).",
     };
   }
-  return { tampered: false, detail: "no runtime-tamper indicators found." };
+  return { tampered: false, detail: "no runtime-tamper indicators found (naive-injection tripwire only)." };
 }
 
 /** Per-command `-c` flags every disposable-repo git invocation carries:
