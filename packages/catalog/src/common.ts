@@ -45,16 +45,52 @@ export const RegionCodeSchema = z
   .regex(/^(US|CA)-[A-Z]{2,3}$/, "must be an ISO 3166-2 US/CA code");
 export type RegionCode = z.infer<typeof RegionCodeSchema>;
 
-const IANA_TIME_ZONES = new Set(Intl.supportedValuesOf("timeZone"));
+/**
+ * `tz: IANAZone` (G-P0-11) — "is this a real IANA zone name" half of the
+ * check. **Not** `Intl.supportedValuesOf('timeZone')` (gate-review
+ * correction, post-e9b3ab0): that API is a fairly recent addition (Node
+ * 18+) and its populated list is an ICU implementation detail that can
+ * vary between runtimes/ICU data versions, so a name it doesn't happen to
+ * enumerate could be wrongly rejected even though `Intl.DateTimeFormat`
+ * itself accepts it. `new Intl.DateTimeFormat('en', { timeZone })` is the
+ * more portable check: every environment with `Intl` support implements
+ * it, and it throws a `RangeError` on an unrecognised zone name — that
+ * throw/no-throw is what this validates, offline, no network fetch, no
+ * pinned dataset needed for this half. See `tzLikelyContainsCoordinates`
+ * in `geo.ts` for the "wrong zone" half, which DOES use a pinned dataset
+ * (via the `tz-lookup` package).
+ */
+export function isValidIanaTimeZoneName(value: string): boolean {
+  try {
+    // eslint-disable-next-line no-new
+    new Intl.DateTimeFormat("en", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-/** `tz: IANAZone` (G-P0-11) — validates against the runtime's own ICU time
- * zone database (`Intl.supportedValuesOf('timeZone')`), which is offline
- * and needs no network fetch or pinned dataset for the "is this a real IANA
- * zone name" half of the check. See `tzLikelyContainsCoordinates` in
- * `geo.ts` for the "wrong zone" half. */
 export const IanaTimeZoneSchema = z
   .string()
-  .refine((value) => IANA_TIME_ZONES.has(value), {
+  .refine((value) => isValidIanaTimeZoneName(value), {
     error: "must be a valid IANA time zone name",
   });
 export type IanaTimeZone = z.infer<typeof IanaTimeZoneSchema>;
+
+/**
+ * S7 (gate review, post-e9b3ab0): every URL this schema accepts on a
+ * curated record must be `https:` — `z.url()` alone accepts any scheme,
+ * including `javascript:`, `http:`, `data:`, etc. Scoped to exactly what
+ * the gate review named (Facility `url`, booking `url`); see `schema.ts`.
+ */
+export const HttpsUrlSchema = z.url().refine(
+  (value) => {
+    try {
+      return new URL(value).protocol === "https:";
+    } catch {
+      return false;
+    }
+  },
+  { error: "must be an https: URL" },
+);
+export type HttpsUrl = z.infer<typeof HttpsUrlSchema>;

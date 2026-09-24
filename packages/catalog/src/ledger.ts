@@ -73,6 +73,13 @@ export const LedgerEntrySchema = z.strictObject({
   /** Facility/course only — the OSM refs a re-seed has ever matched to
    * this id (§4.2 G-P1-12). */
   seedRefs: z.array(OsmRefIdSchema).optional(),
+  /** Course entries only — the facility this course belongs to. Not named
+   * in §3.5's ledger-entry prose, but added (gate review, post-e9b3ab0) so
+   * a re-seed's "already-known" check can resolve a matched `osmRef` to
+   * its full facility+course pair from the ledger alone, without needing
+   * the caller to have already guessed the right candidate (see
+   * `findLedgerIdBySeedRef`/`reseedFacility` below). */
+  facilityId: FacilityIdSchema.optional(),
   /** Set once this id is tombstoned. `mergedInto` is set only when the
    * tombstone is a merge (§3.5: "tombstoned (with an **optional**
    * mergedInto)" — the plan allows a tombstone without one, though the
@@ -139,6 +146,12 @@ export function resolveMergedId(ledger: IdLedger, id: string): string {
 /* Slugs (AT(7))                                                        */
 /* ------------------------------------------------------------------ */
 
+/** A conservative URL-slug pattern: lowercase ASCII letters, digits and
+ * single hyphens, no leading/trailing/doubled hyphen. Rejects anything
+ * that isn't already slugified (gate review, post-e9b3ab0 nit) — minting
+ * never silently slugifies a raw name for the caller. */
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
 /**
  * AT(7): "A slug collision suffixes the newcomer and leaves the existing
  * slug unchanged." Scans every entry's `slug` (ledger-wide — slugs are a
@@ -147,6 +160,11 @@ export function resolveMergedId(ledger: IdLedger, id: string): string {
  * free. Pure: returns the slug to use; does not mutate the ledger.
  */
 export function mintSlug(ledger: IdLedger, desiredSlug: string): string {
+  if (!SLUG_PATTERN.test(desiredSlug)) {
+    throw new Error(
+      `mintSlug: "${desiredSlug}" is not already slugified (expected lowercase letters/digits/hyphens only, e.g. "pebble-hills") — slugify it before calling mintSlug`,
+    );
+  }
   const taken = new Set(
     Object.values(ledger.entries)
       .map((e) => e.slug)
@@ -228,6 +246,7 @@ export function mintStubFacility(
     status: "stub",
     transitions: [transition],
     seedRefs: [osmRef],
+    facilityId,
   });
   return { ledger: next, facilityId, courseId, slug };
 }
@@ -271,6 +290,72 @@ export type ReseedOutcome =
     };
 
 /**
+ * Scans the **whole ledger** (every entry, not just the caller's
+ * `candidates` shortlist) for one whose `seedRefs` already contains
+ * `osmRef`, and resolves it through the `mergedInto` closure (A2-04) to
+ * its live survivor. Returns the survivor's `{ facilityId, courseId }`
+ * pair, using the `facilityId` link `mintStubFacility`/`splitCourse` stamp
+ * on every course entry to find the facility's course id (or vice
+ * versa) without needing the caller to already know it.
+ *
+ * **Gate-review fix (post-e9b3ab0, blocking #4).** The previous
+ * implementation only checked `osmRef` against the caller-supplied
+ * `candidates` array — a shortlist the caller (e.g. `seed-osm.mjs`,
+ * spatially pre-filtering) might not include every already-known owner
+ * in, especially the survivor of a merge that happened after the object
+ * moved or was renamed. That let an already-minted id's `osmRef` fall
+ * through to spatial matching with an empty/wrong candidate list and mint
+ * a **second** id for the same real-world object — exactly what G-P1-12
+ * forbids. This lookup no longer depends on `candidates` at all.
+ */
+export function findLedgerIdBySeedRef(
+  ledger: IdLedger,
+  osmRef: string,
+): { facilityId: FacilityId; courseId: CourseId } | undefined {
+  const parsedRef = OsmRefIdSchema.parse(osmRef);
+  const ownerEntry = Object.values(ledger.entries).find((e) =>
+    (e.seedRefs ?? []).includes(parsedRef),
+  );
+  if (!ownerEntry) return undefined;
+
+  const survivorId = resolveMergedId(ledger, ownerEntry.id);
+  const survivorEntry = ledger.entries[survivorId];
+  if (!survivorEntry) {
+    throw new Error(
+      `findLedgerIdBySeedRef: "${osmRef}" resolved to survivor "${survivorId}", which is not in the ledger`,
+    );
+  }
+
+  if (survivorEntry.kind === "fac") {
+    const facilityId = survivorEntry.id as FacilityId;
+    const courseEntry = Object.values(ledger.entries).find(
+      (e) => e.kind === "crs" && !e.tombstoned && e.facilityId === facilityId,
+    );
+    if (!courseEntry) {
+      throw new Error(
+        `findLedgerIdBySeedRef: facility "${facilityId}" (survivor of "${osmRef}") has no linked course entry in the ledger`,
+      );
+    }
+    return { facilityId, courseId: courseEntry.id as CourseId };
+  }
+
+  if (survivorEntry.kind === "crs") {
+    const courseId = survivorEntry.id as CourseId;
+    const facilityId = survivorEntry.facilityId;
+    if (!facilityId) {
+      throw new Error(
+        `findLedgerIdBySeedRef: course "${courseId}" (survivor of "${osmRef}") has no facilityId link in the ledger`,
+      );
+    }
+    return { facilityId, courseId };
+  }
+
+  throw new Error(
+    `findLedgerIdBySeedRef: "${osmRef}" resolved to a "${survivorEntry.kind}" entry, which is neither a facility nor a course`,
+  );
+}
+
+/**
  * G-P1-12 / FM-14: "`seed-osm.mjs` matches every incoming OSM object
  * **spatially first** (centroid within 150 m **and** normalised-name
  * similarity ≥ 0.8) against existing facilities. A spatial match appends
@@ -284,6 +369,13 @@ export type ReseedOutcome =
  * (`way/123` → `relation/456`) while its coordinates and name stay the
  * same, so it spatially matches its own previous facility and only
  * extends `seedRefs[]` — never mints a second id.
+ *
+ * **S9 (gate review, post-e9b3ab0): proximity without a name match is
+ * ambiguous, not "no match".** An object within 150 m of an existing
+ * facility whose name similarity falls short of 0.8 is exactly the case a
+ * human should look at (a rename? a genuinely distinct adjacent course?
+ * a near-duplicate OSM entry?) — it is never silently treated as "no
+ * spatial match found" and auto-minted as if it were unrelated.
  */
 export function reseedFacility(
   ledger: IdLedger,
@@ -291,35 +383,33 @@ export function reseedFacility(
   candidates: ReseedCandidate[],
 ): ReseedOutcome {
   const osmRef = OsmRefIdSchema.parse(incoming.osmRef);
-  const alreadyKnown = candidates.find((c) =>
-    (ledger.entries[c.facilityId]?.seedRefs ?? []).includes(osmRef),
-  );
-  if (alreadyKnown) {
-    return {
-      kind: "already-known",
-      facilityId: alreadyKnown.facilityId,
-      courseId: alreadyKnown.courseId,
-    };
+
+  const known = findLedgerIdBySeedRef(ledger, osmRef);
+  if (known) {
+    return { kind: "already-known", ...known };
   }
 
-  const matches = candidates.filter(
-    (c) =>
-      haversineDistanceMeters(incoming, c) <= SPATIAL_MATCH_RADIUS_METERS &&
-      normalizedNameSimilarity(incoming.name, c.name) >=
-        NAME_SIMILARITY_THRESHOLD,
+  const nearby = candidates.filter(
+    (c) => haversineDistanceMeters(incoming, c) <= SPATIAL_MATCH_RADIUS_METERS,
   );
 
-  if (matches.length > 1) {
-    return {
-      kind: "ambiguous",
-      candidateFacilityIds: matches.map((m) => m.facilityId),
-    };
-  }
-
-  if (matches.length === 1) {
-    const match = matches[0];
+  if (nearby.length > 0) {
+    const nameMatches = nearby.filter(
+      (c) =>
+        normalizedNameSimilarity(incoming.name, c.name) >= NAME_SIMILARITY_THRESHOLD,
+    );
+    // Exactly one nearby candidate AND its name matches: a clean spatial
+    // match. Anything else nearby — zero name matches (S9), or more than
+    // one — is ambiguous, never auto-minted.
+    if (nameMatches.length !== 1) {
+      return {
+        kind: "ambiguous",
+        candidateFacilityIds: nearby.map((c) => c.facilityId),
+      };
+    }
+    const match = nameMatches[0];
     if (!match) {
-      throw new Error("unreachable: matches.length === 1 but matches[0] is undefined");
+      throw new Error("unreachable: nameMatches.length === 1 but nameMatches[0] is undefined");
     }
     const facilityEntry = ledger.entries[match.facilityId];
     const courseEntry = ledger.entries[match.courseId];
@@ -398,6 +488,22 @@ export function promoteToVerified(
     if (!entry) {
       throw new Error(`promoteToVerified: unknown ledger id "${id}"`);
     }
+    // S8 (gate review, post-e9b3ab0): a tombstoned id is dead — §3.5's
+    // "never removed or reassigned" means a merged-away id can never
+    // re-enter the promotion lifecycle under its own name again.
+    if (entry.tombstoned) {
+      throw new Error(
+        `promoteToVerified: "${id}" is tombstoned (mergedInto: ${entry.mergedInto ?? "?"}) and cannot be promoted`,
+      );
+    }
+    // S8: a second `verified` transition would silently double-record a
+    // one-time promotion event — reject rather than allow it, matching
+    // §3.5's "promotion is a recorded event", singular.
+    if (entry.transitions.some((t) => t.type === "verified")) {
+      throw new Error(
+        `promoteToVerified: "${id}" already has a "verified" transition`,
+      );
+    }
     next = withEntry(next, { ...entry, status: "verified" });
     next = appendTransition(next, id, {
       type: "verified",
@@ -425,7 +531,8 @@ export function splitCourse(
   meta: TransitionMeta,
   now?: Date,
 ): SplitCourseResult {
-  if (!ledger.entries[keptCourseId]) {
+  const keptEntry = ledger.entries[keptCourseId];
+  if (!keptEntry) {
     throw new Error(`splitCourse: unknown ledger id "${keptCourseId}"`);
   }
   const siblingIds: CourseId[] = [];
@@ -448,6 +555,9 @@ export function splitCourse(
           note: `split from ${keptCourseId}`,
         },
       ],
+      // Siblings belong to the same facility as the course they were
+      // split from.
+      ...(keptEntry.facilityId ? { facilityId: keptEntry.facilityId } : {}),
     });
   }
   next = appendTransition(next, keptCourseId, {
@@ -471,8 +581,37 @@ export function mergeIntoSurvivor(
   survivorId: string,
   meta: TransitionMeta,
 ): IdLedger {
-  if (!ledger.entries[survivorId]) {
+  const survivorEntry = ledger.entries[survivorId];
+  if (!survivorEntry) {
     throw new Error(`mergeIntoSurvivor: unknown survivor id "${survivorId}"`);
+  }
+  for (const id of tombstoneIds) {
+    const entry = ledger.entries[id];
+    if (!entry) {
+      throw new Error(`mergeIntoSurvivor: unknown ledger id "${id}"`);
+    }
+    // S8 (gate review, post-e9b3ab0):
+    // - self-merge: an id cannot be tombstoned into itself.
+    if (id === survivorId) {
+      throw new Error(`mergeIntoSurvivor: "${id}" cannot be merged into itself`);
+    }
+    // - cross-kind merge: a course can only merge into a course, a
+    //   facility only into a facility (§4.2's promotion table only ever
+    //   merges "several stub facilities" into "one survivor" — same kind).
+    if (entry.kind !== survivorEntry.kind) {
+      throw new Error(
+        `mergeIntoSurvivor: cannot merge a "${entry.kind}" id ("${id}") into a "${survivorEntry.kind}" survivor ("${survivorId}")`,
+      );
+    }
+    // - merge cycle: if the survivor already (transitively) resolves to
+    //   the very id we're about to tombstone, tombstoning it into the
+    //   survivor would close a loop (A→survivor→...→A).
+    const survivorResolvesTo = resolveMergedId(ledger, survivorId);
+    if (survivorResolvesTo === id) {
+      throw new Error(
+        `mergeIntoSurvivor: merging "${id}" into "${survivorId}" would create a mergedInto cycle (survivor already resolves back to "${id}")`,
+      );
+    }
   }
   let next = ledger;
   for (const id of tombstoneIds) {

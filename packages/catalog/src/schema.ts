@@ -8,12 +8,19 @@
  * immutability, geometry/contact diffs, …) live in `tools/catalog`'s
  * `verify-catalog`, per §10 P1's own naming of that as a separate tool.
  *
- * **Scope note (see the P1a report for the full list).** `AchievementDef`
- * and `OfferTerms` are the two §4.1 top-level entities *not* implemented
- * here. Both require `RuleExpr` (`AchievementDef.rule`, and `OfferTerms`'
- * eligibility rules live in the DB under the same grammar, §4.1), and the
- * task's own out-of-scope list names "`packages/rules` (completion and
- * `RuleExpr`)" as part B. Every other §4.1 entity is implemented.
+ * **Scope note (see the P1a report for the full list; corrected post-e9b3ab0,
+ * gate review S6).** `AchievementDef` is the one §4.1 top-level entity
+ * *not* implemented here — it needs `RuleExpr` (`AchievementDef.rule`),
+ * and the task's own out-of-scope list names "`packages/rules` (completion
+ * and `RuleExpr`)" as part B. **`OfferTerms` IS implemented below** — the
+ * original comment here wrongly grouped it with `AchievementDef` as also
+ * needing `RuleExpr`. It doesn't: §4.1 states plainly that `OfferTerms` is
+ * *"public, reviewed legal text only"* (`id, trailId, title, terms,
+ * termsFr?, mode`) and that *"Offer INSTANCES and parameters (facility,
+ * eligibility RuleExpr, budget, validity, maxRedemptions, funder) live in
+ * the DB under operator scope"* — the `RuleExpr` lives on the DB-side offer
+ * instance, never on `OfferTerms` itself. Every other §4.1 entity is
+ * implemented.
  */
 import { z } from "zod";
 import {
@@ -21,10 +28,12 @@ import {
   DesignerIdSchema,
   FacilityIdSchema,
   HoleIdSchema,
+  OfferTermsIdSchema,
   OsmRefIdSchema,
   TrailIdSchema,
 } from "./ids.js";
 import {
+  HttpsUrlSchema,
   IanaTimeZoneSchema,
   IsoDateSchema,
   ProvSchema,
@@ -32,8 +41,8 @@ import {
   SourceSchema,
 } from "./common.js";
 
-export { CourseIdSchema, DesignerIdSchema, FacilityIdSchema, HoleIdSchema, OsmRefIdSchema, TrailIdSchema };
-export { IanaTimeZoneSchema, IsoDateSchema, ProvSchema, RegionCodeSchema, SourceSchema };
+export { CourseIdSchema, DesignerIdSchema, FacilityIdSchema, HoleIdSchema, OfferTermsIdSchema, OsmRefIdSchema, TrailIdSchema };
+export { HttpsUrlSchema, IanaTimeZoneSchema, IsoDateSchema, ProvSchema, RegionCodeSchema, SourceSchema };
 
 /* ------------------------------------------------------------------ */
 /* Region                                                              */
@@ -94,6 +103,38 @@ export const DesignerSchema = z.strictObject({
 export type Designer = z.infer<typeof DesignerSchema>;
 
 /* ------------------------------------------------------------------ */
+/* OfferTerms (S6, gate review post-e9b3ab0 — see this file's module doc) */
+/* ------------------------------------------------------------------ */
+
+export const OfferTermsModeSchema = z.enum(["portal-verify", "code-pool"]);
+export type OfferTermsMode = z.infer<typeof OfferTermsModeSchema>;
+
+/**
+ * `OfferTerms { id: 'oft_…', trailId, title, terms, termsFr?, mode:
+ * 'portal-verify'|'code-pool' }` (§4.1) — "public, reviewed legal text
+ * only". Offer *instances* (facility, eligibility `RuleExpr`, budget,
+ * validity, `maxRedemptions`, funder) are explicitly DB-side (§4.4
+ * `offer`), not part of this record, which is why `OfferTerms` needs no
+ * `RuleExpr` and is in scope for P1a.
+ *
+ * `termsFr` is optional here at the schema level for the same reason the
+ * rest of this file keeps conditional requirements out of the Zod shape:
+ * it is required only for a trail whose `regions` include a Québec code
+ * (`CA-QC`), which needs the linked `Trail` record to evaluate — a
+ * cross-record gate rule (`tools/catalog`'s `OFFER_TERMS_QC_MISSING_FR`),
+ * not a schema-level one.
+ */
+export const OfferTermsSchema = z.strictObject({
+  id: OfferTermsIdSchema,
+  trailId: TrailIdSchema,
+  title: z.string().min(1),
+  terms: z.string().min(1),
+  termsFr: z.string().min(1).optional(),
+  mode: OfferTermsModeSchema,
+});
+export type OfferTerms = z.infer<typeof OfferTermsSchema>;
+
+/* ------------------------------------------------------------------ */
 /* Facility.verification (FM-07)                                       */
 /* ------------------------------------------------------------------ */
 
@@ -117,14 +158,16 @@ export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
 
 /**
  * `verification: { status, basis?, verifiedAt?, source?, claimProof? }`
- * (§4.1). `claimProof` is "required when basis = course-claim" — a
- * cross-field rule Zod's plain object shape cannot express as
- * required/optional per-branch without a discriminated union on `basis`,
- * which the plan's sketch does not use (`basis` is optional and
- * independent of `status`). Implemented with `superRefine` instead, so the
- * rule still lands inside one Zod parse (surfaced by `verify-catalog` as a
- * `SCHEMA_INVALID` issue at `verification.claimProof`) rather than as a
- * separate cross-record gate rule.
+ * (§4.1). `claimProof` is "required when basis = course-claim", and (S3,
+ * gate review post-e9b3ab0, plan line 677) `basis`, `verifiedAt` and
+ * `source` are each required once `status` is `listed-verified` or
+ * `play-verified` — both are cross-field rules Zod's plain object shape
+ * cannot express as required/optional per-branch without a discriminated
+ * union on `status`/`basis`, which the plan's sketch does not use (both
+ * are independent flat fields). Implemented with `superRefine` instead, so
+ * both rules still land inside one Zod parse (surfaced by `verify-catalog`
+ * as `SCHEMA_INVALID` issues at the specific missing field) rather than as
+ * separate cross-record gate rules.
  */
 export const VerificationSchema = z
   .strictObject({
@@ -142,6 +185,33 @@ export const VerificationSchema = z
         message:
           'claimProof is required when verification.basis is "course-claim" (§4.1)',
       });
+    }
+    // S3 / plan line 677: `listed-verified` requires "... an operator
+    // source, a primary-source fetch, a course claim ... or a
+    // two-source-match ...; a source" — i.e. basis, verifiedAt and source
+    // are all required once the tier is above `unverified`.
+    if (value.status !== "unverified") {
+      if (value.basis === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["basis"],
+          message: `basis is required when verification.status is "${value.status}" (§4.1, plan line 677)`,
+        });
+      }
+      if (value.verifiedAt === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["verifiedAt"],
+          message: `verifiedAt is required when verification.status is "${value.status}" (§4.1, plan line 677)`,
+        });
+      }
+      if (value.source === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["source"],
+          message: `source is required when verification.status is "${value.status}" (§4.1, plan line 677)`,
+        });
+      }
     }
   });
 export type Verification = z.infer<typeof VerificationSchema>;
@@ -172,9 +242,23 @@ export type CourseSeed = z.infer<typeof CourseSeedSchema>;
 /* prov / derivedFrom                                                  */
 /* ------------------------------------------------------------------ */
 
-/** `prov?: { name?, town?, coord? }` (Facility, §4.1). */
+/**
+ * `prov?: { name?, town?, coord? }` (Facility, §4.1) — **plus `nameFr`**
+ * (S2, gate review post-e9b3ab0, plan lines 561–562/569). The literal
+ * type declaration at line 472 only ever shows three keys, but §4.1's own
+ * gate-rule prose (line 562) lists `nameFr` among the Facility content
+ * fields that need a non-OSM `prov` stamp, and line 569 makes the general
+ * rule explicit: *"Verification replaces OSM content with sourced
+ * content"* — an OSM `name:fr` tag is exactly the kind of OSM content that
+ * rule exists to keep out of a curated record. Earlier (e9b3ab0) this was
+ * read as the type declaration overriding the prose and `nameFr` was left
+ * unstamped; the gate review corrected that reading, so `nameFr` gets its
+ * own key here, and `FACILITY_CONTENT_FIELD_TO_PROV_KEY` below maps to it
+ * directly instead of leaving it `undefined`.
+ */
 export const FacilityProvSchema = z.strictObject({
   name: ProvSchema.optional(),
+  nameFr: ProvSchema.optional(),
   town: ProvSchema.optional(),
   coord: ProvSchema.optional(),
 });
@@ -222,10 +306,11 @@ export const BookingProviderSchema = z.enum([
 export type BookingProvider = z.infer<typeof BookingProviderSchema>;
 
 /** One `booking[]` entry: `{ provider, url, externalId?, source, checkedAt
- * }` (§4.1). */
+ * }` (§4.1). `url` is `https:`-only (S7, gate review post-e9b3ab0) — a
+ * `javascript:`/`http:`/other-scheme booking URL is never legitimate. */
 export const BookingEntrySchema = z.strictObject({
   provider: BookingProviderSchema,
-  url: z.url(),
+  url: HttpsUrlSchema,
   externalId: z.string().optional(),
   source: SourceSchema,
   checkedAt: IsoDateSchema,
@@ -355,7 +440,8 @@ export const FacilitySchema = z.strictObject({
    * version (O8); a `verify-catalog` gate rule, not a schema-level one —
    * see `ROSTER_MEMBER_MISSING_ACCESS`. */
   access: FacilityAccessSchema.optional(),
-  url: z.url().optional(),
+  /** `https:`-only (S7, gate review post-e9b3ab0). */
+  url: HttpsUrlSchema.optional(),
   phone: z.string().optional(),
   closed: z.boolean().optional(),
   verification: VerificationSchema,
@@ -571,25 +657,19 @@ export const COURSE_DERIVED_FROM_ALLOWED_KEYS = ["slug"] as const;
  * Maps each Facility content field (§4.1 gate rule (a)'s list above) to
  * the `prov` key that stamps it.
  *
- * **Not a 1:1 mapping, and this is a genuine tension in the plan's own
- * text, not a free design choice.** The `prov` type is declared exactly
- * once, as `{ name?: Prov, town?: Prov, coord?: Prov }` (§4.1) — three
- * keys. But gate rule (a) separately lists five content fields including
- * `nameFr` and separate `lat`/`lng`. Reading the explicit type declaration
- * as authoritative for what `prov` can express (the more literal,
- * structured source): `lat` and `lng` are always sourced together as one
- * coordinate pair, so both map to the single `coord` key; `nameFr` has no
- * matching `prov` key at all, so a facility's `nameFr` is not
- * provenance-tracked in this schema version — `undefined` here means
- * "exempt from the prov-required check", not "always fails it". See the
- * P1a report's ambiguity list.
+ * **Not a 1:1 mapping.** `lat` and `lng` are always sourced together as
+ * one coordinate pair, so both map to the single `coord` key. `nameFr` DID
+ * map to `undefined` ("exempt") through e9b3ab0 — that was the wrong
+ * reading (see `FacilityProvSchema`'s doc, S2 gate-review correction):
+ * `nameFr` now has its own `prov` key and maps to it directly, so it is
+ * fully covered by the prov-required check like every other content field.
  */
 export const FACILITY_CONTENT_FIELD_TO_PROV_KEY: Record<
   (typeof FACILITY_CONTENT_FIELDS)[number],
-  keyof FacilityProv | undefined
+  keyof FacilityProv
 > = {
   name: "name",
-  nameFr: undefined,
+  nameFr: "nameFr",
   town: "town",
   lat: "coord",
   lng: "coord",

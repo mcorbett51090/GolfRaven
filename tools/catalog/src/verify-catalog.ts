@@ -4,28 +4,29 @@
  * every RuleExpr/achievements fixture is part B, per the task's own scope
  * cut).
  *
- * **How the geometry-diff and contact-field diff gates receive "the
- * previous version" (design note, since the task asks for this to be
- * explained).** Both gates (§10 P1 AT(1): "centroid moved > 150 m ...
- * without the `geometry-reviewed` label"; "`url`/`phone`/booking host
- * changed without `contact-reviewed`") compare the incoming catalog
- * against what was last published, and both need an out-of-band human
- * review signal (a PR label) that plainly cannot live inside catalog JSON.
- * This CLI takes:
+ * **How the geometry-diff, contact-field diff and roster-version-immutability
+ * gates receive "the previous version" (design note).** All three compare
+ * the incoming catalog against what was last published. This CLI takes:
  *   - `--base <bundle-file>` — a previously-published `CatalogBundle`
  *     (same shape as the input), read the same way as `--bundle`. Its
  *     absence is not an error: with no `--base`, the diff-shaped gates
- *     (`ROSTER_VERSION_IMMUTABLE_CHANGE`, `GEOMETRY_DIFF_UNREVIEWED`,
- *     `CONTACT_DIFF_UNREVIEWED`) simply have nothing to diff against and
- *     are skipped — exactly decision 0003 S1's own carve-out ("It does not
- *     include `verify-contract`'s breaking-diff check, which has nothing
- *     to diff against before the freeze" — the same reasoning applies to
- *     these per-record diffs before a first version is ever published).
+ *     simply have nothing to diff against and are skipped — decision 0003
+ *     S1's own carve-out ("nothing to diff against before the freeze")
+ *     applies equally to these per-record diffs before a first version is
+ *     ever published.
  *   - `--labels a,b,c` — the PR's labels for this run (in CI,
- *     `${{ join(github.event.pull_request.labels.*.name, ',') }}`). A
- *     bundle may also carry its own `labels[]` field, for a self-contained
- *     fixture that doesn't need a CLI flag; `--labels` overrides it when
- *     given.
+ *     `${{ join(github.event.pull_request.labels.*.name, ',') }}`).
+ *
+ * **Self-approval fix (gate review, post-e9b3ab0, blocking #2).** Neither
+ * the booking-host allow-list nor the review labels can come from the
+ * bundle itself any more (see `bundle.ts`'s module doc). The allow-list
+ * comes from the committed `config/booking-hosts.json` (`config.ts`,
+ * `--booking-hosts <file>` to override, mostly for tests); labels come
+ * ONLY from `--labels`. An omitted `--labels` flag and an explicitly empty
+ * `--labels ""` both mean "no labels" — there is no other source to fall
+ * back to, and the CLI parser treats "flag given with an empty value" and
+ * "flag not given" identically (both -> `[]`), rather than letting an
+ * empty string be mistaken for "use some other source".
  */
 import { readFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
@@ -36,17 +37,18 @@ import {
   FACILITY_CONTENT_FIELDS,
   FACILITY_CONTENT_FIELD_TO_PROV_KEY,
   FACILITY_DERIVED_FROM_ALLOWED_KEYS,
-  isIdTombstoned,
   resolveMergedId,
   tzLikelyContainsCoordinates,
   type Course,
   type Facility,
   type IdLedger,
+  type OfferTerms,
   type RosterMember,
   type RosterVersion,
   type Trail,
 } from "@golfraven/catalog";
-import { parseCatalogBundle, type CatalogBundle } from "./bundle.js";
+import { parseCatalogBundle, type CatalogBundle, type OsmContent } from "./bundle.js";
+import { loadBookingHostAllowList } from "./config.js";
 
 export interface CatalogIssue {
   /** A short, stable, upper-snake identifier — asserted on directly by
@@ -60,7 +62,13 @@ export interface CatalogIssue {
 
 export interface VerifyCatalogOptions {
   base?: CatalogBundle;
-  /** Overrides `bundle.labels` when given (see module doc). */
+  /** The booking-host allow-list for this run (see module doc — no bundle
+   * fallback any more). Defaults to `[]` (nothing allowed but
+   * `course-native` self-matches) when omitted, so a caller that forgets
+   * to load `config/booking-hosts.json` gets a strict, safe default rather
+   * than an unbounded one. */
+  bookingHostAllowList?: string[];
+  /** PR labels for this run (see module doc — no bundle fallback). */
   labels?: string[];
 }
 
@@ -165,6 +173,169 @@ function checkIds(
 }
 
 /* ------------------------------------------------------------------ */
+/* S4: cross-reference checks (gate review, post-e9b3ab0)              */
+/* ------------------------------------------------------------------ */
+
+function checkCrossReferences(
+  bundle: CatalogBundle,
+  courses: CourseWithFacility[],
+  issues: CatalogIssue[],
+): void {
+  const designerIds = new Set((bundle.designers ?? []).map((d) => d.id));
+  const courseById: Map<string, CourseWithFacility> = new Map(
+    courses.map((c) => [c.course.id, c]),
+  );
+
+  // Every catalog id (facility/course/trail/designer) should be minted in
+  // the ledger, and its curated slug should match the ledger's recorded
+  // (first-come, immutable) slug.
+  const checkLedgerBacked = (id: string, slug: string | undefined, path: string, label: string) => {
+    const entry = bundle.idLedger.entries[id];
+    if (!entry) {
+      issues.push(
+        issue(
+          "CROSS_REF_ID_NOT_IN_LEDGER",
+          path,
+          `${label} "${id}" has no entry in the ID ledger (every id must be minted there, §3.5)`,
+        ),
+      );
+      return;
+    }
+    if (slug !== undefined && entry.slug !== undefined && slug !== entry.slug) {
+      issues.push(
+        issue(
+          "CROSS_REF_SLUG_MISMATCH",
+          `${path}.slug`,
+          `${label} "${id}"'s slug "${slug}" does not match the ledger's recorded slug "${entry.slug}" (slugs are first-come and immutable, §3.5)`,
+        ),
+      );
+    }
+  };
+
+  bundle.facilities.forEach((facility, facilityIndex) => {
+    checkLedgerBacked(facility.id, facility.slug, `facilities[${facilityIndex}]`, "facility");
+  });
+  courses.forEach(({ course, facilityIndex, courseIndex }) => {
+    checkLedgerBacked(
+      course.id,
+      course.slug,
+      `facilities[${facilityIndex}].courses[${courseIndex}]`,
+      "course",
+    );
+  });
+  bundle.trails.forEach((trail, trailIndex) => {
+    checkLedgerBacked(trail.id, trail.slug, `trails[${trailIndex}]`, "trail");
+  });
+  (bundle.designers ?? []).forEach((designer, designerIndex) => {
+    checkLedgerBacked(designer.id, undefined, `designers[${designerIndex}]`, "designer");
+  });
+
+  // A ledger entry whose map key differs from its own `id` field.
+  for (const [key, entry] of Object.entries(bundle.idLedger.entries)) {
+    if (key !== entry.id) {
+      issues.push(
+        issue(
+          "LEDGER_KEY_MISMATCH",
+          `idLedger.entries.${key}`,
+          `ledger entry keyed "${key}" has id "${entry.id}" — the map key must equal the entry's own id`,
+        ),
+      );
+    }
+  }
+
+  // Course-level cross-references: composite, designers.
+  courses.forEach(({ course, facilityIndex, courseIndex }) => {
+    const path = `facilities[${facilityIndex}].courses[${courseIndex}]`;
+    if (course.composite) {
+      course.composite.forEach((compositeCourseId, i) => {
+        const resolved = resolveMergedId(bundle.idLedger, compositeCourseId);
+        if (!courseById.has(resolved) && !courseById.has(compositeCourseId)) {
+          issues.push(
+            issue(
+              "CROSS_REF_COMPOSITE_DANGLING",
+              `${path}.composite[${i}]`,
+              `composite references course "${compositeCourseId}", which does not exist in this catalog`,
+            ),
+          );
+        }
+      });
+    }
+    for (const designerId of course.designers ?? []) {
+      if (!designerIds.has(designerId)) {
+        issues.push(
+          issue(
+            "CROSS_REF_UNKNOWN_DESIGNER",
+            `${path}.designers`,
+            `course "${course.id}" lists designer "${designerId}", which is not in designers[] (§4.1 line 611)`,
+          ),
+        );
+      }
+    }
+  });
+
+  // Roster-member-level cross-references: dangling holeId, dangling anyOf
+  // members (partial — see checkRosters for "every id dangling").
+  bundle.trails.forEach((trail, trailIndex) => {
+    const seenVersionNumbers = new Map<number, number>();
+    trail.rosterVersions.forEach((version, versionIndex) => {
+      seenVersionNumbers.set(
+        version.version,
+        (seenVersionNumbers.get(version.version) ?? 0) + 1,
+      );
+      const versionPath = `trails[${trailIndex}].rosterVersions[${versionIndex}]`;
+      version.members.forEach((member, memberIndex) => {
+        const memberPath = `${versionPath}.members[${memberIndex}]`;
+        if (member.unit === "hole") {
+          const resolvedCourseId = resolveMergedId(bundle.idLedger, member.courseId);
+          const entry = courseById.get(resolvedCourseId) ?? courseById.get(member.courseId);
+          if (entry) {
+            const holeExists = (entry.course.holesDetail ?? []).some(
+              (h) => h.id === member.holeId,
+            );
+            if (!holeExists) {
+              issues.push(
+                issue(
+                  "CROSS_REF_DANGLING_HOLE_ID",
+                  `${memberPath}.holeId`,
+                  `hole "${member.holeId}" does not exist in course "${member.courseId}"'s holesDetail`,
+                ),
+              );
+            }
+          }
+          // A dangling courseId itself is already ROSTER_MISSING_MEMBER
+          // (checkRosters) — not duplicated here.
+        }
+        if (member.unit === "course" && "anyOf" in member) {
+          member.anyOf.forEach((courseId, i) => {
+            const resolved = resolveMergedId(bundle.idLedger, courseId);
+            if (!courseById.has(resolved) && !courseById.has(courseId)) {
+              issues.push(
+                issue(
+                  "CROSS_REF_DANGLING_ANYOF_ID",
+                  `${memberPath}.anyOf[${i}]`,
+                  `anyOf member references course "${courseId}", which does not exist in this catalog`,
+                ),
+              );
+            }
+          });
+        }
+      });
+    });
+    for (const [versionNumber, count] of seenVersionNumbers) {
+      if (count > 1) {
+        issues.push(
+          issue(
+            "ROSTER_DUPLICATE_VERSION_NUMBER",
+            `trails[${trailIndex}].rosterVersions`,
+            `trail "${trail.id}" has ${count} roster versions numbered ${versionNumber} — version numbers must be unique per trail`,
+          ),
+        );
+      }
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* Roster member resolution                                            */
 /* ------------------------------------------------------------------ */
 
@@ -175,7 +346,9 @@ interface CatalogIndex {
 
 function buildIndex(bundle: CatalogBundle, courses: CourseWithFacility[]): CatalogIndex {
   const facilityById = new Map(bundle.facilities.map((f) => [f.id, f]));
-  const courseById = new Map(courses.map((c) => [c.course.id, c]));
+  const courseById: Map<string, CourseWithFacility> = new Map(
+    courses.map((c) => [c.course.id, c]),
+  );
   return { facilityById, courseById };
 }
 
@@ -330,7 +503,7 @@ function closedCourseIdsOf(
 }
 
 /* ------------------------------------------------------------------ */
-/* Roster version immutability (needs --base)                          */
+/* Roster version immutability + trail removal (needs --base)          */
 /* ------------------------------------------------------------------ */
 
 function checkRosterVersionImmutability(
@@ -339,6 +512,21 @@ function checkRosterVersionImmutability(
   issues: CatalogIssue[],
 ): void {
   const baseTrailById = new Map(base.trails.map((t) => [t.id, t]));
+  const currentTrailIds = new Set(bundle.trails.map((t) => t.id));
+
+  // A published trail deleted relative to --base (S4).
+  for (const baseTrail of base.trails) {
+    if (!currentTrailIds.has(baseTrail.id)) {
+      issues.push(
+        issue(
+          "ROSTER_TRAIL_REMOVED",
+          "trails",
+          `trail "${baseTrail.id}" was published in the last catalog and is missing from this one — a published trail is never deleted`,
+        ),
+      );
+    }
+  }
+
   bundle.trails.forEach((trail, trailIndex) => {
     const baseTrail = baseTrailById.get(trail.id);
     if (!baseTrail) return; // a brand-new trail has no published versions yet
@@ -372,12 +560,64 @@ function checkRosterVersionImmutability(
 }
 
 /* ------------------------------------------------------------------ */
+/* S4: ledger append-only against --base                               */
+/* ------------------------------------------------------------------ */
+
+function checkLedgerAppendOnly(
+  bundle: CatalogBundle,
+  base: CatalogBundle,
+  issues: CatalogIssue[],
+): void {
+  for (const [id, baseEntry] of Object.entries(base.idLedger.entries)) {
+    const currentEntry = bundle.idLedger.entries[id];
+    if (!currentEntry) {
+      issues.push(
+        issue(
+          "LEDGER_ENTRY_REMOVED",
+          `idLedger.entries.${id}`,
+          `ledger entry "${id}" existed in the last published catalog and is missing from this one — the ledger is append-only (§3.5)`,
+        ),
+      );
+      continue;
+    }
+    if (baseEntry.tombstoned === true && currentEntry.tombstoned !== true) {
+      issues.push(
+        issue(
+          "LEDGER_UNTOMBSTONED",
+          `idLedger.entries.${id}.tombstoned`,
+          `ledger entry "${id}" was tombstoned in the last published catalog and is no longer tombstoned — an id is never un-tombstoned (§3.5)`,
+        ),
+      );
+    }
+    const baseTransitions = baseEntry.transitions;
+    const currentTransitions = currentEntry.transitions;
+    const isPrefix =
+      currentTransitions.length >= baseTransitions.length &&
+      baseTransitions.every((t, i) => deepEqual(t, currentTransitions[i]));
+    if (!isPrefix) {
+      issues.push(
+        issue(
+          "LEDGER_TRANSITIONS_NOT_APPEND_ONLY",
+          `idLedger.entries.${id}.transitions`,
+          `ledger entry "${id}"'s transitions[] in the last published catalog is not a prefix of this catalog's — transitions are append-only (§3.5)`,
+        ),
+      );
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Booking host gate                                                   */
 /* ------------------------------------------------------------------ */
 
+/** Nit (gate review, post-e9b3ab0): `.hostname`, not `.host` — `.host`
+ * includes a `:port` suffix, which would make an allow-list entry for
+ * `www.golfnow.com` fail to match `www.golfnow.com:8443` even though the
+ * host itself is identical; the allow-list is about the domain, not the
+ * port. */
 function hostOf(url: string): string | undefined {
   try {
-    return new URL(url).host;
+    return new URL(url).hostname;
   } catch {
     return undefined;
   }
@@ -385,9 +625,10 @@ function hostOf(url: string): string | undefined {
 
 function checkBooking(
   bundle: CatalogBundle,
+  bookingHostAllowList: string[],
   issues: CatalogIssue[],
 ): void {
-  const allowList = new Set(bundle.bookingHostAllowList ?? []);
+  const allowList = new Set(bookingHostAllowList);
   bundle.facilities.forEach((facility, facilityIndex) => {
     // O8: a private facility may carry no booking[] entry at all — checked
     // once per facility, not once per entry.
@@ -434,6 +675,24 @@ function checkBooking(
 /* Verification-tier gates                                             */
 /* ------------------------------------------------------------------ */
 
+/** Facility coordinates for the `tz` check: the facility's own `lat`/`lng`
+ * if it has them, or — for a stub — its joined OSM coordinates (plan line
+ * 578: "For a stub, those are the joined OSM coordinates"), read from
+ * `bundle.osm[facility.seed.osmRef]`. */
+function facilityCoordinates(
+  facility: Facility,
+  osm: Record<string, OsmContent> | undefined,
+): { lat: number; lng: number } | undefined {
+  if (facility.lat !== undefined && facility.lng !== undefined) {
+    return { lat: facility.lat, lng: facility.lng };
+  }
+  const osmRef = facility.seed.osmRef;
+  if (osmRef && osm?.[osmRef]) {
+    return { lat: osm[osmRef].lat, lng: osm[osmRef].lng };
+  }
+  return undefined;
+}
+
 function checkVerificationTiers(bundle: CatalogBundle, issues: CatalogIssue[]): void {
   bundle.facilities.forEach((facility, facilityIndex) => {
     const path = `facilities[${facilityIndex}]`;
@@ -467,17 +726,18 @@ function checkVerificationTiers(bundle: CatalogBundle, issues: CatalogIssue[]): 
       }
     }
 
-    // tz "wrong zone" (the part IanaTimeZoneSchema cannot check, see geo.ts).
-    if (facility.lat !== undefined && facility.lng !== undefined) {
-      if (!tzLikelyContainsCoordinates(facility.tz, { lat: facility.lat, lng: facility.lng })) {
-        issues.push(
-          issue(
-            "TZ_WRONG_ZONE",
-            `${path}.tz`,
-            `facility "${facility.id}"'s tz "${facility.tz}" does not plausibly contain its coordinates (G-P0-11)`,
-          ),
-        );
-      }
+    // tz "wrong zone" (the part IanaTimeZoneSchema cannot check, see
+    // geo.ts) — checked for a stub too, using its joined OSM coordinates
+    // (plan line 578).
+    const coords = facilityCoordinates(facility, bundle.osm);
+    if (coords && !tzLikelyContainsCoordinates(facility.tz, coords)) {
+      issues.push(
+        issue(
+          "TZ_WRONG_ZONE",
+          `${path}.tz`,
+          `facility "${facility.id}"'s tz "${facility.tz}" does not contain its coordinates (G-P0-11)`,
+        ),
+      );
     }
 
     if (facility.verification.basis === "course-claim" && !facility.verification.claimProof) {
@@ -526,8 +786,9 @@ function checkProvenance(
     for (const field of FACILITY_CONTENT_FIELDS) {
       const value = facility[field as keyof Facility];
       if (value === undefined) continue;
+      // S2 (gate review): every content field, including nameFr, now maps
+      // to a real prov key (see schema.ts's FacilityProvSchema doc).
       const provKey = FACILITY_CONTENT_FIELD_TO_PROV_KEY[field];
-      if (provKey === undefined) continue; // nameFr: no prov key exists (see schema.ts's doc)
       const prov = facility.prov?.[provKey];
       if (prov === undefined || (prov as string) === "osm") {
         issues.push(
@@ -617,10 +878,39 @@ function checkProvenance(
 }
 
 /* ------------------------------------------------------------------ */
-/* Geometry-diff / contact-field diff (need --base and labels)         */
+/* S6: OfferTerms — QC offer terms without FR                          */
 /* ------------------------------------------------------------------ */
 
-const GEOMETRY_CENTROID_MOVE_METERS = 150;
+function checkOfferTerms(bundle: CatalogBundle, issues: CatalogIssue[]): void {
+  const trailById = new Map(bundle.trails.map((t) => [t.id, t]));
+  (bundle.offerTerms ?? []).forEach((offer: OfferTerms, i) => {
+    const path = `offerTerms[${i}]`;
+    const trail = trailById.get(offer.trailId);
+    const isQc = trail?.regions.some((r) => r === "CA-QC") ?? false;
+    if (isQc && offer.termsFr === undefined) {
+      issues.push(
+        issue(
+          "OFFER_TERMS_QC_MISSING_FR",
+          `${path}.termsFr`,
+          `offerTerms "${offer.id}" is linked to a Québec trail ("${offer.trailId}") and has no termsFr (bilingual requirement)`,
+        ),
+      );
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* S1: geometry-diff (coordinate-move + field-change) / contact-field  */
+/* diff (need --base and labels)                                       */
+/* ------------------------------------------------------------------ */
+
+const GEOMETRY_COORDINATE_MOVE_METERS = 150;
+// TODO(pipeline): area-change (> 25%) is NOT implemented — it needs the
+// real geometry pipeline (OSM -> data/osm/geometry/*, §10 P1 scope), which
+// P1a does not build (no real geometry data exists to diff against). This
+// is the same limitation the P1a report already named for the courses'
+// geometry.file content; tracked here so the geometry-reviewed gate's
+// coverage gap is visible at the call site, not just in a report.
 
 function checkDiffs(
   bundle: CatalogBundle,
@@ -634,8 +924,9 @@ function checkDiffs(
     if (!baseFacility) return; // new facility, nothing to diff
     const path = `facilities[${facilityIndex}]`;
 
-    // Geometry-diff: centroid move only (see module/geo.ts doc for why
-    // area-change is not implemented in P1a).
+    // Coordinate-move check (renamed from "geometry-diff" — S1, gate
+    // review: this is specifically Facility.lat/lng moving, not a Course's
+    // `geometry` object; see the field-change check below for that).
     if (
       facility.lat !== undefined &&
       facility.lng !== undefined &&
@@ -646,16 +937,38 @@ function checkDiffs(
         { lat: facility.lat, lng: facility.lng },
         { lat: baseFacility.lat, lng: baseFacility.lng },
       );
-      if (distanceMeters > GEOMETRY_CENTROID_MOVE_METERS && !labels.has("geometry-reviewed")) {
+      if (
+        distanceMeters > GEOMETRY_COORDINATE_MOVE_METERS &&
+        !labels.has("geometry-reviewed")
+      ) {
         issues.push(
           issue(
             "GEOMETRY_DIFF_UNREVIEWED",
             `${path}.lat`,
-            `facility "${facility.id}"'s centroid moved ${distanceMeters.toFixed(0)} m from the last published catalog (> ${GEOMETRY_CENTROID_MOVE_METERS} m) without the "geometry-reviewed" label`,
+            `facility "${facility.id}"'s coordinates moved ${distanceMeters.toFixed(0)} m from the last published catalog (> ${GEOMETRY_COORDINATE_MOVE_METERS} m) without the "geometry-reviewed" label`,
           ),
         );
       }
     }
+
+    // S1: full geometry FIELD-change check, per course — any change to
+    // `ref`/`file`/`layer`/`checkedAt`/`sharedWithFacility` (not just a
+    // coordinate) requires the label. Area-change is NOT covered (see the
+    // TODO above).
+    const baseCourseById = new Map(baseFacility.courses.map((c) => [c.id, c]));
+    facility.courses.forEach((course, courseIndex) => {
+      const baseCourse = baseCourseById.get(course.id);
+      if (!baseCourse) return; // new course, nothing to diff
+      if (!deepEqual(course.geometry, baseCourse.geometry) && !labels.has("geometry-reviewed")) {
+        issues.push(
+          issue(
+            "GEOMETRY_DIFF_UNREVIEWED",
+            `${path}.courses[${courseIndex}].geometry`,
+            `course "${course.id}"'s geometry (ref/file/layer/checkedAt/sharedWithFacility) changed from the last published catalog without the "geometry-reviewed" label`,
+          ),
+        );
+      }
+    });
 
     const contactChanged =
       facility.url !== baseFacility.url ||
@@ -676,11 +989,6 @@ function checkDiffs(
   });
 }
 
-// Duplicated (not imported) from packages/catalog/src/geo.ts deliberately:
-// that module's haversine takes the same 2 points shape, but importing it
-// here would be redundant plumbing for one call — inlined instead. (Left
-// as a note rather than re-exported to avoid a needless coupling for a
-// three-line formula.)
 function haversineForDiff(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   const R = 6_371_000;
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -706,14 +1014,17 @@ export function verifyCatalog(
   const index = buildIndex(bundle, courses);
 
   checkIds(bundle, courses, issues);
+  checkCrossReferences(bundle, courses, issues);
   checkRosters(bundle, index, issues);
-  checkBooking(bundle, issues);
+  checkBooking(bundle, options.bookingHostAllowList ?? [], issues);
   checkVerificationTiers(bundle, issues);
   checkProvenance(bundle, courses, issues);
+  checkOfferTerms(bundle, issues);
 
   if (options.base) {
     checkRosterVersionImmutability(bundle, options.base, issues);
-    const labels = new Set(options.labels ?? bundle.labels ?? []);
+    checkLedgerAppendOnly(bundle, options.base, issues);
+    const labels = new Set(options.labels ?? []);
     checkDiffs(bundle, options.base, labels, issues);
   }
 
@@ -747,28 +1058,41 @@ export function verifyCatalogRaw(
 interface CliArgs {
   bundlePath: string;
   basePath?: string;
+  /** `undefined` when `--labels` was never given at all; `[]` when it was
+   * given with an empty value. Both ultimately mean "no labels" — kept
+   * distinct here only so a future caller can tell the two apart if it
+   * ever needs to (see module doc). */
   labels?: string[];
+  bookingHostsPath?: string;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const opts: Record<string, string> = {};
+  const seen = new Set<string>();
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg && arg.startsWith("--")) {
-      opts[arg.slice(2)] = argv[i + 1] ?? "";
+      const key = arg.slice(2);
+      opts[key] = argv[i + 1] ?? "";
+      seen.add(key);
       i += 1;
     }
   }
   const bundlePath = opts["bundle"];
   if (!bundlePath) {
     throw new Error(
-      "Usage: node dist/verify-catalog.js --bundle <bundle.json> [--base <bundle.json>] [--labels a,b,c]",
+      "Usage: node dist/verify-catalog.js --bundle <bundle.json> [--base <bundle.json>] [--labels a,b,c] [--booking-hosts <file>]",
     );
   }
   return {
     bundlePath,
     ...(opts["base"] ? { basePath: opts["base"] } : {}),
-    ...(opts["labels"] ? { labels: opts["labels"].split(",").filter(Boolean) } : {}),
+    // An empty string means "no labels" — same as the flag being absent —
+    // never a fallback to any other source (blocking #2).
+    ...(seen.has("labels")
+      ? { labels: (opts["labels"] ?? "").split(",").filter(Boolean) }
+      : {}),
+    ...(opts["booking-hosts"] ? { bookingHostsPath: opts["booking-hosts"] } : {}),
   };
 }
 
@@ -795,9 +1119,12 @@ async function main(argv: string[]): Promise<void> {
     base = parsedBase.bundle;
   }
 
+  const bookingHostAllowList = await loadBookingHostAllowList(args.bookingHostsPath);
+
   const result = verifyCatalogRaw(bundleRaw, {
     ...(base ? { base } : {}),
-    ...(args.labels ? { labels: args.labels } : {}),
+    labels: args.labels ?? [],
+    bookingHostAllowList,
   });
 
   if (result.ok) {

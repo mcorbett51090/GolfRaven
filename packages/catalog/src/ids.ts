@@ -17,11 +17,14 @@ const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 const ULID_PATTERN = "[0-9A-HJKMNP-TV-Z]{26}";
 
-/** The id "kinds" the plan defines (§3.5, §4.1). `ach_` and `oft_` are the
- * kinds for `AchievementDef`/`OfferTerms`; those record types are out of
- * P1a's scope (see the catalog package README), so their id kinds are not
- * exercised here, but are listed for completeness against the plan text. */
-export const ID_KINDS = ["trl", "fac", "crs", "hol", "dsg"] as const;
+/** The id "kinds" the plan defines (§3.5, §4.1). `ach_` (`AchievementDef`)
+ * is out of P1a's scope — it needs `RuleExpr`, part B (see `schema.ts`'s
+ * module doc) — so that kind is not exercised here, but is listed for
+ * completeness against the plan text. `oft_` (`OfferTerms`) IS in scope
+ * (S6, gate review post-e9b3ab0): `OfferTerms` itself carries no
+ * `RuleExpr` field at all — only offer *instances*, which live in the DB
+ * under operator scope (§4.1), do — so nothing here required part B. */
+export const ID_KINDS = ["trl", "fac", "crs", "hol", "dsg", "oft"] as const;
 export type IdKind = (typeof ID_KINDS)[number];
 
 function idSchema<P extends string>(prefix: P) {
@@ -39,12 +42,14 @@ export const FacilityIdSchema = idSchema("fac");
 export const CourseIdSchema = idSchema("crs");
 export const HoleIdSchema = idSchema("hol");
 export const DesignerIdSchema = idSchema("dsg");
+export const OfferTermsIdSchema = idSchema("oft");
 
 export type TrailId = z.infer<typeof TrailIdSchema>;
 export type FacilityId = z.infer<typeof FacilityIdSchema>;
 export type CourseId = z.infer<typeof CourseIdSchema>;
 export type HoleId = z.infer<typeof HoleIdSchema>;
 export type DesignerId = z.infer<typeof DesignerIdSchema>;
+export type OfferTermsId = z.infer<typeof OfferTermsIdSchema>;
 
 /** Any of the id kinds implemented in P1a, unbranded (used where the caller
  * genuinely needs to accept more than one kind, e.g. the ledger). */
@@ -54,6 +59,7 @@ export const AnyKnownIdSchema = z.union([
   CourseIdSchema,
   HoleIdSchema,
   DesignerIdSchema,
+  OfferTermsIdSchema,
 ]);
 
 const PREFIX_BY_KIND: Record<IdKind, string> = {
@@ -62,6 +68,7 @@ const PREFIX_BY_KIND: Record<IdKind, string> = {
   crs: "crs",
   hol: "hol",
   dsg: "dsg",
+  oft: "oft",
 };
 
 /** Generates a fresh, valid ULID using cryptographically strong randomness

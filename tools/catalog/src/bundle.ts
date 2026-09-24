@@ -26,8 +26,28 @@ import {
   DesignerSchema,
   FacilitySchema,
   IdLedgerSchema,
+  OfferTermsSchema,
   TrailSchema,
 } from "@golfraven/catalog";
+
+/**
+ * The ODbL-licensed OSM content a stub facility's `seed.osmRef` joins
+ * against at build time (§4.1 ODbL layer split) — just enough of it
+ * (coordinates) for the `tz` "wrong zone" check to run against a stub's
+ * *joined* coordinates (plan line 578: "For a stub, those are the joined
+ * OSM coordinates"), since a stub itself carries no `lat`/`lng` of its
+ * own. Unlike `labels`/`bookingHostAllowList` (removed above), this is not
+ * a self-approval surface — it is the same kind of externally-sourced,
+ * attributed content `data/osm/` will hold in P1.1, just inlined here
+ * because P1a has no real `data/osm/` tree to read it from yet.
+ */
+export const OsmContentSchema = z.strictObject({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  name: z.string().min(1).optional(),
+  holes: z.int().positive().optional(),
+});
+export type OsmContent = z.infer<typeof OsmContentSchema>;
 
 /**
  * **Gate review correction (post-e9b3ab0): a bundle may not assert its own
@@ -49,7 +69,11 @@ export const CatalogBundleSchema = z.strictObject({
   facilities: z.array(FacilitySchema),
   trails: z.array(TrailSchema),
   designers: z.array(DesignerSchema).optional(),
+  /** S6 (gate review post-e9b3ab0): `OfferTerms` is in scope. */
+  offerTerms: z.array(OfferTermsSchema).optional(),
   idLedger: IdLedgerSchema,
+  /** Keyed by `OsmRefId` string — see `OsmContentSchema`'s doc. */
+  osm: z.record(z.string(), OsmContentSchema).optional(),
 });
 export type CatalogBundle = z.infer<typeof CatalogBundleSchema>;
 

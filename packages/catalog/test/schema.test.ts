@@ -3,6 +3,7 @@ import {
   CompletionOrMarkerRuleSchema,
   CourseSchema,
   FacilitySchema,
+  OfferTermsSchema,
   RosterMemberSchema,
   RosterVersionSchema,
   SourceSchema,
@@ -72,7 +73,12 @@ describe("FacilitySchema", () => {
       approx: false,
       prov: { name: "operator", town: "operator", coord: "primary-source" },
       access: "public",
-      verification: { status: "listed-verified", verifiedAt: "2026-09-24" },
+      verification: {
+        status: "listed-verified",
+        basis: "operator",
+        verifiedAt: "2026-09-24",
+        source,
+      },
       courses: [
         {
           ...stubCourse,
@@ -239,5 +245,82 @@ describe("TrailSchema", () => {
       sources: [source],
     };
     expect(TrailSchema.safeParse(trail).success).toBe(true);
+  });
+});
+
+describe("S2: FacilityProvSchema.nameFr (gate review post-e9b3ab0)", () => {
+  it("accepts nameFr with a non-OSM prov stamp", () => {
+    const result = FacilitySchema.safeParse({
+      ...stubFacility,
+      name: "Pebble Hills Golf Club",
+      nameFr: "Club de golf Pebble Hills",
+      town: "Nashville",
+      lat: 36.16,
+      lng: -86.78,
+      prov: { name: "operator", nameFr: "operator", town: "operator", coord: "operator" },
+      verification: {
+        status: "listed-verified",
+        basis: "operator",
+        verifiedAt: "2026-09-24",
+        source,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("S3: VerificationSchema requires basis/verifiedAt/source once verified (plan 677)", () => {
+  it("rejects listed-verified with no basis/verifiedAt/source", () => {
+    const result = FacilitySchema.safeParse({
+      ...stubFacility,
+      verification: { status: "listed-verified" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts unverified with none of those fields", () => {
+    const result = FacilitySchema.safeParse(stubFacility);
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("S7: https-only URLs", () => {
+  it("rejects a facility url that is not https:", () => {
+    expect(FacilitySchema.shape.url.unwrap().safeParse("http://example.com").success).toBe(
+      false,
+    );
+    expect(
+      FacilitySchema.shape.url.unwrap().safeParse("javascript:alert(1)").success,
+    ).toBe(false);
+  });
+  it("accepts an https facility url", () => {
+    expect(FacilitySchema.shape.url.unwrap().safeParse("https://example.com").success).toBe(
+      true,
+    );
+  });
+});
+
+describe("S6: OfferTermsSchema (no RuleExpr field — see schema.ts module doc)", () => {
+  it("accepts a minimal OfferTerms record", () => {
+    const result = OfferTermsSchema.safeParse({
+      id: "oft_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      trailId: "trl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      title: "Finish the Trail",
+      terms: "Complete every stop to redeem.",
+      mode: "portal-verify",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an OfferTerms record with a RuleExpr-shaped extra field (strict object)", () => {
+    const result = OfferTermsSchema.safeParse({
+      id: "oft_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      trailId: "trl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      title: "Finish the Trail",
+      terms: "Complete every stop to redeem.",
+      mode: "portal-verify",
+      rule: { and: [] },
+    });
+    expect(result.success).toBe(false);
   });
 });

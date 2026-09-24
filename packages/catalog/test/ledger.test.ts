@@ -296,4 +296,147 @@ describe("promoteToVerified (AT(8) promotion)", () => {
     // Same ids — promotion never re-keys (G3-01).
     expect(promoted.entries[minted.facilityId]?.id).toBe(minted.facilityId);
   });
+
+  it("S8: rejects a second verified transition", () => {
+    const minted = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "pebble-hills",
+      ...meta,
+    });
+    const promoted = promoteToVerified(minted.ledger, [minted.facilityId], meta);
+    expect(() => promoteToVerified(promoted, [minted.facilityId], meta)).toThrow();
+  });
+
+  it("S8: rejects promoting a tombstoned id", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    expect(() => promoteToVerified(merged, [b.facilityId], meta)).toThrow();
+  });
+});
+
+describe("mergeIntoSurvivor guards (S8, gate review post-e9b3ab0)", () => {
+  it("rejects a self-merge", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    expect(() =>
+      mergeIntoSurvivor(a.ledger, [a.facilityId], a.facilityId, meta),
+    ).toThrow();
+  });
+
+  it("rejects a merge across kinds (course into facility)", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    expect(() =>
+      mergeIntoSurvivor(a.ledger, [a.courseId], a.facilityId, meta),
+    ).toThrow();
+  });
+
+  it("rejects a merge cycle", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    // b already resolves to a; merging a into b would close a 2-cycle.
+    expect(() => mergeIntoSurvivor(merged, [a.facilityId], b.facilityId, meta)).toThrow();
+  });
+});
+
+describe("mintSlug rejects un-slugified input (nit)", () => {
+  it("throws on a raw, non-slugified name", () => {
+    expect(() => mintSlug(emptyLedger(), "Pine Hills!")).toThrow();
+    expect(() => mintSlug(emptyLedger(), "Pine Hills")).toThrow(); // space
+    expect(() => mintSlug(emptyLedger(), "pine--hills")).toThrow(); // doubled hyphen
+    expect(() => mintSlug(emptyLedger(), "-pine-hills")).toThrow(); // leading hyphen
+  });
+  it("accepts an already-slugified name", () => {
+    expect(mintSlug(emptyLedger(), "pine-hills")).toBe("pine-hills");
+  });
+});
+
+describe("blocking #4 (gate review post-e9b3ab0): re-seed must not mint a second id", () => {
+  it("a known ref with an EMPTY candidate list mints nothing (whole-ledger lookup)", () => {
+    const minted = mintStubFacility(emptyLedger(), {
+      osmRef: "relation/9",
+      desiredSlug: "pine-hills",
+      ...meta,
+    });
+    const before = Object.keys(minted.ledger.entries).length;
+    const outcome = reseedFacility(
+      minted.ledger,
+      {
+        osmRef: "relation/9",
+        name: "Pine Hills Golf Club",
+        lat: 36.003,
+        lng: -86.0,
+        desiredSlug: "pine-hills",
+        ...meta,
+      },
+      [], // no candidates supplied at all
+    );
+    expect(outcome.kind).toBe("already-known");
+    if (outcome.kind === "already-known") {
+      expect(outcome.facilityId).toBe(minted.facilityId);
+      expect(outcome.courseId).toBe(minted.courseId);
+    }
+    expect(Object.keys(minted.ledger.entries)).toHaveLength(before);
+  });
+
+  it("the ref of a MERGED-AWAY facility resolves to its survivor and mints nothing", () => {
+    const m = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "pine-hills", ...meta });
+    const m2 = mintStubFacility(m.ledger, { osmRef: "way/50", desiredSlug: "oak", ...meta });
+    const merged = mergeIntoSurvivor(m2.ledger, [m2.facilityId], m.facilityId, meta);
+    const before = Object.keys(merged.entries).length;
+
+    // Re-seeing way/50 (the tombstoned facility's own ref) on every re-seed
+    // must resolve to the SURVIVOR (m), never mint a second id.
+    for (let i = 0; i < 3; i += 1) {
+      const outcome = reseedFacility(
+        merged,
+        {
+          osmRef: "way/50",
+          name: "Oak",
+          lat: 40,
+          lng: -80,
+          desiredSlug: "oak",
+          ...meta,
+        },
+        [{ facilityId: m2.facilityId, courseId: m2.courseId, name: "Oak", lat: 40, lng: -80 }],
+      );
+      expect(outcome.kind).toBe("already-known");
+      if (outcome.kind === "already-known") {
+        expect(outcome.facilityId).toBe(m.facilityId);
+      }
+    }
+    expect(Object.keys(merged.entries)).toHaveLength(before);
+  });
+});
+
+describe("S9 (gate review post-e9b3ab0): proximity without a name match is ambiguous", () => {
+  it('"Pine Hills GC" near "Pine Hills Golf Club" goes to ambiguous, not auto-mint', () => {
+    const minted = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "pine-hills",
+      ...meta,
+    });
+    const candidate: ReseedCandidate = {
+      facilityId: minted.facilityId,
+      courseId: minted.courseId,
+      name: "Pine Hills Golf Club",
+      lat: 36.0,
+      lng: -86.0,
+    };
+    // "Pine Hills GC" vs "Pine Hills Golf Club" — within 150 m, but below
+    // the 0.8 name-similarity bar.
+    const outcome = reseedFacility(
+      minted.ledger,
+      {
+        osmRef: "way/2",
+        name: "Pine Hills GC",
+        lat: 36.0,
+        lng: -86.0,
+        desiredSlug: "pine-hills-gc",
+        ...meta,
+      },
+      [candidate],
+    );
+    expect(outcome.kind).toBe("ambiguous");
+  });
 });
