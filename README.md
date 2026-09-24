@@ -56,6 +56,9 @@ golfraven/
 ├── contract/        contract/catalog.schema.json — generated from
 │                    packages/catalog's Zod schema; verify-contract fails
 │                    the build on any drift (§3.5).
+├── config/          booking-hosts.json — the booking-host allow-list
+│                    verify-catalog reads (synthetic/test hosts only,
+│                    P1a; real contents wait on X4/X6).
 ├── .gitleaks.toml   gitleaks config, at the repo root (not under
 │                    .github/), consumed by .github/workflows/ci.yml.
 └── .github/         CODEOWNERS, PR template, CI workflow (ci.yml).
@@ -71,8 +74,8 @@ Requires **pnpm 10.33.0** (pinned via `packageManager` in `package.json`;
 
 ```shell
 pnpm install --frozen-lockfile
-pnpm -r typecheck
 pnpm -r build
+pnpm -r typecheck
 pnpm -r test
 ```
 
@@ -87,9 +90,23 @@ local-only workaround, never something to weaken in CI.
 `.github/workflows/ci.yml` (workflow name "golfraven CI") runs on every PR
 and every push to `main`, with **no `paths:` filter** — it always
 evaluates, so a consumer of this workflow never sees a check stuck
-pending. It installs with a frozen lockfile, then runs `pnpm -r typecheck`,
-`pnpm -r build`, `pnpm -r test` (which already includes `verify-contract`'s
-committed-file check, `tools/catalog/test/contract-freshness.test.ts`),
-an explicit `verify-contract` CLI step for a clearer dedicated failure
-message, and a gitleaks secret scan, all pinned to full commit SHAs (see
-the workflow file for the exact SHA → version mapping).
+pending. It installs with a frozen lockfile, then runs **Build before
+Typecheck** (`pnpm -r build`, then `pnpm -r typecheck`), `pnpm -r test`
+(which already includes `verify-contract`'s committed-file check,
+`tools/catalog/test/contract-freshness.test.ts`), an explicit
+`verify-contract` CLI step for a clearer dedicated failure message, and a
+gitleaks secret scan, all pinned to full commit SHAs (see the workflow
+file for the exact SHA → version mapping).
+
+**Why Build before Typecheck (gate-review fix, post-e9b3ab0, blocking #1).**
+`tools/catalog` resolves `@golfraven/catalog` through its compiled `dist/`
+output, so typechecking it on a clean runner before anything is built
+failed with `TS2307` (cannot find module). Fixed two ways, deliberately
+redundant: (1) `tools/catalog/tsconfig.json` and `tsconfig.build.json` now
+declare a TypeScript project reference to `packages/catalog/tsconfig.build.json`
+and run via `tsc -b`, so `tsc` builds the dependency's `dist/` automatically
+whenever it's missing — typechecking `tools/catalog` alone, from a clean
+checkout with **no `dist/` anywhere**, now works with no ordering
+requirement at all; (2) CI still runs Build first anyway, as a second,
+independent safeguard. See `tools/catalog/README.md`'s "Build ordering"
+section.

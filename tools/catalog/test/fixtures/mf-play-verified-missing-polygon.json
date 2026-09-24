@@ -68,7 +68,17 @@
             "par": "operator",
             "designers": "operator",
             "opened": "operator"
-          }
+          },
+          "holesDetail": [
+            {
+              "id": "hol_01M39GMFJZ21RFA7G11961JMQ1",
+              "number": 1
+            },
+            {
+              "id": "hol_01M39GMFJZ21RFA7G11961JMQ2",
+              "number": 2
+            }
+          ]
         }
       ]
     }
@@ -163,6 +173,7 @@
         "id": "crs_01M39GMFJZ2P89V3ZZXPPH671T",
         "kind": "crs",
         "status": "verified",
+        "facilityId": "fac_01M39GMFJZYF7W9HXMEC5V7FJ8",
         "transitions": [
           {
             "type": "minted",
@@ -181,10 +192,12 @@
         "kind": "trl",
         "slug": "synthetic-golf-trail",
         "transitions": []
+      },
+      "dsg_01M39GMFJZ21RFA7G11961JMQC": {
+        "id": "dsg_01M39GMFJZ21RFA7G11961JMQC",
+        "kind": "dsg",
+        "transitions": []
       }
     }
-  },
-  "bookingHostAllowList": [
-    "www.golfnow.com"
-  ]
+  }
 }

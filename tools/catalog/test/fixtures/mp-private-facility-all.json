@@ -146,6 +146,7 @@
         "id": "crs_01M39GMFJZP9NPWBMDJ2077SPT",
         "kind": "crs",
         "status": "verified",
+        "facilityId": "fac_01M39GMFJZEVH7GGNHCBV5T7MF",
         "transitions": [
           {
             "type": "minted",
@@ -157,9 +158,14 @@
       "trl_01M39GMFJZ3PT3BS17R05N7TDZ": {
         "id": "trl_01M39GMFJZ3PT3BS17R05N7TDZ",
         "kind": "trl",
+        "slug": "private-inclusive-trail",
+        "transitions": []
+      },
+      "dsg_01M39GMFJZ21RFA7G11961JMQC": {
+        "id": "dsg_01M39GMFJZ21RFA7G11961JMQC",
+        "kind": "dsg",
         "transitions": []
       }
     }
-  },
-  "bookingHostAllowList": []
+  }
 }

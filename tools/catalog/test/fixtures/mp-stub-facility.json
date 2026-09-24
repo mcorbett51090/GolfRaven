@@ -56,6 +56,7 @@
         "id": "crs_01M39GMFJZ7JP34CBPBB415NG9",
         "kind": "crs",
         "status": "stub",
+        "facilityId": "fac_01M39GMFJZ7V57ACYY7K448M4N",
         "transitions": [
           {
             "type": "minted",
@@ -67,6 +68,14 @@
           "way/500"
         ]
       }
+    }
+  },
+  "osm": {
+    "way/500": {
+      "lat": 36.17,
+      "lng": -86.8,
+      "name": "Riverside Municipal",
+      "holes": 18
     }
   }
 }

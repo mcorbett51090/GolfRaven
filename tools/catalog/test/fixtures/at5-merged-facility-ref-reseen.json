@@ -1,0 +1,107 @@
+{
+  "ledgerBefore": {
+    "entries": {
+      "fac_01M39JD3F13X562HMB6VT9AEKT": {
+        "id": "fac_01M39JD3F13X562HMB6VT9AEKT",
+        "kind": "fac",
+        "slug": "cedar-creek",
+        "status": "verified",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "verified",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/9100"
+        ]
+      },
+      "crs_01M39JD3F1RVZ4FK7AQR2GB1H3": {
+        "id": "crs_01M39JD3F1RVZ4FK7AQR2GB1H3",
+        "kind": "crs",
+        "status": "verified",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "verified",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/9100"
+        ],
+        "facilityId": "fac_01M39JD3F13X562HMB6VT9AEKT"
+      },
+      "fac_01M39JD3F3AXB2DXZ75VMFY0P5": {
+        "id": "fac_01M39JD3F3AXB2DXZ75VMFY0P5",
+        "kind": "fac",
+        "slug": "oak",
+        "status": "stub",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          },
+          {
+            "type": "merged",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01",
+            "note": "merged into fac_01M39JD3F13X562HMB6VT9AEKT"
+          }
+        ],
+        "seedRefs": [
+          "way/50"
+        ],
+        "tombstoned": true,
+        "mergedInto": "fac_01M39JD3F13X562HMB6VT9AEKT"
+      },
+      "crs_01M39JD3F3WC8AY5E9AEJASJJV": {
+        "id": "crs_01M39JD3F3WC8AY5E9AEJASJJV",
+        "kind": "crs",
+        "status": "stub",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/50"
+        ],
+        "facilityId": "fac_01M39JD3F3AXB2DXZ75VMFY0P5"
+      }
+    }
+  },
+  "candidates": [
+    {
+      "facilityId": "fac_01M39JD3F3AXB2DXZ75VMFY0P5",
+      "courseId": "crs_01M39JD3F3WC8AY5E9AEJASJJV",
+      "name": "Oak",
+      "lat": 40,
+      "lng": -80
+    }
+  ],
+  "incoming": {
+    "osmRef": "way/50",
+    "name": "Oak",
+    "lat": 40,
+    "lng": -80,
+    "desiredSlug": "oak",
+    "catalogVersion": "20260101-abc0001",
+    "date": "2026-01-01"
+  },
+  "survivorFacilityId": "fac_01M39JD3F13X562HMB6VT9AEKT"
+}

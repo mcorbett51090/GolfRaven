@@ -75,4 +75,52 @@ describe("AT(5): a re-seed never overwrites a verified field", () => {
       fixture.ledgerBefore.entries[candidateId as string]?.slug,
     );
   });
+
+  // S10 (gate review, post-e9b3ab0): this fixture-level test proves
+  // reseedFacility() itself is correct against hand-built ledger/candidate
+  // fixtures. It does NOT yet exercise the real seed-osm.mjs pipeline
+  // (out of P1a scope — no real data, no network fetch), which is where a
+  // genuinely adversarial "does re-seeding ACTUAL emitted records ever
+  // clobber a verified field" case would live. Left skipped, under this
+  // exact name, so it surfaces in `vitest run`'s skip list rather than
+  // silently never existing — see tools/catalog/README.md.
+  it.skip("[STRENGTHEN ONCE seed-osm EXISTS] a re-seed of records seed-osm.mjs actually emits never overwrites a verified field", () => {
+    throw new Error(
+      "Not implemented: needs scripts/seed-osm.mjs (P1.1+) to produce real emitted records to re-seed against.",
+    );
+  });
+});
+
+describe("blocking #4 (gate review post-e9b3ab0): whole-ledger already-known lookup", () => {
+  it("a known ref with an EMPTY candidate list resolves via the ledger, minting nothing", async () => {
+    const fixture = await loadAt5Fixture("at5-known-ref-empty-candidates");
+    expect(fixture.candidates).toHaveLength(0);
+    const before = Object.keys(fixture.ledgerBefore.entries).length;
+
+    const outcome = reseedFacility(fixture.ledgerBefore, fixture.incoming, fixture.candidates);
+
+    expect(outcome.kind).toBe("already-known");
+    if (outcome.kind !== "already-known") {
+      throw new Error(`expected already-known, got ${outcome.kind} — a second id would have been minted`);
+    }
+    expect(Object.keys(fixture.ledgerBefore.entries)).toHaveLength(before);
+  });
+
+  it("the ref of a facility merged away resolves to its survivor and mints nothing", async () => {
+    const raw = JSON.parse(
+      await readFile(join(FIXTURES_DIR, "at5-merged-facility-ref-reseen.json"), "utf8"),
+    ) as At5Fixture & { survivorFacilityId: string };
+    IdLedgerSchema.parse(raw.ledgerBefore);
+    const fixture = raw;
+    const before = Object.keys(fixture.ledgerBefore.entries).length;
+
+    const outcome = reseedFacility(fixture.ledgerBefore, fixture.incoming, fixture.candidates);
+
+    expect(outcome.kind).toBe("already-known");
+    if (outcome.kind !== "already-known") {
+      throw new Error(`expected already-known, got ${outcome.kind}`);
+    }
+    expect(outcome.facilityId).toBe(fixture.survivorFacilityId);
+    expect(Object.keys(fixture.ledgerBefore.entries)).toHaveLength(before);
+  });
 });
