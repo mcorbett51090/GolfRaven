@@ -20,6 +20,18 @@ const BAD_SOURCE = `
   declare const Deno: { env: { get(name: string): string | undefined } };
 `;
 
+// ⛔ FIX (should-fix, post-P3a re-gate round 3): deriveRepoRoot now THROWS
+// when no `.git` ancestor is found and no repoRoot was passed explicitly
+// (it used to fail open, silently falling back to startDir -- see
+// config.ts's own note on this, and config.test.ts's dedicated
+// "deriveRepoRoot" describe block for the throw itself). A mkdtemp()'d
+// /tmp directory has no `.git` ancestor, so every `lintDirectory(tmpRoot)`
+// call below now passes tmpRoot as its own repoRoot (`lintDirectory(
+// tmpRoot, tmpRoot)`) -- none of these tests care about ancestor-config
+// scanning, so this preserves their original behaviour exactly (no
+// ancestor beyond tmpRoot itself, same as the old silent fallback would
+// have produced) while going through the now-mandatory explicit path
+// instead of relying on the removed fail-open default.
 let tmpRoot: string | undefined;
 
 afterEach(() => {
@@ -55,7 +67,7 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     mkdirSync(distDir, { recursive: true });
     writeFileSync(join(distDir, "index.js"), BAD_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(1);
     const [result] = results;
     expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
@@ -67,7 +79,7 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     mkdirSync(nestedFixtures, { recursive: true });
     writeFileSync(join(nestedFixtures, "leak.ts"), BAD_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(1);
     const [result] = results;
     expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
@@ -91,7 +103,7 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     mkdirSync(ownFixtures, { recursive: true });
     writeFileSync(join(ownFixtures, "leak.ts"), BAD_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(1);
     const [result] = results;
     expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
@@ -103,7 +115,7 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     mkdirSync(nm, { recursive: true });
     writeFileSync(join(nm, "index.js"), BAD_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results.length).toBe(0);
   });
 });
@@ -126,7 +138,7 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
     writeFileSync(join(fnDir, "deno.json"), JSON.stringify({ imports: { supabase: "npm:@supabase/supabase-js@2" } }));
     writeFileSync(join(fnDir, "index.ts"), ALIASED_IMPORT_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     // M2 (post-P3a re-gate): config files are now validated in their own
     // right, "regardless of importers" -- this deno.json's own
     // npm:@supabase/supabase-js@2 target is ALSO flagged as its own
@@ -146,7 +158,7 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), ALIASED_IMPORT_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(2);
     const result = results.find((r) => r.filePath.endsWith("index.ts"));
     expect(result?.findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("supabase"))).toBe(true);
@@ -168,7 +180,7 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), ALIASED_IMPORT_SOURCE);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(1);
     const [result] = results;
     expect(
@@ -192,7 +204,7 @@ describe("pinned import-target allow-list (M2)", () => {
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(0);
   });
 
@@ -203,7 +215,7 @@ describe("pinned import-target allow-list (M2)", () => {
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import leftPad from "left-pad"; export const p = leftPad;`);
 
-    const results = lintDirectory(tmpRoot);
+    const results = lintDirectory(tmpRoot, tmpRoot);
     // M2: the deno.json's own unpinned target is ALSO its own config-level
     // finding now, a separate result entry from the importing source file.
     expect(results).toHaveLength(2);

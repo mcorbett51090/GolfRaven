@@ -14,9 +14,11 @@ import {
   detectRuntimeTamper,
   extractX2MdLogSection,
   findAcceptRowLine,
+  isNodeOptionTokenAllowed,
   resolveCorroboration,
   resolveGitBinary,
   sameConfiguredHost,
+  tokenizeNodeOptions,
   verifyAgainstGitHub,
   type EvidenceByTrail,
   type GitHubVerification,
@@ -3243,6 +3245,70 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
       });
     });
 
+    describe("tokenizeNodeOptions / isNodeOptionTokenAllowed (round 8: allow-list, not a denylist)", () => {
+      it("splits on whitespace", () => {
+        expect(tokenizeNodeOptions("--max-old-space-size=8192 --no-warnings")).toEqual([
+          "--max-old-space-size=8192",
+          "--no-warnings",
+        ]);
+      });
+
+      it("keeps a double-quoted value with an embedded space as one token, stripping the quotes", () => {
+        expect(tokenizeNodeOptions('--title="my app name"')).toEqual(['--title=my app name']);
+      });
+
+      it("keeps a single-quoted value with an embedded space as one token, stripping the quotes", () => {
+        expect(tokenizeNodeOptions("--title='my app name'")).toEqual(["--title=my app name"]);
+      });
+
+      it("a bare value following a space-separated flag is its own token", () => {
+        expect(tokenizeNodeOptions("--stack-size 984")).toEqual(["--stack-size", "984"]);
+      });
+
+      it("isNodeOptionTokenAllowed: a bare (non-flag) value is always allowed — it's not itself a vector", () => {
+        expect(isNodeOptionTokenAllowed("984")).toBe(true);
+        expect(isNodeOptionTokenAllowed("./evil.cjs")).toBe(true);
+      });
+
+      it("isNodeOptionTokenAllowed: every named benign flag is allowed", () => {
+        for (const flag of [
+          "--max-old-space-size=8192",
+          "--max-semi-space-size=64",
+          "--stack-size",
+          "--stack-size=984",
+          "--no-warnings",
+          "--enable-source-maps",
+          "--trace-warnings",
+          "--unhandled-rejections=warn",
+        ]) {
+          expect(isNodeOptionTokenAllowed(flag)).toBe(true);
+        }
+      });
+
+      it("isNodeOptionTokenAllowed: every named dangerous/unvetted flag is refused", () => {
+        for (const flag of [
+          "-r",
+          "--require",
+          "--require=./evil.cjs",
+          "--loader",
+          "--experimental-loader",
+          "--import",
+          "--inspect",
+          "--inspect-brk=0",
+          "--env-file=/tmp/x",
+          "--conditions=x",
+          "--openssl-config=/tmp/x",
+          "--use-openssl-ca",
+          "--preserve-symlinks",
+          "--preserve-symlinks-main",
+          "--experimental-anything",
+          "--totally-unknown-flag",
+        ]) {
+          expect(isNodeOptionTokenAllowed(flag)).toBe(false);
+        }
+      });
+    });
+
     describe("detectRuntimeTamper", () => {
       it("a clean environment (no tamper vars, empty execArgv) is not flagged", () => {
         const res = detectRuntimeTamper({}, []);
@@ -3287,6 +3353,55 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
 
       it("any DYLD_* variable is flagged", () => {
         expect(detectRuntimeTamper({ DYLD_INSERT_LIBRARIES: "/tmp/evil.dylib" }, []).tampered).toBe(true);
+      });
+
+      it("round 8 follow-up: any LD_* variable is flagged, not just LD_PRELOAD/LD_LIBRARY_PATH — LD_AUDIT loaded native code in the gate's own round-8 probe", () => {
+        const res = detectRuntimeTamper({ LD_AUDIT: "/tmp/evil-audit.so" }, []);
+        expect(res.tampered).toBe(true);
+        expect(res.detail).toMatch(/LD_AUDIT/);
+      });
+
+      it("round 8: NODE_OPTIONS carrying --inspect is flagged (not on the allow-list)", () => {
+        const res = detectRuntimeTamper({ NODE_OPTIONS: "--inspect" }, []);
+        expect(res.tampered).toBe(true);
+        expect(res.detail).toMatch(/--inspect/);
+      });
+
+      it("round 8: NODE_OPTIONS carrying --inspect-brk=0 is flagged", () => {
+        const res = detectRuntimeTamper({ NODE_OPTIONS: "--inspect-brk=0" }, []);
+        expect(res.tampered).toBe(true);
+      });
+
+      it("round 8: NODE_OPTIONS carrying any UNKNOWN flag not on the allow-list is flagged — default-deny, not a denylist of known attacks", () => {
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--env-file=/tmp/evil.env" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--conditions=evil" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--openssl-config=/tmp/evil.cnf" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--use-openssl-ca" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--preserve-symlinks" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--experimental-fetch" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--totally-made-up-flag" }, []).tampered).toBe(true);
+      });
+
+      it("round 8: every flag on the benign allow-list passes, individually and combined", () => {
+        const benign = [
+          "--max-old-space-size=8192",
+          "--max-semi-space-size=64",
+          "--max-http-header-size=16384", // any other --max-* flag
+          "--stack-size=984",
+          "--no-warnings",
+          "--enable-source-maps",
+          "--trace-warnings",
+          "--unhandled-rejections=warn",
+          "--unhandled-rejections=strict", // any value for this flag
+        ];
+        for (const flag of benign) {
+          expect(detectRuntimeTamper({ NODE_OPTIONS: flag }, []).tampered).toBe(false);
+        }
+        expect(detectRuntimeTamper({ NODE_OPTIONS: benign.join(" ") }, []).tampered).toBe(false);
+      });
+
+      it("round 8: this environment's own ambient NODE_OPTIONS (--max-old-space-size=8192) still passes — the exact live-shell value, not just a synthetic one", () => {
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--max-old-space-size=8192" }, []).tampered).toBe(false);
       });
 
       it("a non-empty execArgv is flagged", () => {
