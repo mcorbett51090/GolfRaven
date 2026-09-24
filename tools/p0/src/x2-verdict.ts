@@ -1302,6 +1302,12 @@ export interface ResolveCorroborationOptions {
    * exercise the canonical-path-match logic against an isolated scratch
    * fixture. */
   canonicalX2MdPath?: string;
+  /** TEST-ONLY seam (gate finding, third re-gate, fix (b)) — `main()`
+   * never overrides this; defaults to `GOLFRAVEN_VERIFIED_MAIN_REF`.
+   * Passed straight through to `blameAcceptRow`'s own reachability
+   * check, so a test can point it at a ref it created locally (no
+   * network) instead of the real fetched ref. */
+  verifiedMainRefName?: string;
 }
 
 async function resolveWaybackRecord(
@@ -1501,13 +1507,14 @@ async function resolveAcceptanceRecord(
   // well-formed its content looks. This is a hard requirement, not a
   // label: there is no legitimate reason for a real acceptance to live
   // anywhere else.
-  const x2MdIsCanonical = await isCanonicalPath(opts.x2Md.path, canonicalX2MdAbsPath());
+  const expectedX2MdPath = opts.canonicalX2MdPath ?? canonicalX2MdAbsPath();
+  const x2MdIsCanonical = await isCanonicalPath(opts.x2Md.path, expectedX2MdPath);
   if (!x2MdIsCanonical) {
     return {
       acceptanceLogged: false,
       acceptanceDetail:
         `"${opts.x2Md.path}" is not this toolkit's own canonical docs/p0/X2.md (resolved: ` +
-        `"${canonicalX2MdAbsPath()}") — an acceptance is only ever trusted from there (gate finding, third ` +
+        `"${expectedX2MdPath}") — an acceptance is only ever trusted from there (gate finding, third ` +
         "re-gate, fix (a)).",
     };
   }
@@ -1529,7 +1536,11 @@ async function resolveAcceptanceRecord(
   // is responsible for having freshly fetched, THIS SAME RUN, from the
   // pinned GitHub URL before ever reaching here — never the editable
   // local `origin/main`.
-  const blame = await blameAcceptRow(opts.x2Md.path, match.lineNumber);
+  const blame = await blameAcceptRow(
+    opts.x2Md.path,
+    match.lineNumber,
+    opts.verifiedMainRefName ?? GOLFRAVEN_VERIFIED_MAIN_REF,
+  );
   if (!blame.ok) {
     return { acceptanceLogged: false, acceptanceDetail: blame.detail };
   }
