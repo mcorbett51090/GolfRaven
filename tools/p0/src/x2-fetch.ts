@@ -529,6 +529,12 @@ async function fetchOneRendered(
     draftCandidateNames,
   } = await storeEvidenceBytes(outDir, buf, contentType, url);
 
+  const { recorded } = await registerCapture(
+    ledgerPath,
+    { method: "rendered", url, sha256 },
+    { allowAdditional: true },
+  );
+
   return {
     trail,
     url,
@@ -548,7 +554,7 @@ async function fetchOneRendered(
     method: "rendered",
     ownerSavedDate: null,
     renderArgs: attemptedArgs,
-    recorded: true,
+    recorded,
   };
 }
 
