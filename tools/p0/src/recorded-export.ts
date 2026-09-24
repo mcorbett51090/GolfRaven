@@ -6,65 +6,57 @@
  * ... The same rule applies separately to each OS.").
  *
  * One line per OS — iOS and Android — holding that OS's recorded export's
- * UTC date as `YYYY-MM-DD`, blank until Matt logs it, plus, once bound:
- * a `sha256:<hex>` suffix (the export's hash) and a `result:pass|kill`
- * suffix (that OS's own recorded X1 verdict) — e.g.
- * `- iOS: 2026-09-20 sha256:abcd... result:kill`.
+ * UTC date as `YYYY-MM-DD`, blank until Matt logs it, plus, once bound: a
+ * `sha256:<hex>` suffix binding that date to one specific export file —
+ * e.g. `- iOS: 2026-09-20 sha256:abcd...`.
  *
- * **Round-2 Opus-gate correction (post-67bdb27), superseding round 1's
- * design:** round 1 let `x1-verdict` treat an input as "recorded" whenever
- * its OWN `recorded`/`os` JSON fields said so — a hand-editable claim, not
- * a verified one. That's gone. Trust now flows ONLY through this file,
- * verified independently by whichever tool is binding a run (never by
- * reading a `recorded`/`exportSha256` field out of someone else's JSON):
+ * **Round-3 Opus-gate correction (post-8e5a29b), simplifying round 2's
+ * design:** round 2 ALSO stored each OS's computed pass/kill as
+ * `result:pass|kill` on this same line, read back later to combine both
+ * OSes' results. That's gone — storing a *result* invites exactly the
+ * failure mode decision 0005 exists to prevent (a stale or hand-typed
+ * result line silently standing in for a real recomputation). This file
+ * now stores ONLY what a result is bound to (a UTC date + a SHA-256),
+ * never a result itself:
  *
- * - **Per-OS, never combined in one call.** `x1-ios-export --os ios` binds
- *   iOS's date+hash here; `x1-verdict --os android` binds Android's. Each
- *   tool computes its OWN os's calendar date and SHA-256 FRESH from the
- *   real source (export.xml for iOS, the reader's output JSON's raw bytes
- *   for Android) — never from a self-reported field.
- * - **The recorded X1 result is also written here, per OS**, as
- *   `result:pass|kill` — `x1-verdict --os <os>` computes it from that OS's
- *   OWN data alone and writes it once, refusing to silently overwrite a
- *   different value later. The overall X1 result then reads BOTH OSes'
- *   `result:` fields from this file (never from a single call's two
- *   inputs) — pass if either is "pass".
- * - **No informational peeking before binding.** Once a date is logged but
- *   before its hash is bound, `--informational` is refused too — that gap
- *   is exactly the window a not-yet-committed "recorded" run could be
- *   quietly previewed and then walked back from.
- * - **Git-history + working-tree integrity**, in the spirit of decision
- *   0001 Addendum F's own precedent (`git log -S` for K2's exclusion
- *   dates — this uses `-G` instead, see `assertHashHistoryIntact`'s doc
- *   for why `-S` alone would miss a value SWAP): before binding, the tool
- *   checks this file is fully committed (not just staged/dirty), scans
- *   full git history for the OS's hash ever changing after being set, and
- *   refuses in a shallow clone (that scan needs full history).
+ * - **No result is ever read back from a markdown line.** A recorded
+ *   `x1-verdict` run RECOMPUTES every bound OS's result, every time, from
+ *   that OS's bound file — re-hashed and re-parsed fresh, in the same
+ *   process, never from a cached or written value. See `x1-verdict.ts`'s
+ *   module doc for the recompute-and-combine mechanism.
+ * - **No informational runs on real data while an OS is unbound.** While
+ *   an OS has no bound `sha256:` (whether its date is blank or logged),
+ *   `--informational` is refused for that OS unless its input path
+ *   resolves under `tools/p0/test/fixtures/` — see
+ *   `assertInformationalInputAllowed`.
+ * - **The first-bind trust limit.** Whatever file is bound first for an
+ *   OS is trusted as that device's genuine output — there is no way to
+ *   verify a device's export against some independent ground truth. This
+ *   is why `docs/p0/X1.md` should be committed AND PUSHED immediately
+ *   after binding, the same as decision 0001 Addendum F requires for K2's
+ *   exclusion dating: rewritten LOCAL history (a rebase or amend) is not
+ *   detected by anything in this module — a pushed copy on GitHub is the
+ *   actual protection. `bindExportHash`'s caller prints "commit and push
+ *   docs/p0/X1.md now" after the first bind.
  */
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { resolveX1DocPath } from "./round-windows.js";
 
-const execFileAsync = promisify(execFile);
-
 export type X1Os = "ios" | "android";
-export type X1RecordedResult = "pass" | "kill";
 
 function osLabelOf(os: X1Os): string {
   return os === "ios" ? "iOS" : "Android";
 }
 
 /** One OS's recorded-export line. `date` (`YYYY-MM-DD`, a UTC calendar
- * date) and `sha256` are `null` until logged/bound; `result` is `null`
- * until `x1-verdict` has computed and written that OS's own recorded X1
- * verdict. */
+ * date) and `sha256` are `null` until logged/bound. There is no stored
+ * result any more — see the module doc. */
 export interface RecordedExportEntry {
   date: string | null;
   sha256: string | null;
-  result: X1RecordedResult | null;
 }
 
 export interface RecordedExportDates {
@@ -85,10 +77,9 @@ const RECORDED_EXPORT_HEADING_RE = /^recorded export\b/i;
 const ROW_RE = /^[-*]\s*(iOS|Android)\s*:\s*(.*)$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** A bullet's value: blank, or a UTC date optionally followed by a bound
- * hash and/or a recorded result, in that order. The hash is always
- * lowercase hex (Node's `crypto` digest("hex") output). */
-const VALUE_RE =
-  /^(\d{4}-\d{2}-\d{2})(?:\s+sha256:([0-9a-f]{64}))?(?:\s+result:(pass|kill))?$/;
+ * hash. The hash is always lowercase hex (Node's `crypto` digest("hex")
+ * output). No `result:` suffix any more — see the module doc. */
+const VALUE_RE = /^(\d{4}-\d{2}-\d{2})(?:\s+sha256:([0-9a-f]{64}))?$/;
 
 function headingText(line: string): string | null {
   const m = HEADING_RE.exec(line.trim());
@@ -104,13 +95,12 @@ function isRealCalendarDate(value: string): boolean {
 }
 
 function parseValue(raw: string, osLabel: string): RecordedExportEntry {
-  if (raw === "") return { date: null, sha256: null, result: null };
+  if (raw === "") return { date: null, sha256: null };
   const m = VALUE_RE.exec(raw);
   if (!m) {
     throw new Error(
       `docs/p0/X1.md "## Recorded export" has a malformed value "${raw}" on the "${osLabel}:" line — expected ` +
-        'blank, or "YYYY-MM-DD" (a UTC date) optionally followed by " sha256:<64 lowercase hex chars>" and/or ' +
-        '" result:pass" / " result:kill".',
+        'blank, or "YYYY-MM-DD" (a UTC date) optionally followed by " sha256:<64 lowercase hex chars>".',
     );
   }
   const date = m[1]!;
@@ -120,7 +110,7 @@ function parseValue(raw: string, osLabel: string): RecordedExportEntry {
         'expected a real calendar date in strict "YYYY-MM-DD" form, or blank (not yet logged).',
     );
   }
-  return { date, sha256: m[2] ?? null, result: (m[3] as X1RecordedResult | undefined) ?? null };
+  return { date, sha256: m[2] ?? null };
 }
 
 /**
@@ -130,7 +120,7 @@ function parseValue(raw: string, osLabel: string): RecordedExportEntry {
  * the heading and the next heading (or end of file). Throws — loudly,
  * never silently defaulting to blank — when: the heading is missing;
  * either OS's line is missing; an OS's line appears more than once; or a
- * non-blank value doesn't match the blank/date[/hash][/result] shape.
+ * non-blank value doesn't match the blank/date[/hash] shape.
  */
 export function parseRecordedExportDates(markdown: string): RecordedExportDates {
   const lines = markdown.split("\n");
@@ -153,8 +143,8 @@ export function parseRecordedExportDates(markdown: string): RecordedExportDates 
   }
 
   const dates: RecordedExportDates = {
-    ios: { date: null, sha256: null, result: null },
-    android: { date: null, sha256: null, result: null },
+    ios: { date: null, sha256: null },
+    android: { date: null, sha256: null },
   };
   const seen = new Set<X1Os>();
   for (let i = startIdx + 1; i < bodyEnd; i += 1) {
@@ -198,7 +188,7 @@ export async function readRecordedExportDates(
  * Decision 0005 "Recorded-export rule": refuses (throws) when the caller is
  * about to produce a RECORDED (non-`--informational`) result for `os` and
  * that OS's recorded-export UTC date is blank. Callers never call this
- * when `--informational` was passed — see `assertNoInformationalPeeking`
+ * when `--informational` was passed — see `assertInformationalInputAllowed`
  * for what gates that path instead.
  */
 export function assertRecordedExportDateLogged(dates: RecordedExportDates, os: X1Os): void {
@@ -213,24 +203,47 @@ export function assertRecordedExportDateLogged(dates: RecordedExportDates, os: X
   }
 }
 
+/** Repo-relative path to `tools/p0/test/fixtures`, resolved from THIS
+ * module's own location (same technique as `round-windows.ts`'s
+ * `resolveX1DocPath` — works identically from `src/` or `dist/`). */
+export function resolveFixturesDir(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(here, "..", "test", "fixtures");
+}
+
+/** True when `candidatePath` resolves to `tools/p0/test/fixtures` itself,
+ * or somewhere under it. */
+export function isUnderFixturesDir(candidatePath: string): boolean {
+  const fixturesDir = path.resolve(resolveFixturesDir());
+  const resolved = path.resolve(candidatePath);
+  return resolved === fixturesDir || resolved.startsWith(fixturesDir + path.sep);
+}
+
 /**
- * Round-2 Opus-gate correction (post-67bdb27), "No informational peeking
- * before binding": refuses `--informational` too when `os`'s UTC date is
- * logged but its SHA-256 isn't bound yet — the window between logging the
- * date and committing to a specific export is exactly what a quiet
- * informational preview would defeat. Once the hash IS bound, later
- * informational runs (against other exports) are fine again; while no date
- * is logged at all, informational runs are fine too (there's nothing yet
- * to peek at). Callers call this ONLY on the `--informational` path.
+ * Round-3 Opus-gate correction (post-8e5a29b), "No informational runs on
+ * real data while an OS is unbound": while `os` has no bound `sha256:`
+ * (whether its UTC date is blank or logged), `--informational` is refused
+ * for it UNLESS `inputPath` resolves under `tools/p0/test/fixtures/` — a
+ * quiet informational preview of real data is exactly what an unbound OS
+ * must not allow, whether or not a date happens to be logged yet. Once
+ * `os` IS bound, informational runs against any path are allowed again
+ * (decision 0005: "a later export can be read for information"). Callers
+ * call this ONLY on the `--informational` path, once per input actually
+ * supplied for that OS.
  */
-export function assertNoInformationalPeeking(dates: RecordedExportDates, os: X1Os): void {
-  if (dates[os].date !== null && dates[os].sha256 === null) {
+export function assertInformationalInputAllowed(
+  dates: RecordedExportDates,
+  os: X1Os,
+  inputPath: string,
+): void {
+  if (dates[os].sha256 !== null) return; // bound — any path is fine informationally.
+  if (!isUnderFixturesDir(inputPath)) {
     const osLabel = osLabelOf(os);
     throw new Error(
-      `docs/p0/X1.md has a ${osLabel} recorded-export UTC date logged but no SHA-256 bound yet — refusing ` +
-        "--informational in this window (decision 0005: no informational peeking before binding). Either run " +
-        "the recorded (non-informational) command to bind it, or use a synthetic test fixture instead of the " +
-        "real export for a dry run in this window.",
+      `Refusing --informational on real data for ${osLabel} (${inputPath}) while ${osLabel} has no bound ` +
+        "SHA-256 yet (decision 0005: no informational runs on real data while an OS is unbound). Use a " +
+        `synthetic fixture under tools/p0/test/fixtures/ for a dry run, or bind ${osLabel} first with a ` +
+        "recorded run.",
     );
   }
 }
@@ -278,7 +291,9 @@ export function assertExportDateMatches(
  * trusts a possibly-stale `dates` the caller read earlier) so a hash bound
  * by a concurrent/earlier step in the same run is never clobbered. On the
  * first recorded run for `os` (no hash bound yet), writes `actualSha256`
- * and returns `{written: true}`. On every later recorded run, compares
+ * and returns `{written: true}` — the caller should then tell the operator
+ * to commit AND PUSH `docs/p0/X1.md` immediately (see the module doc's
+ * "first-bind trust limit"). On every later recorded run, compares
  * `actualSha256` against what's already bound and THROWS on a mismatch.
  * Returns `{written: false}` when it already matched.
  */
@@ -291,7 +306,7 @@ export async function bindExportHash(
   const { dates } = await readRecordedExportDates(x1DocPath);
   const logged = dates[os].sha256;
   if (logged === null) {
-    await updateRecordedExportEntry(x1DocPath, os, { sha256: actualSha256 });
+    await updateRecordedExportEntry(x1DocPath, os, actualSha256);
     return { written: true };
   }
   if (logged !== actualSha256) {
@@ -305,64 +320,13 @@ export async function bindExportHash(
   return { written: false };
 }
 
-/**
- * Writes `os`'s own recorded X1 verdict (`"pass"` or `"kill"`, computed by
- * the caller from that OS's data alone) into `docs/p0/X1.md`, so a LATER
- * run — for the OTHER OS, or a re-run of this one — can read it back
- * without ever needing both OSes' input data in one call (round-2
- * Opus-gate correction: "Record each per-OS recorded result ... so the two
- * runs combine without trusting a hand stamp"). Re-reads the file itself
- * (see `bindExportHash`'s doc for why). Refuses if a DIFFERENT result is
- * already recorded there — the recorded result, once set, never silently
- * changes. Returns `{written: false}` when it already matched.
- */
-export async function writeRecordedResult(
-  x1DocPath: string,
-  os: X1Os,
-  result: X1RecordedResult,
-): Promise<{ written: boolean }> {
-  const osLabel = osLabelOf(os);
-  const { dates } = await readRecordedExportDates(x1DocPath);
-  const logged = dates[os].result;
-  if (logged === null) {
-    await updateRecordedExportEntry(x1DocPath, os, { result });
-    return { written: true };
-  }
-  if (logged !== result) {
-    throw new Error(
-      `docs/p0/X1.md already records ${osLabel}'s X1 result as "${logged}", but this run computed "${result}" ` +
-        "— refusing to silently change a recorded result. If the underlying data genuinely changed, that " +
-        "needs an owner decision, not an automatic overwrite.",
-    );
-  }
-  return { written: false };
-}
-
-/**
- * Combines both OSes' durably-recorded results (never a single call's two
- * inputs — see the module doc) into the overall X1 result: `"pass"` if
- * either OS's own recorded result is `"pass"`; `"kill"` if both OSes have
- * a recorded result and neither is `"pass"`; `"pending"` if at least one
- * OS has no recorded result yet.
- */
-export function computeOverallX1Result(dates: RecordedExportDates): X1RecordedResult | "pending" {
-  if (dates.ios.result === "pass" || dates.android.result === "pass") return "pass";
-  if (dates.ios.result !== null && dates.android.result !== null) return "kill";
-  return "pending";
-}
-
-/** Rewrites `os`'s "## Recorded export" bullet line in `x1DocPath`,
- * merging `patch` into whatever's already on that line (never dropping an
- * already-set `sha256`/`result` when writing the other). Throws if the
- * section/line isn't there, or if no UTC date is logged yet (a hash/result
- * can only ever be bound to an already-logged date) — this is only ever
- * called right after a fresh read confirmed the date exists, so either
- * case means the file changed underneath the run. */
-async function updateRecordedExportEntry(
-  x1DocPath: string,
-  os: X1Os,
-  patch: { sha256?: string; result?: X1RecordedResult },
-): Promise<void> {
+/** Rewrites `os`'s "## Recorded export" bullet line in `x1DocPath` to
+ * append its `sha256:<hex>` suffix, preserving the already-logged date.
+ * Throws if the section/line isn't there, or if no UTC date is logged yet
+ * (a hash can only ever be bound to an already-logged date) — this is
+ * only ever called right after a fresh read confirmed the date exists, so
+ * either case means the file changed underneath the run. */
+async function updateRecordedExportEntry(x1DocPath: string, os: X1Os, sha256: string): Promise<void> {
   const raw = await readFile(x1DocPath, "utf8");
   const lines = raw.split("\n");
   const osLabel = osLabelOf(os);
@@ -381,7 +345,7 @@ async function updateRecordedExportEntry(
     }
   }
   let lineIdx = -1;
-  let current: RecordedExportEntry = { date: null, sha256: null, result: null };
+  let current: RecordedExportEntry = { date: null, sha256: null };
   for (let i = startIdx + 1; i < bodyEnd; i += 1) {
     const m = ROW_RE.exec(lines[i]!.trim());
     if (m && m[1]!.toLowerCase() === os) {
@@ -396,15 +360,7 @@ async function updateRecordedExportEntry(
   if (current.date === null) {
     throw new Error(`docs/p0/X1.md "## Recorded export" has no UTC date logged for ${osLabel} — cannot bind to it.`);
   }
-  const merged: RecordedExportEntry = {
-    date: current.date,
-    sha256: patch.sha256 ?? current.sha256,
-    result: patch.result ?? current.result,
-  };
-  const parts = [merged.date];
-  if (merged.sha256) parts.push(`sha256:${merged.sha256}`);
-  if (merged.result) parts.push(`result:${merged.result}`);
-  lines[lineIdx] = `- ${osLabel}: ${parts.join(" ")}`;
+  lines[lineIdx] = `- ${osLabel}: ${current.date} sha256:${sha256}`;
   await writeFile(x1DocPath, lines.join("\n"), "utf8");
 }
 
@@ -420,164 +376,4 @@ export function informationalBanner(os: X1Os): string {
     "date logged, or was explicitly requested as informational — either way, it never replaces the " +
     "recorded result and is not the P0 verdict."
   );
-}
-
-// ---------------------------------------------------------------------
-// Git integrity (round-2 Opus-gate correction, post-67bdb27, should-fix 3)
-// ---------------------------------------------------------------------
-
-async function runGit(args: string[], cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
-  return stdout;
-}
-
-/** Decision 0001 Addendum F's own precedent ("The count refuses to run in
- * a shallow clone", K2 exclusion dating): `assertHashHistoryIntact` below
- * needs full history to be meaningful, so a shallow clone is refused
- * before any binding happens. */
-export async function assertNotShallowClone(x1DocPath: string): Promise<void> {
-  const dir = path.dirname(x1DocPath);
-  let out: string;
-  try {
-    out = (await runGit(["rev-parse", "--is-shallow-repository"], dir)).trim();
-  } catch (err) {
-    throw new Error(
-      `Could not determine whether this checkout is a shallow git clone (${err instanceof Error ? err.message : String(err)}) ` +
-        "— refusing a recorded run: decision 0005's hash-history integrity check needs a real, full git repo.",
-    );
-  }
-  if (out === "true") {
-    throw new Error(
-      "This checkout is a shallow git clone — refusing a recorded run: decision 0005's hash-history " +
-        "integrity check (git log -S) needs full history. Un-shallow the clone (git fetch --unshallow) first.",
-    );
-  }
-}
-
-/** Refuses a recorded run when `docs/p0/X1.md` has uncommitted changes —
- * decision 0005: a hash/result that isn't committed can't be trusted as
- * the shared, auditable record the rest of this mechanism assumes it is.
- * The FIRST bind for an OS is the one exception in spirit (it necessarily
- * leaves the file dirty right after writing) — but that's handled by
- * calling this check BEFORE any write in a given run, never after; the
- * caller prints "commit docs/p0/X1.md now" once it has written something. */
-export async function assertX1DocCommitted(x1DocPath: string): Promise<void> {
-  const dir = path.dirname(x1DocPath);
-  let out: string;
-  try {
-    out = await runGit(["status", "--porcelain", "--", x1DocPath], dir);
-  } catch (err) {
-    throw new Error(
-      `Could not check docs/p0/X1.md's git status (${err instanceof Error ? err.message : String(err)}) — ` +
-        "refusing a recorded run: decision 0005 requires the hash/result lines to be a committed, auditable " +
-        "record.",
-    );
-  }
-  if (out.trim() !== "") {
-    throw new Error(
-      "docs/p0/X1.md has uncommitted changes — refusing a recorded run: decision 0005 requires the hash/" +
-        "result lines to be committed before they can be trusted as the shared record. Commit docs/p0/X1.md " +
-        "(or discard the changes) first.",
-    );
-  }
-}
-
-/**
- * Should-fix 3, "Hash-line integrity": scans the FULL git history of
- * `x1DocPath` (`git log --reverse -S"sha256:"`, the same `-S` technique
- * decision 0001 Addendum F uses for K2's exclusion dating) for `os`'s bound
- * SHA-256 ever changing after first being set, or being removed entirely.
- * Refuses (throws) if so — a hash that changes after the fact is exactly
- * what this binding exists to catch. A commit whose historical content is
- * unreadable or fails to parse as a "## Recorded export" section is
- * skipped (it predates the section, or is otherwise not comparable), never
- * treated as evidence of tampering on its own.
- */
-export async function assertHashHistoryIntact(x1DocPath: string, os: X1Os): Promise<void> {
-  const osLabel = osLabelOf(os);
-  const dir = path.dirname(x1DocPath);
-  let repoRoot: string;
-  try {
-    repoRoot = (await runGit(["rev-parse", "--show-toplevel"], dir)).trim();
-  } catch (err) {
-    throw new Error(
-      `Could not find this checkout's git root (${err instanceof Error ? err.message : String(err)}) — ` +
-        "refusing a recorded run: decision 0005's hash-history integrity check needs a real git repo.",
-    );
-  }
-  const relPath = path.relative(repoRoot, x1DocPath).split(path.sep).join("/");
-  let logOut: string;
-  try {
-    // `-G` (matches any commit whose diff ADDS OR REMOVES a line matching
-    // the regex), not `-S` (which only fires on a CHANGE IN OCCURRENCE
-    // COUNT of a literal string): the substring "sha256:" itself is
-    // present, unchanged, before and after a value swap, so `-S"sha256:"`
-    // would silently miss exactly the tampering this check exists to
-    // catch. `-G` matches because the WHOLE line (including the hex
-    // value) differs, so it shows as one line removed + one line added.
-    logOut = await runGit(
-      ["log", "--format=%H", "--reverse", "-G", "sha256:[0-9a-f]{64}", "--", relPath],
-      repoRoot,
-    );
-  } catch (err) {
-    throw new Error(
-      `Could not read docs/p0/X1.md's git history (${err instanceof Error ? err.message : String(err)}) — ` +
-        "refusing a recorded run: decision 0005's hash-history integrity check needs full history.",
-    );
-  }
-  const commits = logOut.split("\n").map((l) => l.trim()).filter(Boolean);
-  let firstSeenHash: string | null = null;
-  for (const commit of commits) {
-    let content: string;
-    try {
-      content = await runGit(["show", `${commit}:${relPath}`], repoRoot);
-    } catch {
-      continue; // file didn't exist at that commit — not comparable.
-    }
-    let historical: RecordedExportDates;
-    try {
-      historical = parseRecordedExportDates(content);
-    } catch {
-      continue; // predates the "## Recorded export" section, or malformed at that point — not comparable.
-    }
-    const hash = historical[os].sha256;
-    if (hash === null) continue;
-    if (firstSeenHash === null) {
-      firstSeenHash = hash;
-    } else if (hash !== firstSeenHash) {
-      throw new Error(
-        `docs/p0/X1.md's bound SHA-256 for ${osLabel} has changed across git history (commit ${commit} shows ` +
-          `"${hash}", but it was first bound as "${firstSeenHash}") — refusing a recorded run: decision 0005's ` +
-          "hash binding must never change once set. A genuine re-bind needs an owner decision, not a silent " +
-          "overwrite.",
-      );
-    }
-  }
-  if (firstSeenHash === null) return; // never bound in history — nothing to check yet.
-
-  const { dates: current } = await readRecordedExportDates(x1DocPath);
-  const currentHash = current[os].sha256;
-  if (currentHash === null) {
-    throw new Error(
-      `docs/p0/X1.md's bound SHA-256 for ${osLabel} was previously set (${firstSeenHash}) but is now blank — ` +
-        "refusing a recorded run: it looks like the hash was removed. A genuine re-bind needs an owner " +
-        "decision, not a silent removal.",
-    );
-  }
-  if (currentHash !== firstSeenHash) {
-    throw new Error(
-      `docs/p0/X1.md's bound SHA-256 for ${osLabel} (${currentHash}) does not match what git history shows it ` +
-        `was first bound as (${firstSeenHash}) — refusing a recorded run: decision 0005's hash binding must ` +
-        "never change once set.",
-    );
-  }
-}
-
-/** Convenience wrapper: runs all three git-integrity checks above, in the
- * order that fails fastest/cheapest first. Callers use this right before
- * binding a hash for a recorded run. */
-export async function assertGitIntegrity(x1DocPath: string, os: X1Os): Promise<void> {
-  await assertNotShallowClone(x1DocPath);
-  await assertX1DocCommitted(x1DocPath);
-  await assertHashHistoryIntact(x1DocPath, os);
 }

@@ -44,8 +44,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   assertExportDateMatches,
-  assertGitIntegrity,
-  assertNoInformationalPeeking,
+  assertInformationalInputAllowed,
   assertRecordedExportDateLogged,
   bindExportHash,
   extractCalendarDate,
@@ -463,9 +462,10 @@ async function main(argv: string[]): Promise<void> {
   if (recorded) {
     assertRecordedExportDateLogged(recordedExportDates, args.os);
   } else {
-    // Round-2 Opus-gate correction: --informational is refused too, in the
-    // window between the UTC date being logged and its hash being bound.
-    assertNoInformationalPeeking(recordedExportDates, args.os);
+    // Round-3 Opus-gate correction: --informational on real (non-fixture)
+    // data is refused while iOS is unbound (whether its UTC date is blank
+    // or logged) — only a synthetic fixture path is allowed in that window.
+    assertInformationalInputAllowed(recordedExportDates, args.os, args.exportDir);
   }
 
   const result = await runX1IosExport(args.exportDir, {
@@ -478,11 +478,12 @@ async function main(argv: string[]): Promise<void> {
   // (nothing to bind against), if that UTC date doesn't match what's
   // logged, or if its SHA-256 doesn't match what was already bound there.
   // --informational skips all of this — it is never checked or bound.
-  // Round-2 Opus-gate correction: also refuse in a shallow clone, when
-  // docs/p0/X1.md has uncommitted changes, or when its git history shows
-  // the bound hash was ever changed or removed (decision 0005's
-  // hash-history integrity check, git log -S — same technique K2's
-  // exclusion dating uses).
+  // Round-3 Opus-gate correction: the first-bind trust limit — whatever
+  // file is bound first is trusted as the device's genuine output; there
+  // is no independent ground truth to verify it against. The protection
+  // against a rewritten LOCAL history (rebase/amend, not detected by
+  // anything here) is committing AND PUSHING docs/p0/X1.md right away,
+  // the same as decision 0001 Addendum F requires for K2.
   let boundSomething = false;
   if (recorded) {
     if (result.exportDate === null) {
@@ -494,7 +495,6 @@ async function main(argv: string[]): Promise<void> {
     }
     const exportCalendarDate = extractCalendarDate(result.exportDate);
     assertExportDateMatches(recordedExportDates, args.os, exportCalendarDate);
-    await assertGitIntegrity(source.path, args.os);
     const { written } = await bindExportHash(source.path, args.os, result.exportSha256);
     boundSomething = written;
   }
@@ -518,7 +518,9 @@ async function main(argv: string[]): Promise<void> {
     `x1-ios-export: ${result.golfWorkoutCount} golf workout(s) found (of ${result.totalWorkoutElementsSeen} total <Workout> elements). ` +
       `recorded=${recorded}\n` +
       `Wrote ${jsonPath} and ${mdPath}.\n` +
-      (boundSomething ? "This run bound a new SHA-256 into docs/p0/X1.md — commit docs/p0/X1.md now.\n" : ""),
+      (boundSomething
+        ? "This run bound a new SHA-256 into docs/p0/X1.md — commit and push docs/p0/X1.md now.\n"
+        : ""),
   );
   if (result.warnings.length > 0) {
     process.stderr.write(

@@ -40,41 +40,48 @@
  * **Round-2 Opus-gate correction (post-67bdb27), superseding round 1's own
  * fix:** round 1's fix still trusted a `recorded`/`os` field INSIDE the
  * `--ios`/`--android` JSON itself to decide eligibility — a hand-editable
- * claim, not a verified one; an input hand-stamped `recorded: true` was
- * treated as eligible regardless. That trust is gone:
+ * claim, not a verified one. That trust is gone: `computeX1Verdict` (this
+ * pure function) has no "eligible" concept at all — it has no filesystem
+ * access, so it can't verify anything, and doesn't try.
+ * `recordedVerdicts.ios` / `.android` are unconditionally computed FROM
+ * DATA ALONE (`sourcesPassingByOs` restated per OS). Whether either is
+ * actually the recorded result belongs entirely to the CLI.
  *
- * - **`computeX1Verdict` (this pure function) no longer has an "eligible"
- *   concept at all.** It cannot verify anything — it has no filesystem or
- *   git access — so it doesn't try. `recordedVerdicts.ios` / `.android`
- *   are now unconditionally computed FROM DATA ALONE (`sourcesPassingByOs`
- *   restated per OS), the same whether or not either input claims to be
- *   "recorded". Any `recorded`/`os` field on an input is ignored entirely.
- * - **Only the CLI decides what's actually recorded, and it decides PER
- *   OS, from that OS's OWN data, verified independently** — never from a
- *   stamp. `x1-verdict --os ios` computes iOS's own date/hash FRESH from
- *   the real `--ios` JSON's `exportDir` (re-reading and re-hashing
- *   `export.xml` itself — see `recorded-export.ts`'s module doc), and
- *   ONLY IF that binds cleanly does it treat `recordedVerdicts.ios.verdict`
- *   as the recorded iOS result, writing it into `docs/p0/X1.md` as
- *   `result:pass|kill`. The `--android` input, in an `--os ios` run, is
- *   NEVER checked, NEVER bound, and NEVER treated as recorded, whatever it
- *   claims — it's shown in the informational sections only
- *   (`perSource`, `sourcesPassingByOs`, `countedEntries`).
- * - **The overall X1 result combines two SEPARATE runs' durably-recorded
- *   results, never one call's two inputs.** After binding+writing this
- *   run's OS result, the CLI reads BOTH OSes' `result:` fields back out of
- *   `docs/p0/X1.md` and reports "pass" if either is "pass", "kill" if both
- *   are recorded and neither passed, "pending" if the other OS hasn't run
- *   yet. This is `recordedOverall` in the CLI's JSON output — a separate
- *   field from this module's own (informational) `overallVerdict`.
- * - **No informational peeking before binding**, and git-history/
- *   working-tree integrity around `docs/p0/X1.md` — see
- *   `recorded-export.ts`'s module doc for both.
+ * **Round-3 Opus-gate correction (post-8e5a29b), simplifying round 2's
+ * mechanism — no stored `result:` line, no separate `--ios <json>` to
+ * distrust, no git-log tampering scan:**
+ *
+ * - **No stored result. A recorded run RECOMPUTES every bound OS's
+ *   verdict, every time, from that OS's bound file.** `x1-verdict` takes
+ *   `--ios-export <dir>` (the raw Apple Health export directory — not a
+ *   pre-computed `x1-ios-export` JSON) and/or `--android <json>` (the
+ *   reader's raw output). For each one supplied, on a recorded run: verify
+ *   its UTC date and SHA-256 against `docs/p0/X1.md` (binding them on the
+ *   first run), THEN recompute that OS's pass/kill straight from the
+ *   verified data. There is no separate "claimed" JSON to disagree with
+ *   any more — this eliminates round 2's whole `assertIosWorkoutDataNotTampered`
+ *   tamper-detection path, because there's nothing left to tamper with
+ *   independently of the bound file itself.
+ * - **A recorded run needs the bound input of every OS that already has a
+ *   bound hash.** If `docs/p0/X1.md` shows an OS as bound but its input
+ *   wasn't supplied this run, that's refused — the overall result is never
+ *   guessed from a partial picture.
+ * - **The overall result is computed in-process, this call, from however
+ *   many OSes were recomputed** — "pass" if any of them came back "pass".
+ *   Nothing is ever read back from a markdown line.
+ * - **No informational runs on real data while an OS is unbound** (whether
+ *   its date is blank or logged) **— fixtures only**, and **the first-bind
+ *   trust limit**: whatever file binds an OS first is trusted as that
+ *   device's genuine output; there's no way to verify it further. Local
+ *   git history CAN be rewritten (a rebase/amend) without detection — the
+ *   actual protection is committing AND PUSHING `docs/p0/X1.md`
+ *   immediately after binding (decision 0001 Addendum F's own K2
+ *   precedent). See `recorded-export.ts`'s module doc for all of this.
  */
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { hashFile, type X1IosExportResult, type X1IosWorkoutRecord } from "./x1-ios-export.js";
+import type { X1IosExportResult, X1IosWorkoutRecord } from "./x1-ios-export.js";
 import {
   isWithinRoundWindow,
   readLoggedRoundWindows,
@@ -82,16 +89,12 @@ import {
 } from "./round-windows.js";
 import {
   assertExportDateMatches,
-  assertGitIntegrity,
-  assertNoInformationalPeeking,
+  assertInformationalInputAllowed,
   assertRecordedExportDateLogged,
   bindExportHash,
-  computeOverallX1Result,
   extractCalendarDate,
   informationalBanner,
   readRecordedExportDates,
-  writeRecordedResult,
-  type X1RecordedResult,
   type X1Os,
 } from "./recorded-export.js";
 
@@ -266,17 +269,16 @@ export interface X1VerdictResult {
 
 export interface X1VerdictInput {
   ios: X1IosExportResult;
-  /** Round-2 Opus-gate correction (post-67bdb27): `os` is REQUIRED here —
-   * "The Android reader output must carry os and generatedAt." This is a
-   * basic shape/operator-error guard (e.g. catching the iOS JSON
-   * accidentally passed as `--android`), checked unconditionally by the
-   * CLI — it is NOT a trust mechanism, and never makes this OS's data
-   * "recorded" (that requires real, independently-verified hash binding;
-   * see the module doc). The apps/mobile Health Connect reader itself
-   * doesn't produce this field (that package is out of this repo's lane),
-   * so whoever prepares an Android input JSON adds `os: "android"` to it,
-   * the same lightweight way `x1-ios-export` stamps `os: "ios"` onto its
-   * own output. */
+  /** `os` is REQUIRED here — "The Android reader output must carry os and
+   * generatedAt." This is a basic shape/operator-error guard (e.g. catching
+   * the iOS export.xml directory's own data accidentally passed as
+   * `--android`), checked unconditionally by the CLI — it is NOT a trust
+   * mechanism, and never makes this OS's data "recorded" (that requires
+   * real, independently-verified hash binding; see the module doc).
+   * Round-3 Opus-gate correction (post-8e5a29b): the apps/mobile Health
+   * Connect reader itself now emits `os: "android"` (and `generatedAt`) as
+   * part of its own real output — the bound file is that untouched output,
+   * never hand-annotated. */
   android: AndroidGolfSessionReadResult & { os: X1Os };
   /** Follow-up reads for any Android session with `routeRequiresConsent`,
    * keyed by `recordId`. A session in that state with no entry here is
@@ -411,33 +413,6 @@ function newestStart(entries: X1CountedEntry[]): string | null {
     }
   }
   return newest;
-}
-
-/**
- * Should-fix 4, explicit refusal (not a silent correction), round-2
- * Opus-gate correction: the SHA-256 that binds a recorded iOS run covers
- * `export.xml`, a DIFFERENT file from the `--ios` JSON — so hash-binding
- * alone does NOT catch a `--ios` JSON whose `workouts` field was
- * hand-edited while `exportDir` still points at the real, unmodified
- * export.xml. `main()` closes that gap by recomputing iOS's verdict from a
- * completely FRESH re-parse of export.xml (never trusting the `--ios`
- * JSON's own `workouts`) and calling this function to compare the two:
- * throws when they disagree — that JSON was tampered with after being
- * produced — rather than quietly using the correct (fresh) value and
- * leaving the discrepancy unreported.
- */
-export function assertIosWorkoutDataNotTampered(
-  claimedVerdict: "pass" | "kill",
-  freshVerdict: "pass" | "kill",
-): void {
-  if (claimedVerdict !== freshVerdict) {
-    throw new Error(
-      "The --ios JSON's own workout data disagrees with a fresh re-parse of its bound export.xml (JSON says " +
-        `${claimedVerdict}, export.xml says ${freshVerdict}) — refusing a recorded run: decision 0005 never ` +
-        "trusts the JSON's own fields for the recorded verdict. Re-run x1-ios-export against the same export " +
-        "to get an untampered file.",
-    );
-  }
 }
 
 export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
