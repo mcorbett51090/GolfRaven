@@ -21,7 +21,16 @@
 
 set -euo pipefail
 
-PSQL=(psql -v ON_ERROR_STOP=1 -A -t)
+# S1 restricted-mode fix: this script's INSERTs simulate an ingestion Edge
+# Function, whose real production identity is service_role (matching
+# 09_delete_my_data.sql / 07_rate_limit.sql's own fix, same session) — not
+# whatever PGUSER the harness connects as. Under HARNESS_MODE=restricted
+# that connecting role is migration_owner (NOSUPERUSER NOBYPASSRLS, no
+# grants on app.evidence/app.play), so without this these INSERTs would
+# fail on a table with FORCE ROW LEVEL SECURITY and no matching policy.
+# `-c` flags run as sequential statements on ONE session, so this ONE
+# extra `-c` covers every call site below without editing each one.
+PSQL=(psql -v ON_ERROR_STOP=1 -A -t -c "SET ROLE service_role;")
 USER_ID="00000000-0000-0000-0000-00000000000a"
 DEVICE_ID="20000000-0000-0000-0000-000000000001"
 FAILED=0
