@@ -5,5 +5,24 @@
     "types": ["node"]
   },
   "include": ["src", "test"],
-  "exclude": ["test/with-ownership.test.ts"]
+  // ⛔ FIX (MEDIUM-2 follow-up, post-P3a re-gate round 3): "pnpm -r
+  // typecheck fails because test/fixtures/** is now picked up by `tsc -b
+  // tsconfig.json`." Before this round, the lint's fixtures lived under
+  // supabase/functions/__fixtures__ -- entirely outside this package's
+  // own tsconfig (and outside every other TS project in the pnpm
+  // workspace, since supabase/functions is Deno, not part of `pnpm -r
+  // typecheck` at all), so tsc never saw them. Moving them into
+  // test/fixtures/** put them, for the first time, inside a directory
+  // this tsconfig's own "test" include already covers. They are
+  // deliberately Deno-style sources (URL/npm:/jsr: specifiers, bare
+  // imports meant to resolve only via a deno.json/import_map.json this
+  // package's own lint interprets, `.ts`-suffixed relative imports) and
+  // can never typecheck under plain Node tsc -- that is not a defect in
+  // them, it is what they are FOR (fixtures for a lint that reasons about
+  // Deno's own module resolution, not source this package compiles or
+  // ships). Excluded from typechecking; the vitest suite (`test:
+  // "vitest run"`) still exercises them by reading their raw source text
+  // with lintSource()/lintDirectory(), never by having tsc parse them as
+  // this package's own code.
+  "exclude": ["test/with-ownership.test.ts", "test/fixtures/**"]
 }
