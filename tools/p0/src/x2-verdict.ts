@@ -46,7 +46,7 @@ import { collapseWhitespace } from "./text-extract.js";
 import { extractEvidenceText } from "./evidence-extract.js";
 import { SLATE_TRAILS } from "./slate.js";
 import type { X2FetchManifest, X2Method } from "./x2-fetch.js";
-import type { RecordedLedger } from "./x2-recorded-ledger.js";
+import { defaultLedgerPath, loadLedger, type RecordedLedger } from "./x2-recorded-ledger.js";
 import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
@@ -638,7 +638,8 @@ async function main(argv: string[]): Promise<void> {
   const confirmationPath = flags.confirmation;
   if (!evidenceDir || !confirmationPath) {
     throw new Error(
-      "Usage: node dist/x2-verdict.js --evidence-dir <dir> --confirmation <file.json> [--out <prefix>]",
+      "Usage: node dist/x2-verdict.js --evidence-dir <dir> --confirmation <file.json> [--out <prefix>] " +
+        "[--ledger <path>]",
     );
   }
   const manifest = JSON.parse(

@@ -207,7 +207,7 @@ export function isQualityCoSignalFix(fix: AppFix, playFacilityId: string): boole
     // merely "not none" (which let `challenge: undefined`, or any other
     // non-`"none"` garbage string, through as if it were a real challenge).
     (fix.challenge === "live" || fix.challenge === "prefetched") &&
-    finiteInRange(fix.accuracyMeters, 0, 50) &&
+    finiteInRange(fix.accuracyMeters, 0, ACCURACY_METERS_MAX) &&
     fix.geometryKind === "polygon" &&
     fix.verificationTier === "play-verified" &&
     fix.insideBuffer === true &&
@@ -239,7 +239,7 @@ export function staffFixSatisfiesHardWindow(fix: AppFix, scanAt: number, ctx: Sc
   return (
     isQualityCoSignalFix(fix, ctx.playFacilityId) &&
     fix.localDate === ctx.playLocalDate &&
-    windowMs(fix.capturedAt, scanAt, 10 * 60_000)
+    windowMs(fix.capturedAt, scanAt, STAFF_HARD_WINDOW_MS)
   );
 }
 
@@ -506,7 +506,7 @@ function deviceRowFixGateOk(
   // Every boolean below is an allow-list (fifth gate, H1).
   if (fix.fromApp !== true) return false;
   if (fix.foreground !== true) return false;
-  if (!finiteInRange(fix.accuracyMeters, 0, 50)) return false;
+  if (!finiteInRange(fix.accuracyMeters, 0, ACCURACY_METERS_MAX)) return false;
   if (fix.insideBuffer !== true) return false;
   // `challenge` allow-listed to the two real kinds when required — not
   // merely "not none" (`undefined`/a bogus string previously passed).
@@ -528,9 +528,9 @@ function deviceRowFixGateOk(
  * failing to equal the single denied literal `"none"`. */
 function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challenge">): number {
   let m = 1;
-  if (fix.simulated !== false) m *= 0.3;
+  if (fix.simulated !== false) m *= SIMULATED_PENALTY_MULTIPLIER;
   const grade = resolveFixGrade(fix.token);
-  if (grade === "unattestable" || (fix.challenge !== "live" && fix.challenge !== "prefetched")) m *= 0.6;
+  if (grade === "unattestable" || (fix.challenge !== "live" && fix.challenge !== "prefetched")) m *= UNATTESTABLE_OR_NO_CHALLENGE_PENALTY_MULTIPLIER;
   return m;
 }
 
@@ -787,7 +787,7 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
     }
     case "receipt_green_fee": {
       const classId: EvidenceClassId = "receipt_green_fee";
-      const badgeWeight = rowOk ? (row.status === "approved" ? WEIGHT[classId] : row.status === "pending" ? 0.2 : 0) : 0;
+      const badgeWeight = rowOk ? (row.status === "approved" ? WEIGHT[classId] : row.status === "pending" ? RECEIPT_PENDING_WEIGHT : 0) : 0;
       // Finding 4: anchored to `ctx.playLocalDate`.
       const moneyEligible =
         rowOk &&
@@ -807,7 +807,7 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
     case "health_route": {
       const classId: EvidenceClassId = "health_route";
       // Should-fix: insideRatio below 0.6, or non-finite, scores 0.
-      if (!rowOk || !Number.isFinite(row.insideRatio) || row.insideRatio < 0.6) {
+      if (!rowOk || !Number.isFinite(row.insideRatio) || row.insideRatio < HEALTH_ROUTE_MIN_INSIDE_RATIO) {
         return finish(row, {
           classId,
           group: GROUP[classId],
@@ -820,8 +820,8 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       // (`=== true`/`!== false`), not deny-listed — an ambiguous value
       // (e.g. `simulated: undefined`) must never be read as "definitely
       // not simulated."
-      const base = row.sourceAllowListed !== true ? 0.1 : row.insideRatio >= 0.8 ? 0.6 : 0.4;
-      const badgeWeight0 = row.simulated !== false ? base * 0.3 : base;
+      const base = row.sourceAllowListed !== true ? HEALTH_ROUTE_LOW_WEIGHT : row.insideRatio >= HEALTH_ROUTE_HIGH_INSIDE_RATIO ? HEALTH_ROUTE_HIGH_WEIGHT : HEALTH_ROUTE_MID_WEIGHT;
+      const badgeWeight0 = row.simulated !== false ? base * SIMULATED_PENALTY_MULTIPLIER : base;
       const capped = applyCourseCaps(badgeWeight0, row.geometryKind, row.courseDisambiguatedBy, false);
       return finish(row, {
         classId,
@@ -843,13 +843,13 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
           row.k4bPassed === true &&
           row.insidePolygon === true &&
           Number.isFinite(row.durationMinutes) &&
-          row.durationMinutes >= 90
+          row.durationMinutes >= CONNECT_IQ_ROUTE_MIN_DURATION_MINUTES
             ? WEIGHT[classId]
             : 0;
       } else {
         badgeWeight = WEIGHT[classId];
       }
-      if (row.simulated !== false) badgeWeight *= 0.3;
+      if (row.simulated !== false) badgeWeight *= SIMULATED_PENALTY_MULTIPLIER;
       const capped = applyCourseCaps(badgeWeight, undefined, row.courseDisambiguatedBy, false);
       return finish(row, {
         classId,
@@ -867,7 +867,7 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       if (!hasFix(row.checkinFix) || !hasFix(row.checkoutFix)) {
         return finish(row, { classId, group: GROUP[classId], hard: false, badgeWeight: 0, moneyEligible: false });
       }
-      const threshold = row.holes === 9 ? 50 : 90; // line 1000
+      const threshold = row.holes === 9 ? DWELL_THRESHOLD_9_HOLES_MINUTES : DWELL_THRESHOLD_18_HOLES_MINUTES; // line 1000
       // Should-fix: derive `apartMinutes` from the two fixes' OWN
       // `capturedAt` rather than trusting the stored field — if they
       // disagree, the derived value wins (both are always present on a
@@ -927,7 +927,7 @@ export function classifyEvidenceRow(row: Evidence, ctx: ScorePlayContext): Score
       if (!rowOk) {
         return finish(row, { classId, group, hard: false, badgeWeight: 0, moneyEligible: false });
       }
-      const badgeWeight0 = row.matchedRoute ? 0.4 : 0.1;
+      const badgeWeight0 = row.matchedRoute ? FILE_IMPORT_MATCHED_WEIGHT : FILE_IMPORT_UNMATCHED_WEIGHT;
       const capped = applyCourseCaps(
         badgeWeight0,
         row.matchedRoute ? row.geometryKind : undefined,
