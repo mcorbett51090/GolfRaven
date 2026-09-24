@@ -263,24 +263,53 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   });
 });
 
-function fakeRenderLauncher(opts: {
+/** A minimal PageLike that passes every request through unmodified — for
+ * tests in THIS file that exercise `runX2Fetch`'s render plumbing, not
+ * `x2-render.ts`'s own off-host/https/byte-cap logic (that logic has its
+ * own dedicated, thorough coverage in `x2-render.test.ts`). */
+function passthroughPage(opts: {
   status?: number;
   finalUrl: string;
   html: string;
-}): { launch: ChromiumLauncher; userAgentSeen: string | null } {
-  const state = { userAgentSeen: null as string | null };
-  const page: PageLike = {
+  onHeaders?: (headers: Record<string, string>) => void;
+}): PageLike {
+  return {
     async setExtraHTTPHeaders(headers) {
-      state.userAgentSeen = headers["User-Agent"] ?? null;
+      opts.onHeaders?.(headers);
+    },
+    async route(_pattern, _handler) {
+      // No-op: every request this fake page "sees" is implicitly allowed,
+      // since it never actually feeds anything through the handler.
+    },
+    on() {},
+    mainFrame() {
+      return {};
+    },
+    url() {
+      return opts.finalUrl;
     },
     async goto() {
-      return { status: () => opts.status ?? 200, url: () => opts.finalUrl };
+      return { status: () => opts.status ?? 200, url: () => opts.finalUrl, headers: () => ({}) };
     },
     async content() {
       return opts.html;
     },
     async close() {},
   };
+}
+
+function fakeRenderLauncher(opts: {
+  status?: number;
+  finalUrl: string;
+  html: string;
+}): { launch: ChromiumLauncher; userAgentSeen: string | null } {
+  const state = { userAgentSeen: null as string | null };
+  const page = passthroughPage({
+    ...opts,
+    onHeaders: (h) => {
+      state.userAgentSeen = h["User-Agent"] ?? null;
+    },
+  });
   const browser: BrowserLike = {
     async newPage() {
       return page;
@@ -323,21 +352,13 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
 
   it("keeps the tool's own bot-identifying User-Agent when rendering, never a browser UA", async () => {
     const state = { userAgentSeen: null as string | null };
-    const page: PageLike = {
-      async setExtraHTTPHeaders(headers) {
-        state.userAgentSeen = headers["User-Agent"] ?? null;
+    const page = passthroughPage({
+      finalUrl: "https://golfvancouverisland.ca/",
+      html: "<p>x</p>",
+      onHeaders: (h) => {
+        state.userAgentSeen = h["User-Agent"] ?? null;
       },
-      async goto() {
-        return {
-          status: () => 200,
-          url: () => "https://golfvancouverisland.ca/",
-        };
-      },
-      async content() {
-        return "<p>x</p>";
-      },
-      async close() {},
-    };
+    });
     const browser: BrowserLike = {
       async newPage() {
         return page;
@@ -372,18 +393,27 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
   });
 
   it("records a render failure (e.g. navigation error) as FAILED with method 'rendered', never silently skipped", async () => {
+    const page: PageLike = {
+      async setExtraHTTPHeaders() {},
+      async route() {},
+      on() {},
+      mainFrame() {
+        return {};
+      },
+      url() {
+        return "";
+      },
+      async goto() {
+        throw new Error("net::ERR_CONNECTION_REFUSED");
+      },
+      async content() {
+        return "";
+      },
+      async close() {},
+    };
     const browser: BrowserLike = {
       async newPage() {
-        return {
-          async setExtraHTTPHeaders() {},
-          async goto() {
-            throw new Error("net::ERR_CONNECTION_REFUSED");
-          },
-          async content() {
-            return "";
-          },
-          async close() {},
-        };
+        return page;
       },
       async close() {},
     };

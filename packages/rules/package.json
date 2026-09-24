@@ -19,7 +19,8 @@
   },
   "dependencies": {
     "@golfraven/catalog": "workspace:*",
-    "@golfraven/matching": "workspace:*"
+    "@golfraven/matching": "workspace:*",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "typescript": "7.0.2",
