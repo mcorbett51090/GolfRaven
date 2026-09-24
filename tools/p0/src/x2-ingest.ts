@@ -66,6 +66,7 @@ import {
   type X2SourceConfig,
 } from "./x2-fetch.js";
 import { sameConfiguredHost } from "./x2-verdict.js";
+import { defaultLedgerPath, findLedgerEntry, loadLedger, registerCapture } from "./x2-recorded-ledger.js";
 import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
@@ -165,6 +166,13 @@ export async function ingestOwnerSavedPage(opts: {
    * same URL for the same trail is refused. With it, the capture proceeds
    * and is stored with `recorded: false`. */
   additional?: boolean;
+  /** Gate finding 2: the recorded-captures ledger path — see
+   * `x2-recorded-ledger.ts`. Defaults to `<outDir>/recorded-ledger.json`;
+   * pass the SAME explicit path `x2-fetch --render`/`x2-fetch` used for
+   * TN/VI/RTJ's own evidence when ingesting into a different `--out-dir`
+   * for the same URL set, so first-capture-wins is enforced across all of
+   * them, not just within this one directory. */
+  ledgerPath?: string;
 }): Promise<X2IngestResult> {
   const { trail, filePath, statedUrl, statedDate, sourceConfig, outDir } = opts;
 
@@ -363,7 +371,7 @@ export async function ingestOwnerSavedPage(opts: {
     method: "owner-saved",
     ownerSavedDate: statedDate,
     renderArgs: null,
-    recorded: !hasRecordedPrior,
+    recorded,
   };
 
   manifest.trails[trail] = [...(manifest.trails[trail] ?? []), entry];

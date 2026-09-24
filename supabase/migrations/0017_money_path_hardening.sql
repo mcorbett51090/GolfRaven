@@ -26,37 +26,58 @@
 -- (one real evidence event backing two separate reward claims).
 ALTER TABLE app.play_evidence ADD CONSTRAINT play_evidence_evidence_id_key UNIQUE (evidence_id);
 
--- Composite ownership check: play.user_id must equal evidence.user_id for
--- every (play_id, evidence_id) pair. A true composite FK would need a
--- UNIQUE(id, user_id) on both app.play and app.evidence AND
--- play_evidence to carry its own user_id column to FK against both —
--- carrying a THIRD, redundant user_id column onto play_evidence (whose
--- whole shape today is a clean two-column join table) is a bigger, more
--- invasive schema change than the directive's "or a trigger" alternative
--- calls for. A BEFORE INSERT OR UPDATE trigger enforces the same
--- invariant without reshaping the table.
-CREATE OR REPLACE FUNCTION app.play_evidence_user_match() RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  v_play_user uuid;
-  v_evidence_user uuid;
-BEGIN
-  SELECT user_id INTO v_play_user FROM app.play WHERE id = NEW.play_id;
-  SELECT user_id INTO v_evidence_user FROM app.evidence WHERE id = NEW.evidence_id;
-  IF v_play_user IS DISTINCT FROM v_evidence_user THEN
-    RAISE EXCEPTION
-      'play_evidence: play.user_id (%) does not match evidence.user_id (%) for play_id=%, evidence_id=%',
-      v_play_user, v_evidence_user, NEW.play_id, NEW.evidence_id
-      USING ERRCODE = '23514';
-  END IF;
-  RETURN NEW;
-END;
-$$;
+-- ⛔ FIX (M1, post-P3a gate): the original version used a BEFORE
+-- INSERT/UPDATE plpgsql trigger doing two independent SELECTs, which was
+-- bypassable two ways, both reproduced empirically: (1) deferred-FK
+-- ordering — if play_id/evidence_id pointed at NOT-YET-COMMITTED or
+-- deleted rows within the same deferred-FK transaction, the SELECT ...
+-- INTO found nothing, v_play_user/v_evidence_user were both NULL, and
+-- `NULL IS DISTINCT FROM NULL` is FALSE — the mismatch check silently
+-- passed; (2) re-owning — the trigger only checked ownership AT LINK
+-- TIME; nothing stopped play.user_id or evidence.user_id being changed
+-- to a DIFFERENT user AFTERWARD, silently detaching the pair without
+-- ever re-checking.
+--
+-- Replaced with the composite-FK design: app.play and app.evidence each
+-- get `UNIQUE (id, user_id)` (a trivial derivation of their existing PK
+-- plus one column), play_evidence gains its own `user_id` column, and
+-- TWO composite foreign keys pin it to BOTH parents' (id, user_id) pairs
+-- at once. This closes both bypasses structurally, not by a trigger that
+-- can be out-raced or skipped: (1) a composite FK's NULL semantics only
+-- exempt a referencING row with a NULL in one of ITS OWN key columns
+-- (MATCH SIMPLE) — play_evidence.play_id/evidence_id/user_id are all NOT
+-- NULL, so there is no NULL-lookup escape hatch at all, deferred or not;
+-- (2) re-owning is blocked at the SOURCE: changing app.play.user_id or
+-- app.evidence.user_id while a play_evidence row still references that
+-- (id, user_id) pair is itself an FK violation (default ON UPDATE NO
+-- ACTION) — Postgres refuses the re-own, it does not silently let the
+-- child go stale.
+ALTER TABLE app.play ADD CONSTRAINT play_id_user_id_key UNIQUE (id, user_id);
+ALTER TABLE app.evidence ADD CONSTRAINT evidence_id_user_id_key UNIQUE (id, user_id);
 
-CREATE TRIGGER play_evidence_user_match_trg
-BEFORE INSERT OR UPDATE ON app.play_evidence
-FOR EACH ROW EXECUTE FUNCTION app.play_evidence_user_match();
+ALTER TABLE app.play_evidence ADD COLUMN user_id uuid;
+-- Backfill from app.play (an existing play_evidence row's play_id always
+-- resolves to a real play; the play's own user_id is definitionally the
+-- correct value here, since play_evidence's original intent — and the
+-- FK we're about to add — is exactly "this evidence backs THIS user's
+-- play").
+UPDATE app.play_evidence pe SET user_id = p.user_id FROM app.play p WHERE p.id = pe.play_id;
+ALTER TABLE app.play_evidence ALTER COLUMN user_id SET NOT NULL;
+
+ALTER TABLE app.play_evidence
+  ADD CONSTRAINT play_evidence_play_user_fk FOREIGN KEY (play_id, user_id)
+    REFERENCES app.play (id, user_id) DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT play_evidence_evidence_user_fk FOREIGN KEY (evidence_id, user_id)
+    REFERENCES app.evidence (id, user_id) DEFERRABLE INITIALLY DEFERRED;
+-- DEFERRABLE INITIALLY DEFERRED matches every other app-internal FK's
+-- contract (0014 §3) so delete_my_data's multi-table deletes keep
+-- working in any statement order — play_evidence rows are deleted
+-- transitively (ON DELETE CASCADE from both play_id and evidence_id,
+-- 0003), so by the time either FK is actually checked at commit the
+-- referencing play_evidence row is already gone in the normal
+-- delete_my_data path; deferring just removes any dependency on which
+-- of play/evidence/play_evidence the generic loop happens to delete
+-- first.
 
 -- ============================================================================
 -- 2. Attestation grade: typed column, not evidence.integrity jsonb
