@@ -50,7 +50,14 @@
  * or a fix's own copies of them. A row whose own `facilityId`/`localDate`
  * disagrees with `ctx.playFacilityId`/`ctx.playLocalDate` is dropped
  * before scoring — it is evidence for a DIFFERENT play and must not
- * silently contribute to this one.
+ * silently contribute to this one. **The caller does not have to
+ * pre-filter to one play's rows before calling** — `scorePlay` scores ONE
+ * PLAY PER CALL regardless of how many OTHER plays' rows ride along in
+ * `evidence[]`; those are harmlessly excluded (`parse-evidence.js`'s loose
+ * facility/date/course filter), never quarantined, never counted against
+ * `EVIDENCE_ROW_CAP` (the real per-play row bound — see that constant's
+ * own doc, `internal/classify.js`, for the split from `ABSOLUTE_ROW_CAP`,
+ * the much larger pure-DoS bound on the raw, unfiltered array).
  */
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -128,10 +135,10 @@ export const CORROBORATION_WINDOW_DAYS = 7;
 /* Receipt fingerprint voiding (should-fix, §4.4/§4.5 line 996)         */
 /* ------------------------------------------------------------------ */
 
-/** F2 (sixth gate): status rank for the deterministic fingerprint-dup
- * winner below — higher wins. `void` is included (rank 0) only so the
- * comparison is total; a `void` row can still "win" a group where every
- * member is `void`, which is a no-op either way. */
+/** F2 (sixth gate) fallback comparison, used ONLY when a duplicate group
+ * has no `void` member AND not every member carries a `coSignalFix`
+ * (item 3, seventh gate, changes the PRIMARY rule — see
+ * `voidDuplicateFingerprints`'s own doc). Higher wins. */
 const RECEIPT_STATUS_RANK: Record<"approved" | "pending" | "void", number> = {
   approved: 2,
   pending: 1,
@@ -144,16 +151,36 @@ const RECEIPT_STATUS_RANK: Record<"approved" | "pending" | "void", number> = {
  * `receipt_fingerprint`'s cross-user dedupe (§4.4), applied here at the
  * narrower scope this package can see (one call's own evidence).
  *
- * **F2 (sixth gate): order-independent.** The previous version kept
- * whichever row of a duplicate-fingerprint group came FIRST in the input
- * array and voided every later one — so `[pending, approved, checkin]`
- * kept the `pending` row (voiding `approved`) while
- * `[approved, pending, checkin]` kept `approved` (voiding `pending`),
- * changing `money` on array order alone. The winner is now picked
- * DETERMINISTICALLY, independent of position: highest status rank
- * (`approved` > `pending` > `void`), tie-broken by the smallest `id`
- * (lexicographic) — every other member of the group is voided, whatever
- * order the caller passed them in. */
+ * **Seventh gate, item 3: a reviewer's `void` now wins UNCONDITIONALLY.**
+ * The sixth gate's rank rule (`approved` > `pending` > `void`) let a
+ * NEWER, auto-approved duplicate override an OLDER row a human reviewer
+ * had explicitly voided — `[void(old), approved(new)]` kept the approved
+ * one, silently overturning the reviewer's fraud/duplicate call. Now: if
+ * ANY member of a fingerprint group is `void`, the WHOLE GROUP is void —
+ * a single reviewer void is a statement about the CLAIM (this
+ * booking/payment is a known duplicate), not about one specific row, so
+ * every row sharing that fingerprint is tainted by it.
+ *
+ * **Otherwise (no `void` present): earliest `capturedAt` wins, when every
+ * row in the group carries one (via `coSignalFix`).** The FIRST captured
+ * receipt for a given fingerprint is the honest one; a later duplicate
+ * that happens to get marked `approved` should not out-rank an earlier
+ * `pending`/`approved` one just because of ITS OWN status — that would
+ * reward re-submission. Falls back to the OLD status-rank rule (`approved`
+ * > `pending`, tie-broken by smallest `id`) only when the group is
+ * capturedAt-incomplete (some member has no `coSignalFix` at all, so
+ * "earliest" isn't soundly comparable across the whole group) — **the DB
+ * intake path must independently void the NEWER copy of any duplicate
+ * -fingerprint pair that lacks a comparable capturedAt, so this
+ * comparison-blind fallback is a defence-in-depth floor, not the primary
+ * mechanism** (see `docs/security/p3-money-path-requirements.md`).
+ *
+ * **Order-independent throughout** (F2, sixth gate, preserved): every
+ * comparison here is over the SET of a fingerprint's members, never "the
+ * first/last in array order" — `[pending, approved, checkin]` and
+ * `[approved, pending, checkin]` (no void present) resolve identically,
+ * as do `[void(old), approved(new)]` and `[approved(new), void(old)]`
+ * (both now correctly void the whole group). */
 function voidDuplicateFingerprints(evidence: Evidence[]): Evidence[] {
   const byFingerprint = new Map<string, Extract<Evidence, { source: "receipt_green_fee" }>[]>();
   for (const row of evidence) {
@@ -163,19 +190,34 @@ function voidDuplicateFingerprints(evidence: Evidence[]): Evidence[] {
       byFingerprint.set(row.fingerprint, arr);
     }
   }
+  const allVoidFingerprints = new Set<string>();
   const winnerIdByFingerprint = new Map<string, string>();
   for (const [fingerprint, rows] of byFingerprint) {
     if (rows.length < 2) continue; // not actually a duplicate group
+    if (rows.some((r) => r.status === "void")) {
+      allVoidFingerprints.add(fingerprint);
+      continue;
+    }
+    const everyRowHasCapturedAt = rows.every((r) => r.coSignalFix !== undefined);
     let winner = rows[0]!;
-    for (const row of rows) {
-      const rowRank = RECEIPT_STATUS_RANK[row.status];
-      const winnerRank = RECEIPT_STATUS_RANK[winner.status];
-      if (rowRank > winnerRank || (rowRank === winnerRank && row.id < winner.id)) winner = row;
+    if (everyRowHasCapturedAt) {
+      for (const row of rows) {
+        const rowAt = row.coSignalFix!.capturedAt;
+        const winnerAt = winner.coSignalFix!.capturedAt;
+        if (rowAt < winnerAt || (rowAt === winnerAt && row.id < winner.id)) winner = row;
+      }
+    } else {
+      for (const row of rows) {
+        const rowRank = RECEIPT_STATUS_RANK[row.status];
+        const winnerRank = RECEIPT_STATUS_RANK[winner.status];
+        if (rowRank > winnerRank || (rowRank === winnerRank && row.id < winner.id)) winner = row;
+      }
     }
     winnerIdByFingerprint.set(fingerprint, winner.id);
   }
   return evidence.map((row) => {
     if (row.source !== "receipt_green_fee" || !row.fingerprint) return row;
+    if (allVoidFingerprints.has(row.fingerprint)) return { ...row, status: "void" as const };
     const winnerId = winnerIdByFingerprint.get(row.fingerprint);
     if (winnerId === undefined || row.id === winnerId) return row;
     return { ...row, status: "void" as const };

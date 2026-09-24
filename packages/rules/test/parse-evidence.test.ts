@@ -7,6 +7,7 @@
  * and `scorePlay`'s discriminated-result / quarantine integration (F3).
  */
 import { describe, expect, it } from "vitest";
+import { EVIDENCE_ROW_CAP } from "../src/internal/classify.js";
 import {
   ABSOLUTE_ROW_CAP,
   parseEvidence,
@@ -355,23 +356,23 @@ describe("F6: localDate must be a REAL calendar date, not merely regex-shaped", 
   });
 });
 
-describe("H2 / M4 / F3: parseScorePlayInput's 200-row cap counts only rows that MATCH this play", () => {
-  it("accepts exactly 200 MATCHING rows", () => {
-    const evidence = Array.from({ length: 200 }, (_, i) => staffPresence({ id: `s_${i}`, coSignalFix: goodFix() }));
+describe(`H2 / M4 / F3 / item 9: parseScorePlayInput's ${EVIDENCE_ROW_CAP}-row cap counts only rows that MATCH this play`, () => {
+  it(`accepts exactly ${EVIDENCE_ROW_CAP} MATCHING rows`, () => {
+    const evidence = Array.from({ length: EVIDENCE_ROW_CAP }, (_, i) => staffPresence({ id: `s_${i}`, coSignalFix: goodFix() }));
     const result = parseScorePlayInput({ evidence, ctx: baseCtx() });
     expect(result.success).toBe(true);
   });
 
-  it("rejects 201 MATCHING rows outright, fail-closed, with a reason", () => {
-    const evidence = Array.from({ length: 201 }, (_, i) => staffPresence({ id: `s_${i}`, coSignalFix: goodFix() }));
+  it(`rejects ${EVIDENCE_ROW_CAP + 1} MATCHING rows outright, fail-closed, with a reason`, () => {
+    const evidence = Array.from({ length: EVIDENCE_ROW_CAP + 1 }, (_, i) => staffPresence({ id: `s_${i}`, coSignalFix: goodFix() }));
     const result = parseScorePlayInput({ evidence, ctx: baseCtx() });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.reasons.some((r) => r.includes("200"))).toBe(true);
+      expect(result.reasons.some((r) => r.includes(String(EVIDENCE_ROW_CAP)))).toBe(true);
     }
   });
 
-  it("F3: 500 rows for a DIFFERENT facility plus 1 matching row does NOT fail on the 200 cap — the off-play rows are excluded, not counted", () => {
+  it(`F3: 500 rows for a DIFFERENT facility plus 1 matching row does NOT fail on the ${EVIDENCE_ROW_CAP} cap — the off-play rows are excluded, not counted`, () => {
     const otherFacilityRows = Array.from({ length: 500 }, (_, i) => ({
       id: `other_${i}`,
       facilityId: "fac_OTHER",

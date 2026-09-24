@@ -579,11 +579,22 @@ export const RADIUS_CAP = 0.5;
  * distinct caps, and M5's policy hash (`score-play.ts`) pins them
  * separately so either one drifting is caught on its own. */
 export const USER_PICK_CAP = 0.5;
-/** M4 (fifth gate): the hard row-count ceiling `parseScorePlayInput`
- * enforces before `scorePlay` ever runs — kept here, beside the other
- * policy constants, so `SCORE_PLAY_POLICY_VERSION`'s hash pin covers it
- * too. */
-export const EVIDENCE_ROW_CAP = 200;
+/** M4 (fifth gate) / item 9 (seventh gate): the row-count ceiling
+ * `parseScorePlayInput` enforces on rows that survive the loose
+ * facility/date/course filter — i.e. rows that actually belong to THIS
+ * play (`scorePlay`'s own contract is "one play per call"; see that
+ * function's module doc). Raised from 200 (fifth gate) to 1000 (seventh
+ * gate, item 9: "apply the 1000-row absolute cap only to rows that pass
+ * the loose on-play filter") — 200 was closer to the RAW, unfiltered
+ * ceiling's old value than to a real per-play bound, and a legitimately
+ * evidence-heavy single play (many corroborating device-GPS rows across a
+ * long round) should not be squeezed by the SAME number that also used to
+ * bound "how many other plays' rows can ride along before we even start
+ * filtering." `parse-evidence.ts`'s `ABSOLUTE_ROW_CAP` (raised in the same
+ * gate to 10,000) is now the ONLY cap on the raw, unfiltered array — this
+ * one is the real per-play bound. Kept here, beside the other policy
+ * constants, so `SCORE_PLAY_POLICY_VERSION`'s hash pin covers it too. */
+export const EVIDENCE_ROW_CAP = 1000;
 /** M2 (fifth gate): a `foreground_dwell` whose two fixes are more than 12h
  * apart (or, via a signed rather than absolute delta, apart in the WRONG
  * direction — checkout before checkin) is ineligible outright, never

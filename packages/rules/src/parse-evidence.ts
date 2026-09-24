@@ -149,7 +149,7 @@ const AppFixSchema = z.strictObject({
   // `.finite()` rejects `Infinity`/`-Infinity`/`NaN` (zod's bare
   // `z.number()` accepts `Infinity`, since it IS a JS `number`).
   accuracyMeters: z.number().finite(),
-  capturedAt: z.number().finite(),
+  capturedAt: PlausibleEpochMsSchema,
   localDate: LocalDateSchema,
 });
 
@@ -172,7 +172,7 @@ const EvidenceSchema = z.discriminatedUnion("source", [
   z.strictObject({
     ...EvidenceCommonShape,
     source: z.literal("staff_presence"),
-    scanAt: z.number().finite(),
+    scanAt: PlausibleEpochMsSchema,
     coSignalFix: AppFixSchema.optional(),
   }),
   z.strictObject({
@@ -209,7 +209,7 @@ const EvidenceSchema = z.discriminatedUnion("source", [
     insideRatio: z.number().finite(),
     simulated: z.boolean(),
     geometryKind: GeometryKindSchema,
-    startedAt: z.number().finite().optional(),
+    startedAt: PlausibleEpochMsSchema.optional(),
   }),
   z.strictObject({
     ...EvidenceCommonShape,
@@ -233,7 +233,7 @@ const EvidenceSchema = z.discriminatedUnion("source", [
     source: z.literal("file_import"),
     matchedRoute: z.boolean(),
     geometryKind: GeometryKindSchema.optional(),
-    startedAt: z.number().finite().optional(),
+    startedAt: PlausibleEpochMsSchema.optional(),
   }),
   z.strictObject({ ...EvidenceCommonShape, source: z.literal("foreground_checkin"), fix: AppFixSchema }),
   z.strictObject({ ...EvidenceCommonShape, source: z.literal("health_workout") }),
@@ -459,12 +459,22 @@ export interface ScorePlayInputParseFailure {
 }
 export type ScorePlayInputParseResult = ScorePlayInputParseSuccess | ScorePlayInputParseFailure;
 
-/** F3: the ABSOLUTE ceiling on the RAW `evidence` array length, checked
- * BEFORE any filtering — a pure DoS guard, independent of how many rows
- * actually belong to this play (a real `app.evidence` query can
- * legitimately return many OTHER plays' rows alongside this one's; this
- * cap exists only to bound the work done reading the raw array at all). */
-export const ABSOLUTE_ROW_CAP = 1000;
+/** F3 / item 9 (seventh gate): the ABSOLUTE ceiling on the RAW `evidence`
+ * array length, checked BEFORE any filtering — a pure DoS guard,
+ * independent of how many rows actually belong to this play. **`scorePlay`
+ * scores ONE PLAY PER CALL** (this file's own module doc, and
+ * `score-play.ts`'s) — a real `app.evidence` query can legitimately
+ * return many OTHER plays' rows alongside this one's (an unfiltered scan
+ * of a busy facility's whole day, say), and those are harmlessly excluded
+ * by the loose filter below, never counted against `EVIDENCE_ROW_CAP`
+ * (`internal/classify.js` — the real per-play bound, raised to 1000 in
+ * this same gate). This cap exists ONLY to bound the work done reading
+ * the raw array at all before that filter even runs; raised from 1,000 to
+ * 10,000 (item 9: "keep a much larger raw DoS cap") now that the two caps
+ * have cleanly separated roles — a caller that queries evidence WITHOUT
+ * pre-filtering to one play should still get a fast, sound answer instead
+ * of an arbitrary failure well within realistic query sizes. */
+export const ABSOLUTE_ROW_CAP = 10_000;
 
 /** F3: a LOOSE, tolerant read of a not-yet-validated row's `facilityId`/
  * `localDate`/`courseId` — deliberately NOT the strict `EvidenceSchema`.
