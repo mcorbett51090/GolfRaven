@@ -18,6 +18,18 @@ const ISO_STRICT_RE =
 
 const MIN_YEAR = 2000;
 
+/** `Date.parse`/`new Date(...)` silently roll an invalid calendar date
+ * over instead of rejecting it — `Date.parse("2026-02-30T14:00:00Z")`
+ * parses cleanly as March 2nd, even through the "strict" ISO 8601 code
+ * path — confirmed directly (`node -e`) rather than assumed, since the
+ * more common claim that strict ISO parsing rejects this is wrong in
+ * V8. `Date.UTC`'s own round-trip (construct from the components, read
+ * them back) is what actually catches it. */
+function isRealCalendarDate(year: number, month: number, day: number): boolean {
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day;
+}
+
 export interface StrictTimestamp {
   /** Epoch milliseconds. */
   ms: number;
@@ -41,9 +53,13 @@ export function parseStrictTimestamp(raw: string): StrictTimestamp | undefined {
   const m = ISO_STRICT_RE.exec(trimmed);
   if (!m) return undefined;
   const [, year, month, day, , , , offset] = m;
-  if (Number(year) < MIN_YEAR) return undefined;
-  if (Number(month) < 1 || Number(month) > 12) return undefined;
-  if (Number(day) < 1 || Number(day) > 31) return undefined;
+  const yearNum = Number(year);
+  const monthNum = Number(month);
+  const dayNum = Number(day);
+  if (yearNum < MIN_YEAR) return undefined;
+  if (monthNum < 1 || monthNum > 12) return undefined;
+  if (dayNum < 1 || dayNum > 31) return undefined;
+  if (!isRealCalendarDate(yearNum, monthNum, dayNum)) return undefined;
 
   const ms = Date.parse(trimmed);
   if (!Number.isFinite(ms)) return undefined;

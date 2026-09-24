@@ -5,19 +5,25 @@
  * specific walker this module's limits feed).
  */
 
-/** Input size cap for GPX/CSV. A file over this is refused outright
- * before any parsing work happens. */
-export const MAX_INPUT_BYTES = 20 * 1024 * 1024; // 20 MB
+/** Input size cap for every format (FIT, GPX, CSV alike). A file over
+ * this is refused outright before any parsing work happens.
+ *
+ * Originally 20 MB for GPX/CSV and a separate, lower 5 MB for FIT (after
+ * a 19 MB crafted FIT file was shown to reach 2–3.4 GB peak RSS and 30 s
+ * wall time in `fit-file-parser`). Round 2 of the security gate asked
+ * for one 5 MB cap across all three formats — a real golf round's GPX or
+ * CSV export is also well under 1 MB (a multi-hour, 1 Hz GPS track), so
+ * there was no real-file reason for GPX/CSV to be allowed 4× more room
+ * than FIT, and the format-specific hardening below it
+ * (`fit-prescan.ts`'s message/field-count walk, `csv-rows.ts`'s row cap)
+ * is what actually bounds a small-but-densely-packed hostile file within
+ * whatever this cap allows through — this cap is just the cheap first
+ * refusal, for every format equally. */
+export const MAX_INPUT_BYTES = 5 * 1024 * 1024; // 5 MB
 
-/** Input size cap for FIT specifically — lowered from the general 20 MB
- * cap after a 19 MB crafted FIT file was shown to reach 2–3.4 GB peak
- * RSS and 30 s wall time in `fit-file-parser`. 5 MB is generous for a
- * real golf round (a multi-hour, 1 Hz GPS track is well under 1 MB) and
- * bounds the worst case this cap alone can't fully prevent —
- * `fit-prescan.ts`'s message/field-count walk is the layer that actually
- * bounds a small-but-densely-packed hostile file; this cap is the cheap
- * first refusal. */
-export const MAX_FIT_INPUT_BYTES = 5 * 1024 * 1024; // 5 MB
+/** Alias for `MAX_INPUT_BYTES`, kept for call sites that name the format
+ * explicitly (`parse-fit.ts`) — same value, not a separate cap. */
+export const MAX_FIT_INPUT_BYTES = MAX_INPUT_BYTES;
 
 /** CSV row cap, checked *during* tokenization (`csv-rows.ts`), not after
  * — a 19.9 MB file of ~9.9 million tiny empty rows took 17.8 s to

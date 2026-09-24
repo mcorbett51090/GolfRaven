@@ -224,8 +224,19 @@ describe("parseFitFile: invalid record coordinates", () => {
   });
 });
 
-describe("parseFitFile: oversized input", () => {
-  it("is refused before any parsing work, at the lowered 5 MB FIT cap", async () => {
+describe("parseFitFile: size cap (should-fix: 5 MB, same as GPX/CSV)", () => {
+  it("MAX_FIT_INPUT_BYTES is exactly 5 MB", () => {
+    expect(MAX_FIT_INPUT_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it("boundary: refuses one byte over the cap", async () => {
+    const oversized = new Uint8Array(MAX_FIT_INPUT_BYTES + 1);
+    const result = await parseFitFile(oversized);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("bytes");
+  });
+
+  it("is refused before any parsing work, at the 5 MB cap (original assertion)", async () => {
     const oversized = new Uint8Array(MAX_FIT_INPUT_BYTES + 1);
     const result = await parseFitFile(oversized);
     expect(result.ok).toBe(false);
@@ -233,8 +244,8 @@ describe("parseFitFile: oversized input", () => {
   });
 });
 
-describe("parseFitFile: CRC mismatch", () => {
-  it("warns but still parses (force: true tolerates it)", async () => {
+describe("parseFitFile: CRC mismatch and missing CRC", () => {
+  it("warns but still parses on a CRC mismatch (force: true tolerates it)", async () => {
     const bytes = buildGolfActivityFit({
       records: trackAround(2, new Date("2026-06-01T14:00:00Z")),
       wrongFileCrc: true,
@@ -244,5 +255,15 @@ describe("parseFitFile: CRC mismatch", () => {
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(2);
     expect(result.round.warnings.some((w) => w.toLowerCase().includes("crc"))).toBe(true);
+  });
+
+  it("warns (nit) when the file has no trailing CRC at all, distinctly from a mismatch", async () => {
+    const bytes = buildGolfActivityFit({ records: trackAround(2, new Date("2026-06-01T14:00:00Z")) });
+    const noCrc = truncateFit(bytes, bytes.length - 2);
+    const result = await parseFitFile(noCrc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toHaveLength(2);
+    expect(result.round.warnings.some((w) => w.toLowerCase().includes("no trailing crc"))).toBe(true);
   });
 });

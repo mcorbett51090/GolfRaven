@@ -48,11 +48,15 @@ function zeroFieldRecordFlood(messageCount: number): Uint8Array {
 
 /** A definition for global message 20 with 255 fields (1 byte each),
  * repeated `defCount` times back to back — no data records at all. Each
- * repeat is 6 + 255*3 = 771 bytes. */
+ * repeat is 6 + 255*3 = 771 bytes. Every field uses field number 10
+ * (deliberately never 253 — a definition-time field number of 253 now
+ * triggers the compressed-timestamp-bypass fix's own, more specific
+ * "timestamp field must be size 4" refusal, which this test isn't
+ * about). */
 function bigDefinitionFlood(defCount: number): Uint8Array {
   const def = [0x40, 0, 0, 20, 0, 255];
   const fieldDefs: number[] = [];
-  for (let i = 0; i < 255; i++) fieldDefs.push(i, 1, 0x02 /* Uint8 */);
+  for (let i = 0; i < 255; i++) fieldDefs.push(10, 1, 0x02 /* Uint8 */);
   const one = new Uint8Array([...def, ...fieldDefs]);
   const data = new Uint8Array(one.length * defCount);
   for (let i = 0; i < defCount; i++) data.set(one, i * one.length);
@@ -132,5 +136,95 @@ describe("FIT safety: the 5 MB size cap refuses before prescan even runs", () =>
     const elapsedMs = performance.now() - t0;
     expect(result.ok).toBe(false);
     expect(elapsedMs).toBeLessThan(50);
+  });
+});
+
+describe("FIT safety: the compressed-timestamp bypass (round 2 security-gate finding)", () => {
+  // A definition for global message `global` (default: 20, record) with
+  // one native field: field number 253 (timestamp), declared with a
+  // non-standard size. `fit-file-parser` never actually reads field
+  // 253's bytes for a *compressed*-timestamp record when it's the
+  // definition's first field (the timestamp is folded into the header
+  // byte instead) — so a prescan that (wrongly) counted those bytes
+  // would advance far more per record than the real decoder does,
+  // undercounting the message count by orders of magnitude.
+  function compressedTimestampBypass(fieldSize: number, global = 20, byteCount = 1_000_000): Uint8Array {
+    const def = [0x40, 0, 0, global & 0xff, (global >> 8) & 0xff, 1, 253, fieldSize, 0x86];
+    const data = new Uint8Array(def.length + byteCount);
+    data.set(def);
+    data.fill(0x80, def.length); // compressed-timestamp header bytes, local type 0
+    return fileFrom(data);
+  }
+
+  it("refuses a definition declaring timestamp field 253 with a non-4 size, before decode", async () => {
+    const bytes = compressedTimestampBypass(255);
+    const t0 = performance.now();
+    const scanResult = prescanFit(bytes);
+    const elapsedMs = performance.now() - t0;
+    expect(scanResult.ok).toBe(false);
+    if (!scanResult.ok) {
+      expect(scanResult.error).toContain("253");
+      expect(scanResult.error).toContain("4");
+    }
+    expect(elapsedMs).toBeLessThan(100);
+
+    const parseResult = await parseFitFile(bytes);
+    expect(parseResult.ok).toBe(false);
+  });
+
+  it("refuses the same bypass shape on an unmapped global message number", () => {
+    const bytes = compressedTimestampBypass(255, 0xff00);
+    const result = prescanFit(bytes);
+    expect(result.ok).toBe(false);
+  });
+
+  it("refuses the bypass even when a legitimate timestamp precedes it (a real prior lastTimestamp)", () => {
+    const seedDef = [0x40, 0, 0, 20, 0, 1, 253, 4, 0x86];
+    const seedRecord = [0x00, 0x10, 0x20, 0x30, 0x40]; // a normal, correctly-sized record
+    const badDef = [0x40, 0, 0, 20, 0, 1, 253, 255, 0x86];
+    const prefix = new Uint8Array([...seedDef, ...seedRecord, ...badDef]);
+    const data = new Uint8Array(prefix.length + 1_000_000);
+    data.set(prefix);
+    data.fill(0x80, prefix.length);
+    const result = prescanFit(fileFrom(data));
+    expect(result.ok).toBe(false);
+  });
+
+  it("does not falsely refuse a definition where field 253 is correctly sized (size 4)", () => {
+    const bytes = compressedTimestampBypass(4, 20, 100);
+    const result = prescanFit(bytes);
+    expect(result.ok).toBe(true);
+  });
+
+  it("does not falsely refuse field 253 with a non-4 size when it isn't a timestamp-typed field elsewhere (still refused — 253 always means timestamp)", () => {
+    // Sanity: the rule applies to field number 253 regardless of where
+    // it appears in the field list, not only when it's field index 0.
+    const def = [0x40, 0, 0, 20, 0, 2, 0, 4, 0x85, 253, 255, 0x86];
+    const bytes = fileFrom(new Uint8Array(def));
+    const result = prescanFit(bytes);
+    expect(result.ok).toBe(false);
+  });
+
+  it("mirrors the real decoder's byte-skip rule for a legitimate compressed-timestamp record (fix b)", async () => {
+    // field 253 is size 4 (legitimate) and IS the definition's only (so
+    // first) field, so a compressed-timestamp record using it carries 0
+    // bytes for it on the wire (per fit-file-parser's own rule) —
+    // prescan and the real decoder must agree on where the next record
+    // starts, i.e. a compressed record here is 1 byte (just the header)
+    // total, not 1 + 4. Seed a real timestamp first so decoding a
+    // compressed record doesn't fail for lack of a `lastTimestamp`.
+    const def = [0x40, 0, 0, 20, 0, 1, 253, 4, 0x86]; // 9 bytes
+    const seedRecord = [0x00, 0x00, 0x10, 0x20, 0x30]; // header (local 0) + 4-byte timestamp
+    const compressedRecords = [0x80, 0x80, 0x80]; // 3 compressed-timestamp records, 1 byte each
+    const bytes = new Uint8Array([...def, ...seedRecord, ...compressedRecords]);
+    const file = fileFrom(bytes);
+
+    const scanResult = prescanFit(file);
+    expect(scanResult.ok).toBe(true);
+    if (scanResult.ok) expect(scanResult.messageCount).toBe(5); // def + seed record + 3 compressed records
+
+    const parseResult = await parseFitFile(file);
+    expect(parseResult.ok).toBe(true);
+    if (parseResult.ok) expect(parseResult.round.warnings.join(" ")).not.toContain("truncated");
   });
 });

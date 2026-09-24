@@ -136,6 +136,9 @@ export async function parseFitFile(bytes: Uint8Array, options: ParseFitOptions =
   if (scan.fileCrcOk === false) {
     warnings.push("FIT file CRC mismatch (parsed anyway)");
   }
+  if (scan.fileCrcMissing) {
+    warnings.push("FIT file has no trailing CRC (parsed anyway)");
+  }
 
   const sessions = parsed.sessions ?? [];
   if (sessions.length > 1) {

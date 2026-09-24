@@ -26,6 +26,25 @@
  * always parses with `force: true` (tolerating a bad CRC, because real
  * devices occasionally ship one) but the build plan asks that a mismatch
  * still be surfaced as a warning rather than silently ignored.
+ *
+ * **The compressed-timestamp bypass (round 2 security-gate finding).** A
+ * FIT "compressed timestamp" record header (top bit set) omits its
+ * timestamp field's bytes from the wire entirely — the timestamp is a
+ * 5-bit offset folded into the header byte itself instead — but
+ * `fit-file-parser` only applies that omission when field 253
+ * (timestamp) is the definition's *first* native field. A definition
+ * declaring `{fieldNumber: 253, size: 255}` made this walker and the
+ * real decoder disagree on how many bytes each compressed record
+ * consumes (the walker used the full declared size; the decoder used 0,
+ * since it never reads that field's bytes for a compressed record at
+ * all) — so ~20k "messages" by this walker's old counting decoded into
+ * ~5.2M by the real one, entirely past the message-count cap. Fixed two
+ * ways, deliberately redundant: (a) any definition declaring field 253
+ * with a size other than 4 is refused outright (closes the exploit
+ * regardless of the byte-counting logic), and (b) the byte-counting
+ * logic itself now mirrors the decoder's exact rule — see
+ * `compressedRecordByteLength` below — so the two can never silently
+ * drift apart again even for a shape neither of us has thought of yet.
  */
 
 /** Refuse a FIT file with more than this many total messages
@@ -78,10 +97,14 @@ export interface FitPrescanSuccess {
   /** `undefined` when the 12-byte header form is used (no header CRC to
    * check). */
   headerCrcOk?: boolean;
-  /** `undefined` when the file is too short for a trailing CRC to be
-   * present at all (already a bounds failure caught earlier, in
-   * practice). */
+  /** `undefined` when there's no trailing file CRC to check at all
+   * (`fileCrcMissing` is `true` in that case) — distinct from a *wrong*
+   * CRC (`false`), which still means the file declared one. */
   fileCrcOk?: boolean;
+  /** True when the file has no room at all for the trailing 2-byte file
+   * CRC (the FIT spec always expects one, `force: true` notwithstanding)
+   * — `parse-fit.ts` warns on this distinctly from a CRC *mismatch*. */
+  fileCrcMissing: boolean;
 }
 
 export interface FitPrescanFailure {
@@ -105,9 +128,13 @@ function calculateFitCrc(bytes: Uint8Array, start: number, end: number): number 
 
 interface Definition {
   globalMessageNumber: number;
-  /** Total bytes of one data record using this definition (sum of every
-   * native + developer field's declared size). */
+  /** Total bytes of one *normal* data record using this definition (sum
+   * of every native + developer field's declared size). */
   recordByteLength: number;
+  /** Total bytes of one *compressed-timestamp* data record using this
+   * definition — see this file's doc comment on the compressed-
+   * timestamp bypass for why this can differ from `recordByteLength`. */
+  compressedRecordByteLength: number;
 }
 
 export interface PrescanOptions {
@@ -160,7 +187,8 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
     }
   }
   let fileCrcOk: boolean | undefined;
-  if (crcStart + 2 <= bytes.length) {
+  const fileCrcMissing = crcStart + 2 > bytes.length;
+  if (!fileCrcMissing) {
     const declared = bytes[crcStart]! | (bytes[crcStart + 1]! << 8);
     if (declared !== 0) {
       fileCrcOk = declared === calculateFitCrc(bytes, 0, crcStart);
@@ -201,8 +229,29 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
         return { ok: false, error: "truncated FIT definition field list" };
       }
       let recordByteLength = 0;
+      let firstFieldNumber: number | undefined;
+      let firstFieldSize = 0;
       for (let f = 0; f < numFields; f++) {
-        recordByteLength += bytes[index + f * 3 + 1]!;
+        const fieldNumber = bytes[index + f * 3]!;
+        const fieldSize = bytes[index + f * 3 + 1]!;
+        // Fix (a): the compressed-timestamp bypass depends on declaring
+        // field 253 (timestamp) with a non-standard size (the parser
+        // always treats it as a 4-byte uint32 regardless of what a
+        // definition claims — see fit-file-parser's `binary.js`
+        // `readData`/`FIT.types`). Refusing any other declared size
+        // closes the exploit outright, independent of the byte-counting
+        // fix below.
+        if (fieldNumber === 253 && fieldSize !== 4) {
+          return {
+            ok: false,
+            error: `FIT definition declares timestamp field 253 with size ${fieldSize}, not 4; refused`,
+          };
+        }
+        if (f === 0) {
+          firstFieldNumber = fieldNumber;
+          firstFieldSize = fieldSize;
+        }
+        recordByteLength += fieldSize;
       }
       index += numFields * 3;
       totalDefinitionFields += numFields;
@@ -224,17 +273,31 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
         totalDefinitionFields += numDevFields;
       }
 
-      definitions.set(localType, { globalMessageNumber, recordByteLength });
+      // Fix (b): mirror `fit-file-parser`'s own rule for a compressed-
+      // timestamp record's byte length exactly (`binary.js`'s
+      // `readRecord`: `isCompressedTimestamp && i === 0 && fDef.fDefNo
+      // === 253` skips consuming that field's bytes — and *only* when
+      // it's the definition's first native field). Any other shape
+      // (253 elsewhere in the field list, or absent) consumes the full
+      // `recordByteLength`, exactly like a normal record — getting this
+      // asymmetric special case exactly right, not just "field 253 is
+      // always free", is what keeps the prescan's message boundaries
+      // identical to the real decoder's.
+      const compressedRecordByteLength =
+        firstFieldNumber === 253 ? recordByteLength - firstFieldSize : recordByteLength;
+
+      definitions.set(localType, { globalMessageNumber, recordByteLength, compressedRecordByteLength });
       messageCount += 1;
     } else {
       const def = definitions.get(localType);
       if (!def) {
         return { ok: false, error: "FIT data record has no matching definition" };
       }
-      if (index + def.recordByteLength > crcStart) {
+      const bodyLength = isCompressedTimestamp ? def.compressedRecordByteLength : def.recordByteLength;
+      if (index + bodyLength > crcStart) {
         return { ok: false, error: "truncated FIT data record" };
       }
-      index += def.recordByteLength;
+      index += bodyLength;
       messageCount += 1;
       globalMessageCounts.set(def.globalMessageNumber, (globalMessageCounts.get(def.globalMessageNumber) ?? 0) + 1);
     }
@@ -253,6 +316,7 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
     crcStart,
     messageCount,
     globalMessageCounts,
+    fileCrcMissing,
     ...(headerCrcOk !== undefined ? { headerCrcOk } : {}),
     ...(fileCrcOk !== undefined ? { fileCrcOk } : {}),
   };

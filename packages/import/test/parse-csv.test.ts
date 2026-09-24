@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseCsvFile } from "../src/parse-csv.js";
-import { MAX_INPUT_BYTES, MAX_WARNINGS } from "../src/safety.js";
+import { checkInputSize, MAX_INPUT_BYTES, MAX_WARNINGS } from "../src/safety.js";
 
 function bytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
@@ -184,6 +184,14 @@ describe("parseCsvFile: scorecard format", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("rejects a full timestamp with Feb 30 in the fixes-format header too (round 2 should-fix)", () => {
+    const csv = "timestamp,lat,lon\n2026-02-30T14:00:00+02:00,43.65,-79.38\n";
+    const result = parseCsvFile(bytes(csv));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.round.fixes).toEqual([]);
+  });
+
   describe("holes (should-fix: 9, 18, or an integer up to 36)", () => {
     it("accepts 9", () => {
       const csv = "date,course,holes,score\n2026-06-01,X,9,40\n";
@@ -275,11 +283,20 @@ describe("parseCsvFile: many valid rows still work", () => {
   });
 });
 
-describe("parseCsvFile: size cap", () => {
-  it("refuses a file over the 20 MB cap", () => {
+describe("parseCsvFile: size cap (should-fix: 5 MB, same as FIT)", () => {
+  it("MAX_INPUT_BYTES is exactly 5 MB", () => {
+    expect(MAX_INPUT_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it("boundary: refuses one byte over the cap", () => {
     const oversized = new Uint8Array(MAX_INPUT_BYTES + 1);
     const result = parseCsvFile(oversized);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("bytes");
+  });
+
+  it("boundary: exactly at the cap is not refused for size", () => {
+    expect(checkInputSize(MAX_INPUT_BYTES, MAX_INPUT_BYTES)).toBeUndefined();
+    expect(checkInputSize(MAX_INPUT_BYTES + 1, MAX_INPUT_BYTES)).toBeDefined();
   });
 });

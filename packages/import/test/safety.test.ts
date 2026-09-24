@@ -18,16 +18,31 @@ import {
   truncateEcho,
 } from "../src/safety.js";
 
+describe("size cap literal values (should-fix: one 5 MB cap for FIT/GPX/CSV alike)", () => {
+  it("MAX_INPUT_BYTES is exactly 5 MB", () => {
+    expect(MAX_INPUT_BYTES).toBe(5 * 1024 * 1024);
+  });
+  it("MAX_FIT_INPUT_BYTES is the same 5 MB value, not a separate cap", () => {
+    expect(MAX_FIT_INPUT_BYTES).toBe(5 * 1024 * 1024);
+    expect(MAX_FIT_INPUT_BYTES).toBe(MAX_INPUT_BYTES);
+  });
+});
+
 describe("checkInputSize", () => {
   it("passes for a small input", () => {
     expect(checkInputSize(1024)).toBeUndefined();
   });
-  it("rejects an input over the (default 20 MB) cap", () => {
+  it("rejects an input over the default (5 MB) cap", () => {
     expect(checkInputSize(MAX_INPUT_BYTES + 1)).toBeDefined();
   });
-  it("supports a smaller explicit cap (the FIT 5 MB cap)", () => {
-    expect(checkInputSize(MAX_FIT_INPUT_BYTES, MAX_FIT_INPUT_BYTES)).toBeUndefined();
-    expect(checkInputSize(MAX_FIT_INPUT_BYTES + 1, MAX_FIT_INPUT_BYTES)).toBeDefined();
+  it("boundary: exactly at the cap passes, one byte over refuses", () => {
+    expect(checkInputSize(MAX_INPUT_BYTES)).toBeUndefined();
+    expect(checkInputSize(MAX_INPUT_BYTES - 1)).toBeUndefined();
+    expect(checkInputSize(MAX_INPUT_BYTES + 1)).toBeDefined();
+  });
+  it("supports a smaller explicit cap", () => {
+    expect(checkInputSize(1000, 1000)).toBeUndefined();
+    expect(checkInputSize(1001, 1000)).toBeDefined();
   });
 });
 

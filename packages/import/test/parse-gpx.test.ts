@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseGpxFile } from "../src/parse-gpx.js";
-import { MAX_INPUT_BYTES } from "../src/safety.js";
+import { checkInputSize, MAX_INPUT_BYTES } from "../src/safety.js";
 
 function bytes(xml: string): Uint8Array {
   return new TextEncoder().encode(xml);
@@ -202,6 +202,7 @@ describe("parseGpxFile: strict timestamps (should-fix)", () => {
     "a naive time (no Z/offset)": "2026-06-01T14:00:00",
     "a non-ISO string": "June 1 2026 2:00 PM",
     "a year before 2000": "1999-06-01T14:00:00Z",
+    "Feb 30 (round 2 should-fix — Date.parse silently rolls this to March 2nd)": "2026-02-30T14:00:00+02:00",
   };
   for (const [label, value] of Object.entries(badTimes)) {
     it(`drops a trkpt with ${label} rather than guessing`, () => {
@@ -229,11 +230,24 @@ describe("parseGpxFile: strict timestamps (should-fix)", () => {
   });
 });
 
-describe("parseGpxFile: size cap", () => {
-  it("refuses a file over the 20 MB cap", () => {
+describe("parseGpxFile: size cap (should-fix: 5 MB, same as FIT)", () => {
+  it("MAX_INPUT_BYTES is exactly 5 MB", () => {
+    expect(MAX_INPUT_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it("boundary: refuses one byte over the cap", () => {
     const oversized = new Uint8Array(MAX_INPUT_BYTES + 1);
     const result = parseGpxFile(oversized);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("bytes");
+  });
+
+  it("boundary: exactly at the cap is not refused for size (the size check alone passes it through)", () => {
+    // checkInputSize's own boundary math is unit-tested precisely in
+    // safety.test.ts; this just confirms parseGpxFile wires the cap in
+    // (not off-by-one) without constructing a slow, unnecessary 5 MB
+    // buffer of real-looking XML.
+    expect(checkInputSize(MAX_INPUT_BYTES, MAX_INPUT_BYTES)).toBeUndefined();
+    expect(checkInputSize(MAX_INPUT_BYTES + 1, MAX_INPUT_BYTES)).toBeDefined();
   });
 });
