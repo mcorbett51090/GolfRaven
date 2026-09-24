@@ -1,0 +1,467 @@
+#!/usr/bin/env node
+/**
+ * check-links.mjs — the weekly booking-link checker (build plan §10 P2
+ * stage-2 scope item 3: "Add `scripts/check-links.mjs`, the weekly link
+ * checker. It must never run in CI and has an explicit `--live` flag.
+ * With no network, it exits and says so.").
+ *
+ * Lists every `booking[]` URL in the catalog (real `data/`, or the demo
+ * fixture with `--demo` / `GOLFRAVEN_DEMO=1`, for exercising this script
+ * without real content). By DEFAULT it is a dry run — it never makes a
+ * network request. `--live` is opt-in, and this file is never invoked
+ * from `.github/workflows/ci.yml`.
+ *
+ * **Opus gate should-fix ("check-links") — the `--live` fetch is now
+ * SSRF-hardened**, porting the exact technique southern-wine-country's
+ * `discover-socials.mjs`/`discover-websites.mjs` already use for their
+ * own outbound fetches (this repo's own §5.1 row: "SSRF-hardened fetch
+ * kept; never run in CI"):
+ *
+ *   - **https only** — no plain `http:`, ever (a booking link redirecting
+ *     to `http:` mid-chain is refused, not silently downgraded-and-
+ *     followed).
+ *   - **DNS resolved and checked on EVERY hop** — private/loopback/
+ *     link-local/CGNAT/multicast/reserved ranges (including the
+ *     169.254.169.254 cloud-metadata address) are refused before any
+ *     connection is attempted, re-checked after every redirect (a DNS
+ *     answer that was public on hop 1 is not trusted to still be public
+ *     on hop 2).
+ *   - **Redirects followed MANUALLY, at most 3 hops** — `fetch`'s own
+ *     automatic `redirect: "follow"` never re-validates a redirect
+ *     target before connecting to it; this script reads each
+ *     `Location` header itself and re-runs the full scheme+DNS+allow-
+ *     list check before following it.
+ *   - **Only allow-listed hosts are ever fetched** — the SAME allow-list
+ *     `booking-hosts.ts`/`verify-catalog` use (`config/booking-hosts.json`),
+ *     plus (for a `course-native` entry) the facility's own `url` host —
+ *     a link that shouldn't RENDER is also never REQUESTED.
+ *   - **Exits non-zero when the network is unreachable** — the previous
+ *     version of this script exited 0 on a network-unreachable
+ *     environment (reasoning: a sandboxed session with no network isn't
+ *     a tool failure). The gate review corrected this: a WEEKLY checker
+ *     that silently reports "success" when it never actually reached the
+ *     network would mask exactly the failure mode it exists to catch.
+ *     `--live` now exits 1 on a network-unreachable first request,
+ *     printing why — still never attempted in CI (this script is never
+ *     invoked there at all, `--live` or not).
+ *
+ * Usage:
+ *   node scripts/check-links.mjs                # dry run (default) — lists links, no network
+ *   node scripts/check-links.mjs --demo          # dry run against the demo catalog
+ *   node scripts/check-links.mjs --live          # actually check each link (needs network)
+ *   node scripts/check-links.mjs --live --timeout-ms 5000
+ */
+import dns from "node:dns";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Agent, fetch as undiciFetch } from "undici";
+import { loadCatalog, loadCatalogFromBundle, primaryTrailOf } from "@golfraven/catalog";
+
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const REPO_ROOT = join(HERE, "..");
+const BOOKING_HOSTS_PATH = join(REPO_ROOT, "config", "booking-hosts.json");
+
+const UA = "Mozilla/5.0 (compatible; GolfRaven-LinkChecker/1.0; +offline weekly ops bot)";
+const MAX_REDIRECTS = 3;
+
+// ---------------------------------------------------------------------
+// SSRF hardening (ported from southern-wine-country's discover-socials.mjs)
+// ---------------------------------------------------------------------
+
+function ipv4ToInt(ip) {
+  const p = ip.split(".").map(Number);
+  if (p.length !== 4 || p.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+  return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
+}
+function v4InCidr(ipInt, base, bits) {
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  // BOTH sides need `>>> 0`: JS's `&` returns a SIGNED 32-bit int, so for
+  // any network whose masked prefix has bit 31 set (172.16/12, 192.168/16,
+  // 169.254/16 — including the 169.254.169.254 cloud-metadata address —
+  // 224/4, 240/4, …) the left side came back negative while only the
+  // right side was coerced unsigned, so the comparison silently failed
+  // and every one of those ranges was NEVER flagged as private. Found by
+  // this file's own unit tests (apps/site/test/check-links.test.ts) —
+  // ported from southern-wine-country's discover-socials.mjs, which
+  // carries the identical bug (out of scope to fix there).
+  return ((ipInt & mask) >>> 0) === ((ipv4ToInt(base) & mask) >>> 0);
+}
+export function isPrivateV4(ip) {
+  const n = ipv4ToInt(ip);
+  if (n === null) return true; // unparseable -> treat as unsafe
+  return (
+    v4InCidr(n, "0.0.0.0", 8) ||
+    v4InCidr(n, "10.0.0.0", 8) ||
+    v4InCidr(n, "100.64.0.0", 10) ||
+    v4InCidr(n, "127.0.0.0", 8) ||
+    v4InCidr(n, "169.254.0.0", 16) || // link-local incl. cloud metadata 169.254.169.254
+    v4InCidr(n, "172.16.0.0", 12) ||
+    v4InCidr(n, "192.0.0.0", 24) ||
+    v4InCidr(n, "192.168.0.0", 16) ||
+    v4InCidr(n, "198.18.0.0", 15) ||
+    v4InCidr(n, "224.0.0.0", 4) ||
+    v4InCidr(n, "240.0.0.0", 4)
+  );
+}
+/**
+ * Expands ANY textual IPv6 form (`::`-compressed, an embedded IPv4 tail
+ * like `::ffff:1.2.3.4` or `64:ff9b::1.2.3.4`) into its 8 numeric 16-bit
+ * groups. Returns `null` on anything unparseable (callers then fail
+ * closed, same as `ipv4ToInt`'s `null` convention).
+ */
+export function expandIPv6(addr) {
+  const lower = addr.toLowerCase().trim();
+  const expandV4Tail = (parts) => {
+    const last = parts[parts.length - 1];
+    if (!last || !last.includes(".")) return parts;
+    const v4 = last.split(".").map(Number);
+    if (v4.length !== 4 || v4.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+    const hi = ((v4[0] << 8) | v4[1]).toString(16);
+    const lo = ((v4[2] << 8) | v4[3]).toString(16);
+    return [...parts.slice(0, -1), hi, lo];
+  };
+
+  let headParts, tailParts;
+  if (lower.includes("::")) {
+    const sides = lower.split("::");
+    if (sides.length !== 2) return null; // "::" may appear at most once
+    headParts = sides[0] ? sides[0].split(":").filter(Boolean) : [];
+    tailParts = sides[1] ? sides[1].split(":").filter(Boolean) : [];
+  } else {
+    headParts = lower.split(":").filter(Boolean);
+    tailParts = [];
+  }
+  headParts = expandV4Tail(headParts);
+  tailParts = expandV4Tail(tailParts);
+  if (headParts === null || tailParts === null) return null;
+
+  let groups;
+  if (lower.includes("::")) {
+    const missing = 8 - headParts.length - tailParts.length;
+    if (missing < 0) return null;
+    groups = [...headParts, ...Array(missing).fill("0"), ...tailParts];
+  } else {
+    groups = headParts;
+  }
+  if (groups.length !== 8) return null;
+  const nums = groups.map((g) => parseInt(g, 16));
+  if (nums.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  return nums;
+}
+
+/**
+ * IPv6 private/reserved/transition-mechanism ranges. Each range whose
+ * transport is really an embedded IPv4 address (NAT64 `64:ff9b::/96`,
+ * 6to4 `2002::/16`, v4-mapped `::ffff:0:0/96`, v4-compatible `::/96`)
+ * recurses into `isPrivateV4` on that embedded address — a NAT64/6to4/
+ * v4-mapped/v4-compatible wrapper around a PUBLIC v4 address is not
+ * itself private, only wrapping a PRIVATE one is.
+ */
+export function isPrivateIpv6(addr) {
+  const g = expandIPv6(addr);
+  if (g === null) return true; // unparseable -> treat as unsafe
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
+  const embeddedV4 = () => `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`;
+
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0 && g6 === 0 && g7 === 0) {
+    return true; // ::  (unspecified)
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0 && g6 === 0 && g7 === 1) {
+    return true; // ::1 (loopback)
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+    return isPrivateV4(embeddedV4()); // ::ffff:0:0/96 (v4-mapped)
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateV4(embeddedV4()); // ::0.0.0.0/96 (v4-compatible, deprecated)
+  }
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateV4(embeddedV4()); // 64:ff9b::/96 (NAT64)
+  }
+  if (g0 === 0x2002) {
+    return isPrivateV4(`${g1 >> 8}.${g1 & 0xff}.${g2 >> 8}.${g2 & 0xff}`); // 2002::/16 (6to4)
+  }
+  if ((g0 & 0xff00) === 0xff00) return true; // ff00::/8 (multicast)
+  if ((g0 & 0xffc0) === 0xfe80) return true; // fe80::/10 (link-local)
+  if ((g0 & 0xffc0) === 0xfec0) return true; // fec0::/10 (site-local, deprecated)
+  if ((g0 & 0xfe00) === 0xfc00) return true; // fc00::/7 (unique local)
+  return false;
+}
+
+export function isPrivateIp(addr) {
+  const ip = addr.toLowerCase();
+  if (ip.includes(".") && !ip.includes(":")) return isPrivateV4(ip);
+  return isPrivateIpv6(ip);
+}
+
+async function assertPublicHost(hostname) {
+  let addrs;
+  try {
+    addrs = await dns.promises.lookup(hostname, { all: true });
+  } catch (e) {
+    throw new Error(`dns-fail:${e.code || e.message}`);
+  }
+  if (!addrs.length) throw new Error("dns-empty");
+  for (const a of addrs) {
+    if (isPrivateIp(a.address)) throw new Error(`private-ip:${a.address}`);
+  }
+}
+
+// ---------------------------------------------------------------------
+// Should-fix (Opus gate, "check-links DNS pinning"): the pre-flight
+// `assertPublicHost` above and the actual TCP connection are two SEPARATE
+// DNS resolutions — a DNS answer that was public when checked can change
+// (a rebind) by the time the socket actually connects. This `Agent`'s
+// `connect.lookup` is the SAME function undici's connector calls to
+// resolve the address it actually dials, so pinning it here closes that
+// gap instead of merely narrowing it.
+//
+// **Must use undici's OWN `fetch` export, not Node's global `fetch`, with
+// this `Agent`.** Confirmed this session: Node 22.22.2 bundles undici
+// 6.24.1 internally for `globalThis.fetch`; passing a `dispatcher` built
+// from the separately npm-installed `undici@8.11.2` package into the
+// GLOBAL fetch throws `"invalid onRequestStart method"` (an internal
+// interceptor-interface mismatch across major versions) — passing it to
+// `undiciFetch` (the matching version) works correctly, verified against
+// both a blocked-private-IP case (`https://localhost/`) and a real host.
+// ---------------------------------------------------------------------
+function pinnedLookup(hostname, options, callback) {
+  dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    if (err) return callback(err);
+    const list = Array.isArray(addrs) ? addrs : [addrs];
+    for (const a of list) {
+      if (isPrivateIp(a.address)) {
+        return callback(new Error(`private-ip:${a.address}`));
+      }
+    }
+    if (options.all) callback(null, list);
+    else callback(null, list[0].address, list[0].family);
+  });
+}
+const pinnedAgent = new Agent({ connect: { lookup: pinnedLookup } });
+
+function validateHttpsUrl(raw) {
+  const u = new URL(raw);
+  if (u.protocol !== "https:") throw new Error(`bad-scheme:${u.protocol} (https only)`);
+  return u;
+}
+
+/**
+ * Hardened link check — https-only, DNS+private-IP-checked and
+ * allow-list-checked on EVERY hop, manual redirects (<= MAX_REDIRECTS).
+ * Never follows a redirect off the allow-list, whatever status it 30x'd
+ * with.
+ */
+export async function hardenedCheck(startUrl, allowList, timeoutMs) {
+  let current = startUrl;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const u = validateHttpsUrl(current);
+    if (!allowList.includes(u.host)) {
+      throw Object.assign(new Error(`host-not-allow-listed:${u.host}`), { code: "NOT_ALLOW_LISTED" });
+    }
+    await assertPublicHost(u.hostname);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let res;
+    try {
+      // Must be undici's OWN `fetch`, not Node's global one — see the
+      // `pinnedAgent` doc comment above for why the global fetch's
+      // internal (older, bundled) undici rejects a dispatcher built from
+      // the separately-installed undici package.
+      res = await undiciFetch(u.href, {
+        method: "HEAD",
+        redirect: "manual",
+        credentials: "omit",
+        signal: controller.signal,
+        headers: { "user-agent": UA },
+        dispatcher: pinnedAgent,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (res.status === 405 || res.status === 501) {
+      // Some booking hosts reject HEAD outright — retry this SAME,
+      // already-validated hop as a GET.
+      const controller2 = new AbortController();
+      const timer2 = setTimeout(() => controller2.abort(), timeoutMs);
+      try {
+        res = await undiciFetch(u.href, {
+          method: "GET",
+          redirect: "manual",
+          credentials: "omit",
+          signal: controller2.signal,
+          headers: { "user-agent": UA },
+          dispatcher: pinnedAgent,
+        });
+      } finally {
+        clearTimeout(timer2);
+      }
+    }
+
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* ignore */
+      }
+      if (!loc) return { ok: false, status: res.status, reason: "redirect-no-location" };
+      if (hop === MAX_REDIRECTS) return { ok: false, status: res.status, reason: "too-many-redirects" };
+      current = new URL(loc, u).href;
+      continue;
+    }
+    return { ok: res.ok, status: res.status };
+  }
+  return { ok: false, status: null, reason: "too-many-redirects" };
+}
+
+// ---------------------------------------------------------------------
+// Catalog / CLI
+// ---------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const args = { live: false, demo: false, timeoutMs: 8000 };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--live") args.live = true;
+    else if (a === "--demo") args.demo = true;
+    else if (a === "--timeout-ms") args.timeoutMs = Number(argv[++i]) || args.timeoutMs;
+    else if (a === "--help" || a === "-h") {
+      console.log(
+        "Usage: check-links.mjs [--demo] [--live] [--timeout-ms <n>]\n" +
+          "  (no flags)   dry run against real data/ — lists booking links, no network\n" +
+          "  --demo       use apps/site's synthetic demo catalog instead of data/\n" +
+          "  --live       actually request each link, SSRF-hardened (never done in CI)\n",
+      );
+      process.exit(0);
+    }
+  }
+  return args;
+}
+
+async function loadLinkCatalog(demo) {
+  if (demo || process.env.GOLFRAVEN_DEMO === "1") {
+    const { demoBundleForSite } = await import(
+      join(REPO_ROOT, "apps/site/fixtures/demo-catalog/build-bundle.mjs")
+    );
+    return loadCatalogFromBundle(demoBundleForSite());
+  }
+  return loadCatalog({ dataDir: join(REPO_ROOT, "data") });
+}
+
+function collectLinks(catalog) {
+  const links = [];
+  for (const facility of catalog.facilities) {
+    for (const entry of facility.booking) {
+      const trail = primaryTrailOf(catalog, facility.id, new Map());
+      links.push({
+        facilitySlug: facility.slug,
+        facilityName: facility.name ?? facility.slug,
+        facilityUrl: facility.url ?? null,
+        trail: trail?.name ?? null,
+        provider: entry.provider,
+        url: entry.url,
+        checkedAt: entry.checkedAt,
+      });
+    }
+  }
+  return links;
+}
+
+/** Same rule `booking-hosts.ts`'s `bookingEntryAllowed` enforces: a
+ * `course-native` entry's own facility domain is allowed too, on top of
+ * the committed allow-list — this script fetches nothing a rendered page
+ * wouldn't also have linked to. */
+function allowListFor(link, configuredHosts) {
+  if (link.provider === "course-native" && link.facilityUrl) {
+    try {
+      return [...configuredHosts, new URL(link.facilityUrl).host];
+    } catch {
+      return configuredHosts;
+    }
+  }
+  return configuredHosts;
+}
+
+function looksLikeNoNetwork(err) {
+  const code = err?.cause?.code ?? err?.code;
+  return (
+    code === "ENOTFOUND" ||
+    code === "EAI_AGAIN" ||
+    code === "ECONNREFUSED" ||
+    code === "ENETUNREACH" ||
+    /EGRESS_BLOCKED|network/i.test(String(err?.message ?? ""))
+  );
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const catalog = await loadLinkCatalog(args.demo);
+  const links = collectLinks(catalog);
+  const configuredHosts = JSON.parse(await readFile(BOOKING_HOSTS_PATH, "utf8")).hosts ?? [];
+
+  console.log(`check-links: ${links.length} booking link(s) in the catalog.`);
+  if (links.length === 0) {
+    console.log("Nothing to check.");
+    return;
+  }
+
+  if (!args.live) {
+    console.log("(dry run — pass --live to actually request each link; never done in CI)\n");
+    for (const l of links) {
+      console.log(`  [${l.provider}] ${l.facilityName}${l.trail ? ` (${l.trail})` : ""} -> ${l.url}`);
+    }
+    return;
+  }
+
+  console.log(`--live: checking ${links.length} link(s), ${args.timeoutMs}ms timeout each, https-only, SSRF-hardened...\n`);
+  const findings = [];
+  for (const [i, link] of links.entries()) {
+    const allowList = allowListFor(link, configuredHosts);
+    try {
+      const result = await hardenedCheck(link.url, allowList, args.timeoutMs);
+      const mark = result.ok ? "ok  " : "FAIL";
+      console.log(`  ${mark} [${result.status ?? "?"}] ${link.facilityName} -> ${link.url}`);
+      if (!result.ok) findings.push({ ...link, ...result });
+    } catch (err) {
+      if (i === 0 && looksLikeNoNetwork(err)) {
+        console.error(
+          `check-links: no network reachable (${err?.cause?.code ?? err?.code ?? err?.message}) — ` +
+            `stopping without checking the remaining ${links.length - 1} link(s). A weekly checker that ` +
+            `silently reported success here would be worse than an honest failure, so this exits non-zero.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (err?.code === "NOT_ALLOW_LISTED") {
+        console.log(`  FAIL [not-allow-listed] ${link.facilityName} -> ${link.url} :: ${err.message}`);
+      } else {
+        console.log(`  FAIL [error] ${link.facilityName} -> ${link.url} :: ${err?.message ?? err}`);
+      }
+      findings.push({ ...link, ok: false, status: null, error: String(err?.message ?? err) });
+    }
+  }
+
+  console.log(`\ncheck-links: ${findings.length} finding(s) of ${links.length} link(s) checked.`);
+  if (findings.length > 0) {
+    for (const f of findings) {
+      console.log(`  - ${f.facilityName} [${f.provider}] ${f.url} :: ${f.status ?? f.error ?? f.reason}`);
+    }
+    // A non-zero exit only in --live mode with real findings — this is an
+    // ops report, not a CI gate (this script "must never run in CI").
+    process.exitCode = 1;
+  }
+}
+
+// Should-fix (Opus gate, "check-links `main()` guard"): only run when this
+// file is the entry point, not merely imported (e.g. by
+// `check-links.test.ts`, which imports `hardenedCheck`/`isPrivateIp`/etc.
+// directly and must not trigger a live catalog load + network attempt as
+// a side effect of that import).
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  await main();
+}

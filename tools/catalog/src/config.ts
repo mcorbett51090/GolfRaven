@@ -13,6 +13,9 @@ import { z } from "zod";
 
 export const BookingHostConfigSchema = z.strictObject({
   _comment: z.string().optional(),
+  /** true while the list is a placeholder (X4/X6 pending); a production
+   * site build refuses unless this is explicitly false. */
+  synthetic: z.boolean().optional(),
   hosts: z.array(z.string().min(1)),
 });
 export type BookingHostConfig = z.infer<typeof BookingHostConfigSchema>;

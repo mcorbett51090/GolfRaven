@@ -1,0 +1,171 @@
+/* Minimal stage-1 styling. Brand pipeline (build plan §5.6) and the full
+   design system are later work — this is enough to make the port's pages
+   legible and testable, nothing more. */
+:root {
+  color-scheme: light;
+  --ink: #16241d;
+  --ink-soft: #4b5b52;
+  --paper: #fbfaf6;
+  --accent: #1f4d3a;
+  --rule: #d8d3c4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.5;
+}
+
+.demo-banner {
+  margin: 0;
+  padding: 0.6rem 1.25rem;
+  background: #b23a3a;
+  color: #fff;
+  font-weight: 700;
+  text-align: center;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+}
+.skip-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+  background: var(--accent);
+  color: #fff;
+  padding: 0.5rem 1rem;
+  z-index: 100;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+.site-header .brand {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+.site-header nav a {
+  color: var(--ink);
+  text-decoration: none;
+  margin-left: 1rem;
+}
+
+.wrap {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+.site-footer {
+  border-top: 1px solid var(--rule);
+  padding: 1.25rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+.site-footer a {
+  color: var(--accent);
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+  margin: 0 0 0.25rem;
+}
+
+.card-grid {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+}
+.card {
+  display: block;
+  border: 1px solid var(--rule);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  text-decoration: none;
+  color: inherit;
+}
+.card h2,
+.card h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  color: var(--accent);
+}
+.card p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+.row-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 0.4rem;
+}
+.row a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+.row .cta {
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.note {
+  font-size: 0.9rem;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-left: 3px solid var(--accent);
+  padding: 0.6em 0.9em;
+  border-radius: 0.3rem;
+  margin: 1rem 0;
+}
+.note--banner {
+  background: color-mix(in srgb, #b23a3a 10%, transparent);
+  border-left-color: #b23a3a;
+}
+
+.pager {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+}
+.pager a {
+  color: var(--accent);
+}

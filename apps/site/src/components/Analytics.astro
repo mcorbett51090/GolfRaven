@@ -1,0 +1,32 @@
+---
+/**
+ * Analytics.astro — mounts the PII-safe analytics runtime
+ * (`src/lib/analytics-runtime.ts`) on every page via `BaseLayout.astro`.
+ *
+ * **Opus gate B3 (blocking): "Ship the Analytics script as a bundled
+ * external file, never `is:inline`."** This is now a plain, non-inline
+ * `<script>` — Astro hoists it into an external, same-origin, hashed
+ * bundle (`dist/_astro/Analytics.astro_astro_type_script_….js`), exactly
+ * like `CourseMap.astro`/`SiteSearch.astro`/`BaseLayout.astro`'s own
+ * scripts, so it runs under this site's `default-src 'self'` CSP with no
+ * `'unsafe-inline'` exception. The PREVIOUS stage-2 design kept this
+ * component real-but-unmounted with an `is:inline` script (extracted for
+ * testing via a `vm`-sandbox + regex, never actually shipped anywhere) —
+ * that shape is gone; see `analytics-runtime.ts`'s module doc for the
+ * full reasoning and `test/analytics-pii.test.ts` for how the module is
+ * tested directly now instead.
+ *
+ * **Still inert without a GTM container** (O13, stage-2 scope item 6:
+ * "Keep the GTM slot empty. The container ID comes from build config
+ * later.") — `installAnalytics()` returns immediately when
+ * `window.dataLayer` doesn't exist, which it never will until BaseLayout
+ * actually injects a GTM snippet (still not done — no such snippet exists
+ * anywhere in this codebase). Mounting this component ships the PII
+ * BOUNDARY, not a live analytics integration.
+ */
+---
+
+<script>
+  import { installAnalytics } from "../lib/analytics-runtime";
+  installAnalytics();
+</script>

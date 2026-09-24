@@ -1,0 +1,192 @@
+---
+// Adapted from southern-wine-country's `src/pages/wineries/[slug].astro`
+// @ 572ff7e (build plan §5.1 `wineries/[slug].astro` → `courses/[slug].astro`:
+// "One page per verified facility. Slots: blurb · trail placements (all) ·
+// access · official site + booking rail (none for `access: private`,
+// which shows 'Private — play as a member's guest' instead; O8) · region ·
+// courses `<dl>` (sourced tees only)").
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { isIndexable, primaryTrailOf, trailsOfFacility } from "@golfraven/catalog";
+import { loadPrimaryTrailOverrides, loadSiteCatalog, verifiedFacilities } from "../../lib/derive";
+import { withBase } from "../../lib/nav";
+import { facilityMetaDescription } from "../../lib/facility-copy";
+import { siteOrigin, breadcrumbNode, facilityPageNode } from "../../lib/schema";
+import { allowedBookingEntries, bookingPlatformLabel, loadBookingHostAllowList } from "../../lib/booking-hosts";
+
+export async function getStaticPaths() {
+  const { catalog } = await loadSiteCatalog();
+  // S4: "Every verified facility gets a page, and R1 decides noindex for
+  // thin ones" — every VERIFIED facility gets a page here; whether it's
+  // indexed is decided per-page below (R1's isIndexable), not by which
+  // pages get built.
+  return verifiedFacilities(catalog).map((facility) => ({
+    params: { slug: facility.slug },
+    props: { facility },
+  }));
+}
+
+const { facility } = Astro.props;
+const { catalog, usedDemoData } = await loadSiteCatalog();
+
+const overrides = await loadPrimaryTrailOverrides();
+const trails = trailsOfFacility(catalog, facility.id);
+const primaryTrail = primaryTrailOf(catalog, facility.id, overrides);
+const thin = !isIndexable(facility);
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const path = `/courses/${facility.slug}/`;
+const name = facility.name ?? facility.slug;
+const title = `${name}${facility.town ? ` — ${facility.town}` : ""} | GolfRaven`;
+const description = facilityMetaDescription(facility, {
+  ...(primaryTrail ? { trail: primaryTrail } : {}),
+  ...(facility.courses[0]?.holes ? { holes: facility.courses[0].holes } : {}),
+});
+
+const crumbs = [
+  { name: "GolfRaven", url: `${origin}/` },
+  ...(primaryTrail ? [{ name: primaryTrail.name, url: `${origin}/trails/${primaryTrail.slug}/` }] : []),
+  { name, url: `${origin}${path}` },
+];
+const jsonLd = [breadcrumbNode(crumbs), facilityPageNode(origin, facility)];
+// §5.1 og-card.ts: "OG images for verified pages only" — every page this
+// component renders IS a verified facility (getStaticPaths above), so
+// the verified-only condition is unconditional here. The DEMO condition
+// isn't: a demo build generates no OG card pages at all
+// (og/courses/[slug].png.ts's getStaticPaths returns [] when
+// usedDemoData — Opus gate should-fix, OG cards), so this must never
+// link to a `/og/courses/*.png` URL that wouldn't exist there.
+const ogImage = usedDemoData ? undefined : `/og/courses/${facility.slug}.png`;
+
+const isPrivate = facility.access === "private";
+// AT(4)/stage-2 scope item 3: only host-gated booking entries ever render.
+const bookingHostAllowList = await loadBookingHostAllowList();
+const bookingLinks = allowedBookingEntries(facility, bookingHostAllowList);
+const appDeepLink = primaryTrail ? `golfraven://trail/${primaryTrail.id}` : undefined;
+const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryTrail.id}` : undefined;
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  jsonLd={jsonLd}
+  noindex={thin}
+  demo={usedDemoData}
+  ogImage={ogImage}
+>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">
+        {facility.access ?? "Course"}
+        {facility.town ? ` · ${facility.town}, ${facility.region}` : ` · ${facility.region}`}
+      </p>
+      <h1>{name}</h1>
+    </header>
+
+    {facility.blurb && <p class="wp__blurb">{facility.blurb}</p>}
+
+    {facility.access && (
+      <p>
+        Access: <strong>{facility.access}</strong>
+      </p>
+    )}
+
+    {
+      trails.length > 0 && (
+        <p>
+          On{" "}
+          {trails.map((t, i) => (
+            <>
+              {i > 0 && ", "}
+              <a href={withBase(`/trails/${t.slug}/`)}>{t.name}</a>
+            </>
+          ))}
+        </p>
+      )
+    }
+
+    {
+      appDeepLink && universalLink && (
+        <p class="app-cta">
+          <a class="btn btn--ghost" href={appDeepLink}>Track this trail in the app →</a>
+          <span class="app-cta__fallback">
+            (or open <a href={universalLink}>{universalLink}</a> if the app isn't installed)
+          </span>
+        </p>
+      )
+    }
+
+    {/* O8: a private club gets NO booking rail — a guest note instead.
+        The official-site link is NOT part of the booking rail and still
+        shows for a private club (gate review nit). */}
+    {
+      isPrivate ? (
+        <p class="note" role="note">
+          Private — play as a member's guest.
+        </p>
+      ) : (
+        bookingLinks.length > 0 && (
+          <p class="wp__actions">
+            {bookingLinks.map((b) => (
+              <a
+                class="btn"
+                href={b.url}
+                target="_blank"
+                rel="noopener"
+                data-analytics-event="booking_click"
+                data-analytics-provider={b.provider}
+                data-analytics-trail={primaryTrail?.slug ?? ""}
+              >
+                Book via {bookingPlatformLabel(b)} →
+              </a>
+            ))}
+          </p>
+        )
+      )
+    }
+
+    {facility.url && (
+      <p>
+        <a href={facility.url} target="_blank" rel="noopener">Visit the official website →</a>
+      </p>
+    )}
+
+    <h2 class="section-head">Courses</h2>
+    <dl class="facts">
+      {facility.courses.map((course) => (
+        <>
+          <dt>{course.name ?? course.slug}</dt>
+          <dd>
+            {course.holes ? `${course.holes} holes` : "Holes not yet verified"}
+            {course.par ? ` · par ${course.par}` : ""}
+            {course.tees && course.tees.length > 0 && (
+              <ul class="row-list">
+                {course.tees.map((tee) => (
+                  <li>
+                    {tee.name}
+                    {tee.yards ? ` — ${tee.yards} yds` : ""}
+                    {tee.rating ? ` · rating ${tee.rating}` : ""}
+                    {tee.slope ? ` · slope ${tee.slope}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </dd>
+        </>
+      ))}
+    </dl>
+
+    <p class="wp__claim">
+      Own or know {name}? <a href={withBase(`/claim/?facility=${encodeURIComponent(facility.slug)}`)}>Suggest a correction →</a>
+    </p>
+  </main>
+</BaseLayout>
+
+<style>
+  .app-cta {
+    font-size: 0.9rem;
+  }
+  .app-cta__fallback {
+    color: var(--ink-soft, #4b5b52);
+  }
+</style>

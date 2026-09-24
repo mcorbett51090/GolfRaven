@@ -1,0 +1,46 @@
+---
+// A minimal placeholder target for the "claim or correct this listing"
+// CTA that unverified region/trail rows link to (build plan §5.1
+// `states/*`: "unverified rows link to the claim form" — the R1
+// thin-content guard, §5.1 `indexable.ts`). The real claim FORM (SWC's
+// `claim.astro` + `SecureFormScript.astro` → the shared `raven-secure-upload`
+// Worker with `siteId: 'golfraven'`) is explicitly out of stage-1 scope
+// ("Out of scope for stage 1: ... claim and feedback forms") — this page
+// exists only so the CTA is a real, stable, noindex link rather than a
+// dead one, per the stage-1 instructions ("a claim CTA").
+//
+// TODO(P2, build plan §5.1 `claim.astro`, `SecureFormScript.astro`): wire
+// the real submission form + Worker here.
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { loadSiteCatalog } from "../lib/derive";
+
+const { usedDemoData } = await loadSiteCatalog();
+
+const facility = Astro.url.searchParams.get("facility");
+const trail = Astro.url.searchParams.get("trail");
+const title = "Suggest a correction | GolfRaven";
+const description = "Suggest a correction to a course or trail listing, or claim it as its operator.";
+---
+
+<BaseLayout title={title} description={description} path="/claim/" noindex={true} demo={usedDemoData}>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">Suggest a correction</p>
+      <h1>Suggest a correction or claim this listing</h1>
+    </header>
+    <p>
+      {facility && (
+        <>
+          This is about <strong>{facility}</strong>.{" "}
+        </>
+      )}
+      {trail && (
+        <>
+          This is about the <strong>{trail}</strong> trail.{" "}
+        </>
+      )}
+      The correction/claim form ships in a later phase of the build. Until then, contact GolfRaven
+      through the trail operator's own listed contact details.
+    </p>
+  </main>
+</BaseLayout>

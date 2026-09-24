@@ -10,6 +10,11 @@
   "scripts": {
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "check-links": "node ./scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@golfraven/catalog": "workspace:*",
+    "undici": "8.11.2"
   }
 }

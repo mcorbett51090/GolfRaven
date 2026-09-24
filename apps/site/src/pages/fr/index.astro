@@ -1,0 +1,67 @@
+---
+// The FR hub — chrome-only (build plan §5.5: "FR chrome strings ship in
+// P2 ... Entity content is FR only when real FR editorial exists.
+// Otherwise the EN page carries hreflang='en' only, and there is no
+// machine-translated filler"). Stage 1 has no real FR trail/course
+// editorial content, so this page reuses the SAME catalog data as the EN
+// hub with translated CHROME strings only — never a machine translation
+// of any editorial field (`blurb`, etc.). Content pages (trails, courses,
+// regions) have no FR counterpart yet; they carry `hreflang="en"` only,
+// per §5.5, until real FR content exists for them.
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { latestRosterVersion } from "@golfraven/catalog";
+import { loadSiteCatalog } from "../../lib/derive";
+import { withBase } from "../../lib/nav";
+import { siteOrigin } from "../../lib/schema";
+
+const { catalog, usedDemoData } = await loadSiteCatalog();
+const trails = [...catalog.trails].sort(
+  (a, b) =>
+    latestRosterVersion(b).members.length - latestRosterVersion(a).members.length ||
+    a.name.localeCompare(b.name),
+);
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const title = "GolfRaven — Circuits de golf, parcours par parcours";
+const description =
+  "Trouvez des circuits de golf réputés aux États-Unis et au Canada, suivez chaque étape et réservez sur GolfRaven.";
+const jsonLd = [{ "@type": "WebSite", name: "GolfRaven", url: `${origin}/fr/` }];
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  path="/fr/"
+  jsonLd={jsonLd}
+  demo={usedDemoData}
+  locale="fr"
+  alternates={[{ locale: "en", path: "/" }]}
+>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">Circuits de golf</p>
+      <h1>Jouez le circuit, une étape à la fois.</h1>
+      <p>{trails.length} circuit{trails.length === 1 ? "" : "s"} recensé{trails.length === 1 ? "" : "s"}.</p>
+    </header>
+
+    <ul class="card-grid" role="list">
+      {
+        trails.map((trail) => {
+          const version = latestRosterVersion(trail);
+          const name = trail.nameFr ?? trail.name;
+          return (
+            <li>
+              {/* No FR trail page exists yet (§5.5) — link to the EN page. */}
+              <a class="card" href={withBase(`/trails/${trail.slug}/`)}>
+                <h2>{name}</h2>
+                <p>
+                  {version.members.length} étape{version.members.length === 1 ? "" : "s"}
+                </p>
+              </a>
+            </li>
+          );
+        })
+      }
+    </ul>
+  </main>
+</BaseLayout>

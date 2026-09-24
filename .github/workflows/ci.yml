@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # S5: telemetry stays off in CI, same as any other non-interactive build.
+  ASTRO_TELEMETRY_DISABLED: "1"
+
 jobs:
   verify:
     name: install / typecheck / build / test
@@ -37,13 +41,53 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
+        # B3: apps/site's fail-closed demo guard refuses to build with an
+        # empty data/ unless GOLFRAVEN_DEMO=1 is set explicitly — data/
+        # carries no real facility/trail content yet (data/README.md), so
+        # CI opts into the synthetic demo dataset on purpose, scoped to
+        # just this step (`pnpm -r build` also builds every OTHER package,
+        # none of which reads this var). Never set for a real production
+        # deploy — see apps/site/src/lib/derive.ts's loadSiteCatalog,
+        # which also refuses GOLFRAVEN_DEMO=1 outright when
+        # GOLFRAVEN_ENV=production.
         run: pnpm -r build
+        env:
+          GOLFRAVEN_DEMO: "1"
 
       - name: Typecheck
         run: pnpm -r typecheck
 
+      - name: Install Playwright Chromium (pinned to @playwright/test's own version)
+        # Re-gate correction (superseding the comment the Test step used to
+        # carry): apps/site's `test` script also runs `scripts/run-e2e.mjs`
+        # (the B2 Playwright runtime-CSP check, plus the Pagefind/CSP
+        # search check) after vitest. CI now installs the SAME pinned
+        # Chromium revision `@playwright/test@1.56.1` declares — no
+        # hard-coded revision number here, `playwright install` resolves
+        # whatever revision that package version pins, kept in lockstep by
+        # `pnpm-lock.yaml`. `--with-deps` also installs the OS-level shared
+        # libraries `ubuntu-latest` doesn't ship by default.
+        #
+        # `run-e2e.mjs` still probes for a launchable browser first, but
+        # now under `CI=true` (set automatically by GitHub Actions on every
+        # runner — never has to be set explicitly here) a launch FAILURE is
+        # a hard failure, not a skip: this step is what makes that
+        # distinction meaningful, since a launch failure in CI is now a
+        # real regression (a broken install / a pin drift), never an
+        # expected environment gap. `scripts/lighthouse-audit.mjs` (the
+        # real, non-heuristic half of AT(2)) is a separate story and stays
+        # NOT wired in here — AT(2)'s CI-enforced half stays the static
+        # heuristic (`verify-a11y-budget.mjs`, part of `pnpm -r build`).
+        run: pnpm --filter @golfraven/site exec playwright install --with-deps chromium
+
       - name: Test
+        # Same scoping as the Build step above — apps/site's own test
+        # suite forces GOLFRAVEN_DEMO=1 itself (test/global-setup.mjs), but
+        # setting it here too keeps `pnpm -r test` runnable exactly like a
+        # local `GOLFRAVEN_DEMO=1 pnpm -r test` invocation.
         run: pnpm -r test
+        env:
+          GOLFRAVEN_DEMO: "1"
 
       - name: verify-contract (contract/catalog.schema.json must match packages/catalog's Zod schema)
         run: node tools/catalog/dist/verify-contract.js
@@ -73,7 +117,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build (so bundles under dist/ exist to scan — gate review S13)
+        # Scoped the same way as the verify job's Build step — see its comment.
         run: pnpm -r build
+        env:
+          GOLFRAVEN_DEMO: "1"
 
       - name: Install gitleaks (checksum-pinned, no third-party Action)
         run: |

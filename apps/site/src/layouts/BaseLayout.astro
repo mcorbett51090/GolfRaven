@@ -1,0 +1,188 @@
+---
+import "../styles/global.css";
+import { withBase } from "../lib/nav";
+import { jsonLdScript } from "../lib/schema";
+import SiteSearch from "../components/SiteSearch.astro";
+import Analytics from "../components/Analytics.astro";
+
+interface Alternate {
+  /** BCP-47-ish locale tag for `hreflang` (e.g. "en", "fr"). */
+  locale: string;
+  /** App-absolute path (no BASE prefix) to that locale's version of this page. */
+  path: string;
+}
+
+interface Props {
+  title: string;
+  description: string;
+  path?: string;
+  /** Page-scoped JSON-LD `@graph` nodes. A page that passes none emits no
+   *  schema at all. */
+  jsonLd?: object[];
+  /** `<meta name="robots" content="noindex, follow">` for utility / thin pages. */
+  noindex?: boolean;
+  /** B3: true when this page was built from the synthetic demo catalog.
+   *  Forces `noindex` (whatever `noindex` says) and renders a visible
+   *  "DEMO DATA" banner — "A demo build is noindex on every page ... and
+   *  shows a visible 'DEMO DATA — not real courses' banner." */
+  demo?: boolean;
+  /** The page's own locale (`en` default; `fr` for `/fr/...` pages). */
+  locale?: "en" | "fr";
+  /** Other locales this exact page exists in (hreflang alternates). Omit or
+   *  leave empty when there is no translated counterpart yet — build plan
+   *  §5.5: "Entity content is FR only when real FR editorial exists.
+   *  Otherwise the EN page carries `hreflang="en"` only, and there is no
+   *  machine-translated filler." */
+  alternates?: Alternate[];
+  /** App-absolute path to this page's OG card PNG (stage 2, §5.1
+   *  `og-card.ts`: "OG images for verified pages only"). Only a verified
+   *  course page passes this — every other page emits no `og:image` at
+   *  all, matching SWC's own per-page opt-in (never a site-wide default
+   *  image standing in for a page it isn't). */
+  ogImage?: string;
+}
+const {
+  title,
+  description,
+  path = "",
+  jsonLd = [],
+  noindex = false,
+  demo = false,
+  locale = "en",
+  alternates = [],
+  ogImage,
+} = Astro.props;
+
+const canonical = new URL(withBase(path), Astro.site).href;
+const ogLocale = locale === "fr" ? "fr_CA" : "en_US";
+// B3: a demo build is noindex on EVERY page, whatever the page itself asked for.
+const effectiveNoindex = noindex || demo;
+
+const ldScript = jsonLd.length ? jsonLdScript(jsonLd) : "";
+
+// hreflang: this page's own locale, plus every alternate the caller named,
+// plus x-default pointing at the EN (default-locale) version. Astro's i18n
+// routing serves `en` unprefixed (`prefixDefaultLocale: false`) and `fr`
+// under `/fr/...` — the caller is responsible for handing in the right
+// `path` per locale; this layout only renders the tags.
+const hreflangEntries: { hreflang: string; href: string }[] = [
+  { hreflang: locale, href: canonical },
+  ...alternates.map((a) => ({
+    hreflang: a.locale,
+    href: new URL(withBase(a.path), Astro.site).href,
+  })),
+];
+// S6: x-default is always an ABSOLUTE URL, whichever branch produces it.
+const enAlternate = alternates.find((a) => a.locale === "en");
+const xDefaultHref =
+  locale === "en" ? canonical : enAlternate ? new URL(withBase(enAlternate.path), Astro.site).href : null;
+---
+
+<!doctype html>
+<html lang={locale} class="no-js">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    {/*
+      ============================================================
+      GTM/GA4 SLOT — the CONTAINER stays empty; the PII BOUNDARY is live.
+
+      Build plan §10 P2 scope names "GTM (O13 DECIDED: a new GolfRaven
+      GTM/GA4 container)" as part of the full P2 acceptance bar; this
+      repo's stage-2 instructions say plainly: "Keep the GTM slot empty.
+      The container ID comes from build config later (O13)." No GTM
+      snippet is injected anywhere below or in `<Analytics />` itself —
+      that part is unchanged.
+
+      `<Analytics />` (mounted below, in `<body>`) IS now real and
+      MOUNTED, per the Opus gate B3 fix: it must ship as a bundled
+      external script, never `is:inline`, and a component nobody renders
+      cannot be bundled into anything at all. `installAnalytics()`
+      (`src/lib/analytics-runtime.ts`) still no-ops the instant it runs
+      (`if (!window.dataLayer) return`) because no GTM snippet exists to
+      have set that global — so this mounts the inert PII PROJECTION
+      logic only, never a live analytics integration. See
+      `analytics-runtime.ts`'s and `Analytics.astro`'s own docs, and
+      `test/analytics-pii.test.ts` (AT8, wired into `pnpm -r test`).
+      ============================================================
+    */}
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {effectiveNoindex && <meta name="robots" content="noindex, follow" />}
+
+    {hreflangEntries.map((e) => <link rel="alternate" hreflang={e.hreflang} href={e.href} />)}
+    {xDefaultHref && <link rel="alternate" hreflang="x-default" href={xDefaultHref} />}
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="GolfRaven" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:locale" content={ogLocale} />
+    {ogImage && <meta property="og:image" content={new URL(withBase(ogImage), Astro.site).href} />}
+    {ogImage && <meta name="twitter:card" content="summary_large_image" />}
+    {alternates
+      .filter((a) => a.locale !== locale)
+      .map((a) => (
+        <meta
+          property="og:locale:alternate"
+          content={a.locale === "fr" ? "fr_CA" : "en_US"}
+        />
+      ))}
+
+    <meta name="theme-color" content="#1f4d3a" />
+    <link rel="manifest" href={withBase("/manifest.webmanifest")} />
+    <link rel="icon" href={withBase("/favicon.svg")} type="image/svg+xml" />
+    <link rel="apple-touch-icon" href={withBase("/apple-touch-icon.png")} />
+
+    {ldScript && <Fragment set:html={ldScript} />}
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    {
+      demo && (
+        <p class="demo-banner" role="alert" data-pagefind-ignore>
+          DEMO DATA — not real courses. Every trail and facility on this page is fictional
+          (see `apps/site/fixtures/demo-catalog/README.md`).
+        </p>
+      )
+    }
+    <header class="site-header" data-pagefind-ignore>
+      <a class="brand" href={withBase("/")}>GolfRaven</a>
+      <nav aria-label="Primary">
+        <a href={withBase("/")}>Trails</a>
+      </nav>
+      <SiteSearch />
+    </header>
+    <slot />
+    <footer class="site-footer" data-pagefind-ignore>
+      <p>
+        GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a>.
+      </p>
+    </footer>
+    <Analytics />
+    {
+      // Should-fix (Opus gate, service worker): "Don't register the
+      // worker in demo builds." — a demo build's `sw.js` would otherwise
+      // cache and offline-serve fictional demo content indistinguishably
+      // from a real deploy on the same origin/scope; simplest fix is to
+      // never register it there at all, so a demo build leaves no
+      // service worker (and therefore no cache) behind. The whole
+      // `<script>` element is conditional (an Astro compile-time
+      // template branch, not a runtime string) — see CourseMap.astro's
+      // own `{tiles.configured && (<script>...)}` for the same pattern.
+      !demo && (
+        <script>
+          if ("serviceWorker" in navigator) {
+            window.addEventListener("load", () => {
+              navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});
+            });
+          }
+        </script>
+      )
+    }
+  </body>
+</html>

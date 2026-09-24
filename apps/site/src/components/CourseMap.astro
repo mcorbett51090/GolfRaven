@@ -1,0 +1,370 @@
+---
+/**
+ * CourseMap.astro — adapted from southern-wine-country's `WineryMap.astro`
+ * @ 572ff7e (build plan §5.1: "Adapt | `CourseMap.astro` | Keep lazy boot,
+ * RT8 fallback and JS-free list parity. MapLibre clustering; per-country
+ * GeoJSON from the `scripts/gen-map-data.mjs` prebuild").
+ *
+ * Kept from WineryMap: lazy IntersectionObserver boot (map JS never blocks
+ * first paint); the RT8 "flip to an honest unavailable message" fallback if
+ * the style/tiles never load; a real, always-rendered `<ul>` of every
+ * course as the JS-free fallback (every course is a real link/claim-CTA
+ * whether or not the map — or WebGL, or JS at all — ever runs).
+ *
+ * NOT ported from WineryMap (deliberately out of this component's scope —
+ * SWC's per-winery filter rail, hover card, trip pins, flyover and
+ * colour-blind palette are a much larger UI than the P2 stage-2 mapping
+ * table asks for; "Adapt", not "copy"): faceted filtering, the trip
+ * shortlist integration, state-boundary highlighting. Only what the
+ * mapping table names is here: lazy boot, RT8 fallback, JS-free list
+ * parity, MapLibre clustering.
+ *
+ * **Tile host is never hard-coded** (stage-2 scope item 1) — `map-config.mjs`
+ * reads `GOLFRAVEN_TILE_STYLE_URL`. With none configured, this component
+ * renders ONLY the JS-free list + the OSM attribution notice (no canvas,
+ * no client script at all) — never a broken/placeholder map.
+ *
+ * **CSP: no `worker-src` change needed.** MapLibre's default bundle boots
+ * its tile-parsing worker from a `Blob` URL (confirmed by reading
+ * `node_modules/maplibre-gl/dist/maplibre-gl.js`: `new Blob([...], {type:
+ * 'text/javascript'})` + `URL.createObjectURL`), which would need
+ * `worker-src blob:`. This component instead imports MapLibre's dedicated
+ * CSP-safe worker bundle (`maplibre-gl/dist/maplibre-gl-csp-worker.js`,
+ * shipped for exactly this purpose) as a same-origin, hashed, `?url` asset
+ * and calls `maplibregl.setWorkerUrl()` with it before creating the Map —
+ * a same-origin `Worker(url)` needs no CSP directive beyond the
+ * `default-src 'self'` the site already ships (`worker-src` falls back to
+ * `default-src` when unset, CSP3). So: MapLibre does NOT need
+ * `worker-src blob:` here, and none is added.
+ */
+import { isIndexable, isVerified } from "@golfraven/catalog";
+import type { Facility } from "@golfraven/catalog";
+import { withBase } from "../lib/nav";
+import { tileConfig } from "../lib/map-config.mjs";
+
+interface Props {
+  facilities: Facility[];
+  /** Lowercase ISO country codes to fetch per-country GeoJSON for
+   * (`gen-map-data.mjs`'s output, e.g. `["us", "ca"]`). Defaults to every
+   * country present in `facilities`. */
+  countries?: string[];
+  /** DOM id for the map canvas — must be unique per page (a page can embed
+   * more than one CourseMap, e.g. a future trail-scoped map). */
+  id?: string;
+  heading?: string;
+}
+const {
+  facilities,
+  countries = [...new Set(facilities.map((f) => f.region.split("-")[0]?.toLowerCase()).filter(Boolean))],
+  id = "course-map",
+  heading = "Map",
+} = Astro.props;
+
+const tiles = tileConfig();
+const geoUrls = countries.map((c) => withBase(`/data/map/${c}.geojson`)).join(",");
+---
+
+<section class="course-map" aria-labelledby={`${id}-heading`}>
+  <h2 class="section-head" id={`${id}-heading`}>{heading}</h2>
+
+  {
+    tiles.configured && (
+      <div class="course-map__frame" data-map-root data-geo-urls={geoUrls} data-tile-style={tiles.styleUrl}>
+        <div
+          id={id}
+          class="course-map__canvas"
+          role="region"
+          aria-label="Interactive map of golf courses. The list below is a full keyboard- and screen-reader-accessible equivalent."
+        />
+        <p class="course-map__fallback" data-map-fallback>
+          Loading the interactive map… If it doesn't appear, the course list below has every location as
+          a link.
+        </p>
+      </div>
+    )
+  }
+
+  <p class="course-map__attribution">{tiles.attribution}</p>
+
+  <ul class="row-list course-map__list" role="list" data-map-list>
+    {
+      facilities.map((f) => {
+        const hasPage = isVerified(f);
+        const indexable = isIndexable(f);
+        const label = f.name ?? (hasPage ? f.slug : "Unverified location");
+        return (
+          <li class="row" data-lat={f.lat} data-lng={f.lng} data-slug={f.slug}>
+            {hasPage ? (
+              <a href={withBase(`/courses/${f.slug}/`)} data-noindex={indexable ? undefined : "true"}>
+                {label}
+              </a>
+            ) : (
+              <span>
+                <strong>{label}</strong> <span class="cta">— unverified</span>
+              </span>
+            )}
+            {!hasPage && (
+              <a class="cta" href={withBase(`/claim/?facility=${encodeURIComponent(f.slug)}`)}>
+                Help verify this course →
+              </a>
+            )}
+          </li>
+        );
+      })
+    }
+  </ul>
+</section>
+
+{
+  tiles.configured && (
+    <script>
+      // Hoisted + bundled by Astro into an external, same-origin `<script
+      // type="module" src="/_astro/....js">` — no inline JS content ever
+      // reaches the page (CSP `default-src 'self'`, and AT(7)'s "no other
+      // script tag" rule, generalised in test/acceptance.test.ts to allow
+      // exactly this shape: an external module script with an EMPTY body).
+      import type { GeoJSONSource } from "maplibre-gl";
+      // `?url` gives the CSP worker bundle's built, hashed URL WITHOUT
+      // bundling its content inline — same trick SWC used for the MapLibre
+      // CSS (`maplibre-gl/dist/maplibre-gl.css?url`).
+      import cspWorkerUrl from "maplibre-gl/dist/maplibre-gl-csp-worker.js?url";
+      import maplibreCssUrl from "maplibre-gl/dist/maplibre-gl.css?url";
+      // B2: self-hosted control-icon overrides (../styles/maplibre-overrides.css's
+      // own doc) — loaded AFTER maplibre-gl.css below so these same-
+      // specificity rules win by cascade order, replacing every data:
+      // URI background-image this component can actually trigger with a
+      // same-origin file, under the strict CSP (no `img-src data:`).
+      import maplibreOverridesCssUrl from "../styles/maplibre-overrides.css?url";
+
+      type Props = {
+        slug: string;
+        name: string | null;
+        town: string | null;
+        region: string;
+        access: string | null;
+        verified: boolean;
+        hasPage: boolean;
+        indexable: boolean;
+      };
+      type FC = {
+        type: "FeatureCollection";
+        features: { type: "Feature"; geometry: { type: "Point"; coordinates: [number, number] }; properties: Props }[];
+      };
+
+      const roots = document.querySelectorAll<HTMLElement>("[data-map-root]");
+
+      roots.forEach((root) => {
+        const mapEl = root.querySelector<HTMLElement>(".course-map__canvas");
+        const fallbackEl = root.querySelector<HTMLElement>("[data-map-fallback]");
+        if (!mapEl) return;
+
+        function mapUnavailable() {
+          // RT8: never leave the fallback stuck on "Loading…" — flip it to
+          // an honest message. The JS-free list beside this component
+          // already has every course as a real link either way.
+          if (fallbackEl) {
+            fallbackEl.textContent =
+              "Interactive map unavailable — the course list below has every location as a link.";
+          }
+        }
+
+        let started = false;
+        function boot() {
+          if (started) return;
+          started = true;
+          void init().catch((err) => {
+            console.warn("[course-map] init failed", err);
+            mapUnavailable();
+          });
+        }
+
+        if ("IntersectionObserver" in window) {
+          const io = new IntersectionObserver(
+            (entries) => {
+              if (entries.some((e) => e.isIntersecting)) {
+                io.disconnect();
+                boot();
+              }
+            },
+            { rootMargin: "200px" },
+          );
+          io.observe(mapEl);
+        } else {
+          boot();
+        }
+
+        async function init() {
+          const maplibregl = (await import("maplibre-gl")).default;
+          maplibregl.setWorkerUrl(cspWorkerUrl);
+
+          if (!document.querySelector("link[data-maplibre-css]")) {
+            const cssLink = document.createElement("link");
+            cssLink.rel = "stylesheet";
+            cssLink.href = maplibreCssUrl;
+            cssLink.setAttribute("data-maplibre-css", "");
+            document.head.appendChild(cssLink);
+            // Appended immediately after (same tick) — cascade order, not
+            // timing, is what makes these rules win; both are same-origin
+            // external stylesheets either way.
+            const overridesLink = document.createElement("link");
+            overridesLink.rel = "stylesheet";
+            overridesLink.href = maplibreOverridesCssUrl;
+            overridesLink.setAttribute("data-maplibre-overrides-css", "");
+            document.head.appendChild(overridesLink);
+          }
+
+          const styleUrl = root.dataset.tileStyle;
+          const geoUrls = (root.dataset.geoUrls ?? "").split(",").filter(Boolean);
+          if (!styleUrl || geoUrls.length === 0) throw new Error("[course-map] missing config");
+
+          const collections = await Promise.all(
+            geoUrls.map(async (url) => {
+              const res = await fetch(url);
+              if (!res.ok) throw new Error(`[course-map] geojson fetch ${res.status} (${url})`);
+              return (await res.json()) as FC;
+            }),
+          );
+          const features = collections.flatMap((fc) => fc.features);
+          if (features.length === 0) {
+            mapUnavailable();
+            return;
+          }
+
+          let w = 180,
+            s = 90,
+            e = -180,
+            n = -90;
+          for (const f of features) {
+            const [lng, lat] = f.geometry.coordinates;
+            w = Math.min(w, lng);
+            e = Math.max(e, lng);
+            s = Math.min(s, lat);
+            n = Math.max(n, lat);
+          }
+
+          const loadTimer = window.setTimeout(mapUnavailable, 9000);
+          const map = new maplibregl.Map({
+            container: mapEl!,
+            style: styleUrl,
+            center: [(w + e) / 2, (s + n) / 2],
+            zoom: 4,
+            attributionControl: { compact: true },
+            cooperativeGestures: true,
+          });
+          map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+          map.on("load", () => {
+            window.clearTimeout(loadTimer);
+            map.fitBounds(
+              [
+                [w, s],
+                [e, n],
+              ],
+              { padding: 40, maxZoom: 10, animate: false },
+            );
+
+            map.addSource("courses", {
+              type: "geojson",
+              data: { type: "FeatureCollection", features } as any,
+              cluster: true,
+              clusterRadius: 50,
+              clusterMaxZoom: 12,
+            });
+
+            map.addLayer({
+              id: "clusters",
+              type: "circle",
+              source: "courses",
+              filter: ["has", "point_count"],
+              paint: {
+                "circle-color": "#1f4d3a",
+                "circle-radius": ["step", ["get", "point_count"], 14, 25, 18, 100, 24],
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+            map.addLayer({
+              id: "cluster-count",
+              type: "symbol",
+              source: "courses",
+              filter: ["has", "point_count"],
+              layout: { "text-field": "{point_count_abbreviated}", "text-size": 12 },
+              paint: { "text-color": "#ffffff" },
+            });
+            map.addLayer({
+              id: "unclustered",
+              type: "circle",
+              source: "courses",
+              filter: ["!", ["has", "point_count"]],
+              paint: {
+                "circle-color": ["case", ["get", "verified"], "#1f4d3a", "#8a8073"],
+                "circle-radius": 6,
+                "circle-stroke-width": 1.5,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+
+            map.on("click", "clusters", (ev) => {
+              const feats = map.queryRenderedFeatures(ev.point, { layers: ["clusters"] });
+              const clusterId = feats[0]?.properties?.cluster_id;
+              const source = map.getSource("courses") as GeoJSONSource;
+              if (clusterId === undefined) return;
+              source.getClusterExpansionZoom(clusterId).then((zoom) => {
+                const coords = (feats[0]!.geometry as any).coordinates as [number, number];
+                map.easeTo({ center: coords, zoom });
+              });
+            });
+            map.on("click", "unclustered", (ev) => {
+              const f = ev.features?.[0];
+              if (!f) return;
+              const p = f.properties as unknown as Props;
+              if (p.hasPage) {
+                window.location.href = `/courses/${p.slug}/`;
+              }
+            });
+            map.on("mouseenter", "clusters", () => (map.getCanvas().style.cursor = "pointer"));
+            map.on("mouseleave", "clusters", () => (map.getCanvas().style.cursor = ""));
+            map.on("mouseenter", "unclustered", () => (map.getCanvas().style.cursor = "pointer"));
+            map.on("mouseleave", "unclustered", () => (map.getCanvas().style.cursor = ""));
+          });
+          map.on("error", () => mapUnavailable());
+        }
+      });
+    </script>
+  )
+}
+
+<style>
+  .course-map__frame {
+    position: relative;
+    height: 420px;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--surface-2, #ece2d0);
+  }
+  .course-map__canvas {
+    position: absolute;
+    inset: 0;
+    /* Above the fallback text, even though it comes first in the DOM: a
+       loaded MapLibre canvas (opaque tiles) then visually covers the
+       "Loading…"/"unavailable" message beneath it; an EMPTY canvas div is
+       transparent, so the message shows through until it loads. */
+    z-index: 2;
+  }
+  .course-map__fallback {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    text-align: center;
+    background: var(--surface-2, #ece2d0);
+    pointer-events: none;
+  }
+  .course-map__attribution {
+    font-size: 0.75rem;
+    color: var(--ink-soft, #4b5b52);
+    margin: 0.35rem 0 1rem;
+  }
+</style>

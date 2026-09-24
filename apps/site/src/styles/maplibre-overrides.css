@@ -1,0 +1,63 @@
+/**
+ * maplibre-overrides.css — B2 (Opus gate blocking finding): MapLibre's own
+ * `maplibre-gl.css` embeds every control icon (zoom in/out, the
+ * attribution "i" button, the compact-attribution toggle, the wordmark
+ * logo) as a `background-image: url("data:image/svg+xml,...")`. This
+ * site's CSP has no `img-src data:` allowance (deliberately — see
+ * `scripts/gen-headers.mjs`'s doc), so every one of those icons is BLOCKED
+ * at runtime under the real CSP, even though the build itself never
+ * surfaces the failure (CSP violations are a runtime/browser thing, not a
+ * build-time one — this is exactly why B2 also asked for a Playwright
+ * runtime CSP test, `test/e2e/map-csp-check.mjs`).
+ *
+ * Self-hosted, real SVG files (`public/icons/maplibre/*.svg`) replace
+ * every icon `CourseMap.astro` can actually trigger: `NavigationControl`
+ * (zoom in/out only — `showCompass: false`, so no compass icon ever
+ * renders) and the default compact `AttributionControl` (the "i" button
+ * and its expand toggle). Each SVG's content is the exact, unmodified
+ * path data MapLibre's own CSS carries for that icon's DEFAULT (non
+ * `forced-colors`) variant — extracted from
+ * `node_modules/maplibre-gl/dist/maplibre-gl.css` @ 5.24.0, never
+ * hand-drawn, so there is no visual drift from the icon set the CSS
+ * author (and any docs/screenshots referencing it) expects.
+ *
+ * **Not self-hosted: the `forced-colors:active` (Windows High Contrast
+ * Mode) variant, and the wordmark logo.** The logo is hidden outright
+ * below (MapLibre, unlike Mapbox, does not require its display — BSD
+ * licence, no attribution-logo clause) rather than self-hosted, since this
+ * site draws no value from it. The `forced-colors` variant is a narrow,
+ * documented gap (see this file's own doc below the rules): in that rare
+ * accessibility mode the built-in data: URI still applies and is CSP-
+ * blocked, so those specific icons would not render there. Everywhere
+ * else (the normal case this override targets) the icons are real,
+ * same-origin files and load under the strict CSP with zero exceptions.
+ *
+ * Loaded AFTER `maplibre-gl.css` (`CourseMap.astro`'s boot sequence), so
+ * these same-specificity rules win by cascade order alone — no `!important`
+ * needed except on the logo hide (belt-and-suspenders against MapLibre's
+ * own rule specificity for that one).
+ */
+
+.maplibregl-ctrl button.maplibregl-ctrl-zoom-in .maplibregl-ctrl-icon {
+  background-image: url("/icons/maplibre/zoom-in.svg");
+}
+.maplibregl-ctrl button.maplibregl-ctrl-zoom-out .maplibregl-ctrl-icon {
+  background-image: url("/icons/maplibre/zoom-out.svg");
+}
+.maplibregl-ctrl-attrib-button {
+  background-image: url("/icons/maplibre/attrib.svg");
+}
+.maplibregl-ctrl-attrib.maplibregl-compact:after {
+  background-image: url("/icons/maplibre/compact-after.svg");
+}
+
+/* MapLibre's own wordmark logo — never required (BSD licence, unlike
+   Mapbox's ToS), and not something this site draws attribution value
+   from. Hidden outright rather than self-hosted, and its background-image
+   is cleared too so no browser ever attempts to resolve the built-in
+   data: URI at all, whatever CSP-evaluation-of-unrendered-elements
+   behaviour a given browser implements. */
+.maplibregl-ctrl-logo {
+  display: none !important;
+  background-image: none !important;
+}

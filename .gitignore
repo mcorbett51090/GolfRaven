@@ -13,6 +13,27 @@ build/
 apps/mobile/android/
 apps/mobile/ios/
 
+# Astro (generated types cache — apps/site)
+.astro/
+
+# Build-generated per-country map GeoJSON (apps/site/scripts/gen-map-data.mjs —
+# same pattern southern-wine-country used for public/data/hub-wineries.json)
+apps/site/public/data/map/
+
+# _headers/_redirects are generated straight into dist/ (already ignored,
+# above), never into public/ — these two lines are a defensive backstop
+# only, in case a future script or a local `astro dev` run ever writes
+# them there again (Opus gate nit: these must never be tracked files that
+# a build silently rewrites).
+apps/site/public/_headers
+apps/site/public/_redirects
+
+# Local stand-in for the §5.2 R2 OG-card object store (apps/site/src/lib/og-store.ts)
+apps/site/.og-store/
+
+# scripts/lighthouse-audit.mjs's raw report output
+apps/site/.lighthouse-*.json
+
 # Test / coverage
 coverage/
 

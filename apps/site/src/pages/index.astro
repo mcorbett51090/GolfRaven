@@ -1,0 +1,83 @@
+---
+// The hub — trail-first (build plan §5.1 `index.astro`: "A trail-first
+// hub: trail cards plus a clustered map. Directories move to region
+// pages."). Stage 1 scope: "a simple list is fine for now; the map is
+// stage 2" (this repo's stage-1 instructions) — TODO(stage 2, build plan
+// §5.1 `WineryMap.astro` → `CourseMap.astro`): add the clustered MapLibre
+// map here.
+import BaseLayout from "../layouts/BaseLayout.astro";
+import CourseMap from "../components/CourseMap.astro";
+import { latestRosterVersion } from "@golfraven/catalog";
+import { loadSiteCatalog } from "../lib/derive";
+import { withBase } from "../lib/nav";
+import { siteOrigin } from "../lib/schema";
+
+const { catalog, usedDemoData } = await loadSiteCatalog();
+// §5.1 index.astro: "A trail-first hub: trail cards plus a clustered map."
+const mappedFacilities = catalog.facilities.filter(
+  (f) => typeof f.lat === "number" && typeof f.lng === "number",
+);
+
+const trails = [...catalog.trails].sort(
+  (a, b) =>
+    latestRosterVersion(b).members.length - latestRosterVersion(a).members.length ||
+    a.name.localeCompare(b.name),
+);
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const title = "GolfRaven — Golf Trails, Course by Course";
+const description =
+  "Find branded golf trails across the US and Canada, track every stop, and book on GolfRaven.";
+// The hub's list is over TRAILS, not facilities — `collectionNode`
+// (schema.ts) expects a facility list (a region/trail directory page), so
+// the hub emits a plain `WebSite` node instead of misapplying it here.
+const jsonLd = [{ "@type": "WebSite", name: "GolfRaven", url: `${origin}/` }];
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  path="/"
+  jsonLd={jsonLd}
+  demo={usedDemoData}
+  alternates={[{ locale: "fr", path: "/fr/" }]}
+>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">Golf trails</p>
+      <h1>Play the trail, one stop at a time.</h1>
+      <p>{trails.length} trail{trails.length === 1 ? "" : "s"} mapped across the US and Canada.</p>
+    </header>
+
+    <ul class="card-grid" role="list">
+      {
+        trails.map((trail) => {
+          const version = latestRosterVersion(trail);
+          return (
+            <li>
+              <a class="card" href={withBase(`/trails/${trail.slug}/`)}>
+                <h2>{trail.name}</h2>
+                <p>
+                  {version.members.length} stop{version.members.length === 1 ? "" : "s"} ·{" "}
+                  {trail.regions.join(", ")}
+                </p>
+                {trail.rosterStatus === "conflicting" && (
+                  <p class="card__flag">Sources disagree on this roster</p>
+                )}
+              </a>
+            </li>
+          );
+        })
+      }
+    </ul>
+
+    <CourseMap facilities={mappedFacilities} heading="Every course, mapped" />
+  </main>
+</BaseLayout>
+
+<style>
+  .card__flag {
+    color: #b23a3a;
+    font-weight: 600;
+  }
+</style>

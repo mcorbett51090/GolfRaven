@@ -1,0 +1,142 @@
+---
+// Adapted from southern-wine-country's `src/pages/trails/[trail].astro`
+// @ 572ff7e (build plan §5.1 `trails/*`: "Latest roster version; stops;
+// 'roster last verified'; banner when `rosterStatus = conflicting`; the
+// latest roster version's `completionUnit` and `completionRule` shown;
+// a private-stops note when any member is `access: private`").
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import {
+  distinctStopFacilityCount,
+  isIndexable,
+  isVerified,
+  latestRosterVersion,
+  privateStopCount,
+  rosterStops,
+} from "@golfraven/catalog";
+import { loadSiteCatalog } from "../../lib/derive";
+import { withBase } from "../../lib/nav";
+import { siteOrigin, breadcrumbNode, collectionNode, trailUrl } from "../../lib/schema";
+
+export async function getStaticPaths() {
+  const { catalog } = await loadSiteCatalog();
+  return catalog.trails.map((trail) => ({ params: { slug: trail.slug }, props: { trail } }));
+}
+
+const { trail } = Astro.props;
+const { catalog, usedDemoData } = await loadSiteCatalog();
+
+const version = latestRosterVersion(trail);
+const stops = rosterStops(catalog, trail, version);
+const privateCount = privateStopCount(stops);
+const stopFacilityCount = distinctStopFacilityCount(stops);
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const url = trailUrl(origin, trail.slug);
+const path = `/trails/${trail.slug}/`;
+const title = `${trail.name} — ${version.members.length} stops | GolfRaven`;
+const description =
+  trail.blurb?.slice(0, 155) ||
+  `The ${trail.name}: ${version.members.length} stops across ${trail.regions.join(", ")}. Track your progress with GolfRaven.`;
+
+// S1: the JSON-LD ItemList lists only facilities that actually HAVE a page
+// worth indexing — the R1-indexable subset, distinct by facility id.
+const indexableStopFacilities = stops
+  .map((s) => s.facility)
+  .filter((f) => isIndexable(f))
+  .filter((f, i, arr) => arr.findIndex((x) => x.id === f.id) === i);
+
+const jsonLd = [
+  breadcrumbNode([
+    { name: "GolfRaven", url: `${origin}/` },
+    { name: trail.name, url },
+  ]),
+  collectionNode(origin, trail.name, description, indexableStopFacilities, url),
+];
+
+const completionRuleLabel =
+  version.completionRule.kind === "all"
+    ? "Every stop"
+    : `${version.completionRule.n} of ${version.members.length} stops`;
+
+// O3: no web tracker — "Track this trail in the app" instead.
+const appDeepLink = `golfraven://trail/${trail.id}`;
+const universalLink = `https://golfraven.example/trail/${trail.id}`;
+---
+
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd} demo={usedDemoData}>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">Golf trail · {trail.regions.join(" & ")}</p>
+      <h1>{trail.name}</h1>
+      <p>
+        {version.members.length} stop{version.members.length === 1 ? "" : "s"} · completion unit:{" "}
+        <strong>{version.completionUnit}</strong> · to complete: <strong>{completionRuleLabel}</strong>
+      </p>
+      <p>Roster last verified {version.verifiedAt}.</p>
+      <p class="app-cta">
+        <a class="btn btn--ghost" href={appDeepLink}>Track this trail in the app →</a>
+        <span class="app-cta__fallback">
+          (or open <a href={universalLink}>{universalLink}</a> if the app isn't installed)
+        </span>
+      </p>
+    </header>
+
+    {
+      trail.rosterStatus === "conflicting" && (
+        <p class="note note--banner" role="note">
+          Sources disagree on this trail's roster. We show the version we could best verify — see
+          something wrong? <a href={withBase(`/claim/?trail=${encodeURIComponent(trail.slug)}`)}>Tell us</a>.
+        </p>
+      )
+    }
+
+    {
+      privateCount > 0 && (
+        <p class="note" role="note">
+          {privateCount} of {stopFacilityCount} stops {privateCount === 1 ? "is a" : "are"} private
+          club{privateCount === 1 ? "" : "s"}: completing this trail needs a member's invitation at each.
+        </p>
+      )
+    }
+
+    {trail.blurb && <p>{trail.blurb}</p>}
+
+    <h2 class="section-head">Stops</h2>
+    <ul class="row-list" role="list">
+      {
+        stops.map((stop) => {
+          // S4: every VERIFIED facility has a page (noindex if thin) —
+          // only an UNVERIFIED facility has no page to link to.
+          const hasPage = isVerified(stop.facility);
+          const label = stop.facility.name ?? stop.facility.slug;
+          return (
+            <li class="row">
+              <span>
+                {hasPage ? (
+                  <a href={withBase(`/courses/${stop.facility.slug}/`)}>{label}</a>
+                ) : (
+                  <strong>{label}</strong>
+                )}
+                {stop.facility.access === "private" && <span class="cta"> · Private</span>}
+              </span>
+              {!hasPage && (
+                <a class="cta" href={withBase(`/claim/?facility=${encodeURIComponent(stop.facility.slug)}`)}>
+                  Help verify this course →
+                </a>
+              )}
+            </li>
+          );
+        })
+      }
+    </ul>
+  </main>
+</BaseLayout>
+
+<style>
+  .app-cta {
+    font-size: 0.9rem;
+  }
+  .app-cta__fallback {
+    color: var(--ink-soft, #4b5b52);
+  }
+</style>

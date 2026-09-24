@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "301 redirects for retired slugs (build plan §5.1 'public/_redirects':",
+    "'Rewrite (now live) | generated from data/redirects.json | Cloudflare",
+    "Pages honours path rules'; §5.4: 'A slug changes only by an explicit",
+    "rename PR; the retired slug gets a 301 via data/redirects.json.').",
+    "",
+    "Each entry is a PATH-to-PATH rule, never a query-string rule (SWC's",
+    "one rule, '/?winery=:slug', is explicitly NOT ported — see §5.1's",
+    "'Do not port SWC's only rule' note and G-P2-09: Cloudflare Pages",
+    "_redirects does not match on a query string, so it would silently do",
+    "nothing).",
+    "",
+    "Empty today — no slug has been renamed yet. apps/site/scripts/",
+    "gen-redirects.mjs generates public/_redirects from this file on every",
+    "build; above the §5.2 1,800-rule gate, new entries move to Cloudflare",
+    "Bulk Redirects instead (§5.2)."
+  ],
+  "redirects": []
+}

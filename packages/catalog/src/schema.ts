@@ -261,6 +261,16 @@ export const FacilityProvSchema = z.strictObject({
   nameFr: ProvSchema.optional(),
   town: ProvSchema.optional(),
   coord: ProvSchema.optional(),
+  /**
+   * Plan-gap decision (stage-1 gate review, applied here): §4.1 gives
+   * `Facility` no `blurb` field at all, but §5.1's R1 predicate
+   * ("blurb ≥ 40") and the `courses/[slug]` page slots ("blurb") both
+   * assume one. Added as an optional editorial field, stamped with its own
+   * `prov` key exactly like every other content field (never `'osm'` —
+   * editorial copy is never OSM-derived).
+   */
+  blurb: ProvSchema.optional(),
+  blurbFr: ProvSchema.optional(),
 });
 export type FacilityProv = z.infer<typeof FacilityProvSchema>;
 
@@ -436,6 +446,12 @@ export const FacilitySchema = z.strictObject({
   tz: IanaTimeZoneSchema,
   name: z.string().min(1).optional(),
   nameFr: z.string().optional(),
+  /** Plan-gap decision (§5.1 R1's "blurb ≥ 40", §4.1's content-field
+   * pattern) — see `FacilityProvSchema`'s doc above. Editorial copy only;
+   * never a verbatim copy of any external source (matching SWC's own S1
+   * rule that meta never quotes the blurb verbatim). */
+  blurb: z.string().optional(),
+  blurbFr: z.string().optional(),
   town: z.string().min(1).optional(),
   lat: z.number().min(-90).max(90).optional(),
   lng: z.number().min(-180).max(180).optional(),
@@ -487,7 +503,10 @@ export type RosterStatus = z.infer<typeof RosterStatusSchema>;
 
 export const OperatorSchema = z.strictObject({
   name: z.string().min(1),
-  url: z.url(),
+  /** `https:`-only (gate review nit, matching Facility.url and
+   * booking[].url's own S7 rule) — an operator's `http:`/other-scheme URL
+   * is never legitimate on a curated record. */
+  url: HttpsUrlSchema,
   type: z.string().min(1),
 });
 export type Operator = z.infer<typeof OperatorSchema>;
@@ -609,7 +628,9 @@ export const TrailSchema = z.strictObject({
   kind: TrailKindSchema,
   status: TrailStatusSchema,
   operator: OperatorSchema,
-  officialUrl: z.url(),
+  /** `https:`-only (gate review nit — same S7 rule as Facility.url,
+   * booking[].url and Operator.url). */
+  officialUrl: HttpsUrlSchema,
   rosterStatus: RosterStatusSchema,
   rosterVersions: z.array(RosterVersionSchema).min(1),
   blurb: z.string().optional(),
@@ -625,14 +646,19 @@ export type Trail = z.infer<typeof TrailSchema>;
 
 /** The Facility content fields §4.1's gate rule (a) names by exact list:
  * *"The content fields are: Facility `name`, `nameFr`, `town`, `lat`,
- * `lng`"*. Exported so `verify-catalog` iterates this exact list rather
- * than re-deriving it (and risking drift) from the schema shape. */
+ * `lng`"*, **plus `blurb`/`blurbFr`** (the stage-1 plan-gap decision — see
+ * `FacilitySchema`'s doc): the same "no prov stamp, or `prov: 'osm'`, is a
+ * gate failure" rule applies to editorial copy exactly as to every other
+ * content field. Exported so `verify-catalog` iterates this exact list
+ * rather than re-deriving it (and risking drift) from the schema shape. */
 export const FACILITY_CONTENT_FIELDS = [
   "name",
   "nameFr",
   "town",
   "lat",
   "lng",
+  "blurb",
+  "blurbFr",
 ] as const;
 
 /** Course content fields, same rule: *"Course `name`, `holes`, `par`,
@@ -680,4 +706,6 @@ export const FACILITY_CONTENT_FIELD_TO_PROV_KEY: Record<
   town: "town",
   lat: "coord",
   lng: "coord",
+  blurb: "blurb",
+  blurbFr: "blurbFr",
 };
