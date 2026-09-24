@@ -612,7 +612,9 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       },
       draftCandidateNames: { VI: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
+    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes, {
+      ledger: ledgerFromManifest(manifest),
+    });
     expect(byTrail.VI?.bySha.get(realSha)?.method).toBe("rendered");
   });
 
@@ -633,8 +635,10 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       draftCandidateNames: { TN: [] },
     };
     await expect(
-      buildEvidenceByTrail(manifest, async () =>
-        Buffer.from("<p>Real content.</p>"),
+      buildEvidenceByTrail(
+        manifest,
+        async () => Buffer.from("<p>Real content.</p>"),
+        { ledger: ledgerFromManifest(manifest) },
       ),
     ).rejects.toThrow(/does not match the manifest's recorded/);
   });
@@ -658,7 +662,9 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       },
       draftCandidateNames: { RTJ: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
+    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes, {
+      ledger: ledgerFromManifest(manifest),
+    });
     expect(byTrail.RTJ?.bySha.has(realSha)).toBe(false);
     // The exclusion is reported, never dropped silently.
     expect(
