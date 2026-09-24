@@ -1261,19 +1261,40 @@ async function isCanonicalPath(candidate: string, canonical: string): Promise<bo
 // a TEST-ONLY seam. (2) the child's own PATH is fixed to
 // `/usr/bin:/bin`, never the caller's — closes both a shim placed
 // elsewhere on PATH and PATH itself being rewritten. (3) `detectRuntimeTamper`
-// refuses (UNOFFICIAL) when the ORIGINAL process carries evidence its own
-// process, not just its git commands, may already be compromised:
-// `LD_PRELOAD`/`LD_LIBRARY_PATH`/`GIT_EXEC_PATH`/`DYLD_*` being set at
-// all, `NODE_OPTIONS` carrying a code-injecting flag (`--require`/`-r`/
-// `--loader`/`--experimental-loader`/`--import` — NOT a blanket
-// "NODE_OPTIONS is set" refusal: this environment's own ordinary shell
-// sets a benign `--max-old-space-size` NODE_OPTIONS, confirmed this
-// session, and a check that refused on that would make the live CLI
-// falsely UNOFFICIAL on every normal run here), or `process.execArgv`
-// being non-empty (a plain `node dist/x2-verdict.js` file invocation has
-// an empty `execArgv`, confirmed this session; it becomes non-empty only
-// when flags are passed directly to the `node` invocation itself, e.g.
-// `node --require=evil.cjs dist/x2-verdict.js` or `node -e "…"`).
+// looks for evidence the ORIGINAL process shows signs of the specific,
+// NAIVE injection shapes this checks for.
+//
+// ⛔ Eighth re-gate correction (round 8) — READ THIS BEFORE TRUSTING
+// `detectRuntimeTamper`'s OWN doc, which round 7 overstated: this check
+// is a TRIPWIRE FOR NAIVE, NON-SELF-HIDING INJECTION ONLY. It is NOT a
+// security boundary and CANNOT be made into one from inside this
+// process. The reason is structural, not a bug to patch: `NODE_OPTIONS`
+// preload code (`--require`, etc.) runs BEFORE a single line of this
+// module's own code — including before `detectRuntimeTamper` itself ever
+// executes. Round 8's gate fixture proved this directly: `evil.cjs` was
+// extended with `delete process.env.NODE_OPTIONS; process.execArgv.length
+// = 0;` at its very top — by the time `detectRuntimeTamper` runs, the
+// evidence it looks for has already been erased BY THE SAME INJECTED CODE
+// that patched `child_process.execFile`, and the verdict came back
+// OFFICIAL with TN confirmed. No check added to THIS module can close
+// this: any in-process check reads `process.env`/`process.execArgv` no
+// earlier than the attacker's own preload code did, so a preload
+// sophisticated enough to hide its OWN tracks always wins the race. The
+// checks below remain as defense in depth against a NAIVE attempt (one
+// that patches `execFile` but doesn't bother erasing NODE_OPTIONS/
+// execArgv afterward) — they still refuse `LD_PRELOAD`/an `LD_*`-prefixed
+// variable/`GIT_EXEC_PATH`/`DYLD_*` being set at all, a `NODE_OPTIONS`
+// token outside a narrow benign allow-list (round 8: switched from a
+// dangerous-flag denylist to an allow-list — see `isNodeOptionAllowed`'s
+// own doc for why), or `process.execArgv` being non-empty. The REAL
+// control for this class is procedural: this tool must run from a
+// process an agent has not already compromised, which this module cannot
+// verify about itself. See `docs/p0/X2.md`'s own Scope statement
+// (eighth re-gate, round 8) for the corrected, honest "defends
+// against"/residual split — this comment is the source of truth for the
+// code; that file is the source of truth for what an operator should
+// believe the tool actually does.
+//
 // `detectRuntimeTamper` is INJECTED (`env`/`execArgv` parameters), never
 // reading `process.env`/`process.execArgv` itself — `verifyAgainstGitHub`
 // passes the REAL ones by default and `main()` never overrides that; the

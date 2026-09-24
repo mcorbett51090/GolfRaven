@@ -27,6 +27,27 @@ afterEach(() => {
   tmpRoot = undefined;
 });
 
+// ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): "importing from
+// __fixtures__ bypasses the lint." Committed fixture (not a tmpdir, since
+// nothing here needs cleanup) at
+// test/fixtures/bad/medium2-sibling-service-key/ -- a real-looking
+// function (index.ts) with a plain relative import into a sibling file
+// (_internal/service-key-reader.ts) that itself reads the service-role
+// key. Proves end to end, through the real lintDirectory() walker (not
+// lintSource() on one file), that a file reached only via an ordinary
+// relative sibling import is discovered and flagged on its own content --
+// this is what a directory-based exclusion (the lint's own now-removed
+// __fixtures__ carve-out) used to hide.
+describe("MEDIUM-2: a real function's relative sibling import is walked and its target flagged on its own content", () => {
+  it("flags _internal/service-key-reader.ts's own literal service-role-key read, reached only via index.ts's plain relative import", () => {
+    const fixtureRoot = join(import.meta.dirname, "fixtures", "bad", "medium2-sibling-service-key");
+    const results = lintDirectory(fixtureRoot);
+    const readerResult = results.find((r) => r.filePath.endsWith("service-key-reader.ts"));
+    expect(readerResult).toBeDefined();
+    expect(readerResult?.findings.some((f) => f.rule === "literal-secret-env-var" && f.message.includes("SUPABASE_SERVICE_ROLE_KEY"))).toBe(true);
+  });
+});
+
 describe("lintDirectory — directory-exclusion fix (M3)", () => {
   it("LINTS a directory literally named `dist` (no longer blanket-excluded)", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-dist-"));
