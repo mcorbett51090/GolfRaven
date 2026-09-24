@@ -1593,6 +1593,8 @@ describe("x2-verdict: extractX2MdLogSection (gate finding 3, re-gate)", () => {
 });
 
 describe("x2-verdict: resolveCorroboration (gate finding 3, re-gate)", () => {
+  const SHA_OWNER_FOR_RESOLVE = sha("arbitrary evidence sha key for these tests");
+
   it("wayback: verifies a record whose raw bytes recompute to the cited SHA, re-deriving text with the real extractor", async () => {
     const html = "<html><body><p>Real snapshot content, fetched for real.</p></body></html>";
     const buf = Buffer.from(html);
