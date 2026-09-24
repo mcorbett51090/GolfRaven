@@ -168,6 +168,9 @@ importers:
       '@golfraven/catalog':
         specifier: workspace:*
         version: link:../catalog
+      '@golfraven/matching':
+        specifier: workspace:*
+        version: link:../matching
     devDependencies:
       typescript:
         specifier: 7.0.2

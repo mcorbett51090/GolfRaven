@@ -2,7 +2,7 @@
   "name": "@golfraven/rules",
   "private": true,
   "version": "0.0.0",
-  "description": "GolfRaven scoring/eligibility rules: scorePlay (policyVersion), RuleExpr evaluation, eligibility. Placeholder until P1/§8 (build plan §3.1 row E).",
+  "description": "GolfRaven scoring/eligibility rules: scorePlay (policyVersion, §4.5), RuleExpr evaluation, completion/marker-roster eligibility, offer-eligibility validation (build plan §3.1 row E).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,7 +18,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@golfraven/catalog": "workspace:*"
+    "@golfraven/catalog": "workspace:*",
+    "@golfraven/matching": "workspace:*"
   },
   "devDependencies": {
     "typescript": "7.0.2",
