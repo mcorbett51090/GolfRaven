@@ -27,10 +27,12 @@ import {
   type LatLon,
   type OverpassMember,
 } from "./overpass-geo.js";
+import { buildAsciiUserAgent } from "./net.js";
 
 export const DEFAULT_ENDPOINT = "https://overpass-api.de/api/interpreter";
 export const DEFAULT_BBOX_RADIUS_METERS = 2000;
 export const DEFAULT_TIMEOUT_MS = 190_000;
+
 /**
  * Polite User-Agent per Overpass API usage norms `[unverified — training
  * knowledge on the exact expected format; the practice of identifying the
@@ -39,28 +41,18 @@ export const DEFAULT_TIMEOUT_MS = 190_000;
  *
  * Gate finding B-10: the contact is read from `X5_CONTACT` (an env var, not
  * a hard-coded personal address committed to the repo) and defaults to the
- * project URL when unset.
- */
-const DEFAULT_CONTACT =
-  "https://github.com/golfraven/golfraven (contact not set - export X5_CONTACT)";
-
-/**
- * Gate finding F-S5: a header value above 0xFF is not a valid ByteString,
- * and `fetch` throws on it — with no indication of which header or
- * character caused it. Fail with a clear, pointed message instead of
- * letting every live run crash inside `fetch` with a cryptic error.
+ * project URL when unset. Gate finding F-S5 (a header value above 0xFF is
+ * not a valid ByteString, and `fetch` throws on it with no indication of
+ * which header/character caused it) is now enforced by the shared
+ * `buildAsciiUserAgent` in `net.ts` — this is a thin wrapper over it so
+ * `x2-fetch`/`x4-verify` reuse the exact same fix instead of re-copying it.
  */
 export function buildUserAgent(): string {
-  const contact = process.env.X5_CONTACT?.trim() || DEFAULT_CONTACT;
-  for (let i = 0; i < contact.length; i++) {
-    if (contact.charCodeAt(i) > 0xff) {
-      throw new Error(
-        `X5_CONTACT must be Latin-1 (ByteString) text for the Overpass User-Agent header — ` +
-          `found a non-Latin-1 character at index ${i}. Use plain ASCII (e.g. "-" instead of an em dash).`,
-      );
-    }
-  }
-  return `GolfRaven-P0-X5/0.1 (P0 desk check, docs/p0/X5.md; contact: ${contact})`;
+  return buildAsciiUserAgent({
+    toolTag: "GolfRaven-P0-X5/0.1",
+    docRef: "docs/p0/X5.md",
+    envVarName: "X5_CONTACT",
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "sax": "1.4.1"
+    "entities": "8.1.0",
+    "sax": "1.4.1",
+    "unpdf": "1.8.1"
   },
   "devDependencies": {
     "@types/sax": "1.2.7",
