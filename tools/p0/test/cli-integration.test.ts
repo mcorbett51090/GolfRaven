@@ -73,4 +73,25 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   // exercised here (task requirement: no network calls in tests). That is
   // done once, manually, outside the test suite — see the task report and
   // README "Known risk" / STATUS notes.
+
+  // k1-verdict/k3-verdict read fixed repo docs directly (no network, no
+  // input flags) — same "no override flag" philosophy as x1-ios-export's
+  // round-window read above. Proving both against the REAL, pre-read repo
+  // docs is a real end-to-end check that the refusal/pass-through wiring
+  // reaches all the way from the CLI to `docs/partners/k1-outreach.md` and
+  // `docs/p0/K3.md`.
+  it("k1-verdict CLI runs cleanly against the real, pre-outreach k1-outreach.md (0/5, early miss)", async () => {
+    const outPrefix = path.join(OUT_DIR, "k1-verdict-result");
+    const { stdout } = await execFileAsync("node", [path.join(DIST, "k1-verdict.js"), "--out", outPrefix]);
+    expect(stdout).toContain("Consequence branch: early-miss");
+    expect(existsSync(`${outPrefix}.json`)).toBe(true);
+  });
+
+  it("k3-verdict CLI refuses (non-zero exit) against the real, pre-read K3.md (blank property id)", async () => {
+    const outPrefix = path.join(OUT_DIR, "k3-verdict-result");
+    await expect(
+      execFileAsync("node", [path.join(DIST, "k3-verdict.js"), "--out", outPrefix]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("property id") });
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
+  });
 });

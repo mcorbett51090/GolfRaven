@@ -34,10 +34,27 @@ toward the 5, **only if the plan's X2 swap rule activates it as the slate reserv
 
 | # | Prospect | Category | Why them |
 |---|---|---|---|
-| 1 | **Alabama Tourism Department** — Golf Marketing Director **Kerry Teague** `[snippet-only]` | Tourism board | `[snippet-only — WebSearch result text, not fetched/verified, and not traceable to any research/*.md file]`: reported to already run a "Sweet Home Alabama" golf campaign built around the RTJ Trail (`https://tourism.alabama.gov`); if confirmed, a natural co-funder of RTJ's special-marker run and Trail Card extension. |
+| 1 | **Alabama Tourism Department** — no golf-marketing contact found (the earlier "Kerry Teague, Golf Marketing Director" is **refuted**; see the 2026-09-24 contact research below) | Tourism board | `[snippet-only — WebSearch result text, not fetched/verified, and not traceable to any research/*.md file]`: reported to already run a "Sweet Home Alabama" golf campaign built around the RTJ Trail (`https://tourism.alabama.gov`); if confirmed, a natural co-funder of RTJ's special-marker run and Trail Card extension. |
 | 2 | **Tourism Vancouver Island** | Tourism board / DMO | `[snippet-only — WebSearch result text; not present in `research/canada-trails.md` or any other research file — grep: 0 hits]`: reported to be the regional DMO that promotes Golf Vancouver Island and its Trail Pass, one of six Regional Destination Management Organizations in British Columbia. Verify independently before citing to a prospect. VI is the likely first go-live (year-round golf), so its sponsor conversation can start earliest regardless. |
 | 3 | **Callaway Brands** (Callaway / Odyssey / OGIO / TravisMathew umbrella) | Equipment + apparel | Already operates a cross-brand loyalty program (Callaway Rewards, found this session) spanning clubs and apparel; a special-marker + Wallet-card attribution package is a small incremental ask for an organization already running reward mechanics. `[inference — no existing golf-trail sponsorship by Callaway Brands was found this session; this is a fit rationale, not a confirmed relationship]` |
 | 4 | **Bushnell Golf** | Equipment (GPS / rangefinders) | A tech-forward consumer golf brand whose core product (distance/location measurement) pairs narratively with the app's GPS-verified course-QR mechanic. `[inference — speculative fit, not a sourced existing sponsorship]` |
+
+## Contact research (2026-09-24, WebSearch only — every row `[snippet-only]`; WebFetch is blocked by the proxy)
+
+These findings were applied to the unsent Gmail drafts. Each draft opens with a delete-before-sending note that says what to verify. No email address below was inferred from a naming pattern.
+
+| Target | Finding | Confidence | Verify before sending |
+|---|---|---|---|
+| Tennessee Golf Trail | Mike Nixon, Director of Golf Operations, TDEC / TN State Parks; a TNgolf.org bio covers 2011–2022 | Low (possibly stale) | TN State Parks leadership page (tn.gov/environment/parks-conservation/leadership.html) |
+| Vancouver Island Golf Trail | Chris Elder, Director of Marketing, **corroborated** by 2 sources; phone 250-889-0973 | Med | Email via golfvancouverisland.ca/about-us/media-room/ |
+| Robert Trent Jones Golf Trail | No named partnerships contact. A data-broker list names Landon Shelby, Allie Higgins and Ashelynn Falkenburg, **without titles**, so they are not relied on | Low | rtjgolf.com/partners (Corporate Partners page) |
+| Hammock Coast | Clayton Stairs, Tourism Manager, Georgetown County Chamber, 843-546-8436 x107; alternate: Mark A. Stevens, Director of Tourism Development | Med | visitgeorge.com Staff page for the email |
+| Canadian Rockies Golf Consortium | Gord Schultz, Executive Director; the only source is an old Globe and Mail article | Low–Med (possibly stale) | 1-877-323-3633 / the site's contact form |
+| Alabama Tourism Department | "Kerry Teague, Golf Marketing Director" **refuted**: listed as Director, Financial Services. No golf-marketing person found | High (on the refutation) | tourism.alabama.gov/contact-us |
+| Tourism Vancouver Island | Not found | — | tourismvi.ca |
+| Callaway Brands | Nick McInally, VP Global Marketing (no email found); PR contact Jeff Newton, jeff.newton@callawaygolf.com, visible in a snippet — for routing only; Rodney Ferrell, VP Partnerships, Topgolf Media | Med | Ask PR who owns sponsorships |
+| Bushnell Golf | No named US contact | Low | bushnellgolf.com/contact, (844) 875-0045 |
+| Oklahoma Golf Trail (reserve) | Sheila Dills, Chair, Oklahoma Golf Trail Commission, per 3 outlets from ~2025 launch coverage | Med | oklahoma.golf contact form |
 
 ## (c) Operator first-touch email — base template
 
@@ -192,17 +209,22 @@ GolfRaven signature: _____________________   Date: __________
 Matt [Last Name], [Entity name — TBD]
 ```
 
-## (g) K1 tracking table (empty — Matt fills in as outreach happens)
+## (g) K1 tracking table
 
-| Target | Type | Contacted date | Reply (Y/N/date) | Call date | LOI (Y/N/date) | Notes |
-|---|---|---|---|---|---|---|
-| Tennessee Golf Trail | Operator (slate) | | | | | |
-| Vancouver Island Golf Trail | Operator (slate) | | | | | |
-| Robert Trent Jones Golf Trail | Operator (slate) | | | | | |
-| Oklahoma Golf Trail | Operator (reserve) | | | | | |
-| Hammock Coast Golf Trail | Operator (co-op reserve) | | | | | |
-| Canadian Rockies Golf Consortium | Operator (co-op reserve) | | | | | |
-| Alabama Tourism Department | Sponsor | | | | | |
-| Tourism Vancouver Island | Sponsor | | | | | |
-| Callaway Brands | Sponsor | | | | | |
-| Bushnell Golf | Sponsor | | | | | |
+Columns fixed 2026-09-24, before any outreach was sent — `tools/p0`'s `k1-verdict` reads this table
+directly (`src/k1-log.ts`); every input it needs (acceptance date, LOI date, fee willingness, the OK
+swap activation, and the three sponsor qualifiers) is its own column, ISO dates or `Y`/`N` values, so
+nothing is inferred from free text. Do not rename, reorder or add columns without updating that parser.
+
+| Target | Type | Contacted date | Call accepted date | LOI date | Fee willingness (Y/N) | OK swap replaces | Sponsor: decision-maker named (Y/N) | Sponsor: budget range stated (Y/N) | Sponsor: attribution interest (Y/N) | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Tennessee Golf Trail | Operator (slate) | | | | | | | | | |
+| Vancouver Island Golf Trail | Operator (slate) | | | | | | | | | |
+| Robert Trent Jones Golf Trail | Operator (slate) | | | | | | | | | |
+| Oklahoma Golf Trail | Operator (reserve) | | | | | | | | | |
+| Hammock Coast Golf Trail | Operator (co-op reserve) | | | | | | | | | |
+| Canadian Rockies Golf Consortium | Operator (co-op reserve) | | | | | | | | | |
+| Alabama Tourism Department | Sponsor | | | | | | | | | |
+| Tourism Vancouver Island | Sponsor | | | | | | | | | |
+| Callaway Brands | Sponsor | | | | | | | | | |
+| Bushnell Golf | Sponsor | | | | | | | | | |

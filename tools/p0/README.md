@@ -3,10 +3,12 @@
 Check tools for build plan §10 P0's kill experiments **X1** (=K4a, Health real-device test), **X2**
 (pilot-slate roster/rules direct-fetch), **X4** (GolfNow facility-page coverage) and **X5** (Overpass
 OSM coverage), plus **`p0-desk`**, a one-command runner for the checks that don't need a human
-confirmation file first. See `docs/p0/X1.md`, `docs/p0/X2.md`, `docs/p0/X4.md`, `docs/p0/X5.md`,
-`docs/owner/x1-k4b-device-protocol.md`, `docs/p0/K4.md`, and decision
-`docs/decisions/0001-owner-decisions-and-p0-thresholds.md` Addenda D R6, E, F, G and H for the checks
-these implement — this README only covers running the tools.
+confirmation file first, and the **K1** (operator + sponsor signal) and **K3** (SEO signal) verdict
+tools. See `docs/p0/X1.md`, `docs/p0/X2.md`, `docs/p0/X4.md`, `docs/p0/X5.md`, `docs/p0/K1.md`,
+`docs/p0/K3.md`, `docs/partners/k1-outreach.md`, `docs/owner/x1-k4b-device-protocol.md`,
+`docs/p0/K4.md`, and decision `docs/decisions/0001-owner-decisions-and-p0-thresholds.md` Addenda A, B,
+C, D (R1, R2, R4, R5, R6), E, F, G and H for the checks these implement — this README only covers
+running the tools.
 
 ## Build
 
@@ -15,8 +17,9 @@ pnpm --filter @golfraven/p0-tools build
 ```
 
 Produces `dist/x1-ios-export.js`, `dist/x1-verdict.js`, `dist/x2-fetch.js`, `dist/x2-verdict.js`,
-`dist/x4-verify.js`, `dist/x5-overpass.js`, `dist/p0-desk.js` (plus `dist/index.js`, the library
-entry point re-exporting every tool's pure functions/types).
+`dist/x4-verify.js`, `dist/x5-overpass.js`, `dist/p0-desk.js`, `dist/k1-verdict.js`,
+`dist/k3-verdict.js` (plus `dist/index.js`, the library entry point re-exporting every tool's pure
+functions/types).
 
 ## 1. `x1-ios-export` — iOS Health export reader
 
@@ -444,6 +447,73 @@ running `node dist/x5-overpass.js n-osm` against the real default endpoint was e
 this environment's proxy. See the task report for the exact error text this session got — it was
 not worked around, per the task's own instruction.
 
+## 8. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdict
+
+```shell
+node dist/k1-verdict.js
+node dist/k1-verdict.js --out k1-verdict-result
+```
+
+No input flags: the CLI always reads the repo's own `docs/partners/k1-outreach.md` §(g) tracking
+table — the single K1 log (decision 0001, Addendum D, R2) — same no-override philosophy as
+`x1-ios-export`'s round windows. That table's columns were restructured 2026-09-24, before any
+outreach, so every input `k1-verdict` needs (acceptance date, LOI date, fee willingness, the Oklahoma
+Golf Trail swap activation, and the three sponsor qualifiers) is its own column — see the note above
+the table in that file, and `src/k1-log.ts`'s strict parser.
+
+- **Early read** (decision 0001, Addendum D, R1): count of the 5 named operators whose acceptance of
+  an exploratory call is dated on or before **2026-10-19**. Pass ≥ 2.
+- **Full gate** (decision 0001, Addendum C, window closing 2026-11-30): count of the same 5 with a
+  signed non-binding LOI, including recorded fee willingness, dated on or before **2026-11-30**. Pass
+  needs ≥ 2 of those, **and** ≥ 1 sponsor row with all three qualifiers recorded (named decision-maker,
+  stated season budget range, interest in special-marker attribution).
+- **Oklahoma Golf Trail** counts only when its "OK swap replaces" cell names one of the 3 slate trails
+  (the X2 swap rule activated) — it then replaces that trail in the 5, never a 6th contact (K1.md
+  METHOD step 1).
+
+**Parser strictness (`src/k1-log.ts`):** an unknown operator name, a malformed date, an unexpected
+column layout, or a malformed Y/N cell all throw. A blank cell means "not yet" and is never an error —
+`k1-verdict` is designed to run cleanly against the table in its current, genuinely empty state.
+
+**Output:** each read's count/pass, which entries are late (dated after their cutoff, listed but not
+counted), which LOIs lack recorded fee willingness, which sponsor rows are partially qualified, and
+the pre-written consequence branch — `early-miss`, `operator-full-miss`,
+`sponsor-miss-operators-pass`, or `pass` — with K1.md's Kill-consequence text quoted verbatim (a full
+pass has no kill-consequence text to quote; the tool says so rather than inventing any).
+
+**Feeds:** `consequenceBranch`/`consequenceText` → `docs/p0/K1.md` MEASURED VALUE and VERDICT.
+
+## 9. `k3-verdict` — K3 SEO-signal verdict
+
+```shell
+node dist/k3-verdict.js
+node dist/k3-verdict.js --out k3-verdict-result
+```
+
+No input flags: the CLI always reads the repo's own `docs/p0/K3.md`, whose "## Search Console read"
+and "## Keyword Planner read" tables (added 2026-09-24, before any read) are its two inputs, alongside
+the existing "## SWC Search Console property" memo.
+
+- **Search Console:** the median of the three fixed months' (July/August/September 2026, decision
+  0001 Addendum D R4) total organic clicks (Addendum A's method), compared to **M = 1,000**. Refuses
+  to run if the property id memo is blank, or if any month's clicks total is blank — a blank cell is
+  "not read yet," and the loud-failure contract forbids silently treating that as 0 clicks.
+- **Keyword Planner:** the sum of the six closed-list terms' (decision 0001 Addendum B) lower bounds,
+  compared to **≥ 5,000**, applying Addendum D R5's "identical range counted once" rule exactly: two
+  terms that report the identical `(lower, upper)` range contribute that lower bound only once; a
+  point-value term is never deduplicated (R5 only names "range"). Refuses to run if any term has
+  neither a range nor a point value recorded.
+
+**Parser strictness (`src/k3-log.ts`):** an off-list or missing keyword term, an unexpected/missing/
+duplicate month or term row, a malformed number, or a row with both a range and a point value (or only
+one of the two bounds) all throw.
+
+**Output:** both raw numbers, each individual pass/miss against its own bar, the combined branch
+(`both-miss` / `disagree` / `both-pass`), and K3.md's Kill-consequence text quoted verbatim (plus the
+"P1 proceeds in every case" line, which applies regardless of branch).
+
+**Feeds:** `combinedBranch`/`consequenceText` → `docs/p0/K3.md` MEASURED VALUE and VERDICT.
+
 ## Tests
 
 ```shell
@@ -486,3 +556,18 @@ board, including the BLOCKED row for a fake fetch that throws a `"CONNECT tunnel
 403"`-shaped error (`net.test.ts` also covers the other observed shape — a resolved 403 response
 that IS the proxy's own denial page, vs. one that's the destination site's own 403) and the
 PARTIAL-BLOCKED row for a partial failure/indeterminate result (gate S5).
+
+**K1/K3 coverage:** `k1-verdict` — 0/1/2/5 acceptance counts, a late acceptance (dated after the
+2026-10-19 cutoff) excluded and reported, a 6th contact (Oklahoma Golf Trail) NOT counting while its
+swap is inactive, the Oklahoma swap correctly replacing its named slate trail in the 5 (never a 6th),
+an LOI without recorded fee willingness not counting, an LOI dated after the 2026-11-30 full-gate
+cutoff not counting, a sponsor row missing one of its three qualifiers not counting, every
+consequence branch (`early-miss` / `operator-full-miss` / `sponsor-miss-operators-pass` / `pass`) with
+its quoted text, and the parser throwing on an unknown operator name, a malformed date, a malformed
+Y/N cell, an unexpected column layout, a misplaced or invalid "OK swap replaces" value, and a missing
+or duplicate required row. `k3-verdict` — a blank property id and a blank month/term value all
+refusing; the median computed correctly regardless of input order; Addendum D R5's duplicate-range
+rule counting an identical range once while never deduplicating point values; all three combined
+branches (`both-miss` / `disagree` / `both-pass`) with quoted consequence text; and the parser
+throwing on an off-list or missing keyword term, a missing/duplicate/unexpected month or term row, a
+malformed number, and an ambiguous range-plus-point (or half-filled range) cell.

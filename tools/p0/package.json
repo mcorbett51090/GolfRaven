@@ -2,7 +2,7 @@
   "name": "@golfraven/p0-tools",
   "private": true,
   "version": "0.0.0",
-  "description": "GolfRaven P0 kill-experiment check tools: x1-ios-export, x1-verdict, x5-overpass (build plan §10 P0, docs/p0/X1.md, docs/p0/X5.md).",
+  "description": "GolfRaven P0 kill-experiment check tools: x1-ios-export, x1-verdict, x5-overpass, k1-verdict, k3-verdict (build plan §10 P0, docs/p0/X1.md, docs/p0/X5.md, docs/p0/K1.md, docs/p0/K3.md).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
