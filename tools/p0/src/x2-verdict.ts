@@ -39,7 +39,7 @@
  * indistinguishable from one whose only rules page never loaded.
  */
 import { createHash } from "node:crypto";
-import { readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { collapseWhitespace } from "./text-extract.js";
@@ -88,6 +88,17 @@ export interface TrailEvidence {
 
 /** trail name -> that trail's own evidence (gate S2: never a flat/merged map). */
 export type EvidenceByTrail = Record<string, TrailEvidence>;
+
+/**
+ * Same-site rule for X2 evidence: a host matches its configured host exactly,
+ * or when the two differ only by a leading "www." (e.g. golfvancouverisland.ca
+ * redirecting to www.golfvancouverisland.ca). Nothing broader: a different
+ * registrable domain, or any other subdomain, is never the trail's official source.
+ */
+export function sameConfiguredHost(configured: string, final: string): boolean {
+  const strip = (h: string) => (h.startsWith("www.") ? h.slice(4) : h);
+  return configured === final || strip(configured) === strip(final);
+}
 
 function hostOf(url: string): string | null {
   try {
@@ -139,8 +150,14 @@ export async function buildEvidenceByTrail(
       // config asked for.
       const configuredHost = hostOf(e.url);
       const finalHost = e.finalUrl ? hostOf(e.finalUrl) : configuredHost;
-      if (!configuredHost || !finalHost || configuredHost !== finalHost) {
-        continue; // excluded — not this trail's official evidence
+      if (!configuredHost || !finalHost || !sameConfiguredHost(configuredHost, finalHost)) {
+        // Excluded — not this trail's official evidence. Reported, never dropped silently.
+        failedSources.push({
+          url: e.url,
+          blocked: false,
+          error: `redirected off the configured host (${configuredHost ?? "?"} -> ${finalHost ?? "?"}); excluded as evidence`,
+        });
+        continue;
       }
       const { text } = await extractEvidenceText(raw, e.contentType, e.url);
       bySha.set(recomputedSha, { text });
@@ -419,6 +436,7 @@ async function main(argv: string[]): Promise<void> {
   const outExplicit = Boolean(flags.out);
   const outPrefix = flags.out || path.join(defaultOutsideRepoDir("x2-verdict-result"), "result");
   assertOutsideRepoUnlessExplicit(path.dirname(outPrefix), outExplicit);
+  await mkdir(path.dirname(outPrefix), { recursive: true });
   await writeFile(
     `${outPrefix}.json`,
     `${JSON.stringify(result, null, 2)}\n`,

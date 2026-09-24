@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   buildEvidenceByTrail,
   computeX2Verdict,
+  sameConfiguredHost,
   type EvidenceByTrail,
   type X2ConfirmationFile,
 } from "../src/x2-verdict.js";
@@ -377,6 +378,41 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
     };
     const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
     expect(byTrail.RTJ?.bySha.has(realSha)).toBe(false);
+    // The exclusion is reported, never dropped silently.
+    expect(byTrail.RTJ?.failedSources.some((f) => f.error.includes("redirected off the configured host"))).toBe(true);
+  });
+
+  it("same-site rule: a bare domain redirecting to its www. host still counts as that trail's evidence", async () => {
+    const rawBytes = Buffer.from("<p>Golf Vancouver Island Trail Pass</p>");
+    const realSha = sha(rawBytes.toString("utf8"));
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: {
+        VI: [
+          fetchedEntry({
+            trail: "VI",
+            url: "https://golfvancouverisland.ca/",
+            finalUrl: "https://www.golfvancouverisland.ca/",
+            sha256: realSha,
+            rawFile: "raw/vi.html",
+          }),
+        ],
+      },
+      draftCandidateNames: { VI: [] },
+    };
+    const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
+    expect(byTrail.VI?.bySha.has(realSha)).toBe(true);
+    expect(byTrail.VI?.failedSources).toHaveLength(0);
+  });
+
+  it("sameConfiguredHost: only exact or www.-prefix variants match", () => {
+    expect(sameConfiguredHost("golfvancouverisland.ca", "golfvancouverisland.ca")).toBe(true);
+    expect(sameConfiguredHost("golfvancouverisland.ca", "www.golfvancouverisland.ca")).toBe(true);
+    expect(sameConfiguredHost("www.rtjgolf.com", "rtjgolf.com")).toBe(true);
+    expect(sameConfiguredHost("rtjgolf.com", "rtjgolf.com.evil.example")).toBe(false);
+    expect(sameConfiguredHost("rtjgolf.com", "shop.rtjgolf.com")).toBe(false);
+    expect(sameConfiguredHost("tnstateparks.com", "tn.gov")).toBe(false);
   });
 
   it("gate S5: a failed entry is recorded as a failedSource for its trail", async () => {
