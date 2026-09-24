@@ -302,7 +302,7 @@ describe("should-fix 8: output contract", () => {
       id: "crs_zzz",
       facilityId: "fac_far",
       verificationTier: "play-verified",
-      polygon: rectangle(offset(ORIGIN, 2000, 0), 200, 200),
+      polygon: rectangle(offset(ORIGIN, 3500, 0), 200, 200),
     };
     const near: CandidateCourse = {
       id: "crs_aaa",
@@ -352,15 +352,16 @@ describe("should-fix 9: polygons with holes, and multipolygons", () => {
 
   it("a hole excludes a check-in fix that would otherwise be inside", () => {
     const outer = rectangle(ORIGIN, 400, 400);
-    const hole = rectangle(ORIGIN, 100, 100);
+    const hole = rectangle(ORIGIN, 300, 300);
     const candidate: CandidateCourse = {
       id: "crs_hole",
       facilityId: "fac_hole",
       verificationTier: "play-verified",
       polygon: [outer, hole],
     };
-    // The hole is 50 m half-width; ORIGIN is dead center of the hole, well
-    // clear of the 50 m check-in buffer around the hole's own edge.
+    // The hole has a 150 m half-width; ORIGIN is dead center of the hole,
+    // well clear (150 m > 50 m) of the check-in buffer around the hole's
+    // own edge, so the buffer cannot rescue it.
     const result = matchCheckIn(
       { point: ORIGIN, accuracyMeters: 5, simulated: false, timestamp: T0 },
       candidate,
@@ -390,9 +391,9 @@ describe("should-fix 10: performance", () => {
       });
     }
     const fixes = points.map((p, i) => ({ point: p, timestamp: i * 1000 }));
-    const start = performance.now();
+    const start = Date.now();
     const outcome = matchRoute({ fixes, candidates });
-    const elapsedMs = performance.now() - start;
+    const elapsedMs = Date.now() - start;
     expect(outcome.kind).toBeDefined();
     // Generous bound (the gate's own target is "under 1 s"; observed
     // locally around 300–400 ms).
@@ -429,38 +430,48 @@ describe("mutation-catching boundary fixtures", () => {
 
   it("score gap 0.14 (tied, ask_user) vs 0.16 (clear winner, matched)", () => {
     const facilityId = "fac_gap";
-    // Candidate A: ~0.90 insideRatio (fixed). Candidate B: independently
-    // tunable via a second, overlapping polygon of different size so its
-    // own ratio differs by a controlled amount.
-    const bigCenter = ORIGIN;
+    // 100 points on a line, 50 m apart (well over the 30 m buffer, so each
+    // point's inclusion is unambiguous), evenly spaced in time so the
+    // time-weighted ratio equals the plain point fraction.
+    const points = Array.from({ length: 100 }, (_, i) => offset(ORIGIN, i * 50, 0));
+
+    // A box spanning x ∈ [-50, maxX] (+30 m buffer) includes point i iff
+    // i*50 <= maxX + 30. Choosing maxX = (count-1)*50 includes exactly
+    // `count` points (i = 0..count-1) with a comfortable margin before
+    // the next excluded point (>= 50 m - 30 m = 20 m clearance).
+    function boxCoveringCount(count: number): CandidateCourse["polygon"] {
+      const maxX = (count - 1) * 50;
+      return [
+        offset(ORIGIN, -50, -50),
+        offset(ORIGIN, maxX, -50),
+        offset(ORIGIN, maxX, 50),
+        offset(ORIGIN, -50, 50),
+      ];
+    }
+
     const A: CandidateCourse = {
       id: "crs_gap_a",
       facilityId,
       verificationTier: "play-verified",
-      polygon: rectangle(bigCenter, 400, 400),
+      polygon: boxCoveringCount(90), // insideRatio 0.90
     };
-    // B's polygon covers only part of the loop, tuned so B's ratio sits
-    // either 0.14 or 0.16 below A's by adjusting how much of the loop its
-    // (narrower) rectangle covers.
-    const points = loopInsideRectangle(bigCenter, 400, 400, 20, 100);
 
-    function outcomeWithGap(bWidth: number) {
+    function outcomeWithBRatio(count: number) {
       const B: CandidateCourse = {
         id: "crs_gap_b",
         facilityId,
         verificationTier: "play-verified",
-        polygon: rectangle(bigCenter, bWidth, 400),
+        polygon: boxCoveringCount(count),
       };
       return matchRoute({ fixes: fixesAlong(points, T0, T0 + 4 * HOUR), candidates: [A, B] });
     }
 
-    // Calibrate: shrink B's width until its insideRatio is comfortably
-    // ~0.14 and ~0.16 below A's (A's own ratio is ~1.0 for this loop).
-    const narrow = outcomeWithGap(400 * 0.83); // gap ≈0.16 → not tied
-    const wide = outcomeWithGap(400 * 0.87); // gap ≈0.14 → tied
+    const clearWinner = outcomeWithBRatio(74); // gap = 0.90 - 0.74 = 0.16 → not tied
+    const tied = outcomeWithBRatio(76); // gap = 0.90 - 0.76 = 0.14 → tied
 
-    expect(narrow.kind).toBe("matched");
-    expect(wide.kind).toBe("ask_user");
+    expect(clearWinner.kind).toBe("matched");
+    if (clearWinner.kind === "matched") expect(clearWinner.course.courseId).toBe("crs_gap_a");
+    expect(tied.kind).toBe("ask_user");
   });
 
   it("buffer: 25 m from the edge is inside (+30 m buffer), 35 m is outside", () => {
