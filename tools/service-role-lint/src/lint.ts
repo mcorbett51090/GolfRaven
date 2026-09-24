@@ -369,6 +369,7 @@ export function lintSource(source: string, filePath: string): Finding[] {
     if (!added) break;
   }
   const destructuredEnvGetterNames = new Set<string>(); // a local bound to `Deno.env`/`process.env`'s `.get`/`.toObject` itself
+  const envAliasIsDirectEnvObject = new Set<string>(); // a local bound to `Deno.env`/`process.env` itself (e.g. `const { env } = Deno;`)
   walk(ast, (node) => {
     if (
       node.type === AST_NODE_TYPES.VariableDeclarator &&
@@ -439,12 +440,6 @@ export function lintSource(source: string, filePath: string): Finding[] {
       const arg = call.arguments[0];
       const literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
       flagEnvKey(node, literalKey, "environment variable read (.env.get(...))");
-      if (literalKey !== undefined && !isPublicEnvVar(literalKey)) {
-        const parent = (node as unknown as { parent?: TSESTree.Node }).parent;
-        if (parent && parent.type === AST_NODE_TYPES.VariableDeclarator && parent.id.type === AST_NODE_TYPES.Identifier) {
-          secretEnvValueIdentifiers.add(parent.id.name);
-        }
-      }
     }
 
     // <envObject>.env.toObject() — grabs EVERY env var at once, so no

@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes a still-running run; pushes to main
+# are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # S5: telemetry stays off in CI, same as any other non-interactive build.
   ASTRO_TELEMETRY_DISABLED: "1"

@@ -418,10 +418,9 @@ function checkQuote(
  */
 function checkOwnerSavedCorroboration(
   evidenceSha: string,
-  trail: string,
   quote: string,
   evidence: TrailEvidenceMap,
-  corroboration: X2CorroborationFile,
+  trailCorroboration: Record<string, X2CorroborationRecord>,
   label: string,
   reasons: string[],
 ): { ok: boolean; summary: string | null } {
@@ -430,7 +429,7 @@ function checkOwnerSavedCorroboration(
   if (method !== "owner-saved") {
     return { ok: true, summary: null };
   }
-  const record = corroboration[trail]?.[evidenceSha];
+  const record = trailCorroboration[evidenceSha];
   if (!record) {
     reasons.push(
       `${label}: owner-attested, UNCORROBORATED (evidence ${evidenceSha.slice(0, 12)}... is an owner-saved ` +
@@ -575,7 +574,6 @@ export function computeX2Verdict(
           if (quoteOk) {
             const result = checkOwnerSavedCorroboration(
               rosterEntry.evidenceSha,
-              trail,
               rosterEntry.quote,
               trailEvidence.bySha,
               trailCorroboration,
@@ -604,7 +602,6 @@ export function computeX2Verdict(
         if (quoteOk) {
           const result = checkOwnerSavedCorroboration(
             trailConfirmation.completionUnit.evidenceSha,
-            trail,
             trailConfirmation.completionUnit.quote,
             trailEvidence.bySha,
             trailCorroboration,
@@ -632,7 +629,6 @@ export function computeX2Verdict(
         if (quoteOk) {
           const result = checkOwnerSavedCorroboration(
             trailConfirmation.season.evidenceSha,
-            trail,
             trailConfirmation.season.quote,
             trailEvidence.bySha,
             trailCorroboration,

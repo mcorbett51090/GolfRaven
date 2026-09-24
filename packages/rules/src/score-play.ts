@@ -700,20 +700,44 @@ export interface ScorePlayResult {
   heldReview: boolean;
   policyVersion: number;
   contributions: ScorePlayContribution[];
-  /** H2 (fifth gate): present ONLY on a fail-closed result — `parseScorePlayInput`
-   * rejected the raw `{evidence, ctx}` input before any scoring ran. Every
-   * other field still holds its safe "nothing happened" default
-   * (`money: false`, empty `contributions`, …), so a caller that doesn't
-   * check `reasons` still gets a conservative, non-throwing result. */
-  reasons?: string[];
   /** M5 (fifth gate): SHA-256 (hex) over the canonicalized, ALREADY-PARSED
-   * `{evidence, ctx}` this result was computed from — present only when
-   * parsing succeeded (a failed parse has no "parsed input" to digest).
-   * Lets a caller (or an audit trail) prove exactly which validated input
-   * produced a given money decision, independent of the raw/pre-parse
-   * bytes that arrived over the wire. */
-  inputDigest?: string;
+   * `{evidence, ctx}` this result was computed from. Lets a caller (or an
+   * audit trail) prove exactly which validated input produced a given
+   * money decision, independent of the raw/pre-parse bytes that arrived
+   * over the wire. F4 (sixth gate): independent of the EVIDENCE ARRAY'S
+   * OWN ORDER — `computeInputDigest` sorts by `id` first — so passing the
+   * same rows in a different order can never change the digest. */
+  inputDigest: string;
+  /** F3 (sixth gate): every raw row that did NOT make it into
+   * `contributions` — an off-play row (different facility/date/course) or
+   * a QUARANTINED one (matched this play, but failed strict validation).
+   * Quarantined rows contribute 0 to both scores, exactly as if absent,
+   * but are listed here (with `index` into the ORIGINAL raw `evidence[]`
+   * and `reasons`) rather than silently vanishing OR failing the whole
+   * play — see `parseScorePlayInput`'s own doc (`./parse-evidence.js`).
+   * Empty when every raw row matched and parsed cleanly. */
+  excludedRows: import("./parse-evidence.js").ExcludedRow[];
 }
+
+/** F3 (sixth gate): "Return a discriminated result... so a caller can
+ * never persist a failed parse as a real 0 score." `scorePlay` used to
+ * return the SAME shape (`ScorePlayResult`) whether parsing succeeded or
+ * failed, distinguished only by an optional `reasons` field a caller could
+ * forget to check — and a forgotten check reads a fail-closed `money:
+ * false` result as an honest "this play didn't qualify" ZERO, which is
+ * not what happened at all. The discriminant (`ok`) makes that
+ * impossible to skip at the type level: `ScorePlayResult`'s fields are
+ * only reachable after narrowing `ok === true`. */
+export type ScorePlaySuccess = { ok: true } & ScorePlayResult;
+export interface ScorePlayFailure {
+  ok: false;
+  /** STRUCTURAL problems only (F3): an unrecognized `ctx` key, a missing
+   * required `ctx` field, a non-array `evidence`, or a row count over the
+   * ABSOLUTE cap. A malformed INDIVIDUAL row is never one of these — see
+   * `ScorePlaySuccess.excludedRows` for that (quarantine, not failure). */
+  reasons: string[];
+}
+export type ScorePlayOutcome = ScorePlaySuccess | ScorePlayFailure;
 
 /**
  * §4.5's scorer, policy v1. Pure, deterministic, no I/O.
@@ -740,7 +764,7 @@ export interface ScorePlayResult {
  * | `geometryKind` | Yes | `@golfraven/matching`'s own polygon/radius-fallback determination |
  * | `insideBuffer` | Yes | `@golfraven/matching`'s point-in-polygon (or -circle) containment check against the fix's device-reported coordinates |
  * | `accuracyMeters` | No (device-reported) | the device's own GPS accuracy claim — trusted only as a QUALITY signal (capped, never a proof of anything), never as an identity/location proof by itself |
- * | `localDate` | Partially | derived server-side from `capturedAt` in the facility's tz (H2's own cross-check, this parser) — a fix whose client-labelled `localDate` disagrees with that derivation is rejected outright |
+ * | `localDate` (on a fix) | No, CROSS-CHECKED against a server-derivable fact | the CLIENT labels it, but it is REJECTED unless it agrees with `capturedAt` (device clock) reprojected through `ctx.facilityTz` (F1, sixth gate: `facilityTz` is itself catalog data, below) — corrected from the fifth gate's wording ("derived server-side"), which overstated it: the parser doesn't COMPUTE `localDate` for the caller, it only REJECTS a claimed one that disagrees with the derivation |
  * | `capturedAt` | No (device clock) | the device's own clock — never trusted alone; corroborated via the `localDate` cross-check and the co-signal/hard-window comparisons throughout `internal/classify.ts` |
  * | `fixId` | Yes | the challenge id or assertion hash the attestation exchange itself produced — never a client-invented string (M1) |
  * | `paymentRef` | Yes | the booking/payment ledger's own reference id (M1) |
@@ -748,6 +772,11 @@ export interface ScorePlayResult {
  * | receipt `status` | Yes | the green-fee receipt/POS integration, never the app client |
  * | `courseDisambiguatedBy` | Yes | whichever server-side step actually resolved the course ambiguity (`geometry`/`staff`); `"user"` specifically marks a PLAYER's own pick, which is exactly why it's money-capped (A2-01) |
  * | staff `scanAt` | Yes | the staff-facing scan tool's own server timestamp, not the player's device |
+ * | `ctx.playFacilityId` | Yes | the `play` row itself (already resolved/created server-side before `scorePlay` is ever called for it) |
+ * | `ctx.playLocalDate` | Yes | the `play` row's own facility-local date, computed server-side at play-creation time — never re-derived from a row's `capturedAt` here |
+ * | `ctx.playCourseId` | Yes (F6, sixth gate: now REQUIRED) | the `play` row's resolved course, at a multi-course (e.g. 36-hole) facility — a `courses` table lookup, never client-supplied; a row WITHOUT its own `courseId` is facility-level evidence and stays allowed regardless (H3's residual rule) — the DB's `play_evidence UNIQUE(evidence_id)` constraint (migration 0017) is the separate guarantee that stops the SAME evidence row being attributed to two different plays at all |
+ * | `ctx.facilityTz` | Yes (F1, sixth gate: now REQUIRED) | the FACILITY'S OWN catalog row (`@golfraven/catalog`'s facility timezone field) — never derived from a fix, a device, or a client-supplied guess; allow-listed to a real IANA Area/Location zone name (`Intl.supportedValuesOf('timeZone')`), never a fixed offset or abbreviation |
+ * | `ctx.purchases` | Yes | the `purchase_evidence` table (§4.6) — a DIFFERENT table than `app.evidence`, joined in server-side before this call |
  *
  * **Scope boundary (stated once, so it isn't re-litigated per class).**
  * `scorePlay` computes the two scores, `presence_signal`, `money` and a
