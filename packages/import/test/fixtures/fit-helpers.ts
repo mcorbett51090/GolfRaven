@@ -43,7 +43,9 @@ export interface BuildGolfFitOptions {
 
 /** Builds a synthetic golf-activity FIT file: `file_id`, `session`,
  * (optionally) `record`s, and `activity`. */
-export function buildGolfActivityFit(options: BuildGolfFitOptions = {}): Uint8Array {
+export function buildGolfActivityFit(
+  options: BuildGolfFitOptions = {},
+): Uint8Array {
   const enc = new FitEncoder();
   const manufacturer = options.manufacturer ?? 1; // garmin
   const timeCreated = options.timeCreated ?? new Date("2026-06-01T14:00:00Z");
@@ -53,34 +55,79 @@ export function buildGolfActivityFit(options: BuildGolfFitOptions = {}): Uint8Ar
 
   const fileIdFields: Parameters<FitEncoder["writeMessage"]>[1] = [
     { number: 1, size: 2, baseType: FitBaseType.Uint16, value: manufacturer },
-    { number: 4, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(timeCreated) },
+    {
+      number: 4,
+      size: 4,
+      baseType: FitBaseType.Uint32,
+      value: FitEncoder.toFitTimestamp(timeCreated),
+    },
   ];
   if (options.productName) {
     const bytes = FitEncoder.string(options.productName);
-    fileIdFields.push({ number: 8, size: bytes.length, baseType: FitBaseType.String, value: bytes });
+    fileIdFields.push({
+      number: 8,
+      size: bytes.length,
+      baseType: FitBaseType.String,
+      value: bytes,
+    });
   }
   enc.writeMessage(0, fileIdFields);
 
   enc.writeMessage(18, [
-    { number: 2, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(startTime) },
+    {
+      number: 2,
+      size: 4,
+      baseType: FitBaseType.Uint32,
+      value: FitEncoder.toFitTimestamp(startTime),
+    },
     { number: 5, size: 1, baseType: FitBaseType.Enum, value: sport },
-    { number: 253, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(endTime) },
+    {
+      number: 253,
+      size: 4,
+      baseType: FitBaseType.Uint32,
+      value: FitEncoder.toFitTimestamp(endTime),
+    },
   ]);
 
   for (const rec of options.records ?? []) {
     const fields: Parameters<FitEncoder["writeMessage"]>[1] = [
-      { number: 0, size: 4, baseType: FitBaseType.Sint32, value: toSemicircles(rec.lat) },
-      { number: 1, size: 4, baseType: FitBaseType.Sint32, value: toSemicircles(rec.lon) },
-      { number: 253, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(rec.time) },
+      {
+        number: 0,
+        size: 4,
+        baseType: FitBaseType.Sint32,
+        value: toSemicircles(rec.lat),
+      },
+      {
+        number: 1,
+        size: 4,
+        baseType: FitBaseType.Sint32,
+        value: toSemicircles(rec.lon),
+      },
+      {
+        number: 253,
+        size: 4,
+        baseType: FitBaseType.Uint32,
+        value: FitEncoder.toFitTimestamp(rec.time),
+      },
     ];
     if (rec.accuracyMeters !== undefined) {
-      fields.push({ number: 31, size: 1, baseType: FitBaseType.Uint8, value: rec.accuracyMeters });
+      fields.push({
+        number: 31,
+        size: 1,
+        baseType: FitBaseType.Uint8,
+        value: rec.accuracyMeters,
+      });
     }
     enc.writeMessage(20, fields, 1);
   }
 
   const activityFields: Parameters<FitEncoder["writeMessage"]>[1] = [
-    { number: 253, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(endTime) },
+    {
+      number: 253,
+      size: 4,
+      baseType: FitBaseType.Uint32,
+      value: FitEncoder.toFitTimestamp(endTime),
+    },
     { number: 1, size: 2, baseType: FitBaseType.Uint16, value: 1 },
   ];
   if (options.activityLocalTimestamp) {
@@ -98,7 +145,9 @@ export function buildGolfActivityFit(options: BuildGolfFitOptions = {}): Uint8Ar
     // (GARMIN/SCORE/SCORECARD, [unverified]) — any global message number
     // outside the standard FIT profile exercises the same "report,
     // don't drop" path.
-    enc.writeMessage(65280, [{ number: 0, size: 1, baseType: FitBaseType.Uint8, value: 42 }]);
+    enc.writeMessage(65280, [
+      { number: 0, size: 1, baseType: FitBaseType.Uint8, value: 42 },
+    ]);
   }
 
   const bytes = enc.close();

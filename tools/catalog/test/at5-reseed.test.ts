@@ -34,7 +34,9 @@ interface At5Fixture {
 }
 
 async function loadAt5Fixture(name: string): Promise<At5Fixture> {
-  const raw = JSON.parse(await readFile(join(FIXTURES_DIR, `${name}.json`), "utf8")) as At5Fixture;
+  const raw = JSON.parse(
+    await readFile(join(FIXTURES_DIR, `${name}.json`), "utf8"),
+  ) as At5Fixture;
   // Validate the ledger half against the real schema, so a malformed
   // fixture fails loudly here rather than silently passing a bad test.
   IdLedgerSchema.parse(raw.ledgerBefore);
@@ -46,7 +48,11 @@ describe("AT(5): way→relation remap does not mint a second id", () => {
     const fixture = await loadAt5Fixture("at5-way-relation-remap");
     const before = Object.keys(fixture.ledgerBefore.entries).length;
 
-    const outcome = reseedFacility(fixture.ledgerBefore, fixture.incoming, fixture.candidates);
+    const outcome = reseedFacility(
+      fixture.ledgerBefore,
+      fixture.incoming,
+      fixture.candidates,
+    );
 
     expect(outcome.kind).toBe("matched");
     if (outcome.kind !== "matched") throw new Error("expected a match");
@@ -62,9 +68,15 @@ describe("AT(5): a re-seed never overwrites a verified field", () => {
   it("keeps the facility's status 'verified' after a matching re-seed", async () => {
     const fixture = await loadAt5Fixture("at5-never-overwrites-verified");
     const candidateId = fixture.candidates[0]?.facilityId;
-    expect(fixture.ledgerBefore.entries[candidateId as string]?.status).toBe("verified");
+    expect(fixture.ledgerBefore.entries[candidateId as string]?.status).toBe(
+      "verified",
+    );
 
-    const outcome = reseedFacility(fixture.ledgerBefore, fixture.incoming, fixture.candidates);
+    const outcome = reseedFacility(
+      fixture.ledgerBefore,
+      fixture.incoming,
+      fixture.candidates,
+    );
 
     expect(outcome.kind).toBe("matched");
     if (outcome.kind !== "matched") throw new Error("expected a match");
@@ -97,24 +109,37 @@ describe("blocking #4 (gate review post-e9b3ab0): whole-ledger already-known loo
     expect(fixture.candidates).toHaveLength(0);
     const before = Object.keys(fixture.ledgerBefore.entries).length;
 
-    const outcome = reseedFacility(fixture.ledgerBefore, fixture.incoming, fixture.candidates);
+    const outcome = reseedFacility(
+      fixture.ledgerBefore,
+      fixture.incoming,
+      fixture.candidates,
+    );
 
     expect(outcome.kind).toBe("already-known");
     if (outcome.kind !== "already-known") {
-      throw new Error(`expected already-known, got ${outcome.kind} — a second id would have been minted`);
+      throw new Error(
+        `expected already-known, got ${outcome.kind} — a second id would have been minted`,
+      );
     }
     expect(Object.keys(fixture.ledgerBefore.entries)).toHaveLength(before);
   });
 
   it("the ref of a facility merged away resolves to its survivor and mints nothing", async () => {
     const raw = JSON.parse(
-      await readFile(join(FIXTURES_DIR, "at5-merged-facility-ref-reseen.json"), "utf8"),
+      await readFile(
+        join(FIXTURES_DIR, "at5-merged-facility-ref-reseen.json"),
+        "utf8",
+      ),
     ) as At5Fixture & { survivorFacilityId: string };
     IdLedgerSchema.parse(raw.ledgerBefore);
     const fixture = raw;
     const before = Object.keys(fixture.ledgerBefore.entries).length;
 
-    const outcome = reseedFacility(fixture.ledgerBefore, fixture.incoming, fixture.candidates);
+    const outcome = reseedFacility(
+      fixture.ledgerBefore,
+      fixture.incoming,
+      fixture.candidates,
+    );
 
     expect(outcome.kind).toBe("already-known");
     if (outcome.kind !== "already-known") {

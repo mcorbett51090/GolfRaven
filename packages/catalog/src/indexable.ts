@@ -56,10 +56,16 @@ export function hasSourcedBlurb(facility: Facility): boolean {
  * fields count and why `name`/`holes` are deliberately excluded. */
 export function hasSourcedCourseFact(facility: Facility): boolean {
   return facility.courses.some((course) => {
-    const hasOptionalProvField = OPTIONAL_SOURCED_COURSE_FIELDS.some((field) => {
-      const prov = course.prov?.[field];
-      return course[field] !== undefined && prov !== undefined && (prov as string) !== "osm";
-    });
+    const hasOptionalProvField = OPTIONAL_SOURCED_COURSE_FIELDS.some(
+      (field) => {
+        const prov = course.prov?.[field];
+        return (
+          course[field] !== undefined &&
+          prov !== undefined &&
+          (prov as string) !== "osm"
+        );
+      },
+    );
     const hasSourcedTee = Array.isArray(course.tees) && course.tees.length > 0;
     return hasOptionalProvField || hasSourcedTee;
   });
@@ -71,7 +77,10 @@ export function hasSourcedCourseFact(facility: Facility): boolean {
  * sourced-and-confirmed **absence** (`value: false`) is not "a verified
  * amenity" in R1's sense (it is data, just not a reason to index). */
 export function hasVerifiedAmenity(facility: Facility): boolean {
-  return Array.isArray(facility.amenities) && facility.amenities.some((a) => a.value === true);
+  return (
+    Array.isArray(facility.amenities) &&
+    facility.amenities.some((a) => a.value === true)
+  );
 }
 
 /** §4.2: "'verified' with no qualifier means `listed-verified` or better." */

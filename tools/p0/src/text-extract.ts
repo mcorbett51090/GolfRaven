@@ -42,7 +42,9 @@ function stripScriptStyleAndComments(html: string): string {
     .replace(SCRIPT_STYLE_CLOSED_RE, " ")
     .replace(COMMENT_RE, " ");
   const unclosed = UNCLOSED_SCRIPT_STYLE_OPEN_RE.exec(withoutClosedBlocks);
-  return unclosed ? withoutClosedBlocks.slice(0, unclosed.index) : withoutClosedBlocks;
+  return unclosed
+    ? withoutClosedBlocks.slice(0, unclosed.index)
+    : withoutClosedBlocks;
 }
 
 /** Decision 0001 Addendum G's X2 quote-check and `x4-verify`'s name-check
@@ -147,7 +149,8 @@ function stripTags(html: string): string {
       i += 1;
       continue;
     }
-    const tagName = TAG_NAME_RE.exec(html.slice(i + 1, j))?.[1]?.toLowerCase() ?? "";
+    const tagName =
+      TAG_NAME_RE.exec(html.slice(i + 1, j))?.[1]?.toLowerCase() ?? "";
     out += INLINE_TAG_NAMES.has(tagName) ? "" : " ";
     i = j + 1;
   }

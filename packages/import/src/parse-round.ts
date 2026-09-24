@@ -40,7 +40,10 @@ export interface ParseRoundOptions {
 }
 
 /** Dispatches to the parser for `options.format`. */
-export async function parseRound(bytes: Uint8Array, options: ParseRoundOptions): Promise<ImportResult> {
+export async function parseRound(
+  bytes: Uint8Array,
+  options: ParseRoundOptions,
+): Promise<ImportResult> {
   if (options.signal?.aborted) return { ok: false, error: "aborted" };
 
   switch (options.format) {
@@ -52,14 +55,18 @@ export async function parseRound(bytes: Uint8Array, options: ParseRoundOptions):
       return parseFitFile(bytes, fitOptions);
     }
     case "gpx": {
-      const gpxOptions: ParseGpxOptions = options.tz !== undefined ? { tz: options.tz } : {};
+      const gpxOptions: ParseGpxOptions =
+        options.tz !== undefined ? { tz: options.tz } : {};
       return parseGpxFile(bytes, gpxOptions);
     }
     case "csv":
       return parseCsvFile(bytes);
     default: {
       const _exhaustive: never = options.format;
-      return { ok: false, error: `unknown import format "${String(_exhaustive)}"` };
+      return {
+        ok: false,
+        error: `unknown import format "${String(_exhaustive)}"`,
+      };
     }
   }
 }

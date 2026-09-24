@@ -2,7 +2,11 @@
   "id": "ach_01M39RCEVMHV3Q3ZY9CF478BPC",
   "title": "In order",
   "tier": "special",
-  "rule": { "kind": "agg", "name": "inOrder", "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM" },
+  "rule": {
+    "kind": "agg",
+    "name": "inOrder",
+    "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM"
+  },
   "minConfidence": 0.5,
   "scope": "verified-only",
   "active": true

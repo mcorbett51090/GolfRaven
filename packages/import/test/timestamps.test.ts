@@ -51,8 +51,12 @@ describe("parseStrictTimestamp: calendar-date validation (round 2 should-fix)", 
   });
 
   it("distinguishes a numeric offset (hasExplicitOffset: true) from Z (false)", () => {
-    expect(parseStrictTimestamp("2026-06-01T10:00:00-04:00")?.hasExplicitOffset).toBe(true);
-    expect(parseStrictTimestamp("2026-06-01T14:00:00Z")?.hasExplicitOffset).toBe(false);
+    expect(
+      parseStrictTimestamp("2026-06-01T10:00:00-04:00")?.hasExplicitOffset,
+    ).toBe(true);
+    expect(
+      parseStrictTimestamp("2026-06-01T14:00:00Z")?.hasExplicitOffset,
+    ).toBe(false);
   });
 
   it("literalDate uses the string's own written date, not the UTC-converted one", () => {

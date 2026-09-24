@@ -9,7 +9,9 @@ const admin = createClient(
 );
 
 export async function saveReceipt(userId: string, bytes: Uint8Array) {
-  return admin.storage.from("receipts").upload(`receipts/${userId}/x.jpg`, bytes);
+  return admin.storage
+    .from("receipts")
+    .upload(`receipts/${userId}/x.jpg`, bytes);
 }
 
 declare const Deno: { env: { get(name: string): string | undefined } };

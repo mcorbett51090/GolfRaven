@@ -62,14 +62,14 @@ Matt [Last Name]
 
 ## Candidate vendors (≥ 5 found via WebSearch; none fetched directly — all `[snippet-only]`)
 
-| # | Vendor | URL | Why included |
-|---|---|---|---|
-| 1 | Vivipins | https://vivipins.com/custom-golf-ball-markers/ | Advertises no minimum order and wholesale pricing with free design/revisions — a candidate for a small first trial batch before committing to a full trail run. `[snippet-only]` |
-| 2 | Aceballmarkers.com | https://aceballmarkers.com/ | Advertises no minimum order with per-unit pricing as low as $0.68 at volume — useful as a low-end pricing anchor for course markers specifically. `[snippet-only]` |
-| 3 | GS-JJ | https://www.gs-jj.com/ball-markers/custom-golf-coins | Positions itself around challenge-coin-style commemorative markers with free shipping — a fit for the trail special marker (numbered edition) rather than the everyday course marker. `[snippet-only]` |
-| 4 | Jin Sheu | https://www.jinsheu.com/en/category/Golf-Coin-with-Ball-Marker.html | Taiwan-based manufacturer advertising flexible MOQ for corporate/large-volume orders — worth quoting for a larger trail (e.g. RTJ's 11 sites) where volume could bring unit cost down meaningfully. `[snippet-only]` |
-| 5 | Matchstick Golf | https://matchstickgolf.com/pages/custom-golf-ball-markers | A US-facing wholesale custom-marker seller — worth checking for domestic US production/shipping, which could beat overseas lead times and avoid cross-border customs for US pro shops. `[snippet-only]` |
-| 6 | Signature Coins | https://signaturecoins.com/custom-golf-ball-marker/ | Advertises free shipping and a quality guarantee on custom metal ball markers — another candidate for the special/commemorative marker specifically. `[snippet-only]` |
+| #   | Vendor             | URL                                                                 | Why included                                                                                                                                                                                                         |
+| --- | ------------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Vivipins           | https://vivipins.com/custom-golf-ball-markers/                      | Advertises no minimum order and wholesale pricing with free design/revisions — a candidate for a small first trial batch before committing to a full trail run. `[snippet-only]`                                     |
+| 2   | Aceballmarkers.com | https://aceballmarkers.com/                                         | Advertises no minimum order with per-unit pricing as low as $0.68 at volume — useful as a low-end pricing anchor for course markers specifically. `[snippet-only]`                                                   |
+| 3   | GS-JJ              | https://www.gs-jj.com/ball-markers/custom-golf-coins                | Positions itself around challenge-coin-style commemorative markers with free shipping — a fit for the trail special marker (numbered edition) rather than the everyday course marker. `[snippet-only]`               |
+| 4   | Jin Sheu           | https://www.jinsheu.com/en/category/Golf-Coin-with-Ball-Marker.html | Taiwan-based manufacturer advertising flexible MOQ for corporate/large-volume orders — worth quoting for a larger trail (e.g. RTJ's 11 sites) where volume could bring unit cost down meaningfully. `[snippet-only]` |
+| 5   | Matchstick Golf    | https://matchstickgolf.com/pages/custom-golf-ball-markers           | A US-facing wholesale custom-marker seller — worth checking for domestic US production/shipping, which could beat overseas lead times and avoid cross-border customs for US pro shops. `[snippet-only]`              |
+| 6   | Signature Coins    | https://signaturecoins.com/custom-golf-ball-marker/                 | Advertises free shipping and a quality guarantee on custom metal ball markers — another candidate for the special/commemorative marker specifically. `[snippet-only]`                                                |
 
 **Note on figures already seen in search results** (do not treat as confirmed): per-unit prices as low
 as $0.39–$0.68 at high volume, and MOQs ranging from "no minimum" to 50–100 units, appeared across
@@ -79,7 +79,7 @@ for real, per the build plan's own framing of X8.
 
 ## Quote comparison table (empty — fill in as quotes come back)
 
-| Vendor | Product | MOQ | Unit cost @100 | Unit cost @250 | Unit cost @500 | Unit cost @1000 | Lead time | Finishes offered | US shipping | Canada shipping | Sample cost | Numbering available? | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| | Course marker | | | | | | | | | | | | |
-| | Special/trail marker | | | | | | | | | | | | |
+| Vendor | Product              | MOQ | Unit cost @100 | Unit cost @250 | Unit cost @500 | Unit cost @1000 | Lead time | Finishes offered | US shipping | Canada shipping | Sample cost | Numbering available? | Notes |
+| ------ | -------------------- | --- | -------------- | -------------- | -------------- | --------------- | --------- | ---------------- | ----------- | --------------- | ----------- | -------------------- | ----- |
+|        | Course marker        |     |                |                |                |                 |           |                  |             |                 |             |                      |       |
+|        | Special/trail marker |     |                |                |                |                 |           |                  |             |                 |             |                      |       |

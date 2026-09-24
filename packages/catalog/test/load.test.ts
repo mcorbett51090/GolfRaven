@@ -35,7 +35,11 @@ function makeTrail(id: string, facilityId: string) {
     regions: ["US-TN"],
     kind: "state-agency",
     status: "active",
-    operator: { name: "Test Operator", url: "https://example.com", type: "state" },
+    operator: {
+      name: "Test Operator",
+      url: "https://example.com",
+      type: "state",
+    },
     officialUrl: "https://example.com",
     rosterStatus: "verified",
     rosterVersions: [
@@ -58,7 +62,9 @@ function makeTrail(id: string, facilityId: string) {
 
 const tmpDirs: string[] = [];
 afterEach(async () => {
-  await Promise.all(tmpDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  await Promise.all(
+    tmpDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })),
+  );
 });
 
 describe("loadCatalogFromBundle", () => {
@@ -88,7 +94,9 @@ describe("loadCatalogFromBundle", () => {
   });
 
   it("throws (Zod) on a malformed bundle rather than silently dropping data", () => {
-    expect(() => loadCatalogFromBundle({ facilities: [{ not: "a facility" }] })).toThrow();
+    expect(() =>
+      loadCatalogFromBundle({ facilities: [{ not: "a facility" }] }),
+    ).toThrow();
   });
 
   it("rejects an unrecognized top-level key (strict object)", () => {
@@ -146,7 +154,9 @@ describe("loadCatalogFromDataDir", () => {
     );
     await writeFile(
       join(dir, "designers.json"),
-      JSON.stringify([{ id: designerId, name: "A. Designer", sources: [source] }]),
+      JSON.stringify([
+        { id: designerId, name: "A. Designer", sources: [source] },
+      ]),
     );
     await mkdir(join(dir, "achievements"));
     await writeFile(
@@ -183,7 +193,10 @@ describe("loadCatalogFromDataDir", () => {
     const dir = await mkdtemp(join(tmpdir(), "golfraven-catalog-"));
     tmpDirs.push(dir);
     await mkdir(join(dir, "facilities"));
-    await writeFile(join(dir, "facilities", "bad.json"), JSON.stringify({ not: "valid" }));
+    await writeFile(
+      join(dir, "facilities", "bad.json"),
+      JSON.stringify({ not: "valid" }),
+    );
     await expect(loadCatalogFromDataDir(dir)).rejects.toThrow();
   });
 });

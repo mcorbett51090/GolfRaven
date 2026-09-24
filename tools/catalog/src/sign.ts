@@ -84,7 +84,9 @@ export interface LoadSigningKeyOptions {
  * multi-line value in one variable without that); those are un-escaped
  * before parsing.
  */
-export async function loadSigningKeyPem(opts: LoadSigningKeyOptions = {}): Promise<string> {
+export async function loadSigningKeyPem(
+  opts: LoadSigningKeyOptions = {},
+): Promise<string> {
   if (opts.keyFilePath) {
     const handle = await open(opts.keyFilePath, "r");
     try {
@@ -114,17 +116,25 @@ export async function loadSigningKeyPem(opts: LoadSigningKeyOptions = {}): Promi
 
 function assertEd25519(key: KeyObject, what: string): KeyObject {
   if (key.asymmetricKeyType !== "ed25519") {
-    throw new Error(`${what}: expected an Ed25519 key, got "${String(key.asymmetricKeyType)}"`);
+    throw new Error(
+      `${what}: expected an Ed25519 key, got "${String(key.asymmetricKeyType)}"`,
+    );
   }
   return key;
 }
 
 export function privateKeyFromPem(pem: string): KeyObject {
-  return assertEd25519(createPrivateKey({ key: pem, format: "pem" }), "privateKeyFromPem");
+  return assertEd25519(
+    createPrivateKey({ key: pem, format: "pem" }),
+    "privateKeyFromPem",
+  );
 }
 
 export function publicKeyFromPem(pem: string): KeyObject {
-  return assertEd25519(createPublicKey({ key: pem, format: "pem" }), "publicKeyFromPem");
+  return assertEd25519(
+    createPublicKey({ key: pem, format: "pem" }),
+    "publicKeyFromPem",
+  );
 }
 
 /** Signs `data` with an Ed25519 private key, base64-encoded. Ed25519 is
@@ -134,9 +144,18 @@ export function signBytes(privateKey: KeyObject, data: Buffer): string {
   return cryptoSign(null, data, privateKey).toString("base64");
 }
 
-export function verifyBytes(publicKey: KeyObject, data: Buffer, signatureBase64: string): boolean {
+export function verifyBytes(
+  publicKey: KeyObject,
+  data: Buffer,
+  signatureBase64: string,
+): boolean {
   try {
-    return cryptoVerify(null, data, publicKey, Buffer.from(signatureBase64, "base64"));
+    return cryptoVerify(
+      null,
+      data,
+      publicKey,
+      Buffer.from(signatureBase64, "base64"),
+    );
   } catch {
     return false;
   }
@@ -166,9 +185,14 @@ export function signManifest(
   const bytes = manifestStatementBytes(statement);
   const sig = signBytes(privateKey, bytes);
   if (!verifyBytes(createPublicKey(privateKey), bytes, sig)) {
-    throw new Error("signManifest: self-check failed — signature does not verify against its own derived public key");
+    throw new Error(
+      "signManifest: self-check failed — signature does not verify against its own derived public key",
+    );
   }
-  if (expectedPublicKeyPem && !verifyBytes(publicKeyFromPem(expectedPublicKeyPem), bytes, sig)) {
+  if (
+    expectedPublicKeyPem &&
+    !verifyBytes(publicKeyFromPem(expectedPublicKeyPem), bytes, sig)
+  ) {
     throw new Error(
       `signManifest: the supplied private key does NOT match --kid-public-key for kid "${manifest.kid}" — refusing to sign with the wrong key`,
     );
@@ -184,13 +208,21 @@ export function signVersions(
   privateKey: KeyObject,
   expectedPublicKeyPem?: string,
 ): VersionsSignature {
-  const statement: VersionsStatement = { kid, versionsSha: sha256Hex(versionsBytes) };
+  const statement: VersionsStatement = {
+    kid,
+    versionsSha: sha256Hex(versionsBytes),
+  };
   const bytes = versionsStatementBytes(statement);
   const sig = signBytes(privateKey, bytes);
   if (!verifyBytes(createPublicKey(privateKey), bytes, sig)) {
-    throw new Error("signVersions: self-check failed — signature does not verify against its own derived public key");
+    throw new Error(
+      "signVersions: self-check failed — signature does not verify against its own derived public key",
+    );
   }
-  if (expectedPublicKeyPem && !verifyBytes(publicKeyFromPem(expectedPublicKeyPem), bytes, sig)) {
+  if (
+    expectedPublicKeyPem &&
+    !verifyBytes(publicKeyFromPem(expectedPublicKeyPem), bytes, sig)
+  ) {
     throw new Error(
       `signVersions: the supplied private key does NOT match --kid-public-key for kid "${kid}" — refusing to sign with the wrong key`,
     );
@@ -242,7 +274,11 @@ type SmallFileRead = { ok: true; bytes: Buffer } | { ok: false; issue: string };
  * into an `issue` string rather than a thrown error — callers in
  * `verifyArtifact` fold this straight into their `issues[]` accumulation.
  */
-async function readSmallFile(path: string, maxBytes: number, label: string): Promise<SmallFileRead> {
+async function readSmallFile(
+  path: string,
+  maxBytes: number,
+  label: string,
+): Promise<SmallFileRead> {
   let stats;
   try {
     stats = await lstat(path);
@@ -256,7 +292,10 @@ async function readSmallFile(path: string, maxBytes: number, label: string): Pro
     return { ok: false, issue: `${label} is not a regular file — refused` };
   }
   if (stats.size > maxBytes) {
-    return { ok: false, issue: `${label} is ${stats.size} bytes, over the ${maxBytes}-byte cap — refused` };
+    return {
+      ok: false,
+      issue: `${label} is ${stats.size} bytes, over the ${maxBytes}-byte cap — refused`,
+    };
   }
   try {
     const bytes = await readFile(path);
@@ -295,26 +334,47 @@ export async function verifyArtifact(
 ): Promise<VerifyArtifactResult> {
   const issues: string[] = [];
   const v1Dir = join(dir, "catalog", "v1");
-  const revoked = opts.revokedKids instanceof Set ? opts.revokedKids : new Set(opts.revokedKids);
-  const trusted = new Map(opts.trustedKeys.map((k) => [k.kid, k.publicKeyPem] as const));
+  const revoked =
+    opts.revokedKids instanceof Set
+      ? opts.revokedKids
+      : new Set(opts.revokedKids);
+  const trusted = new Map(
+    opts.trustedKeys.map((k) => [k.kid, k.publicKeyPem] as const),
+  );
 
-  const manifestRead = await readSmallFile(join(v1Dir, "manifest.json"), MANIFEST_MAX_BYTES, "manifest.json");
+  const manifestRead = await readSmallFile(
+    join(v1Dir, "manifest.json"),
+    MANIFEST_MAX_BYTES,
+    "manifest.json",
+  );
   if (!manifestRead.ok) {
     return { ok: false, issues: [manifestRead.issue] };
   }
   const manifestRaw = manifestRead.bytes;
-  const manifestParsed = strictParseAndValidate(manifestRaw, CatalogManifestSchema, "manifest.json");
+  const manifestParsed = strictParseAndValidate(
+    manifestRaw,
+    CatalogManifestSchema,
+    "manifest.json",
+  );
   if (!manifestParsed.ok) {
     return { ok: false, issues: manifestParsed.issues };
   }
   const manifest = manifestParsed.value;
 
-  const sigRead = await readSmallFile(join(v1Dir, "manifest.sig.json"), SIDECAR_MAX_BYTES, "manifest.sig.json");
+  const sigRead = await readSmallFile(
+    join(v1Dir, "manifest.sig.json"),
+    SIDECAR_MAX_BYTES,
+    "manifest.sig.json",
+  );
   if (!sigRead.ok) {
     return { ok: false, issues: [sigRead.issue] };
   }
   const sigRaw = sigRead.bytes;
-  const sigParsed = strictParseAndValidate(sigRaw, ManifestSignatureSchema, "manifest.sig.json");
+  const sigParsed = strictParseAndValidate(
+    sigRaw,
+    ManifestSignatureSchema,
+    "manifest.sig.json",
+  );
   if (!sigParsed.ok) {
     return { ok: false, issues: sigParsed.issues };
   }
@@ -322,16 +382,24 @@ export async function verifyArtifact(
 
   const publicKeyPem = trusted.get(manifest.kid);
   if (!publicKeyPem) {
-    issues.push(`UNKNOWN_KID: manifest kid "${manifest.kid}" is not in the trusted keyset`);
+    issues.push(
+      `UNKNOWN_KID: manifest kid "${manifest.kid}" is not in the trusted keyset`,
+    );
   }
   if (revoked.has(manifest.kid) || revoked.has(sigDoc.kid)) {
-    issues.push(`REVOKED_KID: kid "${manifest.kid}" is in the verifier's revoked-kids set`);
+    issues.push(
+      `REVOKED_KID: kid "${manifest.kid}" is in the verifier's revoked-kids set`,
+    );
   }
   if (manifest.revokedKids.includes(manifest.kid)) {
-    issues.push(`REVOKED_KID: manifest kid "${manifest.kid}" is listed in its own revokedKids[] (self-revoking manifest)`);
+    issues.push(
+      `REVOKED_KID: manifest kid "${manifest.kid}" is listed in its own revokedKids[] (self-revoking manifest)`,
+    );
   }
   if (sigDoc.kid !== manifest.kid) {
-    issues.push(`SIG_KID_MISMATCH: manifest.sig.json kid "${sigDoc.kid}" != manifest.json kid "${manifest.kid}"`);
+    issues.push(
+      `SIG_KID_MISMATCH: manifest.sig.json kid "${sigDoc.kid}" != manifest.json kid "${manifest.kid}"`,
+    );
   }
   if (sigDoc.catalogVersion !== manifest.catalogVersion) {
     issues.push(
@@ -351,12 +419,18 @@ export async function verifyArtifact(
     );
   }
 
-  if (opts.minCatalogVersion && compareCatalogVersions(manifest.catalogVersion, opts.minCatalogVersion) < 0) {
+  if (
+    opts.minCatalogVersion &&
+    compareCatalogVersions(manifest.catalogVersion, opts.minCatalogVersion) < 0
+  ) {
     issues.push(
       `CATALOG_VERSION_ROLLBACK: catalogVersion "${manifest.catalogVersion}" is older than the minimum accepted "${opts.minCatalogVersion}"`,
     );
   }
-  if (opts.supportedContractMajor !== undefined && manifest.contractVersion !== opts.supportedContractMajor) {
+  if (
+    opts.supportedContractMajor !== undefined &&
+    manifest.contractVersion !== opts.supportedContractMajor
+  ) {
     issues.push(
       `CONTRACT_MAJOR_MISMATCH: manifest contractVersion ${manifest.contractVersion} != supported major ${opts.supportedContractMajor}`,
     );
@@ -370,9 +444,15 @@ export async function verifyArtifact(
       kid: sigDoc.kid,
       manifestSha: sigDoc.manifestSha,
     };
-    sigValid = verifyBytes(publicKeyFromPem(publicKeyPem), manifestStatementBytes(statement), sigDoc.sig);
+    sigValid = verifyBytes(
+      publicKeyFromPem(publicKeyPem),
+      manifestStatementBytes(statement),
+      sigDoc.sig,
+    );
     if (!sigValid) {
-      issues.push(`BAD_SIGNATURE: the Ed25519 signature over the manifest statement does not verify against kid "${manifest.kid}"`);
+      issues.push(
+        `BAD_SIGNATURE: the Ed25519 signature over the manifest statement does not verify against kid "${manifest.kid}"`,
+      );
     }
   }
 
@@ -393,7 +473,12 @@ export async function verifyArtifact(
   // non-revoked kid over exactly these bytes — only now do we touch any
   // shard file.
   const onDisk = await listFilesRecursive(v1Dir);
-  const allowedRoot = new Set(["manifest.json", "manifest.sig.json", "versions.json", "versions.sig.json"]);
+  const allowedRoot = new Set([
+    "manifest.json",
+    "manifest.sig.json",
+    "versions.json",
+    "versions.sig.json",
+  ]);
   const shardPaths = new Set(manifest.shards.map((s) => s.path));
 
   for (const shard of manifest.shards) {
@@ -429,12 +514,18 @@ export async function verifyArtifact(
 
   for (const relPath of onDisk) {
     if (allowedRoot.has(relPath) || shardPaths.has(relPath)) continue;
-    issues.push(`STRAY_FILE: ${relPath} is on disk but not listed in manifest.shards[] or a root document`);
+    issues.push(
+      `STRAY_FILE: ${relPath} is on disk but not listed in manifest.shards[] or a root document`,
+    );
   }
 
   // versions.json + versions.sig.json.
   let versionsRaw: Buffer | undefined;
-  const versionsRead = await readSmallFile(join(v1Dir, "versions.json"), MANIFEST_MAX_BYTES, "versions.json");
+  const versionsRead = await readSmallFile(
+    join(v1Dir, "versions.json"),
+    MANIFEST_MAX_BYTES,
+    "versions.json",
+  );
   if (versionsRead.ok) {
     versionsRaw = versionsRead.bytes;
   } else {
@@ -452,8 +543,16 @@ export async function verifyArtifact(
     issues.push(versionsSigRead.issue);
   }
   if (versionsRaw && versionsSigRaw) {
-    const versionsParsed = strictParseAndValidate(versionsRaw, VersionsArraySchema, "versions.json");
-    const versionsSigParsed = strictParseAndValidate(versionsSigRaw, VersionsSignatureSchema, "versions.sig.json");
+    const versionsParsed = strictParseAndValidate(
+      versionsRaw,
+      VersionsArraySchema,
+      "versions.json",
+    );
+    const versionsSigParsed = strictParseAndValidate(
+      versionsSigRaw,
+      VersionsSignatureSchema,
+      "versions.sig.json",
+    );
     if (!versionsParsed.ok) issues.push(...versionsParsed.issues);
     if (!versionsSigParsed.ok) issues.push(...versionsSigParsed.issues);
     if (versionsParsed.ok && versionsSigParsed.ok) {
@@ -467,19 +566,34 @@ export async function verifyArtifact(
       }
       const versionsPublicKeyPem = trusted.get(versionsSig.kid);
       if (!versionsPublicKeyPem) {
-        issues.push(`UNKNOWN_KID: versions.sig.json kid "${versionsSig.kid}" is not in the trusted keyset`);
+        issues.push(
+          `UNKNOWN_KID: versions.sig.json kid "${versionsSig.kid}" is not in the trusted keyset`,
+        );
       } else if (revoked.has(versionsSig.kid)) {
-        issues.push(`REVOKED_KID: versions.sig.json kid "${versionsSig.kid}" is in the verifier's revoked-kids set`);
+        issues.push(
+          `REVOKED_KID: versions.sig.json kid "${versionsSig.kid}" is in the verifier's revoked-kids set`,
+        );
       } else {
-        const stmt: VersionsStatement = { kid: versionsSig.kid, versionsSha: versionsSig.versionsSha };
-        const vSigValid = verifyBytes(publicKeyFromPem(versionsPublicKeyPem), versionsStatementBytes(stmt), versionsSig.sig);
+        const stmt: VersionsStatement = {
+          kid: versionsSig.kid,
+          versionsSha: versionsSig.versionsSha,
+        };
+        const vSigValid = verifyBytes(
+          publicKeyFromPem(versionsPublicKeyPem),
+          versionsStatementBytes(stmt),
+          versionsSig.sig,
+        );
         if (!vSigValid) {
-          issues.push(`BAD_SIGNATURE: versions.json signature does not verify against kid "${versionsSig.kid}"`);
+          issues.push(
+            `BAD_SIGNATURE: versions.json signature does not verify against kid "${versionsSig.kid}"`,
+          );
         }
       }
       const last = versions[versions.length - 1];
       if (!last) {
-        issues.push(`VERSIONS_EMPTY: versions.json has no entries, but a signed manifest was just verified`);
+        issues.push(
+          `VERSIONS_EMPTY: versions.json has no entries, but a signed manifest was just verified`,
+        );
       } else if (
         last.sha256 !== actualManifestSha ||
         last.version !== manifest.catalogVersion ||
@@ -569,15 +683,21 @@ function parseArgs(argv: string[]): CliArgs {
         "[--revoked-kids-file <kids.json>] [--revoked-kids a,b] " +
         "[--min-catalog-version <yyyymmdd-gitsha7>] [--supported-contract-major <n>]\n" +
         '  <keys.json> is an array of {"kid": string, "publicKeyPem": string}\n' +
-        '  <kids.json> is an array of kid strings (the caller\'s compiled + persisted denylist)',
+        "  <kids.json> is an array of kid strings (the caller's compiled + persisted denylist)",
     );
   }
   return {
     dir,
     trustedKeysPath,
-    ...(opts["revoked-kids-file"] ? { revokedKidsFile: opts["revoked-kids-file"] } : {}),
-    revokedKidsInline: seen.has("revoked-kids") ? (opts["revoked-kids"] ?? "").split(",").filter(Boolean) : [],
-    ...(opts["min-catalog-version"] ? { minCatalogVersion: opts["min-catalog-version"] } : {}),
+    ...(opts["revoked-kids-file"]
+      ? { revokedKidsFile: opts["revoked-kids-file"] }
+      : {}),
+    revokedKidsInline: seen.has("revoked-kids")
+      ? (opts["revoked-kids"] ?? "").split(",").filter(Boolean)
+      : [],
+    ...(opts["min-catalog-version"]
+      ? { minCatalogVersion: opts["min-catalog-version"] }
+      : {}),
     ...(opts["supported-contract-major"]
       ? { supportedContractMajor: Number(opts["supported-contract-major"]) }
       : {}),
@@ -586,7 +706,9 @@ function parseArgs(argv: string[]): CliArgs {
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const trustedKeys = JSON.parse(await readFile(args.trustedKeysPath, "utf8")) as TrustedKey[];
+  const trustedKeys = JSON.parse(
+    await readFile(args.trustedKeysPath, "utf8"),
+  ) as TrustedKey[];
   const revokedFromFile = args.revokedKidsFile
     ? (JSON.parse(await readFile(args.revokedKidsFile, "utf8")) as string[])
     : [];
@@ -594,7 +716,9 @@ async function main(argv: string[]): Promise<void> {
   const result = await verifyArtifact(args.dir, {
     trustedKeys,
     revokedKids,
-    ...(args.minCatalogVersion ? { minCatalogVersion: args.minCatalogVersion } : {}),
+    ...(args.minCatalogVersion
+      ? { minCatalogVersion: args.minCatalogVersion }
+      : {}),
     ...(args.supportedContractMajor !== undefined
       ? { supportedContractMajor: args.supportedContractMajor }
       : {}),
@@ -605,7 +729,9 @@ async function main(argv: string[]): Promise<void> {
     );
     return;
   }
-  process.stdout.write(`verify-artifact: FAIL (${result.issues.length} issue(s))\n`);
+  process.stdout.write(
+    `verify-artifact: FAIL (${result.issues.length} issue(s))\n`,
+  );
   for (const issue of result.issues) {
     process.stdout.write(`  ${issue}\n`);
   }

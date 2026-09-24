@@ -32,9 +32,20 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractDraftCandidateNames } from "./text-extract.js";
-import { classifyEvidenceBytes, extractEvidenceText } from "./evidence-extract.js";
-import { buildAsciiUserAgent, DEFAULT_MAX_RESPONSE_BYTES, fetchWithBlockDetection, readBodyCapped } from "./net.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  classifyEvidenceBytes,
+  extractEvidenceText,
+} from "./evidence-extract.js";
+import {
+  buildAsciiUserAgent,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  fetchWithBlockDetection,
+  readBodyCapped,
+} from "./net.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -91,7 +102,11 @@ function failedEntry(
   url: string,
   fetchedAt: string,
   error: string,
-  opts: { blocked?: boolean; httpStatus?: number | null; finalUrl?: string | null } = {},
+  opts: {
+    blocked?: boolean;
+    httpStatus?: number | null;
+    finalUrl?: string | null;
+  } = {},
 ): X2FetchEntry {
   return {
     trail,
@@ -127,7 +142,12 @@ async function fetchOne(
   try {
     parsedUrl = new URL(url);
   } catch {
-    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`);
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `not a valid URL: "${url}" (gate N6)`,
+    );
   }
   if (parsedUrl.protocol !== "https:") {
     return failedEntry(
@@ -227,7 +247,11 @@ async function fetchOne(
     await mkdir(path.join(outDir, "raw"), { recursive: true });
     await writeFile(path.join(outDir, rawRelPath), buf);
 
-    const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, url);
+    const { text, textExtraction, extractor } = await extractEvidenceText(
+      buf,
+      contentType,
+      url,
+    );
     let textFile: string | null = null;
     let draftCandidateNames: string[] = [];
     if (text !== null) {

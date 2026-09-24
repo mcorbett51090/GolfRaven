@@ -91,7 +91,10 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
     const trailId = mintId("trl");
     const fac = facility(facilityId, [courseId]);
     const trail = trailWithMembers(trailId, [
-      { unit: "course", courseId: courseId as Facility["courses"][number]["id"] },
+      {
+        unit: "course",
+        courseId: courseId as Facility["courses"][number]["id"],
+      },
     ]);
     const catalog: Catalog = {
       regions: [],
@@ -101,8 +104,12 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
       achievements: [],
       idLedger: emptyLedger(),
     };
-    expect(trailsOfCourse(catalog, courseId as never).map((t) => t.id)).toEqual([trailId]);
-    expect(trailsOfFacility(catalog, facilityId as never).map((t) => t.id)).toEqual([trailId]);
+    expect(trailsOfCourse(catalog, courseId as never).map((t) => t.id)).toEqual(
+      [trailId],
+    );
+    expect(
+      trailsOfFacility(catalog, facilityId as never).map((t) => t.id),
+    ).toEqual([trailId]);
   });
 
   it("a facility-unit member (RTJ-style) covers EVERY course at that facility", () => {
@@ -122,8 +129,12 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
       achievements: [],
       idLedger: emptyLedger(),
     };
-    expect(trailsOfCourse(catalog, courseA as never).map((t) => t.id)).toEqual([trailId]);
-    expect(trailsOfCourse(catalog, courseB as never).map((t) => t.id)).toEqual([trailId]);
+    expect(trailsOfCourse(catalog, courseA as never).map((t) => t.id)).toEqual([
+      trailId,
+    ]);
+    expect(trailsOfCourse(catalog, courseB as never).map((t) => t.id)).toEqual([
+      trailId,
+    ]);
   });
 
   it("an anyOf course member (a 27-hole 'stop') covers every named course", () => {
@@ -146,7 +157,9 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
       achievements: [],
       idLedger: emptyLedger(),
     };
-    expect(trailsOfCourse(catalog, courseB as never).map((t) => t.id)).toEqual([trailId]);
+    expect(trailsOfCourse(catalog, courseB as never).map((t) => t.id)).toEqual([
+      trailId,
+    ]);
   });
 
   it("a course not on any roster resolves to no trails", () => {
@@ -156,7 +169,10 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
     const trailId = mintId("trl");
     const fac = facility(facilityId, [courseId]);
     const trail = trailWithMembers(trailId, [
-      { unit: "course", courseId: courseId as Facility["courses"][number]["id"] },
+      {
+        unit: "course",
+        courseId: courseId as Facility["courses"][number]["id"],
+      },
     ]);
     const catalog: Catalog = {
       regions: [],
@@ -179,7 +195,11 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
       entries: {
         ...ledger.entries,
         [oldFacilityId]: { id: oldFacilityId, kind: "fac", transitions: [] },
-        [survivorFacilityId]: { id: survivorFacilityId, kind: "fac", transitions: [] },
+        [survivorFacilityId]: {
+          id: survivorFacilityId,
+          kind: "fac",
+          transitions: [],
+        },
       },
     } as unknown as typeof ledger;
     ledger = mergeIntoSurvivor(ledger, [oldFacilityId], survivorFacilityId, {
@@ -199,9 +219,9 @@ describe("trailsOfCourse / trailsOfFacility — unit-aware (§4.3)", () => {
       achievements: [],
       idLedger: ledger,
     };
-    expect(trailsOfFacility(catalog, survivorFacilityId as never).map((t) => t.id)).toEqual([
-      trailId,
-    ]);
+    expect(
+      trailsOfFacility(catalog, survivorFacilityId as never).map((t) => t.id),
+    ).toEqual([trailId]);
   });
 });
 
@@ -287,7 +307,9 @@ describe("primaryTrailOf", () => {
     };
     const overrides = new Map([[facilityId as never, bogusTrailId as never]]);
     // Override names a trail the facility isn't really on — ignored.
-    expect(primaryTrailOf(catalog, facilityId as never, overrides)?.id).toBe(realTrailId);
+    expect(primaryTrailOf(catalog, facilityId as never, overrides)?.id).toBe(
+      realTrailId,
+    );
   });
 });
 
@@ -302,8 +324,16 @@ describe("rosterStops", () => {
       facilities: [facility(facA, [mintId("crs")]), facility(facB, [courseB])],
       trails: [
         trailWithMembers(trailId, [
-          { unit: "facility", facilityId: facB as Facility["id"], stopOrder: 1 },
-          { unit: "facility", facilityId: facA as Facility["id"], stopOrder: 0 },
+          {
+            unit: "facility",
+            facilityId: facB as Facility["id"],
+            stopOrder: 1,
+          },
+          {
+            unit: "facility",
+            facilityId: facA as Facility["id"],
+            stopOrder: 0,
+          },
         ]),
       ],
       designers: [],
@@ -323,7 +353,11 @@ describe("rosterStops", () => {
     ledger = {
       entries: {
         [oldFacilityId]: { id: oldFacilityId, kind: "fac", transitions: [] },
-        [survivorFacilityId]: { id: survivorFacilityId, kind: "fac", transitions: [] },
+        [survivorFacilityId]: {
+          id: survivorFacilityId,
+          kind: "fac",
+          transitions: [],
+        },
       },
     } as unknown as typeof ledger;
     ledger = mergeIntoSurvivor(ledger, [oldFacilityId], survivorFacilityId, {
@@ -370,7 +404,9 @@ describe("privateStopCount / distinctStopFacilityCount (O8, S3)", () => {
     const trailId = mintId("trl");
     const catalog: Catalog = {
       regions: [],
-      facilities: [facility(facilityId, [mintId("crs")], { access: "private" })],
+      facilities: [
+        facility(facilityId, [mintId("crs")], { access: "private" }),
+      ],
       trails: [
         trailWithMembers(trailId, [
           { unit: "facility", facilityId: facilityId as Facility["id"] },
@@ -392,11 +428,19 @@ describe("privateStopCount / distinctStopFacilityCount (O8, S3)", () => {
     const trailId = mintId("trl");
     const catalog: Catalog = {
       regions: [],
-      facilities: [facility(facilityId, [courseA, courseB], { access: "private" })],
+      facilities: [
+        facility(facilityId, [courseA, courseB], { access: "private" }),
+      ],
       trails: [
         trailWithMembers(trailId, [
-          { unit: "course", courseId: courseA as Facility["courses"][number]["id"] },
-          { unit: "course", courseId: courseB as Facility["courses"][number]["id"] },
+          {
+            unit: "course",
+            courseId: courseA as Facility["courses"][number]["id"],
+          },
+          {
+            unit: "course",
+            courseId: courseB as Facility["courses"][number]["id"],
+          },
         ]),
       ],
       designers: [],

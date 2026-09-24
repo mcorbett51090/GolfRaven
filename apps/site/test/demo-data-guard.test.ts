@@ -21,13 +21,15 @@ describe("loadSiteCatalog — the 4 GOLFRAVEN_DEMO × GOLFRAVEN_ENV combinations
   });
 
   it("empty data/ + no GOLFRAVEN_DEMO + GOLFRAVEN_ENV=production -> STILL throws the empty-data message (never silently 'succeeds' into demo)", async () => {
-    await expect(loadSiteCatalog({ GOLFRAVEN_ENV: "production" })).rejects.toThrow(
-      /GOLFRAVEN_DEMO/,
-    );
+    await expect(
+      loadSiteCatalog({ GOLFRAVEN_ENV: "production" }),
+    ).rejects.toThrow(/GOLFRAVEN_DEMO/);
   });
 
   it("GOLFRAVEN_DEMO=1, no production -> uses the demo catalog", async () => {
-    const { catalog, usedDemoData } = await loadSiteCatalog({ GOLFRAVEN_DEMO: "1" });
+    const { catalog, usedDemoData } = await loadSiteCatalog({
+      GOLFRAVEN_DEMO: "1",
+    });
     expect(usedDemoData).toBe(true);
     expect(catalog.trails.length).toBeGreaterThan(0);
   });
@@ -45,9 +47,9 @@ describe("loadSiteCatalog — the 4 GOLFRAVEN_DEMO × GOLFRAVEN_ENV combinations
   });
 
   it("an unknown GOLFRAVEN_ENV value is rejected outright", async () => {
-    await expect(loadSiteCatalog({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_ENV: "prod" })).rejects.toThrow(
-      /Unknown GOLFRAVEN_ENV/,
-    );
+    await expect(
+      loadSiteCatalog({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_ENV: "prod" }),
+    ).rejects.toThrow(/Unknown GOLFRAVEN_ENV/);
   });
 
   it("GOLFRAVEN_ENV=staging (case-insensitive) does NOT refuse demo data", async () => {
@@ -62,16 +64,22 @@ describe("loadSiteCatalog — the 4 GOLFRAVEN_DEMO × GOLFRAVEN_ENV combinations
 describe("loadSiteCatalog — populated real data/ (GOLFRAVEN_DATA_DIR override)", () => {
   const dirs: string[] = [];
   afterEach(async () => {
-    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+    await Promise.all(
+      dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })),
+    );
   });
 
   it("uses real data when data/ is populated, no GOLFRAVEN_DEMO needed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "golfraven-site-derive-"));
     dirs.push(dir);
     await writeFixtureDataDir(dir);
-    const { catalog, usedDemoData } = await loadSiteCatalog({ GOLFRAVEN_DATA_DIR: dir });
+    const { catalog, usedDemoData } = await loadSiteCatalog({
+      GOLFRAVEN_DATA_DIR: dir,
+    });
     expect(usedDemoData).toBe(false);
-    expect(catalog.facilities.length).toBe(demoBundleForSite().facilities.length);
+    expect(catalog.facilities.length).toBe(
+      demoBundleForSite().facilities.length,
+    );
   });
 
   it("uses real data in production too, when data/ is genuinely populated", async () => {

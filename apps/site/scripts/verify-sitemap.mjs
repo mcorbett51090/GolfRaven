@@ -38,7 +38,9 @@ function pathOf(distDir, htmlFile) {
 export async function verifySitemap(distDir) {
   const issues = [];
 
-  const htmlFiles = (await walk(distDir)).filter((f) => f.endsWith("index.html"));
+  const htmlFiles = (await walk(distDir)).filter((f) =>
+    f.endsWith("index.html"),
+  );
   const indexablePages = new Set();
   const noindexPages = new Set();
   for (const file of htmlFiles) {
@@ -55,7 +57,9 @@ export async function verifySitemap(distDir) {
   try {
     const sitemap = await readFile(join(distDir, "sitemap-0.xml"), "utf8");
     sitemapLocs = new Set(
-      [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => new URL(m[1]).pathname),
+      [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map(
+        (m) => new URL(m[1]).pathname,
+      ),
     );
   } catch (err) {
     if (err?.code !== "ENOENT") throw err;
@@ -77,10 +81,17 @@ export async function verifySitemap(distDir) {
     }
   }
 
-  return { ok: issues.length === 0, issues, indexablePages, noindexPages, sitemapLocs };
+  return {
+    ok: issues.length === 0,
+    issues,
+    indexablePages,
+    noindexPages,
+    sitemapLocs,
+  };
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const distDir =
     process.env.DIST_DIR ??

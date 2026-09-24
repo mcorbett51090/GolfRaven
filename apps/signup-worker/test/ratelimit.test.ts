@@ -45,7 +45,11 @@ describe("checkAndConsumeEmailRateLimit", () => {
     for (let i = 0; i < 3; i += 1) {
       await checkAndConsumeEmailRateLimit(env, "same@example.com", 3);
     }
-    const result = await checkAndConsumeEmailRateLimit(env, "same@example.com", 3);
+    const result = await checkAndConsumeEmailRateLimit(
+      env,
+      "same@example.com",
+      3,
+    );
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe("email-daily-cap");
   });
@@ -75,11 +79,15 @@ describe("rateLimitIpKeyMaterial (F5/F6 — IPv6 /64 scoping)", () => {
   });
 
   it("N9: is case-insensitive — the same /64 buckets together regardless of hex case", () => {
-    expect(rateLimitIpKeyMaterial("2001:DB8:1:2::9")).toBe(rateLimitIpKeyMaterial("2001:db8:1:2::9"));
+    expect(rateLimitIpKeyMaterial("2001:DB8:1:2::9")).toBe(
+      rateLimitIpKeyMaterial("2001:db8:1:2::9"),
+    );
   });
 
   it("N9: strips leading zeros per hextet to a canonical bucket", () => {
-    expect(rateLimitIpKeyMaterial("2001:0db8:0001:0002::9")).toBe(rateLimitIpKeyMaterial("2001:db8:1:2::9"));
+    expect(rateLimitIpKeyMaterial("2001:0db8:0001:0002::9")).toBe(
+      rateLimitIpKeyMaterial("2001:db8:1:2::9"),
+    );
   });
 
   it("N9: an IPv4-mapped address (::ffff:a.b.c.d) buckets by its embedded IPv4 address, not one shared bucket", () => {
@@ -96,14 +104,22 @@ describe("checkAndConsumeResendSendLimits (F6)", () => {
 
   it("allows the first send for an address and starts the cooldown", async () => {
     const env = makeTestEnv();
-    const result = await checkAndConsumeResendSendLimits(env, "a@example.com", opts);
+    const result = await checkAndConsumeResendSendLimits(
+      env,
+      "a@example.com",
+      opts,
+    );
     expect(result.allowed).toBe(true);
   });
 
   it("blocks a second send within the cooldown window", async () => {
     const env = makeTestEnv();
     await checkAndConsumeResendSendLimits(env, "a@example.com", opts);
-    const second = await checkAndConsumeResendSendLimits(env, "a@example.com", opts);
+    const second = await checkAndConsumeResendSendLimits(
+      env,
+      "a@example.com",
+      opts,
+    );
     expect(second.allowed).toBe(false);
     expect(second.reason).toBe("resend-cooldown");
   });
@@ -122,7 +138,11 @@ describe("checkAndConsumeResendSendLimits (F6)", () => {
     expireCooldowns(env);
     await checkAndConsumeResendSendLimits(env, "a@example.com", dailyCapOpts);
     expireCooldowns(env);
-    const third = await checkAndConsumeResendSendLimits(env, "a@example.com", dailyCapOpts);
+    const third = await checkAndConsumeResendSendLimits(
+      env,
+      "a@example.com",
+      dailyCapOpts,
+    );
     expect(third.allowed).toBe(false);
     expect(third.reason).toBe("email-send-daily-cap");
   });
@@ -130,8 +150,16 @@ describe("checkAndConsumeResendSendLimits (F6)", () => {
   it("blocks once the global daily send cap is reached, across different addresses", async () => {
     const env = makeTestEnv();
     const tightGlobalOpts = { ...opts, globalDailyCap: 1 };
-    await checkAndConsumeResendSendLimits(env, "a@example.com", tightGlobalOpts);
-    const second = await checkAndConsumeResendSendLimits(env, "b@example.com", tightGlobalOpts);
+    await checkAndConsumeResendSendLimits(
+      env,
+      "a@example.com",
+      tightGlobalOpts,
+    );
+    const second = await checkAndConsumeResendSendLimits(
+      env,
+      "b@example.com",
+      tightGlobalOpts,
+    );
     expect(second.allowed).toBe(false);
     expect(second.reason).toBe("global-send-daily-cap");
   });

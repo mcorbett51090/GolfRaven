@@ -67,7 +67,9 @@ function tnConfirmation(overrides: Partial<X2ConfirmationFile["TN"]> = {}) {
 describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", () => {
   it("confirms a trail when every quote and every roster name appears verbatim in the cited evidence", () => {
     const confirmation: X2ConfirmationFile = { TN: tnConfirmation() };
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(true);
     expect(result.perTrail.TN?.reasons).toEqual([]);
     expect(result.perTrail.TN?.rosterSize).toBe(1);
@@ -83,7 +85,9 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
         },
       }),
     };
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(true);
   });
 
@@ -92,14 +96,19 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
       TN: tnConfirmation({
         season: {
           value: "spring only",
-          quote: "This exact sentence does not appear anywhere in the evidence.",
+          quote:
+            "This exact sentence does not appear anywhere in the evidence.",
           evidenceSha: SHA_TN,
         },
       }),
     };
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
-    expect(result.perTrail.TN?.reasons.some((r) => r.includes("season"))).toBe(true);
+    expect(result.perTrail.TN?.reasons.some((r) => r.includes("season"))).toBe(
+      true,
+    );
   });
 
   it("a quote citing evidence with no extracted text is unconfirmed, not refused", () => {
@@ -112,9 +121,13 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
         },
       }),
     };
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
-    expect(result.perTrail.TN?.reasons.some((r) => r.includes("no extracted text"))).toBe(true);
+    expect(
+      result.perTrail.TN?.reasons.some((r) => r.includes("no extracted text")),
+    ).toBe(true);
   });
 
   it("missing season fact entirely leaves the trail unconfirmed", () => {
@@ -124,15 +137,21 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
         completionUnit: tnConfirmation().completionUnit,
       },
     } as unknown as X2ConfirmationFile;
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
     expect(result.perTrail.TN?.reasons).toContain("season is missing.");
   });
 
   it("a roster entry whose NAME does not appear in the cited evidence (even though the quote does) is unconfirmed", () => {
-    const bytes = "This trail has a member course. It counts a course. The season runs year-round.";
+    const bytes =
+      "This trail has a member course. It counts a course. The season runs year-round.";
     const evidenceByTrail: EvidenceByTrail = {
-      TN: { bySha: new Map([[sha(bytes), { text: bytes }]]), failedSources: [] },
+      TN: {
+        bySha: new Map([[sha(bytes), { text: bytes }]]),
+        failedSources: [],
+      },
     };
     const confirmation: X2ConfirmationFile = {
       TN: tnConfirmation({
@@ -143,13 +162,25 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
             evidenceSha: sha(bytes),
           },
         ],
-        completionUnit: { value: "course", quote: "It counts a course.", evidenceSha: sha(bytes) },
-        season: { value: "year-round", quote: "The season runs year-round.", evidenceSha: sha(bytes) },
+        completionUnit: {
+          value: "course",
+          quote: "It counts a course.",
+          evidenceSha: sha(bytes),
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: sha(bytes),
+        },
       }),
     };
     const result = computeX2Verdict(confirmation, evidenceByTrail, ["TN"]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
-    expect(result.perTrail.TN?.reasons.some((r) => r.includes("name does not appear"))).toBe(true);
+    expect(
+      result.perTrail.TN?.reasons.some((r) =>
+        r.includes("name does not appear"),
+      ),
+    ).toBe(true);
   });
 
   it("a cited evidenceSha with NO matching evidence for this trail at all is a hard refusal (throws)", () => {
@@ -162,9 +193,9 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
         },
       }),
     };
-    expect(() => computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"])).toThrow(
-      /is not "TN"'s own confirmed evidence/,
-    );
+    expect(() =>
+      computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]),
+    ).toThrow(/is not "TN"'s own confirmed evidence/);
   });
 
   it("gate S2: a fact citing ANOTHER trail's SHA is a hard refusal (throws), not a confirmation — probe P2", () => {
@@ -177,18 +208,22 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
         },
       }),
     };
-    expect(() => computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"])).toThrow(
-      /is not "TN"'s own confirmed evidence/,
-    );
+    expect(() =>
+      computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]),
+    ).toThrow(/is not "TN"'s own confirmed evidence/);
   });
 
   it("an empty roster leaves the trail unconfirmed", () => {
     const confirmation: X2ConfirmationFile = {
       TN: tnConfirmation({ roster: [] }),
     };
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
-    expect(result.perTrail.TN?.reasons).toContain("Roster is empty or missing.");
+    expect(result.perTrail.TN?.reasons).toContain(
+      "Roster is empty or missing.",
+    );
   });
 
   it("gate N8: an empty value / quote shorter than 12 chars is unconfirmed", () => {
@@ -197,22 +232,34 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
         season: { value: "", quote: "short", evidenceSha: SHA_TN },
       }),
     };
-    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), ["TN"]);
+    const result = computeX2Verdict(confirmation, baseEvidenceByTrail(), [
+      "TN",
+    ]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
-    expect(result.perTrail.TN?.reasons.some((r) => r.includes("shorter than 12"))).toBe(true);
+    expect(
+      result.perTrail.TN?.reasons.some((r) => r.includes("shorter than 12")),
+    ).toBe(true);
   });
 
   it("gate S5: a failed/blocked source is listed in reasons even for an unconfirmed trail", () => {
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
         bySha: new Map(),
-        failedSources: [{ url: "https://tngolftrail.net/", blocked: true, error: "BLOCKED — network policy" }],
+        failedSources: [
+          {
+            url: "https://tngolftrail.net/",
+            blocked: true,
+            error: "BLOCKED — network policy",
+          },
+        ],
       },
     };
     const result = computeX2Verdict({}, evidenceByTrail, ["TN"]);
     expect(result.perTrail.TN?.confirmed).toBe(false);
     expect(result.perTrail.TN?.hasFailedSource).toBe(true);
-    expect(result.perTrail.TN?.reasons.some((r) => r.includes("tngolftrail.net"))).toBe(true);
+    expect(
+      result.perTrail.TN?.reasons.some((r) => r.includes("tngolftrail.net")),
+    ).toBe(true);
     expect(result.anyUnconfirmedWithFailedSource).toBe(true);
   });
 
@@ -220,7 +267,9 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
         bySha: new Map([[SHA_TN, { text: TN_BYTES }]]),
-        failedSources: [{ url: "https://tn.gov/", blocked: false, error: "404" }],
+        failedSources: [
+          { url: "https://tn.gov/", blocked: false, error: "404" },
+        ],
       },
     };
     const confirmation: X2ConfirmationFile = { TN: tnConfirmation() };
@@ -235,10 +284,22 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
   function trailConfirmation(sha256: string, courseName: string) {
     return {
       roster: [
-        { name: courseName, quote: `${courseName} is a member course.`, evidenceSha: sha256 },
+        {
+          name: courseName,
+          quote: `${courseName} is a member course.`,
+          evidenceSha: sha256,
+        },
       ],
-      completionUnit: { value: "course", quote: "Course is the completion unit.", evidenceSha: sha256 },
-      season: { value: "year-round", quote: "Season runs year-round.", evidenceSha: sha256 },
+      completionUnit: {
+        value: "course",
+        quote: "Course is the completion unit.",
+        evidenceSha: sha256,
+      },
+      season: {
+        value: "year-round",
+        quote: "Season runs year-round.",
+        evidenceSha: sha256,
+      },
     };
   }
 
@@ -248,8 +309,14 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
     const viBytes =
       "Arbutus Ridge is a member course. Facility is the completion unit. Season runs year-round.";
     return {
-      TN: { bySha: new Map([[sha(tnBytes), { text: tnBytes }]]), failedSources: [] },
-      VI: { bySha: new Map([[sha(viBytes), { text: viBytes }]]), failedSources: [] },
+      TN: {
+        bySha: new Map([[sha(tnBytes), { text: tnBytes }]]),
+        failedSources: [],
+      },
+      VI: {
+        bySha: new Map([[sha(viBytes), { text: viBytes }]]),
+        failedSources: [],
+      },
       RTJ: { bySha: new Map(), failedSources: [] },
     };
   }
@@ -262,10 +329,22 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
       TN: trailConfirmation(tnSha, "Bear Trace at Harrison Bay"),
       VI: {
         roster: [
-          { name: "Arbutus Ridge", quote: "Arbutus Ridge is a member course.", evidenceSha: viSha },
+          {
+            name: "Arbutus Ridge",
+            quote: "Arbutus Ridge is a member course.",
+            evidenceSha: viSha,
+          },
         ],
-        completionUnit: { value: "facility", quote: "Facility is the completion unit.", evidenceSha: viSha },
-        season: { value: "year-round", quote: "Season runs year-round.", evidenceSha: viSha },
+        completionUnit: {
+          value: "facility",
+          quote: "Facility is the completion unit.",
+          evidenceSha: viSha,
+        },
+        season: {
+          value: "year-round",
+          quote: "Season runs year-round.",
+          evidenceSha: viSha,
+        },
       },
       // RTJ has no confirmation entry at all -> unconfirmed
     };
@@ -286,7 +365,9 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
   });
 });
 
-function fetchedEntry(overrides: Partial<X2FetchEntry> & { trail: string; url: string }): X2FetchEntry {
+function fetchedEntry(
+  overrides: Partial<X2FetchEntry> & { trail: string; url: string },
+): X2FetchEntry {
   return {
     status: "fetched",
     httpStatus: 200,
@@ -307,7 +388,9 @@ function fetchedEntry(overrides: Partial<X2FetchEntry> & { trail: string; url: s
 
 describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
   it("gate S1: recomputes SHA-256 from the raw bytes and derives text from them — an edited text file does NOT confirm (probe P3)", async () => {
-    const rawBytes = Buffer.from("<h1>Tennessee Golf Trail</h1><p>Nine courses make up the Trail.</p>");
+    const rawBytes = Buffer.from(
+      "<h1>Tennessee Golf Trail</h1><p>Nine courses make up the Trail.</p>",
+    );
     const realSha = sha(rawBytes.toString("utf8"));
     const manifest: X2FetchManifest = {
       generatedAt: new Date().toISOString(),
@@ -329,7 +412,9 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       if (rel === "raw/x.html") return rawBytes;
       // An operator hand-edited the STORED TEXT FILE, but the raw bytes are
       // unchanged — the verdict must ignore this file entirely.
-      return Buffer.from("Fabricated roster: Bear Trace, Arbutus Ridge, some invented course.");
+      return Buffer.from(
+        "Fabricated roster: Bear Trace, Arbutus Ridge, some invented course.",
+      );
     });
     const text = byTrail.TN?.bySha.get(realSha)?.text ?? "";
     expect(text).toContain("Tennessee Golf Trail");
@@ -353,7 +438,9 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       draftCandidateNames: { TN: [] },
     };
     await expect(
-      buildEvidenceByTrail(manifest, async () => Buffer.from("<p>Real content.</p>")),
+      buildEvidenceByTrail(manifest, async () =>
+        Buffer.from("<p>Real content.</p>"),
+      ),
     ).rejects.toThrow(/does not match the manifest's recorded/);
   });
 
@@ -379,7 +466,11 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
     const byTrail = await buildEvidenceByTrail(manifest, async () => rawBytes);
     expect(byTrail.RTJ?.bySha.has(realSha)).toBe(false);
     // The exclusion is reported, never dropped silently.
-    expect(byTrail.RTJ?.failedSources.some((f) => f.error.includes("redirected off the configured host"))).toBe(true);
+    expect(
+      byTrail.RTJ?.failedSources.some((f) =>
+        f.error.includes("redirected off the configured host"),
+      ),
+    ).toBe(true);
   });
 
   it("same-site rule: a bare domain redirecting to its www. host still counts as that trail's evidence", async () => {
@@ -407,10 +498,19 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
   });
 
   it("sameConfiguredHost: only exact or www.-prefix variants match", () => {
-    expect(sameConfiguredHost("golfvancouverisland.ca", "golfvancouverisland.ca")).toBe(true);
-    expect(sameConfiguredHost("golfvancouverisland.ca", "www.golfvancouverisland.ca")).toBe(true);
+    expect(
+      sameConfiguredHost("golfvancouverisland.ca", "golfvancouverisland.ca"),
+    ).toBe(true);
+    expect(
+      sameConfiguredHost(
+        "golfvancouverisland.ca",
+        "www.golfvancouverisland.ca",
+      ),
+    ).toBe(true);
     expect(sameConfiguredHost("www.rtjgolf.com", "rtjgolf.com")).toBe(true);
-    expect(sameConfiguredHost("rtjgolf.com", "rtjgolf.com.evil.example")).toBe(false);
+    expect(sameConfiguredHost("rtjgolf.com", "rtjgolf.com.evil.example")).toBe(
+      false,
+    );
     expect(sameConfiguredHost("rtjgolf.com", "shop.rtjgolf.com")).toBe(false);
     expect(sameConfiguredHost("tnstateparks.com", "tn.gov")).toBe(false);
   });
@@ -442,9 +542,15 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
       },
       draftCandidateNames: { VI: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(""));
+    const byTrail = await buildEvidenceByTrail(manifest, async () =>
+      Buffer.from(""),
+    );
     expect(byTrail.VI?.failedSources).toEqual([
-      { url: "https://golfvancouverisland.ca/wp-content/uploads/2024/10/terms.pdf", blocked: true, error: "BLOCKED — network policy (golfvancouverisland.ca)" },
+      {
+        url: "https://golfvancouverisland.ca/wp-content/uploads/2024/10/terms.pdf",
+        blocked: true,
+        error: "BLOCKED — network policy (golfvancouverisland.ca)",
+      },
     ]);
   });
 });

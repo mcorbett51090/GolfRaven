@@ -34,7 +34,10 @@ export function storeAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
   return true;
 }
 
-export async function readCachedCard(hash: string, env: NodeJS.ProcessEnv = process.env): Promise<Buffer | null> {
+export async function readCachedCard(
+  hash: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Buffer | null> {
   const path = join(ogStoreDir(env), `${hash}.png`);
   if (!existsSync(path)) return null;
   try {

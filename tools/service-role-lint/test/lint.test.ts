@@ -9,7 +9,15 @@ import { lintSource } from "../src/lint.js";
 // must-fail fixtures are one file each for .update, .upsert, .rpc, raw SQL
 // through the DB URL, and a Storage .upload outside withOwnership."
 
-const FIXTURES_ROOT = join(import.meta.dirname, "..", "..", "..", "supabase", "functions", "__fixtures__");
+const FIXTURES_ROOT = join(
+  import.meta.dirname,
+  "..",
+  "..",
+  "..",
+  "supabase",
+  "functions",
+  "__fixtures__",
+);
 
 function lintFixture(relPath: string) {
   const full = join(FIXTURES_ROOT, relPath);
@@ -21,37 +29,57 @@ describe("bad fixtures (must fail)", () => {
   it("flags a service-role .update() call outside withOwnership", () => {
     const findings = lintFixture("bad/direct-update.ts");
     expect(findings.length).toBeGreaterThan(0);
-    expect(findings.some((f) => f.rule === "service-role-construction")).toBe(true);
-    expect(findings.some((f) => f.rule === "privileged-call-outside-withOwnership")).toBe(true);
+    expect(findings.some((f) => f.rule === "service-role-construction")).toBe(
+      true,
+    );
+    expect(
+      findings.some((f) => f.rule === "privileged-call-outside-withOwnership"),
+    ).toBe(true);
   });
 
   it("flags a service-role .upsert() call outside withOwnership", () => {
     const findings = lintFixture("bad/direct-upsert.ts");
-    expect(findings.some((f) => f.rule === "privileged-call-outside-withOwnership" && f.message.includes("upsert"))).toBe(
-      true,
-    );
+    expect(
+      findings.some(
+        (f) =>
+          f.rule === "privileged-call-outside-withOwnership" &&
+          f.message.includes("upsert"),
+      ),
+    ).toBe(true);
   });
 
   it("flags a service-role .rpc() call outside withOwnership", () => {
     const findings = lintFixture("bad/direct-rpc.ts");
-    expect(findings.some((f) => f.rule === "privileged-call-outside-withOwnership" && f.message.includes("rpc"))).toBe(
-      true,
-    );
+    expect(
+      findings.some(
+        (f) =>
+          f.rule === "privileged-call-outside-withOwnership" &&
+          f.message.includes("rpc"),
+      ),
+    ).toBe(true);
   });
 
   it("flags a raw Postgres driver import and SUPABASE_DB_URL reference", () => {
     const findings = lintFixture("bad/raw-sql-db-url.ts");
     const dbUrlFindings = findings.filter((f) => f.rule === "db-url-or-driver");
     expect(dbUrlFindings.length).toBeGreaterThanOrEqual(2); // the import AND the env var reference
-    expect(dbUrlFindings.some((f) => f.message.includes("postgres"))).toBe(true);
-    expect(dbUrlFindings.some((f) => f.message.includes("SUPABASE_DB_URL"))).toBe(true);
+    expect(dbUrlFindings.some((f) => f.message.includes("postgres"))).toBe(
+      true,
+    );
+    expect(
+      dbUrlFindings.some((f) => f.message.includes("SUPABASE_DB_URL")),
+    ).toBe(true);
   });
 
   it("flags a service-role Storage .upload() call outside withOwnership", () => {
     const findings = lintFixture("bad/direct-storage-upload.ts");
-    expect(findings.some((f) => f.rule === "privileged-call-outside-withOwnership" && f.message.includes("upload"))).toBe(
-      true,
-    );
+    expect(
+      findings.some(
+        (f) =>
+          f.rule === "privileged-call-outside-withOwnership" &&
+          f.message.includes("upload"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -73,7 +101,9 @@ describe("privileged.ts itself is exempt", () => {
       export function withOwnership(actor, op) { return op(c); }
       c.from("play").update({});
     `;
-    expect(lintSource(source, "/repo/supabase/functions/_shared/privileged.ts")).toEqual([]);
+    expect(
+      lintSource(source, "/repo/supabase/functions/_shared/privileged.ts"),
+    ).toEqual([]);
   });
 });
 
@@ -91,6 +121,8 @@ describe("real code under withOwnership() is exempt from rule (b)", () => {
     // service-role identifier, so rule (b) never applies to it in the
     // first place — this asserts the common real-code shape produces zero
     // findings end to end.
-    expect(lintSource(source, "/repo/supabase/functions/evidence/index.ts")).toEqual([]);
+    expect(
+      lintSource(source, "/repo/supabase/functions/evidence/index.ts"),
+    ).toEqual([]);
   });
 });

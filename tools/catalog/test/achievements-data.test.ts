@@ -20,7 +20,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { validateAchievementFile } from "../src/verify-catalog.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const REPO_ROOT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+);
 const ACHIEVEMENTS_DIR = join(REPO_ROOT, "data", "achievements");
 
 async function loadAll(): Promise<{ file: string; raw: unknown }[]> {

@@ -5,7 +5,14 @@
  * on-disk key.
  */
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -26,7 +33,9 @@ import { minimalBundle } from "./emit-test-helpers.js";
 function generateEd25519Pem(): { privateKeyPem: string; publicKeyPem: string } {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   return {
-    privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    privateKeyPem: privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString(),
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
   };
 }
@@ -44,7 +53,9 @@ describe("signBytes / verifyBytes", () => {
     const b = generateEd25519Pem();
     const data = Buffer.from("hello catalog");
     const sig = signBytes(privateKeyFromPem(a.privateKeyPem), data);
-    expect(verifyBytes(publicKeyFromPem(b.publicKeyPem), data, sig)).toBe(false);
+    expect(verifyBytes(publicKeyFromPem(b.publicKeyPem), data, sig)).toBe(
+      false,
+    );
   });
 
   it("is deterministic: signing the same bytes twice with the same key produces the same signature", () => {
@@ -78,11 +89,21 @@ describe("finding #10: key hygiene", () => {
     };
     const bytes = Buffer.from("fake manifest bytes");
     expect(() =>
-      signManifest(manifest, bytes, privateKeyFromPem(a.privateKeyPem), b.publicKeyPem),
+      signManifest(
+        manifest,
+        bytes,
+        privateKeyFromPem(a.privateKeyPem),
+        b.publicKeyPem,
+      ),
     ).toThrow(/does NOT match --kid-public-key/);
     // The matching key does not throw.
     expect(() =>
-      signManifest(manifest, bytes, privateKeyFromPem(a.privateKeyPem), a.publicKeyPem),
+      signManifest(
+        manifest,
+        bytes,
+        privateKeyFromPem(a.privateKeyPem),
+        a.publicKeyPem,
+      ),
     ).not.toThrow();
   });
 
@@ -109,9 +130,9 @@ describe("finding #10: key hygiene", () => {
       const { privateKeyPem } = generateEd25519Pem();
       await writeFile(keyPath, privateKeyPem);
       await chmod(keyPath, 0o600);
-      await expect(loadSigningKeyPem({ keyFilePath: keyPath })).resolves.toContain(
-        "BEGIN PRIVATE KEY",
-      );
+      await expect(
+        loadSigningKeyPem({ keyFilePath: keyPath }),
+      ).resolves.toContain("BEGIN PRIVATE KEY");
     });
   });
 });
@@ -134,7 +155,13 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     await rm(dir, { recursive: true, force: true });
   });
 
-  async function emit(opts: { kid?: string; revokedKids?: string[]; catalogVersion?: string } = {}) {
+  async function emit(
+    opts: {
+      kid?: string;
+      revokedKids?: string[];
+      catalogVersion?: string;
+    } = {},
+  ) {
     return emitCatalogArtifact(minimalBundle(), {
       outDir: dir,
       catalogVersion: opts.catalogVersion ?? "20260101-abc0001",
@@ -166,16 +193,21 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     const shard = emitted.manifest.shards[0];
     expect(shard).toBeDefined();
     const shardPath = join(emitted.v1Dir, ...shard!.path.split("/"));
-    await writeFile(shardPath, Buffer.concat([await readFile(shardPath), Buffer.from("TAMPERED")]));
+    await writeFile(
+      shardPath,
+      Buffer.concat([await readFile(shardPath), Buffer.from("TAMPERED")]),
+    );
 
     const result = await verifyArtifact(dir, {
       trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("SHARD_TAMPERED:") && i.includes(shard!.path))).toBe(
-      true,
-    );
+    expect(
+      result.issues.some(
+        (i) => i.startsWith("SHARD_TAMPERED:") && i.includes(shard!.path),
+      ),
+    ).toBe(true);
   });
 
   it("fails: a whitespace-only change to manifest.json (finding #1 — raw bytes, never re-canonicalized)", async () => {
@@ -193,7 +225,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("MANIFEST_TAMPERED:"))).toBe(true);
+    expect(result.issues.some((i) => i.startsWith("MANIFEST_TAMPERED:"))).toBe(
+      true,
+    );
   });
 
   it("PROBE: a duplicate minAppVersion key in manifest.json fails verification", async () => {
@@ -219,7 +253,10 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     const emitted = await emit();
     const manifestPath = join(emitted.v1Dir, "manifest.json");
     const raw = await readFile(manifestPath, "utf8");
-    const tampered = raw.replace("{\n", '{\n  "__proto__": {"polluted": true},\n');
+    const tampered = raw.replace(
+      "{\n",
+      '{\n  "__proto__": {"polluted": true},\n',
+    );
     expect(tampered).not.toBe(raw);
     await writeFile(manifestPath, tampered);
 
@@ -235,7 +272,10 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     const emitted = await emit();
     const manifestPath = join(emitted.v1Dir, "manifest.json");
     const raw = await readFile(manifestPath, "utf8");
-    const tampered = raw.replace('"contractVersion": 0', '"contractVersion": -0.0e0');
+    const tampered = raw.replace(
+      '"contractVersion": 0',
+      '"contractVersion": -0.0e0',
+    );
     expect(tampered).not.toBe(raw);
     await writeFile(manifestPath, tampered);
 
@@ -251,7 +291,10 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     const emitted = await emit();
     const manifestPath = join(emitted.v1Dir, "manifest.json");
     const raw = await readFile(manifestPath, "utf8");
-    const forged = raw.replace(emitted.manifest.catalogVersion, "29990101-fffffff");
+    const forged = raw.replace(
+      emitted.manifest.catalogVersion,
+      "29990101-fffffff",
+    );
     expect(forged).not.toBe(raw);
     await writeFile(manifestPath, forged);
     // manifest.sig.json is left exactly as originally signed — it still
@@ -264,7 +307,11 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     });
     expect(result.ok).toBe(false);
     expect(
-      result.issues.some((i) => i.startsWith("SIG_FIELD_MISMATCH:") || i.startsWith("MANIFEST_TAMPERED:")),
+      result.issues.some(
+        (i) =>
+          i.startsWith("SIG_FIELD_MISMATCH:") ||
+          i.startsWith("MANIFEST_TAMPERED:"),
+      ),
     ).toBe(true);
   });
 
@@ -274,8 +321,14 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     const sigPath = join(emitted.v1Dir, "manifest.sig.json");
     const manifestRaw = await readFile(manifestPath, "utf8");
     const sigRaw = await readFile(sigPath, "utf8");
-    const forgedManifest = manifestRaw.replace(emitted.manifest.catalogVersion, "29990101-fffffff");
-    const forgedSig = sigRaw.replace(emitted.manifest.catalogVersion, "29990101-fffffff");
+    const forgedManifest = manifestRaw.replace(
+      emitted.manifest.catalogVersion,
+      "29990101-fffffff",
+    );
+    const forgedSig = sigRaw.replace(
+      emitted.manifest.catalogVersion,
+      "29990101-fffffff",
+    );
     await writeFile(manifestPath, forgedManifest);
     await writeFile(sigPath, forgedSig);
     // Now manifest.json and manifest.sig.json AGREE on the forged
@@ -288,7 +341,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("BAD_SIGNATURE:"))).toBe(true);
+    expect(result.issues.some((i) => i.startsWith("BAD_SIGNATURE:"))).toBe(
+      true,
+    );
   });
 
   it("fails: verifying with a swapped-in wrong public key for a trusted kid", async () => {
@@ -298,7 +353,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("BAD_SIGNATURE:"))).toBe(true);
+    expect(result.issues.some((i) => i.startsWith("BAD_SIGNATURE:"))).toBe(
+      true,
+    );
   });
 
   it("refuses: an unknown kid (not in the trusted keyset)", async () => {
@@ -318,7 +375,11 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("REVOKED_KID:") && i.includes("its own"))).toBe(true);
+    expect(
+      result.issues.some(
+        (i) => i.startsWith("REVOKED_KID:") && i.includes("its own"),
+      ),
+    ).toBe(true);
   });
 
   it("finding #3 PROBE: a revoked key that leaves itself OUT of its own manifest's revokedKids[] is still refused", async () => {
@@ -353,7 +414,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       minCatalogVersion: "20260101-eee9999",
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("CATALOG_VERSION_ROLLBACK:"))).toBe(true);
+    expect(
+      result.issues.some((i) => i.startsWith("CATALOG_VERSION_ROLLBACK:")),
+    ).toBe(true);
   });
 
   it("finding #9: refuses a manifest whose contractVersion is not the supported major", async () => {
@@ -364,7 +427,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       supportedContractMajor: 7,
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("CONTRACT_MAJOR_MISMATCH:"))).toBe(true);
+    expect(
+      result.issues.some((i) => i.startsWith("CONTRACT_MAJOR_MISMATCH:")),
+    ).toBe(true);
   });
 
   it("finding #7: reports a stray file on disk that the manifest does not list", async () => {
@@ -375,9 +440,12 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("STRAY_FILE:") && i.includes("not-a-real-shard.json"))).toBe(
-      true,
-    );
+    expect(
+      result.issues.some(
+        (i) =>
+          i.startsWith("STRAY_FILE:") && i.includes("not-a-real-shard.json"),
+      ),
+    ).toBe(true);
   });
 
   it("finding #4: versions.json signature is checked, and a tamper is caught", async () => {
@@ -390,7 +458,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("VERSIONS_TAMPERED:"))).toBe(true);
+    expect(result.issues.some((i) => i.startsWith("VERSIONS_TAMPERED:"))).toBe(
+      true,
+    );
   });
 
   it("finding #4: versions.json's last entry must describe THIS manifest", async () => {
@@ -401,15 +471,26 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     // process wrote a DIFFERENT last entry) so its content is internally
     // consistent (signature verifies) but no longer describes the
     // manifest this test is verifying.
-    const bogus = [{ version: "20200101-0000000", publishedAt: "2020-01-01T00:00:00.000Z", kid: KID_A, sha256: "0".repeat(64) }];
+    const bogus = [
+      {
+        version: "20200101-0000000",
+        publishedAt: "2020-01-01T00:00:00.000Z",
+        kid: KID_A,
+        sha256: "0".repeat(64),
+      },
+    ];
     const bogusBytes = Buffer.from(canonicalStringify(bogus), "utf8");
     await writeFile(versionsPath, bogusBytes);
     const versionsSha = sha256Hex(bogusBytes);
     const statementBytes = Buffer.from(
-      "golfraven/catalog/v1/versions\n" + canonicalStringify({ kid: KID_A, versionsSha }),
+      "golfraven/catalog/v1/versions\n" +
+        canonicalStringify({ kid: KID_A, versionsSha }),
       "utf8",
     );
-    const sig = signBytes(privateKeyFromPem(keyA.privateKeyPem), statementBytes);
+    const sig = signBytes(
+      privateKeyFromPem(keyA.privateKeyPem),
+      statementBytes,
+    );
     await writeFile(
       versionsSigPath,
       Buffer.from(canonicalStringify({ kid: KID_A, versionsSha, sig }), "utf8"),
@@ -420,11 +501,16 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("VERSIONS_MISMATCH:"))).toBe(true);
+    expect(result.issues.some((i) => i.startsWith("VERSIONS_MISMATCH:"))).toBe(
+      true,
+    );
   });
 
   it("fails: missing manifest.json", async () => {
-    const result = await verifyArtifact(dir, { trustedKeys: [], revokedKids: new Set() });
+    const result = await verifyArtifact(dir, {
+      trustedKeys: [],
+      revokedKids: new Set(),
+    });
     expect(result.ok).toBe(false);
     expect(result.issues[0]).toMatch(/cannot read manifest\.json/);
   });
@@ -440,7 +526,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
       revokedKids: new Set(),
     });
     expect(result.ok).toBe(false);
-    expect(result.issues.some((i) => i.startsWith("SHARD_MISSING:"))).toBe(true);
+    expect(result.issues.some((i) => i.startsWith("SHARD_MISSING:"))).toBe(
+      true,
+    );
   });
 
   it("finding #8: never reads any shard file when the signature is bad (unknown kid)", async () => {
@@ -459,7 +547,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     });
     expect(result.ok).toBe(false);
     expect(result.issues.some((i) => i.startsWith("UNKNOWN_KID:"))).toBe(true);
-    expect(result.issues.some((i) => i.startsWith("SHARD_MISSING:"))).toBe(false);
+    expect(result.issues.some((i) => i.startsWith("SHARD_MISSING:"))).toBe(
+      false,
+    );
   });
 
   describe("finding #3: manifest and sidecar file reads", () => {
@@ -536,7 +626,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
         revokedKids: new Set(),
       });
       expect(result.ok).toBe(false);
-      expect(result.issues.some((i) => /versions\.json.*symlink/.test(i))).toBe(true);
+      expect(result.issues.some((i) => /versions\.json.*symlink/.test(i))).toBe(
+        true,
+      );
     });
 
     it("PROBE: refuses versions.sig.json over the 64 KB size cap", async () => {
@@ -549,7 +641,9 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
         revokedKids: new Set(),
       });
       expect(result.ok).toBe(false);
-      expect(result.issues.some((i) => /versions\.sig\.json.*byte cap/.test(i))).toBe(true);
+      expect(
+        result.issues.some((i) => /versions\.sig\.json.*byte cap/.test(i)),
+      ).toBe(true);
     });
 
     it("a well-formed artifact under both caps still verifies fine", async () => {

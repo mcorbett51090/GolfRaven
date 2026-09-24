@@ -25,7 +25,7 @@
  * faithful per-build tracker without needing a lockfile/IPC.
  */
 
-const SWC_BASELINE_MS_PER_CARD = (2 * 60 + 37) * 1000 / 857; // ≈ 183ms
+const SWC_BASELINE_MS_PER_CARD = ((2 * 60 + 37) * 1000) / 857; // ≈ 183ms
 
 let spentMs = 0;
 let renderedCount = 0;
@@ -45,7 +45,9 @@ function estimatedNextCardMs(): number {
  * remaining budget — ship the per-trail template card instead, and this
  * card is implicitly "queued for the next release" (the very next build
  * that has cache budget left retries it, since it's still uncached). */
-export function shouldRenderFresh(env: NodeJS.ProcessEnv = process.env): boolean {
+export function shouldRenderFresh(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
   const projected = spentMs + estimatedNextCardMs();
   if (projected > budgetMs(env)) {
     queuedCount++;
@@ -65,7 +67,12 @@ export function recordRenderTime(ms: number): void {
 /** For tests and the build's own end-of-run log line — never mutated by
  * a reader. */
 export function ogBudgetStats() {
-  return { spentMs, renderedCount, queuedCount, estimatedNextCardMs: estimatedNextCardMs() };
+  return {
+    spentMs,
+    renderedCount,
+    queuedCount,
+    estimatedNextCardMs: estimatedNextCardMs(),
+  };
 }
 
 /** Test-only: resets module state between test cases (this module's

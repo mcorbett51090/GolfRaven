@@ -53,7 +53,10 @@ export { computeDurationHours, isWithinDurationWindow } from "./duration.js";
 
 export { validateFixesOrThrow, stableSortByTimestamp } from "./fixes.js";
 
-export { candidatesWithinRadius, isCandidateWithinRadius } from "./candidates.js";
+export {
+  candidatesWithinRadius,
+  isCandidateWithinRadius,
+} from "./candidates.js";
 
 export { matchRoute, resolveAskUser } from "./route-match.js";
 

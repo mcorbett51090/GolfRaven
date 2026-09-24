@@ -5,7 +5,11 @@
  * package has no access to (same boundary `@golfraven/matching` itself
  * draws around `@golfraven/catalog` — see that package's `types.ts`).
  */
-import type { CandidateCourse, MatchRouteInput, RouteFix } from "@golfraven/matching";
+import type {
+  CandidateCourse,
+  MatchRouteInput,
+  RouteFix,
+} from "@golfraven/matching";
 import type { ImportedRound } from "./types.js";
 
 export interface ToMatcherInputOptions {
@@ -46,27 +50,40 @@ export interface ToMatcherInputOptions {
  * money scoring from `file_import` (build plan §4.5: "Files are
  * editable; badge-only").
  */
-export function toMatcherInput(round: ImportedRound, options: ToMatcherInputOptions): MatchRouteInput | undefined {
+export function toMatcherInput(
+  round: ImportedRound,
+  options: ToMatcherInputOptions,
+): MatchRouteInput | undefined {
   if (round.fixes.length === 0) return undefined;
 
   const fixes: RouteFix[] = round.fixes.map((f) => ({
     point: { lat: f.lat, lon: f.lon },
     timestamp: f.timestamp,
-    ...(f.accuracyMeters !== undefined ? { accuracyMeters: f.accuracyMeters } : {}),
+    ...(f.accuracyMeters !== undefined
+      ? { accuracyMeters: f.accuracyMeters }
+      : {}),
   }));
 
   return {
     fixes,
     candidates: options.candidates,
-    ...(options.catalogVersion !== undefined ? { catalogVersion: options.catalogVersion } : {}),
+    ...(options.catalogVersion !== undefined
+      ? { catalogVersion: options.catalogVersion }
+      : {}),
     ...(options.candidateRadiusMeters !== undefined
       ? { candidateRadiusMeters: options.candidateRadiusMeters }
       : {}),
     ...(options.insideRatioBufferMeters !== undefined
       ? { insideRatioBufferMeters: options.insideRatioBufferMeters }
       : {}),
-    ...(options.maxSimplifiedPoints !== undefined ? { maxSimplifiedPoints: options.maxSimplifiedPoints } : {}),
-    ...(options.tieThreshold !== undefined ? { tieThreshold: options.tieThreshold } : {}),
-    ...(options.acceptInsideRatio !== undefined ? { acceptInsideRatio: options.acceptInsideRatio } : {}),
+    ...(options.maxSimplifiedPoints !== undefined
+      ? { maxSimplifiedPoints: options.maxSimplifiedPoints }
+      : {}),
+    ...(options.tieThreshold !== undefined
+      ? { tieThreshold: options.tieThreshold }
+      : {}),
+    ...(options.acceptInsideRatio !== undefined
+      ? { acceptInsideRatio: options.acceptInsideRatio }
+      : {}),
   };
 }

@@ -62,7 +62,11 @@ describe("isVerified", () => {
   });
   it("is true for 'play-verified' (verified or better)", () => {
     expect(
-      isVerified(baseFacility({ verification: { ...verified, status: "play-verified" } })),
+      isVerified(
+        baseFacility({
+          verification: { ...verified, status: "play-verified" },
+        }),
+      ),
     ).toBe(true);
   });
 });
@@ -72,7 +76,9 @@ describe("hasOwnUrl", () => {
     expect(hasOwnUrl(baseFacility())).toBe(false);
   });
   it("is false for a whitespace-only url", () => {
-    expect(hasOwnUrl(baseFacility({ url: "   " as Facility["url"] }))).toBe(false);
+    expect(hasOwnUrl(baseFacility({ url: "   " as Facility["url"] }))).toBe(
+      false,
+    );
   });
   it("is true for a real url", () => {
     expect(hasOwnUrl(baseFacility({ url: "https://example.com" }))).toBe(true);
@@ -89,7 +95,9 @@ describe("hasSourcedBlurb — the real Facility.blurb field", () => {
   it("is true for a blurb of 40+ characters", () => {
     expect(
       hasSourcedBlurb(
-        baseFacility({ blurb: "A championship-length parkland course opened in 1998." }),
+        baseFacility({
+          blurb: "A championship-length parkland course opened in 1998.",
+        }),
       ),
     ).toBe(true);
   });
@@ -143,7 +151,9 @@ describe("hasSourcedCourseFact — excludes mandatory name/holes", () => {
           name: "Bear Trace",
           holes: 18,
           prov: { name: "operator", holes: "operator" },
-          tees: [{ name: "Blue", yards: 6800, source, checkedAt: "2026-09-24" }],
+          tees: [
+            { name: "Blue", yards: 6800, source, checkedAt: "2026-09-24" },
+          ],
         },
       ],
     });
@@ -156,11 +166,15 @@ describe("hasVerifiedAmenity — only value: true counts", () => {
     expect(hasVerifiedAmenity(baseFacility())).toBe(false);
   });
   it("is false when every amenity entry is a sourced-and-confirmed ABSENCE (value: false)", () => {
-    const f = baseFacility({ amenities: [{ key: "cart-rental", value: false, source }] });
+    const f = baseFacility({
+      amenities: [{ key: "cart-rental", value: false, source }],
+    });
     expect(hasVerifiedAmenity(f)).toBe(false);
   });
   it("is true with at least one value:true amenity", () => {
-    const f = baseFacility({ amenities: [{ key: "cart-rental", value: true, source }] });
+    const f = baseFacility({
+      amenities: [{ key: "cart-rental", value: true, source }],
+    });
     expect(hasVerifiedAmenity(f)).toBe(true);
   });
   it("is true when a false and a true entry are both present", () => {
@@ -188,7 +202,10 @@ describe("isIndexable — the R1 predicate (§5.1)", () => {
   });
 
   it("is true when verified with an own url", () => {
-    const f = baseFacility({ verification: verified, url: "https://example.com" });
+    const f = baseFacility({
+      verification: verified,
+      url: "https://example.com",
+    });
     expect(isIndexable(f)).toBe(true);
     expect(isThinStub(f)).toBe(false);
   });

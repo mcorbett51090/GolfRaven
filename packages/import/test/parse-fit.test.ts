@@ -38,7 +38,9 @@ describe("parseFitFile: golf activity with a GPS track", () => {
     expect(result.round.format).toBe("fit");
     expect(result.round.source).toBe("file_import");
     expect(result.round.fixes).toHaveLength(6);
-    expect(result.round.fixes[0]!.timestamp).toBeLessThan(result.round.fixes[5]!.timestamp);
+    expect(result.round.fixes[0]!.timestamp).toBeLessThan(
+      result.round.fixes[5]!.timestamp,
+    );
     expect(result.round.startedAt).toBe(result.round.fixes[0]!.timestamp);
     expect(result.round.endedAt).toBe(result.round.fixes[5]!.timestamp);
     expect(result.round.localDate).toBeUndefined();
@@ -122,18 +124,25 @@ describe("parseFitFile: golf activity without a track (routeless)", () => {
 
 describe("parseFitFile: a corrupt file", () => {
   it("is refused rather than throwing", async () => {
-    const valid = buildGolfActivityFit({ records: trackAround(3, new Date("2026-06-01T14:00:00Z")) });
+    const valid = buildGolfActivityFit({
+      records: trackAround(3, new Date("2026-06-01T14:00:00Z")),
+    });
     const corrupt = corruptFitRecordBytes(valid);
 
     await expect(parseFitFile(corrupt)).resolves.toEqual(
-      expect.objectContaining({ ok: false, error: expect.stringContaining("FIT") }),
+      expect.objectContaining({
+        ok: false,
+        error: expect.stringContaining("FIT"),
+      }),
     );
   });
 });
 
 describe("parseFitFile: a truncated file", () => {
   it("is refused rather than throwing", async () => {
-    const valid = buildGolfActivityFit({ records: trackAround(10, new Date("2026-06-01T14:00:00Z")) });
+    const valid = buildGolfActivityFit({
+      records: trackAround(10, new Date("2026-06-01T14:00:00Z")),
+    });
     const truncated = truncateFit(valid, Math.floor(valid.length * 0.6));
 
     const result = await parseFitFile(truncated);
@@ -158,7 +167,9 @@ describe("parseFitFile: unmapped FIT messages (scorecard stand-in)", () => {
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(2);
     expect(result.round.warnings.some((w) => w.includes("65280"))).toBe(true);
-    expect(result.round.warnings.some((w) => w.toLowerCase().includes("scorecard"))).toBe(true);
+    expect(
+      result.round.warnings.some((w) => w.toLowerCase().includes("scorecard")),
+    ).toBe(true);
   });
 });
 
@@ -168,7 +179,9 @@ describe("parseFitFile: non-golf sport", () => {
     const result = await parseFitFile(bytes);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.round.warnings.some((w) => w.toLowerCase().includes("not golf"))).toBe(true);
+    expect(
+      result.round.warnings.some((w) => w.toLowerCase().includes("not golf")),
+    ).toBe(true);
   });
 });
 
@@ -176,24 +189,48 @@ describe("parseFitFile: invalid record coordinates", () => {
   it("drops an out-of-range fix and warns, keeping the rest of the round", async () => {
     const startTime = new Date("2026-06-01T14:00:00Z");
     const enc = new FitEncoder();
-    enc.writeMessage(0, [{ number: 1, size: 2, baseType: FitBaseType.Uint16, value: 1 }]);
+    enc.writeMessage(0, [
+      { number: 1, size: 2, baseType: FitBaseType.Uint16, value: 1 },
+    ]);
     enc.writeMessage(18, [
-      { number: 2, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(startTime) },
+      {
+        number: 2,
+        size: 4,
+        baseType: FitBaseType.Uint32,
+        value: FitEncoder.toFitTimestamp(startTime),
+      },
       { number: 5, size: 1, baseType: FitBaseType.Enum, value: 25 },
       {
         number: 253,
         size: 4,
         baseType: FitBaseType.Uint32,
-        value: FitEncoder.toFitTimestamp(new Date(startTime.getTime() + 3600_000)),
+        value: FitEncoder.toFitTimestamp(
+          new Date(startTime.getTime() + 3600_000),
+        ),
       },
     ]);
     // A valid record.
     enc.writeMessage(
       20,
       [
-        { number: 0, size: 4, baseType: FitBaseType.Sint32, value: toSemicircles(COURSE_LAT) },
-        { number: 1, size: 4, baseType: FitBaseType.Sint32, value: toSemicircles(COURSE_LON) },
-        { number: 253, size: 4, baseType: FitBaseType.Uint32, value: FitEncoder.toFitTimestamp(startTime) },
+        {
+          number: 0,
+          size: 4,
+          baseType: FitBaseType.Sint32,
+          value: toSemicircles(COURSE_LAT),
+        },
+        {
+          number: 1,
+          size: 4,
+          baseType: FitBaseType.Sint32,
+          value: toSemicircles(COURSE_LON),
+        },
+        {
+          number: 253,
+          size: 4,
+          baseType: FitBaseType.Uint32,
+          value: FitEncoder.toFitTimestamp(startTime),
+        },
       ],
       1,
     );
@@ -203,13 +240,25 @@ describe("parseFitFile: invalid record coordinates", () => {
     enc.writeMessage(
       20,
       [
-        { number: 0, size: 4, baseType: FitBaseType.Sint32, value: toSemicircles(100) },
-        { number: 1, size: 4, baseType: FitBaseType.Sint32, value: toSemicircles(COURSE_LON) },
+        {
+          number: 0,
+          size: 4,
+          baseType: FitBaseType.Sint32,
+          value: toSemicircles(100),
+        },
+        {
+          number: 1,
+          size: 4,
+          baseType: FitBaseType.Sint32,
+          value: toSemicircles(COURSE_LON),
+        },
         {
           number: 253,
           size: 4,
           baseType: FitBaseType.Uint32,
-          value: FitEncoder.toFitTimestamp(new Date(startTime.getTime() + 60_000)),
+          value: FitEncoder.toFitTimestamp(
+            new Date(startTime.getTime() + 60_000),
+          ),
         },
       ],
       1,
@@ -254,16 +303,24 @@ describe("parseFitFile: CRC mismatch and missing CRC", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(2);
-    expect(result.round.warnings.some((w) => w.toLowerCase().includes("crc"))).toBe(true);
+    expect(
+      result.round.warnings.some((w) => w.toLowerCase().includes("crc")),
+    ).toBe(true);
   });
 
   it("warns (nit) when the file has no trailing CRC at all, distinctly from a mismatch", async () => {
-    const bytes = buildGolfActivityFit({ records: trackAround(2, new Date("2026-06-01T14:00:00Z")) });
+    const bytes = buildGolfActivityFit({
+      records: trackAround(2, new Date("2026-06-01T14:00:00Z")),
+    });
     const noCrc = truncateFit(bytes, bytes.length - 2);
     const result = await parseFitFile(noCrc);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(2);
-    expect(result.round.warnings.some((w) => w.toLowerCase().includes("no trailing crc"))).toBe(true);
+    expect(
+      result.round.warnings.some((w) =>
+        w.toLowerCase().includes("no trailing crc"),
+      ),
+    ).toBe(true);
   });
 });

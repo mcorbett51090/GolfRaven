@@ -88,8 +88,7 @@ export interface LoadCatalogFromBundleOptions {
   bundle: unknown;
 }
 export type LoadCatalogOptions =
-  | LoadCatalogFromDirOptions
-  | LoadCatalogFromBundleOptions;
+  LoadCatalogFromDirOptions | LoadCatalogFromBundleOptions;
 
 function isEnoent(err: unknown): boolean {
   return (
@@ -142,7 +141,9 @@ async function readJsonFileOptional<T>(
 
 /** Loads a `Catalog` from a `data/`-shaped directory. See this module's
  * doc, path (a). */
-export async function loadCatalogFromDataDir(dataDir: string): Promise<Catalog> {
+export async function loadCatalogFromDataDir(
+  dataDir: string,
+): Promise<Catalog> {
   const [regions, facilities, trails, designers, achievements, idLedger] =
     await Promise.all([
       readEntityDir(join(dataDir, "regions"), RegionSchema),
@@ -179,7 +180,9 @@ export function loadCatalogFromBundle(bundle: unknown): Catalog {
 
 /** The one entry point (§3.1 row A). Dispatches on which option was given —
  * see `LoadCatalogOptions`. */
-export async function loadCatalog(options: LoadCatalogOptions): Promise<Catalog> {
+export async function loadCatalog(
+  options: LoadCatalogOptions,
+): Promise<Catalog> {
   if ("bundle" in options) {
     return loadCatalogFromBundle(options.bundle);
   }

@@ -39,7 +39,10 @@ import {
   type X4CourseMap,
   type X4VerifyResult,
 } from "./x4-verify.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
 
 export type CheckState =
   | "ran"
@@ -163,7 +166,9 @@ async function runX2FetchStep(
   const fetchedCount = allEntries.filter((e) => e.status === "fetched").length;
   const failedEntries = allEntries.filter((e) => e.status === "failed");
   const blockedHosts = [
-    ...new Set(failedEntries.filter((e) => e.blocked).map((e) => hostOf(e.url))),
+    ...new Set(
+      failedEntries.filter((e) => e.blocked).map((e) => hostOf(e.url)),
+    ),
   ];
 
   if (
@@ -194,7 +199,9 @@ async function runX2FetchStep(
       state: "partial-blocked",
       detail:
         `${fetchedCount}/${allEntries.length} URL(s) fetched into ${dir}; ${failedEntries.length} failed/blocked: ` +
-        failedEntries.map((e) => `${e.url} (${e.blocked ? "blocked" : "failed"})`).join(", "),
+        failedEntries
+          .map((e) => `${e.url} (${e.blocked ? "blocked" : "failed"})`)
+          .join(", "),
     };
   }
   return {
@@ -232,7 +239,9 @@ async function runX4VerifyStep(
     // p0-desk is an unattended desk check, not an operator running the
     // real X4 slate by hand — it never refuses over a partial/custom
     // course map (gate N7's refusal is for `x4-verify` run deliberately).
-    const trailsPresent = [...new Set(Object.values(courseMap).map((e) => e.trail))];
+    const trailsPresent = [
+      ...new Set(Object.values(courseMap).map((e) => e.trail)),
+    ];
     result = await runX4Verify(courseMap, dir, { slateTrails: trailsPresent });
   } catch (err) {
     return {
@@ -259,7 +268,10 @@ async function runX4VerifyStep(
   if (result.anyIndeterminate) {
     const notRun = Object.entries(result.perTrail)
       .filter(([, tc]) => tc.verdict === "not-run")
-      .map(([trail, tc]) => `${trail}: not run — indeterminate (${tc.indeterminateCount})`)
+      .map(
+        ([trail, tc]) =>
+          `${trail}: not run — indeterminate (${tc.indeterminateCount})`,
+      )
       .join("; ");
     return {
       name: "x4-verify",
@@ -293,8 +305,7 @@ export async function runP0Desk(
   opts: RunP0DeskOptions = {},
 ): Promise<P0DeskResult> {
   const runDirExplicit = Boolean(opts.runDir);
-  const runDir =
-    opts.runDir ?? defaultOutsideRepoDir("p0-desk-run");
+  const runDir = opts.runDir ?? defaultOutsideRepoDir("p0-desk-run");
   // Gate finding S7: refuse an accidental write into the source tree; an
   // explicitly-chosen `runDir` (even one inside the repo) is trusted.
   assertOutsideRepoUnlessExplicit(runDir, runDirExplicit);
@@ -309,7 +320,10 @@ export async function runP0Desk(
     ),
   );
   rows.push(
-    await runX2FetchStep(runDir, opts.x2ConfigPath ?? resolveDefaultX2ConfigPath()),
+    await runX2FetchStep(
+      runDir,
+      opts.x2ConfigPath ?? resolveDefaultX2ConfigPath(),
+    ),
   );
   rows.push(
     await runX4VerifyStep(
@@ -319,7 +333,10 @@ export async function runP0Desk(
   );
 
   const exitCode: 0 | 1 = rows.some(
-    (r) => r.state === "blocked" || r.state === "error" || r.state === "partial-blocked",
+    (r) =>
+      r.state === "blocked" ||
+      r.state === "error" ||
+      r.state === "partial-blocked",
   )
     ? 1
     : 0;

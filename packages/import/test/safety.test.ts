@@ -139,7 +139,10 @@ describe("finalizeWarnings", () => {
   });
 
   it("caps at MAX_WARNINGS plus one 'N more' entry", () => {
-    const many = Array.from({ length: MAX_WARNINGS + 25 }, (_, i) => `warning ${i}`);
+    const many = Array.from(
+      { length: MAX_WARNINGS + 25 },
+      (_, i) => `warning ${i}`,
+    );
     const result = finalizeWarnings(many);
     expect(result).toHaveLength(MAX_WARNINGS + 1);
     expect(result[MAX_WARNINGS]).toContain("25");
@@ -161,7 +164,11 @@ describe("capAndSortFixes", () => {
   });
 
   it("truncates to MAX_FIXES with a warning", () => {
-    const fixes = Array.from({ length: MAX_FIXES + 10 }, (_, i) => ({ lat: 0, lon: 0, timestamp: i }));
+    const fixes = Array.from({ length: MAX_FIXES + 10 }, (_, i) => ({
+      lat: 0,
+      lon: 0,
+      timestamp: i,
+    }));
     const { fixes: capped, warnings } = capAndSortFixes(fixes);
     expect(capped).toHaveLength(MAX_FIXES);
     expect(warnings).toHaveLength(1);

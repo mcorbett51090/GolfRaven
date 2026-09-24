@@ -63,7 +63,11 @@ export function findSetHtmlOccurrences(content) {
       // `set:html=` followed by neither `{` nor a quote — still a real
       // attribute use (e.g. a bare/unquoted value); record it generically
       // rather than silently skipping.
-      results.push({ form: "other", raw: "", full: content.slice(idx, i + 40) });
+      results.push({
+        form: "other",
+        raw: "",
+        full: content.slice(idx, i + 40),
+      });
       searchFrom = i + 1;
       continue;
     }
@@ -75,7 +79,11 @@ export function findSetHtmlOccurrences(content) {
       let k = afterToken + 1;
       while (k < content.length && /\s/.test(content[k])) k++;
       if (content[k] === ":") {
-        results.push({ form: "spread-key", raw: "set:html", full: content.slice(idx - 1, k + 1) });
+        results.push({
+          form: "spread-key",
+          raw: "set:html",
+          full: content.slice(idx - 1, k + 1),
+        });
         searchFrom = k + 1;
         continue;
       }

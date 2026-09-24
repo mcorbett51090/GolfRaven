@@ -16,7 +16,9 @@ describe("jsonLdScript — nit: escapes U+2028/U+2029 as well as <", () => {
     expect(html).not.toContain("</script><script>");
   });
   it("escapes U+2028 and U+2029", () => {
-    const html = jsonLdScript([{ name: `line${LINE_SEPARATOR}sep${PARAGRAPH_SEPARATOR}para` }]);
+    const html = jsonLdScript([
+      { name: `line${LINE_SEPARATOR}sep${PARAGRAPH_SEPARATOR}para` },
+    ]);
     expect(html).not.toContain(LINE_SEPARATOR);
     expect(html).not.toContain(PARAGRAPH_SEPARATOR);
     expect(html).toContain("\\u2028");
@@ -50,8 +52,12 @@ describe("normalizeGolfravenEnv / isProductionEnv — case normalisation + close
     expect(normalizeGolfravenEnv("Development")).toBe("development");
   });
   it("rejects an unknown value", () => {
-    expect(() => normalizeGolfravenEnv("prod")).toThrow(/Unknown GOLFRAVEN_ENV/);
-    expect(() => normalizeGolfravenEnv("test")).toThrow(/Unknown GOLFRAVEN_ENV/);
+    expect(() => normalizeGolfravenEnv("prod")).toThrow(
+      /Unknown GOLFRAVEN_ENV/,
+    );
+    expect(() => normalizeGolfravenEnv("test")).toThrow(
+      /Unknown GOLFRAVEN_ENV/,
+    );
   });
   it("isProductionEnv is true only for a case-insensitive 'production'", () => {
     expect(isProductionEnv({ GOLFRAVEN_ENV: "PRODUCTION" })).toBe(true);
@@ -59,7 +65,9 @@ describe("normalizeGolfravenEnv / isProductionEnv — case normalisation + close
     expect(isProductionEnv({})).toBe(false);
   });
   it("isProductionEnv throws on an unknown value rather than treating it as non-production", () => {
-    expect(() => isProductionEnv({ GOLFRAVEN_ENV: "prod" })).toThrow(/Unknown GOLFRAVEN_ENV/);
+    expect(() => isProductionEnv({ GOLFRAVEN_ENV: "prod" })).toThrow(
+      /Unknown GOLFRAVEN_ENV/,
+    );
   });
 });
 
@@ -73,15 +81,15 @@ describe("regionInfo — production refuses the derived-name fallback (gate revi
   });
 
   it("throws in production when no Region record exists for the code", () => {
-    expect(() => regionInfo(catalog, "US-AL", { GOLFRAVEN_ENV: "production" })).toThrow(
-      /Region record/,
-    );
+    expect(() =>
+      regionInfo(catalog, "US-AL", { GOLFRAVEN_ENV: "production" }),
+    ).toThrow(/Region record/);
   });
 
   it("throws the same way for a differently-cased GOLFRAVEN_ENV=Production", () => {
-    expect(() => regionInfo(catalog, "US-AL", { GOLFRAVEN_ENV: "Production" })).toThrow(
-      /Region record/,
-    );
+    expect(() =>
+      regionInfo(catalog, "US-AL", { GOLFRAVEN_ENV: "Production" }),
+    ).toThrow(/Region record/);
   });
 
   it("uses the authored Region record in production when one exists", () => {
@@ -94,7 +102,9 @@ describe("regionInfo — production refuses the derived-name fallback (gate revi
 describe("loadPrimaryTrailOverrides — data/overrides/primary-trail.json (nit: read in the SITE, not packages/catalog)", () => {
   const dirs: string[] = [];
   afterEach(async () => {
-    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+    await Promise.all(
+      dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })),
+    );
   });
 
   it("returns an empty map when the file does not exist", async () => {

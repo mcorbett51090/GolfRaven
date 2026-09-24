@@ -21,7 +21,12 @@
  * every one of them).
  */
 import { describe, expect, it } from "vitest";
-import { scorePlay, type ChallengeKind, type Evidence, type TokenState } from "../src/score-play.js";
+import {
+  scorePlay,
+  type ChallengeKind,
+  type Evidence,
+  type TokenState,
+} from "../src/score-play.js";
 import {
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE,
@@ -43,7 +48,13 @@ import {
 import { oracle } from "./score-play-oracle.js";
 import type { AppFix } from "../src/score-play.js";
 
-const GRADES = ["attested", "unattestable", "failed", "no_token_capable", "no_token_incapable"] as const;
+const GRADES = [
+  "attested",
+  "unattestable",
+  "failed",
+  "no_token_capable",
+  "no_token_incapable",
+] as const;
 type GradeAxis = (typeof GRADES)[number];
 const CHALLENGES: ChallengeKind[] = ["live", "prefetched", "none"];
 const SIMULATED = [false, true];
@@ -79,11 +90,19 @@ function tokenFor(grade: GradeAxis): TokenState {
  * ±10 min boundary (inclusive, per staff-scan window's own "±10 min"
  * wording).
  */
-function buildFix(grade: GradeAxis, challenge: ChallengeKind, simulated: boolean, position: PositionAxis, time: TimeAxis): AppFix {
+function buildFix(
+  grade: GradeAxis,
+  challenge: ChallengeKind,
+  simulated: boolean,
+  position: PositionAxis,
+  time: TimeAxis,
+): AppFix {
   const geometryKind = position === "radius" ? "radius" : "polygon";
-  const insideBuffer = position === "inside" || position === "edge" || position === "radius";
+  const insideBuffer =
+    position === "inside" || position === "edge" || position === "radius";
   const accuracyMeters = position === "edge" ? 50 : 10;
-  const verificationTier = position === "radius" ? "listed-verified" : "play-verified";
+  const verificationTier =
+    position === "radius" ? "listed-verified" : "play-verified";
   let localDate = PLAY_LOCAL_DATE;
   let capturedAt = PLAY_LOCAL_DATE_MS;
   if (time === "tz_boundary") {
@@ -136,23 +155,40 @@ function buildCase(
 
   switch (classId) {
     case "staff_presence_hard":
-      return { ...base, evidence: [staffPresence({ coSignalFix: fix })], deviceOnly: false };
+      return {
+        ...base,
+        evidence: [staffPresence({ coSignalFix: fix })],
+        deviceOnly: false,
+      };
     case "staff_presence_soft":
       return { ...base, evidence: [staffPresence({})], deviceOnly: false };
     case "vendor_sensor":
       return {
         ...base,
-        evidence: [vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true })],
+        evidence: [
+          vendorRound("garmin", {
+            vendorCourseMapped: true,
+            sensorProvenance: true,
+          }),
+        ],
         deviceOnly: false,
       };
     case "self_posted":
       return { ...base, evidence: [ghin({})], deviceOnly: false };
     case "booking_hard":
-      return { ...base, evidence: [booking({ presenceFix: fix })], deviceOnly: false };
+      return {
+        ...base,
+        evidence: [booking({ presenceFix: fix })],
+        deviceOnly: false,
+      };
     case "booking_alone":
       return { ...base, evidence: [booking({})], deviceOnly: false };
     case "receipt_green_fee":
-      return { ...base, evidence: [receipt({ status: "approved", coSignalFix: fix })], deviceOnly: false };
+      return {
+        ...base,
+        evidence: [receipt({ status: "approved", coSignalFix: fix })],
+        deviceOnly: false,
+      };
     case "health_route":
       return {
         ...base,
@@ -160,7 +196,8 @@ function buildCase(
           healthRoute({
             simulated,
             geometryKind: geometryKindFromPosition,
-            insideRatio: position === "inside" || position === "edge" ? 0.9 : 0.65,
+            insideRatio:
+              position === "inside" || position === "edge" ? 0.9 : 0.65,
           }),
         ],
         deviceOnly: true,
@@ -186,17 +223,27 @@ function buildCase(
         deviceOnly: true,
       };
     case "foreground_dwell": {
-      const checkoutFix: AppFix = { ...fix, capturedAt: fix.capturedAt + 95 * 60_000 };
+      const checkoutFix: AppFix = {
+        ...fix,
+        capturedAt: fix.capturedAt + 95 * 60_000,
+      };
       return {
         ...base,
-        evidence: [dwell({ checkinFix: fix, checkoutFix, apartMinutes: 95, holes: 18 })],
+        evidence: [
+          dwell({ checkinFix: fix, checkoutFix, apartMinutes: 95, holes: 18 }),
+        ],
         deviceOnly: true,
       };
     }
     case "file_import":
       return {
         ...base,
-        evidence: [fileImport({ matchedRoute: true, geometryKind: geometryKindFromPosition })],
+        evidence: [
+          fileImport({
+            matchedRoute: true,
+            geometryKind: geometryKindFromPosition,
+          }),
+        ],
         deviceOnly: true,
       };
     case "foreground_checkin":
@@ -209,7 +256,12 @@ function buildCase(
       return {
         ...base,
         evidence: [],
-        purchases: [{ facilityId: PLAY_FACILITY_ID, localDate: time === "tz_boundary" ? "2026-06-02" : PLAY_LOCAL_DATE }],
+        purchases: [
+          {
+            facilityId: PLAY_FACILITY_ID,
+            localDate: time === "tz_boundary" ? "2026-06-02" : PLAY_LOCAL_DATE,
+          },
+        ],
         deviceOnly: false,
       };
     default:
@@ -243,7 +295,14 @@ function* generate(): Generator<GeneratedCase> {
         for (const simulated of SIMULATED) {
           for (const position of POSITIONS) {
             for (const time of TIMES) {
-              yield buildCase(classId, grade, challenge, simulated, position, time);
+              yield buildCase(
+                classId,
+                grade,
+                challenge,
+                simulated,
+                position,
+                time,
+              );
             }
           }
         }
@@ -281,7 +340,9 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
       const ctx = baseCtx(c.purchases ? { purchases: c.purchases } : {});
       const result = scorePlay(c.evidence, ctx);
       if (result.score_monetary >= 0.85) {
-        violations.push(`${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`);
+        violations.push(
+          `${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`,
+        );
       }
     }
     expect(violations).toEqual([]);
@@ -294,7 +355,9 @@ describe("scorePlay — §10 P3 AT(4) exhaustive money-invariant properties", ()
       if (oracle(c.evidence, ctx)) continue; // this case DOES carry a qualifying fix — not in scope for this property
       const result = scorePlay(c.evidence, ctx);
       if (result.money) {
-        violations.push(`${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`);
+        violations.push(
+          `${c.classId}/${c.grade}/${c.challenge}/${c.simulated}/${c.position}/${c.time}`,
+        );
       }
     }
     expect(violations).toEqual([]);

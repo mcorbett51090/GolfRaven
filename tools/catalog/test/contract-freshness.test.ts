@@ -13,7 +13,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { checkContract } from "../src/verify-contract.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const REPO_ROOT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+);
 const CONTRACT_PATH = join(REPO_ROOT, "contract", "catalog.schema.json");
 
 describe("contract/catalog.schema.json freshness", () => {

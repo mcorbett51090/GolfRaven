@@ -28,8 +28,16 @@ import type { RawExerciseSessionRecord, RouteFollowUpResult } from "./types.js";
 import { shapeGolfSessions, shapeRouteFollowUp } from "./shape.js";
 import type { GolfSessionReadResult } from "./types.js";
 
-export type { GolfSessionReadResult, GolfSessionSummary, RouteFollowUpResult } from "./types.js";
-export { shapeGolfSessions, shapeRouteFollowUp, EXERCISE_TYPE_GOLF } from "./shape.js";
+export type {
+  GolfSessionReadResult,
+  GolfSessionSummary,
+  RouteFollowUpResult,
+} from "./types.js";
+export {
+  shapeGolfSessions,
+  shapeRouteFollowUp,
+  EXERCISE_TYPE_GOLF,
+} from "./shape.js";
 
 /** Thrown when Health Connect itself isn't usable on this device (not
  * installed, or the installed provider is too old). The X1 harness
@@ -89,9 +97,13 @@ export async function ensureHealthConnectReady(): Promise<void> {
  * shipped .d.ts, not from a real device]`
  */
 export async function requestGolfReadPermission(): Promise<void> {
-  const granted = await requestPermission([{ accessType: "read", recordType: "ExerciseSession" }]);
+  const granted = await requestPermission([
+    { accessType: "read", recordType: "ExerciseSession" },
+  ]);
   const hasExerciseRead = granted.some(
-    (permission) => permission.accessType === "read" && permission.recordType === "ExerciseSession",
+    (permission) =>
+      permission.accessType === "read" &&
+      permission.recordType === "ExerciseSession",
   );
   if (!hasExerciseRead) {
     throw new HealthConnectPermissionDeniedError();
@@ -103,7 +115,9 @@ export async function requestGolfReadPermission(): Promise<void> {
  * days and shapes them for the X1 memo. Call `ensureHealthConnectReady`
  * and `requestGolfReadPermission` first.
  */
-export async function readGolfSessions(windowDays = 30): Promise<GolfSessionReadResult> {
+export async function readGolfSessions(
+  windowDays = 30,
+): Promise<GolfSessionReadResult> {
   const now = new Date();
   const start = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
 
@@ -115,15 +129,18 @@ export async function readGolfSessions(windowDays = 30): Promise<GolfSessionRead
   const allRecords: RawExerciseSessionRecord[] = [];
   let pageToken: string | undefined;
   do {
-    const { records, pageToken: nextPageToken } = await readRecords("ExerciseSession", {
-      timeRangeFilter: {
-        operator: "between",
-        startTime: start.toISOString(),
-        endTime: now.toISOString(),
+    const { records, pageToken: nextPageToken } = await readRecords(
+      "ExerciseSession",
+      {
+        timeRangeFilter: {
+          operator: "between",
+          startTime: start.toISOString(),
+          endTime: now.toISOString(),
+        },
+        ascendingOrder: false,
+        pageToken,
       },
-      ascendingOrder: false,
-      pageToken,
-    });
+    );
     // The library's ExerciseSessionRecordResult is a structural superset of
     // RawExerciseSessionRecord (see types.ts), so this is a safe narrowing
     // cast, not an unsound one — every field shape.ts reads is present.
@@ -165,7 +182,9 @@ export async function fetchConsentRequiredRouteFollowUp(
  * memo quotes (build plan §10 P0, row X1: "exports them as JSON for the
  * X1 memo").
  */
-export async function runX1HealthConnectCheck(windowDays = 30): Promise<string> {
+export async function runX1HealthConnectCheck(
+  windowDays = 30,
+): Promise<string> {
   await ensureHealthConnectReady();
   await requestGolfReadPermission();
   const result = await readGolfSessions(windowDays);

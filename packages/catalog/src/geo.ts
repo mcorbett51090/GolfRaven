@@ -42,7 +42,8 @@ function offsetCoordinate(
   meters: number,
 ): { lat: number; lng: number } {
   const metersPerDegreeLat = (Math.PI / 180) * EARTH_RADIUS_METERS;
-  const metersPerDegreeLng = metersPerDegreeLat * Math.cos(toRadians(coord.lat));
+  const metersPerDegreeLng =
+    metersPerDegreeLat * Math.cos(toRadians(coord.lat));
   switch (bearing) {
     case "N":
       return { lat: coord.lat + meters / metersPerDegreeLat, lng: coord.lng };

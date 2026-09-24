@@ -42,11 +42,17 @@ const ALLOWED_EXTERNAL_ORIGIN = "https://challenges.cloudflare.com";
 const externalRefs = [
   ...html.matchAll(/(?:src|href)="((?:https?:)?\/\/[^"]+)"/g),
 ].map((m) => m[1]);
-const disallowedHtmlRefs = externalRefs.filter((ref) => !ref.startsWith(ALLOWED_EXTERNAL_ORIGIN));
+const disallowedHtmlRefs = externalRefs.filter(
+  (ref) => !ref.startsWith(ALLOWED_EXTERNAL_ORIGIN),
+);
 if (disallowedHtmlRefs.length > 0) {
-  fail(`found disallowed external script/link references: ${disallowedHtmlRefs.join(", ")}`);
+  fail(
+    `found disallowed external script/link references: ${disallowedHtmlRefs.join(", ")}`,
+  );
 } else {
-  ok(`no external script/link references in index.html beyond ${ALLOWED_EXTERNAL_ORIGIN}`);
+  ok(
+    `no external script/link references in index.html beyond ${ALLOWED_EXTERNAL_ORIGIN}`,
+  );
 }
 
 // main.js injects the Turnstile script dynamically (not a static <script
@@ -54,23 +60,33 @@ if (disallowedHtmlRefs.length > 0) {
 // separately for ANY hardcoded http(s) URL and require every one to be
 // the allowed origin. This is what actually guards against a stray
 // third-party URL sneaking into the injected-script path.
-const jsUrlRefs = [...mainJs.matchAll(/https?:\/\/[^"'\s)]+/g)].map((m) => m[0]);
-const disallowedJsRefs = jsUrlRefs.filter((ref) => !ref.startsWith(ALLOWED_EXTERNAL_ORIGIN));
+const jsUrlRefs = [...mainJs.matchAll(/https?:\/\/[^"'\s)]+/g)].map(
+  (m) => m[0],
+);
+const disallowedJsRefs = jsUrlRefs.filter(
+  (ref) => !ref.startsWith(ALLOWED_EXTERNAL_ORIGIN),
+);
 if (disallowedJsRefs.length > 0) {
-  fail(`found disallowed external URL(s) in main.js: ${disallowedJsRefs.join(", ")}`);
+  fail(
+    `found disallowed external URL(s) in main.js: ${disallowedJsRefs.join(", ")}`,
+  );
 } else {
   ok(`main.js references no external URL beyond ${ALLOWED_EXTERNAL_ORIGIN}`);
 }
 
 // Local scripts referenced are exactly config.js and main.js (plus the
 // local stylesheet) — nothing else is loaded.
-const localScripts = [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1]);
+const localScripts = [...html.matchAll(/<script src="([^"]+)"/g)].map(
+  (m) => m[1],
+);
 const expectedScripts = ["config.js", "main.js"];
 if (
   localScripts.length !== expectedScripts.length ||
   !expectedScripts.every((s) => localScripts.includes(s))
 ) {
-  fail(`expected scripts ${expectedScripts.join(", ")}, found ${localScripts.join(", ")}`);
+  fail(
+    `expected scripts ${expectedScripts.join(", ")}, found ${localScripts.join(", ")}`,
+  );
 } else {
   ok("only the expected local scripts are loaded");
 }
@@ -107,7 +123,9 @@ for (const needle of requiredStrings) {
   }
 }
 if (requiredStrings.every((needle) => html.includes(needle))) {
-  ok("all required copy present (trails, finisher's marker, double opt-in, 16+, unsubscribe)");
+  ok(
+    "all required copy present (trails, finisher's marker, double opt-in, 16+, unsubscribe)",
+  );
 }
 
 // Deploy guard (gate review S5): the page must not ship with the
@@ -121,13 +139,17 @@ const hasPlaceholder = placeholderPattern.test(html);
 if (process.env.DEPLOY === "1") {
   if (hasPlaceholder) {
     fail(
-      "index.html still contains an [OPERATING ENTITY NAME…]/[CONTACT EMAIL…] placeholder and DEPLOY=1 is set — fill these in before deploying (see README.md \"Before this page goes live\")",
+      'index.html still contains an [OPERATING ENTITY NAME…]/[CONTACT EMAIL…] placeholder and DEPLOY=1 is set — fill these in before deploying (see README.md "Before this page goes live")',
     );
   } else {
-    ok("no [OPERATING ENTITY NAME…]/[CONTACT EMAIL…] placeholders found (DEPLOY=1 checked)");
+    ok(
+      "no [OPERATING ENTITY NAME…]/[CONTACT EMAIL…] placeholders found (DEPLOY=1 checked)",
+    );
   }
 } else if (hasPlaceholder) {
-  ok("placeholders present but DEPLOY=1 is not set — not blocking a non-deploy build");
+  ok(
+    "placeholders present but DEPLOY=1 is not set — not blocking a non-deploy build",
+  );
 }
 
 if (failures > 0) {

@@ -19,12 +19,19 @@
  * other than `failed`; inside the polygon+50m of a `play-verified`
  * facility; on the play's facility-local date.
  */
-import type { AppFix, Evidence, ScorePlayContext, TokenState } from "../src/score-play.js";
+import type {
+  AppFix,
+  Evidence,
+  ScorePlayContext,
+  TokenState,
+} from "../src/score-play.js";
 
 /** G3-08, re-derived independently: "a submission that carries no token is
  * graded at intake: on hardware that supports attestation it is `failed`,
  * and otherwise `unattestable`." */
-function oracleGrade(token: TokenState): "attested" | "unattestable" | "failed" {
+function oracleGrade(
+  token: TokenState,
+): "attested" | "unattestable" | "failed" {
   if (token.present) return token.grade;
   return token.hardwareSupportsAttestation ? "failed" : "unattestable";
 }
@@ -34,10 +41,14 @@ function oracleGrade(token: TokenState): "attested" | "unattestable" | "failed" 
 function oracleFixesOf(evidence: Evidence[]): AppFix[] {
   const fixes: AppFix[] = [];
   for (const row of evidence) {
-    if (row.source === "staff_presence" && row.coSignalFix) fixes.push(row.coSignalFix);
-    if (row.source === "booking" && row.presenceFix) fixes.push(row.presenceFix);
-    if (row.source === "receipt_green_fee" && row.coSignalFix) fixes.push(row.coSignalFix);
-    if (row.source === "foreground_dwell") fixes.push(row.checkinFix, row.checkoutFix);
+    if (row.source === "staff_presence" && row.coSignalFix)
+      fixes.push(row.coSignalFix);
+    if (row.source === "booking" && row.presenceFix)
+      fixes.push(row.presenceFix);
+    if (row.source === "receipt_green_fee" && row.coSignalFix)
+      fixes.push(row.coSignalFix);
+    if (row.source === "foreground_dwell")
+      fixes.push(row.checkinFix, row.checkoutFix);
     if (row.source === "foreground_checkin") fixes.push(row.fix);
   }
   return fixes;
@@ -68,5 +79,7 @@ function oracleFixQualifies(fix: AppFix, playLocalDate: string): boolean {
  * same simplification `computePresenceSignal` documents on the scorer
  * side, arrived at independently here from the AT(4) wording itself. */
 export function oracle(evidence: Evidence[], ctx: ScorePlayContext): boolean {
-  return oracleFixesOf(evidence).some((fix) => oracleFixQualifies(fix, ctx.playLocalDate));
+  return oracleFixesOf(evidence).some((fix) =>
+    oracleFixQualifies(fix, ctx.playLocalDate),
+  );
 }

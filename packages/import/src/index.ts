@@ -32,7 +32,11 @@ export {
   MAX_TEXT_FIELD_CHARS,
 } from "./safety.js";
 
-export { MAX_FIT_MESSAGES, MAX_FIT_DEFINITION_FIELDS, KNOWN_FIT_MESSAGE_NUMBERS } from "./fit-prescan.js";
+export {
+  MAX_FIT_MESSAGES,
+  MAX_FIT_DEFINITION_FIELDS,
+  KNOWN_FIT_MESSAGE_NUMBERS,
+} from "./fit-prescan.js";
 
 export { parseStrictTimestamp, localDateForTz } from "./timestamps.js";
 export type { StrictTimestamp } from "./timestamps.js";

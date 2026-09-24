@@ -48,7 +48,10 @@ function evenlySpacedFixes(intervalMinutes: number, hours: number) {
 describe("should-fix 1: Connect IQ sampling constraint (apps/ciq/README.md)", () => {
   it("an 8-fix Connect IQ trace over 3 hours (~25.7 min between fixes — far past the documented ≤10 min ceiling) is too sparse to match → typeahead", () => {
     const points = Array.from({ length: 8 }, (_, i) => loopPoint(i, 8));
-    const outcome = matchRoute({ fixes: fixesAlong(points, 0, 3 * HOUR), candidates: [A] });
+    const outcome = matchRoute({
+      fixes: fixesAlong(points, 0, 3 * HOUR),
+      candidates: [A],
+    });
     expect(outcome.kind).toBe("typeahead");
     expect(outcome.summary.observedCoverage).toBeLessThan(0.5);
   });

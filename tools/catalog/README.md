@@ -91,7 +91,7 @@ allow-list, and pass its own gate. Neither is possible any more:
 
 ### `OfferTerms` (S6, gate review post-e9b3ab0)
 
-`OfferTerms` needs no `RuleExpr` (only DB-side offer *instances* do, §4.1)
+`OfferTerms` needs no `RuleExpr` (only DB-side offer _instances_ do, §4.1)
 and is implemented in `packages/catalog`. `bundle.offerTerms[]` carries any
 for a run; `OFFER_TERMS_QC_MISSING_FR` fires when one is linked to a trail
 whose `regions` include `CA-QC` and it has no `termsFr`.
@@ -321,7 +321,7 @@ now has a tight, dedicated Zod schema, not a bare `z.string().min(1)`:
 `verifyArtifact(dir, { trustedKeys, revokedKids, minCatalogVersion?,
 supportedContractMajor? })` — `revokedKids` is a `Set<string>` (or array)
 the CALLER maintains: the verifier's own compiled denylist, unioned with
-every `revokedKids[]` a *previous* `verifyArtifact` call already accepted.
+every `revokedKids[]` a _previous_ `verifyArtifact` call already accepted.
 On success, the result carries `revokedKids: string[]` — the just-verified
 manifest's own list — so the caller can union it in before the next run.
 Two refusal paths, both named `REVOKED_KID`: the manifest's signing `kid`
@@ -332,8 +332,8 @@ and separately, the manifest lists its own signing `kid` in its own
 
 #### Open risk for the P3 signing-environment gate (§4.8) — NOT fixed here
 
-§3.5's rule is *"a list signed by any non-revoked key; the app stops
-trusting those keys at once"* — i.e., **any** currently-non-revoked key in
+§3.5's rule is _"a list signed by any non-revoked key; the app stops
+trusting those keys at once"_ — i.e., **any** currently-non-revoked key in
 the compiled keyset may publish a manifest revoking **any other** key in
 that keyset, including all of them but itself. This module implements
 that rule literally (`verifyArtifact` trusts a `revokedKids[]` list signed
@@ -369,8 +369,8 @@ for that gate to weigh (owner decides at P3):
   on revocation lists specifically (mirrors §4.8's "GitHub protected
   environment with required reviewers" for signing generally).
 
-Before P3 this is lower-stakes (§3.5: *"P1–P2 ... sign with a pre-P3
-keyset that no app build ever compiles in"* — a pre-P3 keyset compromise
+Before P3 this is lower-stakes (§3.5: _"P1–P2 ... sign with a pre-P3
+keyset that no app build ever compiles in"_ — a pre-P3 keyset compromise
 can't strand a real app install), which is exactly why it's being
 recorded now rather than fixed under time pressure: the pre-P3 window is
 the cheap time to have this conversation, before the production keyset

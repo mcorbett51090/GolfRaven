@@ -67,20 +67,26 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   // `bytes` may be a view over a larger buffer (e.g. a slice from a
   // multipart upload) — copy out exactly its own range so the parser
   // never reads bytes that aren't part of this file.
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
 }
 
 function deviceStringFrom(parsed: ParsedFit): string | undefined {
   const fileId = parsed.file_ids?.[0];
   if (!fileId) return undefined;
-  const manufacturer = typeof fileId.manufacturer === "string" ? fileId.manufacturer : undefined;
+  const manufacturer =
+    typeof fileId.manufacturer === "string" ? fileId.manufacturer : undefined;
   const product =
     fileId.product_name && fileId.product_name.length > 0
       ? fileId.product_name
       : fileId.product !== undefined
         ? String(fileId.product)
         : undefined;
-  const parts = [manufacturer, product].filter((v): v is string => v !== undefined && v.length > 0);
+  const parts = [manufacturer, product].filter(
+    (v): v is string => v !== undefined && v.length > 0,
+  );
   return parts.length > 0 ? sanitizeText(parts.join(" ")) : undefined;
 }
 
@@ -89,8 +95,12 @@ function deviceStringFrom(parsed: ParsedFit): string | undefined {
  * seconds are never adjusted for a real-world UTC offset by the decoder,
  * so reading the resulting `Date`'s *UTC* calendar fields back out gives
  * the intended local calendar date, not a re-shifted one. */
-function localDateFromLocalTimestamp(date: Date | undefined): string | undefined {
-  return date && Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : undefined;
+function localDateFromLocalTimestamp(
+  date: Date | undefined,
+): string | undefined {
+  return date && Number.isFinite(date.getTime())
+    ? date.toISOString().slice(0, 10)
+    : undefined;
 }
 
 /** Parses a FIT file's bytes. Pure aside from the decode itself (no
@@ -103,12 +113,18 @@ function localDateFromLocalTimestamp(date: Date | undefined): string | undefined
  * run this inside a worker with its own hard timeout as the outermost
  * layer; `signal` support here is a cooperative fast-exit, not a
  * substitute for that. */
-export async function parseFitFile(bytes: Uint8Array, options: ParseFitOptions = {}): Promise<ImportResult> {
+export async function parseFitFile(
+  bytes: Uint8Array,
+  options: ParseFitOptions = {},
+): Promise<ImportResult> {
   const sizeError = checkInputSize(bytes.byteLength, MAX_FIT_INPUT_BYTES);
   if (sizeError) return { ok: false, error: finalizeError(sizeError) };
   if (options.signal?.aborted) return { ok: false, error: "aborted" };
 
-  const scan = prescanFit(bytes, options.signal !== undefined ? { signal: options.signal } : {});
+  const scan = prescanFit(
+    bytes,
+    options.signal !== undefined ? { signal: options.signal } : {},
+  );
   if (!scan.ok) {
     return { ok: false, error: finalizeError(scan.error) };
   }
@@ -142,24 +158,34 @@ export async function parseFitFile(bytes: Uint8Array, options: ParseFitOptions =
 
   const sessions = parsed.sessions ?? [];
   if (sessions.length > 1) {
-    warnings.push(`FIT file has ${sessions.length} sessions; only the first is used`);
+    warnings.push(
+      `FIT file has ${sessions.length} sessions; only the first is used`,
+    );
   }
   const session: ParsedSession | undefined = sessions[0];
 
   if (session?.sport !== undefined && session.sport !== GOLF_SPORT) {
-    warnings.push(`FIT session sport is "${truncateEcho(String(session.sport))}", not golf — imported anyway`);
+    warnings.push(
+      `FIT session sport is "${truncateEcho(String(session.sport))}", not golf — imported anyway`,
+    );
   }
 
   const fixesRaw: ImportedFix[] = [];
   for (const rec of parsed.records ?? []) {
-    if (rec.position_lat === undefined || rec.position_long === undefined || !rec.timestamp) {
+    if (
+      rec.position_lat === undefined ||
+      rec.position_long === undefined ||
+      !rec.timestamp
+    ) {
       continue;
     }
     const lat = rec.position_lat;
     const lon = rec.position_long;
     const timestamp = rec.timestamp.getTime();
     if (!isValidLat(lat) || !isValidLon(lon) || !Number.isFinite(timestamp)) {
-      warnings.push("a FIT record had an invalid lat/lon/timestamp and was dropped");
+      warnings.push(
+        "a FIT record had an invalid lat/lon/timestamp and was dropped",
+      );
       continue;
     }
     const accuracyMeters = sanitizeAccuracy(rec.gps_accuracy);
@@ -177,7 +203,10 @@ export async function parseFitFile(bytes: Uint8Array, options: ParseFitOptions =
   warnings.push(...scorecard.warnings);
 
   const device = deviceStringFrom(parsed);
-  const courseNameHint = scorecard.courseNameHint !== undefined ? sanitizeText(scorecard.courseNameHint) : undefined;
+  const courseNameHint =
+    scorecard.courseNameHint !== undefined
+      ? sanitizeText(scorecard.courseNameHint)
+      : undefined;
 
   const round: ImportedRound = {
     source: "file_import",
@@ -188,7 +217,9 @@ export async function parseFitFile(bytes: Uint8Array, options: ParseFitOptions =
     ...(courseNameHint !== undefined ? { courseNameHint } : {}),
     ...(scorecard.holes !== undefined ? { holes: scorecard.holes } : {}),
     ...(scorecard.scores !== undefined ? { scores: scorecard.scores } : {}),
-    ...(scorecard.totalScore !== undefined ? { totalScore: scorecard.totalScore } : {}),
+    ...(scorecard.totalScore !== undefined
+      ? { totalScore: scorecard.totalScore }
+      : {}),
   };
 
   if (fixes.length > 0) {
@@ -202,17 +233,25 @@ export async function parseFitFile(bytes: Uint8Array, options: ParseFitOptions =
     // carries start/end times, so this can never look like route
     // evidence downstream.
     const fromLocalTimestamp =
-      scorecard.localDate ?? localDateFromLocalTimestamp(parsed.activity?.local_timestamp);
+      scorecard.localDate ??
+      localDateFromLocalTimestamp(parsed.activity?.local_timestamp);
     if (fromLocalTimestamp !== undefined) {
       round.localDate = fromLocalTimestamp;
     } else if (options.tz !== undefined) {
       const anyInstant =
-        session?.timestamp ?? session?.start_time ?? parsed.activity?.timestamp ?? parsed.file_ids?.[0]?.time_created;
-      const tzDate = anyInstant ? localDateForTz(anyInstant.getTime(), options.tz) : undefined;
+        session?.timestamp ??
+        session?.start_time ??
+        parsed.activity?.timestamp ??
+        parsed.file_ids?.[0]?.time_created;
+      const tzDate = anyInstant
+        ? localDateForTz(anyInstant.getTime(), options.tz)
+        : undefined;
       if (tzDate !== undefined) {
         round.localDate = tzDate;
       } else {
-        warnings.push(`could not derive a local date using tz "${truncateEcho(options.tz)}"`);
+        warnings.push(
+          `could not derive a local date using tz "${truncateEcho(options.tz)}"`,
+        );
       }
     } else {
       warnings.push(

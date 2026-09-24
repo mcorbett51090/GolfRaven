@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseCsvFile } from "../src/parse-csv.js";
-import { checkInputSize, MAX_INPUT_BYTES, MAX_WARNINGS } from "../src/safety.js";
+import {
+  checkInputSize,
+  MAX_INPUT_BYTES,
+  MAX_WARNINGS,
+} from "../src/safety.js";
 
 function bytes(text: string): Uint8Array {
   return new TextEncoder().encode(text);
@@ -20,7 +24,9 @@ describe("parseCsvFile: fixes format", () => {
     // Mutation-pinning: exact values, not just "close enough".
     expect(result.round.fixes[0]!.lat).toBe(43.65);
     expect(result.round.fixes[0]!.lon).toBe(-79.38);
-    expect(result.round.fixes[0]!.timestamp).toBe(Date.parse("2026-06-01T14:00:00Z"));
+    expect(result.round.fixes[0]!.timestamp).toBe(
+      Date.parse("2026-06-01T14:00:00Z"),
+    );
     expect(result.round.fixes[0]!.accuracyMeters).toBe(5);
     expect(result.round.startedAt).toBe(Date.parse("2026-06-01T14:00:00Z"));
     expect(result.round.endedAt).toBe(Date.parse("2026-06-01T14:05:00Z"));
@@ -31,7 +37,9 @@ describe("parseCsvFile: fixes format", () => {
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.round.fixes[0]!.timestamp).toBe(Date.parse("2026-06-01T14:00:00Z"));
+    expect(result.round.fixes[0]!.timestamp).toBe(
+      Date.parse("2026-06-01T14:00:00Z"),
+    );
   });
 
   it("sorts out-of-order rows by timestamp", () => {
@@ -42,7 +50,9 @@ describe("parseCsvFile: fixes format", () => {
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.round.fixes[0]!.timestamp).toBeLessThan(result.round.fixes[1]!.timestamp);
+    expect(result.round.fixes[0]!.timestamp).toBeLessThan(
+      result.round.fixes[1]!.timestamp,
+    );
   });
 
   it("drops an invalid row and warns, keeping the valid rows", () => {
@@ -126,13 +136,18 @@ describe("parseCsvFile: fixes format", () => {
   });
 
   it("bounds warnings at MAX_WARNINGS plus one summary entry", () => {
-    const rows = Array.from({ length: MAX_WARNINGS + 30 }, () => "not-a-timestamp,43.65,-79.38").join("\n");
+    const rows = Array.from(
+      { length: MAX_WARNINGS + 30 },
+      () => "not-a-timestamp,43.65,-79.38",
+    ).join("\n");
     const csv = `timestamp,lat,lon\n${rows}\n`;
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.warnings.length).toBeLessThanOrEqual(MAX_WARNINGS + 1);
-    expect(result.round.warnings[result.round.warnings.length - 1]).toContain("more");
+    expect(result.round.warnings[result.round.warnings.length - 1]).toContain(
+      "more",
+    );
   });
 });
 
@@ -151,7 +166,8 @@ describe("parseCsvFile: scorecard format", () => {
   });
 
   it("supports a quoted course name containing a comma (RFC 4180)", () => {
-    const csv = 'date,course,holes,score\n2026-06-01,"Pinehill Links, North Course",18,84\n';
+    const csv =
+      'date,course,holes,score\n2026-06-01,"Pinehill Links, North Course",18,84\n';
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -159,7 +175,8 @@ describe("parseCsvFile: scorecard format", () => {
   });
 
   it("supports an escaped-quote course name", () => {
-    const csv = 'date,course,holes,score\n2026-06-01,"The ""Pines"" Club",18,84\n';
+    const csv =
+      'date,course,holes,score\n2026-06-01,"The ""Pines"" Club",18,84\n';
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -224,8 +241,12 @@ describe("parseCsvFile: scorecard format", () => {
       expect(result.ok).toBe(false);
     });
     it("rejects 0 or negative", () => {
-      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,0,72\n")).ok).toBe(false);
-      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,-9,72\n")).ok).toBe(false);
+      expect(
+        parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,0,72\n")).ok,
+      ).toBe(false);
+      expect(
+        parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,-9,72\n")).ok,
+      ).toBe(false);
     });
   });
 
@@ -236,13 +257,18 @@ describe("parseCsvFile: scorecard format", () => {
       expect(result.ok).toBe(false);
     });
     it("rejects 0 or negative", () => {
-      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,18,0\n")).ok).toBe(false);
-      expect(parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,18,-1\n")).ok).toBe(false);
+      expect(
+        parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,18,0\n")).ok,
+      ).toBe(false);
+      expect(
+        parseCsvFile(bytes("date,course,holes,score\n2026-06-01,X,18,-1\n")).ok,
+      ).toBe(false);
     });
   });
 
   it("uses only the first row and warns about extras", () => {
-    const csv = "date,course,holes,score\n2026-06-01,Course A,18,84\n2026-06-02,Course B,18,90\n";
+    const csv =
+      "date,course,holes,score\n2026-06-01,Course A,18,84\n2026-06-02,Course B,18,90\n";
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -274,7 +300,10 @@ describe("parseCsvFile: ambiguous / unrecognized headers", () => {
 
 describe("parseCsvFile: many valid rows still work", () => {
   it("parses 1000 valid fixes rows cleanly (well under the row cap)", () => {
-    const rows = Array.from({ length: 1000 }, () => "2026-06-01T14:00:00Z,43.65,-79.38").join("\n");
+    const rows = Array.from(
+      { length: 1000 },
+      () => "2026-06-01T14:00:00Z,43.65,-79.38",
+    ).join("\n");
     const csv = `timestamp,lat,lon\n${rows}\n`;
     const result = parseCsvFile(bytes(csv));
     expect(result.ok).toBe(true);

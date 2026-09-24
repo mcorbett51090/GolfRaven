@@ -36,7 +36,8 @@ import sharp from "sharp";
 import type { Facility, Trail } from "@golfraven/catalog";
 
 const require = createRequire(import.meta.url);
-const fontDir = (pkg: string) => join(dirname(require.resolve(`${pkg}/package.json`)), "files");
+const fontDir = (pkg: string) =>
+  join(dirname(require.resolve(`${pkg}/package.json`)), "files");
 const PT = fontDir("@fontsource/pt-serif");
 const CIN = fontDir("@fontsource/cinzel");
 const read = (dir: string, file: string) => readFileSync(join(dir, file));
@@ -53,9 +54,24 @@ const read = (dir: string, file: string) => readFileSync(join(dir, file));
 const TEMPLATE_VERSION = 1;
 
 const fonts = [
-  { name: "PT Serif", data: read(PT, "pt-serif-latin-400-normal.woff"), weight: 400 as const, style: "normal" as const },
-  { name: "PT Serif", data: read(PT, "pt-serif-latin-700-normal.woff"), weight: 700 as const, style: "normal" as const },
-  { name: "Cinzel", data: read(CIN, "cinzel-latin-700-normal.woff"), weight: 700 as const, style: "normal" as const },
+  {
+    name: "PT Serif",
+    data: read(PT, "pt-serif-latin-400-normal.woff"),
+    weight: 400 as const,
+    style: "normal" as const,
+  },
+  {
+    name: "PT Serif",
+    data: read(PT, "pt-serif-latin-700-normal.woff"),
+    weight: 700 as const,
+    style: "normal" as const,
+  },
+  {
+    name: "Cinzel",
+    data: read(CIN, "cinzel-latin-700-normal.woff"),
+    weight: 700 as const,
+    style: "normal" as const,
+  },
 ];
 
 // New GolfRaven tokens (§5.1: "New tokens") — distinct from SWC's
@@ -95,7 +111,11 @@ const markSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" 
 const MARK = `data:image/svg+xml;utf8,${encodeURIComponent(markSvg)}`;
 
 type El = { type: string; props: Record<string, unknown> };
-const h = (type: string, style: Record<string, unknown>, ...children: unknown[]): El => ({
+const h = (
+  type: string,
+  style: Record<string, unknown>,
+  ...children: unknown[]
+): El => ({
   type,
   props: { style, children: children.length <= 1 ? children[0] : children },
 });
@@ -123,7 +143,10 @@ function nameSize(name: string): number {
   return 52;
 }
 
-function courseCardTree(facility: Facility, opts: { trail?: Trail; holes?: number; par?: number }): El {
+function courseCardTree(
+  facility: Facility,
+  opts: { trail?: Trail; holes?: number; par?: number },
+): El {
   const name = facility.name ?? facility.slug;
   const accent = opts.trail ? accentForTrail(opts.trail.id) : GREEN;
   const chips: El[] = [];
@@ -131,7 +154,15 @@ function courseCardTree(facility: Facility, opts: { trail?: Trail; holes?: numbe
     chips.push(
       h(
         "div",
-        { display: "flex", alignItems: "center", padding: "7px 18px", borderRadius: 999, border: `1px solid ${GOLD}`, color: INK_SOFT, fontSize: 25 },
+        {
+          display: "flex",
+          alignItems: "center",
+          padding: "7px 18px",
+          borderRadius: 999,
+          border: `1px solid ${GOLD}`,
+          color: INK_SOFT,
+          fontSize: 25,
+        },
         ACCESS_LABEL[facility.access] ?? facility.access,
       ),
     );
@@ -140,7 +171,15 @@ function courseCardTree(facility: Facility, opts: { trail?: Trail; holes?: numbe
     chips.push(
       h(
         "div",
-        { display: "flex", alignItems: "center", padding: "7px 18px", borderRadius: 999, background: "rgba(31,77,58,0.08)", color: GREEN, fontSize: 25 },
+        {
+          display: "flex",
+          alignItems: "center",
+          padding: "7px 18px",
+          borderRadius: 999,
+          background: "rgba(31,77,58,0.08)",
+          color: GREEN,
+          fontSize: 25,
+        },
         `${opts.holes} holes`,
       ),
     );
@@ -149,7 +188,15 @@ function courseCardTree(facility: Facility, opts: { trail?: Trail; holes?: numbe
     chips.push(
       h(
         "div",
-        { display: "flex", alignItems: "center", padding: "7px 18px", borderRadius: 999, background: "rgba(31,77,58,0.08)", color: GREEN, fontSize: 25 },
+        {
+          display: "flex",
+          alignItems: "center",
+          padding: "7px 18px",
+          borderRadius: 999,
+          background: "rgba(31,77,58,0.08)",
+          color: GREEN,
+          fontSize: 25,
+        },
         `Par ${opts.par}`,
       ),
     );
@@ -157,34 +204,116 @@ function courseCardTree(facility: Facility, opts: { trail?: Trail; holes?: numbe
 
   return h(
     "div",
-    { display: "flex", width: "100%", height: "100%", background: `linear-gradient(155deg, ${CREAM}, #e9e3d2)`, fontFamily: "PT Serif", position: "relative" },
-    h("div", { position: "absolute", top: 40, left: 40, right: 40, bottom: 40, border: `2px solid ${GOLD}`, borderRadius: 18 }),
-    h("div", { position: "absolute", top: 40, left: 40, bottom: 40, width: 12, background: accent, borderTopLeftRadius: 18, borderBottomLeftRadius: 18 }),
+    {
+      display: "flex",
+      width: "100%",
+      height: "100%",
+      background: `linear-gradient(155deg, ${CREAM}, #e9e3d2)`,
+      fontFamily: "PT Serif",
+      position: "relative",
+    },
+    h("div", {
+      position: "absolute",
+      top: 40,
+      left: 40,
+      right: 40,
+      bottom: 40,
+      border: `2px solid ${GOLD}`,
+      borderRadius: 18,
+    }),
+    h("div", {
+      position: "absolute",
+      top: 40,
+      left: 40,
+      bottom: 40,
+      width: 12,
+      background: accent,
+      borderTopLeftRadius: 18,
+      borderBottomLeftRadius: 18,
+    }),
     h(
       "div",
-      { display: "flex", flexDirection: "column", justifyContent: "space-between", width: "100%", height: "100%", padding: "82px 92px" },
+      {
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        width: "100%",
+        height: "100%",
+        padding: "82px 92px",
+      },
       h(
         "div",
         { display: "flex", alignItems: "center", gap: 18 },
-        { type: "img", props: { src: MARK, width: 46, height: 46, style: { width: 46, height: 46 } } },
-        h("div", { fontFamily: "Cinzel", fontWeight: 700, fontSize: 26, letterSpacing: 6, color: GREEN }, "GOLFRAVEN"),
+        {
+          type: "img",
+          props: {
+            src: MARK,
+            width: 46,
+            height: 46,
+            style: { width: 46, height: 46 },
+          },
+        },
+        h(
+          "div",
+          {
+            fontFamily: "Cinzel",
+            fontWeight: 700,
+            fontSize: 26,
+            letterSpacing: 6,
+            color: GREEN,
+          },
+          "GOLFRAVEN",
+        ),
       ),
       h(
         "div",
         { display: "flex", flexDirection: "column" },
         opts.trail
-          ? h("div", { display: "flex", fontStyle: "italic", fontSize: 27, color: accent, marginBottom: 14 }, `On the ${opts.trail.name}`)
+          ? h(
+              "div",
+              {
+                display: "flex",
+                fontStyle: "italic",
+                fontSize: 27,
+                color: accent,
+                marginBottom: 14,
+              },
+              `On the ${opts.trail.name}`,
+            )
           : h("div", { display: "flex" }),
-        h("div", { display: "flex", fontWeight: 700, fontSize: nameSize(name), lineHeight: 1.04, color: INK, maxWidth: 940 }, name),
+        h(
+          "div",
+          {
+            display: "flex",
+            fontWeight: 700,
+            fontSize: nameSize(name),
+            lineHeight: 1.04,
+            color: INK,
+            maxWidth: 940,
+          },
+          name,
+        ),
         facility.town
-          ? h("div", { display: "flex", fontSize: 32, color: INK_SOFT, marginTop: 20 }, `${facility.town}, ${facility.region}`)
-          : h("div", { display: "flex", fontSize: 32, color: INK_SOFT, marginTop: 20 }, facility.region),
+          ? h(
+              "div",
+              { display: "flex", fontSize: 32, color: INK_SOFT, marginTop: 20 },
+              `${facility.town}, ${facility.region}`,
+            )
+          : h(
+              "div",
+              { display: "flex", fontSize: 32, color: INK_SOFT, marginTop: 20 },
+              facility.region,
+            ),
       ),
       h(
         "div",
         { display: "flex", flexDirection: "column", gap: 10 },
         h("div", { display: "flex", gap: 14 }, ...chips),
-        h("div", { display: "flex", fontSize: 16, color: INK_SOFT, opacity: 0.8 }, "Map data © OpenStreetMap contributors"),
+        h(
+          "div",
+          { display: "flex", fontSize: 16, color: INK_SOFT, opacity: 0.8 },
+          "Map data © OpenStreetMap contributors",
+        ),
       ),
     ),
   );
@@ -201,36 +330,106 @@ function templateCardTree(trail?: Trail): El {
   const accent = trail ? accentForTrail(trail.id) : GREEN;
   return h(
     "div",
-    { display: "flex", width: "100%", height: "100%", background: `linear-gradient(155deg, ${CREAM}, #e9e3d2)`, fontFamily: "PT Serif", position: "relative" },
-    h("div", { position: "absolute", top: 40, left: 40, right: 40, bottom: 40, border: `2px solid ${GOLD}`, borderRadius: 18 }),
-    h("div", { position: "absolute", top: 40, left: 40, bottom: 40, width: 12, background: accent, borderTopLeftRadius: 18, borderBottomLeftRadius: 18 }),
+    {
+      display: "flex",
+      width: "100%",
+      height: "100%",
+      background: `linear-gradient(155deg, ${CREAM}, #e9e3d2)`,
+      fontFamily: "PT Serif",
+      position: "relative",
+    },
+    h("div", {
+      position: "absolute",
+      top: 40,
+      left: 40,
+      right: 40,
+      bottom: 40,
+      border: `2px solid ${GOLD}`,
+      borderRadius: 18,
+    }),
+    h("div", {
+      position: "absolute",
+      top: 40,
+      left: 40,
+      bottom: 40,
+      width: 12,
+      background: accent,
+      borderTopLeftRadius: 18,
+      borderBottomLeftRadius: 18,
+    }),
     h(
       "div",
-      { display: "flex", flexDirection: "column", justifyContent: "space-between", width: "100%", height: "100%", padding: "82px 92px" },
+      {
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        width: "100%",
+        height: "100%",
+        padding: "82px 92px",
+      },
       h(
         "div",
         { display: "flex", alignItems: "center", gap: 18 },
-        { type: "img", props: { src: MARK, width: 46, height: 46, style: { width: 46, height: 46 } } },
-        h("div", { fontFamily: "Cinzel", fontWeight: 700, fontSize: 26, letterSpacing: 6, color: GREEN }, "GOLFRAVEN"),
+        {
+          type: "img",
+          props: {
+            src: MARK,
+            width: 46,
+            height: 46,
+            style: { width: 46, height: 46 },
+          },
+        },
+        h(
+          "div",
+          {
+            fontFamily: "Cinzel",
+            fontWeight: 700,
+            fontSize: 26,
+            letterSpacing: 6,
+            color: GREEN,
+          },
+          "GOLFRAVEN",
+        ),
       ),
       h(
         "div",
         { display: "flex", flexDirection: "column" },
         h(
           "div",
-          { display: "flex", fontWeight: 700, fontSize: nameSize(trail?.name ?? "GolfRaven"), lineHeight: 1.1, color: INK, maxWidth: 940 },
+          {
+            display: "flex",
+            fontWeight: 700,
+            fontSize: nameSize(trail?.name ?? "GolfRaven"),
+            lineHeight: 1.1,
+            color: INK,
+            maxWidth: 940,
+          },
           trail?.name ?? "Golf trails, course by course",
         ),
-        h("div", { display: "flex", fontSize: 32, color: INK_SOFT, marginTop: 20 }, "See this course on GolfRaven"),
+        h(
+          "div",
+          { display: "flex", fontSize: 32, color: INK_SOFT, marginTop: 20 },
+          "See this course on GolfRaven",
+        ),
       ),
-      h("div", { display: "flex", fontSize: 16, color: INK_SOFT, opacity: 0.8 }, "Map data © OpenStreetMap contributors"),
+      h(
+        "div",
+        { display: "flex", fontSize: 16, color: INK_SOFT, opacity: 0.8 },
+        "Map data © OpenStreetMap contributors",
+      ),
     ),
   );
 }
 
 async function rasterize(tree: El): Promise<Buffer> {
-  const svg = await satori(tree as unknown as Parameters<typeof satori>[0], { width: 1200, height: 630, fonts });
-  return sharp(Buffer.from(svg)).png({ palette: true, compressionLevel: 9 }).toBuffer();
+  const svg = await satori(tree as unknown as Parameters<typeof satori>[0], {
+    width: 1200,
+    height: 630,
+    fonts,
+  });
+  return sharp(Buffer.from(svg))
+    .png({ palette: true, compressionLevel: 9 })
+    .toBuffer();
 }
 
 /** Render a facility's full OG card to a PNG buffer (1200×630). */
@@ -254,7 +453,10 @@ export async function renderTemplateCard(trail?: Trail): Promise<Buffer> {
  * count correction) naturally mints a NEW key rather than silently
  * serving a stale cached PNG under the old one.
  */
-export function ogContentHash(facility: Facility, opts: { trail?: Trail; holes?: number; par?: number } = {}): string {
+export function ogContentHash(
+  facility: Facility,
+  opts: { trail?: Trail; holes?: number; par?: number } = {},
+): string {
   const basis = JSON.stringify({
     slug: facility.slug,
     name: facility.name,

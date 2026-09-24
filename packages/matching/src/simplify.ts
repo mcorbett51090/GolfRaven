@@ -25,7 +25,12 @@
  * slicing at every level AND any risk of a native stack overflow on a
  * pathological, very long or spiral-shaped route.
  */
-import { distancePointToSegment, makeProjector, type Projector, type XY } from "./geo.js";
+import {
+  distancePointToSegment,
+  makeProjector,
+  type Projector,
+  type XY,
+} from "./geo.js";
 import type { LatLng } from "./types.js";
 
 function boundingDiagonalMeters(xy: readonly XY[]): number {
@@ -80,7 +85,10 @@ function computeImportances(xy: readonly XY[]): Float64Array {
  * end are always kept), preserving the original points when the route is
  * already short enough. Deterministic: no randomness, ties in importance
  * broken by original index. */
-export function simplifyToMaxPoints(points: readonly LatLng[], maxPoints: number): LatLng[] {
+export function simplifyToMaxPoints(
+  points: readonly LatLng[],
+  maxPoints: number,
+): LatLng[] {
   const cap = Math.max(2, Math.floor(maxPoints));
   const n = points.length;
   if (n <= cap) return points.slice();

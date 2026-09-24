@@ -19,8 +19,8 @@
 ## Kill consequence (verbatim)
 
 > **Both miss** → the directory is scoped as a partner-facing asset, not a growth engine, and operator
-> co-marketing becomes the primary channel (SP10). **They disagree** → the directory is a growth engine *on
-> probation*, re-read 6 months after M1 from the GolfRaven site's own Search Console. P1 proceeds in every case:
+> co-marketing becomes the primary channel (SP10). **They disagree** → the directory is a growth engine _on
+> probation_, re-read 6 months after M1 from the GolfRaven site's own Search Console. P1 proceeds in every case:
 > the catalog is the app's substrate.
 
 ## METHOD
@@ -39,7 +39,7 @@ Summary:
    Keyword Planner's **"Get search volume and forecasts"** historical-metrics view (not "Discover new
    keywords") to pull monthly search volume for the **closed, six-term list fixed in decision 0001, Addendum
    B** — `golf trail`, `golf trails`, `robert trent jones golf trail`, `tennessee golf trail`, `vancouver
-   island golf trail`, `oklahoma golf trail` — location **United States and Canada**, language **English
+island golf trail`, `oklahoma golf trail` — location **United States and Canada**, language **English
    only**, date range **September 2025 – August 2026** (decision 0001, Addendum D, R5), no additions after
    data is read. Keyword Planner without spend may return only a volume **range**, not a point estimate — the
    check uses the **range's lower bound** for each of the six terms, then sums across all six; **if two of
@@ -61,11 +61,11 @@ rename rows. The "Read date" column was added 2026-09-24, per decision 0001 Adde
 table was still empty — record the date the export was actually read on any ONE of the three rows
 (not all three); it must be no earlier than 2026-10-01, so September 2026 is complete.
 
-| Month | Total organic clicks | Read date |
-|---|---|---|
-| 2026-07 | | |
-| 2026-08 | | |
-| 2026-09 | | |
+| Month   | Total organic clicks | Read date |
+| ------- | -------------------- | --------- |
+| 2026-07 |                      |           |
+| 2026-08 |                      |           |
+| 2026-09 |                      |           |
 
 ## Keyword Planner read
 
@@ -74,14 +74,14 @@ Columns fixed 2026-09-24, before any read — `tools/p0`'s `k3-verdict` reads th
 bound and Upper bound (a point value is entered as lower = upper, decision 0001 Addendum I — there is
 no separate "Point value" column). Do not add, remove or rename rows.
 
-| Term | Lower bound | Upper bound |
-|---|---|---|
-| golf trail | | |
-| golf trails | | |
-| robert trent jones golf trail | | |
-| tennessee golf trail | | |
-| vancouver island golf trail | | |
-| oklahoma golf trail | | |
+| Term                          | Lower bound | Upper bound |
+| ----------------------------- | ----------- | ----------- |
+| golf trail                    |             |             |
+| golf trails                   |             |             |
+| robert trent jones golf trail |             |             |
+| tennessee golf trail          |             |             |
+| vancouver island golf trail   |             |             |
+| oklahoma golf trail           |             |             |
 
 ## OWNER
 
@@ -103,6 +103,6 @@ _(blank: pass | kill | adjust)_
 
 ## Log
 
-| Date | Entry |
-|---|---|
+| Date       | Entry                                                                                  |
+| ---------- | -------------------------------------------------------------------------------------- |
 | 2026-09-23 | Memo created. No Search Console export or Keyword Planner read has been performed yet. |

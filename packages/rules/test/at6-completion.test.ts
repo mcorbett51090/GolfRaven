@@ -12,7 +12,12 @@
  * even sees a `RosterVersion` that fails either.
  */
 import { describe, expect, it } from "vitest";
-import { type CourseId, type DesignerId, type FacilityId, type RosterVersion } from "@golfraven/catalog";
+import {
+  type CourseId,
+  type DesignerId,
+  type FacilityId,
+  type RosterVersion,
+} from "@golfraven/catalog";
 import {
   applyUserPickGuard,
   evaluateVersionCompletion,
@@ -93,12 +98,19 @@ function courseVersion(
     markerUnit: "facility",
     completionRule: { kind: "all" },
     markerRule: { kind: "all" },
-    members: courseIds.map((courseId) => ({ unit: "course" as const, courseId })),
+    members: courseIds.map((courseId) => ({
+      unit: "course" as const,
+      courseId,
+    })),
     ...opts,
   };
 }
 
-function play(courseId: CourseId, localDate: string, overrides: Partial<Play> = {}): Play {
+function play(
+  courseId: CourseId,
+  localDate: string,
+  overrides: Partial<Play> = {},
+): Play {
   return { courseId, localDate, scoreBadge: 1, ...overrides };
 }
 
@@ -112,7 +124,9 @@ describe("AT(6): addition mid-progress", () => {
     const { courseIds: extra, courses: coursesExtra } = makeCourses(3);
     const courses = { ...coursesV1, ...coursesExtra };
     const v1 = courseVersion(1, v1Courses, { effectiveFrom: "2026-01-01" });
-    const v2 = courseVersion(2, [...v1Courses, ...extra], { effectiveFrom: "2026-06-01" });
+    const v2 = courseVersion(2, [...v1Courses, ...extra], {
+      effectiveFrom: "2026-06-01",
+    });
     const allVersions = [v1, v2];
     const ctx: CompletionContext = { courses };
 
@@ -140,8 +154,12 @@ describe("AT(6): removal mid-progress", () => {
   it("V2 drops a course U played before the drop -> that play still satisfies V1; V2 does not need it", () => {
     const { courseIds, courses } = makeCourses(3);
     const [dropped, kept1, kept2] = courseIds as [CourseId, CourseId, CourseId];
-    const v1 = courseVersion(1, [dropped, kept1, kept2], { effectiveFrom: "2026-01-01" });
-    const v2 = courseVersion(2, [kept1, kept2], { effectiveFrom: "2026-06-01" });
+    const v1 = courseVersion(1, [dropped, kept1, kept2], {
+      effectiveFrom: "2026-01-01",
+    });
+    const v2 = courseVersion(2, [kept1, kept2], {
+      effectiveFrom: "2026-06-01",
+    });
     const allVersions = [v1, v2];
     const ctx: CompletionContext = { courses };
     const plays: Play[] = [
@@ -168,14 +186,23 @@ describe("AT(6): a member course closes", () => {
     const { courseIds, courses } = makeCourses(2);
     const [closedCourse, otherCourse] = courseIds as [CourseId, CourseId];
     courses[closedCourse]!.closed = true;
-    const v1 = courseVersion(1, [closedCourse, otherCourse], { effectiveFrom: "2026-01-01" });
+    const v1 = courseVersion(1, [closedCourse, otherCourse], {
+      effectiveFrom: "2026-01-01",
+    });
     const v3 = courseVersion(3, [otherCourse], { effectiveFrom: "2026-09-01" });
     const allVersions = [v1, v3];
     const ctx: CompletionContext = { courses };
-    const plays: Play[] = [play(closedCourse, "2026-01-15"), play(otherCourse, "2026-01-16")];
+    const plays: Play[] = [
+      play(closedCourse, "2026-01-15"),
+      play(otherCourse, "2026-01-16"),
+    ];
 
-    expect(evaluateVersionCompletion(v1, allVersions, plays, ctx).complete).toBe(true);
-    expect(evaluateVersionCompletion(v3, allVersions, plays, ctx).complete).toBe(true);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, plays, ctx).complete,
+    ).toBe(true);
+    expect(
+      evaluateVersionCompletion(v3, allVersions, plays, ctx).complete,
+    ).toBe(true);
   });
 });
 
@@ -197,9 +224,13 @@ describe("AT(6): pre-launch history and trackingStartsOn", () => {
     const v1 = courseVersion(1, courseIds, { trackingStartsOn: "2027-01-01" });
     const ctx: CompletionContext = { courses };
     const plays: Play[] = [play(courseIds[0]!, "2026-12-31")];
-    expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(false);
+    expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(
+      false,
+    );
     const laterPlays: Play[] = [play(courseIds[0]!, "2027-01-01")];
-    expect(evaluateVersionCompletion(v1, [v1], laterPlays, ctx).complete).toBe(true);
+    expect(evaluateVersionCompletion(v1, [v1], laterPlays, ctx).complete).toBe(
+      true,
+    );
   });
 
   it("trackingStartsOn introduced in V2; U has 8/9 pre-date plays then the 9th after -> Complete (v1); V2 counts only the post-date play", () => {
@@ -215,7 +246,9 @@ describe("AT(6): pre-launch history and trackingStartsOn", () => {
       ...courseIds.slice(0, 8).map((c, i) => play(c, `2026-02-0${i + 1}`)),
       play(courseIds[8]!, "2027-02-01"),
     ];
-    expect(evaluateVersionCompletion(v1, allVersions, plays, ctx).complete).toBe(true);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, plays, ctx).complete,
+    ).toBe(true);
     const v2Result = evaluateVersionCompletion(v2, allVersions, plays, ctx);
     expect(v2Result.satisfiedCount).toBe(1);
     expect(v2Result.complete).toBe(false);
@@ -233,18 +266,32 @@ describe("AT(6): n changed (A2-02)", () => {
     const v2Members = courseIds.slice(0, 15);
     const v1 = courseVersion(1, v1Members, {
       effectiveFrom: "2026-01-01",
-      completionRule: { kind: "n-of-m", n: 10, ruleSource: { url: "https://example.com/r", retrieved: "2026-01-01" } },
+      completionRule: {
+        kind: "n-of-m",
+        n: 10,
+        ruleSource: { url: "https://example.com/r", retrieved: "2026-01-01" },
+      },
     });
     const v2 = courseVersion(2, v2Members, {
       effectiveFrom: "2026-06-01",
-      completionRule: { kind: "n-of-m", n: 12, ruleSource: { url: "https://example.com/r", retrieved: "2026-06-01" } },
+      completionRule: {
+        kind: "n-of-m",
+        n: 12,
+        ruleSource: { url: "https://example.com/r", retrieved: "2026-06-01" },
+      },
     });
     const allVersions = [v1, v2];
     const ctx: CompletionContext = { courses };
-    const plays: Play[] = v1Members.slice(0, 10).map((c, i) => play(c, `2026-02-${String(i + 1).padStart(2, "0")}`));
+    const plays: Play[] = v1Members
+      .slice(0, 10)
+      .map((c, i) => play(c, `2026-02-${String(i + 1).padStart(2, "0")}`));
 
-    expect(evaluateVersionCompletion(v1, allVersions, plays, ctx).complete).toBe(true);
-    expect(evaluateVersionCompletion(v2, allVersions, plays, ctx).complete).toBe(false);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, plays, ctx).complete,
+    ).toBe(true);
+    expect(
+      evaluateVersionCompletion(v2, allVersions, plays, ctx).complete,
+    ).toBe(false);
   });
 });
 
@@ -256,7 +303,9 @@ describe("AT(6): unit changed (A2-02)", () => {
   it("V1 course, V2 facility; U plays a V1 course after V2's effectiveFrom -> each version evaluates under its own unit; the play still counts in V1", () => {
     const facilityId = nextId("fac") as FacilityId;
     const courseId = nextId("crs") as CourseId;
-    const courses: CompletionContext["courses"] = { [courseId]: { id: courseId, facilityId, verified: true } };
+    const courses: CompletionContext["courses"] = {
+      [courseId]: { id: courseId, facilityId, verified: true },
+    };
     const v1 = courseVersion(1, [courseId], { effectiveFrom: "2026-01-01" });
     const v2: RosterVersion = {
       version: 2,
@@ -274,8 +323,12 @@ describe("AT(6): unit changed (A2-02)", () => {
     // A play AFTER V2's effectiveFrom — re-typing is not a drop, so it
     // must still count toward V1.
     const plays: Play[] = [play(courseId, "2026-07-01")];
-    expect(evaluateVersionCompletion(v1, allVersions, plays, ctx).complete).toBe(true);
-    expect(evaluateVersionCompletion(v2, allVersions, plays, ctx).complete).toBe(true);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, plays, ctx).complete,
+    ).toBe(true);
+    expect(
+      evaluateVersionCompletion(v2, allVersions, plays, ctx).complete,
+    ).toBe(true);
   });
 });
 
@@ -297,7 +350,13 @@ describe("AT(6): merge after publication (A2-04)", () => {
       courses,
       ledger: {
         entries: {
-          [crsX]: { id: crsX, kind: "crs", transitions: [], tombstoned: true, mergedInto: crsY },
+          [crsX]: {
+            id: crsX,
+            kind: "crs",
+            transitions: [],
+            tombstoned: true,
+            mergedInto: crsY,
+          },
           [crsY]: { id: crsY, kind: "crs", transitions: [] },
         },
       },
@@ -326,14 +385,28 @@ describe("AT(6): B1 — the O19 money leg is judged per completion member, not p
       play(a, "2026-02-01", { moneyQualifies: true }),
       play(b, "2026-02-02", { scoreBadge: 0.5, moneyQualifies: false }),
     ];
-    const purchases: MarkerPurchase[] = [{ facilityId, localDate: "2026-02-01" }];
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const purchases: MarkerPurchase[] = [
+      { facilityId, localDate: "2026-02-01" },
+    ];
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     // A facility-level check would wrongly say "the one facility has SOME
     // money play" and call it entitled — the fix judges the money leg via
     // evaluateVersionCompletion (per-member, under completionRule), which
     // correctly sees B's member as unsatisfied in money mode.
     expect(entitlement.entitled).toBe(false);
-    expect(isTrailComplete([v1], plays, ctx, { money: true, programmeStartsOn: EARLY_PROGRAMME_START })).toBe(false);
+    expect(
+      isTrailComplete([v1], plays, ctx, {
+        money: true,
+        programmeStartsOn: EARLY_PROGRAMME_START,
+      }),
+    ).toBe(false);
     // The badge itself is still fine (badge mode ignores moneyQualifies).
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
   });
@@ -368,9 +441,16 @@ describe("AT(6): B1 — the O19 money leg is judged per completion member, not p
       { facilityId: fA, localDate: "2026-02-01" },
       { facilityId: fB, localDate: "2026-02-01" },
     ];
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, {
-      programmeStartsOn: EARLY_PROGRAMME_START,
-    });
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      {
+        programmeStartsOn: EARLY_PROGRAMME_START,
+      },
+    );
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingMoneyPlays).toEqual([fA]);
   });
@@ -386,11 +466,22 @@ describe("AT(6): B2 — programmeStartsOn is a separate, money-only bound", () =
     const facilityId = courses[courseIds[0]!]!.facilityId;
     const v1 = courseVersion(1, courseIds); // no trackingStartsOn: launch grace
     const ctx: CompletionContext = { courses };
-    const purchases: MarkerPurchase[] = [{ facilityId, localDate: "2019-05-01" }];
-    const plays: Play[] = [play(courseIds[0]!, "2019-05-01", { moneyQualifies: true })];
-    const entitled = specialMarkerEntitlement([v1], plays, purchases, ctx, true, {
-      programmeStartsOn: "2026-01-01",
-    });
+    const purchases: MarkerPurchase[] = [
+      { facilityId, localDate: "2019-05-01" },
+    ];
+    const plays: Play[] = [
+      play(courseIds[0]!, "2019-05-01", { moneyQualifies: true }),
+    ];
+    const entitled = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      {
+        programmeStartsOn: "2026-01-01",
+      },
+    );
     expect(entitled.entitled).toBe(false);
     // Meanwhile the BADGE (no programmeStartsOn concept) still enjoys the
     // launch grace period, per the plain completion rule.
@@ -405,20 +496,40 @@ describe("AT(6): B2 — programmeStartsOn is a separate, money-only bound", () =
     // A play/purchase after trackingStartsOn but BEFORE programmeStartsOn.
     const midDate = "2026-03-01";
     const purchases: MarkerPurchase[] = [{ facilityId, localDate: midDate }];
-    const plays: Play[] = [play(courseIds[0]!, midDate, { moneyQualifies: true })];
+    const plays: Play[] = [
+      play(courseIds[0]!, midDate, { moneyQualifies: true }),
+    ];
     // Badge: satisfied (clears trackingStartsOn).
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
     // Money leg / offer: NOT satisfied (predates programmeStartsOn).
-    const entitled = specialMarkerEntitlement([v1], plays, purchases, ctx, true, {
-      programmeStartsOn: "2026-06-01",
-    });
+    const entitled = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      {
+        programmeStartsOn: "2026-06-01",
+      },
+    );
     expect(entitled.entitled).toBe(false);
     // Once the play/purchase is after programmeStartsOn too, it IS entitled.
-    const laterPurchases: MarkerPurchase[] = [{ facilityId, localDate: "2026-07-01" }];
-    const laterPlays: Play[] = [play(courseIds[0]!, "2026-07-01", { moneyQualifies: true })];
-    const entitledLater = specialMarkerEntitlement([v1], laterPlays, laterPurchases, ctx, true, {
-      programmeStartsOn: "2026-06-01",
-    });
+    const laterPurchases: MarkerPurchase[] = [
+      { facilityId, localDate: "2026-07-01" },
+    ];
+    const laterPlays: Play[] = [
+      play(courseIds[0]!, "2026-07-01", { moneyQualifies: true }),
+    ];
+    const entitledLater = specialMarkerEntitlement(
+      [v1],
+      laterPlays,
+      laterPurchases,
+      ctx,
+      true,
+      {
+        programmeStartsOn: "2026-06-01",
+      },
+    );
     expect(entitledLater.entitled).toBe(true);
   });
 
@@ -433,11 +544,22 @@ describe("AT(6): B2 — programmeStartsOn is a separate, money-only bound", () =
     const facilityId = courses[courseIds[0]!]!.facilityId;
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
-    const purchases: MarkerPurchase[] = [{ facilityId, localDate: "2019-05-01" }];
-    const plays: Play[] = [play(courseIds[0]!, "2026-02-01", { moneyQualifies: true })];
-    const entitled = specialMarkerEntitlement([v1], plays, purchases, ctx, true, {
-      programmeStartsOn: EARLY_PROGRAMME_START,
-    });
+    const purchases: MarkerPurchase[] = [
+      { facilityId, localDate: "2019-05-01" },
+    ];
+    const plays: Play[] = [
+      play(courseIds[0]!, "2026-02-01", { moneyQualifies: true }),
+    ];
+    const entitled = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      {
+        programmeStartsOn: EARLY_PROGRAMME_START,
+      },
+    );
     expect(entitled.entitled).toBe(false);
     expect(entitled.missingPurchases).toEqual([facilityId]);
     expect(entitled.missingMoneyPlays).toEqual([]);
@@ -493,10 +615,14 @@ describe("AT(6): S1 — removed_on is keyed on the member's physical unit (cours
     // A play at `a`, AFTER the swap — must NOT satisfy V1 (a was dropped,
     // even though its facility still hosts a roster member via `b`).
     const plays: Play[] = [play(a, "2026-07-01")];
-    expect(evaluateVersionCompletion(v1, allVersions, plays, ctx).complete).toBe(false);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, plays, ctx).complete,
+    ).toBe(false);
     // A play BEFORE the swap still counts.
     const earlyPlays: Play[] = [play(a, "2026-03-01")];
-    expect(evaluateVersionCompletion(v1, allVersions, earlyPlays, ctx).complete).toBe(true);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, earlyPlays, ctx).complete,
+    ).toBe(true);
   });
 
   it("marker credit (isFacilityCreditedByPlay) respects a FACILITY's own removed_on", () => {
@@ -520,9 +646,13 @@ describe("AT(6): S1 — removed_on is keyed on the member's physical unit (cours
     // (fully-satisfied, single-member) marker roster mask the exact
     // regression this fixture targets.
     const postDropPlays: Play[] = [play(a, "2026-07-01")];
-    expect(isFacilityCreditedByPlay(fA, v1, allVersions, postDropPlays, ctx)).toBe(false);
+    expect(
+      isFacilityCreditedByPlay(fA, v1, allVersions, postDropPlays, ctx),
+    ).toBe(false);
     const preDropPlays: Play[] = [play(a, "2026-03-01")];
-    expect(isFacilityCreditedByPlay(fA, v1, allVersions, preDropPlays, ctx)).toBe(true);
+    expect(
+      isFacilityCreditedByPlay(fA, v1, allVersions, preDropPlays, ctx),
+    ).toBe(true);
   });
 
   it("a purchase after the facility's removed_on does not satisfy the O19 purchase leg", () => {
@@ -552,7 +682,14 @@ describe("AT(6): S1 — removed_on is keyed on the member's physical unit (cours
       play(a, "2026-02-01", { moneyQualifies: true }),
       play(b, "2026-02-02", { moneyQualifies: true }),
     ];
-    const entitlement = specialMarkerEntitlement(allVersions, plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const entitlement = specialMarkerEntitlement(
+      allVersions,
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingPurchases).toContain(fA);
   });
@@ -567,12 +704,21 @@ describe("AT(6): marker vs completion parity", () => {
     const { courseIds, courses } = makeCoursesOneFacilityEach(3);
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
-    const plays: Play[] = courseIds.map((c, i) => play(c, `2026-01-0${i + 1}`, { moneyQualifies: true }));
+    const plays: Play[] = courseIds.map((c, i) =>
+      play(c, `2026-01-0${i + 1}`, { moneyQualifies: true }),
+    );
     const purchases: MarkerPurchase[] = courseIds.map((c) => ({
       facilityId: courses[c]!.facilityId,
       localDate: "2026-01-01",
     }));
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(true);
     expect(isTrailComplete([v1], plays, ctx)).toBe(true);
   });
@@ -580,11 +726,17 @@ describe("AT(6): marker vs completion parity", () => {
   it("n-of-m completion with markerRule: all -> badge at n; the marker set still needs every facility", () => {
     const { courseIds, courses } = makeCoursesOneFacilityEach(3);
     const v1 = courseVersion(1, courseIds, {
-      completionRule: { kind: "n-of-m", n: 2, ruleSource: { url: "https://example.com/r", retrieved: "2026-01-01" } },
+      completionRule: {
+        kind: "n-of-m",
+        n: 2,
+        ruleSource: { url: "https://example.com/r", retrieved: "2026-01-01" },
+      },
       markerRule: { kind: "all" },
     });
     const ctx: CompletionContext = { courses };
-    const plays: Play[] = courseIds.slice(0, 2).map((c, i) => play(c, `2026-01-0${i + 1}`));
+    const plays: Play[] = courseIds
+      .slice(0, 2)
+      .map((c, i) => play(c, `2026-01-0${i + 1}`));
     const result = evaluateVersionCompletion(v1, [v1], plays, ctx);
     expect(result.complete).toBe(true); // 2 of 3 (n-of-m)
     expect(markerSetComplete([v1], plays, ctx)).toBe(false);
@@ -595,8 +747,18 @@ describe("AT(6): marker vs completion parity", () => {
     const facilityIds = courseIds.map((c) => courses[c]!.facilityId);
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
-    const purchases: MarkerPurchase[] = facilityIds.map((f) => ({ facilityId: f, localDate: "2026-01-01" }));
-    const entitlement = specialMarkerEntitlement([v1], [], purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const purchases: MarkerPurchase[] = facilityIds.map((f) => ({
+      facilityId: f,
+      localDate: "2026-01-01",
+    }));
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      [],
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingMoneyPlays.length).toBe(2);
   });
@@ -612,11 +774,21 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
     const facilityIds = courseIds.map((c) => courses[c]!.facilityId);
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
-    const purchases: MarkerPurchase[] = facilityIds.map((f) => ({ facilityId: f, localDate: "2026-01-01" }));
+    const purchases: MarkerPurchase[] = facilityIds.map((f) => ({
+      facilityId: f,
+      localDate: "2026-01-01",
+    }));
     const plays: Play[] = courseIds
       .slice(0, 8)
       .map((c, i) => play(c, `2026-02-0${i + 1}`, { moneyQualifies: true }));
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingMoneyPlays).toEqual([facilityIds[8]]);
     expect(entitlement.missingPurchases).toEqual([]);
@@ -630,8 +802,17 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
     const purchases: MarkerPurchase[] = facilityIds
       .slice(0, 8)
       .map((f) => ({ facilityId: f, localDate: "2026-01-01" }));
-    const plays: Play[] = courseIds.map((c, i) => play(c, `2026-02-0${(i % 9) + 1}`, { moneyQualifies: true }));
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const plays: Play[] = courseIds.map((c, i) =>
+      play(c, `2026-02-0${(i % 9) + 1}`, { moneyQualifies: true }),
+    );
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingPurchases).toEqual([facilityIds[8]]);
     expect(entitlement.missingMoneyPlays).toEqual([]);
@@ -642,30 +823,60 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
     const facilityIds = courseIds.map((c) => courses[c]!.facilityId);
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
-    const purchases: MarkerPurchase[] = facilityIds.map((f) => ({ facilityId: f, localDate: "2026-01-01" }));
+    const purchases: MarkerPurchase[] = facilityIds.map((f) => ({
+      facilityId: f,
+      localDate: "2026-01-01",
+    }));
     const plays: Play[] = [
       play(courseIds[0]!, "2026-02-01", { moneyQualifies: true }),
-      play(courseIds[1]!, "2026-02-02", { moneyQualifies: false, scoreBadge: 0.6 }), // badge-level only
+      play(courseIds[1]!, "2026-02-02", {
+        moneyQualifies: false,
+        scoreBadge: 0.6,
+      }), // badge-level only
     ];
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(false);
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
   });
 
   it("both legs complete, but one leg on V1 and the other only on V2 -> no entitlement: both legs must hold on the same V", () => {
-    const { courseIds: v1CourseIds, courses: v1Courses } = makeCoursesOneFacilityEach(2);
-    const { courseIds: v2CourseIds, courses: v2Courses } = makeCoursesOneFacilityEach(2);
+    const { courseIds: v1CourseIds, courses: v1Courses } =
+      makeCoursesOneFacilityEach(2);
+    const { courseIds: v2CourseIds, courses: v2Courses } =
+      makeCoursesOneFacilityEach(2);
     const courses = { ...v1Courses, ...v2Courses };
     const v1FacilityIds = v1CourseIds.map((c) => courses[c]!.facilityId);
     const v1 = courseVersion(1, v1CourseIds, { effectiveFrom: "2026-01-01" });
     const v2 = courseVersion(2, v2CourseIds, { effectiveFrom: "2026-06-01" });
     const allVersions = [v1, v2];
     const ctx: CompletionContext = { courses };
-    const purchases: MarkerPurchase[] = v1FacilityIds.map((f) => ({ facilityId: f, localDate: "2026-02-01" }));
-    const plays: Play[] = v2CourseIds.map((c, i) => play(c, `2026-07-0${i + 1}`, { moneyQualifies: true }));
-    const entitlement = specialMarkerEntitlement(allVersions, plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const purchases: MarkerPurchase[] = v1FacilityIds.map((f) => ({
+      facilityId: f,
+      localDate: "2026-02-01",
+    }));
+    const plays: Play[] = v2CourseIds.map((c, i) =>
+      play(c, `2026-07-0${i + 1}`, { moneyQualifies: true }),
+    );
+    const entitlement = specialMarkerEntitlement(
+      allVersions,
+      plays,
+      purchases,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(false);
-    expect(entitlement.missingMoneyPlays.length + entitlement.missingPurchases.length).toBeGreaterThan(0);
+    expect(
+      entitlement.missingMoneyPlays.length +
+        entitlement.missingPurchases.length,
+    ).toBeGreaterThan(0);
   });
 });
 
@@ -701,7 +912,12 @@ describe("AT(6): the user-pick member (A2-01)", () => {
       }),
     ];
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
-    expect(trailProgress([v1], plays, ctx, { money: true, programmeStartsOn: EARLY_PROGRAMME_START })).toBe(0);
+    expect(
+      trailProgress([v1], plays, ctx, {
+        money: true,
+        programmeStartsOn: EARLY_PROGRAMME_START,
+      }),
+    ).toBe(0);
   });
 
   it("the one-pick-per-facility-per-date guard: a second, different user pick on the same date replaces the first", () => {
@@ -743,25 +959,43 @@ describe("AT(6): S4 — AchievementDef.minConfidence and the verified-course gat
     const { courseIds, courses } = makeCourses(1);
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
-    const plays: Play[] = [play(courseIds[0]!, "2026-01-01", { scoreBadge: 0.7 })];
+    const plays: Play[] = [
+      play(courseIds[0]!, "2026-01-01", { scoreBadge: 0.7 }),
+    ];
     // Default threshold (0.50): satisfied.
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
     // A stricter achievement-specific threshold (0.80): NOT satisfied.
     expect(
-      evaluateVersionCompletion(v1, [v1], plays, ctx, { badgeThreshold: 0.8 }).complete,
+      evaluateVersionCompletion(v1, [v1], plays, ctx, { badgeThreshold: 0.8 })
+        .complete,
     ).toBe(false);
   });
 
   it("a play at an unverified (stub) course never qualifies, in either mode (G3-01)", () => {
     const facilityId = nextId("fac") as FacilityId;
     const courseId = nextId("crs") as CourseId;
-    const unverifiedCourse: CourseMeta = { id: courseId, facilityId, verified: false };
-    const courses: CompletionContext["courses"] = { [courseId]: unverifiedCourse };
+    const unverifiedCourse: CourseMeta = {
+      id: courseId,
+      facilityId,
+      verified: false,
+    };
+    const courses: CompletionContext["courses"] = {
+      [courseId]: unverifiedCourse,
+    };
     const v1 = courseVersion(1, [courseId]);
     const ctx: CompletionContext = { courses };
-    const plays: Play[] = [play(courseId, "2026-01-01", { moneyQualifies: true })];
-    expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(false);
-    expect(evaluateVersionCompletion(v1, [v1], plays, ctx, { money: true, programmeStartsOn: EARLY_PROGRAMME_START }).complete).toBe(false);
+    const plays: Play[] = [
+      play(courseId, "2026-01-01", { moneyQualifies: true }),
+    ];
+    expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(
+      false,
+    );
+    expect(
+      evaluateVersionCompletion(v1, [v1], plays, ctx, {
+        money: true,
+        programmeStartsOn: EARLY_PROGRAMME_START,
+      }).complete,
+    ).toBe(false);
   });
 });
 
@@ -785,10 +1019,14 @@ describe("S7 mutation-kill fixtures", () => {
     const ctx: CompletionContext = { courses };
     // A play EXACTLY on removed_on's date (2026-06-01) — must NOT count.
     const onBoundary: Play[] = [play(a, "2026-06-01")];
-    expect(evaluateVersionCompletion(v1, allVersions, onBoundary, ctx).complete).toBe(false);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, onBoundary, ctx).complete,
+    ).toBe(false);
     // The day before still counts.
     const dayBefore: Play[] = [play(a, "2026-05-31")];
-    expect(evaluateVersionCompletion(v1, allVersions, dayBefore, ctx).complete).toBe(true);
+    expect(
+      evaluateVersionCompletion(v1, allVersions, dayBefore, ctx).complete,
+    ).toBe(true);
   });
 
   it("trailCompleteWithin: a span of EXACTLY `days` apart is within the window (inclusive)", () => {
@@ -810,9 +1048,13 @@ describe("S7 mutation-kill fixtures", () => {
     const v1 = courseVersion(1, courseIds, { trackingStartsOn: "2026-06-01" });
     const ctx: CompletionContext = { courses };
     const early: Play[] = [play(courseIds[0]!, "2026-01-01")];
-    expect(isFacilityCreditedByPlay(facilityId, v1, [v1], early, ctx)).toBe(false);
+    expect(isFacilityCreditedByPlay(facilityId, v1, [v1], early, ctx)).toBe(
+      false,
+    );
     const onTime: Play[] = [play(courseIds[0]!, "2026-06-02")];
-    expect(isFacilityCreditedByPlay(facilityId, v1, [v1], onTime, ctx)).toBe(true);
+    expect(isFacilityCreditedByPlay(facilityId, v1, [v1], onTime, ctx)).toBe(
+      true,
+    );
   });
 
   it("a member covers a course played under its PRE-MERGE id (merge resolution in play-to-member matching, not just field aggregates)", () => {
@@ -828,7 +1070,13 @@ describe("S7 mutation-kill fixtures", () => {
       courses,
       ledger: {
         entries: {
-          [crsX]: { id: crsX, kind: "crs", transitions: [], tombstoned: true, mergedInto: crsY },
+          [crsX]: {
+            id: crsX,
+            kind: "crs",
+            transitions: [],
+            tombstoned: true,
+            mergedInto: crsY,
+          },
           [crsY]: { id: crsY, kind: "crs", transitions: [] },
         },
       },
@@ -841,7 +1089,11 @@ describe("S7 mutation-kill fixtures", () => {
   it("trailProgress is capped at 1 even when satisfiedCount exceeds an n-of-m requiredCount", () => {
     const { courseIds, courses } = makeCourses(5);
     const v1 = courseVersion(1, courseIds, {
-      completionRule: { kind: "n-of-m", n: 2, ruleSource: { url: "https://example.com/r", retrieved: "2026-01-01" } },
+      completionRule: {
+        kind: "n-of-m",
+        n: 2,
+        ruleSource: { url: "https://example.com/r", retrieved: "2026-01-01" },
+      },
     });
     const ctx: CompletionContext = { courses };
     // ALL 5 members satisfied, but only 2 were required — satisfiedCount
@@ -869,7 +1121,10 @@ describe("S7 mutation-kill fixtures", () => {
     const { courseIds, courses } = makeCourses(1);
     const ctx: CompletionContext = { courses };
     // Jan, then Mar (skip Feb) — longest streak is 1, not 2.
-    const plays: Play[] = [play(courseIds[0]!, "2026-01-15"), play(courseIds[0]!, "2026-03-15")];
+    const plays: Play[] = [
+      play(courseIds[0]!, "2026-01-15"),
+      play(courseIds[0]!, "2026-03-15"),
+    ];
     expect(monthlyStreak(plays, ctx)).toBe(1);
   });
 
@@ -882,9 +1137,20 @@ describe("S7 mutation-kill fixtures", () => {
     const facilityId = courses[courseIds[0]!]!.facilityId;
     const v1 = courseVersion(1, courseIds, { trackingStartsOn: "2026-06-01" });
     const ctx: CompletionContext = { courses };
-    const earlyPurchase: MarkerPurchase[] = [{ facilityId, localDate: "2026-01-01" }];
-    const play_: Play[] = [play(courseIds[0]!, "2026-07-01", { moneyQualifies: true })];
-    const entitlement = specialMarkerEntitlement([v1], play_, earlyPurchase, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    const earlyPurchase: MarkerPurchase[] = [
+      { facilityId, localDate: "2026-01-01" },
+    ];
+    const play_: Play[] = [
+      play(courseIds[0]!, "2026-07-01", { moneyQualifies: true }),
+    ];
+    const entitlement = specialMarkerEntitlement(
+      [v1],
+      play_,
+      earlyPurchase,
+      ctx,
+      true,
+      { programmeStartsOn: EARLY_PROGRAMME_START },
+    );
     expect(entitlement.entitled).toBe(true);
     expect(entitlement.missingPurchases).toEqual([]);
   });
@@ -894,10 +1160,18 @@ describe("S7 mutation-kill fixtures", () => {
     const courseId = nextId("crs") as CourseId;
     const designerId = nextId("dsg") as DesignerId;
     const courses: CompletionContext["courses"] = {
-      [courseId]: { id: courseId, facilityId, verified: true, designers: [designerId] },
+      [courseId]: {
+        id: courseId,
+        facilityId,
+        verified: true,
+        designers: [designerId],
+      },
     };
     const ctx: AggregateContext = { courses, trails: {} };
-    const plays: Play[] = [play(courseId, "2026-01-01"), play(courseId, "2026-02-01")];
+    const plays: Play[] = [
+      play(courseId, "2026-01-01"),
+      play(courseId, "2026-02-01"),
+    ];
     expect(maxCountBy("designer", ctx, plays, {})).toBe(1);
   });
 });

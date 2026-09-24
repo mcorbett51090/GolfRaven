@@ -35,6 +35,7 @@ export async function createTmpBase() {
 export async function readTmpBase() {
   const raw = await readFile(POINTER_PATH, "utf8");
   const base = raw.trim();
-  if (!base) throw new Error(`tmp-base.mjs: pointer file at ${POINTER_PATH} is empty`);
+  if (!base)
+    throw new Error(`tmp-base.mjs: pointer file at ${POINTER_PATH} is empty`);
   return base;
 }

@@ -58,9 +58,7 @@
           "name": "Pebble Hills",
           "holes": 18,
           "par": 72,
-          "designers": [
-            "dsg_01M39GMFJZ21RFA7G11961JMQC"
-          ],
+          "designers": ["dsg_01M39GMFJZ21RFA7G11961JMQC"],
           "opened": 1985,
           "prov": {
             "name": "operator",

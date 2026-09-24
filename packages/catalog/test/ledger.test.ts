@@ -146,9 +146,9 @@ describe("reseedFacility (AT(5), G-P1-12, FM-14)", () => {
       [candidate],
     );
     expect(outcome.kind).toBe("matched");
-    expect(Object.keys((outcome as { ledger: IdLedger }).ledger.entries)).toHaveLength(
-      before,
-    );
+    expect(
+      Object.keys((outcome as { ledger: IdLedger }).ledger.entries),
+    ).toHaveLength(before);
   });
 
   it("an unrelated OSM object with no spatial match mints a new stub facility", () => {
@@ -269,7 +269,12 @@ describe("mergeIntoSurvivor + resolveMergedId (A2-04 closure)", () => {
       desiredSlug: "site-b",
       ...meta,
     });
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
     expect(merged.entries[b.facilityId]?.tombstoned).toBe(true);
     expect(merged.entries[b.facilityId]?.mergedInto).toBe(a.facilityId);
     expect(resolveMergedId(merged, b.facilityId)).toBe(a.facilityId);
@@ -305,39 +310,81 @@ describe("promoteToVerified (AT(8) promotion)", () => {
       desiredSlug: "pebble-hills",
       ...meta,
     });
-    const promoted = promoteToVerified(minted.ledger, [minted.facilityId], meta);
-    expect(() => promoteToVerified(promoted, [minted.facilityId], meta)).toThrow();
+    const promoted = promoteToVerified(
+      minted.ledger,
+      [minted.facilityId],
+      meta,
+    );
+    expect(() =>
+      promoteToVerified(promoted, [minted.facilityId], meta),
+    ).toThrow();
   });
 
   it("S8: rejects promoting a tombstoned id", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
-    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
+    const b = mintStubFacility(a.ledger, {
+      osmRef: "way/2",
+      desiredSlug: "site-b",
+      ...meta,
+    });
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
     expect(() => promoteToVerified(merged, [b.facilityId], meta)).toThrow();
   });
 });
 
 describe("mergeIntoSurvivor guards (S8, gate review post-e9b3ab0)", () => {
   it("rejects a self-merge", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
     expect(() =>
       mergeIntoSurvivor(a.ledger, [a.facilityId], a.facilityId, meta),
     ).toThrow();
   });
 
   it("rejects a merge across kinds (course into facility)", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
     expect(() =>
       mergeIntoSurvivor(a.ledger, [a.courseId], a.facilityId, meta),
     ).toThrow();
   });
 
   it("rejects a merge cycle", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
-    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
+    const b = mintStubFacility(a.ledger, {
+      osmRef: "way/2",
+      desiredSlug: "site-b",
+      ...meta,
+    });
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
     // b already resolves to a; merging a into b would close a 2-cycle.
-    expect(() => mergeIntoSurvivor(merged, [a.facilityId], b.facilityId, meta)).toThrow();
+    expect(() =>
+      mergeIntoSurvivor(merged, [a.facilityId], b.facilityId, meta),
+    ).toThrow();
   });
 });
 
@@ -382,9 +429,22 @@ describe("blocking #4 (gate review post-e9b3ab0): re-seed must not mint a second
   });
 
   it("the ref of a MERGED-AWAY facility resolves to its survivor and mints nothing", () => {
-    const m = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "pine-hills", ...meta });
-    const m2 = mintStubFacility(m.ledger, { osmRef: "way/50", desiredSlug: "oak", ...meta });
-    const merged = mergeIntoSurvivor(m2.ledger, [m2.facilityId], m.facilityId, meta);
+    const m = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "pine-hills",
+      ...meta,
+    });
+    const m2 = mintStubFacility(m.ledger, {
+      osmRef: "way/50",
+      desiredSlug: "oak",
+      ...meta,
+    });
+    const merged = mergeIntoSurvivor(
+      m2.ledger,
+      [m2.facilityId],
+      m.facilityId,
+      meta,
+    );
     const before = Object.keys(merged.entries).length;
 
     // Re-seeing way/50 (the tombstoned facility's own ref) on every re-seed
@@ -400,7 +460,15 @@ describe("blocking #4 (gate review post-e9b3ab0): re-seed must not mint a second
           desiredSlug: "oak",
           ...meta,
         },
-        [{ facilityId: m2.facilityId, courseId: m2.courseId, name: "Oak", lat: 40, lng: -80 }],
+        [
+          {
+            facilityId: m2.facilityId,
+            courseId: m2.courseId,
+            name: "Oak",
+            lat: 40,
+            lng: -80,
+          },
+        ],
       );
       expect(outcome.kind).toBe("already-known");
       if (outcome.kind === "already-known") {
@@ -445,11 +513,24 @@ describe("S9 (gate review post-e9b3ab0): proximity without a name match is ambig
 
 describe("item 3 (gate review round 2): merge re-parenting (§4.2 row 2)", () => {
   it("mergeIntoSurvivor re-parents the merged facility's course(s) under the survivor", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
-    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
+    const b = mintStubFacility(a.ledger, {
+      osmRef: "way/2",
+      desiredSlug: "site-b",
+      ...meta,
+    });
     expect(b.ledger.entries[b.courseId]?.facilityId).toBe(b.facilityId);
 
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
 
     // The course's own id is unchanged; only its facilityId link moves.
     expect(merged.entries[b.courseId]).toBeDefined();
@@ -458,9 +539,22 @@ describe("item 3 (gate review round 2): merge re-parenting (§4.2 row 2)", () =>
   });
 
   it("findLedgerIdBySeedRef resolves a merged facility's ref to {survivor facility, ORIGINAL course}", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
-    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
+    const b = mintStubFacility(a.ledger, {
+      osmRef: "way/2",
+      desiredSlug: "site-b",
+      ...meta,
+    });
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
 
     const found = findLedgerIdBySeedRef(merged, "way/2");
     expect(found?.facilityId).toBe(a.facilityId); // the survivor
@@ -468,9 +562,22 @@ describe("item 3 (gate review round 2): merge re-parenting (§4.2 row 2)", () =>
   });
 
   it("does not confuse the survivor's own course with the re-parented one when both exist", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
-    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
+    const b = mintStubFacility(a.ledger, {
+      osmRef: "way/2",
+      desiredSlug: "site-b",
+      ...meta,
+    });
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
 
     // The survivor "a" now has TWO courses under it: its own (a.courseId)
     // and the re-parented one (b.courseId). Looking up each ref must
@@ -481,7 +588,11 @@ describe("item 3 (gate review round 2): merge re-parenting (§4.2 row 2)", () =>
   });
 
   it("splitCourse's siblings inherit the kept course's facilityId (unaffected by re-parenting)", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
     const { ledger, siblingIds } = splitCourse(a.ledger, a.courseId, 2, meta);
     for (const siblingId of siblingIds) {
       expect(ledger.entries[siblingId]?.facilityId).toBe(a.facilityId);
@@ -491,7 +602,11 @@ describe("item 3 (gate review round 2): merge re-parenting (§4.2 row 2)", () =>
 
 describe("nit (gate review round 2): a mergedInto cycle is reported, not thrown", () => {
   it("resolveMergedId stops and returns a value instead of throwing on a self-cycle", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
     const corrupted: IdLedger = {
       entries: {
         ...a.ledger.entries,
@@ -507,15 +622,31 @@ describe("nit (gate review round 2): a mergedInto cycle is reported, not thrown"
   });
 
   it("detectMergeCycle reports true for a self-cycle and false for a normal chain", () => {
-    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
-    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
-    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    const a = mintStubFacility(emptyLedger(), {
+      osmRef: "way/1",
+      desiredSlug: "site-a",
+      ...meta,
+    });
+    const b = mintStubFacility(a.ledger, {
+      osmRef: "way/2",
+      desiredSlug: "site-b",
+      ...meta,
+    });
+    const merged = mergeIntoSurvivor(
+      b.ledger,
+      [b.facilityId],
+      a.facilityId,
+      meta,
+    );
     expect(detectMergeCycle(merged, b.facilityId)).toBe(false);
 
     const corrupted: IdLedger = {
       entries: {
         ...merged.entries,
-        [a.facilityId]: { ...merged.entries[a.facilityId]!, mergedInto: b.facilityId },
+        [a.facilityId]: {
+          ...merged.entries[a.facilityId]!,
+          mergedInto: b.facilityId,
+        },
       },
     };
     // Now a -> b -> a: a genuine cycle.

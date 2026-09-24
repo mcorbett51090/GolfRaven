@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { K2_GATE_CLOSES_AT_FLOOR, checkK2Day0, checkK2GateClosesAt, checkK2GateMatchesDay0 } from "../src/config";
+import {
+  K2_GATE_CLOSES_AT_FLOOR,
+  checkK2Day0,
+  checkK2GateClosesAt,
+  checkK2GateMatchesDay0,
+} from "../src/config";
 
 // N2: the retention cron must never be able to delete a confirmed row the
 // K2 verdict still needs. Every invalid form from the reverify report's
@@ -48,7 +53,8 @@ describe("checkK2GateClosesAt (N2)", () => {
   it("accepts the floor timestamp exactly (2026-10-05 P0 start + 42 days)", () => {
     const result = checkK2GateClosesAt(K2_GATE_CLOSES_AT_FLOOR);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.gateCloses.toISOString()).toBe("2026-11-16T00:00:00.000Z");
+    if (result.ok)
+      expect(result.gateCloses.toISOString()).toBe("2026-11-16T00:00:00.000Z");
   });
 
   it("accepts a well-formed, sufficiently-late timestamp", () => {
@@ -99,7 +105,8 @@ describe("checkK2Day0 (A-3)", () => {
   it("accepts a well-formed bare date", () => {
     const result = checkK2Day0("2026-10-05");
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.day0.toISOString()).toBe("2026-10-05T00:00:00.000Z");
+    if (result.ok)
+      expect(result.day0.toISOString()).toBe("2026-10-05T00:00:00.000Z");
   });
 });
 

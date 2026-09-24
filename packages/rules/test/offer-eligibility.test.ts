@@ -5,9 +5,17 @@
  * still issues nothing on a 0.50 play."
  */
 import { describe, expect, it } from "vitest";
-import type { CourseId, FacilityId, RuleExpr, TrailId } from "@golfraven/catalog";
+import type {
+  CourseId,
+  FacilityId,
+  RuleExpr,
+  TrailId,
+} from "@golfraven/catalog";
 import { validateOfferEligibility } from "../src/offer-eligibility.js";
-import { evaluateRuleExpr, type RuleExprEvalContext } from "../src/rule-expr-eval.js";
+import {
+  evaluateRuleExpr,
+  type RuleExprEvalContext,
+} from "../src/rule-expr-eval.js";
 import { nextId } from "./test-ids.js";
 
 describe("validateOfferEligibility (A2-05)", () => {
@@ -77,7 +85,12 @@ describe("validateOfferEligibility (A2-05)", () => {
       programmeStartsOn: "2020-01-01",
       plays: [
         // Badge-level only (0.50) — NOT money-qualifying.
-        { courseId, localDate: "2026-06-01", scoreBadge: 0.5, moneyQualifies: false },
+        {
+          courseId,
+          localDate: "2026-06-01",
+          scoreBadge: 0.5,
+          moneyQualifies: false,
+        },
       ],
     };
     expect(evaluateRuleExpr(rule, ctx, "money")).toBe(false);

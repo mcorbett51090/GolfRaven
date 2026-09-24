@@ -2,6 +2,15 @@
   "version": 0.6,
   "generator": "test-fixture",
   "elements": [
-    { "type": "count", "id": 0, "tags": { "nodes": "0", "ways": "15800", "relations": "412", "total": "16212" } }
+    {
+      "type": "count",
+      "id": 0,
+      "tags": {
+        "nodes": "0",
+        "ways": "15800",
+        "relations": "412",
+        "total": "16212"
+      }
+    }
   ]
 }

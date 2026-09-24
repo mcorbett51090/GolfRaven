@@ -84,6 +84,7 @@ development-only `[unverified — training knowledge]` (plan §7.7, FM-27, G-P1-
 the provider passes DMARC alignment.
 
 **How to verify DMARC passes:**
+
 1. Send a test email through the configured SMTP provider to an address on a mail service that publishes
    DMARC results in headers (e.g. a Gmail address), or use a DMARC-testing service
    (e.g. `mail-tester.com`, or the provider's own DMARC test tool).
@@ -131,7 +132,7 @@ step (`docs/owner/network-unblock.md`) if attempted from this environment.
 is on GitHub Pages currently, per X3 — GolfRaven's own site moves to Cloudflare Pages).
 
 **Done when:** The account exists and a Pages project is ready to receive the P2 site build (not itself a P0
-blocker — the landing page for K2 needs *somewhere* to be hosted, which may be this account or a simpler
+blocker — the landing page for K2 needs _somewhere_ to be hosted, which may be this account or a simpler
 interim host).
 
 **P0 acceptance test satisfied:** Supports AT(5) indirectly (the domain needs to resolve to something) and

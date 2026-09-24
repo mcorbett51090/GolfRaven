@@ -5,7 +5,11 @@
   "rule": {
     "kind": "compare",
     "op": ">=",
-    "left": { "kind": "agg", "name": "played", "courseId": "crs_01M39RCEWWQH25N81WMTW4Q52N" },
+    "left": {
+      "kind": "agg",
+      "name": "played",
+      "courseId": "crs_01M39RCEWWQH25N81WMTW4Q52N"
+    },
     "right": { "kind": "literal", "value": 1 }
   },
   "minConfidence": 0.5,

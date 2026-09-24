@@ -43,7 +43,10 @@ const here = fileURLToPath(new URL(".", import.meta.url));
  * at a temporary, populated `data/`-shaped directory without touching the
  * real (deliberately empty) committed one. */
 function realDataDir(env: NodeJS.ProcessEnv): string {
-  return env.GOLFRAVEN_DATA_DIR ?? fileURLToPath(new URL("../../../../data", import.meta.url));
+  return (
+    env.GOLFRAVEN_DATA_DIR ??
+    fileURLToPath(new URL("../../../../data", import.meta.url))
+  );
 }
 /** `data/overrides/primary-trail.json` — read here (the site), never in
  * `packages/catalog` ("Never does: Hold data or fetch", §3.1 row A). */
@@ -84,7 +87,7 @@ export async function loadSiteCatalog(
   const real = await loadCatalog({ dataDir: realDataDir(env) });
   if (isCatalogEmpty(real)) {
     throw new Error(
-      "data/ has no facility/trail content and GOLFRAVEN_DEMO was not set to \"1\". " +
+      'data/ has no facility/trail content and GOLFRAVEN_DEMO was not set to "1". ' +
         "Set GOLFRAVEN_DEMO=1 to build with the synthetic demo dataset (fixtures/demo-catalog/), " +
         "or add real content to data/ before building.",
     );
@@ -96,12 +99,13 @@ export async function loadSiteCatalog(
  * "gated to real members" (§4.3) by `primaryTrailOf` itself. Read here,
  * not in `packages/catalog`. Missing file (the common case today — this
  * override list starts empty) reads as no overrides, never an error. */
-export async function loadPrimaryTrailOverrides(): Promise<Map<Facility["id"], TrailId>> {
+export async function loadPrimaryTrailOverrides(): Promise<
+  Map<Facility["id"], TrailId>
+> {
   try {
-    const raw = JSON.parse(await readFile(PRIMARY_TRAIL_OVERRIDE_PATH, "utf8")) as Record<
-      string,
-      string
-    >;
+    const raw = JSON.parse(
+      await readFile(PRIMARY_TRAIL_OVERRIDE_PATH, "utf8"),
+    ) as Record<string, string>;
     return new Map(Object.entries(raw)) as Map<Facility["id"], TrailId>;
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return new Map();
@@ -129,7 +133,10 @@ export function verifiedFacilities(catalog: Catalog): Facility[] {
 
 /** Every facility in one region (by `RegionCode`), name-sorted. Powers
  * `[country]/[region]/` (§5.1 `states/*`: "Directory of all entries"). */
-export function facilitiesInRegion(catalog: Catalog, regionCode: string): Facility[] {
+export function facilitiesInRegion(
+  catalog: Catalog,
+  regionCode: string,
+): Facility[] {
   return [...catalog.facilities]
     .filter((f) => f.region === regionCode)
     .sort((a, b) => (a.name ?? a.slug).localeCompare(b.name ?? b.slug));
@@ -177,7 +184,12 @@ export function regionInfo(
     );
   }
   const [country = "", subdivision = ""] = code.split("-");
-  return { code, country: country.toLowerCase(), slug: subdivision.toLowerCase(), name: code };
+  return {
+    code,
+    country: country.toLowerCase(),
+    slug: subdivision.toLowerCase(),
+    name: code,
+  };
 }
 
 /** Every distinct region code present on at least one facility, sorted. */

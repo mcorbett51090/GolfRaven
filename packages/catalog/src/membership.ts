@@ -27,7 +27,9 @@ import type {
 /** The roster member variants that carry `unit: 'course'` are told apart by
  * which of `courseId` / `anyOf` they carry (§4.1: not a `discriminatedUnion`
  * on `unit` alone, because two variants share it — see `schema.ts`). */
-function courseMemberIds(member: RosterMember & { unit: "course" }): CourseId[] {
+function courseMemberIds(
+  member: RosterMember & { unit: "course" },
+): CourseId[] {
   return "courseId" in member ? [member.courseId] : member.anyOf;
 }
 
@@ -89,7 +91,8 @@ export function memberCoversCourse(
         resolveId(courseId, ledger) as CourseId,
       );
       return (
-        facilityId !== undefined && idEquals(member.facilityId, facilityId, ledger)
+        facilityId !== undefined &&
+        idEquals(member.facilityId, facilityId, ledger)
       );
     }
   }
@@ -140,7 +143,12 @@ export function trailsOfFacility(
   const courseFacility = buildCourseFacilityIndex(catalog);
   return catalog.trails.filter((trail) =>
     latestRosterVersion(trail).members.some((member) =>
-      memberCoversFacility(member, facilityId, courseFacility, catalog.idLedger),
+      memberCoversFacility(
+        member,
+        facilityId,
+        courseFacility,
+        catalog.idLedger,
+      ),
     ),
   );
 }
@@ -210,7 +218,9 @@ export function rosterStops(
   version: RosterVersion = latestRosterVersion(trail),
 ): RosterStop[] {
   const ledger = catalog.idLedger;
-  const facilityById = new Map(catalog.facilities.map((f) => [resolveId(f.id, ledger), f]));
+  const facilityById = new Map(
+    catalog.facilities.map((f) => [resolveId(f.id, ledger), f]),
+  );
   const courseById = new Map<CourseId, Course>();
   for (const facility of catalog.facilities) {
     for (const course of facility.courses) {
@@ -232,7 +242,13 @@ export function rosterStops(
     if (member.unit === "facility") {
       const facility = facilityById.get(resolveId(member.facilityId, ledger));
       if (facility) {
-        stops.push({ member, facility, course: undefined, stopOrder: member.stopOrder, seq });
+        stops.push({
+          member,
+          facility,
+          course: undefined,
+          stopOrder: member.stopOrder,
+          seq,
+        });
       }
       return;
     }
@@ -241,20 +257,36 @@ export function rosterStops(
       if (firstId === undefined) return;
       const resolvedCourseId = resolveId(firstId, ledger) as CourseId;
       const facilityId = courseFacility.get(resolvedCourseId);
-      const facility = facilityId ? facilityById.get(resolveId(facilityId, ledger)) : undefined;
+      const facility = facilityId
+        ? facilityById.get(resolveId(facilityId, ledger))
+        : undefined;
       const course = courseById.get(resolvedCourseId);
       if (facility) {
-        stops.push({ member, facility, course, stopOrder: member.stopOrder, seq });
+        stops.push({
+          member,
+          facility,
+          course,
+          stopOrder: member.stopOrder,
+          seq,
+        });
       }
       return;
     }
     // unit === 'hole'
     const resolvedCourseId = resolveId(member.courseId, ledger) as CourseId;
     const facilityId = courseFacility.get(resolvedCourseId);
-    const facility = facilityId ? facilityById.get(resolveId(facilityId, ledger)) : undefined;
+    const facility = facilityId
+      ? facilityById.get(resolveId(facilityId, ledger))
+      : undefined;
     const course = courseById.get(resolvedCourseId);
     if (facility) {
-      stops.push({ member, facility, course, stopOrder: member.stopOrder, seq });
+      stops.push({
+        member,
+        facility,
+        course,
+        stopOrder: member.stopOrder,
+        seq,
+      });
     }
   });
 
@@ -264,16 +296,19 @@ export function rosterStops(
       const bOrder = b.stopOrder ?? Number.MAX_SAFE_INTEGER;
       return aOrder - bOrder || a.seq - b.seq;
     })
-    .map(
-      ({ member, facility, course }): RosterStop =>
-        course === undefined ? { member, facility } : { member, facility, course },
+    .map(({ member, facility, course }): RosterStop =>
+      course === undefined
+        ? { member, facility }
+        : { member, facility, course },
     );
 }
 
 /** Distinct facilities among the resolved stops — the "n" a private-stops
  * note counts against (S3): a course-unit trail with several members at
  * one facility counts that facility once. */
-export function distinctStopFacilityCount(stops: readonly RosterStop[]): number {
+export function distinctStopFacilityCount(
+  stops: readonly RosterStop[],
+): number {
   return new Set(stops.map((s) => s.facility.id)).size;
 }
 
@@ -284,7 +319,9 @@ export function distinctStopFacilityCount(stops: readonly RosterStop[]): number 
  * counts that facility once. */
 export function privateStopCount(stops: readonly RosterStop[]): number {
   const privateFacilityIds = new Set(
-    stops.filter((s) => s.facility.access === "private").map((s) => s.facility.id),
+    stops
+      .filter((s) => s.facility.access === "private")
+      .map((s) => s.facility.id),
   );
   return privateFacilityIds.size;
 }

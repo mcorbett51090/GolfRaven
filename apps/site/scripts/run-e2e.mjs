@@ -44,14 +44,20 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 import { serveDistWithHeaders } from "../test/e2e/serve-with-headers.mjs";
-import { runMapCspTest, checkSearch, FAKE_STYLE_URL } from "../test/e2e/map-csp-check.mjs";
+import {
+  runMapCspTest,
+  checkSearch,
+  FAKE_STYLE_URL,
+} from "../test/e2e/map-csp-check.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const siteRoot = join(here, "..");
 
 async function main() {
   if (process.env.GOLFRAVEN_E2E_SKIP === "1") {
-    console.log("run-e2e: GOLFRAVEN_E2E_SKIP=1 — skipping the runtime CSP e2e test.");
+    console.log(
+      "run-e2e: GOLFRAVEN_E2E_SKIP=1 — skipping the runtime CSP e2e test.",
+    );
     return;
   }
 
@@ -61,7 +67,8 @@ async function main() {
   try {
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   } catch (err) {
-    const reason = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    const reason =
+      err instanceof Error ? err.message.split("\n")[0] : String(err);
     if (inCi) {
       // CI now installs the pinned Chromium itself (.github/workflows/ci.yml)
       // — a launch failure here is a real regression, not an expected gap.
@@ -105,17 +112,29 @@ async function main() {
       // matching note; Astro's `public/` copy only ever reads the real
       // `public/` directory.
     };
-    execFileSync("node", ["./scripts/gen-map-data.mjs"], { cwd: siteRoot, stdio: "inherit", env: buildEnv });
+    execFileSync("node", ["./scripts/gen-map-data.mjs"], {
+      cwd: siteRoot,
+      stdio: "inherit",
+      env: buildEnv,
+    });
     execFileSync("./node_modules/.bin/astro", ["build", "--outDir", dist], {
       cwd: siteRoot,
       stdio: "inherit",
       env: buildEnv,
     });
-    execFileSync("node", ["./scripts/gen-headers.mjs", dist], { cwd: siteRoot, stdio: "inherit", env: buildEnv });
+    execFileSync("node", ["./scripts/gen-headers.mjs", dist], {
+      cwd: siteRoot,
+      stdio: "inherit",
+      env: buildEnv,
+    });
     // Search runs against Pagefind's own generated index — build it here
     // too, or /pagefind/pagefind.js (and the WASM shards it loads) simply
     // wouldn't exist for checkSearch() to exercise below.
-    execFileSync("node", ["./scripts/pagefind-index.mjs", dist], { cwd: siteRoot, stdio: "inherit", env: buildEnv });
+    execFileSync("node", ["./scripts/pagefind-index.mjs", dist], {
+      cwd: siteRoot,
+      stdio: "inherit",
+      env: buildEnv,
+    });
 
     const port = 4500 + Math.floor(Math.random() * 1000);
     const server = await serveDistWithHeaders(dist, port);

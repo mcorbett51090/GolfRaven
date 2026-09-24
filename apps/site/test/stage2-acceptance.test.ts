@@ -24,7 +24,11 @@ import {
   renderRedirectsFile,
 } from "../scripts/gen-redirects.mjs";
 import { buildHeaders } from "../scripts/gen-headers.mjs";
-import { allowedBookingEntries, bookingEntryAllowed, bookingPlatformLabel } from "../src/lib/booking-hosts";
+import {
+  allowedBookingEntries,
+  bookingEntryAllowed,
+  bookingPlatformLabel,
+} from "../src/lib/booking-hosts";
 import { loadCatalogFromBundle } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
 import { BUILDS } from "./paths.mjs";
@@ -44,7 +48,11 @@ describe("AT(2): offline Lighthouse-style budget + a11y check (hub, trail, cours
   it("passes against the real build", async () => {
     const result = await verifyA11yBudget(BUILDS.real.dist);
     expect(result.ok, result.issues.join("\n")).toBe(true);
-    expect(result.report.map((r) => r.kind).sort()).toEqual(["course", "hub", "trail"]);
+    expect(result.report.map((r) => r.kind).sort()).toEqual([
+      "course",
+      "hub",
+      "trail",
+    ]);
   });
 
   it("PROOF: catches a missing alt attribute (mutated copy)", async () => {
@@ -77,23 +85,30 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
       return out;
     }
     const allowList = JSON.parse(
-      await rf(join(siteRoot, "..", "..", "config", "booking-hosts.json"), "utf8"),
+      await rf(
+        join(siteRoot, "..", "..", "config", "booking-hosts.json"),
+        "utf8",
+      ),
     ).hosts as string[];
 
-    const courseFiles = (await walk(join(BUILDS.real.dist, "courses"))).filter((f) =>
-      f.endsWith("index.html"),
+    const courseFiles = (await walk(join(BUILDS.real.dist, "courses"))).filter(
+      (f) => f.endsWith("index.html"),
     );
     let sawBookingLink = false;
     for (const file of courseFiles) {
       const html = await rf(file, "utf8");
-      const hrefs = [...html.matchAll(/data-analytics-event="booking_click"[^>]*href="([^"]+)"/g)].map(
-        (m) => m[1],
-      );
+      const hrefs = [
+        ...html.matchAll(
+          /data-analytics-event="booking_click"[^>]*href="([^"]+)"/g,
+        ),
+      ].map((m) => m[1]);
       // href can appear before or after the data attribute in source
       // order — also match the reverse attribute order.
-      const hrefsAlt = [...html.matchAll(/href="([^"]+)"[^>]*data-analytics-event="booking_click"/g)].map(
-        (m) => m[1],
-      );
+      const hrefsAlt = [
+        ...html.matchAll(
+          /href="([^"]+)"[^>]*data-analytics-event="booking_click"/g,
+        ),
+      ].map((m) => m[1]);
       for (const href of [...hrefs, ...hrefsAlt]) {
         sawBookingLink = true;
         const host = new URL(href!).host;
@@ -106,7 +121,10 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
         // host".
         const onAllowList = allowList.includes(host);
         const isCourseNative = host === "ridge-overlook.example.com";
-        expect(onAllowList || isCourseNative, `unexpected booking host: ${host}`).toBe(true);
+        expect(
+          onAllowList || isCourseNative,
+          `unexpected booking host: ${host}`,
+        ).toBe(true);
       }
     }
     expect(sawBookingLink).toBe(true);
@@ -114,19 +132,28 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
 
   it("unit: bookingEntryAllowed accepts an allow-listed golfnow host and rejects an unlisted one", async () => {
     const catalog = loadCatalogFromBundle(demoBundleForSite());
-    const facility = catalog.facilities.find((f) => f.slug === "highland-meadows-golf-course")!;
+    const facility = catalog.facilities.find(
+      (f) => f.slug === "highland-meadows-golf-course",
+    )!;
     const goodEntry = facility.booking[0]!;
-    expect(bookingEntryAllowed(goodEntry, facility, ["www.golfnow.com"])).toBe(true);
+    expect(bookingEntryAllowed(goodEntry, facility, ["www.golfnow.com"])).toBe(
+      true,
+    );
     expect(bookingEntryAllowed(goodEntry, facility, [])).toBe(false);
   });
 
   it("unit: bookingEntryAllowed enforces course-native === the facility's own domain", async () => {
     const catalog = loadCatalogFromBundle(demoBundleForSite());
-    const facility = catalog.facilities.find((f) => f.slug === "ridge-overlook-golf-club")!;
+    const facility = catalog.facilities.find(
+      (f) => f.slug === "ridge-overlook-golf-club",
+    )!;
     const entry = facility.booking[0]!;
     expect(entry.provider).toBe("course-native");
     expect(bookingEntryAllowed(entry, facility, [])).toBe(true); // matches facility.url's host
-    const spoofed = { ...entry, url: "https://not-the-course.example.com/tee-times" as any };
+    const spoofed = {
+      ...entry,
+      url: "https://not-the-course.example.com/tee-times" as any,
+    };
     expect(bookingEntryAllowed(spoofed, facility, [])).toBe(false);
   });
 
@@ -134,14 +161,19 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
   // booking entry that must not render (a bypass must fail the test)."
   it("a MIXED booking[] (one allow-listed entry + one disallowed entry) renders ONLY the allowed one — a bypass (dropping the filter) fails this test", async () => {
     const catalog = loadCatalogFromBundle(demoBundleForSite());
-    const facility = catalog.facilities.find((f) => f.slug === "highland-meadows-golf-course")!;
+    const facility = catalog.facilities.find(
+      (f) => f.slug === "highland-meadows-golf-course",
+    )!;
     const allowedEntry = facility.booking[0]!; // real fixture: www.golfnow.com, allow-listed
     const disallowedEntry = {
       ...allowedEntry,
       provider: "chronogolf" as const,
       url: "https://booking.not-allow-listed.example/highland-meadows",
     };
-    const mixedFacility = { ...facility, booking: [allowedEntry, disallowedEntry] };
+    const mixedFacility = {
+      ...facility,
+      booking: [allowedEntry, disallowedEntry],
+    };
     const allowList = ["www.golfnow.com"];
 
     const rendered = allowedBookingEntries(mixedFacility, allowList);
@@ -154,69 +186,107 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
     // introduce by forgetting to call allowedBookingEntries), the
     // disallowed entry WOULD be present — so this test fails loudly the
     // moment that filter is ever skipped.
-    expect(mixedFacility.booking.some((e) => e.url === disallowedEntry.url)).toBe(true);
+    expect(
+      mixedFacility.booking.some((e) => e.url === disallowedEntry.url),
+    ).toBe(true);
   });
 
   it("bookingPlatformLabel derives the label from the ACTUAL host — never a hard-coded 'GolfNow' for every non-course-native provider", () => {
-    expect(bookingPlatformLabel({ provider: "golfnow", url: "https://www.golfnow.com/x" } as any)).toBe(
-      "GolfNow",
-    );
     expect(
-      bookingPlatformLabel({ provider: "chronogolf", url: "https://www.chronogolf.com/x" } as any),
+      bookingPlatformLabel({
+        provider: "golfnow",
+        url: "https://www.golfnow.com/x",
+      } as any),
+    ).toBe("GolfNow");
+    expect(
+      bookingPlatformLabel({
+        provider: "chronogolf",
+        url: "https://www.chronogolf.com/x",
+      } as any),
     ).toBe("Chronogolf");
-    expect(bookingPlatformLabel({ provider: "teeon", url: "https://book.teeon.com/x" } as any)).toBe(
-      "TeeOn",
-    );
     expect(
-      bookingPlatformLabel({ provider: "club-prophet", url: "https://www.clubprophetsystems.com/x" } as any),
+      bookingPlatformLabel({
+        provider: "teeon",
+        url: "https://book.teeon.com/x",
+      } as any),
+    ).toBe("TeeOn");
+    expect(
+      bookingPlatformLabel({
+        provider: "club-prophet",
+        url: "https://www.clubprophetsystems.com/x",
+      } as any),
     ).toBe("Club Prophet");
-    expect(bookingPlatformLabel({ provider: "course-native", url: "https://example.com/x" } as any)).toBe(
-      "the course",
-    );
+    expect(
+      bookingPlatformLabel({
+        provider: "course-native",
+        url: "https://example.com/x",
+      } as any),
+    ).toBe("the course");
     // An allow-listed host this table doesn't know by name still gets a
     // real, non-misleading label derived from the host itself.
     expect(
-      bookingPlatformLabel({ provider: "chronogolf", url: "https://tee.someotherplatform.io/x" } as any),
+      bookingPlatformLabel({
+        provider: "chronogolf",
+        url: "https://tee.someotherplatform.io/x",
+      } as any),
     ).toBe("Someotherplatform");
   });
 
   // Nit (re-gate): the guard now reads a structural "synthetic" field,
   // never `_comment` prose — see booking-hosts-guard.mjs's doc for why.
   it("assertBookingHostsNotSynthetic refuses a production build unless synthetic === false EXPLICITLY, and allows non-production regardless", async () => {
-    const { assertBookingHostsNotSynthetic } = await import("../src/lib/booking-hosts-guard.mjs");
+    const { assertBookingHostsNotSynthetic } =
+      await import("../src/lib/booking-hosts-guard.mjs");
     const syntheticRaw = { synthetic: true, hosts: ["www.golfnow.com"] };
     expect(() =>
-      assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "production" }),
+      assertBookingHostsNotSynthetic(syntheticRaw, {
+        GOLFRAVEN_ENV: "production",
+      }),
     ).toThrow(/synthetic/i);
-    expect(() => assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "development" })).not.toThrow();
+    expect(() =>
+      assertBookingHostsNotSynthetic(syntheticRaw, {
+        GOLFRAVEN_ENV: "development",
+      }),
+    ).not.toThrow();
 
     // Missing field entirely — fail-closed, same as `true` (the should-fix's
     // explicit requirement: "refuse if the field is absent entirely").
     const missingFieldRaw = { hosts: ["www.golfnow.com"] };
     expect(() =>
-      assertBookingHostsNotSynthetic(missingFieldRaw, { GOLFRAVEN_ENV: "production" }),
+      assertBookingHostsNotSynthetic(missingFieldRaw, {
+        GOLFRAVEN_ENV: "production",
+      }),
     ).toThrow(/missing entirely/);
 
     // A truthy-but-not-boolean value (e.g. a stray string) also refuses —
     // only the literal boolean `false` is trusted.
     const stringyRaw = { synthetic: "false", hosts: ["www.golfnow.com"] };
     expect(() =>
-      assertBookingHostsNotSynthetic(stringyRaw, { GOLFRAVEN_ENV: "production" }),
+      assertBookingHostsNotSynthetic(stringyRaw, {
+        GOLFRAVEN_ENV: "production",
+      }),
     ).toThrow(/not the boolean false/);
 
     const realRaw = { synthetic: false, hosts: ["www.golfnow.com"] };
-    expect(() => assertBookingHostsNotSynthetic(realRaw, { GOLFRAVEN_ENV: "production" })).not.toThrow();
+    expect(() =>
+      assertBookingHostsNotSynthetic(realRaw, { GOLFRAVEN_ENV: "production" }),
+    ).not.toThrow();
   });
 
-  it("the REAL config/booking-hosts.json has no \"synthetic\": false field today (P1a not yet resolved) — verify-input.mjs / booking-hosts.ts both refuse it in production", async () => {
+  it('the REAL config/booking-hosts.json has no "synthetic": false field today (P1a not yet resolved) — verify-input.mjs / booking-hosts.ts both refuse it in production', async () => {
     const raw = JSON.parse(
-      await (await import("node:fs/promises")).readFile(
+      await (
+        await import("node:fs/promises")
+      ).readFile(
         join(siteRoot, "..", "..", "config", "booking-hosts.json"),
         "utf8",
       ),
     );
-    const { assertBookingHostsNotSynthetic } = await import("../src/lib/booking-hosts-guard.mjs");
-    expect(() => assertBookingHostsNotSynthetic(raw, { GOLFRAVEN_ENV: "production" })).toThrow();
+    const { assertBookingHostsNotSynthetic } =
+      await import("../src/lib/booking-hosts-guard.mjs");
+    expect(() =>
+      assertBookingHostsNotSynthetic(raw, { GOLFRAVEN_ENV: "production" }),
+    ).toThrow();
   });
 });
 
@@ -231,40 +301,62 @@ describe("AT(5): retired slugs get a 301 rule in the generated _redirects", () =
     const rules = parseRedirects({
       redirects: [{ from: "/courses/old-slug/", to: "/courses/new-slug/" }],
     });
-    expect(renderRedirectsFile(rules)).toContain("/courses/old-slug/\t/courses/new-slug/\t301");
+    expect(renderRedirectsFile(rules)).toContain(
+      "/courses/old-slug/\t/courses/new-slug/\t301",
+    );
 
     const built = await readIn(BUILDS.real.dist, "_redirects");
-    expect(built).toContain("/courses/old-ridge-overlook-slug/\t/courses/ridge-overlook-golf-club/\t301");
+    expect(built).toContain(
+      "/courses/old-ridge-overlook-slug/\t/courses/ridge-overlook-golf-club/\t301",
+    );
   });
 
   it("gen-redirects.mjs refuses a query-string rule (G-P2-09 — the SWC rule explicitly not ported)", () => {
-    expect(() => parseRedirects({ redirects: [{ from: "/?winery=slug", to: "/x/" }] })).toThrow(
-      /query string/,
-    );
+    expect(() =>
+      parseRedirects({ redirects: [{ from: "/?winery=slug", to: "/x/" }] }),
+    ).toThrow(/query string/);
   });
 
   // Nit (Opus gate): refuse from === to.
   it("assertNoSelfRedirects refuses a rule whose from equals its to", () => {
-    const rules = parseRedirects({ redirects: [{ from: "/courses/same-slug/", to: "/courses/same-slug/" }] });
+    const rules = parseRedirects({
+      redirects: [{ from: "/courses/same-slug/", to: "/courses/same-slug/" }],
+    });
     expect(() => assertNoSelfRedirects(rules)).toThrow(/from === to/);
   });
   it("assertNoSelfRedirects accepts a rule whose from differs from its to", () => {
-    const rules = parseRedirects({ redirects: [{ from: "/courses/old-slug/", to: "/courses/new-slug/" }] });
+    const rules = parseRedirects({
+      redirects: [{ from: "/courses/old-slug/", to: "/courses/new-slug/" }],
+    });
     expect(() => assertNoSelfRedirects(rules)).not.toThrow();
   });
 
   // Nit (Opus gate): refuse a `from` that shadows an actually-built page.
   it("assertFromNotShadowingBuiltPage refuses a from that IS a real built page in the real dist", () => {
     const rules = parseRedirects({
-      redirects: [{ from: "/courses/ridge-overlook-golf-club/", to: "/courses/thinfield-muni/" }],
+      redirects: [
+        {
+          from: "/courses/ridge-overlook-golf-club/",
+          to: "/courses/thinfield-muni/",
+        },
+      ],
     });
-    expect(() => assertFromNotShadowingBuiltPage(rules, BUILDS.real.dist)).toThrow(/would shadow it/);
+    expect(() =>
+      assertFromNotShadowingBuiltPage(rules, BUILDS.real.dist),
+    ).toThrow(/would shadow it/);
   });
   it("assertFromNotShadowingBuiltPage accepts a from that is NOT a built page (a genuinely retired slug)", () => {
     const rules = parseRedirects({
-      redirects: [{ from: "/courses/old-ridge-overlook-slug/", to: "/courses/ridge-overlook-golf-club/" }],
+      redirects: [
+        {
+          from: "/courses/old-ridge-overlook-slug/",
+          to: "/courses/ridge-overlook-golf-club/",
+        },
+      ],
     });
-    expect(() => assertFromNotShadowingBuiltPage(rules, BUILDS.real.dist)).not.toThrow();
+    expect(() =>
+      assertFromNotShadowingBuiltPage(rules, BUILDS.real.dist),
+    ).not.toThrow();
     // Sanity: the SAME rule's `to` really is built — proves the fixture
     // used above resembles a genuine retired-slug rename, not an
     // accidental typo that happens to dodge both checks.
@@ -298,7 +390,10 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
   // hit the real (empty) `data/` dir and thrown. Both tests below now set
   // `GOLFRAVEN_DEMO: "1"` explicitly via `withEnv`, same as every other
   // env var they depend on.
-  function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  function withEnv<T>(
+    overrides: Record<string, string | undefined>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
     const saved: Record<string, string | undefined> = {};
     for (const key of Object.keys(overrides)) saved[key] = process.env[key];
     for (const [key, value] of Object.entries(overrides)) {
@@ -315,17 +410,22 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
 
   it("a simulated empty OG store completes with the fallback TEMPLATE card, never a failure", async () => {
     const catalog = loadCatalogFromBundle(demoBundleForSite());
-    const facility = catalog.facilities.find((f) => f.slug === "ridge-overlook-golf-club")!;
-    await withEnv({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: "1" }, async () => {
-      const { GET } = await import("../src/pages/og/courses/[slug].png.ts");
-      const response = await GET({ props: { facility } } as any);
-      expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("image/png");
-      const buf = Buffer.from(await response.arrayBuffer());
-      // A real (if generic) PNG, not an empty/error body — starts with the
-      // PNG magic bytes.
-      expect(buf.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-    });
+    const facility = catalog.facilities.find(
+      (f) => f.slug === "ridge-overlook-golf-club",
+    )!;
+    await withEnv(
+      { GOLFRAVEN_DEMO: "1", GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: "1" },
+      async () => {
+        const { GET } = await import("../src/pages/og/courses/[slug].png.ts");
+        const response = await GET({ props: { facility } } as any);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("Content-Type")).toBe("image/png");
+        const buf = Buffer.from(await response.arrayBuffer());
+        // A real (if generic) PNG, not an empty/error body — starts with the
+        // PNG magic bytes.
+        expect(buf.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+      },
+    );
   });
 
   it("§5.2's REAL budget-projected fallback: a near-zero GOLFRAVEN_OG_BUDGET_MS ships the template card for a fresh (cache-miss) facility instead of rendering the full one", async () => {
@@ -333,7 +433,9 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
     // thinfield-muni is on NO trail in the demo fixture (unlike
     // blue-heron-links etc.) — picked specifically so the expected
     // template render below needs no primaryTrailOf() lookup to match.
-    const facility = catalog.facilities.find((f) => f.slug === "thinfield-muni")!;
+    const facility = catalog.facilities.find(
+      (f) => f.slug === "thinfield-muni",
+    )!;
     const { mkdtemp, rm } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -347,7 +449,8 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
           GOLFRAVEN_OG_BUDGET_MS: "1", // effectively zero — the very first card already exceeds it
         },
         async () => {
-          const { resetOgBudgetForTests } = await import("../src/lib/og-budget");
+          const { resetOgBudgetForTests } =
+            await import("../src/lib/og-budget");
           resetOgBudgetForTests();
           const { GET } = await import("../src/pages/og/courses/[slug].png.ts");
           const { renderTemplateCard } = await import("../src/lib/og-card");
@@ -373,7 +476,12 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
     await expect(readdir(ogDir)).rejects.toThrow(); // the whole dist/og/ tree never exists
 
     const html = await readFile(
-      join(BUILDS.demo.dist, "courses", "ridge-overlook-golf-club", "index.html"),
+      join(
+        BUILDS.demo.dist,
+        "courses",
+        "ridge-overlook-golf-club",
+        "index.html",
+      ),
       "utf8",
     ).catch(() => null);
     // The demo build IS noindex-everywhere (B3), but the course page
@@ -405,7 +513,10 @@ describe("AT(11): the generated CSP passes csp_evaluator with no HIGH-severity f
   });
 
   it("the tile-host-configured CSP (a synthetic https tile provider) also has no HIGH findings", () => {
-    const headers = buildHeaders({ GOLFRAVEN_TILE_STYLE_URL: "https://tiles.example.com/styles/positron/style.json" });
+    const headers = buildHeaders({
+      GOLFRAVEN_TILE_STYLE_URL:
+        "https://tiles.example.com/styles/positron/style.json",
+    });
     expect(headers).toContain("connect-src 'self' https://tiles.example.com");
     const csp = cspOf(headers);
     const parsed = new CspParser(csp).csp;
@@ -458,18 +569,28 @@ describe("AT(12): §5.2 budget gates", () => {
     const { tmpdir } = await import("node:os");
     const scratch = await mkdtemp(join(tmpdir(), "golfraven-redirects-proof-"));
     try {
-      const rules = Array.from({ length: 1801 }, (_, i) => `/a${i}/\t/b${i}/\t301`).join("\n");
+      const rules = Array.from(
+        { length: 1801 },
+        (_, i) => `/a${i}/\t/b${i}/\t301`,
+      ).join("\n");
       await wf(join(scratch, "_redirects"), rules + "\n");
       const result = await verifyBudget(scratch);
       expect(result.ok).toBe(false);
-      expect(result.issues.some((i) => /_redirects has 1801 rule/.test(i))).toBe(true);
+      expect(
+        result.issues.some((i) => /_redirects has 1801 rule/.test(i)),
+      ).toBe(true);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
   });
 
   it("PROOF: verify-budget FAILS a synthetic dist/ that exceeds the 18,000-file gate", async () => {
-    const { mkdtemp, writeFile: wf, mkdir: mkd, rm } = await import("node:fs/promises");
+    const {
+      mkdtemp,
+      writeFile: wf,
+      mkdir: mkd,
+      rm,
+    } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const scratch = await mkdtemp(join(tmpdir(), "golfraven-filecount-proof-"));
     try {
@@ -486,7 +607,9 @@ describe("AT(12): §5.2 budget gates", () => {
       const result = await verifyBudget(scratch);
       expect(result.ok).toBe(false);
       expect(result.fileCount).toBe(18010);
-      expect(result.issues.some((i) => /exceeds the 18000-file gate/.test(i))).toBe(true);
+      expect(
+        result.issues.some((i) => /exceeds the 18000-file gate/.test(i)),
+      ).toBe(true);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -506,27 +629,42 @@ describe("AT(12): §5.2 budget gates", () => {
       }
       const result = await verifyBudget(scratch);
       expect(result.ok).toBe(false);
-      expect(result.issues.some((i) => /dist\/ is 4\d{2}\.\d MB, exceeds the 400 MB gate/.test(i))).toBe(
-        true,
-      );
+      expect(
+        result.issues.some((i) =>
+          /dist\/ is 4\d{2}\.\d MB, exceeds the 400 MB gate/.test(i),
+        ),
+      ).toBe(true);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
   }, 30_000);
 
   it("PROOF: verify-budget FAILS a geometry/* shard over the 5 MiB gate (and passes a shard under it)", async () => {
-    const { mkdtemp, writeFile: wf, mkdir: mkd, rm } = await import("node:fs/promises");
+    const {
+      mkdtemp,
+      writeFile: wf,
+      mkdir: mkd,
+      rm,
+    } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const scratch = await mkdtemp(join(tmpdir(), "golfraven-geometry-proof-"));
     try {
       const geomDir = join(scratch, "data", "geometry");
       await mkd(geomDir, { recursive: true });
-      await wf(join(geomDir, "us-tn.geojson"), Buffer.alloc(6 * 1024 * 1024, 1)); // > 5 MiB
-      await wf(join(geomDir, "ca-bc.geojson"), Buffer.alloc(1 * 1024 * 1024, 1)); // well under
+      await wf(
+        join(geomDir, "us-tn.geojson"),
+        Buffer.alloc(6 * 1024 * 1024, 1),
+      ); // > 5 MiB
+      await wf(
+        join(geomDir, "ca-bc.geojson"),
+        Buffer.alloc(1 * 1024 * 1024, 1),
+      ); // well under
       const result = await verifyBudget(scratch);
       expect(result.ok).toBe(false);
       expect(result.geometryOffenders).toEqual(["data/geometry/us-tn.geojson"]);
-      expect(result.issues.some((i) => /geometry-shard gate/.test(i))).toBe(true);
+      expect(result.issues.some((i) => /geometry-shard gate/.test(i))).toBe(
+        true,
+      );
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -547,7 +685,10 @@ describe("AT(12): §5.2 budget gates", () => {
     // 0 as "unset" (its `startedMs > 0` guard), same as it treats NaN.
     const startedMs = 1;
 
-    const wellUnder = await emptyDistOk({ GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) }, 5 * 60_000);
+    const wellUnder = await emptyDistOk(
+      { GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) },
+      5 * 60_000,
+    );
     expect(wellUnder.ok).toBe(true);
     expect(wellUnder.warnings).toEqual([]);
 
@@ -556,11 +697,20 @@ describe("AT(12): §5.2 budget gates", () => {
       11 * 60_000, // 11 min > 10.8 min (90% of 12) but < 12 min
     );
     expect(past90Percent.ok).toBe(true); // a warning, never a failure
-    expect(past90Percent.warnings.some((w) => /over 90% of the/.test(w))).toBe(true);
+    expect(past90Percent.warnings.some((w) => /over 90% of the/.test(w))).toBe(
+      true,
+    );
 
-    const overGate = await emptyDistOk({ GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) }, 13 * 60_000);
+    const overGate = await emptyDistOk(
+      { GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) },
+      13 * 60_000,
+    );
     expect(overGate.ok).toBe(false);
-    expect(overGate.issues.some((i) => /exceeds the §5.2 12 min warm-build gate/.test(i))).toBe(true);
+    expect(
+      overGate.issues.some((i) =>
+        /exceeds the §5.2 12 min warm-build gate/.test(i),
+      ),
+    ).toBe(true);
 
     const noSignal = await emptyDistOk({}, 999 * 60_000);
     expect(noSignal.ok).toBe(true);

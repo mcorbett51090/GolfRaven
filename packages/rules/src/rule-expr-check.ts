@@ -51,7 +51,11 @@ export interface RuleExprCheckIssue {
   message: string;
 }
 
-function issue(code: string, path: string, message: string): RuleExprCheckIssue {
+function issue(
+  code: string,
+  path: string,
+  message: string,
+): RuleExprCheckIssue {
   return { code, path, message };
 }
 
@@ -120,7 +124,9 @@ export function numericRangeOf(operand: NumericOperand): NumericRange {
       return { min: 0, max: 1 };
     case "countDistinct": {
       const domainBound = domainBoundForField(operand.field);
-      const whereBound = operand.where ? new Set(operand.where.in).size : Infinity;
+      const whereBound = operand.where
+        ? new Set(operand.where.in).size
+        : Infinity;
       return { min: 0, max: Math.min(domainBound, whereBound) };
     }
     default:
@@ -208,7 +214,9 @@ function walk(
   switch (expr.kind) {
     case "and":
     case "or":
-      expr.args.forEach((arg, i) => walk(arg, `${path}.args[${i}]`, mode, negated, issues));
+      expr.args.forEach((arg, i) =>
+        walk(arg, `${path}.args[${i}]`, mode, negated, issues),
+      );
       return;
     case "not":
       walk(expr.arg, `${path}.arg`, mode, !negated, issues);
@@ -219,7 +227,11 @@ function walk(
       // N2 (gate review): only a comparison that actually involves an
       // aggregate operand has a "polarity" concept at all — a pure
       // literal-vs-literal comparison (`1 == 1`) has none to lack.
-      if ((expr.op === "==" || expr.op === "!=") && mode === "money" && (leftIsAggregate || rightIsAggregate)) {
+      if (
+        (expr.op === "==" || expr.op === "!=") &&
+        mode === "money" &&
+        (leftIsAggregate || rightIsAggregate)
+      ) {
         issues.push(
           issue(
             "RULE_MONEY_MODE_NO_POLARITY",

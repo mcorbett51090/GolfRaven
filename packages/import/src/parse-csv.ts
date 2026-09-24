@@ -60,7 +60,11 @@ function isRealCalendarDate(dateStr: string): boolean {
   const day = Number(m[3]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return false;
   const dt = new Date(Date.UTC(year, month - 1, day));
-  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day;
+  return (
+    dt.getUTCFullYear() === year &&
+    dt.getUTCMonth() === month - 1 &&
+    dt.getUTCDate() === day
+  );
 }
 
 function isPositiveInteger(n: number): boolean {
@@ -72,7 +76,9 @@ function parseFixesCsv(rows: string[][], rowsTruncated: boolean): ImportResult {
   const warnings: string[] = [];
   const fixes: ImportedFix[] = [];
   if (rowsTruncated) {
-    warnings.push(`CSV had over ${MAX_CSV_ROWS} rows; stopped reading after the cap`);
+    warnings.push(
+      `CSV had over ${MAX_CSV_ROWS} rows; stopped reading after the cap`,
+    );
   }
 
   for (let i = 1; i < rows.length; i++) {
@@ -87,18 +93,33 @@ function parseFixesCsv(rows: string[][], rowsTruncated: boolean): ImportResult {
     const lon = parseStrictDecimal(row[2]!);
     const accuracyRaw = hasAccuracy ? row[3]?.trim() : undefined;
     const accuracyParsed =
-      accuracyRaw !== undefined && accuracyRaw.length > 0 ? parseStrictDecimal(accuracyRaw) : undefined;
+      accuracyRaw !== undefined && accuracyRaw.length > 0
+        ? parseStrictDecimal(accuracyRaw)
+        : undefined;
 
     if (parsedTime === undefined) {
-      warnings.push(`row ${rowNum}: timestamp "${truncateEcho(row[0]!)}" isn't a strict ISO 8601 Z/offset time, skipped`);
+      warnings.push(
+        `row ${rowNum}: timestamp "${truncateEcho(row[0]!)}" isn't a strict ISO 8601 Z/offset time, skipped`,
+      );
       continue;
     }
-    if (lat === undefined || lon === undefined || !isValidLat(lat) || !isValidLon(lon)) {
+    if (
+      lat === undefined ||
+      lon === undefined ||
+      !isValidLat(lat) ||
+      !isValidLon(lon)
+    ) {
       warnings.push(`row ${rowNum}: invalid lat/lon, skipped`);
       continue;
     }
-    if (accuracyRaw !== undefined && accuracyRaw.length > 0 && accuracyParsed === undefined) {
-      warnings.push(`row ${rowNum}: invalid accuracy "${truncateEcho(accuracyRaw)}", ignored for this row`);
+    if (
+      accuracyRaw !== undefined &&
+      accuracyRaw.length > 0 &&
+      accuracyParsed === undefined
+    ) {
+      warnings.push(
+        `row ${rowNum}: invalid accuracy "${truncateEcho(accuracyRaw)}", ignored for this row`,
+      );
     }
     const accuracyMeters = sanitizeAccuracy(accuracyParsed);
     fixes.push({
@@ -126,7 +147,9 @@ function parseFixesCsv(rows: string[][], rowsTruncated: boolean): ImportResult {
     // Routeless: the fixes-format header has no separate date field to
     // fall back to, so there's genuinely nothing to derive `localDate`
     // from — leave it undefined and say so.
-    warnings.push("no valid fixes and no separate date field to fall back to; local date left undefined");
+    warnings.push(
+      "no valid fixes and no separate date field to fall back to; local date left undefined",
+    );
   }
   round.warnings = finalizeWarnings(warnings);
   return { ok: true, round };
@@ -138,7 +161,9 @@ function parseScorecardCsv(rows: string[][]): ImportResult {
   }
   const warnings: string[] = [];
   if (rows.length > 2) {
-    warnings.push(`${rows.length - 2} extra scorecard row(s) ignored; a CSV file is one round`);
+    warnings.push(
+      `${rows.length - 2} extra scorecard row(s) ignored; a CSV file is one round`,
+    );
   }
   const row = rows[1]!;
   if (row.length < 4) {
@@ -147,18 +172,34 @@ function parseScorecardCsv(rows: string[][]): ImportResult {
   const [dateRaw, courseRaw, holesRaw, scoreRaw] = row;
   const date = dateRaw!.trim();
   if (!isRealCalendarDate(date)) {
-    return { ok: false, error: finalizeError(`scorecard date "${date}" is not a real YYYY-MM-DD calendar date`) };
-  }
-  const holesParsed = parseStrictDecimal(holesRaw!.trim());
-  if (holesParsed === undefined || !isPositiveInteger(holesParsed) || holesParsed > MAX_HOLES) {
     return {
       ok: false,
-      error: finalizeError(`scorecard holes "${holesRaw}" must be a positive integer up to ${MAX_HOLES}`),
+      error: finalizeError(
+        `scorecard date "${date}" is not a real YYYY-MM-DD calendar date`,
+      ),
+    };
+  }
+  const holesParsed = parseStrictDecimal(holesRaw!.trim());
+  if (
+    holesParsed === undefined ||
+    !isPositiveInteger(holesParsed) ||
+    holesParsed > MAX_HOLES
+  ) {
+    return {
+      ok: false,
+      error: finalizeError(
+        `scorecard holes "${holesRaw}" must be a positive integer up to ${MAX_HOLES}`,
+      ),
     };
   }
   const scoreParsed = parseStrictDecimal(scoreRaw!.trim());
   if (scoreParsed === undefined || !isPositiveInteger(scoreParsed)) {
-    return { ok: false, error: finalizeError(`scorecard score "${scoreRaw}" must be a positive integer`) };
+    return {
+      ok: false,
+      error: finalizeError(
+        `scorecard score "${scoreRaw}" must be a positive integer`,
+      ),
+    };
   }
   const courseNameHint = sanitizeText(courseRaw!.trim());
 
@@ -189,7 +230,10 @@ export function parseCsvFile(bytes: Uint8Array): ImportResult {
   }
   const header = normalizeHeader(rows[0]!);
 
-  if (headerEquals(header, FIXES_HEADER_3) || headerEquals(header, FIXES_HEADER_4)) {
+  if (
+    headerEquals(header, FIXES_HEADER_3) ||
+    headerEquals(header, FIXES_HEADER_4)
+  ) {
     return parseFixesCsv(rows, truncated);
   }
   if (headerEquals(header, SCORECARD_HEADER)) {

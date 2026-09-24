@@ -27,20 +27,29 @@ import { existsSync } from "node:fs";
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 
-const distDir = process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
+const distDir =
+  process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
 const pagefindBin = join(here, "..", "node_modules", ".bin", "pagefind");
 
 async function main() {
   if (!existsSync(distDir)) {
-    throw new Error(`pagefind-index: ${distDir} does not exist — run \`astro build\` first.`);
+    throw new Error(
+      `pagefind-index: ${distDir} does not exist — run \`astro build\` first.`,
+    );
   }
   const bin = existsSync(pagefindBin) ? pagefindBin : "pagefind";
-  const { stdout, stderr } = await execFileAsync(bin, ["--site", distDir, "--output-subdir", "pagefind"], {
-    cwd: join(here, ".."),
-  });
+  const { stdout, stderr } = await execFileAsync(
+    bin,
+    ["--site", distDir, "--output-subdir", "pagefind"],
+    {
+      cwd: join(here, ".."),
+    },
+  );
   if (stdout.trim()) console.log(stdout.trim());
   if (stderr.trim()) console.error(stderr.trim());
-  console.log(`pagefind-index: indexed ${distDir} -> ${join(distDir, "pagefind")}`);
+  console.log(
+    `pagefind-index: indexed ${distDir} -> ${join(distDir, "pagefind")}`,
+  );
 }
 
 await main();

@@ -84,8 +84,7 @@ Apple Watch + phone with a golf app), so one round covers all three:
 ### 2b. Apple Watch Workout
 
 1. Start a Workout on the Apple Watch — Golf, if offered as an activity type, else the closest available
-   `[unverified — training knowledge: whether `HKWorkoutActivityType` includes a dedicated golf case;
-   `research/golf-app-sync.md` flags this as unverified]`.
+   `[unverified — training knowledge: whether `HKWorkoutActivityType`includes a dedicated golf case;`research/golf-app-sync.md` flags this as unverified]`.
 2. Keep the watch on-wrist for the round; end the workout afterward.
 
 ### 2c. One phone golf app — 18Birdies (Hole19 pre-round fallback)
@@ -129,11 +128,11 @@ analogue of `HKSource.bundleIdentifier`).
 
 ### 2f. What to inspect, restated (both OSes)
 
-| Field | iOS | Android |
-|---|---|---|
-| Activity/exercise type | `workoutActivityType` | Health Connect exercise type |
-| Route present | GPX file in `workout-routes/` (⇒ `HKWorkoutRoute`) | Health Connect route record present |
-| Source app | `HKSource.bundleIdentifier` | Health Connect `dataOrigin` |
+| Field                  | iOS                                                | Android                             |
+| ---------------------- | -------------------------------------------------- | ----------------------------------- |
+| Activity/exercise type | `workoutActivityType`                              | Health Connect exercise type        |
+| Route present          | GPX file in `workout-routes/` (⇒ `HKWorkoutRoute`) | Health Connect route record present |
+| Source app             | `HKSource.bundleIdentifier`                        | Health Connect `dataOrigin`         |
 
 ## 3. K4b protocol (Connect IQ)
 
@@ -147,7 +146,7 @@ analogue of `HKSource.bundleIdentifier`).
    - Install the Connect IQ component; start Garmin's **native** Golf activity (not a custom activity — the
      plan is explicit that a data field hosted only inside a third-party activity is a de facto fail, since
      Garmin's native Golf activity "may not host third-party data fields `[unverified — training
-     knowledge]`", making a fail the pre-planned expected case, A47).
+knowledge]`", making a fail the pre-planned expected case, A47).
    - Confirm the component records **≥ 1 GPS fix inside a course polygon** while that native Golf activity
      runs.
    - Confirm the fix **reaches the phone companion app with the phone app backgrounded** — test this
@@ -161,20 +160,20 @@ session Health Connect reports as `CONSENT_REQUIRED`, record whether a follow-up
 for that session's record id returned ≥ 1 point (**Y** — counts as "route present"), returned none (**N** —
 counts as "not present"), or the session never hit `CONSENT_REQUIRED` at all (**N/A**).
 
-| Source | OS | Workout/exercise written? | Route present? | CONSENT_REQUIRED + follow-up read | Source id (`bundleIdentifier`/`dataOrigin`) | Verdict |
-|---|---|---|---|---|---|---|
-| Garmin watch + Connect Mobile | iOS | | | N/A (iOS) | | |
-| Garmin watch + Connect Mobile | Android | | | | | |
-| Apple Watch Workout | iOS | | | N/A (iOS) | | |
-| Apple Watch Workout | Android | N/A | N/A | N/A | N/A | N/A (no Apple Watch on Android) |
-| Phone golf app (18Birdies, or Hole19 if substituted) | iOS | | | N/A (iOS) | | |
-| Phone golf app (18Birdies, or Hole19 if substituted) | Android | | | | | |
+| Source                                               | OS      | Workout/exercise written? | Route present? | CONSENT_REQUIRED + follow-up read | Source id (`bundleIdentifier`/`dataOrigin`) | Verdict                         |
+| ---------------------------------------------------- | ------- | ------------------------- | -------------- | --------------------------------- | ------------------------------------------- | ------------------------------- |
+| Garmin watch + Connect Mobile                        | iOS     |                           |                | N/A (iOS)                         |                                             |                                 |
+| Garmin watch + Connect Mobile                        | Android |                           |                |                                   |                                             |                                 |
+| Apple Watch Workout                                  | iOS     |                           |                | N/A (iOS)                         |                                             |                                 |
+| Apple Watch Workout                                  | Android | N/A                       | N/A            | N/A                               | N/A                                         | N/A (no Apple Watch on Android) |
+| Phone golf app (18Birdies, or Hole19 if substituted) | iOS     |                           |                | N/A (iOS)                         |                                             |                                 |
+| Phone golf app (18Birdies, or Hole19 if substituted) | Android |                           |                |                                   |                                             |                                 |
 
-| K4b | Watch model 1 | Watch model 2 |
-|---|---|---|
-| Fix recorded inside polygon during native Golf activity? | | |
-| Delivered to phone app backgrounded — iOS? | | |
-| Delivered to phone app backgrounded — Android? | | |
-| Verdict | | |
+| K4b                                                      | Watch model 1 | Watch model 2 |
+| -------------------------------------------------------- | ------------- | ------------- |
+| Fix recorded inside polygon during native Golf activity? |               |               |
+| Delivered to phone app backgrounded — iOS?               |               |               |
+| Delivered to phone app backgrounded — Android?           |               |               |
+| Verdict                                                  |               |               |
 
 Copy final values into `docs/p0/X1.md` and `docs/p0/K4.md`'s MEASURED VALUE / VERDICT / Log sections once run.

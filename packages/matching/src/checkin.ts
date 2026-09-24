@@ -13,7 +13,10 @@
  * silently coerced or defaulted into acceptance.
  */
 import { haversineMeters, roundTo } from "./geo.js";
-import { isInsidePreparedWithBuffer, preparePolygonGeometry } from "./polygon.js";
+import {
+  isInsidePreparedWithBuffer,
+  preparePolygonGeometry,
+} from "./polygon.js";
 import type { CandidateCourse, CheckInFix, CheckInResult } from "./types.js";
 
 const CHECKIN_ACCURACY_MAX_METERS = 50;
@@ -27,7 +30,10 @@ function isFiniteNumber(value: unknown): value is number {
  * The caller picks which candidate to check against (typically the one
  * the player is looking at in the app); this function does not search —
  * use `matchRoute`'s candidate search for that. */
-export function matchCheckIn(fix: CheckInFix, candidate: CandidateCourse): CheckInResult {
+export function matchCheckIn(
+  fix: CheckInFix,
+  candidate: CandidateCourse,
+): CheckInResult {
   // Fails closed on malformed coordinates before anything else — an
   // invalid point can't be meaningfully tested against any geometry.
   if (
@@ -65,12 +71,17 @@ export function matchCheckIn(fix: CheckInFix, candidate: CandidateCourse): Check
     const prepared = preparePolygonGeometry(candidate.polygon);
     if (!prepared) return { accepted: false, reason: "no_geometry" };
     geometryKind = "polygon";
-    inside = isInsidePreparedWithBuffer(fix.point, prepared, CHECKIN_BUFFER_METERS);
+    inside = isInsidePreparedWithBuffer(
+      fix.point,
+      prepared,
+      CHECKIN_BUFFER_METERS,
+    );
   } else if (candidate.radiusFallback) {
     geometryKind = "radius";
     const { center, radiusMeters } = candidate.radiusFallback;
     inside =
-      roundTo(haversineMeters(fix.point, center), 2) <= roundTo(radiusMeters + CHECKIN_BUFFER_METERS, 2);
+      roundTo(haversineMeters(fix.point, center), 2) <=
+      roundTo(radiusMeters + CHECKIN_BUFFER_METERS, 2);
   } else {
     return { accepted: false, reason: "no_geometry" };
   }

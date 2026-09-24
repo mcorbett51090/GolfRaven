@@ -12,18 +12,23 @@ import { join } from "node:path";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
 
 export async function writeFixtureDataDir(dir) {
-  const { regions, facilities, trails, designers, idLedger } = demoBundleForSite();
+  const { regions, facilities, trails, designers, idLedger } =
+    demoBundleForSite();
 
   await mkdir(join(dir, "regions"), { recursive: true });
   await mkdir(join(dir, "facilities"), { recursive: true });
   await mkdir(join(dir, "trails"), { recursive: true });
 
   await Promise.all([
-    ...regions.map((r) => writeFile(join(dir, "regions", `${r.slug}.json`), JSON.stringify(r))),
+    ...regions.map((r) =>
+      writeFile(join(dir, "regions", `${r.slug}.json`), JSON.stringify(r)),
+    ),
     ...facilities.map((f) =>
       writeFile(join(dir, "facilities", `${f.slug}.json`), JSON.stringify(f)),
     ),
-    ...trails.map((t) => writeFile(join(dir, "trails", `${t.slug}.json`), JSON.stringify(t))),
+    ...trails.map((t) =>
+      writeFile(join(dir, "trails", `${t.slug}.json`), JSON.stringify(t)),
+    ),
     writeFile(join(dir, "designers.json"), JSON.stringify(designers)),
     writeFile(join(dir, "id-ledger.json"), JSON.stringify(idLedger)),
     // AT(5)/§5.4: "A slug changes only by an explicit rename PR; the
@@ -33,7 +38,12 @@ export async function writeFixtureDataDir(dir) {
     writeFile(
       join(dir, "redirects.json"),
       JSON.stringify({
-        redirects: [{ from: "/courses/old-ridge-overlook-slug/", to: "/courses/ridge-overlook-golf-club/" }],
+        redirects: [
+          {
+            from: "/courses/old-ridge-overlook-slug/",
+            to: "/courses/ridge-overlook-golf-club/",
+          },
+        ],
       }),
     ),
   ]);

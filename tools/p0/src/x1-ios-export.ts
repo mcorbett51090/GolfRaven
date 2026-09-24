@@ -198,7 +198,9 @@ export function computeSourceSummaries(
       sourceName,
       count: list.length,
       newestStartDate: newestOf(list.filter((w) => w.routePresent)),
-      newestStartDateWithoutRoute: newestOf(list.filter((w) => !w.routePresent)),
+      newestStartDateWithoutRoute: newestOf(
+        list.filter((w) => !w.routePresent),
+      ),
     });
   }
   return summaries.sort((a, b) => a.sourceName.localeCompare(b.sourceName));
@@ -314,7 +316,9 @@ export async function runX1IosExport(
       );
     }
     const testRound = isWithinRoundWindow(w.startDate, roundWindows);
-    workouts.push(toRecord(w, routeFileExists, routeTrackpointCount, testRound));
+    workouts.push(
+      toRecord(w, routeFileExists, routeTrackpointCount, testRound),
+    );
   }
 
   if (golf.length === 0) {
@@ -442,7 +446,7 @@ function parseArgs(argv: string[]): X1IosExportCliArgs {
     // at run time, which the decision forbids for a recorded run — it's
     // only available on an --informational dry run.
     throw new Error(
-      "--since is refused on a recorded run (decision 0005: \"No recency limit\" — an old round counts the " +
+      '--since is refused on a recorded run (decision 0005: "No recency limit" — an old round counts the ' +
         "same as a new one). Pass --informational if you genuinely want a date-limited, non-recorded dry run.",
     );
   }
@@ -466,9 +470,13 @@ function parseArgs(argv: string[]): X1IosExportCliArgs {
  * calls this with `resolveX1DocPath()`; only tests call it directly with a
  * different path.
  */
-export async function runX1IosExportCli(args: X1IosExportCliArgs, x1DocPath: string): Promise<void> {
+export async function runX1IosExportCli(
+  args: X1IosExportCliArgs,
+  x1DocPath: string,
+): Promise<void> {
   const roundWindows = await readLoggedRoundWindows();
-  const { dates: recordedExportDates, source } = await readRecordedExportDates(x1DocPath);
+  const { dates: recordedExportDates, source } =
+    await readRecordedExportDates(x1DocPath);
   const recorded = !args.informational;
   if (recorded) {
     // Round-4 Opus-gate correction (post-4279773): a recorded run only
@@ -480,7 +488,11 @@ export async function runX1IosExportCli(args: X1IosExportCliArgs, x1DocPath: str
     // Round-3 Opus-gate correction: --informational on real (non-fixture)
     // data is refused while iOS is unbound (whether its UTC date is blank
     // or logged) — only a synthetic fixture path is allowed in that window.
-    assertInformationalInputAllowed(recordedExportDates, args.os, args.exportDir);
+    assertInformationalInputAllowed(
+      recordedExportDates,
+      args.os,
+      args.exportDir,
+    );
   }
 
   const result = await runX1IosExport(args.exportDir, {
@@ -510,7 +522,11 @@ export async function runX1IosExportCli(args: X1IosExportCliArgs, x1DocPath: str
     }
     const exportCalendarDate = extractCalendarDate(result.exportDate);
     assertExportDateMatches(recordedExportDates, args.os, exportCalendarDate);
-    const { written } = await bindExportHash(source.path, args.os, result.exportSha256);
+    const { written } = await bindExportHash(
+      source.path,
+      args.os,
+      result.exportSha256,
+    );
     boundThisRun = written;
   }
 

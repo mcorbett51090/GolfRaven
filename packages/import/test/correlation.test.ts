@@ -6,7 +6,10 @@ function routeRound(startedAt: number | undefined): ImportedRound {
   return {
     source: "file_import",
     format: "gpx",
-    fixes: startedAt !== undefined ? [{ lat: 43.65, lon: -79.38, timestamp: startedAt }] : [],
+    fixes:
+      startedAt !== undefined
+        ? [{ lat: 43.65, lon: -79.38, timestamp: startedAt }]
+        : [],
     warnings: [],
     ...(startedAt !== undefined ? { startedAt } : {}),
   };
@@ -42,7 +45,11 @@ describe("correlationKey", () => {
     const keys = correlationKey(routeRound(base), "fac_1");
     expect(keys).toHaveLength(3);
     const floor = Math.floor(base / (15 * 60 * 1000));
-    expect(keys).toEqual([`fac_1:${floor - 1}`, `fac_1:${floor}`, `fac_1:${floor + 1}`]);
+    expect(keys).toEqual([
+      `fac_1:${floor - 1}`,
+      `fac_1:${floor}`,
+      `fac_1:${floor + 1}`,
+    ]);
   });
 
   it("shares a key for two rounds close together at the same facility", () => {
@@ -74,29 +81,53 @@ describe("correlationKey", () => {
     // fails under that mutation and passes under the real 15-minute one.
     // Clock-aligned timestamps (both grids share epoch-0 alignment) keep
     // the bucket arithmetic exact rather than alignment-dependent.
-    const a = correlationKey(routeRound(Date.parse("2026-06-01T10:00:00Z")), "fac_1");
-    const b = correlationKey(routeRound(Date.parse("2026-06-01T11:30:00Z")), "fac_1");
+    const a = correlationKey(
+      routeRound(Date.parse("2026-06-01T10:00:00Z")),
+      "fac_1",
+    );
+    const b = correlationKey(
+      routeRound(Date.parse("2026-06-01T11:30:00Z")),
+      "fac_1",
+    );
     expect(shareKey(a, b)).toBe(false);
   });
 
   describe("boundary cases", () => {
     it("shares a key 2 seconds apart, straddling a 15-minute grid line (10:07:29 vs 10:07:31)", () => {
-      const a = correlationKey(routeRound(Date.parse("2026-06-01T10:07:29Z")), "fac_1");
-      const b = correlationKey(routeRound(Date.parse("2026-06-01T10:07:31Z")), "fac_1");
+      const a = correlationKey(
+        routeRound(Date.parse("2026-06-01T10:07:29Z")),
+        "fac_1",
+      );
+      const b = correlationKey(
+        routeRound(Date.parse("2026-06-01T10:07:31Z")),
+        "fac_1",
+      );
       expect(shareKey(a, b)).toBe(true);
     });
 
     it("shares a key at exactly ±15 minutes", () => {
-      const a = correlationKey(routeRound(Date.parse("2026-06-01T10:00:00Z")), "fac_1");
-      const b = correlationKey(routeRound(Date.parse("2026-06-01T10:15:00Z")), "fac_1");
+      const a = correlationKey(
+        routeRound(Date.parse("2026-06-01T10:00:00Z")),
+        "fac_1",
+      );
+      const b = correlationKey(
+        routeRound(Date.parse("2026-06-01T10:15:00Z")),
+        "fac_1",
+      );
       expect(shareKey(a, b)).toBe(true);
     });
 
     it("shares a key at exactly ±15 minutes even when it lands on a grid boundary", () => {
       // 09:52:30 is mid-bucket; 10:07:30 is exactly 15 minutes later and
       // sits exactly on a grid boundary (floor jumps by 1 there).
-      const a = correlationKey(routeRound(Date.parse("2026-06-01T09:52:30Z")), "fac_1");
-      const b = correlationKey(routeRound(Date.parse("2026-06-01T10:07:30Z")), "fac_1");
+      const a = correlationKey(
+        routeRound(Date.parse("2026-06-01T09:52:30Z")),
+        "fac_1",
+      );
+      const b = correlationKey(
+        routeRound(Date.parse("2026-06-01T10:07:30Z")),
+        "fac_1",
+      );
       expect(shareKey(a, b)).toBe(true);
     });
   });

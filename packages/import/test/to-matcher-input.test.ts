@@ -31,7 +31,12 @@ function routeWithFixes(): ImportedRound {
 
 describe("toMatcherInput", () => {
   it("returns undefined for a routeless round", () => {
-    const round: ImportedRound = { source: "file_import", format: "csv", fixes: [], warnings: [] };
+    const round: ImportedRound = {
+      source: "file_import",
+      format: "csv",
+      fixes: [],
+      warnings: [],
+    };
     expect(toMatcherInput(round, { candidates: CANDIDATES })).toBeUndefined();
   });
 
@@ -40,7 +45,11 @@ describe("toMatcherInput", () => {
     expect(input).toBeDefined();
     expect(input!.fixes).toEqual([
       { point: { lat: 43.65, lon: -79.38 }, timestamp: 1_000 },
-      { point: { lat: 43.651, lon: -79.379 }, timestamp: 2_000, accuracyMeters: 8 },
+      {
+        point: { lat: 43.651, lon: -79.379 },
+        timestamp: 2_000,
+        accuracyMeters: 8,
+      },
     ]);
     expect(input!.fixes.every((f) => !("simulated" in f))).toBe(true);
     expect(input!.candidates).toBe(CANDIDATES);

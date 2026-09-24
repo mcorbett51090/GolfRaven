@@ -4,7 +4,11 @@ import { ORIGIN, offset } from "./helpers.js";
 
 describe("simplifyToMaxPoints", () => {
   it("leaves a short route untouched", () => {
-    const points = [offset(ORIGIN, 0, 0), offset(ORIGIN, 10, 0), offset(ORIGIN, 20, 5)];
+    const points = [
+      offset(ORIGIN, 0, 0),
+      offset(ORIGIN, 10, 0),
+      offset(ORIGIN, 20, 5),
+    ];
     expect(simplifyToMaxPoints(points, 500)).toEqual(points);
   });
 
@@ -20,18 +24,24 @@ describe("simplifyToMaxPoints", () => {
     expect(simplified.length).toBeLessThanOrEqual(500);
     expect(simplified.length).toBeGreaterThan(1);
     expect(simplified[0]).toEqual(points[0]);
-    expect(simplified[simplified.length - 1]).toEqual(points[points.length - 1]);
+    expect(simplified[simplified.length - 1]).toEqual(
+      points[points.length - 1],
+    );
   });
 
   it("is deterministic: repeated calls on the same input produce identical output", () => {
-    const points = Array.from({ length: 800 }, (_, i) => offset(ORIGIN, i, Math.cos(i * 0.3) * 5));
+    const points = Array.from({ length: 800 }, (_, i) =>
+      offset(ORIGIN, i, Math.cos(i * 0.3) * 5),
+    );
     const first = simplifyToMaxPoints(points, 300);
     const second = simplifyToMaxPoints(points, 300);
     expect(second).toEqual(first);
   });
 
   it("respects a smaller cap", () => {
-    const points = Array.from({ length: 1000 }, (_, i) => offset(ORIGIN, i, Math.sin(i * 0.1) * 10));
+    const points = Array.from({ length: 1000 }, (_, i) =>
+      offset(ORIGIN, i, Math.sin(i * 0.1) * 10),
+    );
     const simplified = simplifyToMaxPoints(points, 50);
     expect(simplified.length).toBeLessThanOrEqual(50);
   });

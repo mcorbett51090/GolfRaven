@@ -41,8 +41,23 @@ import {
   SourceSchema,
 } from "./common.js";
 
-export { CourseIdSchema, DesignerIdSchema, FacilityIdSchema, HoleIdSchema, OfferTermsIdSchema, OsmRefIdSchema, TrailIdSchema };
-export { HttpsUrlSchema, IanaTimeZoneSchema, IsoDateSchema, ProvSchema, RegionCodeSchema, SourceSchema };
+export {
+  CourseIdSchema,
+  DesignerIdSchema,
+  FacilityIdSchema,
+  HoleIdSchema,
+  OfferTermsIdSchema,
+  OsmRefIdSchema,
+  TrailIdSchema,
+};
+export {
+  HttpsUrlSchema,
+  IanaTimeZoneSchema,
+  IsoDateSchema,
+  ProvSchema,
+  RegionCodeSchema,
+  SourceSchema,
+};
 
 /* ------------------------------------------------------------------ */
 /* Region                                                              */
@@ -350,7 +365,8 @@ export type Geometry = z.infer<typeof GeometrySchema>;
 export const CompositeSchema = z
   .tuple([CourseIdSchema, CourseIdSchema])
   .refine(([a, b]) => a !== b, {
-    error: "composite must name two distinct courses, not the same course twice",
+    error:
+      "composite must name two distinct courses, not the same course twice",
   });
 export type Composite = z.infer<typeof CompositeSchema>;
 

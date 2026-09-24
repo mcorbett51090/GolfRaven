@@ -42,7 +42,10 @@ function verdict(raw: unknown, mode: "badge" | "money"): Verdict {
     return { ok: false, codes: parsed.error.issues.map((i) => i.code) };
   }
   const checkerIssues = checkRuleExpr(parsed.data, { mode });
-  return { ok: checkerIssues.length === 0, codes: checkerIssues.map((i) => i.code) };
+  return {
+    ok: checkerIssues.length === 0,
+    codes: checkerIssues.map((i) => i.code),
+  };
 }
 
 function expectPass(raw: RuleExpr, mode: "badge" | "money" = "badge") {
@@ -63,13 +66,15 @@ function expectFailSchema(raw: unknown, path: string, code: string) {
   expect(parsed.success).toBe(false);
   if (!parsed.success) {
     expect(
-      parsed.error.issues.some((i) => i.path.join(".") === path && i.code === code),
+      parsed.error.issues.some(
+        (i) => i.path.join(".") === path && i.code === code,
+      ),
     ).toBe(true);
   }
 }
 
 describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
-  it("R-01: played(courseId) >= 1 — \"First tee at <course>\" (line 1892)", () => {
+  it('R-01: played(courseId) >= 1 — "First tee at <course>" (line 1892)', () => {
     expectPass({
       kind: "compare",
       op: ">=",
@@ -89,15 +94,20 @@ describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
     }
   });
 
-  it("R-03: trailComplete(trailId) — \"Trail Complete (vN)\" (line 1894)", () => {
+  it('R-03: trailComplete(trailId) — "Trail Complete (vN)" (line 1894)', () => {
     expectPass({ kind: "agg", name: "trailComplete", trailId: TRL });
   });
 
   it("R-04: trailCompleteWithin(trailId, 180) (line 1895)", () => {
-    expectPass({ kind: "agg", name: "trailCompleteWithin", trailId: TRL, days: 180 });
+    expectPass({
+      kind: "agg",
+      name: "trailCompleteWithin",
+      trailId: TRL,
+      days: 180,
+    });
   });
 
-  it("R-05: inOrder(trailId) — \"In order\" (line 1896)", () => {
+  it('R-05: inOrder(trailId) — "In order" (line 1896)', () => {
     expectPass({ kind: "agg", name: "inOrder", trailId: TRL });
   });
 
@@ -112,7 +122,7 @@ describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
     }
   });
 
-  it("R-07: maxCountBy(\"designer\") >= 5 (line 1898)", () => {
+  it('R-07: maxCountBy("designer") >= 5 (line 1898)', () => {
     expectPass({
       kind: "compare",
       op: ">=",
@@ -121,7 +131,7 @@ describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
     });
   });
 
-  it("R-08: countWhere(\"designer\", \"dsg_…\") >= 5 (line 1899)", () => {
+  it('R-08: countWhere("designer", "dsg_…") >= 5 (line 1899)', () => {
     expectPass({
       kind: "compare",
       op: ">=",
@@ -162,7 +172,7 @@ describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
     });
   });
 
-  it("R-12: markerSetComplete(trailId) — \"Full set\" (P5, line 1903)", () => {
+  it('R-12: markerSetComplete(trailId) — "Full set" (P5, line 1903)', () => {
     expectPass({ kind: "agg", name: "markerSetComplete", trailId: TRL });
   });
 
@@ -197,7 +207,11 @@ describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
 
 describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917) — N3: every fixture asserts BOTH code and path", () => {
   it("R-F1: an unknown aggregate, e.g. holesInOne() — not on the closed list", () => {
-    expectFailSchema({ kind: "agg", name: "holesInOne" }, "name", "invalid_union");
+    expectFailSchema(
+      { kind: "agg", name: "holesInOne" },
+      "name",
+      "invalid_union",
+    );
   });
 
   it('R-F2: countDistinct("par") — "par" is not in the field enum', () => {
@@ -205,7 +219,10 @@ describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917) — N3: e
     // under `not` — wrapped here so the fixture reaches the field-enum
     // check at all, rather than failing one level higher.
     expectFailSchema(
-      { kind: "not", arg: { kind: "agg", name: "countDistinct", field: "par" } },
+      {
+        kind: "not",
+        arg: { kind: "agg", name: "countDistinct", field: "par" },
+      },
       "arg.field",
       "invalid_value",
     );
@@ -215,14 +232,19 @@ describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917) — N3: e
     expectFailSchema(
       {
         kind: "not",
-        arg: { kind: "agg", name: "countDistinct", field: "region", where: { in: ["CA-XX"] } },
+        arg: {
+          kind: "agg",
+          name: "countDistinct",
+          field: "region",
+          where: { in: ["CA-XX"] },
+        },
       },
       "arg.where.in.0",
       "custom",
     );
   });
 
-  it("R-F4: countDistinct(\"region\", { in: [4 codes] }) >= 5 — unsatisfiable", () => {
+  it('R-F4: countDistinct("region", { in: [4 codes] }) >= 5 — unsatisfiable', () => {
     const raw: RuleExpr = {
       kind: "compare",
       op: ">=",
@@ -239,19 +261,31 @@ describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917) — N3: e
     if (parsed.success) {
       const issues = checkRuleExpr(parsed.data, { mode: "badge" });
       expect(issues.map((i) => i.code)).toContain("RULE_UNSATISFIABLE");
-      expect(issues.some((i) => i.code === "RULE_UNSATISFIABLE" && i.path === "rule")).toBe(true);
+      expect(
+        issues.some(
+          (i) => i.code === "RULE_UNSATISFIABLE" && i.path === "rule",
+        ),
+      ).toBe(true);
     }
   });
 
   it('R-F5: countWhere("designer", "Pete Dye") — not a dsg_ id', () => {
     expectFailSchema(
-      { kind: "not", arg: { kind: "agg", name: "countWhere", field: "designer", value: "Pete Dye" } },
+      {
+        kind: "not",
+        arg: {
+          kind: "agg",
+          name: "countWhere",
+          field: "designer",
+          value: "Pete Dye",
+        },
+      },
       "arg.value",
       "custom",
     );
   });
 
-  it("R-F6: an offer with played(\"crs_F\") == 0 — == has no polarity in money mode", () => {
+  it('R-F6: an offer with played("crs_F") == 0 — == has no polarity in money mode', () => {
     const raw: RuleExpr = {
       kind: "compare",
       op: "==",
@@ -266,17 +300,28 @@ describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917) — N3: e
       // Money mode: rejected, at the compare node's own path.
       const moneyIssues = checkRuleExpr(parsed.data, { mode: "money" });
       expect(
-        moneyIssues.some((i) => i.code === "RULE_MONEY_MODE_NO_POLARITY" && i.path === "rule"),
+        moneyIssues.some(
+          (i) => i.code === "RULE_MONEY_MODE_NO_POLARITY" && i.path === "rule",
+        ),
       ).toBe(true);
     }
   });
 
   it("R-F7: a confidence or score operand — no such operand in the offer grammar (A2-05)", () => {
     // minConfidence 0.5
-    expectFailSchema({ kind: "agg", name: "minConfidence", value: 0.5 }, "name", "invalid_union");
+    expectFailSchema(
+      { kind: "agg", name: "minConfidence", value: 0.5 },
+      "name",
+      "invalid_union",
+    );
     // score_badge >= 0.5
     expectFailSchema(
-      { kind: "compare", op: ">=", left: { kind: "agg", name: "score_badge" }, right: { kind: "literal", value: 0.5 } },
+      {
+        kind: "compare",
+        op: ">=",
+        left: { kind: "agg", name: "score_badge" },
+        right: { kind: "literal", value: 0.5 },
+      },
       "left",
       "invalid_union",
     );
@@ -307,7 +352,12 @@ describe("gate-review nits N2/N4/N5", () => {
   });
 
   it("N2: RULE_MONEY_MODE_NO_POLARITY never fires on a literal-only comparison", () => {
-    const raw: RuleExpr = { kind: "compare", op: "==", left: { kind: "literal", value: 1 }, right: { kind: "literal", value: 1 } };
+    const raw: RuleExpr = {
+      kind: "compare",
+      op: "==",
+      left: { kind: "literal", value: 1 },
+      right: { kind: "literal", value: 1 },
+    };
     const parsed = RuleExprSchema.safeParse(raw);
     expect(parsed.success).toBe(true);
     if (parsed.success) {
@@ -323,7 +373,11 @@ describe("gate-review nits N2/N4/N5", () => {
       expect(checkRuleExpr(parsed.data, { mode: "badge" })).toEqual([]);
       const moneyIssues = checkRuleExpr(parsed.data, { mode: "money" });
       expect(
-        moneyIssues.some((i) => i.code === "RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE" && i.path === "rule"),
+        moneyIssues.some(
+          (i) =>
+            i.code === "RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE" &&
+            i.path === "rule",
+        ),
       ).toBe(true);
     }
   });
@@ -340,13 +394,15 @@ describe("gate-review nits N2/N4/N5", () => {
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       const moneyIssues = checkRuleExpr(parsed.data, { mode: "money" });
-      expect(moneyIssues.map((i) => i.code)).toContain("RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE");
+      expect(moneyIssues.map((i) => i.code)).toContain(
+        "RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE",
+      );
     }
   });
 });
 
 describe("S7 mutation-kill: checker bound regressions (S5)", () => {
-  it("countDistinct(\"region\", { in: [a code repeated 5 times] }) >= 2 is unsatisfiable — the bound is the DEDUPED count (1), not the raw array length (5)", () => {
+  it('countDistinct("region", { in: [a code repeated 5 times] }) >= 2 is unsatisfiable — the bound is the DEDUPED count (1), not the raw array length (5)', () => {
     const raw: RuleExpr = {
       kind: "compare",
       op: ">=",

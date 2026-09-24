@@ -54,7 +54,15 @@
  * `osm/attribution.txt` — every one of those shards flagged
  * `license: "ODbL-1.0"` in the manifest.
  */
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -140,20 +148,30 @@ export async function emitCatalogArtifact(
   /* 1. Validate inputs and load the key — no filesystem writes yet.   */
   /* ---------------------------------------------------------------- */
   if (!CatalogVersionSchema.safeParse(opts.catalogVersion).success) {
-    throw new Error(`emit-catalog: --catalog-version "${opts.catalogVersion}" must match "yyyymmdd-gitsha7"`);
+    throw new Error(
+      `emit-catalog: --catalog-version "${opts.catalogVersion}" must match "yyyymmdd-gitsha7"`,
+    );
   }
   if (!SemverSchema.safeParse(opts.minAppVersion).success) {
-    throw new Error(`emit-catalog: --min-app-version "${opts.minAppVersion}" must be a semver string`);
+    throw new Error(
+      `emit-catalog: --min-app-version "${opts.minAppVersion}" must be a semver string`,
+    );
   }
   if (!KidSchema.safeParse(opts.kid).success) {
-    throw new Error(`emit-catalog: --kid "${opts.kid}" must match ^[a-z0-9-]{1,64}$`);
+    throw new Error(
+      `emit-catalog: --kid "${opts.kid}" must match ^[a-z0-9-]{1,64}$`,
+    );
   }
   for (const revoked of opts.revokedKids ?? []) {
     if (!KidSchema.safeParse(revoked).success) {
-      throw new Error(`emit-catalog: --revoked-kids entry "${revoked}" must match ^[a-z0-9-]{1,64}$`);
+      throw new Error(
+        `emit-catalog: --revoked-kids entry "${revoked}" must match ^[a-z0-9-]{1,64}$`,
+      );
     }
   }
-  const revokedKidsSorted = [...(opts.revokedKids ?? [])].sort(compareCodePoints);
+  const revokedKidsSorted = [...(opts.revokedKids ?? [])].sort(
+    compareCodePoints,
+  );
   const privateKey = privateKeyFromPem(opts.privateKeyPem); // throws if not Ed25519
 
   const v1Dir = join(opts.outDir, "catalog", "v1");
@@ -171,21 +189,33 @@ export async function emitCatalogArtifact(
   /* 2. Load whatever's already published (read-only) and resolve the  */
   /*    emit timestamp deterministically.                              */
   /* ---------------------------------------------------------------- */
-  const previousVersions = await loadPreviousVersions(v1Dir, opts.previousVersionsPath);
+  const previousVersions = await loadPreviousVersions(
+    v1Dir,
+    opts.previousVersionsPath,
+  );
   const now = resolveGeneratedAt(opts, previousVersions);
 
   /* ---------------------------------------------------------------- */
   /* 3. Build every shard's bytes in memory.                           */
   /* ---------------------------------------------------------------- */
-  const shardBuilds: { path: string; bytes: Buffer; license?: "ODbL-1.0" }[] = [];
-  function addJsonShard(relPath: string, content: unknown, license?: "ODbL-1.0"): void {
+  const shardBuilds: { path: string; bytes: Buffer; license?: "ODbL-1.0" }[] =
+    [];
+  function addJsonShard(
+    relPath: string,
+    content: unknown,
+    license?: "ODbL-1.0",
+  ): void {
     shardBuilds.push({
       path: relPath,
       bytes: Buffer.from(canonicalStringify(content), "utf8"),
       ...(license ? { license } : {}),
     });
   }
-  function addRawShard(relPath: string, bytes: Buffer, license?: "ODbL-1.0"): void {
+  function addRawShard(
+    relPath: string,
+    bytes: Buffer,
+    license?: "ODbL-1.0",
+  ): void {
     shardBuilds.push({ path: relPath, bytes, ...(license ? { license } : {}) });
   }
 
@@ -207,7 +237,10 @@ export async function emitCatalogArtifact(
   for (const region of [...byRegion.keys()].sort(compareCodePoints)) {
     const list = byRegion.get(region);
     if (list) {
-      addJsonShard(`facilities/${regionShardSlug(region)}.json`, sortById(list));
+      addJsonShard(
+        `facilities/${regionShardSlug(region)}.json`,
+        sortById(list),
+      );
     }
   }
 
@@ -216,10 +249,18 @@ export async function emitCatalogArtifact(
     for (const region of [...osmByRegion.keys()].sort(compareCodePoints)) {
       const content = osmByRegion.get(region);
       if (content) {
-        addJsonShard(`osm/directory/${regionShardSlug(region)}.json`, content, "ODbL-1.0");
+        addJsonShard(
+          `osm/directory/${regionShardSlug(region)}.json`,
+          content,
+          "ODbL-1.0",
+        );
       }
     }
-    addRawShard("osm/attribution.txt", Buffer.from(ODBL_ATTRIBUTION, "utf8"), "ODbL-1.0");
+    addRawShard(
+      "osm/attribution.txt",
+      Buffer.from(ODBL_ATTRIBUTION, "utf8"),
+      "ODbL-1.0",
+    );
   }
 
   const shards: ShardEntry[] = shardBuilds
@@ -235,7 +276,9 @@ export async function emitCatalogArtifact(
     if (!ShardPathSchema.safeParse(shard.path).success) {
       // Defense in depth: `CatalogManifestSchema` below would also catch
       // this, but failing here is failing before anything else runs.
-      throw new Error(`emit-catalog: internal error — generated an invalid shard path "${shard.path}"`);
+      throw new Error(
+        `emit-catalog: internal error — generated an invalid shard path "${shard.path}"`,
+      );
     }
   }
 
@@ -253,15 +296,25 @@ export async function emitCatalogArtifact(
   };
   const manifestParsed = CatalogManifestSchema.safeParse(manifestCandidate);
   if (!manifestParsed.success) {
-    throw new Error(`emit-catalog: internal error — built an invalid manifest: ${manifestParsed.error.message}`);
+    throw new Error(
+      `emit-catalog: internal error — built an invalid manifest: ${manifestParsed.error.message}`,
+    );
   }
   const manifest: CatalogManifest = manifestParsed.data;
 
   const manifestBytes = Buffer.from(canonicalStringify(manifest), "utf8");
   assertCanonicalRoundTrip(manifestBytes, "manifest.json");
 
-  const manifestSignature = signManifest(manifest, manifestBytes, privateKey, opts.expectedPublicKeyPem);
-  const manifestSigBytes = Buffer.from(canonicalStringify(manifestSignature), "utf8");
+  const manifestSignature = signManifest(
+    manifest,
+    manifestBytes,
+    privateKey,
+    opts.expectedPublicKeyPem,
+  );
+  const manifestSigBytes = Buffer.from(
+    canonicalStringify(manifestSignature),
+    "utf8",
+  );
   assertCanonicalRoundTrip(manifestSigBytes, "manifest.sig.json");
 
   /* ---------------------------------------------------------------- */
@@ -278,8 +331,16 @@ export async function emitCatalogArtifact(
   const versionsBytes = Buffer.from(canonicalStringify(versions), "utf8");
   assertCanonicalRoundTrip(versionsBytes, "versions.json");
 
-  const versionsSignature = signVersions(versionsBytes, opts.kid, privateKey, opts.expectedPublicKeyPem);
-  const versionsSigBytes = Buffer.from(canonicalStringify(versionsSignature), "utf8");
+  const versionsSignature = signVersions(
+    versionsBytes,
+    opts.kid,
+    privateKey,
+    opts.expectedPublicKeyPem,
+  );
+  const versionsSigBytes = Buffer.from(
+    canonicalStringify(versionsSignature),
+    "utf8",
+  );
   assertCanonicalRoundTrip(versionsSigBytes, "versions.sig.json");
 
   /* ---------------------------------------------------------------- */
@@ -347,7 +408,9 @@ export async function emitCatalogArtifact(
 /** Groups `bundle.osm` entries by the ISO region of the facility/course
  * whose `seed.osmRef` references them; an entry no known `osmRef` points
  * at lands in an `"unassigned"` bucket rather than being silently dropped. */
-function shardOsmByRegion(bundle: CatalogBundle): Map<string, Record<string, unknown>> {
+function shardOsmByRegion(
+  bundle: CatalogBundle,
+): Map<string, Record<string, unknown>> {
   const byRegion = new Map<string, Record<string, unknown>>();
   if (bundle.osm === undefined) return byRegion;
   const consumed = new Set<string>();
@@ -388,7 +451,9 @@ function assertCanonicalRoundTrip(bytes: Buffer, label: string): void {
   try {
     reparsed = parseStrictJson(text);
   } catch (err) {
-    throw new Error(`emit-catalog: internal error — ${label} failed to re-parse: ${errMessage(err)}`);
+    throw new Error(
+      `emit-catalog: internal error — ${label} failed to re-parse: ${errMessage(err)}`,
+    );
   }
   const roundTrip = canonicalStringify(reparsed);
   if (roundTrip !== text) {
@@ -398,11 +463,19 @@ function assertCanonicalRoundTrip(bytes: Buffer, label: string): void {
   }
 }
 
-function resolveGeneratedAt(opts: EmitCatalogOptions, previousVersions: VersionEntry[]): Date {
+function resolveGeneratedAt(
+  opts: EmitCatalogOptions,
+  previousVersions: VersionEntry[],
+): Date {
   if (opts.generatedAt !== undefined) {
-    const d = opts.generatedAt instanceof Date ? opts.generatedAt : new Date(opts.generatedAt);
+    const d =
+      opts.generatedAt instanceof Date
+        ? opts.generatedAt
+        : new Date(opts.generatedAt);
     if (Number.isNaN(d.getTime())) {
-      throw new Error(`emit-catalog: invalid --generated-at "${String(opts.generatedAt)}"`);
+      throw new Error(
+        `emit-catalog: invalid --generated-at "${String(opts.generatedAt)}"`,
+      );
     }
     return d;
   }
@@ -410,11 +483,15 @@ function resolveGeneratedAt(opts: EmitCatalogOptions, previousVersions: VersionE
   if (sourceDateEpoch) {
     const seconds = Number(sourceDateEpoch);
     if (!Number.isFinite(seconds)) {
-      throw new Error(`emit-catalog: invalid SOURCE_DATE_EPOCH "${sourceDateEpoch}"`);
+      throw new Error(
+        `emit-catalog: invalid SOURCE_DATE_EPOCH "${sourceDateEpoch}"`,
+      );
     }
     return new Date(seconds * 1000);
   }
-  const alreadyPublished = previousVersions.some((v) => v.version === opts.catalogVersion);
+  const alreadyPublished = previousVersions.some(
+    (v) => v.version === opts.catalogVersion,
+  );
   if (alreadyPublished) {
     throw new Error(
       `emit-catalog: refusing a non-deterministic re-emit of already-published version "${opts.catalogVersion}" ` +
@@ -438,9 +515,13 @@ async function assertNoRecoveryDebris(catalogDir: string): Promise<void> {
     entries = await readdir(catalogDir);
   } catch (err) {
     if (isEnoent(err)) return; // no `catalog/` dir yet — nothing to recover from.
-    throw new Error(`emit-catalog: cannot inspect "${catalogDir}" for recovery debris: ${errMessage(err)}`);
+    throw new Error(
+      `emit-catalog: cannot inspect "${catalogDir}" for recovery debris: ${errMessage(err)}`,
+    );
   }
-  const debris = entries.filter((name) => name.startsWith(".v1.tmp-") || name.startsWith(".v1.backup-"));
+  const debris = entries.filter(
+    (name) => name.startsWith(".v1.tmp-") || name.startsWith(".v1.backup-"),
+  );
   if (debris.length === 0) return;
   const paths = debris.map((name) => join(catalogDir, name));
   throw new Error(
@@ -463,7 +544,9 @@ async function loadPreviousVersions(
     raw = await readFile(versionsPath);
   } catch (err) {
     if (!isEnoent(err)) {
-      throw new Error(`emit-catalog: cannot read existing versions.json at ${versionsPath}: ${errMessage(err)}`);
+      throw new Error(
+        `emit-catalog: cannot read existing versions.json at ${versionsPath}: ${errMessage(err)}`,
+      );
     }
     raw = undefined;
   }
@@ -476,9 +559,15 @@ async function loadPreviousVersions(
   if (raw === undefined) {
     return [];
   }
-  const parsed = strictParseAndValidate(raw, VersionsArraySchema, "previous versions.json");
+  const parsed = strictParseAndValidate(
+    raw,
+    VersionsArraySchema,
+    "previous versions.json",
+  );
   if (!parsed.ok) {
-    throw new Error(`emit-catalog: malformed previous versions.json:\n${parsed.issues.join("\n")}`);
+    throw new Error(
+      `emit-catalog: malformed previous versions.json:\n${parsed.issues.join("\n")}`,
+    );
   }
   return parsed.value;
 }
@@ -493,7 +582,12 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 function isEnoent(err: unknown): boolean {
-  return typeof err === "object" && err !== null && "code" in err && (err as { code?: unknown }).code === "ENOENT";
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "ENOENT"
+  );
 }
 
 function errMessage(err: unknown): string {
@@ -553,9 +647,13 @@ function parseArgs(argv: string[]): CliArgs {
     ...(seen.has("revoked-kids")
       ? { revokedKids: (opts["revoked-kids"] ?? "").split(",").filter(Boolean) }
       : {}),
-    ...(opts["previous-versions"] ? { previousVersionsPath: opts["previous-versions"] } : {}),
+    ...(opts["previous-versions"]
+      ? { previousVersionsPath: opts["previous-versions"] }
+      : {}),
     ...(opts["generated-at"] ? { generatedAt: opts["generated-at"] } : {}),
-    ...(opts["kid-public-key"] ? { kidPublicKeyPath: opts["kid-public-key"] } : {}),
+    ...(opts["kid-public-key"]
+      ? { kidPublicKeyPath: opts["kid-public-key"] }
+      : {}),
   };
 }
 
@@ -587,7 +685,9 @@ async function main(argv: string[]): Promise<void> {
     kid: args.kid,
     privateKeyPem,
     ...(args.revokedKids ? { revokedKids: args.revokedKids } : {}),
-    ...(args.previousVersionsPath ? { previousVersionsPath: args.previousVersionsPath } : {}),
+    ...(args.previousVersionsPath
+      ? { previousVersionsPath: args.previousVersionsPath }
+      : {}),
     ...(args.generatedAt ? { generatedAt: args.generatedAt } : {}),
     ...(expectedPublicKeyPem ? { expectedPublicKeyPem } : {}),
   });

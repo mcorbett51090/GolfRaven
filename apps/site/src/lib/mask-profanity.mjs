@@ -13,19 +13,34 @@
  * second copy drifting in later.
  */
 const GREEDY = [
-  'fuck', 'shit', 'bitch', 'cunt', 'motherfuck', 'bullshit', 'asshole',
-  'dumbass', 'jackass', 'goddamn', 'dickhead', 'bastard', 'wank', 'twat',
-  'bollock', 'douche', 'slut', 'shithead',
+  "fuck",
+  "shit",
+  "bitch",
+  "cunt",
+  "motherfuck",
+  "bullshit",
+  "asshole",
+  "dumbass",
+  "jackass",
+  "goddamn",
+  "dickhead",
+  "bastard",
+  "wank",
+  "twat",
+  "bollock",
+  "douche",
+  "slut",
+  "shithead",
 ];
-const EXACT = ['ass', 'damn', 'piss', 'dick', 'cock', 'crap', 'prick', 'whore'];
+const EXACT = ["ass", "damn", "piss", "dick", "cock", "crap", "prick", "whore"];
 
-const greedyRe = new RegExp('\\b(' + GREEDY.join('|') + ')\\w*', 'gi');
-const exactRe = new RegExp('\\b(' + EXACT.join('|') + ')\\b', 'gi');
+const greedyRe = new RegExp("\\b(" + GREEDY.join("|") + ")\\w*", "gi");
+const exactRe = new RegExp("\\b(" + EXACT.join("|") + ")\\b", "gi");
 
-const maskWord = (w) => w[0] + '*'.repeat(Math.max(1, w.length - 1));
+const maskWord = (w) => w[0] + "*".repeat(Math.max(1, w.length - 1));
 
 export function maskProfanity(text) {
-  if (typeof text !== 'string' || !text) return text;
+  if (typeof text !== "string" || !text) return text;
   return text.replace(greedyRe, maskWord).replace(exactRe, maskWord);
 }
 
@@ -33,11 +48,11 @@ export function maskProfanity(text) {
  * intact). Scoped to `content/blog` once that collection exists. */
 export default function remarkMaskProfanity() {
   return (tree, file) => {
-    const p = (file && (file.path || (file.history && file.history[0]))) || '';
+    const p = (file && (file.path || (file.history && file.history[0]))) || "";
     if (!/[\\/]content[\\/]blog[\\/]/.test(p)) return;
     const walk = (node) => {
-      if (node.type === 'code' || node.type === 'inlineCode') return;
-      if (node.type === 'text' && typeof node.value === 'string') {
+      if (node.type === "code" || node.type === "inlineCode") return;
+      if (node.type === "text" && typeof node.value === "string") {
         node.value = maskProfanity(node.value);
       }
       if (Array.isArray(node.children)) node.children.forEach(walk);

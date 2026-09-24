@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeInsideRatio, haversineMeters, isInsidePolygonWithBuffer } from "../src/index.js";
+import {
+  computeInsideRatio,
+  haversineMeters,
+  isInsidePolygonWithBuffer,
+} from "../src/index.js";
 
 // These assertions are placed at the equator (lat = 0) deliberately: there,
 // the package's local equirectangular projection has zero cos(lat)

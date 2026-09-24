@@ -1,5 +1,12 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +18,9 @@ import { minimalBundle } from "./emit-test-helpers.js";
 function generateKeys() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   return {
-    privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    privateKeyPem: privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString(),
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
   };
 }
@@ -68,7 +77,9 @@ describe("emitCatalogArtifact", () => {
     expect(files).toContain("catalog/v1/id-ledger.json");
     expect(files.every((f) => f.startsWith("catalog/v1/"))).toBe(true);
     // No leftover temp/backup directories after a clean run.
-    expect(files.some((f) => f.includes(".v1.tmp-") || f.includes(".v1.backup-"))).toBe(false);
+    expect(
+      files.some((f) => f.includes(".v1.tmp-") || f.includes(".v1.backup-")),
+    ).toBe(false);
   });
 
   it("produces an artifact that verifyArtifact accepts end to end", async () => {
@@ -81,7 +92,10 @@ describe("emitCatalogArtifact", () => {
       privateKeyPem,
       generatedAt: FIXED,
     });
-    const result = await verifyArtifact(dir, { trustedKeys: trustedKeys(), revokedKids: new Set() });
+    const result = await verifyArtifact(dir, {
+      trustedKeys: trustedKeys(),
+      revokedKids: new Set(),
+    });
     expect(result.issues).toEqual([]);
     expect(result.ok).toBe(true);
   });
@@ -140,37 +154,55 @@ describe("emitCatalogArtifact", () => {
       privateKeyPem,
       generatedAt: FIXED,
     });
-    const osmShard = result.manifest.shards.find((s) => s.path === "osm/directory/us-tn.json");
+    const osmShard = result.manifest.shards.find(
+      (s) => s.path === "osm/directory/us-tn.json",
+    );
     expect(osmShard?.license).toBe("ODbL-1.0");
-    const attribution = result.manifest.shards.find((s) => s.path === "osm/attribution.txt");
+    const attribution = result.manifest.shards.find(
+      (s) => s.path === "osm/attribution.txt",
+    );
     expect(attribution?.license).toBe("ODbL-1.0");
-    const nonOsmShard = result.manifest.shards.find((s) => s.path === "trails.json");
+    const nonOsmShard = result.manifest.shards.find(
+      (s) => s.path === "trails.json",
+    );
     expect(nonOsmShard?.license).toBeUndefined();
   });
 
   it("omits every osm/* shard when the bundle carries no osm content at all", async () => {
-    const result = await emitCatalogArtifact(minimalBundle({ osm: undefined }), {
-      outDir: dir,
-      catalogVersion: "20260101-abc0001",
-      minAppVersion: "0.0.0",
-      kid: KID,
-      privateKeyPem,
-      generatedAt: FIXED,
-    });
-    expect(result.manifest.shards.some((s) => s.path.startsWith("osm/"))).toBe(false);
+    const result = await emitCatalogArtifact(
+      minimalBundle({ osm: undefined }),
+      {
+        outDir: dir,
+        catalogVersion: "20260101-abc0001",
+        minAppVersion: "0.0.0",
+        kid: KID,
+        privateKeyPem,
+        generatedAt: FIXED,
+      },
+    );
+    expect(result.manifest.shards.some((s) => s.path.startsWith("osm/"))).toBe(
+      false,
+    );
   });
 
   it("omits designers.json / offer-terms.json when the bundle doesn't carry those fields at all", async () => {
-    const result = await emitCatalogArtifact(minimalBundle({ designers: undefined }), {
-      outDir: dir,
-      catalogVersion: "20260101-abc0001",
-      minAppVersion: "0.0.0",
-      kid: KID,
-      privateKeyPem,
-      generatedAt: FIXED,
-    });
-    expect(result.manifest.shards.some((s) => s.path === "designers.json")).toBe(false);
-    expect(result.manifest.shards.some((s) => s.path === "offer-terms.json")).toBe(false);
+    const result = await emitCatalogArtifact(
+      minimalBundle({ designers: undefined }),
+      {
+        outDir: dir,
+        catalogVersion: "20260101-abc0001",
+        minAppVersion: "0.0.0",
+        kid: KID,
+        privateKeyPem,
+        generatedAt: FIXED,
+      },
+    );
+    expect(
+      result.manifest.shards.some((s) => s.path === "designers.json"),
+    ).toBe(false);
+    expect(
+      result.manifest.shards.some((s) => s.path === "offer-terms.json"),
+    ).toBe(false);
   });
 
   it("is deterministic: two emits of the same bundle with the same options (and a pinned generatedAt) are byte-identical", async () => {
@@ -189,8 +221,12 @@ describe("emitCatalogArtifact", () => {
       await emitCatalogArtifact(bundle, { ...opts, outDir: dirA });
       await emitCatalogArtifact(bundle, { ...opts, outDir: dirB });
 
-      const filesA = (await listFilesRecursive(dirA)).map((f) => relative(dirA, f)).sort();
-      const filesB = (await listFilesRecursive(dirB)).map((f) => relative(dirB, f)).sort();
+      const filesA = (await listFilesRecursive(dirA))
+        .map((f) => relative(dirA, f))
+        .sort();
+      const filesB = (await listFilesRecursive(dirB))
+        .map((f) => relative(dirB, f))
+        .sort();
       expect(filesA).toEqual(filesB);
 
       for (const rel of filesA) {
@@ -228,7 +264,9 @@ describe("emitCatalogArtifact", () => {
   });
 
   it("finding #11: SOURCE_DATE_EPOCH is honored as a time source", async () => {
-    process.env["SOURCE_DATE_EPOCH"] = String(Math.floor(FIXED.getTime() / 1000));
+    process.env["SOURCE_DATE_EPOCH"] = String(
+      Math.floor(FIXED.getTime() / 1000),
+    );
     try {
       const result = await emitCatalogArtifact(minimalBundle(), {
         outDir: dir,
@@ -271,7 +309,10 @@ describe("emitCatalogArtifact", () => {
     ) as VersionEntry[];
     expect(onDisk).toEqual(second.versions);
 
-    const result = await verifyArtifact(dir, { trustedKeys: trustedKeys(), revokedKids: new Set() });
+    const result = await verifyArtifact(dir, {
+      trustedKeys: trustedKeys(),
+      revokedKids: new Set(),
+    });
     expect(result.ok).toBe(true);
   });
 
@@ -367,7 +408,10 @@ describe("emitCatalogArtifact", () => {
           sha256: "1".repeat(64),
         },
       ];
-      await writeFile(previousVersionsPath, JSON.stringify(seed, null, 2) + "\n");
+      await writeFile(
+        previousVersionsPath,
+        JSON.stringify(seed, null, 2) + "\n",
+      );
 
       const result = await emitCatalogArtifact(minimalBundle(), {
         outDir: dir,
@@ -404,13 +448,18 @@ describe("emitCatalogArtifact", () => {
         privateKeyPem,
         generatedAt: FIXED,
       });
-      const beforeFiles = (await listFilesRecursive(join(dir, "catalog", "v1"))).sort();
+      const beforeFiles = (
+        await listFilesRecursive(join(dir, "catalog", "v1"))
+      ).sort();
       const beforeBytes = new Map<string, Buffer>();
       for (const f of beforeFiles) beforeBytes.set(f, await readFile(f));
 
       vi.resetModules();
       vi.doMock("node:fs/promises", async () => {
-        const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+        const actual =
+          await vi.importActual<typeof import("node:fs/promises")>(
+            "node:fs/promises",
+          );
         let writeFileCalls = 0;
         return {
           ...actual,
@@ -427,7 +476,8 @@ describe("emitCatalogArtifact", () => {
         };
       });
       try {
-        const { emitCatalogArtifact: emitWithMockedFs } = await import("../src/emit-catalog.js");
+        const { emitCatalogArtifact: emitWithMockedFs } =
+          await import("../src/emit-catalog.js");
         await expect(
           emitWithMockedFs(bundle, {
             outDir: dir,
@@ -446,12 +496,17 @@ describe("emitCatalogArtifact", () => {
       // `verifyArtifact` and `readFile` above were imported statically at
       // the top of this file, BEFORE any mocking — they're bound to the
       // real `node:fs/promises`, unaffected by the mock/reset above.
-      const afterFiles = (await listFilesRecursive(join(dir, "catalog", "v1"))).sort();
+      const afterFiles = (
+        await listFilesRecursive(join(dir, "catalog", "v1"))
+      ).sort();
       expect(afterFiles).toEqual(beforeFiles);
       for (const f of afterFiles) {
         expect((await readFile(f)).equals(beforeBytes.get(f)!)).toBe(true);
       }
-      const stillVerifies = await verifyArtifact(dir, { trustedKeys: trustedKeys(), revokedKids: new Set() });
+      const stillVerifies = await verifyArtifact(dir, {
+        trustedKeys: trustedKeys(),
+        revokedKids: new Set(),
+      });
       expect(stillVerifies.ok).toBe(true);
       expect(stillVerifies.revokedKids).toEqual(first.manifest.revokedKids);
       // And no temp/backup directory was left behind under catalog/.
@@ -547,13 +602,18 @@ describe("emitCatalogArtifact", () => {
         privateKeyPem,
         generatedAt: FIXED,
       });
-      const beforeFiles = (await listFilesRecursive(join(dir, "catalog", "v1"))).sort();
+      const beforeFiles = (
+        await listFilesRecursive(join(dir, "catalog", "v1"))
+      ).sort();
       const beforeBytes = new Map<string, Buffer>();
       for (const f of beforeFiles) beforeBytes.set(f, await readFile(f));
 
       vi.resetModules();
       vi.doMock("node:fs/promises", async () => {
-        const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+        const actual =
+          await vi.importActual<typeof import("node:fs/promises")>(
+            "node:fs/promises",
+          );
         let renameCalls = 0;
         return {
           ...actual,
@@ -570,7 +630,8 @@ describe("emitCatalogArtifact", () => {
         };
       });
       try {
-        const { emitCatalogArtifact: emitWithMockedFs } = await import("../src/emit-catalog.js");
+        const { emitCatalogArtifact: emitWithMockedFs } =
+          await import("../src/emit-catalog.js");
         await expect(
           emitWithMockedFs(bundle, {
             outDir: dir,
@@ -588,14 +649,19 @@ describe("emitCatalogArtifact", () => {
 
       // The backup was rolled back into v1, and no debris is left —
       // exactly what `assertNoRecoveryDebris` needs to see on the NEXT run.
-      const afterFiles = (await listFilesRecursive(join(dir, "catalog", "v1"))).sort();
+      const afterFiles = (
+        await listFilesRecursive(join(dir, "catalog", "v1"))
+      ).sort();
       expect(afterFiles).toEqual(beforeFiles);
       for (const f of afterFiles) {
         expect((await readFile(f)).equals(beforeBytes.get(f)!)).toBe(true);
       }
       const catalogEntries = await readdir(join(dir, "catalog"));
       expect(catalogEntries).toEqual(["v1"]);
-      const stillVerifies = await verifyArtifact(dir, { trustedKeys: trustedKeys(), revokedKids: new Set() });
+      const stillVerifies = await verifyArtifact(dir, {
+        trustedKeys: trustedKeys(),
+        revokedKids: new Set(),
+      });
       expect(stillVerifies.ok).toBe(true);
       expect(stillVerifies.revokedKids).toEqual(first.manifest.revokedKids);
 
@@ -625,7 +691,10 @@ describe("emitCatalogArtifact", () => {
       privateKeyPem,
       generatedAt: FIXED,
     });
-    const result = await verifyArtifact(dir, { trustedKeys: trustedKeys(), revokedKids: new Set() });
+    const result = await verifyArtifact(dir, {
+      trustedKeys: trustedKeys(),
+      revokedKids: new Set(),
+    });
     expect(result.issues.some((i) => i.startsWith("STRAY_FILE:"))).toBe(false);
   });
 

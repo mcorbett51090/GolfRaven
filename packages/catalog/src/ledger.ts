@@ -308,7 +308,12 @@ const NAME_SIMILARITY_THRESHOLD = 0.8;
 
 export type ReseedOutcome =
   | { kind: "already-known"; facilityId: FacilityId; courseId: CourseId }
-  | { kind: "matched"; facilityId: FacilityId; courseId: CourseId; ledger: IdLedger }
+  | {
+      kind: "matched";
+      facilityId: FacilityId;
+      courseId: CourseId;
+      ledger: IdLedger;
+    }
   | { kind: "ambiguous"; candidateFacilityIds: FacilityId[] }
   | {
       kind: "minted";
@@ -396,7 +401,8 @@ export function findLedgerIdBySeedRef(
     );
   }
   const courseEntry = entries.find(
-    (e) => e.kind === "crs" && !e.tombstoned && e.facilityId === survivorFacilityId,
+    (e) =>
+      e.kind === "crs" && !e.tombstoned && e.facilityId === survivorFacilityId,
   );
   if (!courseEntry) {
     throw new Error(
@@ -450,7 +456,8 @@ export function reseedFacility(
   if (nearby.length > 0) {
     const nameMatches = nearby.filter(
       (c) =>
-        normalizedNameSimilarity(incoming.name, c.name) >= NAME_SIMILARITY_THRESHOLD,
+        normalizedNameSimilarity(incoming.name, c.name) >=
+        NAME_SIMILARITY_THRESHOLD,
     );
     // Exactly one nearby candidate AND its name matches: a clean spatial
     // match. Anything else nearby — zero name matches (S9), or more than
@@ -463,7 +470,9 @@ export function reseedFacility(
     }
     const match = nameMatches[0];
     if (!match) {
-      throw new Error("unreachable: nameMatches.length === 1 but nameMatches[0] is undefined");
+      throw new Error(
+        "unreachable: nameMatches.length === 1 but nameMatches[0] is undefined",
+      );
     }
     const facilityEntry = ledger.entries[match.facilityId];
     const courseEntry = ledger.entries[match.courseId];
@@ -647,7 +656,9 @@ export function mergeIntoSurvivor(
     // S8 (gate review, post-e9b3ab0):
     // - self-merge: an id cannot be tombstoned into itself.
     if (id === survivorId) {
-      throw new Error(`mergeIntoSurvivor: "${id}" cannot be merged into itself`);
+      throw new Error(
+        `mergeIntoSurvivor: "${id}" cannot be merged into itself`,
+      );
     }
     // - cross-kind merge: a course can only merge into a course, a
     //   facility only into a facility (§4.2's promotion table only ever

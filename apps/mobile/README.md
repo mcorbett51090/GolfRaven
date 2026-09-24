@@ -31,7 +31,7 @@ device or emulator with Health Connect installed.** This container has no
 Android device, no emulator, and no way to grant a runtime health
 permission — so the reader's actual behavior against real Health Connect
 data is `[unverified — training knowledge and the library's shipped
-`.d.ts` only]`. What *is* verified in this repo: the reader typechecks
+`.d.ts` only]`. What _is_ verified in this repo: the reader typechecks
 against `react-native-health-connect@4.1.3`'s real type definitions (pinned
 in `package.json`; inspected directly from the published package, not
 recalled from training), and the pure shaping logic (`shape.ts`) is

@@ -121,11 +121,15 @@ describe("parseGpxFile: no <time> on any point", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.localDate).toBeUndefined();
-    expect(result.round.warnings.some((w) => w.toLowerCase().includes("tz"))).toBe(true);
+    expect(
+      result.round.warnings.some((w) => w.toLowerCase().includes("tz")),
+    ).toBe(true);
   });
 
   it("uses a tz option to convert a bare-Z metadata time into a local date", () => {
-    const result = parseGpxFile(bytes(GPX_NO_TIME_WITH_Z_METADATA), { tz: "America/Toronto" });
+    const result = parseGpxFile(bytes(GPX_NO_TIME_WITH_Z_METADATA), {
+      tz: "America/Toronto",
+    });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     // 2026-04-16T02:00:00Z is 2026-04-15T22:00 EDT (UTC-4).
@@ -202,7 +206,8 @@ describe("parseGpxFile: strict timestamps (should-fix)", () => {
     "a naive time (no Z/offset)": "2026-06-01T14:00:00",
     "a non-ISO string": "June 1 2026 2:00 PM",
     "a year before 2000": "1999-06-01T14:00:00Z",
-    "Feb 30 (round 2 should-fix — Date.parse silently rolls this to March 2nd)": "2026-02-30T14:00:00+02:00",
+    "Feb 30 (round 2 should-fix — Date.parse silently rolls this to March 2nd)":
+      "2026-02-30T14:00:00+02:00",
   };
   for (const [label, value] of Object.entries(badTimes)) {
     it(`drops a trkpt with ${label} rather than guessing`, () => {
@@ -226,7 +231,9 @@ describe("parseGpxFile: strict timestamps (should-fix)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.round.fixes).toHaveLength(1);
-    expect(result.round.fixes[0]!.timestamp).toBe(Date.parse("2026-06-01T14:00:00Z"));
+    expect(result.round.fixes[0]!.timestamp).toBe(
+      Date.parse("2026-06-01T14:00:00Z"),
+    );
   });
 });
 

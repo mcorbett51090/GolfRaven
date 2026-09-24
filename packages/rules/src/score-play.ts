@@ -225,7 +225,11 @@ interface EvidenceBase {
 }
 
 export type Evidence =
-  | (EvidenceBase & { source: "staff_presence"; scanAt: number; coSignalFix?: AppFix })
+  | (EvidenceBase & {
+      source: "staff_presence";
+      scanAt: number;
+      coSignalFix?: AppFix;
+    })
   | (EvidenceBase & {
       source: "arccos" | "garmin";
       vendorCourseMapped: boolean;
@@ -260,7 +264,11 @@ export type Evidence =
       apartMinutes: number;
       holes: 9 | 18;
     })
-  | (EvidenceBase & { source: "file_import"; matchedRoute: boolean; geometryKind?: GeometryKind })
+  | (EvidenceBase & {
+      source: "file_import";
+      matchedRoute: boolean;
+      geometryKind?: GeometryKind;
+    })
   | (EvidenceBase & { source: "foreground_checkin"; fix: AppFix })
   | (EvidenceBase & { source: "health_workout" })
   | (EvidenceBase & { source: "self_report" });
@@ -328,7 +336,10 @@ const GROUP: Record<EvidenceClassId, EvidenceGroup> = {
   purchase_corroboration: "corroboration",
 };
 
-const HARD: ReadonlySet<EvidenceClassId> = new Set(["staff_presence_hard", "booking_hard"]);
+const HARD: ReadonlySet<EvidenceClassId> = new Set([
+  "staff_presence_hard",
+  "booking_hard",
+]);
 
 /** §4.5's `score_monetary` include/exclude list (lines 944-957), keyed by
  * class id. `foreground_checkin` / `foreground_dwell` are money-eligible
@@ -354,7 +365,9 @@ const MONEY_ELIGIBLE_BASE: ReadonlySet<EvidenceClassId> = new Set([
  * / `foreground_dwell`). §4.5 line 1009-1013. A `failed` grade is handled
  * separately (zeroes the fix outright) — see `fixDeviceWeight`.
  */
-function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challenge">): number {
+function deviceFixMultiplier(
+  fix: Pick<AppFix, "simulated" | "token" | "challenge">,
+): number {
   let m = 1;
   if (fix.simulated) m *= 0.3;
   const grade = resolveFixGrade(fix.token);
@@ -366,7 +379,10 @@ function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challeng
  * `failed` zeroes it outright ("A `failed` fix is never a co-signal... a
  * `failed` grade zeroes the fix", lines 920, 1012); otherwise the
  * simulated/unattestable/no-challenge multipliers apply. */
-function fixDeviceWeight(base: number, fix: Pick<AppFix, "simulated" | "token" | "challenge">): number {
+function fixDeviceWeight(
+  base: number,
+  fix: Pick<AppFix, "simulated" | "token" | "challenge">,
+): number {
   if (resolveFixGrade(fix.token) === "failed") return 0;
   return base * deviceFixMultiplier(fix);
 }
@@ -437,7 +453,9 @@ function finish(
   return {
     evidenceId: row.id,
     ...fields,
-    ...(row.correlationId !== undefined ? { correlationId: row.correlationId } : {}),
+    ...(row.correlationId !== undefined
+      ? { correlationId: row.correlationId }
+      : {}),
   };
 }
 
@@ -449,7 +467,9 @@ function classify(row: Evidence): ScorePlayContribution {
         row.coSignalFix !== undefined &&
         isQualityCoSignalFix(row.coSignalFix) &&
         windowMinutes(row.coSignalFix.capturedAt, row.scanAt, 10);
-      const classId: EvidenceClassId = hasCoSignal ? "staff_presence_hard" : "staff_presence_soft";
+      const classId: EvidenceClassId = hasCoSignal
+        ? "staff_presence_hard"
+        : "staff_presence_soft";
       const badgeWeight = WEIGHT[classId];
       // Excluded from score_monetary when co-signal-less (line 991).
       const moneyEligible = hasCoSignal;
@@ -465,7 +485,9 @@ function classify(row: Evidence): ScorePlayContribution {
     case "arccos":
     case "garmin": {
       const isSensorVendor = row.vendorCourseMapped && row.sensorProvenance;
-      const classId: EvidenceClassId = isSensorVendor ? "vendor_sensor" : "self_posted";
+      const classId: EvidenceClassId = isSensorVendor
+        ? "vendor_sensor"
+        : "self_posted";
       const badgeWeight = WEIGHT[classId];
       // "Counts in score_monetary, but money still needs presence_signal"
       // (line 992) — vendor_sensor is money-eligible; a vendor round
@@ -499,7 +521,9 @@ function classify(row: Evidence): ScorePlayContribution {
         row.presenceFix !== undefined &&
         isQualityCoSignalFix(row.presenceFix) &&
         row.presenceFix.localDate === row.localDate;
-      const classId: EvidenceClassId = hasPresence ? "booking_hard" : "booking_alone";
+      const classId: EvidenceClassId = hasPresence
+        ? "booking_hard"
+        : "booking_alone";
       const badgeWeight = WEIGHT[classId];
       return finish(row, {
         classId,
@@ -533,7 +557,11 @@ function classify(row: Evidence): ScorePlayContribution {
       // -> 0.40 (the matcher's own acceptance floor, §7.4 step 4/G2-07);
       // an unlisted source overrides both bands to 0.10 (ruling SP1-2 lane
       // 5).
-      const base = !row.sourceAllowListed ? 0.1 : row.insideRatio >= 0.8 ? 0.6 : 0.4;
+      const base = !row.sourceAllowListed
+        ? 0.1
+        : row.insideRatio >= 0.8
+          ? 0.6
+          : 0.4;
       // Only the `simulated`×0.3 penalty applies here — a Health route is
       // structurally never captured against a server challenge (it isn't a
       // checkin-style fix at all, §4.5 line 908), so the ×0.6
@@ -542,7 +570,12 @@ function classify(row: Evidence): ScorePlayContribution {
       // weight; deliberately not reusing `fixDeviceWeight`, which would
       // wrongly fire the ×0.6 leg on every row.
       const badgeWeight0 = row.simulated ? base * 0.3 : base;
-      const capped = applyCourseCaps(badgeWeight0, row.geometryKind, row.courseDisambiguatedBy, false);
+      const capped = applyCourseCaps(
+        badgeWeight0,
+        row.geometryKind,
+        row.courseDisambiguatedBy,
+        false,
+      );
       return finish(row, {
         classId,
         group: GROUP[classId],
@@ -553,16 +586,25 @@ function classify(row: Evidence): ScorePlayContribution {
       });
     }
     case "connect_iq": {
-      const classId: EvidenceClassId = row.variant === "route" ? "connect_iq_route" : "connect_iq_checkin";
+      const classId: EvidenceClassId =
+        row.variant === "route" ? "connect_iq_route" : "connect_iq_checkin";
       let badgeWeight: number;
       if (row.variant === "route") {
         // "only if K4b passed"; "inside polygon, ≥90min" (line 998)
-        badgeWeight = row.k4bPassed && row.insidePolygon && row.durationMinutes >= 90 ? WEIGHT[classId] : 0;
+        badgeWeight =
+          row.k4bPassed && row.insidePolygon && row.durationMinutes >= 90
+            ? WEIGHT[classId]
+            : 0;
       } else {
         badgeWeight = WEIGHT[classId]; // the K4b-fail one-tap shape — always qualifies as itself
       }
       if (row.simulated) badgeWeight *= 0.3;
-      const capped = applyCourseCaps(badgeWeight, undefined, row.courseDisambiguatedBy, false);
+      const capped = applyCourseCaps(
+        badgeWeight,
+        undefined,
+        row.courseDisambiguatedBy,
+        false,
+      );
       return finish(row, {
         classId,
         group: GROUP[classId],
@@ -593,10 +635,16 @@ function classify(row: Evidence): ScorePlayContribution {
       const closeW = fixDeviceWeight(1, row.checkoutFix);
       const badgeWeight0 = WEIGHT[classId] * Math.min(openW, closeW);
       const bothPolygon =
-        row.checkinFix.geometryKind === "polygon" && row.checkoutFix.geometryKind === "polygon";
+        row.checkinFix.geometryKind === "polygon" &&
+        row.checkoutFix.geometryKind === "polygon";
       const geometryKind: GeometryKind = bothPolygon ? "polygon" : "radius";
       const moneyBase = MONEY_ELIGIBLE_BASE.has(classId); // true
-      const capped = applyCourseCaps(badgeWeight0, geometryKind, row.courseDisambiguatedBy, moneyBase);
+      const capped = applyCourseCaps(
+        badgeWeight0,
+        geometryKind,
+        row.courseDisambiguatedBy,
+        moneyBase,
+      );
       return finish(row, {
         classId,
         group: GROUP[classId],
@@ -629,7 +677,12 @@ function classify(row: Evidence): ScorePlayContribution {
       const classId: EvidenceClassId = "foreground_checkin";
       const badgeWeight0 = fixDeviceWeight(WEIGHT[classId], row.fix);
       const moneyBase = MONEY_ELIGIBLE_BASE.has(classId); // true — polygon-matched only, enforced below
-      const capped = applyCourseCaps(badgeWeight0, row.fix.geometryKind, row.courseDisambiguatedBy, moneyBase);
+      const capped = applyCourseCaps(
+        badgeWeight0,
+        row.fix.geometryKind,
+        row.courseDisambiguatedBy,
+        moneyBase,
+      );
       return finish(row, {
         classId,
         group: GROUP[classId],
@@ -694,10 +747,9 @@ function noisyOr(weights: number[]): number {
  * only the max-weight member of each group. Operates on a single pipeline's
  * weight field (`badge` or `money`) — see `combine` below, which calls this
  * twice with different weight selectors. */
-function mergeByMax<T extends { classId: EvidenceClassId; correlationId?: string }>(
-  items: T[],
-  weightOf: (item: T) => number,
-): T[] {
+function mergeByMax<
+  T extends { classId: EvidenceClassId; correlationId?: string },
+>(items: T[], weightOf: (item: T) => number): T[] {
   const groups = new Map<string, T[]>();
   for (const item of items) {
     // Grouped by explicit `correlationId` when present (a caller-declared
@@ -735,9 +787,12 @@ function combine(
   contributions: ScorePlayContribution[],
   pipeline: "badge" | "money",
 ): number {
-  const weightOf = (c: ScorePlayContribution) => (pipeline === "badge" ? c.badgeWeight : c.moneyWeight);
+  const weightOf = (c: ScorePlayContribution) =>
+    pipeline === "badge" ? c.badgeWeight : c.moneyWeight;
   const pool =
-    pipeline === "badge" ? contributions : contributions.filter((c) => c.moneyEligible);
+    pipeline === "badge"
+      ? contributions
+      : contributions.filter((c) => c.moneyEligible);
   const merged = mergeByMax(pool, weightOf);
   const deviceGps = merged.filter((c) => c.group === "device-gps");
   const rest = merged.filter((c) => c.group !== "device-gps");
@@ -793,8 +848,13 @@ function collectFixes(evidence: Evidence[]): AppFix[] {
  * passed to one `scorePlay` call already shares by construction (module
  * doc's "one call = one play").
  */
-function computePresenceSignal(evidence: Evidence[], playLocalDate: string): boolean {
-  return collectFixes(evidence).some((fix) => isQualityCoSignalFix(fix) && fix.localDate === playLocalDate);
+function computePresenceSignal(
+  evidence: Evidence[],
+  playLocalDate: string,
+): boolean {
+  return collectFixes(evidence).some(
+    (fix) => isQualityCoSignalFix(fix) && fix.localDate === playLocalDate,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -809,7 +869,9 @@ function daysBetween(a: string, b: string): number {
 function corroborationApplies(ctx: ScorePlayContext): boolean {
   const purchases = ctx.purchases ?? [];
   return purchases.some(
-    (p) => p.facilityId === ctx.playFacilityId && daysBetween(p.localDate, ctx.playLocalDate) <= 7,
+    (p) =>
+      p.facilityId === ctx.playFacilityId &&
+      daysBetween(p.localDate, ctx.playLocalDate) <= 7,
   );
 }
 
@@ -831,7 +893,10 @@ export interface ScorePlayResult {
  * doc for the "one call = one play" and "counted once" contracts `evidence`
  * and `ctx` must already satisfy.
  */
-export function scorePlay(evidence: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
+export function scorePlay(
+  evidence: Evidence[],
+  ctx: ScorePlayContext,
+): ScorePlayResult {
   const playContributions = evidence.map((row) => classify(row));
 
   // "Purchase corroboration... applies only if at least one play class is
@@ -840,7 +905,8 @@ export function scorePlay(evidence: Evidence[], ctx: ScorePlayContext): ScorePla
   // (A2-19). It never counts in score_monetary." (§4.5 line 1005.)
   const playClassesBadge = combine(playContributions, "badge");
   const hasPlayClass = playContributions.length > 0;
-  const corroborationEligible = hasPlayClass && playClassesBadge >= 0.5 && corroborationApplies(ctx);
+  const corroborationEligible =
+    hasPlayClass && playClassesBadge >= 0.5 && corroborationApplies(ctx);
 
   const allContributions: ScorePlayContribution[] = [...playContributions];
   if (corroborationApplies(ctx)) {

@@ -7,8 +7,16 @@
  * B2/N6/S2 fixtures.
  */
 import { describe, expect, it } from "vitest";
-import { type CourseId, type FacilityId, type RuleExpr, type TrailId } from "@golfraven/catalog";
-import { evaluateRuleExpr, type RuleExprEvalContext } from "../src/rule-expr-eval.js";
+import {
+  type CourseId,
+  type FacilityId,
+  type RuleExpr,
+  type TrailId,
+} from "@golfraven/catalog";
+import {
+  evaluateRuleExpr,
+  type RuleExprEvalContext,
+} from "../src/rule-expr-eval.js";
 import { nextId } from "./test-ids.js";
 
 /** Re-gate item 1: `programmeStartsOn` is now required for any POSITIVE
@@ -54,7 +62,10 @@ describe("R-14: trailProgress(T) >= 0.5 && !played(F), money mode", () => {
           left: { kind: "agg", name: "trailProgress", trailId },
           right: { kind: "literal", value: 0.5 },
         },
-        { kind: "not", arg: { kind: "agg", name: "played", courseId: courseF } },
+        {
+          kind: "not",
+          arg: { kind: "agg", name: "played", courseId: courseF },
+        },
       ],
     };
     const ctx: RuleExprEvalContext = {
@@ -64,8 +75,18 @@ describe("R-14: trailProgress(T) >= 0.5 && !played(F), money mode", () => {
       },
       trails: trailContext(trailId, courseT, facilityId),
       plays: [
-        { courseId: courseT, localDate: "2026-05-01", scoreBadge: 1, moneyQualifies: true },
-        { courseId: courseF, localDate: "2026-05-02", scoreBadge: 0.6, moneyQualifies: false },
+        {
+          courseId: courseT,
+          localDate: "2026-05-01",
+          scoreBadge: 1,
+          moneyQualifies: true,
+        },
+        {
+          courseId: courseF,
+          localDate: "2026-05-02",
+          scoreBadge: 0.6,
+          moneyQualifies: false,
+        },
       ],
       programmeStartsOn: EARLY_PROGRAMME_START,
     };
@@ -86,7 +107,10 @@ describe("R-14: trailProgress(T) >= 0.5 && !played(F), money mode", () => {
           left: { kind: "agg", name: "trailProgress", trailId },
           right: { kind: "literal", value: 0.5 },
         },
-        { kind: "not", arg: { kind: "agg", name: "played", courseId: courseF } },
+        {
+          kind: "not",
+          arg: { kind: "agg", name: "played", courseId: courseF },
+        },
       ],
     };
     const ctx: RuleExprEvalContext = {
@@ -96,11 +120,21 @@ describe("R-14: trailProgress(T) >= 0.5 && !played(F), money mode", () => {
       },
       trails: trailContext(trailId, courseT, facilityId),
       plays: [
-        { courseId: courseT, localDate: "2026-05-01", scoreBadge: 1, moneyQualifies: true },
+        {
+          courseId: courseT,
+          localDate: "2026-05-01",
+          scoreBadge: 1,
+          moneyQualifies: true,
+        },
         // scoreBadge below the 0.50 default, but moneyQualifies is true —
         // S2 says the negative-occurrence play set is "scoreBadge >=
         // threshold OR moneyQualifies", so this still counts.
-        { courseId: courseF, localDate: "2026-05-02", scoreBadge: 0.1, moneyQualifies: true },
+        {
+          courseId: courseF,
+          localDate: "2026-05-02",
+          scoreBadge: 0.1,
+          moneyQualifies: true,
+        },
       ],
       programmeStartsOn: EARLY_PROGRAMME_START,
     };
@@ -121,7 +155,10 @@ describe("R-14: trailProgress(T) >= 0.5 && !played(F), money mode", () => {
           left: { kind: "agg", name: "trailProgress", trailId },
           right: { kind: "literal", value: 0.5 },
         },
-        { kind: "not", arg: { kind: "agg", name: "played", courseId: courseF } },
+        {
+          kind: "not",
+          arg: { kind: "agg", name: "played", courseId: courseF },
+        },
       ],
     };
     const ctx: RuleExprEvalContext = {
@@ -130,7 +167,14 @@ describe("R-14: trailProgress(T) >= 0.5 && !played(F), money mode", () => {
         [courseF]: { id: courseF, facilityId, verified: true },
       },
       trails: trailContext(trailId, courseT, facilityId),
-      plays: [{ courseId: courseT, localDate: "2026-05-01", scoreBadge: 1, moneyQualifies: true }],
+      plays: [
+        {
+          courseId: courseT,
+          localDate: "2026-05-01",
+          scoreBadge: 1,
+          moneyQualifies: true,
+        },
+      ],
       programmeStartsOn: EARLY_PROGRAMME_START,
     };
     expect(evaluateRuleExpr(rule, ctx, "money")).toBe(true);
@@ -151,7 +195,14 @@ describe("B2: programmeStartsOn applies only to POSITIVE occurrences", () => {
     const ctx: RuleExprEvalContext = {
       courses: { [courseT]: { id: courseT, facilityId, verified: true } },
       trails: trailContext(trailId, courseT, facilityId),
-      plays: [{ courseId: courseT, localDate: "2019-01-01", scoreBadge: 1, moneyQualifies: true }],
+      plays: [
+        {
+          courseId: courseT,
+          localDate: "2019-01-01",
+          scoreBadge: 1,
+          moneyQualifies: true,
+        },
+      ],
       programmeStartsOn: "2026-01-01",
     };
     expect(evaluateRuleExpr(rule, ctx, "money")).toBe(false);
@@ -173,7 +224,10 @@ describe("B2: programmeStartsOn applies only to POSITIVE occurrences", () => {
           left: { kind: "agg", name: "trailProgress", trailId },
           right: { kind: "literal", value: 0.5 },
         },
-        { kind: "not", arg: { kind: "agg", name: "played", courseId: courseF } },
+        {
+          kind: "not",
+          arg: { kind: "agg", name: "played", courseId: courseF },
+        },
       ],
     };
     const ctx: RuleExprEvalContext = {
@@ -184,11 +238,21 @@ describe("B2: programmeStartsOn applies only to POSITIVE occurrences", () => {
       trails: trailContext(trailId, courseT, facilityId),
       plays: [
         // trailProgress leg satisfied AFTER programmeStartsOn.
-        { courseId: courseT, localDate: "2026-06-01", scoreBadge: 1, moneyQualifies: true },
+        {
+          courseId: courseT,
+          localDate: "2026-06-01",
+          scoreBadge: 1,
+          moneyQualifies: true,
+        },
         // The F play predates programmeStartsOn — a NEGATIVE occurrence
         // must still see it (it is never backdated OUT of view), so the
         // offer is correctly NOT issued.
-        { courseId: courseF, localDate: "2019-01-01", scoreBadge: 1, moneyQualifies: false },
+        {
+          courseId: courseF,
+          localDate: "2019-01-01",
+          scoreBadge: 1,
+          moneyQualifies: false,
+        },
       ],
       programmeStartsOn: "2026-01-01",
     };
@@ -208,8 +272,18 @@ describe("N6: the A2-01 user-pick guard is applied inside the evaluator", () => 
       },
       trails: {},
       plays: [
-        { courseId: courseA, localDate: "2026-01-01", scoreBadge: 0.5, courseDisambiguatedBy: "user" },
-        { courseId: courseB, localDate: "2026-01-01", scoreBadge: 0.5, courseDisambiguatedBy: "user" },
+        {
+          courseId: courseA,
+          localDate: "2026-01-01",
+          scoreBadge: 0.5,
+          courseDisambiguatedBy: "user",
+        },
+        {
+          courseId: courseB,
+          localDate: "2026-01-01",
+          scoreBadge: 0.5,
+          courseDisambiguatedBy: "user",
+        },
       ],
     };
     const rule: RuleExpr = {
@@ -234,7 +308,14 @@ describe("S7 mutation-kill: a bare BOOLEAN aggregate's own occurrence polarity",
       courses: { [courseT]: { id: courseT, facilityId, verified: true } },
       trails: trailContext(trailId, courseT, facilityId),
       // Badge-level only, NOT money-qualifying.
-      plays: [{ courseId: courseT, localDate: "2026-05-01", scoreBadge: 1, moneyQualifies: false }],
+      plays: [
+        {
+          courseId: courseT,
+          localDate: "2026-05-01",
+          scoreBadge: 1,
+          moneyQualifies: false,
+        },
+      ],
       programmeStartsOn: EARLY_PROGRAMME_START,
     };
     // Money mode: a positive occurrence needs a money-qualifying play —
@@ -248,11 +329,21 @@ describe("S7 mutation-kill: a bare BOOLEAN aggregate's own occurrence polarity",
     const trailId = nextId("trl") as TrailId;
     const courseT = nextId("crs") as CourseId;
     const facilityId = nextId("fac") as FacilityId;
-    const rule: RuleExpr = { kind: "not", arg: { kind: "agg", name: "trailComplete", trailId } };
+    const rule: RuleExpr = {
+      kind: "not",
+      arg: { kind: "agg", name: "trailComplete", trailId },
+    };
     const ctx: RuleExprEvalContext = {
       courses: { [courseT]: { id: courseT, facilityId, verified: true } },
       trails: trailContext(trailId, courseT, facilityId),
-      plays: [{ courseId: courseT, localDate: "2026-05-01", scoreBadge: 1, moneyQualifies: false }],
+      plays: [
+        {
+          courseId: courseT,
+          localDate: "2026-05-01",
+          scoreBadge: 1,
+          moneyQualifies: false,
+        },
+      ],
     };
     // Negative occurrence: badge-level plays count, so trailComplete is
     // TRUE here, and !trailComplete is FALSE.
@@ -281,7 +372,14 @@ describe("S7 mutation-kill: an aggregate on the RIGHT side of a comparator gets 
     const ctx: RuleExprEvalContext = {
       courses: { [courseF]: { id: courseF, facilityId, verified: true } },
       trails: {},
-      plays: [{ courseId: courseF, localDate: "2026-01-01", scoreBadge: 1, moneyQualifies: false }],
+      plays: [
+        {
+          courseId: courseF,
+          localDate: "2026-01-01",
+          scoreBadge: 1,
+          moneyQualifies: false,
+        },
+      ],
     };
     expect(evaluateRuleExpr(rule, ctx, "money")).toBe(false);
   });

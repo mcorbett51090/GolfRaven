@@ -46,7 +46,9 @@ describe("end to end: GPX import -> toMatcherInput -> matchRoute", () => {
     if (!parsed.ok) return;
     expect(parsed.round.fixes.length).toBeGreaterThan(0);
 
-    const matcherInput = toMatcherInput(parsed.round, { candidates: CANDIDATES });
+    const matcherInput = toMatcherInput(parsed.round, {
+      candidates: CANDIDATES,
+    });
     expect(matcherInput).toBeDefined();
     if (!matcherInput) return;
 

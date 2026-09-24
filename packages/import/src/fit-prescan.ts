@@ -114,7 +114,11 @@ export interface FitPrescanFailure {
 
 export type FitPrescanResult = FitPrescanSuccess | FitPrescanFailure;
 
-function calculateFitCrc(bytes: Uint8Array, start: number, end: number): number {
+function calculateFitCrc(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+): number {
   let crc = 0;
   for (let i = start; i < end; i++) {
     let value = crc ^ bytes[i]!;
@@ -151,7 +155,10 @@ export interface PrescanOptions {
  * finishing the walk over the rest of a hostile file (so a 250,001st
  * message aborts immediately rather than after walking the other
  * millions). */
-export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): FitPrescanResult {
+export function prescanFit(
+  bytes: Uint8Array,
+  options: PrescanOptions = {},
+): FitPrescanResult {
   const abortCheckInterval = options.abortCheckInterval ?? 5000;
 
   if (bytes.length < 12) {
@@ -162,13 +169,25 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
     return { ok: false, error: `unexpected FIT header size ${headerLength}` };
   }
   if (bytes.length < headerLength) {
-    return { ok: false, error: "FIT file shorter than its own declared header size" };
+    return {
+      ok: false,
+      error: "FIT file shorter than its own declared header size",
+    };
   }
-  const magic = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!);
+  const magic = String.fromCharCode(
+    bytes[8]!,
+    bytes[9]!,
+    bytes[10]!,
+    bytes[11]!,
+  );
   if (magic !== ".FIT") {
     return { ok: false, error: 'missing ".FIT" file-type marker in header' };
   }
-  const dataLength = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(4, true);
+  const dataLength = new DataView(
+    bytes.buffer,
+    bytes.byteOffset,
+    bytes.byteLength,
+  ).getUint32(4, true);
   const crcStart = headerLength + dataLength;
   if (crcStart > bytes.length || crcStart < headerLength) {
     // The second condition catches a declared length so large that
@@ -176,7 +195,10 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
     // slip past the first bounds check (defensive; `dataLength` is a
     // uint32 read via DataView so it can't itself be negative, but keep
     // the check explicit rather than relying on that fact silently).
-    return { ok: false, error: "FIT file data length exceeds the actual input size" };
+    return {
+      ok: false,
+      error: "FIT file data length exceeds the actual input size",
+    };
   }
 
   let headerCrcOk: boolean | undefined;
@@ -209,7 +231,9 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
     const headerByte = bytes[index]!;
     const isCompressedTimestamp = (headerByte & 0x80) !== 0;
     const isDefinition = !isCompressedTimestamp && (headerByte & 0x40) !== 0;
-    const localType = isCompressedTimestamp ? (headerByte >> 5) & 0x3 : headerByte & 0x0f;
+    const localType = isCompressedTimestamp
+      ? (headerByte >> 5) & 0x3
+      : headerByte & 0x0f;
     index += 1;
 
     if (isDefinition) {
@@ -284,29 +308,49 @@ export function prescanFit(bytes: Uint8Array, options: PrescanOptions = {}): Fit
       // always free", is what keeps the prescan's message boundaries
       // identical to the real decoder's.
       const compressedRecordByteLength =
-        firstFieldNumber === 253 ? recordByteLength - firstFieldSize : recordByteLength;
+        firstFieldNumber === 253
+          ? recordByteLength - firstFieldSize
+          : recordByteLength;
 
-      definitions.set(localType, { globalMessageNumber, recordByteLength, compressedRecordByteLength });
+      definitions.set(localType, {
+        globalMessageNumber,
+        recordByteLength,
+        compressedRecordByteLength,
+      });
       messageCount += 1;
     } else {
       const def = definitions.get(localType);
       if (!def) {
-        return { ok: false, error: "FIT data record has no matching definition" };
+        return {
+          ok: false,
+          error: "FIT data record has no matching definition",
+        };
       }
-      const bodyLength = isCompressedTimestamp ? def.compressedRecordByteLength : def.recordByteLength;
+      const bodyLength = isCompressedTimestamp
+        ? def.compressedRecordByteLength
+        : def.recordByteLength;
       if (index + bodyLength > crcStart) {
         return { ok: false, error: "truncated FIT data record" };
       }
       index += bodyLength;
       messageCount += 1;
-      globalMessageCounts.set(def.globalMessageNumber, (globalMessageCounts.get(def.globalMessageNumber) ?? 0) + 1);
+      globalMessageCounts.set(
+        def.globalMessageNumber,
+        (globalMessageCounts.get(def.globalMessageNumber) ?? 0) + 1,
+      );
     }
 
     if (messageCount > MAX_FIT_MESSAGES) {
-      return { ok: false, error: `FIT file has over ${MAX_FIT_MESSAGES} messages; refused` };
+      return {
+        ok: false,
+        error: `FIT file has over ${MAX_FIT_MESSAGES} messages; refused`,
+      };
     }
     if (totalDefinitionFields > MAX_FIT_DEFINITION_FIELDS) {
-      return { ok: false, error: `FIT file's definitions declare over ${MAX_FIT_DEFINITION_FIELDS} fields in total; refused` };
+      return {
+        ok: false,
+        error: `FIT file's definitions declare over ${MAX_FIT_DEFINITION_FIELDS} fields in total; refused`,
+      };
     }
   }
 

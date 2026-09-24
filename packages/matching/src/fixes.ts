@@ -36,7 +36,9 @@ interface HasTimestamp {
  * tiebreaker anyway (build plan gate fix: determinism) so stability never
  * depends on engine compliance — two fixes sharing one timestamp always
  * keep their original relative order, on every engine, forever. */
-export function stableSortByTimestamp<T extends HasTimestamp>(items: readonly T[]): T[] {
+export function stableSortByTimestamp<T extends HasTimestamp>(
+  items: readonly T[],
+): T[] {
   return items
     .map((item, index) => ({ item, index }))
     .sort((a, b) => a.item.timestamp - b.item.timestamp || a.index - b.index)

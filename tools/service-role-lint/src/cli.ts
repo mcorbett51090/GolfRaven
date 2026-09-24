@@ -20,8 +20,12 @@ if (results.length === 0) {
 
 for (const result of results) {
   for (const finding of result.findings) {
-    console.error(`${result.filePath}:${finding.line}:${finding.column} [${finding.rule}] ${finding.message}`);
+    console.error(
+      `${result.filePath}:${finding.line}:${finding.column} [${finding.rule}] ${finding.message}`,
+    );
   }
 }
-console.error(`service-role-lint: ${results.reduce((n, r) => n + r.findings.length, 0)} finding(s) in ${results.length} file(s)`);
+console.error(
+  `service-role-lint: ${results.reduce((n, r) => n + r.findings.length, 0)} finding(s) in ${results.length} file(s)`,
+);
 process.exit(1);

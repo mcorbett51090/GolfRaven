@@ -14,9 +14,16 @@
 // Uses a real parser (@typescript-eslint/typescript-estree, pinned) rather
 // than a method-name grep, per the plan's own explicit requirement.
 
-import { AST_NODE_TYPES, parse, type TSESTree } from "@typescript-eslint/typescript-estree";
+import {
+  AST_NODE_TYPES,
+  parse,
+  type TSESTree,
+} from "@typescript-eslint/typescript-estree";
 
-export type RuleId = "service-role-construction" | "privileged-call-outside-withOwnership" | "db-url-or-driver";
+export type RuleId =
+  | "service-role-construction"
+  | "privileged-call-outside-withOwnership"
+  | "db-url-or-driver";
 
 export interface Finding {
   rule: RuleId;
@@ -41,7 +48,12 @@ const ALLOWED_PATH_SUFFIX = "_shared/privileged.ts";
 const DB_URL_ENV_VAR = "SUPABASE_DB_URL";
 
 /** Postgres driver package specifiers a raw-SQL import would use. */
-const POSTGRES_DRIVER_SPECIFIERS = new Set(["pg", "postgres", "postgres.js", "pg-promise"]);
+const POSTGRES_DRIVER_SPECIFIERS = new Set([
+  "pg",
+  "postgres",
+  "postgres.js",
+  "pg-promise",
+]);
 
 /** Env var name substrings that mark a client as service-role (case-insensitive). */
 const SERVICE_ROLE_MARKERS = ["SERVICE_ROLE"];
@@ -51,7 +63,10 @@ function isAllowedFile(filePath: string): boolean {
 }
 
 function nodeLoc(node: TSESTree.Node): { line: number; column: number } {
-  return { line: node.loc?.start.line ?? 0, column: node.loc?.start.column ?? 0 };
+  return {
+    line: node.loc?.start.line ?? 0,
+    column: node.loc?.start.column ?? 0,
+  };
 }
 
 /** True if this string literal / identifier text names the DB URL env var. */
@@ -65,7 +80,11 @@ function subtreeMentionsServiceRole(node: TSESTree.Node): boolean {
   walk(node, (n) => {
     if (found) return;
     if (n.type === AST_NODE_TYPES.Literal && typeof n.value === "string") {
-      if (SERVICE_ROLE_MARKERS.some((m) => n.value!.toString().toUpperCase().includes(m))) {
+      if (
+        SERVICE_ROLE_MARKERS.some((m) =>
+          n.value!.toString().toUpperCase().includes(m),
+        )
+      ) {
         found = true;
       }
     }
@@ -82,7 +101,11 @@ function subtreeMentionsDbUrl(node: TSESTree.Node): boolean {
   let found = false;
   walk(node, (n) => {
     if (found) return;
-    if (n.type === AST_NODE_TYPES.Literal && typeof n.value === "string" && mentionsDbUrlEnvVar(n.value)) {
+    if (
+      n.type === AST_NODE_TYPES.Literal &&
+      typeof n.value === "string" &&
+      mentionsDbUrlEnvVar(n.value)
+    ) {
       found = true;
     }
     if (n.type === AST_NODE_TYPES.Identifier && mentionsDbUrlEnvVar(n.name)) {
@@ -93,7 +116,10 @@ function subtreeMentionsDbUrl(node: TSESTree.Node): boolean {
 }
 
 /** Minimal generic AST walker (typescript-estree nodes are plain objects). */
-function walk(node: TSESTree.Node | null | undefined, visit: (n: TSESTree.Node) => void): void {
+function walk(
+  node: TSESTree.Node | null | undefined,
+  visit: (n: TSESTree.Node) => void,
+): void {
   if (!node || typeof node !== "object") return;
   visit(node);
   for (const key of Object.keys(node)) {
@@ -105,13 +131,19 @@ function walk(node: TSESTree.Node | null | undefined, visit: (n: TSESTree.Node) 
           walk(item as TSESTree.Node, visit);
         }
       }
-    } else if (value && typeof value === "object" && "type" in (value as object)) {
+    } else if (
+      value &&
+      typeof value === "object" &&
+      "type" in (value as object)
+    ) {
       walk(value as TSESTree.Node, visit);
     }
   }
 }
 
-function isCreateClientCall(node: TSESTree.Node): node is TSESTree.CallExpression {
+function isCreateClientCall(
+  node: TSESTree.Node,
+): node is TSESTree.CallExpression {
   return (
     node.type === AST_NODE_TYPES.CallExpression &&
     node.callee.type === AST_NODE_TYPES.Identifier &&
@@ -151,7 +183,9 @@ export function lintSource(source: string, filePath: string): Finding[] {
   walk(ast, (node) => {
     // Rule (a): service-role client construction.
     if (isCreateClientCall(node)) {
-      const usesServiceRole = node.arguments.some((arg) => subtreeMentionsServiceRole(arg));
+      const usesServiceRole = node.arguments.some((arg) =>
+        subtreeMentionsServiceRole(arg),
+      );
       if (usesServiceRole) {
         const loc = nodeLoc(node);
         findings.push({
@@ -175,9 +209,18 @@ export function lintSource(source: string, filePath: string): Finding[] {
         });
       }
     }
-    if (node.type === AST_NODE_TYPES.CallExpression && node.callee.type === AST_NODE_TYPES.Identifier && node.callee.name === "require") {
+    if (
+      node.type === AST_NODE_TYPES.CallExpression &&
+      node.callee.type === AST_NODE_TYPES.Identifier &&
+      node.callee.name === "require"
+    ) {
       const arg = node.arguments[0];
-      if (arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" && POSTGRES_DRIVER_SPECIFIERS.has(arg.value)) {
+      if (
+        arg &&
+        arg.type === AST_NODE_TYPES.Literal &&
+        typeof arg.value === "string" &&
+        POSTGRES_DRIVER_SPECIFIERS.has(arg.value)
+      ) {
         const loc = nodeLoc(node);
         findings.push({
           rule: "db-url-or-driver",
@@ -189,8 +232,11 @@ export function lintSource(source: string, filePath: string): Finding[] {
 
     // Rule (c): DB URL env var reference.
     if (
-      (node.type === AST_NODE_TYPES.Literal && typeof node.value === "string" && mentionsDbUrlEnvVar(node.value)) ||
-      (node.type === AST_NODE_TYPES.Identifier && mentionsDbUrlEnvVar(node.name))
+      (node.type === AST_NODE_TYPES.Literal &&
+        typeof node.value === "string" &&
+        mentionsDbUrlEnvVar(node.value)) ||
+      (node.type === AST_NODE_TYPES.Identifier &&
+        mentionsDbUrlEnvVar(node.name))
     ) {
       const loc = nodeLoc(node);
       findings.push({
@@ -220,7 +266,8 @@ export function lintSource(source: string, filePath: string): Finding[] {
       const cb = node.arguments[1];
       if (
         cb &&
-        (cb.type === AST_NODE_TYPES.ArrowFunctionExpression || cb.type === AST_NODE_TYPES.FunctionExpression) &&
+        (cb.type === AST_NODE_TYPES.ArrowFunctionExpression ||
+          cb.type === AST_NODE_TYPES.FunctionExpression) &&
         cb.range
       ) {
         withOwnershipCallbackRanges.push([cb.range[0], cb.range[1]]);
@@ -230,7 +277,9 @@ export function lintSource(source: string, filePath: string): Finding[] {
 
   const insideWithOwnership = (node: TSESTree.Node): boolean => {
     if (!node.range) return false;
-    return withOwnershipCallbackRanges.some(([start, end]) => node.range![0] >= start && node.range![1] <= end);
+    return withOwnershipCallbackRanges.some(
+      ([start, end]) => node.range![0] >= start && node.range![1] <= end,
+    );
   };
 
   // Rule (b): any call on a privileged (service-role) handle outside a
@@ -242,7 +291,9 @@ export function lintSource(source: string, filePath: string): Finding[] {
 
     const callee = node.callee;
     const methodName =
-      callee.property.type === AST_NODE_TYPES.Identifier ? callee.property.name : undefined;
+      callee.property.type === AST_NODE_TYPES.Identifier
+        ? callee.property.name
+        : undefined;
 
     // Find the root identifier of the member-expression chain
     // (`svc.storage.from(...).upload(...)` -> `svc`).
@@ -252,17 +303,30 @@ export function lintSource(source: string, filePath: string): Finding[] {
         base = base.object;
         continue;
       }
-      if (base.type === AST_NODE_TYPES.CallExpression && base.callee.type === AST_NODE_TYPES.MemberExpression) {
+      if (
+        base.type === AST_NODE_TYPES.CallExpression &&
+        base.callee.type === AST_NODE_TYPES.MemberExpression
+      ) {
         base = base.callee.object;
         continue;
       }
       break;
     }
-    if (base.type !== AST_NODE_TYPES.Identifier || !serviceRoleIdentifiers.has(base.name)) return;
+    if (
+      base.type !== AST_NODE_TYPES.Identifier ||
+      !serviceRoleIdentifiers.has(base.name)
+    )
+      return;
 
     const isPrivilegedMethod =
-      methodName === "from" || methodName === "rpc" || methodName === "upload" || methodName === "remove" ||
-      methodName === "update" || methodName === "upsert" || methodName === "insert" || methodName === "delete" ||
+      methodName === "from" ||
+      methodName === "rpc" ||
+      methodName === "upload" ||
+      methodName === "remove" ||
+      methodName === "update" ||
+      methodName === "upsert" ||
+      methodName === "insert" ||
+      methodName === "delete" ||
       methodName === "select";
 
     if (isPrivilegedMethod && !insideWithOwnership(node)) {

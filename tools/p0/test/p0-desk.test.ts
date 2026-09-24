@@ -45,10 +45,14 @@ describe("p0-desk: BLOCKED reporting with a fake fetch that returns a 403 CONNEC
     const x4Row = result.rows.find((r) => r.name === "x4-verify");
 
     expect(x5Row?.state).toBe("blocked");
-    expect(x5Row?.detail).toContain("BLOCKED — network policy (overpass-api.de)");
+    expect(x5Row?.detail).toContain(
+      "BLOCKED — network policy (overpass-api.de)",
+    );
 
     expect(x2Row?.state).toBe("blocked");
-    expect(x2Row?.detail).toMatch(/BLOCKED — network policy \(.*tnstateparks\.com.*\)/);
+    expect(x2Row?.detail).toMatch(
+      /BLOCKED — network policy \(.*tnstateparks\.com.*\)/,
+    );
 
     expect(x4Row?.state).toBe("skipped");
 
@@ -65,7 +69,9 @@ describe("p0-desk: BLOCKED reporting with a fake fetch that returns a 403 CONNEC
     expect(existsSync(path.join(runDir, "x2-evidence", "manifest.json"))).toBe(
       true,
     );
-    const status = JSON.parse(readFileSync(path.join(runDir, "status.json"), "utf8"));
+    const status = JSON.parse(
+      readFileSync(path.join(runDir, "status.json"), "utf8"),
+    );
     expect(status.exitCode).toBe(1);
   });
 });
@@ -77,7 +83,9 @@ describe("p0-desk: a healthy run", () => {
       vi.fn(async (url: string) => {
         if (url.includes("overpass-api.de")) {
           return new Response(
-            JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "16212" } }] }),
+            JSON.stringify({
+              elements: [{ type: "count", id: 0, tags: { total: "16212" } }],
+            }),
             { status: 200 },
           );
         }
@@ -115,13 +123,18 @@ describe("p0-desk: gate finding S5 — partial block/failure must not read as a 
       vi.fn(async (url: string) => {
         if (url.includes("overpass-api.de")) {
           return new Response(
-            JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "100" } }] }),
+            JSON.stringify({
+              elements: [{ type: "count", id: 0, tags: { total: "100" } }],
+            }),
             { status: 200 },
           );
         }
         call += 1;
         if (call === 1) return new Response("not found", { status: 404 });
-        return new Response("<h1>OK</h1>", { status: 200, headers: { "content-type": "text/html" } });
+        return new Response("<h1>OK</h1>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
       }),
     );
     const runDir = path.join(OUT_DIR, "partial-x2-run");
@@ -142,25 +155,34 @@ describe("p0-desk: gate finding S5 — partial block/failure must not read as a 
       vi.fn(async (url: string) => {
         if (url.includes("overpass-api.de")) {
           return new Response(
-            JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "100" } }] }),
+            JSON.stringify({
+              elements: [{ type: "count", id: 0, tags: { total: "100" } }],
+            }),
             { status: 200 },
           );
         }
         if (url.includes("golfnow.com")) {
           return new Response("rate limited", { status: 429 });
         }
-        return new Response("<h1>Trail Page</h1>", { status: 200, headers: { "content-type": "text/html" } });
+        return new Response("<h1>Trail Page</h1>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
       }),
     );
     const runDir = path.join(OUT_DIR, "indeterminate-x4-run");
     const x2ConfigPath = writeX2Config(OUT_DIR);
-    const x4CoursesPath = path.join(OUT_DIR, "x4-course-map-indeterminate.json");
+    const x4CoursesPath = path.join(
+      OUT_DIR,
+      "x4-course-map-indeterminate.json",
+    );
     writeFileSync(
       x4CoursesPath,
       JSON.stringify({
         "Grand National": {
           trail: "RTJ",
-          golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+          golfnowFacilityUrl:
+            "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
         },
       }),
       "utf8",
@@ -180,7 +202,9 @@ describe("p0-desk: x4-verify runs and reports a verdict when a course map file I
       vi.fn(async (url: string) => {
         if (url.includes("overpass-api.de")) {
           return new Response(
-            JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "100" } }] }),
+            JSON.stringify({
+              elements: [{ type: "count", id: 0, tags: { total: "100" } }],
+            }),
             { status: 200 },
           );
         }
@@ -190,7 +214,8 @@ describe("p0-desk: x4-verify runs and reports a verdict when a course map file I
             headers: { "content-type": "text/html" },
           });
           Object.defineProperty(res, "url", {
-            value: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+            value:
+              "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
           });
           return res;
         }

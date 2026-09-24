@@ -2,7 +2,11 @@
   "id": "ach_01M39RCEVDGG9MBNS9VKV1983B",
   "title": "Trail Complete",
   "tier": "gold",
-  "rule": { "kind": "agg", "name": "trailComplete", "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM" },
+  "rule": {
+    "kind": "agg",
+    "name": "trailComplete",
+    "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM"
+  },
   "minConfidence": 0.5,
   "scope": "verified-only",
   "active": true

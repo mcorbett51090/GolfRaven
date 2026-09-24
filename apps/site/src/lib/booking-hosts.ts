@@ -86,7 +86,10 @@ function derivedPlatformLabel(host: string): string {
   // would otherwise mislabel the platform by its subdomain instead of
   // its actual domain).
   const segments = bare.split(".").filter(Boolean);
-  const labelPart = segments.length >= 2 ? segments[segments.length - 2]! : (segments[0] ?? bare);
+  const labelPart =
+    segments.length >= 2
+      ? segments[segments.length - 2]!
+      : (segments[0] ?? bare);
   return labelPart.charAt(0).toUpperCase() + labelPart.slice(1);
 }
 
@@ -134,6 +137,11 @@ export function bookingEntryAllowed(
 
 /** Every `booking[]` entry that passes the gate, in the facility's own
  * order (AT(4)). */
-export function allowedBookingEntries(facility: Facility, allowList: string[]): BookingEntry[] {
-  return facility.booking.filter((entry) => bookingEntryAllowed(entry, facility, allowList));
+export function allowedBookingEntries(
+  facility: Facility,
+  allowList: string[],
+): BookingEntry[] {
+  return facility.booking.filter((entry) =>
+    bookingEntryAllowed(entry, facility, allowList),
+  );
 }

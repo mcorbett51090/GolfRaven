@@ -4,8 +4,18 @@
  * counts for its survivor, and never twice."
  */
 import { describe, expect, it } from "vitest";
-import { type CourseId, type DesignerId, type FacilityId, type TrailId } from "@golfraven/catalog";
-import { countDistinct, countWhere, maxCountBy, type AggregateContext } from "../src/aggregates.js";
+import {
+  type CourseId,
+  type DesignerId,
+  type FacilityId,
+  type TrailId,
+} from "@golfraven/catalog";
+import {
+  countDistinct,
+  countWhere,
+  maxCountBy,
+  type AggregateContext,
+} from "../src/aggregates.js";
 import type { Play } from "../src/completion.js";
 import { nextId } from "./test-ids.js";
 
@@ -17,18 +27,33 @@ describe("S3: field aggregates resolve mergedInto before deduping", () => {
     const designerId = nextId("dsg") as DesignerId;
     const ctx: AggregateContext = {
       courses: {
-        [y]: { id: y, facilityId, region: "CA-NB", country: "CA", designers: [designerId], verified: true },
+        [y]: {
+          id: y,
+          facilityId,
+          region: "CA-NB",
+          country: "CA",
+          designers: [designerId],
+          verified: true,
+        },
       },
       ledger: {
         entries: {
-          [x]: { id: x, kind: "crs", transitions: [], tombstoned: true, mergedInto: y },
+          [x]: {
+            id: x,
+            kind: "crs",
+            transitions: [],
+            tombstoned: true,
+            mergedInto: y,
+          },
           [y]: { id: y, kind: "crs", transitions: [] },
         },
       },
       trails: {},
     };
     // A play recorded against the OLD (tombstoned) id.
-    const plays: Play[] = [{ courseId: x, localDate: "2026-01-01", scoreBadge: 1 }];
+    const plays: Play[] = [
+      { courseId: x, localDate: "2026-01-01", scoreBadge: 1 },
+    ];
 
     expect(countDistinct("region", ctx, plays, {})).toBe(1);
     expect(countWhere("designer", designerId, ctx, plays, {})).toBe(1);
@@ -52,7 +77,13 @@ describe("S3: field aggregates resolve mergedInto before deduping", () => {
       courses: { [y]: { id: y, facilityId, verified: true } },
       ledger: {
         entries: {
-          [x]: { id: x, kind: "crs", transitions: [], tombstoned: true, mergedInto: y },
+          [x]: {
+            id: x,
+            kind: "crs",
+            transitions: [],
+            tombstoned: true,
+            mergedInto: y,
+          },
           [y]: { id: y, kind: "crs", transitions: [] },
         },
       },
@@ -73,7 +104,9 @@ describe("S3: field aggregates resolve mergedInto before deduping", () => {
         ],
       },
     };
-    const plays: Play[] = [{ courseId: y, localDate: "2026-01-01", scoreBadge: 1 }];
+    const plays: Play[] = [
+      { courseId: y, localDate: "2026-01-01", scoreBadge: 1 },
+    ];
     expect(countDistinct("trail", ctx, plays, {})).toBe(1);
   });
 });

@@ -105,7 +105,12 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
 
   it("#7: P8 Garmin sensor round alone, no app fix — no presence fact", () => {
     const result = scorePlay(
-      [vendorRound("garmin", { vendorCourseMapped: true, sensorProvenance: true })],
+      [
+        vendorRound("garmin", {
+          vendorCourseMapped: true,
+          sensorProvenance: true,
+        }),
+      ],
       baseCtx(),
     );
     expect(result.score_badge).toBe(0.85);
@@ -115,7 +120,14 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#8: Marker scratch code + its same-date co-signal check-in — corroboration cannot cross 0.50", () => {
-    const result = scorePlay([checkin({ fix: goodFix() })], baseCtx({ purchases: [{ facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE }] }));
+    const result = scorePlay(
+      [checkin({ fix: goodFix() })],
+      baseCtx({
+        purchases: [
+          { facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE },
+        ],
+      }),
+    );
     expect(result.score_badge).toBe(0.3);
     expect(result.score_monetary).toBe(0.3);
     expect(result.presence_signal).toBe(true);
@@ -149,7 +161,10 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
       [
         staffPresence({
           scanAt: PLAY_LOCAL_DATE_MS,
-          coSignalFix: goodFix({ challenge: "prefetched", capturedAt: PLAY_LOCAL_DATE_MS + 6 * 60_000 }),
+          coSignalFix: goodFix({
+            challenge: "prefetched",
+            capturedAt: PLAY_LOCAL_DATE_MS + 6 * 60_000,
+          }),
         }),
       ],
       baseCtx(),
@@ -186,7 +201,10 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
     const result = scorePlay(
       [
         checkin({ fix: goodFix({ token: tokenState("unattestable") }) }),
-        receipt({ status: "approved", coSignalFix: goodFix({ token: tokenState("unattestable") }) }),
+        receipt({
+          status: "approved",
+          coSignalFix: goodFix({ token: tokenState("unattestable") }),
+        }),
       ],
       baseCtx(),
     );
@@ -198,7 +216,11 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
 
   it("#15: Staff scan + `unattestable` co-signal — hard class, routed to held_review", () => {
     const result = scorePlay(
-      [staffPresence({ coSignalFix: goodFix({ token: tokenState("unattestable") }) })],
+      [
+        staffPresence({
+          coSignalFix: goodFix({ token: tokenState("unattestable") }),
+        }),
+      ],
       baseCtx(),
     );
     expect(result.score_badge).toBe(0.95);

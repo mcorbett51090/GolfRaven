@@ -19,19 +19,19 @@ from matching.
 
 ## Modules
 
-| File | What it does |
-|---|---|
-| `types.ts` | The public input/output shapes. |
-| `geo.ts` | Single-ring geometry primitives: haversine distance, the local equirectangular projector, point-in-ring, ring-boundary distance, `roundTo`. Kept stable (a flat `LatLng[]` ring in, a number out) because tests and diagnostic probes call these directly. |
-| `polygon.ts` | Multipolygon-with-holes geometry, built on `geo.ts`'s primitives: normalizing the three accepted polygon shapes, preparing a candidate's geometry once (projected + bounding box), the buffered inside test, and the bbox-prefiltered distance test used for the candidate search. |
-| `inside-ratio.ts` | The time-weighted `insideRatio` computation over raw, sorted fixes. |
-| `simplify.ts` | Deterministic route simplification to a point-count cap, for the transmitted summary only. |
-| `duration.ts` | The 1.5–6 h / 9-hole ≥ 0.75 h acceptance window. |
-| `fixes.ts` | Fix validation (`RangeError` on non-finite fields) and stable time-sorting. |
-| `candidates.ts` | The 3 km candidate search. |
-| `route-match.ts` | `matchRoute` (the whole pipeline) and `resolveAskUser`. |
-| `checkin.ts` | `matchCheckIn`, the foreground check-in match — fails closed on malformed input. |
-| `version.ts` | `MATCHER_VERSION`. |
+| File              | What it does                                                                                                                                                                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `types.ts`        | The public input/output shapes.                                                                                                                                                                                                                                                    |
+| `geo.ts`          | Single-ring geometry primitives: haversine distance, the local equirectangular projector, point-in-ring, ring-boundary distance, `roundTo`. Kept stable (a flat `LatLng[]` ring in, a number out) because tests and diagnostic probes call these directly.                         |
+| `polygon.ts`      | Multipolygon-with-holes geometry, built on `geo.ts`'s primitives: normalizing the three accepted polygon shapes, preparing a candidate's geometry once (projected + bounding box), the buffered inside test, and the bbox-prefiltered distance test used for the candidate search. |
+| `inside-ratio.ts` | The time-weighted `insideRatio` computation over raw, sorted fixes.                                                                                                                                                                                                                |
+| `simplify.ts`     | Deterministic route simplification to a point-count cap, for the transmitted summary only.                                                                                                                                                                                         |
+| `duration.ts`     | The 1.5–6 h / 9-hole ≥ 0.75 h acceptance window.                                                                                                                                                                                                                                   |
+| `fixes.ts`        | Fix validation (`RangeError` on non-finite fields) and stable time-sorting.                                                                                                                                                                                                        |
+| `candidates.ts`   | The 3 km candidate search.                                                                                                                                                                                                                                                         |
+| `route-match.ts`  | `matchRoute` (the whole pipeline) and `resolveAskUser`.                                                                                                                                                                                                                            |
+| `checkin.ts`      | `matchCheckIn`, the foreground check-in match — fails closed on malformed input.                                                                                                                                                                                                   |
+| `version.ts`      | `MATCHER_VERSION`.                                                                                                                                                                                                                                                                 |
 
 ## Ambiguities and design decisions
 
@@ -45,7 +45,7 @@ after an Opus-tier review found real bugs in it.
 1. Added an optional `holes` field to `CandidateCourse`, beyond the design
    constraint's literal field list (id, verification tier, polygon/circle,
    facility id, shared flag) — the §7.4 step 4 duration window depends on
-   whether a candidate is a 9-hole course, so the matcher needs *some*
+   whether a candidate is a 9-hole course, so the matcher needs _some_
    signal for that. Defaults to 18 when omitted.
 2. Generalized "shared polygon" into a single `sharedGeometry` flag that
    also covers identical radius-fallback circles (§4.2: "every course at
@@ -93,18 +93,18 @@ after an Opus-tier review found real bugs in it.
 10. **A solo candidate still routes to `ask_user` if it's flagged
     `sharedGeometry`**, even when no sibling appears in that particular
     call (e.g. a sibling was filtered out by the duration window).
-    Geometry that is *inherently* shared can't vouch for uniqueness just
+    Geometry that is _inherently_ shared can't vouch for uniqueness just
     because this call happens not to include the sibling.
 11. **Holes and multipolygons.** `CandidateCourse.polygon` accepts a flat
     `LatLng[]` ring (unchanged), a single polygon's rings (`Ring[]`, outer
-    + holes), or a `MultiPolygon` (several such polygons — e.g. a
-    composite course whose lobes don't touch). A point inside a hole is
-    outside the polygon. The buffer is applied symmetrically to hole
-    boundaries too (a point just inside a hole, near its edge, is treated
-    the same as a point just outside the course boundary near its edge) —
-    GPS noise doesn't know which side of a boundary is "the excluded
-    part", so there's no principled reason to buffer one direction and
-    not the other.
+    - holes), or a `MultiPolygon` (several such polygons — e.g. a
+      composite course whose lobes don't touch). A point inside a hole is
+      outside the polygon. The buffer is applied symmetrically to hole
+      boundaries too (a point just inside a hole, near its edge, is treated
+      the same as a point just outside the course boundary near its edge) —
+      GPS noise doesn't know which side of a boundary is "the excluded
+      part", so there's no principled reason to buffer one direction and
+      not the other.
 12. **Determinism.** `roundTo` (`geo.ts`) rounds every boundary comparison
     (distances to 0.01 m, ratios and durations to 1e-9) before comparing,
     because `Math.sin`/`cos`/`atan2`/etc. are only
@@ -127,7 +127,7 @@ after an Opus-tier review found real bugs in it.
 **Round 3 (a second gate re-review, one more real bug):**
 
 14. **The gap problem, and the fix.** Round 2's time-weighting (ambiguity 8
-    above) summed *every* inter-fix interval uncapped. That reopened a
+    above) summed _every_ inter-fix interval uncapped. That reopened a
     narrower but real exploit: one inside fix, a multi-hour gap, then one
     more inside fix could make that whole unobserved gap count as
     "inside" time, because nothing bounded how large a single interval's
@@ -161,7 +161,7 @@ after an Opus-tier review found real bugs in it.
 15. **Connect IQ sampling constraint, made explicit for a consumer that
     doesn't read this package's source.** `MAX_GAP_SECONDS` (300 s) and
     `MIN_OBSERVED_COVERAGE` (0.5) together impose a real constraint on
-    *any* recorder that wants its route to be matchable, not just on
+    _any_ recorder that wants its route to be matchable, not just on
     matching's own internals — and the Connect IQ "Trail Check-in"
     recorder (build plan §3.1 row I, §7.3, `apps/ciq/`) is the one shape
     in this codebase most likely to sample sparsely (a watch, batching

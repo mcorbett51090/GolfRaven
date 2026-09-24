@@ -60,7 +60,9 @@ function firstMatch(html, pageRelPath) {
   const navTags = [...html.matchAll(/<nav\b[^>]*>/gi)];
   for (const [tag] of navTags) {
     if (!/aria-label="[^"]+"/i.test(tag)) {
-      issues.push(`${pageRelPath}: a <nav> has no aria-label — ${tag.slice(0, 60)}`);
+      issues.push(
+        `${pageRelPath}: a <nav> has no aria-label — ${tag.slice(0, 60)}`,
+      );
     }
   }
   // Alt text on every <img> (an empty alt="" is a valid, deliberate
@@ -68,7 +70,9 @@ function firstMatch(html, pageRelPath) {
   const imgTags = [...html.matchAll(/<img\b[^>]*>/gi)];
   for (const [tag] of imgTags) {
     if (!/\salt="[^"]*"/i.test(tag)) {
-      issues.push(`${pageRelPath}: an <img> has no alt attribute — ${tag.slice(0, 80)}`);
+      issues.push(
+        `${pageRelPath}: an <img> has no alt attribute — ${tag.slice(0, 80)}`,
+      );
     }
   }
 
@@ -77,8 +81,12 @@ function firstMatch(html, pageRelPath) {
 
 async function pageWeight(distDir, html) {
   let bytes = 0;
-  const linkHrefs = [...html.matchAll(/<link\s+rel="stylesheet"\s+href="([^"]+)"/gi)].map((m) => m[1]);
-  const scriptSrcs = [...html.matchAll(/<script\s+type="module"\s+src="([^"]+)"/gi)].map((m) => m[1]);
+  const linkHrefs = [
+    ...html.matchAll(/<link\s+rel="stylesheet"\s+href="([^"]+)"/gi),
+  ].map((m) => m[1]);
+  const scriptSrcs = [
+    ...html.matchAll(/<script\s+type="module"\s+src="([^"]+)"/gi),
+  ].map((m) => m[1]);
   for (const href of [...linkHrefs, ...scriptSrcs]) {
     if (!href.startsWith("/")) continue; // same-origin only
     try {
@@ -106,7 +114,9 @@ export async function verifyA11yBudget(distDir, opts = {}) {
   const targets = [];
   const hub = files.find((f) => relOf(f) === "index.html");
   if (hub) targets.push({ kind: "hub", file: hub });
-  const trail = files.find((f) => relOf(f).startsWith("trails/") && relOf(f) !== "trails/index.html");
+  const trail = files.find(
+    (f) => relOf(f).startsWith("trails/") && relOf(f) !== "trails/index.html",
+  );
   if (trail) targets.push({ kind: "trail", file: trail });
   const course = files.find((f) => relOf(f).startsWith("courses/"));
   if (course) targets.push({ kind: "course", file: course });
@@ -125,13 +135,19 @@ export async function verifyA11yBudget(distDir, opts = {}) {
       );
     }
     issues.push(...a11yIssues);
-    report.push({ kind, path: relPath, weightBytes: weight, issues: a11yIssues });
+    report.push({
+      kind,
+      path: relPath,
+      weightBytes: weight,
+      issues: a11yIssues,
+    });
   }
 
   return { ok: issues.length === 0, issues, report };
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   const distDir =
     process.env.DIST_DIR ??
@@ -143,7 +159,9 @@ if (isMain) {
       `verify-a11y-budget: PASS (${result.report.map((r) => `${r.kind}: ${(r.weightBytes / 1024).toFixed(1)} KB`).join(", ")})`,
     );
   } else {
-    console.error(`verify-a11y-budget: FAIL (${result.issues.length} issue(s))`);
+    console.error(
+      `verify-a11y-budget: FAIL (${result.issues.length} issue(s))`,
+    );
     for (const issue of result.issues) console.error(`  - ${issue}`);
     process.exit(1);
   }

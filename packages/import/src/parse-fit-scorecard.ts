@@ -40,11 +40,16 @@ export interface FitScorecardData {
 
 /** `counts` is the prescan's tally of global message number → occurrence
  * count (`FitPrescanSuccess.globalMessageCounts`). */
-export function extractGolfScorecard(counts: ReadonlyMap<number, number>): FitScorecardData {
+export function extractGolfScorecard(
+  counts: ReadonlyMap<number, number>,
+): FitScorecardData {
   const warnings: string[] = [];
 
   const unknown = [...counts.entries()]
-    .filter(([globalMessageNumber]) => !KNOWN_FIT_MESSAGE_NUMBERS.has(globalMessageNumber))
+    .filter(
+      ([globalMessageNumber]) =>
+        !KNOWN_FIT_MESSAGE_NUMBERS.has(globalMessageNumber),
+    )
     .sort((a, b) => a[0] - b[0]);
 
   for (const [globalMessageNumber, count] of unknown) {

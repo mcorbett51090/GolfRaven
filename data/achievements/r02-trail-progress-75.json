@@ -5,7 +5,11 @@
   "rule": {
     "kind": "compare",
     "op": ">=",
-    "left": { "kind": "agg", "name": "trailProgress", "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM" },
+    "left": {
+      "kind": "agg",
+      "name": "trailProgress",
+      "trailId": "trl_01M39RCEWSGKZVYGQTJFW8ZZQM"
+    },
     "right": { "kind": "literal", "value": 0.75 }
   },
   "minConfidence": 0.5,

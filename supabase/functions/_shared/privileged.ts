@@ -44,12 +44,12 @@ export interface Op<T> {
 const serviceRoleClient = createClient(
   // [unverified — training knowledge on the env var name] Deno.env.get is
   // the Deno runtime's env accessor; real Edge Functions run on Deno.
-  (globalThis as { Deno?: { env: { get(name: string): string | undefined } } }).Deno?.env.get(
-    "SUPABASE_URL",
-  ) ?? "",
-  (globalThis as { Deno?: { env: { get(name: string): string | undefined } } }).Deno?.env.get(
-    "SUPABASE_SERVICE_ROLE_KEY",
-  ) ?? "",
+  (
+    globalThis as { Deno?: { env: { get(name: string): string | undefined } } }
+  ).Deno?.env.get("SUPABASE_URL") ?? "",
+  (
+    globalThis as { Deno?: { env: { get(name: string): string | undefined } } }
+  ).Deno?.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
 );
 
 /**

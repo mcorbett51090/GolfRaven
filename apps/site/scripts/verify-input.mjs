@@ -14,16 +14,31 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isCatalogEmpty, loadCatalog, loadCatalogFromBundle } from "@golfraven/catalog";
+import {
+  isCatalogEmpty,
+  loadCatalog,
+  loadCatalogFromBundle,
+} from "@golfraven/catalog";
 import { verifyCatalogRaw } from "@golfraven/catalog-tools";
-import { demoBundleForSite, demoBundleForVerify } from "../fixtures/demo-catalog/build-bundle.mjs";
+import {
+  demoBundleForSite,
+  demoBundleForVerify,
+} from "../fixtures/demo-catalog/build-bundle.mjs";
 import { isProductionEnv } from "../src/lib/env.mjs";
 import { assertBookingHostsNotSynthetic } from "../src/lib/booking-hosts-guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Overridable via GOLFRAVEN_DATA_DIR — see derive.ts's realDataDir() doc.
-const REAL_DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
-const BOOKING_HOSTS_PATH = join(here, "..", "..", "..", "config", "booking-hosts.json");
+const REAL_DATA_DIR =
+  process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
+const BOOKING_HOSTS_PATH = join(
+  here,
+  "..",
+  "..",
+  "..",
+  "config",
+  "booking-hosts.json",
+);
 
 async function loadSiteCatalog() {
   const isProduction = isProductionEnv(process.env);
@@ -31,9 +46,14 @@ async function loadSiteCatalog() {
 
   if (demoRequested) {
     if (isProduction) {
-      throw new Error("GOLFRAVEN_ENV=production refuses demo data (GOLFRAVEN_DEMO=1 was set).");
+      throw new Error(
+        "GOLFRAVEN_ENV=production refuses demo data (GOLFRAVEN_DEMO=1 was set).",
+      );
     }
-    return { catalog: loadCatalogFromBundle(demoBundleForSite()), usedDemoData: true };
+    return {
+      catalog: loadCatalogFromBundle(demoBundleForSite()),
+      usedDemoData: true,
+    };
   }
 
   const real = await loadCatalog({ dataDir: REAL_DATA_DIR });

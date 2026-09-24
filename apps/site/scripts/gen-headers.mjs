@@ -81,9 +81,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 export function buildHeaders(env = process.env) {
   const tiles = tileConfig(env);
 
-  const tileHostSrcs = tiles.configured ? tiles.hosts.map((h) => `https://${h}`) : [];
-  const connectSrc = tiles.configured ? `connect-src 'self' ${tileHostSrcs.join(" ")}` : null;
-  const imgSrc = tiles.configured ? `img-src 'self' ${tileHostSrcs.join(" ")}` : null;
+  const tileHostSrcs = tiles.configured
+    ? tiles.hosts.map((h) => `https://${h}`)
+    : [];
+  const connectSrc = tiles.configured
+    ? `connect-src 'self' ${tileHostSrcs.join(" ")}`
+    : null;
+  const imgSrc = tiles.configured
+    ? `img-src 'self' ${tileHostSrcs.join(" ")}`
+    : null;
 
   const baseCsp = [
     `default-src 'self'`,
@@ -132,9 +138,11 @@ export function buildHeaders(env = process.env) {
   );
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  const distDir = process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
+  const distDir =
+    process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
   const outPath = join(distDir, "_headers");
   await mkdir(distDir, { recursive: true });
   const content = buildHeaders();

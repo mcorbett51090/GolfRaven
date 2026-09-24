@@ -17,7 +17,9 @@ export const PLAY_FACILITY_ID = "fac_test";
 export const PLAY_LOCAL_DATE = "2026-06-01";
 export const PLAY_LOCAL_DATE_MS = Date.parse("2026-06-01T12:00:00.000Z");
 
-export function baseCtx(overrides: Partial<ScorePlayContext> = {}): ScorePlayContext {
+export function baseCtx(
+  overrides: Partial<ScorePlayContext> = {},
+): ScorePlayContext {
   return {
     playFacilityId: PLAY_FACILITY_ID,
     playLocalDate: PLAY_LOCAL_DATE,
@@ -47,7 +49,9 @@ export function goodFix(overrides: Partial<AppFix> = {}): AppFix {
   };
 }
 
-export function tokenState(grade: "attested" | "unattestable" | "failed"): TokenState {
+export function tokenState(
+  grade: "attested" | "unattestable" | "failed",
+): TokenState {
   return { present: true, grade };
 }
 
@@ -72,17 +76,24 @@ interface EvidenceCommon {
   correlationId?: string;
 }
 
-function common(label: string, overrides: EvidenceCommon = {}): Required<Pick<Evidence, "id" | "facilityId" | "localDate">> &
+function common(
+  label: string,
+  overrides: EvidenceCommon = {},
+): Required<Pick<Evidence, "id" | "facilityId" | "localDate">> &
   Pick<Evidence, "courseId" | "courseDisambiguatedBy" | "correlationId"> {
   return {
     id: overrides.id ?? evId(label),
     facilityId: overrides.facilityId ?? PLAY_FACILITY_ID,
     localDate: overrides.localDate ?? PLAY_LOCAL_DATE,
-    ...(overrides.courseId !== undefined ? { courseId: overrides.courseId } : {}),
+    ...(overrides.courseId !== undefined
+      ? { courseId: overrides.courseId }
+      : {}),
     ...(overrides.courseDisambiguatedBy !== undefined
       ? { courseDisambiguatedBy: overrides.courseDisambiguatedBy }
       : {}),
-    ...(overrides.correlationId !== undefined ? { correlationId: overrides.correlationId } : {}),
+    ...(overrides.correlationId !== undefined
+      ? { correlationId: overrides.correlationId }
+      : {}),
   };
 }
 
@@ -93,13 +104,18 @@ export function staffPresence(
     ...common("staff", opts),
     source: "staff_presence",
     scanAt: opts.scanAt ?? PLAY_LOCAL_DATE_MS,
-    ...(opts.coSignalFix !== undefined ? { coSignalFix: opts.coSignalFix } : {}),
+    ...(opts.coSignalFix !== undefined
+      ? { coSignalFix: opts.coSignalFix }
+      : {}),
   };
 }
 
 export function vendorRound(
   source: "arccos" | "garmin",
-  opts: EvidenceCommon & { vendorCourseMapped: boolean; sensorProvenance: boolean },
+  opts: EvidenceCommon & {
+    vendorCourseMapped: boolean;
+    sensorProvenance: boolean;
+  },
 ): Evidence {
   return {
     ...common(source, opts),
@@ -113,22 +129,31 @@ export function ghin(opts: EvidenceCommon = {}): Evidence {
   return { ...common("ghin", opts), source: "ghin" };
 }
 
-export function booking(opts: EvidenceCommon & { presenceFix?: AppFix }): Evidence {
+export function booking(
+  opts: EvidenceCommon & { presenceFix?: AppFix },
+): Evidence {
   return {
     ...common("booking", opts),
     source: "booking",
-    ...(opts.presenceFix !== undefined ? { presenceFix: opts.presenceFix } : {}),
+    ...(opts.presenceFix !== undefined
+      ? { presenceFix: opts.presenceFix }
+      : {}),
   };
 }
 
 export function receipt(
-  opts: EvidenceCommon & { status: "approved" | "pending"; coSignalFix?: AppFix },
+  opts: EvidenceCommon & {
+    status: "approved" | "pending";
+    coSignalFix?: AppFix;
+  },
 ): Evidence {
   return {
     ...common("receipt", opts),
     source: "receipt_green_fee",
     status: opts.status,
-    ...(opts.coSignalFix !== undefined ? { coSignalFix: opts.coSignalFix } : {}),
+    ...(opts.coSignalFix !== undefined
+      ? { coSignalFix: opts.coSignalFix }
+      : {}),
   };
 }
 
@@ -184,20 +209,27 @@ export function dwell(
     ...common("dwell", opts),
     source: "foreground_dwell",
     checkinFix: opts.checkinFix ?? goodFix(),
-    checkoutFix: opts.checkoutFix ?? goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + apart * 60_000 }),
+    checkoutFix:
+      opts.checkoutFix ??
+      goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + apart * 60_000 }),
     apartMinutes: apart,
     holes,
   };
 }
 
 export function fileImport(
-  opts: EvidenceCommon & { matchedRoute: boolean; geometryKind?: "polygon" | "radius" },
+  opts: EvidenceCommon & {
+    matchedRoute: boolean;
+    geometryKind?: "polygon" | "radius";
+  },
 ): Evidence {
   return {
     ...common("file_import", opts),
     source: "file_import",
     matchedRoute: opts.matchedRoute,
-    ...(opts.geometryKind !== undefined ? { geometryKind: opts.geometryKind } : {}),
+    ...(opts.geometryKind !== undefined
+      ? { geometryKind: opts.geometryKind }
+      : {}),
   };
 }
 

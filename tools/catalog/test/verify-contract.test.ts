@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { canonicalJsonString, checkContract, generateContractSchema } from "../src/verify-contract.js";
+import {
+  canonicalJsonString,
+  checkContract,
+  generateContractSchema,
+} from "../src/verify-contract.js";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 describe("generateContractSchema", () => {
   it("produces a registry with every implemented top-level entity, including AchievementDef (part B)", () => {
-    const generated = generateContractSchema() as { schemas: Record<string, unknown> };
+    const generated = generateContractSchema() as {
+      schemas: Record<string, unknown>;
+    };
     // "__shared" is Zod's own JSON-Schema-generator bucket for the
     // recursive RuleExpr type's $defs (AchievementDef.rule) — not a
     // top-level §4.1 entity, but part of what z.toJSONSchema emits once a
@@ -61,7 +67,11 @@ describe("checkContract (the committed-file staleness check)", () => {
     const dir = await mkdtemp(join(tmpdir(), "catalog-contract-"));
     try {
       const file = join(dir, "catalog.schema.json");
-      await writeFile(file, canonicalJsonString(generateContractSchema()), "utf8");
+      await writeFile(
+        file,
+        canonicalJsonString(generateContractSchema()),
+        "utf8",
+      );
       const result = await checkContract(file);
       expect(result.stale).toBe(false);
     } finally {

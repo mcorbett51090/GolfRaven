@@ -29,7 +29,9 @@ export function defaultBookingHostsConfigPath(): string {
   return join(here, "..", "..", "..", "config", "booking-hosts.json");
 }
 
-export async function loadBookingHostAllowList(path?: string): Promise<string[]> {
+export async function loadBookingHostAllowList(
+  path?: string,
+): Promise<string[]> {
   const configPath = path ?? defaultBookingHostsConfigPath();
   const raw = JSON.parse(await readFile(configPath, "utf8"));
   const parsed = BookingHostConfigSchema.parse(raw);

@@ -56,13 +56,18 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Agent, fetch as undiciFetch } from "undici";
-import { loadCatalog, loadCatalogFromBundle, primaryTrailOf } from "@golfraven/catalog";
+import {
+  loadCatalog,
+  loadCatalogFromBundle,
+  primaryTrailOf,
+} from "@golfraven/catalog";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const BOOKING_HOSTS_PATH = join(REPO_ROOT, "config", "booking-hosts.json");
 
-const UA = "Mozilla/5.0 (compatible; GolfRaven-LinkChecker/1.0; +offline weekly ops bot)";
+const UA =
+  "Mozilla/5.0 (compatible; GolfRaven-LinkChecker/1.0; +offline weekly ops bot)";
 const MAX_REDIRECTS = 3;
 
 // ---------------------------------------------------------------------
@@ -71,7 +76,8 @@ const MAX_REDIRECTS = 3;
 
 function ipv4ToInt(ip) {
   const p = ip.split(".").map(Number);
-  if (p.length !== 4 || p.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+  if (p.length !== 4 || p.some((n) => Number.isNaN(n) || n < 0 || n > 255))
+    return null;
   return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
 }
 function v4InCidr(ipInt, base, bits) {
@@ -85,7 +91,7 @@ function v4InCidr(ipInt, base, bits) {
   // this file's own unit tests (apps/site/test/check-links.test.ts) —
   // ported from southern-wine-country's discover-socials.mjs, which
   // carries the identical bug (out of scope to fix there).
-  return ((ipInt & mask) >>> 0) === ((ipv4ToInt(base) & mask) >>> 0);
+  return (ipInt & mask) >>> 0 === (ipv4ToInt(base) & mask) >>> 0;
 }
 export function isPrivateV4(ip) {
   const n = ipv4ToInt(ip);
@@ -116,7 +122,8 @@ export function expandIPv6(addr) {
     const last = parts[parts.length - 1];
     if (!last || !last.includes(".")) return parts;
     const v4 = last.split(".").map(Number);
-    if (v4.length !== 4 || v4.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+    if (v4.length !== 4 || v4.some((n) => Number.isNaN(n) || n < 0 || n > 255))
+      return null;
     const hi = ((v4[0] << 8) | v4[1]).toString(16);
     const lo = ((v4[2] << 8) | v4[3]).toString(16);
     return [...parts.slice(0, -1), hi, lo];
@@ -164,19 +171,51 @@ export function isPrivateIpv6(addr) {
   const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
   const embeddedV4 = () => `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`;
 
-  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0 && g6 === 0 && g7 === 0) {
+  if (
+    g0 === 0 &&
+    g1 === 0 &&
+    g2 === 0 &&
+    g3 === 0 &&
+    g4 === 0 &&
+    g5 === 0 &&
+    g6 === 0 &&
+    g7 === 0
+  ) {
     return true; // ::  (unspecified)
   }
-  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0 && g6 === 0 && g7 === 1) {
+  if (
+    g0 === 0 &&
+    g1 === 0 &&
+    g2 === 0 &&
+    g3 === 0 &&
+    g4 === 0 &&
+    g5 === 0 &&
+    g6 === 0 &&
+    g7 === 1
+  ) {
     return true; // ::1 (loopback)
   }
-  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+  if (
+    g0 === 0 &&
+    g1 === 0 &&
+    g2 === 0 &&
+    g3 === 0 &&
+    g4 === 0 &&
+    g5 === 0xffff
+  ) {
     return isPrivateV4(embeddedV4()); // ::ffff:0:0/96 (v4-mapped)
   }
   if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
     return isPrivateV4(embeddedV4()); // ::0.0.0.0/96 (v4-compatible, deprecated)
   }
-  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+  if (
+    g0 === 0x64 &&
+    g1 === 0xff9b &&
+    g2 === 0 &&
+    g3 === 0 &&
+    g4 === 0 &&
+    g5 === 0
+  ) {
     return isPrivateV4(embeddedV4()); // 64:ff9b::/96 (NAT64)
   }
   if (g0 === 0x2002) {
@@ -243,7 +282,8 @@ const pinnedAgent = new Agent({ connect: { lookup: pinnedLookup } });
 
 function validateHttpsUrl(raw) {
   const u = new URL(raw);
-  if (u.protocol !== "https:") throw new Error(`bad-scheme:${u.protocol} (https only)`);
+  if (u.protocol !== "https:")
+    throw new Error(`bad-scheme:${u.protocol} (https only)`);
   return u;
 }
 
@@ -258,7 +298,9 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs) {
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const u = validateHttpsUrl(current);
     if (!allowList.includes(u.host)) {
-      throw Object.assign(new Error(`host-not-allow-listed:${u.host}`), { code: "NOT_ALLOW_LISTED" });
+      throw Object.assign(new Error(`host-not-allow-listed:${u.host}`), {
+        code: "NOT_ALLOW_LISTED",
+      });
     }
     await assertPublicHost(u.hostname);
 
@@ -308,8 +350,14 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs) {
       } catch {
         /* ignore */
       }
-      if (!loc) return { ok: false, status: res.status, reason: "redirect-no-location" };
-      if (hop === MAX_REDIRECTS) return { ok: false, status: res.status, reason: "too-many-redirects" };
+      if (!loc)
+        return {
+          ok: false,
+          status: res.status,
+          reason: "redirect-no-location",
+        };
+      if (hop === MAX_REDIRECTS)
+        return { ok: false, status: res.status, reason: "too-many-redirects" };
       current = new URL(loc, u).href;
       continue;
     }
@@ -328,7 +376,8 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--live") args.live = true;
     else if (a === "--demo") args.demo = true;
-    else if (a === "--timeout-ms") args.timeoutMs = Number(argv[++i]) || args.timeoutMs;
+    else if (a === "--timeout-ms")
+      args.timeoutMs = Number(argv[++i]) || args.timeoutMs;
     else if (a === "--help" || a === "-h") {
       console.log(
         "Usage: check-links.mjs [--demo] [--live] [--timeout-ms <n>]\n" +
@@ -401,7 +450,8 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const catalog = await loadLinkCatalog(args.demo);
   const links = collectLinks(catalog);
-  const configuredHosts = JSON.parse(await readFile(BOOKING_HOSTS_PATH, "utf8")).hosts ?? [];
+  const configuredHosts =
+    JSON.parse(await readFile(BOOKING_HOSTS_PATH, "utf8")).hosts ?? [];
 
   console.log(`check-links: ${links.length} booking link(s) in the catalog.`);
   if (links.length === 0) {
@@ -410,21 +460,29 @@ async function main() {
   }
 
   if (!args.live) {
-    console.log("(dry run — pass --live to actually request each link; never done in CI)\n");
+    console.log(
+      "(dry run — pass --live to actually request each link; never done in CI)\n",
+    );
     for (const l of links) {
-      console.log(`  [${l.provider}] ${l.facilityName}${l.trail ? ` (${l.trail})` : ""} -> ${l.url}`);
+      console.log(
+        `  [${l.provider}] ${l.facilityName}${l.trail ? ` (${l.trail})` : ""} -> ${l.url}`,
+      );
     }
     return;
   }
 
-  console.log(`--live: checking ${links.length} link(s), ${args.timeoutMs}ms timeout each, https-only, SSRF-hardened...\n`);
+  console.log(
+    `--live: checking ${links.length} link(s), ${args.timeoutMs}ms timeout each, https-only, SSRF-hardened...\n`,
+  );
   const findings = [];
   for (const [i, link] of links.entries()) {
     const allowList = allowListFor(link, configuredHosts);
     try {
       const result = await hardenedCheck(link.url, allowList, args.timeoutMs);
       const mark = result.ok ? "ok  " : "FAIL";
-      console.log(`  ${mark} [${result.status ?? "?"}] ${link.facilityName} -> ${link.url}`);
+      console.log(
+        `  ${mark} [${result.status ?? "?"}] ${link.facilityName} -> ${link.url}`,
+      );
       if (!result.ok) findings.push({ ...link, ...result });
     } catch (err) {
       if (i === 0 && looksLikeNoNetwork(err)) {
@@ -437,18 +495,31 @@ async function main() {
         return;
       }
       if (err?.code === "NOT_ALLOW_LISTED") {
-        console.log(`  FAIL [not-allow-listed] ${link.facilityName} -> ${link.url} :: ${err.message}`);
+        console.log(
+          `  FAIL [not-allow-listed] ${link.facilityName} -> ${link.url} :: ${err.message}`,
+        );
       } else {
-        console.log(`  FAIL [error] ${link.facilityName} -> ${link.url} :: ${err?.message ?? err}`);
+        console.log(
+          `  FAIL [error] ${link.facilityName} -> ${link.url} :: ${err?.message ?? err}`,
+        );
       }
-      findings.push({ ...link, ok: false, status: null, error: String(err?.message ?? err) });
+      findings.push({
+        ...link,
+        ok: false,
+        status: null,
+        error: String(err?.message ?? err),
+      });
     }
   }
 
-  console.log(`\ncheck-links: ${findings.length} finding(s) of ${links.length} link(s) checked.`);
+  console.log(
+    `\ncheck-links: ${findings.length} finding(s) of ${links.length} link(s) checked.`,
+  );
   if (findings.length > 0) {
     for (const f of findings) {
-      console.log(`  - ${f.facilityName} [${f.provider}] ${f.url} :: ${f.status ?? f.error ?? f.reason}`);
+      console.log(
+        `  - ${f.facilityName} [${f.provider}] ${f.url} :: ${f.status ?? f.error ?? f.reason}`,
+      );
     }
     // A non-zero exit only in --live mode with real findings — this is an
     // ops report, not a CI gate (this script "must never run in CI").
@@ -461,7 +532,8 @@ async function main() {
 // `check-links.test.ts`, which imports `hardenedCheck`/`isPrivateIp`/etc.
 // directly and must not trigger a live catalog load + network attempt as
 // a side effect of that import).
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+const isMain =
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
   await main();
 }

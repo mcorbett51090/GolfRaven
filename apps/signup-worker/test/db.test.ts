@@ -29,7 +29,11 @@ describe("createPendingSignup — race safety (F3)", () => {
   it("a second insert for the SAME email_lc (simulating a concurrent signup) does NOT throw, does NOT create a second row, and reports inserted: false", async () => {
     const db = new FakeD1();
     await createPendingSignup(db, NEW_ROW);
-    const second = await createPendingSignup(db, { ...NEW_ROW, id: "id-2", confirmTokenHash: "hash-2" });
+    const second = await createPendingSignup(db, {
+      ...NEW_ROW,
+      id: "id-2",
+      confirmTokenHash: "hash-2",
+    });
     expect(second.inserted).toBe(false);
     expect(db.rows).toHaveLength(1);
     // The original row (from the "winning" insert) is untouched.
@@ -60,7 +64,11 @@ describe("recordConfirmation — single-use token (F4)", () => {
 describe("retention cron deletes (F11)", () => {
   it("deleteStaleUnconfirmed removes only unconfirmed rows older than the cutoff", async () => {
     const db = new FakeD1();
-    await createPendingSignup(db, { ...NEW_ROW, id: "old-unconfirmed", createdAt: "2026-01-01T00:00:00.000Z" });
+    await createPendingSignup(db, {
+      ...NEW_ROW,
+      id: "old-unconfirmed",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
     await createPendingSignup(db, {
       ...NEW_ROW,
       id: "recent-unconfirmed",
@@ -75,10 +83,16 @@ describe("retention cron deletes (F11)", () => {
     });
     await recordConfirmation(db, "old-confirmed", "2026-01-02T00:00:00.000Z");
 
-    const deleted = await deleteStaleUnconfirmed(db, "2026-03-01T00:00:00.000Z", "2026-03-01T00:00:00.000Z");
+    const deleted = await deleteStaleUnconfirmed(
+      db,
+      "2026-03-01T00:00:00.000Z",
+      "2026-03-01T00:00:00.000Z",
+    );
     expect(deleted).toBe(1);
     const remainingIds = db.rows.map((r) => r.id).sort();
-    expect(remainingIds).toEqual(["old-confirmed", "recent-unconfirmed"].sort());
+    expect(remainingIds).toEqual(
+      ["old-confirmed", "recent-unconfirmed"].sort(),
+    );
   });
 
   it("N8: does NOT delete an old-created row whose confirm token was re-issued and is still valid", async () => {
@@ -118,14 +132,27 @@ describe("retention cron deletes (F11)", () => {
 
   it("deleteStaleUnsubscribed removes only rows unsubscribed before the cutoff", async () => {
     const db = new FakeD1();
-    await createPendingSignup(db, { ...NEW_ROW, id: "a", emailLc: "a@example.com" });
-    await createPendingSignup(db, { ...NEW_ROW, id: "b", emailLc: "b@example.com" });
+    await createPendingSignup(db, {
+      ...NEW_ROW,
+      id: "a",
+      emailLc: "a@example.com",
+    });
+    await createPendingSignup(db, {
+      ...NEW_ROW,
+      id: "b",
+      emailLc: "b@example.com",
+    });
     await recordConfirmation(db, "a", "2026-01-01T00:00:00.000Z");
     await recordConfirmation(db, "b", "2026-01-01T00:00:00.000Z");
-    db.rows.find((r) => r.id === "a")!.unsubscribed_at = "2026-01-05T00:00:00.000Z";
-    db.rows.find((r) => r.id === "b")!.unsubscribed_at = "2026-06-01T00:00:00.000Z";
+    db.rows.find((r) => r.id === "a")!.unsubscribed_at =
+      "2026-01-05T00:00:00.000Z";
+    db.rows.find((r) => r.id === "b")!.unsubscribed_at =
+      "2026-06-01T00:00:00.000Z";
 
-    const deleted = await deleteStaleUnsubscribed(db, "2026-03-01T00:00:00.000Z");
+    const deleted = await deleteStaleUnsubscribed(
+      db,
+      "2026-03-01T00:00:00.000Z",
+    );
     expect(deleted).toBe(1);
     expect(db.rows.map((r) => r.id)).toEqual(["b"]);
   });

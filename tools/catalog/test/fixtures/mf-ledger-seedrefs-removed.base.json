@@ -58,9 +58,7 @@
           "name": "Pebble Hills",
           "holes": 18,
           "par": 72,
-          "designers": [
-            "dsg_01M39GMFJZ21RFA7G11961JMQC"
-          ],
+          "designers": ["dsg_01M39GMFJZ21RFA7G11961JMQC"],
           "opened": 1985,
           "prov": {
             "name": "operator",
@@ -95,12 +93,8 @@
       "id": "trl_01M39GMFJZQN74WV3R6HA63H0F",
       "slug": "synthetic-golf-trail",
       "name": "Synthetic Golf Trail",
-      "countries": [
-        "US"
-      ],
-      "regions": [
-        "US-TN"
-      ],
+      "countries": ["US"],
+      "regions": ["US-TN"],
       "kind": "state-agency",
       "status": "active",
       "operator": {
@@ -175,9 +169,7 @@
             "date": "2026-01-01"
           }
         ],
-        "seedRefs": [
-          "way/1"
-        ]
+        "seedRefs": ["way/1"]
       },
       "crs_01M39GMFJZ2P89V3ZZXPPH671T": {
         "id": "crs_01M39GMFJZ2P89V3ZZXPPH671T",

@@ -23,8 +23,11 @@ export const coursePageUrl = (origin: string, slug: string): string =>
   `${origin}/courses/${slug}/`;
 export const trailUrl = (origin: string, slug: string): string =>
   `${origin}/trails/${slug}/`;
-export const regionUrl = (origin: string, country: string, regionSlug: string): string =>
-  `${origin}/${country.toLowerCase()}/${regionSlug}/`;
+export const regionUrl = (
+  origin: string,
+  country: string,
+  regionSlug: string,
+): string => `${origin}/${country.toLowerCase()}/${regionSlug}/`;
 
 /** C2-equivalent gate: precise `GeoCoordinates` ONLY for verified
  * (non-approx) coordinates (§5.1: "`GeoCoordinates` only when `approx ===
