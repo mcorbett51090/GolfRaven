@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(6);
+SELECT plan(9);
 
 -- (1) Every function in app/api/private has a private.function_inventory
 -- row. A new function with no row fails here immediately — this is the
@@ -137,6 +137,88 @@ SELECT is(
   ),
   0,
   'every SECURITY DEFINER function in app/api/private sets search_path in proconfig'
+);
+
+-- ==========================================================================
+-- (7)-(9) 0016_private_definer.sql / gate round 3 step 5: "Add a pgTAP
+-- inventory assertion: every private.* SECURITY DEFINER function is owned
+-- by private_definer, and every policy granted to private_definer appears
+-- in an explicit allow-list table. That way a new broad policy fails the
+-- build."
+-- ==========================================================================
+
+-- (7) Ownership: every SECURITY DEFINER function in schema `private` is
+-- owned by `private_definer` (NOT the table owner -- see 0016 preamble),
+-- checked directly against pg_proc so it can't be bypassed by a function
+-- that quietly stays owned by `postgres`/the migration role.
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles r ON r.oid = p.proowner
+    WHERE n.nspname = 'private'
+      AND p.prosecdef
+      AND r.rolname <> 'private_definer'
+  ),
+  0,
+  'every SECURITY DEFINER function in schema private is owned by private_definer'
+);
+
+-- (8) Forward direction: every RLS policy granted TO private_definer has a
+-- matching row in private.definer_policy_allowlist. A new, broader policy
+-- added later without a matching allow-list row fails here -- this is the
+-- literal "a new broad policy fails the build" the directive asked for.
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM pg_policy pol
+    JOIN pg_class cl ON cl.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    CROSS JOIN pg_roles pr
+    WHERE pr.rolname = 'private_definer'
+      AND pr.oid = ANY (pol.polroles)
+      AND NOT EXISTS (
+        SELECT 1 FROM private.definer_policy_allowlist al
+        WHERE al.schema_name = n.nspname
+          AND al.table_name = cl.relname
+          AND al.policy_name = pol.polname
+          AND al.command = CASE pol.polcmd
+                WHEN 'r' THEN 'SELECT'
+                WHEN 'a' THEN 'INSERT'
+                WHEN 'w' THEN 'UPDATE'
+                WHEN 'd' THEN 'DELETE'
+                WHEN '*' THEN 'ALL'
+                ELSE pol.polcmd::text
+              END
+      )
+  ),
+  0,
+  'every RLS policy granted to private_definer is registered in private.definer_policy_allowlist'
+);
+
+-- (9) Reverse direction: every allow-list row still names a real policy
+-- actually granted to private_definer (catches a stale/removed entry, the
+-- same "both directions" discipline (1)/(2) apply to function_inventory).
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM private.definer_policy_allowlist al
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM pg_policy pol
+      JOIN pg_class cl ON cl.oid = pol.polrelid
+      JOIN pg_namespace n ON n.oid = cl.relnamespace
+      CROSS JOIN pg_roles pr
+      WHERE pr.rolname = 'private_definer'
+        AND pr.oid = ANY (pol.polroles)
+        AND n.nspname = al.schema_name
+        AND cl.relname = al.table_name
+        AND pol.polname = al.policy_name
+    )
+  ),
+  0,
+  'every private.definer_policy_allowlist row still names a real policy granted to private_definer'
 );
 
 SELECT * FROM finish();
