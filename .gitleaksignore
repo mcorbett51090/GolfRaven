@@ -8,3 +8,16 @@ b78bdb6152f4faf898e15a43feef4abcf4c6e6e2:apps/signup-worker/test/env.ts:generic-
 b78bdb6152f4faf898e15a43feef4abcf4c6e6e2:apps/signup-worker/test/router.test.ts:generic-api-key:45
 fe6b390e215b383fab9e8feeafb61bbd33052b60:apps/signup-worker/test/env.ts:generic-api-key:17
 fe6b390e215b383fab9e8feeafb61bbd33052b60:apps/signup-worker/test/router.test.ts:generic-api-key:41
+
+# 2026-09-24 — supabase/tests/matrix/11_money_path.sql in two WIP commits. The flagged lines are
+# SQL test statements that name Vault secrets ('pseudonym_key_1' / '_2' / '_3') and reference fixed
+# fake UUIDs ('a0000000-1111-…'); gitleaks' generic-api-key rule fires on the word "key" next to
+# them. No secret value appears on any of these lines (the only test key values are the obviously fake
+# 'shim-test-only-…' literals in supabase/tests/shim.sql, which gitleaks does not flag).
+# The secret names are being renamed so the current file no longer matches; these entries cover
+# only the historical commits.
+00ca7610ce61656be609db6a35e4a6d7ae286916:supabase/tests/matrix/11_money_path.sql:generic-api-key:564
+00ca7610ce61656be609db6a35e4a6d7ae286916:supabase/tests/matrix/11_money_path.sql:generic-api-key:568
+685fc71970560bdbd2ec2bc2b944e6fe0c29efc3:supabase/tests/matrix/11_money_path.sql:generic-api-key:459
+685fc71970560bdbd2ec2bc2b944e6fe0c29efc3:supabase/tests/matrix/11_money_path.sql:generic-api-key:467
+685fc71970560bdbd2ec2bc2b944e6fe0c29efc3:supabase/tests/matrix/11_money_path.sql:generic-api-key:569
