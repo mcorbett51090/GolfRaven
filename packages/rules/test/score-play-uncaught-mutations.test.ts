@@ -153,6 +153,74 @@ describe("uncaught mutation: fingerprint voiding disabled (non-tautological — 
   });
 });
 
+describe("item 3 (seventh gate): a reviewer's void wins UNCONDITIONALLY — the whole fingerprint group goes void", () => {
+  it("the probe's own exploit: an OLDER reviewer-voided row + a NEWER approved duplicate — the approved one no longer overrides the void", () => {
+    const rVoidOld = receipt({ id: "a-old", status: "void", fingerprint: "fp2", coSignalFix: goodFix() });
+    const rApprNew = receipt({ id: "b-new", status: "approved", fingerprint: "fp2", coSignalFix: goodFix() });
+    const ck = checkin({ fix: goodFix() });
+    const result = scorePlayOrThrow([rVoidOld, rApprNew, ck], baseCtx());
+    // Both receipt copies are void (weight 0) — only the check-in (0.30)
+    // remains. Before this fix, the approved copy (0.80) would have won.
+    expect(result.score_badge).toBe(0.3);
+    expect(result.score_monetary).toBe(0);
+  });
+
+  it("order-independent: [void, approved] and [approved, void] give the SAME (voided) result", () => {
+    const mk = (voidFirst: boolean) => {
+      const v = receipt({ id: "v1", status: "void", fingerprint: "fp3", coSignalFix: goodFix() });
+      const a = receipt({ id: "a1", status: "approved", fingerprint: "fp3", coSignalFix: goodFix() });
+      return voidFirst ? [v, a] : [a, v];
+    };
+    const forward = scorePlayOrThrow(mk(true), baseCtx());
+    const reversed = scorePlayOrThrow(mk(false), baseCtx());
+    expect(forward.score_badge).toBe(0);
+    expect(reversed.score_badge).toBe(0);
+  });
+
+  it("a THREE-way group with one void member: the whole group is void, not just the void row itself", () => {
+    const v = receipt({ id: "v1", status: "void", fingerprint: "fp4", coSignalFix: goodFix() });
+    const p = receipt({ id: "p1", status: "pending", fingerprint: "fp4", coSignalFix: goodFix() });
+    const a = receipt({ id: "a1", status: "approved", fingerprint: "fp4", coSignalFix: goodFix() });
+    const result = scorePlayOrThrow([v, p, a], baseCtx());
+    expect(result.score_badge).toBe(0);
+  });
+});
+
+describe("item 3 (seventh gate): earliest capturedAt wins when no void is present and every row carries a coSignalFix", () => {
+  it("an earlier-captured pending receipt wins over a later-captured approved duplicate (no void present)", () => {
+    const earlier = receipt({
+      id: "early",
+      status: "pending",
+      fingerprint: "fp5",
+      coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS }),
+    });
+    const later = receipt({
+      id: "late",
+      status: "approved",
+      fingerprint: "fp5",
+      coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + 5 * 60_000 }),
+    });
+    const forward = scorePlayOrThrow([earlier, later], baseCtx());
+    const reversed = scorePlayOrThrow([later, earlier], baseCtx());
+    // The EARLIER (pending, 0.20) wins over the LATER (approved, 0.80) —
+    // re-submission does not out-rank the honest first capture. Both
+    // orders agree.
+    expect(forward.score_badge).toBe(0.2);
+    expect(reversed.score_badge).toBe(0.2);
+  });
+
+  it("falls back to approved-wins when NOT every row in the group carries a coSignalFix (capturedAt incomplete)", () => {
+    // One row has no coSignalFix at all — "earliest" isn't soundly
+    // comparable across the whole group, so this falls back to the
+    // status-rank rule (documented: the DB intake path must independently
+    // void the newer copy in this shape).
+    const noFix = receipt({ id: "r1", status: "pending", fingerprint: "fp6" });
+    const withFix = receipt({ id: "r2", status: "approved", fingerprint: "fp6", coSignalFix: goodFix() });
+    const result = scorePlayOrThrow([noFix, withFix], baseCtx());
+    expect(result.score_badge).toBe(0.8);
+  });
+});
+
 describe("uncaught mutation: booking row-date anchor removed", () => {
   it("a booking row dated off-play is dropped entirely, even with an otherwise-perfect inline presence fix", () => {
     const result = scorePlayOrThrow(

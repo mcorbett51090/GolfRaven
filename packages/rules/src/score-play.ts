@@ -829,9 +829,37 @@ export type ScorePlayOutcome = ScorePlaySuccess | ScorePlayFailure;
  * | staff `scanAt` | Yes | the staff-facing scan tool's own server timestamp, not the player's device |
  * | `ctx.playFacilityId` | Yes | the `play` row itself (already resolved/created server-side before `scorePlay` is ever called for it) |
  * | `ctx.playLocalDate` | Yes | the `play` row's own facility-local date, computed server-side at play-creation time — never re-derived from a row's `capturedAt` here |
- * | `ctx.playCourseId` | Yes (F6, sixth gate: now REQUIRED) | the `play` row's resolved course, at a multi-course (e.g. 36-hole) facility — a `courses` table lookup, never client-supplied; a row WITHOUT its own `courseId` is facility-level evidence and stays allowed regardless (H3's residual rule) — the DB's `play_evidence UNIQUE(evidence_id)` constraint (migration 0017) is the separate guarantee that stops the SAME evidence row being attributed to two different plays at all |
- * | `ctx.facilityTz` | Yes (F1, sixth gate: now REQUIRED) | the FACILITY'S OWN catalog row (`@golfraven/catalog`'s facility timezone field) — never derived from a fix, a device, or a client-supplied guess; allow-listed to a real IANA Area/Location zone name (`Intl.supportedValuesOf('timeZone')`), never a fixed offset or abbreviation |
+ * | `ctx.playCourseId` | Yes (H3 residual, seventh gate: now REQUIRED in BOTH the parser schema and the TypeScript type, item 8) | the `play` row's resolved course, at a multi-course (e.g. 36-hole) facility — a `courses` table lookup, never client-supplied; a row WITHOUT its own `courseId` is facility-level evidence and stays allowed regardless (H3's residual rule) — the DB's `play_evidence UNIQUE(evidence_id)` constraint (migration 0017) is the separate guarantee that stops the SAME evidence row being attributed to two different plays at all |
+ * | `ctx.facilityTz` | Yes (F1, sixth gate: now REQUIRED; corrected, seventh gate item 1: validated via `@golfraven/catalog`'s `isValidIanaTimeZoneName` — an `Intl.DateTimeFormat` try/catch — PLUS an Area/Location shape rule, never `Intl.supportedValuesOf('timeZone')`, which wrongly excludes several genuine, still-current zone names — see `parse-evidence.ts`'s own doc for the exact regression) | the FACILITY'S OWN catalog row (`@golfraven/catalog`'s facility timezone field, itself typically `tz-lookup`-derived) — never derived from a fix, a device, or a client-supplied guess |
  * | `ctx.purchases` | Yes | the `purchase_evidence` table (§4.6) — a DIFFERENT table than `app.evidence`, joined in server-side before this call |
+ *
+ * **Open owner question (item 11, seventh gate): composite courses.**
+ * `ctx.playCourseId`/a row's own `courseId` are compared with STRICT
+ * equality (`internal/classify.js`'s `courseOk`) — a row whose `courseId`
+ * is one of a COMPOSITE 18's two component nines (the build plan's own
+ * `Course.composite?: [CourseId, CourseId]`, §4.1, G-P0-13 — "an 18
+ * formed from two nines, e.g. Red+White") does NOT match a play whose
+ * `playCourseId` is the composite 18's OWN id, or vice versa, even though
+ * the build plan treats a composite play as satisfying BOTH the composite
+ * AND its two nines for ROSTER/COMPLETION credit (§4.1 line 744-745,
+ * `uniqueCourses`/A2-18 — `packages/rules`' own `completion.ts`/
+ * `aggregates.ts`, unaffected by this). The build plan (grepped for
+ * "composite" in full, `docs/golf-trails/02-build-plan.md`) defines
+ * `composite` ONLY at the catalog/roster-credit layer — it never states
+ * which `courseId` the MONEY-PATH EVIDENCE MATCHER (`@golfraven/matching`,
+ * the system that would populate a row's `courseId` for `app.evidence`)
+ * should record for a play on a composite 18: the composite's own id, one
+ * (or both) of the component nines' ids, or something else. Absent that
+ * answer, this module keeps strict equality (the safe default — it can
+ * only ever be OVER-strict, never under-strict, so a composite-course
+ * play at worst loses its course anchor's benefit of the doubt and still
+ * scores as facility-level evidence would if the matcher simply omits
+ * `courseId` for such a row) rather than guessing a matching rule that
+ * could be wrong. **Owner: whoever specs the evidence matcher's
+ * `courseId` assignment for composite courses — this needs an explicit
+ * answer before a 27/36-hole facility with COURSE-scoped evidence rows
+ * (not just facility-level ones) can be trusted not to silently
+ * under-count money-eligible plays on its composite tee sheets.**
  *
  * **Scope boundary (stated once, so it isn't re-litigated per class).**
  * `scorePlay` computes the two scores, `presence_signal`, `money` and a

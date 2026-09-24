@@ -21,6 +21,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Gate finding 2c (re-gate): the per-directory default ledger was
+ * removed — `ledgerPath` is now required on `ingestOwnerSavedPage`. Most
+ * tests in this file don't care about cross-run ledger sharing; they just
+ * need SOME explicit ledger scoped to their own `outDir` — reproducing
+ * what the removed default used to compute automatically. */
+function ledgerFor(dir: string): string {
+  return path.join(dir, "recorded-ledger.json");
+}
+
 const TN_CONFIG: X2SourceConfig = {
   TN: ["https://www.tnstateparks.com/golf", "https://tngolftrail.net/"],
   VI: ["https://golfvancouverisland.ca/"],
@@ -81,6 +90,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
 
     expect(entry.status).toBe("fetched");
@@ -131,6 +141,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
 
     expect(manifest.trails.TN).toHaveLength(2);
@@ -148,6 +159,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "http-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "http-run")),
       }),
     ).rejects.toThrow(/gate N6/);
   });
@@ -162,6 +174,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "foreign-host-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "foreign-host-run")),
       }),
     ).rejects.toThrow(/configured host list/);
   });
@@ -176,6 +189,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         statedDate: "09/24/2026",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "baddate-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "baddate-run")),
       }),
     ).rejects.toThrow(/not a real YYYY-MM-DD/);
   });
@@ -190,6 +204,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         statedDate: "2026-02-30",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "badcal-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "badcal-run")),
       }),
     ).rejects.toThrow(/not a real calendar date/);
   });
@@ -204,6 +219,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "unknown-trail-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "unknown-trail-run")),
       }),
     ).rejects.toThrow(/no entry in the source config/);
   });
@@ -217,6 +233,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "missing-file-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "missing-file-run")),
       }),
     ).rejects.toThrow(/could not read --file/);
   });
@@ -236,6 +253,7 @@ describe("x2-ingest: gate findings — date bounds (Addendum J correction)", () 
         statedDate: "2099-12-31",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "future-date-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "future-date-run")),
       }),
     ).rejects.toThrow(/is after the latest possible "today" anywhere on Earth/);
   });
@@ -255,6 +273,7 @@ describe("x2-ingest: gate findings — date bounds (Addendum J correction)", () 
       statedDate: nowUtcPlus14,
       sourceConfig: TN_CONFIG,
       outDir: path.join(OUT_DIR, "utc14-boundary-run"),
+      ledgerPath: ledgerFor(path.join(OUT_DIR, "utc14-boundary-run")),
     });
     expect(entry.ownerSavedDate).toBe(nowUtcPlus14);
   });
@@ -274,6 +293,7 @@ describe("x2-ingest: gate findings — date bounds (Addendum J correction)", () 
         statedDate: oneDayBeyondUtc14,
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "utc14-over-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "utc14-over-run")),
       }),
     ).rejects.toThrow(/is after the latest possible "today" anywhere on Earth/);
   });
@@ -288,6 +308,7 @@ describe("x2-ingest: gate findings — date bounds (Addendum J correction)", () 
         statedDate: "1999-01-01",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "ancient-date-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "ancient-date-run")),
       }),
     ).rejects.toThrow(/earlier than 2026-09-01/);
   });
@@ -301,6 +322,7 @@ describe("x2-ingest: gate findings — date bounds (Addendum J correction)", () 
       statedDate: "2026-09-01",
       sourceConfig: TN_CONFIG,
       outDir: path.join(OUT_DIR, "boundary-date-run"),
+      ledgerPath: ledgerFor(path.join(OUT_DIR, "boundary-date-run")),
     });
     expect(entry.ownerSavedDate).toBe("2026-09-01");
   });
@@ -317,6 +339,7 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
     const file2 = writeFixtureHtml(
       "tn-dup-2.html",
@@ -330,6 +353,7 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir,
+        ledgerPath: ledgerFor(outDir),
       }),
     ).rejects.toThrow(/first-capture-wins/);
   });
@@ -344,6 +368,7 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
     expect(first.entry.recorded).toBe(true);
 
@@ -358,6 +383,7 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
       additional: true,
     });
     expect(second.entry.recorded).toBe(false);
@@ -376,6 +402,7 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
     const file2 = writeFixtureHtml("tn-diff-2.html", "<h1>Rules page</h1>");
     const second = await ingestOwnerSavedPage({
@@ -385,6 +412,7 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
     expect(second.entry.recorded).toBe(true);
   });
@@ -402,6 +430,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "huge-file-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "huge-file-run")),
       }),
     ).rejects.toThrow(/over the 10485760-byte cap/);
   });
@@ -416,6 +445,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir: path.join(OUT_DIR, "at-cap-run"),
+      ledgerPath: ledgerFor(path.join(OUT_DIR, "at-cap-run")),
     });
     expect(entry.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -435,6 +465,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir,
+        ledgerPath: ledgerFor(outDir),
       }),
     ).rejects.toThrow();
     // No raw/ directory should have been created at all — extraction ran
@@ -452,6 +483,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
         statedDate: "2026-09-24",
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "proto-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "proto-run")),
       }),
     ).rejects.toThrow(/refused outright/);
     // The prototype of Object itself was never touched.
@@ -484,6 +516,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
     const originalGeneratedAt = first.manifest.generatedAt;
 
@@ -497,6 +530,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
+      ledgerPath: ledgerFor(outDir),
     });
     expect(second.manifest.generatedAt).toBe(originalGeneratedAt);
 
