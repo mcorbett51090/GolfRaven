@@ -31,6 +31,8 @@
 </div>
 
 <script>
+  import { withBase } from "../lib/nav";
+
   const root = document.querySelector<HTMLElement>("[data-site-search]");
   const input = root?.querySelector<HTMLInputElement>("[data-search-input]");
   const resultsEl = root?.querySelector<HTMLUListElement>("[data-search-results]");
@@ -38,6 +40,12 @@
     // Nothing to wire up on this render — fails closed to "no search UI
     // active" rather than throwing.
   } else {
+    // Rebind to a fresh, definitely-non-null `const` — TS's control-flow
+    // narrowing above does not carry into the `function`-declared closures
+    // below (they're hoisted and, in principle, callable before the
+    // narrowing check runs), so `resultsEl` itself stays `HTMLUListElement
+    // | undefined` inside them without this.
+    const results_ = resultsEl;
     let pagefind: {
       search: (q: string) => Promise<{ results: { id: string; data: () => Promise<any> }[] }>;
     } | null = null;
@@ -46,7 +54,20 @@
     function loadPagefind(): Promise<void> {
       if (pagefind) return Promise.resolve();
       if (loading) return loading;
-      loading = import(/* @vite-ignore */ "/pagefind/pagefind.js")
+      // The path is built from a runtime variable (not a literal in the
+      // `import()` call) so Vite/Rollup never try to resolve/bundle it at
+      // BUILD time — `/pagefind/pagefind.js` is written by
+      // `scripts/pagefind-index.mjs` straight into `dist/pagefind/` AFTER
+      // `astro build` finishes, so it genuinely does not exist yet when
+      // this file is compiled. A literal string argument here (even with
+      // a `@vite-ignore` comment, which only suppresses Vite's DEV-time
+      // analysis warning) still fails the production Rollup build, which
+      // always tries to resolve a static import specifier — confirmed
+      // this session (`astro build` failed with "Rollup failed to
+      // resolve import '/pagefind/pagefind.js'" until this was changed to
+      // a variable).
+      const pagefindUrl = withBase("/pagefind/pagefind.js");
+      loading = import(/* @vite-ignore */ pagefindUrl)
         .then((mod) => {
           pagefind = mod;
         })
@@ -59,8 +80,8 @@
     let debounceTimer: number | undefined;
     async function runSearch(query: string) {
       if (!query.trim()) {
-        resultsEl.hidden = true;
-        resultsEl.innerHTML = "";
+        results_.hidden = true;
+        results_.innerHTML = "";
         return;
       }
       await loadPagefind();
@@ -68,11 +89,11 @@
       const { results } = await pagefind.search(query);
       const top = results.slice(0, 8);
       const items = await Promise.all(top.map((r) => r.data()));
-      resultsEl.innerHTML = "";
+      results_.innerHTML = "";
       if (items.length === 0) {
         const li = document.createElement("li");
         li.textContent = "No results.";
-        resultsEl.append(li);
+        results_.append(li);
       } else {
         for (const item of items) {
           const li = document.createElement("li");
@@ -80,10 +101,10 @@
           a.href = item.url;
           a.textContent = item.meta?.title ?? item.url;
           li.append(a);
-          resultsEl.append(li);
+          results_.append(li);
         }
       }
-      resultsEl.hidden = false;
+      results_.hidden = false;
     }
 
     input.addEventListener("focus", () => void loadPagefind(), { once: true });
@@ -94,7 +115,7 @@
     });
     document.addEventListener("click", (e) => {
       if (!root.contains(e.target as Node)) {
-        resultsEl.hidden = true;
+        results_.hidden = true;
       }
     });
   }

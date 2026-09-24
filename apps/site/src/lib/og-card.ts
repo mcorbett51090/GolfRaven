@@ -52,7 +52,6 @@ const fonts = [
 // wine tone; gold stays as the accent metal, matching BaseLayout's
 // `theme-color` (`#1f4d3a`).
 const GREEN = "#1f4d3a";
-const GREEN_DEEP = "#163829";
 const GOLD = "#c9a227";
 const INK = "#182420";
 const INK_SOFT = "#4b5b52";

@@ -32,6 +32,7 @@
   "devDependencies": {
     "@astrojs/check": "0.9.10",
     "@golfraven/catalog-tools": "workspace:*",
+    "csp_evaluator": "1.1.8",
     "typescript": "5.9.3",
     "vitest": "5.0.1"
   }

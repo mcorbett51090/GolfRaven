@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Event schema for the (not-yet-live) GolfRaven GTM/GA4 container",
+    "(build plan §5.1 BaseLayout.astro: 'A new GolfRaven GTM/GA4 container",
+    "(O13 DECIDED 2026-09-23: RavenPower's is not reused)'; §10 P2 stage-2",
+    "scope item 6: 'Keep the GTM slot empty. The container ID comes from",
+    "build config later (O13).').",
+    "",
+    "THIS FILE AND src/components/Analytics.astro MUST AGREE — same",
+    "contract SWC's own analytics-schema.json/Analytics.astro pair used:",
+    "Analytics.astro decides what the site is allowed to PUBLISH to",
+    "dataLayer; this file is what GTM would be configured to READ once the",
+    "container exists. A key here the site never pushes is simply empty in",
+    "GA4; a key the site pushes that is missing here never reaches GA4 at",
+    "all. Neither failure leaks anything, but both are silent — change them",
+    "together, and see test/analytics-pii.test.ts (the ported",
+    "test-analytics-pii.mjs harness) for the enforcement.",
+    "",
+    "`booking_click` (§6.1 T0 row): 'A first-party booking_click event (no",
+    "PII) builds the T1 case [for a GolfNow partner-API application].'",
+    "`provider`/`trail_slug` are public catalog identifiers, never a",
+    "visitor's own data.",
+    "",
+    "NEVER add name, email, message, phone or a free-text field for any",
+    "facility/trail label. The claim/feedback form's eventual submission",
+    "(stage 3, the Worker backend) already carries all of that out of band."
+  ],
+  "generate_lead": ["form_name", "request_type", "relationship"],
+  "feedback_submit": ["form_name", "topic"],
+  "contact_click": ["contact_method"],
+  "booking_click": ["provider", "trail_slug"],
+  "csp_violation": ["effective_directive"]
+}

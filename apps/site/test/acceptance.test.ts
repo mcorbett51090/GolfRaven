@@ -187,18 +187,40 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
     expect(findSetHtmlOccurrences(prose)).toEqual([]);
   });
 
-  it("every built page has at most one JSON-LD <script>, and no OTHER <script> tag at all", async () => {
-    const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) => f.endsWith(".html"));
-    for (const file of htmlFiles) {
-      const html = await readFile(file, "utf8");
-      const scriptTags = [...html.matchAll(/<script\b[^>]*>/gi)];
-      for (const tag of scriptTags) {
-        expect(tag[0]).toMatch(/type="application\/ld\+json"/);
+  it(
+    "every built page has at most one JSON-LD <script>, and every OTHER <script> tag is an " +
+      "Astro-bundled external module with an EMPTY body — never inline JS content " +
+      "(stage-2 generalisation: CourseMap/SiteSearch/the sw.js registrar are real client " +
+      "islands now, so 'no other script tag at all' becomes 'no INLINE script content ever " +
+      "reaches the page' — the same property AT(7) exists to guarantee)",
+    async () => {
+      const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) => f.endsWith(".html"));
+      let sawExternalModule = false;
+      for (const file of htmlFiles) {
+        const html = await readFile(file, "utf8");
+        const scriptTags = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+        const ldJsonCount = scriptTags.filter(([, attrs]) => /type="application\/ld\+json"/.test(attrs)).length;
+        expect(ldJsonCount).toBeLessThanOrEqual(1);
+        for (const [full, attrs, body] of scriptTags) {
+          const isLdJson = /type="application\/ld\+json"/.test(attrs);
+          if (isLdJson) continue;
+          const isExternalModule = /type="module"/.test(attrs) && /\ssrc="\/_astro\/[^"]+"/.test(attrs);
+          expect(isExternalModule, `unexpected <script> shape: ${full.slice(0, 120)}`).toBe(true);
+          // The defining property: NOTHING between the tags. Astro hoists
+          // every non-`is:inline` <script> block's actual code into the
+          // external file the `src=` attribute points at — the tag Astro
+          // emits in the HTML itself carries no executable content, so
+          // there is nothing here `set:html` (or any other injection path)
+          // could have put a payload into.
+          expect(body.trim(), `external module script had inline body: ${full.slice(0, 120)}`).toBe("");
+          sawExternalModule = true;
+        }
       }
-      const ldJsonCount = scriptTags.filter((t) => /application\/ld\+json/.test(t[0])).length;
-      expect(ldJsonCount).toBeLessThanOrEqual(1);
-    }
-  });
+      // Proves the generalisation is actually exercised, not vacuously
+      // true because no page happens to embed a client island.
+      expect(sawExternalModule).toBe(true);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------

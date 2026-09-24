@@ -59,6 +59,28 @@ export default defineConfig({
     // loading under the site's own policy.
     inlineStylesheets: "never",
   },
+  vite: {
+    build: {
+      // Stage-2 discovery: Astro's OWN script-hoisting plugin
+      // (`core/build/plugins/plugin-scripts.js`) inlines a hoisted
+      // client `<script>` DIRECTLY into the page (`<script
+      // type="module">…code…</script>`, no `src=`) whenever the compiled
+      // chunk is small and not shared with another page — exactly what
+      // `CourseMap.astro`'s/`SiteSearch.astro`'s/BaseLayout's small
+      // per-page scripts are. That inline form is unrunnable under this
+      // site's CSP (`default-src 'self'`/`script-src 'self'
+      // 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no nonce/hash
+      // mechanism wired up), so left at Astro's default it would have
+      // SILENTLY shipped a broken (CSP-blocked) client feature — caught
+      // this session only because `test/acceptance.test.ts`'s AT(7) check
+      // asserts every non-ld+json `<script>` is `type="module" src="…"`.
+      // `assetsInlineLimit: 0` is the exact knob that heuristic reads
+      // (`shouldInlineAsset` in Astro's own source), so it now NEVER
+      // inlines — every hoisted script is always an external, same-origin
+      // file, whatever its size.
+      assetsInlineLimit: 0,
+    },
+  },
   integrations: [
     sitemap({
       // AT(1)/B2: the sitemap filter is EXACT set membership against

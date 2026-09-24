@@ -6,7 +6,11 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    dependencies:
+      '@golfraven/catalog':
+        specifier: workspace:*
+        version: link:packages/catalog
 
   apps/ciq: {}
 
@@ -90,6 +94,9 @@ importers:
       '@golfraven/catalog-tools':
         specifier: workspace:*
         version: link:../../tools/catalog
+      csp_evaluator:
+        specifier: 1.1.8
+        version: 1.1.8
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -2477,6 +2484,9 @@ packages:
 
   crossws@0.3.5:
     resolution: {integrity: sha512-ojKiDvcmByhwa8YYqbQI/hg7MEU0NC03+pSdEq4ZUnZR9xXpwk7E43SMNGkn+JxJGPFtNvQ48+vV2p+P1ml5PA==}
+
+  csp_evaluator@1.1.8:
+    resolution: {integrity: sha512-EwOnfYuNbTytvbMKsLixTrRgnjOa0WZCxGy8A9nnSYAicrdwn+T/epU/yjgymmOxlgKnvH+8wXt+7p/8ak5Feg==}
 
   css-background-parser@0.1.0:
     resolution: {integrity: sha512-2EZLisiZQ+7m4wwur/qiYJRniHX4K5Tc9w93MT3AS0WS1u5kaZ4FKXlOTBhOjc+CgEgPiGY+fX1yWD8UwpEqUA==}
@@ -7199,6 +7209,8 @@ snapshots:
   crossws@0.3.5:
     dependencies:
       uncrypto: 0.1.3
+
+  csp_evaluator@1.1.8: {}
 
   css-background-parser@0.1.0: {}
 

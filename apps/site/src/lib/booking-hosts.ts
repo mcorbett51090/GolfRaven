@@ -23,15 +23,28 @@
  * bypassed `verify-catalog` itself.
  */
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { BookingEntry, Facility } from "@golfraven/catalog";
 
-const BOOKING_HOSTS_PATH = fileURLToPath(
-  new URL("../../../../config/booking-hosts.json", import.meta.url),
-);
+/**
+ * **Deliberately `process.cwd()`-based, NOT `import.meta.url`-relative**
+ * (unlike `derive.ts`'s `realDataDir`/`PRIMARY_TRAIL_OVERRIDE_PATH`).
+ * Confirmed this session: Astro's SSR build can inline this module
+ * DIRECTLY into a per-page bundle (`dist/pages/courses/_slug_.astro.mjs`
+ * — a different nesting depth than the source file `src/lib/`), which
+ * silently breaks a `../../../../` count computed from `import.meta.url`
+ * (it resolved to `apps/config/...`, one level short, instead of
+ * `config/...`). `apps/site`'s own scripts are ALWAYS invoked with
+ * `apps/site` as `cwd` (every `package.json` script, `astro build`
+ * itself, and this test suite all run from there), so `process.cwd()` is
+ * the stable anchor a bundler's chunking decisions can't move.
+ */
+export function bookingHostsConfigPath(cwd: string = process.cwd()): string {
+  return join(cwd, "..", "..", "config", "booking-hosts.json");
+}
 
 export async function loadBookingHostAllowList(): Promise<string[]> {
-  const raw = JSON.parse(await readFile(BOOKING_HOSTS_PATH, "utf8")) as { hosts?: string[] };
+  const raw = JSON.parse(await readFile(bookingHostsConfigPath(), "utf8")) as { hosts?: string[] };
   return raw.hosts ?? [];
 }
 

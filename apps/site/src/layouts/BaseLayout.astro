@@ -85,15 +85,18 @@ const xDefaultHref =
 
     {/*
       ============================================================
-      GTM/GA4 SLOT — deliberately empty in stage 1.
+      GTM/GA4 SLOT — deliberately still empty in stage 2.
 
       Build plan §10 P2 scope names "GTM (O13 DECIDED: a new GolfRaven
-      GTM/GA4 container)" as part of the full P2 acceptance bar, but this
-      repo's stage-1 instructions say plainly: "For now it has no GTM;
-      leave a clearly marked slot." Wire the container here (guarded
-      `import.meta.env.PROD`, matching SWC's PII-safe pattern) when
-      analytics lands, and re-run SWC's ported `test-analytics-pii.mjs`
-      gate before it ships (build plan §5.1, §15).
+      GTM/GA4 container)" as part of the full P2 acceptance bar; this
+      repo's stage-2 instructions say plainly: "Keep the GTM slot empty.
+      The container ID comes from build config later (O13)." The PII
+      boundary itself (`src/components/Analytics.astro`, ported from SWC's
+      own Analytics.astro) and its allow-listed event schema
+      (`analytics-schema.json`) are already built and fully tested
+      (`test/analytics-pii.test.ts`, wired into `pnpm -r test`, AT8) — only
+      MOUNTING `<Analytics />` here, guarded on the real container id (once
+      O13 lands), remains.
       ============================================================
     */}
 
@@ -123,6 +126,9 @@ const xDefaultHref =
       ))}
 
     <meta name="theme-color" content="#1f4d3a" />
+    <link rel="manifest" href={withBase("/manifest.webmanifest")} />
+    <link rel="icon" href={withBase("/favicon.svg")} type="image/svg+xml" />
+    <link rel="apple-touch-icon" href={withBase("/apple-touch-icon.png")} />
 
     {ldScript && <Fragment set:html={ldScript} />}
   </head>
@@ -149,5 +155,18 @@ const xDefaultHref =
         GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a>.
       </p>
     </footer>
+    <script>
+      // Stage-2 item 5: registers `public/sw.js` — hoisted by Astro into an
+      // external, same-origin module bundle (no inline script content; see
+      // CourseMap.astro's doc for the CSP/AT(7) reasoning this shares).
+      // A registration failure (an older/unsupporting browser, a disabled
+      // service-worker permission) is swallowed: this is a progressive
+      // enhancement, never a requirement to use the site.
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>

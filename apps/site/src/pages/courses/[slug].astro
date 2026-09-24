@@ -124,7 +124,15 @@ const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryT
         bookingLinks.length > 0 && (
           <p class="wp__actions">
             {bookingLinks.map((b) => (
-              <a class="btn" href={b.url} target="_blank" rel="noopener">
+              <a
+                class="btn"
+                href={b.url}
+                target="_blank"
+                rel="noopener"
+                data-analytics-event="booking_click"
+                data-analytics-provider={b.provider}
+                data-analytics-trail={primaryTrail?.slug ?? ""}
+              >
                 Book via {b.provider === "course-native" ? "the course" : "GolfNow"} →
               </a>
             ))}
