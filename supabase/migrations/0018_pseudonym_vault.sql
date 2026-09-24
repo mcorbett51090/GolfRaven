@@ -60,7 +60,14 @@ AS $$
   WHERE name LIKE 'pseudonym_key%';
 $$;
 
+-- 0016 REVOKEd CREATE ON SCHEMA private FROM private_definer once its own
+-- ownership transfers were done -- this function's transfer needs it
+-- again, briefly, for the same reason (Postgres checks the new owner has
+-- CREATE in the object's schema for an ownership transfer). Re-revoked
+-- immediately after, same discipline as 0016.
+GRANT CREATE ON SCHEMA private TO private_definer;
 ALTER FUNCTION private.pseudonym_key_status() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
 REVOKE EXECUTE ON FUNCTION private.pseudonym_key_status() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.pseudonym_key_status() TO service_role;
 
