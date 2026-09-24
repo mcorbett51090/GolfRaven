@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chownSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { promisify } from "node:util";
@@ -11,9 +11,11 @@ import {
   computeMarkdownLineVisibility,
   computeX2Verdict,
   corroborationResolutionKey,
+  detectRuntimeTamper,
   extractX2MdLogSection,
   findAcceptRowLine,
   resolveCorroboration,
+  resolveGitBinary,
   sameConfiguredHost,
   verifyAgainstGitHub,
   type EvidenceByTrail,
@@ -1909,6 +1911,40 @@ describe("x2-verdict: computeMarkdownLineVisibility / findAcceptRowLine (gate fi
     expect(match?.lineNumber).toBe(5);
     expect(match?.line).toBe("ACCEPT NC season deadbeef 2026-09-20 Matt");
   });
+
+  it("round 7 follow-up: <details> stays hidden across a blank line, unlike a generic HTML block", () => {
+    const detailsText = "before\n<details>\n<summary>x</summary>\n\nhidden even after the blank line\n\n</details>\nafter\n";
+    expect(computeMarkdownLineVisibility(detailsText)).toEqual([
+      true, // before
+      false, // <details>
+      false, // <summary>x</summary>
+      false, // (blank line — still inside for <details> specifically)
+      false, // hidden even after the blank line
+      false, // (blank line)
+      false, // </details>
+      true, // after
+      true, // trailing
+    ]);
+  });
+
+  it("round 7 follow-up, control: a generic HTML block (<div>) still ends at the first blank line, unaffected by the <details>-specific change", () => {
+    const divText = "before\n<div>\nhidden\n\nvisible again after the blank line\n</div>\nafter\n";
+    expect(computeMarkdownLineVisibility(divText)).toEqual([
+      true, // before
+      false, // <div>
+      false, // hidden
+      true, // (blank line ends the block for <div>, per the generic rule)
+      true, // visible again after the blank line
+      true, // </div> — no longer inside any tracked block, so visible
+      true, // after
+      true, // trailing
+    ]);
+  });
+
+  it("<details> opened and closed on the same line hides only that line", () => {
+    const text = "before\n<details>one-liner</details>\nafter\n";
+    expect(computeMarkdownLineVisibility(text)).toEqual([true, false, true, true]);
+  });
 });
 
 describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / finding 2 re-gate)", () => {
@@ -2664,16 +2700,32 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       });
 
       it("should-fix, fourth re-gate: a row hidden inside a <details> raw HTML block is NOT counted", async () => {
-        // CommonMark's own rule for this HTML-block type: it runs until
-        // the next BLANK line, never until a matching close tag — so
-        // (deliberately, matching real Markdown renderers) there must be
-        // NO blank line between <details> and the row for it to still be
-        // "inside" the block by this rule.
         const fullText =
           "# X2\n\n## Log\n\n<details>\n<summary>old</summary>\n" +
           `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` +
           "</details>\n";
         expect(await resolveHiddenRowScenario(fullText)).toBe(false);
+      });
+
+      it("round 7 follow-up: a row inside <details>...</details> is STILL hidden even ACROSS a blank line — unlike every other HTML block, which the generic CommonMark rule ends at the first blank line", async () => {
+        // GitHub's own renderer keeps a <details> section collapsed
+        // across internal blank lines/paragraph breaks — the generic
+        // "ends at the first blank line" rule (still correct for every
+        // OTHER block tag, see the <div> test below) would let this row
+        // read as "visible" here even though it is still inside the
+        // collapsed section on GitHub.
+        const fullText =
+          "# X2\n\n## Log\n\n<details>\n<summary>old</summary>\n\n" +
+          `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` +
+          "\n</details>\n";
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
+      });
+
+      it("round 7 follow-up, control: the SAME row after a blank line, with NO enclosing <details>, DOES count — proves the test above is about <details> specifically, not blank lines in general", async () => {
+        const fullText =
+          "# X2\n\n## Log\n\nsome unrelated preceding line\n\n" +
+          `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+        expect(await resolveHiddenRowScenario(fullText)).toBe(true);
       });
 
       it("should-fix, fourth re-gate: a row hidden inside any other raw HTML block (a <div>) is NOT counted", async () => {
@@ -3138,6 +3190,233 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
     } finally {
       restoreEnv();
     }
+  });
+
+  describe("round 7 hardening: absolute git path, fixed child PATH, runtime-tamper detection", () => {
+    describe("resolveGitBinary", () => {
+      it("with no override, resolves to a real, root-owned, non-writable absolute path in this environment", () => {
+        const res = resolveGitBinary();
+        expect(res.ok).toBe(true);
+        expect(res.path).toMatch(/^\/(usr\/)?bin\/git$/);
+      });
+
+      it("the override seam still runs the real ownership/writability checks — a trustworthy override validates fine", () => {
+        const res = resolveGitBinary("/usr/bin/git");
+        expect(res.ok).toBe(true);
+        expect(res.path).toBe("/usr/bin/git");
+      });
+
+      it("refuses a non-root-owned git path, via the seam", () => {
+        const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gitbin-uid-"));
+        const fakeGit = nodePath.join(dir, "git");
+        writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        // This test environment runs as root, so a file this test creates
+        // is root-owned by default — chown it to a non-zero uid directly
+        // (root can chown to any uid) to construct the exact shape being
+        // refused, rather than merely asserting the seam exists.
+        chownSync(fakeGit, 1000, 1000);
+        const res = resolveGitBinary(fakeGit);
+        expect(res.ok).toBe(false);
+        expect(res.detail).toMatch(/not owned by root/);
+      });
+
+      it("refuses a group/world-writable git path, via the seam", () => {
+        const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gitbin-mode-"));
+        const fakeGit = nodePath.join(dir, "git");
+        writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o777 }); // world-writable
+        const res = resolveGitBinary(fakeGit);
+        expect(res.ok).toBe(false);
+        expect(res.detail).toMatch(/group- or world-writable/);
+      });
+
+      it("refuses when the override path does not exist at all", () => {
+        const res = resolveGitBinary("/this/path/does/not/exist/git");
+        expect(res.ok).toBe(false);
+        expect(res.path).toBeNull();
+      });
+    });
+
+    describe("detectRuntimeTamper", () => {
+      it("a clean environment (no tamper vars, empty execArgv) is not flagged", () => {
+        const res = detectRuntimeTamper({}, []);
+        expect(res.tampered).toBe(false);
+      });
+
+      it("a BENIGN NODE_OPTIONS (e.g. a memory-limit flag, this environment's own ordinary shell value) is NOT flagged", () => {
+        const res = detectRuntimeTamper({ NODE_OPTIONS: "--max-old-space-size=8192" }, []);
+        expect(res.tampered).toBe(false);
+      });
+
+      it("NODE_OPTIONS carrying --require is flagged", () => {
+        const res = detectRuntimeTamper({ NODE_OPTIONS: "--require ./evil.cjs" }, []);
+        expect(res.tampered).toBe(true);
+        expect(res.detail).toMatch(/NODE_OPTIONS/);
+      });
+
+      it("NODE_OPTIONS carrying -r is flagged", () => {
+        const res = detectRuntimeTamper({ NODE_OPTIONS: "-r ./evil.cjs" }, []);
+        expect(res.tampered).toBe(true);
+      });
+
+      it("NODE_OPTIONS carrying --loader/--experimental-loader/--import is flagged", () => {
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--loader ./evil.mjs" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--experimental-loader ./evil.mjs" }, []).tampered).toBe(true);
+        expect(detectRuntimeTamper({ NODE_OPTIONS: "--import ./evil.mjs" }, []).tampered).toBe(true);
+      });
+
+      it("LD_PRELOAD is flagged", () => {
+        const res = detectRuntimeTamper({ LD_PRELOAD: "/tmp/evil.so" }, []);
+        expect(res.tampered).toBe(true);
+        expect(res.detail).toMatch(/LD_PRELOAD/);
+      });
+
+      it("LD_LIBRARY_PATH is flagged", () => {
+        expect(detectRuntimeTamper({ LD_LIBRARY_PATH: "/tmp/evil" }, []).tampered).toBe(true);
+      });
+
+      it("GIT_EXEC_PATH is flagged", () => {
+        expect(detectRuntimeTamper({ GIT_EXEC_PATH: "/tmp/evil" }, []).tampered).toBe(true);
+      });
+
+      it("any DYLD_* variable is flagged", () => {
+        expect(detectRuntimeTamper({ DYLD_INSERT_LIBRARIES: "/tmp/evil.dylib" }, []).tampered).toBe(true);
+      });
+
+      it("a non-empty execArgv is flagged", () => {
+        const res = detectRuntimeTamper({}, ["--require", "/tmp/evil.cjs"]);
+        expect(res.tampered).toBe(true);
+        expect(res.detail).toMatch(/execArgv/);
+      });
+    });
+
+    describe("verifyAgainstGitHub wired to the round 7 checks", () => {
+      it("a fake git shimmed EARLIER on the caller's own PATH has NO EFFECT — the absolute-path resolution never consults PATH", async () => {
+        const realBareDir = await initUpstreamBare();
+        await pushDocs(realBareDir, { x2Md: "# X2\n\nREAL-PATH-SHIM-TEST\n" });
+        const fakeBareDir = await initUpstreamBare();
+        await pushDocs(fakeBareDir, { x2Md: "# X2\n\nFAKE-PATH-SHIM-TEST\n" });
+
+        // A fake `git` that rewrites the real URL to the fake repo and
+        // lies about ls-remote --get-url — the same shape as this
+        // round's own gate fixture (fakebin/git).
+        const fakeBinDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-fakebin-"));
+        const fakeGitPath = nodePath.join(fakeBinDir, "git");
+        writeFileSync(
+          fakeGitPath,
+          "#!/bin/bash\n" +
+            `args=(); for a in "$@"; do a="\${a//${realBareDir.replace(/\//g, "\\/")}/${fakeBareDir.replace(/\//g, "\\/")}}"; args+=("$a"); done\n` +
+            `if [[ "$*" == *"ls-remote --get-url"* ]]; then echo ${realBareDir}; exit 0; fi\n` +
+            `exec /usr/bin/git "\${args[@]}"\n`,
+          { mode: 0o755 },
+        );
+
+        stashEnv("PATH");
+        process.env.PATH = `${fakeBinDir}:${process.env.PATH}`;
+        try {
+          // Confirms the shim IS first on PATH (the setup is real).
+          const { stdout: whichGit } = await execFileAsync("bash", ["-lc", "command -v git"]);
+          expect(whichGit.trim()).toBe(fakeGitPath);
+
+          const verification = await verifyAgainstGitHub({ repoUrl: realBareDir, runtimeExecArgv: [] });
+          expect(verification.ok).toBe(true);
+          expect(verification.x2MdText).toContain("REAL-PATH-SHIM-TEST");
+          expect(verification.x2MdText).not.toContain("FAKE-PATH-SHIM-TEST");
+          await verification.cleanup();
+        } finally {
+          restoreEnv();
+        }
+      });
+
+      it("NODE_OPTIONS with a --require flag in the calling process's env gives UNOFFICIAL (ok: false)", async () => {
+        const bareDir = await initUpstreamBare();
+        await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+        const verification = await verifyAgainstGitHub({
+          repoUrl: bareDir,
+          runtimeEnv: { ...process.env, NODE_OPTIONS: "--require /tmp/evil.cjs" },
+          runtimeExecArgv: [],
+        });
+        expect(verification.ok).toBe(false);
+        expect(verification.detail).toMatch(/NODE_OPTIONS/);
+        await verification.cleanup();
+      });
+
+      it("LD_PRELOAD in the calling process's env gives UNOFFICIAL (ok: false)", async () => {
+        const bareDir = await initUpstreamBare();
+        await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+        const verification = await verifyAgainstGitHub({
+          repoUrl: bareDir,
+          runtimeEnv: { ...process.env, LD_PRELOAD: "/tmp/evil.so" },
+          runtimeExecArgv: [],
+        });
+        expect(verification.ok).toBe(false);
+        expect(verification.detail).toMatch(/LD_PRELOAD/);
+        await verification.cleanup();
+      });
+
+      it("a non-empty execArgv gives UNOFFICIAL (ok: false) — e.g. node --require=evil.cjs or -e", async () => {
+        const bareDir = await initUpstreamBare();
+        await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+        const verification = await verifyAgainstGitHub({
+          repoUrl: bareDir,
+          runtimeExecArgv: ["--require", "/tmp/evil.cjs"],
+        });
+        expect(verification.ok).toBe(false);
+        expect(verification.detail).toMatch(/execArgv/);
+        await verification.cleanup();
+      });
+
+      it("a BENIGN NODE_OPTIONS (this environment's own ordinary-shell value) does NOT trip the check — the live CLI must not falsely refuse on a clean shell", async () => {
+        const bareDir = await initUpstreamBare();
+        await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+        const verification = await verifyAgainstGitHub({
+          repoUrl: bareDir,
+          runtimeEnv: { ...process.env, NODE_OPTIONS: "--max-old-space-size=8192" },
+          runtimeExecArgv: [],
+        });
+        expect(verification.ok).toBe(true);
+        await verification.cleanup();
+      });
+
+      it("a non-root-owned git binary (via the gitBinary seam) gives UNOFFICIAL (ok: false)", async () => {
+        const bareDir = await initUpstreamBare();
+        await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+        const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gitbin-live-"));
+        const fakeGit = nodePath.join(dir, "git");
+        writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        chownSync(fakeGit, 1000, 1000);
+        const verification = await verifyAgainstGitHub({
+          repoUrl: bareDir,
+          gitBinary: fakeGit,
+          runtimeExecArgv: [],
+        });
+        expect(verification.ok).toBe(false);
+        expect(verification.detail).toMatch(/not owned by root/);
+        await verification.cleanup();
+      });
+
+      it("the child git process's own PATH is fixed to /usr/bin:/bin — a caller-PATH-only tool is not reachable from it", async () => {
+        const bareDir = await initUpstreamBare();
+        await pushDocs(bareDir, { x2Md: "# X2\n\nPATH-FIX-TEST\n" });
+        // A directory-only-on-the-caller's-PATH marker tool; if the
+        // child inherited the caller's PATH, a hook or helper could find
+        // it. We assert indirectly: the real fetch still succeeds
+        // (proving /usr/bin:/bin has everything git itself needs) while
+        // a PATH-dependent probe placed ONLY in a caller-only PATH entry
+        // is not on the child's resolved PATH.
+        const onlyCallerDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-only-caller-path-"));
+        writeFileSync(nodePath.join(onlyCallerDir, "not-on-child-path"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        stashEnv("PATH");
+        process.env.PATH = `${onlyCallerDir}:${process.env.PATH}`;
+        try {
+          const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
+          expect(verification.ok).toBe(true);
+          expect(verification.x2MdText).toContain("PATH-FIX-TEST");
+          await verification.cleanup();
+        } finally {
+          restoreEnv();
+        }
+      });
+    });
   });
 });
 

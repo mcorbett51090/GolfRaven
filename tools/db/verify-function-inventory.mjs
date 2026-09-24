@@ -238,6 +238,61 @@ if (fixtureRows.length > 0 || liveRows.length > 0) {
   }
 }
 
+// 7. ⛔ FIX (HIGH-1 regression, post-P3a re-gate round 3): every
+// current_setting( call inside ANY RLS policy expression (USING or WITH
+// CHECK), anywhere, must be wrapped in nullif(..., ''). Repro this round:
+// set_config(name, value, true) ("is_local = true") only means "roll this
+// back if the CURRENT transaction aborts" -- once that transaction
+// COMMITS, the GUC keeps reading its set value (or, after a later RESET/
+// clear, reads '' -- Postgres's own session-default for an unset text
+// GUC, never NULL) for the REST of the session, and PostgREST/Supavisor
+// reuse connections across unrelated requests. A bare
+// current_setting(...)::uuid then raises "invalid input syntax for type
+// uuid: """ the moment ANY later query on that same connection touches a
+// table carrying that policy -- and since Postgres evaluates EVERY
+// candidate policy for a role and ORs them together (it does not
+// short-circuit past one that errors), ONE unwrapped policy anywhere on
+// a table breaks every later query against it, even one a completely
+// unrelated function runs for a completely unrelated reason (the
+// concrete repro: private.offer_code_play_guard's own narrowly-scoped
+// re-read started raising because of an UNRELATED older policy's
+// unwrapped cast). nullif(x, '') turns a leftover '' into a genuine SQL
+// NULL before any cast runs; NULL::uuid is simply NULL, never an error,
+// and `col = NULL` is never true either way, so the fail-closed behaviour
+// (no rows visible with no real target set) is unchanged -- only the
+// ERROR is gone. Scans pg_policies system-wide (not just private_definer
+// policies), since ANY role's policy carrying this shape is the same
+// live bug waiting to happen. Case-insensitive "NULLIF(" match: pg_get_
+// expr's own deparser (which is what populates pg_policies.qual/
+// with_check) always prints NULLIF in upper case, confirmed empirically
+// this session, even though the migration source itself is lower case.
+const policyExprRows = psql(`
+  SELECT schemaname || '.' || tablename || '.' || policyname,
+         COALESCE(qual, ''), COALESCE(with_check, '')
+  FROM pg_policies
+  WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+    AND (COALESCE(qual, '') LIKE '%current_setting(%' OR COALESCE(with_check, '') LIKE '%current_setting(%')
+`);
+function findUnwrappedCurrentSetting(expr) {
+  const needle = "current_setting(";
+  let idx = 0;
+  for (;;) {
+    const found = expr.indexOf(needle, idx);
+    if (found === -1) return false;
+    const before = expr.slice(Math.max(0, found - 7), found);
+    if (before.toUpperCase() !== "NULLIF(") return true;
+    idx = found + needle.length;
+  }
+}
+for (const [policy, qual, withCheck] of policyExprRows) {
+  if (findUnwrappedCurrentSetting(qual)) {
+    failures.push(`RLS policy ${policy}: USING expression contains a current_setting( not wrapped in nullif(...,'') — HIGH-1 regression, post-P3a re-gate round 3: ${qual}`);
+  }
+  if (findUnwrappedCurrentSetting(withCheck)) {
+    failures.push(`RLS policy ${policy}: WITH CHECK expression contains a current_setting( not wrapped in nullif(...,'') — HIGH-1 regression, post-P3a re-gate round 3: ${withCheck}`);
+  }
+}
+
 if (failures.length > 0) {
   console.error(`verify-function-inventory: ${failures.length} failure(s):`);
   for (const f of failures) console.error(`  - ${f}`);

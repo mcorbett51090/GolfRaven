@@ -1312,22 +1312,32 @@ export interface GitBinaryResolution {
  * at the well-known path is itself exactly the attack this closes, and
  * quietly trying somewhere else an attacker may equally control buys
  * nothing. `gitBinaryOverride` is a TEST-ONLY seam (the shipped CLI's
- * `main()` never passes it) — the real test environment's own trusted
- * `git` may not live at `/usr/bin/git`, so tests point this at whatever
- * `git` they can actually trust (e.g. resolved once via `command -v git`
- * in the test file itself), never at a path a test wants proven UNSAFE
- * (those tests point at a deliberately bad file/permission instead).
+ * `main()` never passes it) that REPLACES the candidate list with the
+ * one given path — the same ownership/writability checks still run
+ * against it, never bypassed. This lets a test do either: point at
+ * whatever `git` the test environment actually trusts (its own real
+ * `/usr/bin/git` may not exist, e.g. under a container with `git` only
+ * at `/opt/.../git`), and see it validate fine; or point at a
+ * deliberately bad file (wrong uid, or group/world-writable) and see it
+ * genuinely refused — proving the check itself works, not merely that
+ * the seam exists.
  */
 export function resolveGitBinary(gitBinaryOverride?: string): GitBinaryResolution {
-  if (gitBinaryOverride !== undefined) {
-    return { ok: true, path: gitBinaryOverride, detail: `test-only override: "${gitBinaryOverride}".` };
-  }
-  for (const candidate of GIT_BINARY_CANDIDATES) {
+  // TEST-ONLY seam: REPLACES the candidate list with the single
+  // overridden path — it does NOT bypass the ownership/writability
+  // checks below. This is deliberate: a test needs to prove BOTH that a
+  // trustworthy override validates fine (the test environment's real
+  // `git` may not live at `/usr/bin/git`) AND that a deliberately bad
+  // one (non-root-owned, or group/world-writable) is genuinely refused
+  // — a seam that unconditionally returned `ok: true` could never
+  // exercise the second case at all.
+  const candidates = gitBinaryOverride !== undefined ? [gitBinaryOverride] : GIT_BINARY_CANDIDATES;
+  for (const candidate of candidates) {
     let st: ReturnType<typeof statSync>;
     try {
       st = statSync(candidate);
     } catch {
-      continue; // doesn't exist here — try the next candidate.
+      continue; // doesn't exist here — try the next candidate (none, under the override).
     }
     if (st.uid !== 0) {
       return {
@@ -1351,8 +1361,8 @@ export function resolveGitBinary(gitBinaryOverride?: string): GitBinaryResolutio
     ok: false,
     path: null,
     detail:
-      `refusing: neither ${GIT_BINARY_CANDIDATES.join(" nor ")} exists — never falling back to a PATH-resolved ` +
-      '"git" (round 7 hardening).',
+      `refusing: neither ${candidates.join(" nor ")} exists — never falling back to a PATH-resolved "git" ` +
+      "(round 7 hardening).",
   };
 }
 

@@ -169,72 +169,99 @@ CREATE POLICY pd_rate_limit_purge ON private.rate_limit_bucket FOR DELETE TO pri
 CREATE POLICY pd_rate_limit_purge_r ON private.rate_limit_bucket FOR SELECT TO private_definer USING (true);
 
 -- ---- 6a. delete_row-policed tables ----
-CREATE POLICY pd_delete_admin_user_user_id ON app.admin_user FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_admin_user_user_id_r ON app.admin_user FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_app_review_demo_account_user_id ON app.app_review_demo_account FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_app_review_demo_account_user_id_r ON app.app_review_demo_account FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_booking_user_id ON app.booking FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_booking_user_id_r ON app.booking FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_checkin_challenge_staff_user_id ON app.checkin_challenge FOR DELETE TO private_definer USING (staff_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_checkin_challenge_staff_user_id_r ON app.checkin_challenge FOR SELECT TO private_definer USING (staff_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_checkin_challenge_user_id ON app.checkin_challenge FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_checkin_challenge_user_id_r ON app.checkin_challenge FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_connector_account_user_id ON app.connector_account FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_connector_account_user_id_r ON app.connector_account FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_course_qr_token_issued_by_staff ON app.course_qr_token FOR DELETE TO private_definer USING (issued_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_course_qr_token_issued_by_staff_r ON app.course_qr_token FOR SELECT TO private_definer USING (issued_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_course_qr_token_used_by_user ON app.course_qr_token FOR DELETE TO private_definer USING (used_by_user = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_course_qr_token_used_by_user_r ON app.course_qr_token FOR SELECT TO private_definer USING (used_by_user = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_device_user_id ON app.device FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_device_user_id_r ON app.device FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_device_reward_ledger_user_id ON app.device_reward_ledger FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_device_reward_ledger_user_id_r ON app.device_reward_ledger FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_evidence_user_id ON app.evidence FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_evidence_user_id_r ON app.evidence FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_marker_credit_user_id ON app.marker_credit FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_marker_credit_user_id_r ON app.marker_credit FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_offer_code_user_id ON app.offer_code FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_offer_code_user_id_r ON app.offer_code FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_partner_member_user_id ON app.partner_member FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_partner_member_user_id_r ON app.partner_member FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_play_user_id ON app.play FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_play_user_id_r ON app.play FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_profile_user_id ON app.profile FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_profile_user_id_r ON app.profile FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_purchase_evidence_user_id ON app.purchase_evidence FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_purchase_evidence_user_id_r ON app.purchase_evidence FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_push_token_user_id ON app.push_token FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_push_token_user_id_r ON app.push_token FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_signin_provider_token_user_id ON app.signin_provider_token FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_signin_provider_token_user_id_r ON app.signin_provider_token FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_staff_activity_staff_user_id ON app.staff_activity FOR DELETE TO private_definer USING (staff_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_staff_activity_staff_user_id_r ON app.staff_activity FOR SELECT TO private_definer USING (staff_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_user_achievement_user_id ON app.user_achievement FOR DELETE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_delete_user_achievement_user_id_r ON app.user_achievement FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
+-- ⛔ FIX (HIGH-1 regression, post-P3a re-gate round 3): every
+-- `current_setting('app.delete_my_data.target_user_id', true)` below that
+-- is cast `::uuid` is wrapped in `nullif(..., '')` first. Repro this
+-- round: `set_config(..., true)` (`is_local = true`) sets the GUC for the
+-- REST OF THE SESSION once the transaction that set it commits (`true`
+-- only means "roll back the value if THIS transaction aborts" -- it does
+-- NOT mean "clear it at commit", confirmed empirically) -- so after ANY
+-- delete_my_data(...) call commits, this same connection's GUC reads ''
+-- (Postgres's own "session default" for a var that was `RESET` back to
+-- unset is '', not NULL) for every later statement on that SAME
+-- connection, for as long as PostgREST/Supavisor keep reusing it. Bare
+-- `''::uuid` raises `invalid input syntax for type uuid: ""` -- and since
+-- every candidate RLS policy for a role is OR'd together (Postgres
+-- evaluates ALL of them, it does not short-circuit past one whose
+-- expression happens to error), ONE unwrapped policy anywhere on a table
+-- poisons every later query against it on that connection, even a query
+-- a completely different guard/function runs for a completely different
+-- reason (the concrete repro: private.offer_code_play_guard's own
+-- narrowly-GUC-scoped re-read, unrelated to delete_my_data, started
+-- raising once ANY of these older policies' OR-clauses tried to cast the
+-- now-'' target_user_id). `nullif(x, '')` turns the leftover '' into a
+-- genuine SQL NULL before the cast ever runs, and `NULL::uuid` is simply
+-- NULL (never an error) -- `id = NULL` is never true either way, so the
+-- FAIL-CLOSED behaviour (no rows visible with no real target set) is
+-- unchanged; only the ERROR is gone. See tools/db/verify-function-
+-- inventory.mjs and 10_function_inventory.sql for the new lint that
+-- fails the build if this regresses.
+CREATE POLICY pd_delete_admin_user_user_id ON app.admin_user FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_admin_user_user_id_r ON app.admin_user FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_app_review_demo_account_user_id ON app.app_review_demo_account FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_app_review_demo_account_user_id_r ON app.app_review_demo_account FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_booking_user_id ON app.booking FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_booking_user_id_r ON app.booking FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_checkin_challenge_staff_user_id ON app.checkin_challenge FOR DELETE TO private_definer USING (staff_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_checkin_challenge_staff_user_id_r ON app.checkin_challenge FOR SELECT TO private_definer USING (staff_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_checkin_challenge_user_id ON app.checkin_challenge FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_checkin_challenge_user_id_r ON app.checkin_challenge FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_connector_account_user_id ON app.connector_account FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_connector_account_user_id_r ON app.connector_account FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_course_qr_token_issued_by_staff ON app.course_qr_token FOR DELETE TO private_definer USING (issued_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_course_qr_token_issued_by_staff_r ON app.course_qr_token FOR SELECT TO private_definer USING (issued_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_course_qr_token_used_by_user ON app.course_qr_token FOR DELETE TO private_definer USING (used_by_user = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_course_qr_token_used_by_user_r ON app.course_qr_token FOR SELECT TO private_definer USING (used_by_user = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_device_user_id ON app.device FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_device_user_id_r ON app.device FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_device_reward_ledger_user_id ON app.device_reward_ledger FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_device_reward_ledger_user_id_r ON app.device_reward_ledger FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_evidence_user_id ON app.evidence FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_evidence_user_id_r ON app.evidence FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_marker_credit_user_id ON app.marker_credit FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_marker_credit_user_id_r ON app.marker_credit FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_offer_code_user_id ON app.offer_code FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_offer_code_user_id_r ON app.offer_code FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_partner_member_user_id ON app.partner_member FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_partner_member_user_id_r ON app.partner_member FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_play_user_id ON app.play FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_play_user_id_r ON app.play FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_profile_user_id ON app.profile FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_profile_user_id_r ON app.profile FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_purchase_evidence_user_id ON app.purchase_evidence FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_purchase_evidence_user_id_r ON app.purchase_evidence FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_push_token_user_id ON app.push_token FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_push_token_user_id_r ON app.push_token FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_signin_provider_token_user_id ON app.signin_provider_token FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_signin_provider_token_user_id_r ON app.signin_provider_token FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_staff_activity_staff_user_id ON app.staff_activity FOR DELETE TO private_definer USING (staff_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_staff_activity_staff_user_id_r ON app.staff_activity FOR SELECT TO private_definer USING (staff_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_user_achievement_user_id ON app.user_achievement FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_delete_user_achievement_user_id_r ON app.user_achievement FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
 
 -- ---- 6b. set_null-policed tables ----
-CREATE POLICY pd_setnull_attestation_staff_user_id ON app.attestation FOR UPDATE TO private_definer USING (staff_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (staff_user_id IS NULL);
-CREATE POLICY pd_setnull_attestation_staff_user_id_r ON app.attestation FOR SELECT TO private_definer USING ((staff_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (staff_user_id IS NULL));
-CREATE POLICY pd_setnull_entitlement_redeemed_by_staff ON app.entitlement FOR UPDATE TO private_definer USING (redeemed_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (redeemed_by_staff IS NULL);
-CREATE POLICY pd_setnull_entitlement_redeemed_by_staff_r ON app.entitlement FOR SELECT TO private_definer USING ((redeemed_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (redeemed_by_staff IS NULL));
-CREATE POLICY pd_setnull_fraud_signal_cleared_by ON app.fraud_signal FOR UPDATE TO private_definer USING (cleared_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (cleared_by IS NULL);
-CREATE POLICY pd_setnull_fraud_signal_cleared_by_r ON app.fraud_signal FOR SELECT TO private_definer USING ((cleared_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (cleared_by IS NULL));
-CREATE POLICY pd_setnull_marker_code_activated_by_staff ON app.marker_code FOR UPDATE TO private_definer USING (activated_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (activated_by_staff IS NULL);
-CREATE POLICY pd_setnull_marker_code_activated_by_staff_r ON app.marker_code FOR SELECT TO private_definer USING ((activated_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (activated_by_staff IS NULL));
-CREATE POLICY pd_setnull_marker_code_redeemed_by ON app.marker_code FOR UPDATE TO private_definer USING (redeemed_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (redeemed_by IS NULL);
-CREATE POLICY pd_setnull_marker_code_redeemed_by_r ON app.marker_code FOR SELECT TO private_definer USING ((redeemed_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (redeemed_by IS NULL));
-CREATE POLICY pd_setnull_offer_code_redeemed_by_staff ON app.offer_code FOR UPDATE TO private_definer USING (redeemed_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (redeemed_by_staff IS NULL);
-CREATE POLICY pd_setnull_offer_code_redeemed_by_staff_r ON app.offer_code FOR SELECT TO private_definer USING ((redeemed_by_staff = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (redeemed_by_staff IS NULL));
-CREATE POLICY pd_setnull_partner_member_invited_by ON app.partner_member FOR UPDATE TO private_definer USING (invited_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (invited_by IS NULL);
-CREATE POLICY pd_setnull_partner_member_invited_by_r ON app.partner_member FOR SELECT TO private_definer USING ((invited_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (invited_by IS NULL));
-CREATE POLICY pd_setnull_review_item_resolved_by ON app.review_item FOR UPDATE TO private_definer USING (resolved_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (resolved_by IS NULL);
-CREATE POLICY pd_setnull_review_item_resolved_by_r ON app.review_item FOR SELECT TO private_definer USING ((resolved_by = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (resolved_by IS NULL));
-CREATE POLICY pd_setnull_special_marker_stock_movement_by_member ON app.special_marker_stock_movement FOR UPDATE TO private_definer USING (by_member = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (by_member IS NULL);
-CREATE POLICY pd_setnull_special_marker_stock_movement_by_member_r ON app.special_marker_stock_movement FOR SELECT TO private_definer USING ((by_member = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (by_member IS NULL));
+CREATE POLICY pd_setnull_attestation_staff_user_id ON app.attestation FOR UPDATE TO private_definer USING (staff_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (staff_user_id IS NULL);
+CREATE POLICY pd_setnull_attestation_staff_user_id_r ON app.attestation FOR SELECT TO private_definer USING ((staff_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (staff_user_id IS NULL));
+CREATE POLICY pd_setnull_entitlement_redeemed_by_staff ON app.entitlement FOR UPDATE TO private_definer USING (redeemed_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (redeemed_by_staff IS NULL);
+CREATE POLICY pd_setnull_entitlement_redeemed_by_staff_r ON app.entitlement FOR SELECT TO private_definer USING ((redeemed_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (redeemed_by_staff IS NULL));
+CREATE POLICY pd_setnull_fraud_signal_cleared_by ON app.fraud_signal FOR UPDATE TO private_definer USING (cleared_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (cleared_by IS NULL);
+CREATE POLICY pd_setnull_fraud_signal_cleared_by_r ON app.fraud_signal FOR SELECT TO private_definer USING ((cleared_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (cleared_by IS NULL));
+CREATE POLICY pd_setnull_marker_code_activated_by_staff ON app.marker_code FOR UPDATE TO private_definer USING (activated_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (activated_by_staff IS NULL);
+CREATE POLICY pd_setnull_marker_code_activated_by_staff_r ON app.marker_code FOR SELECT TO private_definer USING ((activated_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (activated_by_staff IS NULL));
+CREATE POLICY pd_setnull_marker_code_redeemed_by ON app.marker_code FOR UPDATE TO private_definer USING (redeemed_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (redeemed_by IS NULL);
+CREATE POLICY pd_setnull_marker_code_redeemed_by_r ON app.marker_code FOR SELECT TO private_definer USING ((redeemed_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (redeemed_by IS NULL));
+CREATE POLICY pd_setnull_offer_code_redeemed_by_staff ON app.offer_code FOR UPDATE TO private_definer USING (redeemed_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (redeemed_by_staff IS NULL);
+CREATE POLICY pd_setnull_offer_code_redeemed_by_staff_r ON app.offer_code FOR SELECT TO private_definer USING ((redeemed_by_staff = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (redeemed_by_staff IS NULL));
+CREATE POLICY pd_setnull_partner_member_invited_by ON app.partner_member FOR UPDATE TO private_definer USING (invited_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (invited_by IS NULL);
+CREATE POLICY pd_setnull_partner_member_invited_by_r ON app.partner_member FOR SELECT TO private_definer USING ((invited_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (invited_by IS NULL));
+CREATE POLICY pd_setnull_review_item_resolved_by ON app.review_item FOR UPDATE TO private_definer USING (resolved_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (resolved_by IS NULL);
+CREATE POLICY pd_setnull_review_item_resolved_by_r ON app.review_item FOR SELECT TO private_definer USING ((resolved_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (resolved_by IS NULL));
+CREATE POLICY pd_setnull_special_marker_stock_movement_by_member ON app.special_marker_stock_movement FOR UPDATE TO private_definer USING (by_member = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (by_member IS NULL);
+CREATE POLICY pd_setnull_special_marker_stock_movement_by_member_r ON app.special_marker_stock_movement FOR SELECT TO private_definer USING ((by_member = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (by_member IS NULL));
 
 -- ---- 6c. Bespoke ('special') cases ----
-CREATE POLICY pd_entitlement_update ON app.entitlement FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_entitlement_update_r ON app.entitlement FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
+CREATE POLICY pd_entitlement_update ON app.entitlement FOR UPDATE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_entitlement_update_r ON app.entitlement FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
 -- ⛔ FIX (post-P3a re-gate, found while regression-testing M2): offer_code
 -- had a DELETE policy (pd_delete_offer_code_user_id, generic pass) and a
 -- narrow redeemed_by_staff UPDATE policy, but no general "own row" UPDATE
@@ -251,25 +278,25 @@ CREATE POLICY pd_entitlement_update_r ON app.entitlement FOR SELECT TO private_d
 -- nulled at the point app.play is deleted, order-dependent within the
 -- generic pass, the silent no-op became load-bearing and raised a false
 -- FK violation). Mirrors pd_entitlement_update exactly.
-CREATE POLICY pd_offer_code_update ON app.offer_code FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_offer_code_update_r ON app.offer_code FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
-CREATE POLICY pd_fraud_signal_update ON app.fraud_signal FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id IS NULL);
-CREATE POLICY pd_fraud_signal_update_r ON app.fraud_signal FOR SELECT TO private_definer USING ((user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (user_id IS NULL));
-CREATE POLICY pd_attestation_player_update ON app.attestation FOR UPDATE TO private_definer USING (player_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (player_user_id IS NULL);
-CREATE POLICY pd_attestation_player_update_r ON app.attestation FOR SELECT TO private_definer USING ((player_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (player_user_id IS NULL));
-CREATE POLICY pd_audit_log_update ON app.audit_log FOR UPDATE TO private_definer USING (actor_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (actor_user_id IS NULL);
-CREATE POLICY pd_audit_log_update_r ON app.audit_log FOR SELECT TO private_definer USING ((actor_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (actor_user_id IS NULL));
-CREATE POLICY pd_partner_invite_delete ON app.partner_invite FOR DELETE TO private_definer USING (invited_by = current_setting('app.delete_my_data.target_user_id', true)::uuid OR invitee_email = current_setting('app.delete_my_data.target_email', true));
-CREATE POLICY pd_partner_invite_delete_r ON app.partner_invite FOR SELECT TO private_definer USING (invited_by = current_setting('app.delete_my_data.target_user_id', true)::uuid OR invitee_email = current_setting('app.delete_my_data.target_email', true));
-CREATE POLICY pd_shift_log_update ON app.attestation_shift_log FOR UPDATE TO private_definer USING (player_pseudonym = current_setting('app.delete_my_data.target_pseudonym', true) OR (player_pseudonym IS NULL AND player_handle_snapshot = current_setting('app.delete_my_data.target_handle', true))) WITH CHECK (player_handle_snapshot = 'deleted player');
-CREATE POLICY pd_shift_log_update_r ON app.attestation_shift_log FOR SELECT TO private_definer USING ((player_pseudonym = current_setting('app.delete_my_data.target_pseudonym', true) OR (player_pseudonym IS NULL AND player_handle_snapshot = current_setting('app.delete_my_data.target_handle', true))) OR (player_handle_snapshot = 'deleted player'));
-CREATE POLICY pd_public_profile_delete ON app.public_profile_projection FOR DELETE TO private_definer USING (handle = current_setting('app.delete_my_data.target_handle', true));
-CREATE POLICY pd_public_profile_delete_r ON app.public_profile_projection FOR SELECT TO private_definer USING (handle = current_setting('app.delete_my_data.target_handle', true));
-CREATE POLICY pd_receipt_fingerprint_update ON app.receipt_fingerprint FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id IS NULL);
-CREATE POLICY pd_receipt_fingerprint_update_r ON app.receipt_fingerprint FOR SELECT TO private_definer USING ((user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (user_id IS NULL));
-CREATE POLICY pd_storage_objects_delete ON storage.objects FOR DELETE TO private_definer USING (bucket_id = 'receipts' AND (owner = current_setting('app.delete_my_data.target_user_id', true)::uuid OR name LIKE 'receipts/' || current_setting('app.delete_my_data.target_user_id', true) || '/%'));
-CREATE POLICY pd_storage_objects_delete_r ON storage.objects FOR SELECT TO private_definer USING (bucket_id = 'receipts' AND (owner = current_setting('app.delete_my_data.target_user_id', true)::uuid OR name LIKE 'receipts/' || current_setting('app.delete_my_data.target_user_id', true) || '/%'));
-CREATE POLICY pd_profile_select ON app.profile FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
+CREATE POLICY pd_offer_code_update ON app.offer_code FOR UPDATE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_offer_code_update_r ON app.offer_code FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+CREATE POLICY pd_fraud_signal_update ON app.fraud_signal FOR UPDATE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (user_id IS NULL);
+CREATE POLICY pd_fraud_signal_update_r ON app.fraud_signal FOR SELECT TO private_definer USING ((user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (user_id IS NULL));
+CREATE POLICY pd_attestation_player_update ON app.attestation FOR UPDATE TO private_definer USING (player_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (player_user_id IS NULL);
+CREATE POLICY pd_attestation_player_update_r ON app.attestation FOR SELECT TO private_definer USING ((player_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (player_user_id IS NULL));
+CREATE POLICY pd_audit_log_update ON app.audit_log FOR UPDATE TO private_definer USING (actor_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (actor_user_id IS NULL);
+CREATE POLICY pd_audit_log_update_r ON app.audit_log FOR SELECT TO private_definer USING ((actor_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (actor_user_id IS NULL));
+CREATE POLICY pd_partner_invite_delete ON app.partner_invite FOR DELETE TO private_definer USING (invited_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR invitee_email = nullif(current_setting('app.delete_my_data.target_email', true), ''));
+CREATE POLICY pd_partner_invite_delete_r ON app.partner_invite FOR SELECT TO private_definer USING (invited_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR invitee_email = nullif(current_setting('app.delete_my_data.target_email', true), ''));
+CREATE POLICY pd_shift_log_update ON app.attestation_shift_log FOR UPDATE TO private_definer USING (player_pseudonym = nullif(current_setting('app.delete_my_data.target_pseudonym', true), '') OR (player_pseudonym IS NULL AND player_handle_snapshot = nullif(current_setting('app.delete_my_data.target_handle', true), ''))) WITH CHECK (player_handle_snapshot = 'deleted player');
+CREATE POLICY pd_shift_log_update_r ON app.attestation_shift_log FOR SELECT TO private_definer USING ((player_pseudonym = nullif(current_setting('app.delete_my_data.target_pseudonym', true), '') OR (player_pseudonym IS NULL AND player_handle_snapshot = nullif(current_setting('app.delete_my_data.target_handle', true), ''))) OR (player_handle_snapshot = 'deleted player'));
+CREATE POLICY pd_public_profile_delete ON app.public_profile_projection FOR DELETE TO private_definer USING (handle = nullif(current_setting('app.delete_my_data.target_handle', true), ''));
+CREATE POLICY pd_public_profile_delete_r ON app.public_profile_projection FOR SELECT TO private_definer USING (handle = nullif(current_setting('app.delete_my_data.target_handle', true), ''));
+CREATE POLICY pd_receipt_fingerprint_update ON app.receipt_fingerprint FOR UPDATE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (user_id IS NULL);
+CREATE POLICY pd_receipt_fingerprint_update_r ON app.receipt_fingerprint FOR SELECT TO private_definer USING ((user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (user_id IS NULL));
+CREATE POLICY pd_storage_objects_delete ON storage.objects FOR DELETE TO private_definer USING (bucket_id = 'receipts' AND (owner = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR name LIKE 'receipts/' || current_setting('app.delete_my_data.target_user_id', true) || '/%'));
+CREATE POLICY pd_storage_objects_delete_r ON storage.objects FOR SELECT TO private_definer USING (bucket_id = 'receipts' AND (owner = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid OR name LIKE 'receipts/' || current_setting('app.delete_my_data.target_user_id', true) || '/%'));
+CREATE POLICY pd_profile_select ON app.profile FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
 
 -- ============================================================================
 -- 7. Baseline table grants (the GRANTs the policies above depend on to even
