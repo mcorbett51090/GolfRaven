@@ -127,7 +127,10 @@ function makeFakeContext(opts: {
             };
             if (routeHandler) await routeHandler(route, request);
             if (!aborted) {
-              if (spec.isNavigation) currentUrl = spec.url;
+              // Only a MAIN-FRAME navigation updates page.url() — an
+              // iframe/popup navigating does not change what the page
+              // itself reports as its own URL, matching real Playwright.
+              if (spec.isNavigation && (spec.mainFrame ?? true)) currentUrl = spec.url;
               if (responseHandler) {
                 responseHandler({
                   status: () => 200,
