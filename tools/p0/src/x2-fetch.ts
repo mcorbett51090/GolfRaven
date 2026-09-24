@@ -62,6 +62,7 @@ import {
   validateRenderExtraArgs,
   type ChromiumLauncher,
 } from "./x2-render.js";
+import { defaultLedgerPath, registerCapture } from "./x2-recorded-ledger.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -575,6 +576,12 @@ export async function runX2Fetch(
      * `renderUrl`'s own doc for why this exists (an environment-specific
      * TLS-trust escape hatch, never proxy-specific code in this file). */
     renderExtraArgs?: string[];
+    /** Gate finding 2: the recorded-captures ledger path — defaults to
+     * `<outDir>/recorded-ledger.json`; pass an explicit shared path when
+     * running several `--out-dir`s against the same logical URL set (see
+     * `x2-recorded-ledger.ts`'s own doc for why first-capture-wins cannot
+     * be scoped to one evidence directory). */
+    ledgerPath?: string;
   } = {},
 ): Promise<X2FetchManifest> {
   const timeoutMs = opts.timeoutMs ?? X2_DEFAULT_TIMEOUT_MS;
@@ -584,17 +591,34 @@ export async function runX2Fetch(
     );
   }
   await mkdir(outDir, { recursive: true });
-  const trails: Record<string, X2FetchEntry[]> = {};
-  const draftCandidateNames: Record<string, string[]> = {};
+  const ledgerPath = opts.ledgerPath ?? defaultLedgerPath(outDir);
+
+  // Gate finding 2b: MERGE into an existing manifest.json rather than
+  // overwriting it wholesale — a prior run's OTHER trails' entries (e.g.
+  // from `x2-ingest`, or an earlier `x2-fetch` call for a different trail)
+  // must never be silently dropped just because this run's `config` only
+  // covers a subset of trails.
+  const manifestPath = path.join(outDir, "manifest.json");
+  let existingManifest: X2FetchManifest | null = null;
+  try {
+    existingManifest = JSON.parse(await readFile(manifestPath, "utf8")) as X2FetchManifest;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  const trails: Record<string, X2FetchEntry[]> = { ...(existingManifest?.trails ?? {}) };
+  const draftCandidateNames: Record<string, string[]> = {
+    ...(existingManifest?.draftCandidateNames ?? {}),
+  };
   for (const [trail, urls] of Object.entries(config)) {
     const entries: X2FetchEntry[] = [];
-    const names: string[] = [];
-    const seenNames = new Set<string>();
+    const names: string[] = [...(draftCandidateNames[trail] ?? [])];
+    const seenNames = new Set<string>(names);
     for (const url of urls) {
       // Sequential, not parallel: polite to the destination hosts, and
       // keeps fetchedAt strictly ordered for a human reading the log.
       const entry = opts.render
-        ? await fetchOneRendered(trail, url, outDir, timeoutMs, {
+        ? await fetchOneRendered(trail, url, outDir, timeoutMs, ledgerPath, {
             ...(opts.renderExecutablePath !== undefined
               ? { executablePath: opts.renderExecutablePath }
               : {}),
@@ -605,7 +629,7 @@ export async function runX2Fetch(
               ? { extraArgs: opts.renderExtraArgs }
               : {}),
           })
-        : await fetchOne(trail, url, outDir, timeoutMs);
+        : await fetchOne(trail, url, outDir, timeoutMs, ledgerPath);
       entries.push(entry);
       for (const n of entry.draftCandidateNames) {
         if (!seenNames.has(n)) {
@@ -614,20 +638,19 @@ export async function runX2Fetch(
         }
       }
     }
-    trails[trail] = entries;
+    // MERGE (append), never replace — a re-run for a trail this manifest
+    // already had entries for keeps the old ones too (each carrying its
+    // own `recorded` status from the ledger, above).
+    trails[trail] = [...(trails[trail] ?? []), ...entries];
     draftCandidateNames[trail] = names;
   }
   const manifest: X2FetchManifest = {
-    generatedAt: new Date().toISOString(),
+    generatedAt: existingManifest?.generatedAt ?? new Date().toISOString(),
     outDir,
     trails,
     draftCandidateNames,
   };
-  await writeFile(
-    path.join(outDir, "manifest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    "utf8",
-  );
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return manifest;
 }
 
