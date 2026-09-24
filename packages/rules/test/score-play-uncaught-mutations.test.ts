@@ -160,9 +160,12 @@ describe("item 3 (seventh gate): a reviewer's void wins UNCONDITIONALLY — the 
     const ck = checkin({ fix: goodFix() });
     const result = scorePlayOrThrow([rVoidOld, rApprNew, ck], baseCtx());
     // Both receipt copies are void (weight 0) — only the check-in (0.30)
-    // remains. Before this fix, the approved copy (0.80) would have won.
+    // remains, money-eligible on its own but well under MONEY_MIN. Before
+    // this fix, the approved copy (0.80) would have won and both scores
+    // would have been 0.80.
     expect(result.score_badge).toBe(0.3);
-    expect(result.score_monetary).toBe(0);
+    expect(result.score_monetary).toBe(0.3);
+    expect(result.money).toBe(false);
   });
 
   it("order-independent: [void, approved] and [approved, void] give the SAME (voided) result", () => {

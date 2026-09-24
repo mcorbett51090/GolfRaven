@@ -137,7 +137,10 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
     const { manifest } = await ingestOwnerSavedPage({
       trail: "TN",
       filePath: file,
-      statedUrl: "https://tngolftrail.net/rules",
+      // Gate finding 2a (re-gate): must exactly match a configured URL,
+      // not merely share an allowed host — TN_CONFIG's own root URL for
+      // this host, not an arbitrary "/rules" path on it.
+      statedUrl: "https://tngolftrail.net/",
       statedDate: "2026-09-24",
       sourceConfig: TN_CONFIG,
       outDir,
@@ -164,7 +167,7 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
     ).rejects.toThrow(/gate N6/);
   });
 
-  it("decision 0001 Addendum J(a): refuses a stated URL whose host is not on the trail's configured host list", async () => {
+  it("decision 0001 Addendum J(a) / gate finding 2a: refuses a stated URL whose host is not on the trail's configured host list", async () => {
     const file = writeFixtureHtml("tn-foreign.html", "<h1>x</h1>");
     await expect(
       ingestOwnerSavedPage({
@@ -176,7 +179,24 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
         outDir: path.join(OUT_DIR, "foreign-host-run"),
         ledgerPath: ledgerFor(path.join(OUT_DIR, "foreign-host-run")),
       }),
-    ).rejects.toThrow(/configured host list/);
+    ).rejects.toThrow(/does not exactly match .* configured list/);
+  });
+
+  it("gate finding 2a (re-gate): refuses a stated URL on an ALLOWED host but a path the trail never configured (the host-only bypass this finding closed)", async () => {
+    const file = writeFixtureHtml("tn-anypath.html", "<h1>x</h1>");
+    await expect(
+      ingestOwnerSavedPage({
+        trail: "TN",
+        filePath: file,
+        // "tnstateparks.com" (www-equivalent) IS an allowed HOST — but
+        // "/anything-at-all" was never one of TN's configured URLs.
+        statedUrl: "https://www.tnstateparks.com/anything-at-all",
+        statedDate: "2026-09-24",
+        sourceConfig: TN_CONFIG,
+        outDir: path.join(OUT_DIR, "any-path-run"),
+        ledgerPath: ledgerFor(path.join(OUT_DIR, "any-path-run")),
+      }),
+    ).rejects.toThrow(/does not exactly match .* configured list/);
   });
 
   it("refuses a malformed stated date", async () => {
