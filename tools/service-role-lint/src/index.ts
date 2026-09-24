@@ -22,9 +22,23 @@ const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts",
 // path, not even an attack) or `supabase/functions/some-fn/__fixtures__/`
 // was never linted at all. Only `node_modules` (legitimate: vendored
 // third-party code, never product code) is still excluded by basename.
-// The lint's OWN fixtures directory is excluded by its EXACT resolved
-// path — `<functionsRoot>/__fixtures__` — not by name, so a
-// differently-located `__fixtures__` is linted like anything else.
+//
+// ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): "importing from
+// __fixtures__ bypasses the lint." The lint's OWN fixtures directory used
+// to be excluded here by its exact resolved path
+// (`<functionsRoot>/__fixtures__`) — closing the "differently-located
+// __fixtures__" gap the M3 fix above already named, but leaving a
+// DIFFERENT, real one open: a genuine function under supabase/functions
+// could `import` a RELATIVE path INTO that excluded directory
+// (`../__fixtures__/bad/g1-pinned-build-esm-sh.ts`), and since the lint
+// never walked/read anything under __fixtures__ at all, it never saw —
+// and never flagged — the file the import actually pulled in, while Deno
+// would happily run it at deploy time. The fix is not a smarter
+// exclusion: the lint's own fixtures no longer live anywhere under
+// supabase/functions at all (moved to tools/service-role-lint/test/
+// fixtures/**, this round) — nothing under supabase/functions is EVER
+// excluded here now, closing this class of gap structurally rather than
+// by carving out one more special case.
 const EXCLUDED_BASENAMES = new Set(["node_modules"]);
 
 // ⛔ FIX (follow-up, post-P3a re-gate round 2): "the lint walker must
@@ -36,7 +50,6 @@ const EXCLUDED_BASENAMES = new Set(["node_modules"]);
 function listFiles(root: string): { files: string[]; findings: LintResult[] } {
   const out: string[] = [];
   const problems: LintResult[] = [];
-  const ownFixturesDir = resolve(root, "__fixtures__");
   const visitedRealPaths = new Set<string>();
   try {
     visitedRealPaths.add(realpathSync(root));
@@ -60,7 +73,6 @@ function listFiles(root: string): { files: string[]; findings: LintResult[] } {
       }
       if (st.isDirectory()) {
         if (EXCLUDED_BASENAMES.has(entry)) continue;
-        if (resolve(full) === ownFixturesDir) continue;
         let real: string;
         try {
           real = realpathSync(full);

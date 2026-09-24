@@ -384,10 +384,14 @@ export interface ConfigIndex {
 // REALPATH (symlinks resolved) is recorded before recursing into it; a
 // directory whose realpath was already visited is reported once and NOT
 // walked again, instead of recursing forever.
+// ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): the `__fixtures__`
+// exclusion is GONE — see index.ts's own note on this. The lint's
+// fixtures no longer live under supabase/functions at all (moved to
+// tools/service-role-lint/test/fixtures/**), so nothing under
+// functionsRoot is ever excluded from config discovery either.
 function listDirectories(root: string): { dirs: string[]; problems: ConfigProblem[] } {
   const out: string[] = [resolve(root)];
   const problems: ConfigProblem[] = [];
-  const ownFixturesDir = resolve(root, "__fixtures__");
   const visitedRealPaths = new Set<string>();
   try {
     visitedRealPaths.add(realpathSync(root));
@@ -413,7 +417,6 @@ function listDirectories(root: string): { dirs: string[]; problems: ConfigProble
       }
       if (!st.isDirectory()) continue;
       if (EXCLUDED_BASENAMES.has(entry)) continue;
-      if (resolve(full) === ownFixturesDir) continue;
       let real: string;
       try {
         real = realpathSync(full);
