@@ -136,4 +136,68 @@ export async function runMapCspTest(browser, baseUrl, paths) {
   return results;
 }
 
+/**
+ * Blocking re-gate finding: "Add an e2e search assertion: type a query,
+ * and expect results under the CSP with zero violations." Pagefind's own
+ * WASM search index is exactly the thing the `/pagefind/*` CSP block
+ * exists for (`gen-headers.mjs`'s doc) — this exercises it for real:
+ * types into `SiteSearch.astro`'s input, waits for a real result to
+ * render, and asserts zero `securitypolicyviolation` events the whole
+ * time (a WASM-compile block would show up here, not as a thrown JS
+ * error Playwright would otherwise surface on its own).
+ *
+ * @param {import('@playwright/test').Browser} browser
+ * @param {string} baseUrl
+ * @param {string} path
+ * @param {string} query
+ */
+export async function checkSearch(browser, baseUrl, path, query) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  await page.addInitScript(() => {
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", (ev) => {
+      window.__cspViolations.push({ directive: ev.violatedDirective, blockedURI: ev.blockedURI });
+    });
+  });
+
+  const response = await page.goto(`${baseUrl}${path}`, { waitUntil: "load" });
+  assert.equal(response?.status(), 200, `${path}: expected HTTP 200`);
+
+  const input = page.locator("[data-search-input]");
+  await input.click();
+  await input.fill(query);
+
+  const results = page.locator("[data-search-results] li");
+  await results
+    .first()
+    .waitFor({ state: "attached", timeout: 8000 })
+    .catch(() => {
+      throw new Error(
+        `search for "${query}" on ${path} produced no results within 8s — either Pagefind's WASM ` +
+          `index failed to load under this page's CSP, or the query genuinely matched nothing ` +
+          `(check the query against the built site's actual content first)`,
+      );
+    });
+  const resultCount = await results.count();
+  const firstResultText = await results.first().innerText();
+
+  const violations = await page.evaluate(() => window.__cspViolations ?? []);
+  await context.close();
+
+  if (violations.length > 0) {
+    throw new Error(
+      `search e2e: ${violations.length} CSP violation(s) while searching — ` +
+        violations.map((v) => `${v.directive} blocked ${v.blockedURI}`).join("; "),
+    );
+  }
+  if (resultCount === 0) {
+    throw new Error(`search e2e: 0 results for "${query}" — the assertion needs a query that actually matches`);
+  }
+
+  console.log(`  [e2e] search "${query}" on ${path}: ${resultCount} result(s), 0 CSP violations (first: "${firstResultText}")`);
+  return { resultCount, violations };
+}
+
 export { FAKE_STYLE_URL, FAKE_TILE_HOST };

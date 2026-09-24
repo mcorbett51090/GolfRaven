@@ -33,16 +33,25 @@
  *   WASM search index needs `'wasm-unsafe-eval'` (below), but nothing else
  *   on the site does, so the BLANKET grant from the previous design is
  *   replaced with a path-scoped one.
- * - **`/pagefind/*` gets its OWN `_headers` block** adding
- *   `'wasm-unsafe-eval'` to `script-src` — Cloudflare Pages `_headers`
- *   supports multiple path-prefixed blocks, each independent (more
- *   specific rules do not merge with `/*`, per Cloudflare's own docs
- *   `[unverified — training knowledge; not independently re-confirmed
- *   this session]`), so this keyword now applies ONLY to requests under
- *   `/pagefind/`, never site-wide `[inference — general CSP+WebAssembly
- *   platform behaviour, not independently confirmed against Pagefind's
- *   own docs: pagefind.app was unreachable from this sandbox's egress
- *   proxy this session]`.
+ * - **`/pagefind/*` gets its OWN `_headers` block, AFTER `/*`, and
+ *   DETACHES `Content-Security-Policy` before re-setting it** — corrected
+ *   this round (confirmed against Cloudflare's own docs,
+ *   https://developers.cloudflare.com/pages/configuration/headers/, and
+ *   cloudflare-docs PR #32995): Pages does NOT let a later, more specific
+ *   block override an earlier header value. Every MATCHING block's
+ *   headers apply, in file order, and a header name repeated across
+ *   blocks is JOINED WITH A COMMA rather than replaced — so without the
+ *   `! Content-Security-Policy` line below, `/pagefind/*` would have
+ *   received BOTH the `/*` block's CSP and its own, comma-joined into one
+ *   invalid, doubly-restrictive header (the browser intersects the two
+ *   policies, and the `/*` block's policy has no `'wasm-unsafe-eval'`, so
+ *   Pagefind's WASM would still be blocked even though this file *looks*
+ *   like it grants the keyword). `! Content-Security-Policy` clears
+ *   whatever `/*` already contributed for a `/pagefind/*` request BEFORE
+ *   this block's own `Content-Security-Policy:` line sets the real,
+ *   final value — the "detach" only removes what earlier rules added, so
+ *   the file order here (`/*` first, `/pagefind/*` second) is load-
+ *   bearing, not cosmetic.
  * - `connect-src 'self'[, <tile hosts>]` / `img-src 'self'[, <tile
  *   hosts>]` — added ONLY when `GOLFRAVEN_TILE_STYLE_URL` is configured,
  *   for the EXACT host set `map-config.mjs`'s `tileConfig()` derives
@@ -108,8 +117,14 @@ export function buildHeaders(env = process.env) {
     `  Referrer-Policy: strict-origin-when-cross-origin\n` +
     `\n` +
     `# Pagefind's WASM search index needs 'wasm-unsafe-eval' — scoped to\n` +
-    `# ONLY this path, not the site-wide block above (see module doc).\n` +
+    `# ONLY this path, not the site-wide block above (see module doc). The\n` +
+    `# "! Content-Security-Policy" line DETACHES the /* block's CSP for a\n` +
+    `# /pagefind/* request before this block sets its own — Cloudflare Pages\n` +
+    `# joins a repeated header's values across matching blocks with a comma\n` +
+    `# rather than overriding, so omitting this line would silently ship\n` +
+    `# BOTH policies joined (and Pagefind's WASM blocked either way).\n` +
     `/pagefind/*\n` +
+    `  ! Content-Security-Policy\n` +
     `  Content-Security-Policy: ${pagefindCsp}\n` +
     `\n` +
     `/catalog/v1/*\n` +

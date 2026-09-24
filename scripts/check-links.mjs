@@ -55,6 +55,7 @@ import dns from "node:dns";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Agent, fetch as undiciFetch } from "undici";
 import { loadCatalog, loadCatalogFromBundle, primaryTrailOf } from "@golfraven/catalog";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -103,15 +104,95 @@ export function isPrivateV4(ip) {
     v4InCidr(n, "240.0.0.0", 4)
   );
 }
+/**
+ * Expands ANY textual IPv6 form (`::`-compressed, an embedded IPv4 tail
+ * like `::ffff:1.2.3.4` or `64:ff9b::1.2.3.4`) into its 8 numeric 16-bit
+ * groups. Returns `null` on anything unparseable (callers then fail
+ * closed, same as `ipv4ToInt`'s `null` convention).
+ */
+export function expandIPv6(addr) {
+  const lower = addr.toLowerCase().trim();
+  const expandV4Tail = (parts) => {
+    const last = parts[parts.length - 1];
+    if (!last || !last.includes(".")) return parts;
+    const v4 = last.split(".").map(Number);
+    if (v4.length !== 4 || v4.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+    const hi = ((v4[0] << 8) | v4[1]).toString(16);
+    const lo = ((v4[2] << 8) | v4[3]).toString(16);
+    return [...parts.slice(0, -1), hi, lo];
+  };
+
+  let headParts, tailParts;
+  if (lower.includes("::")) {
+    const sides = lower.split("::");
+    if (sides.length !== 2) return null; // "::" may appear at most once
+    headParts = sides[0] ? sides[0].split(":").filter(Boolean) : [];
+    tailParts = sides[1] ? sides[1].split(":").filter(Boolean) : [];
+  } else {
+    headParts = lower.split(":").filter(Boolean);
+    tailParts = [];
+  }
+  headParts = expandV4Tail(headParts);
+  tailParts = expandV4Tail(tailParts);
+  if (headParts === null || tailParts === null) return null;
+
+  let groups;
+  if (lower.includes("::")) {
+    const missing = 8 - headParts.length - tailParts.length;
+    if (missing < 0) return null;
+    groups = [...headParts, ...Array(missing).fill("0"), ...tailParts];
+  } else {
+    groups = headParts;
+  }
+  if (groups.length !== 8) return null;
+  const nums = groups.map((g) => parseInt(g, 16));
+  if (nums.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return null;
+  return nums;
+}
+
+/**
+ * IPv6 private/reserved/transition-mechanism ranges. Each range whose
+ * transport is really an embedded IPv4 address (NAT64 `64:ff9b::/96`,
+ * 6to4 `2002::/16`, v4-mapped `::ffff:0:0/96`, v4-compatible `::/96`)
+ * recurses into `isPrivateV4` on that embedded address — a NAT64/6to4/
+ * v4-mapped/v4-compatible wrapper around a PUBLIC v4 address is not
+ * itself private, only wrapping a PRIVATE one is.
+ */
+export function isPrivateIpv6(addr) {
+  const g = expandIPv6(addr);
+  if (g === null) return true; // unparseable -> treat as unsafe
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
+  const embeddedV4 = () => `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`;
+
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0 && g6 === 0 && g7 === 0) {
+    return true; // ::  (unspecified)
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0 && g6 === 0 && g7 === 1) {
+    return true; // ::1 (loopback)
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+    return isPrivateV4(embeddedV4()); // ::ffff:0:0/96 (v4-mapped)
+  }
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateV4(embeddedV4()); // ::0.0.0.0/96 (v4-compatible, deprecated)
+  }
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
+    return isPrivateV4(embeddedV4()); // 64:ff9b::/96 (NAT64)
+  }
+  if (g0 === 0x2002) {
+    return isPrivateV4(`${g1 >> 8}.${g1 & 0xff}.${g2 >> 8}.${g2 & 0xff}`); // 2002::/16 (6to4)
+  }
+  if ((g0 & 0xff00) === 0xff00) return true; // ff00::/8 (multicast)
+  if ((g0 & 0xffc0) === 0xfe80) return true; // fe80::/10 (link-local)
+  if ((g0 & 0xffc0) === 0xfec0) return true; // fec0::/10 (site-local, deprecated)
+  if ((g0 & 0xfe00) === 0xfc00) return true; // fc00::/7 (unique local)
+  return false;
+}
+
 export function isPrivateIp(addr) {
   const ip = addr.toLowerCase();
-  if (ip.startsWith("::ffff:")) return isPrivateV4(ip.slice(7));
   if (ip.includes(".") && !ip.includes(":")) return isPrivateV4(ip);
-  if (ip === "::1" || ip === "::" || ip === "0:0:0:0:0:0:0:1") return true;
-  if (ip.startsWith("fe80") || ip.startsWith("fe9") || ip.startsWith("fea") || ip.startsWith("feb")) return true;
-  const hi = ip.slice(0, 2);
-  if (hi === "fc" || hi === "fd") return true;
-  return false;
+  return isPrivateIpv6(ip);
 }
 
 async function assertPublicHost(hostname) {
@@ -126,6 +207,39 @@ async function assertPublicHost(hostname) {
     if (isPrivateIp(a.address)) throw new Error(`private-ip:${a.address}`);
   }
 }
+
+// ---------------------------------------------------------------------
+// Should-fix (Opus gate, "check-links DNS pinning"): the pre-flight
+// `assertPublicHost` above and the actual TCP connection are two SEPARATE
+// DNS resolutions — a DNS answer that was public when checked can change
+// (a rebind) by the time the socket actually connects. This `Agent`'s
+// `connect.lookup` is the SAME function undici's connector calls to
+// resolve the address it actually dials, so pinning it here closes that
+// gap instead of merely narrowing it.
+//
+// **Must use undici's OWN `fetch` export, not Node's global `fetch`, with
+// this `Agent`.** Confirmed this session: Node 22.22.2 bundles undici
+// 6.24.1 internally for `globalThis.fetch`; passing a `dispatcher` built
+// from the separately npm-installed `undici@8.11.2` package into the
+// GLOBAL fetch throws `"invalid onRequestStart method"` (an internal
+// interceptor-interface mismatch across major versions) — passing it to
+// `undiciFetch` (the matching version) works correctly, verified against
+// both a blocked-private-IP case (`https://localhost/`) and a real host.
+// ---------------------------------------------------------------------
+function pinnedLookup(hostname, options, callback) {
+  dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    if (err) return callback(err);
+    const list = Array.isArray(addrs) ? addrs : [addrs];
+    for (const a of list) {
+      if (isPrivateIp(a.address)) {
+        return callback(new Error(`private-ip:${a.address}`));
+      }
+    }
+    if (options.all) callback(null, list);
+    else callback(null, list[0].address, list[0].family);
+  });
+}
+const pinnedAgent = new Agent({ connect: { lookup: pinnedLookup } });
 
 function validateHttpsUrl(raw) {
   const u = new URL(raw);
@@ -152,12 +266,17 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs) {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
-      res = await fetch(u.href, {
+      // Must be undici's OWN `fetch`, not Node's global one — see the
+      // `pinnedAgent` doc comment above for why the global fetch's
+      // internal (older, bundled) undici rejects a dispatcher built from
+      // the separately-installed undici package.
+      res = await undiciFetch(u.href, {
         method: "HEAD",
         redirect: "manual",
         credentials: "omit",
         signal: controller.signal,
         headers: { "user-agent": UA },
+        dispatcher: pinnedAgent,
       });
     } finally {
       clearTimeout(timer);
@@ -169,12 +288,13 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs) {
       const controller2 = new AbortController();
       const timer2 = setTimeout(() => controller2.abort(), timeoutMs);
       try {
-        res = await fetch(u.href, {
+        res = await undiciFetch(u.href, {
           method: "GET",
           redirect: "manual",
           credentials: "omit",
           signal: controller2.signal,
           headers: { "user-agent": UA },
+          dispatcher: pinnedAgent,
         });
       } finally {
         clearTimeout(timer2);
@@ -336,4 +456,12 @@ async function main() {
   }
 }
 
-await main();
+// Should-fix (Opus gate, "check-links `main()` guard"): only run when this
+// file is the entry point, not merely imported (e.g. by
+// `check-links.test.ts`, which imports `hardenedCheck`/`isPrivateIp`/etc.
+// directly and must not trigger a live catalog load + network attempt as
+// a side effect of that import).
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  await main();
+}

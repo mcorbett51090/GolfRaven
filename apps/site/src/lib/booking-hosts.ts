@@ -47,6 +47,7 @@ export function bookingHostsConfigPath(cwd: string = process.cwd()): string {
 export async function loadBookingHostAllowList(): Promise<string[]> {
   const raw = JSON.parse(await readFile(bookingHostsConfigPath(), "utf8")) as {
     hosts?: string[];
+    synthetic?: unknown;
     _comment?: unknown;
   };
   // Should-fix (Opus gate, Booking): refuse a production build outright

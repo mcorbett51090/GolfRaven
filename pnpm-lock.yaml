@@ -11,6 +11,9 @@ importers:
       '@golfraven/catalog':
         specifier: workspace:*
         version: link:packages/catalog
+      undici:
+        specifier: 8.11.2
+        version: 8.11.2
 
   apps/ciq: {}
 

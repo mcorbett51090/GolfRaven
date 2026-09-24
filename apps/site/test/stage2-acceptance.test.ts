@@ -16,7 +16,13 @@ import { CspParser } from "csp_evaluator/dist/parser.js";
 import { Severity } from "csp_evaluator/dist/finding.js";
 import { verifyBudget } from "../scripts/verify-budget.mjs";
 import { verifyA11yBudget } from "../scripts/verify-a11y-budget.mjs";
-import { parseRedirects, renderRedirectsFile } from "../scripts/gen-redirects.mjs";
+import {
+  assertFromNotShadowingBuiltPage,
+  assertNoSelfRedirects,
+  assertTargetsBuilt,
+  parseRedirects,
+  renderRedirectsFile,
+} from "../scripts/gen-redirects.mjs";
 import { buildHeaders } from "../scripts/gen-headers.mjs";
 import { allowedBookingEntries, bookingEntryAllowed, bookingPlatformLabel } from "../src/lib/booking-hosts";
 import { loadCatalogFromBundle } from "@golfraven/catalog";
@@ -174,18 +180,35 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
     ).toBe("Someotherplatform");
   });
 
-  it("assertBookingHostsNotSynthetic refuses a production build while the SYNTHETIC/TEST-ONLY marker is present, and allows non-production", async () => {
+  // Nit (re-gate): the guard now reads a structural "synthetic" field,
+  // never `_comment` prose — see booking-hosts-guard.mjs's doc for why.
+  it("assertBookingHostsNotSynthetic refuses a production build unless synthetic === false EXPLICITLY, and allows non-production regardless", async () => {
     const { assertBookingHostsNotSynthetic } = await import("../src/lib/booking-hosts-guard.mjs");
-    const syntheticRaw = { _comment: "SYNTHETIC / TEST ONLY (P1a). ...", hosts: ["www.golfnow.com"] };
-    expect(() => assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "production" })).toThrow(
-      /synthetic|test-only/i,
-    );
+    const syntheticRaw = { synthetic: true, hosts: ["www.golfnow.com"] };
+    expect(() =>
+      assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "production" }),
+    ).toThrow(/synthetic/i);
     expect(() => assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "development" })).not.toThrow();
-    const realRaw = { _comment: "The real, X4/X6-approved allow-list.", hosts: ["www.golfnow.com"] };
+
+    // Missing field entirely — fail-closed, same as `true` (the should-fix's
+    // explicit requirement: "refuse if the field is absent entirely").
+    const missingFieldRaw = { hosts: ["www.golfnow.com"] };
+    expect(() =>
+      assertBookingHostsNotSynthetic(missingFieldRaw, { GOLFRAVEN_ENV: "production" }),
+    ).toThrow(/missing entirely/);
+
+    // A truthy-but-not-boolean value (e.g. a stray string) also refuses —
+    // only the literal boolean `false` is trusted.
+    const stringyRaw = { synthetic: "false", hosts: ["www.golfnow.com"] };
+    expect(() =>
+      assertBookingHostsNotSynthetic(stringyRaw, { GOLFRAVEN_ENV: "production" }),
+    ).toThrow(/not the boolean false/);
+
+    const realRaw = { synthetic: false, hosts: ["www.golfnow.com"] };
     expect(() => assertBookingHostsNotSynthetic(realRaw, { GOLFRAVEN_ENV: "production" })).not.toThrow();
   });
 
-  it("the REAL config/booking-hosts.json still carries the SYNTHETIC marker today (P1a not yet resolved) — verify-input.mjs / booking-hosts.ts both refuse it in production", async () => {
+  it("the REAL config/booking-hosts.json has no \"synthetic\": false field today (P1a not yet resolved) — verify-input.mjs / booking-hosts.ts both refuse it in production", async () => {
     const raw = JSON.parse(
       await (await import("node:fs/promises")).readFile(
         join(siteRoot, "..", "..", "config", "booking-hosts.json"),
@@ -219,6 +242,34 @@ describe("AT(5): retired slugs get a 301 rule in the generated _redirects", () =
       /query string/,
     );
   });
+
+  // Nit (Opus gate): refuse from === to.
+  it("assertNoSelfRedirects refuses a rule whose from equals its to", () => {
+    const rules = parseRedirects({ redirects: [{ from: "/courses/same-slug/", to: "/courses/same-slug/" }] });
+    expect(() => assertNoSelfRedirects(rules)).toThrow(/from === to/);
+  });
+  it("assertNoSelfRedirects accepts a rule whose from differs from its to", () => {
+    const rules = parseRedirects({ redirects: [{ from: "/courses/old-slug/", to: "/courses/new-slug/" }] });
+    expect(() => assertNoSelfRedirects(rules)).not.toThrow();
+  });
+
+  // Nit (Opus gate): refuse a `from` that shadows an actually-built page.
+  it("assertFromNotShadowingBuiltPage refuses a from that IS a real built page in the real dist", () => {
+    const rules = parseRedirects({
+      redirects: [{ from: "/courses/ridge-overlook-golf-club/", to: "/courses/thinfield-muni/" }],
+    });
+    expect(() => assertFromNotShadowingBuiltPage(rules, BUILDS.real.dist)).toThrow(/would shadow it/);
+  });
+  it("assertFromNotShadowingBuiltPage accepts a from that is NOT a built page (a genuinely retired slug)", () => {
+    const rules = parseRedirects({
+      redirects: [{ from: "/courses/old-ridge-overlook-slug/", to: "/courses/ridge-overlook-golf-club/" }],
+    });
+    expect(() => assertFromNotShadowingBuiltPage(rules, BUILDS.real.dist)).not.toThrow();
+    // Sanity: the SAME rule's `to` really is built — proves the fixture
+    // used above resembles a genuine retired-slug rename, not an
+    // accidental typo that happens to dodge both checks.
+    expect(() => assertTargetsBuilt(rules, BUILDS.real.dist)).not.toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------
@@ -233,9 +284,20 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
 
   // Should-fix: "Make AT9 set its own env instead of relying on the
   // caller's shell." — every env var this describe block depends on
-  // (GOLFRAVEN_OG_STORE_SIMULATE_EMPTY, GOLFRAVEN_OG_BUDGET_MS) is set
-  // and restored INSIDE each test below, never assumed to be pre-set by
-  // whatever invoked `vitest run`.
+  // (GOLFRAVEN_OG_STORE_SIMULATE_EMPTY, GOLFRAVEN_OG_BUDGET_MS,
+  // GOLFRAVEN_DEMO) is set and restored INSIDE each test below, never
+  // assumed to be pre-set by whatever invoked `vitest run`.
+  //
+  // Re-gate should-fix: the two tests below call `og/courses/[slug].png.ts`'s
+  // `GET()` directly, which internally calls `loadSiteCatalog()` with NO
+  // args — i.e. it reads `process.env.GOLFRAVEN_DEMO` itself, ambiently.
+  // These tests happened to pass because this repo's required test
+  // command sets `GOLFRAVEN_DEMO=1` for the whole process, but that made
+  // them silently depend on the CALLER's shell rather than the test's own
+  // setup — `vitest run` on its own (no ambient GOLFRAVEN_DEMO) would have
+  // hit the real (empty) `data/` dir and thrown. Both tests below now set
+  // `GOLFRAVEN_DEMO: "1"` explicitly via `withEnv`, same as every other
+  // env var they depend on.
   function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
     const saved: Record<string, string | undefined> = {};
     for (const key of Object.keys(overrides)) saved[key] = process.env[key];
@@ -254,7 +316,7 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
   it("a simulated empty OG store completes with the fallback TEMPLATE card, never a failure", async () => {
     const catalog = loadCatalogFromBundle(demoBundleForSite());
     const facility = catalog.facilities.find((f) => f.slug === "ridge-overlook-golf-club")!;
-    await withEnv({ GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: "1" }, async () => {
+    await withEnv({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: "1" }, async () => {
       const { GET } = await import("../src/pages/og/courses/[slug].png.ts");
       const response = await GET({ props: { facility } } as any);
       expect(response.status).toBe(200);
@@ -279,6 +341,7 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
     try {
       await withEnv(
         {
+          GOLFRAVEN_DEMO: "1",
           GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: undefined,
           GOLFRAVEN_OG_STORE_DIR: scratchStore, // fresh, empty, REACHABLE store — a real cache miss
           GOLFRAVEN_OG_BUDGET_MS: "1", // effectively zero — the very first card already exceeds it
