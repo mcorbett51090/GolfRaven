@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(24);
+SELECT plan(38);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -152,11 +152,9 @@ SELECT is(
 -- ---------------------------------------------------------------------------
 -- 5. Receipt dedupe: partial unique index + serialized dedupe function.
 -- ---------------------------------------------------------------------------
-SELECT throws_ok(
+SELECT lives_ok(
   $$INSERT INTO app.receipt_fingerprint (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
     VALUES (NULL, '00000000-0000-0000-0000-00000000000b', 'phash-dupe-ocr', 'OCR-DUPE-1', 'fac_x', current_date)$$,
-  NULL,
-  NULL,
   'setup: seed one receipt_fingerprint row with a real OCR number'
 );
 SELECT throws_ok(
