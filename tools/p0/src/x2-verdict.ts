@@ -234,10 +234,21 @@ export interface AcceptRowGitProvenance {
    * `N` means "no signature"), printed as-is, never interpreted as proof
    * of identity. */
   signatureStatus: string;
-  /** `true` only when `git merge-base --is-ancestor <commit> origin/main`
-   * succeeds — the commit is reachable from the shared, pushed history,
-   * not merely sitting in a local/unshared branch. */
-  reachableFromOriginMain: boolean;
+  /** Gate finding (third re-gate, "trust root is the caller's repo plus
+   * local refs"): `true` only when `git merge-base --is-ancestor <commit>
+   * refs/x2-verdict/verified-main` succeeds, where that ref was just
+   * FRESHLY FETCHED (this same run, never read stale) from the pinned
+   * canonical URL (`GOLFRAVEN_CANONICAL_REPO_URL`) — never the editable
+   * local `origin` remote, which a caller can point anywhere or forge
+   * with a bare `git update-ref`. This proves the commit is reachable
+   * from GENUINE GitHub `main`, not merely from some local ref of the
+   * same name. See this module's own "Honest limit" doc: this still does
+   * not prove WHO made the commit (agents hold Matt's own credentials,
+   * and even an API-made commit is GitHub-signed, so `signatureStatus`
+   * proves nothing about identity either) — the value is that a forgery
+   * now has to land in the SHARED, PUBLIC GitHub history, where Matt can
+   * see it, not merely in a throwaway local repo. */
+  reachableFromVerifiedMain: boolean;
 }
 
 export interface ResolvedCorroborationEntry {
@@ -257,13 +268,19 @@ export interface ResolvedCorroborationEntry {
    * for the verdict output/reasons — never left implicit. */
   waybackDetail?: string;
   /** `acceptance` records only: `true` only when a matching structured
-   * `ACCEPT` row was found in `docs/p0/X2.md`'s `## Log` section AND the
-   * commit that introduced it is reachable from `origin/main` (gate
-   * finding 2, re-gate). */
+   * `ACCEPT` row was found in `docs/p0/X2.md`'s `## Log` section, that
+   * row is VISIBLE prose (not inside a fenced code block, an HTML
+   * comment, or an indented code block — gate finding, third re-gate,
+   * fix (c)), `docs/p0/X2.md` itself is the toolkit's own canonical file
+   * (fix (a)), the commit that introduced the row is reachable from a
+   * FRESHLY FETCHED `refs/x2-verdict/verified-main` (fix (b)), and the
+   * acceptance date is on/after the evidence's own `ownerSavedDate` and
+   * no more than 1 day after the commit's own date (should-fix). */
   acceptanceLogged?: boolean;
   /** `acceptance` records only: the git provenance of the matched row,
    * when one was found (regardless of whether it was reachable from
-   * `origin/main` — printed either way so a reader can see why). */
+   * `refs/x2-verdict/verified-main` — printed either way so a reader can
+   * see why). */
   acceptanceProvenance?: AcceptRowGitProvenance | null;
   /** `acceptance` records only: why `acceptanceLogged` is `false`, or a
    * plain confirmation — never left implicit. */
