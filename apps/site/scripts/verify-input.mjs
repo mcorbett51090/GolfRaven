@@ -18,6 +18,7 @@ import { isCatalogEmpty, loadCatalog, loadCatalogFromBundle } from "@golfraven/c
 import { verifyCatalogRaw } from "@golfraven/catalog-tools";
 import { demoBundleForSite, demoBundleForVerify } from "../fixtures/demo-catalog/build-bundle.mjs";
 import { isProductionEnv } from "../src/lib/env.mjs";
+import { assertBookingHostsNotSynthetic } from "../src/lib/booking-hosts-guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Overridable via GOLFRAVEN_DATA_DIR — see derive.ts's realDataDir() doc.
@@ -48,6 +49,9 @@ async function loadSiteCatalog() {
 const { catalog, usedDemoData } = await loadSiteCatalog();
 
 const bookingHostsRaw = JSON.parse(await readFile(BOOKING_HOSTS_PATH, "utf8"));
+// Should-fix (Opus gate, Booking): refuse a production build outright
+// while the allow-list is still the synthetic/test-only P1a fixture.
+assertBookingHostsNotSynthetic(bookingHostsRaw);
 const bookingHostAllowList = bookingHostsRaw.hosts ?? [];
 
 // tools/catalog's CatalogBundleSchema has no `regions` field (site-only) —

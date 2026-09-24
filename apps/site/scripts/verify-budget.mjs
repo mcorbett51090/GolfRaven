@@ -15,16 +15,18 @@
  *   | Largest single file        | ≤ 20 MiB  |
  *   | Any `geometry/*` shard     | ≤ 5 MiB   |
  *
- * §5.2's "Warm `astro build` ≤ 12 min" gate is deliberately NOT enforced
- * as a hard failure here — build wall-clock varies enormously by host
- * (this repo's own sandboxed sessions in particular), and a flaky timing
- * gate is worse than an honest advisory one; `GOLFRAVEN_BUILD_STARTED_MS`
- * (set by the caller, e.g. `package.json`'s `build` script, to
- * `$(date +%s%3N)` before the chain starts) is read and REPORTED if
- * present, never failed on. §5.2's own text agrees with the "advisory,
- * never blocks" shape for the analogous nightly-cold-build case ("it
- * never blocks a deploy") — the same reasoning applies to a hot,
- * resource-constrained CI/dev sandbox.
+ * §5.2's "Warm `astro build` ≤ 12 min" gate (Opus gate should-fix,
+ * "Gates": "Add a warm-build timing check with the 12-minute gate and a
+ * warning at 90%.") IS now a real gate — `GOLFRAVEN_BUILD_STARTED_MS`
+ * (`package.json`'s `build` script sets it to `$(date +%s%3N)` before the
+ * chain starts) is read by `verifyBudget()` itself: past 12 min it's a
+ * FAILING issue (same list every other gate reports into); past 90% of
+ * that (10.8 min) it's a printed warning, never a failure — an early
+ * heads-up while there's still time to notice a build creeping toward
+ * the wall before it actually crosses it. Absent `GOLFRAVEN_BUILD_STARTED_MS`
+ * (a caller that never set it, or `verifyBudget()` called directly from a
+ * test with no timing to judge), the timing check is skipped outright —
+ * never a false pass OR fail from a missing signal.
  */
 import { readdir, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
@@ -32,6 +34,7 @@ import { fileURLToPath } from "node:url";
 
 const MiB = 1024 * 1024;
 const MB = 1_000_000;
+const MIN = 60_000;
 
 const GATES = {
   distSizeBytes: 400 * MB,
@@ -39,6 +42,8 @@ const GATES = {
   maxRedirectsRules: 1_800,
   maxFileBytes: 20 * MiB,
   maxGeometryShardBytes: 5 * MiB,
+  warmBuildMs: 12 * MIN,
+  warmBuildWarnFraction: 0.9,
 };
 
 async function walk(dir) {
@@ -59,8 +64,11 @@ function countRedirectsRules(text) {
     .filter((l) => l.length > 0 && !l.startsWith("#")).length;
 }
 
-export async function verifyBudget(distDir) {
+export async function verifyBudget(distDir, opts = {}) {
+  const env = opts.env ?? process.env;
+  const nowMs = opts.nowMs ?? Date.now();
   const issues = [];
+  const warnings = [];
   const files = await walk(distDir);
 
   let totalBytes = 0;
@@ -110,14 +118,32 @@ export async function verifyBudget(distDir) {
     // the gate, nothing to report.
   }
 
+  let warmBuildMs = null;
+  const startedMs = Number(env.GOLFRAVEN_BUILD_STARTED_MS);
+  if (Number.isFinite(startedMs) && startedMs > 0) {
+    warmBuildMs = nowMs - startedMs;
+    if (warmBuildMs > GATES.warmBuildMs) {
+      issues.push(
+        `warm build took ${(warmBuildMs / MIN).toFixed(1)} min, exceeds the §5.2 ${GATES.warmBuildMs / MIN} min warm-build gate`,
+      );
+    } else if (warmBuildMs > GATES.warmBuildMs * GATES.warmBuildWarnFraction) {
+      warnings.push(
+        `warm build took ${(warmBuildMs / MIN).toFixed(1)} min — over ${GATES.warmBuildWarnFraction * 100}% of the ` +
+          `§5.2 ${GATES.warmBuildMs / MIN} min warm-build gate`,
+      );
+    }
+  }
+
   return {
     ok: issues.length === 0,
     issues,
+    warnings,
     fileCount: files.length,
     totalBytes,
     largest,
     redirectsRules,
     geometryOffenders,
+    warmBuildMs,
   };
 }
 
@@ -129,12 +155,10 @@ if (isMain) {
     join(new URL(".", import.meta.url).pathname, "..", "dist");
   const result = await verifyBudget(distDir);
 
-  const startedMs = Number(process.env.GOLFRAVEN_BUILD_STARTED_MS);
-  if (Number.isFinite(startedMs) && startedMs > 0) {
-    const elapsedMin = (Date.now() - startedMs) / 60_000;
-    const flag = elapsedMin > 12 ? " (over the §5.2 12 min warm-build target — advisory only)" : "";
-    console.log(`verify-budget: build took ~${elapsedMin.toFixed(1)} min${flag}`);
+  if (result.warmBuildMs !== null) {
+    console.log(`verify-budget: warm build took ~${(result.warmBuildMs / MIN).toFixed(1)} min`);
   }
+  for (const warning of result.warnings) console.warn(`verify-budget: WARN — ${warning}`);
 
   if (result.ok) {
     console.log(

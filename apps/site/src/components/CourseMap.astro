@@ -129,6 +129,12 @@ const geoUrls = countries.map((c) => withBase(`/data/map/${c}.geojson`)).join(",
       // CSS (`maplibre-gl/dist/maplibre-gl.css?url`).
       import cspWorkerUrl from "maplibre-gl/dist/maplibre-gl-csp-worker.js?url";
       import maplibreCssUrl from "maplibre-gl/dist/maplibre-gl.css?url";
+      // B2: self-hosted control-icon overrides (../styles/maplibre-overrides.css's
+      // own doc) — loaded AFTER maplibre-gl.css below so these same-
+      // specificity rules win by cascade order, replacing every data:
+      // URI background-image this component can actually trigger with a
+      // same-origin file, under the strict CSP (no `img-src data:`).
+      import maplibreOverridesCssUrl from "../styles/maplibre-overrides.css?url";
 
       type Props = {
         slug: string;
@@ -197,6 +203,14 @@ const geoUrls = countries.map((c) => withBase(`/data/map/${c}.geojson`)).join(",
             cssLink.href = maplibreCssUrl;
             cssLink.setAttribute("data-maplibre-css", "");
             document.head.appendChild(cssLink);
+            // Appended immediately after (same tick) — cascade order, not
+            // timing, is what makes these rules win; both are same-origin
+            // external stylesheets either way.
+            const overridesLink = document.createElement("link");
+            overridesLink.rel = "stylesheet";
+            overridesLink.href = maplibreOverridesCssUrl;
+            overridesLink.setAttribute("data-maplibre-overrides-css", "");
+            document.head.appendChild(overridesLink);
           }
 
           const styleUrl = root.dataset.tileStyle;

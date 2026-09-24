@@ -5,18 +5,31 @@
  * path rules. Do not port SWC's only rule (`/?winery=:slug`) ... Above the
  * rule cap, slug 301s move to Cloudflare Bulk Redirects (§5.2)."
  *
- * Reads `<dataDir>/redirects.json` (same `GOLFRAVEN_DATA_DIR` override
- * `derive.ts`/`verify-input.mjs` use, so a test's fixture data dir can
- * carry its own `redirects.json` right alongside its facilities/trails)
- * and writes `public/_redirects` as plain PATH-to-PATH 301 rules — never a
- * query-string rule (G-P2-09: Cloudflare Pages `_redirects` does not match
- * on a query string).
+ * **Runs POSTBUILD, writes directly into `<dist>/_redirects`** — same
+ * reasoning and same move as `gen-headers.mjs` (Opus gate nit: stop
+ * rewriting the tracked `public/_redirects`; §5.1's shape ["do not port
+ * ... a query string [rule]"] is unaffected by where the file lands).
+ * Moving this to postbuild ALSO makes B1's "`to` must be a built page"
+ * check possible at all: `data/redirects.json` is read before `astro
+ * build` even runs, so there is no `dist/` to check a target against
+ * until now.
  *
- * §5.2's 1,800-static-rule budget gate is enforced by `verify-budget.mjs`
- * (postbuild), not here — this script always writes every configured
- * rule; the budget gate is what tells a human to move the overflow to
- * Cloudflare Bulk Redirects.
+ * **B1 (Opus gate, blocking) — redirect injection.** `from`/`to` are
+ * validated against PATH_RE below (lower-case, digits, slash, underscore,
+ * hyphen only, always app-absolute, always trailing-slash) — no whitespace, no
+ * newline (confirmed empirically: JS `$` without the `m` flag does NOT
+ * match before a trailing `\n`, so this alone rejects embedded/trailing
+ * newline injection), no query string, no fragment, no scheme, no host.
+ * That regex ALONE still admits a protocol-relative path made only of
+ * allowed characters (`//evilhost/path/` — no dot, so it passes the
+ * charset) `[docs: confirmed this session by testing the regex directly]`
+ * — `rejectsDoubleSlashPrefix` below is the separate, explicit check for
+ * exactly that. `to` is additionally required to be a page that actually
+ * exists in `distDir` (an `index.html` at that path) — a typo'd or
+ * removed target 404s instead of silently shipping a dead 301. The status
+ * is always `301` (no caller-suppliable status).
  */
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,43 +37,80 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "..", "data");
 const REDIRECTS_JSON_PATH = join(DATA_DIR, "redirects.json");
-const OUT_PATH = process.env.REDIRECTS_OUT_PATH ?? join(here, "..", "public", "_redirects");
+
+/** Every character `from`/`to` may contain, and the overall shape: always
+ * app-absolute, always trailing-slash, lower-case only. */
+const PATH_RE = /^\/[a-z0-9/_-]*\/$/;
+
+function rejectsDoubleSlashPrefix(path) {
+  return path.startsWith("//");
+}
+
+/**
+ * @param {string} path
+ * @param {string} field
+ * @param {number} i
+ */
+function validatePathShape(path, field, i) {
+  if (typeof path !== "string") {
+    throw new Error(`data/redirects.json: redirects[${i}].${field} must be a string`);
+  }
+  if (rejectsDoubleSlashPrefix(path)) {
+    throw new Error(
+      `data/redirects.json: redirects[${i}].${field} ("${JSON.stringify(path)}") starts with "//" — ` +
+        `a protocol-relative path is never valid here (it would redirect off-site).`,
+    );
+  }
+  if (!PATH_RE.test(path)) {
+    throw new Error(
+      `data/redirects.json: redirects[${i}].${field} (${JSON.stringify(path)}) must match ` +
+        `${PATH_RE} — an app-absolute, trailing-slash, lower-case path only (no scheme, no host, ` +
+        `no query string, no fragment, no whitespace, no newline).`,
+    );
+  }
+}
 
 /** @param {unknown} raw @returns {{from: string, to: string}[]} */
 export function parseRedirects(raw) {
   const parsed = /** @type {{ redirects?: unknown }} */ (raw);
   const list = Array.isArray(parsed?.redirects) ? parsed.redirects : [];
   return list.map((entry, i) => {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      typeof entry.from !== "string" ||
-      typeof entry.to !== "string"
-    ) {
+    if (typeof entry !== "object" || entry === null) {
       throw new Error(`data/redirects.json: redirects[${i}] must be {"from": "/…/", "to": "/…/"}`);
     }
-    if (entry.from.includes("?") || entry.to.includes("?")) {
+    const { from, to } = /** @type {{ from?: unknown; to?: unknown }} */ (entry);
+    validatePathShape(/** @type {string} */ (from), "from", i);
+    validatePathShape(/** @type {string} */ (to), "to", i);
+    return { from: /** @type {string} */ (from), to: /** @type {string} */ (to) };
+  });
+}
+
+/** B1: `to` must resolve to a REAL built page in `distDir` — an
+ * `index.html` at that path, the same convention `verify-sitemap.mjs`/
+ * `verify-budget.mjs` already use to enumerate built pages. */
+export function assertTargetsBuilt(rules, distDir) {
+  for (const [i, rule] of rules.entries()) {
+    const trimmed = rule.to.replace(/^\/|\/$/g, "");
+    const indexPath = join(distDir, trimmed, "index.html");
+    if (!existsSync(indexPath)) {
       throw new Error(
-        `data/redirects.json: redirects[${i}] ("${entry.from}") contains "?" — a query-string rule ` +
-          `is never valid here (G-P2-09: Cloudflare Pages _redirects does not match on a query string; ` +
-          `this is exactly the SWC rule §5.1 says NOT to port).`,
+        `data/redirects.json: redirects[${i}].to ("${rule.to}") does not correspond to a built ` +
+          `page (expected ${indexPath} to exist). Fix the target, or remove the stale rule.`,
       );
     }
-    if (!entry.from.startsWith("/") || !entry.to.startsWith("/")) {
-      throw new Error(`data/redirects.json: redirects[${i}] paths must be app-absolute (start with "/")`);
-    }
-    return { from: entry.from, to: entry.to };
-  });
+  }
 }
 
 export function renderRedirectsFile(rules) {
   const header =
     "# GENERATED by apps/site/scripts/gen-redirects.mjs from data/redirects.json — do not hand-edit.\n";
   if (rules.length === 0) return header;
+  // Status is ALWAYS 301 — never taken from the input (B1).
   return header + rules.map((r) => `${r.from}\t${r.to}\t301`).join("\n") + "\n";
 }
 
 async function main() {
+  const distDir = process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
   let raw = { redirects: [] };
   try {
     raw = JSON.parse(await readFile(REDIRECTS_JSON_PATH, "utf8"));
@@ -70,9 +120,11 @@ async function main() {
     // never an error; matches loadCatalog()'s own "missing = empty" rule.
   }
   const rules = parseRedirects(raw);
-  await mkdir(dirname(OUT_PATH), { recursive: true });
-  await writeFile(OUT_PATH, renderRedirectsFile(rules));
-  console.log(`gen-redirects: wrote ${rules.length} rule(s) to ${OUT_PATH}`);
+  assertTargetsBuilt(rules, distDir);
+  const outPath = join(distDir, "_redirects");
+  await mkdir(distDir, { recursive: true });
+  await writeFile(outPath, renderRedirectsFile(rules));
+  console.log(`gen-redirects: wrote ${rules.length} rule(s) to ${outPath}`);
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

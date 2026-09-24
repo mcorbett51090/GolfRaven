@@ -41,6 +41,17 @@ const PT = fontDir("@fontsource/pt-serif");
 const CIN = fontDir("@fontsource/cinzel");
 const read = (dir: string, file: string) => readFileSync(join(dir, file));
 
+/**
+ * Should-fix (Opus gate, OG cards): "Include a hash of the template,
+ * fonts and tokens in the content hash." Bump this by hand whenever the
+ * card's TREE STRUCTURE/layout changes (a font swap or a token edit is
+ * caught automatically below, since both are hashed directly — but a
+ * structural change to `courseCardTree()`/`templateCardTree()` has no
+ * single value to hash, so it needs an explicit version bump the same way
+ * `CONTRACT_VERSION` is bumped by hand elsewhere in this repo).
+ */
+const TEMPLATE_VERSION = 1;
+
 const fonts = [
   { name: "PT Serif", data: read(PT, "pt-serif-latin-400-normal.woff"), weight: 400 as const, style: "normal" as const },
   { name: "PT Serif", data: read(PT, "pt-serif-latin-700-normal.woff"), weight: 700 as const, style: "normal" as const },
@@ -56,6 +67,18 @@ const GOLD = "#c9a227";
 const INK = "#182420";
 const INK_SOFT = "#4b5b52";
 const CREAM = "#f4f1e6";
+
+/** Hashes `TEMPLATE_VERSION` + every font file's actual bytes + every
+ * token colour — computed once at module load, folded into
+ * `ogContentHash()` below. A font swap or a token edit changes this
+ * value automatically (no hand-bump needed for those two; only a
+ * structural tree change needs `TEMPLATE_VERSION` bumped by hand). */
+const TEMPLATE_FINGERPRINT = createHash("sha256")
+  .update(String(TEMPLATE_VERSION))
+  .update(JSON.stringify({ GREEN, GOLD, INK, INK_SOFT, CREAM }))
+  .update(Buffer.concat(fonts.map((f) => Buffer.from(f.data))))
+  .digest("hex")
+  .slice(0, 16);
 
 const ACCESS_LABEL: Record<string, string> = {
   public: "Public",
@@ -242,6 +265,11 @@ export function ogContentHash(facility: Facility, opts: { trail?: Trail; holes?:
     trailName: opts.trail?.name ?? null,
     holes: opts.holes ?? null,
     par: opts.par ?? null,
+    // Should-fix: a template/font/token change now mints a NEW key too —
+    // a stale-looking cached PNG under an old design never serves again.
+    templateFingerprint: TEMPLATE_FINGERPRINT,
   });
   return createHash("sha256").update(basis).digest("hex").slice(0, 24);
 }
+
+export { TEMPLATE_FINGERPRINT, TEMPLATE_VERSION };

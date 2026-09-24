@@ -18,7 +18,7 @@ import { verifyBudget } from "../scripts/verify-budget.mjs";
 import { verifyA11yBudget } from "../scripts/verify-a11y-budget.mjs";
 import { parseRedirects, renderRedirectsFile } from "../scripts/gen-redirects.mjs";
 import { buildHeaders } from "../scripts/gen-headers.mjs";
-import { bookingEntryAllowed } from "../src/lib/booking-hosts";
+import { allowedBookingEntries, bookingEntryAllowed, bookingPlatformLabel } from "../src/lib/booking-hosts";
 import { loadCatalogFromBundle } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
 import { BUILDS } from "./paths.mjs";
@@ -123,6 +123,78 @@ describe("AT(4): every rendered booking link passes the booking-host gate", () =
     const spoofed = { ...entry, url: "https://not-the-course.example.com/tee-times" as any };
     expect(bookingEntryAllowed(spoofed, facility, [])).toBe(false);
   });
+
+  // Should-fix (Opus gate, Booking): "Add a fixture with a disallowed
+  // booking entry that must not render (a bypass must fail the test)."
+  it("a MIXED booking[] (one allow-listed entry + one disallowed entry) renders ONLY the allowed one — a bypass (dropping the filter) fails this test", async () => {
+    const catalog = loadCatalogFromBundle(demoBundleForSite());
+    const facility = catalog.facilities.find((f) => f.slug === "highland-meadows-golf-course")!;
+    const allowedEntry = facility.booking[0]!; // real fixture: www.golfnow.com, allow-listed
+    const disallowedEntry = {
+      ...allowedEntry,
+      provider: "chronogolf" as const,
+      url: "https://booking.not-allow-listed.example/highland-meadows",
+    };
+    const mixedFacility = { ...facility, booking: [allowedEntry, disallowedEntry] };
+    const allowList = ["www.golfnow.com"];
+
+    const rendered = allowedBookingEntries(mixedFacility, allowList);
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]!.url).toBe(allowedEntry.url);
+    expect(rendered.some((e) => e.url === disallowedEntry.url)).toBe(false);
+
+    // PROOF the test isn't vacuous: without the gate (a "bypass" —
+    // rendering facility.booking directly, the shape a regression could
+    // introduce by forgetting to call allowedBookingEntries), the
+    // disallowed entry WOULD be present — so this test fails loudly the
+    // moment that filter is ever skipped.
+    expect(mixedFacility.booking.some((e) => e.url === disallowedEntry.url)).toBe(true);
+  });
+
+  it("bookingPlatformLabel derives the label from the ACTUAL host — never a hard-coded 'GolfNow' for every non-course-native provider", () => {
+    expect(bookingPlatformLabel({ provider: "golfnow", url: "https://www.golfnow.com/x" } as any)).toBe(
+      "GolfNow",
+    );
+    expect(
+      bookingPlatformLabel({ provider: "chronogolf", url: "https://www.chronogolf.com/x" } as any),
+    ).toBe("Chronogolf");
+    expect(bookingPlatformLabel({ provider: "teeon", url: "https://book.teeon.com/x" } as any)).toBe(
+      "TeeOn",
+    );
+    expect(
+      bookingPlatformLabel({ provider: "club-prophet", url: "https://www.clubprophetsystems.com/x" } as any),
+    ).toBe("Club Prophet");
+    expect(bookingPlatformLabel({ provider: "course-native", url: "https://example.com/x" } as any)).toBe(
+      "the course",
+    );
+    // An allow-listed host this table doesn't know by name still gets a
+    // real, non-misleading label derived from the host itself.
+    expect(
+      bookingPlatformLabel({ provider: "chronogolf", url: "https://tee.someotherplatform.io/x" } as any),
+    ).toBe("Someotherplatform");
+  });
+
+  it("assertBookingHostsNotSynthetic refuses a production build while the SYNTHETIC/TEST-ONLY marker is present, and allows non-production", async () => {
+    const { assertBookingHostsNotSynthetic } = await import("../src/lib/booking-hosts-guard.mjs");
+    const syntheticRaw = { _comment: "SYNTHETIC / TEST ONLY (P1a). ...", hosts: ["www.golfnow.com"] };
+    expect(() => assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "production" })).toThrow(
+      /synthetic|test-only/i,
+    );
+    expect(() => assertBookingHostsNotSynthetic(syntheticRaw, { GOLFRAVEN_ENV: "development" })).not.toThrow();
+    const realRaw = { _comment: "The real, X4/X6-approved allow-list.", hosts: ["www.golfnow.com"] };
+    expect(() => assertBookingHostsNotSynthetic(realRaw, { GOLFRAVEN_ENV: "production" })).not.toThrow();
+  });
+
+  it("the REAL config/booking-hosts.json still carries the SYNTHETIC marker today (P1a not yet resolved) — verify-input.mjs / booking-hosts.ts both refuse it in production", async () => {
+    const raw = JSON.parse(
+      await (await import("node:fs/promises")).readFile(
+        join(siteRoot, "..", "..", "config", "booking-hosts.json"),
+        "utf8",
+      ),
+    );
+    const { assertBookingHostsNotSynthetic } = await import("../src/lib/booking-hosts-guard.mjs");
+    expect(() => assertBookingHostsNotSynthetic(raw, { GOLFRAVEN_ENV: "production" })).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------
@@ -144,7 +216,7 @@ describe("AT(5): retired slugs get a 301 rule in the generated _redirects", () =
 
   it("gen-redirects.mjs refuses a query-string rule (G-P2-09 — the SWC rule explicitly not ported)", () => {
     expect(() => parseRedirects({ redirects: [{ from: "/?winery=slug", to: "/x/" }] })).toThrow(
-      /query-string/,
+      /query string/,
     );
   });
 });
@@ -159,12 +231,30 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
     expect(result.ok, result.issues.join("\n")).toBe(true);
   });
 
+  // Should-fix: "Make AT9 set its own env instead of relying on the
+  // caller's shell." — every env var this describe block depends on
+  // (GOLFRAVEN_OG_STORE_SIMULATE_EMPTY, GOLFRAVEN_OG_BUDGET_MS) is set
+  // and restored INSIDE each test below, never assumed to be pre-set by
+  // whatever invoked `vitest run`.
+  function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+    const saved: Record<string, string | undefined> = {};
+    for (const key of Object.keys(overrides)) saved[key] = process.env[key];
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return fn().finally(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+  }
+
   it("a simulated empty OG store completes with the fallback TEMPLATE card, never a failure", async () => {
     const catalog = loadCatalogFromBundle(demoBundleForSite());
     const facility = catalog.facilities.find((f) => f.slug === "ridge-overlook-golf-club")!;
-    const prevEnv = process.env.GOLFRAVEN_OG_STORE_SIMULATE_EMPTY;
-    process.env.GOLFRAVEN_OG_STORE_SIMULATE_EMPTY = "1";
-    try {
+    await withEnv({ GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: "1" }, async () => {
       const { GET } = await import("../src/pages/og/courses/[slug].png.ts");
       const response = await GET({ props: { facility } } as any);
       expect(response.status).toBe(200);
@@ -173,10 +263,60 @@ describe("AT(9): build/deploy budget gates, and the OG store's empty-store fallb
       // A real (if generic) PNG, not an empty/error body — starts with the
       // PNG magic bytes.
       expect(buf.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+    });
+  });
+
+  it("§5.2's REAL budget-projected fallback: a near-zero GOLFRAVEN_OG_BUDGET_MS ships the template card for a fresh (cache-miss) facility instead of rendering the full one", async () => {
+    const catalog = loadCatalogFromBundle(demoBundleForSite());
+    // thinfield-muni is on NO trail in the demo fixture (unlike
+    // blue-heron-links etc.) — picked specifically so the expected
+    // template render below needs no primaryTrailOf() lookup to match.
+    const facility = catalog.facilities.find((f) => f.slug === "thinfield-muni")!;
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const scratchStore = await mkdtemp(join(tmpdir(), "golfraven-og-budget-"));
+    try {
+      await withEnv(
+        {
+          GOLFRAVEN_OG_STORE_SIMULATE_EMPTY: undefined,
+          GOLFRAVEN_OG_STORE_DIR: scratchStore, // fresh, empty, REACHABLE store — a real cache miss
+          GOLFRAVEN_OG_BUDGET_MS: "1", // effectively zero — the very first card already exceeds it
+        },
+        async () => {
+          const { resetOgBudgetForTests } = await import("../src/lib/og-budget");
+          resetOgBudgetForTests();
+          const { GET } = await import("../src/pages/og/courses/[slug].png.ts");
+          const { renderTemplateCard } = await import("../src/lib/og-card");
+          const response = await GET({ props: { facility } } as any);
+          const buf = Buffer.from(await response.arrayBuffer());
+          const templateBuf = await renderTemplateCard(undefined);
+          // Same fallback path as the empty-store case — a byte-identical
+          // template render (both draw the same, trail-less template
+          // tree; this facility fixture has no primary trail wired up).
+          expect(buf.equals(templateBuf)).toBe(true);
+          resetOgBudgetForTests();
+        },
+      );
     } finally {
-      if (prevEnv === undefined) delete process.env.GOLFRAVEN_OG_STORE_SIMULATE_EMPTY;
-      else process.env.GOLFRAVEN_OG_STORE_SIMULATE_EMPTY = prevEnv;
+      await rm(scratchStore, { recursive: true, force: true });
     }
+  });
+
+  it("demo builds generate NO OG card pages, write nothing to .og-store, and emit no og:image", async () => {
+    const { readdir, readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const ogDir = join(BUILDS.demo.dist, "og");
+    await expect(readdir(ogDir)).rejects.toThrow(); // the whole dist/og/ tree never exists
+
+    const html = await readFile(
+      join(BUILDS.demo.dist, "courses", "ridge-overlook-golf-club", "index.html"),
+      "utf8",
+    ).catch(() => null);
+    // The demo build IS noindex-everywhere (B3), but the course page
+    // itself still renders (S4) — if it exists, it must carry no
+    // og:image meta tag at all.
+    if (html) expect(html).not.toMatch(/property="og:image"/);
   });
 });
 
@@ -263,5 +403,104 @@ describe("AT(12): §5.2 budget gates", () => {
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
+  });
+
+  it("PROOF: verify-budget FAILS a synthetic dist/ that exceeds the 18,000-file gate", async () => {
+    const { mkdtemp, writeFile: wf, mkdir: mkd, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const scratch = await mkdtemp(join(tmpdir(), "golfraven-filecount-proof-"));
+    try {
+      // 18,001 tiny files — one over the gate. Written into 1,801 shard
+      // directories (10 files each) so no single directory listing is
+      // absurdly large; the gate counts files recursively either way.
+      for (let shard = 0; shard < 1801; shard++) {
+        const dir = join(scratch, `s${shard}`);
+        await mkd(dir, { recursive: true });
+        for (let i = 0; i < 10; i++) {
+          await wf(join(dir, `f${i}.txt`), "x");
+        }
+      }
+      const result = await verifyBudget(scratch);
+      expect(result.ok).toBe(false);
+      expect(result.fileCount).toBe(18010);
+      expect(result.issues.some((i) => /exceeds the 18000-file gate/.test(i))).toBe(true);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("PROOF: verify-budget FAILS a synthetic dist/ whose TOTAL size exceeds the 400 MB gate", async () => {
+    const { mkdtemp, writeFile: wf, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const scratch = await mkdtemp(join(tmpdir(), "golfraven-distsize-proof-"));
+    try {
+      // 21 files at 20 MiB each (under the PER-FILE 20 MiB gate on its
+      // own) totalling ~420 MB — proves the TOTAL-size gate independently
+      // of the largest-single-file gate above.
+      const chunk = Buffer.alloc(20 * 1024 * 1024, 1);
+      for (let i = 0; i < 21; i++) {
+        await wf(join(scratch, `f${i}.bin`), chunk);
+      }
+      const result = await verifyBudget(scratch);
+      expect(result.ok).toBe(false);
+      expect(result.issues.some((i) => /dist\/ is 4\d{2}\.\d MB, exceeds the 400 MB gate/.test(i))).toBe(
+        true,
+      );
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("PROOF: verify-budget FAILS a geometry/* shard over the 5 MiB gate (and passes a shard under it)", async () => {
+    const { mkdtemp, writeFile: wf, mkdir: mkd, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const scratch = await mkdtemp(join(tmpdir(), "golfraven-geometry-proof-"));
+    try {
+      const geomDir = join(scratch, "data", "geometry");
+      await mkd(geomDir, { recursive: true });
+      await wf(join(geomDir, "us-tn.geojson"), Buffer.alloc(6 * 1024 * 1024, 1)); // > 5 MiB
+      await wf(join(geomDir, "ca-bc.geojson"), Buffer.alloc(1 * 1024 * 1024, 1)); // well under
+      const result = await verifyBudget(scratch);
+      expect(result.ok).toBe(false);
+      expect(result.geometryOffenders).toEqual(["data/geometry/us-tn.geojson"]);
+      expect(result.issues.some((i) => /geometry-shard gate/.test(i))).toBe(true);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("PROOF: the warm-build timing gate FAILS past 12 min, WARNS past 90% (10.8 min), and is silent under both — all via injected env/clock, never the real wall-clock", async () => {
+    const emptyDistOk = async (env: Record<string, string>, nowMs: number) => {
+      const { mkdtemp, rm } = await import("node:fs/promises");
+      const { tmpdir } = await import("node:os");
+      const scratch = await mkdtemp(join(tmpdir(), "golfraven-timing-proof-"));
+      try {
+        return await verifyBudget(scratch, { env, nowMs });
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    };
+    // Not 0 — verifyBudget treats a GOLFRAVEN_BUILD_STARTED_MS of exactly
+    // 0 as "unset" (its `startedMs > 0` guard), same as it treats NaN.
+    const startedMs = 1;
+
+    const wellUnder = await emptyDistOk({ GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) }, 5 * 60_000);
+    expect(wellUnder.ok).toBe(true);
+    expect(wellUnder.warnings).toEqual([]);
+
+    const past90Percent = await emptyDistOk(
+      { GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) },
+      11 * 60_000, // 11 min > 10.8 min (90% of 12) but < 12 min
+    );
+    expect(past90Percent.ok).toBe(true); // a warning, never a failure
+    expect(past90Percent.warnings.some((w) => /over 90% of the/.test(w))).toBe(true);
+
+    const overGate = await emptyDistOk({ GOLFRAVEN_BUILD_STARTED_MS: String(startedMs) }, 13 * 60_000);
+    expect(overGate.ok).toBe(false);
+    expect(overGate.issues.some((i) => /exceeds the §5.2 12 min warm-build gate/.test(i))).toBe(true);
+
+    const noSignal = await emptyDistOk({}, 999 * 60_000);
+    expect(noSignal.ok).toBe(true);
+    expect(noSignal.warmBuildMs).toBeNull();
   });
 });

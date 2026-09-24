@@ -11,7 +11,7 @@ import { loadPrimaryTrailOverrides, loadSiteCatalog, verifiedFacilities } from "
 import { withBase } from "../../lib/nav";
 import { facilityMetaDescription } from "../../lib/facility-copy";
 import { siteOrigin, breadcrumbNode, facilityPageNode } from "../../lib/schema";
-import { allowedBookingEntries, loadBookingHostAllowList } from "../../lib/booking-hosts";
+import { allowedBookingEntries, bookingPlatformLabel, loadBookingHostAllowList } from "../../lib/booking-hosts";
 
 export async function getStaticPaths() {
   const { catalog } = await loadSiteCatalog();
@@ -50,8 +50,12 @@ const crumbs = [
 const jsonLd = [breadcrumbNode(crumbs), facilityPageNode(origin, facility)];
 // §5.1 og-card.ts: "OG images for verified pages only" — every page this
 // component renders IS a verified facility (getStaticPaths above), so
-// this is unconditional here.
-const ogImage = `/og/courses/${facility.slug}.png`;
+// the verified-only condition is unconditional here. The DEMO condition
+// isn't: a demo build generates no OG card pages at all
+// (og/courses/[slug].png.ts's getStaticPaths returns [] when
+// usedDemoData — Opus gate should-fix, OG cards), so this must never
+// link to a `/og/courses/*.png` URL that wouldn't exist there.
+const ogImage = usedDemoData ? undefined : `/og/courses/${facility.slug}.png`;
 
 const isPrivate = facility.access === "private";
 // AT(4)/stage-2 scope item 3: only host-gated booking entries ever render.
@@ -133,7 +137,7 @@ const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryT
                 data-analytics-provider={b.provider}
                 data-analytics-trail={primaryTrail?.slug ?? ""}
               >
-                Book via {b.provider === "course-native" ? "the course" : "GolfNow"} →
+                Book via {bookingPlatformLabel(b)} →
               </a>
             ))}
           </p>

@@ -11,7 +11,7 @@
  * the path this just created.
  */
 import { execFileSync } from "node:child_process";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTmpBase } from "./tmp-base.mjs";
@@ -19,7 +19,7 @@ import { writeFixtureDataDir } from "./write-fixture-data-dir.mjs";
 
 const siteRoot = fileURLToPath(new URL("..", import.meta.url));
 
-async function runBuild(name, { dist, indexability, publicDir, env: extraEnv }) {
+function runBuild(name, { dist, indexability, env: extraEnv }) {
   // Drop any stale GOLFRAVEN_ENV=production / GOLFRAVEN_DEMO /
   // GOLFRAVEN_DATA_DIR / REGION_PAGE_SIZE the caller's shell might carry —
   // each build's own `extraEnv` is authoritative.
@@ -30,27 +30,28 @@ async function runBuild(name, { dist, indexability, publicDir, env: extraEnv }) 
     REGION_PAGE_SIZE: _r,
     ...restEnv
   } = process.env;
-
-  // A per-build COPY of the real public/ (icons, manifest, sw.js, the
-  // committed _headers/_redirects) that this build's own generated files
-  // (gen-map-data/gen-headers/gen-redirects) write INTO — never the real,
-  // committed apps/site/public/ (discovered this session: without this,
-  // running the test suite left whichever of the three scenarios ran LAST
-  // sitting in the real committed `_redirects`, `_headers` and
-  // `public/data/map/*.geojson`, corrupting them for anyone building for
-  // real afterwards). `astro.config.mjs`'s `publicDir` reads
-  // `GOLFRAVEN_PUBLIC_DIR` for exactly this override.
-  await mkdir(publicDir, { recursive: true });
-  await cp(join(siteRoot, "public"), publicDir, { recursive: true });
-
   const env = {
     ...restEnv,
     ASTRO_TELEMETRY_DISABLED: "1",
     INDEXABILITY_OUT_PATH: indexability,
-    GOLFRAVEN_PUBLIC_DIR: publicDir,
-    MAP_DATA_OUT_DIR: join(publicDir, "data", "map"),
-    HEADERS_OUT_PATH: join(publicDir, "_headers"),
-    REDIRECTS_OUT_PATH: join(publicDir, "_redirects"),
+    // gen-map-data writes to its DEFAULT location
+    // (`apps/site/public/data/map/`, gitignored — see .gitignore) rather
+    // than an override: Astro's `public/` copy only ever copies from the
+    // REAL `public/` directory (there is no per-build `publicDir` swap
+    // any more — see astro.config.mjs's history), so the generated
+    // per-country GeoJSON has to actually land there for `/data/map/*`
+    // to resolve in each build's own `dist/`. Harmless to share across
+    // the three sequential test builds below: each one's own
+    // `gen-map-data` step re-generates it immediately before that
+    // build's `astro build` call, and it is never a tracked file.
+    //
+    // gen-headers/gen-redirects now run POSTBUILD, straight into `dist`
+    // (see both scripts' own docs — Opus gate nit: never rewrite a
+    // tracked `public/` file), so no output-path override is needed for
+    // either; `DIST_DIR` below already makes each build's postbuild step
+    // write into ITS OWN dist.
+    DIST_DIR: dist,
+    GOLFRAVEN_BUILD_STARTED_MS: String(Date.now()),
     ...extraEnv,
   };
   const run = (cmd, args) => execFileSync(cmd, args, { cwd: siteRoot, stdio: "inherit", env });
@@ -59,9 +60,10 @@ async function runBuild(name, { dist, indexability, publicDir, env: extraEnv }) 
   run("node", ["./scripts/verify-input.mjs"]);
   run("node", ["./scripts/emit-indexability.mjs"]);
   run("node", ["./scripts/gen-map-data.mjs"]);
-  run("node", ["./scripts/gen-headers.mjs"]);
-  run("node", ["./scripts/gen-redirects.mjs"]);
   run("./node_modules/.bin/astro", ["build", "--outDir", dist]);
+  run("node", ["./scripts/gen-headers.mjs", dist]);
+  run("node", ["./scripts/gen-redirects.mjs", dist]);
+  run("node", ["./scripts/gen-sw.mjs", dist]);
   run("node", ["./scripts/pagefind-index.mjs", dist]);
   run("node", ["./scripts/verify-sitemap.mjs", dist]);
   run("node", ["./scripts/verify-budget.mjs", dist]);
@@ -76,9 +78,9 @@ export default async function setup() {
 
   const { BUILDS } = await import("./paths.mjs");
 
-  await runBuild("real", { ...BUILDS.real, publicDir: join(tmpBase, "public-real") });
-  await runBuild("demo", { ...BUILDS.demo, publicDir: join(tmpBase, "public-demo") });
-  await runBuild("paginated", { ...BUILDS.paginated, publicDir: join(tmpBase, "public-paginated") });
+  runBuild("real", BUILDS.real);
+  runBuild("demo", BUILDS.demo);
+  runBuild("paginated", BUILDS.paginated);
 
   // Teardown: vitest calls the function a globalSetup default-exports.
   return async () => {

@@ -1,205 +1,32 @@
 ---
 /**
- * Analytics.astro — the PII boundary between this site and Tag Manager.
- * Ported from southern-wine-country's `src/components/Analytics.astro`
- * @ 572ff7e (build plan §5.1 `verify-editorial.mjs`, `verify-socials.mjs`,
- * `test-analytics-pii.mjs` row: "Adapt/copy | same | The PII test is
- * wired into PR CI"; BaseLayout.astro row: "A new GolfRaven GTM/GA4
- * container ... guarded by the PII allow-list gate ported from the wine
- * site").
+ * Analytics.astro — mounts the PII-safe analytics runtime
+ * (`src/lib/analytics-runtime.ts`) on every page via `BaseLayout.astro`.
  *
- * **This component is NOT mounted anywhere yet** (stage-2 scope item 6:
+ * **Opus gate B3 (blocking): "Ship the Analytics script as a bundled
+ * external file, never `is:inline`."** This is now a plain, non-inline
+ * `<script>` — Astro hoists it into an external, same-origin, hashed
+ * bundle (`dist/_astro/Analytics.astro_astro_type_script_….js`), exactly
+ * like `CourseMap.astro`/`SiteSearch.astro`/`BaseLayout.astro`'s own
+ * scripts, so it runs under this site's `default-src 'self'` CSP with no
+ * `'unsafe-inline'` exception. The PREVIOUS stage-2 design kept this
+ * component real-but-unmounted with an `is:inline` script (extracted for
+ * testing via a `vm`-sandbox + regex, never actually shipped anywhere) —
+ * that shape is gone; see `analytics-runtime.ts`'s module doc for the
+ * full reasoning and `test/analytics-pii.test.ts` for how the module is
+ * tested directly now instead.
+ *
+ * **Still inert without a GTM container** (O13, stage-2 scope item 6:
  * "Keep the GTM slot empty. The container ID comes from build config
- * later (O13)."). It exists, and is fully tested
- * (`test/analytics-pii.test.ts`, the ported `test-analytics-pii.mjs`
- * harness — build plan §15: "runs against the new GolfRaven GTM/GA4
- * container's allow-listed event schema"), so that wiring it in later is
- * a one-line `<Analytics />` in `BaseLayout.astro` guarded on the
- * container id, not a new PII review. `analytics-schema.json` (site root)
- * is the same allowlist, read by whatever eventually configures the real
- * GTM tags — the two must always agree (see that file's own doc).
- *
- * Tag Manager means tags are configured in a console outside this repo,
- * by whoever holds access — a tag added there can read anything in the
- * dataLayer. The protection sits at the BOUNDARY, not at the sender:
- *
- *   this site -> [schema allowlist] -> dataLayer -> GTM -> any tag
- *                     ^^^^^^^^^^^^
- *                   PII dropped here
- *
- * `is:inline` deliberately (same as SWC's): the dataLayer projection must
- * exist before ANY tag can read it, and `test/analytics-pii.test.ts`
- * extracts this exact literal script text out of the component's source —
- * same harness technique as SWC's own test, ported unchanged (see that
- * test file's doc for why an unmounted-but-real inline script is not a
- * CSP concern at this stage).
+ * later.") — `installAnalytics()` returns immediately when
+ * `window.dataLayer` doesn't exist, which it never will until BaseLayout
+ * actually injects a GTM snippet (still not done — no such snippet exists
+ * anywhere in this codebase). Mounting this component ships the PII
+ * BOUNDARY, not a live analytics integration.
  */
 ---
 
-<script is:inline>
-  (function () {
-    "use strict";
-    if (!window.dataLayer) return; // container not loaded (dev, or no GTM id configured)
-
-    /* ---------------------------------------------------------------------
-     * The schema. The caller's object is walked against THIS, never
-     * passed through. Every enum is a closed set of value slugs (never a
-     * display label), matching `apps/site/analytics-schema.json` exactly.
-     *
-     * NEVER add: name, email, message, description, or any free-text
-     * facility/trail label. Free text cannot be enum-validated, so it can
-     * never be safely allowlisted. The claim/feedback form's eventual
-     * submission (stage 3, the Worker backend) already carries all of it
-     * out of band.
-     * ------------------------------------------------------------------- */
-    var REQUEST_TYPES = ["correction", "new-listing", "feedback"];
-    var RELATIONSHIPS = ["owner", "staff", "visitor", "other"];
-    var TOPICS = ["general", "problem", "idea", "listing", "other"];
-    var BOOKING_PROVIDERS = ["golfnow", "chronogolf", "teeon", "club-prophet", "course-native"];
-    var CSP_DIRECTIVES = [
-      "default-src", "script-src", "script-src-elem", "script-src-attr",
-      "style-src", "style-src-elem", "style-src-attr", "img-src", "connect-src",
-      "font-src", "frame-src", "object-src", "media-src", "worker-src",
-      "manifest-src", "base-uri", "form-action",
-    ];
-
-    var SCHEMA = {
-      generate_lead: {
-        form_name: { type: "const", value: "listing_claim" },
-        request_type: { type: "enum", values: REQUEST_TYPES },
-        relationship: { type: "enum", values: RELATIONSHIPS },
-      },
-      feedback_submit: {
-        form_name: { type: "const", value: "feedback" },
-        topic: { type: "enum", values: TOPICS },
-      },
-      contact_click: {
-        contact_method: { type: "enum", values: ["tel", "mailto"] },
-      },
-      // §6.1 T0: "A first-party booking_click event (no PII) builds the
-      // T1 case [for a GolfNow partner-API application]." trail_slug is a
-      // public catalog identifier (the same slug the trail's own URL
-      // carries), never a visitor's own data.
-      booking_click: {
-        provider: { type: "enum", values: BOOKING_PROVIDERS },
-        trail_slug: { type: "pattern", value: /^[a-z0-9-]{1,80}$/ },
-      },
-      csp_violation: {
-        effective_directive: { type: "enum", values: CSP_DIRECTIVES },
-      },
-    };
-
-    // Every key any event can emit — nulled before each push, so GTM's
-    // dataLayer variables (which resolve to the most recent value) never
-    // report a value left over from an earlier, different event.
-    var ALL_KEYS = (function () {
-      var seen = {};
-      for (var ev in SCHEMA) {
-        if (!Object.prototype.hasOwnProperty.call(SCHEMA, ev)) continue;
-        for (var k in SCHEMA[ev]) {
-          if (Object.prototype.hasOwnProperty.call(SCHEMA[ev], k)) seen[k] = true;
-        }
-      }
-      return Object.keys(seen);
-    })();
-
-    /* ---------------------------------------------------------------------
-     * Shape guard — the backstop for a correctly-added, wrongly-wired key.
-     * !! DO NOT DELETE AS DEAD CODE !! Unreachable by design today (const/
-     * enum/pattern each emit only a closed, pre-validated value) — it
-     * exists for the moment a freer type is added and wired to a field
-     * that turns out to carry personal data.
-     * ------------------------------------------------------------------- */
-    var LEAK = [/[@]/, /\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/, /\b\d{5}(-\d{4})?\b/];
-    window.__ccAnalyticsDropped = window.__ccAnalyticsDropped || 0;
-
-    function looksLikePii(v) {
-      var s = String(v);
-      if (s.length > 100) return true;
-      for (var i = 0; i < LEAK.length; i++) if (LEAK[i].test(s)) return true;
-      return false;
-    }
-
-    function project(name, raw) {
-      var spec = SCHEMA[name];
-      if (!spec) return null; // unknown event -> dropped whole
-      var input = raw || {};
-      var out = {};
-      for (var key in spec) {
-        if (!Object.prototype.hasOwnProperty.call(spec, key)) continue;
-        var rule = spec[key], value;
-        if (rule.type === "const") {
-          value = rule.value;
-        } else if (rule.type === "enum") {
-          if (rule.values.indexOf(input[key]) === -1) continue; // omitted, never defaulted
-          value = input[key];
-        } else if (rule.type === "pattern") {
-          if (typeof input[key] !== "string" || !rule.value.test(input[key])) continue;
-          value = input[key];
-        } else {
-          continue;
-        }
-        if (looksLikePii(value)) {
-          window.__ccAnalyticsDropped++;
-          return null; // drop the ENTIRE event
-        }
-        out[key] = value;
-      }
-      return out;
-    }
-
-    function track(name, rawParams) {
-      try {
-        var params = project(name, rawParams);
-        if (params === null) {
-          if (!SCHEMA[name]) window.__ccAnalyticsDropped++;
-          return;
-        }
-        var payload = { event: name };
-        for (var i = 0; i < ALL_KEYS.length; i++) payload[ALL_KEYS[i]] = undefined;
-        for (var k in params) {
-          if (Object.prototype.hasOwnProperty.call(params, k)) payload[k] = params[k];
-        }
-        window.dataLayer.push(payload);
-      } catch (e) {
-        /* analytics must never affect the page it measures */
-      }
-    }
-
-    window.ccAnalytics = {
-      track: track,
-      ready: function () {
-        return !!window.dataLayer;
-      },
-    };
-
-    document.addEventListener(
-      "click",
-      function (ev) {
-        try {
-          var a = ev.target && ev.target.closest && ev.target.closest("a[href]");
-          if (!a) return;
-          var href = a.getAttribute("href") || "";
-          var m = href.indexOf("tel:") === 0 ? "tel" : href.indexOf("mailto:") === 0 ? "mailto" : null;
-          if (m) {
-            track("contact_click", { contact_method: m });
-            return;
-          }
-          if (a.getAttribute("data-analytics-event") === "booking_click") {
-            track("booking_click", {
-              provider: a.getAttribute("data-analytics-provider") || "",
-              trail_slug: a.getAttribute("data-analytics-trail") || "",
-            });
-          }
-        } catch (e) {}
-      },
-      true,
-    );
-
-    window.addEventListener("securitypolicyviolation", function (ev) {
-      try {
-        track("csp_violation", { effective_directive: ev.effectiveDirective || ev.violatedDirective });
-      } catch (e) {}
-    });
-  })();
+<script>
+  import { installAnalytics } from "../lib/analytics-runtime";
+  installAnalytics();
 </script>

@@ -42,15 +42,6 @@ const indexablePaths = new Set(indexability.indexablePaths);
 export default defineConfig({
   site: SITE,
   base: BASE,
-  // Overridable via GOLFRAVEN_PUBLIC_DIR — the test suite points this at a
-  // per-build tmp COPY of public/ (test/global-setup.mjs), so the three
-  // test builds' own generated `_headers`/`_redirects`/`data/map/*.geojson`
-  // (scripts/gen-headers.mjs, gen-redirects.mjs, gen-map-data.mjs) land
-  // there instead of overwriting the real, committed apps/site/public/ —
-  // discovered this session: without this, running `pnpm test` silently
-  // left the LAST test scenario's synthetic `_redirects` rule sitting in
-  // the real committed file.
-  publicDir: process.env.GOLFRAVEN_PUBLIC_DIR ?? "./public",
   trailingSlash: "always",
   i18n: {
     locales: ["en", "fr"],
@@ -60,7 +51,8 @@ export default defineConfig({
     },
   },
   build: {
-    // B1: the site's own CSP is `default-src 'self'` (public/_headers) —
+    // B1: the site's own CSP is `default-src 'self'` (generated into
+    // `dist/_headers` postbuild, `scripts/gen-headers.mjs`) —
     // no `unsafe-inline` allowance for styles. Astro's default behaviour
     // inlines small per-page stylesheets straight into the HTML
     // (`<style>...</style>`), which that CSP then blocks. Emitting every

@@ -3,11 +3,21 @@ packages:
   - "packages/*"
   - "tools/*"
 
-# P2 stage 2 (apps/site): sharp is a pinned dependency of og-card.ts
-# (build plan §5.1 "og-card.ts ... Adapt | same" — satori + sharp, same
-# as southern-wine-country @ 572ff7e). pnpm 10 blocks a dependency's
-# native postinstall (sharp's libvips prebuild fetch) unless explicitly
-# allow-listed here; without this, `sharp` has no binary to load at
-# runtime.
+# P2 stage 2 (apps/site): `sharp` is a pinned dependency of og-card.ts
+# (build plan §5.1 "og-card.ts ... Adapt | same" — satori + sharp, same as
+# southern-wine-country @ 572ff7e) AND of gen-app-icons.mjs. pnpm 10 blocks
+# a dependency's native postinstall (sharp's own libvips prebuild fetch)
+# unless explicitly allow-listed here; without this line, `pnpm install`
+# reports "Ignored build scripts: sharp" and `sharp` has no binary to load
+# at runtime (confirmed this session: the OG-card/icon scripts throw on
+# import until this is present).
+#
+# `@playwright/test` (added for the B2 runtime-CSP e2e test,
+# apps/site/test/e2e/) needed NO entry here — confirmed this session, a
+# plain `pnpm install` reports no "Ignored build scripts" for it. It reads
+# its Chromium binary from `PLAYWRIGHT_BROWSERS_PATH` (this environment
+# pre-populates `/opt/pw-browsers`, pinned to the exact revision
+# `@playwright/test@1.56.1` expects) rather than running its own
+# postinstall download.
 onlyBuiltDependencies:
   - sharp

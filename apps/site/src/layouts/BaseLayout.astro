@@ -3,6 +3,7 @@ import "../styles/global.css";
 import { withBase } from "../lib/nav";
 import { jsonLdScript } from "../lib/schema";
 import SiteSearch from "../components/SiteSearch.astro";
+import Analytics from "../components/Analytics.astro";
 
 interface Alternate {
   /** BCP-47-ish locale tag for `hreflang` (e.g. "en", "fr"). */
@@ -85,18 +86,25 @@ const xDefaultHref =
 
     {/*
       ============================================================
-      GTM/GA4 SLOT — deliberately still empty in stage 2.
+      GTM/GA4 SLOT — the CONTAINER stays empty; the PII BOUNDARY is live.
 
       Build plan §10 P2 scope names "GTM (O13 DECIDED: a new GolfRaven
       GTM/GA4 container)" as part of the full P2 acceptance bar; this
       repo's stage-2 instructions say plainly: "Keep the GTM slot empty.
-      The container ID comes from build config later (O13)." The PII
-      boundary itself (`src/components/Analytics.astro`, ported from SWC's
-      own Analytics.astro) and its allow-listed event schema
-      (`analytics-schema.json`) are already built and fully tested
-      (`test/analytics-pii.test.ts`, wired into `pnpm -r test`, AT8) — only
-      MOUNTING `<Analytics />` here, guarded on the real container id (once
-      O13 lands), remains.
+      The container ID comes from build config later (O13)." No GTM
+      snippet is injected anywhere below or in `<Analytics />` itself —
+      that part is unchanged.
+
+      `<Analytics />` (mounted below, in `<body>`) IS now real and
+      MOUNTED, per the Opus gate B3 fix: it must ship as a bundled
+      external script, never `is:inline`, and a component nobody renders
+      cannot be bundled into anything at all. `installAnalytics()`
+      (`src/lib/analytics-runtime.ts`) still no-ops the instant it runs
+      (`if (!window.dataLayer) return`) because no GTM snippet exists to
+      have set that global — so this mounts the inert PII PROJECTION
+      logic only, never a live analytics integration. See
+      `analytics-runtime.ts`'s and `Analytics.astro`'s own docs, and
+      `test/analytics-pii.test.ts` (AT8, wired into `pnpm -r test`).
       ============================================================
     */}
 
@@ -155,18 +163,26 @@ const xDefaultHref =
         GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a>.
       </p>
     </footer>
-    <script>
-      // Stage-2 item 5: registers `public/sw.js` — hoisted by Astro into an
-      // external, same-origin module bundle (no inline script content; see
-      // CourseMap.astro's doc for the CSP/AT(7) reasoning this shares).
-      // A registration failure (an older/unsupporting browser, a disabled
-      // service-worker permission) is swallowed: this is a progressive
-      // enhancement, never a requirement to use the site.
-      if ("serviceWorker" in navigator) {
-        window.addEventListener("load", () => {
-          navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});
-        });
-      }
-    </script>
+    <Analytics />
+    {
+      // Should-fix (Opus gate, service worker): "Don't register the
+      // worker in demo builds." — a demo build's `sw.js` would otherwise
+      // cache and offline-serve fictional demo content indistinguishably
+      // from a real deploy on the same origin/scope; simplest fix is to
+      // never register it there at all, so a demo build leaves no
+      // service worker (and therefore no cache) behind. The whole
+      // `<script>` element is conditional (an Astro compile-time
+      // template branch, not a runtime string) — see CourseMap.astro's
+      // own `{tiles.configured && (<script>...)}` for the same pattern.
+      !demo && (
+        <script>
+          if ("serviceWorker" in navigator) {
+            window.addEventListener("load", () => {
+              navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {});
+            });
+          }
+        </script>
+      )
+    }
   </body>
 </html>

@@ -62,6 +62,26 @@ jobs:
         # suite forces GOLFRAVEN_DEMO=1 itself (test/global-setup.mjs), but
         # setting it here too keeps `pnpm -r test` runnable exactly like a
         # local `GOLFRAVEN_DEMO=1 pnpm -r test` invocation.
+        #
+        # apps/site's `test` script also runs `scripts/run-e2e.mjs` (the
+        # B2 Playwright runtime-CSP check) after vitest. This runner has NO
+        # `playwright install` step anywhere in this workflow — confirmed
+        # this session that neither `playwright-core` nor `playwright` has
+        # a postinstall browser download at all (it's an explicit, separate
+        # `npx playwright install` step nobody runs here), so a GitHub
+        # Actions `ubuntu-latest` runner has no browser for it to find.
+        # `run-e2e.mjs` probes for a launchable Chromium FIRST and skips
+        # itself (exit 0, with a printed reason) when none is found, rather
+        # than failing this step — so CI stays green with the check simply
+        # not exercised here, exactly the "gate it... and say so" shape the
+        # gate review asked for. It is exercised where a Chromium binary
+        # IS already provisioned (this repo's own agent sandbox,
+        # `/opt/pw-browsers`). `scripts/lighthouse-audit.mjs` (the real,
+        # non-heuristic half of AT(2)) is the same story and is
+        # NOT wired in here for the same reason — AT(2)'s CI-enforced half
+        # stays the static heuristic (`verify-a11y-budget.mjs`, part of
+        # `pnpm -r build`) until someone confirms Chromium is actually
+        # available on this workflow's runner and wires it in deliberately.
         run: pnpm -r test
         env:
           GOLFRAVEN_DEMO: "1"

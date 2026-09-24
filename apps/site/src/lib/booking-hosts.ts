@@ -25,6 +25,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BookingEntry, Facility } from "@golfraven/catalog";
+import { assertBookingHostsNotSynthetic } from "./booking-hosts-guard.mjs";
 
 /**
  * **Deliberately `process.cwd()`-based, NOT `import.meta.url`-relative**
@@ -44,8 +45,62 @@ export function bookingHostsConfigPath(cwd: string = process.cwd()): string {
 }
 
 export async function loadBookingHostAllowList(): Promise<string[]> {
-  const raw = JSON.parse(await readFile(bookingHostsConfigPath(), "utf8")) as { hosts?: string[] };
+  const raw = JSON.parse(await readFile(bookingHostsConfigPath(), "utf8")) as {
+    hosts?: string[];
+    _comment?: unknown;
+  };
+  // Should-fix (Opus gate, Booking): refuse a production build outright
+  // while the allow-list is still the synthetic/test-only P1a fixture.
+  assertBookingHostsNotSynthetic(raw);
   return raw.hosts ?? [];
+}
+
+/** Known booking-platform hosts → their real display name. Anything
+ * allow-listed but NOT in this table falls back to a name derived from
+ * the host itself (`derivedPlatformLabel` below) — never a hard-coded
+ * "GolfNow" for every non-`course-native` provider (should-fix, Opus
+ * gate Booking: "Label links by their actual platform, derived from the
+ * host" — the PREVIOUS stage-2 code said "GolfNow" unconditionally for
+ * chronogolf/teeon/club-prophet links too, which is simply wrong). */
+const KNOWN_HOST_LABELS: Record<string, string> = {
+  "www.golfnow.com": "GolfNow",
+  "golfnow.com": "GolfNow",
+};
+
+/** `chronogolf.com` -> "Chronogolf"; `book.teeon.com` -> "TeeOn" (kept as
+ * one word, matching the provider's own brand casing) — else the
+ * registrable domain's own label, title-cased. */
+function derivedPlatformLabel(host: string): string {
+  const bare = host.replace(/^www\./, "");
+  // Brand keywords are matched against the WHOLE host, not just one
+  // label — a real host is often `book.teeon.com` or
+  // `tee-times.clubprophetsystems.com`, where the brand name is not the
+  // first dot-separated segment.
+  if (/teeon/i.test(bare)) return "TeeOn";
+  if (/clubprophet|club-prophet/i.test(bare)) return "Club Prophet";
+  if (/chronogolf/i.test(bare)) return "Chronogolf";
+  // No known brand keyword: fall back to the REGISTRABLE domain's own
+  // label — the segment immediately before the TLD, not the first
+  // segment (which is often a subdomain like `book.` or `tee-times.` and
+  // would otherwise mislabel the platform by its subdomain instead of
+  // its actual domain).
+  const segments = bare.split(".").filter(Boolean);
+  const labelPart = segments.length >= 2 ? segments[segments.length - 2]! : (segments[0] ?? bare);
+  return labelPart.charAt(0).toUpperCase() + labelPart.slice(1);
+}
+
+/** The label a booking button should show, derived from the entry's
+ * ACTUAL host — `course-native` always reads "the course" (it IS the
+ * facility's own site, whatever its domain), every other provider is
+ * named from its real host, known or not. */
+export function bookingPlatformLabel(entry: BookingEntry): string {
+  if (entry.provider === "course-native") return "the course";
+  try {
+    const host = new URL(entry.url).host;
+    return KNOWN_HOST_LABELS[host] ?? derivedPlatformLabel(host);
+  } catch {
+    return "the booking site";
+  }
 }
 
 /**

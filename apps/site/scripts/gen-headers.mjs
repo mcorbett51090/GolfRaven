@@ -1,73 +1,116 @@
 #!/usr/bin/env node
 /**
- * gen-headers.mjs — generates `public/_headers` (the Cloudflare Pages
+ * gen-headers.mjs — generates `<dist>/_headers` (the Cloudflare Pages
  * CSP/headers file) from build-time config, so the CSP can allow-list a
  * tile host WITHOUT hand-editing a static file every time
- * `GOLFRAVEN_TILE_STYLE_URL` changes (stage-2 scope item 1: "allow-list
- * its host in the CSP through config"). `src/lib/map-config.ts` derives
- * the SAME host from the SAME env var, so the map component and the CSP
- * can never disagree about which host is allowed.
+ * `GOLFRAVEN_TILE_STYLE_URL`/`GOLFRAVEN_TILE_HOSTS` change (stage-2 scope
+ * item 1: "allow-list its host in the CSP through config").
+ * `src/lib/map-config.mjs` derives the SAME host set from the SAME env
+ * vars, so the map component and the CSP can never disagree.
  *
- * Run as part of `apps/site`'s `build` chain, BEFORE `astro build` (see
- * `package.json`) — Astro copies `public/` into `dist/` verbatim, same
- * pattern as `gen-map-data.mjs`.
+ * **Runs POSTBUILD, writes directly into `<dist>/_headers`** (Opus gate
+ * nit: "Stop the scripts rewriting tracked `public/_headers`... write to
+ * the build output instead"). This is a deliberate move from stage 2's
+ * original prebuild-into-`public/` design: Cloudflare Pages reads
+ * `_headers`/`_redirects` from the DEPLOYED output (`dist/`, per
+ * `wrangler pages deploy dist`, §3.1 row C) — writing there directly means
+ * nothing in this repo's own working tree (`public/`) is a build
+ * artifact that keeps changing shape run to run. Same position as
+ * `verify-sitemap.mjs` in `package.json`'s `build` script — after `astro
+ * build`, before `pagefind-index.mjs` (the CSP those rules govern does not
+ * depend on Pagefind's own generated files existing yet).
  *
- * **Every directive here, and why (stage-2 report requirement: "CSP
- * changes, each with its justification"):**
+ * **Every directive here, and why:**
  *
- * - `default-src 'self'` — stage-1's baseline, unchanged. Everything below
- *   is an explicit, narrower directive that would otherwise just inherit
- *   this default; nothing here widens `default-src` itself.
- * - `script-src 'self' 'wasm-unsafe-eval'` — Pagefind's client search
- *   (§10 P2 stage-2 item 4) loads a WebAssembly search index; browsers
- *   require `'wasm-unsafe-eval'` (a narrower grant than `'unsafe-eval'` —
- *   it permits WebAssembly compilation only, never `eval()`/`new
- *   Function()`) once any `script-src`/`default-src` is set without it
- *   `[inference — general CSP+WebAssembly platform behaviour (MDN,
- *   Chromium's "Wasm code generation disallowed by CSP" diagnostic),
- *   not independently confirmed against Pagefind's own docs: pagefind.app
- *   was unreachable from this sandbox's egress proxy this session].`
- *   Scoped to `'self'` + this one keyword — no `'unsafe-inline'`.
- * - `connect-src 'self'[, <tileHost>]` / `img-src 'self'[, <tileHost>]` —
- *   added ONLY when `GOLFRAVEN_TILE_STYLE_URL` is configured. MapLibre
- *   fetches the style JSON, vector tiles, sprites and glyphs from the tile
- *   host via `fetch()` (connect-src) and may load raster tiles as `Image`
- *   (img-src); both are needed for the SAME single host `map-config.ts`
- *   derives from the style URL, nothing broader. With no tile host
- *   configured, neither directive is added — `_headers` stays byte-identical
- *   to stage-1's (verified by this script's own test).
+ * - `default-src 'self'` — stage-1's baseline, unchanged.
+ * - `base-uri 'self'` / `frame-ancestors 'none'` / `object-src 'none'` /
+ *   `form-action 'self'` (Opus gate should-fix "CSP") — a static site has
+ *   no legitimate use for a `<base>` tag pointing elsewhere, being framed
+ *   by another origin, a plugin/object embed, or a form posting off-site;
+ *   each is a narrow, standard hardening directive with zero functional
+ *   cost here.
+ * - `script-src 'self'` (the site-wide default block) — Pagefind's own
+ *   WASM search index needs `'wasm-unsafe-eval'` (below), but nothing else
+ *   on the site does, so the BLANKET grant from the previous design is
+ *   replaced with a path-scoped one.
+ * - **`/pagefind/*` gets its OWN `_headers` block** adding
+ *   `'wasm-unsafe-eval'` to `script-src` — Cloudflare Pages `_headers`
+ *   supports multiple path-prefixed blocks, each independent (more
+ *   specific rules do not merge with `/*`, per Cloudflare's own docs
+ *   `[unverified — training knowledge; not independently re-confirmed
+ *   this session]`), so this keyword now applies ONLY to requests under
+ *   `/pagefind/`, never site-wide `[inference — general CSP+WebAssembly
+ *   platform behaviour, not independently confirmed against Pagefind's
+ *   own docs: pagefind.app was unreachable from this sandbox's egress
+ *   proxy this session]`.
+ * - `connect-src 'self'[, <tile hosts>]` / `img-src 'self'[, <tile
+ *   hosts>]` — added ONLY when `GOLFRAVEN_TILE_STYLE_URL` is configured,
+ *   for the EXACT host set `map-config.mjs`'s `tileConfig()` derives
+ *   (the style URL's own host, plus any `GOLFRAVEN_TILE_HOSTS` entries for
+ *   a style whose tiles/glyphs/sprites live elsewhere) — MapLibre fetches
+ *   all of those via `fetch()` (connect-src) and may load raster tiles as
+ *   `Image` (img-src). With no tile host configured, neither directive is
+ *   added.
  * - `worker-src` — deliberately NOT added. See `CourseMap.astro`'s module
  *   doc: MapLibre's worker is booted via `setWorkerUrl()` pointing at its
  *   CSP-safe, same-origin worker bundle, which needs nothing beyond
  *   `default-src 'self'` (CSP3: `worker-src` falls back to `default-src`).
+ * - `img-src data:` — NOT added. See `src/styles/maplibre-overrides.css`'s
+ *   doc: every control icon this site's map actually renders is
+ *   self-hosted as a real file instead.
  *
  * `X-Content-Type-Options` / `Referrer-Policy` / the `/catalog/v1/*`
  * `X-Robots-Tag` rule are carried over from stage 1 unchanged.
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tileConfig } from "../src/lib/map-config.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const OUT_PATH = process.env.HEADERS_OUT_PATH ?? join(here, "..", "public", "_headers");
 
 export function buildHeaders(env = process.env) {
   const tiles = tileConfig(env);
 
-  const scriptSrc = "script-src 'self' 'wasm-unsafe-eval'";
-  const connectSrc = tiles.configured ? `connect-src 'self' https://${tiles.host}` : null;
-  const imgSrc = tiles.configured ? `img-src 'self' https://${tiles.host}` : null;
+  const tileHostSrcs = tiles.configured ? tiles.hosts.map((h) => `https://${h}`) : [];
+  const connectSrc = tiles.configured ? `connect-src 'self' ${tileHostSrcs.join(" ")}` : null;
+  const imgSrc = tiles.configured ? `img-src 'self' ${tileHostSrcs.join(" ")}` : null;
 
-  const csp = [`default-src 'self'`, scriptSrc, connectSrc, imgSrc].filter(Boolean).join("; ");
+  const baseCsp = [
+    `default-src 'self'`,
+    `script-src 'self'`,
+    `base-uri 'self'`,
+    `frame-ancestors 'none'`,
+    `object-src 'none'`,
+    `form-action 'self'`,
+    connectSrc,
+    imgSrc,
+  ]
+    .filter(Boolean)
+    .join("; ");
+
+  const pagefindCsp = [
+    `default-src 'self'`,
+    `script-src 'self' 'wasm-unsafe-eval'`,
+    `base-uri 'self'`,
+    `frame-ancestors 'none'`,
+    `object-src 'none'`,
+    `form-action 'self'`,
+  ].join("; ");
 
   return (
     `# GENERATED by scripts/gen-headers.mjs — do not hand-edit. Config:\n` +
     `# GOLFRAVEN_TILE_STYLE_URL=${tiles.configured ? tiles.styleUrl : "(unset)"}\n` +
+    `# GOLFRAVEN_TILE_HOSTS=${tiles.configured ? tiles.hosts.join(",") : "(unset)"}\n` +
     `/*\n` +
-    `  Content-Security-Policy: ${csp}\n` +
+    `  Content-Security-Policy: ${baseCsp}\n` +
     `  X-Content-Type-Options: nosniff\n` +
     `  Referrer-Policy: strict-origin-when-cross-origin\n` +
+    `\n` +
+    `# Pagefind's WASM search index needs 'wasm-unsafe-eval' — scoped to\n` +
+    `# ONLY this path, not the site-wide block above (see module doc).\n` +
+    `/pagefind/*\n` +
+    `  Content-Security-Policy: ${pagefindCsp}\n` +
     `\n` +
     `/catalog/v1/*\n` +
     `  X-Robots-Tag: noindex\n`
@@ -76,10 +119,10 @@ export function buildHeaders(env = process.env) {
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
+  const distDir = process.env.DIST_DIR ?? process.argv[2] ?? join(here, "..", "dist");
+  const outPath = join(distDir, "_headers");
+  await mkdir(distDir, { recursive: true });
   const content = buildHeaders();
-  await writeFile(OUT_PATH, content);
-  const before = await readFile(OUT_PATH, "utf8").catch(() => "");
-  console.log(
-    `gen-headers: wrote ${OUT_PATH} (${before.includes("wasm-unsafe-eval") ? "ok" : "written"})`,
-  );
+  await writeFile(outPath, content);
+  console.log(`gen-headers: wrote ${outPath}`);
 }
