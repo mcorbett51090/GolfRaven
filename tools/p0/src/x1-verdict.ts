@@ -31,13 +31,48 @@
  *   true` in `countedEntries` below. `computeX1Verdict` no longer refuses
  *   when no window is logged, and no longer excludes anything by date.
  * - **The recorded-export rule** (see `recorded-export.ts`) replaces the
- *   round-window refusal as the CLI's gate: `--os ios|android` names which
- *   OS's `docs/p0/X1.md` "## Recorded export" date this run is standing on;
- *   a blank date refuses unless `--informational` is passed, in which case
- *   the output is marked `recorded: false` with a loud banner. The verdict
- *   itself always combines both OSes' input data, as before — `--os` only
- *   decides which OS's recorded-export date gates this particular run.
+ *   round-window refusal as the CLI's gate.
+ *
+ * **Opus-gate correction (post-d0de4b8, superseding the two paragraphs
+ * above about how "recorded" combines across OSes):** the original fix let
+ * a recorded run for one OS silently borrow the OTHER OS's raw data to
+ * decide `overallVerdict` — an `--os ios` run backed by an `ios` JSON
+ * stamped `recorded: false` could still report an overall PASS purely from
+ * `android`'s (unstamped, unverified) sessions. That is now closed:
+ *
+ * - **A recorded verdict is per OS, decided from that OS's data alone.**
+ *   `computeX1Verdict` computes `recordedVerdicts.ios` / `.android`
+ *   independently, each `eligible` only when that OS's own input object
+ *   carries `recorded === true` and (if it states one) a matching `os`
+ *   field — i.e. it is itself the JSON a recorded `x1-ios-export`/Android
+ *   reader run produced, not an `--informational` one or the wrong OS's
+ *   file. An ineligible OS's data still appears in the informational
+ *   sections below (`perSource`, `sourcesPassingByOs`, `countedEntries`)
+ *   — clearly separate, and NEVER folded into `recordedVerdicts` or
+ *   `overallVerdict`.
+ * - **`overallVerdict`** ("pass" | "kill" | "not-recorded") is now derived
+ *   ONLY from `recordedVerdicts`: "pass" if either eligible OS's own
+ *   verdict is "pass" (Addendum F's ≥ 2-of-3-on-one-OS bar, applied WITHIN
+ *   that OS's data only); "kill" if at least one OS is eligible and none
+ *   passed; "not-recorded" if NEITHER OS is eligible — there is then no
+ *   trustworthy recorded result to report at all, which is what the old
+ *   code got wrong (it would still compute a "pass"/"kill" from raw,
+ *   unstamped data).
+ * - **The CLI still takes `--os ios|android`,** naming which OS this run
+ *   claims to produce THE recorded result for, and now additionally
+ *   REFUSES (throws, before writing any output) when
+ *   `recordedVerdicts[--os].eligible` is false — i.e., when the input JSON
+ *   for that OS is not itself stamped `recorded: true` for that OS.
+ *   `--informational` skips this refusal entirely (and skips the
+ *   export-date/SHA-256 binding below).
+ * - **The recorded run is also bound to one specific export** (its own
+ *   correction, not a d0de4b8 regression): Apple's `<ExportDate>` /
+ *   the Android reader's `generatedAt` must match the calendar date logged
+ *   in `docs/p0/X1.md`, and its SHA-256 is bound there on the first
+ *   recorded run and checked on every later one — see `recorded-export.ts`
+ *   and `x1-ios-export.ts`'s module doc for the mechanism.
  */
+import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { X1IosExportResult, X1IosWorkoutRecord } from "./x1-ios-export.js";
@@ -47,7 +82,10 @@ import {
   type RoundWindow,
 } from "./round-windows.js";
 import {
+  assertExportDateMatches,
   assertRecordedExportDateLogged,
+  bindExportHash,
+  extractCalendarDate,
   informationalBanner,
   readRecordedExportDates,
   type X1Os,
@@ -143,38 +181,79 @@ export interface X1NewestDateByOs {
   android: string | null;
 }
 
+/** Opus-gate correction (post-d0de4b8): one OS's slice of the recorded
+ * verdict. `eligible` is true only when that OS's own input object is
+ * itself stamped `recorded: true` (and, if it states one, `os` matching
+ * this OS) — i.e. it is the JSON a RECORDED run of that OS's export tool
+ * produced. When `eligible` is false, `verdict` is `null` and
+ * `ineligibleReason` says why (never silently defaulted to a verdict). */
+export interface X1RecordedOsResult {
+  eligible: boolean;
+  ineligibleReason: string | null;
+  /** How many of the 3 sources passed on this OS — meaningful only when
+   * `eligible`; still populated (mirrors `sourcesPassingByOs`) when not,
+   * for visibility, but MUST NOT be read as a recorded count. */
+  sourcesPassing: number;
+  verdict: "pass" | "kill" | null;
+}
+
 export interface X1VerdictResult {
   generatedAt: string;
+  /** INFORMATIONAL ONLY (Opus-gate correction, post-d0de4b8) — computed
+   * from BOTH inputs' raw data regardless of their `recorded`/`os` stamps.
+   * Never used to decide `recordedVerdicts` or `overallVerdict`; see those
+   * fields for the actual recorded result. Kept for visibility (decision
+   * 0005 §1's "a separately labelled informational section"). */
   perSource: {
     garmin: SourceVerdict;
     appleWatch: SourceVerdict;
     phoneApp: PhoneAppSourceVerdict;
   };
-  /** Gate finding B-6: how many of the 3 sources pass ON EACH OS
-   * independently — the bar is "≥ 2 of 3 sources pass on ONE OS", not "≥ 2
-   * of 3 pass somewhere, possibly on different OSes" (decision 0001
-   * Addendum F: "Sources that pass on different operating systems do not
-   * combine"). Emitted alongside the verdict so both readings stay visible. */
+  /** INFORMATIONAL ONLY — see `perSource` above. Gate finding B-6: how many
+   * of the 3 sources pass ON EACH OS independently — the bar is "≥ 2 of 3
+   * sources pass on ONE OS", not "≥ 2 of 3 pass somewhere, possibly on
+   * different OSes" (decision 0001 Addendum F). */
   sourcesPassingByOs: { ios: number; android: number };
-  overallVerdict: "pass" | "kill";
+  /** Opus-gate correction (post-d0de4b8): the per-OS recorded verdict,
+   * decided from EACH OS's own data alone — never combined across OSes.
+   * See the module doc. */
+  recordedVerdicts: { ios: X1RecordedOsResult; android: X1RecordedOsResult };
+  /** "pass" if either eligible OS's `recordedVerdicts` entry is "pass";
+   * "kill" if at least one OS is eligible and none passed; "not-recorded"
+   * if NEITHER OS is eligible — there is then no trustworthy recorded
+   * result at all. Derived ONLY from `recordedVerdicts`, never from the
+   * informational `sourcesPassingByOs` above (that was the leak). */
+  overallVerdict: "pass" | "kill" | "not-recorded";
   /** Whether X1's half of the K4 written-statement trigger fires
    * (`docs/p0/K4.md`: "if K4b fails, or if X1's Garmin source specifically
    * fails ... a written statement ... must go to the owner before P1").
    * This tool has no K4b data, so it can only assess the X1 side; K4b
    * failing independently also triggers the statement and is not
-   * reflected here. */
+   * reflected here. INFORMATIONAL (built from `perSource.garmin`, same
+   * caveat as above). */
   garminWrittenStatementTriggeredByX1: boolean;
-  /** Decision 0005: every counted workout/session matched to one of the 3
+  /** INFORMATIONAL — every counted workout/session matched to one of the 3
    * sources, listed with its date, source id, and (iOS only) version and
-   * device — the per-workout listing. */
+   * device — the per-workout listing (decision 0005). */
   countedEntries: {
     garmin: X1CountedEntry[];
     appleWatch: X1CountedEntry[];
     phoneApp: X1CountedEntry[];
   };
   /** Decision 0005: "The memo shows, per source, the newest counted
-   * workout's date" — per source, per OS. */
+   * workout's date" — per source, per OS. Should-fix (Opus gate,
+   * post-d0de4b8): covers only entries that count toward the verdict
+   * (route present); a route-less entry's date is tracked separately in
+   * `newestRouteLessWorkoutDateBySource`, never conflated with this one. */
   newestCountedWorkoutDateBySource: {
+    garmin: X1NewestDateByOs;
+    appleWatch: X1NewestDateByOs;
+    phoneApp: X1NewestDateByOs;
+  };
+  /** Should-fix (Opus gate, post-d0de4b8): the newest counted workout
+   * WITHOUT a route, per source per OS — visible, but never counted as
+   * the verdict-bearing "newest counted workout date" above. */
+  newestRouteLessWorkoutDateBySource: {
     garmin: X1NewestDateByOs;
     appleWatch: X1NewestDateByOs;
     phoneApp: X1NewestDateByOs;
@@ -183,8 +262,20 @@ export interface X1VerdictResult {
 }
 
 export interface X1VerdictInput {
-  ios: X1IosExportResult;
-  android: AndroidGolfSessionReadResult;
+  /** Opus-gate correction (post-d0de4b8): the `recorded`/`os` fields are
+   * whatever a recorded `x1-ios-export` run stamped into its JSON output
+   * (optional here so plain/synthetic `X1IosExportResult` data — e.g. an
+   * informational combined view, or a test fixture — still type-checks;
+   * `computeX1Verdict` treats a missing/false `recorded` as "not eligible
+   * for a recorded verdict on this OS", never as a permissive default). */
+  ios: X1IosExportResult & Partial<{ os: X1Os; recorded: boolean }>;
+  /** Opus-gate correction (post-d0de4b8): same stamp convention as `ios`
+   * above — the apps/mobile Health Connect reader itself doesn't produce
+   * these fields (that package is out of this repo's lane), so whoever
+   * prepares a RECORDED Android run's input JSON stamps `recorded: true,
+   * os: "android"` onto it by hand or with a small wrapper, mirroring what
+   * `x1-ios-export --os ios` does automatically. */
+  android: AndroidGolfSessionReadResult & Partial<{ os: X1Os; recorded: boolean }>;
   /** Follow-up reads for any Android session with `routeRequiresConsent`,
    * keyed by `recordId`. A session in that state with no entry here is
    * treated as "not present" (R6's default when the follow-up wasn't run
@@ -415,18 +506,39 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   };
   const iosOf = (entries: X1CountedEntry[]) => entries.filter((e) => e.os === "ios");
   const androidOf = (entries: X1CountedEntry[]) => entries.filter((e) => e.os === "android");
+  // Should-fix (Opus gate, post-d0de4b8): "newest counted workout date"
+  // covers only entries that count TOWARD THE VERDICT — golf, allow-listed
+  // source (both already true of everything in `countedEntries`), AND
+  // route present. A route-less entry's date is tracked separately below,
+  // never allowed to pull the verdict-bearing date forward.
+  const withRoute = (entries: X1CountedEntry[]) => entries.filter((e) => e.routePresent);
+  const withoutRoute = (entries: X1CountedEntry[]) => entries.filter((e) => !e.routePresent);
   const newestCountedWorkoutDateBySource = {
     garmin: {
-      ios: newestStart(iosOf(countedEntries.garmin)),
-      android: newestStart(androidOf(countedEntries.garmin)),
+      ios: newestStart(withRoute(iosOf(countedEntries.garmin))),
+      android: newestStart(withRoute(androidOf(countedEntries.garmin))),
     },
     appleWatch: {
-      ios: newestStart(iosOf(countedEntries.appleWatch)),
+      ios: newestStart(withRoute(iosOf(countedEntries.appleWatch))),
       android: null,
     },
     phoneApp: {
-      ios: newestStart(iosOf(countedEntries.phoneApp)),
-      android: newestStart(androidOf(countedEntries.phoneApp)),
+      ios: newestStart(withRoute(iosOf(countedEntries.phoneApp))),
+      android: newestStart(withRoute(androidOf(countedEntries.phoneApp))),
+    },
+  };
+  const newestRouteLessWorkoutDateBySource = {
+    garmin: {
+      ios: newestStart(withoutRoute(iosOf(countedEntries.garmin))),
+      android: newestStart(withoutRoute(androidOf(countedEntries.garmin))),
+    },
+    appleWatch: {
+      ios: newestStart(withoutRoute(iosOf(countedEntries.appleWatch))),
+      android: null,
+    },
+    phoneApp: {
+      ios: newestStart(withoutRoute(iosOf(countedEntries.phoneApp))),
+      android: newestStart(withoutRoute(androidOf(countedEntries.phoneApp))),
     },
   };
 
@@ -461,32 +573,117 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
       phoneAppVerdict.android,
     ].filter((v) => v === "pass").length,
   };
-  const overallVerdict: "pass" | "kill" =
-    sourcesPassingByOs.ios >= 2 || sourcesPassingByOs.android >= 2
+  // Opus-gate correction (post-d0de4b8): per-OS recorded eligibility,
+  // decided ONLY from that OS's own input object's `recorded`/`os` stamp —
+  // never from the other OS's data, and never from whether the DATA looks
+  // good. An input not stamped `recorded: true` (or stamped for a
+  // different OS) is ineligible, full stop; see the module doc.
+  const osEligibility = (
+    stampedRecorded: boolean | undefined,
+    stampedOs: X1Os | undefined,
+    expectedOs: X1Os,
+  ): { eligible: boolean; reason: string | null } => {
+    if (stampedRecorded !== true) {
+      return {
+        eligible: false,
+        reason: `input.${expectedOs}.recorded is ${JSON.stringify(stampedRecorded)}, not true — this OS's ` +
+          "data was not itself produced by a recorded run.",
+      };
+    }
+    if (stampedOs !== undefined && stampedOs !== expectedOs) {
+      return {
+        eligible: false,
+        reason: `input.${expectedOs}.os is "${stampedOs}", not "${expectedOs}" — this OS's data was produced ` +
+          "for a different OS.",
+      };
+    }
+    return { eligible: true, reason: null };
+  };
+
+  const iosElig = osEligibility(input.ios.recorded, input.ios.os, "ios");
+  const androidElig = osEligibility(input.android.recorded, input.android.os, "android");
+
+  const recordedVerdicts: X1VerdictResult["recordedVerdicts"] = {
+    ios: {
+      eligible: iosElig.eligible,
+      ineligibleReason: iosElig.reason,
+      sourcesPassing: sourcesPassingByOs.ios,
+      verdict: iosElig.eligible ? (sourcesPassingByOs.ios >= 2 ? "pass" : "kill") : null,
+    },
+    android: {
+      eligible: androidElig.eligible,
+      ineligibleReason: androidElig.reason,
+      sourcesPassing: sourcesPassingByOs.android,
+      verdict: androidElig.eligible ? (sourcesPassingByOs.android >= 2 ? "pass" : "kill") : null,
+    },
+  };
+
+  // "the overall is a pass if any recorded OS passes" — derived ONLY from
+  // recordedVerdicts, never from the informational sourcesPassingByOs
+  // above. "not-recorded" (neither OS eligible) is a distinct state from
+  // "kill" (at least one OS's OWN recorded data was examined and failed
+  // the bar) — the old code conflated these, which was the leak.
+  const overallVerdict: "pass" | "kill" | "not-recorded" =
+    recordedVerdicts.ios.verdict === "pass" || recordedVerdicts.android.verdict === "pass"
       ? "pass"
-      : "kill";
+      : recordedVerdicts.ios.verdict === "kill" || recordedVerdicts.android.verdict === "kill"
+        ? "kill"
+        : "not-recorded";
 
   // docs/p0/K4.md: "if ... X1's Garmin source specifically fails (even
   // while X1 passes overall on the other two sources)" the written
   // statement is required — i.e. Garmin not passing on any tested OS. This
   // is a per-source ("any OS") question, distinct from the per-OS 2-of-3
   // combination bar above, so `passesOnAnyOS` is kept for it.
+  // INFORMATIONAL, same caveat as `perSource` (see the module doc).
   const garminWrittenStatementTriggeredByX1 = !garmin.passesOnAnyOS;
 
   return {
     generatedAt: new Date().toISOString(),
     perSource: { garmin, appleWatch, phoneApp: phoneAppVerdict },
     sourcesPassingByOs,
+    recordedVerdicts,
     overallVerdict,
     garminWrittenStatementTriggeredByX1,
     countedEntries,
     newestCountedWorkoutDateBySource,
+    newestRouteLessWorkoutDateBySource,
     warnings,
   };
 }
 
 export function renderVerdictMarkdown(result: X1VerdictResult): string {
   const lines: string[] = [];
+
+  // Opus-gate correction (post-d0de4b8): the recorded verdict, per OS,
+  // leads — this is the actual answer, decided from each OS's own data
+  // alone. Everything after "## Informational" is cross-reference only.
+  lines.push("## Recorded verdict, per OS");
+  for (const [label, os] of [
+    ["iOS", "ios"],
+    ["Android", "android"],
+  ] as const) {
+    const r = result.recordedVerdicts[os];
+    const state = r.eligible ? (r.verdict === "pass" ? "PASS" : "KILL") : "NOT RECORDED";
+    lines.push(`**X1 recorded on ${label}: ${state}**${r.eligible ? "" : ` — ${r.ineligibleReason}`}`);
+  }
+  lines.push("");
+  lines.push(
+    `**X1 overall verdict: ${result.overallVerdict.toUpperCase()}** ` +
+      "(pass if either recorded OS passes; kill if a recorded OS was examined and failed the ≥ 2-of-3 bar; " +
+      "not-recorded if neither OS's input is itself stamped as a recorded run).",
+  );
+  lines.push(
+    `**K4 Garmin written statement triggered by X1: ${result.garminWrittenStatementTriggeredByX1 ? "YES" : "no"}** (K4b failing independently also triggers it; not assessed by this tool; informational, see below).`,
+  );
+
+  lines.push("");
+  lines.push("## Informational (NOT the recorded result — see \"Recorded verdict\" above)");
+  lines.push(
+    "Everything below is computed from BOTH inputs' raw data regardless of their `recorded`/`os` stamps — " +
+      "cross-OS reference only, never folded into the recorded verdict above.",
+  );
+  lines.push("");
   lines.push("| Source | iOS | Android | Passes on ≥ 1 OS? |");
   lines.push("|---|---|---|---|");
   lines.push(
@@ -500,19 +697,13 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
   );
   lines.push("");
   lines.push(
-    `**Sources passing per OS: iOS ${result.sourcesPassingByOs.ios} of 3, Android ${result.sourcesPassingByOs.android} of 3** ` +
+    `Sources passing per OS (informational): iOS ${result.sourcesPassingByOs.ios} of 3, Android ${result.sourcesPassingByOs.android} of 3 ` +
       "(decision 0001 Addendum F: sources passing on different OSes do not combine).",
-  );
-  lines.push(
-    `**X1 overall verdict: ${result.overallVerdict.toUpperCase()}** (bar: ≥ 2 of 3 on ONE OS).`,
-  );
-  lines.push(
-    `**K4 Garmin written statement triggered by X1: ${result.garminWrittenStatementTriggeredByX1 ? "YES" : "no"}** (K4b failing independently also triggers it; not assessed by this tool).`,
   );
 
   // Decision 0005: newest counted workout date, per source per OS.
   lines.push("");
-  lines.push("## Newest counted workout date, per source");
+  lines.push("### Newest counted workout date, per source (route present only)");
   lines.push("| Source | Newest iOS date | Newest Android date |");
   lines.push("|---|---|---|");
   for (const [label, key] of [
@@ -524,10 +715,23 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
     lines.push(`| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`);
   }
 
+  lines.push("");
+  lines.push("### Newest workout WITHOUT a route, per source (does not count toward the verdict)");
+  lines.push("| Source | Newest iOS date | Newest Android date |");
+  lines.push("|---|---|---|");
+  for (const [label, key] of [
+    ["Garmin watch + Connect Mobile", "garmin"],
+    ["Apple Watch Workout", "appleWatch"],
+    [`Phone app (${result.perSource.phoneApp.appUsed})`, "phoneApp"],
+  ] as const) {
+    const d = result.newestRouteLessWorkoutDateBySource[key];
+    lines.push(`| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`);
+  }
+
   // Decision 0005 "every counted workout is listed" — the per-workout
   // listing, one row per counted entry across all 3 sources.
   lines.push("");
-  lines.push("## Counted workouts/sessions");
+  lines.push("### Counted workouts/sessions");
   lines.push("| Source | OS | Start | Source id | Source version | Device | Route present? | Test round? |");
   lines.push("|---|---|---|---|---|---|---|---|");
   const allEntries: [string, X1CountedEntry][] = [
@@ -603,25 +807,33 @@ function parseArgs(argv: string[]): CliArgs {
   };
 }
 
+function sha256Of(raw: string): string {
+  return createHash("sha256").update(raw).digest("hex");
+}
+
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const ios = JSON.parse(
-    await readFile(args.iosPath, "utf8"),
-  ) as X1IosExportResult;
-  const android = JSON.parse(
-    await readFile(args.androidPath, "utf8"),
-  ) as AndroidGolfSessionReadResult;
-  const sourceMap = JSON.parse(
-    await readFile(args.sourceMapPath, "utf8"),
-  ) as SourceMap;
+  const { resolve } = await import("node:path");
+
+  // Opus-gate correction (post-d0de4b8), point 3's third bullet: stamp
+  // EVERY input file's path + SHA-256 into the output provenance, not just
+  // docs/p0/X1.md.
+  const iosRaw = await readFile(args.iosPath, "utf8");
+  const ios = JSON.parse(iosRaw) as X1VerdictInput["ios"];
+  const androidRaw = await readFile(args.androidPath, "utf8");
+  const android = JSON.parse(androidRaw) as X1VerdictInput["android"];
+  const sourceMapRaw = await readFile(args.sourceMapPath, "utf8");
+  const sourceMap = JSON.parse(sourceMapRaw) as SourceMap;
+  let followUpsRaw: string | undefined;
   const androidRouteFollowUps = args.followUpsPath
-    ? (JSON.parse(await readFile(args.followUpsPath, "utf8")) as Record<
+    ? (JSON.parse((followUpsRaw = await readFile(args.followUpsPath, "utf8"))) as Record<
         string,
         AndroidRouteFollowUp
       >)
     : undefined;
+
   const roundWindows = await readLoggedRoundWindows();
-  const { dates: recordedExportDates, source } = await readRecordedExportDates();
+  const { dates: recordedExportDates, source: x1DocSource } = await readRecordedExportDates();
   if (!args.informational) {
     assertRecordedExportDateLogged(recordedExportDates, args.os);
   }
@@ -634,9 +846,70 @@ async function main(argv: string[]): Promise<void> {
     roundWindows,
     ...(androidRouteFollowUps ? { androidRouteFollowUps } : {}),
   });
+
+  if (recorded) {
+    // Point 2: refuse a recorded run when the OS this run claims (--os)
+    // isn't itself eligible — its input JSON wasn't recorded, or was
+    // produced for a different OS. Checked from computeX1Verdict's own
+    // eligibility determination, not re-derived here.
+    const osResult = result.recordedVerdicts[args.os];
+    if (!osResult.eligible) {
+      throw new Error(
+        `Refusing a recorded run for --os ${args.os}: ${osResult.ineligibleReason} Pass --informational to ` +
+          "run anyway (the output is then marked informational, never the recorded P0 result).",
+      );
+    }
+
+    // Point 3: bind the recorded run to one specific export — Apple's
+    // ExportDate (iOS) or the Android reader's generatedAt (Android) must
+    // match docs/p0/X1.md's logged date, and its SHA-256 is bound there on
+    // the first recorded run and checked on every later one. iOS is
+    // RE-VERIFIED here from the ios JSON's own embedded exportDate/
+    // exportSha256 (written by a recorded x1-ios-export run) — this tool
+    // never has direct access to export.xml itself, so it trusts those
+    // embedded fields the same way it re-checks round windows itself
+    // instead of trusting x1-ios-export's own filtering (gate finding B-7
+    // philosophy) — a mismatch there still catches a stale/hand-edited
+    // ios.json.
+    if (args.os === "ios") {
+      if (ios.exportDate === undefined || ios.exportDate === null) {
+        throw new Error(
+          "The --ios JSON has no exportDate — refusing a recorded run: decision 0005 requires binding the " +
+            "recorded run to one specific export, and there is nothing to compare against docs/p0/X1.md's " +
+            "logged date. Re-run x1-ios-export (not --informational) to produce a properly-stamped file, or " +
+            "pass --informational here to run anyway.",
+        );
+      }
+      const exportCalendarDate = extractCalendarDate(ios.exportDate);
+      assertExportDateMatches(recordedExportDates, "ios", exportCalendarDate);
+      await bindExportHash(x1DocSource.path, recordedExportDates, "ios", ios.exportSha256);
+    } else {
+      const androidCalendarDate = extractCalendarDate(android.generatedAt);
+      assertExportDateMatches(recordedExportDates, "android", androidCalendarDate);
+      await bindExportHash(x1DocSource.path, recordedExportDates, "android", sha256Of(androidRaw));
+    }
+  }
+
   const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
   const md = banner + renderVerdictMarkdown(result);
-  const output = { ...result, os: args.os, recorded, source };
+
+  const provenance = {
+    x1Doc: x1DocSource,
+    iosJson: { path: resolve(args.iosPath), sha256: sha256Of(iosRaw) },
+    androidJson: { path: resolve(args.androidPath), sha256: sha256Of(androidRaw) },
+    sourceMapJson: { path: resolve(args.sourceMapPath), sha256: sha256Of(sourceMapRaw) },
+    followUpsJson:
+      args.followUpsPath && followUpsRaw !== undefined
+        ? { path: resolve(args.followUpsPath), sha256: sha256Of(followUpsRaw) }
+        : null,
+    // As recorded in the --ios JSON itself (x1-verdict has no direct
+    // access to export.xml — see the ios-side rebind above).
+    exportXml:
+      ios.exportSha256 !== undefined
+        ? { path: `${ios.exportDir}/export.xml`, sha256: ios.exportSha256 }
+        : null,
+  };
+  const output = { ...result, os: args.os, recorded, provenance };
 
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
