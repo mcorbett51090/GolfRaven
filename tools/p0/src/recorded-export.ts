@@ -250,12 +250,111 @@ export function resolveFixturesDir(): string {
   return path.join(here, "..", "test", "fixtures");
 }
 
-/** True when `candidatePath` resolves to `tools/p0/test/fixtures` itself,
- * or somewhere under it. */
-export function isUnderFixturesDir(candidatePath: string): boolean {
-  const fixturesDir = path.resolve(resolveFixturesDir());
+/** `fs.realpathSync`, following symlinks — falling back to a plain
+ * `path.resolve` when the path doesn't exist (or can't be stat'd), so a
+ * not-yet-real path (a caller checking a hypothetical location, or an
+ * existing unit test's synthetic non-existent path) never throws here. */
+function realOrResolved(candidatePath: string): string {
   const resolved = path.resolve(candidatePath);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** True when `candidatePath` resolves to `tools/p0/test/fixtures` itself,
+ * or somewhere under it. **Round-4 Opus-gate correction (post-4279773,
+ * nit):** resolves both sides with `fs.realpathSync`, not just
+ * `path.resolve` — a SYMLINK placed under fixtures/ that points OUTSIDE
+ * it previously read as "under fixtures" (a purely syntactic path check
+ * never follows the link), which would have let `--informational` peek at
+ * real, unbound data through a fixtures-dir symlink. Following the link
+ * on both sides closes that. */
+export function isUnderFixturesDir(candidatePath: string): boolean {
+  const fixturesDir = realOrResolved(resolveFixturesDir());
+  const resolved = realOrResolved(candidatePath);
   return resolved === fixturesDir || resolved.startsWith(fixturesDir + path.sep);
+}
+
+/**
+ * Runs `git <args>` in `cwd` and returns its stdout. **Round-4 Opus-gate
+ * correction (post-4279773):** a recorded run's binding/commit checks
+ * depend on git, so any failure here — git missing from PATH, `cwd` not
+ * inside a git repository, or any other non-zero exit — is a hard refusal,
+ * never a silent "assume clean"/"assume not previously bound". Only the
+ * caller decides the exact refusal wording; this just surfaces the cause.
+ */
+async function runGit(args: string[], cwd: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", args, { cwd });
+    return stdout;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    const detail =
+      code === "ENOENT"
+        ? "git is not installed / not on PATH"
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    throw new Error(
+      `git ${args.join(" ")} (in ${cwd}) failed: ${detail} — refusing a recorded run: decision 0005's ` +
+        "binding/commit-integrity checks (round-4 Opus-gate correction, post-4279773) require a working git " +
+        "and docs/p0/X1.md to be inside a real git repository. --informational runs never reach this check.",
+    );
+  }
+}
+
+/**
+ * Round-4 Opus-gate correction (post-4279773), "verdicts come only from a
+ * committed binding": refuses (throws) when `x1DocPath` has any uncommitted
+ * change (`git status --porcelain` is non-empty for it) — a recorded run
+ * (binding OR verdict) must always reflect what's actually committed, never
+ * a working copy that could be edited and then discarded right after. Runs
+ * on every recorded call, before anything else reads/trusts the file's
+ * logged dates or hashes.
+ */
+export async function assertDocCommitted(x1DocPath: string): Promise<void> {
+  const cwd = path.dirname(x1DocPath);
+  const stdout = await runGit(["status", "--porcelain", "--", x1DocPath], cwd);
+  if (stdout.trim() !== "") {
+    throw new Error(
+      "docs/p0/X1.md has uncommitted changes — refusing a recorded run (round-4 Opus-gate correction, " +
+        "post-4279773): decision 0005 needs a recorded result — a bind OR a verdict — to come only from a " +
+        "COMMITTED docs/p0/X1.md, never a modified-but-uncommitted working copy. Commit (and push) " +
+        "docs/p0/X1.md, then re-run.",
+    );
+  }
+}
+
+/**
+ * Round-4 Opus-gate correction (post-4279773), "refuse a second binding":
+ * scans `x1DocPath`'s own git history for a commit whose diff touched a
+ * bound `sha256:` value on `os`'s line — even one since deleted or
+ * reverted. `bindExportHash` calls this ONLY when `os` currently reads as
+ * unbound (about to write a hash for what looks like the first time) — if
+ * history shows it was bound before, the current "unbound" reading is a
+ * delete/revert, not a genuinely-never-bound line, and re-binding to a
+ * (possibly different) export is an owner decision, not this tool's to
+ * make silently.
+ */
+async function assertNotPreviouslyBound(x1DocPath: string, os: X1Os): Promise<void> {
+  const osLabel = osLabelOf(os);
+  const cwd = path.dirname(x1DocPath);
+  const pattern = `^- ${osLabel}:.*sha256:`;
+  const stdout = await runGit(["log", "-G", pattern, "--format=%H", "--", x1DocPath], cwd);
+  const commits = stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  if (commits.length > 0) {
+    throw new Error(
+      `${osLabel}'s "## Recorded export" line reads as unbound now, but git history shows it WAS bound to a ` +
+        `sha256: before (commit(s): ${commits.join(", ")}) — refusing to silently bind a new export in its ` +
+        "place: re-binding needs an owner decision (round-4 Opus-gate correction, post-4279773), not a " +
+        "delete/revert quietly reopening it.",
+    );
+  }
 }
 
 /**
@@ -364,6 +463,10 @@ export async function bindExportHash(
   const { dates } = await readRecordedExportDates(x1DocPath);
   const logged = dates[os].sha256;
   if (logged === null) {
+    // Round-4 Opus-gate correction (post-4279773): "unbound" might mean
+    // genuinely never bound, or a delete/revert of a real prior bind —
+    // git history is the only thing that can tell the two apart.
+    await assertNotPreviouslyBound(x1DocPath, os);
     await updateRecordedExportEntry(x1DocPath, os, actualSha256);
     return { written: true };
   }

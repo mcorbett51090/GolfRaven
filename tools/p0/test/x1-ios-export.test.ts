@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync as fsWriteFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   runX1IosExport,
+  runX1IosExportCli,
   renderMarkdownTable,
   renderSourceSummaryMarkdown,
 } from "../src/x1-ios-export.js";
@@ -393,5 +397,88 @@ describe("countGpxTrackpoints", () => {
       path.join(FIXTURES, "workout-routes", "route_hole19_empty.gpx"),
     );
     expect(result).toEqual({ exists: true, count: 0 });
+  });
+});
+
+const GIT_TEST_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], { cwd, encoding: "utf8" });
+}
+
+/** A fresh temp git repo with `X1.md` written and committed — the
+ * round-4 Opus-gate correction (post-4279773) baseline `runX1IosExportCli`
+ * now needs, since a recorded run requires both a real git repo AND a
+ * clean (committed) working tree. */
+function tmpGitX1Doc(body: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-cli-"));
+  git(dir, ["init", "-q"]);
+  const file = path.join(dir, "X1.md");
+  fsWriteFileSync(file, `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`, "utf8");
+  git(dir, ["add", "X1.md"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+  return file;
+}
+
+describe("runX1IosExportCli (round-4 Opus-gate correction, post-4279773) — 'a binding run binds and prints no verdict'", () => {
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  });
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+  });
+
+  it("the run that performs the first bind prints only the bind message — no verdict, no per-source detail, no output files", async () => {
+    // The fixture export.xml's <ExportDate> is 2026-09-21 09:00:00 -0400,
+    // whose UTC calendar date is 2026-09-21 — must match what's logged.
+    const x1DocPath = tmpGitX1Doc("- iOS: 2026-09-21\n- Android: \n");
+    const outDir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-out-"));
+    const outPrefix = path.join(outDir, "result");
+
+    await runX1IosExportCli(
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
+      x1DocPath,
+    );
+
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    expect(printed).toContain("bound: commit and push docs/p0/X1.md, then re-run");
+    // No verdict/per-source detail was ever computed or printed.
+    expect(printed).not.toMatch(/golf workout\(s\) found/);
+    expect(printed).not.toContain("recorded=");
+    expect(printed).not.toContain("|"); // no markdown table row
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
+    expect(existsSync(`${outPrefix}.md`)).toBe(false);
+
+    // The bind itself DID happen — docs/p0/X1.md now carries the hash.
+    const updatedDoc = readFileSync(x1DocPath, "utf8");
+    expect(updatedDoc).toMatch(/- iOS: 2026-09-21 sha256:[0-9a-f]{64}/);
+  });
+
+  it("a later run against the now-committed bind DOES print the recorded verdict", async () => {
+    const x1DocPath = tmpGitX1Doc("- iOS: 2026-09-21\n- Android: \n");
+    const outDir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-out-"));
+    const outPrefix = path.join(outDir, "result");
+
+    // First run: binds, prints no verdict (as above).
+    await runX1IosExportCli(
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
+      x1DocPath,
+    );
+    // Commit the bind — the real "commit and push docs/p0/X1.md now" step.
+    git(path.dirname(x1DocPath), ["add", "X1.md"]);
+    git(path.dirname(x1DocPath), ["commit", "-q", "-m", "bind iOS"]);
+    stdoutSpy.mockClear();
+
+    // Second run: the hash already matches — this run recomputes and
+    // prints the actual result.
+    await runX1IosExportCli(
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
+      x1DocPath,
+    );
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    expect(printed).toMatch(/golf workout\(s\) found/);
+    expect(printed).not.toContain("bound: commit and push");
+    expect(existsSync(`${outPrefix}.json`)).toBe(true);
   });
 });

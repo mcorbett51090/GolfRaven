@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertBoundInputProvided,
+  assertDocCommitted,
   assertExportDateMatches,
   assertInformationalInputAllowed,
   assertRecordedExportDateLogged,
@@ -139,6 +141,21 @@ describe("resolveFixturesDir / isUnderFixturesDir", () => {
     expect(isUnderFixturesDir("/tmp/some-real-export")).toBe(false);
     expect(isUnderFixturesDir(path.join(tmpdir(), "not-fixtures"))).toBe(false);
   });
+
+  it("round-4 Opus-gate correction (post-4279773, nit): does NOT treat a symlink placed UNDER fixtures as 'under fixtures' when it points OUTSIDE it", () => {
+    const dir = resolveFixturesDir();
+    const outsideTarget = mkdtempSync(path.join(tmpdir(), "golfraven-outside-fixtures-"));
+    const linkPath = path.join(dir, "escape-symlink-test");
+    try {
+      symlinkSync(outsideTarget, linkPath, "dir");
+      // Syntactically the link's own path IS under fixtures/ — the point
+      // of following it with realpath is that it must not read as such.
+      expect(isUnderFixturesDir(linkPath)).toBe(false);
+    } finally {
+      rmSync(linkPath, { force: true });
+      rmSync(outsideTarget, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("assertInformationalInputAllowed (round-3 Opus-gate correction, post-8e5a29b)", () => {
@@ -176,6 +193,21 @@ describe("assertInformationalInputAllowed (round-3 Opus-gate correction, post-8e
     };
     expect(() => assertInformationalInputAllowed(dates, "ios", "/tmp/real-export")).not.toThrow();
   });
+
+  it("round-4 Opus-gate correction (post-4279773, nit): refuses through a symlink placed UNDER fixtures that points OUTSIDE it, while unbound", () => {
+    const dir = resolveFixturesDir();
+    const outsideTarget = mkdtempSync(path.join(tmpdir(), "golfraven-outside-fixtures-"));
+    const linkPath = path.join(dir, "escape-symlink-test-informational");
+    try {
+      symlinkSync(outsideTarget, linkPath, "dir");
+      expect(() => assertInformationalInputAllowed(BLANK, "ios", linkPath)).toThrow(
+        /no informational runs on real data/i,
+      );
+    } finally {
+      rmSync(linkPath, { force: true });
+      rmSync(outsideTarget, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("extractCalendarDate", () => {
@@ -210,16 +242,31 @@ describe("assertExportDateMatches", () => {
   });
 });
 
-function tmpX1Doc(body = "- iOS: 2026-09-20\n- Android: \n"): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-recorded-export-"));
+const GIT_TEST_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+
+/** Runs `git <args>` in `cwd` synchronously (tests only — the src side is
+ * always async via `execFileAsync`), with a pinned test identity so these
+ * tests never depend on the host having a global git identity configured. */
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], { cwd, encoding: "utf8" });
+}
+
+/** A fresh temp directory that IS a git repo, with `X1.md` written and
+ * committed — the round-4 baseline every `bindExportHash`/`assertDocCommitted`
+ * test needs now that both require a real git repository. */
+function tmpGitX1Doc(body = "- iOS: 2026-09-20\n- Android: \n"): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-recorded-export-git-"));
+  git(dir, ["init", "-q"]);
   const file = path.join(dir, "X1.md");
   writeFileSync(file, `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`, "utf8");
+  git(dir, ["add", "X1.md"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
   return file;
 }
 
 describe("bindExportHash", () => {
   it("writes the hash on the first recorded run (sha256 previously null)", async () => {
-    const docPath = tmpX1Doc();
+    const docPath = tmpGitX1Doc();
     const hash = "b".repeat(64);
     const result = await bindExportHash(docPath, "ios", hash);
     expect(result.written).toBe(true);
@@ -229,16 +276,76 @@ describe("bindExportHash", () => {
 
   it("does not throw and reports written:false when the hash already matches", async () => {
     const hash = "c".repeat(64);
-    const docPath = tmpX1Doc(`- iOS: 2026-09-20 sha256:${hash}\n- Android: \n`);
+    const docPath = tmpGitX1Doc(`- iOS: 2026-09-20 sha256:${hash}\n- Android: \n`);
     const result = await bindExportHash(docPath, "ios", hash);
     expect(result.written).toBe(false);
   });
 
   it("throws on a hash mismatch — a different export than the one first bound", async () => {
-    const docPath = tmpX1Doc(`- iOS: 2026-09-20 sha256:${"c".repeat(64)}\n- Android: \n`);
+    const docPath = tmpGitX1Doc(`- iOS: 2026-09-20 sha256:${"c".repeat(64)}\n- Android: \n`);
     await expect(bindExportHash(docPath, "ios", "d".repeat(64))).rejects.toThrow(
       /does not match the hash already recorded/,
     );
+  });
+
+  it("throws when docs/p0/X1.md isn't inside a git repository at all", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "golfraven-recorded-export-nogit-"));
+    const file = path.join(dir, "X1.md");
+    writeFileSync(file, "# X1\n\n## Recorded export\n\n- iOS: 2026-09-20\n- Android: \n\n## METHOD\n", "utf8");
+    await expect(bindExportHash(file, "ios", "e".repeat(64))).rejects.toThrow(
+      /not a real git repository|git .* failed/i,
+    );
+  });
+});
+
+describe("re-binding after a delete/revert is refused (round-4 Opus-gate correction, post-4279773)", () => {
+  it("refuses a second bind once git history shows iOS was bound before, even though the hash line now reads as unbound", async () => {
+    const docPath = tmpGitX1Doc();
+    const firstHash = "1".repeat(64);
+    // First bind: succeeds, and is committed (the real workflow's "commit
+    // and push docs/p0/X1.md now" step).
+    const first = await bindExportHash(docPath, "ios", firstHash);
+    expect(first.written).toBe(true);
+    git(path.dirname(docPath), ["add", "X1.md"]);
+    git(path.dirname(docPath), ["commit", "-q", "-m", "bind iOS"]);
+
+    // Delete (revert) the sha256: suffix — back to just a bare logged date
+    // — and commit THAT too, so the line now reads as unbound again.
+    writeFileSync(docPath, "# X1\n\n## Recorded export\n\n- iOS: 2026-09-20\n- Android: \n\n## METHOD\n", "utf8");
+    git(path.dirname(docPath), ["add", "X1.md"]);
+    git(path.dirname(docPath), ["commit", "-q", "-m", "revert iOS bind"]);
+
+    // A second bind — even to the SAME export's hash, let alone a
+    // different one — must be refused: only an owner decision reopens it.
+    await expect(bindExportHash(docPath, "ios", "2".repeat(64))).rejects.toThrow(
+      /re-binding needs an owner decision/,
+    );
+  });
+
+  it("does NOT refuse a genuinely first-ever bind (no prior sha256: anywhere in history)", async () => {
+    const docPath = tmpGitX1Doc();
+    const result = await bindExportHash(docPath, "ios", "3".repeat(64));
+    expect(result.written).toBe(true);
+  });
+});
+
+describe("assertDocCommitted (round-4 Opus-gate correction, post-4279773) — 'verdicts come only from a committed binding'", () => {
+  it("does not throw when docs/p0/X1.md has no uncommitted changes", async () => {
+    const docPath = tmpGitX1Doc();
+    await expect(assertDocCommitted(docPath)).resolves.toBeUndefined();
+  });
+
+  it("throws when docs/p0/X1.md has uncommitted changes", async () => {
+    const docPath = tmpGitX1Doc();
+    writeFileSync(docPath, "# X1\n\n## Recorded export\n\n- iOS: 2026-09-21\n- Android: \n\n## METHOD\n", "utf8");
+    await expect(assertDocCommitted(docPath)).rejects.toThrow(/uncommitted changes/);
+  });
+
+  it("throws when docs/p0/X1.md is not inside a git repository at all", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "golfraven-recorded-export-nogit-"));
+    const file = path.join(dir, "X1.md");
+    writeFileSync(file, "# X1\n\n## Recorded export\n\n- iOS: \n- Android: \n\n## METHOD\n", "utf8");
+    await expect(assertDocCommitted(file)).rejects.toThrow(/git .* failed|not a git repository/i);
   });
 });
 

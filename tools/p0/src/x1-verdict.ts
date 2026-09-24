@@ -85,10 +85,12 @@ import type { X1IosExportResult, X1IosWorkoutRecord } from "./x1-ios-export.js";
 import {
   isWithinRoundWindow,
   readLoggedRoundWindows,
+  resolveX1DocPath,
   type RoundWindow,
 } from "./round-windows.js";
 import {
   assertBoundInputProvided,
+  assertDocCommitted,
   assertExportDateMatches,
   assertInformationalInputAllowed,
   assertRecordedExportDateLogged,
@@ -715,7 +717,7 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
   return lines.join("\n");
 }
 
-interface CliArgs {
+export interface X1VerdictCliArgs {
   iosExportDir: string | undefined;
   androidPath: string | undefined;
   followUpsPath?: string;
@@ -724,7 +726,7 @@ interface CliArgs {
   informational: boolean;
 }
 
-function parseArgs(argv: string[]): CliArgs {
+function parseArgs(argv: string[]): X1VerdictCliArgs {
   const opts: Record<string, string> = {};
   const flags = new Set<string>();
   for (let i = 0; i < argv.length; i += 1) {
@@ -803,8 +805,17 @@ const EMPTY_ANDROID: X1VerdictInput["android"] = {
   os: "android",
 };
 
-async function main(argv: string[]): Promise<void> {
-  const args = parseArgs(argv);
+/**
+ * The CLI's actual body, factored out of `main()` so it can be exercised
+ * directly against a temp git repo in tests (round-4 Opus-gate correction,
+ * post-4279773) — **there is no `--x1-doc` CLI flag** (decision 0005's own
+ * "no override flag" rule, same philosophy as the K2 CLI's no-`--k2-doc`
+ * rule: a recorded tool that WRITES a binding must never be pointable at
+ * anywhere other than the repo's own `docs/p0/X1.md`). `main()` always
+ * calls this with `resolveX1DocPath()`; only tests call it directly with a
+ * different path.
+ */
+export async function runX1VerdictCli(args: X1VerdictCliArgs, x1DocPath: string): Promise<void> {
   const { resolve, join } = await import("node:path");
   const { runX1IosExport } = await import("./x1-ios-export.js");
 
@@ -819,8 +830,14 @@ async function main(argv: string[]): Promise<void> {
     : undefined;
 
   const roundWindows = await readLoggedRoundWindows();
-  const { dates: recordedExportDates, source: x1DocSource } = await readRecordedExportDates();
+  const { dates: recordedExportDates, source: x1DocSource } = await readRecordedExportDates(x1DocPath);
   const recorded = !args.informational;
+  if (recorded) {
+    // Round-4 Opus-gate correction (post-4279773): a recorded run — a bind
+    // OR a verdict — only ever trusts a COMMITTED docs/p0/X1.md, checked
+    // before anything else reads/relies on its logged dates or hashes.
+    await assertDocCommitted(x1DocSource.path);
+  }
 
   // Round-3 Opus-gate correction (post-8e5a29b): no `--os` flag any more —
   // each OS is processed if (and only if) its input flag was supplied.
@@ -859,8 +876,14 @@ async function main(argv: string[]): Promise<void> {
       assertExportDateMatches(recordedExportDates, "ios", extractCalendarDate(freshIos.exportDate));
       const { written } = await bindExportHash(x1DocSource.path, "ios", freshIos.exportSha256);
       iosBoundThisRun = written;
-      const r = computeX1Verdict({ ios: freshIos, android: EMPTY_ANDROID, sourceMap, roundWindows });
-      boundResults.ios = r.recordedVerdicts.ios.verdict;
+      // Round-4 Opus-gate correction (post-4279773): the run that performs
+      // the FIRST bind never computes a verdict from it — see the
+      // early-return below. Only a run against an ALREADY-bound (and
+      // freshly re-verified) hash recomputes iOS's verdict.
+      if (!written) {
+        const r = computeX1Verdict({ ios: freshIos, android: EMPTY_ANDROID, sourceMap, roundWindows });
+        boundResults.ios = r.recordedVerdicts.ios.verdict;
+      }
     }
   } else if (recorded) {
     // iOS is bound but its input wasn't supplied — refusing rather than
@@ -898,19 +921,40 @@ async function main(argv: string[]): Promise<void> {
       assertExportDateMatches(recordedExportDates, "android", extractCalendarDate(androidParsed.generatedAt));
       const { written } = await bindExportHash(x1DocSource.path, "android", sha256Of(androidRaw));
       androidBoundThisRun = written;
-      const r = computeX1Verdict({ ios: EMPTY_IOS, android: androidParsed, sourceMap, roundWindows });
-      boundResults.android = r.recordedVerdicts.android.verdict;
+      // Round-4 Opus-gate correction (post-4279773): same as iOS above —
+      // a fresh first bind never computes a verdict this run.
+      if (!written) {
+        const r = computeX1Verdict({ ios: EMPTY_IOS, android: androidParsed, sourceMap, roundWindows });
+        boundResults.android = r.recordedVerdicts.android.verdict;
+      }
     }
   } else if (recorded) {
     assertBoundInputProvided(recordedExportDates, "android", false);
   }
 
-  if (recorded && Object.keys(boundResults).length === 0) {
+  if (recorded && Object.keys(boundResults).length === 0 && !iosBoundThisRun && !androidBoundThisRun) {
     throw new Error(
       "Nothing to record: no OS has both a logged UTC date and its input supplied this run. Log a UTC date " +
         'in docs/p0/X1.md\'s "## Recorded export" section for the OS you\'re binding, and pass its ' +
         "--ios-export/--android input.",
     );
+  }
+
+  // Round-4 Opus-gate correction (post-4279773), "a binding run binds and
+  // prints no verdict": if THIS run performed the first bind for either
+  // OS, stop here — never compute or print a verdict/per-source detail,
+  // and never write a result file, from a binding that hasn't even been
+  // pushed yet. A later run, once docs/p0/X1.md is committed and pushed,
+  // re-verifies the (now-matching) hash and produces the actual result.
+  if (recorded && (iosBoundThisRun || androidBoundThisRun)) {
+    const boundLabels = [iosBoundThisRun ? "iOS" : null, androidBoundThisRun ? "Android" : null].filter(
+      (l): l is string => l !== null,
+    );
+    process.stdout.write(
+      `x1-verdict: bound a new SHA-256 for ${boundLabels.join(" and ")} into docs/p0/X1.md.\n` +
+        "bound: commit and push docs/p0/X1.md, then re-run.\n",
+    );
+    return;
   }
 
   // INFORMATIONAL combined view (perSource/sourcesPassingByOs/countedEntries/
@@ -940,10 +984,11 @@ async function main(argv: string[]): Promise<void> {
     lines.push(
       `**X1 overall recorded result: ${overall.toUpperCase()}** (pass if any bound OS recomputes to a pass).`,
     );
-    if (iosBoundThisRun || androidBoundThisRun) {
-      lines.push("");
-      lines.push("This run bound new state into docs/p0/X1.md — **commit and push docs/p0/X1.md now**.");
-    }
+    // Round-4 Opus-gate correction (post-4279773): a run that bound
+    // anything already returned above, before ever reaching here — so
+    // reaching this point on a recorded run means every OS in
+    // `boundResults` was recomputed from an ALREADY-bound, freshly
+    // re-verified hash, never a fresh first bind.
     recordedSection = `${lines.join("\n")}\n\n`;
   }
   const banner = recorded
@@ -979,6 +1024,10 @@ async function main(argv: string[]): Promise<void> {
   process.stdout.write(`${md}\n`);
 }
 
+async function main(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  await runX1VerdictCli(args, resolveX1DocPath());
+}
 
 /** Gate finding B-11 (the N7 symlink bug, again): real-path comparison —
  * see x1-ios-export.ts's identical fix for why the naive comparison this

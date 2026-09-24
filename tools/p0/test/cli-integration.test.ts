@@ -62,7 +62,13 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   // is genuinely blank, so this is a real end-to-end proof the refusal is
   // wired all the way through the built CLI, not just unit-level. (The
   // OLD refusal here was "no round window logged" — decision 0005
-  // supersedes it; round windows no longer gate anything.)
+  // supersedes it; round windows no longer gate anything.) Round-4 Opus-gate
+  // correction (post-4279773) added an EARLIER-firing check — a recorded
+  // run also refuses while docs/p0/X1.md has uncommitted changes — so
+  // which message actually fires here now depends on this checkout's own
+  // ambient git state (this repo is under active development elsewhere in
+  // the same session); the assertion accepts either refusal, since both
+  // prove the run was correctly refused end-to-end.
   it("x1-ios-export CLI refuses (non-zero exit) against the real, pre-round docs/p0/X1.md with no recorded-export date logged", async () => {
     const outPrefix = path.join(OUT_DIR, "x1-ios-export-result");
     await expect(
@@ -74,7 +80,7 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
         "--out",
         outPrefix,
       ]),
-    ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
+    ).rejects.toMatchObject({ stderr: expect.stringMatching(/Recorded export|uncommitted changes/) });
     expect(existsSync(`${outPrefix}.json`)).toBe(false);
   });
 
@@ -184,7 +190,7 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
         "--out",
         path.join(OUT_DIR, "x1-verdict-refuse-ios-result"),
       ]),
-    ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
+    ).rejects.toMatchObject({ stderr: expect.stringMatching(/Recorded export|uncommitted changes/) });
   });
 
   it("x1-verdict CLI refuses (non-zero exit) a recorded run for Android against the real, blank recorded-export date", async () => {
@@ -198,7 +204,7 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
         "--out",
         path.join(OUT_DIR, "x1-verdict-refuse-android-result"),
       ]),
-    ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
+    ).rejects.toMatchObject({ stderr: expect.stringMatching(/Recorded export|uncommitted changes/) });
   });
 
   // Round-3 Opus-gate correction: "The Android reader output must carry os

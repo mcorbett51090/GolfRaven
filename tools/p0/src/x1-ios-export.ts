@@ -43,6 +43,7 @@ import {
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
+  assertDocCommitted,
   assertExportDateMatches,
   assertInformationalInputAllowed,
   assertRecordedExportDateLogged,
@@ -52,6 +53,7 @@ import {
   readRecordedExportDates,
   type X1Os,
 } from "./recorded-export.js";
+import { resolveX1DocPath } from "./round-windows.js";
 
 export interface X1IosWorkoutRecord {
   sourceName: string;
@@ -386,7 +388,7 @@ export function renderSourceSummaryMarkdown(result: X1IosExportResult): string {
   return [header, ...rows].join("\n");
 }
 
-interface CliArgs {
+export interface X1IosExportCliArgs {
   exportDir: string;
   since?: string;
   outPrefix: string;
@@ -394,7 +396,7 @@ interface CliArgs {
   informational: boolean;
 }
 
-function parseArgs(argv: string[]): CliArgs {
+function parseArgs(argv: string[]): X1IosExportCliArgs {
   const positional: string[] = [];
   let since: string | undefined;
   let outPrefix = "x1-ios-export-result";
@@ -454,12 +456,25 @@ function parseArgs(argv: string[]): CliArgs {
   };
 }
 
-async function main(argv: string[]): Promise<void> {
-  const args = parseArgs(argv);
+/**
+ * The CLI's actual body, factored out of `main()` so it can be exercised
+ * directly against a temp git repo in tests (round-4 Opus-gate correction,
+ * post-4279773) — **there is no `--x1-doc` CLI flag** (decision 0005's own
+ * "no override flag" rule, same philosophy as the K2 CLI's no-`--k2-doc`
+ * rule: a recorded tool that WRITES a binding must never be pointable at
+ * anywhere other than the repo's own `docs/p0/X1.md`). `main()` always
+ * calls this with `resolveX1DocPath()`; only tests call it directly with a
+ * different path.
+ */
+export async function runX1IosExportCli(args: X1IosExportCliArgs, x1DocPath: string): Promise<void> {
   const roundWindows = await readLoggedRoundWindows();
-  const { dates: recordedExportDates, source } = await readRecordedExportDates();
+  const { dates: recordedExportDates, source } = await readRecordedExportDates(x1DocPath);
   const recorded = !args.informational;
   if (recorded) {
+    // Round-4 Opus-gate correction (post-4279773): a recorded run only
+    // ever trusts a COMMITTED docs/p0/X1.md — checked before anything else
+    // reads/relies on its logged dates or hashes.
+    await assertDocCommitted(source.path);
     assertRecordedExportDateLogged(recordedExportDates, args.os);
   } else {
     // Round-3 Opus-gate correction: --informational on real (non-fixture)
@@ -484,7 +499,7 @@ async function main(argv: string[]): Promise<void> {
   // against a rewritten LOCAL history (rebase/amend, not detected by
   // anything here) is committing AND PUSHING docs/p0/X1.md right away,
   // the same as decision 0001 Addendum F requires for K2.
-  let boundSomething = false;
+  let boundThisRun = false;
   if (recorded) {
     if (result.exportDate === null) {
       throw new Error(
@@ -496,7 +511,21 @@ async function main(argv: string[]): Promise<void> {
     const exportCalendarDate = extractCalendarDate(result.exportDate);
     assertExportDateMatches(recordedExportDates, args.os, exportCalendarDate);
     const { written } = await bindExportHash(source.path, args.os, result.exportSha256);
-    boundSomething = written;
+    boundThisRun = written;
+  }
+
+  // Round-4 Opus-gate correction (post-4279773), "a binding run binds and
+  // prints no verdict": the run that performs the FIRST bind for iOS stops
+  // here — it never computes or prints a verdict/per-source detail, and
+  // never writes a result file, from a binding that hasn't even been
+  // pushed yet. A later run, once docs/p0/X1.md is committed and pushed,
+  // re-verifies the (now-matching) hash and produces the actual result.
+  if (boundThisRun) {
+    process.stdout.write(
+      "x1-ios-export: bound a new SHA-256 for iOS into docs/p0/X1.md.\n" +
+        "bound: commit and push docs/p0/X1.md, then re-run.\n",
+    );
+    return;
   }
 
   const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
@@ -517,16 +546,18 @@ async function main(argv: string[]): Promise<void> {
   process.stdout.write(
     `x1-ios-export: ${result.golfWorkoutCount} golf workout(s) found (of ${result.totalWorkoutElementsSeen} total <Workout> elements). ` +
       `recorded=${recorded}\n` +
-      `Wrote ${jsonPath} and ${mdPath}.\n` +
-      (boundSomething
-        ? "This run bound a new SHA-256 into docs/p0/X1.md — commit and push docs/p0/X1.md now.\n"
-        : ""),
+      `Wrote ${jsonPath} and ${mdPath}.\n`,
   );
   if (result.warnings.length > 0) {
     process.stderr.write(
       `Warnings:\n${result.warnings.map((w) => `  - ${w}`).join("\n")}\n`,
     );
   }
+}
+
+async function main(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  await runX1IosExportCli(args, resolveX1DocPath());
 }
 
 /** Gate finding B-11 (the N7 symlink bug, again): real-path comparison, not

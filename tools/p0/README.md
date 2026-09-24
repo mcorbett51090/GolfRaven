@@ -74,12 +74,17 @@ is bound, `--informational` may run against any path, real or fixture. The outpu
 `export.xml`'s own `<ExportDate>` doesn't fall on the SAME UTC calendar date as the one logged in
 `docs/p0/X1.md`, or if `export.xml`'s SHA-256 (`exportSha256` in the output) doesn't match the hash
 already bound there. On the FIRST recorded run, that hash is written into `docs/p0/X1.md` next to
-the date automatically, and the CLI prints **"commit and push docs/p0/X1.md now"** — pushing right
-away is the real protection here, since local git history can be rewritten (rebase/amend) without
-this tooling detecting it (round-3 Opus-gate correction, post-8e5a29b — a git-history tampering scan
-was tried in round 2 and removed as unneeded machinery once the design stopped storing anything to
-tamper with; see `x1-verdict`'s section below). `--informational` skips all of this.
-`exportDate`/`exportSha256` are always in the JSON output, recorded or not.
+the date automatically, and the CLI prints **"bound: commit and push docs/p0/X1.md, then re-run"** —
+pushing right away is the real protection here, since local git history can be rewritten (rebase/amend)
+without this tooling detecting it in place (see `x1-verdict`'s section below for the full round-4
+mechanics, which apply identically here). `--informational` skips all of this. `exportDate`/
+`exportSha256` are always in the JSON output, recorded or not.
+
+**A binding run prints no verdict (round-4 Opus-gate correction, post-4279773).** The run above that
+performs the FIRST bind stops right there — it never computes or writes `x1-ios-export-result.json`/
+`.md` from a binding that hasn't even been pushed yet. Run the tool again, after committing and
+pushing, to get the actual per-source result (that later run's hash already matches, so it recomputes
+and writes output normally).
 
 **Feeds:** the JSON is one of `x1-verdict`'s two inputs. The markdown table's columns match
 `docs/owner/x1-k4b-device-protocol.md` §4's results table (Source / OS / Start date / Test round? /
@@ -195,11 +200,40 @@ round 2's post-67bdb27 design).** Round 2 stored each OS's `result:pass`/`result
 shallow-clone/uncommitted-file refusals to protect that stored value. Round 3's gate asked for this to
 be simplified rather than have more integrity machinery added to it: with nothing durable stored to
 tamper with — the file only ever holds a date and a hash, and the verdict is recomputed fresh every
-time — that scan had nothing left to protect, so it's gone. **What's left, and documented rather than
-enforced:** local git history CAN still be rewritten (rebase/amend) without this tooling detecting it.
-The actual protection is committing AND PUSHING `docs/p0/X1.md` immediately after a binding run
-(decision 0001 Addendum F's own K2 precedent) — the CLI prints **"commit and push docs/p0/X1.md
-now"** on the run that performs a first bind, precisely to prompt that.
+time — that scan had nothing left to protect, so it's gone.
+
+**A binding run prints no verdict; a second binding is refused; a verdict needs a committed doc
+(round-4 Opus-gate correction, post-4279773).** Round 3's simplification opened a gap of its own:
+because only the CURRENT state of `docs/p0/X1.md` was ever consulted, deleting (or reverting) a bound
+`sha256:` suffix and committing that made an OS read as unbound again — so the very next run would
+silently bind it to a DIFFERENT export, with no owner ever having decided a re-bind was warranted.
+Three fixes, all in `recorded-export.ts`, shared by both CLIs:
+
+- **The run that performs an OS's FIRST bind never computes or prints a verdict.** It writes the
+  hash, prints "bound: commit and push docs/p0/X1.md, then re-run," and stops — no
+  `recordedOverall`, no `boundResults`, no output file, from a binding that hasn't even been pushed
+  yet. Only a LATER run, against a hash that already matches what's committed, recomputes and reports
+  the actual result.
+- **A second binding is refused.** Before writing a hash, `bindExportHash` scans `docs/p0/X1.md`'s
+  own git history for a commit whose diff touched a `sha256:` value on that OS's line
+  (`git log -G"^- <OS>:.*sha256:" --format=%H -- docs/p0/X1.md`) — even one since deleted/reverted. A
+  non-empty result refuses with **"re-binding needs an owner decision."**
+- **A verdict comes only from a committed binding.** `assertDocCommitted` refuses any recorded run
+  (bind OR verdict) while `docs/p0/X1.md` has uncommitted changes (`git status --porcelain`) — checked
+  before anything else reads/relies on its logged dates or hashes.
+
+**If git itself is unavailable, or `docs/p0/X1.md` isn't inside a real git repository, a recorded run
+refuses outright** — these checks are load-bearing, not best-effort; `--informational` runs never
+reach them. **What's still left, and documented rather than enforced:** local git history CAN still be
+rewritten IN PLACE (rebase/amend) without this tooling detecting it — the git-history scan above
+catches a delete-then-rebind, not a rewritten commit. The actual protection remains committing AND
+PUSHING `docs/p0/X1.md` immediately after a binding run (decision 0001 Addendum F's own K2 precedent)
+— the CLI's "bound: commit and push docs/p0/X1.md, then re-run" message is precisely that prompt.
+
+**There is no `--x1-doc` (or similar) CLI flag on either tool** — same philosophy as the K2 CLI's
+no-`--k2-doc` rule: a recorded tool that WRITES a binding must never be pointable at anywhere other
+than the repo's own `docs/p0/X1.md`. Tests that need a throwaway git repo call `runX1IosExportCli`/
+`runX1VerdictCli` directly (exported for exactly this) rather than through a CLI flag.
 
 **Recorded-export rule (decision 0005), plus binding to one specific export — REQUIRED, this is what
 else gates the CLI.** Before running (without `--informational`), the CLI reads `docs/p0/X1.md`'s "##

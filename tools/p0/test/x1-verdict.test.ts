@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   computeOverallFromBoundResults,
   computeX1Verdict,
+  runX1VerdictCli,
   type AndroidGolfSessionReadResult,
   type SourceMap,
   type X1VerdictInput,
@@ -570,5 +575,64 @@ describe("computeOverallFromBoundResults (round-3 Opus-gate correction, post-8e5
 
   it("pass when both bound OSes recomputed to pass", () => {
     expect(computeOverallFromBoundResults({ ios: "pass", android: "pass" })).toBe("pass");
+  });
+});
+
+const GIT_TEST_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], { cwd, encoding: "utf8" });
+}
+
+function tmpGitX1Doc(body: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-verdict-cli-"));
+  git(dir, ["init", "-q"]);
+  const file = path.join(dir, "X1.md");
+  writeFileSync(file, `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`, "utf8");
+  git(dir, ["add", "X1.md"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+  return file;
+}
+
+function tmpMinimalSourceMap(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-verdict-cli-inputs-"));
+  const file = path.join(dir, "source-map.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      garmin: { iosSourceNames: [], androidDataOrigins: [] },
+      appleWatch: { iosSourceNames: [] },
+      phoneApp: { iosSourceNames: [], androidDataOrigins: [], appUsed: "18Birdies" },
+    }),
+    "utf8",
+  );
+  return file;
+}
+
+function tmpMinimalAndroidJson(dir: string, generatedAt = "2026-09-20T09:00:00Z"): string {
+  const file = path.join(dir, "android.json");
+  writeFileSync(
+    file,
+    JSON.stringify({ generatedAt, windowDays: 7, sessionCount: 0, sessions: [], os: "android" }),
+    "utf8",
+  );
+  return file;
+}
+
+describe("runX1VerdictCli (round-4 Opus-gate correction, post-4279773) — 'verdicts come only from a committed binding'", () => {
+  it("refuses a recorded run while docs/p0/X1.md has uncommitted changes", async () => {
+    const x1DocPath = tmpGitX1Doc("- iOS: \n- Android: 2026-09-20\n");
+    // An UNCOMMITTED edit — never staged/committed — is what must refuse.
+    writeFileSync(x1DocPath, "# X1\n\n## Recorded export\n\n- iOS: \n- Android: 2026-09-21\n\n## METHOD\n", "utf8");
+    const androidJson = tmpMinimalAndroidJson(path.dirname(x1DocPath));
+    const sourceMapPath = tmpMinimalSourceMap();
+    const outPrefix = path.join(mkdtempSync(path.join(tmpdir(), "golfraven-x1-verdict-out-")), "result");
+
+    await expect(
+      runX1VerdictCli(
+        { iosExportDir: undefined, androidPath: androidJson, sourceMapPath, outPrefix, informational: false },
+        x1DocPath,
+      ),
+    ).rejects.toThrow(/uncommitted changes/);
   });
 });

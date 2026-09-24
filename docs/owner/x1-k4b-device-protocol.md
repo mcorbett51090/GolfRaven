@@ -58,10 +58,16 @@ file every single time `x1-verdict` runs — nothing about the result is ever st
 gate's explicit "fix by simplifying" instruction). Run `x1-verdict --ios-export <dir>` after the iOS
 pass and `x1-verdict --android <json>` after the Android pass (or both together, once both are
 bound) — each call verifies and recomputes whichever OS(es) it's given, and the overall result is
-"pass if any of them recomputed to pass." **The real protection against a rewritten local git history
-is procedural, not automatic:** commit AND PUSH `docs/p0/X1.md` to GitHub immediately after any run
-that binds a new hash (the tool prints "commit and push docs/p0/X1.md now" when it does) — the same
-discipline decision 0001 Addendum F relies on for K2's exclusion dating.
+"pass if any of them recomputed to pass." **The run that performs an OS's FIRST bind prints no verdict
+at all (round-4 Opus-gate correction, post-4279773)** — it stops at "bound: commit and push
+docs/p0/X1.md, then re-run" without computing or writing anything else; commit, push, then run the
+SAME command again to get the actual result. Deleting/reverting a bound `sha256:` line does **not**
+quietly reopen that OS for a re-bind — the tools check `docs/p0/X1.md`'s own git history first and
+refuse with "re-binding needs an owner decision" if it was ever bound before; ask Matt before trying
+to force one. Every recorded run also refuses outright if `docs/p0/X1.md` has uncommitted changes, or
+if git itself isn't available. **The real protection against a rewritten local git history is
+procedural, not automatic:** commit AND PUSH `docs/p0/X1.md` to GitHub immediately after any run that
+binds a new hash — the same discipline decision 0001 Addendum F relies on for K2's exclusion dating.
 
 Play **one real round (~4 h)** carrying all three iOS sources simultaneously where possible (Garmin watch +
 Apple Watch + phone with a golf app), so one round covers all three:
