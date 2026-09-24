@@ -103,6 +103,37 @@ export function sha256Hex(data: Buffer | string): string {
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 /**
+ * Rejects a decoded JSON string that contains a raw or `\u`-escaped C0/DEL
+ * control character, or a lone (unpaired) UTF-16 surrogate — checked on
+ * the FULLY DECODED string, so `\u0000` (an escaped control char) is
+ * caught exactly like a literal one, and `\ud800` (a lone high surrogate
+ * with no following low surrogate) is caught whether it came from one
+ * `\u` escape or a raw code unit. Every signed string in this artifact
+ * (`kid`, `catalogVersion`, `generatedAt`/`publishedAt`, ...) is already
+ * format-constrained by its own Zod regex, but this runs earlier, at
+ * PARSE time, over every string `parseStrictJson` ever builds — including
+ * ones a looser schema might one day forget to constrain.
+ */
+function assertNoLoneSurrogatesOrControls(s: string, fail: (msg: string) => never): void {
+  for (let idx = 0; idx < s.length; idx += 1) {
+    const code = s.charCodeAt(idx);
+    if (code < 0x20 || code === 0x7f) {
+      fail(`string contains a control character (U+${code.toString(16).padStart(4, "0")})`);
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = s.charCodeAt(idx + 1);
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) {
+        fail(`string contains a lone (unpaired) high surrogate U+${code.toString(16)}`);
+      } else {
+        idx += 1; // consumed as a valid surrogate pair
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      fail(`string contains a lone (unpaired) low surrogate U+${code.toString(16)}`);
+    }
+  }
+}
+
+/**
  * A minimal, strict, recursive-descent JSON parser (full grammar; no
  * extensions). Differs from `JSON.parse` in exactly the ways that matter
  * for trusting an artifact someone else produced:
@@ -263,6 +294,7 @@ export function parseStrictJson(text: string): unknown {
         fail("unterminated string");
       }
     }
+    assertNoLoneSurrogatesOrControls(out, fail);
     return out;
   }
   function parseNumber(): number {
@@ -320,6 +352,22 @@ export const SemverSchema = z
     "must be a semver string",
   );
 
+/** A key id: lower-case letters, digits and hyphens only, 1–64 chars. */
+export const KidSchema = z.string().regex(/^[a-z0-9-]{1,64}$/, "must match ^[a-z0-9-]{1,64}$");
+
+/**
+ * A strict, UTC-only ISO-8601 datetime with millisecond precision —
+ * exactly what `Date#toISOString()` produces
+ * (`YYYY-MM-DDTHH:mm:ss.sssZ`). Rejects an offset (`+05:00`), a local
+ * (no-`Z`) form, and — because the underlying regex's year component is a
+ * plain `\d{4}`, not an open-ended digit run — an "extended year" string
+ * like `+010000-01-01T00:00:00Z` (which `new Date(...)` will happily
+ * parse and `.toISOString()` will happily echo back, but which breaks the
+ * plain string comparison `appendVersion` uses for "publishedAt strictly
+ * increases").
+ */
+export const IsoDateTimeSchema = z.iso.datetime({ precision: 3 });
+
 /**
  * Shard paths, relative to `catalog/v1/`. Lower-case only (a security-gate
  * requirement, not a style choice — see `emit-catalog.ts`'s module doc for
@@ -346,9 +394,9 @@ export const CatalogManifestSchema = z.strictObject({
   contractVersion: z.int().nonnegative(),
   catalogVersion: CatalogVersionSchema,
   minAppVersion: SemverSchema,
-  kid: z.string().min(1),
-  revokedKids: z.array(z.string().min(1)),
-  generatedAt: z.string().min(1),
+  kid: KidSchema,
+  revokedKids: z.array(KidSchema),
+  generatedAt: IsoDateTimeSchema,
   shards: z.array(ShardEntrySchema),
 });
 export type CatalogManifest = z.infer<typeof CatalogManifestSchema>;
@@ -362,7 +410,7 @@ export type CatalogManifest = z.infer<typeof CatalogManifestSchema>;
 export const ManifestStatementSchema = z.strictObject({
   catalogVersion: CatalogVersionSchema,
   contractVersion: z.int().nonnegative(),
-  kid: z.string().min(1),
+  kid: KidSchema,
   manifestSha: Sha256HexSchema,
 });
 export type ManifestStatement = z.infer<typeof ManifestStatementSchema>;
@@ -383,8 +431,8 @@ export function manifestStatementBytes(statement: ManifestStatement): Buffer {
 /** One entry in the append-only `catalog/v1/versions.json`. */
 export const VersionEntrySchema = z.strictObject({
   version: CatalogVersionSchema,
-  publishedAt: z.string().min(1),
-  kid: z.string().min(1),
+  publishedAt: IsoDateTimeSchema,
+  kid: KidSchema,
   sha256: Sha256HexSchema,
 });
 export type VersionEntry = z.infer<typeof VersionEntrySchema>;
@@ -394,7 +442,7 @@ export const VersionsArraySchema = z.array(VersionEntrySchema);
 /** `versions.sig.json`: signs `versions.json`'s raw bytes, domain-separated
  * from the manifest signature so one can never be replayed as the other. */
 export const VersionsStatementSchema = z.strictObject({
-  kid: z.string().min(1),
+  kid: KidSchema,
   versionsSha: Sha256HexSchema,
 });
 export type VersionsStatement = z.infer<typeof VersionsStatementSchema>;

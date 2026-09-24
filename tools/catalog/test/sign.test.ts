@@ -5,7 +5,7 @@
  * on-disk key.
  */
 import { generateKeyPairSync } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -460,5 +460,105 @@ describe("AT(2) + security-gate — verifyArtifact over a real emitted artifact"
     expect(result.ok).toBe(false);
     expect(result.issues.some((i) => i.startsWith("UNKNOWN_KID:"))).toBe(true);
     expect(result.issues.some((i) => i.startsWith("SHARD_MISSING:"))).toBe(false);
+  });
+
+  describe("finding #3: manifest and sidecar file reads", () => {
+    it("PROBE: refuses manifest.json when it is a symlink", async () => {
+      const emitted = await emit();
+      const manifestPath = join(emitted.v1Dir, "manifest.json");
+      const real = join(dir, "manifest-real.json");
+      await writeFile(real, await readFile(manifestPath));
+      await rm(manifestPath);
+      await symlink(real, manifestPath);
+
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.issues[0]).toMatch(/symlink/);
+    });
+
+    it("PROBE: refuses manifest.sig.json when it is a symlink", async () => {
+      const emitted = await emit();
+      const sigPath = join(emitted.v1Dir, "manifest.sig.json");
+      const real = join(dir, "sig-real.json");
+      await writeFile(real, await readFile(sigPath));
+      await rm(sigPath);
+      await symlink(real, sigPath);
+
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.issues[0]).toMatch(/symlink/);
+    });
+
+    it("PROBE: refuses manifest.json over the 5 MB size cap", async () => {
+      const emitted = await emit();
+      const manifestPath = join(emitted.v1Dir, "manifest.json");
+      // Overwrite with something well over the cap (still garbage — the
+      // size check must fire BEFORE any parse attempt).
+      await writeFile(manifestPath, Buffer.alloc(5 * 1024 * 1024 + 1, "a"));
+
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.issues[0]).toMatch(/byte cap/);
+    });
+
+    it("PROBE: refuses manifest.sig.json over the 64 KB size cap", async () => {
+      const emitted = await emit();
+      const sigPath = join(emitted.v1Dir, "manifest.sig.json");
+      await writeFile(sigPath, Buffer.alloc(64 * 1024 + 1, "a"));
+
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.issues[0]).toMatch(/byte cap/);
+    });
+
+    it("PROBE: refuses versions.json when it is a symlink", async () => {
+      const emitted = await emit();
+      const versionsPath = join(emitted.v1Dir, "versions.json");
+      const real = join(dir, "versions-real.json");
+      await writeFile(real, await readFile(versionsPath));
+      await rm(versionsPath);
+      await symlink(real, versionsPath);
+
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.issues.some((i) => /versions\.json.*symlink/.test(i))).toBe(true);
+    });
+
+    it("PROBE: refuses versions.sig.json over the 64 KB size cap", async () => {
+      const emitted = await emit();
+      const versionsSigPath = join(emitted.v1Dir, "versions.sig.json");
+      await writeFile(versionsSigPath, Buffer.alloc(64 * 1024 + 1, "a"));
+
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.issues.some((i) => /versions\.sig\.json.*byte cap/.test(i))).toBe(true);
+    });
+
+    it("a well-formed artifact under both caps still verifies fine", async () => {
+      await emit();
+      const result = await verifyArtifact(dir, {
+        trustedKeys: trusted({ kid: KID_A, pem: keyA.publicKeyPem }),
+        revokedKids: new Set(),
+      });
+      expect(result.ok).toBe(true);
+    });
   });
 });

@@ -54,7 +54,7 @@
  * `osm/attribution.txt` — every one of those shards flagged
  * `license: "ODbL-1.0"` in the manifest.
  */
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -63,6 +63,7 @@ import { parseCatalogBundle, type CatalogBundle } from "./bundle.js";
 import {
   CatalogManifestSchema,
   CatalogVersionSchema,
+  KidSchema,
   SemverSchema,
   ShardPathSchema,
   VersionsArraySchema,
@@ -144,13 +145,27 @@ export async function emitCatalogArtifact(
   if (!SemverSchema.safeParse(opts.minAppVersion).success) {
     throw new Error(`emit-catalog: --min-app-version "${opts.minAppVersion}" must be a semver string`);
   }
-  if (!opts.kid) {
-    throw new Error("emit-catalog: --kid is required");
+  if (!KidSchema.safeParse(opts.kid).success) {
+    throw new Error(`emit-catalog: --kid "${opts.kid}" must match ^[a-z0-9-]{1,64}$`);
+  }
+  for (const revoked of opts.revokedKids ?? []) {
+    if (!KidSchema.safeParse(revoked).success) {
+      throw new Error(`emit-catalog: --revoked-kids entry "${revoked}" must match ^[a-z0-9-]{1,64}$`);
+    }
   }
   const revokedKidsSorted = [...(opts.revokedKids ?? [])].sort(compareCodePoints);
   const privateKey = privateKeyFromPem(opts.privateKeyPem); // throws if not Ed25519
 
   const v1Dir = join(opts.outDir, "catalog", "v1");
+  const catalogDir = join(opts.outDir, "catalog");
+
+  /* ---------------------------------------------------------------- */
+  /* 1b. Refuse outright if a previous run's crash left recovery debris */
+  /*     behind (finding #1) — a `.v1.tmp-*` or `.v1.backup-*` sibling  */
+  /*     of `catalog/v1/` means an earlier emit did not finish cleanly, */
+  /*     and this run must not guess whether it's safe to proceed.     */
+  /* ---------------------------------------------------------------- */
+  await assertNoRecoveryDebris(catalogDir);
 
   /* ---------------------------------------------------------------- */
   /* 2. Load whatever's already published (read-only) and resolve the  */
@@ -272,7 +287,6 @@ export async function emitCatalogArtifact(
   /*    swap it into place. A failure at any point up to here has      */
   /*    touched no file under `outDir` at all.                         */
   /* ---------------------------------------------------------------- */
-  const catalogDir = join(opts.outDir, "catalog");
   await mkdir(catalogDir, { recursive: true });
   const suffix = randomBytes(6).toString("hex");
   const tmpDir = join(catalogDir, `.v1.tmp-${suffix}`);
@@ -310,6 +324,10 @@ export async function emitCatalogArtifact(
         // Best-effort rollback; the original error is what matters to the caller.
       });
     }
+    // The temp dir is done for either way (rolled back, or renamed away
+    // already and now orphaned) — remove it rather than leaving it as
+    // debris for `assertNoRecoveryDebris` to trip the NEXT run over.
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
   if (backupDir) {
@@ -404,6 +422,35 @@ function resolveGeneratedAt(opts: EmitCatalogOptions, previousVersions: VersionE
     );
   }
   return new Date();
+}
+
+/**
+ * Refuses outright if `catalogDir` already contains a `.v1.tmp-*` or
+ * `.v1.backup-*` entry (finding #1) — evidence that a previous emit into
+ * this same `outDir` crashed between writing the temp tree and finishing
+ * the swap (or was killed before its own cleanup ran). This run must not
+ * guess which of "resume", "the temp dir is garbage" or "the backup is
+ * the real data" is true; it names the exact recovery step instead.
+ */
+async function assertNoRecoveryDebris(catalogDir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(catalogDir);
+  } catch (err) {
+    if (isEnoent(err)) return; // no `catalog/` dir yet — nothing to recover from.
+    throw new Error(`emit-catalog: cannot inspect "${catalogDir}" for recovery debris: ${errMessage(err)}`);
+  }
+  const debris = entries.filter((name) => name.startsWith(".v1.tmp-") || name.startsWith(".v1.backup-"));
+  if (debris.length === 0) return;
+  const paths = debris.map((name) => join(catalogDir, name));
+  throw new Error(
+    `emit-catalog: refusing to emit — a previous run left recovery debris in "${catalogDir}": ` +
+      `${paths.join(", ")}. This means an earlier emit crashed mid-swap. Resolve it manually before retrying: ` +
+      `if a ".v1.backup-*" is present and "v1" is missing or wrong, restore it with ` +
+      `\`mv <catalog>/.v1.backup-<suffix> <catalog>/v1\`; otherwise remove the debris with ` +
+      `\`rm -rf <catalog>/.v1.tmp-<suffix> <catalog>/.v1.backup-<suffix>\` once you've confirmed ` +
+      `"<catalog>/v1" already holds the last good, verified artifact.`,
+  );
 }
 
 async function loadPreviousVersions(

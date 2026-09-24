@@ -22,7 +22,7 @@
  * (`crypto.generateKeyPairSync('ed25519')`) rather than reading or
  * committing one.
  */
-import { lstat, readdir, readFile, stat } from "node:fs/promises";
+import { lstat, open, readdir, readFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join, relative } from "node:path";
@@ -73,21 +73,33 @@ export interface LoadSigningKeyOptions {
  * a path inside the repo. A key file that is group- or world-readable
  * (`mode & 0o077 !== 0`) is refused outright, regardless of content — a
  * CI secret mount should be `0600`, and a looser mode is itself a finding
- * worth failing loudly on rather than silently signing with. A PEM held
- * in an env var commonly arrives with literal `\n` escapes (most CI
- * secret stores can't hold a real multi-line value in one variable
- * without that); those are un-escaped before parsing.
+ * worth failing loudly on rather than silently signing with. **The mode
+ * check and the read happen against the SAME open file handle** (`open`
+ * → `handle.stat()` → `handle.readFile()` → `handle.close()`), not two
+ * separate `stat`/`readFile` calls against a path — a path-based
+ * check-then-read has a TOCTOU race (the file at that path could be
+ * swapped between the two calls); an open handle cannot be swapped out
+ * from under itself. A PEM held in an env var commonly arrives with
+ * literal `\n` escapes (most CI secret stores can't hold a real
+ * multi-line value in one variable without that); those are un-escaped
+ * before parsing.
  */
 export async function loadSigningKeyPem(opts: LoadSigningKeyOptions = {}): Promise<string> {
   if (opts.keyFilePath) {
-    const stats = await stat(opts.keyFilePath);
-    if ((stats.mode & 0o077) !== 0) {
-      throw new Error(
-        `loadSigningKeyPem: refusing "${opts.keyFilePath}" — mode ${(stats.mode & 0o777).toString(8)} ` +
-          `is group- or world-readable (need e.g. \`chmod 600\`)`,
-      );
+    const handle = await open(opts.keyFilePath, "r");
+    try {
+      const stats = await handle.stat();
+      if ((stats.mode & 0o077) !== 0) {
+        throw new Error(
+          `loadSigningKeyPem: refusing "${opts.keyFilePath}" — mode ${(stats.mode & 0o777).toString(8)} ` +
+            `is group- or world-readable (need e.g. \`chmod 600\`)`,
+        );
+      }
+      const bytes = await handle.readFile();
+      return bytes.toString("utf8").trim();
+    } finally {
+      await handle.close();
     }
-    return (await readFile(opts.keyFilePath, "utf8")).trim();
   }
   const envVar = opts.envVar ?? DEFAULT_SIGNING_KEY_ENV_VAR;
   const raw = process.env[envVar];
@@ -213,6 +225,47 @@ export interface VerifyArtifactResult {
   revokedKids?: string[];
 }
 
+/** `manifest.json`/`versions.json` are content-bearing (they grow with the
+ * catalog); `manifest.sig.json`/`versions.sig.json` are small, fixed-shape
+ * signature blobs. Both caps are deliberately generous relative to what
+ * these files should ever actually contain — they exist to refuse a
+ * pathological/adversarial file outright, not to constrain normal growth. */
+const MANIFEST_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const SIDECAR_MAX_BYTES = 64 * 1024; // 64 KB
+
+type SmallFileRead = { ok: true; bytes: Buffer } | { ok: false; issue: string };
+
+/**
+ * Reads a small, trust-relevant file safely (finding #3): `lstat`s it
+ * first and refuses a symlink or anything that isn't a regular file, caps
+ * its size before ever calling `readFile` on it, and turns every failure
+ * into an `issue` string rather than a thrown error — callers in
+ * `verifyArtifact` fold this straight into their `issues[]` accumulation.
+ */
+async function readSmallFile(path: string, maxBytes: number, label: string): Promise<SmallFileRead> {
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (err) {
+    return { ok: false, issue: `cannot read ${label}: ${errMessage(err)}` };
+  }
+  if (stats.isSymbolicLink()) {
+    return { ok: false, issue: `${label} is a symlink — refused` };
+  }
+  if (!stats.isFile()) {
+    return { ok: false, issue: `${label} is not a regular file — refused` };
+  }
+  if (stats.size > maxBytes) {
+    return { ok: false, issue: `${label} is ${stats.size} bytes, over the ${maxBytes}-byte cap — refused` };
+  }
+  try {
+    const bytes = await readFile(path);
+    return { ok: true, bytes };
+  } catch (err) {
+    return { ok: false, issue: `cannot read ${label}: ${errMessage(err)}` };
+  }
+}
+
 /**
  * The AT(2) gate, rebuilt around raw-byte signing (finding #1), a
  * domain-separated statement (finding #2), caller-supplied revocation
@@ -245,24 +298,22 @@ export async function verifyArtifact(
   const revoked = opts.revokedKids instanceof Set ? opts.revokedKids : new Set(opts.revokedKids);
   const trusted = new Map(opts.trustedKeys.map((k) => [k.kid, k.publicKeyPem] as const));
 
-  let manifestRaw: Buffer;
-  try {
-    manifestRaw = await readFile(join(v1Dir, "manifest.json"));
-  } catch (err) {
-    return { ok: false, issues: [`cannot read manifest.json: ${errMessage(err)}`] };
+  const manifestRead = await readSmallFile(join(v1Dir, "manifest.json"), MANIFEST_MAX_BYTES, "manifest.json");
+  if (!manifestRead.ok) {
+    return { ok: false, issues: [manifestRead.issue] };
   }
+  const manifestRaw = manifestRead.bytes;
   const manifestParsed = strictParseAndValidate(manifestRaw, CatalogManifestSchema, "manifest.json");
   if (!manifestParsed.ok) {
     return { ok: false, issues: manifestParsed.issues };
   }
   const manifest = manifestParsed.value;
 
-  let sigRaw: Buffer;
-  try {
-    sigRaw = await readFile(join(v1Dir, "manifest.sig.json"));
-  } catch (err) {
-    return { ok: false, issues: [`cannot read manifest.sig.json: ${errMessage(err)}`] };
+  const sigRead = await readSmallFile(join(v1Dir, "manifest.sig.json"), SIDECAR_MAX_BYTES, "manifest.sig.json");
+  if (!sigRead.ok) {
+    return { ok: false, issues: [sigRead.issue] };
   }
+  const sigRaw = sigRead.bytes;
   const sigParsed = strictParseAndValidate(sigRaw, ManifestSignatureSchema, "manifest.sig.json");
   if (!sigParsed.ok) {
     return { ok: false, issues: sigParsed.issues };
@@ -383,16 +434,22 @@ export async function verifyArtifact(
 
   // versions.json + versions.sig.json.
   let versionsRaw: Buffer | undefined;
-  try {
-    versionsRaw = await readFile(join(v1Dir, "versions.json"));
-  } catch (err) {
-    issues.push(`cannot read versions.json: ${errMessage(err)}`);
+  const versionsRead = await readSmallFile(join(v1Dir, "versions.json"), MANIFEST_MAX_BYTES, "versions.json");
+  if (versionsRead.ok) {
+    versionsRaw = versionsRead.bytes;
+  } else {
+    issues.push(versionsRead.issue);
   }
   let versionsSigRaw: Buffer | undefined;
-  try {
-    versionsSigRaw = await readFile(join(v1Dir, "versions.sig.json"));
-  } catch (err) {
-    issues.push(`cannot read versions.sig.json: ${errMessage(err)}`);
+  const versionsSigRead = await readSmallFile(
+    join(v1Dir, "versions.sig.json"),
+    SIDECAR_MAX_BYTES,
+    "versions.sig.json",
+  );
+  if (versionsSigRead.ok) {
+    versionsSigRaw = versionsSigRead.bytes;
+  } else {
+    issues.push(versionsSigRead.issue);
   }
   if (versionsRaw && versionsSigRaw) {
     const versionsParsed = strictParseAndValidate(versionsRaw, VersionsArraySchema, "versions.json");

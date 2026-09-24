@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -478,6 +478,141 @@ describe("emitCatalogArtifact", () => {
       });
       const entries = await readdir(join(dir, "catalog"));
       expect(entries).toEqual(["v1"]);
+    });
+
+    it("finding #1 PROBE: refuses to emit while a stale .v1.tmp-* sibling exists, naming the recovery step", async () => {
+      await emitCatalogArtifact(minimalBundle(), {
+        outDir: dir,
+        catalogVersion: "20260101-abc0001",
+        minAppVersion: "0.0.0",
+        kid: KID,
+        privateKeyPem,
+        generatedAt: FIXED,
+      });
+      const staleTmp = join(dir, "catalog", ".v1.tmp-deadbeef");
+      await mkdir(staleTmp, { recursive: true });
+      try {
+        await expect(
+          emitCatalogArtifact(minimalBundle(), {
+            outDir: dir,
+            catalogVersion: "20260102-abc0002",
+            minAppVersion: "0.0.0",
+            kid: KID,
+            privateKeyPem,
+            generatedAt: new Date("2026-01-02T00:00:00.000Z"),
+          }),
+        ).rejects.toThrow(/recovery debris/);
+        // Nothing else changed — the refusal happened before any new write.
+        const onDisk = await readdir(join(dir, "catalog"));
+        expect(onDisk.sort()).toEqual(["v1", ".v1.tmp-deadbeef"].sort());
+      } finally {
+        await rm(staleTmp, { recursive: true, force: true });
+      }
+    });
+
+    it("finding #1 PROBE: refuses to emit while a stale .v1.backup-* sibling exists, naming the recovery step", async () => {
+      await emitCatalogArtifact(minimalBundle(), {
+        outDir: dir,
+        catalogVersion: "20260101-abc0001",
+        minAppVersion: "0.0.0",
+        kid: KID,
+        privateKeyPem,
+        generatedAt: FIXED,
+      });
+      const staleBackup = join(dir, "catalog", ".v1.backup-deadbeef");
+      await mkdir(staleBackup, { recursive: true });
+      try {
+        await expect(
+          emitCatalogArtifact(minimalBundle(), {
+            outDir: dir,
+            catalogVersion: "20260102-abc0002",
+            minAppVersion: "0.0.0",
+            kid: KID,
+            privateKeyPem,
+            generatedAt: new Date("2026-01-02T00:00:00.000Z"),
+          }),
+        ).rejects.toThrow(/recovery debris/);
+      } finally {
+        await rm(staleBackup, { recursive: true, force: true });
+      }
+    });
+
+    it("finding #1: a failure at the FINAL rename rolls the backup back into place and removes the temp dir", async () => {
+      const bundle = minimalBundle();
+      const first = await emitCatalogArtifact(bundle, {
+        outDir: dir,
+        catalogVersion: "20260101-abc0001",
+        minAppVersion: "0.0.0",
+        kid: KID,
+        privateKeyPem,
+        generatedAt: FIXED,
+      });
+      const beforeFiles = (await listFilesRecursive(join(dir, "catalog", "v1"))).sort();
+      const beforeBytes = new Map<string, Buffer>();
+      for (const f of beforeFiles) beforeBytes.set(f, await readFile(f));
+
+      vi.resetModules();
+      vi.doMock("node:fs/promises", async () => {
+        const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+        let renameCalls = 0;
+        return {
+          ...actual,
+          rename: async (...args: Parameters<typeof actual.rename>) => {
+            renameCalls += 1;
+            // Call 1 is the existing v1 -> backup rename (let it succeed,
+            // so there's a real backup to roll back from). Call 2 is the
+            // tmp -> v1 swap itself — fail exactly there.
+            if (renameCalls === 2) {
+              throw new Error("SIMULATED_FINAL_RENAME_FAILURE");
+            }
+            return actual.rename(...args);
+          },
+        };
+      });
+      try {
+        const { emitCatalogArtifact: emitWithMockedFs } = await import("../src/emit-catalog.js");
+        await expect(
+          emitWithMockedFs(bundle, {
+            outDir: dir,
+            catalogVersion: "20260102-abc0002",
+            minAppVersion: "0.0.0",
+            kid: KID,
+            privateKeyPem,
+            generatedAt: new Date("2026-01-02T00:00:00.000Z"),
+          }),
+        ).rejects.toThrow(/SIMULATED_FINAL_RENAME_FAILURE/);
+      } finally {
+        vi.doUnmock("node:fs/promises");
+        vi.resetModules();
+      }
+
+      // The backup was rolled back into v1, and no debris is left —
+      // exactly what `assertNoRecoveryDebris` needs to see on the NEXT run.
+      const afterFiles = (await listFilesRecursive(join(dir, "catalog", "v1"))).sort();
+      expect(afterFiles).toEqual(beforeFiles);
+      for (const f of afterFiles) {
+        expect((await readFile(f)).equals(beforeBytes.get(f)!)).toBe(true);
+      }
+      const catalogEntries = await readdir(join(dir, "catalog"));
+      expect(catalogEntries).toEqual(["v1"]);
+      const stillVerifies = await verifyArtifact(dir, { trustedKeys: trustedKeys(), revokedKids: new Set() });
+      expect(stillVerifies.ok).toBe(true);
+      expect(stillVerifies.revokedKids).toEqual(first.manifest.revokedKids);
+
+      // And a normal emit works again right after (no leftover debris to
+      // trip `assertNoRecoveryDebris`).
+      const recovered = await emitCatalogArtifact(bundle, {
+        outDir: dir,
+        catalogVersion: "20260103-abc0003",
+        minAppVersion: "0.0.0",
+        kid: KID,
+        privateKeyPem,
+        generatedAt: new Date("2026-01-03T00:00:00.000Z"),
+      });
+      expect(recovered.versions.map((v) => v.version)).toEqual([
+        "20260101-abc0001",
+        "20260103-abc0003",
+      ]);
     });
   });
 

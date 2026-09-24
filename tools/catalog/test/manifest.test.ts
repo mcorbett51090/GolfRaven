@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  IsoDateTimeSchema,
+  KidSchema,
   VersionEntrySchema,
   appendVersion,
   assertVersionsAppendOnly,
@@ -272,5 +274,96 @@ describe("appendVersion", () => {
         version({ version: "20260102-abc0002", publishedAt: "2026-01-01T00:00:00.000Z" }),
       ),
     ).toThrow(/must be strictly after/);
+  });
+});
+
+describe("finding #2: strict formats for signed strings", () => {
+  describe("KidSchema", () => {
+    it.each(["a", "k1", "pre-p3-key-1", "a".repeat(64)])("accepts %s", (kid) => {
+      expect(KidSchema.safeParse(kid).success).toBe(true);
+    });
+
+    it.each([
+      ["", "empty"],
+      ["A", "upper-case"],
+      ["k_1", "underscore"],
+      ["kid with spaces", "spaces"],
+      ["a".repeat(65), "over 64 chars"],
+      ["kid\n", "trailing newline"],
+      ["kïd", "non-ASCII"],
+    ])("rejects %s (%s)", (kid) => {
+      expect(KidSchema.safeParse(kid).success).toBe(false);
+    });
+  });
+
+  describe("IsoDateTimeSchema", () => {
+    it("accepts exactly what Date#toISOString() produces", () => {
+      expect(IsoDateTimeSchema.safeParse(new Date("2026-01-01T00:00:00.000Z").toISOString()).success).toBe(
+        true,
+      );
+    });
+
+    it("PROBE: rejects an extended-year datetime (year outside 0000-9999)", () => {
+      const extended = new Date("+010000-01-01T00:00:00Z").toISOString();
+      expect(extended.startsWith("+")).toBe(true); // sanity: Date really does produce this
+      expect(IsoDateTimeSchema.safeParse(extended).success).toBe(false);
+    });
+
+    it("rejects a form with a timezone OFFSET instead of Z", () => {
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.000+05:00").success).toBe(false);
+    });
+
+    it("rejects a form missing the Z suffix (local time)", () => {
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.000").success).toBe(false);
+    });
+
+    it("rejects a form with the wrong fractional-second precision", () => {
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00Z").success).toBe(false); // no ms
+      expect(IsoDateTimeSchema.safeParse("2026-01-01T00:00:00.00Z").success).toBe(false); // 2 digits
+    });
+  });
+
+  describe("parseStrictJson: lone surrogates and control characters", () => {
+    it("PROBE: rejects a lone (unpaired) high surrogate", () => {
+      expect(() => parseStrictJson('"\\ud800"')).toThrow(/lone \(unpaired\) high surrogate/);
+    });
+
+    it("PROBE: rejects a lone (unpaired) low surrogate", () => {
+      expect(() => parseStrictJson('"\\udc00"')).toThrow(/lone \(unpaired\) low surrogate/);
+    });
+
+    it("accepts a properly paired surrogate (a real astral character)", () => {
+      // U+1F600 GRINNING FACE, as its UTF-16 surrogate pair.
+      expect(parseStrictJson('"\\ud83d\\ude00"')).toBe("\u{1f600}");
+    });
+
+    it("PROBE: rejects an escaped control character (\\u0000)", () => {
+      expect(() => parseStrictJson('"\\u0000"')).toThrow(/control character/);
+    });
+
+    it("PROBE: rejects an escaped DEL (\\u007f)", () => {
+      expect(() => parseStrictJson('"\\u007f"')).toThrow(/control character/);
+    });
+
+    it("still rejects a raw (unescaped) control character", () => {
+      expect(() => parseStrictJson('"a\tb"')).toThrow(/control character/);
+    });
+
+    // Every actual field in manifest.json/manifest.sig.json/versions.json/
+    // versions.sig.json (kid, catalogVersion, generatedAt/publishedAt,
+    // sha256, sig, ...) is a short technical token that never legitimately
+    // contains whitespace controls — so rejecting even the NAMED escapes
+    // (\n, \t, \r) here, not just raw literal control bytes, costs nothing
+    // for this parser's actual scope (these 4 small metadata files) while
+    // closing off one more place a signed string's meaning could be bent.
+    it("PROBE: rejects the named whitespace escapes (\\n, \\t, \\r) too, not just raw control bytes", () => {
+      expect(() => parseStrictJson('"a\\nb"')).toThrow(/control character/);
+      expect(() => parseStrictJson('"a\\tb"')).toThrow(/control character/);
+      expect(() => parseStrictJson('"a\\rb"')).toThrow(/control character/);
+    });
+
+    it("accepts ordinary printable text with no control characters", () => {
+      expect(parseStrictJson('"hello world 123-abc"')).toBe("hello world 123-abc");
+    });
   });
 });
