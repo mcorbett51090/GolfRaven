@@ -59,25 +59,35 @@ BEGIN
   -- 42883 ("function ... does not exist") here even though the extension
   -- is present.
   --
-  -- ⛔ FIX (should-fix, post-P3a gate): keyed HMAC, not unkeyed SHA-256.
-  -- An unkeyed digest(uid, 'sha256') is a pure function of the uid alone
-  -- — anyone who can guess or enumerate uids (they are not secret; they
-  -- appear in URLs, JWTs, database rows readable by many roles) can
-  -- precompute the exact same pseudonym offline and correlate it back to
-  -- a specific account, defeating the whole point of pseudonymizing it.
-  -- A keyed HMAC with a secret only the server holds (current_setting
-  -- with no `, true` — missing_ok — so a cluster with no key configured
-  -- fails closed with "unrecognized configuration parameter" rather than
-  -- silently falling back to something weaker) makes the pseudonym
-  -- infeasible to reproduce without that key. supabase/tests/shim.sql
-  -- sets a test-only key (ALTER DATABASE ... SET, so every session in
-  -- the harness sees it); a real deploy sets `app.pseudonym_key` from a
-  -- proper secret store (Supabase Vault or equivalent) — out of this
-  -- stage's scope, same as every other out-of-scope Edge Function
-  -- integration this file already notes.
-  v_pseudonym := encode(public.hmac(p_user_id::text, current_setting('app.pseudonym_key'), 'sha256'), 'hex');
+  -- ⛔ FIX (M1, post-P3a re-gate): the pseudonym key is NEVER read from a
+  -- GUC any more (0015/0016's prior `current_setting('app.pseudonym_key')`
+  -- design had four confirmed problems: readable by anon/authenticated,
+  -- overridable by any caller's own `SET LOCAL`, silently accepted an
+  -- empty value with no error, and production never sets an `app.*` GUC
+  -- at all — see supabase/tests/shim.sql's own note on this, where the
+  -- fix is explained in full). The key now comes from Supabase Vault
+  -- (`vault.decrypted_secrets`, real in production, shimmed locally) —
+  -- read INSIDE this SECURITY DEFINER function body, which no other role
+  -- can do (private_definer's own narrow, column-level grant on that
+  -- view, 0018_pseudonym_vault.sql — anon/authenticated get none).
+  --
+  -- Rotation: EVERY row named `pseudonym_key%` in the vault is an
+  -- "active" key (0018's own deploy-check note explains the naming
+  -- convention). A pseudonym was computed, at WRITE time, with WHATEVER
+  -- key was active then — so finding it again means trying every
+  -- currently-active key, not just the newest one, or a row written
+  -- under an older key becomes permanently unfindable the moment a new
+  -- key is added. The loop below (right before the one place this
+  -- function actually MATCHES rows by pseudonym, attestation_shift_log)
+  -- does exactly that: for each active key, validate it, compute this
+  -- user's pseudonym under it, and run the shift-log UPDATE once per
+  -- key — safe to repeat (idempotent: a row already updated on an
+  -- earlier key's pass no longer matches ANY later key's WHERE clause,
+  -- since its own player_pseudonym column never changes).
+  NULL; -- (the pseudonym-matching work itself now lives just above the
+        -- attestation_shift_log UPDATE below, not here — see that block)
 
-  -- The three derived GUCs the "special" policies (partner_invite,
+  -- The two derived GUCs the "special" policies (partner_invite,
   -- attestation_shift_log, public_profile_projection) match on — set once
   -- either value is known; empty string (not NULL) when there is nothing
   -- to match, so `current_setting(..., true)` never returns NULL into a

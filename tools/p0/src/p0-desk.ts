@@ -145,6 +145,7 @@ async function runX5NOsmStep(
 async function runX2FetchStep(
   runDir: string,
   configPath: string,
+  ledgerPath: string,
 ): Promise<CheckRow> {
   const dir = path.join(runDir, "x2-evidence");
   let config: X2SourceConfig;
@@ -158,7 +159,7 @@ async function runX2FetchStep(
     };
   }
 
-  const manifest = await runX2Fetch(config, dir);
+  const manifest = await runX2Fetch(config, dir, { ledgerPath });
   const allEntries = Object.values(manifest.trails).flat();
   const fetchedCount = allEntries.filter((e) => e.status === "fetched").length;
   const failedEntries = allEntries.filter((e) => e.status === "failed");
@@ -287,6 +288,12 @@ export interface RunP0DeskOptions {
   x4CoursesPath?: string;
   endpoint?: string;
   timeoutMs?: number;
+  /** Gate finding 2c (re-gate): `x2-fetch`'s `ledgerPath` is now required
+   * — `runP0Desk` defaults it to `<runDir>/recorded-ledger.json` (THIS
+   * file's own explicit choice, made once here, not a fallback hidden
+   * inside `x2-fetch.ts` itself), unless the caller passes one to share
+   * with evidence captured outside this one desk-check run. */
+  x2LedgerPath?: string;
 }
 
 export async function runP0Desk(
@@ -309,7 +316,11 @@ export async function runP0Desk(
     ),
   );
   rows.push(
-    await runX2FetchStep(runDir, opts.x2ConfigPath ?? resolveDefaultX2ConfigPath()),
+    await runX2FetchStep(
+      runDir,
+      opts.x2ConfigPath ?? resolveDefaultX2ConfigPath(),
+      opts.x2LedgerPath ?? path.join(runDir, "recorded-ledger.json"),
+    ),
   );
   rows.push(
     await runX4VerifyStep(
@@ -384,6 +395,7 @@ async function main(argv: string[]): Promise<void> {
   const result = await runP0Desk({
     ...(flags["run-dir"] ? { runDir: flags["run-dir"] } : {}),
     ...(flags["x2-config"] ? { x2ConfigPath: flags["x2-config"] } : {}),
+    ...(flags["x2-ledger"] ? { x2LedgerPath: flags["x2-ledger"] } : {}),
     ...(flags["x4-courses"] ? { x4CoursesPath: flags["x4-courses"] } : {}),
     ...(flags.endpoint ? { endpoint: flags.endpoint } : {}),
   });
