@@ -35,6 +35,9 @@ interface FakeRequestSpec {
    * only "delivered" (fed to the response listener) if this request was
    * NOT aborted. */
   contentLength?: number;
+  /** Gate finding 1 (re-gate): a `Sec-Fetch-Dest: worker`/`sharedworker`
+   * header, for testing the request-level worker-script abort. */
+  secFetchDest?: string;
 }
 
 interface FakeWsSpec {
@@ -47,20 +50,35 @@ interface FakePopupSpec {
   url: string;
 }
 
+/** Gate finding 1 (re-gate): simulates a dedicated Worker being created —
+ * fed to the main page's own `page.on("worker", …)` handler. */
+interface FakeWorkerSpec {
+  url: string;
+}
+
 function makeFakeContext(opts: {
   requests: FakeRequestSpec[];
   websockets?: FakeWsSpec[];
   popups?: FakePopupSpec[];
+  workers?: FakeWorkerSpec[];
   finalStatus?: number;
   gotoThrows?: Error;
   gotoReturnsNull?: boolean;
   contentValue?: string;
   contentDelayMs?: number;
+  /** Gate finding, should-fix (re-gate): fires a popup/worker AFTER
+   * `goto()` has already returned but WHILE `content()` is running (only
+   * meaningful together with `contentDelayMs`) — simulates a delayed
+   * `setTimeout`/event-handler popup or worker, to test the late
+   * re-check right before/after `page.content()`. */
+  popupDuringContent?: FakePopupSpec;
+  workerDuringContent?: FakeWorkerSpec;
 }): {
   context: ContextLike;
   isClosed: () => boolean;
   wsClosedUrls: () => string[];
   wsSeenUrls: () => string[];
+  wsConnectedToServerUrls: () => string[];
   abortedUrls: () => string[];
   continuedUrls: () => string[];
   newContextOpts: { userAgent?: string; serviceWorkers?: string };
@@ -70,11 +88,13 @@ function makeFakeContext(opts: {
     | null = null;
   let wsHandler: ((ws: WebSocketRouteLike) => void | Promise<void>) | null = null;
   let pageHandler: ((page: PageLike) => void) | null = null;
+  let workerHandler: ((worker: WorkerLike) => void) | null = null;
   let responseHandler: ((response: ResponseLike) => void) | null = null;
   let currentUrl = "";
   let closed = false;
   const wsClosed: string[] = [];
   const wsSeen: string[] = [];
+  const wsConnectedToServer: string[] = [];
   const abortedUrls: string[] = [];
   const continuedUrls: string[] = [];
   const mainFrameToken = { main: true };
@@ -97,6 +117,7 @@ function makeFakeContext(opts: {
       mainFrame() {
         return { main: false };
       },
+      on() {},
     };
   }
 
@@ -114,6 +135,10 @@ function makeFakeContext(opts: {
                 if (spec.frameThrows) throw new Error("frame not available yet");
                 return (spec.mainFrame ?? true) ? mainFrameToken : { main: false };
               },
+              headers: () =>
+                spec.secFetchDest !== undefined
+                  ? { "sec-fetch-dest": spec.secFetchDest }
+                  : {},
             };
             let aborted = false;
             const route: RouteLike = {
@@ -152,12 +177,19 @@ function makeFakeContext(opts: {
                 close: async () => {
                   wsClosed.push(wsSpec.url);
                 },
+                connectToServer: () => {
+                  wsConnectedToServer.push(wsSpec.url);
+                  return {};
+                },
               };
               await wsHandler(ws);
             }
           }
           for (const popupSpec of opts.popups ?? []) {
             if (pageHandler) pageHandler(makeFakePopup(popupSpec.url));
+          }
+          for (const workerSpec of opts.workers ?? []) {
+            if (workerHandler) workerHandler({ url: () => workerSpec.url });
           }
           if (opts.gotoReturnsNull) return null;
           return {
@@ -168,7 +200,28 @@ function makeFakeContext(opts: {
         },
         async content() {
           if (opts.contentDelayMs) {
-            await new Promise((resolve) => setTimeout(resolve, opts.contentDelayMs));
+            const delayed = new Promise<string>((resolve) => {
+              setTimeout(() => {
+                if (opts.popupDuringContent && pageHandler) {
+                  pageHandler(makeFakePopup(opts.popupDuringContent.url));
+                }
+                if (opts.workerDuringContent && workerHandler) {
+                  workerHandler({ url: () => opts.workerDuringContent!.url });
+                }
+                resolve(opts.contentValue ?? "<p>ok</p>");
+              }, opts.contentDelayMs);
+            });
+            return delayed;
+          }
+          // No delay: still fire a during-content popup/worker
+          // synchronously first, so a caller relying ONLY on the
+          // immediately-before-content() check (not a delay) is tested
+          // too.
+          if (opts.popupDuringContent && pageHandler) {
+            pageHandler(makeFakePopup(opts.popupDuringContent.url));
+          }
+          if (opts.workerDuringContent && workerHandler) {
+            workerHandler({ url: () => opts.workerDuringContent!.url });
           }
           return opts.contentValue ?? "<p>ok</p>";
         },
@@ -178,6 +231,9 @@ function makeFakeContext(opts: {
         },
         mainFrame() {
           return mainFrameToken;
+        },
+        on(event, handler) {
+          if (event === "worker") workerHandler = handler as (worker: WorkerLike) => void;
         },
       };
       return page;
@@ -202,6 +258,7 @@ function makeFakeContext(opts: {
     isClosed: () => closed,
     wsClosedUrls: () => wsClosed,
     wsSeenUrls: () => wsSeen,
+    wsConnectedToServerUrls: () => wsConnectedToServer,
     abortedUrls: () => abortedUrls,
     continuedUrls: () => continuedUrls,
     newContextOpts: {},
@@ -554,6 +611,131 @@ describe("x2-render: renderUrl — off-host WebSocket blocking (gate finding, pa
     await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
     expect(wsClosedUrls()).toEqual([]);
   });
+
+  it("should-fix (re-gate): a same-host WebSocket calls connectToServer() — a routed WebSocket is NOT connected to anything by default, so leaving it merely unhandled would silently mock it dead", async () => {
+    const { context, wsConnectedToServerUrls, wsClosedUrls } = makeFakeContext({
+      requests: [SAME_HOST_NAV],
+      websockets: [{ url: "wss://golfvancouverisland.ca/sock" }],
+    });
+    const { launch } = fakeLauncher(context);
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(wsConnectedToServerUrls()).toEqual(["wss://golfvancouverisland.ca/sock"]);
+    expect(wsClosedUrls()).toEqual([]);
+  });
+
+  it("should-fix (re-gate): an OFF-host WebSocket is closed and never has connectToServer() called on it", async () => {
+    const { context, wsConnectedToServerUrls, wsClosedUrls } = makeFakeContext({
+      requests: [SAME_HOST_NAV],
+      websockets: [{ url: "wss://127.0.0.1:8443/sock" }],
+    });
+    const { launch } = fakeLauncher(context);
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(wsConnectedToServerUrls()).toEqual([]);
+    expect(wsClosedUrls()).toEqual(["wss://127.0.0.1:8443/sock"]);
+  });
+});
+
+describe("x2-render: renderUrl — dedicated Worker handling (gate finding 1, re-gate)", () => {
+  it("fails the capture when a Worker is created — a Worker's own network activity is not reliably interceptable at all", async () => {
+    const { context } = makeFakeContext({
+      requests: [SAME_HOST_NAV],
+      workers: [{ url: "https://golfvancouverisland.ca/w.js" }],
+    });
+    const { launch } = fakeLauncher(context);
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
+      /created a dedicated Worker/,
+    );
+  });
+
+  it("a plain page with NO worker renders fine — workers are not required for normal rendering", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch } = fakeLauncher(context);
+    const result = await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(result.html).toBeTruthy();
+  });
+
+  it("defense in depth: aborts a request carrying Sec-Fetch-Dest: worker, the worker SCRIPT's own request", async () => {
+    const { context, abortedUrls } = makeFakeContext({
+      requests: [
+        SAME_HOST_NAV,
+        {
+          url: "https://golfvancouverisland.ca/w.js",
+          secFetchDest: "worker",
+        },
+      ],
+    });
+    const { launch } = fakeLauncher(context);
+    // No `workers` spec fired here (isolating the request-level defense
+    // from the page.on("worker") one) — the render should still succeed
+    // (the worker script request is aborted, no Worker object created),
+    // but the abort must have happened.
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(abortedUrls()).toContain("https://golfvancouverisland.ca/w.js");
+  });
+
+  it("defense in depth: aborts a Sec-Fetch-Dest: sharedworker request too", async () => {
+    const { context, abortedUrls } = makeFakeContext({
+      requests: [
+        SAME_HOST_NAV,
+        {
+          url: "https://golfvancouverisland.ca/sw.js",
+          secFetchDest: "sharedworker",
+        },
+      ],
+    });
+    const { launch } = fakeLauncher(context);
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(abortedUrls()).toContain("https://golfvancouverisland.ca/sw.js");
+  });
+
+  it("does NOT abort an ordinary script request lacking a worker Sec-Fetch-Dest", async () => {
+    const { context, continuedUrls, abortedUrls } = makeFakeContext({
+      requests: [
+        SAME_HOST_NAV,
+        { url: "https://golfvancouverisland.ca/app.js" },
+      ],
+    });
+    const { launch } = fakeLauncher(context);
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(continuedUrls()).toContain("https://golfvancouverisland.ca/app.js");
+    expect(abortedUrls()).not.toContain("https://golfvancouverisland.ca/app.js");
+  });
+});
+
+describe("x2-render: renderUrl — late popup/worker re-check (should-fix, re-gate)", () => {
+  it("catches a popup that opens AFTER goto() resolves but WHILE content() is still running (e.g. a delayed setTimeout)", async () => {
+    const { context } = makeFakeContext({
+      requests: [SAME_HOST_NAV],
+      contentDelayMs: 5,
+      popupDuringContent: { url: "https://127.0.0.1:8443/popup-src.html" },
+    });
+    const { launch } = fakeLauncher(context);
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
+      /popup/,
+    );
+  });
+
+  it("catches a Worker that is created AFTER goto() resolves but WHILE content() is still running", async () => {
+    const { context } = makeFakeContext({
+      requests: [SAME_HOST_NAV],
+      contentDelayMs: 5,
+      workerDuringContent: { url: "https://golfvancouverisland.ca/late-w.js" },
+    });
+    const { launch } = fakeLauncher(context);
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
+      /Worker/,
+    );
+  });
+
+  it("a render with no late popup/worker at all still succeeds normally (the re-check is not a false-positive trap)", async () => {
+    const { context } = makeFakeContext({
+      requests: [SAME_HOST_NAV],
+      contentDelayMs: 5,
+    });
+    const { launch } = fakeLauncher(context);
+    const result = await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(result.html).toBeTruthy();
+  });
 });
 
 describe("x2-render: renderUrl — popup (window.open) handling (gate finding, pass 2)", () => {
@@ -593,6 +775,7 @@ describe("x2-render: renderUrl — popup (window.open) handling (gate finding, p
       mainFrame() {
         return { main: true };
       },
+      on() {},
     };
     const context: ContextLike = {
       async newPage() {
