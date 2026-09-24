@@ -1576,32 +1576,57 @@ function failedGitHubVerification(detail: string, tmpDir: string | null): GitHub
 }
 
 /**
- * Gate finding (fourth re-gate, Addendum J round 6): the ONLY function in
- * this module that touches the network, and the ONLY place any
- * GitHub-verification git command ever runs — always inside a fresh
- * disposable bare repo, always under `scrubbedGitEnv`. See this
- * section's own banner comment for the full rationale and the exploits
- * (I/R/G/GIT_DIR/hooks) this closes. Never throws: any failure (a
+ * Gate finding (fourth re-gate, Addendum J round 6; hardened seventh
+ * re-gate): the ONLY function in this module that touches the network,
+ * and the ONLY place any GitHub-verification git command ever runs —
+ * always at a resolved, root-owned absolute path (round 7), always
+ * inside a fresh disposable bare repo, always under `scrubbedGitEnv`
+ * (round 7: a FIXED child PATH, never the caller's). See this section's
+ * own banner comment for the full rationale and the exploits
+ * (I/R/G/GIT_DIR/hooks/PATH/NODE_OPTIONS/LD_PRELOAD) this closes. Never
+ * throws: any failure (runtime tamper, an untrusted git binary, a
  * redirected fetch canary, `sslVerify` disabled, a shallow result, a
  * `grafts`/`replace` finding, a network error) comes back as
  * `{ok: false}` — the caller then treats the run as UNOFFICIAL, never
  * OFFICIAL.
  *
- * `opts.repoUrl` is a TEST-ONLY seam: `main()` NEVER passes it (no CLI
- * flag reaches this function's own arguments), so the only way to point
- * this at something other than the real, pinned GitHub URL — and the
- * only way `protocol.file.allow` is ever relaxed — is to call this
- * directly from test code, against a local bare repo standing in for
- * GitHub, never through the shipped CLI.
+ * `opts.repoUrl` and `opts.gitBinary` are TEST-ONLY seams: `main()`
+ * NEVER passes either (no CLI flag reaches this function's own
+ * arguments), so the only way to point this at something other than the
+ * real, pinned GitHub URL and a resolved system `git` — and the only way
+ * `protocol.file.allow` is ever relaxed — is to call this directly from
+ * test code, never through the shipped CLI. `opts.runtimeEnv`/
+ * `opts.runtimeExecArgv` are a SEPARATE test-only seam for
+ * `detectRuntimeTamper` alone (see this section's own banner comment for
+ * why it needs one) — default to the REAL `process.env`/`process.execArgv`,
+ * which `main()` always gets.
  */
-export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Promise<GitHubVerification> {
+export async function verifyAgainstGitHub(
+  opts: {
+    repoUrl?: string;
+    gitBinary?: string;
+    runtimeEnv?: NodeJS.ProcessEnv;
+    runtimeExecArgv?: readonly string[];
+  } = {},
+): Promise<GitHubVerification> {
   const repoUrl = opts.repoUrl ?? GOLFRAVEN_CANONICAL_REPO_URL;
   const allowFileProtocol = opts.repoUrl !== undefined;
+  const runtimeEnv = opts.runtimeEnv ?? process.env;
+  const runtimeExecArgv = opts.runtimeExecArgv ?? process.execArgv;
+
+  // Round 7 hardening (3), checked FIRST: if the VERDICT PROCESS ITSELF
+  // shows signs of runtime tampering, nothing else this function does
+  // can be trusted — injected code can patch child_process.execFile
+  // before any of the checks below ever run.
+  const tamper = detectRuntimeTamper(runtimeEnv, runtimeExecArgv);
+  if (tamper.tampered) {
+    return failedGitHubVerification(tamper.detail, null);
+  }
 
   // Checked BEFORE even creating the temp dir: an original environment
   // that has already disabled TLS verification for git makes any fetch
   // below untrustworthy regardless of what the disposable repo does.
-  if (process.env.GIT_SSL_NO_VERIFY !== undefined) {
+  if (runtimeEnv.GIT_SSL_NO_VERIFY !== undefined) {
     return failedGitHubVerification(
       "refusing: GIT_SSL_NO_VERIFY is set in this process's own environment — a fetch under a disabled-TLS-" +
         "verification environment cannot be trusted as genuinely from GitHub (fourth re-gate).",
@@ -1609,10 +1634,20 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     );
   }
 
+  // Round 7 hardening (1): resolve git to a verified, root-owned,
+  // non-writable ABSOLUTE path — never the bare string "git", which a
+  // fake shim earlier on PATH (or a rewritten PATH) would silently
+  // satisfy via `execFileAsync`'s own PATH lookup.
+  const gitResolution = resolveGitBinary(opts.gitBinary);
+  if (!gitResolution.ok || !gitResolution.path) {
+    return failedGitHubVerification(gitResolution.detail, null);
+  }
+  const gitBinary = gitResolution.path;
+
   let tmpDir: string | null = null;
   try {
     tmpDir = await mkdtemp(path.join(os.tmpdir(), "x2-verdict-verify-"));
-    await execFileAsync("git", ["init", "--quiet", "--bare", tmpDir], {
+    await execFileAsync(gitBinary, ["init", "--quiet", "--bare", tmpDir], {
       env: scrubbedGitEnv(tmpDir),
     });
 
@@ -1624,7 +1659,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     // GIT_CONFIG_* variable from the caller's own env and pointed
     // GIT_CONFIG_GLOBAL at /dev/null with GIT_CONFIG_NOSYSTEM=1, so this
     // check is really asserting those took effect, belt-and-braces.
-    const { stdout: resolvedUrl } = await runDisposableGit(tmpDir, allowFileProtocol, [
+    const { stdout: resolvedUrl } = await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, [
       "ls-remote",
       "--get-url",
       repoUrl,
@@ -1643,8 +1678,12 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     // http.sslVerify to false — a caller-set `-c http.sslVerify=false`
     // (or GIT_SSL_NO_VERIFY, checked above) means TLS was not actually
     // verified for whatever proxy/MITM sits between here and GitHub.
+    // Deliberately uses the ORIGINAL (unscrubbed) environment — this is
+    // asking "does the ambient config disable verification," not asking
+    // the disposable repo's own (scrubbed, GIT_CONFIG_GLOBAL=/dev/null)
+    // config — but still through the resolved, trusted absolute path.
     try {
-      const { stdout } = await execFileAsync("git", ["config", "--get", "http.sslVerify"]);
+      const { stdout } = await execFileAsync(gitBinary, ["config", "--get", "http.sslVerify"]);
       if (stdout.trim() === "false") {
         return failedGitHubVerification(
           "refusing: this environment's own git config resolves http.sslVerify to false — a fetch under " +
@@ -1660,7 +1699,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     // Step 4: fetch `main` with FULL history (no --depth) into the
     // disposable repo's own refs/heads/main.
     try {
-      await runDisposableGit(tmpDir, allowFileProtocol, [
+      await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, [
         "fetch",
         "--no-tags",
         repoUrl,
@@ -1676,7 +1715,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     // Refuse a shallow result outright — a shallow boundary commit can
     // misrepresent ancestor-reachability.
     try {
-      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
+      const { stdout } = await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, [
         "rev-parse",
         "--is-shallow-repository",
       ]);
@@ -1709,7 +1748,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
       // Expected: no grafts file.
     }
     try {
-      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, ["for-each-ref", "refs/replace/"]);
+      const { stdout } = await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, ["for-each-ref", "refs/replace/"]);
       if (stdout.trim().length > 0) {
         return failedGitHubVerification(
           "refusing: the disposable verification repo has refs/replace/* entries (belt-and-braces — should " +
@@ -1728,7 +1767,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     // refs/heads/main's own tree — never the local working tree.
     let ledgerBlobHash: string | null = null;
     try {
-      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
+      const { stdout } = await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, [
         "rev-parse",
         `refs/heads/main:${CANONICAL_LEDGER_REPO_RELATIVE_PATH}`,
       ]);
@@ -1739,12 +1778,12 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     let x2MdBlobHash: string | null = null;
     let x2MdText: string | null = null;
     try {
-      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
+      const { stdout } = await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, [
         "rev-parse",
         `refs/heads/main:${CANONICAL_X2MD_REPO_RELATIVE_PATH}`,
       ]);
       x2MdBlobHash = stdout.trim();
-      const { stdout: text } = await runDisposableGit(tmpDir, allowFileProtocol, [
+      const { stdout: text } = await runDisposableGit(gitBinary, tmpDir, allowFileProtocol, [
         "show",
         `refs/heads/main:${CANONICAL_X2MD_REPO_RELATIVE_PATH}`,
       ]);
@@ -1760,7 +1799,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
     ): Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }> => {
       let sha: string;
       try {
-        const { stdout } = await runDisposableGit(finalTmpDir, allowFileProtocol, [
+        const { stdout } = await runDisposableGit(gitBinary, finalTmpDir, allowFileProtocol, [
           "blame",
           "-L",
           `${lineNumber},${lineNumber}`,
@@ -1785,7 +1824,7 @@ export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Prom
       let authorDate = "";
       let signatureStatus = "";
       try {
-        const { stdout } = await runDisposableGit(finalTmpDir, allowFileProtocol, [
+        const { stdout } = await runDisposableGit(gitBinary, finalTmpDir, allowFileProtocol, [
           "show",
           "-s",
           "--format=%an%x1f%aI%x1f%G?",
