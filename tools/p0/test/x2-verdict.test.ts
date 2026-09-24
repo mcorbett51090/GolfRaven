@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { promisify } from "node:util";
@@ -176,6 +176,15 @@ function fakeGitHubVerification(overrides: Partial<GitHubVerification> = {}): Gi
     cleanup: async () => {},
     ...overrides,
   };
+}
+
+// A file this test creates is owned by the test's own uid. Under root
+// (this sandbox) that is uid 0, so chown it away; under an unprivileged
+// runner (CI runs as uid 1001, and cannot chown) it is already
+// non-root-owned — exactly the shape being refused.
+function makeNonRootOwned(file: string): void {
+  if (process.getuid?.() === 0) chownSync(file, 1000, 1000);
+  expect(statSync(file).uid).not.toBe(0);
 }
 
 describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", () => {
@@ -3215,11 +3224,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
         const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gitbin-uid-"));
         const fakeGit = nodePath.join(dir, "git");
         writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-        // This test environment runs as root, so a file this test creates
-        // is root-owned by default — chown it to a non-zero uid directly
-        // (root can chown to any uid) to construct the exact shape being
-        // refused, rather than merely asserting the seam exists.
-        chownSync(fakeGit, 1000, 1000);
+        makeNonRootOwned(fakeGit);
         const res = resolveGitBinary(fakeGit);
         expect(res.ok).toBe(false);
         expect(res.detail).toMatch(/not owned by root/);
@@ -3517,7 +3522,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
         const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gitbin-live-"));
         const fakeGit = nodePath.join(dir, "git");
         writeFileSync(fakeGit, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-        chownSync(fakeGit, 1000, 1000);
+        makeNonRootOwned(fakeGit);
         const verification = await verifyAgainstGitHub({
           repoUrl: bareDir,
           gitBinary: fakeGit,

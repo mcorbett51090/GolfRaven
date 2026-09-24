@@ -1360,20 +1360,20 @@ export function resolveGitBinary(gitBinaryOverride?: string): GitBinaryResolutio
     } catch {
       continue; // doesn't exist here — try the next candidate (none, under the override).
     }
-    if (st.uid !== 0) {
-      return {
-        ok: false,
-        path: null,
-        detail: `refusing: "${candidate}" exists but is not owned by root (uid ${st.uid}) — will not trust ` +
-          "a git binary an unprivileged (or attacker) process could have written (round 7 hardening).",
-      };
-    }
     if ((st.mode & 0o022) !== 0) {
       return {
         ok: false,
         path: null,
         detail: `refusing: "${candidate}" is group- or world-writable (mode ${(st.mode & 0o777).toString(8)}) ` +
           "— will not trust a git binary that could be tampered with after this check (round 7 hardening).",
+      };
+    }
+    if (st.uid !== 0) {
+      return {
+        ok: false,
+        path: null,
+        detail: `refusing: "${candidate}" exists but is not owned by root (uid ${st.uid}) — will not trust ` +
+          "a git binary an unprivileged (or attacker) process could have written (round 7 hardening).",
       };
     }
     return { ok: true, path: candidate, detail: `resolved to "${candidate}" (root-owned, not group/world-writable).` };
