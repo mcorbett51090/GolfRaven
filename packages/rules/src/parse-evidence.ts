@@ -19,6 +19,7 @@
  * the other.
  */
 import { z } from "zod";
+import { canonicalizeTimeZone, isValidIanaTimeZoneName } from "@golfraven/catalog";
 import {
   EVIDENCE_ROW_CAP,
   fixesOfEvidenceRow,
@@ -189,44 +190,88 @@ const PurchaseCorroborationSchema = z.strictObject({
   localDate: LocalDateSchema,
 });
 
-/** F1 (sixth gate): "`ctx.facilityTz` is optional and defaults to 'UTC'"
- * was the exploit — an LA fix legitimately captured at 18:00 PDT (already
- * 01:00 UTC the NEXT day) could be relabelled with the NEXT day's
- * `localDate` and still parse clean under the silent UTC default, while
- * the HONEST `localDate` (the real Pacific calendar day) got rejected.
- * `facilityTz` is REQUIRED now (`ScorePlayContextSchema` below drops
- * `.optional()`) and allow-listed to genuine IANA Area/Location zone
- * names ONLY — never a fixed offset (`"-07:00"`), an abbreviation
- * (`"EST"`, `"PST8PDT"`), or a legacy/backward-compat link
- * (`"US/Pacific"`, `"Etc/GMT+7"` — both real strings SOME systems accept,
- * neither a canonical IANA zone `Intl` enumerates). */
-function isValidIanaTimeZone(tz: string): boolean {
-  const supportedValuesOf = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
-  if (typeof supportedValuesOf === "function") {
-    try {
-      return supportedValuesOf("timeZone").includes(tz);
-    } catch {
-      // Fall through to the structural fallback below — a broken
-      // `supportedValuesOf` implementation is not proof the tz is bad.
-    }
+/** Seventh gate, item 1 (HIGH — a correctness regression in the sixth
+ * gate's own fix): `Intl.supportedValuesOf('timeZone')` was WRONG for
+ * this job — it returns CLDR's canonical-id list, which excludes several
+ * genuine, still-current IANA names it merely prefers an alias for
+ * (`America/Indiana/Indianapolis`, `America/Kentucky/Louisville`,
+ * `America/Argentina/Buenos_Aires`, `Europe/Kyiv`, `America/Nuuk`) — so
+ * every play at a facility in one of THOSE zones failed outright, even
+ * though `@golfraven/catalog`'s own `tz-lookup`-derived value (this
+ * package's actual server-side source of `facilityTz`) can BE
+ * `America/Indiana/Indianapolis`. `packages/catalog/src/common.ts:62-74`
+ * already worked this out (`isValidIanaTimeZoneName`'s own doc: "that API
+ * is a fairly recent addition... and its populated list is an ICU
+ * implementation detail that can vary... a name it doesn't happen to
+ * enumerate could be wrongly rejected") — this reuses that exact
+ * function, imported from `@golfraven/catalog` (an existing dependency;
+ * no import cycle — `@golfraven/catalog` does not depend on
+ * `@golfraven/rules`).
+ *
+ * `isValidIanaTimeZoneName` alone is not enough, though: `Intl` in this
+ * environment is FAR more permissive than "is this a real zone" — `new
+ * Intl.DateTimeFormat('en-US', {timeZone: tz})` does NOT throw for
+ * `"-07:00"` (a literal fixed offset), `"EST"` (resolves to
+ * `America/Panama` — numerically correct, semantically the wrong zone),
+ * `"US/Pacific"`/`"Canada/Eastern"` (legacy Area-prefix links) or
+ * `"PST8PDT"` (a POSIX-style zone spec) — confirmed directly, `node -e`,
+ * against this exact runtime, not assumed. `hasAreaLocationShape` below
+ * is the SECOND, independent gate this fix adds: a genuine canonical IANA
+ * name is always `Area/Location[/Location...]`, each segment built from
+ * letters/underscores/hyphens ONLY, with at least one segment containing
+ * an uppercase letter (rules out an all-lowercase `"america/los_angeles"`
+ * — canonical names are capitalized) — and the Area itself is never one
+ * of the three DENIED legacy-link prefixes this gate names (`Etc`, `US`,
+ * `Canada`). BOTH gates must pass. */
+const AREA_LOCATION_SEGMENT_RE = /^[A-Za-z_]+(?:-[A-Za-z_]+)*$/;
+const DENIED_TZ_AREA_PREFIXES = new Set(["Etc", "US", "Canada"]);
+
+function hasAreaLocationShape(tz: string): boolean {
+  const segments = tz.split("/");
+  if (segments.length < 2) return false; // must be Area/Location — at least one "/"
+  for (const segment of segments) {
+    if (segment.length === 0) return false;
+    if (!AREA_LOCATION_SEGMENT_RE.test(segment)) return false;
+    if (!/[A-Z]/.test(segment)) return false; // rejects an all-lowercase segment
   }
-  // Fallback (a runtime without `Intl.supportedValuesOf`): require an
-  // Area/Location SHAPE (at least one "/", letters/underscores only on
-  // either side) — this alone rejects every fixed-offset/abbreviation
-  // probe case (`"-07:00"`, `"EST"`, `"PST8PDT"` all lack a "/") — AND
-  // that `Intl` itself accepts the string without throwing.
-  if (!/^[A-Za-z_]+(?:\/[A-Za-z_]+)+$/.test(tz)) return false;
+  return !DENIED_TZ_AREA_PREFIXES.has(segments[0]!);
+}
+
+/** Never throws — not even when `Intl` itself is missing entirely (item
+ * 1's own requirement, and the probe's `NO-INTL` case): `isValidIanaTimeZoneName`
+ * already try/catches its own `Intl` reference internally, and this
+ * wraps the call again anyway, as defence in depth, so a caller can never
+ * observe an uncaught exception out of this function regardless of what
+ * changes inside it later. */
+function isValidFacilityTimeZone(tz: string): boolean {
   try {
-    new Intl.DateTimeFormat("en-CA", { timeZone: tz });
-    return true;
+    return hasAreaLocationShape(tz) && isValidIanaTimeZoneName(tz);
   } catch {
     return false;
   }
 }
 
-const FacilityTzSchema = NonEmptyStringSchema.refine(isValidIanaTimeZone, {
-  message: "must be a real IANA Area/Location timezone name (not a fixed offset, abbreviation, or legacy link)",
-});
+/** Canonicalizes an accepted tz through the catalog's vendored tzdb
+ * backward-links table (item 1: "canonicalise using the catalog's
+ * vendored tzdb-backward-links.json... importable without a cycle" — it
+ * is; see the import above) — e.g. a legacy alias some upstream step
+ * still emits resolves to its modern canonical name before this value is
+ * used further or stored back into the parsed `ctx`/`inputDigest`. Falls
+ * back to the ORIGINAL string (never throws) if canonicalization itself
+ * somehow fails — a canonicalization failure is not evidence the ALREADY
+ * -validated tz is invalid. */
+function canonicalizeFacilityTimeZone(tz: string): string {
+  try {
+    return canonicalizeTimeZone(tz);
+  } catch {
+    return tz;
+  }
+}
+
+const FacilityTzSchema = NonEmptyStringSchema.refine(isValidFacilityTimeZone, {
+  message:
+    "must be a real IANA Area/Location timezone name (not a fixed offset, abbreviation, or Etc/US/Canada-style legacy link)",
+}).transform(canonicalizeFacilityTimeZone);
 
 const ScorePlayContextSchema = z.strictObject({
   playFacilityId: NonEmptyStringSchema,
