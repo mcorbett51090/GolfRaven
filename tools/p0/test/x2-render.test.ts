@@ -39,9 +39,15 @@ function fakePage(opts: {
 function fakeLauncher(page: PageLike): {
   launch: ChromiumLauncher;
   seenExecutablePath: string[];
+  seenArgs: (string[] | undefined)[];
   closed: boolean;
 } {
-  const state = { launch: (() => {}) as unknown as ChromiumLauncher, seenExecutablePath: [] as string[], closed: false };
+  const state = {
+    launch: (() => {}) as unknown as ChromiumLauncher,
+    seenExecutablePath: [] as string[],
+    seenArgs: [] as (string[] | undefined)[],
+    closed: false,
+  };
   const browser: BrowserLike = {
     async newPage() {
       return page;
@@ -50,8 +56,9 @@ function fakeLauncher(page: PageLike): {
       state.closed = true;
     },
   };
-  state.launch = (async (opts: { executablePath: string; headless: boolean }) => {
+  state.launch = (async (opts: { executablePath: string; headless: boolean; args?: string[] }) => {
     state.seenExecutablePath.push(opts.executablePath);
+    state.seenArgs.push(opts.args);
     expect(opts.headless).toBe(true);
     return browser;
   }) as ChromiumLauncher;
@@ -76,6 +83,20 @@ describe("x2-render: renderUrl (decision 0001 Addendum J(a)(i))", () => {
     expect(seenExecutablePath).toEqual([DEFAULT_CHROMIUM_EXECUTABLE_PATH]);
     expect(page.headersSeen).toEqual({ "User-Agent": "GolfRaven-P0-X2/0.1 (test)" });
     expect(page.closed).toBe(true);
+  });
+
+  it("passes extraArgs through to the launcher unchanged (e.g. an environment-specific TLS-trust escape hatch), and omits `args` when none given", async () => {
+    const page = fakePage({ finalUrl: "https://example.test/", html: "<p>x</p>" });
+    const { launch, seenArgs } = fakeLauncher(page);
+    await renderUrl("https://example.test/", { userAgent: "ua", launch });
+    expect(seenArgs).toEqual([undefined]);
+
+    await renderUrl("https://example.test/", {
+      userAgent: "ua",
+      launch,
+      extraArgs: ["--ignore-certificate-errors-spki-list=abc123"],
+    });
+    expect(seenArgs[1]).toEqual(["--ignore-certificate-errors-spki-list=abc123"]);
   });
 
   it("uses an explicit executablePath when given, instead of the default", async () => {

@@ -42,6 +42,15 @@ BEGIN
     RAISE EXCEPTION 'delete_my_data: user_id is required';
   END IF;
 
+  -- S1 close-out (gate round 3): this function is owned by `private_definer`
+  -- (0016_private_definer.sql), a NOLOGIN NOSUPERUSER NOBYPASSRLS role that
+  -- is NOT the table owner — every table below stays ENABLE + FORCE ROW
+  -- LEVEL SECURITY, and private_definer reaches rows only through the
+  -- explicit, narrow policies 0016 defines, each scoped to this session-
+  -- local GUC. Set it FIRST, before the very first table read below, since
+  -- even `app.profile`'s own SELECT now goes through a policy keyed on it.
+  PERFORM set_config('app.delete_my_data.target_user_id', p_user_id::text, true);
+
   SELECT handle INTO v_handle FROM app.profile WHERE user_id = p_user_id;
   SELECT email INTO v_email FROM auth.users WHERE id = p_user_id;
   -- Fully qualified: this function runs with search_path = '' (below),
@@ -50,6 +59,17 @@ BEGIN
   -- ("function digest(text, unknown) does not exist") here even though
   -- the extension is present.
   v_pseudonym := encode(public.digest(p_user_id::text, 'sha256'), 'hex');
+
+  -- The three derived GUCs the "special" policies (partner_invite,
+  -- attestation_shift_log, public_profile_projection) match on — set once
+  -- either value is known; empty string (not NULL) when there is nothing
+  -- to match, so `current_setting(..., true)` never returns NULL into a
+  -- `column = NULL` comparison (which would be neither true nor false and
+  -- so would never permit a row — the intended, fail-closed behaviour when
+  -- e.g. the account has no email on file).
+  PERFORM set_config('app.delete_my_data.target_email', COALESCE(v_email, ''), true);
+  PERFORM set_config('app.delete_my_data.target_handle', COALESCE(v_handle, ''), true);
+  PERFORM set_config('app.delete_my_data.target_pseudonym', v_pseudonym, true);
 
   -- ==========================================================================
   -- Generic pass: every FK-to-auth.users column in `app`, driven by
