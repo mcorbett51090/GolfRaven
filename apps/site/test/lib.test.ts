@@ -5,6 +5,10 @@ import { regionInfo, regionPageSize } from "../src/lib/derive";
 import type { Catalog } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
 import { loadCatalogFromBundle } from "@golfraven/catalog";
+import { normalizeGolfravenEnv, isProductionEnv } from "../src/lib/env.mjs";
+
+const LINE_SEPARATOR = String.fromCharCode(0x2028);
+const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
 
 describe("jsonLdScript — nit: escapes U+2028/U+2029 as well as <", () => {
   it("escapes a literal </script>", () => {
@@ -12,9 +16,9 @@ describe("jsonLdScript — nit: escapes U+2028/U+2029 as well as <", () => {
     expect(html).not.toContain("</script><script>");
   });
   it("escapes U+2028 and U+2029", () => {
-    const html = jsonLdScript([{ name: "line sep para" }]);
-    expect(html).not.toContain(" ");
-    expect(html).not.toContain(" ");
+    const html = jsonLdScript([{ name: `line${LINE_SEPARATOR}sep${PARAGRAPH_SEPARATOR}para` }]);
+    expect(html).not.toContain(LINE_SEPARATOR);
+    expect(html).not.toContain(PARAGRAPH_SEPARATOR);
     expect(html).toContain("\\u2028");
     expect(html).toContain("\\u2029");
   });
@@ -33,6 +37,32 @@ describe("regionPageSize — REGION_PAGE_SIZE env override (B2)", () => {
   });
 });
 
+describe("normalizeGolfravenEnv / isProductionEnv — case normalisation + closed value set", () => {
+  it("returns undefined for unset/empty", () => {
+    expect(normalizeGolfravenEnv(undefined)).toBeUndefined();
+    expect(normalizeGolfravenEnv("")).toBeUndefined();
+  });
+  it("normalises case for each allowed value", () => {
+    expect(normalizeGolfravenEnv("production")).toBe("production");
+    expect(normalizeGolfravenEnv("Production")).toBe("production");
+    expect(normalizeGolfravenEnv("PRODUCTION")).toBe("production");
+    expect(normalizeGolfravenEnv("Staging")).toBe("staging");
+    expect(normalizeGolfravenEnv("Development")).toBe("development");
+  });
+  it("rejects an unknown value", () => {
+    expect(() => normalizeGolfravenEnv("prod")).toThrow(/Unknown GOLFRAVEN_ENV/);
+    expect(() => normalizeGolfravenEnv("test")).toThrow(/Unknown GOLFRAVEN_ENV/);
+  });
+  it("isProductionEnv is true only for a case-insensitive 'production'", () => {
+    expect(isProductionEnv({ GOLFRAVEN_ENV: "PRODUCTION" })).toBe(true);
+    expect(isProductionEnv({ GOLFRAVEN_ENV: "staging" })).toBe(false);
+    expect(isProductionEnv({})).toBe(false);
+  });
+  it("isProductionEnv throws on an unknown value rather than treating it as non-production", () => {
+    expect(() => isProductionEnv({ GOLFRAVEN_ENV: "prod" })).toThrow(/Unknown GOLFRAVEN_ENV/);
+  });
+});
+
 describe("regionInfo — production refuses the derived-name fallback (gate review nit)", () => {
   const catalog: Catalog = loadCatalogFromBundle(demoBundleForSite());
 
@@ -44,6 +74,12 @@ describe("regionInfo — production refuses the derived-name fallback (gate revi
 
   it("throws in production when no Region record exists for the code", () => {
     expect(() => regionInfo(catalog, "US-AL", { GOLFRAVEN_ENV: "production" })).toThrow(
+      /Region record/,
+    );
+  });
+
+  it("throws the same way for a differently-cased GOLFRAVEN_ENV=Production", () => {
+    expect(() => regionInfo(catalog, "US-AL", { GOLFRAVEN_ENV: "Production" })).toThrow(
       /Region record/,
     );
   });

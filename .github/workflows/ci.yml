@@ -15,13 +15,6 @@ permissions:
 env:
   # S5: telemetry stays off in CI, same as any other non-interactive build.
   ASTRO_TELEMETRY_DISABLED: "1"
-  # B3: apps/site's fail-closed demo guard refuses to build with an empty
-  # data/ unless this is set explicitly — data/ carries no real
-  # facility/trail content yet (data/README.md), so CI opts into the
-  # synthetic demo dataset on purpose. This is never set in a real
-  # production deploy (see apps/site/src/lib/derive.ts's loadSiteCatalog,
-  # which also refuses GOLFRAVEN_DEMO=1 outright when GOLFRAVEN_ENV=production).
-  GOLFRAVEN_DEMO: "1"
 
 jobs:
   verify:
@@ -48,13 +41,30 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
+        # B3: apps/site's fail-closed demo guard refuses to build with an
+        # empty data/ unless GOLFRAVEN_DEMO=1 is set explicitly — data/
+        # carries no real facility/trail content yet (data/README.md), so
+        # CI opts into the synthetic demo dataset on purpose, scoped to
+        # just this step (`pnpm -r build` also builds every OTHER package,
+        # none of which reads this var). Never set for a real production
+        # deploy — see apps/site/src/lib/derive.ts's loadSiteCatalog,
+        # which also refuses GOLFRAVEN_DEMO=1 outright when
+        # GOLFRAVEN_ENV=production.
         run: pnpm -r build
+        env:
+          GOLFRAVEN_DEMO: "1"
 
       - name: Typecheck
         run: pnpm -r typecheck
 
       - name: Test
+        # Same scoping as the Build step above — apps/site's own test
+        # suite forces GOLFRAVEN_DEMO=1 itself (test/global-setup.mjs), but
+        # setting it here too keeps `pnpm -r test` runnable exactly like a
+        # local `GOLFRAVEN_DEMO=1 pnpm -r test` invocation.
         run: pnpm -r test
+        env:
+          GOLFRAVEN_DEMO: "1"
 
       - name: verify-contract (contract/catalog.schema.json must match packages/catalog's Zod schema)
         run: node tools/catalog/dist/verify-contract.js
@@ -84,7 +94,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build (so bundles under dist/ exist to scan — gate review S13)
+        # Scoped the same way as the verify job's Build step — see its comment.
         run: pnpm -r build
+        env:
+          GOLFRAVEN_DEMO: "1"
 
       - name: Install gitleaks (checksum-pinned, no third-party Action)
         run: |

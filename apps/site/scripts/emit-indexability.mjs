@@ -21,15 +21,17 @@
  * Run directly by `node` (not through Astro/Vite), as `apps/site`'s
  * `build` script's first step — see `package.json`. It therefore cannot
  * import `src/lib/derive.ts` (a `.ts` file Node can't load without a
- * loader); the small demo-fallback/production-refusal logic it needs is
- * duplicated here from `derive.ts`'s `loadSiteCatalog()`, deliberately
- * kept tiny so the duplication stays cheap to keep in sync.
+ * loader); the demo-fallback/production-refusal logic it needs mirrors
+ * `derive.ts`'s `loadSiteCatalog()` (the `GOLFRAVEN_ENV` normalisation
+ * itself is shared, not duplicated — both import `src/lib/env.mjs`,
+ * which is plain JS so either side can load it).
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isCatalogEmpty, isIndexable, loadCatalog, loadCatalogFromBundle } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
+import { isProductionEnv } from "../src/lib/env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Overridable via GOLFRAVEN_DATA_DIR — see derive.ts's realDataDir() doc.
@@ -37,7 +39,7 @@ const REAL_DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "
 const OUT_PATH = process.env.INDEXABILITY_OUT_PATH ?? join(here, "..", "build", "indexability.json");
 
 async function loadSiteCatalog() {
-  const isProduction = process.env.GOLFRAVEN_ENV === "production";
+  const isProduction = isProductionEnv(process.env);
   const demoRequested = process.env.GOLFRAVEN_DEMO === "1";
 
   if (demoRequested) {

@@ -4,11 +4,13 @@
  * the three real `dist/` trees `test/global-setup.mjs` builds — see
  * `test/paths.mjs`'s doc for why there are three, not one.
  */
-import { readFile, readdir, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { verifySitemap } from "../scripts/verify-sitemap.mjs";
+import { findSetHtmlOccurrences, isSanctionedSetHtml } from "./scan-set-html.mjs";
 import { BUILDS } from "./paths.mjs";
 
 const siteRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -132,18 +134,14 @@ describe("AT(6)/S4: JS off — every verified facility's course page is reachabl
 // ---------------------------------------------------------------------
 
 describe("AT(7): no set:html outside jsonLdScript()", () => {
-  it("every set:html in the .astro source tree, in ANY form/attribute-order, renders schema.ts's jsonLdScript() output, and only in BaseLayout.astro", async () => {
+  it("every set:html in the .astro source tree, in ANY form (expr, string literal, spread), is the one sanctioned set:html={ldScript} in BaseLayout.astro", async () => {
     const files = (await walk(srcDir)).filter((f) => f.endsWith(".astro"));
     const offenders: string[] = [];
     for (const file of files) {
       const content = await readFile(file, "utf8");
-      // Matches set:html anywhere in a tag, any surrounding attributes,
-      // any whitespace/newlines inside the braces (dotall) — "every form".
-      const matches = [...content.matchAll(/set:html\s*=\s*\{([^}]*)\}/gs)];
-      for (const m of matches) {
-        const expr = m[1]!.trim();
-        const isSanctioned = file.endsWith("BaseLayout.astro") && expr === "ldScript";
-        if (!isSanctioned) offenders.push(`${file}: set:html={${expr}}`);
+      for (const occ of findSetHtmlOccurrences(content)) {
+        const sanctioned = file.endsWith("BaseLayout.astro") && isSanctionedSetHtml(occ);
+        if (!sanctioned) offenders.push(`${file}: [${occ.form}] ${occ.full}`);
       }
     }
     expect(offenders).toEqual([]);
@@ -152,6 +150,41 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
   it("BaseLayout's ldScript is built from schema.ts's jsonLdScript()", async () => {
     const layout = await readFile(join(srcDir, "layouts", "BaseLayout.astro"), "utf8");
     expect(layout).toMatch(/const ldScript = jsonLd\.length \? jsonLdScript\(jsonLd\) : ""/);
+  });
+
+  it("PROOF: the detector actually catches a string-literal set:html in a scratch mutated copy (not just that none exist today)", async () => {
+    const original = await readFile(join(srcDir, "layouts", "BaseLayout.astro"), "utf8");
+    const scratchDir = await mkdtemp(join(tmpdir(), "golfraven-set-html-proof-"));
+    try {
+      const injected = original.replace(
+        "<slot />",
+        '<slot />\n    <div set:html="<img src=x onerror=alert(1)>"></div>',
+      );
+      const scratchFile = join(scratchDir, "Scratch.astro");
+      await writeFile(scratchFile, injected);
+
+      const occurrences = findSetHtmlOccurrences(injected);
+      const offenders = occurrences.filter((o) => !isSanctionedSetHtml(o));
+      // The real ldScript use is still sanctioned; the injected string
+      // literal must be the ONE offender the scan reports.
+      expect(offenders).toHaveLength(1);
+      expect(offenders[0]!.form).toBe("string");
+      expect(offenders[0]!.raw).toContain("onerror=alert(1)");
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("PROOF: the detector also catches a spread-embedded set:html key", () => {
+    const injected = `<div {...{ "set:html": dangerous }} />`;
+    const offenders = findSetHtmlOccurrences(injected).filter((o) => !isSanctionedSetHtml(o));
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0]!.form).toBe("spread-key");
+  });
+
+  it("does NOT flag plain prose mentioning 'set:html' in a comment", () => {
+    const prose = `{/* no set:html use here, just prose about set:html */}`;
+    expect(findSetHtmlOccurrences(prose)).toEqual([]);
   });
 
   it("every built page has at most one JSON-LD <script>, and no OTHER <script> tag at all", async () => {

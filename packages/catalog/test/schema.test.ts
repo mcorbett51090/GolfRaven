@@ -4,6 +4,7 @@ import {
   CourseSchema,
   FacilitySchema,
   OfferTermsSchema,
+  OperatorSchema,
   RegionCodeSchema,
   RosterMemberSchema,
   RosterVersionSchema,
@@ -246,6 +247,75 @@ describe("TrailSchema", () => {
       sources: [source],
     };
     expect(TrailSchema.safeParse(trail).success).toBe(true);
+  });
+
+  const minimalTrail = {
+    id: "trl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    slug: "tennessee-golf-trail",
+    name: "Tennessee Golf Trail",
+    countries: ["US"],
+    regions: ["US-TN"],
+    kind: "state-agency",
+    status: "active",
+    operator: { name: "TN Dept. of Tourism", url: "https://example.com", type: "state-agency" },
+    officialUrl: "https://example.com",
+    rosterStatus: "verified",
+    rosterVersions: [
+      {
+        version: 1,
+        effectiveFrom: "2026-01-01",
+        source,
+        verifiedAt: "2026-01-01",
+        completionUnit: "course",
+        markerUnit: "facility",
+        completionRule: { kind: "all" },
+        markerRule: { kind: "all" },
+        members: [{ unit: "course", courseId: "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
+      },
+    ],
+    lastReviewed: "2026-09-24",
+    sources: [source],
+  };
+
+  it("rejects a http: officialUrl (gate review: https:-only, same S7 rule as Facility.url)", () => {
+    const result = TrailSchema.safeParse({ ...minimalTrail, officialUrl: "http://example.com" });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a http: operator.url", () => {
+    const result = TrailSchema.safeParse({
+      ...minimalTrail,
+      operator: { ...minimalTrail.operator, url: "http://example.com" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a https: officialUrl and operator.url", () => {
+    expect(TrailSchema.safeParse(minimalTrail).success).toBe(true);
+  });
+});
+
+describe("OperatorSchema — https:-only url (gate review nit)", () => {
+  it("accepts a https: url", () => {
+    expect(
+      OperatorSchema.safeParse({ name: "TN Dept. of Tourism", url: "https://example.com", type: "state-agency" })
+        .success,
+    ).toBe(true);
+  });
+  it("rejects a http: url", () => {
+    expect(
+      OperatorSchema.safeParse({ name: "TN Dept. of Tourism", url: "http://example.com", type: "state-agency" })
+        .success,
+    ).toBe(false);
+  });
+  it("rejects a javascript: url", () => {
+    expect(
+      OperatorSchema.safeParse({
+        name: "TN Dept. of Tourism",
+        url: "javascript:alert(1)",
+        type: "state-agency",
+      }).success,
+    ).toBe(false);
   });
 });
 

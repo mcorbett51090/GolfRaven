@@ -503,7 +503,10 @@ export type RosterStatus = z.infer<typeof RosterStatusSchema>;
 
 export const OperatorSchema = z.strictObject({
   name: z.string().min(1),
-  url: z.url(),
+  /** `https:`-only (gate review nit, matching Facility.url and
+   * booking[].url's own S7 rule) — an operator's `http:`/other-scheme URL
+   * is never legitimate on a curated record. */
+  url: HttpsUrlSchema,
   type: z.string().min(1),
 });
 export type Operator = z.infer<typeof OperatorSchema>;
@@ -625,7 +628,9 @@ export const TrailSchema = z.strictObject({
   kind: TrailKindSchema,
   status: TrailStatusSchema,
   operator: OperatorSchema,
-  officialUrl: z.url(),
+  /** `https:`-only (gate review nit — same S7 rule as Facility.url,
+   * booking[].url and Operator.url). */
+  officialUrl: HttpsUrlSchema,
   rosterStatus: RosterStatusSchema,
   rosterVersions: z.array(RosterVersionSchema).min(1),
   blurb: z.string().optional(),

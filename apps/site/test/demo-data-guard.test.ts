@@ -37,6 +37,26 @@ describe("loadSiteCatalog — the 4 GOLFRAVEN_DEMO × GOLFRAVEN_ENV combinations
       loadSiteCatalog({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_ENV: "production" }),
     ).rejects.toThrow(/production/i);
   });
+
+  it("GOLFRAVEN_ENV is case-normalised: 'Production' refuses demo data exactly like 'production'", async () => {
+    await expect(
+      loadSiteCatalog({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_ENV: "Production" }),
+    ).rejects.toThrow(/production/i);
+  });
+
+  it("an unknown GOLFRAVEN_ENV value is rejected outright", async () => {
+    await expect(loadSiteCatalog({ GOLFRAVEN_DEMO: "1", GOLFRAVEN_ENV: "prod" })).rejects.toThrow(
+      /Unknown GOLFRAVEN_ENV/,
+    );
+  });
+
+  it("GOLFRAVEN_ENV=staging (case-insensitive) does NOT refuse demo data", async () => {
+    const { usedDemoData } = await loadSiteCatalog({
+      GOLFRAVEN_DEMO: "1",
+      GOLFRAVEN_ENV: "Staging",
+    });
+    expect(usedDemoData).toBe(true);
+  });
 });
 
 describe("loadSiteCatalog — populated real data/ (GOLFRAVEN_DATA_DIR override)", () => {

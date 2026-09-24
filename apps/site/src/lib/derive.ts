@@ -34,6 +34,7 @@ import {
   type TrailId,
 } from "@golfraven/catalog";
 import { demoBundleForSite } from "../../fixtures/demo-catalog/build-bundle.mjs";
+import { isProductionEnv } from "./env.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 
@@ -66,7 +67,7 @@ function loadDemoCatalog(): Catalog {
 export async function loadSiteCatalog(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<LoadedCatalog> {
-  const isProduction = env.GOLFRAVEN_ENV === "production";
+  const isProduction = isProductionEnv(env);
   const demoRequested = env.GOLFRAVEN_DEMO === "1";
 
   if (demoRequested) {
@@ -168,7 +169,7 @@ export function regionInfo(
       name: authored.name,
     };
   }
-  if (env.GOLFRAVEN_ENV === "production") {
+  if (isProductionEnv(env)) {
     throw new Error(
       `Region "${code}" has no authored Region record (data/regions/) and ` +
         `GOLFRAVEN_ENV=production refuses the derived-name fallback — add a Region ` +

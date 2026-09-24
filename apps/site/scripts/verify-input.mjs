@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { isCatalogEmpty, loadCatalog, loadCatalogFromBundle } from "@golfraven/catalog";
 import { verifyCatalogRaw } from "@golfraven/catalog-tools";
 import { demoBundleForSite, demoBundleForVerify } from "../fixtures/demo-catalog/build-bundle.mjs";
+import { isProductionEnv } from "../src/lib/env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Overridable via GOLFRAVEN_DATA_DIR — see derive.ts's realDataDir() doc.
@@ -24,7 +25,7 @@ const REAL_DATA_DIR = process.env.GOLFRAVEN_DATA_DIR ?? join(here, "..", "..", "
 const BOOKING_HOSTS_PATH = join(here, "..", "..", "..", "config", "booking-hosts.json");
 
 async function loadSiteCatalog() {
-  const isProduction = process.env.GOLFRAVEN_ENV === "production";
+  const isProduction = isProductionEnv(process.env);
   const demoRequested = process.env.GOLFRAVEN_DEMO === "1";
 
   if (demoRequested) {
