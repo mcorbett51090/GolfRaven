@@ -179,7 +179,9 @@ export async function buildEvidenceByTrail(
         rawMethod === "rendered" ||
         rawMethod === "owner-saved"
       );
-      const method: X2Method = methodDefaulted ? "direct" : (rawMethod as X2Method);
+      const method: X2Method = methodDefaulted
+        ? "direct"
+        : (rawMethod as X2Method);
 
       // Gate finding: cross-check method against httpStatus — an
       // "owner-saved" entry must carry the literal httpStatus "owner-saved"
@@ -188,7 +190,11 @@ export async function buildEvidenceByTrail(
       // A mismatch means a corrupted or hand-edited manifest — refused
       // outright, the same hard-integrity style as gate S1's SHA check,
       // never silently trusted.
-      if (method === "owner-saved" ? e.httpStatus !== "owner-saved" : typeof e.httpStatus !== "number") {
+      if (
+        method === "owner-saved"
+          ? e.httpStatus !== "owner-saved"
+          : typeof e.httpStatus !== "number"
+      ) {
         throw new Error(
           `Evidence entry for trail "${trail}", url "${e.url}" has method "${method}" but httpStatus ` +
             `${JSON.stringify(e.httpStatus)} — these are inconsistent ("owner-saved" must pair with the ` +
@@ -480,7 +486,12 @@ export function computeX2Verdict(
       facts: {
         roster: (trailConfirmation?.roster ?? []).map((r) => ({
           ...r,
-          method: factMethod(trailEvidence.bySha, r.evidenceSha, `Roster entry "${r.name}"`, reasons),
+          method: factMethod(
+            trailEvidence.bySha,
+            r.evidenceSha,
+            `Roster entry "${r.name}"`,
+            reasons,
+          ),
         })),
         completionUnit: trailConfirmation?.completionUnit
           ? {

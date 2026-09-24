@@ -57,7 +57,11 @@ import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
 } from "./run-dir.js";
-import { renderUrl, validateRenderExtraArgs, type ChromiumLauncher } from "./x2-render.js";
+import {
+  renderUrl,
+  validateRenderExtraArgs,
+  type ChromiumLauncher,
+} from "./x2-render.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -457,7 +461,12 @@ async function fetchOneRendered(
         url,
         fetchedAt,
         `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
-        { httpStatus: status, finalUrl, method: "rendered", renderArgs: attemptedArgs },
+        {
+          httpStatus: status,
+          finalUrl,
+          method: "rendered",
+          renderArgs: attemptedArgs,
+        },
       );
     }
   } catch {
@@ -470,7 +479,12 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `render navigation returned HTTP ${status}`,
-      { httpStatus: status, finalUrl, method: "rendered", renderArgs: attemptedArgs },
+      {
+        httpStatus: status,
+        finalUrl,
+        method: "rendered",
+        renderArgs: attemptedArgs,
+      },
     );
   }
 
@@ -481,7 +495,12 @@ async function fetchOneRendered(
       url,
       fetchedAt,
       `rendered content exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes (gate S6)`,
-      { httpStatus: status, finalUrl, method: "rendered", renderArgs: attemptedArgs },
+      {
+        httpStatus: status,
+        finalUrl,
+        method: "rendered",
+        renderArgs: attemptedArgs,
+      },
     );
   }
 

@@ -194,10 +194,17 @@ async function defaultLauncher(): Promise<ChromiumLauncher> {
 
 /** Manual timeout wrapper for a call with no timeout option of its own
  * (`page.content()`) — never left to hang indefinitely. */
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
   });
   try {
     return await Promise.race([promise, timeout]);
@@ -263,7 +270,8 @@ export async function renderUrl(
     try {
       await page.setExtraHTTPHeaders({ "User-Agent": opts.userAgent });
 
-      const byteCap = opts.subresourceByteCapBytes ?? DEFAULT_RENDER_SUBRESOURCE_BYTE_CAP;
+      const byteCap =
+        opts.subresourceByteCapBytes ?? DEFAULT_RENDER_SUBRESOURCE_BYTE_CAP;
       let totalBytes = 0;
       let capExceeded = false;
       let offHostNavigation: string | null = null;
@@ -351,7 +359,9 @@ export async function renderUrl(
       try {
         finalHost = new URL(finalUrl).hostname;
       } catch {
-        throw new Error(`render of "${url}" ended on an unparseable final URL "${finalUrl}"`);
+        throw new Error(
+          `render of "${url}" ended on an unparseable final URL "${finalUrl}"`,
+        );
       }
       if (finalHost !== requestedHost) {
         throw new Error(

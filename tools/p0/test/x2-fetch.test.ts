@@ -289,7 +289,11 @@ function passthroughPage(opts: {
       return opts.finalUrl;
     },
     async goto() {
-      return { status: () => opts.status ?? 200, url: () => opts.finalUrl, headers: () => ({}) };
+      return {
+        status: () => opts.status ?? 200,
+        url: () => opts.finalUrl,
+        headers: () => ({}),
+      };
     },
     async content() {
       return opts.html;

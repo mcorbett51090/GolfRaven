@@ -28,13 +28,39 @@ function baseEvidenceByTrail(): EvidenceByTrail {
   return {
     TN: {
       bySha: new Map([
-        [SHA_TN, { text: TN_BYTES, method: "direct" as const, methodDefaulted: false, recorded: true }],
-        [SHA_PDF, { text: null, method: "direct" as const, methodDefaulted: false, recorded: true }],
+        [
+          SHA_TN,
+          {
+            text: TN_BYTES,
+            method: "direct" as const,
+            methodDefaulted: false,
+            recorded: true,
+          },
+        ],
+        [
+          SHA_PDF,
+          {
+            text: null,
+            method: "direct" as const,
+            methodDefaulted: false,
+            recorded: true,
+          },
+        ],
       ]),
       failedSources: [],
     },
     VI: {
-      bySha: new Map([[SHA_VI, { text: VI_BYTES, method: "direct" as const, methodDefaulted: false, recorded: true }]]),
+      bySha: new Map([
+        [
+          SHA_VI,
+          {
+            text: VI_BYTES,
+            method: "direct" as const,
+            methodDefaulted: false,
+            recorded: true,
+          },
+        ],
+      ]),
       failedSources: [],
     },
     RTJ: { bySha: new Map(), failedSources: [] },
@@ -90,7 +116,17 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
       "Rendered SPA text. Arbutus Ridge is a member course. It counts a facility. Plays year-round.";
     const evidenceByTrail: EvidenceByTrail = {
       VI: {
-        bySha: new Map([[sha(bytes), { text: bytes, method: "rendered" as const, methodDefaulted: false, recorded: true }]]),
+        bySha: new Map([
+          [
+            sha(bytes),
+            {
+              text: bytes,
+              method: "rendered" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
+        ]),
         failedSources: [],
       },
     };
@@ -197,7 +233,15 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
         bySha: new Map([
-          [sha(bytes), { text: bytes, method: "direct" as const, methodDefaulted: false, recorded: true }],
+          [
+            sha(bytes),
+            {
+              text: bytes,
+              method: "direct" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
         ]),
         failedSources: [],
       },
@@ -316,7 +360,15 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
         bySha: new Map([
-          [SHA_TN, { text: TN_BYTES, method: "direct" as const, methodDefaulted: false, recorded: true }],
+          [
+            SHA_TN,
+            {
+              text: TN_BYTES,
+              method: "direct" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
         ]),
         failedSources: [
           { url: "https://tn.gov/", blocked: false, error: "404" },
@@ -362,13 +414,29 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
     return {
       TN: {
         bySha: new Map([
-          [sha(tnBytes), { text: tnBytes, method: "direct" as const, methodDefaulted: false, recorded: true }],
+          [
+            sha(tnBytes),
+            {
+              text: tnBytes,
+              method: "direct" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
         ]),
         failedSources: [],
       },
       VI: {
         bySha: new Map([
-          [sha(viBytes), { text: viBytes, method: "direct" as const, methodDefaulted: false, recorded: true }],
+          [
+            sha(viBytes),
+            {
+              text: viBytes,
+              method: "direct" as const,
+              methodDefaulted: false,
+              recorded: true,
+            },
+          ],
         ]),
         failedSources: [],
       },
@@ -644,7 +712,9 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
 });
 
 describe("x2-verdict: gate findings — legacy method default, method/httpStatus cross-check, non-recorded refusal", () => {
-  function baseManifestEntry(overrides: Partial<X2FetchEntry> = {}): X2FetchEntry {
+  function baseManifestEntry(
+    overrides: Partial<X2FetchEntry> = {},
+  ): X2FetchEntry {
     return {
       trail: "TN",
       url: "https://www.tnstateparks.com/golf",
@@ -669,10 +739,14 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     };
   }
 
-  it("gate finding: a legacy manifest entry with NO `method` field at all defaults to \"direct\", and it is stated in reasons", async () => {
-    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+  it('gate finding: a legacy manifest entry with NO `method` field at all defaults to "direct", and it is stated in reasons', async () => {
+    const bytes =
+      "Nine courses make up the Trail. It counts a course. The season runs year-round.";
     const rawSha = sha(bytes);
-    const legacyEntry = baseManifestEntry({ sha256: rawSha, rawFile: "raw/x.html" });
+    const legacyEntry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+    });
     // Simulate a REAL legacy manifest read from disk (JSON.parse'd), which
     // never had a `method` key at all — strip it, defeating the TS type.
     delete (legacyEntry as { method?: unknown }).method;
@@ -682,22 +756,41 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [legacyEntry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes));
+    const byTrail = await buildEvidenceByTrail(manifest, async () =>
+      Buffer.from(bytes),
+    );
     expect(byTrail.TN?.bySha.get(rawSha)?.method).toBe("direct");
     expect(byTrail.TN?.bySha.get(rawSha)?.methodDefaulted).toBe(true);
 
     const confirmation: X2ConfirmationFile = {
       TN: {
-        roster: [{ name: "Nine courses make up", quote: "Nine courses make up the Trail.", evidenceSha: rawSha }],
-        completionUnit: { value: "course", quote: "It counts a course.", evidenceSha: rawSha },
-        season: { value: "year-round", quote: "The season runs year-round.", evidenceSha: rawSha },
+        roster: [
+          {
+            name: "Nine courses make up",
+            quote: "Nine courses make up the Trail.",
+            evidenceSha: rawSha,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "It counts a course.",
+          evidenceSha: rawSha,
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: rawSha,
+        },
       },
     };
     const result = computeX2Verdict(confirmation, byTrail, ["TN"]);
     expect(result.perTrail.TN?.confirmed).toBe(true);
     expect(result.perTrail.TN?.facts.completionUnit?.method).toBe("direct");
     expect(
-      result.perTrail.TN?.reasons.some((r) => r.includes("legacy manifest") && r.includes('defaulted to "direct"')),
+      result.perTrail.TN?.reasons.some(
+        (r) =>
+          r.includes("legacy manifest") && r.includes('defaulted to "direct"'),
+      ),
     ).toBe(true);
   });
 
@@ -722,7 +815,7 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     ).rejects.toThrow(/inconsistent/);
   });
 
-  it("gate finding: cross-checks method against httpStatus — a \"direct\" entry with httpStatus \"owner-saved\" refuses (throws)", async () => {
+  it('gate finding: cross-checks method against httpStatus — a "direct" entry with httpStatus "owner-saved" refuses (throws)', async () => {
     const bytes = "Some evidence text.";
     const rawSha = sha(bytes);
     const badEntry = baseManifestEntry({
@@ -742,8 +835,9 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     ).rejects.toThrow(/inconsistent/);
   });
 
-  it("a consistent owner-saved entry (method owner-saved, httpStatus \"owner-saved\") builds evidence fine — the owner-saved verdict path", async () => {
-    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+  it('a consistent owner-saved entry (method owner-saved, httpStatus "owner-saved") builds evidence fine — the owner-saved verdict path', async () => {
+    const bytes =
+      "Nine courses make up the Trail. It counts a course. The season runs year-round.";
     const rawSha = sha(bytes);
     const entry = baseManifestEntry({
       sha256: rawSha,
@@ -758,12 +852,28 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [entry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes));
+    const byTrail = await buildEvidenceByTrail(manifest, async () =>
+      Buffer.from(bytes),
+    );
     const confirmation: X2ConfirmationFile = {
       TN: {
-        roster: [{ name: "Nine courses make up", quote: "Nine courses make up the Trail.", evidenceSha: rawSha }],
-        completionUnit: { value: "course", quote: "It counts a course.", evidenceSha: rawSha },
-        season: { value: "year-round", quote: "The season runs year-round.", evidenceSha: rawSha },
+        roster: [
+          {
+            name: "Nine courses make up",
+            quote: "Nine courses make up the Trail.",
+            evidenceSha: rawSha,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "It counts a course.",
+          evidenceSha: rawSha,
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: rawSha,
+        },
       },
     };
     const result = computeX2Verdict(confirmation, byTrail, ["TN"]);
@@ -772,7 +882,8 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
   });
 
   it("Addendum J correction (first-capture-wins): refuses (throws) a confirmation that cites a NON-RECORDED capture", async () => {
-    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const bytes =
+      "Nine courses make up the Trail. It counts a course. The season runs year-round.";
     const rawSha = sha(bytes);
     const entry = baseManifestEntry({
       sha256: rawSha,
@@ -788,22 +899,44 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [entry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes));
+    const byTrail = await buildEvidenceByTrail(manifest, async () =>
+      Buffer.from(bytes),
+    );
     expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(false);
     const confirmation: X2ConfirmationFile = {
       TN: {
-        roster: [{ name: "Nine courses make up", quote: "Nine courses make up the Trail.", evidenceSha: rawSha }],
-        completionUnit: { value: "course", quote: "It counts a course.", evidenceSha: rawSha },
-        season: { value: "year-round", quote: "The season runs year-round.", evidenceSha: rawSha },
+        roster: [
+          {
+            name: "Nine courses make up",
+            quote: "Nine courses make up the Trail.",
+            evidenceSha: rawSha,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "It counts a course.",
+          evidenceSha: rawSha,
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: rawSha,
+        },
       },
     };
-    expect(() => computeX2Verdict(confirmation, byTrail, ["TN"])).toThrow(/NON-RECORDED capture/);
+    expect(() => computeX2Verdict(confirmation, byTrail, ["TN"])).toThrow(
+      /NON-RECORDED capture/,
+    );
   });
 
   it("a legacy entry with no `recorded` field at all defaults to recorded: true", async () => {
-    const bytes = "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const bytes =
+      "Nine courses make up the Trail. It counts a course. The season runs year-round.";
     const rawSha = sha(bytes);
-    const legacyEntry = baseManifestEntry({ sha256: rawSha, rawFile: "raw/x.html" });
+    const legacyEntry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+    });
     delete (legacyEntry as { recorded?: unknown }).recorded;
     const manifest: X2FetchManifest = {
       generatedAt: new Date().toISOString(),
@@ -811,7 +944,9 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
       trails: { TN: [legacyEntry] },
       draftCandidateNames: { TN: [] },
     };
-    const byTrail = await buildEvidenceByTrail(manifest, async () => Buffer.from(bytes));
+    const byTrail = await buildEvidenceByTrail(manifest, async () =>
+      Buffer.from(bytes),
+    );
     expect(byTrail.TN?.bySha.get(rawSha)?.recorded).toBe(true);
   });
 });

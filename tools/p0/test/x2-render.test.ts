@@ -41,10 +41,14 @@ function makeFakePage(opts: {
   gotoReturnsNull?: boolean;
   contentValue?: string;
   contentDelayMs?: number;
-}): { page: PageLike; isClosed: () => boolean; headersSeen: () => Record<string, string> | null } {
+}): {
+  page: PageLike;
+  isClosed: () => boolean;
+  headersSeen: () => Record<string, string> | null;
+} {
   let routeHandler:
-    | ((route: RouteLike, request: RequestLike) => void | Promise<void>)
-    | null = null;
+    ((route: RouteLike, request: RequestLike) => void | Promise<void>) | null =
+    null;
   let responseHandler: ((response: ResponseLike) => void) | null = null;
   let currentUrl = "";
   let closed = false;
@@ -113,7 +117,9 @@ function makeFakePage(opts: {
     },
     async content() {
       if (opts.contentDelayMs) {
-        await new Promise((resolve) => setTimeout(resolve, opts.contentDelayMs));
+        await new Promise((resolve) =>
+          setTimeout(resolve, opts.contentDelayMs),
+        );
       }
       return opts.contentValue ?? "<p>ok</p>";
     },
@@ -173,7 +179,9 @@ describe("x2-render: validateRenderExtraArgs (gate: Chromium arg allowlist)", ()
   it("accepts exactly one well-formed --ignore-certificate-errors-spki-list=<sha256> arg", () => {
     const hash = "A".repeat(43) + "=";
     expect(() =>
-      validateRenderExtraArgs([`--ignore-certificate-errors-spki-list=${hash}`]),
+      validateRenderExtraArgs([
+        `--ignore-certificate-errors-spki-list=${hash}`,
+      ]),
     ).not.toThrow();
   });
 
@@ -190,9 +198,9 @@ describe("x2-render: validateRenderExtraArgs (gate: Chromium arg allowlist)", ()
     expect(() => validateRenderExtraArgs(["--disable-web-security"])).toThrow(
       /must match/,
     );
-    expect(() => validateRenderExtraArgs(["--ignore-certificate-errors"])).toThrow(
-      /must match/,
-    );
+    expect(() =>
+      validateRenderExtraArgs(["--ignore-certificate-errors"]),
+    ).toThrow(/must match/);
     expect(() =>
       validateRenderExtraArgs(["--host-resolver-rules=MAP a b"]),
     ).toThrow(/must match/);
@@ -224,7 +232,8 @@ describe("x2-render: renderUrl — basic flow", () => {
   it("launches Chromium at the default pinned executablePath, sets the User-Agent, and returns status/finalUrl/html", async () => {
     const { page, headersSeen } = makeFakePage({
       requests: [SAME_HOST_NAV],
-      contentValue: "<html><body><h1>Vancouver Island Golf Trail</h1></body></html>",
+      contentValue:
+        "<html><body><h1>Vancouver Island Golf Trail</h1></body></html>",
     });
     const { launch, seenExecutablePath } = fakeLauncher(page);
     const result = await renderUrl(SAME_HOST_URL, {
@@ -236,7 +245,9 @@ describe("x2-render: renderUrl — basic flow", () => {
     expect(result.html).toContain("Vancouver Island Golf Trail");
     expect(result.argsUsed).toEqual([]);
     expect(seenExecutablePath).toEqual([DEFAULT_CHROMIUM_EXECUTABLE_PATH]);
-    expect(headersSeen()).toEqual({ "User-Agent": "GolfRaven-P0-X2/0.1 (test)" });
+    expect(headersSeen()).toEqual({
+      "User-Agent": "GolfRaven-P0-X2/0.1 (test)",
+    });
   });
 
   it("validates extraArgs (throws on an invalid shape) BEFORE ever launching a browser", async () => {
@@ -262,8 +273,12 @@ describe("x2-render: renderUrl — basic flow", () => {
       launch,
       extraArgs: [`--ignore-certificate-errors-spki-list=${hash}`],
     });
-    expect(seenArgs).toEqual([[`--ignore-certificate-errors-spki-list=${hash}`]]);
-    expect(result.argsUsed).toEqual([`--ignore-certificate-errors-spki-list=${hash}`]);
+    expect(seenArgs).toEqual([
+      [`--ignore-certificate-errors-spki-list=${hash}`],
+    ]);
+    expect(result.argsUsed).toEqual([
+      `--ignore-certificate-errors-spki-list=${hash}`,
+    ]);
   });
 
   it("uses an explicit executablePath and launchTimeoutMs when given", async () => {
@@ -291,7 +306,10 @@ describe("x2-render: renderUrl — basic flow", () => {
     const { launch } = fakeLauncher(page);
     const launchSpy = vi.fn(launch);
     await expect(
-      renderUrl("http://golfvancouverisland.ca/", { userAgent: "ua", launch: launchSpy }),
+      renderUrl("http://golfvancouverisland.ca/", {
+        userAgent: "ua",
+        launch: launchSpy,
+      }),
     ).rejects.toThrow(/gate N6/);
     expect(launchSpy).not.toHaveBeenCalled();
   });
@@ -312,9 +330,9 @@ describe("x2-render: renderUrl — basic flow", () => {
       gotoReturnsNull: true,
     });
     const { launch, isClosed: browserClosed } = fakeLauncher(page);
-    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
-      /produced no response/,
-    );
+    await expect(
+      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch }),
+    ).rejects.toThrow(/produced no response/);
     expect(isClosed()).toBe(true);
     expect(browserClosed()).toBe(true);
   });
@@ -325,9 +343,9 @@ describe("x2-render: renderUrl — basic flow", () => {
       gotoThrows: new Error("navigation failed"),
     });
     const { launch, isClosed: browserClosed } = fakeLauncher(page);
-    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
-      /navigation failed/,
-    );
+    await expect(
+      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch }),
+    ).rejects.toThrow(/navigation failed/);
     expect(isClosed()).toBe(true);
     expect(browserClosed()).toBe(true);
   });
@@ -349,9 +367,9 @@ describe("x2-render: renderUrl — main-frame navigation control (gate finding)"
       ],
     });
     const { launch } = fakeLauncher(page);
-    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
-      /off-host/,
-    );
+    await expect(
+      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch }),
+    ).rejects.toThrow(/off-host/);
     expect(isClosed()).toBe(true);
   });
 
@@ -367,9 +385,9 @@ describe("x2-render: renderUrl — main-frame navigation control (gate finding)"
       ],
     });
     const { launch } = fakeLauncher(page);
-    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
-      /downgraded to non-https/,
-    );
+    await expect(
+      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch }),
+    ).rejects.toThrow(/downgraded to non-https/);
   });
 
   it("does NOT block a sub-frame (iframe) navigation to a different host — only MAIN-frame navigation is host-restricted", async () => {
@@ -408,9 +426,9 @@ describe("x2-render: renderUrl — main-frame navigation control (gate finding)"
     // Force page.url() to report an off-host URL directly.
     page.url = () => "https://elsewhere.test/sneaky";
     const { launch } = fakeLauncher(page);
-    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
-      /ended off-host/,
-    );
+    await expect(
+      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch }),
+    ).rejects.toThrow(/ended off-host/);
   });
 });
 
@@ -481,7 +499,11 @@ describe("x2-render: renderUrl — subresource byte cap (best-effort, gate findi
     });
     const { launch } = fakeLauncher(page);
     await expect(
-      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch, subresourceByteCapBytes: 2000 }),
+      renderUrl(SAME_HOST_URL, {
+        userAgent: "ua",
+        launch,
+        subresourceByteCapBytes: 2000,
+      }),
     ).rejects.toThrow(/subresource cap/);
   });
 });
@@ -494,7 +516,11 @@ describe("x2-render: renderUrl — explicit content timeout", () => {
     });
     const { launch } = fakeLauncher(page);
     await expect(
-      renderUrl(SAME_HOST_URL, { userAgent: "ua", launch, contentTimeoutMs: 20 }),
+      renderUrl(SAME_HOST_URL, {
+        userAgent: "ua",
+        launch,
+        contentTimeoutMs: 20,
+      }),
     ).rejects.toThrow(/timed out/);
   });
 

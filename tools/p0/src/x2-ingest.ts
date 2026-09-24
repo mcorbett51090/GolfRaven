@@ -88,7 +88,11 @@ export const X2_INGEST_MAX_FILE_BYTES = 10 * 1024 * 1024;
  * corrupt a plain object's prototype chain via bracket-notation assignment
  * (`obj[trail] = …`) rather than creating an ordinary own property. Refused
  * outright, cleanly, before any such assignment is attempted. */
-const DANGEROUS_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const DANGEROUS_OBJECT_KEYS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 export function assertSafeObjectKey(key: string, label: string): void {
   if (DANGEROUS_OBJECT_KEYS.has(key)) {
     throw new Error(

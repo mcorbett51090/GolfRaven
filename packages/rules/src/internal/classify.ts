@@ -571,6 +571,28 @@ function hasFix(x: unknown): x is AppFix {
   return x !== null && x !== undefined && typeof x === "object";
 }
 
+/** Every `AppFix` embedded in one evidence row (any source) — shared by
+ * `score-play.ts`'s own correlation logic (`fixesOfRow`, re-exported from
+ * there under that name for backward compatibility within this package)
+ * and `parse-evidence.ts`'s capturedAt/localDate cross-check (H2, fifth
+ * gate), so the two enumerations can never drift apart. */
+export function fixesOfEvidenceRow(row: Evidence): AppFix[] {
+  switch (row.source) {
+    case "staff_presence":
+      return row.coSignalFix ? [row.coSignalFix] : [];
+    case "booking":
+      return row.presenceFix ? [row.presenceFix] : [];
+    case "receipt_green_fee":
+      return row.coSignalFix ? [row.coSignalFix] : [];
+    case "foreground_dwell":
+      return [row.checkinFix, row.checkoutFix];
+    case "foreground_checkin":
+      return [row.fix];
+    default:
+      return [];
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Per-row classification                                              */
 /* ------------------------------------------------------------------ */

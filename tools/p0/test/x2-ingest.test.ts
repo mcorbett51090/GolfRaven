@@ -280,7 +280,10 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
       sourceConfig: TN_CONFIG,
       outDir,
     });
-    const file2 = writeFixtureHtml("tn-dup-2.html", "<h1>Second capture, different bytes</h1>");
+    const file2 = writeFixtureHtml(
+      "tn-dup-2.html",
+      "<h1>Second capture, different bytes</h1>",
+    );
     await expect(
       ingestOwnerSavedPage({
         trail: "TN",
@@ -306,7 +309,10 @@ describe("x2-ingest: gate findings — first-capture-wins (Addendum J correction
     });
     expect(first.entry.recorded).toBe(true);
 
-    const file2 = writeFixtureHtml("tn-add-2.html", "<h1>Second capture, different bytes</h1>");
+    const file2 = writeFixtureHtml(
+      "tn-add-2.html",
+      "<h1>Second capture, different bytes</h1>",
+    );
     const second = await ingestOwnerSavedPage({
       trail: "TN",
       filePath: file2,
@@ -398,7 +404,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
     expect(existsSync(path.join(outDir, "raw"))).toBe(false);
   });
 
-  it("gate finding: rejects a `trail` of \"__proto__\" cleanly, before any object-key use", async () => {
+  it('gate finding: rejects a `trail` of "__proto__" cleanly, before any object-key use', async () => {
     const file = writeFixtureHtml("proto.html", "<h1>x</h1>");
     await expect(
       ingestOwnerSavedPage({
@@ -414,7 +420,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
-  it("gate finding: rejects \"constructor\" and \"prototype\" as trail names too", async () => {
+  it('gate finding: rejects "constructor" and "prototype" as trail names too', async () => {
     const file = writeFixtureHtml("proto2.html", "<h1>x</h1>");
     for (const badTrail of ["constructor", "prototype"]) {
       await expect(
