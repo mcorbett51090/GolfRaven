@@ -450,8 +450,9 @@ SELECT lives_ok(
 -- check, long before a LATER, separate delete_my_data call.
 SELECT lives_ok(
   $$SET CONSTRAINTS app.offer_code_play_user_fk, app.entitlement_play_user_fk,
-      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg IMMEDIATE$$,
-  'setup: settle the M2 composite FKs/guards for player C''s H1 setup rows before delete_my_data runs'
+      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg,
+      app.play_deleted_detach_play_id_trg IMMEDIATE$$,
+  'setup: settle the M2 composite FKs/guards/detach-trigger for player C''s H1 setup rows before delete_my_data runs'
 );
 SELECT lives_ok(
   $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000c0000001'::uuid)$$,
@@ -637,8 +638,9 @@ SELECT is(
 -- raise until COMMIT, which this file's outer transaction never reaches.
 SELECT lives_ok(
   $$SET CONSTRAINTS app.offer_code_play_user_fk, app.entitlement_play_user_fk,
-      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg IMMEDIATE$$,
-  'setup: check the M2 composite FKs + constraint triggers immediately for the bypass tests below'
+      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg,
+      app.play_deleted_detach_play_id_trg IMMEDIATE$$,
+  'setup: check the M2 composite FKs + constraint triggers + detach-trigger immediately for the bypass tests below'
 );
 
 -- (b) deferred insert ordering: play_id pointing at a play that, at
