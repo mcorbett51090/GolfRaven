@@ -39,7 +39,7 @@
  *   acceptance or LOI dated before its own row's contacted date is an
  *   error. Dates are plain calendar dates — no timezone conversion.
  */
-import { readK1Log, K1_BASE_FIVE_NAMES, type K1Row } from "./k1-log.js";
+import { readK1Log, resolveK1LogPath, K1_BASE_FIVE_NAMES, type K1Row } from "./k1-log.js";
 
 /** Decision 0001, Addendum D, R1: "P0 start 2026-10-05 + 14 days" — dated
  * on or before this counts toward the early read. */
@@ -501,7 +501,7 @@ interface CliArgs {
 
 /** The real current date (UTC) — the only place this module reads the
  * system clock. Everything else takes `today`/`asOf` as parameters, so
- * tests can pin them (decision 0001, Addendum I: "make today injectable"). */
+ * tests can pin them (decision 0001, Addendum I: "The read date is real"). */
 function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -522,10 +522,26 @@ function parseArgs(argv: string[]): CliArgs {
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const rows = await readK1Log(args.logPath);
+  // Provenance (gate round 3): every output records which file it was computed
+  // from, with its SHA-256, and says loudly when that is not the repo's own
+  // K1 log — so a --log/--memo run can never pass for the recorded verdict.
+  const { readFile: readSource } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const { resolve: resolvePath } = await import("node:path");
+  const repoPath = resolvePath(resolveK1LogPath());
+  const sourcePath = resolvePath(args.logPath ?? repoPath);
+  const source = {
+    path: sourcePath,
+    sha256: createHash("sha256").update(await readSource(sourcePath)).digest("hex"),
+    isRepoLog: sourcePath === repoPath,
+  };
+  const banner = source.isRepoLog
+    ? ""
+    : `> **NOT THE RECORDED K1 LOG.** Computed from \`${sourcePath}\`, not the repo's own K1 log. This output is not a P0 verdict.\n\n`;
   const result = computeK1Verdict(rows, args.asOf, todayUtc());
   const { writeFile } = await import("node:fs/promises");
-  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify(result, null, 2)}\n`, "utf8");
-  const md = renderK1VerdictMarkdown(result);
+  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify({ ...result, source }, null, 2)}\n`, "utf8");
+  const md = banner + renderK1VerdictMarkdown(result);
   await writeFile(`${args.outPrefix}.md`, `${md}\n`, "utf8");
   process.stdout.write(`${md}\n`);
 }

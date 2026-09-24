@@ -27,7 +27,7 @@
  *   point value exactly as it does to a shared range. Refuses to run if
  *   any of the six terms has no range recorded at all.
  */
-import { readK3Log, K3_KEYWORD_TERMS, type K3Log } from "./k3-log.js";
+import { readK3Log, resolveK3DocPath, K3_KEYWORD_TERMS, type K3Log } from "./k3-log.js";
 
 /** Decision 0001, Addendum A (default) / K3.md Pass bar. */
 export const K3_SEARCH_CONSOLE_BAR = 1000;
@@ -284,11 +284,27 @@ function parseArgs(argv: string[]): CliArgs {
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const log = await readK3Log(args.memoPath);
+  // Provenance (gate round 3): every output records which file it was computed
+  // from, with its SHA-256, and says loudly when that is not the repo's own
+  // K3 memo — so a --log/--memo run can never pass for the recorded verdict.
+  const { readFile: readSource } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const { resolve: resolvePath } = await import("node:path");
+  const repoPath = resolvePath(resolveK3DocPath());
+  const sourcePath = resolvePath(args.memoPath ?? repoPath);
+  const source = {
+    path: sourcePath,
+    sha256: createHash("sha256").update(await readSource(sourcePath)).digest("hex"),
+    isRepoLog: sourcePath === repoPath,
+  };
+  const banner = source.isRepoLog
+    ? ""
+    : `> **NOT THE RECORDED K3 MEMO.** Computed from \`${sourcePath}\`, not the repo's own K3 memo. This output is not a P0 verdict.\n\n`;
   const today = new Date().toISOString().slice(0, 10);
   const result = computeK3Verdict(log, today);
   const { writeFile } = await import("node:fs/promises");
-  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify(result, null, 2)}\n`, "utf8");
-  const md = renderK3VerdictMarkdown(result);
+  await writeFile(`${args.outPrefix}.json`, `${JSON.stringify({ ...result, source }, null, 2)}\n`, "utf8");
+  const md = banner + renderK3VerdictMarkdown(result);
   await writeFile(`${args.outPrefix}.md`, `${md}\n`, "utf8");
   process.stdout.write(`${md}\n`);
 }

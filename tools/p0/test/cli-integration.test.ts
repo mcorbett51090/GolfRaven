@@ -8,7 +8,7 @@
  * needing a build).
  */
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -93,7 +93,11 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     expect(stdout).toContain("Full gate state: pending");
     expect(stdout).not.toMatch(/\bMISS\b/);
     expect(stdout).not.toMatch(/\bPASS\b/);
-    expect(existsSync(`${outPrefix}.json`)).toBe(true);
+    // A --log run is stamped as NOT the recorded log (provenance, gate round 3).
+    expect(stdout).toContain("NOT THE RECORDED K1 LOG");
+    const json = JSON.parse(readFileSync(`${outPrefix}.json`, "utf8"));
+    expect(json.source.isRepoLog).toBe(false);
+    expect(json.source.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
   // Decision 0001, Addendum I ("the read date is real"): a --as-of later than
