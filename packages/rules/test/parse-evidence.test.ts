@@ -670,3 +670,126 @@ describe("item 2 (seventh gate): heldReview is forced true when money is true an
     expect(result.heldReview).toBe(false);
   });
 });
+
+describe("item 2 (eighth gate): a MALFORMED anchor field is quarantined, never silently read as off-play (closes the quarantine-hold bypass)", () => {
+  it("courseId: null does not read as off-play — it is quarantined", () => {
+    const badRow = { id: "bad_courseid_null", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, courseId: null, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("quarantined");
+    }
+  });
+
+  it("courseId: 123 (wrong type, not a string) is quarantined, not off-play", () => {
+    const badRow = { id: "bad_courseid_num", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, courseId: 123, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("quarantined");
+    }
+  });
+
+  it('localDate: "2026-6-1" (not zero-padded — regex-malformed) is quarantined, not off-play', () => {
+    const badRow = { id: "bad_localdate", facilityId: PLAY_FACILITY_ID, localDate: "2026-6-1", source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("quarantined");
+    }
+  });
+
+  it('facilityId: "fac_test " (trailing space) is quarantined, not off-play', () => {
+    const badRow = { id: "bad_facilityid_space", facilityId: `${PLAY_FACILITY_ID} `, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [badRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("quarantined");
+    }
+  });
+
+  it("the actual bypass this closes: scorePlay forces heldReview true when a malformed-anchor row sits alongside a money-qualifying play", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const badRow = { id: "bad_anchor", facilityId: PLAY_FACILITY_ID, localDate: "2026-6-1", source: "self_report" } as any;
+    const result = scorePlayOrThrow([hardRow, badRow], baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.heldReview).toBe(true);
+    expect(result.heldReviewReasons).toContain("quarantined");
+  });
+
+  it("regression guard — a WELL-FORMED but genuinely different facilityId is still off-play, not over-quarantined", () => {
+    const otherPlayRow = { id: "other_well_formed", facilityId: "fac_OTHER", localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    const result = parseScorePlayInput({ evidence: [otherPlayRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("off-play");
+    }
+  });
+
+  it("regression guard — a WELL-FORMED but different courseId is still off-play, not over-quarantined", () => {
+    const otherCourseRow = {
+      id: "other_course",
+      facilityId: PLAY_FACILITY_ID,
+      localDate: PLAY_LOCAL_DATE,
+      courseId: "crs_other",
+      source: "self_report",
+    };
+    const result = parseScorePlayInput({ evidence: [otherCourseRow], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.excludedRows.length).toBe(1);
+      expect(result.excludedRows[0]?.kind).toBe("off-play");
+    }
+  });
+});
+
+describe("item 4 (eighth gate): id/fixId restricted to [A-Za-z0-9_.:-]{1,128} — rejects a bidi override, zero-width characters, and a BOM", () => {
+  const BIDI_OVERRIDE = "‮";
+  const ZERO_WIDTH_SPACE = "​";
+  const BOM = "﻿";
+
+  it("rejects an evidence id containing a right-to-left override (U+202E)", () => {
+    const row = { id: `evil${BIDI_OVERRIDE}txe.live`, facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects an evidence id containing a zero-width space (U+200B)", () => {
+    const row = { id: `evidence${ZERO_WIDTH_SPACE}12345`, facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects an evidence id containing a BOM (U+FEFF)", () => {
+    const row = { id: `${BOM}evidence12345`, facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects a fixId containing a right-to-left override (U+202E)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: `fix${BIDI_OVERRIDE}evil` } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects a fixId containing a zero-width space (U+200B)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: `fix${ZERO_WIDTH_SPACE}1` } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects a fixId containing a BOM (U+FEFF)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: `${BOM}fix1` } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects a facilityId containing a bidi override (the anchor field this same character class now also covers, item 2's own dependency)", () => {
+    const row = { id: "anchor_bidi", facilityId: `fac${BIDI_OVERRIDE}A`, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("a well-formed id using every allowed character class member (letters, digits, _ . : -) is accepted", () => {
+    const row = { id: "Evidence_123.abc:def-ghi", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+});

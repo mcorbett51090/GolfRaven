@@ -511,20 +511,70 @@ export type ScorePlayInputParseResult = ScorePlayInputParseSuccess | ScorePlayIn
  * of an arbitrary failure well within realistic query sizes. */
 export const ABSOLUTE_ROW_CAP = 10_000;
 
-/** F3: a LOOSE, tolerant read of a not-yet-validated row's `facilityId`/
- * `localDate`/`courseId` — deliberately NOT the strict `EvidenceSchema`.
- * This is what decides whether a row is even a CANDIDATE for this play
- * (and therefore eligible for quarantine-on-malformed, rather than being
- * silently excluded as someone else's evidence) — H3's residual rule
- * applies here too: a row with no `courseId` at all is facility-level and
- * always a candidate; a row whose `courseId` disagrees with
- * `ctx.playCourseId` is not. */
+/** Eighth gate, item 2: is `v` a WELL-FORMED `facilityId`/`courseId`-shaped
+ * value — independent of whether it MATCHES the play. Deliberately reuses
+ * `ID_LIKE_RE`/`MAX_ID_LENGTH`, the exact bar the strict schema applies to
+ * these same fields, so "well-formed here" and "would parse downstream"
+ * can never disagree with each other. */
+function isWellFormedIdLike(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0 && v.length <= MAX_ID_LENGTH && ID_LIKE_RE.test(v);
+}
+
+/** Eighth gate, item 2: same idea for `localDate` — well-formed means "a
+ * real YYYY-MM-DD calendar date," the same bar `LocalDateSchema` enforces,
+ * checked loosely (without a full Zod parse) so this stays a cheap
+ * boolean read used only to decide candidacy, not to validate. */
+function isWellFormedLooseLocalDate(v: unknown): v is string {
+  if (typeof v !== "string" || !LOCAL_DATE_RE.test(v)) return false;
+  const [y, m, d] = v.split("-").map(Number);
+  return isRealCalendarDate(y!, m!, d!);
+}
+
+/** F3, TIGHTENED by eighth gate item 2: a LOOSE, tolerant read of a
+ * not-yet-validated row's `facilityId`/`localDate`/`courseId` —
+ * deliberately NOT the strict `EvidenceSchema`. This is what decides
+ * whether a row is even a CANDIDATE for this play (and therefore eligible
+ * for quarantine-on-malformed, rather than being silently excluded as
+ * someone else's evidence) — H3's residual rule applies here too: a row
+ * with no `courseId` at all is facility-level and always a candidate.
+ *
+ * **The seventh gate's version of this function compared FIRST and never
+ * asked whether the value being compared was even well-formed** — so
+ * `courseId: null`, `courseId: 123`, `localDate: "2026-6-1"`, or
+ * `facilityId: "fac_A "` (a trailing space) all failed the `!==`
+ * comparison against the play's own well-formed value and were read as
+ * "a different play's row," excluded with `kind: "off-play"` — a
+ * NO-SECURITY-SIGNIFICANCE outcome. That's exactly backwards: those
+ * values are not "someone else's evidence," they're MALFORMED evidence
+ * for a row that (for all this filter can tell) may belong to THIS play —
+ * and routing a malformed on-play row to "off-play" instead of
+ * "quarantined" let it skip the quarantine hold (`scorePlay`'s forced
+ * `heldReview` + the DB layer's mandatory `fraud_signal`/`review_item`,
+ * §3 of the security doc) entirely.
+ *
+ * The fix checks WELL-FORMEDNESS first: only once every anchor field
+ * present is well-formed does a value comparison even happen. A
+ * malformed field (wrong type, or a value that fails the exact same
+ * check the strict schema will apply) makes the row a CANDIDATE
+ * unconditionally — it proceeds to strict `parseEvidence`, which rejects
+ * it for that same malformation, landing it in `excludedRows` with
+ * `kind: "quarantined"` (never silently dropped as `"off-play"`). Only a
+ * WELL-FORMED value that provably differs from the play's own is
+ * genuinely "a different play's row, no security significance." */
 function looseRowMatchesPlay(raw: unknown, ctx: ScorePlayContext): boolean {
   if (raw === null || typeof raw !== "object") return false;
   const r = raw as Record<string, unknown>;
+
+  const facilityWellFormed = isWellFormedIdLike(r.facilityId);
+  const dateWellFormed = isWellFormedLooseLocalDate(r.localDate);
+  const courseIdPresent = r.courseId !== undefined;
+  const courseWellFormed = !courseIdPresent || isWellFormedIdLike(r.courseId);
+
+  if (!facilityWellFormed || !dateWellFormed || !courseWellFormed) return true;
+
   if (r.facilityId !== ctx.playFacilityId) return false;
   if (r.localDate !== ctx.playLocalDate) return false;
-  if (r.courseId !== undefined && r.courseId !== ctx.playCourseId) return false;
+  if (courseIdPresent && r.courseId !== ctx.playCourseId) return false;
   return true;
 }
 
