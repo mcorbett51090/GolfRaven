@@ -256,17 +256,28 @@ ALTER TABLE storage.objects FORCE ROW LEVEL SECURITY;
 -- enabled + forced + zero policies for those roles is exactly "denied (no
 -- policy)" (§4.7.7).
 --
--- migration_owner IS granted a narrow INSERT-only policy here (S1, gate
--- round 3, 1a(i) above): 0012_storage.sql's own INSERT INTO storage.buckets
--- runs as migration_owner in restricted mode, and storage.buckets is owned
--- by the bootstrap role (created in this file), not migration_owner, so
--- FORCE ROW LEVEL SECURITY applies to it the same as to anon/authenticated
--- — no exemption, just an explicit grant for the one legitimate write this
--- role's migration actually makes. Bucket config only, never storage.objects
--- (no policy for migration_owner there at all).
-GRANT INSERT ON storage.buckets TO migration_owner;
+-- migration_owner IS granted a narrow INSERT (+ its SELECT companion)
+-- policy here (S1, gate round 3, 1a(i) above): 0012_storage.sql's own
+-- `INSERT ... ON CONFLICT (id) DO NOTHING` into storage.buckets runs as
+-- migration_owner in restricted mode, and storage.buckets is owned by the
+-- bootstrap role (created in this file), not migration_owner, so FORCE
+-- ROW LEVEL SECURITY applies to it the same as to anon/authenticated — no
+-- exemption, just an explicit grant for the one legitimate write this
+-- role's migration actually makes. Bucket config only, never
+-- storage.objects (no policy for migration_owner there at all). The
+-- SELECT grant+policy is required too -- confirmed empirically this
+-- session: `ON CONFLICT (id) DO NOTHING` needs to read the conflict
+-- target (the same "DELETE/UPDATE ... WHERE needs SELECT-level
+-- visibility" mechanic 0016_private_definer.sql documents at length, here
+-- triggered by ON CONFLICT's implicit existence check instead of a WHERE
+-- clause) — a bare INSERT grant alone reproduced "permission denied for
+-- table buckets" with the ON CONFLICT clause present, and succeeded with
+-- it removed, isolating SELECT as the missing privilege.
+GRANT INSERT, SELECT ON storage.buckets TO migration_owner;
 CREATE POLICY migration_owner_seed_buckets ON storage.buckets
   FOR INSERT TO migration_owner WITH CHECK (true);
+CREATE POLICY migration_owner_seed_buckets_r ON storage.buckets
+  FOR SELECT TO migration_owner USING (true);
 
 GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role, migration_owner;
 GRANT SELECT, INSERT, UPDATE, DELETE ON storage.buckets TO service_role;
