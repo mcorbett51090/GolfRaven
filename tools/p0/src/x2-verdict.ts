@@ -1072,53 +1072,397 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
  * "unverified"/"not logged", which `checkOwnerSavedCorroboration` then
  * correctly refuses to count.
  */
+export interface ResolveCorroborationOptions {
+  /** This trail's own evidence (as `buildEvidenceByTrail` already
+   * produced it) — needed to look up an owner-saved fact's stated URL
+   * and `ownerSavedDate` for Wayback re-validation (gate finding 3,
+   * second re-gate), and to confirm a corroboration record is actually
+   * attached to an owner-saved fact in the first place. */
+  evidenceByTrail: EvidenceByTrail;
+  /** Reads a file's raw bytes, relative to `evidenceDir` — same
+   * dependency-injection principle as everywhere else in this tool
+   * family (real files for the CLI, in-memory for tests). */
+  readRaw: (relPath: string) => Promise<Buffer>;
+  /** The evidence directory `rawFile` paths are relative to — needed to
+   * resolve a `wayback` record's `rawFile` and refuse any path escape
+   * (gate finding 3, second re-gate). */
+  evidenceDir: string;
+  /** The canonical recorded-captures ledger — a `wayback` record must be
+   * registered in it under method `"wayback"` (gate finding 3, second
+   * re-gate) for its corroboration to count at all; `x2-corroborate-
+   * wayback` is the only tool that writes such an entry. */
+  ledger: RecordedLedger;
+  /** `docs/p0/X2.md`'s FULL text (not just the Log section — a matched
+   * row's line number is handed to `git blame` against the real, on-disk
+   * file) plus the path it was read from. `null` when the file could not
+   * be read — every `acceptance` record then resolves to "not logged",
+   * the safe default (gate finding 2, re-gate). */
+  x2Md: { fullText: string; path: string } | null;
+}
+
+async function resolveWaybackRecord(
+  trail: string,
+  evidenceSha: string,
+  record: X2WaybackCorroboration,
+  opts: ResolveCorroborationOptions,
+): Promise<ResolvedCorroborationEntry> {
+  // Gate finding 3 (second re-gate): the verdict RE-VALIDATES every rule
+  // itself — never trusts that a record shaped like a wayback record was
+  // actually produced by `x2-corroborate-wayback`.
+  const ownerEntry = opts.evidenceByTrail[trail]?.bySha.get(evidenceSha);
+  if (!ownerEntry || ownerEntry.method !== "owner-saved") {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        "this record's evidenceSha is not an owner-saved fact in this trail's own evidence — a Wayback " +
+        "record can only corroborate an owner-saved fact.",
+    };
+  }
+  const parsed = parseWaybackUrl(record.snapshotUrl);
+  if (!parsed) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        `snapshotUrl "${record.snapshotUrl}" is not in the required ` +
+        '"https://web.archive.org/web/<14-digit timestamp>/<url>" form.',
+    };
+  }
+  let embeddedNormalized: string;
+  try {
+    embeddedNormalized = normalizeUrlForFirstCapture(parsed.embeddedUrl);
+  } catch {
+    return {
+      waybackVerified: false,
+      waybackDetail: `the archive URL's embedded URL "${parsed.embeddedUrl}" is not a valid URL.`,
+    };
+  }
+  let statedNormalized: string;
+  try {
+    statedNormalized = normalizeUrlForFirstCapture(ownerEntry.url);
+  } catch {
+    return {
+      waybackVerified: false,
+      waybackDetail: `the owner-saved fact's own stated URL "${ownerEntry.url}" is not a valid URL.`,
+    };
+  }
+  if (embeddedNormalized !== statedNormalized) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        `the archive URL's embedded URL ("${parsed.embeddedUrl}", normalises to "${embeddedNormalized}") does ` +
+        `not match the owner-saved fact's own stated URL ("${ownerEntry.url}", normalises to ` +
+        `"${statedNormalized}") — a snapshot of a DIFFERENT page can never corroborate this fact.`,
+    };
+  }
+  if (!ownerEntry.ownerSavedDate) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        "the owner-saved fact has no ownerSavedDate recorded — the ±90-day tolerance cannot be checked.",
+    };
+  }
+  let snapshotDate: Date;
+  try {
+    snapshotDate = waybackTimestampToDate(parsed.timestamp);
+  } catch {
+    return {
+      waybackVerified: false,
+      waybackDetail: `snapshot timestamp "${parsed.timestamp}" is not a real calendar date/time.`,
+    };
+  }
+  const [y, mo, d] = ownerEntry.ownerSavedDate.split("-").map(Number);
+  if (
+    y === undefined ||
+    mo === undefined ||
+    d === undefined ||
+    Number.isNaN(y) ||
+    Number.isNaN(mo) ||
+    Number.isNaN(d)
+  ) {
+    return {
+      waybackVerified: false,
+      waybackDetail: `the owner-saved fact's ownerSavedDate "${ownerEntry.ownerSavedDate}" is not YYYY-MM-DD.`,
+    };
+  }
+  const ownerSavedDateObj = new Date(Date.UTC(y, mo - 1, d));
+  const gapDays = daysBetween(snapshotDate, ownerSavedDateObj);
+  if (gapDays > WAYBACK_TIMESTAMP_TOLERANCE_DAYS) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        `the snapshot's timestamp (${parsed.timestamp}) is ${gapDays.toFixed(1)} days from the owner-saved ` +
+        `fact's own ownerSavedDate (${ownerEntry.ownerSavedDate}) — outside the ` +
+        `${WAYBACK_TIMESTAMP_TOLERANCE_DAYS}-day tolerance.`,
+    };
+  }
+  // Gate finding 3 (second re-gate): `rawFile` must resolve, INSIDE the
+  // evidence dir, to exactly `raw/<snapshotSha256>.<ext>` — refuses a
+  // path-escape attempt (e.g. `../../outside.html`) outright, since that
+  // shape can never match this regex at all.
+  const normalizedRawFile = record.rawFile.split(path.sep).join("/");
+  const rawFileMatch = /^raw\/([0-9a-f]{64})\.[A-Za-z0-9]+$/.exec(normalizedRawFile);
+  if (!rawFileMatch || rawFileMatch[1] !== record.snapshotSha256) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        `rawFile "${record.rawFile}" is not in the required "raw/<snapshotSha256>.<ext>" shape (or its ` +
+        "embedded hash does not match snapshotSha256) — refusing rather than trusting an arbitrary path.",
+    };
+  }
+  const resolvedDir = path.resolve(opts.evidenceDir);
+  const resolvedRaw = path.resolve(opts.evidenceDir, record.rawFile);
+  if (resolvedRaw !== path.join(resolvedDir, ...normalizedRawFile.split("/"))) {
+    return {
+      waybackVerified: false,
+      waybackDetail: `rawFile "${record.rawFile}" resolves outside the evidence directory — refusing (path escape).`,
+    };
+  }
+  // Gate finding 3 (second re-gate): the snapshot's own SHA must DIFFER
+  // from the owner-saved fact's own SHA — an identical SHA means the
+  // "corroboration" is just the owner-saved bytes relabelled as their own
+  // independent check, never a genuine second, independent capture.
+  if (record.snapshotSha256 === evidenceSha) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        "the snapshot's SHA-256 is IDENTICAL to the owner-saved fact's own SHA — a genuine, independent " +
+        "Wayback snapshot is a distinct capture of the page, never byte-identical to the owner's own save.",
+    };
+  }
+  // Gate finding 3 (second re-gate): the snapshot must be registered in
+  // the canonical ledger under method "wayback" — `x2-corroborate-
+  // wayback` is the only tool that writes such an entry, so its presence
+  // is evidence this record was produced by that tool's real fetch
+  // pipeline, not hand-crafted.
+  const ledgerHasWayback = opts.ledger.entries.some(
+    (le) =>
+      le.method === "wayback" &&
+      le.sha256 === record.snapshotSha256 &&
+      le.normalizedUrl === embeddedNormalized,
+  );
+  if (!ledgerHasWayback) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        `no ledger entry registers this snapshot (sha256 ${record.snapshotSha256.slice(0, 12)}..., url ` +
+        `"${embeddedNormalized}") under method "wayback" — a Wayback corroboration must come from x2-` +
+        "corroborate-wayback (which registers the ledger entry itself), never a hand-crafted record.",
+    };
+  }
+  try {
+    const raw = await opts.readRaw(record.rawFile);
+    const recomputed = createHash("sha256").update(raw).digest("hex");
+    if (recomputed !== record.snapshotSha256) {
+      return {
+        waybackVerified: false,
+        waybackDetail: "the raw bytes at rawFile do not recompute to the cited snapshotSha256.",
+      };
+    }
+    const { text } = await extractEvidenceText(raw, "text/html", record.snapshotUrl);
+    return { waybackVerified: true, waybackText: text, waybackDetail: "verified." };
+  } catch (err) {
+    return {
+      waybackVerified: false,
+      waybackDetail: `could not read/verify rawFile: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+async function resolveAcceptanceRecord(
+  trail: string,
+  evidenceSha: string,
+  record: X2AcceptanceCorroboration,
+  opts: ResolveCorroborationOptions,
+): Promise<ResolvedCorroborationEntry> {
+  if (!opts.x2Md) {
+    return { acceptanceLogged: false, acceptanceDetail: "docs/p0/X2.md could not be read." };
+  }
+  const match = findAcceptRowLine(opts.x2Md.fullText, trail, record.fact, evidenceSha, record.date);
+  if (!match) {
+    return {
+      acceptanceLogged: false,
+      acceptanceDetail:
+        `no line reading exactly "${acceptRowLiteral(trail, record.fact, evidenceSha, record.date)}" was found ` +
+        'in the "## Log" section.',
+    };
+  }
+  const blame = await blameAcceptRow(opts.x2Md.path, match.lineNumber);
+  if (!blame.ok) {
+    return { acceptanceLogged: false, acceptanceDetail: blame.detail };
+  }
+  if (!blame.provenance.reachableFromOriginMain) {
+    return {
+      acceptanceLogged: false,
+      acceptanceProvenance: blame.provenance,
+      acceptanceDetail:
+        `commit ${blame.provenance.commit} (git blame's answer for who introduced this Log row) is not ` +
+        "reachable from origin/main — not yet pushed to the shared history.",
+    };
+  }
+  return {
+    acceptanceLogged: true,
+    acceptanceProvenance: blame.provenance,
+    acceptanceDetail: "logged in X2.md's Log section, on a commit reachable from origin/main.",
+  };
+}
+
+/**
+ * Gate finding 3 (re-gate)/finding 2 (re-gate): the verification pass
+ * that makes a `X2CorroborationFile` trustworthy — run ONCE, before
+ * `computeX2Verdict`, never inside it (keeping that function pure/
+ * synchronous). See `resolveWaybackRecord`/`resolveAcceptanceRecord` for
+ * the per-type rules. Never throws on a per-record failure — a record
+ * that fails resolution just resolves to "unverified"/"not logged", which
+ * `checkOwnerSavedCorroboration` then correctly refuses to count.
+ */
 export async function resolveCorroboration(
   corroboration: X2CorroborationFile,
-  readRaw: (relPath: string) => Promise<Buffer>,
-  x2MdLogText: string | null,
+  opts: ResolveCorroborationOptions,
 ): Promise<X2ResolvedCorroboration> {
   const resolved: X2ResolvedCorroboration = new Map();
   for (const [trail, trailRecords] of Object.entries(corroboration)) {
     for (const [evidenceSha, record] of Object.entries(trailRecords)) {
       const key = corroborationResolutionKey(trail, evidenceSha);
       if (record.type === "wayback") {
-        try {
-          const raw = await readRaw(record.rawFile);
-          const recomputed = createHash("sha256").update(raw).digest("hex");
-          if (recomputed !== record.snapshotSha256) {
-            resolved.set(key, { waybackVerified: false });
-            continue;
-          }
-          const { text } = await extractEvidenceText(raw, "text/html", record.snapshotUrl);
-          resolved.set(key, { waybackVerified: true, waybackText: text });
-        } catch {
-          resolved.set(key, { waybackVerified: false });
-        }
+        resolved.set(key, await resolveWaybackRecord(trail, evidenceSha, record, opts));
       } else {
-        // record.type === "acceptance"
-        const logged =
-          x2MdLogText !== null &&
-          x2MdLogText
-            .split("\n")
-            .some((line) => line.includes(record.id) && line.includes(record.date));
-        resolved.set(key, { acceptanceLogged: logged });
+        resolved.set(key, await resolveAcceptanceRecord(trail, evidenceSha, record, opts));
       }
     }
   }
   return resolved;
 }
 
-/** Gate finding 3 (re-gate): extracts just the `## Log` section's text
- * from a full `docs/p0/X2.md` read — an acceptance record must be logged
- * THERE specifically, not merely anywhere in the file (a stray mention of
- * an id/date elsewhere in the document must not count). Returns the
- * WHOLE file's text if no `## Log` heading is found, rather than silently
- * treating "no Log section" as "nothing is logged" — a missing section
- * is itself a shape worth surfacing as a search-scope difference, not
- * hidden behind an empty-string match-nothing result. */
+/** Gate finding 3 (re-gate)/finding 2 (re-gate): extracts just the
+ * `## Log` section's text from a full `docs/p0/X2.md` read — bounded at
+ * the NEXT top-level `## ` heading (should-fix, second re-gate: the old
+ * version matched to end-of-file unconditionally, which happened to be
+ * right only because Log was always the last section in practice — a
+ * section added after Log would have been silently swept in too).
+ * Returns the WHOLE file's text if no `## Log` heading is found, rather
+ * than silently treating "no Log section" as "nothing is logged" — a
+ * missing section is itself a shape worth surfacing as a search-scope
+ * difference, not hidden behind an empty-string match-nothing result. */
 export function extractX2MdLogSection(x2MdText: string): string {
-  const m = /^## Log\b[\s\S]*/m.exec(x2MdText);
-  return m ? m[0] : x2MdText;
+  const startMatch = /^## Log\b/m.exec(x2MdText);
+  if (!startMatch) return x2MdText;
+  const start = startMatch.index;
+  const afterHeading = start + startMatch[0].length;
+  const rest = x2MdText.slice(afterHeading);
+  const nextHeadingMatch = /\n## /.exec(rest);
+  const end = nextHeadingMatch ? afterHeading + nextHeadingMatch.index + 1 : x2MdText.length;
+  return x2MdText.slice(start, end);
+}
+
+/** Gate finding 2 (re-gate): the exact literal Log row an `acceptance`
+ * corroboration record must be backed by — see `X2AcceptanceCorroboration`'s
+ * own doc for the full rationale. */
+export function acceptRowLiteral(trail: string, fact: string, evidenceSha: string, date: string): string {
+  return `ACCEPT ${trail} ${fact} ${evidenceSha} ${date} Matt`;
+}
+
+/** One matched `ACCEPT …` row, with its 1-based line number IN THE FULL
+ * FILE (not just the Log section) — handed straight to `git blame`. */
+export interface AcceptRowMatch {
+  lineNumber: number;
+  line: string;
+}
+
+/** Finds `acceptRowLiteral(trail, fact, evidenceSha, date)` as an EXACT,
+ * trimmed-equal line — never a substring/loose match — ONLY inside
+ * `x2MdFullText`'s `## Log` section, bounded the same way
+ * `extractX2MdLogSection` now is (at the next top-level `## ` heading). */
+export function findAcceptRowLine(
+  x2MdFullText: string,
+  trail: string,
+  fact: string,
+  evidenceSha: string,
+  date: string,
+): AcceptRowMatch | null {
+  const lines = x2MdFullText.split("\n");
+  let logStart = -1;
+  let logEnd = lines.length;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (logStart === -1 && /^## Log\b/.test(lines[i] ?? "")) {
+      logStart = i;
+      continue;
+    }
+    if (logStart !== -1 && i > logStart && /^## /.test(lines[i] ?? "")) {
+      logEnd = i;
+      break;
+    }
+  }
+  if (logStart === -1) return null;
+  const wanted = acceptRowLiteral(trail, fact, evidenceSha, date);
+  for (let i = logStart; i < logEnd; i += 1) {
+    if ((lines[i] ?? "").trim() === wanted) {
+      return { lineNumber: i + 1, line: lines[i] ?? "" };
+    }
+  }
+  return null;
+}
+
+/** Gate finding 2 (re-gate): finds the commit that introduced the given
+ * line of `x2MdPath` (`git blame --porcelain`), then requires it
+ * reachable from `origin/main` (`git merge-base --is-ancestor`) — never
+ * throws; a git failure of any kind comes back as `{ok: false, detail}`,
+ * the same house style as `checkLedgerAgainstGit`. Author/date/signature
+ * come from `git show`; see `AcceptRowGitProvenance`'s own doc for what
+ * this can and cannot prove. */
+export async function blameAcceptRow(
+  x2MdPath: string,
+  lineNumber: number,
+): Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }> {
+  const cwd = path.dirname(path.resolve(x2MdPath));
+  let sha: string;
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["blame", "-L", `${lineNumber},${lineNumber}`, "--porcelain", "--", x2MdPath],
+      { cwd },
+    );
+    const firstLine = stdout.split("\n")[0] ?? "";
+    const candidate = firstLine.split(" ")[0] ?? "";
+    if (!/^[0-9a-f]{40}$/.test(candidate)) {
+      return {
+        ok: false,
+        detail: `git blame did not return a commit hash for line ${lineNumber} of "${x2MdPath}" (got: ${JSON.stringify(firstLine)}).`,
+      };
+    }
+    sha = candidate;
+  } catch (err) {
+    return { ok: false, detail: `git blame failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  let author = "";
+  let authorDate = "";
+  let signatureStatus = "";
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["show", "-s", "--format=%an%x1f%aI%x1f%G?", sha],
+      { cwd },
+    );
+    const [an, aI, gStatus] = stdout.trim().split("\x1f");
+    author = an ?? "";
+    authorDate = aI ?? "";
+    signatureStatus = gStatus ?? "";
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `git show failed for commit ${sha}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  let reachableFromOriginMain = false;
+  try {
+    await execFileAsync("git", ["merge-base", "--is-ancestor", sha, "origin/main"], { cwd });
+    reachableFromOriginMain = true;
+  } catch {
+    reachableFromOriginMain = false;
+  }
+  return {
+    ok: true,
+    provenance: { commit: sha, author, authorDate, signatureStatus, reachableFromOriginMain },
+  };
 }
 
 // ---------------------------------------------------------------------------
