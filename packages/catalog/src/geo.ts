@@ -2,9 +2,11 @@
  * Geo helpers used by `verify-catalog`'s `tz` and geometry-diff gates
  * (§4.1 "Facility time zone (G-P0-11)"; §10 P1 AT(1) "centroid moved > 150
  * m"). No network fetch — everything here is arithmetic over lat/lng plus
- * the pinned `tz-lookup` package's bundled boundary data.
+ * the pinned `tz-lookup` package's bundled boundary data and the vendored
+ * tzdb backward-links table (`tzdb-backward-links.json`).
  */
 import tzlookup from "tz-lookup";
+import tzdbBackward from "./tzdb-backward-links.json" with { type: "json" };
 
 const EARTH_RADIUS_METERS = 6_371_000;
 
@@ -31,49 +33,97 @@ export function haversineDistanceMeters(
   return EARTH_RADIUS_METERS * c;
 }
 
+/** Offsets a coordinate by `meters` due north/south/east/west. Local
+ * equirectangular approximation (fine at the 5 km scale this is used at —
+ * see `tzLikelyContainsCoordinates`'s border-tolerance doc). */
+function offsetCoordinate(
+  coord: { lat: number; lng: number },
+  bearing: "N" | "S" | "E" | "W",
+  meters: number,
+): { lat: number; lng: number } {
+  const metersPerDegreeLat = (Math.PI / 180) * EARTH_RADIUS_METERS;
+  const metersPerDegreeLng = metersPerDegreeLat * Math.cos(toRadians(coord.lat));
+  switch (bearing) {
+    case "N":
+      return { lat: coord.lat + meters / metersPerDegreeLat, lng: coord.lng };
+    case "S":
+      return { lat: coord.lat - meters / metersPerDegreeLat, lng: coord.lng };
+    case "E":
+      return { lat: coord.lat, lng: coord.lng + meters / metersPerDegreeLng };
+    case "W":
+      return { lat: coord.lat, lng: coord.lng - meters / metersPerDegreeLng };
+  }
+}
+
+/**
+ * Canonicalizes an IANA zone name through the vendored tzdb backward-links
+ * table (`tzdb-backward-links.json` — its own `tzdbVersion` field records
+ * the pinned tzdb release, exported here as `TZDB_BACKWARD_LINKS_VERSION`).
+ * A name not in the table (already canonical, or simply unknown) is
+ * returned unchanged. Follows at most a few hops with cycle protection,
+ * though the real backward file is a flat alias -> canonical map (single
+ * hop) as of this pin.
+ */
+const BACKWARD_LINKS: Record<string, string> = tzdbBackward.links;
+export const TZDB_BACKWARD_LINKS_VERSION: string = tzdbBackward.tzdbVersion;
+
+export function canonicalizeTimeZone(tz: string): string {
+  let current = tz;
+  const seen = new Set<string>();
+  for (;;) {
+    const next = BACKWARD_LINKS[current];
+    if (next === undefined || seen.has(current)) break; // defensive: the real table has no cycles
+    seen.add(current);
+    current = next;
+  }
+  return current;
+}
+
 /**
  * The "wrong-zone" half of the `tz` gate (§4.1: *"The check uses a pinned
  * time-zone boundary dataset `[unverified — training knowledge; library
- * choice in P1]`."*). **Gate-review correction (post-e9b3ab0): this is now
- * a real, pinned, offline boundary lookup**, not a longitude heuristic —
- * the earlier ±3 h offset approximation is retired; the exact fixtures it
- * couldn't discriminate (Knoxville/Chicago vs New_York, Phoenix/Denver,
- * Kenora/Toronto vs Winnipeg, Indianapolis) all resolve correctly under
- * this package.
+ * choice in P1]`."*). A real, pinned, offline boundary lookup — see
+ * `tz-lookup`'s license/vintage/size writeup, unchanged from round 1.
  *
- * **Library choice, pinned exactly.** [`tz-lookup@6.1.25`](https://www.npmjs.com/package/tz-lookup)
- * (npm, resolved and installed this session — network was reachable).
- * - **License:** CC0-1.0 (public domain dedication) — no attribution
- *   obligation, compatible with anything.
- * - **Data vintage:** the package's own README states its bundled
- *   boundary data, sourced from Evan Siroky's `timezone-boundary-builder`,
- *   *"was last updated on 6 Jan 2019"* — stated here rather than assumed,
- *   since the plan explicitly asked the vintage be named. This is a known
- *   staleness: a handful of real-world zone-boundary or naming changes
- *   since 2019 (rare, and none in the pilot slate's TN/VI/RTJ regions)
- *   would not be reflected. Acceptable for P1a's purpose (catching an
- *   unambiguously wrong zone, not adjudicating a meters-from-the-border
- *   dispute); flagged here so a future re-pin is a deliberate decision,
- *   not a silent gap.
- * - **Size:** ~152 KB unpacked (`tz.js` is ~73 KB), zero runtime
- *   dependencies — small enough to vendor into every environment that
- *   imports `@golfraven/catalog` without materially changing its footprint.
- * - **Mechanism:** synchronous `tzlookup(lat, lng) -> IANA zone name`,
- *   using simplified/compressed boundary polygons (its own README: "the
- *   timezones returned ... are approximate ... expect errors near timezone
- *   borders far away from populated areas" — acceptable for the same
- *   reason as the data-vintage note above).
+ * **Round 2 additions (gate review):**
  *
- * This function compares `tz-lookup`'s own answer for the coordinate
- * against the facility's declared `tz`, by exact string equality — two
- * IANA names can denote the same underlying rules (e.g. historical
- * aliases), but P1a does not attempt alias resolution; an exact match is
- * the literal, unambiguous reading of "does this tz contain this
- * coordinate".
+ * 1. **Link-table canonicalization, both sides.** `tz-lookup`'s bundled
+ *    data (vintage "6 Jan 2019") still returns pre-2022-merge Canadian zone
+ *    names for some coordinates (e.g. Thunder Bay -> `America/Thunder_Bay`,
+ *    not the now-canonical `America/Toronto`), and a facility may
+ *    legitimately declare a legacy alias (`America/Indianapolis` rather
+ *    than `America/Indiana/Indianapolis`). Comparing raw strings made both
+ *    of those fail incorrectly. Both `tz-lookup`'s answer and the
+ *    facility's declared `tz` are now canonicalized through
+ *    `canonicalizeTimeZone` before comparing.
+ * 2. **Border tolerance (~5 km).** `tz-lookup`'s simplified polygons can
+ *    misattribute a point within a few km of a real zone boundary to the
+ *    wrong neighbour entirely (not a linkable alias — a genuinely
+ *    different zone, e.g. Rainy River, ON reads as `America/Chicago`
+ *    instead of `America/Winnipeg`). Rather than trying to detect
+ *    "near a boundary" directly (this package has no polygon data, only
+ *    point lookups), this looks up 4 more points 5 km due
+ *    north/south/east/west of the declared coordinate and accepts the
+ *    declared `tz` if ANY of the 5 lookups (center + 4 offsets),
+ *    canonicalized, matches it. This can only make the check MORE
+ *    permissive near a boundary — it never accepts a zone that isn't
+ *    within 5 km of the declared point under this package's own lookup.
  */
+const BORDER_TOLERANCE_METERS = 5_000;
+
 export function tzLikelyContainsCoordinates(
   tz: string,
   coord: { lat: number; lng: number },
 ): boolean {
-  return tzlookup(coord.lat, coord.lng) === tz;
+  const declaredCanonical = canonicalizeTimeZone(tz);
+  const points = [
+    coord,
+    offsetCoordinate(coord, "N", BORDER_TOLERANCE_METERS),
+    offsetCoordinate(coord, "S", BORDER_TOLERANCE_METERS),
+    offsetCoordinate(coord, "E", BORDER_TOLERANCE_METERS),
+    offsetCoordinate(coord, "W", BORDER_TOLERANCE_METERS),
+  ];
+  return points.some(
+    (p) => canonicalizeTimeZone(tzlookup(p.lat, p.lng)) === declaredCanonical,
+  );
 }

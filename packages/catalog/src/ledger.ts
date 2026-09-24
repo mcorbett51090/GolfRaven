@@ -126,18 +126,47 @@ export function isIdTombstoned(ledger: IdLedger, id: string): boolean {
  * first." Follows `mergedInto` links until reaching an id that is not
  * itself tombstoned-with-a-survivor, guarding against a cycle (which would
  * itself be a ledger corruption bug, not a valid state). */
+/**
+ * Nit (gate review round 2): a `mergedInto` cycle in the ledger is
+ * reported as an issue by `verify-catalog`'s `checkMergeCycles`
+ * (`LEDGER_MERGE_CYCLE`), never thrown here. `resolveMergedId` is called
+ * from many places across this package and `tools/catalog` while
+ * resolving ordinary references, and a malformed/adversarial ledger
+ * (however it got that way) must not be able to crash the whole
+ * `verify-catalog` run just by making one id's chain cyclic — a thrown
+ * exception here would do exactly that, everywhere this function is
+ * called, not just at the one place meant to report the problem. On a
+ * cycle, this stops and returns the id where the repeat was detected
+ * (a safe, deterministic "best effort" answer) rather than looping
+ * forever or throwing; `detectMergeCycle` below is the actual yes/no
+ * check `checkMergeCycles` uses to raise the issue.
+ */
 export function resolveMergedId(ledger: IdLedger, id: string): string {
   const seen = new Set<string>();
   let current = id;
   while (true) {
     if (seen.has(current)) {
-      throw new Error(
-        `resolveMergedId: mergedInto cycle detected starting at "${id}"`,
-      );
+      return current;
     }
     seen.add(current);
     const entry = ledger.entries[current];
     if (!entry || !entry.mergedInto) return current;
+    current = entry.mergedInto;
+  }
+}
+
+/** `true` if following `id`'s `mergedInto` chain ever revisits an id
+ * already seen — i.e. the chain cannot terminate. Non-throwing, same
+ * walk `resolveMergedId` does, used by `verify-catalog`'s
+ * `checkMergeCycles` to report `LEDGER_MERGE_CYCLE` as an ordinary issue. */
+export function detectMergeCycle(ledger: IdLedger, id: string): boolean {
+  const seen = new Set<string>();
+  let current = id;
+  while (true) {
+    if (seen.has(current)) return true;
+    seen.add(current);
+    const entry = ledger.entries[current];
+    if (!entry || !entry.mergedInto) return false;
     current = entry.mergedInto;
   }
 }
@@ -307,52 +336,77 @@ export type ReseedOutcome =
  * through to spatial matching with an empty/wrong candidate list and mint
  * a **second** id for the same real-world object — exactly what G-P1-12
  * forbids. This lookup no longer depends on `candidates` at all.
+ *
+ * **Round-2 fix (gate review, "merge re-parenting"): prefer the COURSE
+ * entry that actually carries the ref, not "a" course found by working
+ * backward from the facility.** `mintStubFacility` mirrors a fresh
+ * `osmRef` onto both the facility entry AND its one stub course entry, so
+ * historically either could be used to find "the" course — but once
+ * `mergeIntoSurvivor` re-parents a merged facility's courses under the
+ * survivor (§4.2 row 2), a survivor can end up with more than one course
+ * entry, and picking "any course under this facility" is no longer
+ * necessarily the RIGHT course for this specific ref. The course-level
+ * record is the canonical anchor for a ref (§4.2: "the stub course
+ * through the same seedRefs[]"), so this now searches course entries
+ * FIRST, resolves that specific course through its own `mergedInto` chain,
+ * and reads the facility off that course's CURRENT `facilityId` link
+ * (correct even after re-parenting, because re-parenting updates exactly
+ * that field and never the course's own id). Only when no course entry
+ * carries the ref (a facility-only ref — not how `mintStubFacility` mints
+ * today, kept as a defensive fallback) does it fall back to resolving via
+ * the facility and picking one of its courses.
  */
 export function findLedgerIdBySeedRef(
   ledger: IdLedger,
   osmRef: string,
 ): { facilityId: FacilityId; courseId: CourseId } | undefined {
   const parsedRef = OsmRefIdSchema.parse(osmRef);
-  const ownerEntry = Object.values(ledger.entries).find((e) =>
-    (e.seedRefs ?? []).includes(parsedRef),
+  const entries = Object.values(ledger.entries);
+
+  const courseOwner = entries.find(
+    (e) => e.kind === "crs" && (e.seedRefs ?? []).includes(parsedRef),
   );
-  if (!ownerEntry) return undefined;
-
-  const survivorId = resolveMergedId(ledger, ownerEntry.id);
-  const survivorEntry = ledger.entries[survivorId];
-  if (!survivorEntry) {
-    throw new Error(
-      `findLedgerIdBySeedRef: "${osmRef}" resolved to survivor "${survivorId}", which is not in the ledger`,
-    );
-  }
-
-  if (survivorEntry.kind === "fac") {
-    const facilityId = survivorEntry.id as FacilityId;
-    const courseEntry = Object.values(ledger.entries).find(
-      (e) => e.kind === "crs" && !e.tombstoned && e.facilityId === facilityId,
-    );
+  if (courseOwner) {
+    const resolvedCourseId = resolveMergedId(ledger, courseOwner.id);
+    const courseEntry = ledger.entries[resolvedCourseId];
     if (!courseEntry) {
       throw new Error(
-        `findLedgerIdBySeedRef: facility "${facilityId}" (survivor of "${osmRef}") has no linked course entry in the ledger`,
+        `findLedgerIdBySeedRef: "${osmRef}" resolved to course "${resolvedCourseId}", which is not in the ledger`,
       );
     }
-    return { facilityId, courseId: courseEntry.id as CourseId };
-  }
-
-  if (survivorEntry.kind === "crs") {
-    const courseId = survivorEntry.id as CourseId;
-    const facilityId = survivorEntry.facilityId;
+    const facilityId = courseEntry.facilityId;
     if (!facilityId) {
       throw new Error(
-        `findLedgerIdBySeedRef: course "${courseId}" (survivor of "${osmRef}") has no facilityId link in the ledger`,
+        `findLedgerIdBySeedRef: course "${resolvedCourseId}" (owner of "${osmRef}") has no facilityId link in the ledger`,
       );
     }
-    return { facilityId, courseId };
+    return { facilityId, courseId: resolvedCourseId as CourseId };
   }
 
-  throw new Error(
-    `findLedgerIdBySeedRef: "${osmRef}" resolved to a "${survivorEntry.kind}" entry, which is neither a facility nor a course`,
+  const facilityOwner = entries.find(
+    (e) => e.kind === "fac" && (e.seedRefs ?? []).includes(parsedRef),
   );
+  if (!facilityOwner) return undefined;
+
+  const survivorFacilityId = resolveMergedId(ledger, facilityOwner.id);
+  const facilityEntry = ledger.entries[survivorFacilityId];
+  if (!facilityEntry) {
+    throw new Error(
+      `findLedgerIdBySeedRef: "${osmRef}" resolved to facility "${survivorFacilityId}", which is not in the ledger`,
+    );
+  }
+  const courseEntry = entries.find(
+    (e) => e.kind === "crs" && !e.tombstoned && e.facilityId === survivorFacilityId,
+  );
+  if (!courseEntry) {
+    throw new Error(
+      `findLedgerIdBySeedRef: facility "${survivorFacilityId}" (survivor of "${osmRef}") has no linked course entry in the ledger`,
+    );
+  }
+  return {
+    facilityId: survivorFacilityId as FacilityId,
+    courseId: courseEntry.id as CourseId,
+  };
 }
 
 /**
@@ -619,8 +673,26 @@ export function mergeIntoSurvivor(
     if (!entry) {
       throw new Error(`mergeIntoSurvivor: unknown ledger id "${id}"`);
     }
+    // Round-2 fix (gate review, "merge re-parenting"): §4.2 row 2 — "each
+    // stub course keeps its id and moves under the survivor." Re-parent
+    // every course whose facilityId currently points at the id being
+    // tombstoned, BEFORE tombstoning it, by updating that link to the
+    // survivor. The course's own id, status and transitions are untouched
+    // — only which facility it belongs to changes. (Course-kind merges
+    // have no children to re-parent; `entry.kind === survivorEntry.kind`
+    // is already enforced above, so this only ever fires for a facility.)
+    if (entry.kind === "fac") {
+      for (const courseEntry of Object.values(next.entries)) {
+        if (courseEntry.kind === "crs" && courseEntry.facilityId === id) {
+          next = withEntry(next, {
+            ...courseEntry,
+            facilityId: survivorId as FacilityId,
+          });
+        }
+      }
+    }
     next = withEntry(next, {
-      ...entry,
+      ...next.entries[id]!,
       tombstoned: true,
       mergedInto: survivorId as z.infer<typeof AnyKnownIdSchema>,
     });

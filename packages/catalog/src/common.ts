@@ -4,6 +4,7 @@
  * (G-P0-11).
  */
 import { z } from "zod";
+import regionCodesData from "./region-codes.json" with { type: "json" };
 
 /** Date-only ISO 8601 string (`YYYY-MM-DD`). The plan's `ISODate` fields
  * (`RosterVersion.effectiveFrom`, `verifiedAt`, `Source.retrieved`,
@@ -35,14 +36,23 @@ export type Source = z.infer<typeof SourceSchema>;
 
 /**
  * `Region.code` — ISO 3166-2 (`'US-AL'|'CA-QC'|…`). The plan's sketch shows
- * a handful of examples followed by `…`, which this schema reads as
- * "any ISO 3166-2 US/CA subdivision code", not as an exhaustive literal
- * union — see the P1a report's ambiguity list for why a pattern was chosen
- * over hand-typing all 51 + 13 codes.
+ * a handful of examples followed by `…`, read as "any ISO 3166-2 US/CA
+ * subdivision code".
+ *
+ * **Round 2 (gate-review nit): validated against a pinned list, not a
+ * shape-only pattern.** The original `^(US|CA)-[A-Z]{2,3}$` regex let
+ * `US-ZZ` (not a real state) through — it checked the *shape* of a region
+ * code, not that the code actually names a US state/territory or Canadian
+ * province/territory. `region-codes.json` (this directory) is the full,
+ * pinned ISO 3166-2:US / ISO 3166-2:CA list (69 codes: 50 states + DC + 5
+ * inhabited territories + 13 Canadian provinces/territories); see that
+ * file's `_comment` for the exact source.
  */
-export const RegionCodeSchema = z
-  .string()
-  .regex(/^(US|CA)-[A-Z]{2,3}$/, "must be an ISO 3166-2 US/CA code");
+const REGION_CODES = new Set<string>(regionCodesData.codes);
+
+export const RegionCodeSchema = z.string().refine((value) => REGION_CODES.has(value), {
+  error: "must be a real ISO 3166-2 US/CA subdivision code (see region-codes.json)",
+});
 export type RegionCode = z.infer<typeof RegionCodeSchema>;
 
 /**

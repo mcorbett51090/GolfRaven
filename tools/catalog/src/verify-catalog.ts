@@ -730,12 +730,27 @@ function checkVerificationTiers(bundle: CatalogBundle, issues: CatalogIssue[]): 
     // geo.ts) — checked for a stub too, using its joined OSM coordinates
     // (plan line 578).
     const coords = facilityCoordinates(facility, bundle.osm);
-    if (coords && !tzLikelyContainsCoordinates(facility.tz, coords)) {
+    if (coords) {
+      if (!tzLikelyContainsCoordinates(facility.tz, coords)) {
+        issues.push(
+          issue(
+            "TZ_WRONG_ZONE",
+            `${path}.tz`,
+            `facility "${facility.id}"'s tz "${facility.tz}" does not contain its coordinates (G-P0-11)`,
+          ),
+        );
+      }
+    } else {
+      // Fails closed (gate review round 2, item 4): a facility with no
+      // coordinates of its own AND no OSM join to borrow them from cannot
+      // have its declared tz checked at all — that is a reason to flag it,
+      // not a reason to silently skip the check. Silence here would let an
+      // unverifiable tz pass the gate by omission.
       issues.push(
         issue(
-          "TZ_WRONG_ZONE",
+          "TZ_UNVERIFIABLE",
           `${path}.tz`,
-          `facility "${facility.id}"'s tz "${facility.tz}" does not contain its coordinates (G-P0-11)`,
+          `facility "${facility.id}" has no coordinates (own lat/lng or a joined OSM ref) to check its declared tz "${facility.tz}" against — cannot verify (G-P0-11)`,
         ),
       );
     }

@@ -332,9 +332,16 @@ export const GeometrySchema = z.strictObject({
 });
 export type Geometry = z.infer<typeof GeometrySchema>;
 
-/** `composite?: [CourseId, CourseId]` — "an 18 formed from two nines"
- * (§4.1, G-P0-13). */
-export const CompositeSchema = z.tuple([CourseIdSchema, CourseIdSchema]);
+/**
+ * `composite?: [CourseId, CourseId]` — "an 18 formed from two nines"
+ * (§4.1, G-P0-13). Two DISTINCT nines — a course cannot be composed with
+ * itself (nit, gate review round 2: rejects `[X, X]`).
+ */
+export const CompositeSchema = z
+  .tuple([CourseIdSchema, CourseIdSchema])
+  .refine(([a, b]) => a !== b, {
+    error: "composite must name two distinct courses, not the same course twice",
+  });
 export type Composite = z.infer<typeof CompositeSchema>;
 
 export const ExternalIdsSchema = z.strictObject({
