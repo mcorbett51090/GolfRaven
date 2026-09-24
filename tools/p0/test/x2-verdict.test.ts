@@ -1568,3 +1568,145 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
     );
   });
 });
+
+describe("x2-verdict: extractX2MdLogSection (gate finding 3, re-gate)", () => {
+  it("extracts everything from a top-level '## Log' heading onward", () => {
+    const doc = "# X2\n\n## STATUS\n\nsome status\n\n## Log\n\n| Date | Entry |\n|---|---|\n| 2026-09-24 | did a thing |\n";
+    const section = extractX2MdLogSection(doc);
+    expect(section.startsWith("## Log")).toBe(true);
+    expect(section).toContain("did a thing");
+    expect(section).not.toContain("some status");
+  });
+
+  it("returns the WHOLE text when no '## Log' heading exists — a missing section is surfaced, not silently empty", () => {
+    const doc = "# X2\n\n## STATUS\n\nno log section here at all\n";
+    const section = extractX2MdLogSection(doc);
+    expect(section).toBe(doc);
+  });
+
+  it("a stray mention of an id/date OUTSIDE the Log section does not count as logged (scoped correctly)", () => {
+    const doc =
+      "# X2\n\n## STATUS\n\nNC-2026-09-20-acceptance was discussed informally on 2026-09-20 but not logged.\n\n## Log\n\n| Date | Entry |\n|---|---|\n| 2026-09-19 | unrelated |\n";
+    const section = extractX2MdLogSection(doc);
+    expect(section).not.toContain("NC-2026-09-20-acceptance");
+  });
+});
+
+describe("x2-verdict: resolveCorroboration (gate finding 3, re-gate)", () => {
+  it("wayback: verifies a record whose raw bytes recompute to the cited SHA, re-deriving text with the real extractor", async () => {
+    const html = "<html><body><p>Real snapshot content, fetched for real.</p></body></html>";
+    const buf = Buffer.from(html);
+    const shaOfBuf = sha(html);
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER_FOR_RESOLVE]: {
+          type: "wayback",
+          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+          snapshotSha256: shaOfBuf,
+          rawFile: "raw/wayback-x.html",
+        },
+      },
+    };
+    const resolved = await resolveCorroboration(
+      corroboration,
+      async (rel) => {
+        expect(rel).toBe("raw/wayback-x.html");
+        return buf;
+      },
+      null,
+    );
+    const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+    expect(entry?.waybackVerified).toBe(true);
+    expect(entry?.waybackText).toContain("Real snapshot content, fetched for real.");
+  });
+
+  it("wayback: a SHA mismatch (tampered/wrong raw bytes) resolves to unverified, regardless of what the bytes actually say", async () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER_FOR_RESOLVE]: {
+          type: "wayback",
+          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+          snapshotSha256: "d".repeat(64), // does not match the bytes below
+          rawFile: "raw/wayback-x.html",
+        },
+      },
+    };
+    const resolved = await resolveCorroboration(
+      corroboration,
+      async () => Buffer.from("<p>The quote you want to see is right here.</p>"),
+      null,
+    );
+    const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+    expect(entry?.waybackVerified).toBe(false);
+    expect(entry?.waybackText).toBeUndefined();
+  });
+
+  it("wayback: a read failure (missing/unreadable raw file) resolves to unverified, never throws", async () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER_FOR_RESOLVE]: {
+          type: "wayback",
+          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+          snapshotSha256: "d".repeat(64),
+          rawFile: "raw/does-not-exist.html",
+        },
+      },
+    };
+    const resolved = await resolveCorroboration(
+      corroboration,
+      async () => {
+        throw new Error("ENOENT");
+      },
+      null,
+    );
+    const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+    expect(entry?.waybackVerified).toBe(false);
+  });
+
+  it("acceptance: resolves logged: true only when a Log-section line names BOTH the id and the date", async () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER_FOR_RESOLVE]: {
+          type: "acceptance",
+          id: "NC-my-record-id",
+          acceptedBy: "Matt",
+          date: "2026-09-20",
+        },
+      },
+    };
+    const logged = await resolveCorroboration(
+      corroboration,
+      async () => Buffer.from(""),
+      "## Log\n\n| Date | Entry |\n|---|---|\n| 2026-09-20 | Accepted NC-my-record-id per Matt's review. |\n",
+    );
+    expect(
+      logged.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
+    ).toBe(true);
+
+    const notLogged = await resolveCorroboration(
+      corroboration,
+      async () => Buffer.from(""),
+      "## Log\n\n| Date | Entry |\n|---|---|\n| 2026-09-21 | A different entry, wrong date. |\n",
+    );
+    expect(
+      notLogged.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
+    ).toBe(false);
+  });
+
+  it("acceptance: a null x2MdLogText (X2.md unreadable) resolves logged: false, never throws", async () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER_FOR_RESOLVE]: {
+          type: "acceptance",
+          id: "NC-my-record-id",
+          acceptedBy: "Matt",
+          date: "2026-09-20",
+        },
+      },
+    };
+    const resolved = await resolveCorroboration(corroboration, async () => Buffer.from(""), null);
+    expect(
+      resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
+    ).toBe(false);
+  });
+});

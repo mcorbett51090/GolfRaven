@@ -212,6 +212,13 @@ ON CONFLICT (name) DO NOTHING;
 -- superuser mode. So service_role needs this grant too, in both modes --
 -- confirmed empirically this session: superuser-mode M1 tests failed
 -- with "permission denied for schema vault" before this grant existed.
+-- Table-level grants alone are not enough — both roles also need SCHEMA
+-- USAGE on `vault` itself (0018_pseudonym_vault.sql only grants USAGE to
+-- private_definer; confirmed empirically this session: without this,
+-- service_role got "permission denied for schema vault", not a
+-- table-level denial, even with the table grants below in place).
+GRANT USAGE ON SCHEMA vault TO migration_owner;
+GRANT USAGE ON SCHEMA vault TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO migration_owner;
 GRANT SELECT ON vault.decrypted_secrets TO migration_owner;
 GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO service_role;
