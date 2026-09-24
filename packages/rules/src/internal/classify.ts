@@ -42,6 +42,46 @@ import type { GeometryKind, VerificationTier } from "@golfraven/matching";
 import type { CourseDisambiguatedBy } from "../completion.js";
 
 /* ------------------------------------------------------------------ */
+/* F5 (sixth gate): every inline policy literal, hoisted into a named    */
+/* constant — "so changing a weight without bumping the version fails    */
+/* CI" now covers these too, not just the WEIGHT table/MONEY_MIN/caps    */
+/* that were already pinned. Grouped here, at the top of the module, so  */
+/* a reader (or `score-play-policy-hash.test.ts`) can see every money-   */
+/* path number in one place instead of hunting inline literals.          */
+/* ------------------------------------------------------------------ */
+
+/** The co-signal / device-row-fix accuracy ceiling (meters). */
+export const ACCURACY_METERS_MAX = 50;
+/** staff_presence's hard-window half-width. */
+export const STAFF_HARD_WINDOW_MS = 10 * 60_000;
+/** The `simulated` penalty multiplier (device-row classes). */
+export const SIMULATED_PENALTY_MULTIPLIER = 0.3;
+/** The `unattestable`-grade / no-challenge penalty multiplier. */
+export const UNATTESTABLE_OR_NO_CHALLENGE_PENALTY_MULTIPLIER = 0.6;
+/** A `pending`-status receipt's badge weight. */
+export const RECEIPT_PENDING_WEIGHT = 0.2;
+/** `health_route`'s minimum `insideRatio` to score anything at all. */
+export const HEALTH_ROUTE_MIN_INSIDE_RATIO = 0.6;
+/** `health_route`'s `insideRatio` threshold for the HIGH weight tier. */
+export const HEALTH_ROUTE_HIGH_INSIDE_RATIO = 0.8;
+/** `health_route`'s weight when `sourceAllowListed` is false. */
+export const HEALTH_ROUTE_LOW_WEIGHT = 0.1;
+/** `health_route`'s weight for `insideRatio` in `[MIN, HIGH)`. */
+export const HEALTH_ROUTE_MID_WEIGHT = 0.4;
+/** `health_route`'s weight for `insideRatio >= HIGH`. */
+export const HEALTH_ROUTE_HIGH_WEIGHT = 0.6;
+/** `connect_iq` route variant's minimum duration to score anything. */
+export const CONNECT_IQ_ROUTE_MIN_DURATION_MINUTES = 90;
+/** `foreground_dwell`'s minimum apart-time for a 9-hole round. */
+export const DWELL_THRESHOLD_9_HOLES_MINUTES = 50;
+/** `foreground_dwell`'s minimum apart-time for an 18-hole round. */
+export const DWELL_THRESHOLD_18_HOLES_MINUTES = 90;
+/** `file_import`'s weight when it matched a route. */
+export const FILE_IMPORT_MATCHED_WEIGHT = 0.4;
+/** `file_import`'s weight when it did NOT match a route. */
+export const FILE_IMPORT_UNMATCHED_WEIGHT = 0.1;
+
+/* ------------------------------------------------------------------ */
 /* Attestation grade (G3-08)                                           */
 /* ------------------------------------------------------------------ */
 

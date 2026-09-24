@@ -647,8 +647,18 @@ async function main(argv: string[]): Promise<void> {
   const confirmation = JSON.parse(
     await readFile(confirmationPath, "utf8"),
   ) as X2ConfirmationFile;
-  const evidenceByTrail = await buildEvidenceByTrail(manifest, (rel) =>
-    readFile(path.join(evidenceDir, rel)),
+  // Gate finding 2c: when a ledger path is given (default:
+  // `<evidence-dir>/recorded-ledger.json`, same default `x2-fetch`/
+  // `x2-ingest` use — pass `--ledger` explicitly when the recorded
+  // captures for this trail set live in a SHARED ledger outside this one
+  // evidence dir), it is authoritative for `recorded`, not each entry's
+  // own field.
+  const ledgerPath = flags.ledger || defaultLedgerPath(evidenceDir);
+  const ledger = await loadLedger(ledgerPath);
+  const evidenceByTrail = await buildEvidenceByTrail(
+    manifest,
+    (rel) => readFile(path.join(evidenceDir, rel)),
+    { ledger },
   );
   const result = computeX2Verdict(confirmation, evidenceByTrail);
   const outExplicit = Boolean(flags.out);
