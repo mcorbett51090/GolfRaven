@@ -8,7 +8,7 @@
  * diff against the plan is a one-line lookup.
  */
 import { describe, expect, it } from "vitest";
-import { MONEY_MIN, scorePlay } from "../src/score-play.js";
+import { MONEY_MIN } from "../src/score-play.js";
 import {
   scorePlayOrThrow,
   PLAY_FACILITY_ID,

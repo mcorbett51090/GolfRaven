@@ -13,7 +13,7 @@
  * some other assertion.
  */
 import { describe, expect, it } from "vitest";
-import { MONEY_MIN, scorePlay } from "../src/score-play.js";
+import { MONEY_MIN } from "../src/score-play.js";
 import {
   scorePlayOrThrow,
   PLAY_LOCAL_DATE_MS,

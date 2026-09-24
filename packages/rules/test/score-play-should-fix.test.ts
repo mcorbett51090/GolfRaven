@@ -8,7 +8,6 @@
  * by `offer-eligibility.test.ts`.)
  */
 import { describe, expect, it } from "vitest";
-import {} from "../src/score-play.js";
 import {
   scorePlayOrThrow,
   baseCtx,

@@ -4,7 +4,6 @@
  * fixes themselves live in `src/score-play.ts`, cited inline below).
  */
 import { describe, expect, it } from "vitest";
-import {} from "../src/score-play.js";
 import {
   scorePlayOrThrow,
   PLAY_FACILITY_ID,
