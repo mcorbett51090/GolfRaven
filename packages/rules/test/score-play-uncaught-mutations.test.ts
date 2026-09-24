@@ -189,37 +189,65 @@ describe("item 3 (seventh gate): a reviewer's void wins UNCONDITIONALLY — the 
   });
 });
 
-describe("item 3 (seventh gate): earliest capturedAt wins when no void is present and every row carries a coSignalFix", () => {
-  it("an earlier-captured pending receipt wins over a later-captured approved duplicate (no void present)", () => {
-    const earlier = receipt({
+describe("item 1 (eighth gate): status wins FIRST — capturedAt is only a tiebreak between EQUAL statuses (fixes the seventh gate's Case B regression)", () => {
+  it("an earlier-captured PENDING receipt does NOT beat a later-captured APPROVED duplicate — approved wins regardless of capture order", () => {
+    const earlierPending = receipt({
       id: "early",
       status: "pending",
       fingerprint: "fp5",
       coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS }),
     });
-    const later = receipt({
+    const laterApproved = receipt({
       id: "late",
       status: "approved",
       fingerprint: "fp5",
       coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + 5 * 60_000 }),
     });
-    const forward = scorePlayOrThrow([earlier, later], baseCtx());
-    const reversed = scorePlayOrThrow([later, earlier], baseCtx());
-    // The EARLIER (pending, 0.20) wins over the LATER (approved, 0.80) —
-    // re-submission does not out-rank the honest first capture. Both
-    // orders agree.
-    expect(forward.score_badge).toBe(0.2);
-    expect(reversed.score_badge).toBe(0.2);
+    const forward = scorePlayOrThrow([earlierPending, laterApproved], baseCtx());
+    const reversed = scorePlayOrThrow([laterApproved, earlierPending], baseCtx());
+    // The seventh gate's own bug: this used to resolve to 0.20 (the
+    // earlier PENDING copy won on capturedAt alone). Status now wins
+    // first — APPROVED (0.80) beats PENDING (0.20) regardless of which
+    // one was captured earlier. Both orders agree.
+    expect(forward.score_badge).toBe(0.8);
+    expect(reversed.score_badge).toBe(0.8);
   });
 
-  it("falls back to approved-wins when NOT every row in the group carries a coSignalFix (capturedAt incomplete)", () => {
-    // One row has no coSignalFix at all — "earliest" isn't soundly
-    // comparable across the whole group, so this falls back to the
-    // status-rank rule (documented: the DB intake path must independently
-    // void the newer copy in this shape).
+  it("capturedAt DOES tiebreak between two APPROVED copies (same status) — earliest wins", () => {
+    const earlier = receipt({
+      id: "early2",
+      status: "approved",
+      fingerprint: "fp5b",
+      coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS }),
+    });
+    const later = receipt({
+      id: "late2",
+      status: "approved",
+      fingerprint: "fp5b",
+      coSignalFix: goodFix({ capturedAt: PLAY_LOCAL_DATE_MS + 5 * 60_000 }),
+    });
+    const forward = scorePlayOrThrow([earlier, later], baseCtx());
+    const reversed = scorePlayOrThrow([later, earlier], baseCtx());
+    // Both are approved (0.80) either way, so this specifically checks
+    // WHICH row survives as the winner by checking `contributions` rather
+    // than the score (which is identical either way) — the winning row's
+    // evidenceId must be the earlier one.
+    expect(forward.score_badge).toBe(0.8);
+    expect(reversed.score_badge).toBe(0.8);
+    const forwardWinner = forward.contributions.find((c) => c.classId === "receipt_green_fee" && c.badgeWeight > 0);
+    const reversedWinner = reversed.contributions.find((c) => c.classId === "receipt_green_fee" && c.badgeWeight > 0);
+    expect(forwardWinner?.evidenceId).toBe("early2");
+    expect(reversedWinner?.evidenceId).toBe("early2");
+  });
+
+  it("falls back straight to id-tiebreak when the tied-status pair doesn't both carry a coSignalFix", () => {
     const noFix = receipt({ id: "r1", status: "pending", fingerprint: "fp6" });
     const withFix = receipt({ id: "r2", status: "approved", fingerprint: "fp6", coSignalFix: goodFix() });
     const result = scorePlayOrThrow([noFix, withFix], baseCtx());
+    // Different statuses here (approved beats pending) — this is really
+    // exercising the SAME status-wins-first rule as the first test in
+    // this block, just via the no-coSignalFix path; kept as its own test
+    // for the specific "not every row carries a coSignalFix" shape.
     expect(result.score_badge).toBe(0.8);
   });
 });

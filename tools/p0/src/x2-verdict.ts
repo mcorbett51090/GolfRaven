@@ -502,10 +502,12 @@ function checkQuote(
  * with a `null` summary (nothing to name).
  */
 function checkOwnerSavedCorroboration(
+  trail: string,
   evidenceSha: string,
   quote: string,
   evidence: TrailEvidenceMap,
   trailCorroboration: Record<string, X2CorroborationRecord>,
+  resolved: X2ResolvedCorroboration,
   label: string,
   reasons: string[],
 ): { ok: boolean; summary: string | null } {
@@ -523,18 +525,54 @@ function checkOwnerSavedCorroboration(
     );
     return { ok: false, summary: "owner-attested, uncorroborated" };
   }
+  const resolution = resolved.get(corroborationResolutionKey(trail, evidenceSha));
   if (record.type === "acceptance") {
-    const summary = `owner-attested, accepted uncorroborated by ${record.acceptedBy} on ${record.date}`;
+    // Gate finding 3 (re-gate): `acceptedBy` must be EXACTLY "Matt", and
+    // the record's `id`+`date` must show up in docs/p0/X2.md's own Log —
+    // never just trusted because the JSON file says so.
+    if (record.acceptedBy !== "Matt") {
+      reasons.push(
+        `${label}: owner-attested, acceptance record rejected — acceptedBy must be exactly "Matt", got ` +
+          `${JSON.stringify(record.acceptedBy)} (gate finding 3, re-gate).`,
+      );
+      return { ok: false, summary: "owner-attested, acceptance record rejected (acceptedBy is not Matt)" };
+    }
+    if (!resolution?.acceptanceLogged) {
+      reasons.push(
+        `${label}: owner-attested, acceptance record cited (id "${record.id}", ${record.date}) but no row ` +
+          'naming both was found in docs/p0/X2.md\'s "## Log" section — an acceptance not logged where this ' +
+          "project's own decision trail lives does not count (gate finding 3, re-gate).",
+      );
+      return {
+        ok: false,
+        summary: `owner-attested, acceptance NOT FOUND in X2.md's Log (id "${record.id}")`,
+      };
+    }
+    const summary = `owner-attested, accepted by Matt on ${record.date} (logged in X2.md, id "${record.id}")`;
     reasons.push(`${label}: ${summary}.`);
     return { ok: true, summary };
   }
-  // record.type === "wayback"
+  // record.type === "wayback" — gate finding 3 (re-gate): the record
+  // cites only a SHA now; `resolution.waybackText` is what the CLI's own
+  // re-verification pass derived from the REAL fetched bytes, never
+  // free text from the file itself.
+  if (!resolution?.waybackVerified) {
+    reasons.push(
+      `${label}: owner-attested, Wayback corroboration record cited (${record.snapshotUrl}) but its stored ` +
+        `evidence (sha256 ${record.snapshotSha256.slice(0, 12)}...) could not be verified — the raw bytes at ` +
+        "its rawFile did not recompute to the cited SHA, or could not be read — corroboration fails (gate " +
+        "finding 3, re-gate).",
+    );
+    return { ok: false, summary: `owner-attested, Wayback corroboration UNVERIFIABLE (${record.snapshotUrl})` };
+  }
   const collapsedQuote = collapseWhitespace(quote);
-  const foundInSnapshot = collapseWhitespace(record.snapshotText).includes(collapsedQuote);
+  const snapshotText = resolution.waybackText ?? "";
+  const foundInSnapshot = collapseWhitespace(snapshotText).includes(collapsedQuote);
   if (!foundInSnapshot) {
     reasons.push(
       `${label}: owner-attested, corroboration record cited (Wayback snapshot ${record.snapshotUrl}) but the ` +
-        "quote does NOT appear verbatim in the snapshot's own text — corroboration fails, this fact does not count.",
+        "quote does NOT appear verbatim in the snapshot's own (re-derived) text — corroboration fails, this " +
+        "fact does not count.",
     );
     return { ok: false, summary: `owner-attested, Wayback corroboration FAILED (${record.snapshotUrl})` };
   }
@@ -614,6 +652,16 @@ export function computeX2Verdict(
   evidenceByTrail: EvidenceByTrail,
   slateTrails: readonly string[] = X2_SLATE_TRAILS,
   corroboration: X2CorroborationFile = {},
+  /** Gate finding 3 (re-gate): pre-resolved, pre-verified corroboration
+   * data — see `X2ResolvedCorroboration`'s own doc. This function stays
+   * pure/synchronous; resolving a `wayback` record's real text (reading
+   * files, recomputing a SHA) and an `acceptance` record's X2.md-logged
+   * status (reading `docs/p0/X2.md`) both happen BEFORE this is called,
+   * never inside it. Omitted (the default) means every corroboration
+   * record resolves to "unverified" — the SAFE default: an owner-saved
+   * fact citing a corroboration record that was never actually verified
+   * does NOT count, rather than silently passing. */
+  resolvedCorroboration: X2ResolvedCorroboration = new Map(),
 ): X2VerdictResult {
   const perTrail: Record<string, X2TrailVerdict> = {};
   for (const trail of slateTrails) {
@@ -658,10 +706,12 @@ export function computeX2Verdict(
           let corroborationOk = true;
           if (quoteOk) {
             const result = checkOwnerSavedCorroboration(
+              trail,
               rosterEntry.evidenceSha,
               rosterEntry.quote,
               trailEvidence.bySha,
               trailCorroboration,
+              resolvedCorroboration,
               `Roster entry "${rosterEntry.name}"`,
               reasons,
             );
@@ -686,10 +736,12 @@ export function computeX2Verdict(
         let corroborationOk = true;
         if (quoteOk) {
           const result = checkOwnerSavedCorroboration(
+            trail,
             trailConfirmation.completionUnit.evidenceSha,
             trailConfirmation.completionUnit.quote,
             trailEvidence.bySha,
             trailCorroboration,
+            resolvedCorroboration,
             "completionUnit",
             reasons,
           );
@@ -713,10 +765,12 @@ export function computeX2Verdict(
         let corroborationOk = true;
         if (quoteOk) {
           const result = checkOwnerSavedCorroboration(
+            trail,
             trailConfirmation.season.evidenceSha,
             trailConfirmation.season.quote,
             trailEvidence.bySha,
             trailCorroboration,
+            resolvedCorroboration,
             "season",
             reasons,
           );
