@@ -28,13 +28,13 @@ function baseEvidenceByTrail(): EvidenceByTrail {
   return {
     TN: {
       bySha: new Map([
-        [SHA_TN, { text: TN_BYTES }],
-        [SHA_PDF, { text: null }],
+        [SHA_TN, { text: TN_BYTES, method: "direct" as const }],
+        [SHA_PDF, { text: null, method: "direct" as const }],
       ]),
       failedSources: [],
     },
     VI: {
-      bySha: new Map([[SHA_VI, { text: VI_BYTES }]]),
+      bySha: new Map([[SHA_VI, { text: VI_BYTES, method: "direct" as const }]]),
       failedSources: [],
     },
     RTJ: { bySha: new Map(), failedSources: [] },
@@ -132,7 +132,7 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
   it("a roster entry whose NAME does not appear in the cited evidence (even though the quote does) is unconfirmed", () => {
     const bytes = "This trail has a member course. It counts a course. The season runs year-round.";
     const evidenceByTrail: EvidenceByTrail = {
-      TN: { bySha: new Map([[sha(bytes), { text: bytes }]]), failedSources: [] },
+      TN: { bySha: new Map([[sha(bytes), { text: bytes, method: "direct" as const }]]), failedSources: [] },
     };
     const confirmation: X2ConfirmationFile = {
       TN: tnConfirmation({
@@ -219,7 +219,7 @@ describe("x2-verdict: quote/name matching (decision 0001 Addendum G, literal)", 
   it("gate S5: a CONFIRMED trail with an unrelated failed source is not flagged as needing a refusal-worthy re-run", () => {
     const evidenceByTrail: EvidenceByTrail = {
       TN: {
-        bySha: new Map([[SHA_TN, { text: TN_BYTES }]]),
+        bySha: new Map([[SHA_TN, { text: TN_BYTES, method: "direct" as const }]]),
         failedSources: [{ url: "https://tn.gov/", blocked: false, error: "404" }],
       },
     };
@@ -248,8 +248,8 @@ describe("x2-verdict: pass bar — 2 of 3 slate trails confirmed", () => {
     const viBytes =
       "Arbutus Ridge is a member course. Facility is the completion unit. Season runs year-round.";
     return {
-      TN: { bySha: new Map([[sha(tnBytes), { text: tnBytes }]]), failedSources: [] },
-      VI: { bySha: new Map([[sha(viBytes), { text: viBytes }]]), failedSources: [] },
+      TN: { bySha: new Map([[sha(tnBytes), { text: tnBytes, method: "direct" as const }]]), failedSources: [] },
+      VI: { bySha: new Map([[sha(viBytes), { text: viBytes, method: "direct" as const }]]), failedSources: [] },
       RTJ: { bySha: new Map(), failedSources: [] },
     };
   }
@@ -301,6 +301,8 @@ function fetchedEntry(overrides: Partial<X2FetchEntry> & { trail: string; url: s
     blocked: false,
     error: null,
     draftCandidateNames: [],
+    method: "direct",
+    ownerSavedDate: null,
     ...overrides,
   };
 }
@@ -437,6 +439,8 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
             blocked: true,
             error: "BLOCKED — network policy (golfvancouverisland.ca)",
             draftCandidateNames: [],
+            method: "direct",
+            ownerSavedDate: null,
           },
         ],
       },

@@ -45,7 +45,7 @@ import { fileURLToPath } from "node:url";
 import { collapseWhitespace } from "./text-extract.js";
 import { extractEvidenceText } from "./evidence-extract.js";
 import { SLATE_TRAILS } from "./slate.js";
-import type { X2FetchManifest } from "./x2-fetch.js";
+import type { X2FetchManifest, X2Method } from "./x2-fetch.js";
 import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
 
 export interface X2ConfirmationRosterEntry {
@@ -72,8 +72,12 @@ export const X2_PASS_BAR_CONFIRMED = 2;
 /** One trail's own evidence — never merged with another trail's. `text ===
  * null` means the evidence EXISTS but has no extracted text (should not
  * happen for HTML/PDF with a working extractor, but can for an opaque
- * binary), so any quote citing it fails the verbatim check. */
-export type TrailEvidenceMap = Map<string, { text: string | null }>;
+ * binary), so any quote citing it fails the verbatim check. `method`
+ * (decision 0001 Addendum J(a)) is carried straight through from the
+ * `x2-fetch` manifest entry that produced this evidence, into the
+ * verdict's own output (see `X2TrailVerdict.facts`) — never re-derived or
+ * guessed. */
+export type TrailEvidenceMap = Map<string, { text: string | null; method: X2Method }>;
 
 export interface FailedSource {
   url: string;
@@ -160,16 +164,32 @@ export async function buildEvidenceByTrail(
         continue;
       }
       const { text } = await extractEvidenceText(raw, e.contentType, e.url);
-      bySha.set(recomputedSha, { text });
+      // Decision 0001 Addendum J: `method` is carried straight through from
+      // the manifest entry, not re-derived — `x2-fetch`/`x2-ingest` are the
+      // only places that ever decide it.
+      bySha.set(recomputedSha, { text, method: e.method });
     }
     byTrail[trail] = { bySha, failedSources };
   }
   return byTrail;
 }
 
+/** Decision 0001 Addendum J: a fact's output echo, WITH the `method` of the
+ * evidence its `evidenceSha` cites carried straight through — `null` only
+ * when the trail has no confirmation entry for this fact at all (so there
+ * is no evidenceSha to look a method up for); every fact that actually
+ * cites evidence has already had that evidenceSha validated by `checkQuote`
+ * before this is built, so the method lookup always succeeds. */
+export interface X2FactOutput extends X2ConfirmationFact {
+  method: X2Method;
+}
+export interface X2RosterEntryOutput extends X2ConfirmationRosterEntry {
+  method: X2Method;
+}
+
 /** Gate finding S8: the verdict output echoes exactly what was checked —
- * every fact's value/quote/evidenceSha and the roster size — so a reviewer
- * can see WHY a trail confirmed (or didn't) without re-opening the
+ * every fact's value/quote/evidenceSha/method and the roster size — so a
+ * reviewer can see WHY a trail confirmed (or didn't) without re-opening the
  * confirmation file, and can spot a suspiciously short roster at a glance
  * next to X2.md's own research counts. */
 export interface X2TrailVerdict {
@@ -181,9 +201,9 @@ export interface X2TrailVerdict {
   hasFailedSource: boolean;
   rosterSize: number;
   facts: {
-    roster: X2ConfirmationRosterEntry[];
-    completionUnit: X2ConfirmationFact | null;
-    season: X2ConfirmationFact | null;
+    roster: X2RosterEntryOutput[];
+    completionUnit: X2FactOutput | null;
+    season: X2FactOutput | null;
   };
 }
 export interface X2VerdictResult {
@@ -240,6 +260,25 @@ function checkQuote(
     return false;
   }
   return true;
+}
+
+/** Decision 0001 Addendum J: looks up the `method` of the evidence a fact
+ * cites, for echoing in the verdict output (`X2TrailVerdict.facts`). Only
+ * ever called for a fact that `checkQuote` has already run over — which
+ * throws (refuses the whole run) if `evidenceSha` is not present in this
+ * trail's own evidence — so the lookup below is safe by construction; the
+ * thrown error here is unreachable in practice and exists only so a future
+ * change that stops calling this after `checkQuote` fails loudly instead of
+ * silently mislabeling a method. */
+function factMethod(evidence: TrailEvidenceMap, evidenceSha: string): X2Method {
+  const entry = evidence.get(evidenceSha);
+  if (!entry) {
+    throw new Error(
+      `internal: evidenceSha "${evidenceSha}" missing from this trail's evidence while building the facts ` +
+        "output — this should be unreachable, since checkQuote already validates evidenceSha first.",
+    );
+  }
+  return entry.method;
 }
 
 function checkRosterEntryName(
@@ -335,9 +374,22 @@ export function computeX2Verdict(
       hasFailedSource: trailEvidence.failedSources.length > 0,
       rosterSize: trailConfirmation?.roster?.length ?? 0,
       facts: {
-        roster: trailConfirmation?.roster ?? [],
-        completionUnit: trailConfirmation?.completionUnit ?? null,
-        season: trailConfirmation?.season ?? null,
+        roster: (trailConfirmation?.roster ?? []).map((r) => ({
+          ...r,
+          method: factMethod(trailEvidence.bySha, r.evidenceSha),
+        })),
+        completionUnit: trailConfirmation?.completionUnit
+          ? {
+              ...trailConfirmation.completionUnit,
+              method: factMethod(trailEvidence.bySha, trailConfirmation.completionUnit.evidenceSha),
+            }
+          : null,
+        season: trailConfirmation?.season
+          ? {
+              ...trailConfirmation.season,
+              method: factMethod(trailEvidence.bySha, trailConfirmation.season.evidenceSha),
+            }
+          : null,
       },
     };
   }
@@ -370,16 +422,18 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
     if (!v.confirmed && v.facts.roster.length === 0 && !v.facts.completionUnit && !v.facts.season) continue;
     lines.push(`**${trail} facts checked** (gate S8):`);
     for (const r of v.facts.roster) {
-      lines.push(`- roster: "${r.name}" — quote: "${r.quote}" (evidence ${r.evidenceSha.slice(0, 12)}...)`);
+      lines.push(
+        `- roster: "${r.name}" — quote: "${r.quote}" (evidence ${r.evidenceSha.slice(0, 12)}..., method: ${r.method})`,
+      );
     }
     if (v.facts.completionUnit) {
       lines.push(
-        `- completionUnit: "${v.facts.completionUnit.value}" — quote: "${v.facts.completionUnit.quote}" (evidence ${v.facts.completionUnit.evidenceSha.slice(0, 12)}...)`,
+        `- completionUnit: "${v.facts.completionUnit.value}" — quote: "${v.facts.completionUnit.quote}" (evidence ${v.facts.completionUnit.evidenceSha.slice(0, 12)}..., method: ${v.facts.completionUnit.method})`,
       );
     }
     if (v.facts.season) {
       lines.push(
-        `- season: "${v.facts.season.value}" — quote: "${v.facts.season.quote}" (evidence ${v.facts.season.evidenceSha.slice(0, 12)}...)`,
+        `- season: "${v.facts.season.value}" — quote: "${v.facts.season.quote}" (evidence ${v.facts.season.evidenceSha.slice(0, 12)}..., method: ${v.facts.season.method})`,
       );
     }
     lines.push("");

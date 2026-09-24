@@ -26,6 +26,17 @@
  * evidence, never by this tool's own DRAFT candidate-name list (printed
  * below, clearly labelled — it is a hint for a human writing the
  * confirmation file, never itself a confirmation).
+ *
+ * **`--render` (decision 0001 Addendum J(a)(i), 2026-09-24, written AFTER
+ * the first X2 run).** For a page whose static HTML carries no body text
+ * (VI's JS-only SPA, found by the first run), `--render` fetches every
+ * configured URL by booting headless Chromium instead of a direct `fetch()`
+ * — see `x2-render.ts`. The evidence stored is identical in shape (raw
+ * bytes, final URL, HTTP status, `fetchedAt` UTC, SHA-256, extracted text),
+ * with `method: "rendered"` instead of `"direct"`. It keeps the tool's own
+ * bot-identifying User-Agent and the same https-only rule (gate N6); it
+ * never renders a URL outside that trail's own configured list. See
+ * `x2-ingest.ts` for the THIRD method, `"owner-saved"` (Addendum J(a)(ii)).
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
@@ -35,8 +46,17 @@ import { extractDraftCandidateNames } from "./text-extract.js";
 import { classifyEvidenceBytes, extractEvidenceText } from "./evidence-extract.js";
 import { buildAsciiUserAgent, DEFAULT_MAX_RESPONSE_BYTES, fetchWithBlockDetection, readBodyCapped } from "./net.js";
 import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import { renderUrl, type ChromiumLauncher } from "./x2-render.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
+export const X2_RENDER_DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Decision 0001 Addendum J(a): which route these bytes reached the tool
+ * by — `"direct"` (the original `fetch()` path), `"rendered"` (headless
+ * Chromium, `--render`), or `"owner-saved"` (`x2-ingest`, a file the owner
+ * saved from their own browser). Every evidence entry states its own
+ * method; `x2-verdict` carries it through to its output unchanged. */
+export type X2Method = "direct" | "rendered" | "owner-saved";
 
 export function buildX2UserAgent(): string {
   return buildAsciiUserAgent({
@@ -53,10 +73,15 @@ export interface X2FetchEntry {
   trail: string;
   url: string;
   status: "fetched" | "failed";
-  httpStatus: number | null;
+  /** `"owner-saved"` (decision 0001 Addendum J(a)(ii)) records that this
+   * entry's evidence has no real HTTP status at all — it was saved by the
+   * owner from their own browser, not fetched by this tool. */
+  httpStatus: number | "owner-saved" | null;
   finalUrl: string | null;
   contentType: string | null;
-  /** UTC ISO-8601 retrieval time (Addendum G: "the retrieval time (UTC)"). */
+  /** UTC ISO-8601 retrieval time (Addendum G: "the retrieval time (UTC)")
+   * — for an owner-saved entry, this is the ingestion time, distinct from
+   * `ownerSavedDate` below. */
   fetchedAt: string;
   sha256: string | null;
   /** Path to the raw bytes, relative to the evidence output dir. */
@@ -75,6 +100,13 @@ export interface X2FetchEntry {
   /** Headings/link texts pulled from this one URL's HTML — DRAFT only, see
    * module doc. Empty for PDFs and failed fetches. */
   draftCandidateNames: string[];
+  /** Decision 0001 Addendum J(a): which route these bytes reached the tool
+   * by. Carried through unchanged by `x2-verdict` into its own output. */
+  method: X2Method;
+  /** Decision 0001 Addendum J(a)(ii), `"owner-saved"` entries only: the
+   * date the OWNER states they saved the page — `null` for `"direct"`/
+   * `"rendered"` entries, where `fetchedAt` already is that date. */
+  ownerSavedDate: string | null;
 }
 
 export interface X2FetchManifest {
@@ -91,7 +123,12 @@ function failedEntry(
   url: string,
   fetchedAt: string,
   error: string,
-  opts: { blocked?: boolean; httpStatus?: number | null; finalUrl?: string | null } = {},
+  opts: {
+    method: X2Method;
+    blocked?: boolean;
+    httpStatus?: number | "owner-saved" | null;
+    finalUrl?: string | null;
+  },
 ): X2FetchEntry {
   return {
     trail,
@@ -109,7 +146,49 @@ function failedEntry(
     blocked: opts.blocked ?? false,
     error,
     draftCandidateNames: [],
+    method: opts.method,
+    ownerSavedDate: null,
   };
+}
+
+/** Stores raw bytes as evidence (sha256, raw/text files, DRAFT candidate
+ * names) exactly as Addendum G requires — shared by the direct-fetch path
+ * (`fetchOne`) and the render path (`fetchOneRendered`) so there is exactly
+ * one definition of "how evidence bytes get stored", per gate S1/S3's
+ * "one extractor, used everywhere" principle. */
+async function storeEvidenceBytes(
+  outDir: string,
+  buf: Buffer,
+  contentType: string | null,
+  url: string,
+): Promise<{
+  sha256: string;
+  rawFile: string;
+  textFile: string | null;
+  textExtraction: "auto" | "auto-pdf" | "n/a";
+  extractor: string | null;
+  draftCandidateNames: string[];
+}> {
+  const sha256 = createHash("sha256").update(buf).digest("hex");
+  const kind = classifyEvidenceBytes(buf, contentType, url);
+  const ext = kind === "pdf" ? "pdf" : kind === "html" ? "html" : "bin";
+  const rawRelPath = path.join("raw", `${sha256}.${ext}`);
+  await mkdir(path.join(outDir, "raw"), { recursive: true });
+  await writeFile(path.join(outDir, rawRelPath), buf);
+
+  const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, url);
+  let textFile: string | null = null;
+  let draftCandidateNames: string[] = [];
+  if (text !== null) {
+    const textRelPath = path.join("text", `${sha256}.txt`);
+    await mkdir(path.join(outDir, "text"), { recursive: true });
+    await writeFile(path.join(outDir, textRelPath), text, "utf8");
+    textFile = textRelPath;
+  }
+  if (kind === "html") {
+    draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
+  }
+  return { sha256, rawFile: rawRelPath, textFile, textExtraction, extractor, draftCandidateNames };
 }
 
 async function fetchOne(
@@ -127,7 +206,7 @@ async function fetchOne(
   try {
     parsedUrl = new URL(url);
   } catch {
-    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`);
+    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`, { method: "direct" });
   }
   if (parsedUrl.protocol !== "https:") {
     return failedEntry(
@@ -135,6 +214,7 @@ async function fetchOne(
       url,
       fetchedAt,
       `refusing to fetch non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
+      { method: "direct" },
     );
   }
 
@@ -155,6 +235,7 @@ async function fetchOne(
         url,
         fetchedAt,
         `fetch threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+        { method: "direct" },
       );
     }
 
@@ -166,7 +247,7 @@ async function fetchOne(
         outcome.kind === "blocked"
           ? `BLOCKED — network policy (${outcome.host}): ${outcome.detail}`
           : `fetch error (${outcome.host}): ${outcome.detail}`,
-        { blocked: outcome.kind === "blocked" },
+        { blocked: outcome.kind === "blocked", method: "direct" },
       );
     }
 
@@ -180,7 +261,7 @@ async function fetchOne(
           url,
           fetchedAt,
           `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
-          { httpStatus: response.status, finalUrl },
+          { httpStatus: response.status, finalUrl, method: "direct" },
         );
       }
     } catch {
@@ -199,7 +280,7 @@ async function fetchOne(
         url,
         fetchedAt,
         `HTTP ${response.status} ${response.statusText} — ${bodySample.slice(0, 300)}`,
-        { httpStatus: response.status, finalUrl },
+        { httpStatus: response.status, finalUrl, method: "direct" },
       );
     }
 
@@ -216,29 +297,12 @@ async function fetchOne(
         url,
         fetchedAt,
         `body read failed (timeout or size cap, gate S6): ${err instanceof Error ? err.message : String(err)}`,
-        { httpStatus: response.status, finalUrl },
+        { httpStatus: response.status, finalUrl, method: "direct" },
       );
     }
 
-    const sha256 = createHash("sha256").update(buf).digest("hex");
-    const kind = classifyEvidenceBytes(buf, contentType, url);
-    const ext = kind === "pdf" ? "pdf" : kind === "html" ? "html" : "bin";
-    const rawRelPath = path.join("raw", `${sha256}.${ext}`);
-    await mkdir(path.join(outDir, "raw"), { recursive: true });
-    await writeFile(path.join(outDir, rawRelPath), buf);
-
-    const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, url);
-    let textFile: string | null = null;
-    let draftCandidateNames: string[] = [];
-    if (text !== null) {
-      const textRelPath = path.join("text", `${sha256}.txt`);
-      await mkdir(path.join(outDir, "text"), { recursive: true });
-      await writeFile(path.join(outDir, textRelPath), text, "utf8");
-      textFile = textRelPath;
-    }
-    if (kind === "html") {
-      draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
-    }
+    const { sha256, rawFile, textFile, textExtraction, extractor, draftCandidateNames } =
+      await storeEvidenceBytes(outDir, buf, contentType, url);
 
     return {
       trail,
@@ -249,13 +313,15 @@ async function fetchOne(
       contentType,
       fetchedAt,
       sha256,
-      rawFile: rawRelPath,
+      rawFile,
       textFile,
       textExtraction,
       extractor,
       blocked: false,
       error: null,
       draftCandidateNames,
+      method: "direct",
+      ownerSavedDate: null,
     };
   } finally {
     // Gate S6: the timer stays live through the ENTIRE fetch — including
@@ -264,10 +330,135 @@ async function fetchOne(
   }
 }
 
+/** The `--render` path (decision 0001 Addendum J(a)(i)): renders `url` in
+ * headless Chromium (`x2-render.ts`) instead of a direct `fetch()`, then
+ * stores the rendered `page.content()` bytes through the SAME
+ * `storeEvidenceBytes` helper `fetchOne` uses — same sha256/text/DRAFT-name
+ * handling, only the route the bytes arrived by differs. Keeps the same
+ * https-only rule (gate N6) and the tool's own bot-identifying User-Agent
+ * (never a browser UA). */
+async function fetchOneRendered(
+  trail: string,
+  url: string,
+  outDir: string,
+  timeoutMs: number,
+  renderOpts: { executablePath?: string; launch?: ChromiumLauncher } = {},
+): Promise<X2FetchEntry> {
+  const fetchedAt = new Date().toISOString();
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`, { method: "rendered" });
+  }
+  if (parsedUrl.protocol !== "https:") {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `refusing to render non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
+      { method: "rendered" },
+    );
+  }
+
+  let status: number;
+  let finalUrl: string;
+  let html: string;
+  try {
+    const rendered = await renderUrl(url, {
+      userAgent: buildX2UserAgent(),
+      timeoutMs,
+      ...renderOpts,
+    });
+    status = rendered.status;
+    finalUrl = rendered.finalUrl;
+    html = rendered.html;
+  } catch (err) {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `render failed: ${err instanceof Error ? err.message : String(err)}`,
+      { method: "rendered" },
+    );
+  }
+
+  try {
+    const finalParsed = new URL(finalUrl);
+    if (finalParsed.protocol !== "https:") {
+      return failedEntry(
+        trail,
+        url,
+        fetchedAt,
+        `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
+        { httpStatus: status, finalUrl, method: "rendered" },
+      );
+    }
+  } catch {
+    // finalUrl not parseable — fall through, handled generically below.
+  }
+
+  if (status < 200 || status >= 300) {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `render navigation returned HTTP ${status}`,
+      { httpStatus: status, finalUrl, method: "rendered" },
+    );
+  }
+
+  const buf = Buffer.from(html, "utf8");
+  if (buf.byteLength > DEFAULT_MAX_RESPONSE_BYTES) {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `rendered content exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes (gate S6)`,
+      { httpStatus: status, finalUrl, method: "rendered" },
+    );
+  }
+
+  const contentType = "text/html; charset=utf-8";
+  const { sha256, rawFile, textFile, textExtraction, extractor, draftCandidateNames } =
+    await storeEvidenceBytes(outDir, buf, contentType, url);
+
+  return {
+    trail,
+    url,
+    status: "fetched",
+    httpStatus: status,
+    finalUrl,
+    contentType,
+    fetchedAt,
+    sha256,
+    rawFile,
+    textFile,
+    textExtraction,
+    extractor,
+    blocked: false,
+    error: null,
+    draftCandidateNames,
+    method: "rendered",
+    ownerSavedDate: null,
+  };
+}
+
 export async function runX2Fetch(
   config: X2SourceConfig,
   outDir: string,
-  opts: { timeoutMs?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    /** Decision 0001 Addendum J(a)(i): render every configured URL in
+     * headless Chromium instead of fetching it directly. */
+    render?: boolean;
+    /** `--render` only: passed straight through to `x2-render.ts`'s
+     * `renderUrl` — an injectable launcher is how tests avoid starting a
+     * real browser. */
+    renderExecutablePath?: string;
+    renderLaunch?: ChromiumLauncher;
+  } = {},
 ): Promise<X2FetchManifest> {
   const timeoutMs = opts.timeoutMs ?? X2_DEFAULT_TIMEOUT_MS;
   if (Object.keys(config).length === 0) {
@@ -285,7 +476,14 @@ export async function runX2Fetch(
     for (const url of urls) {
       // Sequential, not parallel: polite to the destination hosts, and
       // keeps fetchedAt strictly ordered for a human reading the log.
-      const entry = await fetchOne(trail, url, outDir, timeoutMs);
+      const entry = opts.render
+        ? await fetchOneRendered(trail, url, outDir, timeoutMs, {
+            ...(opts.renderExecutablePath !== undefined
+              ? { executablePath: opts.renderExecutablePath }
+              : {}),
+            ...(opts.renderLaunch !== undefined ? { launch: opts.renderLaunch } : {}),
+          })
+        : await fetchOne(trail, url, outDir, timeoutMs);
       entries.push(entry);
       for (const n of entry.draftCandidateNames) {
         if (!seenNames.has(n)) {
@@ -360,15 +558,22 @@ export function resolveDefaultX2ConfigPath(): string {
 }
 
 async function main(argv: string[]): Promise<void> {
-  const flags = parseFlags(argv);
+  // Decision 0001 Addendum J(a)(i): `--render` boots headless Chromium
+  // (`x2-render.ts`) instead of a direct fetch for every configured URL.
+  // It is a bare boolean toggle (no value), so it is stripped from argv
+  // BEFORE `parseFlags` runs — otherwise `parseFlags`'s generic
+  // "next token is this flag's value" rule would swallow whatever flag
+  // happened to follow `--render` on the command line.
+  const render = argv.includes("--render");
+  const flags = parseFlags(argv.filter((a) => a !== "--render"));
   const configPath = flags.config || resolveDefaultX2ConfigPath();
   const outDirExplicit = Boolean(flags["out-dir"]);
-  const outDir = flags["out-dir"] || defaultOutsideRepoDir("x2-evidence");
+  const outDir = flags["out-dir"] || defaultOutsideRepoDir(render ? "x2-render-evidence" : "x2-evidence");
   assertOutsideRepoUnlessExplicit(outDir, outDirExplicit);
   const config = JSON.parse(
     await readFile(configPath, "utf8"),
   ) as X2SourceConfig;
-  const manifest = await runX2Fetch(config, outDir);
+  const manifest = await runX2Fetch(config, outDir, { render });
   process.stdout.write(`${renderManifestSummary(manifest)}\n`);
   process.stdout.write(
     `Manifest written to ${path.join(outDir, "manifest.json")}\n`,
