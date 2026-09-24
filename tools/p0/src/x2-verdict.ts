@@ -46,7 +46,10 @@ import { collapseWhitespace } from "./text-extract.js";
 import { extractEvidenceText } from "./evidence-extract.js";
 import { SLATE_TRAILS } from "./slate.js";
 import type { X2FetchManifest, X2Method } from "./x2-fetch.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
 
 export interface X2ConfirmationRosterEntry {
   name: string;
@@ -77,7 +80,10 @@ export const X2_PASS_BAR_CONFIRMED = 2;
  * `x2-fetch` manifest entry that produced this evidence, into the
  * verdict's own output (see `X2TrailVerdict.facts`) — never re-derived or
  * guessed. */
-export type TrailEvidenceMap = Map<string, { text: string | null; method: X2Method }>;
+export type TrailEvidenceMap = Map<
+  string,
+  { text: string | null; method: X2Method }
+>;
 
 export interface FailedSource {
   url: string;
@@ -154,7 +160,11 @@ export async function buildEvidenceByTrail(
       // config asked for.
       const configuredHost = hostOf(e.url);
       const finalHost = e.finalUrl ? hostOf(e.finalUrl) : configuredHost;
-      if (!configuredHost || !finalHost || !sameConfiguredHost(configuredHost, finalHost)) {
+      if (
+        !configuredHost ||
+        !finalHost ||
+        !sameConfiguredHost(configuredHost, finalHost)
+      ) {
         // Excluded — not this trail's official evidence. Reported, never dropped silently.
         failedSources.push({
           url: e.url,
@@ -249,7 +259,9 @@ function checkQuote(
   }
   const collapsedQuote = collapseWhitespace(fact.quote);
   if (!collapsedQuote || collapsedQuote.length < 12) {
-    reasons.push(`${label}: quote is empty or shorter than 12 characters (gate finding N8).`);
+    reasons.push(
+      `${label}: quote is empty or shorter than 12 characters (gate finding N8).`,
+    );
     return false;
   }
   if (!collapseWhitespace(text).includes(collapsedQuote)) {
@@ -296,7 +308,9 @@ function checkRosterEntryName(
     reasons.push(`Roster entry has an empty name (gate finding N8).`);
     return false;
   }
-  const found = collapseWhitespace(text).includes(collapseWhitespace(entry.name));
+  const found = collapseWhitespace(text).includes(
+    collapseWhitespace(entry.name),
+  );
   if (!found) {
     reasons.push(
       `Roster entry "${entry.name}": name does not appear in evidence ${entry.evidenceSha.slice(0, 12)}....`,
@@ -338,7 +352,12 @@ export function computeX2Verdict(
             `Roster entry "${rosterEntry.name}"`,
             reasons,
           );
-          const nameOk = checkRosterEntryName(rosterEntry, trail, trailEvidence.bySha, reasons);
+          const nameOk = checkRosterEntryName(
+            rosterEntry,
+            trail,
+            trailEvidence.bySha,
+            reasons,
+          );
           if (!quoteOk || !nameOk) ok = false;
         }
       }
@@ -347,7 +366,13 @@ export function computeX2Verdict(
         reasons.push("completionUnit is missing.");
         ok = false;
       } else if (
-        !checkQuote(trailConfirmation.completionUnit, trail, trailEvidence.bySha, "completionUnit", reasons)
+        !checkQuote(
+          trailConfirmation.completionUnit,
+          trail,
+          trailEvidence.bySha,
+          "completionUnit",
+          reasons,
+        )
       ) {
         ok = false;
       }
@@ -355,7 +380,15 @@ export function computeX2Verdict(
       if (!trailConfirmation.season) {
         reasons.push("season is missing.");
         ok = false;
-      } else if (!checkQuote(trailConfirmation.season, trail, trailEvidence.bySha, "season", reasons)) {
+      } else if (
+        !checkQuote(
+          trailConfirmation.season,
+          trail,
+          trailEvidence.bySha,
+          "season",
+          reasons,
+        )
+      ) {
         ok = false;
       }
     }
@@ -381,20 +414,28 @@ export function computeX2Verdict(
         completionUnit: trailConfirmation?.completionUnit
           ? {
               ...trailConfirmation.completionUnit,
-              method: factMethod(trailEvidence.bySha, trailConfirmation.completionUnit.evidenceSha),
+              method: factMethod(
+                trailEvidence.bySha,
+                trailConfirmation.completionUnit.evidenceSha,
+              ),
             }
           : null,
         season: trailConfirmation?.season
           ? {
               ...trailConfirmation.season,
-              method: factMethod(trailEvidence.bySha, trailConfirmation.season.evidenceSha),
+              method: factMethod(
+                trailEvidence.bySha,
+                trailConfirmation.season.evidenceSha,
+              ),
             }
           : null,
       },
     };
   }
 
-  const confirmedCount = Object.values(perTrail).filter((t) => t.confirmed).length;
+  const confirmedCount = Object.values(perTrail).filter(
+    (t) => t.confirmed,
+  ).length;
   const anyUnconfirmedWithFailedSource = Object.values(perTrail).some(
     (t) => !t.confirmed && t.hasFailedSource,
   );
@@ -419,7 +460,13 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
   }
   lines.push("");
   for (const [trail, v] of Object.entries(result.perTrail)) {
-    if (!v.confirmed && v.facts.roster.length === 0 && !v.facts.completionUnit && !v.facts.season) continue;
+    if (
+      !v.confirmed &&
+      v.facts.roster.length === 0 &&
+      !v.facts.completionUnit &&
+      !v.facts.season
+    )
+      continue;
     lines.push(`**${trail} facts checked** (gate S8):`);
     for (const r of v.facts.roster) {
       lines.push(
@@ -488,7 +535,9 @@ async function main(argv: string[]): Promise<void> {
   );
   const result = computeX2Verdict(confirmation, evidenceByTrail);
   const outExplicit = Boolean(flags.out);
-  const outPrefix = flags.out || path.join(defaultOutsideRepoDir("x2-verdict-result"), "result");
+  const outPrefix =
+    flags.out ||
+    path.join(defaultOutsideRepoDir("x2-verdict-result"), "result");
   assertOutsideRepoUnlessExplicit(path.dirname(outPrefix), outExplicit);
   await mkdir(path.dirname(outPrefix), { recursive: true });
   await writeFile(

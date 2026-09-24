@@ -8,7 +8,11 @@ import {
   runX2Fetch,
   type X2SourceConfig,
 } from "../src/x2-fetch.js";
-import type { BrowserLike, ChromiumLauncher, PageLike } from "../src/x2-render.js";
+import type {
+  BrowserLike,
+  ChromiumLauncher,
+  PageLike,
+} from "../src/x2-render.js";
 import { buildMinimalPdf } from "./fixtures/pdf/build-mini-pdf.js";
 
 const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-x2-test-"));
@@ -44,7 +48,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       }),
     );
 
-    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
+    const config: X2SourceConfig = {
+      TN: ["https://www.tnstateparks.com/golf"],
+    };
     const outDir = path.join(OUT_DIR, "html-run");
     const manifest = await runX2Fetch(config, outDir);
 
@@ -74,7 +80,8 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   });
 
   it("gate S3: stores a REAL PDF's bytes and auto-extracts its text with the pinned extractor — never 'manual'", async () => {
-    const quote = "The Trail Pass unit is the facility. Season runs year-round.";
+    const quote =
+      "The Trail Pass unit is the facility. Season runs year-round.";
     const pdfBytes = buildMinimalPdf(quote);
     vi.stubGlobal(
       "fetch",
@@ -115,12 +122,17 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   it("gate N5: a .pdf URL that actually serves an HTML error page is stored as binary, not mis-read as PDF text or HTML", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response("<html>404 Not Found</html>", {
-        status: 200,
-        headers: { "content-type": "application/pdf" },
-      })),
+      vi.fn(
+        async () =>
+          new Response("<html>404 Not Found</html>", {
+            status: 200,
+            headers: { "content-type": "application/pdf" },
+          }),
+      ),
     );
-    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/missing.pdf"] };
+    const config: X2SourceConfig = {
+      VI: ["https://golfvancouverisland.ca/missing.pdf"],
+    };
     const outDir = path.join(OUT_DIR, "fake-pdf-run");
     const manifest = await runX2Fetch(config, outDir);
     const entry = manifest.trails.VI?.[0];
@@ -154,7 +166,10 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
   it("records a non-blocked HTTP failure (e.g. 404) as FAILED too, distinct from a network-policy block", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response("not found", { status: 404, statusText: "Not Found" })),
+      vi.fn(
+        async () =>
+          new Response("not found", { status: 404, statusText: "Not Found" }),
+      ),
     );
     const config: X2SourceConfig = { TN: ["https://tngolftrail.net/missing"] };
     const outDir = path.join(OUT_DIR, "404-run");
@@ -203,11 +218,15 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
           status: 200,
           headers: { "content-type": "text/html" },
         });
-        Object.defineProperty(res, "url", { value: "https://www.tnstateparks.com/golf" });
+        Object.defineProperty(res, "url", {
+          value: "https://www.tnstateparks.com/golf",
+        });
         return res;
       }),
     );
-    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
+    const config: X2SourceConfig = {
+      TN: ["https://www.tnstateparks.com/golf"],
+    };
     const outDir = path.join(OUT_DIR, "oversized-run");
     const manifest = await runX2Fetch(config, outDir);
     const entry = manifest.trails.TN?.[0];
@@ -238,9 +257,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
       "fetched",
     ]);
 
-    await expect(runX2Fetch({}, path.join(OUT_DIR, "empty-run"))).rejects.toThrow(
-      /empty source list/,
-    );
+    await expect(
+      runX2Fetch({}, path.join(OUT_DIR, "empty-run")),
+    ).rejects.toThrow(/empty source list/);
   });
 });
 
@@ -275,12 +294,18 @@ function fakeRenderLauncher(opts: {
 describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", () => {
   it("stores the rendered page.content() bytes and extracted text, with method 'rendered', via an injected launcher (no real browser)", async () => {
     const html =
-      "<html><body><div id=\"app\">" +
+      '<html><body><div id="app">' +
       "<h1>Vancouver Island Golf Trail</h1><p>Rendered after JS ran.</p></div></body></html>";
-    const { launch } = fakeRenderLauncher({ finalUrl: "https://golfvancouverisland.ca/", html });
+    const { launch } = fakeRenderLauncher({
+      finalUrl: "https://golfvancouverisland.ca/",
+      html,
+    });
     const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
     const outDir = path.join(OUT_DIR, "render-run");
-    const manifest = await runX2Fetch(config, outDir, { render: true, renderLaunch: launch });
+    const manifest = await runX2Fetch(config, outDir, {
+      render: true,
+      renderLaunch: launch,
+    });
 
     const entry = manifest.trails.VI?.[0];
     expect(entry?.status).toBe("fetched");
@@ -303,7 +328,10 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
         state.userAgentSeen = headers["User-Agent"] ?? null;
       },
       async goto() {
-        return { status: () => 200, url: () => "https://golfvancouverisland.ca/" };
+        return {
+          status: () => 200,
+          url: () => "https://golfvancouverisland.ca/",
+        };
       },
       async content() {
         return "<p>x</p>";
@@ -329,10 +357,14 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
   it("gate N6: refuses to render a non-https configured URL, never launching a browser", async () => {
     const launchSpy = vi.fn<ChromiumLauncher>();
     const config: X2SourceConfig = { TN: ["http://www.tnstateparks.com/golf"] };
-    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-http-run"), {
-      render: true,
-      renderLaunch: launchSpy,
-    });
+    const manifest = await runX2Fetch(
+      config,
+      path.join(OUT_DIR, "render-http-run"),
+      {
+        render: true,
+        renderLaunch: launchSpy,
+      },
+    );
     const entry = manifest.trails.TN?.[0];
     expect(entry?.status).toBe("failed");
     expect(entry?.error).toContain("gate N6");
@@ -357,10 +389,14 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     };
     const launch: ChromiumLauncher = async () => browser;
     const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/"] };
-    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "render-fail-run"), {
-      render: true,
-      renderLaunch: launch,
-    });
+    const manifest = await runX2Fetch(
+      config,
+      path.join(OUT_DIR, "render-fail-run"),
+      {
+        render: true,
+        renderLaunch: launch,
+      },
+    );
     const entry = manifest.trails.VI?.[0];
     expect(entry?.status).toBe("failed");
     expect(entry?.method).toBe("rendered");
@@ -370,13 +406,21 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
   it("a direct (non-render) run still stamps method 'direct' on every entry", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response("<h1>Tennessee Golf Trail</h1>", {
-        status: 200,
-        headers: { "content-type": "text/html" },
-      })),
+      vi.fn(
+        async () =>
+          new Response("<h1>Tennessee Golf Trail</h1>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          }),
+      ),
     );
-    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
-    const manifest = await runX2Fetch(config, path.join(OUT_DIR, "direct-method-run"));
+    const config: X2SourceConfig = {
+      TN: ["https://www.tnstateparks.com/golf"],
+    };
+    const manifest = await runX2Fetch(
+      config,
+      path.join(OUT_DIR, "direct-method-run"),
+    );
     expect(manifest.trails.TN?.[0]?.method).toBe("direct");
   });
 });
@@ -385,10 +429,13 @@ describe("x2-fetch: renderManifestSummary", () => {
   it("labels the candidate list DRAFT and never as a confirmation", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response("<h1>Some Trail</h1>", {
-        status: 200,
-        headers: { "content-type": "text/html" },
-      })),
+      vi.fn(
+        async () =>
+          new Response("<h1>Some Trail</h1>", {
+            status: 200,
+            headers: { "content-type": "text/html" },
+          }),
+      ),
     );
     const manifest = await runX2Fetch(
       { TN: ["https://www.tnstateparks.com/golf"] },

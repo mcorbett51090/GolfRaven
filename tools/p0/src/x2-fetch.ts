@@ -43,9 +43,20 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractDraftCandidateNames } from "./text-extract.js";
-import { classifyEvidenceBytes, extractEvidenceText } from "./evidence-extract.js";
-import { buildAsciiUserAgent, DEFAULT_MAX_RESPONSE_BYTES, fetchWithBlockDetection, readBodyCapped } from "./net.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  classifyEvidenceBytes,
+  extractEvidenceText,
+} from "./evidence-extract.js";
+import {
+  buildAsciiUserAgent,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  fetchWithBlockDetection,
+  readBodyCapped,
+} from "./net.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
 import { renderUrl, type ChromiumLauncher } from "./x2-render.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
@@ -175,7 +186,11 @@ async function storeEvidenceBytes(
   await mkdir(path.join(outDir, "raw"), { recursive: true });
   await writeFile(path.join(outDir, rawRelPath), buf);
 
-  const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, url);
+  const { text, textExtraction, extractor } = await extractEvidenceText(
+    buf,
+    contentType,
+    url,
+  );
   let textFile: string | null = null;
   let draftCandidateNames: string[] = [];
   if (text !== null) {
@@ -187,7 +202,14 @@ async function storeEvidenceBytes(
   if (kind === "html") {
     draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
   }
-  return { sha256, rawFile: rawRelPath, textFile, textExtraction, extractor, draftCandidateNames };
+  return {
+    sha256,
+    rawFile: rawRelPath,
+    textFile,
+    textExtraction,
+    extractor,
+    draftCandidateNames,
+  };
 }
 
 async function fetchOne(
@@ -205,7 +227,13 @@ async function fetchOne(
   try {
     parsedUrl = new URL(url);
   } catch {
-    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`, { method: "direct" });
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `not a valid URL: "${url}" (gate N6)`,
+      { method: "direct" },
+    );
   }
   if (parsedUrl.protocol !== "https:") {
     return failedEntry(
@@ -300,8 +328,14 @@ async function fetchOne(
       );
     }
 
-    const { sha256, rawFile, textFile, textExtraction, extractor, draftCandidateNames } =
-      await storeEvidenceBytes(outDir, buf, contentType, url);
+    const {
+      sha256,
+      rawFile,
+      textFile,
+      textExtraction,
+      extractor,
+      draftCandidateNames,
+    } = await storeEvidenceBytes(outDir, buf, contentType, url);
 
     return {
       trail,
@@ -341,7 +375,11 @@ async function fetchOneRendered(
   url: string,
   outDir: string,
   timeoutMs: number,
-  renderOpts: { executablePath?: string; launch?: ChromiumLauncher; extraArgs?: string[] } = {},
+  renderOpts: {
+    executablePath?: string;
+    launch?: ChromiumLauncher;
+    extraArgs?: string[];
+  } = {},
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
 
@@ -349,7 +387,13 @@ async function fetchOneRendered(
   try {
     parsedUrl = new URL(url);
   } catch {
-    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`, { method: "rendered" });
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `not a valid URL: "${url}" (gate N6)`,
+      { method: "rendered" },
+    );
   }
   if (parsedUrl.protocol !== "https:") {
     return failedEntry(
@@ -420,8 +464,14 @@ async function fetchOneRendered(
   }
 
   const contentType = "text/html; charset=utf-8";
-  const { sha256, rawFile, textFile, textExtraction, extractor, draftCandidateNames } =
-    await storeEvidenceBytes(outDir, buf, contentType, url);
+  const {
+    sha256,
+    rawFile,
+    textFile,
+    textExtraction,
+    extractor,
+    draftCandidateNames,
+  } = await storeEvidenceBytes(outDir, buf, contentType, url);
 
   return {
     trail,
@@ -484,8 +534,12 @@ export async function runX2Fetch(
             ...(opts.renderExecutablePath !== undefined
               ? { executablePath: opts.renderExecutablePath }
               : {}),
-            ...(opts.renderLaunch !== undefined ? { launch: opts.renderLaunch } : {}),
-            ...(opts.renderExtraArgs !== undefined ? { extraArgs: opts.renderExtraArgs } : {}),
+            ...(opts.renderLaunch !== undefined
+              ? { launch: opts.renderLaunch }
+              : {}),
+            ...(opts.renderExtraArgs !== undefined
+              ? { extraArgs: opts.renderExtraArgs }
+              : {}),
           })
         : await fetchOne(trail, url, outDir, timeoutMs);
       entries.push(entry);
@@ -572,7 +626,9 @@ async function main(argv: string[]): Promise<void> {
   const flags = parseFlags(argv.filter((a) => a !== "--render"));
   const configPath = flags.config || resolveDefaultX2ConfigPath();
   const outDirExplicit = Boolean(flags["out-dir"]);
-  const outDir = flags["out-dir"] || defaultOutsideRepoDir(render ? "x2-render-evidence" : "x2-evidence");
+  const outDir =
+    flags["out-dir"] ||
+    defaultOutsideRepoDir(render ? "x2-render-evidence" : "x2-evidence");
   assertOutsideRepoUnlessExplicit(outDir, outDirExplicit);
   const config = JSON.parse(
     await readFile(configPath, "utf8"),
@@ -581,10 +637,13 @@ async function main(argv: string[]): Promise<void> {
   // TLS-trust escape hatch (see `renderUrl`'s own doc) — never wired to
   // anything proxy-specific in this file, just read from an env var the
   // operator sets for the environment they're actually running in.
-  const renderExtraArgs = process.env.X2_RENDER_CHROMIUM_ARGS?.split(/\s+/).filter(Boolean);
+  const renderExtraArgs =
+    process.env.X2_RENDER_CHROMIUM_ARGS?.split(/\s+/).filter(Boolean);
   const manifest = await runX2Fetch(config, outDir, {
     render,
-    ...(renderExtraArgs && renderExtraArgs.length > 0 ? { renderExtraArgs } : {}),
+    ...(renderExtraArgs && renderExtraArgs.length > 0
+      ? { renderExtraArgs }
+      : {}),
   });
   process.stdout.write(`${renderManifestSummary(manifest)}\n`);
   process.stdout.write(

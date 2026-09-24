@@ -56,7 +56,11 @@ function fakeLauncher(page: PageLike): {
       state.closed = true;
     },
   };
-  state.launch = (async (opts: { executablePath: string; headless: boolean; args?: string[] }) => {
+  state.launch = (async (opts: {
+    executablePath: string;
+    headless: boolean;
+    args?: string[];
+  }) => {
     state.seenExecutablePath.push(opts.executablePath);
     state.seenArgs.push(opts.args);
     expect(opts.headless).toBe(true);
@@ -81,12 +85,17 @@ describe("x2-render: renderUrl (decision 0001 Addendum J(a)(i))", () => {
     expect(result.finalUrl).toBe("https://golfvancouverisland.ca/");
     expect(result.html).toContain("Vancouver Island Golf Trail");
     expect(seenExecutablePath).toEqual([DEFAULT_CHROMIUM_EXECUTABLE_PATH]);
-    expect(page.headersSeen).toEqual({ "User-Agent": "GolfRaven-P0-X2/0.1 (test)" });
+    expect(page.headersSeen).toEqual({
+      "User-Agent": "GolfRaven-P0-X2/0.1 (test)",
+    });
     expect(page.closed).toBe(true);
   });
 
   it("passes extraArgs through to the launcher unchanged (e.g. an environment-specific TLS-trust escape hatch), and omits `args` when none given", async () => {
-    const page = fakePage({ finalUrl: "https://example.test/", html: "<p>x</p>" });
+    const page = fakePage({
+      finalUrl: "https://example.test/",
+      html: "<p>x</p>",
+    });
     const { launch, seenArgs } = fakeLauncher(page);
     await renderUrl("https://example.test/", { userAgent: "ua", launch });
     expect(seenArgs).toEqual([undefined]);
@@ -96,11 +105,16 @@ describe("x2-render: renderUrl (decision 0001 Addendum J(a)(i))", () => {
       launch,
       extraArgs: ["--ignore-certificate-errors-spki-list=abc123"],
     });
-    expect(seenArgs[1]).toEqual(["--ignore-certificate-errors-spki-list=abc123"]);
+    expect(seenArgs[1]).toEqual([
+      "--ignore-certificate-errors-spki-list=abc123",
+    ]);
   });
 
   it("uses an explicit executablePath when given, instead of the default", async () => {
-    const page = fakePage({ finalUrl: "https://example.test/", html: "<p>x</p>" });
+    const page = fakePage({
+      finalUrl: "https://example.test/",
+      html: "<p>x</p>",
+    });
     const { launch, seenExecutablePath } = fakeLauncher(page);
     await renderUrl("https://example.test/", {
       userAgent: "ua",
@@ -115,7 +129,10 @@ describe("x2-render: renderUrl (decision 0001 Addendum J(a)(i))", () => {
     const { launch } = fakeLauncher(page);
     const launchSpy = vi.fn(launch);
     await expect(
-      renderUrl("http://golfvancouverisland.ca/", { userAgent: "ua", launch: launchSpy }),
+      renderUrl("http://golfvancouverisland.ca/", {
+        userAgent: "ua",
+        launch: launchSpy,
+      }),
     ).rejects.toThrow(/gate N6/);
     expect(launchSpy).not.toHaveBeenCalled();
   });
@@ -124,14 +141,18 @@ describe("x2-render: renderUrl (decision 0001 Addendum J(a)(i))", () => {
     const page = fakePage({ finalUrl: "x", html: "x" });
     const { launch } = fakeLauncher(page);
     const launchSpy = vi.fn(launch);
-    await expect(renderUrl("not a url", { userAgent: "ua", launch: launchSpy })).rejects.toThrow(
-      /not a valid URL/,
-    );
+    await expect(
+      renderUrl("not a url", { userAgent: "ua", launch: launchSpy }),
+    ).rejects.toThrow(/not a valid URL/);
     expect(launchSpy).not.toHaveBeenCalled();
   });
 
   it("throws, and still closes the browser, when navigation produces no response at all", async () => {
-    const page = fakePage({ finalUrl: "https://x.test/", html: "", noResponse: true });
+    const page = fakePage({
+      finalUrl: "https://x.test/",
+      html: "",
+      noResponse: true,
+    });
     const { launch, closed } = fakeLauncher(page);
     await expect(
       renderUrl("https://x.test/", { userAgent: "ua", launch }),
@@ -162,9 +183,9 @@ describe("x2-render: renderUrl (decision 0001 Addendum J(a)(i))", () => {
       },
     };
     const launch: ChromiumLauncher = async () => browser;
-    await expect(renderUrl("https://x.test/", { userAgent: "ua", launch })).rejects.toThrow(
-      /navigation failed/,
-    );
+    await expect(
+      renderUrl("https://x.test/", { userAgent: "ua", launch }),
+    ).rejects.toThrow(/navigation failed/);
     expect(pageClosed).toBe(true);
     expect(browserClosed).toBe(true);
   });

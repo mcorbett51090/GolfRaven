@@ -37,10 +37,21 @@ import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractDraftCandidateNames } from "./text-extract.js";
-import { classifyEvidenceBytes, extractEvidenceText } from "./evidence-extract.js";
-import { resolveDefaultX2ConfigPath, type X2FetchEntry, type X2FetchManifest, type X2SourceConfig } from "./x2-fetch.js";
+import {
+  classifyEvidenceBytes,
+  extractEvidenceText,
+} from "./evidence-extract.js";
+import {
+  resolveDefaultX2ConfigPath,
+  type X2FetchEntry,
+  type X2FetchManifest,
+  type X2SourceConfig,
+} from "./x2-fetch.js";
 import { sameConfiguredHost } from "./x2-verdict.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -65,7 +76,10 @@ export function trailConfiguredHosts(urls: readonly string[]): string[] {
 /** True when `statedUrl`'s host matches at least one of `configuredHosts`
  * under the same same-host equivalence `x2-verdict.ts` uses (exact match,
  * or differing only by a leading "www."). */
-export function statedHostAllowed(statedUrl: string, configuredHosts: readonly string[]): boolean {
+export function statedHostAllowed(
+  statedUrl: string,
+  configuredHosts: readonly string[],
+): boolean {
   let host: string;
   try {
     host = new URL(statedUrl).hostname;
@@ -113,7 +127,9 @@ export async function ingestOwnerSavedPage(opts: {
   }
 
   if (!DATE_RE.test(statedDate)) {
-    throw new Error(`--date "${statedDate}" is not a real YYYY-MM-DD calendar date.`);
+    throw new Error(
+      `--date "${statedDate}" is not a real YYYY-MM-DD calendar date.`,
+    );
   }
   const [y, m, d] = statedDate.split("-").map(Number);
   const asDate = new Date(Date.UTC(y!, m! - 1, d!));
@@ -159,7 +175,11 @@ export async function ingestOwnerSavedPage(opts: {
   await mkdir(path.join(outDir, "raw"), { recursive: true });
   await writeFile(path.join(outDir, rawRelPath), buf);
 
-  const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, statedUrl);
+  const { text, textExtraction, extractor } = await extractEvidenceText(
+    buf,
+    contentType,
+    statedUrl,
+  );
   let textFile: string | null = null;
   let draftCandidateNames: string[] = [];
   if (text !== null) {
@@ -196,9 +216,16 @@ export async function ingestOwnerSavedPage(opts: {
   let manifest: X2FetchManifest;
   const exists = await stat(manifestPath).catch(() => null);
   if (exists) {
-    manifest = JSON.parse(await readFile(manifestPath, "utf8")) as X2FetchManifest;
+    manifest = JSON.parse(
+      await readFile(manifestPath, "utf8"),
+    ) as X2FetchManifest;
   } else {
-    manifest = { generatedAt: fetchedAt, outDir, trails: {}, draftCandidateNames: {} };
+    manifest = {
+      generatedAt: fetchedAt,
+      outDir,
+      trails: {},
+      draftCandidateNames: {},
+    };
   }
   manifest.trails[trail] = [...(manifest.trails[trail] ?? []), entry];
   const seen = new Set(manifest.draftCandidateNames[trail] ?? []);
@@ -211,7 +238,11 @@ export async function ingestOwnerSavedPage(opts: {
   }
   manifest.draftCandidateNames[trail] = names;
   manifest.generatedAt = fetchedAt;
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    "utf8",
+  );
 
   return { entry, manifest };
 }
@@ -242,7 +273,9 @@ async function main(argv: string[]): Promise<void> {
     );
   }
   const configPath = flags.config || resolveDefaultX2ConfigPath();
-  const sourceConfig = JSON.parse(await readFile(configPath, "utf8")) as X2SourceConfig;
+  const sourceConfig = JSON.parse(
+    await readFile(configPath, "utf8"),
+  ) as X2SourceConfig;
   const outDirExplicit = Boolean(flags["out-dir"]);
   const outDir = flags["out-dir"] || defaultOutsideRepoDir("x2-evidence");
   assertOutsideRepoUnlessExplicit(outDir, outDirExplicit);
@@ -259,7 +292,9 @@ async function main(argv: string[]): Promise<void> {
     `Ingested owner-saved evidence for ${trail}: ${entry.url} (saved ${entry.ownerSavedDate}, sha256 ` +
       `${entry.sha256?.slice(0, 12)}...)\n`,
   );
-  process.stdout.write(`Manifest written to ${path.join(outDir, "manifest.json")}\n`);
+  process.stdout.write(
+    `Manifest written to ${path.join(outDir, "manifest.json")}\n`,
+  );
 }
 
 async function isMainModule(): Promise<boolean> {

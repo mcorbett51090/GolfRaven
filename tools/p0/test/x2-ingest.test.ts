@@ -2,14 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runX2Fetch, type X2FetchManifest, type X2SourceConfig } from "../src/x2-fetch.js";
+import {
+  runX2Fetch,
+  type X2FetchManifest,
+  type X2SourceConfig,
+} from "../src/x2-fetch.js";
 import {
   ingestOwnerSavedPage,
   statedHostAllowed,
   trailConfiguredHosts,
 } from "../src/x2-ingest.js";
 
-const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-x2-ingest-test-"));
+const OUT_DIR = mkdtempSync(
+  path.join(tmpdir(), "golfraven-p0-x2-ingest-test-"),
+);
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -35,20 +41,29 @@ describe("x2-ingest: trailConfiguredHosts / statedHostAllowed (decision 0001 Add
   });
 
   it("allows a stated URL whose host exactly matches a configured host", () => {
-    expect(statedHostAllowed("https://tngolftrail.net/rules", trailConfiguredHosts(TN_CONFIG.TN!))).toBe(
-      true,
-    );
+    expect(
+      statedHostAllowed(
+        "https://tngolftrail.net/rules",
+        trailConfiguredHosts(TN_CONFIG.TN!),
+      ),
+    ).toBe(true);
   });
 
   it("allows a stated URL whose host differs only by a leading www.", () => {
     expect(
-      statedHostAllowed("https://tnstateparks.com/golf", trailConfiguredHosts(TN_CONFIG.TN!)),
+      statedHostAllowed(
+        "https://tnstateparks.com/golf",
+        trailConfiguredHosts(TN_CONFIG.TN!),
+      ),
     ).toBe(true);
   });
 
   it("refuses a stated URL on a host the trail never configured", () => {
     expect(
-      statedHostAllowed("https://evil.example/tnstateparks.com", trailConfiguredHosts(TN_CONFIG.TN!)),
+      statedHostAllowed(
+        "https://evil.example/tnstateparks.com",
+        trailConfiguredHosts(TN_CONFIG.TN!),
+      ),
     ).toBe(false);
   });
 });
@@ -83,7 +98,9 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
     expect(text).toContain("Season runs year-round.");
 
     expect(manifest.trails.TN).toHaveLength(1);
-    const onDisk = JSON.parse(readFileSync(path.join(outDir, "manifest.json"), "utf8")) as X2FetchManifest;
+    const onDisk = JSON.parse(
+      readFileSync(path.join(outDir, "manifest.json"), "utf8"),
+    ) as X2FetchManifest;
     expect(onDisk.trails.TN?.[0]?.method).toBe("owner-saved");
   });
 
@@ -103,7 +120,10 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
     await runX2Fetch({ TN: ["https://www.tnstateparks.com/golf"] }, outDir);
     vi.unstubAllGlobals();
 
-    const file = writeFixtureHtml("tn-owner-saved-2.html", "<h1>Owner saved copy</h1>");
+    const file = writeFixtureHtml(
+      "tn-owner-saved-2.html",
+      "<h1>Owner saved copy</h1>",
+    );
     const { manifest } = await ingestOwnerSavedPage({
       trail: "TN",
       filePath: file,

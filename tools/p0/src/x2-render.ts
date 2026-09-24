@@ -46,7 +46,10 @@ export interface PageLike {
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
   goto(
     url: string,
-    opts: { waitUntil?: "load" | "domcontentloaded" | "networkidle"; timeout?: number },
+    opts: {
+      waitUntil?: "load" | "domcontentloaded" | "networkidle";
+      timeout?: number;
+    },
   ): Promise<ResponseLike | null>;
   content(): Promise<string>;
   close(): Promise<void>;
@@ -122,7 +125,9 @@ export async function renderUrl(
   const browser = await launch({
     executablePath: opts.executablePath ?? DEFAULT_CHROMIUM_EXECUTABLE_PATH,
     headless: true,
-    ...(opts.extraArgs && opts.extraArgs.length > 0 ? { args: opts.extraArgs } : {}),
+    ...(opts.extraArgs && opts.extraArgs.length > 0
+      ? { args: opts.extraArgs }
+      : {}),
   });
   try {
     const page = await browser.newPage();
