@@ -348,18 +348,15 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     expect(text).toContain("Rendered after JS ran.");
   });
 
-  it("keeps the tool's own bot-identifying User-Agent when rendering, never a browser UA", async () => {
-    const state = { userAgentSeen: null as string | null };
-    const page = passthroughPage({
-      finalUrl: "https://golfvancouverisland.ca/",
-      html: "<p>x</p>",
-      onHeaders: (h) => {
-        state.userAgentSeen = h["User-Agent"] ?? null;
-      },
-    });
+  it("keeps the tool's own bot-identifying User-Agent when rendering (via context.newContext, never a browser UA), and blocks Service Workers for the context", async () => {
+    const state = { userAgentSeen: null as string | null, serviceWorkersSeen: null as string | null };
+    const page = passthroughPage({ finalUrl: "https://golfvancouverisland.ca/", html: "<p>x</p>" });
+    const context = passthroughContext(page);
     const browser: BrowserLike = {
-      async newPage() {
-        return page;
+      async newContext(contextOpts) {
+        state.userAgentSeen = contextOpts.userAgent;
+        state.serviceWorkersSeen = contextOpts.serviceWorkers ?? null;
+        return context;
       },
       async close() {},
     };
@@ -371,6 +368,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
     });
     expect(state.userAgentSeen).toMatch(/^GolfRaven-P0-X2\/0\.1/);
     expect(state.userAgentSeen).not.toMatch(/Mozilla|Chrome|Safari/);
+    expect(state.serviceWorkersSeen).toBe("block");
   });
 
   it("gate N6: refuses to render a non-https configured URL, never launching a browser", async () => {
@@ -392,9 +390,6 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
 
   it("records a render failure (e.g. navigation error) as FAILED with method 'rendered', never silently skipped", async () => {
     const page: PageLike = {
-      async setExtraHTTPHeaders() {},
-      async route() {},
-      on() {},
       mainFrame() {
         return {};
       },
@@ -409,9 +404,10 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
       },
       async close() {},
     };
+    const context = passthroughContext(page);
     const browser: BrowserLike = {
-      async newPage() {
-        return page;
+      async newContext() {
+        return context;
       },
       async close() {},
     };
