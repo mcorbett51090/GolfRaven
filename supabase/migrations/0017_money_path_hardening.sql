@@ -586,6 +586,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v_dupe_id uuid;
+  v_dupe_user_id uuid;
+  v_dupe_purchase_evidence_id uuid;
   v_real_user_id uuid;
 BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN
@@ -603,14 +605,21 @@ BEGIN
 
   PERFORM pg_advisory_xact_lock(hashtext(p_phash));
 
-  SELECT id INTO v_dupe_id
+  SELECT id, user_id, purchase_evidence_id INTO v_dupe_id, v_dupe_user_id, v_dupe_purchase_evidence_id
   FROM app.receipt_fingerprint
   WHERE phash = p_phash
     AND (purchase_evidence_id IS DISTINCT FROM p_purchase_evidence_id)
   LIMIT 1;
 
-  IF v_dupe_id IS NOT NULL THEN
-    UPDATE app.purchase_evidence SET status = 'void' WHERE id = p_purchase_evidence_id;
+  IF v_dupe_id IS NOT NULL AND v_dupe_user_id IS NOT DISTINCT FROM p_user_id THEN
+    -- SAME USER: a genuine retry/duplicate submission — auto-void the
+    -- NEWER (this) one, same as before, now tagged void_reason='duplicate'.
+    UPDATE app.purchase_evidence SET status = 'void', void_reason = 'duplicate' WHERE id = p_purchase_evidence_id;
+    -- Detach (never delete) any non-terminal marker_credit this purchase
+    -- backed — see this section's own note above (no play_evidence link
+    -- exists to detach; marker_credit is the real analog).
+    UPDATE app.marker_credit SET purchase_evidence_id = NULL
+      WHERE purchase_evidence_id = p_purchase_evidence_id AND status <> 'credited';
     INSERT INTO app.fraud_signal (user_id, kind, detail)
     VALUES (
       p_user_id,
@@ -618,6 +627,48 @@ BEGIN
       jsonb_build_object(
         'purchase_evidence_id', p_purchase_evidence_id,
         'duplicate_of_receipt_fingerprint_id', v_dupe_id,
+        'phash', p_phash,
+        'facility_id', p_facility_id,
+        'local_date', p_local_date
+      )
+    );
+    RETURN false;
+  ELSIF v_dupe_id IS NOT NULL THEN
+    -- ⛔ FIX (post-P3a re-gate, cross-user griefing): a DIFFERENT user's
+    -- fingerprint matches. Do NOT void either purchase -- neither
+    -- submission is known-fraudulent from a phash match alone (a shared
+    -- paper receipt legitimately produces this). Open a review_item +
+    -- fraud_signal instead, and leave BOTH purchases pending (never
+    -- reopen a purchase that is already terminally void, e.g. a prior
+    -- reviewer/fraud void -- that verdict stands).
+    UPDATE app.purchase_evidence SET status = 'pending' WHERE id = p_purchase_evidence_id AND status <> 'void';
+    IF v_dupe_purchase_evidence_id IS NOT NULL THEN
+      UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status <> 'void';
+    END IF;
+    INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
+    VALUES (
+      'receipt_cross_user_match',
+      'purchase_evidence',
+      p_purchase_evidence_id,
+      jsonb_build_object(
+        'purchase_evidence_id', p_purchase_evidence_id,
+        'user_id', p_user_id,
+        'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+        'matched_user_id', v_dupe_user_id,
+        'matched_receipt_fingerprint_id', v_dupe_id,
+        'phash', p_phash,
+        'facility_id', p_facility_id,
+        'local_date', p_local_date
+      )
+    );
+    INSERT INTO app.fraud_signal (user_id, kind, detail)
+    VALUES (
+      p_user_id,
+      'receipt_cross_user_match',
+      jsonb_build_object(
+        'purchase_evidence_id', p_purchase_evidence_id,
+        'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+        'matched_user_id', v_dupe_user_id,
         'phash', p_phash,
         'facility_id', p_facility_id,
         'local_date', p_local_date
@@ -634,9 +685,17 @@ BEGIN
     ON CONFLICT (purchase_evidence_id) WHERE purchase_evidence_id IS NOT NULL DO NOTHING;
   EXCEPTION WHEN unique_violation THEN
     -- receipt_fingerprint_ocr_facility_uniq: a DIFFERENT receipt already
-    -- claimed this (receipt_number_ocr, facility_id) pair. Same handled
-    -- outcome as a phash duplicate, not a raw exception to the caller.
-    UPDATE app.purchase_evidence SET status = 'void' WHERE id = p_purchase_evidence_id;
+    -- claimed this (receipt_number_ocr, facility_id) pair. An OCR number
+    -- is a real, near-unique printed identifier (not an approximate
+    -- perceptual hash), so — unlike the phash path above — a collision
+    -- here stays a same-user-shaped auto-void regardless of who the
+    -- other purchase belongs to: two different people's receipts
+    -- legitimately sharing the identical OCR'd receipt number at the
+    -- identical facility/date is not a realistic "shared photo" scenario
+    -- the way a phash collision is.
+    UPDATE app.purchase_evidence SET status = 'void', void_reason = 'duplicate' WHERE id = p_purchase_evidence_id;
+    UPDATE app.marker_credit SET purchase_evidence_id = NULL
+      WHERE purchase_evidence_id = p_purchase_evidence_id AND status <> 'credited';
     INSERT INTO app.fraud_signal (user_id, kind, detail)
     VALUES (
       p_user_id,
