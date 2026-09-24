@@ -9,37 +9,41 @@
  * cannot be computed without.** `Play.courseId` / `Play.localDate` /
  * `Play.courseDisambiguatedBy` (§4.3's "evidence class" — `geometry` /
  * `staff` / `user`, A2-01) / `Play.scoreBadge` map onto the task's four
- * named fields directly. Two things had to be added beyond that literal
- * four, both cited at the point they're used below:
+ * named fields directly. Beyond that literal four:
  *
  * 1. `Play.moneyQualifies` — a boolean the (out-of-scope, P3) money-rule
- *    scorer would have already computed. §8.2's core completion rule only
- *    ever needs `score_badge ≥ 0.50` (line 1942) — but AT(6)'s own O19
- *    rows (plan lines 1985-1988) are written entirely in terms of "money-
- *    mode plays" vs "badge-level" plays for the special-marker entitlement,
- *    and "compute completion and marker eligibility... including every
- *    case listed in AT(6)" is the literal scope instruction. Since
- *    `scorePlay`/the money rule itself is explicitly out of scope (task's
- *    own "Out of scope" list), this field is taken as a pre-computed input,
- *    the same way `scoreBadge` already is.
+ *    scorer would have already computed.
  * 2. `MarkerPurchase` (a separate, much smaller input: `facilityId` +
  *    `localDate`) — the O19 fixtures need "a purchase at every marker-
  *    roster facility" as a distinct leg from "money-mode plays at every
- *    member" (plan lines 1985-1986 name both legs separately, and
- *    line 1984 ties `marker_requires_completion` to "counting purchase
- *    corroboration"). There is no way to model two independently-failing
- *    legs from one input stream, so a second, minimal input was necessary.
+ *    member".
+ * 3. `EvalOptions.programmeStartsOn` (gate review B2) — §4.6's
+ *    `trail_programme.starts_on`, a bound that governs ONLY money-mode
+ *    qualification, kept strictly separate from `RosterVersion.trackingStartsOn`
+ *    (the badge bound): "a backdated badge never backdates an offer or a
+ *    marker" (§8.2 line ≈1956). Passed explicitly by the caller — never
+ *    inferred from `trackingStartsOn`.
+ * 4. `EvalOptions.badgeThreshold` (gate review S4) — `AchievementDef.minConfidence`
+ *    ("thresholds are data", §4.5 line ≈1024). Defaults to `BADGE_THRESHOLD`
+ *    (0.50, §8.2's own literal "score_badge ≥ 0.50") when the caller has no
+ *    achievement-specific threshold to apply.
  *
- * **`trail_programme.starts_on` simplification (documented, not modelled).**
- * §4.6 dates a purchase leg against `trail_programme.starts_on` (a DB-side
- * concept, §4.4/§4.6 — no `TrailProgramme` record exists in this task's
- * catalog scope). `specialMarkerEntitlement` below uses the SAME
- * `trackingStartsOn`/`removedOn` bounds for both legs (purchases and
- * plays) rather than a separate programme-start date, since the plan's
- * own "marker vs completion parity" fixture (AT(6) row) explicitly wants
- * both legs judged under the SAME bounds when the two dates coincide, and
- * modelling a second, independent date source has no fixture driving its
- * shape. Flagged again at `specialMarkerEntitlement`'s own doc.
+ * **Qualification (S2, S4).** A play "qualifies" for a given `EvalOptions`
+ * as follows:
+ *   - money mode (`opts.money`): `play.moneyQualifies === true` AND the
+ *     play's date clears BOTH `version.trackingStartsOn` (if set) AND
+ *     `opts.programmeStartsOn` (if set) — both bounds apply together
+ *     (point 3 above).
+ *   - non-money mode (plain badge-mode evaluation, OR a NEGATIVE occurrence
+ *     inside a money-mode `RuleExpr`, S2): `play.scoreBadge >= threshold OR
+ *     play.moneyQualifies === true` — meeting the stricter money bar always
+ *     counts as meeting the weaker badge one too, and the play's date only
+ *     needs to clear `version.trackingStartsOn` (never `programmeStartsOn`,
+ *     which is a money-only bound).
+ *   - the course played must be `verified` (`CourseMeta.verified`, S4;
+ *     §4.1 line ≈589: "Qualifying... at a verified course; stub-course
+ *     plays qualify only after promotion", G3-01) — checked identically in
+ *     both modes.
  */
 import {
   resolveMergedId,
@@ -51,10 +55,11 @@ import {
   type RegionCode,
   type RosterMember,
   type RosterVersion,
-  type TrailId,
 } from "@golfraven/catalog";
 
-/** §8.2 line 1942: "any play at m with `score_badge ≥ 0.50`". */
+/** §8.2 line 1942: "any play at m with `score_badge ≥ 0.50`" — the DEFAULT
+ * badge threshold, overridden per achievement by `EvalOptions.badgeThreshold`
+ * (`AchievementDef.minConfidence`, S4). */
 export const BADGE_THRESHOLD = 0.5;
 
 /* ------------------------------------------------------------------ */
@@ -68,24 +73,19 @@ export interface Play {
   /** Facility-local `play_date` (A2-17: date-only evidence — self-report,
    * a Health workout with no route, a file with no route — is already
    * resolved to a single date by the caller before it ever reaches this
-   * package; a device's own time zone plays no part here, which is
-   * exactly AT(6)'s "date-only `local_date`" fixture: this field is used
-   * verbatim, never re-derived from anything device-side). */
+   * package; a device's own time zone plays no part here). */
   localDate: IsoDate;
   /** "evidence class" (task wording) — §4.3's `course_disambiguated_by`.
-   * Defaults to `'geometry'` when omitted (the strongest, unambiguous
-   * case) so a caller that has no multi-course-site ambiguity to report
-   * need not always set it. */
+   * Defaults to `'geometry'` when omitted. */
   courseDisambiguatedBy?: CourseDisambiguatedBy;
-  /** "score" (task wording) — `score_badge`, §8.2's only completion
-   * threshold. */
+  /** "score" (task wording) — `score_badge`. */
   scoreBadge: number;
   /** Whether this SAME play also meets the §4.5 money rule (out of
-   * scope — see module doc point 1). Defaults to `false`. */
+   * scope). Defaults to `false`. */
   moneyQualifies?: boolean;
 }
 
-/** The §4.6/O19 purchase leg — see module doc point 2. */
+/** The §4.6/O19 purchase leg. */
 export interface MarkerPurchase {
   facilityId: FacilityId;
   localDate: IsoDate;
@@ -98,9 +98,14 @@ export interface CourseMeta {
   country?: "US" | "CA";
   designers?: DesignerId[];
   closed?: boolean;
-  /** Mirrors `Course.composite` (§4.1): the two nines this course is
-   * composed of, when this course IS an 18 formed from two nines. */
+  /** Mirrors `Course.composite` (§4.1). */
   composite?: [CourseId, CourseId];
+  /** S4 (gate review): "a qualifying play must be at a verified course"
+   * (§4.1 line ≈589, G3-01). Defaults to `true` when omitted so existing
+   * synthetic fixtures that predate this field (and any caller that
+   * genuinely doesn't model verification) keep working — an explicit
+   * `verified: false` is what opts a course OUT. */
+  verified?: boolean;
 }
 
 /** The course metadata `packages/rules` needs (never fetched — supplied by
@@ -109,6 +114,25 @@ export interface CourseMeta {
 export interface CompletionContext {
   courses: Record<string, CourseMeta>;
   ledger?: IdLedger;
+}
+
+/**
+ * Shared knobs every completion/aggregate function below accepts (gate
+ * review B2/S4 — see this module's doc for the full qualification rule).
+ */
+export interface EvalOptions {
+  /** Use money-qualifying plays (and `programmeStartsOn`) instead of
+   * badge-level ones. Default `false`. */
+  money?: boolean;
+  /** B2: an additional lower bound applied ONLY when `money` is true, in
+   * ADDITION to (never instead of) each version's own `trackingStartsOn`.
+   * Never applied in non-money mode. */
+  programmeStartsOn?: IsoDate;
+  /** S4: `AchievementDef.minConfidence` — the `score_badge` threshold a
+   * play must meet to qualify in non-money mode. Defaults to
+   * `BADGE_THRESHOLD` (0.50). Never applied in money mode (money mode
+   * uses the already-thresholded `moneyQualifies` boolean directly). */
+  badgeThreshold?: number;
 }
 
 function resolveId(ctx: CompletionContext, id: string): string {
@@ -124,6 +148,42 @@ function facilityOfCourse(ctx: CompletionContext, courseId: string): FacilityId 
   return courseMeta(ctx, courseId)?.facilityId;
 }
 
+function isCourseVerified(ctx: CompletionContext, courseId: string): boolean {
+  const meta = courseMeta(ctx, courseId);
+  return meta?.verified !== false;
+}
+
+/**
+ * The single play-qualification predicate every function below (and
+ * `aggregates.ts`'s field-keyed aggregates) shares (module doc
+ * "Qualification"). `trackingStartsOn` is the version's own bound (always
+ * consulted; pass `undefined` for a roster-agnostic global aggregate like
+ * `uniqueCourses`); `opts.programmeStartsOn` is consulted ADDITIONALLY,
+ * only in money mode. Exported so `aggregates.ts` never re-derives this
+ * logic (S3/S4 both apply there too: merge resolution AND qualification
+ * are orthogonal, but qualification itself must be identical everywhere).
+ */
+export function playQualifies(
+  play: Play,
+  ctx: CompletionContext,
+  opts: EvalOptions,
+  trackingStartsOn: IsoDate | undefined,
+): boolean {
+  if (!isCourseVerified(ctx, play.courseId)) return false;
+  if (trackingStartsOn && play.localDate < trackingStartsOn) return false;
+  if (opts.money) {
+    if (play.moneyQualifies !== true) return false;
+    if (opts.programmeStartsOn && play.localDate < opts.programmeStartsOn) return false;
+    return true;
+  }
+  const threshold = opts.badgeThreshold ?? BADGE_THRESHOLD;
+  // S2: a non-money query (plain badge mode, or a negative occurrence
+  // inside a money-mode RuleExpr) counts scoreBadge >= threshold OR
+  // moneyQualifies — meeting the stricter money bar always also meets the
+  // weaker badge one.
+  return play.scoreBadge >= threshold || play.moneyQualifies === true;
+}
+
 /* ------------------------------------------------------------------ */
 /* A2-01: the user-pick one-per-facility-per-date guard                */
 /* ------------------------------------------------------------------ */
@@ -132,10 +192,8 @@ function facilityOfCourse(ctx: CompletionContext, courseId: string): FacilityId 
  * "A `user` pick yields at most one course per facility per facility-local
  * date. A second, different pick on the same date replaces the first
  * (audited)" (§4.3). Only `courseDisambiguatedBy: 'user'` plays are
- * subject to this — `geometry`/`staff` plays are never ambiguous and pass
- * through untouched. "Replaces" is read as last-write-wins on **input
- * order** (the caller's array order is the audit order; this function has
- * no other way to know which pick came later).
+ * subject to this. "Replaces" is read as last-write-wins on **input
+ * order**.
  */
 export function applyUserPickGuard(plays: Play[], ctx: CompletionContext): Play[] {
   const latestUserPickIndex = new Map<string, number>();
@@ -154,15 +212,49 @@ export function applyUserPickGuard(plays: Play[], ctx: CompletionContext): Play[
 }
 
 /* ------------------------------------------------------------------ */
-/* removedOn (§4.3: "the import derives each member's removed_on")     */
+/* Physical member identity + removedOn (§4.3)                          */
 /* ------------------------------------------------------------------ */
 
-/** A member's PHYSICAL identity, for cross-version "is this the same
- * stop" comparisons (§4.3: "re-typing is not a drop... a member counts as
- * dropped only when no member of the later version covers the same
- * physical unit"). Facility id is the common denominator every unit type
- * resolves to (a course belongs to one facility; a hole belongs to a
- * course which belongs to one facility). */
+/** A roster member's physical identity, for cross-version "is this the
+ * same stop" comparisons (§4.3: "re-typing is not a drop... a member
+ * counts as dropped only when no member of the later version covers the
+ * same physical unit").
+ *
+ * S1 (gate review): keyed on the FACILITY only when the member itself is
+ * facility-unit; a course (or hole) member's physical identity is the
+ * COURSE — two different courses at the same facility are two different
+ * physical stops, so swapping one for the other at a course-unit trail IS
+ * a drop, even though the facility itself is unchanged. `anyOf`'s
+ * identity is the whole listed course set (any one of them still being
+ * coverable counts as "still present", mirroring how `anyOf` itself is
+ * satisfied).
+ */
+export type PhysicalIdentity =
+  | { kind: "facility"; facilityId: FacilityId }
+  | { kind: "course"; courseIds: string[] };
+
+export function physicalIdentityOfMember(
+  member: RosterMember,
+  ctx: CompletionContext,
+): PhysicalIdentity | undefined {
+  switch (member.unit) {
+    case "facility": {
+      const resolved = resolveId(ctx, member.facilityId) as FacilityId;
+      return { kind: "facility", facilityId: resolved };
+    }
+    case "course": {
+      if ("courseId" in member) return { kind: "course", courseIds: [resolveId(ctx, member.courseId)] };
+      return { kind: "course", courseIds: member.anyOf.map((id) => resolveId(ctx, id)) };
+    }
+    case "hole":
+      return { kind: "course", courseIds: [resolveId(ctx, member.courseId)] };
+  }
+}
+
+/** Backward-compatible convenience: the FACILITY a member resolves to,
+ * regardless of unit (used by the marker roster, which is always
+ * facility-level per §4.3, and by `deriveRemovedOn`'s facility-identity
+ * branch). */
 export function physicalFacilityIdOfMember(
   member: RosterMember,
   ctx: CompletionContext,
@@ -170,49 +262,55 @@ export function physicalFacilityIdOfMember(
   switch (member.unit) {
     case "facility":
       return (resolveId(ctx, member.facilityId) as FacilityId) ?? member.facilityId;
-    case "course":
+    case "course": {
       if ("courseId" in member) return facilityOfCourse(ctx, member.courseId);
-      // anyOf: every listed course is, by construction, the same
-      // multi-course site (A2-18), so the first resolvable one's facility
-      // is authoritative.
       for (const courseId of member.anyOf) {
         const f = facilityOfCourse(ctx, courseId);
         if (f) return f;
       }
       return undefined;
+    }
     case "hole":
       return facilityOfCourse(ctx, member.courseId);
   }
 }
 
+/** Whether `identity` is still covered by SOME member of `version` — the
+ * shared presence test `deriveRemovedOn` walks forward with. */
+function isIdentityPresentIn(
+  identity: PhysicalIdentity,
+  version: RosterVersion,
+  ctx: CompletionContext,
+): boolean {
+  if (identity.kind === "facility") {
+    return version.members.some((m) => physicalFacilityIdOfMember(m, ctx) === identity.facilityId);
+  }
+  return identity.courseIds.some((courseId) =>
+    version.members.some((m) => memberCoversCourseId(courseId, m, version.completionUnit, ctx)),
+  );
+}
+
 /**
  * §4.3: "the import derives each member's `removed_on` (the
  * `effectiveFrom` of the first later version that drops it, reset to null
- * if a later version re-adds it)." Implemented as a single forward scan
- * (ascending version number) rather than literally "find first drop, then
- * separately reset" — the two are equivalent (a `removed_on` is only ever
- * READ when the member is absent from the *latest* version, §8.2 line
- * 1944: "if m has been dropped from the latest version"), and a forward
- * scan naturally lands on the correct final state either way: present in
- * latest ⇒ `undefined`; absent in latest ⇒ the `effectiveFrom` of the
- * start of the unbroken absence streak that reaches the latest version.
+ * if a later version re-adds it)." A single forward scan (ascending
+ * version number) — equivalent to the plan's two-step description, since
+ * `removed_on` is only ever READ when the member is absent from the
+ * *latest* version (§8.2 line ≈1944).
  */
 export function deriveRemovedOn(
-  memberFacilityId: FacilityId | undefined,
+  identity: PhysicalIdentity | undefined,
   fromVersion: number,
   allVersions: RosterVersion[],
   ctx: CompletionContext,
 ): IsoDate | undefined {
-  if (!memberFacilityId) return undefined;
+  if (!identity) return undefined;
   const later = [...allVersions]
     .filter((v) => v.version > fromVersion)
     .sort((a, b) => a.version - b.version);
   let absentSince: IsoDate | undefined;
   for (const v of later) {
-    const present = v.members.some(
-      (m) => physicalFacilityIdOfMember(m, ctx) === memberFacilityId,
-    );
-    if (present) {
+    if (isIdentityPresentIn(identity, v, ctx)) {
       absentSince = undefined;
     } else if (absentSince === undefined) {
       absentSince = v.effectiveFrom;
@@ -221,19 +319,27 @@ export function deriveRemovedOn(
   return absentSince;
 }
 
+/** `removed_on` for a bare FACILITY id (S1: "marker credit and purchases
+ * must respect `removed_on` too", §4.6 line ≈1155) — the facility's own
+ * `removed_on`, computed the identical way a facility-unit member's would
+ * be. */
+function deriveFacilityRemovedOn(
+  facilityId: FacilityId,
+  fromVersion: number,
+  allVersions: RosterVersion[],
+  ctx: CompletionContext,
+): IsoDate | undefined {
+  return deriveRemovedOn({ kind: "facility", facilityId }, fromVersion, allVersions, ctx);
+}
+
 /* ------------------------------------------------------------------ */
 /* Member satisfaction (§8.2 core rule)                                 */
 /* ------------------------------------------------------------------ */
 
 /**
- * Whether `courseId` (a bare course id — NOT tied to any particular play's
- * date/score) is the/a physical unit `member` names, under `unit`. Handles
- * the composite case (A2-18): the composite course id itself covers each
- * of its two nines' course-unit members. This is the shared core both
- * `playMatchesMember` (a real play, date/score already checked by the
- * caller) and `aggregates.ts`'s `field: 'trail'` lookup (no play at all,
- * just "does this trail's roster include this course anywhere") need —
- * factored out so the two never drift.
+ * Whether `courseId` (a bare course id) is the/a physical unit `member`
+ * names, under `unit`. Handles the composite case (A2-18): the composite
+ * course id itself covers each of its two nines' course-unit members.
  */
 export function memberCoversCourseId(
   courseId: string,
@@ -242,12 +348,6 @@ export function memberCoversCourseId(
   ctx: CompletionContext,
 ): boolean {
   const resolvedCourseId = resolveId(ctx, courseId);
-  // A2-18: "a play on the composite satisfies the composite AND BOTH
-  // NINES as roster members" — so the composite's `composite: [a, b]`
-  // pair is read off the PLAY's own course (`resolvedCourseId`), and a
-  // member naming either nine (`resolved`) matches it. (Not the other way
-  // around — a nine's own `courseMeta` carries no `composite` field at
-  // all; only the 18-hole composite course does.)
   const matchesAnyOf = (courseIds: string[]): boolean =>
     courseIds.some((id) => {
       const resolved = resolveId(ctx, id);
@@ -268,16 +368,14 @@ export function memberCoversCourseId(
       return matchesAnyOf(member.anyOf);
     }
     case "hole": {
-      // "the course containing that signature hole has a qualifying play"
-      // (§4.3) — the specific hole is cosmetic, so this is a course match.
       if (member.unit !== "hole") return false;
       return matchesAnyOf([member.courseId]);
     }
   }
 }
 
-/** Whether `play` (already ledger-resolved) is a play AT the physical unit
- * `member` names, under `version.completionUnit`. */
+/** Whether `play` is a play AT the physical unit `member` names, under
+ * `version.completionUnit`. */
 export function playMatchesMember(
   play: Play,
   member: RosterMember,
@@ -289,17 +387,20 @@ export function playMatchesMember(
 
 export interface MemberSatisfactionResult {
   satisfied: boolean;
+  /** Every qualifying play date, sorted ascending (B3: `trailCompleteWithin`
+   * needs the FULL set, not just the earliest, to search candidate
+   * windows correctly). Empty when not satisfied. */
+  qualifyingDates: IsoDate[];
   /** The earliest qualifying play date, when satisfied — used by
-   * `trailCompleteWithin`/`inOrder` below. */
+   * `inOrder`. `undefined` when not satisfied. */
   earliestQualifyingDate?: IsoDate;
 }
 
 /**
  * §8.2's core per-member rule (line 1941-1946): a member m of version V is
- * satisfied by any play at m with `score_badge ≥ 0.50` whose facility-local
- * `play_date` (a) is on/after V's `trackingStartsOn` if set, and (b) is
- * before m's derived `removed_on`, if m has been dropped from the latest
- * version.
+ * satisfied by any QUALIFYING play at m (module doc's "Qualification")
+ * whose facility-local `play_date` is before m's derived `removed_on`, if
+ * m has been dropped from the latest version.
  */
 export function isMemberSatisfied(
   member: RosterMember,
@@ -307,27 +408,20 @@ export function isMemberSatisfied(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  /** `true` selects money-rule-qualifying plays instead of badge-level
-   * ones — used only by the `RuleExpr` evaluator (`rule-expr-eval.ts`)
-   * when this aggregate occurrence is POSITIVE in a money-mode rule
-   * (§4.1 line 629-643: "the caller sets the evaluation mode... a positive
-   * occurrence counts only money-rule plays"). §8.2's own completion rule
-   * (a badge, never an offer) always calls this with the default `false`. */
-  money = false,
+  opts: EvalOptions = {},
 ): MemberSatisfactionResult {
-  const memberFacilityId = physicalFacilityIdOfMember(member, ctx);
-  const removedOn = deriveRemovedOn(memberFacilityId, version.version, allVersions, ctx);
+  const identity = physicalIdentityOfMember(member, ctx);
+  const removedOn = deriveRemovedOn(identity, version.version, allVersions, ctx);
   const qualifyingDates: IsoDate[] = [];
   for (const play of plays) {
-    if (money ? play.moneyQualifies !== true : play.scoreBadge < BADGE_THRESHOLD) continue;
-    if (version.trackingStartsOn && play.localDate < version.trackingStartsOn) continue;
+    if (!playQualifies(play, ctx, opts, version.trackingStartsOn)) continue;
     if (removedOn && !(play.localDate < removedOn)) continue;
     if (!playMatchesMember(play, member, version.completionUnit, ctx)) continue;
     qualifyingDates.push(play.localDate);
   }
-  if (qualifyingDates.length === 0) return { satisfied: false };
   qualifyingDates.sort();
-  return { satisfied: true, earliestQualifyingDate: qualifyingDates[0]! };
+  if (qualifyingDates.length === 0) return { satisfied: false, qualifyingDates: [] };
+  return { satisfied: true, qualifyingDates, earliestQualifyingDate: qualifyingDates[0]! };
 }
 
 /* ------------------------------------------------------------------ */
@@ -338,9 +432,7 @@ export interface VersionCompletionResult {
   complete: boolean;
   satisfiedCount: number;
   requiredCount: number;
-  /** Per-member results, in `version.members` order — used by callers
-   * that need to know WHICH members are still missing (e.g. a Wallet
-   * "names the missing stop" UI, O19). */
+  /** Per-member results, in `version.members` order. */
   members: MemberSatisfactionResult[];
 }
 
@@ -356,11 +448,9 @@ export function evaluateVersionCompletion(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  money = false,
+  opts: EvalOptions = {},
 ): VersionCompletionResult {
-  const members = version.members.map((m) =>
-    isMemberSatisfied(m, version, allVersions, plays, ctx, money),
-  );
+  const members = version.members.map((m) => isMemberSatisfied(m, version, allVersions, plays, ctx, opts));
   const satisfiedCount = members.filter((r) => r.satisfied).length;
   const requiredCount = requiredCountOf(version.completionRule, version.members.length);
   return { complete: satisfiedCount >= requiredCount, satisfiedCount, requiredCount, members };
@@ -371,11 +461,9 @@ export function isTrailComplete(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  money = false,
+  opts: EvalOptions = {},
 ): boolean {
-  return allVersions.some(
-    (v) => evaluateVersionCompletion(v, allVersions, plays, ctx, money).complete,
-  );
+  return allVersions.some((v) => evaluateVersionCompletion(v, allVersions, plays, ctx, opts).complete);
 }
 
 /**
@@ -387,11 +475,11 @@ export function trailProgress(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  money = false,
+  opts: EvalOptions = {},
 ): number {
   let best = 0;
   for (const v of allVersions) {
-    const result = evaluateVersionCompletion(v, allVersions, plays, ctx, money);
+    const result = evaluateVersionCompletion(v, allVersions, plays, ctx, opts);
     const share = result.requiredCount === 0 ? 0 : result.satisfiedCount / result.requiredCount;
     if (share > best) best = share;
   }
@@ -401,30 +489,49 @@ export function trailProgress(
 /**
  * `trailCompleteWithin(trailId, days)`: "∃V, and one qualifying play per
  * member V requires, whose facility-local dates all fall within `days` of
- * each other" (§4.1 line 598). Each member's EARLIEST qualifying play date
- * is its representative (the date most likely to fit inside any feasible
- * window); for `n-of-m`, a sliding window over the sorted representative
- * dates checks whether at least `n` of them fit within `days`.
+ * each other" (§4.1 line 598).
+ *
+ * B3 (gate review): "SOME one qualifying play per member inside a window
+ * of `days`, not each member's earliest play." Every candidate window is
+ * searched — a classic minimum-window-covering-K-groups sliding window
+ * over ALL (member, date) pairs (not just each member's earliest date):
+ * sort every qualifying date across every member, slide a window, and
+ * track how many DISTINCT members have at least one date currently inside
+ * it. `n-of-m`'s sliding-window count check is kept (only `requiredCount`
+ * distinct members need to be covered, not all of them).
  */
 export function trailCompleteWithin(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
   days: number,
-  money = false,
+  opts: EvalOptions = {},
 ): boolean {
   return allVersions.some((v) => {
-    const result = evaluateVersionCompletion(v, allVersions, plays, ctx, money);
+    const result = evaluateVersionCompletion(v, allVersions, plays, ctx, opts);
     if (!result.complete) return false;
-    const dates = result.members
-      .map((m) => m.earliestQualifyingDate)
-      .filter((d): d is IsoDate => d !== undefined)
-      .sort();
-    if (dates.length < result.requiredCount) return false;
-    for (let i = 0; i + result.requiredCount - 1 < dates.length; i += 1) {
-      const windowStart = dates[i]!;
-      const windowEnd = dates[i + result.requiredCount - 1]!;
-      if (daysBetween(windowStart, windowEnd) <= days) return true;
+    const points: { memberIndex: number; date: IsoDate }[] = [];
+    result.members.forEach((m, i) => {
+      for (const date of m.qualifyingDates) points.push({ memberIndex: i, date });
+    });
+    points.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+    const countByMember = new Map<number, number>();
+    let distinctInWindow = 0;
+    let left = 0;
+    for (let right = 0; right < points.length; right += 1) {
+      const p = points[right]!;
+      const nextCount = (countByMember.get(p.memberIndex) ?? 0) + 1;
+      countByMember.set(p.memberIndex, nextCount);
+      if (nextCount === 1) distinctInWindow += 1;
+      while (daysBetween(points[left]!.date, p.date) > days) {
+        const lp = points[left]!;
+        const c = countByMember.get(lp.memberIndex)! - 1;
+        countByMember.set(lp.memberIndex, c);
+        if (c === 0) distinctInWindow -= 1;
+        left += 1;
+      }
+      if (distinctInWindow >= result.requiredCount) return true;
     }
     return false;
   });
@@ -438,19 +545,17 @@ function daysBetween(a: IsoDate, b: IsoDate): number {
 /**
  * `inOrder(trailId)`: "∃V that has `stopOrder` and is complete, where the
  * first qualifying play at each stop falls on or after the first
- * qualifying play at the previous stop" (§4.1 line 599). A version whose
- * members don't ALL carry `stopOrder` cannot be evaluated for order and is
- * skipped (the aggregate is about versions that opt into ordering).
+ * qualifying play at the previous stop" (§4.1 line 599).
  */
 export function inOrder(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  money = false,
+  opts: EvalOptions = {},
 ): boolean {
   return allVersions.some((v) => {
     if (!v.members.every((m) => m.stopOrder !== undefined)) return false;
-    const result = evaluateVersionCompletion(v, allVersions, plays, ctx, money);
+    const result = evaluateVersionCompletion(v, allVersions, plays, ctx, opts);
     if (!result.complete) return false;
     const ordered = v.members
       .map((m, i) => ({ stopOrder: m.stopOrder!, result: result.members[i]! }))
@@ -469,12 +574,8 @@ export function inOrder(
 /* Marker roster (§4.3)                                                 */
 /* ------------------------------------------------------------------ */
 
-/**
- * "With `markerUnit: 'facility'`... the marker roster of version V is the
- * set of **distinct facilities** that host a member of V" (§4.3 line 738).
- * `markerUnit` is currently always `'facility'` (§4.1: "the default and,
- * in v1, the only value") so this does not branch on it.
- */
+/** "the marker roster of version V is the set of **distinct facilities**
+ * that host a member of V" (§4.3 line 738). */
 export function markerRosterOf(version: RosterVersion, ctx: CompletionContext): FacilityId[] {
   const seen = new Set<string>();
   const out: FacilityId[] = [];
@@ -488,46 +589,38 @@ export function markerRosterOf(version: RosterVersion, ctx: CompletionContext): 
   return out;
 }
 
-/** Whether `facilityId` has a qualifying (badge-level, respecting the
- * version's `trackingStartsOn`) play at any of its courses — the same
- * date-bounding `isMemberSatisfied` applies, specialised to a bare
- * facility id (used for the marker roster, which is always facility-unit
- * regardless of the trail's own `completionUnit`). Exported for
- * `markerCredits` (`aggregates.ts`), which needs the identical rule. */
+/** Whether `facilityId` has a qualifying play at any of its courses,
+ * respecting `removed_on` for the FACILITY itself (S1). */
 export function isFacilityCreditedByPlay(
   facilityId: FacilityId,
   version: RosterVersion,
+  allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  requireMoney: boolean,
+  opts: EvalOptions = {},
 ): boolean {
+  const removedOn = deriveFacilityRemovedOn(facilityId, version.version, allVersions, ctx);
   return plays.some((play) => {
-    if (requireMoney ? play.moneyQualifies !== true : play.scoreBadge < BADGE_THRESHOLD) {
-      return false;
-    }
-    if (version.trackingStartsOn && play.localDate < version.trackingStartsOn) return false;
+    if (!playQualifies(play, ctx, opts, version.trackingStartsOn)) return false;
+    if (removedOn && !(play.localDate < removedOn)) return false;
     return facilityOfCourse(ctx, play.courseId) === facilityId;
   });
 }
 
 /**
  * `markerSetComplete(trailId)`: "∃V whose marker roster is covered under
- * V's `markerRule`" (§4.1 line 605). "Covered" is read as the same kind of
- * play-based crediting `isMemberSatisfied` uses for completion (§8.2's own
- * "the marker set (§4.6) and the badge reach the same verdict for the
- * same member set" fixture, AT(6)), not a purchase — purchases are the
- * SEPARATE O19 special-marker leg (`specialMarkerEntitlement` below).
+ * V's `markerRule`" (§4.1 line 605).
  */
 export function markerSetComplete(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  money = false,
+  opts: EvalOptions = {},
 ): boolean {
   return allVersions.some((v) => {
     const roster = markerRosterOf(v, ctx);
     const creditedCount = roster.filter((f) =>
-      isFacilityCreditedByPlay(f, v, plays, ctx, money),
+      isFacilityCreditedByPlay(f, v, allVersions, plays, ctx, opts),
     ).length;
     const required = requiredCountOf(v.markerRule, roster.length);
     return creditedCount >= required;
@@ -540,9 +633,7 @@ export function markerSetComplete(
 
 export interface SpecialMarkerEntitlementResult {
   entitled: boolean;
-  /** The version the entitlement was (or would be) judged on — `undefined`
-   * when no single version satisfies both legs (AT(6): "both legs must
-   * hold on the SAME V"). */
+  /** The version the entitlement was (or would be) judged on. */
   version?: number;
   missingPurchases: FacilityId[];
   missingMoneyPlays: FacilityId[];
@@ -551,19 +642,22 @@ export interface SpecialMarkerEntitlementResult {
 /**
  * O19 (§4.6, default `true`): "The special marker needs a valid marker
  * purchase at every marker-roster facility **and** a qualifying (money-
- * mode) play at every member... both on the same roster version." With
- * `markerRequiresCompletion: false`, only the purchase leg is required
- * (§4.6's per-trail toggle).
+ * mode) play at every member... both on the same roster version."
  *
- * **Both legs are judged on ONE version** — this function tries every
- * published version and returns the first where both legs hold (or, with
- * the toggle off, where the purchase leg alone holds); a trail where leg 1
- * holds on V1 and leg 2 only on V2 is correctly NOT entitled (AT(6): "one
- * leg on V1 and the other only on V2 → No entitlement").
+ * B1 (gate review): the money leg is judged PER COMPLETION MEMBER, under
+ * V's own `completionRule` (`evaluateVersionCompletion(v, …, {money:
+ * true, …}).complete`) — NOT per marker-roster facility. Two course
+ * members sharing one facility, with a money play at only one of them,
+ * must NOT be entitled just because "the facility" has some money play —
+ * §4.6 (line ≈1142) says "a qualifying play at every MEMBER", and members
+ * are completion-unit-typed, not always facility-grained. The FACILITY
+ * report (`missingMoneyPlays`) is still facility-shaped for the Wallet UI
+ * ("names the missing shop") — it's derived from which members failed,
+ * mapped to their facilities, not from an independent facility-level
+ * credit check.
  *
- * See this module's doc for the `trail_programme.starts_on` simplification
- * (both legs use `version.trackingStartsOn`, not a separate programme
- * date).
+ * With `markerRequiresCompletion: false`, only the purchase leg is
+ * required (§4.6's per-trail toggle).
  */
 export function specialMarkerEntitlement(
   allVersions: RosterVersion[],
@@ -571,22 +665,45 @@ export function specialMarkerEntitlement(
   purchases: MarkerPurchase[],
   ctx: CompletionContext,
   markerRequiresCompletion = true,
+  opts: Omit<EvalOptions, "money"> = {},
 ): SpecialMarkerEntitlementResult {
   let bestMissingPurchases: FacilityId[] = [];
   let bestMissingMoneyPlays: FacilityId[] = [];
   for (const v of allVersions) {
     const roster = markerRosterOf(v, ctx);
     const missingPurchases = roster.filter(
-      (f) => !hasPurchase(f, v, purchases),
+      (f) => !hasPurchase(f, v, allVersions, purchases, ctx, opts),
     );
-    const missingMoneyPlays = markerRequiresCompletion
-      ? roster.filter((f) => !isFacilityCreditedByPlay(f, v, plays, ctx, true))
-      : [];
+
+    let missingMoneyPlays: FacilityId[] = [];
+    if (markerRequiresCompletion) {
+      const moneyResult = evaluateVersionCompletion(v, allVersions, plays, ctx, {
+        ...opts,
+        money: true,
+      });
+      const missingFacilities = new Set<string>();
+      v.members.forEach((member, i) => {
+        if (moneyResult.members[i]!.satisfied) return;
+        const facilityId = physicalFacilityIdOfMember(member, ctx);
+        if (facilityId) missingFacilities.add(facilityId);
+      });
+      missingMoneyPlays = [...missingFacilities] as FacilityId[];
+      if (!moneyResult.complete && missingMoneyPlays.length === 0) {
+        // n-of-m: every INDIVIDUAL member could show as "satisfied" while
+        // the version is still short of `requiredCount` overall (e.g. one
+        // member counted twice via a shared facility can't happen, but a
+        // trail could require MORE satisfied members than are actually
+        // satisfied even with none individually "missing" a facility of
+        // its own — defensive fallback so the boolean and the report never
+        // disagree: fall back to the whole roster when nothing more
+        // specific can be named).
+        missingMoneyPlays = roster;
+      }
+    }
+
     if (missingPurchases.length === 0 && missingMoneyPlays.length === 0) {
       return { entitled: true, version: v.version, missingPurchases: [], missingMoneyPlays: [] };
     }
-    // Keep the best (fewest-missing) attempt across versions, purely for a
-    // more useful "what's missing" report when nothing is entitled.
     if (
       bestMissingPurchases.length + bestMissingMoneyPlays.length === 0 ||
       missingPurchases.length + missingMoneyPlays.length <
@@ -603,13 +720,21 @@ export function specialMarkerEntitlement(
   };
 }
 
+/** A purchase leg check respecting `removed_on` (S1) and `programmeStartsOn`
+ * (B2) for the facility, on top of the version's own `trackingStartsOn`. */
 function hasPurchase(
   facilityId: FacilityId,
   version: RosterVersion,
+  allVersions: RosterVersion[],
   purchases: MarkerPurchase[],
+  ctx: CompletionContext,
+  opts: Omit<EvalOptions, "money">,
 ): boolean {
+  const removedOn = deriveFacilityRemovedOn(facilityId, version.version, allVersions, ctx);
   return purchases.some((p) => {
     if (version.trackingStartsOn && p.localDate < version.trackingStartsOn) return false;
+    if (opts.programmeStartsOn && p.localDate < opts.programmeStartsOn) return false;
+    if (removedOn && !(p.localDate < removedOn)) return false;
     return p.facilityId === facilityId;
   });
 }
@@ -618,27 +743,26 @@ function hasPurchase(
 /* played / uniqueCourses / monthlyStreak (simple, no roster needed)    */
 /* ------------------------------------------------------------------ */
 
-/** `played(courseId)`: "Qualifying plays at that course" (§4.1 line 595) —
- * badge-level (`scoreBadge >= 0.50`) unless `money` is true, in which case
- * only `moneyQualifies` plays count (§4.1 line 629-632, "the caller sets
- * the evaluation mode"). */
-export function played(courseId: CourseId, plays: Play[], ctx: CompletionContext, money = false): number {
+/** `played(courseId)`: "Qualifying plays at that course" (§4.1 line 595). */
+export function played(
+  courseId: CourseId,
+  plays: Play[],
+  ctx: CompletionContext,
+  opts: EvalOptions = {},
+): number {
   const resolvedTarget = resolveId(ctx, courseId);
   return plays.filter((p) => {
-    if (money ? p.moneyQualifies !== true : p.scoreBadge < BADGE_THRESHOLD) return false;
+    if (!playQualifies(p, ctx, opts, undefined)) return false;
     return resolveId(ctx, p.courseId) === resolvedTarget;
   }).length;
 }
 
 /** `uniqueCourses`: "Distinct qualifying played courses; a composite play
- * counts once" (§4.1 line 600) — a composite play already only ever
- * carries ONE `courseId` (the composite's own), so "counts once" is
- * automatic here; the "also satisfies both nines as roster members" half
- * of A2-18 is `playMatchesMember`'s concern, not this aggregate's. */
-export function uniqueCourses(plays: Play[], ctx: CompletionContext, money = false): number {
+ * counts once" (§4.1 line 600). */
+export function uniqueCourses(plays: Play[], ctx: CompletionContext, opts: EvalOptions = {}): number {
   const set = new Set<string>();
   for (const p of plays) {
-    if (money ? p.moneyQualifies !== true : p.scoreBadge < BADGE_THRESHOLD) continue;
+    if (!playQualifies(p, ctx, opts, undefined)) continue;
     set.add(resolveId(ctx, p.courseId));
   }
   return set.size;
@@ -646,10 +770,10 @@ export function uniqueCourses(plays: Play[], ctx: CompletionContext, money = fal
 
 /** `monthlyStreak`: "The longest run of consecutive calendar months, in
  * facility-local dates, with ≥ 1 qualifying play" (§4.1 line 606). */
-export function monthlyStreak(plays: Play[], money = false): number {
+export function monthlyStreak(plays: Play[], ctx: CompletionContext, opts: EvalOptions = {}): number {
   const months = new Set<string>();
   for (const p of plays) {
-    if (money ? p.moneyQualifies !== true : p.scoreBadge < BADGE_THRESHOLD) continue;
+    if (!playQualifies(p, ctx, opts, undefined)) continue;
     months.add(p.localDate.slice(0, 7)); // "YYYY-MM"
   }
   const sorted = [...months].sort();

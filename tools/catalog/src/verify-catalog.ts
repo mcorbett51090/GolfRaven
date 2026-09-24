@@ -1025,6 +1025,7 @@ function checkAchievements(
 ): void {
   const trailIds = new Set<string>(bundle.trails.map((t) => t.id));
   const designerIds = new Set<string>((bundle.designers ?? []).map((d) => d.id));
+  const facilityIds = new Set<string>(bundle.facilities.map((f) => f.id));
 
   (bundle.achievements ?? []).forEach((achievement: AchievementDef, i) => {
     const path = `achievements[${i}]`;
@@ -1064,16 +1065,33 @@ function checkAchievements(
           ),
         );
       }
+      if (ref.kind === "facility" && !facilityIds.has(ref.id)) {
+        issues.push(
+          issue(
+            "ACHIEVEMENT_RULE_UNKNOWN_FACILITY",
+            `${path}.rule`,
+            `achievement "${achievement.id}"'s rule references facility "${ref.id}", which is not in this catalog`,
+          ),
+        );
+      }
     });
   });
 }
 
-/** Walks a `RuleExpr` tree, calling `visit` for every `trailId`/`courseId`
- * and every `countWhere("designer", …)` value it references — the ids a
- * schema parse cannot cross-check against the rest of the catalog. */
+type RuleExprRef = { kind: "trail" | "course" | "designer" | "facility"; id: string };
+
+/**
+ * Walks a `RuleExpr` tree, calling `visit` for every id it references that
+ * a schema parse cannot cross-check against the rest of the catalog: a
+ * `trailId`/`courseId` argument, and every `field`-keyed aggregate's
+ * `where.in`/`value` when `field` names an id kind (`designer`/`facility`/
+ * `trail` — `region`/`country` are closed enums with no catalog id to
+ * check, S6: "every aggregate that takes a designer, course, facility or
+ * trail id, not only `countWhere(\"designer\")`").
+ */
 function walkRuleExprRefs(
-  expr: import("@golfraven/catalog").RuleExpr,
-  visit: (ref: { kind: "trail" | "course" | "designer"; id: string }) => void,
+  expr: import("@golfraven/catalog").RuleExpr | import("@golfraven/catalog").NotArg,
+  visit: (ref: RuleExprRef) => void,
 ): void {
   switch (expr.kind) {
     case "and":
@@ -1094,15 +1112,33 @@ function walkRuleExprRefs(
 
 function walkNumericOperandRefs(
   operand: import("@golfraven/catalog").NumericOperand,
-  visit: (ref: { kind: "trail" | "course" | "designer"; id: string }) => void,
+  visit: (ref: RuleExprRef) => void,
 ): void {
   if (operand.kind === "literal") return;
   walkAggregateRefs(operand, visit);
 }
 
+/** `field`-keyed aggregate id refs, S6: `designer`/`facility`/`trail` are
+ * catalog id kinds (checked here); `region`/`country` are closed enums
+ * already fully validated at the schema layer (`fieldValueShapeIssue`) —
+ * no catalog id to cross-reference. */
+function fieldRefKind(field: import("@golfraven/catalog").Field): RuleExprRef["kind"] | undefined {
+  switch (field) {
+    case "designer":
+      return "designer";
+    case "facility":
+      return "facility";
+    case "trail":
+      return "trail";
+    case "region":
+    case "country":
+      return undefined;
+  }
+}
+
 function walkAggregateRefs(
   agg: import("@golfraven/catalog").AggregateCall,
-  visit: (ref: { kind: "trail" | "course" | "designer"; id: string }) => void,
+  visit: (ref: RuleExprRef) => void,
 ): void {
   switch (agg.name) {
     case "played":
@@ -1116,15 +1152,71 @@ function walkAggregateRefs(
     case "markerSetComplete":
       visit({ kind: "trail", id: agg.trailId });
       return;
-    case "countWhere":
-      if (agg.field === "designer") visit({ kind: "designer", id: agg.value });
+    case "countWhere": {
+      const kind = fieldRefKind(agg.field);
+      if (kind) visit({ kind, id: agg.value });
       return;
-    case "uniqueCourses":
-    case "countDistinct":
+    }
+    case "countDistinct": {
+      const kind = fieldRefKind(agg.field);
+      if (kind && agg.where) {
+        for (const id of agg.where.in) visit({ kind, id });
+      }
+      return;
+    }
+    // maxCountBy(field) names no specific VALUE, only the field itself —
+    // nothing to cross-reference.
     case "maxCountBy":
+    case "uniqueCourses":
     case "monthlyStreak":
       return;
   }
+}
+
+/**
+ * N5 (gate review): `completionRule`/`markerRule: n-of-m` with `n` greater
+ * than the version's own member count is never satisfiable — no roster
+ * assembled from `members` can ever reach it. `CompletionOrMarkerRuleSchema`
+ * (`packages/catalog/src/schema.ts`) only enforces `n` is a positive
+ * integer; it cannot ALSO know `members.length` without a cross-field
+ * check, so — the same split this file already uses everywhere else —
+ * that comparison lives here.
+ */
+function checkNOfMBounds(bundle: CatalogBundle, index: CatalogIndex, issues: CatalogIssue[]): void {
+  bundle.trails.forEach((trail, trailIndex) => {
+    trail.rosterVersions.forEach((version, versionIndex) => {
+      const versionPath = `trails[${trailIndex}].rosterVersions[${versionIndex}]`;
+      const memberCount = version.members.length;
+      if (version.completionRule.kind === "n-of-m" && version.completionRule.n > memberCount) {
+        issues.push(
+          issue(
+            "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT",
+            `${versionPath}.completionRule.n`,
+            `completionRule.n (${version.completionRule.n}) exceeds this version's member count (${memberCount}) — never satisfiable`,
+          ),
+        );
+      }
+      // markerRule's "m" is the MARKER ROSTER — distinct facilities
+      // hosting a member (§4.3) — not the raw member count, which can
+      // differ (e.g. 12 course members at 5 shared facilities).
+      if (version.markerRule.kind === "n-of-m") {
+        const markerRosterSize = new Set(
+          version.members
+            .map((m) => resolveMemberFacility(m, index, bundle.idLedger)?.id)
+            .filter((id) => id !== undefined),
+        ).size;
+        if (version.markerRule.n > markerRosterSize) {
+          issues.push(
+            issue(
+              "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT",
+              `${versionPath}.markerRule.n`,
+              `markerRule.n (${version.markerRule.n}) exceeds this version's marker roster size (${markerRosterSize} distinct facilities) — never satisfiable`,
+            ),
+          );
+        }
+      }
+    });
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1250,6 +1342,7 @@ export function verifyCatalog(
   checkProvenance(bundle, courses, issues);
   checkOfferTerms(bundle, issues);
   checkAchievements(bundle, index, issues);
+  checkNOfMBounds(bundle, index, issues);
 
   if (options.base) {
     checkRosterVersionImmutability(bundle, options.base, issues);

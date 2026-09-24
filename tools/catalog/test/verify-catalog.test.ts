@@ -436,4 +436,19 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
     expectExactFail("mf-achievement-unsatisfiable", [
       { code: "RULE_UNSATISFIABLE", path: "achievements[0].rule" },
     ]));
+
+  it("S6: an achievement rule's countWhere(\"facility\", …) referencing an unknown facility", () =>
+    expectExactFail("mf-achievement-unknown-facility", [
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_FACILITY", path: "achievements[0].rule" },
+    ]));
+
+  it("S6: an achievement rule's countDistinct(\"trail\", {in}) referencing an unknown trail", () =>
+    expectExactFail("mf-achievement-unknown-trail-countdistinct", [
+      { code: "ACHIEVEMENT_RULE_UNKNOWN_TRAIL", path: "achievements[0].rule" },
+    ]));
+
+  it("N5: completionRule n-of-m with n greater than the member count", () =>
+    expectExactFail("mf-nofm-exceeds-member-count", [
+      { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].completionRule.n" },
+    ]));
 });

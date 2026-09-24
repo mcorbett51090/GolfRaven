@@ -7,18 +7,26 @@
  * **`field: 'trail'` and cross-trail context.** "`trail` (every trail with
  * some roster version that contains the course)" (§4.1 line 609) is the
  * one field whose value for a course depends on trails OTHER than any
- * single trail the caller might be evaluating — so these three functions
- * take `trails: Record<TrailId, RosterVersion[]>` (every trail this
- * evaluation run knows about), not a single trail's roster versions the
- * way `completion.ts`'s trail-scoped functions do.
+ * single trail the caller might be evaluating — so these functions take
+ * `trails: Record<TrailId, RosterVersion[]>` (every trail this evaluation
+ * run knows about).
+ *
+ * **S3 (gate review): every id resolves through the ledger's `mergedInto`
+ * closure first (A2-04, §4.1 line 590).** A play recorded against a
+ * tombstoned course id counts for its SURVIVOR, and — because the
+ * qualifying-course SET is built from resolved ids — never twice even if
+ * two plays name the pre-merge id and the survivor id separately for the
+ * "same" real course.
  */
-import type { Field, RosterVersion, TrailId } from "@golfraven/catalog";
+import type { Field, IdLedger, RosterVersion, TrailId } from "@golfraven/catalog";
+import { resolveMergedId } from "@golfraven/catalog";
 import {
-  BADGE_THRESHOLD,
   isFacilityCreditedByPlay,
   markerRosterOf,
   memberCoversCourseId,
+  playQualifies,
   type CompletionContext,
+  type EvalOptions,
   type Play,
 } from "./completion.js";
 
@@ -26,17 +34,24 @@ export interface AggregateContext extends CompletionContext {
   trails: Record<string, RosterVersion[]>;
 }
 
-function qualifyingCourseIds(plays: Play[], money: boolean): Set<string> {
+function resolveId(ledger: IdLedger | undefined, id: string): string {
+  return ledger ? resolveMergedId(ledger, id) : id;
+}
+
+/** S3: every qualifying play's course id, resolved through `mergedInto`
+ * FIRST, then deduped — a `Set` of already-resolved ids, so a tombstoned
+ * id's play and its survivor's own play collapse into one entry. */
+function qualifyingCourseIds(plays: Play[], ctx: AggregateContext, opts: EvalOptions): Set<string> {
   const set = new Set<string>();
   for (const p of plays) {
-    if (money ? p.moneyQualifies !== true : p.scoreBadge < BADGE_THRESHOLD) continue;
-    set.add(p.courseId);
+    if (!playQualifies(p, ctx, opts, undefined)) continue;
+    set.add(resolveId(ctx.ledger, p.courseId));
   }
   return set;
 }
 
-function fieldValuesOfCourse(courseId: string, field: Field, ctx: AggregateContext): string[] {
-  const meta = ctx.courses[courseId];
+function fieldValuesOfCourse(resolvedCourseId: string, field: Field, ctx: AggregateContext): string[] {
+  const meta = ctx.courses[resolvedCourseId];
   switch (field) {
     case "region":
       return meta?.region ? [meta.region] : [];
@@ -47,17 +62,20 @@ function fieldValuesOfCourse(courseId: string, field: Field, ctx: AggregateConte
     case "facility":
       return meta?.facilityId ? [meta.facilityId] : [];
     case "trail":
-      return trailsContainingCourse(courseId, ctx);
+      return trailsContainingCourse(resolvedCourseId, ctx);
   }
 }
 
 /** "every trail with some roster version that contains the course"
- * (§4.1 line 609) — scans every trail this evaluation run was given. */
-function trailsContainingCourse(courseId: string, ctx: AggregateContext): TrailId[] {
+ * (§4.1 line 609) — scans every trail this evaluation run was given,
+ * resolving each member's own course reference(s) through the ledger too
+ * (S3), so a roster that still lists a since-tombstoned id correctly
+ * covers the survivor. */
+function trailsContainingCourse(resolvedCourseId: string, ctx: AggregateContext): TrailId[] {
   const out: TrailId[] = [];
   for (const [trailId, versions] of Object.entries(ctx.trails)) {
     const contains = versions.some((v) =>
-      v.members.some((m) => memberCoversCourseId(courseId, m, v.completionUnit, ctx)),
+      v.members.some((m) => memberCoversCourseId(resolvedCourseId, m, v.completionUnit, ctx)),
     );
     if (contains) out.push(trailId as TrailId);
   }
@@ -71,12 +89,12 @@ export function countDistinct(
   field: Field,
   ctx: AggregateContext,
   plays: Play[],
-  money = false,
+  opts: EvalOptions = {},
   where?: { in: string[] },
 ): number {
   const allowed = where ? new Set(where.in) : undefined;
   const values = new Set<string>();
-  for (const courseId of qualifyingCourseIds(plays, money)) {
+  for (const courseId of qualifyingCourseIds(plays, ctx, opts)) {
     for (const value of fieldValuesOfCourse(courseId, field, ctx)) {
       if (allowed && !allowed.has(value)) continue;
       values.add(value);
@@ -86,10 +104,17 @@ export function countDistinct(
 }
 
 /** `maxCountBy(field)`: "The largest number of distinct qualifying played
- * courses sharing one value of `field`" (§4.1 line 602). */
-export function maxCountBy(field: Field, ctx: AggregateContext, plays: Play[], money = false): number {
+ * courses sharing one value of `field`" (§4.1 line 602) — counts
+ * COURSES, one per distinct qualifying course id, never plays (a player
+ * who plays the same course twice must not inflate this). */
+export function maxCountBy(
+  field: Field,
+  ctx: AggregateContext,
+  plays: Play[],
+  opts: EvalOptions = {},
+): number {
   const countByValue = new Map<string, number>();
-  for (const courseId of qualifyingCourseIds(plays, money)) {
+  for (const courseId of qualifyingCourseIds(plays, ctx, opts)) {
     for (const value of fieldValuesOfCourse(courseId, field, ctx)) {
       countByValue.set(value, (countByValue.get(value) ?? 0) + 1);
     }
@@ -108,10 +133,10 @@ export function countWhere(
   value: string,
   ctx: AggregateContext,
   plays: Play[],
-  money = false,
+  opts: EvalOptions = {},
 ): number {
   let count = 0;
-  for (const courseId of qualifyingCourseIds(plays, money)) {
+  for (const courseId of qualifyingCourseIds(plays, ctx, opts)) {
     if (fieldValuesOfCourse(courseId, field, ctx).includes(value)) count += 1;
   }
   return count;
@@ -119,18 +144,17 @@ export function countWhere(
 
 /** `markerCredits(trailId)`: "the maximum over V of credited facilities
  * that satisfy V's marker roster under the §4.6 membership rule" (§4.1
- * line 604) — the same crediting rule `markerSetComplete` (`completion.ts`)
- * uses, but counted rather than thresholded against `markerRule`. */
+ * line 604). */
 export function markerCredits(
   allVersions: RosterVersion[],
   plays: Play[],
   ctx: CompletionContext,
-  money = false,
+  opts: EvalOptions = {},
 ): number {
   let best = 0;
   for (const v of allVersions) {
     const roster = markerRosterOf(v, ctx);
-    const credited = roster.filter((f) => isFacilityCreditedByPlay(f, v, plays, ctx, money)).length;
+    const credited = roster.filter((f) => isFacilityCreditedByPlay(f, v, allVersions, plays, ctx, opts)).length;
     if (credited > best) best = credited;
   }
   return best;

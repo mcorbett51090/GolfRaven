@@ -54,11 +54,17 @@ function expectPass(raw: RuleExpr, mode: "badge" | "money" = "badge") {
   expect(v.ok).toBe(true);
 }
 
-function expectFailSchema(raw: unknown, path: string) {
+/** N3 (gate review): every R-F fixture asserts BOTH the code and the
+ * path — `code` is the raw Zod issue code (this suite operates directly
+ * against `RuleExprSchema`/`checkRuleExpr`, not through `verify-catalog`'s
+ * `SCHEMA_INVALID` wrapping). */
+function expectFailSchema(raw: unknown, path: string, code: string) {
   const parsed = RuleExprSchema.safeParse(raw);
   expect(parsed.success).toBe(false);
   if (!parsed.success) {
-    expect(parsed.error.issues.some((i) => i.path.join(".") === path)).toBe(true);
+    expect(
+      parsed.error.issues.some((i) => i.path.join(".") === path && i.code === code),
+    ).toBe(true);
   }
 }
 
@@ -189,26 +195,31 @@ describe("AT(1) must-pass fixtures R-01–R-14 (§8.1)", () => {
   });
 });
 
-describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917)", () => {
+describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917) — N3: every fixture asserts BOTH code and path", () => {
   it("R-F1: an unknown aggregate, e.g. holesInOne() — not on the closed list", () => {
-    expectFailSchema({ kind: "agg", name: "holesInOne" }, "name");
+    expectFailSchema({ kind: "agg", name: "holesInOne" }, "name", "invalid_union");
   });
 
   it('R-F2: countDistinct("par") — "par" is not in the field enum', () => {
-    expectFailSchema({ kind: "agg", name: "countDistinct", field: "par" }, "field");
+    // N1 (gate review): a bare numeric aggregate is legal ONLY directly
+    // under `not` — wrapped here so the fixture reaches the field-enum
+    // check at all, rather than failing one level higher.
+    expectFailSchema(
+      { kind: "not", arg: { kind: "agg", name: "countDistinct", field: "par" } },
+      "arg.field",
+      "invalid_value",
+    );
   });
 
   it('R-F3: countDistinct("region", { in: ["CA-XX"] }) — unknown region value', () => {
-    const parsed = RuleExprSchema.safeParse({
-      kind: "agg",
-      name: "countDistinct",
-      field: "region",
-      where: { in: ["CA-XX"] },
-    });
-    expect(parsed.success).toBe(false);
-    if (!parsed.success) {
-      expect(parsed.error.issues.some((i) => i.path.join(".") === "where.in.0")).toBe(true);
-    }
+    expectFailSchema(
+      {
+        kind: "not",
+        arg: { kind: "agg", name: "countDistinct", field: "region", where: { in: ["CA-XX"] } },
+      },
+      "arg.where.in.0",
+      "custom",
+    );
   });
 
   it("R-F4: countDistinct(\"region\", { in: [4 codes] }) >= 5 — unsatisfiable", () => {
@@ -228,21 +239,16 @@ describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917)", () => {
     if (parsed.success) {
       const issues = checkRuleExpr(parsed.data, { mode: "badge" });
       expect(issues.map((i) => i.code)).toContain("RULE_UNSATISFIABLE");
-      expect(issues.some((i) => i.path === "rule")).toBe(true);
+      expect(issues.some((i) => i.code === "RULE_UNSATISFIABLE" && i.path === "rule")).toBe(true);
     }
   });
 
   it('R-F5: countWhere("designer", "Pete Dye") — not a dsg_ id', () => {
-    const parsed = RuleExprSchema.safeParse({
-      kind: "agg",
-      name: "countWhere",
-      field: "designer",
-      value: "Pete Dye",
-    });
-    expect(parsed.success).toBe(false);
-    if (!parsed.success) {
-      expect(parsed.error.issues.some((i) => i.path.join(".") === "value")).toBe(true);
-    }
+    expectFailSchema(
+      { kind: "not", arg: { kind: "agg", name: "countWhere", field: "designer", value: "Pete Dye" } },
+      "arg.value",
+      "custom",
+    );
   });
 
   it("R-F6: an offer with played(\"crs_F\") == 0 — == has no polarity in money mode", () => {
@@ -257,22 +263,121 @@ describe("AT(1) must-fail fixtures R-F1–R-F7 (§8.1 lines 1909-1917)", () => {
     if (parsed.success) {
       // Badge mode: polarity makes no difference — no issue.
       expect(checkRuleExpr(parsed.data, { mode: "badge" })).toEqual([]);
-      // Money mode: rejected.
+      // Money mode: rejected, at the compare node's own path.
       const moneyIssues = checkRuleExpr(parsed.data, { mode: "money" });
-      expect(moneyIssues.map((i) => i.code)).toContain("RULE_MONEY_MODE_NO_POLARITY");
+      expect(
+        moneyIssues.some((i) => i.code === "RULE_MONEY_MODE_NO_POLARITY" && i.path === "rule"),
+      ).toBe(true);
     }
   });
 
   it("R-F7: a confidence or score operand — no such operand in the offer grammar (A2-05)", () => {
     // minConfidence 0.5
-    expectFailSchema({ kind: "agg", name: "minConfidence", value: 0.5 }, "name");
+    expectFailSchema({ kind: "agg", name: "minConfidence", value: 0.5 }, "name", "invalid_union");
     // score_badge >= 0.5
-    const parsed = RuleExprSchema.safeParse({
+    expectFailSchema(
+      { kind: "compare", op: ">=", left: { kind: "agg", name: "score_badge" }, right: { kind: "literal", value: 0.5 } },
+      "left",
+      "invalid_union",
+    );
+  });
+});
+
+describe("gate-review nits N2/N4/N5", () => {
+  it("N2: not(unsatisfiable comparison) is satisfiable (vacuously true), never RULE_UNSATISFIABLE", () => {
+    const raw: RuleExpr = {
+      kind: "not",
+      arg: {
+        kind: "compare",
+        op: ">=",
+        left: {
+          kind: "agg",
+          name: "countDistinct",
+          field: "region",
+          where: { in: ["CA-NB", "CA-NS", "CA-PE", "CA-NL"] },
+        },
+        right: { kind: "literal", value: 5 },
+      },
+    };
+    const parsed = RuleExprSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(checkRuleExpr(parsed.data, { mode: "badge" })).toEqual([]);
+    }
+  });
+
+  it("N2: RULE_MONEY_MODE_NO_POLARITY never fires on a literal-only comparison", () => {
+    const raw: RuleExpr = { kind: "compare", op: "==", left: { kind: "literal", value: 1 }, right: { kind: "literal", value: 1 } };
+    const parsed = RuleExprSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(checkRuleExpr(parsed.data, { mode: "money" })).toEqual([]);
+    }
+  });
+
+  it("N4: inOrder is rejected in a money-mode rule", () => {
+    const raw: RuleExpr = { kind: "agg", name: "inOrder", trailId: TRL };
+    const parsed = RuleExprSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(checkRuleExpr(parsed.data, { mode: "badge" })).toEqual([]);
+      const moneyIssues = checkRuleExpr(parsed.data, { mode: "money" });
+      expect(
+        moneyIssues.some((i) => i.code === "RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE" && i.path === "rule"),
+      ).toBe(true);
+    }
+  });
+
+  it("N4: inOrder nested inside and()/not() is also rejected in money mode", () => {
+    const raw: RuleExpr = {
+      kind: "and",
+      args: [
+        { kind: "agg", name: "inOrder", trailId: TRL },
+        { kind: "not", arg: { kind: "agg", name: "played", courseId: CRS } },
+      ],
+    };
+    const parsed = RuleExprSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      const moneyIssues = checkRuleExpr(parsed.data, { mode: "money" });
+      expect(moneyIssues.map((i) => i.code)).toContain("RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE");
+    }
+  });
+});
+
+describe("S7 mutation-kill: checker bound regressions (S5)", () => {
+  it("countDistinct(\"region\", { in: [a code repeated 5 times] }) >= 2 is unsatisfiable — the bound is the DEDUPED count (1), not the raw array length (5)", () => {
+    const raw: RuleExpr = {
       kind: "compare",
       op: ">=",
-      left: { kind: "agg", name: "score_badge" },
-      right: { kind: "literal", value: 0.5 },
-    });
-    expect(parsed.success).toBe(false);
+      left: {
+        kind: "agg",
+        name: "countDistinct",
+        field: "region",
+        where: { in: ["CA-NB", "CA-NB", "CA-NB", "CA-NB", "CA-NB"] },
+      },
+      right: { kind: "literal", value: 2 },
+    };
+    const parsed = RuleExprSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      const issues = checkRuleExpr(parsed.data, { mode: "badge" });
+      expect(issues.map((i) => i.code)).toContain("RULE_UNSATISFIABLE");
+    }
+  });
+
+  it("trailProgress(T) > 1 is unsatisfiable — trailProgress is bounded to [0, 1]", () => {
+    const raw: RuleExpr = {
+      kind: "compare",
+      op: ">",
+      left: { kind: "agg", name: "trailProgress", trailId: TRL },
+      right: { kind: "literal", value: 1 },
+    };
+    const parsed = RuleExprSchema.safeParse(raw);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      const issues = checkRuleExpr(parsed.data, { mode: "badge" });
+      expect(issues.map((i) => i.code)).toContain("RULE_UNSATISFIABLE");
+    }
   });
 });

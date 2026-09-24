@@ -1182,21 +1182,7 @@
               "type": "object"
             },
             {
-              "additionalProperties": false,
-              "properties": {
-                "arg": {
-                  "$ref": "__shared#/$defs/schema0"
-                },
-                "kind": {
-                  "const": "not",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "kind",
-                "arg"
-              ],
-              "type": "object"
+              "$ref": "__shared#/$defs/schema1"
             },
             {
               "additionalProperties": false,
@@ -1708,220 +1694,6 @@
                 {
                   "additionalProperties": false,
                   "properties": {
-                    "courseId": {
-                      "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
-                      "type": "string"
-                    },
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "played",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name",
-                    "courseId"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "trailProgress",
-                      "type": "string"
-                    },
-                    "trailId": {
-                      "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name",
-                    "trailId"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "uniqueCourses",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "field": {
-                      "enum": [
-                        "region",
-                        "country",
-                        "designer",
-                        "facility",
-                        "trail"
-                      ],
-                      "type": "string"
-                    },
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "countDistinct",
-                      "type": "string"
-                    },
-                    "where": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "in": {
-                          "items": {
-                            "minLength": 1,
-                            "type": "string"
-                          },
-                          "minItems": 1,
-                          "type": "array"
-                        }
-                      },
-                      "required": [
-                        "in"
-                      ],
-                      "type": "object"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name",
-                    "field"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "field": {
-                      "enum": [
-                        "region",
-                        "country",
-                        "designer",
-                        "facility",
-                        "trail"
-                      ],
-                      "type": "string"
-                    },
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "maxCountBy",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name",
-                    "field"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "field": {
-                      "enum": [
-                        "region",
-                        "country",
-                        "designer",
-                        "facility",
-                        "trail"
-                      ],
-                      "type": "string"
-                    },
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "countWhere",
-                      "type": "string"
-                    },
-                    "value": {
-                      "minLength": 1,
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name",
-                    "field",
-                    "value"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "markerCredits",
-                      "type": "string"
-                    },
-                    "trailId": {
-                      "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name",
-                    "trailId"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "kind": {
-                      "const": "agg",
-                      "type": "string"
-                    },
-                    "name": {
-                      "const": "monthlyStreak",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "kind",
-                    "name"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "additionalProperties": false,
-                  "properties": {
                     "kind": {
                       "const": "agg",
                       "type": "string"
@@ -2020,6 +1792,890 @@
               ]
             }
           ]
+        },
+        "schema1": {
+          "additionalProperties": false,
+          "properties": {
+            "arg": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "args": {
+                      "items": {
+                        "$ref": "__shared#/$defs/schema0"
+                      },
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "and",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "args"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "args": {
+                      "items": {
+                        "$ref": "__shared#/$defs/schema0"
+                      },
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "or",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "args"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "$ref": "__shared#/$defs/schema1"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "compare",
+                      "type": "string"
+                    },
+                    "left": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "literal",
+                              "type": "string"
+                            },
+                            "value": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "courseId": {
+                                  "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "played",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "courseId"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "trailProgress",
+                                  "type": "string"
+                                },
+                                "trailId": {
+                                  "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "uniqueCourses",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field": {
+                                  "enum": [
+                                    "region",
+                                    "country",
+                                    "designer",
+                                    "facility",
+                                    "trail"
+                                  ],
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "countDistinct",
+                                  "type": "string"
+                                },
+                                "where": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "in": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "minItems": 1,
+                                      "type": "array"
+                                    }
+                                  },
+                                  "required": [
+                                    "in"
+                                  ],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field": {
+                                  "enum": [
+                                    "region",
+                                    "country",
+                                    "designer",
+                                    "facility",
+                                    "trail"
+                                  ],
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "maxCountBy",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field": {
+                                  "enum": [
+                                    "region",
+                                    "country",
+                                    "designer",
+                                    "facility",
+                                    "trail"
+                                  ],
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "countWhere",
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "field",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "markerCredits",
+                                  "type": "string"
+                                },
+                                "trailId": {
+                                  "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "monthlyStreak",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "op": {
+                      "enum": [
+                        ">=",
+                        ">",
+                        "<=",
+                        "<",
+                        "==",
+                        "!="
+                      ],
+                      "type": "string"
+                    },
+                    "right": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "const": "literal",
+                              "type": "string"
+                            },
+                            "value": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "courseId": {
+                                  "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "played",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "courseId"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "trailProgress",
+                                  "type": "string"
+                                },
+                                "trailId": {
+                                  "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "uniqueCourses",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field": {
+                                  "enum": [
+                                    "region",
+                                    "country",
+                                    "designer",
+                                    "facility",
+                                    "trail"
+                                  ],
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "countDistinct",
+                                  "type": "string"
+                                },
+                                "where": {
+                                  "additionalProperties": false,
+                                  "properties": {
+                                    "in": {
+                                      "items": {
+                                        "minLength": 1,
+                                        "type": "string"
+                                      },
+                                      "minItems": 1,
+                                      "type": "array"
+                                    }
+                                  },
+                                  "required": [
+                                    "in"
+                                  ],
+                                  "type": "object"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field": {
+                                  "enum": [
+                                    "region",
+                                    "country",
+                                    "designer",
+                                    "facility",
+                                    "trail"
+                                  ],
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "maxCountBy",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "field"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "field": {
+                                  "enum": [
+                                    "region",
+                                    "country",
+                                    "designer",
+                                    "facility",
+                                    "trail"
+                                  ],
+                                  "type": "string"
+                                },
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "countWhere",
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "field",
+                                "value"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "markerCredits",
+                                  "type": "string"
+                                },
+                                "trailId": {
+                                  "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name",
+                                "trailId"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "kind": {
+                                  "const": "agg",
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "const": "monthlyStreak",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "name"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "op",
+                    "left",
+                    "right"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "courseId": {
+                          "pattern": "^crs_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "played",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "courseId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "trailProgress",
+                          "type": "string"
+                        },
+                        "trailId": {
+                          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "uniqueCourses",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field": {
+                          "enum": [
+                            "region",
+                            "country",
+                            "designer",
+                            "facility",
+                            "trail"
+                          ],
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "countDistinct",
+                          "type": "string"
+                        },
+                        "where": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "in": {
+                              "items": {
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "minItems": 1,
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "in"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "field"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field": {
+                          "enum": [
+                            "region",
+                            "country",
+                            "designer",
+                            "facility",
+                            "trail"
+                          ],
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "maxCountBy",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "field"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "field": {
+                          "enum": [
+                            "region",
+                            "country",
+                            "designer",
+                            "facility",
+                            "trail"
+                          ],
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "countWhere",
+                          "type": "string"
+                        },
+                        "value": {
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "field",
+                        "value"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "markerCredits",
+                          "type": "string"
+                        },
+                        "trailId": {
+                          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "monthlyStreak",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "trailComplete",
+                          "type": "string"
+                        },
+                        "trailId": {
+                          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "days": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991,
+                          "type": "integer"
+                        },
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "trailCompleteWithin",
+                          "type": "string"
+                        },
+                        "trailId": {
+                          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId",
+                        "days"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "inOrder",
+                          "type": "string"
+                        },
+                        "trailId": {
+                          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "agg",
+                          "type": "string"
+                        },
+                        "name": {
+                          "const": "markerSetComplete",
+                          "type": "string"
+                        },
+                        "trailId": {
+                          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name",
+                        "trailId"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              ]
+            },
+            "kind": {
+              "const": "not",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "arg"
+          ],
+          "type": "object"
         }
       }
     }

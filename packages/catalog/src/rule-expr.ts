@@ -310,9 +310,20 @@ export interface OrNode {
   kind: "or";
   args: RuleExpr[];
 }
+/**
+ * N1 (gate review): a bare numeric aggregate (e.g. `played(F)`, R-14's
+ * `!played(F)`) is legal ONLY as `not`'s immediate argument — nowhere
+ * else in the tree. `NotArg` is therefore its own type, wider than
+ * `RuleExpr`: everything `RuleExpr` allows, PLUS a bare
+ * `NumericAggregateCall`. `and`/`or`'s `args` stay typed `RuleExpr[]`
+ * (narrower), so `and(trailProgress(T), uniqueCourses)` — two bare
+ * numerics with no comparator, wrongly accepted before this fix — no
+ * longer parses.
+ */
+export type NotArg = RuleExpr | NumericAggregateCall;
 export interface NotNode {
   kind: "not";
-  arg: RuleExpr;
+  arg: NotArg;
 }
 export interface CompareNode {
   kind: "compare";
@@ -321,8 +332,11 @@ export interface CompareNode {
   right: NumericOperand;
 }
 
-/** The closed, typed JSON AST (§4.1 line 588). */
-export type RuleExpr = AndNode | OrNode | NotNode | CompareNode | AggregateCall;
+/** The closed, typed JSON AST (§4.1 line 588). Note: `AggregateCall` here
+ * is narrowed to `BooleanAggregateCall` only (not the full 12-name union)
+ * — see `NotArg`'s doc: a bare NUMERIC aggregate is legal only directly
+ * under `not`, never as a free-standing node or an `and`/`or` argument. */
+export type RuleExpr = AndNode | OrNode | NotNode | CompareNode | BooleanAggregateCall;
 
 const NumberLiteralSchema = z.strictObject({ kind: z.literal("literal"), value: z.number() });
 
@@ -378,27 +392,50 @@ export const OrNodeSchema = z.strictObject({
   kind: z.literal("or"),
   args: z.array(z.lazy((): z.ZodType<RuleExpr> => RuleExprSchema)).min(2),
 });
+/** `not`'s `arg` is `NotArgSchema` (declared below `NotNodeSchema`, after
+ * `AggregateCallSchema` and friends are all already defined) — WIDER than
+ * `RuleExprSchema`: it alone admits a bare `NumericAggregateCall` (N1). */
 export const NotNodeSchema = z.strictObject({
   kind: z.literal("not"),
-  arg: z.lazy((): z.ZodType<RuleExpr> => RuleExprSchema),
+  arg: z.lazy((): z.ZodType<NotArg> => NotArgSchema),
 });
+
+/**
+ * `NotArg` — everything `RuleExprSchema` accepts, PLUS a bare numeric
+ * aggregate call (both halves of `AggregateCallSchema`, not just the
+ * boolean-returning half `RuleExprSchema` itself uses). Declared AFTER
+ * `NotNodeSchema` so it can reference it directly (no `z.lazy` needed at
+ * THIS use site — `NotNodeSchema` is already a defined value by the time
+ * this line runs; only ITS OWN `arg` property needed deferring, for the
+ * opposite direction of the same cycle).
+ */
+export const NotArgSchema: z.ZodType<NotArg> = z.discriminatedUnion("kind", [
+  AndNodeSchema,
+  OrNodeSchema,
+  NotNodeSchema,
+  CompareNodeSchema,
+  AggregateCallSchema,
+]);
 
 /**
  * The top-level `RuleExpr` schema — a `discriminatedUnion` on `kind` (not
  * a plain `z.union`), confirmed against this Zod version to nest cleanly
- * with `AggregateCallSchema` (itself a `discriminatedUnion` on `name`) as
- * one of its five branches: Zod resolves the two-level discriminator
- * correctly (`kind: "agg"` at this level, `name: <...>` one level in),
- * which is what gives R-F1/R-F7 their precise `path: ["name"]` "Invalid
- * discriminator value" error instead of a bare, path-less "no union
- * member matched".
+ * with `BooleanAggregateCallSchema` (itself a `discriminatedUnion` on
+ * `name`) as one of its five branches: Zod resolves the two-level
+ * discriminator correctly (`kind: "agg"` at this level, `name: <...>` one
+ * level in), which is what gives R-F1/R-F7 their precise `path: ["name"]`
+ * "Invalid discriminator value" error instead of a bare, path-less "no
+ * union member matched". Only `BooleanAggregateCallSchema` here (not the
+ * full `AggregateCallSchema`) — N1: a bare NUMERIC aggregate is legal only
+ * inside `NotArgSchema`, never as a free-standing rule or an `and`/`or`
+ * argument.
  */
 export const RuleExprSchema: z.ZodType<RuleExpr> = z.discriminatedUnion("kind", [
   AndNodeSchema,
   OrNodeSchema,
   NotNodeSchema,
   CompareNodeSchema,
-  AggregateCallSchema,
+  BooleanAggregateCallSchema,
 ]);
 
 /* ------------------------------------------------------------------ */

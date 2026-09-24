@@ -30,7 +30,14 @@
  * first and only call `checkRuleExpr` on an already-well-typed tree — this
  * module never re-derives the field enum or an aggregate's argument shape.
  */
-import type { CompareOp, NumericOperand, RuleExpr } from "@golfraven/catalog";
+import {
+  REGION_CODES,
+  type CompareOp,
+  type Field,
+  type NotArg,
+  type NumericOperand,
+  type RuleExpr,
+} from "@golfraven/catalog";
 
 export type RuleExprEvalMode = "badge" | "money";
 
@@ -69,6 +76,41 @@ export interface NumericRange {
  * comparison against it can be rejected as unsatisfiable on range grounds
  * alone" — not a real numeric commitment.
  */
+/**
+ * S5 (gate review): a `countDistinct` bound is the DOMAIN size, not
+ * `where.in.length` verbatim — `country` only ever has 2 possible values
+ * regardless of `where`, and `region` is bounded by the pinned ISO 3166-2
+ * list size even with no `where` at all. `designer`/`facility`/`trail`
+ * have no fixed universe (new ones can always be minted), so they stay
+ * unbounded absent a `where` restriction.
+ */
+function domainBoundForField(field: Field): number {
+  switch (field) {
+    case "country":
+      return 2;
+    case "region":
+      return REGION_CODES.size;
+    case "designer":
+    case "facility":
+    case "trail":
+      return Infinity;
+  }
+}
+
+/**
+ * The statically-derivable range of a `NumericOperand`. Every aggregate
+ * not named below is bounded only below (a non-negative count, unbounded
+ * above) — the plan gives exactly one bounded example (`trailProgress`,
+ * "`number in [0, 1]`", §4.1 line 596); `countDistinct` is bounded by its
+ * `field`'s domain size (S5 above), narrowed further by `where.in`'s
+ * DISTINCT values (deduped — a repeated code in `where.in` does not add a
+ * second possible value, §4.1 line 613's own R-F4 fixture depends on
+ * this); every other aggregate (`played`, `uniqueCourses`, `maxCountBy`,
+ * `countWhere`, `markerCredits`, `monthlyStreak`) has no plan-stated upper
+ * bound, so `Infinity` here means exactly that: "no comparison against it
+ * can be rejected as unsatisfiable on range grounds alone" — not a real
+ * numeric commitment.
+ */
 export function numericRangeOf(operand: NumericOperand): NumericRange {
   if (operand.kind === "literal") {
     return { min: operand.value, max: operand.value };
@@ -76,8 +118,11 @@ export function numericRangeOf(operand: NumericOperand): NumericRange {
   switch (operand.name) {
     case "trailProgress":
       return { min: 0, max: 1 };
-    case "countDistinct":
-      return { min: 0, max: operand.where ? operand.where.in.length : Infinity };
+    case "countDistinct": {
+      const domainBound = domainBoundForField(operand.field);
+      const whereBound = operand.where ? new Set(operand.where.in).size : Infinity;
+      return { min: 0, max: Math.min(domainBound, whereBound) };
+    }
     default:
       return { min: 0, max: Infinity };
   }
@@ -141,26 +186,40 @@ export function checkRuleExpr(
   options: CheckRuleExprOptions,
 ): RuleExprCheckIssue[] {
   const issues: RuleExprCheckIssue[] = [];
-  walk(expr, "rule", options.mode, issues);
+  walk(expr, "rule", options.mode, false, issues);
   return issues;
 }
 
 function walk(
-  expr: RuleExpr,
+  expr: NotArg,
   path: string,
   mode: RuleExprEvalMode,
+  /** N2 (gate review): the parity of enclosing `not`s. An "impossible"
+   * comparison (`RULE_UNSATISFIABLE`) under an EVEN number of `not`s truly
+   * can never be satisfied — but under an ODD number, `not` flips it into
+   * something that is ALWAYS true (vacuous, a different smell entirely,
+   * never "unsatisfiable"). The false positive this fixes: `not(countDistinct
+   * (region, {in: [4 codes]}) >= 5)` is a perfectly satisfiable rule (it's
+   * ALWAYS true, since the inner comparison can never hold) — flagging it
+   * UNSATISFIABLE was backwards. */
+  negated: boolean,
   issues: RuleExprCheckIssue[],
 ): void {
   switch (expr.kind) {
     case "and":
     case "or":
-      expr.args.forEach((arg, i) => walk(arg, `${path}.args[${i}]`, mode, issues));
+      expr.args.forEach((arg, i) => walk(arg, `${path}.args[${i}]`, mode, negated, issues));
       return;
     case "not":
-      walk(expr.arg, `${path}.arg`, mode, issues);
+      walk(expr.arg, `${path}.arg`, mode, !negated, issues);
       return;
     case "compare": {
-      if ((expr.op === "==" || expr.op === "!=") && mode === "money") {
+      const leftIsAggregate = expr.left.kind !== "literal";
+      const rightIsAggregate = expr.right.kind !== "literal";
+      // N2 (gate review): only a comparison that actually involves an
+      // aggregate operand has a "polarity" concept at all — a pure
+      // literal-vs-literal comparison (`1 == 1`) has none to lack.
+      if ((expr.op === "==" || expr.op === "!=") && mode === "money" && (leftIsAggregate || rightIsAggregate)) {
         issues.push(
           issue(
             "RULE_MONEY_MODE_NO_POLARITY",
@@ -171,7 +230,7 @@ function walk(
       }
       const left = numericRangeOf(expr.left);
       const right = numericRangeOf(expr.right);
-      if (!isRangeSatisfiable(expr.op, left, right)) {
+      if (!negated && !isRangeSatisfiable(expr.op, left, right)) {
         issues.push(
           issue(
             "RULE_UNSATISFIABLE",
@@ -182,13 +241,22 @@ function walk(
       }
       return;
     }
-    // A bare aggregate call, used directly as a boolean node (numeric
-    // truthiness for a number-returning aggregate — see this package's
-    // `@golfraven/catalog` `rule-expr.ts` module doc on R-14). Nothing
-    // further to check here: aggregate argument SHAPES are already
-    // schema-level (R-F1/R-F2/R-F3/R-F5/R-F7), and a bare aggregate has no
-    // comparator to have a polarity or a satisfiability question about.
+    // A bare aggregate call — numeric (legal only here, directly under
+    // `not`, N1) or boolean (`trailComplete` etc, legal anywhere a
+    // `RuleExpr` is). Nothing further to check for either return type:
+    // argument SHAPES are already schema-level (R-F1/R-F2/R-F3/R-F5/R-F7),
+    // and a bare aggregate has no comparator to have a polarity or a
+    // satisfiability question about. `inOrder` is the one exception (N4).
     default:
+      if (expr.name === "inOrder" && mode === "money") {
+        issues.push(
+          issue(
+            "RULE_INORDER_NOT_ALLOWED_IN_MONEY_MODE",
+            path,
+            `"inOrder" is a cosmetic, badge-only aggregate (§8.1 R-05: "cosmetic") and is rejected in any money-mode rule`,
+          ),
+        );
+      }
       return;
   }
 }

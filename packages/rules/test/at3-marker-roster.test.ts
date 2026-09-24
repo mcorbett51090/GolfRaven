@@ -9,7 +9,7 @@
  * … passport`).
  */
 import { describe, expect, it } from "vitest";
-import { mintId, type CourseId, type FacilityId, type RosterMember, type RosterVersion } from "@golfraven/catalog";
+import { type CourseId, type FacilityId, type RosterMember, type RosterVersion } from "@golfraven/catalog";
 import {
   evaluateVersionCompletion,
   markerRosterOf,
@@ -17,9 +17,11 @@ import {
   type CompletionContext,
   type Play,
 } from "../src/completion.js";
+import { nextId } from "./test-ids.js";
 
+// N7 (gate review): deterministic ids, no Date.now().
 function ids(kind: "fac" | "crs", n: number): string[] {
-  return Array.from({ length: n }, (_, i) => mintId(kind, new Date(Date.now() + i)));
+  return Array.from({ length: n }, () => nextId(kind));
 }
 
 describe("AT(3): RTJ fixture — 26 courses / 11 facilities → marker roster of 11", () => {
@@ -32,7 +34,7 @@ describe("AT(3): RTJ fixture — 26 courses / 11 facilities → marker roster of
     const courses: CompletionContext["courses"] = {};
     let facilityIndex = 0;
     for (let i = 0; i < 26; i += 1) {
-      const courseId = mintId("crs", new Date(Date.now() + 1000 + i)) as CourseId;
+      const courseId = nextId("crs") as CourseId;
       const facilityId = facilityIds[facilityIndex % 11]!;
       courseIds.push(courseId);
       courses[courseId] = { id: courseId, facilityId };
@@ -74,7 +76,7 @@ describe("AT(3): Great Okanagan — hole unit → 18 courses", () => {
       members: courseIds.map(
         (courseId, i): RosterMember => ({
           unit: "hole",
-          holeId: mintId("hol", new Date(Date.now() + 2000 + i)) as never,
+          holeId: nextId("hol") as never,
           courseId,
         }),
       ),
@@ -91,10 +93,10 @@ describe("AT(3): Great Okanagan — hole unit → 18 courses", () => {
 
 describe("AT(3): a 27-hole composite fixture (A2-18)", () => {
   it("a play on the composite course counts once in uniqueCourses, and satisfies both nines as members", () => {
-    const facilityId = mintId("fac") as FacilityId;
-    const nineA = mintId("crs", new Date(Date.now() + 1)) as CourseId;
-    const nineB = mintId("crs", new Date(Date.now() + 2)) as CourseId;
-    const composite18 = mintId("crs", new Date(Date.now() + 3)) as CourseId;
+    const facilityId = nextId("fac") as FacilityId;
+    const nineA = nextId("crs") as CourseId;
+    const nineB = nextId("crs") as CourseId;
+    const composite18 = nextId("crs") as CourseId;
 
     const courses: CompletionContext["courses"] = {
       [nineA]: { id: nineA, facilityId },
