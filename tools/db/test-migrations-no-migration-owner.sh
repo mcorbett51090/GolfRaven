@@ -158,6 +158,28 @@ if [ "$H2_MODE" = "approximation" ]; then
   echo "tools/db/test-migrations-no-migration-owner.sh: creating $APPROX_ROLE (LOGIN NOSUPERUSER CREATEROLE CREATEDB, owns \$DBNAME) — approximating Supabase's real non-superuser postgres role"
   run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -c \"CREATE ROLE $APPROX_ROLE LOGIN NOSUPERUSER NOBYPASSRLS CREATEROLE CREATEDB;\""
   run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -c \"ALTER DATABASE \\\"$DBNAME\\\" OWNER TO $APPROX_ROLE;\""
+  # $APPROX_ROLE is a DIFFERENT role from migration_owner (which was just
+  # dropped above), so it needs its OWN copy of the same narrow,
+  # bootstrap-tier grants supabase/tests/shim.sql gives migration_owner
+  # for the auth/storage/vault schemas the migrations touch — a real
+  # Supabase project's non-superuser `postgres` role has this kind of
+  # access to its own project's schemas already; this harness's bootstrap
+  # (`postgres`, the cluster superuser) provisions the equivalent here,
+  # same tier shim.sql's own grants already live in.
+  echo "tools/db/test-migrations-no-migration-owner.sh: granting $APPROX_ROLE the same auth/storage/vault access migration_owner gets in shim.sql"
+  run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -c \"
+    GRANT USAGE ON SCHEMA auth TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT SELECT ON auth.users TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT REFERENCES ON auth.users TO $APPROX_ROLE;
+    ALTER TABLE storage.objects OWNER TO $APPROX_ROLE;
+    GRANT USAGE ON SCHEMA storage TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT INSERT, SELECT ON storage.buckets TO $APPROX_ROLE;
+    CREATE POLICY h2_approx_seed_buckets ON storage.buckets FOR INSERT TO $APPROX_ROLE WITH CHECK (true);
+    CREATE POLICY h2_approx_seed_buckets_r ON storage.buckets FOR SELECT TO $APPROX_ROLE USING (true);
+    GRANT ALL ON SCHEMA vault TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT ALL ON vault.secrets TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT ALL ON vault.decrypted_secrets TO $APPROX_ROLE WITH GRANT OPTION;
+  \""
   MIGRATE_USER="$APPROX_ROLE"
 fi
 

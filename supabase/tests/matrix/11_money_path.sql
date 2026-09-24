@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(120);
+SELECT plan(130);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
