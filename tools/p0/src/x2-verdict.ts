@@ -311,11 +311,16 @@ export async function buildEvidenceByTrail(
  * is no evidenceSha to look a method up for); every fact that actually
  * cites evidence has already had that evidenceSha validated by `checkQuote`
  * before this is built, so the method lookup always succeeds. */
+/** Gate finding 4: names the corroboration record backing an owner-saved
+ * fact (or its absence) in the output — never left implicit. `null` for a
+ * `direct`/`rendered` fact, where corroboration does not apply. */
 export interface X2FactOutput extends X2ConfirmationFact {
   method: X2Method;
+  corroboration: string | null;
 }
 export interface X2RosterEntryOutput extends X2ConfirmationRosterEntry {
   method: X2Method;
+  corroboration: string | null;
 }
 
 /** Gate finding S8: the verdict output echoes exactly what was checked —

@@ -142,15 +142,6 @@ function nodeLoc(node: TSESTree.Node): { line: number; column: number } {
   return { line: node.loc?.start.line ?? 0, column: node.loc?.start.column ?? 0 };
 }
 
-function isBannedSpecifier(spec: string): boolean {
-  return BANNED_SPECIFIER_PATTERNS.some((re) => re.test(spec));
-}
-
-function mentionsSecretEnvVar(text: string): boolean {
-  const upper = text.toUpperCase();
-  return SECRET_ENV_MARKERS.some((m) => upper.includes(m));
-}
-
 /** Minimal generic AST walker (typescript-estree nodes are plain objects). */
 function walk(node: TSESTree.Node | null | undefined, visit: (n: TSESTree.Node) => void): void {
   if (!node || typeof node !== "object") return;
