@@ -481,7 +481,7 @@ export async function renderUrl(
           );
 
           await context.route("**/*", async (route, request) => {
-            if (capExceeded || popupOpened || workerOpened) {
+            if (capExceeded || popupOpened || workerOpened || disallowedTarget) {
               await route.abort();
               return;
             }
@@ -608,6 +608,15 @@ export async function renderUrl(
                   "fails the capture; a plain page renders fine without one.",
               );
             }
+            if (disallowedTarget) {
+              throw new Error(
+                `render of "${url}" detected a disallowed CDP target (${disallowedTarget}) — SharedWorker and ` +
+                  "ServiceWorker targets are invisible to page.on('worker') entirely (gate finding 1, second " +
+                  "re-gate), so this is caught only by watching Target.targetCreated at the browser CDP session " +
+                  "level; any shared_worker/service_worker/worker target fails the capture, same as a dedicated " +
+                  "Worker does above.",
+              );
+            }
             if (insecureHop) {
               throw new Error(
                 `render of "${url}" blocked a main-frame navigation hop that downgraded to non-https: ` +
@@ -645,9 +654,9 @@ export async function renderUrl(
             // running (a `setTimeout`, a delayed event handler) after
             // `goto()` returned but before `page.content()` actually runs;
             // the checks above only caught one taken right after `goto()`.
-            if (popupOpened || workerOpened) {
+            if (popupOpened || workerOpened || disallowedTarget) {
               throw new Error(
-                `render of "${url}" opened a ${popupOpened ? `popup ("${popupOpened}")` : `Worker ("${workerOpened}")`} ` +
+                `render of "${url}" opened a ${popupOpened ? `popup ("${popupOpened}")` : workerOpened ? `Worker ("${workerOpened}")` : `disallowed CDP target (${disallowedTarget})`} ` +
                   "just before content() was read — caught by the late re-check, not the earlier one.",
               );
             }
@@ -662,9 +671,9 @@ export async function renderUrl(
             // content() itself can take time (DEFAULT_RENDER_CONTENT_TIMEOUT_MS
             // worth), long enough for a delayed popup/worker to appear WHILE
             // it was running; a check only before it would miss that window.
-            if (popupOpened || workerOpened) {
+            if (popupOpened || workerOpened || disallowedTarget) {
               throw new Error(
-                `render of "${url}" opened a ${popupOpened ? `popup ("${popupOpened}")` : `Worker ("${workerOpened}")`} ` +
+                `render of "${url}" opened a ${popupOpened ? `popup ("${popupOpened}")` : workerOpened ? `Worker ("${workerOpened}")` : `disallowed CDP target (${disallowedTarget})`} ` +
                   "while content() was being read — caught by the late re-check.",
               );
             }

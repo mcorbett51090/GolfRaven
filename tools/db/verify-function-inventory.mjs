@@ -78,14 +78,17 @@ for (const row of grantRows) {
 
 // 3. Every SECURITY DEFINER function/procedure ANYWHERE (not just
 // app/api/private — should-fix mirrors 10_function_inventory.sql's own
-// M2(c) widening) sets search_path, excluding extension-owned ones.
+// M2(c) widening) sets search_path, excluding functions owned by an
+// ALLOW-LISTED extension only (postgis/pgtap/pgcrypto — should-fix,
+// post-P3a re-gate: a function from any OTHER extension is no longer
+// exempted at all).
 const missingSearchPath = psql(`
   SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE p.prokind IN ('f', 'p') AND p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto'))
     AND NOT EXISTS (SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}'::text[])) cfg WHERE cfg LIKE 'search_path=%')
 `);
 for (const [fn] of missingSearchPath) {
@@ -93,7 +96,7 @@ for (const [fn] of missingSearchPath) {
 }
 
 // 4. M2(c)/should-fix: every SECURITY DEFINER function/procedure
-// anywhere (non-extension) lives in schema `private` AND is owned by
+// anywhere (non-allowlisted-extension) lives in schema `private` AND is owned by
 // `private_definer` — the standalone-CLI mirror of
 // 10_function_inventory.sql's own check.
 const misplacedOrMisowned = psql(`
@@ -104,7 +107,7 @@ const misplacedOrMisowned = psql(`
   LEFT JOIN pg_roles r ON r.oid = p.proowner
   WHERE p.prokind IN ('f', 'p') AND p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto'))
     AND (n.nspname <> 'private' OR r.rolname IS DISTINCT FROM 'private_definer')
 `);
 for (const [fn, schema, owner] of misplacedOrMisowned) {

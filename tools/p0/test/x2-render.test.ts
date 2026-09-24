@@ -742,6 +742,87 @@ describe("x2-render: renderUrl — dedicated Worker handling (gate finding 1, re
   });
 });
 
+describe("x2-render: renderUrl — SharedWorker/ServiceWorker CDP-level detection (gate finding 1, second re-gate)", () => {
+  it("fails the capture when the browser-level CDP watch reports a shared_worker target — even though NO page.on('worker') event ever fires (SharedWorker is architecturally invisible to it)", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    // No `workers` spec at all — proves this is caught by the CDP watch,
+    // not by page.on("worker"), which SharedWorker never triggers.
+    const { launch } = fakeLauncher(context, {
+      targetInfo: { type: "shared_worker", url: "blob:https://golfvancouverisland.ca/abc" },
+    });
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
+      /disallowed CDP target \(shared_worker/,
+    );
+  });
+
+  it("fails the capture when the CDP watch reports a service_worker target", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch } = fakeLauncher(context, {
+      targetInfo: { type: "service_worker", url: "https://golfvancouverisland.ca/sw.js" },
+    });
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
+      /disallowed CDP target \(service_worker/,
+    );
+  });
+
+  it("fails the capture when the CDP watch reports a plain 'worker' target too (belt-and-suspenders alongside page.on('worker'))", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch } = fakeLauncher(context, {
+      targetInfo: { type: "worker", url: "https://golfvancouverisland.ca/w.js" },
+    });
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow(
+      /disallowed CDP target \(worker/,
+    );
+  });
+
+  it("does NOT fail when the CDP watch reports no target at all — a plain render still succeeds", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch } = fakeLauncher(context);
+    const result = await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(result.html).toBeTruthy();
+  });
+
+  it("wires up the CDP watch via Target.setDiscoverTargets + Target.setAutoAttach on the BROWSER-level CDP session, and detaches it when done", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch, cdpMethodsCalled, cdpDetached } = fakeLauncher(context);
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(cdpMethodsCalled()).toContain("Target.setDiscoverTargets");
+    expect(cdpMethodsCalled()).toContain("Target.setAutoAttach");
+    expect(cdpDetached()).toBe(true);
+  });
+
+  it("still detaches the CDP session even when the capture fails on a disallowed target", async () => {
+    const { context } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch, cdpDetached } = fakeLauncher(context, {
+      targetInfo: { type: "shared_worker", url: "https://golfvancouverisland.ca/x" },
+    });
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow();
+    expect(cdpDetached()).toBe(true);
+  });
+
+  it("installs an addInitScript on the context (second independent layer: neutralises SharedWorker/ServiceWorker.register at the JS-API level itself)", async () => {
+    const { context, initScriptCount } = makeFakeContext({ requests: [SAME_HOST_NAV] });
+    const { launch } = fakeLauncher(context);
+    await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(initScriptCount()).toBeGreaterThan(0);
+  });
+
+  it("aborts even a same-host, otherwise-fine request once the CDP watch has already flagged a disallowed target (the route handler's early-abort condition includes disallowedTarget)", async () => {
+    const { context, abortedUrls } = makeFakeContext({
+      requests: [SAME_HOST_NAV, { url: "https://golfvancouverisland.ca/app.js" }],
+    });
+    // The fake CDP session fires targetHandler synchronously from
+    // Target.setDiscoverTargets, i.e. BEFORE the context/page (and thus
+    // any request) is ever created — so disallowedTarget is already set
+    // by the time the route handler runs for every subsequent request.
+    const { launch } = fakeLauncher(context, {
+      targetInfo: { type: "shared_worker", url: "https://golfvancouverisland.ca/x" },
+    });
+    await expect(renderUrl(SAME_HOST_URL, { userAgent: "ua", launch })).rejects.toThrow();
+    expect(abortedUrls()).toContain("https://golfvancouverisland.ca/app.js");
+  });
+});
+
 describe("x2-render: renderUrl — late popup/worker re-check (should-fix, re-gate)", () => {
   it("catches a popup that opens AFTER goto() resolves but WHILE content() is still running (e.g. a delayed setTimeout)", async () => {
     const { context } = makeFakeContext({

@@ -188,8 +188,16 @@ run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1
 # creation collide with the real restricted-mode run's later, idempotent
 # one (roles are cluster-global, not per-database), breaking THAT run in
 # a confusing way. See the script's own header for the full diagnosis.
-echo "tools/db/test.sh: H2 check — migrations with no migration_owner role in the cluster"
-bash "$ROOT_DIR/tools/db/test-migrations-no-migration-owner.sh"
+echo "tools/db/test.sh: H2 check — migrations with no migration_owner role in the cluster (superuser)"
+H2_MODE=superuser bash "$ROOT_DIR/tools/db/test-migrations-no-migration-owner.sh"
+# should-fix (post-P3a re-gate): ALSO run it as a NOSUPERUSER CREATEROLE
+# CREATEDB role that owns the database — approximating Supabase's real,
+# non-superuser project `postgres` role, not just this harness's own
+# cluster-bootstrap superuser. Sequential, same script, own fresh cluster
+# each time (it tears its own down on exit) — see that script's own
+# H2_MODE comment.
+echo "tools/db/test.sh: H2 check — migrations with no migration_owner role in the cluster (approximation of Supabase's non-superuser postgres role)"
+H2_MODE=approximation bash "$ROOT_DIR/tools/db/test-migrations-no-migration-owner.sh"
 
 echo "tools/db/test.sh: applying supabase/tests/shim.sql"
 run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -d '$DBNAME' -f '$SUPABASE_DIR/tests/shim.sql'"

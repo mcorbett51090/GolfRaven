@@ -48,8 +48,9 @@ SELECT is(
 -- H1 (post-P3a gate) catalog test: every FK that references a
 -- "delete_row table" (a table whose OWN rows get DELETEd by
 -- delete_my_data's generic pass, per private.pii_retention_policy) must
--- be deferrable OR carry ON DELETE CASCADE/SET NULL — a plain NO ACTION,
--- non-deferrable FK to such a table fails at whatever point in the
+-- carry ON DELETE CASCADE/SET NULL, OR have a REAL, present explicit
+-- detach trigger registered in private.fk_explicit_detach_allowlist — a
+-- plain NO ACTION FK to such a table fails at whatever point in the
 -- generic loop's (arbitrary) iteration order the referenced table
 -- happens to be deleted, exactly H1's reproduction (offer_code.play_id/
 -- entitlement.play_id, added by 0017, were NO ACTION + non-deferrable
@@ -57,6 +58,22 @@ SELECT is(
 -- test below, so a FUTURE FK added to a delete_row table without the
 -- right shape fails here even before anyone seeds data that would
 -- trigger it.
+--
+-- ⛔ FIX (should-fix, post-P3a re-gate): "require CASCADE or SET NULL —
+-- deferrable NO ACTION alone is not enough unless an explicit null-out is
+-- registered." The PRIOR version of this test accepted bare
+-- `con.condeferrable` as sufficient on its own (`NOT (condeferrable OR
+-- confdeltype IN ('c','n'))`) — a merely-deferred NO ACTION FK with NO
+-- detach logic at all would have passed this test even though it offers
+-- no actual protection (deferred just means the SAME hard failure
+-- happens at COMMIT instead of at the statement). Deferrable is no longer
+-- checked at all: the FK must be CASCADE/SET NULL outright, OR its
+-- constraint name must appear in private.fk_explicit_detach_allowlist
+-- WITH a real, live, non-internal trigger of the registered name actually
+-- present on the referenced (parent) table — a stale allowlist row whose
+-- trigger was later dropped does NOT satisfy this (EXISTS requires
+-- pg_trigger to have a live match), so removing the trigger without also
+-- removing the allowlist row still fails here.
 SELECT is(
   (
     SELECT count(*)::int
@@ -67,14 +84,25 @@ SELECT is(
     JOIN pg_namespace tn ON tn.oid = target.relnamespace
     WHERE con.contype = 'f'
       AND n.nspname = 'app'
-      AND NOT (con.condeferrable OR con.confdeltype IN ('c', 'n'))
+      AND con.confdeltype NOT IN ('c', 'n')
       AND EXISTS (
         SELECT 1 FROM private.pii_retention_policy pol
         WHERE pol.schema_name = tn.nspname AND pol.table_name = target.relname AND pol.action = 'delete_row'
       )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM private.fk_explicit_detach_allowlist al
+        JOIN pg_trigger trg
+          ON trg.tgrelid = target.oid
+         AND trg.tgname = al.detach_trigger_name
+         AND NOT trg.tgisinternal
+        WHERE al.schema_name = n.nspname
+          AND al.table_name = cl.relname
+          AND al.constraint_name = con.conname
+      )
   ),
   0,
-  'every FK referencing a delete_row table is deferrable or ON DELETE CASCADE/SET NULL (H1)'
+  'every FK referencing a delete_row table is ON DELETE CASCADE/SET NULL, or has a REAL registered+present explicit-detach trigger (H1, tightened post-P3a re-gate)'
 );
 
 -- No row is left with an open TODO (gate round 2, item 2: "The 09 test

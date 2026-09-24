@@ -138,16 +138,36 @@ SELECT pass('every function''s actual service_role EXECUTE grant matches private
 -- to private_definer appears in an explicit allow-list table."
 -- ==========================================================================
 
+-- ⛔ FIX (should-fix, post-P3a re-gate): "also flag extension-member
+-- functions whose extension is not in a fixed allow-list (postgis,
+-- pgtap, pgcrypto, ...)." The PRIOR version excluded EVERY extension-
+-- owned function unconditionally (`pg_depend deptype='e'` alone) — an
+-- extension this project never intentionally installs could ship its own
+-- SECURITY DEFINER function and sail through silently, the exact "not
+-- checked at all" gap the should-fix names. A fixed allow-list of the
+-- extensions this project genuinely installs (grepped every
+-- `CREATE EXTENSION` in supabase/migrations/ + the harness bootstrap
+-- this session: postgis and pgcrypto via 0001_schemas.sql, pgtap via the
+-- harness/CI bootstrap only, never a real migration) means only THOSE
+-- extensions' own member functions are exempted; a function belonging to
+-- any OTHER extension is no longer exempted at all, and falls through to
+-- the same private/private_definer + search_path checks as product code
+-- — which it will almost certainly fail, surfacing it here rather than
+-- silently passing. Inlined as a repeated EXISTS (not a helper function)
+-- so this stays a pure read — no schema object to create/rollback inside
+-- a test file's own transaction.
+
 -- (7) M2(c): every SECURITY DEFINER function ANYWHERE in this database
 -- (not just app/api/private -- a definer function planted in `public` or
 -- `tests` was invisible to the old, schema-scoped check) is checked two
 -- ways at once: it must live in schema `private`, AND be owned by
 -- `private_definer` -- fails on either a definer function outside
 -- `private` (app/api/public/tests/anywhere else) or one inside `private`
--- but not private_definer-owned. Extension-owned functions (pg_depend
--- deptype='e' -- postgis/pgtap sometimes ship their own SECURITY DEFINER
--- helpers) are excluded, the same "not product code" carve-out
--- 03_views_and_rpc.sql already applies to extension-owned views.
+-- but not private_definer-owned. Only ALLOW-LISTED-extension-owned
+-- functions (postgis/pgtap/pgcrypto — see the note above) are excluded,
+-- the same "not product code" carve-out 03_views_and_rpc.sql already
+-- applies to extension-owned views — an extension outside that list gets
+-- no such exemption.
 SELECT is(
   (
     SELECT count(*)::int
@@ -156,15 +176,19 @@ SELECT is(
     LEFT JOIN pg_roles r ON r.oid = p.proowner
     WHERE p.prosecdef
       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        JOIN pg_extension e ON e.oid = d.refobjid
+        WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto')
+      )
       AND (n.nspname <> 'private' OR r.rolname IS DISTINCT FROM 'private_definer')
   ),
   0,
-  'every non-extension SECURITY DEFINER function anywhere lives in schema private AND is owned by private_definer'
+  'every non-allowlisted-extension SECURITY DEFINER function anywhere lives in schema private AND is owned by private_definer'
 );
 
 -- (8) M2(c): every SECURITY DEFINER function anywhere (same scope/
--- extension-exclusion as (7)) sets search_path in proconfig -- not
+-- extension-allowlist as (7)) sets search_path in proconfig -- not
 -- scoped to app/api/private, since the whole point is catching a definer
 -- function planted somewhere the old check never looked.
 SELECT is(
@@ -174,13 +198,17 @@ SELECT is(
     JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE p.prosecdef
       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        JOIN pg_extension e ON e.oid = d.refobjid
+        WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto')
+      )
       AND NOT EXISTS (
         SELECT 1 FROM unnest(COALESCE(p.proconfig, '{}'::text[])) cfg WHERE cfg LIKE 'search_path=%'
       )
   ),
   0,
-  'every SECURITY DEFINER function anywhere (non-extension) sets search_path in proconfig'
+  'every SECURITY DEFINER function anywhere (non-allowlisted-extension) sets search_path in proconfig'
 );
 
 -- (9) Forward direction: every RLS policy that APPLIES TO private_definer
