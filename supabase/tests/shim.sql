@@ -192,7 +192,14 @@ AS $$
 $$;
 
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role, migration_owner;
-GRANT SELECT ON auth.users TO service_role;
+GRANT SELECT, INSERT ON auth.users TO service_role;
+-- INSERT (not UPDATE/DELETE — helpers.sql never does either): fixture
+-- account seeding in supabase/tests/helpers.sql now runs `SET ROLE
+-- service_role` first (tools/db/test.sh, S1 gate round 3), matching how a
+-- real account would really be created (Supabase's admin/auth API, not a
+-- direct client write) — auth.users itself carries no RLS in this shim
+-- (matching a real Supabase project, which does not expose it to
+-- PostgREST at all), so the table-level grant is the only gate.
 -- migration_owner (S1, gate round 3) needs REFERENCES on auth.users
 -- because several migrations' own tables declare
 -- `... REFERENCES auth.users (id)` FK constraints — creating an FK
