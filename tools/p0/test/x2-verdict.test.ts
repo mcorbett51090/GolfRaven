@@ -970,21 +970,30 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
     // Gate finding 4: an owner-saved fact needs a corroboration record to
     // count — without one it is "owner-attested, uncorroborated" and does
     // not confirm the trail. Supplying Matt's dated, X2.md-logged
-    // acceptance is enough (gate finding 3, re-gate: the id+date must be
-    // resolved as logged — never just trusted because the JSON says so).
+    // acceptance is enough — gate finding 2 (re-gate): one owner-saved
+    // capture backing THREE different facts needs THREE separate
+    // acceptance records (one per fact), each resolved as logged — never
+    // one blanket acceptance covering whichever facts get cited against
+    // this SHA.
     const corroboration: X2CorroborationFile = {
       TN: {
-        [rawSha]: { type: "acceptance", id: "TN-season-2026-09-24", acceptedBy: "Matt", date: "2026-09-24" },
+        [rawSha]: [
+          { type: "acceptance", fact: "roster:Nine courses make up", acceptedBy: "Matt", date: "2026-09-24" },
+          { type: "acceptance", fact: "completionUnit", acceptedBy: "Matt", date: "2026-09-24" },
+          { type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-24" },
+        ],
       },
     };
     const resolved: X2ResolvedCorroboration = new Map([
-      [corroborationResolutionKey("TN", rawSha), { acceptanceLogged: true }],
+      [corroborationResolutionKey("TN", rawSha, "roster:Nine courses make up"), { acceptanceLogged: true }],
+      [corroborationResolutionKey("TN", rawSha, "completionUnit"), { acceptanceLogged: true }],
+      [corroborationResolutionKey("TN", rawSha, "season"), { acceptanceLogged: true }],
     ]);
     const result = computeX2Verdict(confirmation, byTrail, ["TN"], corroboration, resolved);
     expect(result.perTrail.TN?.confirmed).toBe(true);
     expect(result.perTrail.TN?.facts.season?.method).toBe("owner-saved");
     expect(result.perTrail.TN?.facts.season?.corroboration).toBe(
-      'owner-attested, accepted by Matt on 2026-09-24 (logged in X2.md, id "TN-season-2026-09-24")',
+      "owner-attested, accepted by Matt on 2026-09-24 (X2.md Log row, commit unavailable)",
     );
   });
 
@@ -1516,41 +1525,68 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
   });
 
   it("an owner-saved fact backed by Matt's dated acceptance record, LOGGED in X2.md, passes and names it", () => {
+    // Gate finding 2 (re-gate): roster/completionUnit/season all cite the
+    // SAME owner-saved SHA — each needs its OWN acceptance record, naming
+    // its own fact, for the trail to confirm overall.
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "acceptance",
-          id: "NC-2026-09-20-acceptance",
-          acceptedBy: "Matt",
-          date: "2026-09-20",
-        },
+        [SHA_OWNER]: [
+          { type: "acceptance", fact: "roster:Pinehurst Creek", acceptedBy: "Matt", date: "2026-09-20" },
+          { type: "acceptance", fact: "completionUnit", acceptedBy: "Matt", date: "2026-09-20" },
+          { type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" },
+        ],
       },
     };
     const resolved: X2ResolvedCorroboration = new Map([
-      [corroborationResolutionKey("NC", SHA_OWNER), { acceptanceLogged: true }],
+      [corroborationResolutionKey("NC", SHA_OWNER, "roster:Pinehurst Creek"), { acceptanceLogged: true }],
+      [corroborationResolutionKey("NC", SHA_OWNER, "completionUnit"), { acceptanceLogged: true }],
+      [corroborationResolutionKey("NC", SHA_OWNER, "season"), { acceptanceLogged: true }],
     ]);
     const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration, resolved);
     const nc = result.perTrail.NC;
     expect(nc?.confirmed).toBe(true);
     expect(nc?.facts.roster[0]?.corroboration).toBe(
-      'owner-attested, accepted by Matt on 2026-09-20 (logged in X2.md, id "NC-2026-09-20-acceptance")',
+      "owner-attested, accepted by Matt on 2026-09-20 (X2.md Log row, commit unavailable)",
     );
     expect(nc?.reasons.join("\n")).toMatch(/accepted by Matt on 2026-09-20/);
+  });
+
+  it("gate finding 2 (re-gate): an acceptance record whose fact does NOT match the fact being checked is rejected — one fact's acceptance never backs another", () => {
+    const corroboration: X2CorroborationFile = {
+      NC: {
+        [SHA_OWNER]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
+      },
+    };
+    const resolved: X2ResolvedCorroboration = new Map([
+      [corroborationResolutionKey("NC", SHA_OWNER, "season"), { acceptanceLogged: true }],
+    ]);
+    const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration, resolved);
+    const nc = result.perTrail.NC;
+    expect(nc?.confirmed).toBe(false);
+    // Roster/completionUnit have no MATCHING record at all (only "season"
+    // is in the array) — uncorroborated for THIS fact, distinctly worded.
+    expect(nc?.facts.roster[0]?.corroboration).toBe("owner-attested, uncorroborated for this fact");
+    expect(nc?.facts.completionUnit?.corroboration).toBe("owner-attested, uncorroborated for this fact");
+    expect(nc?.facts.season?.corroboration).toBe(
+      "owner-attested, accepted by Matt on 2026-09-20 (X2.md Log row, commit unavailable)",
+    );
   });
 
   it("gate finding 3 (re-gate): an acceptance record whose acceptedBy is NOT exactly \"Matt\" is rejected outright, even if it WOULD be logged", () => {
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "acceptance",
-          id: "NC-2026-09-20-acceptance",
-          acceptedBy: "matt", // wrong case — not exact
-          date: "2026-09-20",
-        },
+        [SHA_OWNER]: [
+          {
+            type: "acceptance",
+            fact: "roster:Pinehurst Creek",
+            acceptedBy: "matt", // wrong case — not exact
+            date: "2026-09-20",
+          },
+        ],
       },
     };
     const resolved: X2ResolvedCorroboration = new Map([
-      [corroborationResolutionKey("NC", SHA_OWNER), { acceptanceLogged: true }],
+      [corroborationResolutionKey("NC", SHA_OWNER, "roster:Pinehurst Creek"), { acceptanceLogged: true }],
     ]);
     const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration, resolved);
     const nc = result.perTrail.NC;
@@ -1559,15 +1595,12 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
     expect(nc?.reasons.join("\n")).toMatch(/acceptedBy must be exactly "Matt"/);
   });
 
-  it("gate finding 3 (re-gate): an acceptance record that is NOT resolved as logged in X2.md's Log is rejected — the JSON file alone is never enough", () => {
+  it("gate finding 2 (re-gate): an acceptance record that is NOT resolved as logged (and pushed) in X2.md's Log is rejected — the JSON file alone is never enough", () => {
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "acceptance",
-          id: "NC-2026-09-20-acceptance",
-          acceptedBy: "Matt",
-          date: "2026-09-20",
-        },
+        [SHA_OWNER]: [
+          { type: "acceptance", fact: "roster:Pinehurst Creek", acceptedBy: "Matt", date: "2026-09-20" },
+        ],
       },
     };
     // No resolved map entry at all (as if the resolution pass never ran,
@@ -1575,19 +1608,24 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
     const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration);
     const nc = result.perTrail.NC;
     expect(nc?.confirmed).toBe(false);
-    expect(nc?.facts.roster[0]?.corroboration).toMatch(/NOT FOUND in X2\.md's Log/);
-    expect(nc?.reasons.join("\n")).toMatch(/no row naming both was found in docs\/p0\/X2\.md/);
+    expect(nc?.facts.roster[0]?.corroboration).toMatch(/NOT FOUND\/NOT PUSHED in X2\.md's Log/);
+    expect(nc?.reasons.join("\n")).toMatch(/reachable from origin\/main, was found in docs\/p0\/X2\.md/);
   });
 
   it("an owner-saved fact backed by a VERIFIED Wayback snapshot whose re-derived text contains the quote passes and names the snapshot", () => {
+    // Gate finding 3 (second re-gate): a `wayback` record is NOT
+    // fact-specific — one snapshot of the whole page corroborates every
+    // fact drawn from it, regardless of which one is being checked.
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "wayback",
-          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
-          snapshotSha256: "e".repeat(64),
-          rawFile: "raw/wayback-e.html",
-        },
+        [SHA_OWNER]: [
+          {
+            type: "wayback",
+            snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
+            snapshotSha256: "e".repeat(64),
+            rawFile: "raw/wayback-e.html",
+          },
+        ],
       },
     };
     const resolved: X2ResolvedCorroboration = new Map([
