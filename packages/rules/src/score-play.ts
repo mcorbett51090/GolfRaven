@@ -52,7 +52,8 @@
  * before scoring — it is evidence for a DIFFERENT play and must not
  * silently contribute to this one.
  */
-import { createHash } from "node:crypto";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import {
   bookingFixSatisfiesHardWindow,
   classifyEvidenceRow,
@@ -752,10 +753,22 @@ function canonicalize(value: unknown): unknown {
 /** M5 (fifth gate): SHA-256 (hex) over the canonicalized, ALREADY-PARSED
  * `{evidence, ctx}` — computed AFTER `parseScorePlayInput` has already
  * validated it, so this digest is over trusted, shape-checked data, never
- * the raw pre-parse bytes. */
+ * the raw pre-parse bytes.
+ *
+ * **Deliberately `@noble/hashes`, never `node:crypto`.** This package's
+ * own module doc says it plainly: "authoritative on the server,
+ * preview-only on DEVICE" — the device is the React Native app, which has
+ * no `node:crypto`. `@noble/hashes` is pure JS (MIT, audited,
+ * zero-dependency) and runs identically in both places, so `scorePlay`
+ * stays host-neutral rather than silently gaining a Node-only dependency
+ * the app build can't satisfy. */
 function computeInputDigest(evidence: Evidence[], ctx: ScorePlayContext): string {
   const canonical = JSON.stringify(canonicalize({ evidence, ctx }));
-  return createHash("sha256").update(canonical).digest("hex");
+  // `utf8ToBytes` (not the DOM-only `TextEncoder`, which this package's
+  // "ES2022"-only `lib` doesn't type and which isn't guaranteed on every
+  // host this pure-TS package runs on) — same `@noble/hashes` package as
+  // `sha256`/`bytesToHex`, so no new dependency for this one conversion.
+  return bytesToHex(sha256(utf8ToBytes(canonical)));
 }
 
 /**
