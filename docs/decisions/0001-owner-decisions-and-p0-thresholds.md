@@ -511,3 +511,26 @@ agent should have known could never be met.
 
 Drafted by an agent, after Run 2 and a gate review, at the owner's instruction. This correction is complete
 once committed; Step C's re-runs and memo fixes follow it, not the other way around.
+
+### Erratum to the Addendum J correction (2026-09-24, after the second gate review)
+
+This note corrects two parts of the correction above. The text above is not edited.
+
+1. **Correction 1 understated what was already known.** It says the numeric id pairing (for example `2361` →
+   `1046010`) "was new information from Run 2". That is false. Run 1's saved result
+   (`/tmp/golfraven-p0/x4-verify-result/result.json`, generated 18:29:29Z, before Run 2 at 18:54Z) already
+   recorded every pairing. Both the qualitative fact and the concrete numbers were on record before Addendum
+   J(b) was drafted.
+2. **The X2 attribution is incomplete.** The agent wrote the description of the X2 option Matt chose. Quoted
+   verbatim, it read: "You open the Tennessee and Vancouver Island trail pages in your own browser and save each
+   one (File → Save Page As). I load Vancouver Island's page in a real web browser here too. The same pass mark
+   is re-checked against those saved copies, and the record says this rule was added after the first result."
+   Browser rendering, route J(a)(i), was therefore part of the option Matt chose, but only for Vancouver
+   Island. Using it for any other trail (the RTJ renders) is the agent's own addition. Those renders are
+   recorded only to test whether RTJ's facts are really absent. They cannot confirm RTJ without Matt's
+   sign-off.
+
+   The full X4 option description read: "Count a course as live when GolfNow forwards to its own current page
+   (same course number, course name on the page), then re-run. The record says this was written after the
+   first result. Either way, links go to courses' own booking pages first until a lawyer clears GolfNow's
+   terms."
