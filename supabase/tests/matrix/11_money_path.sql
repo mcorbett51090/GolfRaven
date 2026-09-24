@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(135);
+SELECT plan(137);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -784,64 +784,85 @@ SELECT is(
   'the SET LOCAL GUC had NO effect: the row was still found and updated using the REAL vault key, not the rogue GUC value'
 );
 
--- a missing key raises an error.
+-- ⛔ FIX (should-fix 4, post-P3a re-gate): "match on each row's recorded
+-- hmac id and raise if that key is missing." delete_my_data now
+-- discovers the SET of hmac ids ACTUALLY REFERENCED anywhere in
+-- attestation_shift_log (not "every vault row named pseudonym_hmac%"),
+-- so simulating "missing" now means the referenced vault row is
+-- genuinely GONE, not merely renamed (renaming no longer matters at all
+-- — id-based lookup doesn't care what a key is currently named, closing
+-- the exact "rename v1 to retired_v1" gap the should-fix names). This is
+-- deliberately conservative/fail-closed: since the discovery scan is
+-- table-wide (it has to be — it doesn't know which rows belong to the
+-- deletion target until it's tried every referenced key), a SINGLE
+-- unresolvable historical key blocks delete_my_data for EVERY user,
+-- not just one whose data used that key. A dedicated player D3 + a
+-- dedicated throwaway key isolate this from every other test's own
+-- data.
 SELECT lives_ok(
-  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000d0000002', 'player-d2@example.test')$$,
-  'setup: player D2''s auth.users row'
+  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000d0000003', 'player-d3@example.test')$$,
+  'setup: player D3''s auth.users row (should-fix 4 tests)'
 );
--- RENAME out of the pseudonym_hmac% match, not DELETE: app.attestation's
--- player_pseudonym_hmac_id/staff_pseudonym_hmac_id (0018) FK to
--- vault.secrets(id), and helpers.sql's seeded attestation row references
--- key 1 — a real DELETE here hits a 23503, not the "no active key"
--- 23514/fail-closed path this test wants (confirmed empirically this
--- session). Renaming makes delete_my_data's own `name LIKE
--- 'pseudonym_hmac%'` lookup find nothing, without touching referential
--- integrity at all.
--- PREFIX the name (not suffix — `name || '_suffix'` still starts with
--- 'pseudonym_hmac' and so still matches the SAME `LIKE 'pseudonym_hmac%'`
--- prefix pattern delete_my_data itself uses, confirmed empirically this
--- session: the first version of this fix left the rows matching after
--- all).
 SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = 'hidden_for_test_' || name WHERE name LIKE 'pseudonym_hmac%'$$,
-  'setup: hide every pseudonym_hmac from the vault (renamed, not deleted)'
+  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000098', 'pseudonym_hmac_throwaway', 'shim-test-only-pseudonym-hmac-throwaway-32bytes-minimum-wwwwwwwwwwww')$$,
+  'setup: a dedicated throwaway pseudonym_hmac key, for the missing-key test'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
+    VALUES ('fac_x', 'presence', 'player_d3',
+            encode(hmac('00000000-0000-0000-0000-0000d0000003', 'shim-test-only-pseudonym-hmac-throwaway-32bytes-minimum-wwwwwwwwwwww', 'sha256'), 'hex'),
+            'a0000000-1111-0000-0000-000000000098', 'staff_x_handle')$$,
+  'setup: an attestation_shift_log row keyed with the dedicated throwaway key'
+);
+-- Delete the vault row the row above references -- possible at all only
+-- because should-fix 6 (post-P3a re-gate) dropped the FK into
+-- vault.secrets; this is exactly the scenario that FK's removal was for
+-- (validating the reference programmatically, inside the definer,
+-- instead of relying on referential integrity to prevent it going
+-- stale).
+SELECT lives_ok(
+  $$DELETE FROM vault.secrets WHERE id = 'a0000000-1111-0000-0000-000000000098'$$,
+  'setup: delete the throwaway key from vault.secrets entirely (no FK blocks this any more)'
 );
 SELECT throws_ok(
-  $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000002'::uuid)$$,
+  $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000003'::uuid)$$,
   NULL,
-  'delete_my_data: no active pseudonym_hmac found in vault.decrypted_secrets',
-  'delete_my_data raises when the vault has NO active pseudonym_hmac (fail-closed, not a silent leave-PII-behind)'
+  NULL,
+  'delete_my_data raises when a REFERENCED pseudonym_hmac id no longer resolves in vault.decrypted_secrets at all (deleted, not just renamed)'
 );
 
--- a short key raises an error.
+-- a short key raises an error (same dedicated row, key re-added short).
 SELECT lives_ok(
-  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000099', 'pseudonym_hmac_short', 'too-short')$$,
-  'setup: seed a pseudonym_hmac shorter than 32 bytes'
+  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000098', 'pseudonym_hmac_throwaway', 'too-short')$$,
+  'setup: re-add the throwaway key, this time shorter than 32 bytes'
 );
 SELECT throws_ok(
-  $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000002'::uuid)$$,
+  $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000003'::uuid)$$,
   NULL,
   NULL,
-  'delete_my_data raises when a pseudonym_hmac in the vault is shorter than 32 bytes'
+  'delete_my_data raises when a REFERENCED pseudonym_hmac in the vault is shorter than 32 bytes'
+);
+-- cleanup: detach the dedicated row from the now-removed throwaway key so
+-- it doesn't block every OTHER remaining delete_my_data call in this file.
+SELECT lives_ok(
+  $$DELETE FROM app.attestation_shift_log WHERE player_pseudonym_hmac_id = 'a0000000-1111-0000-0000-000000000098'$$,
+  'cleanup: remove the dedicated attestation_shift_log row (its key is being removed next)'
 );
 SELECT lives_ok(
-  $$DELETE FROM vault.secrets WHERE name = 'pseudonym_hmac_short'$$,
-  'cleanup: remove the short key'
-);
-SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = 'pseudonym_hmac_v1' WHERE id = 'a0000000-1111-0000-0000-000000000001'$$,
-  'cleanup: restore pseudonym_hmac_v1''s name (hidden above for the missing-key test)'
-);
-SELECT lives_ok(
-  $$UPDATE vault.secrets SET name = 'pseudonym_hmac_v2' WHERE id = 'a0000000-1111-0000-0000-000000000002'$$,
-  'cleanup: restore pseudonym_hmac_v2''s name'
+  $$DELETE FROM vault.secrets WHERE id = 'a0000000-1111-0000-0000-000000000098'$$,
+  'cleanup: remove the throwaway key'
 );
 
--- rotation: a row written with key 1 is still found after key 2 (already
--- restored above) AND a brand-new key 3 are both active.
+-- rotation: a row written with key 1 is still found after key 2 AND a
+-- brand-new key 3 are both active — id-based resolution means rotation
+-- (adding new keys) never affects an EXISTING row's own recorded id.
 SELECT lives_ok(
   $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000003', 'pseudonym_hmac_v3', 'shim-test-only-pseudonym-hmac-three-32bytes-minimum-zzzzzzzzzzzzzzzzzzz')$$,
   'setup: rotate in a THIRD active pseudonym_hmac (key 1 never stops being active -- rotation adds, this design never retires a key on its own)'
+);
+SELECT lives_ok(
+  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000d0000002', 'player-d2@example.test')$$,
+  'setup: player D2''s auth.users row'
 );
 SELECT lives_ok(
   $$INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_hmac_id, staff_handle)
@@ -857,7 +878,7 @@ SELECT lives_ok(
 SELECT is(
   (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE player_pseudonym = encode(hmac('00000000-0000-0000-0000-0000d0000002', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex')),
   'deleted player',
-  'ROTATION: the row written under key 1 is still found and updated after key 2 AND key 3 were added later -- delete_my_data tried every active key, not just the newest'
+  'ROTATION: the row written under key 1 is still found and updated after key 2 AND key 3 were added later -- resolved by its OWN recorded key id, unaffected by later keys existing'
 );
 SELECT lives_ok(
   $$DELETE FROM vault.secrets WHERE name = 'pseudonym_hmac_v3'$$,
