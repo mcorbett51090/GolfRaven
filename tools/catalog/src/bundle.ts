@@ -29,24 +29,27 @@ import {
   TrailSchema,
 } from "@golfraven/catalog";
 
+/**
+ * **Gate review correction (post-e9b3ab0): a bundle may not assert its own
+ * review state.** Earlier this schema carried `bookingHostAllowList` and
+ * `labels` fields, so a bundle could ship its own allow-list or claim its
+ * own `geometry-reviewed`/`contact-reviewed` labels — a self-approval hole
+ * (a malicious or careless PR could add its own booking host to its own
+ * allow-list, or assert the review label that lets it skip review). Both
+ * now come only from trusted, out-of-band inputs the bundle cannot touch:
+ * the booking-host allow-list from the committed `config/booking-hosts.json`
+ * (`src/config.ts`), and labels only from the CLI's `--labels` flag (real
+ * PR labels, passed in by CI). `mf-bundle-cannot-self-label` and
+ * `mf-bundle-cannot-self-allow-booking-host` (test/fixtures) prove a
+ * bundle carrying either field is now rejected outright (`strictObject`
+ * -> `SCHEMA_INVALID: Unrecognized key`).
+ */
 export const CatalogBundleSchema = z.strictObject({
   contractVersion: z.literal(CONTRACT_VERSION),
   facilities: z.array(FacilitySchema),
   trails: z.array(TrailSchema),
   designers: z.array(DesignerSchema).optional(),
   idLedger: IdLedgerSchema,
-  /** The booking-host allow-list this run checks against. Decision 0003
-   * (superseded, but its S2 design survives here) names this explicitly:
-   * "`verify-catalog`, run against **synthetic fixtures only** ... the
-   * booking-host rule against a **fixture** allow-list" — the real
-   * allow-list's contents wait on X4/X6 (out of P1a scope), so the bundle
-   * carries its own for each fixture/run rather than this tool reading a
-   * committed real one. */
-  bookingHostAllowList: z.array(z.string()).optional(),
-  /** PR labels active for this run — how the `geometry-reviewed` and
-   * `contact-reviewed` diff gates receive their out-of-band review signal
-   * offline (see `verify-catalog.ts`'s module doc for the full design). */
-  labels: z.array(z.string()).optional(),
 });
 export type CatalogBundle = z.infer<typeof CatalogBundleSchema>;
 
