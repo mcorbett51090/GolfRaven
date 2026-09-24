@@ -1,106 +1,478 @@
 /**
- * Manifest and `versions.json` shape, canonical-JSON, and append-only
- * helpers for the catalog artifact (build plan §3.3 "A signed, append-only
- * `catalog/v1/versions.json`", §3.5 "App lifecycle fields in the signed
- * manifest", §10 P1 AT(2): "The signature verifies per `kid`, a tampered
- * shard fails, and a manifest whose `kid` is in `revokedKids` is
- * refused.").
+ * Manifest and `versions.json` shape, canonical-JSON, strict parsing, and
+ * append-only helpers for the catalog artifact (build plan §3.3 "A
+ * signed, append-only `catalog/v1/versions.json`", §3.5 "App lifecycle
+ * fields in the signed manifest", §10 P1 AT(2)).
  *
- * Deliberately dependency-free (no `@golfraven/catalog` import) so
- * `emit-catalog.ts` and `sign.ts` share one small module for the parts of
- * the artifact format that are not about the bundle shape or signing
- * itself — the two other pieces of this task.
+ * **Rewritten after the Opus security gate (commit 7692919, 4 blocking
+ * findings).** The load-bearing correction: canonical JSON is signed and
+ * verified as EXACT BYTES on both ends — never re-derived from a parsed
+ * object at verify time (`sign.ts`'s `verifyArtifact` reads the file's raw
+ * bytes and hashes those; it never calls `canonicalStringify` on a parsed
+ * manifest and checks a signature against that). `canonicalStringify` here
+ * is used only (a) by the emitter, to produce the bytes that get written
+ * and hashed in the first place, and (b) as a self-check inside the
+ * emitter (`raw === canonicalStringify(parseStrictJson(raw))`) — a check
+ * on the WRITER's own serializer, not part of what a verifier trusts.
+ *
+ * This module still adds no dependency beyond `zod`, which
+ * `@golfraven/catalog-tools` already depends on (`package.json`) — using
+ * it here is not a new dependency.
  */
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
-/** One entry in `manifest.json`'s `shards[]` — every file the artifact
- * tree carries besides `manifest.json`/`manifest.sig.json`/`versions.json`
- * themselves (those three are not self-listed; see `emit-catalog.ts`). */
-export interface ShardEntry {
-  /** POSIX-style path relative to `catalog/v1/`, e.g.
-   * `"facilities/US-CA.json"`. Always forward slashes, even if this ever
-   * runs on Windows. */
-  path: string;
-  sha256: string;
-  bytes: number;
-  /** Present only on the separately-licensed ODbL part (§4.1 "the ODbL
-   * layer split"). Absent = ordinary catalog content under the project's
-   * own terms. */
-  license?: "ODbL-1.0";
+/* ------------------------------------------------------------------ */
+/* Code-point string ordering (finding: "code-point ordering, not        */
+/* engine or localeCompare order")                                      */
+/* ------------------------------------------------------------------ */
+
+/** Compares two strings by Unicode code point (not UTF-16 code unit,
+ * which is what `<`/`.sort()`'s default comparator and `.localeCompare`
+ * both use, and which can disagree with true code-point order across a
+ * surrogate-pair boundary). Used everywhere this module or its callers
+ * need a stable, engine-independent, locale-independent order: object key
+ * sort, shard-list sort, `revokedKids[]` sort, `sortById`. */
+export function compareCodePoints(a: string, b: string): number {
+  if (a === b) return 0;
+  const ai = Array.from(a);
+  const bi = Array.from(b);
+  const len = Math.min(ai.length, bi.length);
+  for (let i = 0; i < len; i += 1) {
+    const ca = ai[i]!.codePointAt(0)!;
+    const cb = bi[i]!.codePointAt(0)!;
+    if (ca !== cb) return ca < cb ? -1 : 1;
+  }
+  return ai.length - bi.length;
 }
 
-/** `manifest.json`'s shape. Signed as a whole by `sign.ts`'s
- * `signManifest` — the signature and its sidecar `manifestSha` live in
- * `manifest.sig.json`, not inline, mirroring §3.3's own
- * `manifestSig: {catalogVersion, manifestSha, kid, sig}` shape for the
- * header the app attaches to evidence. */
-export interface CatalogManifest {
-  contractVersion: number;
-  /** `yyyymmdd-gitsha7` (§3.5) — this module does not enforce the shape;
-   * the caller (the emitter's CLI) decides how to compute it. */
-  catalogVersion: string;
-  /** Below this app version, the app shows a force-update screen and
-   * keeps the last good cached catalog read-only (§3.5 FM-24). */
-  minAppVersion: string;
-  /** The `kid` that signs THIS manifest. */
-  kid: string;
-  /** Keys the app/import function must stop trusting from this manifest
-   * on (§3.5, §4.8 "Catalog key revocation"). May include `manifest.kid`
-   * itself — that is a self-revoking manifest (AT(2)'s "a manifest whose
-   * `kid` is in `revokedKids` is refused" fixture) and `verifyArtifact`
-   * refuses it; this module does not filter it out on write, since the
-   * emitter must be able to produce that exact fixture for tests. */
-  revokedKids: string[];
-  generatedAt: string;
-  shards: ShardEntry[];
+/** Sorts an array of `{id: string}`-shaped records by `id` (code-point
+ * order), without mutating the input. */
+export function sortById<T extends { id: string }>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => compareCodePoints(a.id, b.id));
 }
 
-/** One entry in the append-only `catalog/v1/versions.json` (§3.3: "the
- * site publishes a signed, append-only `catalog/v1/versions.json`
- * (version, `published_at`, `kid`, sha)"). */
-export interface VersionEntry {
-  version: string;
-  publishedAt: string;
-  kid: string;
-  /** sha256 of the manifest this version entry describes (matches
-   * `ManifestSignature.manifestSha` for that emit). */
-  sha256: string;
-}
+/* ------------------------------------------------------------------ */
+/* Canonical JSON                                                       */
+/* ------------------------------------------------------------------ */
 
-/**
- * Deterministic JSON: object keys sorted recursively (array element order
- * is left exactly as the caller built it — the caller is responsible for
- * putting array elements in a canonical order, e.g. sorted by `id`, since
- * "sort the array" is not well-defined for arbitrary array content the
- * way "sort the keys" is for objects). Two-space indent, trailing newline,
- * so two emits with the same logical content are byte-identical.
- */
-export function canonicalStringify(value: unknown): string {
-  return `${JSON.stringify(sortKeysDeep(value), null, 2)}\n`;
-}
-
-function sortKeysDeep(value: unknown): unknown {
+function sortAndValidate(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map(sortKeysDeep);
+    return value.map(sortAndValidate);
   }
   if (value !== null && typeof value === "object") {
     const input = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
-    for (const key of Object.keys(input).sort()) {
-      out[key] = sortKeysDeep(input[key]);
+    for (const key of Object.keys(input).sort(compareCodePoints)) {
+      out[key] = sortAndValidate(input[key]);
     }
     return out;
   }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(`canonicalStringify: refusing a non-finite number (${value})`);
+    }
+    if (Object.is(value, -0)) {
+      throw new Error("canonicalStringify: refusing -0 (negative zero)");
+    }
+  }
   return value;
+}
+
+/**
+ * Deterministic JSON: object keys sorted by code point recursively (array
+ * element order is left exactly as the caller built it — array element
+ * ordering is the caller's job, e.g. `sortById`). Rejects any non-finite
+ * number or `-0` anywhere in the value tree. Two-space indent, trailing
+ * newline, so two emits with the same logical content are byte-identical.
+ */
+export function canonicalStringify(value: unknown): string {
+  return `${JSON.stringify(sortAndValidate(value), null, 2)}\n`;
 }
 
 export function sha256Hex(data: Buffer | string): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
+/* ------------------------------------------------------------------ */
+/* Strict JSON parsing (finding: reject duplicate keys, __proto__/       */
+/* constructor/prototype keys, and -0, at PARSE time — `JSON.parse`      */
+/* cannot detect duplicate keys once they've collapsed to "last wins")  */
+/* ------------------------------------------------------------------ */
+
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 /**
- * Enforces `versions.json`'s append-only discipline (§3.3), the same
- * discipline `data/id-ledger.json` follows (§3.5): every entry in
+ * A minimal, strict, recursive-descent JSON parser (full grammar; no
+ * extensions). Differs from `JSON.parse` in exactly the ways that matter
+ * for trusting an artifact someone else produced:
+ *  - an object with a **duplicate key** throws (`JSON.parse` silently
+ *    keeps the last one — a duplicate `minAppVersion` key would otherwise
+ *    parse without a trace of the ambiguity, which is exactly the shape
+ *    of a canonicalization-confusion attack);
+ *  - an object key of `__proto__`, `constructor` or `prototype` throws;
+ *  - a number literal that evaluates to `-0` (`-0`, `-0.0`, `-0.0e0`, ...)
+ *    throws — JSON's own grammar already makes `NaN`/`Infinity` literals
+ *    unparseable, so nothing extra is needed for those.
+ * Objects are built with `Object.create(null)` (no inherited prototype at
+ * all), so even a permitted-looking key can never reach `Object.prototype`.
+ */
+export function parseStrictJson(text: string): unknown {
+  let i = 0;
+  const n = text.length;
+
+  function fail(msg: string): never {
+    throw new Error(`strict JSON parse error at offset ${i}: ${msg}`);
+  }
+  function skipWs(): void {
+    while (i < n) {
+      const c = text[i];
+      if (c === " " || c === "\t" || c === "\n" || c === "\r") i += 1;
+      else break;
+    }
+  }
+  function parseValue(): unknown {
+    skipWs();
+    if (i >= n) fail("unexpected end of input");
+    const c = text[i];
+    if (c === "{") return parseObject();
+    if (c === "[") return parseArray();
+    if (c === '"') return parseString();
+    if (c === "t") return parseLiteral("true", true);
+    if (c === "f") return parseLiteral("false", false);
+    if (c === "n") return parseLiteral("null", null);
+    if (c === "-" || (c !== undefined && c >= "0" && c <= "9")) return parseNumber();
+    fail(`unexpected character ${JSON.stringify(c)}`);
+  }
+  function parseLiteral(lit: string, val: unknown): unknown {
+    if (text.slice(i, i + lit.length) !== lit) fail(`expected literal "${lit}"`);
+    i += lit.length;
+    return val;
+  }
+  function parseObject(): Record<string, unknown> {
+    i += 1; // "{"
+    const obj: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    const seen = new Set<string>();
+    skipWs();
+    if (text[i] === "}") {
+      i += 1;
+      return obj;
+    }
+    for (;;) {
+      skipWs();
+      if (text[i] !== '"') fail("expected a string key");
+      const key = parseString();
+      if (FORBIDDEN_KEYS.has(key)) fail(`forbidden object key "${key}"`);
+      if (seen.has(key)) fail(`duplicate object key "${key}"`);
+      seen.add(key);
+      skipWs();
+      if (text[i] !== ":") fail('expected ":"');
+      i += 1;
+      obj[key] = parseValue();
+      skipWs();
+      if (text[i] === ",") {
+        i += 1;
+        continue;
+      }
+      if (text[i] === "}") {
+        i += 1;
+        break;
+      }
+      fail('expected "," or "}"');
+    }
+    return obj;
+  }
+  function parseArray(): unknown[] {
+    i += 1; // "["
+    const arr: unknown[] = [];
+    skipWs();
+    if (text[i] === "]") {
+      i += 1;
+      return arr;
+    }
+    for (;;) {
+      arr.push(parseValue());
+      skipWs();
+      if (text[i] === ",") {
+        i += 1;
+        continue;
+      }
+      if (text[i] === "]") {
+        i += 1;
+        break;
+      }
+      fail('expected "," or "]"');
+    }
+    return arr;
+  }
+  function parseString(): string {
+    i += 1; // opening quote
+    let out = "";
+    for (;;) {
+      if (i >= n) fail("unterminated string");
+      const c = text[i];
+      if (c === '"') {
+        i += 1;
+        break;
+      }
+      if (c === "\\") {
+        i += 1;
+        const esc = text[i];
+        switch (esc) {
+          case '"':
+            out += '"';
+            break;
+          case "\\":
+            out += "\\";
+            break;
+          case "/":
+            out += "/";
+            break;
+          case "b":
+            out += "\b";
+            break;
+          case "f":
+            out += "\f";
+            break;
+          case "n":
+            out += "\n";
+            break;
+          case "r":
+            out += "\r";
+            break;
+          case "t":
+            out += "\t";
+            break;
+          case "u": {
+            const hex = text.slice(i + 1, i + 5);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("invalid \\u escape");
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+            break;
+          }
+          default:
+            fail(`invalid escape "\\${String(esc)}"`);
+        }
+        i += 1;
+      } else if (c !== undefined) {
+        const code = c.charCodeAt(0);
+        if (code < 0x20) fail("unescaped control character in string");
+        out += c;
+        i += 1;
+      } else {
+        fail("unterminated string");
+      }
+    }
+    return out;
+  }
+  function parseNumber(): number {
+    const start = i;
+    if (text[i] === "-") i += 1;
+    const d0 = text[i];
+    if (d0 === "0") {
+      i += 1;
+    } else if (d0 !== undefined && d0 >= "1" && d0 <= "9") {
+      i += 1;
+      while (i < n && text[i]! >= "0" && text[i]! <= "9") i += 1;
+    } else {
+      fail("invalid number");
+    }
+    if (text[i] === ".") {
+      i += 1;
+      if (!(i < n && text[i]! >= "0" && text[i]! <= "9")) fail("invalid number (fraction)");
+      while (i < n && text[i]! >= "0" && text[i]! <= "9") i += 1;
+    }
+    if (text[i] === "e" || text[i] === "E") {
+      i += 1;
+      const sign = text[i];
+      if (sign === "+" || sign === "-") i += 1;
+      if (!(i < n && text[i]! >= "0" && text[i]! <= "9")) fail("invalid number (exponent)");
+      while (i < n && text[i]! >= "0" && text[i]! <= "9") i += 1;
+    }
+    const literal = text.slice(start, i);
+    const value = Number(literal);
+    if (!Number.isFinite(value)) fail("non-finite number");
+    if (Object.is(value, -0)) fail("negative zero is not allowed");
+    return value;
+  }
+
+  const value = parseValue();
+  skipWs();
+  if (i !== n) fail("trailing content after the JSON value");
+  return value;
+}
+
+/* ------------------------------------------------------------------ */
+/* Schemas                                                              */
+/* ------------------------------------------------------------------ */
+
+export const Sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/, "must be a lowercase hex sha256");
+
+/** `yyyymmdd-gitsha7` (§3.5). */
+export const CatalogVersionSchema = z
+  .string()
+  .regex(/^\d{8}-[0-9a-f]{7}$/, 'must be "yyyymmdd-gitsha7"');
+
+export const SemverSchema = z
+  .string()
+  .regex(
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+    "must be a semver string",
+  );
+
+/**
+ * Shard paths, relative to `catalog/v1/`. Lower-case only (a security-gate
+ * requirement, not a style choice — see `emit-catalog.ts`'s module doc for
+ * why region-code shard filenames are lower-cased even though the
+ * `Region`/`Facility.region` VALUE inside the file stays the real,
+ * upper-case ISO 3166-2 code). No `..` segment, never absolute.
+ */
+export const ShardPathSchema = z
+  .string()
+  .min(1)
+  .regex(/^[a-z0-9][a-z0-9/_.-]*\.(json|txt)$/, "invalid shard path")
+  .refine((p) => !p.split("/").includes(".."), { message: "shard path must not contain .." })
+  .refine((p) => !p.startsWith("/"), { message: "shard path must not be absolute" });
+
+export const ShardEntrySchema = z.strictObject({
+  path: ShardPathSchema,
+  sha256: Sha256HexSchema,
+  bytes: z.int().nonnegative(),
+  license: z.literal("ODbL-1.0").optional(),
+});
+export type ShardEntry = z.infer<typeof ShardEntrySchema>;
+
+export const CatalogManifestSchema = z.strictObject({
+  contractVersion: z.int().nonnegative(),
+  catalogVersion: CatalogVersionSchema,
+  minAppVersion: SemverSchema,
+  kid: z.string().min(1),
+  revokedKids: z.array(z.string().min(1)),
+  generatedAt: z.string().min(1),
+  shards: z.array(ShardEntrySchema),
+});
+export type CatalogManifest = z.infer<typeof CatalogManifestSchema>;
+
+/** The domain-separated statement that actually gets signed (§3.3(ii)):
+ * `"golfraven/catalog/v1/manifest\n" + canonicalStringify(ManifestStatement)`.
+ * `manifestSha` is the sha256 of `manifest.json`'s raw bytes — the
+ * statement commits to the manifest's exact content through that hash,
+ * without the statement itself needing to embed the (potentially large)
+ * manifest body. */
+export const ManifestStatementSchema = z.strictObject({
+  catalogVersion: CatalogVersionSchema,
+  contractVersion: z.int().nonnegative(),
+  kid: z.string().min(1),
+  manifestSha: Sha256HexSchema,
+});
+export type ManifestStatement = z.infer<typeof ManifestStatementSchema>;
+
+/** `manifest.sig.json`: the statement's fields plus the signature. */
+export const ManifestSignatureSchema = ManifestStatementSchema.extend({
+  sig: z.string().min(1),
+});
+export type ManifestSignature = z.infer<typeof ManifestSignatureSchema>;
+
+export const MANIFEST_DOMAIN = "golfraven/catalog/v1/manifest\n";
+export const VERSIONS_DOMAIN = "golfraven/catalog/v1/versions\n";
+
+export function manifestStatementBytes(statement: ManifestStatement): Buffer {
+  return Buffer.from(MANIFEST_DOMAIN + canonicalStringify(statement), "utf8");
+}
+
+/** One entry in the append-only `catalog/v1/versions.json`. */
+export const VersionEntrySchema = z.strictObject({
+  version: CatalogVersionSchema,
+  publishedAt: z.string().min(1),
+  kid: z.string().min(1),
+  sha256: Sha256HexSchema,
+});
+export type VersionEntry = z.infer<typeof VersionEntrySchema>;
+
+export const VersionsArraySchema = z.array(VersionEntrySchema);
+
+/** `versions.sig.json`: signs `versions.json`'s raw bytes, domain-separated
+ * from the manifest signature so one can never be replayed as the other. */
+export const VersionsStatementSchema = z.strictObject({
+  kid: z.string().min(1),
+  versionsSha: Sha256HexSchema,
+});
+export type VersionsStatement = z.infer<typeof VersionsStatementSchema>;
+
+export const VersionsSignatureSchema = VersionsStatementSchema.extend({
+  sig: z.string().min(1),
+});
+export type VersionsSignature = z.infer<typeof VersionsSignatureSchema>;
+
+export function versionsStatementBytes(statement: VersionsStatement): Buffer {
+  return Buffer.from(VERSIONS_DOMAIN + canonicalStringify(statement), "utf8");
+}
+
+/* ------------------------------------------------------------------ */
+/* Strict-parse + schema-validate, in one call, returning issues rather */
+/* than throwing (finding: "Zod-validate ... returning issues rather    */
+/* than throwing a TypeError")                                          */
+/* ------------------------------------------------------------------ */
+
+export type StrictParseResult<T> = { ok: true; value: T } | { ok: false; issues: string[] };
+
+export function strictParseAndValidate<T>(
+  raw: Buffer,
+  schema: z.ZodType<T>,
+  label: string,
+): StrictParseResult<T> {
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJson(raw.toString("utf8"));
+  } catch (err) {
+    return { ok: false, issues: [`${label}: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const result = schema.safeParse(parsed);
+  if (!result.success) {
+    return {
+      ok: false,
+      issues: result.error.issues.map((i) => `${label}: ${formatZodPath(i.path)}: ${i.message}`),
+    };
+  }
+  return { ok: true, value: result.data };
+}
+
+function formatZodPath(path: readonly PropertyKey[]): string {
+  if (path.length === 0) return "<root>";
+  return path.map(String).join(".");
+}
+
+/* ------------------------------------------------------------------ */
+/* catalogVersion ordering (for append-only strict-increase + rollback  */
+/* refusal)                                                             */
+/* ------------------------------------------------------------------ */
+
+export function parseCatalogVersion(v: string): { date: string; sha: string } | undefined {
+  const m = /^(\d{8})-([0-9a-f]{7})$/.exec(v);
+  if (!m) return undefined;
+  return { date: m[1]!, sha: m[2]! };
+}
+
+/** Orders `yyyymmdd-gitsha7` strings primarily by date, falling back to a
+ * code-point comparison of the sha suffix only to make the ordering total
+ * (two versions cut on the same day have no other meaningful order). Not
+ * cryptographically or chronologically meaningful beyond the date — it
+ * exists only to detect "not older" / "not the same instant published
+ * twice", not to reconstruct true publish order within a day. */
+export function compareCatalogVersions(a: string, b: string): number {
+  const pa = parseCatalogVersion(a);
+  const pb = parseCatalogVersion(b);
+  if (!pa || !pb) return compareCodePoints(a, b);
+  if (pa.date !== pb.date) return pa.date < pb.date ? -1 : 1;
+  return compareCodePoints(pa.sha, pb.sha);
+}
+
+/* ------------------------------------------------------------------ */
+/* versions.json append-only                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Enforces `versions.json`'s append-only discipline (§3.3): every entry in
  * `previous` must appear, unchanged, at the same position, in `next` —
  * `next` may only add entries after `previous`'s. Throws with a message
  * naming the exact violation; never silently drops or rewrites data.
@@ -135,12 +507,15 @@ export function assertVersionsAppendOnly(
 }
 
 /**
- * Appends `entry` to `previous`, refusing (via `assertVersionsAppendOnly`)
- * whenever that would drop or change any earlier entry. A duplicate
- * `version` republished with IDENTICAL content is treated as re-emitting
- * the same already-published version and is a no-op (idempotent); a
- * duplicate `version` with DIFFERENT content is refused outright, since
- * that would silently rewrite what that version means.
+ * Appends `entry` to `previous`. A genuinely new entry must strictly
+ * increase both `version` (by `compareCatalogVersions`) and `publishedAt`
+ * (by plain string comparison — safe because every `publishedAt` this
+ * module writes is a fixed-format `Date#toISOString()` UTC timestamp) past
+ * the current last entry, or the append is refused. A duplicate `version`
+ * is legal ONLY as an idempotent republish of the CURRENT last entry with
+ * IDENTICAL content (a retried emit of the same version); a duplicate of
+ * any earlier version, or a same-version republish with different
+ * content, is refused outright.
  */
 export function appendVersion(
   previous: readonly VersionEntry[],
@@ -148,6 +523,11 @@ export function appendVersion(
 ): VersionEntry[] {
   const existingIndex = previous.findIndex((v) => v.version === entry.version);
   if (existingIndex !== -1) {
+    if (existingIndex !== previous.length - 1) {
+      throw new Error(
+        `versions.json append-only violation: version "${entry.version}" already exists earlier in the list, not as the last entry — refusing to rewrite history`,
+      );
+    }
     const existing = previous[existingIndex];
     if (
       !existing ||
@@ -161,13 +541,20 @@ export function appendVersion(
     }
     return [...previous];
   }
+  const last = previous[previous.length - 1];
+  if (last) {
+    if (compareCatalogVersions(entry.version, last.version) <= 0) {
+      throw new Error(
+        `versions.json append-only violation: new version "${entry.version}" must be strictly greater than the last published version "${last.version}"`,
+      );
+    }
+    if (!(entry.publishedAt > last.publishedAt)) {
+      throw new Error(
+        `versions.json append-only violation: new publishedAt "${entry.publishedAt}" must be strictly after the last published "${last.publishedAt}"`,
+      );
+    }
+  }
   const next = [...previous, entry];
   assertVersionsAppendOnly(previous, next);
   return next;
-}
-
-/** Sorts an array of `{id: string}`-shaped records by `id`, for
- * deterministic shard output regardless of the bundle's own array order. */
-export function sortById<T extends { id: string }>(items: readonly T[]): T[] {
-  return [...items].sort((a, b) => a.id.localeCompare(b.id));
 }
