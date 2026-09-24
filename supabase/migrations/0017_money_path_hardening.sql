@@ -825,7 +825,10 @@ ALTER TABLE private.consumed_nonce FORCE ROW LEVEL SECURITY;
 -- No client policy at all (nobody but the two trigger functions below
 -- ever touches it) — service_role gets the table-level grants it needs
 -- (it bypasses RLS entirely regardless, 0009/shim).
-GRANT INSERT, SELECT ON private.consumed_nonce TO service_role;
+-- DELETE added (should-fix, post-P3a re-gate): private.purge_consumed_nonce
+-- (below) DELETEs expired rows; it is not SECURITY DEFINER, so it runs
+-- with the CALLER's own grants (service_role, its only EXECUTE grantee).
+GRANT INSERT, SELECT, DELETE ON private.consumed_nonce TO service_role;
 
 CREATE OR REPLACE FUNCTION app.checkin_challenge_tombstone_nonce() RETURNS trigger
 LANGUAGE plpgsql
