@@ -189,12 +189,55 @@ const PurchaseCorroborationSchema = z.strictObject({
   localDate: LocalDateSchema,
 });
 
+/** F1 (sixth gate): "`ctx.facilityTz` is optional and defaults to 'UTC'"
+ * was the exploit — an LA fix legitimately captured at 18:00 PDT (already
+ * 01:00 UTC the NEXT day) could be relabelled with the NEXT day's
+ * `localDate` and still parse clean under the silent UTC default, while
+ * the HONEST `localDate` (the real Pacific calendar day) got rejected.
+ * `facilityTz` is REQUIRED now (`ScorePlayContextSchema` below drops
+ * `.optional()`) and allow-listed to genuine IANA Area/Location zone
+ * names ONLY — never a fixed offset (`"-07:00"`), an abbreviation
+ * (`"EST"`, `"PST8PDT"`), or a legacy/backward-compat link
+ * (`"US/Pacific"`, `"Etc/GMT+7"` — both real strings SOME systems accept,
+ * neither a canonical IANA zone `Intl` enumerates). */
+function isValidIanaTimeZone(tz: string): boolean {
+  const supportedValuesOf = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+  if (typeof supportedValuesOf === "function") {
+    try {
+      return supportedValuesOf("timeZone").includes(tz);
+    } catch {
+      // Fall through to the structural fallback below — a broken
+      // `supportedValuesOf` implementation is not proof the tz is bad.
+    }
+  }
+  // Fallback (a runtime without `Intl.supportedValuesOf`): require an
+  // Area/Location SHAPE (at least one "/", letters/underscores only on
+  // either side) — this alone rejects every fixed-offset/abbreviation
+  // probe case (`"-07:00"`, `"EST"`, `"PST8PDT"` all lack a "/") — AND
+  // that `Intl` itself accepts the string without throwing.
+  if (!/^[A-Za-z_]+(?:\/[A-Za-z_]+)+$/.test(tz)) return false;
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const FacilityTzSchema = NonEmptyStringSchema.refine(isValidIanaTimeZone, {
+  message: "must be a real IANA Area/Location timezone name (not a fixed offset, abbreviation, or legacy link)",
+});
+
 const ScorePlayContextSchema = z.strictObject({
   playFacilityId: NonEmptyStringSchema,
   playLocalDate: LocalDateSchema,
-  playCourseId: NonEmptyStringSchema.optional(),
+  // H3 residual (sixth gate): REQUIRED — see this schema's own callers
+  // for the "a row without its own courseId is facility-level and stays
+  // allowed" rule this does NOT disable (`internal/classify.ts`'s
+  // `courseOk`).
+  playCourseId: NonEmptyStringSchema,
   purchases: z.array(PurchaseCorroborationSchema).optional(),
-  facilityTz: NonEmptyStringSchema.optional(),
+  facilityTz: FacilityTzSchema,
 });
 
 /* ------------------------------------------------------------------ */
