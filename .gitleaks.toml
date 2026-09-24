@@ -15,3 +15,17 @@ useDefault = true
 # ("Failed to load config ... [[allowlists]] must contain at least one
 # check"). Add an [allowlist] table back only when there is a real entry
 # to put in it, with a comment naming the exact false positive it covers.
+
+# 2026-09-24 — money-path pgTAP test. Lines that name the Vault test secrets
+# ('pseudonym_key_1' / '_2' / '_3') next to fixed fake UUIDs trip the default
+# generic-api-key rule on the word "key". No secret value is on those lines
+# (the only test secret values are the obviously fake 'shim-test-only-…'
+# literals in supabase/tests/shim.sql, which are not flagged).
+# Line-scoped only: a finding is ignored only when its own line contains a
+# pseudonym Vault-secret NAME. No `paths` entry — gitleaks 8.30 skips a
+# path-allowlisted file entirely (verified: "scanned ~0 bytes"), which would
+# hide a real secret anywhere in that file.
+[[allowlists]]
+description = "money-path test: Vault secret names beside fake UUIDs (no secret values)"
+regexTarget = "line"
+regexes = ['''pseudonym_(key|hmac)_v?[0-9]''']
