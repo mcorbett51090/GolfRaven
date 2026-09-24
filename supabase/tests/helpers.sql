@@ -124,6 +124,12 @@ INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_ca
 VALUES ('60000000-0000-0000-0000-000000000001', 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 100, current_date, current_date + 30, 'live');
 INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, valid_from, valid_to, status)
 VALUES ('60000000-0000-0000-0000-000000000002', 'trl_u', 'fac_x', '{}'::jsonb, 'operator', 100, current_date, current_date + 30, 'live');
+-- offer #3: unrestricted, held in reserve for tests that need an offer_id
+-- not already claimed by another (user_id, offer_id) pair in the file
+-- (11_money_path.sql's M2 bypass (b) test — offers #1/#2 are both already
+-- claimed for other users/tests by the time that test runs).
+INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, valid_from, valid_to, status)
+VALUES ('60000000-0000-0000-0000-000000000003', 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 100, current_date, current_date + 30, 'live');
 -- offer_code #1: earned (untouched state)
 INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state)
 VALUES ('70000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000001',

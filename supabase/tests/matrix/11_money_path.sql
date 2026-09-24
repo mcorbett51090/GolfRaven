@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(95);
+SELECT plan(96);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -435,6 +435,24 @@ SELECT lives_ok(
             'special_marker', 'trl_t', 'redeemable', '43000000-0000-0000-0000-000000000001')$$,
   'setup: an entitlement for player C with play_id SET (H1''s exact reproduction shape)'
 );
+-- Settle the M2 composite FKs/constraint triggers for THESE two inserts
+-- right now, while player C's play still exists — otherwise the deferred
+-- check stays queued against the ORIGINAL (still-valid) INSERT values and
+-- would only fire later (at this file's own M2 SET CONSTRAINTS IMMEDIATE,
+-- or COMMIT), by which point delete_my_data(C) below has deleted player
+-- C's play/offer_code outright (both are `delete_row`), so the queued
+-- check would evaluate a now-STALE key pair and raise a false positive —
+-- confirmed empirically this session (test 90 died with a spurious
+-- "play not found" for player C's already-deleted offer_code once the
+-- M2 section forced IMMEDIATE checking much later in this same
+-- transaction). Settling here matches real usage: the INSERT's own
+-- transaction would already have committed, resolving its deferred
+-- check, long before a LATER, separate delete_my_data call.
+SELECT lives_ok(
+  $$SET CONSTRAINTS app.offer_code_play_user_fk, app.entitlement_play_user_fk,
+      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg IMMEDIATE$$,
+  'setup: settle the M2 composite FKs/guards for player C''s H1 setup rows before delete_my_data runs'
+);
 SELECT lives_ok(
   $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000c0000001'::uuid)$$,
   'H1: delete_my_data succeeds when offer_code.play_id/entitlement.play_id are set (FK is deferrable + ON DELETE SET NULL, and delete_my_data nulls both explicitly too)'
@@ -627,9 +645,14 @@ SELECT lives_ok(
 -- INSERT time, does not exist yet. Under the OLD plain-BEFORE-trigger
 -- design this silently passed (NOT FOUND -> RETURN NEW); the composite
 -- FK + CONSTRAINT TRIGGER design raises once checked.
+-- Offer #3 (60000000-...-3), not offer #2 (already claimed by player E's
+-- (a)-test offer_code above) — a second offer_code for the SAME
+-- (user_id, offer_id) pair would hit UNIQUE(user_id, offer_id) before the
+-- FK check even gets a chance to run, masking the 23503 this test wants
+-- (confirmed empirically this session).
 SELECT throws_ok(
   $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
-    VALUES ('73000000-0000-0000-0000-000000000099', '60000000-0000-0000-0000-000000000002',
+    VALUES ('73000000-0000-0000-0000-000000000099', '60000000-0000-0000-0000-000000000003',
             '00000000-0000-0000-0000-0000e0000001', 'fac_x', 'earned', '44000000-0000-0000-0000-000000000099')$$,
   '23503',
   NULL,

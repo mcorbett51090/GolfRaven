@@ -204,9 +204,18 @@ ON CONFLICT (name) DO NOTHING;
 -- TEST MANIPULATION ONLY (11_money_path.sql's M1 tests add/remove keys
 -- to exercise the missing-key and rotation scenarios), never a grant a
 -- real migration gives to anything. Under HARNESS_MODE=superuser this is
--- moot (postgres already has full access as the schema's creator).
+-- moot for the CONNECTING role (postgres already has full access as the
+-- schema's creator) -- but 11_money_path.sql's M1 test manipulations run
+-- as `service_role` (tests.authenticate_as, a real SET ROLE in EITHER
+-- harness mode, matching 09/11's own "assert as the real caller identity"
+-- discipline), which is a DIFFERENT, unprivileged role even under
+-- superuser mode. So service_role needs this grant too, in both modes --
+-- confirmed empirically this session: superuser-mode M1 tests failed
+-- with "permission denied for schema vault" before this grant existed.
 GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO migration_owner;
 GRANT SELECT ON vault.decrypted_secrets TO migration_owner;
+GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO service_role;
+GRANT SELECT ON vault.decrypted_secrets TO service_role;
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
 -- runs supabase/tests/helpers.sql and
