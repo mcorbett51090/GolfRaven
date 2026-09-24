@@ -126,6 +126,17 @@ ALTER TABLE app.offer ADD CONSTRAINT offer_budget_within_cap
 -- time via trigger (a plain CHECK cannot reference another table's row
 -- count). NULL max_redemptions means unlimited (matches the column's own
 -- nullability, 0006).
+-- ⛔ FIX (H3, post-P3a gate): the original version read app.offer and
+-- app.offer_code with plain SELECTs, no lock — reproduced empirically:
+-- two concurrent sessions inserting against the SAME offer_id with
+-- max_redemptions=1 could both read count=0 before either committed, and
+-- both pass the check (classic TOCTOU race, the same class H3 names).
+-- `SELECT ... FOR UPDATE` on the offer row serializes concurrent
+-- redeemers of the SAME offer: the second session's FOR UPDATE blocks
+-- until the first commits, then re-reads a count that already reflects
+-- the first session's insert. Also now fires on `UPDATE OF offer_id`
+-- (re-pointing an existing offer_code at a different, maybe-exhausted
+-- offer was previously unchecked entirely).
 CREATE OR REPLACE FUNCTION app.offer_code_enforce_max_redemptions() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -133,7 +144,7 @@ DECLARE
   v_max int;
   v_count int;
 BEGIN
-  SELECT max_redemptions INTO v_max FROM app.offer WHERE id = NEW.offer_id;
+  SELECT max_redemptions INTO v_max FROM app.offer WHERE id = NEW.offer_id FOR UPDATE;
   IF v_max IS NOT NULL THEN
     SELECT count(*) INTO v_count FROM app.offer_code WHERE offer_id = NEW.offer_id;
     IF v_count >= v_max THEN
@@ -146,7 +157,7 @@ END;
 $$;
 
 CREATE TRIGGER offer_code_enforce_max_redemptions_trg
-BEFORE INSERT ON app.offer_code
+BEFORE INSERT OR UPDATE OF offer_id ON app.offer_code
 FOR EACH ROW EXECUTE FUNCTION app.offer_code_enforce_max_redemptions();
 
 -- Reserve-budget function: locks the offer row (SELECT ... FOR UPDATE)

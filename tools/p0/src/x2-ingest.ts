@@ -334,6 +334,16 @@ export async function ingestOwnerSavedPage(opts: {
   await mkdir(path.join(outDir, "raw"), { recursive: true });
   await writeFile(path.join(outDir, rawRelPath), buf);
 
+  // Register against the ledger now that the SHA is known. The pre-check
+  // above already refused a duplicate without `--additional`; this call
+  // cannot refuse again (nothing changed the ledger in between within one
+  // call), so its `recorded` result is what actually gets stored.
+  const { recorded } = await registerCapture(
+    ledgerPath,
+    { method: "owner-saved", url: statedUrl, sha256 },
+    { allowAdditional: opts.additional ?? false },
+  );
+
   const entry: X2FetchEntry = {
     trail,
     url: statedUrl,
