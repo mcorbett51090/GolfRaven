@@ -63,6 +63,42 @@ const LocalDateSchema = z
  * array), and `.min(1)` rejects the empty string. */
 const NonEmptyStringSchema = z.string().min(1);
 
+/** Seventh gate, item 5: "Cap `fixId` and id lengths (e.g. 128) and
+ * restrict them to printable, non-control characters." An unbounded id
+ * is a DoS vector (a megabyte-long string flowing into every downstream
+ * comparison/grouping key this package computes) and a control character
+ * (a raw newline, a bell, an escape sequence) is an injection vector into
+ * any log line or reasons array that ever echoes it back — `evidence[3]:
+ * fix evil\nINJECTED<script>: ...` is not just ugly, it's a fake extra log
+ * LINE if the string is ever printed unescaped. */
+const MAX_ID_LENGTH = 128;
+const PRINTABLE_NO_CONTROL_RE = /^[^\x00-\x1F\x7F-\x9F]+$/;
+const IdSchema = z
+  .string()
+  .min(1)
+  .max(MAX_ID_LENGTH, `must be at most ${MAX_ID_LENGTH} characters`)
+  .regex(PRINTABLE_NO_CONTROL_RE, "must be printable, non-control characters (no newlines, escapes, or other control characters)");
+
+/** Seventh gate, item 5: "Never interpolate raw attacker strings into
+ * reasons: truncate and escape them (JSON.stringify)." Used everywhere
+ * this module builds a human-readable `reasons` entry that embeds a
+ * caller-supplied value — `JSON.stringify` escapes quotes/control
+ * characters so the value can't break out of its own quoting or forge
+ * fake structure in a log line, and truncation bounds how much of a
+ * single malicious field can bloat one message. **`excludedRows` and
+ * `reasons` are SERVER-SIDE DIAGNOSTIC DATA ONLY** — they exist to help
+ * an operator or an internal dashboard understand why a row didn't
+ * score, never to be echoed verbatim into a player-facing UI (even
+ * escaped, a quarantine reason can restate exactly what shape check
+ * rejected the input, which is more detail than an end user needs and
+ * more than an adversary probing the validator should get back). */
+const MAX_INTERPOLATED_VALUE_LENGTH = 128;
+function safeQuote(value: string): string {
+  const truncated =
+    value.length > MAX_INTERPOLATED_VALUE_LENGTH ? `${value.slice(0, MAX_INTERPOLATED_VALUE_LENGTH)}…` : value;
+  return JSON.stringify(truncated);
+}
+
 const ChallengeKindSchema = z.enum(["live", "prefetched", "none"]);
 const GeometryKindSchema = z.enum(["polygon", "radius"]);
 const VerificationTierSchema = z.enum(["unverified", "listed-verified", "play-verified"]);
@@ -80,7 +116,7 @@ const TokenStateSchema = z.union([
 ]);
 
 const AppFixSchema = z.strictObject({
-  fixId: NonEmptyStringSchema,
+  fixId: IdSchema,
   facilityId: NonEmptyStringSchema,
   fromApp: z.boolean(),
   simulated: z.boolean(),
@@ -99,7 +135,7 @@ const AppFixSchema = z.strictObject({
 });
 
 const EvidenceCommonShape = {
-  id: NonEmptyStringSchema,
+  id: IdSchema,
   facilityId: NonEmptyStringSchema,
   courseId: NonEmptyStringSchema.optional(),
   localDate: LocalDateSchema,
@@ -321,10 +357,10 @@ function tzCrossCheckIssues(row: Evidence, tz: string): string[] {
   for (const fix of fixesOfEvidenceRow(row)) {
     const derived = localDateForTz(fix.capturedAt, tz);
     if (derived === undefined) {
-      issues.push(`fix ${fix.fixId}: facilityTz "${tz}" is not a timezone Intl recognizes`);
+      issues.push(`fix ${safeQuote(fix.fixId)}: facilityTz ${safeQuote(tz)} is not a timezone Intl recognizes`);
     } else if (derived !== fix.localDate) {
       issues.push(
-        `fix ${fix.fixId}: capturedAt resolves to ${derived} in tz "${tz}", but localDate says ${fix.localDate}`,
+        `fix ${safeQuote(fix.fixId)}: capturedAt resolves to ${derived} in tz ${safeQuote(tz)}, but localDate says ${safeQuote(fix.localDate)}`,
       );
     }
   }
