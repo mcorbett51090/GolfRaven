@@ -11,6 +11,7 @@ import {
   type ResponseLike,
   type RouteLike,
   type WebSocketRouteLike,
+  type WorkerLike,
 } from "../src/x2-render.js";
 
 /**

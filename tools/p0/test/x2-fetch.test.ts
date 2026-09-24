@@ -527,6 +527,7 @@ function passthroughPage(opts: { status?: number; finalUrl: string; html: string
       return opts.html;
     },
     async close() {},
+    on() {},
   };
 }
 
@@ -711,6 +712,7 @@ describe("x2-fetch: runX2Fetch --render mode (decision 0001 Addendum J(a)(i))", 
       async goto() {
         throw new Error("net::ERR_CONNECTION_REFUSED");
       },
+      on() {},
       async content() {
         return "";
       },
