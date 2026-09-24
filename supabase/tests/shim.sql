@@ -198,6 +198,15 @@ INSERT INTO vault.secrets (id, name, secret) VALUES
   ('a0000000-1111-0000-0000-000000000001', 'pseudonym_key_1', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx'),
   ('a0000000-1111-0000-0000-000000000002', 'pseudonym_key_2', 'shim-test-only-pseudonym-key-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy')
 ON CONFLICT (name) DO NOTHING;
+
+-- migration_owner (the pgTAP matrix's own connecting role under
+-- HARNESS_MODE=restricted) gets full DML on the vault stand-in — HARNESS
+-- TEST MANIPULATION ONLY (11_money_path.sql's M1 tests add/remove keys
+-- to exercise the missing-key and rotation scenarios), never a grant a
+-- real migration gives to anything. Under HARNESS_MODE=superuser this is
+-- moot (postgres already has full access as the schema's creator).
+GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO migration_owner;
+GRANT SELECT ON vault.decrypted_secrets TO migration_owner;
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
 -- runs supabase/tests/helpers.sql and

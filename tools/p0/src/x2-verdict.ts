@@ -38,10 +38,12 @@
  * non-zero exit — a trail reading as a genuine KILL must not be
  * indistinguishable from one whose only rules page never loaded.
  */
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { collapseWhitespace } from "./text-extract.js";
 import { extractEvidenceText } from "./evidence-extract.js";
 import { SLATE_TRAILS } from "./slate.js";
@@ -785,6 +787,97 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
 // CLI
 // ---------------------------------------------------------------------------
 
+const execFileAsync = promisify(execFile);
+
+export interface LedgerGitCheck {
+  /** `git hash-object <ledgerPath>` — the blob hash the ledger's CURRENT
+   * on-disk content would have if committed as-is, printed regardless of
+   * clean/dirty so a reader can always see exactly which ledger content
+   * produced this verdict. `null` only when `git` itself is unavailable
+   * (not installed / not on PATH). */
+  blobHash: string | null;
+  /** True only when `git diff --quiet -- <ledgerPath>` reports no
+   * uncommitted changes AND the file is not untracked/staged — i.e. the
+   * ledger's on-disk content is EXACTLY what git history already has, so
+   * this verdict is reproducible from the committed record alone. */
+  clean: boolean;
+  /** Human-readable reason for `clean: false`, or a plain "clean"
+   * confirmation. */
+  detail: string;
+}
+
+/**
+ * Gate finding 2d: `docs/p0/x2-recorded-ledger.json` is the CANONICAL
+ * ledger — living in the repo means every edit to it shows in `git log`,
+ * unlike a `/tmp` file nobody else can audit. This checks that the ledger
+ * a verdict run is ABOUT TO USE is exactly what git already has on record
+ * (no uncommitted edit could have snuck in a bogus entry between commit
+ * and this run), and reports the blob hash so the verdict output names
+ * EXACTLY which ledger content it read — never "trust me," always
+ * checkable against `git show <blobHash>` or `git log -p -- <path>`.
+ * Never throws: a git failure (not a repo, git missing, path outside any
+ * repo) comes back as `clean: false` with the reason in `detail` — the
+ * caller decides whether that refuses the run or only marks it UNOFFICIAL
+ * (this repo's own house style per `recorded-export.ts`'s `runGit`: a
+ * git-check failure is never silently treated as "assume clean").
+ */
+export async function checkLedgerAgainstGit(ledgerPath: string): Promise<LedgerGitCheck> {
+  const cwd = path.dirname(path.resolve(ledgerPath));
+  let blobHash: string | null = null;
+  try {
+    const { stdout } = await execFileAsync("git", ["hash-object", ledgerPath]);
+    blobHash = stdout.trim();
+  } catch {
+    blobHash = null;
+  }
+  try {
+    // Exit 0 = no diff between working tree and index for this path.
+    await execFileAsync("git", ["diff", "--quiet", "--", ledgerPath], { cwd });
+  } catch (err) {
+    const code = (err as { code?: number }).code;
+    if (code === 1) {
+      return {
+        blobHash,
+        clean: false,
+        detail: `"${ledgerPath}" has uncommitted changes against the index (git diff is non-empty).`,
+      };
+    }
+    return {
+      blobHash,
+      clean: false,
+      detail:
+        `could not verify "${ledgerPath}" is clean in git: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  // `git diff` alone says nothing about an UNTRACKED file (never added at
+  // all) — that would wrongly read as "clean". `git status --porcelain`
+  // catches that too (an untracked file shows as `??`).
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["status", "--porcelain", "--", ledgerPath],
+      { cwd },
+    );
+    if (stdout.trim().length > 0) {
+      return {
+        blobHash,
+        clean: false,
+        detail: `"${ledgerPath}" is untracked or has staged-but-uncommitted changes (git status: "${stdout.trim()}").`,
+      };
+    }
+  } catch (err) {
+    return {
+      blobHash,
+      clean: false,
+      detail:
+        `could not verify "${ledgerPath}"'s git status: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return { blobHash, clean: true, detail: "clean — no uncommitted changes." };
+}
+
 function parseFlags(argv: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -798,13 +891,19 @@ function parseFlags(argv: string[]): Record<string, string> {
 }
 
 async function main(argv: string[]): Promise<void> {
-  const flags = parseFlags(argv);
+  // `--allow-dirty-ledger` is a bare boolean toggle (no value) — stripped
+  // before `parseFlags` runs, same reasoning as `--render` in
+  // `x2-fetch.ts`.
+  const allowDirtyLedger = argv.includes("--allow-dirty-ledger");
+  const flags = parseFlags(argv.filter((a) => a !== "--allow-dirty-ledger"));
   const evidenceDir = flags["evidence-dir"];
   const confirmationPath = flags.confirmation;
-  if (!evidenceDir || !confirmationPath) {
+  if (!evidenceDir || !confirmationPath || !flags.ledger) {
     throw new Error(
-      "Usage: node dist/x2-verdict.js --evidence-dir <dir> --confirmation <file.json> [--out <prefix>] " +
-        "[--ledger <path>] [--corroboration <file.json>]",
+      "Usage: node dist/x2-verdict.js --evidence-dir <dir> --confirmation <file.json> --ledger <path> " +
+        "[--out <prefix>] [--corroboration <file.json>] [--allow-dirty-ledger] — `--ledger` is REQUIRED " +
+        "(gate finding 2c, re-gate): the per-directory default ledger was removed. The canonical ledger is " +
+        "`docs/p0/x2-recorded-ledger.json` (gate finding 2d).",
     );
   }
   const manifest = JSON.parse(
@@ -813,13 +912,23 @@ async function main(argv: string[]): Promise<void> {
   const confirmation = JSON.parse(
     await readFile(confirmationPath, "utf8"),
   ) as X2ConfirmationFile;
-  // Gate finding 2c: when a ledger path is given (default:
-  // `<evidence-dir>/recorded-ledger.json`, same default `x2-fetch`/
-  // `x2-ingest` use — pass `--ledger` explicitly when the recorded
-  // captures for this trail set live in a SHARED ledger outside this one
-  // evidence dir), it is authoritative for `recorded`, not each entry's
-  // own field.
-  const ledgerPath = flags.ledger || defaultLedgerPath(evidenceDir);
+  const ledgerPath = flags.ledger;
+  // Gate finding 2d: the ledger must be exactly what git already has on
+  // record — an uncommitted (or untracked) edit could otherwise slip a
+  // bogus entry into a verdict run with no trace in `git log`. A dirty or
+  // unverifiable ledger REFUSES the run outright unless
+  // `--allow-dirty-ledger` is passed, in which case the run proceeds but
+  // the output is marked UNOFFICIAL — never silently treated as if the
+  // ledger were the committed, auditable one.
+  const ledgerGitCheck = await checkLedgerAgainstGit(ledgerPath);
+  if (!ledgerGitCheck.clean && !allowDirtyLedger) {
+    throw new Error(
+      `Refusing: the ledger "${ledgerPath}" is not clean in git — ${ledgerGitCheck.detail} Pass ` +
+        "--allow-dirty-ledger to proceed anyway; the output will be marked UNOFFICIAL, and this is never " +
+        "the recommended path for a result meant to stand as the recorded verdict.",
+    );
+  }
+  const ledgerOfficial = ledgerGitCheck.clean;
   const ledger = await loadLedger(ledgerPath);
   const evidenceByTrail = await buildEvidenceByTrail(
     manifest,
@@ -841,12 +950,28 @@ async function main(argv: string[]): Promise<void> {
     path.join(defaultOutsideRepoDir("x2-verdict-result"), "result");
   assertOutsideRepoUnlessExplicit(path.dirname(outPrefix), outExplicit);
   await mkdir(path.dirname(outPrefix), { recursive: true });
+  // Gate finding 2d: the ledger's git blob hash and clean/UNOFFICIAL
+  // status are written alongside the verdict itself — a reader of the
+  // JSON result never has to separately go find and re-hash the ledger to
+  // know exactly which version of it produced this verdict.
+  const resultWithLedgerInfo = {
+    ...result,
+    ledger: {
+      path: ledgerPath,
+      blobHash: ledgerGitCheck.blobHash,
+      official: ledgerOfficial,
+      detail: ledgerGitCheck.detail,
+    },
+  };
   await writeFile(
     `${outPrefix}.json`,
-    `${JSON.stringify(result, null, 2)}\n`,
+    `${JSON.stringify(resultWithLedgerInfo, null, 2)}\n`,
     "utf8",
   );
-  const md = renderX2VerdictMarkdown(result);
+  const ledgerHeader =
+    `Ledger: ${ledgerPath} (blob ${ledgerGitCheck.blobHash ?? "unavailable — git not found"}) — ` +
+    `${ledgerOfficial ? "OFFICIAL (clean in git)" : `**UNOFFICIAL** (${ledgerGitCheck.detail})`}\n\n`;
+  const md = ledgerHeader + renderX2VerdictMarkdown(result);
   await writeFile(`${outPrefix}.md`, `${md}\n`, "utf8");
   process.stdout.write(`${md}\n`);
   if (result.anyUnconfirmedWithFailedSource) {

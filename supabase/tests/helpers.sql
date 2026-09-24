@@ -144,23 +144,29 @@ VALUES ('80000000-0000-0000-0000-000000000001', '90000000-0000-0000-0000-0000000
 -- player_pseudonym = a KEYED HMAC of user_id (line 841), NOT of the
 -- handle — it must stay derivable from user_id alone so delete_my_data
 -- can find it without depending on a handle that may have since changed
--- (B3, gate round 2). ⛔ FIX (should-fix, post-P3a gate): this used to be
--- an unkeyed digest(), which is precomputable offline by anyone who can
--- guess/enumerate uids (they are not secret) — now hmac() with the same
--- `app.pseudonym_key` database-level setting shim.sql configures (which
--- private.delete_my_data, 0015, itself now reads), so a seeded fixture
--- pseudonym and a delete_my_data-COMPUTED one for the same uid are
--- guaranteed to match.
-INSERT INTO app.attestation (id, facility_id, staff_user_id, staff_pseudonym, player_user_id, player_pseudonym, kind, token_jti, cosignal_ok)
+-- (B3, gate round 2). ⛔ FIX (M1, post-P3a re-gate): the key now comes
+-- from Vault (supabase/tests/shim.sql seeds 'pseudonym_key_1'/
+-- 'pseudonym_key_2'), not a GUC -- this fixture uses key 1's LITERAL
+-- value (helpers.sql runs as service_role, which -- deliberately, per
+-- shim.sql's own note -- has no grant on vault.decrypted_secrets; only
+-- private_definer does, so this file can't query the vault itself and
+-- instead hardcodes the same literal shim.sql seeds, matching what a
+-- real attest-time write would do: pick whichever key is currently
+-- active) and records that choice in *_pseudonym_key_id
+-- (0018_pseudonym_vault.sql), the same way a real writer would.
+INSERT INTO app.attestation (id, facility_id, staff_user_id, staff_pseudonym, staff_pseudonym_key_id, player_user_id, player_pseudonym, player_pseudonym_key_id, kind, token_jti, cosignal_ok)
 VALUES ('a0000000-0000-0000-0000-000000000001', 'fac_x', '00000000-0000-0000-0000-1000000000a1',
-        encode(hmac('00000000-0000-0000-0000-1000000000a1', current_setting('app.pseudonym_key'), 'sha256'), 'hex'),
+        encode(hmac('00000000-0000-0000-0000-1000000000a1', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+        'a0000000-1111-0000-0000-000000000001',
         '00000000-0000-0000-0000-00000000000a',
-        encode(hmac('00000000-0000-0000-0000-00000000000a', current_setting('app.pseudonym_key'), 'sha256'), 'hex'),
+        encode(hmac('00000000-0000-0000-0000-00000000000a', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+        'a0000000-1111-0000-0000-000000000001',
         'presence', 'jti-1', true);
 
-INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, staff_handle)
+INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, player_pseudonym_key_id, staff_handle)
 VALUES ('fac_x', 'presence', 'player_a',
-        encode(hmac('00000000-0000-0000-0000-00000000000a', current_setting('app.pseudonym_key'), 'sha256'), 'hex'),
+        encode(hmac('00000000-0000-0000-0000-00000000000a', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx', 'sha256'), 'hex'),
+        'a0000000-1111-0000-0000-000000000001',
         'staff_x_handle');
 
 INSERT INTO app.staff_activity (staff_user_id, facility_id, day, attests, activations)
