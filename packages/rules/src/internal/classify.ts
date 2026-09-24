@@ -2,6 +2,10 @@
  * The evidence-row classification engine (§4.5's class table) — moved into
  * `src/internal/` (fourth re-gate, blocking finding 1) specifically so its
  * per-row classifier is NEVER part of `@golfraven/rules`'s public surface.
+ * Everything exported from this file (`classifyEvidenceRow`, `finish`,
+ * `WEIGHT`, `isQualityCoSignalFix`, …) is package-internal: `package.json`
+ * exposes only `"."`, and nothing here is re-exported from `index.ts`. Never
+ * add a subpath export for `internal/` — callers must go through `scorePlay`.
  *
  * **Why this file exists at all.** The classifier used to be a plain,
  * exported function directly in `score-play.ts` — which meant it was also
