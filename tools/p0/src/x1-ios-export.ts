@@ -44,6 +44,8 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   assertExportDateMatches,
+  assertGitIntegrity,
+  assertNoInformationalPeeking,
   assertRecordedExportDateLogged,
   bindExportHash,
   extractCalendarDate,
