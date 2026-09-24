@@ -1,0 +1,11 @@
+# Cloudflare Pages headers (build plan §3.1 row C, §10 P2 scope: "`_headers`
+# CSP (`default-src 'self'`)"). Stage 1 ships the CSP only; tile/GTM host
+# allow-listing (§10 P2: "tile and GTM hosts allow-listed") is deferred to
+# when the map and analytics land (both out of stage-1 scope).
+/*
+  Content-Security-Policy: default-src 'self'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+/catalog/v1/*
+  X-Robots-Tag: noindex

@@ -1,0 +1,59 @@
+---
+// Page 2+ of a region's directory — see `../index.astro`'s doc. Only
+// generated for a region whose row count exceeds `REGION_PAGE_SIZE`
+// (200); the demo dataset is far below that, so `getStaticPaths` returns
+// `[]` in stage 1 and this route builds no pages yet — it exists so the
+// pagination code path is real and testable the day a region crosses 200
+// rows (build plan §5.1 `states/*`: "paginated at 200").
+import BaseLayout from "../../../../layouts/BaseLayout.astro";
+import RegionDirectory from "../../../../components/RegionDirectory.astro";
+import { loadSiteCatalog, regionCodesInUse, regionInfo, regionPages } from "../../../../lib/derive";
+import { siteOrigin, breadcrumbNode, collectionNode, regionUrl } from "../../../../lib/schema";
+
+export async function getStaticPaths() {
+  const { catalog } = await loadSiteCatalog();
+  const paths: {
+    params: { country: string; region: string; n: string };
+    props: { code: string; facilities: ReturnType<typeof regionPages>[number]; pageNumber: number; totalPages: number };
+  }[] = [];
+  for (const code of regionCodesInUse(catalog)) {
+    const info = regionInfo(catalog, code);
+    const pages = regionPages(catalog, code);
+    for (let i = 1; i < pages.length; i += 1) {
+      paths.push({
+        params: { country: info.country, region: info.slug, n: String(i + 1) },
+        props: { code, facilities: pages[i] ?? [], pageNumber: i + 1, totalPages: pages.length },
+      });
+    }
+  }
+  return paths;
+}
+
+const { code, facilities, pageNumber, totalPages } = Astro.props;
+const { catalog } = await loadSiteCatalog();
+const info = regionInfo(catalog, code);
+const totalCount = catalog.facilities.filter((f) => f.region === code).length;
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const url = regionUrl(origin, info.country, info.slug);
+const path = `/${info.country}/${info.slug}/page/${pageNumber}/`;
+const title = `${info.name} Golf Courses — page ${pageNumber} | GolfRaven`;
+const description = `Every golf course GolfRaven has found in ${info.name} — page ${pageNumber} of ${totalPages}.`;
+const jsonLd = [
+  breadcrumbNode([
+    { name: "GolfRaven", url: `${origin}/` },
+    { name: info.name, url },
+  ]),
+  collectionNode(origin, `${info.name} Golf Courses`, description, facilities, url),
+];
+---
+
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd} noindex={true}>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">Region · page {pageNumber} of {totalPages}</p>
+      <h1>{info.name}</h1>
+    </header>
+    <RegionDirectory region={info} facilities={facilities} pageNumber={pageNumber} totalPages={totalPages} totalCount={totalCount} />
+  </main>
+</BaseLayout>

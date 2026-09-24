@@ -2,10 +2,23 @@
   "name": "@golfraven/site",
   "private": true,
   "version": "0.0.0",
-  "description": "Public site (Astro 5 static, build plan §3.1 row C). Placeholder until P2 ports southern-wine-country here (build plan §5).",
+  "type": "module",
+  "description": "Public site (Astro 5 static, build plan §3.1 row C). P2 stage 1 port from southern-wine-country @ 572ff7e (build plan §5).",
   "scripts": {
-    "build": "node ./scripts/build.mjs",
-    "typecheck": "echo \"@golfraven/site: no TypeScript yet (placeholder until P2, build plan §5)\"",
-    "test": "echo \"@golfraven/site: no tests yet (placeholder until P2, build plan §5)\""
+    "dev": "astro dev",
+    "emit-indexability": "node ./scripts/emit-indexability.mjs",
+    "build": "pnpm run emit-indexability && astro build",
+    "typecheck": "astro check",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@golfraven/catalog": "workspace:*",
+    "astro": "5.18.2",
+    "@astrojs/sitemap": "3.7.3"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1"
   }
 }

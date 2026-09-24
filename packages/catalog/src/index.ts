@@ -26,6 +26,9 @@ export * from "./name-similarity.js";
 export * from "./schema.js";
 export * from "./ledger.js";
 export * from "./rule-expr.js";
+export * from "./load.js";
+export * from "./membership.js";
+export * from "./indexable.js";
 
 /** Retained from the P0 placeholder only so `CONTRACT_VERSION` stays
  * exercised by a real Zod parse in this package's own tests, independent

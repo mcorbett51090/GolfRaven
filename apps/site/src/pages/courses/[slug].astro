@@ -1,0 +1,135 @@
+---
+// Adapted from southern-wine-country's `src/pages/wineries/[slug].astro`
+// @ 572ff7e (build plan §5.1 `wineries/[slug].astro` → `courses/[slug].astro`:
+// "One page per verified facility. Slots: blurb · trail placements (all) ·
+// access · official site + booking rail (none for `access: private`,
+// which shows 'Private — play as a member's guest' instead; O8) · region ·
+// courses `<dl>` (sourced tees only)").
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { primaryTrailOf, trailsOfFacility } from "@golfraven/catalog";
+import { loadSiteCatalog, indexableFacilities } from "../../lib/derive";
+import { withBase } from "../../lib/nav";
+import { facilityMetaDescription } from "../../lib/facility-copy";
+import { siteOrigin, breadcrumbNode, facilityPageNode } from "../../lib/schema";
+
+export async function getStaticPaths() {
+  const { catalog } = await loadSiteCatalog();
+  // "verified facilities only" — the R1 predicate (§4.2: "'verified' with
+  // no qualifier means listed-verified or better"), same gate the sitemap
+  // and region-page linking use (AT(6), AT(10)) — never a second formula.
+  return indexableFacilities(catalog).map((facility) => ({
+    params: { slug: facility.slug },
+    props: { facility },
+  }));
+}
+
+const { facility } = Astro.props;
+const { catalog } = await loadSiteCatalog();
+
+const trails = trailsOfFacility(catalog, facility.id);
+const primaryTrail = primaryTrailOf(catalog, facility.id);
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const path = `/courses/${facility.slug}/`;
+const name = facility.name ?? facility.slug;
+const title = `${name}${facility.town ? ` — ${facility.town}` : ""} | GolfRaven`;
+const description = facilityMetaDescription(facility, {
+  ...(primaryTrail ? { trail: primaryTrail } : {}),
+  ...(facility.courses[0]?.holes ? { holes: facility.courses[0].holes } : {}),
+});
+
+const crumbs = [
+  { name: "GolfRaven", url: `${origin}/` },
+  ...(primaryTrail ? [{ name: primaryTrail.name, url: `${origin}/trails/${primaryTrail.slug}/` }] : []),
+  { name, url: `${origin}${path}` },
+];
+const jsonLd = [breadcrumbNode(crumbs), facilityPageNode(origin, facility)];
+
+const isPrivate = facility.access === "private";
+---
+
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">
+        {facility.access ?? "Course"}
+        {facility.town ? ` · ${facility.town}, ${facility.region}` : ` · ${facility.region}`}
+      </p>
+      <h1>{name}</h1>
+    </header>
+
+    {facility.access && (
+      <p>
+        Access: <strong>{facility.access}</strong>
+      </p>
+    )}
+
+    {
+      trails.length > 0 && (
+        <p>
+          On{" "}
+          {trails.map((t, i) => (
+            <>
+              {i > 0 && ", "}
+              <a href={withBase(`/trails/${t.slug}/`)}>{t.name}</a>
+            </>
+          ))}
+        </p>
+      )
+    }
+
+    {/* O8: a private club gets NO booking rail — a guest note instead. */}
+    {
+      isPrivate ? (
+        <p class="note" role="note">
+          Private — play as a member's guest.
+        </p>
+      ) : (
+        facility.booking.length > 0 && (
+          <p class="wp__actions">
+            {facility.booking.map((b) => (
+              <a class="btn" href={b.url} target="_blank" rel="noopener">
+                Book on {b.provider === "course-native" ? "the course site" : b.provider} →
+              </a>
+            ))}
+          </p>
+        )
+      )
+    }
+
+    {facility.url && !isPrivate && (
+      <p>
+        <a href={facility.url} target="_blank" rel="noopener">Visit the official website →</a>
+      </p>
+    )}
+
+    <h2 class="section-head">Courses</h2>
+    <dl class="facts">
+      {facility.courses.map((course) => (
+        <>
+          <dt>{course.name ?? course.slug}</dt>
+          <dd>
+            {course.holes ? `${course.holes} holes` : "Holes not yet verified"}
+            {course.par ? ` · par ${course.par}` : ""}
+            {course.tees && course.tees.length > 0 && (
+              <ul class="row-list">
+                {course.tees.map((tee) => (
+                  <li>
+                    {tee.name}
+                    {tee.yards ? ` — ${tee.yards} yds` : ""}
+                    {tee.rating ? ` · rating ${tee.rating}` : ""}
+                    {tee.slope ? ` · slope ${tee.slope}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </dd>
+        </>
+      ))}
+    </dl>
+
+    <p class="wp__claim">
+      Own or know {name}? <a href={withBase(`/claim/?facility=${encodeURIComponent(facility.slug)}`)}>Claim or correct this listing →</a>
+    </p>
+  </main>
+</BaseLayout>

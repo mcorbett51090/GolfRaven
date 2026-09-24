@@ -1,0 +1,66 @@
+---
+// Shared render for `[country]/[region]/` (page 1) and
+// `[country]/[region]/page/[n]/` (page 2+) — one template, so the two
+// route files can never drift (build plan §5.1 `states/*`: "Directory of
+// all entries — verified rows link to pages, unverified rows link to the
+// claim form, paginated at 200").
+import { isIndexable } from "@golfraven/catalog";
+import type { Facility } from "@golfraven/catalog";
+import { withBase } from "../lib/nav";
+import type { RegionInfo } from "../lib/derive";
+
+interface Props {
+  region: RegionInfo;
+  facilities: Facility[];
+  pageNumber: number;
+  totalPages: number;
+  totalCount: number;
+}
+const { region, facilities, pageNumber, totalPages, totalCount } = Astro.props;
+
+const basePath = `/${region.country}/${region.slug}/`;
+function pageHref(n: number): string {
+  return n <= 1 ? withBase(basePath) : withBase(`${basePath}page/${n}/`);
+}
+---
+
+<h2 class="section-head">
+  All {totalCount} {totalCount === 1 ? "course" : "courses"} in {region.name}
+</h2>
+
+<ul class="row-list" role="list">
+  {
+    facilities.map((f) => {
+      const indexable = isIndexable(f);
+      const label = f.name ?? f.slug;
+      return (
+        <li class="row">
+          {indexable ? (
+            <a href={withBase(`/courses/${f.slug}/`)}>{label}</a>
+          ) : (
+            <span>
+              <strong>{label}</strong> <span class="cta">— unverified</span>
+            </span>
+          )}
+          {!indexable && (
+            <a class="cta" href={withBase(`/claim/?facility=${encodeURIComponent(f.slug)}`)}>
+              Help verify this course →
+            </a>
+          )}
+        </li>
+      );
+    })
+  }
+</ul>
+
+{
+  totalPages > 1 && (
+    <nav class="pager" aria-label="Pagination">
+      {Array.from({ length: totalPages }, (_, i) => i + 1).map((n) => (
+        <a href={pageHref(n)} aria-current={n === pageNumber ? "page" : undefined}>
+          {n}
+        </a>
+      ))}
+    </nav>
+  )
+}

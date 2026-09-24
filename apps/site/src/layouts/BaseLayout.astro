@@ -1,0 +1,124 @@
+---
+import "../styles/global.css";
+import { withBase } from "../lib/nav";
+import { jsonLdScript } from "../lib/schema";
+
+interface Alternate {
+  /** BCP-47-ish locale tag for `hreflang` (e.g. "en", "fr"). */
+  locale: string;
+  /** App-absolute path (no BASE prefix) to that locale's version of this page. */
+  path: string;
+}
+
+interface Props {
+  title: string;
+  description: string;
+  path?: string;
+  /** Page-scoped JSON-LD `@graph` nodes. A page that passes none emits no
+   *  schema at all. */
+  jsonLd?: object[];
+  /** `<meta name="robots" content="noindex, follow">` for utility / thin pages. */
+  noindex?: boolean;
+  /** The page's own locale (`en` default; `fr` for `/fr/...` pages). */
+  locale?: "en" | "fr";
+  /** Other locales this exact page exists in (hreflang alternates). Omit or
+   *  leave empty when there is no translated counterpart yet — build plan
+   *  §5.5: "Entity content is FR only when real FR editorial exists.
+   *  Otherwise the EN page carries `hreflang="en"` only, and there is no
+   *  machine-translated filler." */
+  alternates?: Alternate[];
+}
+const {
+  title,
+  description,
+  path = "",
+  jsonLd = [],
+  noindex = false,
+  locale = "en",
+  alternates = [],
+} = Astro.props;
+
+const canonical = new URL(withBase(path), Astro.site).href;
+const ogLocale = locale === "fr" ? "fr_CA" : "en_US";
+
+const ldScript = jsonLd.length ? jsonLdScript(jsonLd) : "";
+
+// hreflang: this page's own locale, plus every alternate the caller named,
+// plus x-default pointing at the EN (default-locale) version. Astro's i18n
+// routing serves `en` unprefixed (`prefixDefaultLocale: false`) and `fr`
+// under `/fr/...` — the caller is responsible for handing in the right
+// `path` per locale; this layout only renders the tags.
+const hreflangEntries: { hreflang: string; href: string }[] = [
+  { hreflang: locale, href: canonical },
+  ...alternates.map((a) => ({
+    hreflang: a.locale,
+    href: new URL(withBase(a.path), Astro.site).href,
+  })),
+];
+const xDefaultHref =
+  locale === "en" ? canonical : (alternates.find((a) => a.locale === "en")?.path ?? null);
+---
+
+<!doctype html>
+<html lang={locale} class="no-js">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    {/*
+      ============================================================
+      GTM/GA4 SLOT — deliberately empty in stage 1.
+
+      Build plan §10 P2 scope names "GTM (O13 DECIDED: a new GolfRaven
+      GTM/GA4 container)" as part of the full P2 acceptance bar, but this
+      repo's stage-1 instructions say plainly: "For now it has no GTM;
+      leave a clearly marked slot." Wire the container here (guarded
+      `import.meta.env.PROD`, matching SWC's PII-safe pattern) when
+      analytics lands, and re-run SWC's ported `test-analytics-pii.mjs`
+      gate before it ships (build plan §5.1, §15).
+      ============================================================
+    */}
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {noindex && <meta name="robots" content="noindex, follow" />}
+
+    {hreflangEntries.map((e) => <link rel="alternate" hreflang={e.hreflang} href={e.href} />)}
+    {xDefaultHref && <link rel="alternate" hreflang="x-default" href={xDefaultHref} />}
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="GolfRaven" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:locale" content={ogLocale} />
+    {alternates
+      .filter((a) => a.locale !== locale)
+      .map((a) => (
+        <meta
+          property="og:locale:alternate"
+          content={a.locale === "fr" ? "fr_CA" : "en_US"}
+        />
+      ))}
+
+    <meta name="theme-color" content="#1f4d3a" />
+
+    {ldScript && <Fragment set:html={ldScript} />}
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <a class="brand" href={withBase("/")}>GolfRaven</a>
+      <nav aria-label="Primary">
+        <a href={withBase("/")}>Trails</a>
+      </nav>
+    </header>
+    <slot />
+    <footer class="site-footer">
+      <p>
+        GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a>.
+      </p>
+    </footer>
+  </body>
+</html>

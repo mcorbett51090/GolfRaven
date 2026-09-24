@@ -1,0 +1,115 @@
+---
+// Adapted from southern-wine-country's `src/pages/trails/[trail].astro`
+// @ 572ff7e (build plan §5.1 `trails/*`: "Latest roster version; stops;
+// 'roster last verified'; banner when `rosterStatus = conflicting`; the
+// latest roster version's `completionUnit` and `completionRule` shown;
+// a private-stops note when any member is `access: private`").
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import {
+  latestRosterVersion,
+  privateStopCount,
+  rosterStops,
+} from "@golfraven/catalog";
+import { loadSiteCatalog } from "../../lib/derive";
+import { withBase } from "../../lib/nav";
+import { siteOrigin, breadcrumbNode, collectionNode, trailUrl } from "../../lib/schema";
+import { isIndexable } from "@golfraven/catalog";
+
+export async function getStaticPaths() {
+  const { catalog } = await loadSiteCatalog();
+  return catalog.trails.map((trail) => ({ params: { slug: trail.slug }, props: { trail } }));
+}
+
+const { trail } = Astro.props;
+const { catalog } = await loadSiteCatalog();
+
+const version = latestRosterVersion(trail);
+const stops = rosterStops(catalog, trail, version);
+const privateCount = privateStopCount(stops);
+
+const origin = siteOrigin(Astro.site, import.meta.env.BASE_URL);
+const url = trailUrl(origin, trail.slug);
+const path = `/trails/${trail.slug}/`;
+const title = `${trail.name} — ${version.members.length} stops | GolfRaven`;
+const description =
+  trail.blurb?.slice(0, 155) ||
+  `The ${trail.name}: ${version.members.length} stops across ${trail.regions.join(", ")}. Track your progress with GolfRaven.`;
+
+const indexableFacilities = stops
+  .map((s) => s.facility)
+  .filter((f, i, arr) => arr.findIndex((x) => x.id === f.id) === i);
+
+const jsonLd = [
+  breadcrumbNode([
+    { name: "GolfRaven", url: `${origin}/` },
+    { name: trail.name, url },
+  ]),
+  collectionNode(origin, trail.name, description, indexableFacilities, url),
+];
+
+const completionRuleLabel =
+  version.completionRule.kind === "all"
+    ? "Every stop"
+    : `${version.completionRule.n} of ${version.members.length} stops`;
+---
+
+<BaseLayout title={title} description={description} path={path} jsonLd={jsonLd}>
+  <main class="wrap" id="main-content" tabindex="-1">
+    <header>
+      <p class="eyebrow">Golf trail · {trail.regions.join(" & ")}</p>
+      <h1>{trail.name}</h1>
+      <p>
+        {version.members.length} stop{version.members.length === 1 ? "" : "s"} · completion unit:{" "}
+        <strong>{version.completionUnit}</strong> · to complete: <strong>{completionRuleLabel}</strong>
+      </p>
+      <p>Roster last verified {version.verifiedAt}.</p>
+    </header>
+
+    {
+      trail.rosterStatus === "conflicting" && (
+        <p class="note note--banner" role="note">
+          Sources disagree on this trail's roster. We show the version we could best verify — see
+          something wrong? <a href={withBase(`/claim/?trail=${encodeURIComponent(trail.slug)}`)}>Tell us</a>.
+        </p>
+      )
+    }
+
+    {
+      privateCount > 0 && (
+        <p class="note" role="note">
+          {privateCount} of {version.members.length} stops {privateCount === 1 ? "is a" : "are"} private
+          club{privateCount === 1 ? "" : "s"}: completing this trail needs a member's invitation at each.
+        </p>
+      )
+    }
+
+    {trail.blurb && <p>{trail.blurb}</p>}
+
+    <h2 class="section-head">Stops</h2>
+    <ul class="row-list" role="list">
+      {
+        stops.map((stop) => {
+          const indexable = isIndexable(stop.facility);
+          const label = stop.facility.name ?? stop.facility.slug;
+          return (
+            <li class="row">
+              <span>
+                {indexable ? (
+                  <a href={withBase(`/courses/${stop.facility.slug}/`)}>{label}</a>
+                ) : (
+                  <strong>{label}</strong>
+                )}
+                {stop.facility.access === "private" && <span class="cta"> · Private</span>}
+              </span>
+              {!indexable && (
+                <a class="cta" href={withBase(`/claim/?facility=${encodeURIComponent(stop.facility.slug)}`)}>
+                  Help verify this course →
+                </a>
+              )}
+            </li>
+          );
+        })
+      }
+    </ul>
+  </main>
+</BaseLayout>
