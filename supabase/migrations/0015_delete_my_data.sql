@@ -214,18 +214,26 @@ BEGIN
   -- loop even though rows still carry its id in their OWN
   -- player_pseudonym_hmac_id column, "succeeding" while leaving that
   -- key's rows unredacted. This version drives the loop from the DATA
-  -- instead of the vault's naming convention: every DISTINCT
-  -- player_pseudonym_hmac_id actually recorded on an attestation_shift_
-  -- log row is resolved BY ID (name-independent, so a rename never
-  -- matters), and a recorded id that no longer resolves in vault.
-  -- decrypted_secrets at all (deleted, not merely renamed — should-fix
-  -- "FK into vault.secrets", 0018, dropped the FK specifically so this
-  -- can be validated here instead of relying on referential integrity to
-  -- prevent it) RAISES rather than silently skipping that key's rows.
+  -- instead of the vault's naming convention: every id ever recorded
+  -- against a player_pseudonym/staff_pseudonym pair is resolved BY ID
+  -- (name-independent, so a rename never matters), and a recorded id that
+  -- no longer resolves in vault.decrypted_secrets at all (deleted, not
+  -- merely renamed — should-fix "FK into vault.secrets", 0018, dropped
+  -- the FK specifically so this can be validated here instead of relying
+  -- on referential integrity to prevent it) RAISES rather than silently
+  -- skipping that key's rows.
+  --
+  -- ⛔ FIX (should-fix 2, post-P3a re-gate): "replace the broad
+  -- pd_shift_log_discover_hmac_id policy (USING(true)) with a small
+  -- registry of key ids ever used ... deletion iterates the registry."
+  -- The SOURCE of this loop's key ids is now private.
+  -- pseudonym_key_registry (0018), populated at WRITE time by the
+  -- app.attestation/app.attestation_shift_log validation triggers (also
+  -- 0018) — NOT a live, row-unscoped SELECT over the wide
+  -- attestation_shift_log table any more, which is what let the broad
+  -- discovery policy this replaces be narrowed away entirely.
   FOR v_key_id IN
-    SELECT DISTINCT player_pseudonym_hmac_id
-    FROM app.attestation_shift_log
-    WHERE player_pseudonym_hmac_id IS NOT NULL
+    SELECT key_id FROM private.pseudonym_key_registry
   LOOP
     SELECT decrypted_secret INTO v_key_secret FROM vault.decrypted_secrets WHERE id = v_key_id;
     IF NOT FOUND THEN

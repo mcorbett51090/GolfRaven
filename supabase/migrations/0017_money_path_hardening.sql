@@ -223,18 +223,47 @@ FOR EACH ROW EXECUTE FUNCTION app.play_deleted_detach_play_id();
 -- composite FK guarantees existence by commit time too, so this is
 -- belt-and-suspenders against constraint-check ordering not being
 -- guaranteed, not a live gap on its own anymore.
+-- ⛔ FIX (should-fix 4, post-P3a re-gate: "stale NEW guard"): these are
+-- DEFERRABLE INITIALLY DEFERRED constraint triggers -- NEW here is the
+-- row image captured AT THE TIME OF THE TRIGGERING STATEMENT, which can
+-- be STALE by the time this actually fires (COMMIT, or SET CONSTRAINTS
+-- IMMEDIATE): if a LATER statement in the SAME transaction further
+-- changes this row, the earlier deferred firing still queues and still
+-- runs, checking values the row no longer has. Confirmed empirically
+-- this session: `UPDATE app.entitlement SET play_id = <X>` (queues a
+-- deferred check with NEW.play_id = X), immediately followed in the SAME
+-- transaction by private.delete_my_data (which detaches play_id back to
+-- NULL via its own UPDATE, THEN deletes the now-unreferenced app.play row
+-- outright) -- at commit, the FIRST deferred firing (still holding the
+-- STALE NEW.play_id = X) ran its own fresh `SELECT ... FROM app.play
+-- WHERE id = X`, found NOT FOUND (the row is genuinely gone by then), and
+-- raised "was not found in app.play at constraint-check time" for an
+-- entirely legitimate deletion. Re-reading the row BY ID and checking ITS
+-- CURRENT (not the captured NEW) state fixes both directions this can go
+-- wrong: the row may have been further updated since (a stale NEW could
+-- pass OR fail incorrectly relative to its real final state), or deleted
+-- outright (nothing left to guard -- exit quietly rather than raising
+-- over a row that no longer exists by commit time). Every deferred
+-- firing queued for the same row converges on the SAME fresh read, so
+-- this stays correct (if slightly redundant) even with multiple firings
+-- queued for one row in one transaction.
 CREATE OR REPLACE FUNCTION app.offer_code_play_guard() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
+  v_row app.offer_code%ROWTYPE;
   v_play_held boolean;
 BEGIN
-  IF NEW.play_id IS NULL THEN
-    RETURN NEW;
-  END IF;
-  SELECT held_review INTO v_play_held FROM app.play WHERE id = NEW.play_id AND user_id = NEW.user_id;
+  SELECT * INTO v_row FROM app.offer_code WHERE id = NEW.id;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'offer_code: play_id % (user_id %) was not found in app.play at constraint-check time', NEW.play_id, NEW.user_id
+    RETURN NULL; -- the row is gone by the time this (possibly stale) deferred check fires; nothing to guard
+  END IF;
+  IF v_row.play_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+  SELECT held_review INTO v_play_held FROM app.play WHERE id = v_row.play_id AND user_id = v_row.user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'offer_code: play_id % (user_id %) was not found in app.play at constraint-check time', v_row.play_id, v_row.user_id
       USING ERRCODE = '23514';
   END IF;
   -- should-fix (post-P3a re-gate): "a reviewer cannot set offer_code/
@@ -244,11 +273,11 @@ BEGIN
   -- those are exactly the outcomes a reviewer clearing a held item picks
   -- between, and blocking them here made a genuine reviewer action
   -- impossible, not just a bypass.
-  IF v_play_held AND NEW.state NOT IN ('held_review', 'void', 'expired') THEN
-    RAISE EXCEPTION 'offer_code: play_id % is held_review, so this offer_code must be state=held_review (pending review) or a terminal void/expired (resolved by review) -- got %', NEW.play_id, NEW.state
+  IF v_play_held AND v_row.state NOT IN ('held_review', 'void', 'expired') THEN
+    RAISE EXCEPTION 'offer_code: play_id % is held_review, so this offer_code must be state=held_review (pending review) or a terminal void/expired (resolved by review) -- got %', v_row.play_id, v_row.state
       USING ERRCODE = '23514';
   END IF;
-  RETURN NEW;
+  RETURN NULL;
 END;
 $$;
 
@@ -261,24 +290,32 @@ CREATE OR REPLACE FUNCTION app.entitlement_play_guard() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
+  v_row app.entitlement%ROWTYPE;
   v_play_held boolean;
 BEGIN
-  IF NEW.play_id IS NULL THEN
-    RETURN NEW;
-  END IF;
-  SELECT held_review INTO v_play_held FROM app.play WHERE id = NEW.play_id AND user_id = NEW.user_id;
+  -- should-fix 4 (post-P3a re-gate): re-read the row by id instead of
+  -- trusting the (possibly stale, by commit time) captured NEW -- same
+  -- reasoning as app.offer_code_play_guard above.
+  SELECT * INTO v_row FROM app.entitlement WHERE id = NEW.id;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'entitlement: play_id % (user_id %) was not found in app.play at constraint-check time', NEW.play_id, NEW.user_id
+    RETURN NULL;
+  END IF;
+  IF v_row.play_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+  SELECT held_review INTO v_play_held FROM app.play WHERE id = v_row.play_id AND user_id = v_row.user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'entitlement: play_id % (user_id %) was not found in app.play at constraint-check time', v_row.play_id, v_row.user_id
       USING ERRCODE = '23514';
   END IF;
   -- should-fix (post-P3a re-gate): same reasoning as offer_code_play_guard
   -- above -- app.entitlement_state has no separate 'expired' (only
   -- 'void'), so only that terminal is added.
-  IF v_play_held AND NEW.state NOT IN ('held_review', 'void') THEN
-    RAISE EXCEPTION 'entitlement: play_id % is held_review, so this entitlement must be state=held_review (pending review) or terminal void (resolved by review) -- got %', NEW.play_id, NEW.state
+  IF v_play_held AND v_row.state NOT IN ('held_review', 'void') THEN
+    RAISE EXCEPTION 'entitlement: play_id % is held_review, so this entitlement must be state=held_review (pending review) or terminal void (resolved by review) -- got %', v_row.play_id, v_row.state
       USING ERRCODE = '23514';
   END IF;
-  RETURN NEW;
+  RETURN NULL;
 END;
 $$;
 
@@ -1031,38 +1068,28 @@ CREATE POLICY pd_purge_consumed_nonce_expired_r ON private.consumed_nonce
   FOR SELECT TO private_definer
   USING (COALESCE(expires_at, consumed_at) < now() - interval '7 days');
 
--- ⛔ FIX (should-fix 4, post-P3a re-gate: "key rotation ... match on each
--- row's recorded hmac id"): private.delete_my_data's rewritten pseudonym
--- loop (0015) must first DISCOVER which player_pseudonym_hmac_id values
--- exist in app.attestation_shift_log at all, BEFORE it knows which
--- target_pseudonym to compute — but 0016's existing pd_shift_log_
--- update_r policy only makes a row visible once target_pseudonym (or
--- target_handle) already matches it, a chicken-and-egg problem the
--- discovery step can never satisfy on its own (confirmed empirically
--- this session: without this, the discovery SELECT saw zero rows under
--- RLS and the redaction silently matched nothing). A player_pseudonym_
--- hmac_id value is not itself personally identifying — it only says
--- WHICH vault key wrote a row, never WHO — so a broad, row-unscoped
--- SELECT policy for private_definer on just this table is a safe,
--- narrow exception, reachable only from inside a SECURITY DEFINER
--- function in the first place (never a client-facing role).
-CREATE POLICY pd_shift_log_discover_hmac_id ON app.attestation_shift_log
-  FOR SELECT TO private_definer
-  USING (true);
-
--- Register both new policies in private.definer_policy_allowlist (0016) —
--- that table is already FORCE-RLS'd with no INSERT policy for anyone by
--- the time THIS migration runs (0016's own seeding happens BEFORE it
--- turns RLS on for itself), so this migration needs its own narrow,
--- self-revoked CURRENT_USER insert policy, same pattern already used for
--- private.function_inventory/private.fk_explicit_detach_allowlist above.
+-- ⛔ SUPERSEDED (should-fix 2, post-P3a re-gate): the broad, row-unscoped
+-- pd_shift_log_discover_hmac_id policy this comment block used to explain
+-- (`FOR SELECT TO private_definer USING (true)` on the whole table) is
+-- REMOVED as of this round. It did its job (closing should-fix 4's own
+-- chicken-and-egg discovery problem) but was broader than it needed to
+-- be: a policy scoped only by "which role" (private_definer), not by
+-- "which rows", grants visibility into every row of a real player-data
+-- table for a query shape that only ever needed the DISTINCT set of key
+-- ids in use. private.pseudonym_key_registry (0018) replaces it: the M1
+-- write-time trigger registers every key id AS it is validated, and
+-- private.delete_my_data (0015) now iterates that small, purpose-built
+-- registry instead of scanning app.attestation_shift_log directly -- the
+-- discovery step no longer needs to read the wide table at all, so this
+-- policy no longer needs to exist. Its private.definer_policy_allowlist
+-- row is removed in the same edit (0018 registers the registry's own
+-- narrow policy instead).
 GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
   ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired', 'DELETE', true, 'purge_consumed_nonce (should-fix, post-P3a re-gate correction) -- hardcoded 7-days-past-source-expiry floor, independent of the function body'),
-  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired_r', 'SELECT', true, 'row-visibility companion to pd_purge_consumed_nonce_expired'),
-  ('app', 'attestation_shift_log', 'pd_shift_log_discover_hmac_id', 'SELECT', false, 'should-fix 4 (post-P3a re-gate): broad, row-unscoped discovery read of player_pseudonym_hmac_id (not itself personally identifying) -- delete_my_data needs this BEFORE it knows which target_pseudonym to compute');
+  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired_r', 'SELECT', true, 'row-visibility companion to pd_purge_consumed_nonce_expired');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
@@ -1070,7 +1097,7 @@ FROM pg_policy pol
 JOIN pg_class cl ON cl.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = cl.relnamespace
 WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
-  AND al.policy_name IN ('pd_purge_consumed_nonce_expired', 'pd_purge_consumed_nonce_expired_r', 'pd_shift_log_discover_hmac_id');
+  AND al.policy_name IN ('pd_purge_consumed_nonce_expired', 'pd_purge_consumed_nonce_expired_r');
 DROP POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist;
 REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 
