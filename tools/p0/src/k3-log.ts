@@ -87,9 +87,10 @@ function findTableStart(lines: string[], fromIdx: number): number {
   return -1;
 }
 
-/** Decision 0001, Addendum I ("Rows must never be silently dropped"): once
- * the contiguous table ends, keep scanning forward — stopping only at the
- * next heading — and throw if any further line starts with "|". */
+/** Decision 0001, Addendum I ("Log integrity": every row is read; a row
+ * that cannot be read is an error, never skipped): once the contiguous
+ * table ends, keep scanning forward — stopping only at the next heading —
+ * and throw if any further line starts with "|". */
 function assertNoStrayRowsAfterTable(lines: string[], fromIdx: number, label: string): void {
   for (let i = fromIdx; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -97,7 +98,8 @@ function assertNoStrayRowsAfterTable(lines: string[], fromIdx: number, label: st
     if (line.trim().startsWith("|")) {
       throw new Error(
         `${label} has a table row separated from the table by a blank line (or other content): ` +
-          `"${line.trim()}" — rows must be contiguous with the table; move it back in.`,
+          `"${line.trim()}" — rows must be contiguous with the table; move it back in (decision 0001, ` +
+          'Addendum I: "Log integrity" — a row that cannot be read is an error, never skipped).',
       );
     }
   }

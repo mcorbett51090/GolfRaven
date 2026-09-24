@@ -11,6 +11,8 @@ import { K3_KEYWORD_TERMS, K3_SEARCH_CONSOLE_MONTHS, type K3Log, type K3KeywordR
 
 const VALID_PROPERTY_ID = "sc-domain:southernwinecountry.com";
 const VALID_READ_DATE = "2026-10-05";
+// Comfortably after VALID_READ_DATE and K3_MIN_READ_DATE.
+const TODAY = "2026-12-01";
 
 function scRows(clicks: [number | null, number | null, number | null]) {
   return K3_SEARCH_CONSOLE_MONTHS.map((month, i) => ({ month, clicks: clicks[i]! }));
@@ -52,57 +54,76 @@ function buildLog(
   return { propertyId, readDate, searchConsole: scRows(clicks), keywords: kwRows(keywords) };
 }
 
+// `today` defaults to TODAY (comfortably after any readDate these tests
+// use); tests about the read-date-vs-today relationship pass it explicitly.
+function verdict(log: K3Log, today: string = TODAY): ReturnType<typeof computeK3Verdict> {
+  return computeK3Verdict(log, today);
+}
+
 describe("computeK3Verdict: refusals", () => {
   it("refuses (throws) when the property id is blank", () => {
-    expect(() => computeK3Verdict(buildLog({ propertyId: "" }))).toThrow(/property id/);
+    expect(() => verdict(buildLog({ propertyId: "" }))).toThrow(/property id/);
   });
 
   it("refuses when the property id doesn't look like a real property (e.g. 'TBD')", () => {
-    expect(() => computeK3Verdict(buildLog({ propertyId: "TBD" }))).toThrow(/doesn't look like a Search Console/);
+    expect(() => verdict(buildLog({ propertyId: "TBD" }))).toThrow(/doesn't look like a Search Console/);
   });
 
   it("accepts an https:// URL-prefix property id", () => {
-    const result = computeK3Verdict(buildLog({ propertyId: "https://www.southernwinecountry.com/" }));
+    const result = verdict(buildLog({ propertyId: "https://www.southernwinecountry.com/" }));
     expect(result.propertyId).toBe("https://www.southernwinecountry.com/");
   });
 
+  it("accepts an http:// URL-prefix property id", () => {
+    const result = verdict(buildLog({ propertyId: "http://www.southernwinecountry.com/" }));
+    expect(result.propertyId).toBe("http://www.southernwinecountry.com/");
+  });
+
   it("refuses when the read date is blank", () => {
-    expect(() => computeK3Verdict(buildLog({ readDate: null }))).toThrow(/read date/);
+    expect(() => verdict(buildLog({ readDate: null }))).toThrow(/read date/);
   });
 
   it("refuses when the read date is before 2026-10-01 (e.g. 2026-09-30)", () => {
-    expect(() => computeK3Verdict(buildLog({ readDate: "2026-09-30" }))).toThrow(/before 2026-10-01/);
+    expect(() => verdict(buildLog({ readDate: "2026-09-30" }), "2026-12-01")).toThrow(/before 2026-10-01/);
+  });
+
+  it("refuses when the read date is not a real calendar date", () => {
+    expect(() => verdict(buildLog({ readDate: "2026-13-45" }))).toThrow(/not a real calendar date/);
+  });
+
+  it("refuses when the read date is later than today", () => {
+    expect(() => verdict(buildLog({ readDate: "2026-10-05" }), "2026-10-01")).toThrow(/later than today/);
   });
 
   it("refuses when a month's clicks total is blank", () => {
-    expect(() => computeK3Verdict(buildLog({ clicks: [1000, null, 1000] }))).toThrow(/missing: 2026-08/);
+    expect(() => verdict(buildLog({ clicks: [1000, null, 1000] }))).toThrow(/missing: 2026-08/);
   });
 
   it("refuses when a keyword term has no range recorded", () => {
     const keywords = allEqualBounds(1000);
     delete (keywords as Record<string, unknown>)["golf trail"];
-    expect(() => computeK3Verdict(buildLog({ keywords }))).toThrow(/missing: golf trail/);
+    expect(() => verdict(buildLog({ keywords }))).toThrow(/missing: golf trail/);
   });
 });
 
 describe("computeK3Verdict: Search Console median (decision 0001 Addendum A)", () => {
   it("takes the median of the three months regardless of input order", () => {
     // July=2000, August=500, September=1000 -> sorted [500, 1000, 2000] -> median 1000
-    const result = computeK3Verdict(buildLog({ clicks: [2000, 500, 1000] }));
+    const result = verdict(buildLog({ clicks: [2000, 500, 1000] }));
     expect(result.searchConsole.median).toBe(1000);
     expect(result.searchConsole.bar).toBe(K3_SEARCH_CONSOLE_BAR);
     expect(result.searchConsole.pass).toBe(true); // 1000 >= 1000 bar (boundary)
   });
 
   it("just under the bar fails", () => {
-    const result = computeK3Verdict(buildLog({ clicks: [999, 999, 999] }));
+    const result = verdict(buildLog({ clicks: [999, 999, 999] }));
     expect(result.searchConsole.pass).toBe(false);
   });
 });
 
 describe("computeK3Verdict: Keyword Planner — decision 0001 Addendum D R5 duplicate-range rule (Addendum I: applies to points too)", () => {
   it("counts an identical range shared by two terms only once", () => {
-    const result = computeK3Verdict(
+    const result = verdict(
       buildLog({
         keywords: {
           "golf trail": { lowerBound: 1000, upperBound: 1500 },
@@ -125,7 +146,7 @@ describe("computeK3Verdict: Keyword Planner — decision 0001 Addendum D R5 dupl
   });
 
   it("dedups an identical POINT value (lower === upper) shared by two terms, per Addendum I", () => {
-    const result = computeK3Verdict(
+    const result = verdict(
       buildLog({
         keywords: {
           "golf trail": { lowerBound: 500, upperBound: 500 },
@@ -144,7 +165,7 @@ describe("computeK3Verdict: Keyword Planner — decision 0001 Addendum D R5 dupl
 
 describe("computeK3Verdict: keyword sum boundary (bar >= 5000)", () => {
   it("a combined sum of 4,999 misses", () => {
-    const result = computeK3Verdict(
+    const result = verdict(
       buildLog({
         keywords: {
           "golf trail": { lowerBound: 4999, upperBound: 4999 },
@@ -161,7 +182,7 @@ describe("computeK3Verdict: keyword sum boundary (bar >= 5000)", () => {
   });
 
   it("a combined sum of 5,000 passes", () => {
-    const result = computeK3Verdict(
+    const result = verdict(
       buildLog({
         keywords: {
           "golf trail": { lowerBound: 5000, upperBound: 5000 },
@@ -181,7 +202,7 @@ describe("computeK3Verdict: keyword sum boundary (bar >= 5000)", () => {
 
 describe("computeK3Verdict: combined branch and consequence text", () => {
   it("both miss", () => {
-    const result = computeK3Verdict(buildLog({ clicks: [100, 150, 200], keywords: allEqualBounds(100) }));
+    const result = verdict(buildLog({ clicks: [100, 150, 200], keywords: allEqualBounds(100) }));
     expect(result.searchConsole.pass).toBe(false);
     expect(result.keyword.pass).toBe(false);
     expect(result.combinedBranch).toBe("both-miss");
@@ -189,7 +210,7 @@ describe("computeK3Verdict: combined branch and consequence text", () => {
   });
 
   it("disagree — search console passes, keyword misses", () => {
-    const result = computeK3Verdict(buildLog({ clicks: [1200, 1100, 1300], keywords: allEqualBounds(100) }));
+    const result = verdict(buildLog({ clicks: [1200, 1100, 1300], keywords: allEqualBounds(100) }));
     expect(result.searchConsole.pass).toBe(true);
     expect(result.keyword.pass).toBe(false);
     expect(result.combinedBranch).toBe("disagree");
@@ -203,7 +224,7 @@ describe("computeK3Verdict: combined branch and consequence text", () => {
     K3_KEYWORD_TERMS.forEach((t, i) => {
       keywords[t] = { lowerBound: 1000 + i, upperBound: 1000 + i };
     });
-    const result = computeK3Verdict(buildLog({ clicks: [100, 100, 100], keywords }));
+    const result = verdict(buildLog({ clicks: [100, 100, 100], keywords }));
     expect(result.searchConsole.pass).toBe(false);
     expect(result.keyword.pass).toBe(true);
     expect(result.combinedBranch).toBe("disagree");
@@ -211,7 +232,7 @@ describe("computeK3Verdict: combined branch and consequence text", () => {
   });
 
   it("both pass", () => {
-    const result = computeK3Verdict(
+    const result = verdict(
       buildLog({
         clicks: [1000, 1100, 1200],
         keywords: {

@@ -154,11 +154,12 @@ function parseYNOrNull(raw: string, context: string): "Y" | "N" | null {
   );
 }
 
-/** Decision 0001, Addendum I ("Rows must never be silently dropped"): once
- * the contiguous table ends, keep scanning forward — stopping only at the
- * next heading — and throw if any further line starts with "|". A pipe
- * row separated from the table by a blank line (or anything else) is a
- * data-loss bug in the document, not a legitimate end of table. */
+/** Decision 0001, Addendum I ("Log integrity": every row is read; a row
+ * that cannot be read is an error, never skipped): once the contiguous
+ * table ends, keep scanning forward — stopping only at the next heading —
+ * and throw if any further line starts with "|". A pipe row separated from
+ * the table by a blank line (or anything else) is a data-loss bug in the
+ * document, not a legitimate end of table. */
 function assertNoStrayRowsAfterTable(lines: string[], fromIdx: number, label: string): void {
   for (let i = fromIdx; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -166,7 +167,8 @@ function assertNoStrayRowsAfterTable(lines: string[], fromIdx: number, label: st
     if (line.trim().startsWith("|")) {
       throw new Error(
         `${label} has a table row separated from the table by a blank line (or other content): ` +
-          `"${line.trim()}" — rows must be contiguous with the table; move it back in.`,
+          `"${line.trim()}" — rows must be contiguous with the table; move it back in (decision 0001, ` +
+          'Addendum I: "Log integrity" — a row that cannot be read is an error, never skipped).',
       );
     }
   }
@@ -326,7 +328,9 @@ export function parseK1Table(markdown: string): K1Row[] {
     if (row.type === "Sponsor") continue;
     if (seen.has(row.target)) {
       throw new Error(
-        `docs/partners/k1-outreach.md §(g) has a duplicate operator row for "${row.target}".`,
+        `docs/partners/k1-outreach.md §(g) has a duplicate operator row for "${row.target}" — this also ` +
+          'catches logging the same operator under both its name and its alias (decision 0001, Addendum I: ' +
+          '"Name alias" — logging it under both names is an error).',
       );
     }
     seen.add(row.target);

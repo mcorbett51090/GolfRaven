@@ -76,18 +76,45 @@ export const K1_CONSEQUENCE_FULL_GATE_PASS_NOTE =
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function assertValidAsOf(asOf: string): void {
-  if (!ISO_DATE_RE.test(asOf)) {
-    throw new Error(`computeK1Verdict: malformed --as-of "${asOf}" — expected ISO "YYYY-MM-DD".`);
+/** Decision 0001, Addendum I ("the read date is real"): a real ISO calendar
+ * date — not just digit-shaped (rejects e.g. "2026-13-45"). Shared by every
+ * date this module validates, whether it came through the strict table
+ * parser or was constructed directly (the pure `compute*` functions accept
+ * plain data, so this is validated again here — never assumed). */
+function isRealCalendarDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
+
+/** Decision 0001, Addendum I ("the read date is real"): `asOf` must be a
+ * real calendar date and must not be later than `today` (UTC) — a read
+ * can't be dated after the day it's actually run. `today` is a parameter,
+ * never `Date.now()` read internally, so callers (tests, the CLI) control
+ * it explicitly. */
+function assertValidAsOf(asOf: string, today: string): void {
+  if (!isRealCalendarDate(asOf)) {
+    throw new Error(`computeK1Verdict: malformed --as-of "${asOf}" — not a real ISO "YYYY-MM-DD" calendar date.`);
+  }
+  if (!isRealCalendarDate(today)) {
+    throw new Error(`computeK1Verdict: malformed today "${today}" — not a real ISO "YYYY-MM-DD" calendar date.`);
+  }
+  if (asOf > today) {
+    throw new Error(
+      `computeK1Verdict: --as-of "${asOf}" is later than today (${today}) — refusing a read dated in the future ` +
+        "(decision 0001, Addendum I).",
+    );
   }
 }
 
-/** Decision 0001, Addendum I "K1 dates": every logged date in a row must
- * be on or after 2026-09-23 and on or before `asOf`; an acceptance or LOI
- * dated before that row's own Contacted date is also an error. Checked
- * over EVERY row (operators, the inactive/dropped ones, and sponsors)
- * regardless of whether that row currently affects a verdict — a bad date
- * is a data-integrity problem on its own. */
+/** Decision 0001, Addendum I "K1 dates" / "the read date is real" /
+ * "sponsor dates" / "log integrity": every logged date in a row must be a
+ * real calendar date, on or after 2026-09-23, and on or before `asOf`; an
+ * acceptance, an LOI, or a sponsor conversation dated before that row's own
+ * Contacted date is also an error. Checked over EVERY row (operators, the
+ * inactive/dropped ones, and sponsors) regardless of whether that row
+ * currently affects a verdict — a bad date is a data-integrity problem on
+ * its own, and no row is ever skipped. */
 function assertRowDatesSane(row: K1Row, asOf: string): void {
   const fields: [string, string | null][] = [
     ["Contacted date", row.contactedDate],
@@ -97,6 +124,12 @@ function assertRowDatesSane(row: K1Row, asOf: string): void {
   ];
   for (const [label, value] of fields) {
     if (value === null) continue;
+    if (!isRealCalendarDate(value)) {
+      throw new Error(
+        `${row.target}: ${label} "${value}" is not a real calendar date (decision 0001, Addendum I: ` +
+          '"the read date is real").',
+      );
+    }
     if (value < K1_MIN_LOG_DATE) {
       throw new Error(
         `${row.target}: ${label} "${value}" is before ${K1_MIN_LOG_DATE} (decision 0001, Addendum I: ` +
@@ -121,6 +154,12 @@ function assertRowDatesSane(row: K1Row, asOf: string): void {
       throw new Error(
         `${row.target}: LOI date "${row.loiDate}" is before Contacted date "${row.contactedDate}" ` +
           "(decision 0001, Addendum I).",
+      );
+    }
+    if (row.sponsorConversationDate !== null && row.sponsorConversationDate < row.contactedDate) {
+      throw new Error(
+        `${row.target}: Sponsor conversation date "${row.sponsorConversationDate}" is before Contacted date ` +
+          `"${row.contactedDate}" (decision 0001, Addendum I: "sponsor dates").`,
       );
     }
   }
@@ -183,8 +222,8 @@ export interface K1VerdictResult {
   warnings: string[];
 }
 
-export function computeK1Verdict(rows: K1Row[], asOf: string): K1VerdictResult {
-  assertValidAsOf(asOf);
+export function computeK1Verdict(rows: K1Row[], asOf: string, today: string): K1VerdictResult {
+  assertValidAsOf(asOf, today);
 
   const byTarget = new Map(rows.map((r) => [r.target, r]));
   const okRow = byTarget.get("Oklahoma Golf Trail");
@@ -251,8 +290,8 @@ export function computeK1Verdict(rows: K1Row[], asOf: string): K1VerdictResult {
   const earlyReadPending = asOf < K1_EARLY_READ_WINDOW_CLOSES;
   const earlyState: K1EarlyReadState = earlyReadPending ? "pending" : accepted.length >= 2 ? "pass" : "miss";
   const earlyConsequenceText = earlyReadPending
-    ? `Pending (${accepted.length} so far) — the early-read window (through ${K1_EARLY_READ_CUTOFF}) closes ` +
-      `${K1_EARLY_READ_WINDOW_CLOSES}; as of ${asOf} it has not closed yet, so no consequence branch applies.`
+    ? `Pending (${accepted.length} so far) — through ${K1_EARLY_READ_CUTOFF}; readable from ` +
+      `${K1_EARLY_READ_WINDOW_CLOSES}. As of ${asOf}, no consequence branch applies yet.`
     : earlyState === "miss"
       ? K1_CONSEQUENCE_EARLY_MISS
       : K1_CONSEQUENCE_EARLY_PASS_NOTE;
@@ -313,9 +352,9 @@ export function computeK1Verdict(rows: K1Row[], asOf: string): K1VerdictResult {
     fullGateState = "pass";
   }
   const fullGateConsequenceText = fullGatePending
-    ? `Pending (operators: ${qualified.length} so far, sponsors: ${sponsorQualified.length} so far) — the ` +
-      `full-gate window (through ${K1_FULL_GATE_CUTOFF}) closes ${K1_FULL_GATE_WINDOW_CLOSES}; as of ${asOf} ` +
-      "it has not closed yet, so no consequence branch applies."
+    ? `Pending (operators: ${qualified.length} so far, sponsors: ${sponsorQualified.length} so far) — window ` +
+      `runs through ${K1_FULL_GATE_CUTOFF}; verdict readable from ${K1_FULL_GATE_WINDOW_CLOSES}. As of ${asOf}, ` +
+      "no consequence branch applies yet."
     : fullGateState === "operator-miss"
       ? K1_CONSEQUENCE_OPERATOR_FULL_MISS
       : fullGateState === "sponsor-miss"
@@ -407,7 +446,8 @@ export function renderK1VerdictMarkdown(result: K1VerdictResult): string {
   lines.push("## Early read");
   lines.push(
     `${result.earlyRead.count} of 5 accepted an exploratory call on or before ${result.earlyRead.cutoff} ` +
-      `(bar ≥ ${result.earlyRead.passBar}) — **${result.earlyRead.state.toUpperCase()}**.`,
+      `(bar ≥ ${result.earlyRead.passBar}) — ` +
+      `**${result.earlyRead.state === "pending" ? `${result.earlyRead.count} so far` : result.earlyRead.state.toUpperCase()}**.`,
   );
   if (result.earlyRead.accepted.length > 0) {
     lines.push(`Accepted: ${result.earlyRead.accepted.map((e) => `${e.target} (${e.date})`).join(", ")}`);
@@ -416,12 +456,13 @@ export function renderK1VerdictMarkdown(result: K1VerdictResult): string {
     lines.push(`Late (do not count): ${result.earlyRead.late.map((e) => `${e.target} (${e.date})`).join(", ")}`);
   }
   lines.push(`> ${result.earlyRead.consequenceText}`);
+  const pending = result.fullGate.state === "pending";
   lines.push("");
   lines.push("## Full gate — operators");
   lines.push(
     `${result.fullGate.operators.count} of 5 have a qualifying LOI (fee willingness recorded, dated on or ` +
       `before ${result.fullGate.operators.cutoff}) (bar ≥ ${result.fullGate.operators.passBar}) — ` +
-      `**${result.fullGate.operators.pass ? "PASS" : "MISS"}**.`,
+      `**${pending ? `${result.fullGate.operators.count} so far` : result.fullGate.operators.pass ? "PASS" : "MISS"}**.`,
   );
   if (result.fullGate.operators.qualified.length > 0) {
     lines.push(
@@ -432,7 +473,8 @@ export function renderK1VerdictMarkdown(result: K1VerdictResult): string {
   lines.push("## Full gate — sponsors");
   lines.push(
     `${result.fullGate.sponsors.count} sponsor row(s) with all qualifiers recorded ` +
-      `(bar ≥ ${result.fullGate.sponsors.passBar}) — **${result.fullGate.sponsors.pass ? "PASS" : "MISS"}**.`,
+      `(bar ≥ ${result.fullGate.sponsors.passBar}) — ` +
+      `**${pending ? `${result.fullGate.sponsors.count} so far` : result.fullGate.sponsors.pass ? "PASS" : "MISS"}**.`,
   );
   if (result.fullGate.sponsors.qualified.length > 0) {
     lines.push(`Qualified: ${result.fullGate.sponsors.qualified.join(", ")}`);
@@ -451,9 +493,16 @@ export function renderK1VerdictMarkdown(result: K1VerdictResult): string {
 interface CliArgs {
   outPrefix: string;
   asOf: string;
+  /** `--log <path>`: a copy of the K1 log to read instead of the repo's
+   * `docs/partners/k1-outreach.md`. For tests only — the recorded K1 verdict is
+   * always computed from the repo's own log (the default). */
+  logPath: string | undefined;
 }
 
-function defaultAsOf(): string {
+/** The real current date (UTC) — the only place this module reads the
+ * system clock. Everything else takes `today`/`asOf` as parameters, so
+ * tests can pin them (decision 0001, Addendum I: "make today injectable"). */
+function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
@@ -466,13 +515,14 @@ function parseArgs(argv: string[]): CliArgs {
       i += 1;
     }
   }
-  return { outPrefix: opts.out || "k1-verdict-result", asOf: opts["as-of"] || defaultAsOf() };
+  const today = todayUtc();
+  return { outPrefix: opts.out || "k1-verdict-result", asOf: opts["as-of"] || today, logPath: opts.log || undefined };
 }
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const rows = await readK1Log();
-  const result = computeK1Verdict(rows, args.asOf);
+  const rows = await readK1Log(args.logPath);
+  const result = computeK1Verdict(rows, args.asOf, todayUtc());
   const { writeFile } = await import("node:fs/promises");
   await writeFile(`${args.outPrefix}.json`, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   const md = renderK1VerdictMarkdown(result);

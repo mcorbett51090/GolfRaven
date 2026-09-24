@@ -6,15 +6,17 @@
  * - **Search Console**: median of the three fixed-month organic-click
  *   totals (decision 0001, Addendum A), compared to **M = 1,000**. Refuses
  *   to run if the SWC property id memo is blank, doesn't look like a real
- *   Search Console property (decision 0001, Addendum I — must read
- *   `sc-domain:<host>` or an `https://` URL-prefix property, never e.g.
- *   "TBD"), if any of the three months' clicks is blank, or if the read
- *   date is blank or earlier than **2026-10-01** (decision 0001, Addendum
- *   I: a read before that date would lock in a partial September). A
- *   blank month is "not read yet," and silently treating it as 0 clicks
- *   would be exactly the "silently count zero" the loud-failure contract
- *   forbids, so a partial read refuses rather than computing a wrong
- *   median.
+ *   Search Console property (decision 0001, Addendum I "Search Console
+ *   property id" — must read `sc-domain:<host>`, an `https://` or an
+ *   `http://` URL-prefix property, never e.g. "TBD"), if any of the three
+ *   months' clicks is blank, or if the read date is blank, not a real
+ *   calendar date, later than today, or earlier than **2026-10-01**
+ *   (decision 0001, Addendum I "the read date is real"). A blank month is
+ *   "not read yet," and silently treating it as 0 clicks would be exactly
+ *   the "silently count zero" the loud-failure contract forbids, so a
+ *   partial read refuses rather than computing a wrong median. `today` is
+ *   a parameter, never read from the system clock internally, so callers
+ *   (tests, the CLI) control it explicitly.
  * - **Keyword Planner**: sum of the six closed-list terms' lower bounds,
  *   compared to **≥ 5,000**, applying decision 0001 Addendum D R5's
  *   "identical range counted once" rule EXACTLY as stated — two terms
@@ -34,9 +36,20 @@ export const K3_KEYWORD_BAR = 5000;
 /** Decision 0001, Addendum I: a read before this date would lock in a
  * partial September 2026. */
 export const K3_MIN_READ_DATE = "2026-10-01";
-/** Decision 0001, Addendum I: the property id must look like a real
- * Search Console property, not a placeholder like "TBD". */
-const PROPERTY_ID_RE = /^(sc-domain:\S+|https:\/\/\S+)$/i;
+/** Decision 0001, Addendum I ("Search Console property id"): the property
+ * id must be a domain property (`sc-domain:<host>`) or a URL-prefix
+ * property (`https://…` or `http://…`), not a placeholder like "TBD". */
+const PROPERTY_ID_RE = /^(sc-domain:\S+|https?:\/\/\S+)$/i;
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Decision 0001, Addendum I ("the read date is real"): a real ISO
+ * calendar date — not just digit-shaped (rejects e.g. "2026-13-45"). */
+function isRealCalendarDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
 
 export const K3_CONSEQUENCE_BOTH_MISS =
   "Both miss → the directory is scoped as a partner-facing asset, not a growth engine, and operator " +
@@ -85,7 +98,11 @@ function median3(values: number[]): number {
   return sorted[1]!;
 }
 
-export function computeK3Verdict(log: K3Log): K3VerdictResult {
+export function computeK3Verdict(log: K3Log, today: string): K3VerdictResult {
+  if (!isRealCalendarDate(today)) {
+    throw new Error(`computeK3Verdict: malformed today "${today}" — not a real ISO "YYYY-MM-DD" calendar date.`);
+  }
+
   const propertyId = log.propertyId.trim();
   if (propertyId === "") {
     throw new Error(
@@ -96,15 +113,28 @@ export function computeK3Verdict(log: K3Log): K3VerdictResult {
   if (!PROPERTY_ID_RE.test(propertyId)) {
     throw new Error(
       `computeK3Verdict: the recorded property id "${propertyId}" doesn't look like a Search Console ` +
-        'property — expected "sc-domain:<host>" or an "https://" URL-prefix property (decision 0001, ' +
-        "Addendum I). A placeholder like \"TBD\" is refused.",
+        'property — expected "sc-domain:<host>", an "https://" or an "http://" URL-prefix property ' +
+        '(decision 0001, Addendum I: "Search Console property id"). A placeholder like "TBD" is refused.',
     );
   }
 
   if (log.readDate === null) {
     throw new Error(
-      "computeK3Verdict requires a recorded Search Console read date (decision 0001, Addendum I) — " +
-        'refusing to run with docs/p0/K3.md\'s "## Search Console read" table\'s Read date still blank.',
+      "computeK3Verdict requires a recorded Search Console read date (decision 0001, Addendum I: " +
+        '"the read date is real") — refusing to run with docs/p0/K3.md\'s "## Search Console read" ' +
+        "table's Read date still blank.",
+    );
+  }
+  if (!isRealCalendarDate(log.readDate)) {
+    throw new Error(
+      `computeK3Verdict: the recorded read date "${log.readDate}" is not a real calendar date (decision ` +
+        '0001, Addendum I: "the read date is real").',
+    );
+  }
+  if (log.readDate > today) {
+    throw new Error(
+      `computeK3Verdict: the recorded read date "${log.readDate}" is later than today (${today}) — refusing ` +
+        'a read dated in the future (decision 0001, Addendum I: "the read date is real").',
     );
   }
   if (log.readDate < K3_MIN_READ_DATE) {
@@ -233,6 +263,10 @@ export function renderK3VerdictMarkdown(result: K3VerdictResult): string {
 
 interface CliArgs {
   outPrefix: string;
+  /** `--memo <path>`: a copy of K3.md to read instead of the repo's
+   * `docs/p0/K3.md`. For tests only — the recorded K3 verdict is always
+   * computed from the repo's own memo (the default). */
+  memoPath: string | undefined;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -244,13 +278,14 @@ function parseArgs(argv: string[]): CliArgs {
       i += 1;
     }
   }
-  return { outPrefix: opts.out || "k3-verdict-result" };
+  return { outPrefix: opts.out || "k3-verdict-result", memoPath: opts.memo || undefined };
 }
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  const log = await readK3Log();
-  const result = computeK3Verdict(log);
+  const log = await readK3Log(args.memoPath);
+  const today = new Date().toISOString().slice(0, 10);
+  const result = computeK3Verdict(log, today);
   const { writeFile } = await import("node:fs/promises");
   await writeFile(`${args.outPrefix}.json`, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   const md = renderK3VerdictMarkdown(result);

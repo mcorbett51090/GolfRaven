@@ -74,42 +74,53 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   // done once, manually, outside the test suite — see the task report and
   // README "Known risk" / STATUS notes.
 
-  // k1-verdict/k3-verdict read fixed repo docs directly (no network, no
-  // input flags) — same "no override flag" philosophy as x1-ios-export's
-  // round-window read above. Proving both against the REAL, pre-read repo
-  // docs is a real end-to-end check that the refusal/pass-through wiring
-  // reaches all the way from the CLI to `docs/partners/k1-outreach.md` and
-  // `docs/p0/K3.md`.
-  // Decision 0001, Addendum I: before the early-read window closes
-  // (2026-10-20), the CLI's own default --as-of (today's UTC date, which
-  // is 2026-09-24 in this repo's fixed "today") reports PENDING, not a
-  // miss — the read is genuinely not due yet. An explicit --as-of past
-  // both window closes proves the miss/pending distinction end to end.
-  it("k1-verdict CLI runs cleanly against the real, pre-outreach k1-outreach.md (default as-of: pending)", async () => {
+  // k1-verdict / k3-verdict: each CLI test reads a FROZEN copy of the log
+  // (test/fixtures/k1-log-empty.md, test/fixtures/k3-memo-blank.md, copied
+  // from the repo docs before any data was logged), passed with --log /
+  // --memo. Reading the live repo docs would make these tests change result
+  // as the calendar moves past 2026-10-20 or as soon as Matt logs real data.
+  // Pinned as-of 2026-09-24 is before both K1 windows close, so the read is
+  // pending ("n so far"), never MISS/PASS (decision 0001, Addendum I).
+  it("k1-verdict CLI: empty log, as-of 2026-09-24 → pending, no MISS/PASS", async () => {
     const outPrefix = path.join(OUT_DIR, "k1-verdict-result");
-    const { stdout } = await execFileAsync("node", [path.join(DIST, "k1-verdict.js"), "--out", outPrefix]);
-    expect(stdout).toContain("PENDING");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "k1-verdict.js"),
+      "--log", path.join(FIXTURES, "k1-log-empty.md"),
+      "--as-of", "2026-09-24",
+      "--out", outPrefix,
+    ]);
+    expect(stdout).toContain("so far");
     expect(stdout).toContain("Full gate state: pending");
+    expect(stdout).not.toMatch(/\bMISS\b/);
+    expect(stdout).not.toMatch(/\bPASS\b/);
     expect(existsSync(`${outPrefix}.json`)).toBe(true);
   });
 
-  it("k1-verdict CLI --as-of past both windows reports early-read MISS and full-gate operator-miss", async () => {
-    const outPrefix = path.join(OUT_DIR, "k1-verdict-result-later");
-    const { stdout } = await execFileAsync("node", [
-      path.join(DIST, "k1-verdict.js"),
-      "--as-of",
-      "2026-12-01",
-      "--out",
-      outPrefix,
-    ]);
-    expect(stdout).toContain("MISS");
-    expect(stdout).toContain("Full gate state: operator-miss");
+  // Decision 0001, Addendum I ("the read date is real"): a --as-of later than
+  // today (UTC, the real system clock) is refused. "Tomorrow" is computed at
+  // run time so the test never goes stale.
+  it("k1-verdict CLI refuses a --as-of later than today", async () => {
+    const outPrefix = path.join(OUT_DIR, "k1-verdict-result-future");
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "k1-verdict.js"),
+        "--log", path.join(FIXTURES, "k1-log-empty.md"),
+        "--as-of", tomorrow,
+        "--out", outPrefix,
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("later than today") });
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
   });
 
-  it("k3-verdict CLI refuses (non-zero exit) against the real, pre-read K3.md (blank property id)", async () => {
+  it("k3-verdict CLI refuses (non-zero exit) on a memo with a blank property id", async () => {
     const outPrefix = path.join(OUT_DIR, "k3-verdict-result");
     await expect(
-      execFileAsync("node", [path.join(DIST, "k3-verdict.js"), "--out", outPrefix]),
+      execFileAsync("node", [
+        path.join(DIST, "k3-verdict.js"),
+        "--memo", path.join(FIXTURES, "k3-memo-blank.md"),
+        "--out", outPrefix,
+      ]),
     ).rejects.toMatchObject({ stderr: expect.stringContaining("property id") });
     expect(existsSync(`${outPrefix}.json`)).toBe(false);
   });

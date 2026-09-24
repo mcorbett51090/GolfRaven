@@ -1,0 +1,108 @@
+# K3 — SEO signal (proxy)
+
+## Check (verbatim, plan §10 P0)
+
+> **SEO signal — a proxy, named as one (G2-08).** The GolfRaven site does not exist until P2, so K3 reads
+> **SWC's** Search Console (90-day export, 15 min, Matt). It assumes that wine-trail organic search behaviour
+> predicts golf-trail SEO `[inference — not evidenced; the transfer is untested]`. It is therefore paired with
+> a **golf-specific check**: monthly search volume for "golf trail" plus the pilot-candidate trail names, from
+> a keyword tool (Google Keyword Planner through a Google Ads account opened with **no spend**, O23; it may
+> show only volume ranges without active spend `[unverified — training knowledge; A79]`, so the check uses the
+> range's lower bound; 30 min).
+
+## Pass bar (verbatim)
+
+> **SWC M = 1,000 monthly organic clicks** (90-day median) by default (G-P0-01), **and** golf keyword volume
+> ≥ **5,000/month** combined `[inference default; O7]`. Both thresholds are fixed **before** the data is opened
+> (**O7 DECIDED 2026-09-23: kept as written**).
+
+## Kill consequence (verbatim)
+
+> **Both miss** → the directory is scoped as a partner-facing asset, not a growth engine, and operator
+> co-marketing becomes the primary channel (SP10). **They disagree** → the directory is a growth engine *on
+> probation*, re-read 6 months after M1 from the GolfRaven site's own Search Console. P1 proceeds in every case:
+> the catalog is the app's substrate.
+
+## METHOD
+
+Full step-by-step: `docs/owner/k3-seo-reads.md`.
+
+Summary:
+
+1. **SWC Search Console read (Matt, 15 min):** the months are fixed — **July, August and September 2026**
+   (decision 0001, Addendum D, R4) — read from southern-wine-country's Search Console property (exact
+   property id recorded below, before opening the report), search type **Web**, **all countries, all
+   devices**. Take the **median of the three monthly organic-click totals** (method pinned in decision 0001,
+   Addendum A). **The first read performed is the recorded one — there are no re-reads.** Compare to
+   M = 1,000/month.
+2. **Golf keyword read (Matt, 30 min):** open a Google Ads account with **no active spend** (O23), use Google
+   Keyword Planner's **"Get search volume and forecasts"** historical-metrics view (not "Discover new
+   keywords") to pull monthly search volume for the **closed, six-term list fixed in decision 0001, Addendum
+   B** — `golf trail`, `golf trails`, `robert trent jones golf trail`, `tennessee golf trail`, `vancouver
+   island golf trail`, `oklahoma golf trail` — location **United States and Canada**, language **English
+   only**, date range **September 2025 – August 2026** (decision 0001, Addendum D, R5), no additions after
+   data is read. Keyword Planner without spend may return only a volume **range**, not a point estimate — the
+   check uses the **range's lower bound** for each of the six terms, then sums across all six; **if two of
+   the six terms return the identical range, count that range once** (Addendum D, R5 — this replaces
+   Addendum B's "exact-match only" wording). Compare the combined total to ≥ 5,000/month.
+3. Record both numbers, whether each individually passes its own threshold, and the combined verdict logic
+   (both miss / disagree / both pass).
+
+## SWC Search Console property
+
+_(blank — Matt records the exact property id here before opening the report, per decision 0001, Addendum D,
+R4.)_
+
+## Search Console read
+
+Columns fixed 2026-09-24, before any read — `tools/p0`'s `k3-verdict` reads this table directly
+(`src/k3-log.ts`). The three months are fixed (decision 0001, Addendum D, R4); do not add, remove or
+rename rows. The "Read date" column was added 2026-09-24, per decision 0001 Addendum I, while the
+table was still empty — record the date the export was actually read on any ONE of the three rows
+(not all three); it must be no earlier than 2026-10-01, so September 2026 is complete.
+
+| Month | Total organic clicks | Read date |
+|---|---|---|
+| 2026-07 | | |
+| 2026-08 | | |
+| 2026-09 | | |
+
+## Keyword Planner read
+
+Columns fixed 2026-09-24, before any read — `tools/p0`'s `k3-verdict` reads this table directly
+(`src/k3-log.ts`). The six terms are the closed list (decision 0001, Addendum B); fill both Lower
+bound and Upper bound (a point value is entered as lower = upper, decision 0001 Addendum I — there is
+no separate "Point value" column). Do not add, remove or rename rows.
+
+| Term | Lower bound | Upper bound |
+|---|---|---|
+| golf trail | | |
+| golf trails | | |
+| robert trent jones golf trail | | |
+| tennessee golf trail | | |
+| vancouver island golf trail | | |
+| oklahoma golf trail | | |
+
+## OWNER
+
+**Matt-only.** Both reads require Matt's own Google account access: SWC's Search Console property (his
+existing site) and a Google Ads account opened in his name. An agent cannot authenticate as Matt to either
+service.
+
+## STATUS
+
+OWNER — needs Matt's SWC Search Console access and a Google Ads account, then Keyword Planner reads.
+
+## MEASURED VALUE
+
+_(blank — SWC 90-day median not yet pulled; keyword volumes not yet pulled)_
+
+## VERDICT
+
+_(blank: pass | kill | adjust)_
+
+## Log
+
+| Date | Entry |
+|---|---|
+| 2026-09-23 | Memo created. No Search Console export or Keyword Planner read has been performed yet. |
