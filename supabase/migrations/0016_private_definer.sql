@@ -63,6 +63,17 @@ GRANT SELECT ON auth.users TO private_definer;
 -- unconditionally rather than branching on mode.
 GRANT private_definer TO migration_owner WITH SET TRUE;
 
+-- CREATE on schema `private` (S1, gate round 3): confirmed empirically
+-- this session that `ALTER FUNCTION ... OWNER TO private_definer` fails
+-- with "permission denied for schema private" without it -- Postgres
+-- checks the NEW owner has CREATE privilege in the object's schema for an
+-- ownership transfer, the same check CREATE FUNCTION itself would make.
+-- This is schema-level DDL capability only (create new objects in
+-- `private`), never table-level data access -- private_definer's actual
+-- data reach is still exactly the narrow policies in section 4-6 below,
+-- unaffected by this grant.
+GRANT CREATE ON SCHEMA private TO private_definer;
+
 -- ============================================================================
 -- 2. Ownership: every private.* SECURITY DEFINER function moves to
 --    private_definer. The pinned `search_path = ''` (already set on each,

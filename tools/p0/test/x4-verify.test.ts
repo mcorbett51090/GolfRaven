@@ -222,6 +222,17 @@ describe("x4-verify: isLiveFacilityPage (decision 0001 Addendum H's three-way ou
     expect(result.status).toBe("live");
   });
 
+  it("decision 0001 Addendum J(b), gate B2: a /courses/<id>- match ONLY in the query string, not the path, is not covered", () => {
+    const result = isLiveFacilityPage(
+      200,
+      "https://www.golfnow.com/search?ret=/courses/2360-x",
+      "No results found for Grand National.",
+      "Grand National",
+      "2360",
+    );
+    expect(result.status).toBe("not-live");
+  });
+
   it("name match applies Addendum F normalisation (case/punctuation-insensitive whole-word match)", () => {
     const result = isLiveFacilityPage(
       200,

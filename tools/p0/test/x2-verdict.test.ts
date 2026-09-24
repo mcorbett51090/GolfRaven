@@ -623,6 +623,8 @@ describe("x2-verdict: buildEvidenceByTrail (gate findings S1/S2/S5)", () => {
             draftCandidateNames: [],
             method: "direct",
             ownerSavedDate: null,
+            renderArgs: null,
+            recorded: true,
           },
         ],
       },
