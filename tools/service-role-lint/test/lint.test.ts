@@ -254,10 +254,18 @@ describe("bad fixtures (must fail) — MEDIUM 3, post-P3a re-gate (allow-list re
 
   it("bypass 10: flags an import-map ALIAS resolving to a banned specifier (unit-level — see index.test.ts for the real deno.json end-to-end case)", () => {
     const source = readFileSync(join(FIXTURES_ROOT, "bad/import-map-alias.ts"), "utf8");
+    // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): SUPERSEDES the prior
+    // assertion here, which expected the bare specifier "supabase" to
+    // pass with NO import map at all. M2's deny-by-default model makes
+    // that itself a finding now (a bare specifier with no import-map
+    // coverage is never legitimate), independent of and in addition to
+    // whatever a resolved alias might ALSO say.
     const findingsWithoutMap = lintSource(source, join(FIXTURES_ROOT, "bad/import-map-alias.ts"));
-    // Without a resolved import map, the bare specifier "supabase" isn't
-    // itself banned — this documents the gap the alias resolution closes.
-    expect(findingsWithoutMap.some((f) => f.rule === "banned-import-specifier")).toBe(false);
+    expect(
+      findingsWithoutMap.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("not a relative import and not an exact key"),
+      ),
+    ).toBe(true);
     const findingsWithMap = lintSource(source, join(FIXTURES_ROOT, "bad/import-map-alias.ts"), {
       importMap: { supabase: "npm:@supabase/supabase-js@2" },
     });
@@ -331,13 +339,143 @@ describe("bad fixtures (must fail) — post-P3a re-gate M1 (7 confirmed bypasses
     expect(findings.some((f) => f.message.includes("resolves outside supabase/functions"))).toBe(false);
   });
 
-  it("g6: flags a remote import from a host with no banned package name (host allow-list, not a package deny-list)", () => {
+  it("g6: flags a remote import from a host with no banned package name -- SUPERSEDED message text (M2, post-P3a re-gate): host trust is gone entirely, so this is now banned as a direct-URL-outside-the-map, not an unlisted host", () => {
     const findings = lintFixture("bad/g6-untrusted-host.ts");
-    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not on the allow-list"))).toBe(true);
+    expect(
+      findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"),
+      ),
+    ).toBe(true);
+  });
+});
+
+// ⛔ M2 BLOCKING (post-P3a re-gate): "the lint trusts hosts and
+// registries, not modules." Every repro named in the re-gate, plus the
+// two clean controls the decision itself calls for.
+describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, host trust dropped)", () => {
+  it("flags a direct esm.sh 'gh/' GitHub-passthrough URL (was allowed under the old host allow-list)", () => {
+    const findings = lintFixture("bad/m2-raw-esm-gh.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
   });
 
-  it("clean negative control: a legitimate esm.sh import of an unrelated package, an in-bounds relative import, and an allow-listed Deno.env.get read produce ZERO findings", () => {
-    expect(lintFixtureWithRoot("good/legit-remote-import.ts")).toEqual([]);
+  it("flags a direct cdn.jsdelivr.net 'gh/' GitHub-passthrough URL", () => {
+    const findings = lintFixture("bad/m2-raw-jsdelivr-gh.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags a direct deno.land/x/ URL for an attacker-named module (was allowed under the old host allow-list)", () => {
+    const findings = lintFixture("bad/m2-raw-denoland.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags a direct esm.sh URL naming an unlisted attacker package (no package-name deny-list closes this; the URL itself is what's banned)", () => {
+    const findings = lintFixture("bad/m2-raw-esm-direct.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags a direct npm: scheme specifier outside any import map", () => {
+    const findings = lintFixture("bad/m2-raw-npm-scheme.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags a direct jsr: scheme specifier outside any import map", () => {
+    const findings = lintFixture("bad/m2-raw-jsr-scheme.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags a direct file: URL", () => {
+    const findings = lintFixture("bad/m2-raw-file-scheme.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags a bare absolute filesystem path", () => {
+    const findings = lintFixture("bad/m2-raw-absolute-path.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("outside a reviewed import map"))).toBe(true);
+  });
+
+  it("flags 'lib/admin.ts' resolving through a PREFIX import-map entry ('lib/': '../../../outside/') -- prefix/scope resolution is gone entirely, so this is banned as an unmapped bare specifier, never reaching the escape", () => {
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/": "../../../outside/" });
+    expect(
+      findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("not a relative import and not an exact key"),
+      ),
+    ).toBe(true);
+  });
+
+  it("flags the prefix KEY itself ('lib/') if imported verbatim, once its relative TARGET is checked and found to escape the root", () => {
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "../../../outside/admin.ts" });
+    // Now it IS an exact key -- resolves to a relative target, which the
+    // escape check still catches (M2's own text: "run the escape check
+    // on the resolved import-map target too").
+    expect(
+      findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("resolves to a relative path outside supabase/functions"),
+      ),
+    ).toBe(true);
+  });
+
+  it("flags a mapped @supabase/... import (an exact-key alias does not launder the substring check)", () => {
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "npm:@supabase/supabase-js@2" });
+    expect(
+      findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("@supabase/"),
+      ),
+    ).toBe(true);
+  });
+
+  it("flags an import-map target that is a prefix mapping (trailing '/') onto a remote host, even for an exact-matched key", () => {
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "https://esm.sh/" });
+    expect(
+      findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("prefix mapping"),
+      ),
+    ).toBe(true);
+  });
+
+  it("flags an exact-key alias whose target is a clean-looking URL that is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "https://esm.sh/left-pad@1.3.0" }, []);
+    expect(
+      findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list"),
+      ),
+    ).toBe(true);
+  });
+
+  it("flags (() => {})[\"constr\" + \"uctor\"] -- a computed member access whose key is built from a binary '+' concatenation", () => {
+    const findings = lintFixture("bad/m2-constructor-string-build.ts");
+    expect(
+      findings.some((f) => f.rule === "dynamic-code-execution" && f.message.includes("computed member access whose key is built")),
+    ).toBe(true);
+  });
+
+  it("flags Object.getPrototypeOf(...) unconditionally, and Object.getOwnPropertyDescriptor(...) with a non-literal key -- reaches Function without ever writing a .constructor token", () => {
+    const findings = lintFixture("bad/m2-reflective-key-gadget.ts");
+    expect(findings.some((f) => f.rule === "dynamic-code-execution" && f.message.includes("Object.getPrototypeOf"))).toBe(true);
+    expect(
+      findings.some((f) => f.rule === "dynamic-code-execution" && f.message.includes("Object.getOwnPropertyDescriptor")),
+    ).toBe(true);
+  });
+
+  it("does NOT flag Reflect.get(obj, \"literalKey\") -- a string-literal key is statically reviewable", () => {
+    const findings = lintSource(
+      `export function readOne(obj: Record<string, unknown>) { return Reflect.get(obj, "literalKey"); }`,
+      "supabase/functions/some-fn/index.ts",
+    );
+    expect(findings.some((f) => f.rule === "dynamic-code-execution")).toBe(false);
+  });
+
+  it("does NOT flag ordinary computed access (arr[i], obj[key]) with identifier/literal keys", () => {
+    const findings = lintSource(
+      `export function pick(arr: number[], i: number, obj: Record<string, number>, key: string) { return arr[i] + obj[key] + obj["literal"]; }`,
+      "supabase/functions/some-fn/index.ts",
+    );
+    expect(findings.some((f) => f.rule === "dynamic-code-execution")).toBe(false);
+  });
+
+  it("clean negative control: a legitimate dependency imported ONLY through an exact-key, pinned-target import map, an in-bounds relative import, an allow-listed Deno.env.get read, and ordinary arr[i]/obj[key] access produce ZERO findings", () => {
+    expect(
+      lintFixtureWithMap("good/legit-remote-import.ts", { zod: "https://esm.sh/zod@3.23.8" }, ["https://esm.sh/zod@3.23.8"]),
+    ).toEqual([]);
   });
 });
 

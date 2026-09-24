@@ -840,6 +840,22 @@ FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_used_at_once();
 ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_expires_at_bounded
   CHECK (expires_at <= issued_at + interval '24 hours');
 
+-- ⛔ FIX (should-fix 3, post-P3a re-gate): "a future issued_at sidesteps
+-- the 24h cap." The CHECK above only bounds the GAP between issued_at and
+-- expires_at -- it says nothing about issued_at itself, so a caller free
+-- to choose issued_at can set it far in the future (e.g. now() + 30 days)
+-- and still satisfy the 24h-gap CHECK while the challenge's real validity
+-- window sits 30 days out, defeating the purpose of bounding it at all
+-- (and, by extension, private.consumed_nonce's purge floor above, which
+-- is anchored to expires_at). issued_at is pinned to "now, plus a small
+-- clock-skew margin" instead -- a CHECK (not a forcing BEFORE INSERT
+-- trigger) is sufficient and simpler, per this should-fix's own stated
+-- options ("force issued_at = now() ... or CHECK issued_at <= now() +
+-- interval '1 minute'"); a volatile now() in a CHECK is validated only at
+-- write time, which is exactly the point in time this needs to be true.
+ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_issued_at_not_future
+  CHECK (issued_at <= now() + interval '1 minute');
+
 CREATE TABLE private.consumed_nonce (
   nonce_hash text PRIMARY KEY,
   source text NOT NULL,

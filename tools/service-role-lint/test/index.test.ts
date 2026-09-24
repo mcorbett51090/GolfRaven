@@ -106,20 +106,62 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
     expect(result?.findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("supabase"))).toBe(true);
   });
 
-  it("does NOT flag the bare specifier \"supabase\" when NO import map resolves it (documents the alias is what makes it dangerous, not the bare name)", () => {
+  // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): SUPERSEDES the prior version of
+  // this test, which asserted the OPPOSITE — that an unmapped bare
+  // specifier was NOT flagged. M2's own decision reverses that
+  // deliberately: "bare specifiers that are exact keys in a reviewed
+  // import map" are the ONLY legitimate non-relative import; an unmapped
+  // bare specifier is deny-by-default now, whether or not it happens to
+  // be named "supabase" — naming is not the mechanism any more, coverage
+  // by a reviewed import map is.
+  it("flags the bare specifier \"supabase\" when NO import map resolves it (M2: deny-by-default -- an unmapped bare specifier is never legitimate, not just a suspiciously-named one)", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-importmap-none-"));
     const fnDir = join(tmpRoot, "no-map-fn");
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), ALIASED_IMPORT_SOURCE);
 
     const results = lintDirectory(tmpRoot);
-    // "supabase" alone isn't a banned specifier, and Deno.env.get("SUPABASE_URL")/
-    // Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") — the SERVICE_ROLE key IS still a
-    // literal-secret-env-var finding independent of the import map, so this file
-    // still fails, but NOT for the aliasing reason.
     expect(results).toHaveLength(1);
     const [result] = results;
-    expect(result?.findings.some((f) => f.rule === "banned-import-specifier")).toBe(false);
+    expect(
+      result?.findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("not a relative import and not an exact key"),
+      ),
+    ).toBe(true);
     expect(result?.findings.some((f) => f.rule === "literal-secret-env-var")).toBe(true);
+  });
+});
+
+// M2 (post-P3a re-gate): the pinned-import-targets allow-list, end to end
+// through the REAL lintDirectory path (reads
+// tools/service-role-lint/pinned-import-targets.json, not a value passed
+// in by the caller).
+describe("pinned import-target allow-list (M2)", () => {
+  it("passes a bare specifier resolved through a real deno.json to a target that IS on the committed pinned-import-targets.json (zod, the one real entry)", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-pinned-ok-"));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@3.23.8" } }));
+    const fnDir = join(tmpRoot, "some-fn");
+    mkdirSync(fnDir, { recursive: true });
+    writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);
+
+    const results = lintDirectory(tmpRoot);
+    expect(results).toHaveLength(0);
+  });
+
+  it("flags a bare specifier resolved to a target that looks legitimate but is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-pinned-missing-"));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { "left-pad": "https://esm.sh/left-pad@1.3.0" } }));
+    const fnDir = join(tmpRoot, "some-fn");
+    mkdirSync(fnDir, { recursive: true });
+    writeFileSync(join(fnDir, "index.ts"), `import leftPad from "left-pad"; export const p = leftPad;`);
+
+    const results = lintDirectory(tmpRoot);
+    expect(results).toHaveLength(1);
+    const [result] = results;
+    expect(
+      result?.findings.some(
+        (f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list"),
+      ),
+    ).toBe(true);
   });
 });

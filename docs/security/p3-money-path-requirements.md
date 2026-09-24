@@ -198,3 +198,47 @@ for real** — check what `GRANT`s the project's own `postgres` role actually ho
 role, or `information_schema.role_table_grants`), and narrow both `shim.sql` and
 `test-migrations-no-migration-owner.sh` to match reality once confirmed, rather than
 leaving the WITH-GRANT-OPTION-by-fiat assumption as the only evidence this path works.
+
+## service-role lint: what it is and isn't (post-P3a re-gate M2)
+
+`tools/service-role-lint` (`supabase/functions/**`, §4.7.1a) is a **guardrail against
+accidental misuse and against unreviewed code entering through the import graph** — it
+is not, and cannot be, a boundary against a deliberate insider who obfuscates within a
+single file.
+
+What it enforces, after the M2 rewrite (post-P3a re-gate): a service-role Supabase
+client, and every privileged call on one, is confined to
+`supabase/functions/_shared/privileged.ts`'s `withOwnership()` callback; `Deno.env`/
+`process.env` are unreachable outside one sanctioned, allow-listed
+`Deno.env.get("<literal>")` shape; and — the M2 rewrite — **every import is either a
+relative import that resolves inside `supabase/functions`, or a bare specifier that is
+an EXACT key in a reviewed import map (`supabase/functions/deno.json` or
+`import_map.json`) whose target is on the committed
+`tools/service-role-lint/pinned-import-targets.json` allow-list.** Every direct
+`http(s):`/`npm:`/`jsr:`/`file:` import, every absolute path, and every import-map
+PREFIX mapping (a key or target ending in `/`) is banned outright — host trust is gone
+entirely; only a specific, pinned, reviewed target string is ever legitimate. Adding a
+new dependency is therefore a reviewed diff against that one file, not a judgment call
+the lint makes about a host or a package name at import time.
+
+**What it is not:** a static AST check over ONE file's syntax cannot see across a
+process boundary, cannot see what a legitimately-imported, pinned dependency's OWN code
+does once invoked, and cannot stop a sufficiently determined author from smuggling
+privileged behaviour into logic this lint has no rule for at all (an infinite space of
+possible JS/TS shapes — the whole reason M1/M3 moved from a deny-list of syntactic
+bypasses to allow-lists in the first place still applies structurally: an allow-list
+narrows the *legitimate* surface, it does not enumerate and block every possible
+*illegitimate* one). It also only ever runs over `supabase/functions/**` — it says
+nothing about privileged code anywhere else in the repo, and nothing about what an
+Edge Function's *runtime* dependencies (an already-pinned, already-imported package)
+do once actually executing.
+
+**The backstop is the DB side, not this lint.** Row-Level Security (`FORCE ROW LEVEL
+SECURITY`, never removed, on every table), the `private_definer` ownership/allow-list
+model (`private.function_inventory`, `private.definer_policy_allowlist`), and Supabase's
+own service-role/anon/authenticated grant boundaries are what actually stop a privileged
+action from succeeding, regardless of what code path — reviewed or not, inside
+`supabase/functions` or entirely outside it — attempted it. This lint's job is narrower
+and earlier: catch an accidental or unreviewed privileged-access shape in Edge Function
+code *before* it ships, as a second, in-loop signal alongside code review — not to be
+the boundary review substitutes for.
