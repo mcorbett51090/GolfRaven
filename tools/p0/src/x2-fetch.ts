@@ -6,15 +6,18 @@
  * DIRECTLY — never a search snippet, per X2.md METHOD — and stores evidence
  * per decision 0001 Addendum G: the raw bytes, the final URL after
  * redirects, the HTTP status, the retrieval time (UTC), a SHA-256 of the
- * bytes, and an extracted-text file (HTML → text, tags stripped and
- * whitespace collapsed — `text-extract.ts`; PDF → the bytes are stored and
- * text extraction is recorded as `"manual"`, since no PDF-parsing library
- * is added as a dependency — "do not pretend" applies here exactly as it
- * does to any other unverified claim in this codebase).
+ * bytes, and an extracted-text file. HTML is tag-stripped (`text-extract.
+ * ts`, gate S4: inline element boundaries never insert a space); a PDF's
+ * text is derived with the pinned pure-JS extractor (`pdf-extract.ts`,
+ * gate S3) — the SAME extraction function `x2-verdict` re-runs over the
+ * raw bytes at verdict time (`evidence-extract.ts`), so the stored
+ * `text/<sha>.txt` file is a convenience copy, never itself trusted.
  *
  * A fetch that fails — including a network-policy block, see `net.ts` — is
  * recorded as FAILED with the exact error; it is never silently skipped or
- * dropped from the manifest.
+ * dropped from the manifest. The abort timer used for the request timeout
+ * stays live through the full body read (gate S6), and the body is capped
+ * at `DEFAULT_MAX_RESPONSE_BYTES` while streaming.
  *
  * This tool only gathers and stores evidence. It does NOT confirm a
  * trail's roster/completionUnit/season — that is `x2-verdict`, a separate,
@@ -28,8 +31,10 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { extractDraftCandidateNames, stripHtmlToText } from "./text-extract.js";
-import { buildAsciiUserAgent, fetchWithBlockDetection } from "./net.js";
+import { extractDraftCandidateNames } from "./text-extract.js";
+import { classifyEvidenceBytes, extractEvidenceText } from "./evidence-extract.js";
+import { buildAsciiUserAgent, DEFAULT_MAX_RESPONSE_BYTES, fetchWithBlockDetection, readBodyCapped } from "./net.js";
+import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -57,9 +62,12 @@ export interface X2FetchEntry {
   /** Path to the raw bytes, relative to the evidence output dir. */
   rawFile: string | null;
   /** Path to the extracted-text file, relative to the evidence output dir
-   * — `null` when extraction is `"manual"` or the fetch failed. */
+   * — `null` when there is no extractable text or the fetch failed. */
   textFile: string | null;
-  textExtraction: "auto" | "manual" | "n/a";
+  /** `"auto-pdf"` (gate S3) records which pinned extractor produced the
+   * text, so a verdict-time re-derivation can assert it used the same one. */
+  textExtraction: "auto" | "auto-pdf" | "n/a";
+  extractor: string | null;
   /** True when the failure was this environment's own network-policy block
    * (see `net.ts`), not a genuine site-side failure. */
   blocked: boolean;
@@ -78,17 +86,30 @@ export interface X2FetchManifest {
   draftCandidateNames: Record<string, string[]>;
 }
 
-function extForUrlAndType(contentType: string | null, url: string): string {
-  const ct = (contentType ?? "").toLowerCase();
-  if (ct.includes("pdf") || url.toLowerCase().split("?")[0]?.endsWith(".pdf")) {
-    return "pdf";
-  }
-  if (ct.includes("html")) return "html";
-  return "bin";
-}
-
-function isPdf(contentType: string | null, url: string): boolean {
-  return extForUrlAndType(contentType, url) === "pdf";
+function failedEntry(
+  trail: string,
+  url: string,
+  fetchedAt: string,
+  error: string,
+  opts: { blocked?: boolean; httpStatus?: number | null; finalUrl?: string | null } = {},
+): X2FetchEntry {
+  return {
+    trail,
+    url,
+    status: "failed",
+    httpStatus: opts.httpStatus ?? null,
+    finalUrl: opts.finalUrl ?? null,
+    contentType: null,
+    fetchedAt,
+    sha256: null,
+    rawFile: null,
+    textFile: null,
+    textExtraction: "n/a",
+    extractor: null,
+    blocked: opts.blocked ?? false,
+    error,
+    draftCandidateNames: [],
+  };
 }
 
 async function fetchOne(
@@ -98,106 +119,149 @@ async function fetchOne(
   timeoutMs: number,
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let outcome: Awaited<ReturnType<typeof fetchWithBlockDetection>>;
-  try {
-    outcome = await fetchWithBlockDetection(url, {
-      method: "GET",
-      headers: { "User-Agent": buildX2UserAgent() },
-      redirect: "follow",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
 
-  if (outcome.kind !== "ok") {
-    return {
+  // Gate finding N6: only ever fetch https: URLs — a repo-controlled config
+  // is low-risk, but a `data:`/`http:` entry should still be refused rather
+  // than silently "fetched" as evidence.
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`);
+  }
+  if (parsedUrl.protocol !== "https:") {
+    return failedEntry(
       trail,
       url,
-      status: "failed",
-      httpStatus: null,
-      finalUrl: null,
-      contentType: null,
       fetchedAt,
-      sha256: null,
-      rawFile: null,
-      textFile: null,
-      textExtraction: "n/a",
-      blocked: outcome.kind === "blocked",
-      error:
+      `refusing to fetch non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
+    );
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let outcome: Awaited<ReturnType<typeof fetchWithBlockDetection>>;
+    try {
+      outcome = await fetchWithBlockDetection(url, {
+        method: "GET",
+        headers: { "User-Agent": buildX2UserAgent() },
+        redirect: "follow",
+        signal: controller.signal,
+      });
+    } catch (err) {
+      return failedEntry(
+        trail,
+        url,
+        fetchedAt,
+        `fetch threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (outcome.kind !== "ok") {
+      return failedEntry(
+        trail,
+        url,
+        fetchedAt,
         outcome.kind === "blocked"
           ? `BLOCKED — network policy (${outcome.host}): ${outcome.detail}`
           : `fetch error (${outcome.host}): ${outcome.detail}`,
-      draftCandidateNames: [],
-    };
-  }
+        { blocked: outcome.kind === "blocked" },
+      );
+    }
 
-  const response = outcome.response;
-  if (!response.ok) {
-    const bodySample = await response.text().catch(() => "");
+    const response = outcome.response;
+    const finalUrl = response.url || url;
+    try {
+      const finalParsed = new URL(finalUrl);
+      if (finalParsed.protocol !== "https:") {
+        return failedEntry(
+          trail,
+          url,
+          fetchedAt,
+          `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
+          { httpStatus: response.status, finalUrl },
+        );
+      }
+    } catch {
+      // finalUrl not parseable — fall through, handled generically below.
+    }
+
+    if (!response.ok) {
+      const bodySample = await readBodyCapped(response, {
+        signal: controller.signal,
+        maxBytes: DEFAULT_MAX_RESPONSE_BYTES,
+      })
+        .then((buf) => buf.toString("utf8"))
+        .catch(() => "");
+      return failedEntry(
+        trail,
+        url,
+        fetchedAt,
+        `HTTP ${response.status} ${response.statusText} — ${bodySample.slice(0, 300)}`,
+        { httpStatus: response.status, finalUrl },
+      );
+    }
+
+    const contentType = response.headers.get("content-type");
+    let buf: Buffer;
+    try {
+      buf = await readBodyCapped(response, {
+        signal: controller.signal,
+        maxBytes: DEFAULT_MAX_RESPONSE_BYTES,
+      });
+    } catch (err) {
+      return failedEntry(
+        trail,
+        url,
+        fetchedAt,
+        `body read failed (timeout or size cap, gate S6): ${err instanceof Error ? err.message : String(err)}`,
+        { httpStatus: response.status, finalUrl },
+      );
+    }
+
+    const sha256 = createHash("sha256").update(buf).digest("hex");
+    const kind = classifyEvidenceBytes(buf, contentType, url);
+    const ext = kind === "pdf" ? "pdf" : kind === "html" ? "html" : "bin";
+    const rawRelPath = path.join("raw", `${sha256}.${ext}`);
+    await mkdir(path.join(outDir, "raw"), { recursive: true });
+    await writeFile(path.join(outDir, rawRelPath), buf);
+
+    const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, url);
+    let textFile: string | null = null;
+    let draftCandidateNames: string[] = [];
+    if (text !== null) {
+      const textRelPath = path.join("text", `${sha256}.txt`);
+      await mkdir(path.join(outDir, "text"), { recursive: true });
+      await writeFile(path.join(outDir, textRelPath), text, "utf8");
+      textFile = textRelPath;
+    }
+    if (kind === "html") {
+      draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
+    }
+
     return {
       trail,
       url,
-      status: "failed",
+      status: "fetched",
       httpStatus: response.status,
-      finalUrl: response.url || null,
-      contentType: response.headers.get("content-type"),
+      finalUrl,
+      contentType,
       fetchedAt,
-      sha256: null,
-      rawFile: null,
-      textFile: null,
-      textExtraction: "n/a",
+      sha256,
+      rawFile: rawRelPath,
+      textFile,
+      textExtraction,
+      extractor,
       blocked: false,
-      error: `HTTP ${response.status} ${response.statusText} — ${bodySample.slice(0, 300)}`,
-      draftCandidateNames: [],
+      error: null,
+      draftCandidateNames,
     };
+  } finally {
+    // Gate S6: the timer stays live through the ENTIRE fetch — including
+    // the body read above — and is cleared only once everything is done.
+    clearTimeout(timer);
   }
-
-  const contentType = response.headers.get("content-type");
-  const buf = Buffer.from(await response.arrayBuffer());
-  const sha256 = createHash("sha256").update(buf).digest("hex");
-  const ext = extForUrlAndType(contentType, url);
-  const rawRelPath = path.join("raw", `${sha256}.${ext}`);
-  await mkdir(path.join(outDir, "raw"), { recursive: true });
-  await writeFile(path.join(outDir, rawRelPath), buf);
-
-  let textFile: string | null = null;
-  let textExtraction: "auto" | "manual" | "n/a" = "n/a";
-  let draftCandidateNames: string[] = [];
-  if (isPdf(contentType, url)) {
-    // Addendum G / task instruction: no pure-JS PDF extractor is pinned as
-    // a dependency, so a PDF's text is never pretended to have been read —
-    // the bytes are stored and this is recorded plainly as "manual".
-    textExtraction = "manual";
-  } else {
-    const html = buf.toString("utf8");
-    const text = stripHtmlToText(html);
-    const textRelPath = path.join("text", `${sha256}.txt`);
-    await mkdir(path.join(outDir, "text"), { recursive: true });
-    await writeFile(path.join(outDir, textRelPath), text, "utf8");
-    textFile = textRelPath;
-    textExtraction = "auto";
-    draftCandidateNames = extractDraftCandidateNames(html);
-  }
-
-  return {
-    trail,
-    url,
-    status: "fetched",
-    httpStatus: response.status,
-    finalUrl: response.url || url,
-    contentType,
-    fetchedAt,
-    sha256,
-    rawFile: rawRelPath,
-    textFile,
-    textExtraction,
-    blocked: false,
-    error: null,
-    draftCandidateNames,
-  };
 }
 
 export async function runX2Fetch(
@@ -298,7 +362,9 @@ export function resolveDefaultX2ConfigPath(): string {
 async function main(argv: string[]): Promise<void> {
   const flags = parseFlags(argv);
   const configPath = flags.config || resolveDefaultX2ConfigPath();
-  const outDir = flags["out-dir"] || "x2-evidence";
+  const outDirExplicit = Boolean(flags["out-dir"]);
+  const outDir = flags["out-dir"] || defaultOutsideRepoDir("x2-evidence");
+  assertOutsideRepoUnlessExplicit(outDir, outDirExplicit);
   const config = JSON.parse(
     await readFile(configPath, "utf8"),
   ) as X2SourceConfig;

@@ -24,6 +24,13 @@
 
 const LATIN1_MAX_CODE_POINT = 0xff;
 
+/** Gate finding S6: the default response-size cap, enforced WHILE
+ * STREAMING (never after buffering the whole body), so a hostile or
+ * misconfigured server can't exhaust memory before the cap is checked. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+export class ResponseTooLargeError extends Error {}
+
 /** Gate finding F-S5 (x5-overpass.ts), generalized: a header value above
  * 0xFF is not a valid ByteString and `fetch`/`Headers` throws on it with no
  * indication of which header or character caused it — fail with a clear,
@@ -85,13 +92,15 @@ export function isPolicyBlockedResponse(
   headers: Headers,
   bodyTextSample: string,
 ): boolean {
-  if (status !== 403) return false;
+  // Gate finding N2: a policy denial can resolve as HTTP 407 (proxy
+  // authentication required), not only 403 — `/root/.ccr/README.md`.
+  if (status !== 403 && status !== 407) return false;
   if (headers.has(BLOCKED_RESPONSE_HEADER)) return true;
   return BLOCKED_BODY_RE.test(bodyTextSample);
 }
 
 const BLOCKED_ERROR_RE =
-  /(connect|tunnel|proxy)[\s\S]*?\b403\b|\b403\b[\s\S]*?(connect|tunnel|proxy)|forbidden[\s\S]*?(proxy|tunnel)/i;
+  /(connect|tunnel|proxy)[\s\S]*?\b40[37]\b|\b40[37]\b[\s\S]*?(connect|tunnel|proxy)|forbidden[\s\S]*?(proxy|tunnel)/i;
 
 /** Walks an Error's `.cause` chain (fetch/undici nest the real reason
  * several levels deep — see module doc) collecting every message, so the
@@ -161,7 +170,7 @@ export async function fetchWithBlockDetection(
       ? { kind: "blocked", host, detail }
       : { kind: "error", host, detail };
   }
-  if (response.status === 403) {
+  if (response.status === 403 || response.status === 407) {
     const sample = await response
       .clone()
       .text()
@@ -170,9 +179,67 @@ export async function fetchWithBlockDetection(
       return {
         kind: "blocked",
         host,
-        detail: `HTTP 403 (${sample.slice(0, 200) || "no body"})`,
+        detail: `HTTP ${response.status} (${sample.slice(0, 200) || "no body"})`,
       };
     }
   }
   return { kind: "ok", response };
+}
+
+/**
+ * Reads a `Response` body into a single `Buffer`, enforcing BOTH a byte cap
+ * (checked WHILE STREAMING, gate S6) and `opts.signal` for the ENTIRE read —
+ * not just the initial `fetch()` — via an explicit race against the
+ * signal's `abort` event, so a server that sends headers and then stalls the
+ * body is still bounded by the caller's timeout. Previously callers cleared
+ * their abort timer as soon as `fetch()` resolved (i.e. once headers
+ * arrived), leaving the body read with no timeout and no size cap at all.
+ */
+export async function readBodyCapped(
+  response: Response,
+  opts: { signal: AbortSignal; maxBytes?: number },
+): Promise<Buffer> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  const abortRejection = new Promise<never>((_, reject) => {
+    const onAbort = (): void => reject(new Error("response body read aborted (timeout)"));
+    if (opts.signal.aborted) {
+      onAbort();
+      return;
+    }
+    opts.signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  const readAll = async (): Promise<Buffer> => {
+    const body = response.body;
+    if (!body) {
+      const buf = Buffer.from(await response.arrayBuffer());
+      if (buf.byteLength > maxBytes) {
+        throw new ResponseTooLargeError(`response body exceeds ${maxBytes} bytes`);
+      }
+      return buf;
+    }
+    const reader = body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > maxBytes) {
+            throw new ResponseTooLargeError(
+              `response body exceeds ${maxBytes} bytes (stopped mid-stream)`,
+            );
+          }
+          chunks.push(Buffer.from(value));
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks);
+  };
+
+  return Promise.race([readAll(), abortRejection]);
 }

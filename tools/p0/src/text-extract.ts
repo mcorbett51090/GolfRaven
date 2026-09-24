@@ -1,66 +1,48 @@
 /**
- * Minimal, dependency-free HTML→text extraction for X2 evidence (decision
- * 0001 Addendum G: "HTML → text with tags stripped and whitespace
- * collapsed"). No HTML-parsing library is added as a dependency — the same
- * "do not pretend" spirit that governs `x2-fetch`'s PDF handling (store the
- * bytes, mark extraction "manual" rather than fake a parse) applies here:
- * this is a conservative tag-strip, not a DOM-accurate render, and X2
- * confirmation quotes are expected to be short prose fragments that survive
- * it untouched. Also extracts a DRAFT candidate-name list (heading and link
- * text) for `x2-fetch` to print — explicitly never a confirmation; only
- * `x2-verdict`, checking a human-written confirmation file against this
- * same extracted text, confirms anything.
+ * Minimal HTML→text extraction for X2/X4 evidence (decision 0001 Addendum
+ * G: "HTML → text with tags stripped and whitespace collapsed"). This is a
+ * conservative tag-strip, not a DOM-accurate render — X2 confirmation
+ * quotes are expected to be short prose fragments that survive it
+ * unchanged, matching how a person would copy the same text out of a
+ * browser (gate finding S4: an inline element like `<span>` or `<a>` must
+ * NOT insert a space at its boundary — `<a>Bear Trace</a>, <a>Fall
+ * Creek</a>` must read as "Bear Trace, Fall Creek", exactly as a browser's
+ * own copy-paste would produce; a block element like `<p>`/`<li>`/`<br>`
+ * DOES break text, the same as a browser's copy-paste). Also extracts a
+ * DRAFT candidate-name list (heading and link text) for `x2-fetch` to print
+ * — explicitly never a confirmation; only `x2-verdict`, checking a
+ * human-written confirmation file against this same extracted text,
+ * confirms anything.
  */
+import { decodeHTML } from "entities";
 
-const SCRIPT_STYLE_RE =
-  /<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const SCRIPT_STYLE_TAG_NAMES = "script|style|noscript|template";
+const SCRIPT_STYLE_CLOSED_RE = new RegExp(
+  `<(${SCRIPT_STYLE_TAG_NAMES})\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>`,
+  "gi",
+);
+// Gate finding N3: an UNCLOSED <script>/<style>/... has no matching close
+// tag for SCRIPT_STYLE_CLOSED_RE to remove, so its JS/CSS source leaked into
+// "visible" text. Once every properly-closed block is gone, any leftover
+// opening tag for one of these names is, by construction, unclosed — drop
+// everything from there to the end of the document rather than guess where
+// it might have ended.
+const UNCLOSED_SCRIPT_STYLE_OPEN_RE = new RegExp(
+  `<(?:${SCRIPT_STYLE_TAG_NAMES})\\b[^>]*>`,
+  "i",
+);
 const COMMENT_RE = /<!--[\s\S]*?-->/g;
-const TAG_RE = /<[^>]*>/g;
 
-const NAMED_ENTITIES: Record<string, string> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-  mdash: "—",
-  ndash: "–",
-  rsquo: "’",
-  lsquo: "‘",
-  rdquo: "”",
-  ldquo: "“",
-  hellip: "…",
-};
-
-const ENTITY_RE = /&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g;
-
-/** Decodes the small, common set of HTML entities above plus numeric
- * (`&#NNN;`) and hex (`&#xHH;`) character references. An unrecognized named
- * entity is left as-is (e.g. `&somethingobscure;`) rather than guessed at —
- * consistent with this module's "conservative, not DOM-accurate" scope. */
-export function decodeEntities(input: string): string {
-  return input.replace(ENTITY_RE, (whole, body: string) => {
-    if (body.startsWith("#x") || body.startsWith("#X")) {
-      const codePoint = parseInt(body.slice(2), 16);
-      if (Number.isNaN(codePoint)) return whole;
-      try {
-        return String.fromCodePoint(codePoint);
-      } catch {
-        return whole;
-      }
-    }
-    if (body.startsWith("#")) {
-      const codePoint = parseInt(body.slice(1), 10);
-      if (Number.isNaN(codePoint)) return whole;
-      try {
-        return String.fromCodePoint(codePoint);
-      } catch {
-        return whole;
-      }
-    }
-    return NAMED_ENTITIES[body] ?? whole;
-  });
+/** Removes fully-closed `<script>`/`<style>`/`<noscript>`/`<template>`
+ * blocks and HTML comments, then drops the tail of any leftover UNCLOSED
+ * one of those tags (gate finding N3). Shared by `stripHtmlToText` and
+ * `extractDraftCandidateNames` so both see the same "noise-free" input. */
+function stripScriptStyleAndComments(html: string): string {
+  const withoutClosedBlocks = html
+    .replace(SCRIPT_STYLE_CLOSED_RE, " ")
+    .replace(COMMENT_RE, " ");
+  const unclosed = UNCLOSED_SCRIPT_STYLE_OPEN_RE.exec(withoutClosedBlocks);
+  return unclosed ? withoutClosedBlocks.slice(0, unclosed.index) : withoutClosedBlocks;
 }
 
 /** Decision 0001 Addendum G's X2 quote-check and `x4-verify`'s name-check
@@ -70,15 +52,114 @@ export function collapseWhitespace(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }
 
-/** HTML → text: strips `<script>`/`<style>`/`<noscript>`/`<template>`
- * blocks and HTML comments entirely (their content is never prose), strips
- * every remaining tag, decodes entities, and collapses whitespace. */
+/** Decodes HTML entities using the full HTML5 named-entity table (gate
+ * finding N4 — the previous hand-rolled table left e.g. `&eacute;`/`&shy;`
+ * as literal text, which breaks any accented course name) plus numeric
+ * (`&#NNN;`/`&#xHH;`) character references, via the pinned `entities`
+ * package. */
+export function decodeEntities(input: string): string {
+  return decodeHTML(input);
+}
+
+/** Gate finding S4: elements that render with NO surrounding whitespace in
+ * a browser's own text/copy-paste — their boundary must not become a space,
+ * or a verbatim quote copied from the rendered page (e.g. "Bear Trace, Fall
+ * Creek" from `<a>Bear Trace</a>, <a>Fall Creek</a>`) fails to match text
+ * that has a spurious space inserted at every tag boundary. Everything not
+ * in this list (block elements like `p`/`div`/`li`/`br`/headings/table
+ * cells, and any unrecognized/custom tag) is treated as a break, the
+ * conservative default. */
+const INLINE_TAG_NAMES = new Set([
+  "a",
+  "b",
+  "i",
+  "em",
+  "strong",
+  "span",
+  "small",
+  "sup",
+  "sub",
+  "abbr",
+  "code",
+  "mark",
+  "u",
+  "cite",
+  "q",
+  "time",
+  "kbd",
+  "samp",
+  "var",
+  "bdi",
+  "bdo",
+  "wbr",
+  "ins",
+  "del",
+  "label",
+  "strike",
+  "tt",
+  "font",
+  "data",
+  "dfn",
+  "acronym",
+  "big",
+  "nobr",
+  "output",
+  "ruby",
+  "rt",
+  "rp",
+]);
+
+const TAG_NAME_RE = /^\/?\s*([a-zA-Z][a-zA-Z0-9]*)/;
+
+/** Strips every tag from `html`, replacing an inline element's boundary
+ * with nothing and every other element's boundary (block elements, and any
+ * unrecognized tag) with a single space. Hand-rolled instead of a single
+ * "match a tag" regex so a `>` inside a QUOTED ATTRIBUTE VALUE (gate finding
+ * N3, e.g. `alt="a > b"`) is not mistaken for the tag's own end. */
+function stripTags(html: string): string {
+  let out = "";
+  let i = 0;
+  const n = html.length;
+  while (i < n) {
+    const ch = html[i];
+    if (ch !== "<") {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    let j = i + 1;
+    let quote: '"' | "'" | null = null;
+    while (j < n) {
+      const c = html[j];
+      if (quote) {
+        if (c === quote) quote = null;
+      } else if (c === '"' || c === "'") {
+        quote = c as '"' | "'";
+      } else if (c === ">") {
+        break;
+      }
+      j += 1;
+    }
+    if (j >= n) {
+      // No closing '>' found at all — not a real tag; emit the '<' as text
+      // rather than silently discarding the rest of the document.
+      out += ch;
+      i += 1;
+      continue;
+    }
+    const tagName = TAG_NAME_RE.exec(html.slice(i + 1, j))?.[1]?.toLowerCase() ?? "";
+    out += INLINE_TAG_NAMES.has(tagName) ? "" : " ";
+    i = j + 1;
+  }
+  return out;
+}
+
+/** HTML → text: strips noise blocks/comments (see above), strips every
+ * remaining tag per the inline/block rule (gate S4), decodes entities, and
+ * collapses whitespace. */
 export function stripHtmlToText(html: string): string {
-  const withoutNoise = html
-    .replace(SCRIPT_STYLE_RE, " ")
-    .replace(COMMENT_RE, " ");
-  const withoutTags = withoutNoise.replace(TAG_RE, " ");
-  return collapseWhitespace(decodeEntities(withoutTags));
+  const withoutNoise = stripScriptStyleAndComments(html);
+  return collapseWhitespace(decodeEntities(stripTags(withoutNoise)));
 }
 
 const HEADING_RE = /<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]\s*>/gi;
@@ -97,13 +178,11 @@ const MAX_CANDIDATE_LENGTH = 120;
  * appearance preserved.
  */
 export function extractDraftCandidateNames(html: string): string[] {
-  const withoutNoise = html
-    .replace(SCRIPT_STYLE_RE, " ")
-    .replace(COMMENT_RE, " ");
+  const withoutNoise = stripScriptStyleAndComments(html);
   const names: string[] = [];
   const seen = new Set<string>();
   const add = (raw: string): void => {
-    const text = collapseWhitespace(decodeEntities(raw.replace(TAG_RE, " ")));
+    const text = collapseWhitespace(decodeEntities(stripTags(raw)));
     if (!text || text.length > MAX_CANDIDATE_LENGTH) return;
     if (seen.has(text)) return;
     seen.add(text);

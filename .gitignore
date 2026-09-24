@@ -38,5 +38,10 @@ Thumbs.db
 # Test scratch output (tests write to the OS temp dir; this guards against regressions)
 .tmp-test-*
 
-# P0 desk-check run output (evidence belongs in a run dir outside the source tree)
+# P0 desk-check run output (evidence belongs in a run dir outside the source tree —
+# gate finding S7; tools default there automatically, these patterns are a backstop
+# for an explicit --out/--out-dir/--run-dir that still lands inside the repo)
 p0-desk-run-*/
+x2-evidence/
+x4-verify-result/
+x2-verdict-result.*

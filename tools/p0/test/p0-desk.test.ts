@@ -107,6 +107,72 @@ describe("p0-desk: a healthy run", () => {
   });
 });
 
+describe("p0-desk: gate finding S5 — partial block/failure must not read as a clean exit-0 state", () => {
+  it("x2-fetch: some URLs fetched, some failed -> state 'partial-blocked', exit non-zero", async () => {
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("overpass-api.de")) {
+          return new Response(
+            JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "100" } }] }),
+            { status: 200 },
+          );
+        }
+        call += 1;
+        if (call === 1) return new Response("not found", { status: 404 });
+        return new Response("<h1>OK</h1>", { status: 200, headers: { "content-type": "text/html" } });
+      }),
+    );
+    const runDir = path.join(OUT_DIR, "partial-x2-run");
+    const x2ConfigPath = writeX2Config(OUT_DIR);
+    const result = await runP0Desk({
+      runDir,
+      x2ConfigPath,
+      x4CoursesPath: path.join(OUT_DIR, "no-course-map.json"),
+    });
+    const x2Row = result.rows.find((r) => r.name === "x2-fetch");
+    expect(x2Row?.state).toBe("partial-blocked");
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("x4-verify: an indeterminate course (e.g. 429) -> state 'partial-blocked', exit non-zero, never a clean 'verdict'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("overpass-api.de")) {
+          return new Response(
+            JSON.stringify({ elements: [{ type: "count", id: 0, tags: { total: "100" } }] }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("golfnow.com")) {
+          return new Response("rate limited", { status: 429 });
+        }
+        return new Response("<h1>Trail Page</h1>", { status: 200, headers: { "content-type": "text/html" } });
+      }),
+    );
+    const runDir = path.join(OUT_DIR, "indeterminate-x4-run");
+    const x2ConfigPath = writeX2Config(OUT_DIR);
+    const x4CoursesPath = path.join(OUT_DIR, "x4-course-map-indeterminate.json");
+    writeFileSync(
+      x4CoursesPath,
+      JSON.stringify({
+        "Grand National": {
+          trail: "RTJ",
+          golfnowFacilityUrl: "https://www.golfnow.com/tee-times/facility/2360-grand-national/search",
+        },
+      }),
+      "utf8",
+    );
+    const result = await runP0Desk({ runDir, x2ConfigPath, x4CoursesPath });
+    const x4Row = result.rows.find((r) => r.name === "x4-verify");
+    expect(x4Row?.state).toBe("partial-blocked");
+    expect(x4Row?.detail).toContain("not run — indeterminate");
+    expect(result.exitCode).toBe(1);
+  });
+});
+
 describe("p0-desk: x4-verify runs and reports a verdict when a course map file IS present", () => {
   it("state 'verdict' with per-trail pass/kill once a course-map file exists", async () => {
     vi.stubGlobal(

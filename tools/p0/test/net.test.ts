@@ -5,6 +5,8 @@ import {
   fetchWithBlockDetection,
   hostFromUrl,
   isPolicyBlockedResponse,
+  readBodyCapped,
+  ResponseTooLargeError,
 } from "../src/net.js";
 
 describe("net: buildAsciiUserAgent", () => {
@@ -78,9 +80,14 @@ describe("net: isPolicyBlockedResponse", () => {
       false,
     );
   });
-  it("false for a non-403 status", () => {
+  it("false for a non-403/407 status", () => {
     const headers = new Headers({ "x-deny-reason": "host_not_allowed" });
     expect(isPolicyBlockedResponse(404, headers, "")).toBe(false);
+  });
+
+  it("gate finding N2: true for a 407 (proxy authentication required) with the deny-reason header", () => {
+    const headers = new Headers({ "x-deny-reason": "host_not_allowed" });
+    expect(isPolicyBlockedResponse(407, headers, "")).toBe(true);
   });
 });
 
@@ -191,5 +198,59 @@ describe("net: fetchWithBlockDetection", () => {
     );
     const outcome = await fetchWithBlockDetection("https://example.invalid/", {});
     expect(outcome.kind).toBe("error");
+  });
+
+  it("returns kind 'blocked' for a 407 proxy-auth-required denial", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("Host not in allowlist: www.rtjgolf.com.", {
+            status: 407,
+            headers: { "x-deny-reason": "host_not_allowed" },
+          }),
+      ),
+    );
+    const outcome = await fetchWithBlockDetection("https://www.rtjgolf.com/", {});
+    expect(outcome.kind).toBe("blocked");
+  });
+});
+
+describe("net: readBodyCapped (gate finding S6)", () => {
+  it("reads a normal body fully under the cap", async () => {
+    const res = new Response("hello world");
+    const controller = new AbortController();
+    const buf = await readBodyCapped(res, { signal: controller.signal, maxBytes: 1024 });
+    expect(buf.toString("utf8")).toBe("hello world");
+  });
+
+  it("throws ResponseTooLargeError once the streamed body exceeds the cap, without buffering it all first", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        for (let i = 0; i < 5; i += 1) {
+          controller.enqueue(new TextEncoder().encode("x".repeat(1000)));
+        }
+        controller.close();
+      },
+    });
+    const res = new Response(stream);
+    const controller2 = new AbortController();
+    await expect(
+      readBodyCapped(res, { signal: controller2.signal, maxBytes: 2000 }),
+    ).rejects.toThrow(ResponseTooLargeError);
+  });
+
+  it("rejects once the timeout's AbortSignal fires mid-read, even though headers already arrived (probe P6 shape)", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        // Never closes — simulates a server that sends headers then stalls.
+      },
+    });
+    const res = new Response(stream);
+    const controller = new AbortController();
+    const readPromise = readBodyCapped(res, { signal: controller.signal, maxBytes: 1024 });
+    setTimeout(() => controller.abort(), 20);
+    await expect(readPromise).rejects.toThrow(/aborted/i);
   });
 });

@@ -5,7 +5,7 @@ Check tools for build plan §10 P0's kill experiments **X1** (=K4a, Health real-
 OSM coverage), plus **`p0-desk`**, a one-command runner for the checks that don't need a human
 confirmation file first. See `docs/p0/X1.md`, `docs/p0/X2.md`, `docs/p0/X4.md`, `docs/p0/X5.md`,
 `docs/owner/x1-k4b-device-protocol.md`, `docs/p0/K4.md`, and decision
-`docs/decisions/0001-owner-decisions-and-p0-thresholds.md` Addenda D R6, E, F and G for the checks
+`docs/decisions/0001-owner-decisions-and-p0-thresholds.md` Addenda D R6, E, F, G and H for the checks
 these implement — this README only covers running the tools.
 
 ## Build
@@ -133,20 +133,34 @@ node dist/x2-fetch.js --config config/x2-sources.json --out-dir x2-evidence
   `tnstateparks.com/golf`, `tngolftrail.net` and `tn.gov` candidates — the exact `tngolftrail.net`/
   `tn.gov` paths are `[unverified — X2.md only names the hosts, not a confirmed path]`, so their
   entries are each host's root URL; VI the two pages plus the Trail Pass terms PDF; RTJ
-  `rtjgolf.com`).
-- `--out-dir <dir>` (default `x2-evidence`) — where evidence is written:
-  `<out-dir>/manifest.json` (the full per-URL record), `<out-dir>/raw/<sha256>.<ext>` (raw bytes)
-  and `<out-dir>/text/<sha256>.txt` (extracted text, HTML only).
+  `rtjgolf.com`). **Gate finding S9 — operator note:** these are HOMEPAGES, not confirmed trail
+  rules/roster pages; the tool fetches exactly what's configured and never crawls or searches, so if
+  a trail's `completionUnit`/season/roster facts actually live on a deeper rules page, **add that
+  page's URL to `config/x2-sources.json` before writing the confirmation file** — a homepage-only
+  config structurally biases that trail toward "unconfirmed," not because the trail's facts don't
+  exist, but because this tool never went looking for them past the homepage.
+- `--out-dir <dir>` (default: a fresh directory under the OS temp dir — gate finding S7; pass
+  `--out-dir` explicitly to write anywhere else, including inside the repo) — where evidence is
+  written: `<out-dir>/manifest.json` (the full per-URL record), `<out-dir>/raw/<sha256>.<ext>` (raw
+  bytes) and `<out-dir>/text/<sha256>.txt` (extracted text).
 
 **Evidence stored per URL, per decision 0001 Addendum G ("X2 'confirmed from a direct fetch'"):**
 raw bytes, the final URL after redirects, the HTTP status, `fetchedAt` (UTC), a SHA-256 of the
 bytes, and an extracted-text file. HTML → text with tags stripped and whitespace collapsed
-(`text-extract.ts`, dependency-free). **PDF → the bytes are stored and `textExtraction` is recorded
-as `"manual"` — no PDF-parsing library is added as a dependency, so a PDF's text is never pretended
-to have been read** ("do not pretend," same discipline as everywhere else in this codebase). A
-fetch that fails — including this environment's own network-policy block, reported as `"BLOCKED —
-network policy (<host>)"` (see `net.ts`) — is recorded in the manifest as `status: "failed"` with
-the exact error; it is never silently skipped.
+(`text-extract.ts`; inline elements like `<a>`/`<span>`/`<b>` never insert a space at their
+boundary, matching a browser's own copy-paste — gate finding S4). **PDF → text is derived with a
+pinned, pure-JS extractor (`unpdf`, no native build step — `pdf-extract.ts`, gate finding S3)** and
+recorded as `textExtraction: "auto-pdf"` plus the exact `extractor` id (e.g. `unpdf@1.8.1`); a PDF
+is never left as bytes-only or typed by hand. The evidence bytes are classified by their **magic
+bytes** first (`%PDF-`), not the HTTP content-type or URL suffix (gate N5), so a `.pdf` URL that
+actually serves an HTML error page is stored as opaque binary, not mis-read as either. `x2-verdict`
+re-derives this SAME text from the SAME raw bytes at verdict time — the stored `text/<sha>.txt` file
+is a convenience copy only, never itself trusted (gate S1). A fetch that fails — including this
+environment's own network-policy block, reported as `"BLOCKED — network policy (<host>)"` (see
+`net.ts`) — is recorded in the manifest as `status: "failed"` with the exact error; it is never
+silently skipped. Only `https:` URLs are ever fetched, and a response that downgrades to `http:` via
+redirect is rejected too (gate N6). Every fetch has a real timeout covering the full body read (not
+just the initial headers) and a 10 MB response-size cap enforced while streaming (gate S6).
 
 **DRAFT candidate names.** For each successfully-fetched HTML page, headings (`h1`-`h6`) and link
 text are extracted into a per-trail, deduplicated list, printed to stdout clearly labelled
@@ -196,16 +210,31 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   evidence file its `evidenceSha` cites (`collapseWhitespace`, same rule for both sides of the
   comparison — a quote copy-pasted with different line-wrapping still matches), and
 - **every roster entry's name** also appears (same whitespace-collapsing rule) in the evidence text
-  its own `evidenceSha` cites.
+  its own `evidenceSha` cites, and the quote/value are non-empty and at least 12 characters (gate N8).
 
 X2 passes when **≥ 2 of the 3 slate trails are confirmed** (X2.md's pass bar, unchanged). Each
-trail's `reasons` array explains exactly which fact failed and why (quote not found, name not
-found, fact missing, or — for a PDF evidence file with `textExtraction: "manual"` — "no extracted
-text available, cannot verify").
+trail's `reasons` array explains exactly which fact failed and why, and also lists every source
+that FAILED or was BLOCKED for that trail — even one that contributed no evidence at all (gate S5),
+so an unconfirmed trail is never indistinguishable from one whose only rules page never loaded.
+`perTrail[trail].facts` echoes every fact actually checked (value/quote/evidenceSha) and
+`rosterSize`, so a reviewer can see why a trail confirmed without re-opening the confirmation file
+(gate S8).
 
-**Refuses (non-zero exit) if a cited `evidenceSha` doesn't match any evidence `x2-fetch` actually
-produced** — this is a hard integrity check, never silently treated as "quote not found" (which
-would make a fabricated SHA indistinguishable from a real, failed verification).
+**Evidence is never trusted from the manifest or the stored `text/<sha>.txt` file.** At verdict
+time, `buildEvidenceByTrail` re-reads each entry's RAW bytes, **recomputes its SHA-256**, and
+**re-derives its text with the identical extractor `x2-fetch` used** — refusing (throwing) if the
+recomputed hash doesn't match the manifest's recorded one (gate S1). Evidence is scoped **strictly
+per trail**: a fact may only cite evidence that trail's own `x2-fetch` run produced, whose final URL
+(after redirects) is still on the same host that trail's own config asked for; citing another
+trail's SHA, or a SHA that redirected to a foreign host, is a hard refusal — never silently treated
+as a confirmation (gate S2).
+
+**Refuses (non-zero exit) if a cited `evidenceSha` doesn't match evidence belonging to that trail**
+— whether because the SHA doesn't exist anywhere, belongs to a different trail, or was excluded as a
+foreign-host redirect. This is a hard integrity check, never silently treated as "quote not found"
+(which would make a fabricated/borrowed SHA indistinguishable from a real, failed verification). The
+CLI also exits non-zero when a trail is unconfirmed while one of its sources failed/was blocked
+(gate S5) — `--out` defaults outside the repo the same way `x2-fetch`'s `--out-dir` does (gate S7).
 
 **Feeds:** `overallVerdict` → `docs/p0/X2.md` VERDICT; `perTrail` reasons → the log entry explaining
 each trail's confirmed/unconfirmed status.
@@ -237,23 +266,44 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 - `--responses <file>` — a saved-response file from a prior live run (`<out-dir>/responses.json`),
   keyed by course name. When given, no network call is made; a course with a non-null URL but no
   entry in this file is a hard **refusal**, never silently treated as not-live (same run-integrity
-  style `x5-overpass.ts` uses for its own `--responses`).
-- `--out-dir <dir>` (default `x4-verify-result`) — writes `result.json` always, and
-  `responses.json` in live mode (every live response saved for replay, same `{request, fetchedAt,
-  response}` envelope pattern as `x5-overpass.ts`'s own saved responses).
+  style `x5-overpass.ts` uses for its own `--responses`). A saved entry whose `request.url` no
+  longer matches the course map's CURRENT url for that course is also a hard refusal, rather than
+  silently replaying a stale response (gate N1).
+- `--out-dir <dir>` (default: a fresh directory under the OS temp dir — gate S7) — writes
+  `result.json` always, and `responses.json` in live mode (every live response saved for replay,
+  same `{request, fetchedAt, response}` envelope pattern as `x5-overpass.ts`'s own saved responses).
+- `--slate TN,VI,RTJ` (default: the pilot slate) — every named trail must have at least one entry in
+  `--courses`, or the run refuses (gate N7); pass a narrower/different list to evaluate a
+  partial/reserve slate deliberately.
 
-**"Live page," decision 0001 Addendum G, applied literally:** HTTP 200, **and** the final URL after
-redirects still contains `/tee-times/facility/<id>-` (so a redirect to a generic search page is NOT
-live), **and** the page text contains the course's name under Addendum F's name normalisation
-(`namesMatch`, reused verbatim from `overpass-geo.ts` — not reimplemented).
+**Decision 0001 Addendum H's three-way per-course outcome, applied literally** (this supersedes the
+old two-way live/not-live read):
 
-**Coverage per trail = live ÷ that trail's roster size** (a `null` URL and a non-live page both
-count as not covered — X4.md's own rule). **Evaluated per trail, independently** (decision 0001
-Addendum G: "no combined figure decides anything") — pass ≥ 80%, else kill with that trail's
+- **live** — HTTP 200, the final URL's **host is exactly `www.golfnow.com`**, its **path** contains
+  `/tee-times/facility/<id>-` for the **SAME `<id>`** parsed from the *configured* URL (gate B2 — a
+  match in the query string, or for a different id, does NOT count), and the page text contains the
+  course's name under Addendum F's normalisation (`namesMatch`, reused verbatim from
+  `overpass-geo.ts`).
+- **not covered (definitive)** — no URL configured, HTTP 404/410, or a resolved HTTP 200 page that
+  fails the live test above (wrong id, generic search page, foreign host, name absent).
+- **indeterminate** — a network-policy block, timeout, connection error, HTTP 403/429/any 5xx, or
+  any other unlisted status. **Never** counted as "not covered" (gate B1).
+
+A configured URL is parsed with `^https://www\.golfnow\.com/tee-times/facility/(\d+)-[^/]+/search$`
+(gate B2); a course map entry that doesn't match is a hard refusal, not a silent skip. Every fetch's
+timeout covers the full body read, with a 10 MB size cap enforced while streaming (gate S6).
+
+**Coverage per trail = live ÷ that trail's roster size** (a `null` URL and a definitively-not-live
+page both count as not covered — X4.md's own rule). **A trail's verdict is computed only when NONE
+of its courses is indeterminate** (Addendum H); otherwise that trail reads as `"not run —
+indeterminate (n)"` in `perTrail[trail]` (`verdict: "not-run"`, `pct: null`), and the CLI exits
+non-zero (`result.anyIndeterminate`). Otherwise, **evaluated per trail, independently** (decision
+0001 Addendum G: "no combined figure decides anything") — pass ≥ 80%, else kill with that trail's
 consequence ("course-native link becomes primary for `<trail>`").
 
 **Feeds:** `perTrail` → `docs/p0/X4.md` MEASURED VALUE and VERDICT (per trail; X4.md has no single
-combined figure).
+combined figure). A `"not-run"` trail is not a verdict at all — re-run once its indeterminate
+course(s) resolve.
 
 ## 6. `p0-desk` — one-command desk check + status board
 
@@ -264,24 +314,28 @@ node dist/p0-desk.js --run-dir p0-desk-run-2026-10-05 --x2-config config/x2-sour
 
 Runs, **in order**: `x5-overpass n-osm`, `x2-fetch`, and — **only if a course-map file exists** at
 `--x4-courses` (default: `config/x4-course-map.json`, not seeded — X4.md's own precondition is that
-X2's rosters are confirmed first) — `x4-verify`. All evidence is written under one timestamped run
-directory (`--run-dir`, default `p0-desk-run-<UTC-timestamp>`): `x5-n-osm/response.json`,
-`x2-evidence/` (the same shape `x2-fetch` writes on its own), and, when it ran, `x4-verify/`.
+X2's rosters are confirmed first) — `x4-verify` (evaluated over whichever trails are actually present
+in that course map, not a hard-coded slate). All evidence is written under one timestamped run
+directory OUTSIDE the source tree (`--run-dir`, default: a fresh directory under the OS temp dir —
+gate S7; pass `--run-dir` explicitly to write anywhere else, including inside the repo):
+`x5-n-osm/response.json`, `x2-evidence/` (the same shape `x2-fetch` writes on its own), and, when it
+ran, `x4-verify/`.
 
 Prints a status board, one row per check, with `state`:
 
 | State | Meaning |
 |---|---|
 | `ran` | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail). |
-| `needs-confirmation` | Evidence gathered (`x2-fetch`); a human must still write a confirmation file and run `x2-verdict`. |
-| `verdict` | The check computed its own pass/kill (`x4-verify`, per trail). |
+| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`. |
+| `verdict` | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate). |
+| `partial-blocked` | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`. |
 | `skipped` | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure). |
-| `blocked` | **A network-policy block** — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
+| `blocked` | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
 | `error` | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc). |
 
-**Exits non-zero if any check's state is `blocked` or `error`** — a legitimately `skipped` check
-(no course-map file yet) is not treated as a failure to run. `status.json` in the run dir carries
-the same rows machine-readably.
+**Exits non-zero if any check's state is `blocked`, `partial-blocked` or `error`** — a legitimately
+`skipped` check (no course-map file yet) is not treated as a failure to run. `status.json` in the
+run dir carries the same rows machine-readably.
 
 ## 7. `x5-overpass` — Overpass OSM coverage
 
@@ -409,14 +463,26 @@ boundary (exactly 60% passes, just under fails).
 
 **X2/X4/`p0-desk` coverage** (all fetches go through a stubbed `global.fetch` — `vi.stubGlobal`,
 same technique the X5 tests already use — never the real network): HTML text extraction (tags
-stripped, whitespace collapsed, script/style/comment blocks removed) and DRAFT candidate-name
-extraction; PDF evidence stored with `textExtraction: "manual"`, never a fabricated text; a failed
-fetch recorded with the exact error and never skipped, distinguishing a network-policy block from a
-genuine site-side failure (e.g. 404); X2 verdict cases — quote present / absent / a whitespace-variant
-quote still matching / a cited SHA with no matching evidence refusing outright / a roster name
-missing from its own cited evidence / a missing season fact / the 2-of-3 trail boundary; X4's "live
-page" definition (a redirect to a generic search page, a 200 page missing the course name, both NOT
-live) and its 80%-per-trail boundary (exactly 80% passes, just under fails); and `p0-desk`'s status
+stripped, whitespace collapsed, script/style/comment blocks removed, inline vs. block element
+boundaries per gate S4, quoted-attribute-safe tag matching and unclosed-`<script>` tail-dropping per
+gate N3) and DRAFT candidate-name extraction; PDF evidence auto-extracted with the pinned `unpdf`
+extractor against a real, deterministically-built PDF fixture (`test/fixtures/pdf/`), never left as
+bytes-only or typed by hand (gate S3); magic-byte content classification (gate N5); charset
+detection from the header or a `<meta>` tag (gate N4); a failed fetch recorded with the exact error
+and never skipped, distinguishing a network-policy block from a genuine site-side failure (e.g.
+404); a body that exceeds the size cap, or stalls past the timeout, failing instead of hanging or
+silently truncating (gate S6); non-`https:` URLs refused before fetching (gate N6); X2 verdict
+cases — quote present / absent / a whitespace-variant quote still matching / a cited SHA with no
+matching evidence for that trail refusing outright / a cited SHA belonging to a DIFFERENT trail
+refusing outright (gate S2) / an edited stored-text file NOT confirming because the raw bytes are
+re-derived at verdict time (gate S1) / a roster name missing from its own cited evidence / a missing
+season fact / a too-short quote (gate N8) / a failed source listed and flagged (gate S5) / the 2-of-3
+trail boundary; X4's three-way live/not-live/indeterminate outcome (decision 0001 Addendum H) —
+a redirect to a different facility id, a match only in the query string, a foreign host, a 200 page
+missing the course name (all NOT live); a block/timeout/403/429/5xx (all indeterminate, never not
+covered, gate B1); a stale replay refused (gate N1) — and its 80%-per-trail boundary (exactly 80%
+passes, just under fails), never computed while any course is indeterminate; and `p0-desk`'s status
 board, including the BLOCKED row for a fake fetch that throws a `"CONNECT tunnel failed, response
 403"`-shaped error (`net.test.ts` also covers the other observed shape — a resolved 403 response
-that IS the proxy's own denial page, vs. one that's the destination site's own 403).
+that IS the proxy's own denial page, vs. one that's the destination site's own 403) and the
+PARTIAL-BLOCKED row for a partial failure/indeterminate result (gate S5).

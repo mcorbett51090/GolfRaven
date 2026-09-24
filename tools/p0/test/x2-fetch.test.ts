@@ -8,6 +8,7 @@ import {
   runX2Fetch,
   type X2SourceConfig,
 } from "../src/x2-fetch.js";
+import { buildMinimalPdf } from "./fixtures/pdf/build-mini-pdf.js";
 
 const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-x2-test-"));
 
@@ -71,8 +72,9 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
     expect(manifestOnDisk.trails.TN[0].sha256).toBe(entry?.sha256);
   });
 
-  it("stores a PDF's bytes but marks text extraction 'manual' — never pretends to have read it", async () => {
-    const pdfBytes = Buffer.from("%PDF-1.4 fake pdf bytes for a test");
+  it("gate S3: stores a REAL PDF's bytes and auto-extracts its text with the pinned extractor — never 'manual'", async () => {
+    const quote = "The Trail Pass unit is the facility. Season runs year-round.";
+    const pdfBytes = buildMinimalPdf(quote);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -98,13 +100,33 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
 
     const entry = manifest.trails.VI?.[0];
     expect(entry?.status).toBe("fetched");
-    expect(entry?.textExtraction).toBe("manual");
-    expect(entry?.textFile).toBeNull();
+    expect(entry?.textExtraction).toBe("auto-pdf");
+    expect(entry?.extractor).toBe("unpdf@1.8.1");
+    expect(entry?.textFile).toBeTruthy();
     expect(entry?.rawFile?.endsWith(".pdf")).toBe(true);
-    expect(entry?.draftCandidateNames).toEqual([]);
 
     const raw = readFileSync(path.join(outDir, entry!.rawFile!));
     expect(raw.equals(pdfBytes)).toBe(true);
+    const text = readFileSync(path.join(outDir, entry!.textFile!), "utf8");
+    expect(text).toContain(quote);
+  });
+
+  it("gate N5: a .pdf URL that actually serves an HTML error page is stored as binary, not mis-read as PDF text or HTML", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html>404 Not Found</html>", {
+        status: 200,
+        headers: { "content-type": "application/pdf" },
+      })),
+    );
+    const config: X2SourceConfig = { VI: ["https://golfvancouverisland.ca/missing.pdf"] };
+    const outDir = path.join(OUT_DIR, "fake-pdf-run");
+    const manifest = await runX2Fetch(config, outDir);
+    const entry = manifest.trails.VI?.[0];
+    expect(entry?.status).toBe("fetched");
+    expect(entry?.textExtraction).toBe("n/a");
+    expect(entry?.textFile).toBeNull();
+    expect(entry?.rawFile?.endsWith(".bin")).toBe(true);
   });
 
   it("records a network-policy-blocked fetch as FAILED with the exact error, never silently skipped", async () => {
@@ -140,6 +162,56 @@ describe("x2-fetch: runX2Fetch — HTML evidence storage (decision 0001 Addendum
     expect(entry?.status).toBe("failed");
     expect(entry?.blocked).toBe(false);
     expect(entry?.error).toContain("404");
+  });
+
+  it("gate N6: refuses a non-https configured URL rather than fetching it", async () => {
+    const fetchSpy = vi.fn(async () => new Response("should never be called"));
+    vi.stubGlobal("fetch", fetchSpy);
+    const config: X2SourceConfig = { TN: ["http://www.tnstateparks.com/golf"] };
+    const outDir = path.join(OUT_DIR, "http-scheme-run");
+    const manifest = await runX2Fetch(config, outDir);
+    const entry = manifest.trails.TN?.[0];
+    expect(entry?.status).toBe("failed");
+    expect(entry?.error).toContain("gate N6");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("gate N6: refuses a data: URL rather than fetching it", async () => {
+    const fetchSpy = vi.fn(async () => new Response("should never be called"));
+    vi.stubGlobal("fetch", fetchSpy);
+    const config: X2SourceConfig = { TN: ["data:text/html,<h1>hi</h1>"] };
+    const outDir = path.join(OUT_DIR, "data-url-run");
+    const manifest = await runX2Fetch(config, outDir);
+    const entry = manifest.trails.TN?.[0];
+    expect(entry?.status).toBe("failed");
+    expect(entry?.error).toContain("gate N6");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("gate S6: a body that streams past the size cap is recorded as failed, not silently truncated into evidence", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(11 * 1024 * 1024));
+            controller.close();
+          },
+        });
+        const res = new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+        Object.defineProperty(res, "url", { value: "https://www.tnstateparks.com/golf" });
+        return res;
+      }),
+    );
+    const config: X2SourceConfig = { TN: ["https://www.tnstateparks.com/golf"] };
+    const outDir = path.join(OUT_DIR, "oversized-run");
+    const manifest = await runX2Fetch(config, outDir);
+    const entry = manifest.trails.TN?.[0];
+    expect(entry?.status).toBe("failed");
+    expect(entry?.error).toContain("size cap");
   });
 
   it("continues fetching remaining URLs after one fails, and refuses on an empty config", async () => {

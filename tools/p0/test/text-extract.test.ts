@@ -29,6 +29,11 @@ describe("text-extract: decodeEntities", () => {
   it("leaves an unrecognized named entity untouched rather than guessing", () => {
     expect(decodeEntities("&somethingobscure;")).toBe("&somethingobscure;");
   });
+
+  it("gate finding N4: decodes the full HTML5 named-entity table, not just a hand-picked subset", () => {
+    expect(decodeEntities("caf&eacute;")).toBe("café");
+    expect(decodeEntities("soft&shy;hyphen")).toContain("hyphen");
+  });
 });
 
 describe("text-extract: stripHtmlToText (Addendum G: tags stripped, whitespace collapsed)", () => {
@@ -65,6 +70,39 @@ describe("text-extract: stripHtmlToText (Addendum G: tags stripped, whitespace c
     expect(text).toContain(
       "The Robert Trent Jones Golf Trail is played year-round across Alabama.",
     );
+  });
+
+  it("gate finding S4: an inline element boundary (a/span/b/i/em/strong/small/sup/sub/abbr/code/mark/u) inserts NO space, matching a browser's own copy-paste", () => {
+    expect(stripHtmlToText("<a>Bear Trace</a>, <a>Fall Creek</a>.")).toBe(
+      "Bear Trace, Fall Creek.",
+    );
+    expect(stripHtmlToText("Sea<b>son</b>")).toBe("Season");
+    expect(stripHtmlToText("The trail: Bear Trace<span>, </span>Fall Creek")).toBe(
+      "The trail: Bear Trace, Fall Creek",
+    );
+    expect(stripHtmlToText("caf<sup>1</sup>e")).toBe("caf1e");
+  });
+
+  it("gate finding S4: a BLOCK element (p/div/li/br/h1-h6/tr/td) still breaks text", () => {
+    expect(stripHtmlToText("<p>One</p><p>Two</p>")).toBe("One Two");
+    expect(stripHtmlToText("<li>Bear Trace</li><li>Fall Creek</li>")).toBe(
+      "Bear Trace Fall Creek",
+    );
+    expect(stripHtmlToText("First<br>Second")).toBe("First Second");
+  });
+
+  it("gate finding N3: a '>' inside a QUOTED ATTRIBUTE VALUE does not end the tag early", () => {
+    const html = `<p>Before <img alt="a > b" src="x.png"> After</p>`;
+    const text = stripHtmlToText(html);
+    expect(text).toBe("Before After");
+    expect(text).not.toContain("b\" src");
+  });
+
+  it("gate finding N3: an UNCLOSED <script> drops its source to the end of the document instead of leaking it", () => {
+    const html = `<p>Real prose.</p><script>var x = "not prose, no closing tag here`;
+    const text = stripHtmlToText(html);
+    expect(text).toBe("Real prose.");
+    expect(text).not.toContain("not prose");
   });
 });
 

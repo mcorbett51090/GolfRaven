@@ -2,10 +2,12 @@
 /**
  * `p0-desk` — one command that runs, in order: `x5-overpass n-osm`,
  * `x2-fetch`, and (only when a course-map file exists) `x4-verify`,
- * writing all evidence under one timestamped run directory, then prints a
- * status board naming each check's state. A network-policy block is
- * surfaced as "BLOCKED — network policy (<host>)" (see `net.ts`), and the
- * process exits non-zero if any check could not run.
+ * writing all evidence under one timestamped run directory OUTSIDE the
+ * source tree (gate finding S7), then prints a status board naming each
+ * check's state. A network-policy block is surfaced as "BLOCKED — network
+ * policy (<host>)" (see `net.ts`), and the process exits non-zero if any
+ * check could not run, or ran only PARTIALLY (gate finding S5 — some
+ * sources fetched, some failed/blocked/indeterminate).
  *
  * This tool does NOT run `x1-verdict`, `x2-verdict` or `x5-overpass
  * coverage` — those need a human-written confirmation/course-list input
@@ -37,11 +39,13 @@ import {
   type X4CourseMap,
   type X4VerifyResult,
 } from "./x4-verify.js";
+import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
 
 export type CheckState =
   | "ran"
   | "needs-confirmation"
   | "blocked"
+  | "partial-blocked"
   | "verdict"
   | "skipped"
   | "error";
@@ -181,6 +185,18 @@ async function runX2FetchStep(
       detail: `all ${failedEntries.length} fetch(es) failed — see ${path.join(dir, "manifest.json")}`,
     };
   }
+  if (failedEntries.length > 0) {
+    // Gate finding S5: a PARTIAL block/failure must not read as a clean
+    // "needs-confirmation" with exit 0 — the caller might never notice a
+    // trail's rules page silently never loaded.
+    return {
+      name: "x2-fetch",
+      state: "partial-blocked",
+      detail:
+        `${fetchedCount}/${allEntries.length} URL(s) fetched into ${dir}; ${failedEntries.length} failed/blocked: ` +
+        failedEntries.map((e) => `${e.url} (${e.blocked ? "blocked" : "failed"})`).join(", "),
+    };
+  }
   return {
     name: "x2-fetch",
     state: "needs-confirmation",
@@ -213,7 +229,11 @@ async function runX4VerifyStep(
 
   let result: X4VerifyResult;
   try {
-    result = await runX4Verify(courseMap, dir);
+    // p0-desk is an unattended desk check, not an operator running the
+    // real X4 slate by hand — it never refuses over a partial/custom
+    // course map (gate N7's refusal is for `x4-verify` run deliberately).
+    const trailsPresent = [...new Set(Object.values(courseMap).map((e) => e.trail))];
+    result = await runX4Verify(courseMap, dir, { slateTrails: trailsPresent });
   } catch (err) {
     return {
       name: "x4-verify",
@@ -233,10 +253,25 @@ async function runX4VerifyStep(
     };
   }
 
+  // Decision 0001 Addendum H: ANY indeterminate course means the affected
+  // trail(s) never get a verdict — that must not read as a clean "verdict"
+  // state with exit 0.
+  if (result.anyIndeterminate) {
+    const notRun = Object.entries(result.perTrail)
+      .filter(([, tc]) => tc.verdict === "not-run")
+      .map(([trail, tc]) => `${trail}: not run — indeterminate (${tc.indeterminateCount})`)
+      .join("; ");
+    return {
+      name: "x4-verify",
+      state: "partial-blocked",
+      detail: `${notRun} — see ${path.join(dir, "result.json")}`,
+    };
+  }
+
   const perTrailSummary = Object.entries(result.perTrail)
     .map(
       ([trail, tc]) =>
-        `${trail} ${tc.liveCount}/${tc.rosterSize} (${tc.pct.toFixed(1)}%) ${tc.verdict.toUpperCase()}`,
+        `${trail} ${tc.liveCount}/${tc.rosterSize} (${(tc.pct ?? 0).toFixed(1)}%) ${tc.verdict.toUpperCase()}`,
     )
     .join("; ");
   return {
@@ -257,12 +292,12 @@ export interface RunP0DeskOptions {
 export async function runP0Desk(
   opts: RunP0DeskOptions = {},
 ): Promise<P0DeskResult> {
+  const runDirExplicit = Boolean(opts.runDir);
   const runDir =
-    opts.runDir ??
-    path.join(
-      process.cwd(),
-      `p0-desk-run-${new Date().toISOString().replace(/[:.]/g, "-")}`,
-    );
+    opts.runDir ?? defaultOutsideRepoDir("p0-desk-run");
+  // Gate finding S7: refuse an accidental write into the source tree; an
+  // explicitly-chosen `runDir` (even one inside the repo) is trusted.
+  assertOutsideRepoUnlessExplicit(runDir, runDirExplicit);
   await mkdir(runDir, { recursive: true });
 
   const rows: CheckRow[] = [];
@@ -284,7 +319,7 @@ export async function runP0Desk(
   );
 
   const exitCode: 0 | 1 = rows.some(
-    (r) => r.state === "blocked" || r.state === "error",
+    (r) => r.state === "blocked" || r.state === "error" || r.state === "partial-blocked",
   )
     ? 1
     : 0;
@@ -306,6 +341,7 @@ const STATE_LABEL: Record<CheckState, string> = {
   ran: "RAN",
   "needs-confirmation": "NEEDS-CONFIRMATION",
   blocked: "BLOCKED",
+  "partial-blocked": "PARTIAL-BLOCKED",
   verdict: "VERDICT",
   skipped: "SKIPPED",
   error: "ERROR",
@@ -322,7 +358,7 @@ export function renderStatusBoard(result: P0DeskResult): string {
   lines.push(
     result.exitCode === 0
       ? "All checks ran (or are legitimately skipped)."
-      : "Exiting non-zero: at least one check could not run — see BLOCKED/ERROR rows above.",
+      : "Exiting non-zero: at least one check could not run, or ran only partially — see BLOCKED/PARTIAL-BLOCKED/ERROR rows above.",
   );
   return lines.join("\n");
 }
