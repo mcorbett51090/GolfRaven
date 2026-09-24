@@ -77,6 +77,36 @@ The DB-side items are tracked in the P3a queue.
   `validateOfferEligibility`. That validator rejects rules that are true on an empty play set. Treat a thrown
   validator error as invalid.
 
+## 5. Receipts and fingerprints
+
+Item 1 of the eighth gate: `packages/rules`' own fingerprint-dedup logic (`voidDuplicateFingerprints`,
+`score-play.ts`) now trusts `voidReason` (`"duplicate" | "reviewer" | "fraud"`) to tell an honest intake-side
+dedup apart from a real fraud/reviewer flag — a `"duplicate"`-void row is simply ignored (never poisons its
+fingerprint group); a `"reviewer"`/`"fraud"`-void row (or a `status: "void"` row with NO `voidReason` at all —
+defaults to `"reviewer"`, fails safe) poisons the whole group. This is a pure function; it can only act
+correctly on what the DB/intake layer hands it. That layer MUST:
+
+- **Never attach a dedup-voided duplicate to `play_evidence` in the first place.** `voidDuplicateFingerprints`
+  ignoring a `"duplicate"`-void row is a *second* layer of defence, not a substitute for intake not creating
+  the row as scoreable evidence at all — a receipt intake already recognizes as a re-upload of an existing one
+  should either not be inserted into `app.evidence` as a distinct row, or should be inserted already `void` /
+  `voidReason: 'duplicate'` and never linked into `play_evidence` for a DIFFERENT play than the original.
+- **`voidReason` MUST be set at intake or at review — never left implicit.** A void row with no `voidReason`
+  is treated as `"reviewer"` by `packages/rules` (the safe default), but that is a *fallback*, not a licence to
+  skip setting it: an intake dedup step that voids a row without recording WHY loses the distinction this
+  whole mechanism exists to preserve, and every such row will poison its group even when the intake step
+  itself knew it was a harmless duplicate.
+- **A fingerprint match against ANOTHER user's receipt goes to human review and is NEVER auto-voided.**
+  This is the grief-vector this section exists to name: a shared or public receipt (a group green-fee slip, a
+  clubhouse photo op) can be fingerprinted and uploaded by more than one legitimate player. If intake
+  auto-voids "the second submission of a fingerprint," WHOEVER UPLOADS FIRST can silently void the
+  RIGHTFUL owner's receipt just by getting there first with the same photo — the fingerprint match alone
+  says two receipts look identical, not which uploader (if either) actually owns the underlying green fee. A
+  cross-user fingerprint match must route to a human reviewer (who can ask for the original file, check
+  payment records, etc.) — it is exactly the `"reviewer"` (or, if the review substantiates it, `"fraud"`)
+  `voidReason` case, never `"duplicate"`, which is reserved for a SAME-USER re-upload intake can safely
+  recognize on its own.
+
 ## Status
 
 | Item | Where | Status |

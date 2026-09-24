@@ -859,6 +859,7 @@ export type ScorePlayOutcome = ScorePlaySuccess | ScorePlayFailure;
  * | `paymentRef` | Yes | the booking/payment ledger's own reference id (M1) |
  * | `vendorCourseMapped` / `sensorProvenance` | Yes | the vendor-sync pipeline's own course-matching and device-provenance checks (Garmin/Arccos) — never client-set |
  * | receipt `status` | Yes | the green-fee receipt/POS integration, never the app client |
+ * | receipt `voidReason` | Yes | the review queue (`"reviewer"`/`"fraud"`) or intake's own fingerprint-dedup step (`"duplicate"`) — never the app client. A missing value on a `status: "void"` row defaults to `"reviewer"` (item 1, eighth gate: fails safe) |
  * | `courseDisambiguatedBy` | Yes | whichever server-side step actually resolved the course ambiguity (`geometry`/`staff`); `"user"` specifically marks a PLAYER's own pick, which is exactly why it's money-capped (A2-01) |
  * | staff `scanAt` | Yes | the staff-facing scan tool's own server timestamp, not the player's device |
  * | `ctx.playFacilityId` | Yes | the `play` row itself (already resolved/created server-side before `scorePlay` is ever called for it) |

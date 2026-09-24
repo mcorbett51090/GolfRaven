@@ -235,6 +235,24 @@ CREATE POLICY pd_setnull_special_marker_stock_movement_by_member_r ON app.specia
 -- ---- 6c. Bespoke ('special') cases ----
 CREATE POLICY pd_entitlement_update ON app.entitlement FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
 CREATE POLICY pd_entitlement_update_r ON app.entitlement FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
+-- ⛔ FIX (post-P3a re-gate, found while regression-testing M2): offer_code
+-- had a DELETE policy (pd_delete_offer_code_user_id, generic pass) and a
+-- narrow redeemed_by_staff UPDATE policy, but no general "own row" UPDATE
+-- policy — so 0015's own belt-and-suspenders `UPDATE app.offer_code SET
+-- play_id = NULL WHERE user_id = p_user_id` (and, since this round,
+-- app.play_deleted_detach_play_id()'s trigger UPDATE, fired inside this
+-- same SECURITY DEFINER context) silently affected ZERO rows under FORCE
+-- ROW LEVEL SECURITY (private_definer has NOBYPASSRLS) — no error, just a
+-- no-op, confirmed empirically this session (the offer_code row's own
+-- play_id was never actually nulled; it went unnoticed before because
+-- offer_code.user_id is `delete_row`, so the row is deleted outright
+-- moments later by pd_delete_offer_code_user_id regardless — but once
+-- app.play's own composite-FK delete-time check needs play_id ALREADY
+-- nulled at the point app.play is deleted, order-dependent within the
+-- generic pass, the silent no-op became load-bearing and raised a false
+-- FK violation). Mirrors pd_entitlement_update exactly.
+CREATE POLICY pd_offer_code_update ON app.offer_code FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
+CREATE POLICY pd_offer_code_update_r ON app.offer_code FOR SELECT TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid);
 CREATE POLICY pd_fraud_signal_update ON app.fraud_signal FOR UPDATE TO private_definer USING (user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (user_id IS NULL);
 CREATE POLICY pd_fraud_signal_update_r ON app.fraud_signal FOR SELECT TO private_definer USING ((user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) OR (user_id IS NULL));
 CREATE POLICY pd_attestation_player_update ON app.attestation FOR UPDATE TO private_definer USING (player_user_id = current_setting('app.delete_my_data.target_user_id', true)::uuid) WITH CHECK (player_user_id IS NULL);
@@ -376,6 +394,8 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'special_marker_stock_movement', 'pd_setnull_special_marker_stock_movement_by_member_r', 'SELECT', true, 'row-visibility companion to pd_setnull_special_marker_stock_movement_by_member (UPDATE ... WHERE needs SELECT-level visibility, confirmed empirically) -- ORs in the post-update condition (WITH CHECK) alongside the pre-update one, since the UPDATE changes the scoping column'),
   ('app', 'entitlement', 'pd_entitlement_update', 'UPDATE', true, 'detach activated_device_id (all states) and void unredeemed/vouchered special_marker entitlements (O9/O10)'),
   ('app', 'entitlement', 'pd_entitlement_update_r', 'SELECT', true, 'row-visibility companion to pd_entitlement_update (UPDATE ... WHERE needs SELECT-level visibility, confirmed empirically)'),
+  ('app', 'offer_code', 'pd_offer_code_update', 'UPDATE', true, 'nulls offer_code.play_id (0015 belt-and-suspenders + app.play_deleted_detach_play_id trigger, M2 post-P3a re-gate)'),
+  ('app', 'offer_code', 'pd_offer_code_update_r', 'SELECT', true, 'row-visibility companion to pd_offer_code_update (UPDATE ... WHERE needs SELECT-level visibility, confirmed empirically)'),
   ('app', 'fraud_signal', 'pd_fraud_signal_update', 'UPDATE', true, 'nulls fraud_signal.user_id for the target account'),
   ('app', 'fraud_signal', 'pd_fraud_signal_update_r', 'SELECT', true, 'row-visibility companion to pd_fraud_signal_update (UPDATE ... WHERE needs SELECT-level visibility, confirmed empirically) -- ORs in the post-update condition (WITH CHECK) alongside the pre-update one, since the UPDATE changes the scoping column'),
   ('app', 'attestation', 'pd_attestation_player_update', 'UPDATE', true, 'nulls attestation.player_user_id for the target account (line 841)'),
