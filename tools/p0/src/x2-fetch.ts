@@ -341,7 +341,7 @@ async function fetchOneRendered(
   url: string,
   outDir: string,
   timeoutMs: number,
-  renderOpts: { executablePath?: string; launch?: ChromiumLauncher } = {},
+  renderOpts: { executablePath?: string; launch?: ChromiumLauncher; extraArgs?: string[] } = {},
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
 
@@ -457,6 +457,10 @@ export async function runX2Fetch(
      * real browser. */
     renderExecutablePath?: string;
     renderLaunch?: ChromiumLauncher;
+    /** `--render` only: extra Chromium command-line args — see
+     * `renderUrl`'s own doc for why this exists (an environment-specific
+     * TLS-trust escape hatch, never proxy-specific code in this file). */
+    renderExtraArgs?: string[];
   } = {},
 ): Promise<X2FetchManifest> {
   const timeoutMs = opts.timeoutMs ?? X2_DEFAULT_TIMEOUT_MS;
@@ -481,6 +485,7 @@ export async function runX2Fetch(
               ? { executablePath: opts.renderExecutablePath }
               : {}),
             ...(opts.renderLaunch !== undefined ? { launch: opts.renderLaunch } : {}),
+            ...(opts.renderExtraArgs !== undefined ? { extraArgs: opts.renderExtraArgs } : {}),
           })
         : await fetchOne(trail, url, outDir, timeoutMs);
       entries.push(entry);
@@ -572,7 +577,15 @@ async function main(argv: string[]): Promise<void> {
   const config = JSON.parse(
     await readFile(configPath, "utf8"),
   ) as X2SourceConfig;
-  const manifest = await runX2Fetch(config, outDir, { render });
+  // Decision 0001 Addendum J(a)(i): an environment-specific Chromium
+  // TLS-trust escape hatch (see `renderUrl`'s own doc) — never wired to
+  // anything proxy-specific in this file, just read from an env var the
+  // operator sets for the environment they're actually running in.
+  const renderExtraArgs = process.env.X2_RENDER_CHROMIUM_ARGS?.split(/\s+/).filter(Boolean);
+  const manifest = await runX2Fetch(config, outDir, {
+    render,
+    ...(renderExtraArgs && renderExtraArgs.length > 0 ? { renderExtraArgs } : {}),
+  });
   process.stdout.write(`${renderManifestSummary(manifest)}\n`);
   process.stdout.write(
     `Manifest written to ${path.join(outDir, "manifest.json")}\n`,

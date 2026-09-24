@@ -62,6 +62,7 @@ export interface BrowserLike {
 export type ChromiumLauncher = (opts: {
   executablePath: string;
   headless: boolean;
+  args?: string[];
 }) => Promise<BrowserLike>;
 
 let cachedLauncher: ChromiumLauncher | null = null;
@@ -92,6 +93,17 @@ export async function renderUrl(
     timeoutMs?: number;
     executablePath?: string;
     launch?: ChromiumLauncher;
+    /** Extra Chromium command-line arguments, passed straight through to
+     * the launcher. This is a generic escape hatch — e.g. for an
+     * environment whose outbound network re-terminates TLS behind a proxy
+     * with its own CA (this session's own agent proxy, `/root/.ccr/
+     * README.md`), where the fix is `--ignore-certificate-errors-spki-list=
+     * <that proxy's own known CA SPKI hashes>` — a scoped pin of specific,
+     * already-known certificates, never a blanket `--ignore-certificate-
+     * errors` that would also swallow a genuine TLS problem with the
+     * destination site itself. Nothing proxy-specific is hard-coded here;
+     * the CLI reads it from `X2_RENDER_CHROMIUM_ARGS` (see `x2-fetch.ts`). */
+    extraArgs?: string[];
   },
 ): Promise<RenderedPage> {
   let parsed: URL;
@@ -110,6 +122,7 @@ export async function renderUrl(
   const browser = await launch({
     executablePath: opts.executablePath ?? DEFAULT_CHROMIUM_EXECUTABLE_PATH,
     headless: true,
+    ...(opts.extraArgs && opts.extraArgs.length > 0 ? { args: opts.extraArgs } : {}),
   });
   try {
     const page = await browser.newPage();
