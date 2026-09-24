@@ -30,7 +30,7 @@ set -euo pipefail
 # fail on a table with FORCE ROW LEVEL SECURITY and no matching policy.
 # `-c` flags run as sequential statements on ONE session, so this ONE
 # extra `-c` covers every call site below without editing each one.
-PSQL=(psql -v ON_ERROR_STOP=1 -A -t -c "SET ROLE service_role;")
+PSQL=(psql -v ON_ERROR_STOP=1 -A -t -q -c "SET ROLE service_role;")
 USER_ID="00000000-0000-0000-0000-00000000000a"
 DEVICE_ID="20000000-0000-0000-0000-000000000001"
 FAILED=0
