@@ -341,6 +341,15 @@ export async function assertDocCommitted(x1DocPath: string): Promise<void> {
 async function assertNotPreviouslyBound(x1DocPath: string, os: X1Os): Promise<void> {
   const osLabel = osLabelOf(os);
   const cwd = path.dirname(x1DocPath);
+  // Round-5 gate: a shallow clone can hide an earlier bind commit beyond its
+  // depth, so the history scan below would miss it. Refuse to bind there.
+  const shallow = (await runGit(["rev-parse", "--is-shallow-repository"], cwd)).trim();
+  if (shallow !== "false") {
+    throw new Error(
+      `refusing to bind ${osLabel}'s export in a shallow clone (git rev-parse --is-shallow-repository → ` +
+        `"${shallow}"): an earlier bind could sit beyond the clone's depth. Run \`git fetch --unshallow\` first.`,
+    );
+  }
   const pattern = `^- ${osLabel}:.*sha256:`;
   const stdout = await runGit(["log", "-G", pattern, "--format=%H", "--", x1DocPath], cwd);
   const commits = stdout

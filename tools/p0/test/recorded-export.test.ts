@@ -288,6 +288,17 @@ describe("bindExportHash", () => {
     );
   });
 
+  it("refuses to bind in a shallow clone, where an earlier bind could be beyond the depth (round-5 gate)", async () => {
+    const origin = path.dirname(tmpGitX1Doc());
+    writeFileSync(path.join(origin, "other.md"), "second commit\n", "utf8");
+    git(origin, ["add", "other.md"]);
+    git(origin, ["commit", "-q", "-m", "second"]);
+    const clone = mkdtempSync(path.join(tmpdir(), "golfraven-recorded-export-shallow-"));
+    git(clone, ["clone", "-q", "--depth", "1", `file://${origin}`, "repo"]);
+    const docPath = path.join(clone, "repo", "X1.md");
+    await expect(bindExportHash(docPath, "ios", "f".repeat(64))).rejects.toThrow(/shallow clone/);
+  });
+
   it("throws when docs/p0/X1.md isn't inside a git repository at all", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "golfraven-recorded-export-nogit-"));
     const file = path.join(dir, "X1.md");
