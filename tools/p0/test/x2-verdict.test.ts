@@ -2401,7 +2401,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       const bareDir = await initUpstreamBare();
       const fullText = `# X2\n\n## Log\n\nACCEPT NC roster:Pinehurst Creek ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
       const { x2MdPath } = await pushX2Md(bareDir, fullText);
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
       expect(verification.ok).toBe(true);
 
       const corroboration: X2CorroborationFile = {
@@ -2435,7 +2435,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       const bareDir = await initUpstreamBare();
       const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
       const { x2MdPath } = await pushX2Md(bareDir, fullText);
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
       const corroboration: X2CorroborationFile = {
         NC: {
@@ -2462,7 +2462,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       const bareDir = await initUpstreamBare();
       // The upstream has SOME content, but not the row we're about to cite.
       await pushX2Md(bareDir, "# X2\n\n## Log\n\nunrelated\n");
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
       const localFullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
       const { x2MdPath } = localOnlyX2Md(localFullText);
@@ -2493,7 +2493,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       const bareDir = await initUpstreamBare();
       const fullText = "# X2\n\n## Log\n\nsome unrelated line, not an ACCEPT row\n";
       const { x2MdPath } = await pushX2Md(bareDir, fullText);
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
       const corroboration: X2CorroborationFile = {
         NC: {
@@ -2522,7 +2522,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         "# X2\n\n## Log\n\nunrelated\n\n## Later Section\n\n" +
         `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
       const { x2MdPath } = await pushX2Md(bareDir, fullText);
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
       const corroboration: X2CorroborationFile = {
         NC: {
@@ -2609,7 +2609,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         const bareDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2-hidden-upstream-"));
         await execFileAsync("git", ["init", "-q", "--bare", bareDir]);
         const { x2MdPath } = await pushX2Md(bareDir, fullText, "forged, as Matt");
-        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact, acceptedBy: "Matt", date: "2026-09-20" }],
@@ -2707,7 +2707,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-01-01 Matt\n`;
         const { x2MdPath } = await pushX2Md(bareDir, fullText);
-        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-01-01" }],
@@ -2733,7 +2733,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2099-01-01 Matt\n`;
         const { x2MdPath } = await pushX2Md(bareDir, fullText);
-        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2099-01-01" }],
@@ -2759,7 +2759,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
         const { x2MdPath } = await pushX2Md(bareDir, fullText);
-        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
@@ -2785,7 +2785,7 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
         const { x2MdPath } = await pushX2Md(bareDir, fullText);
-        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
@@ -2858,7 +2858,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
   it("succeeds against a real (local, bare-repo-standing-in-for-GitHub) main, reading the ledger and X2.md blobs directly from refs/heads/main", async () => {
     const bareDir = await initUpstreamBare();
     await pushDocs(bareDir, { x2Md: "# X2\n\nhello\n", ledger: '{"entries": []}\n' });
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
     expect(verification.ok).toBe(true);
     expect(verification.x2MdText).toBe("# X2\n\nhello\n");
     expect(verification.x2MdBlobHash).toMatch(/^[0-9a-f]{40}$/);
@@ -2867,7 +2867,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
   });
 
   it("a bad/unreachable repoUrl gives ok: false, never throws", async () => {
-    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all" });
+    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all", runtimeExecArgv: [] });
     expect(verification.ok).toBe(false);
     expect(verification.ledgerBlobHash).toBeNull();
     await verification.cleanup();
@@ -2876,7 +2876,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
   it("a source repo missing docs/p0/X2.md or the ledger resolves ok: true with those blob hashes null, never a hard failure", async () => {
     const bareDir = await initUpstreamBare();
     await pushDocs(bareDir, {}); // placeholder commit, no docs/p0 files
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
     expect(verification.ok).toBe(true);
     expect(verification.ledgerBlobHash).toBeNull();
     expect(verification.x2MdBlobHash).toBeNull();
@@ -2904,7 +2904,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
     const shallowDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-shallow-clone-"));
     await execFileAsync("git", ["clone", "-q", "--depth", "1", bareDir, shallowDir]);
 
-    const verification = await verifyAgainstGitHub({ repoUrl: shallowDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: shallowDir, runtimeExecArgv: [] });
     expect(verification.ok).toBe(false);
     expect(verification.detail).toMatch(/shallow/);
     await verification.cleanup();
@@ -2932,7 +2932,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
       expect(unprotectedUrl.trim()).toBe(fakeBareDir);
 
       // The fix: verifyAgainstGitHub is unaffected — it reads the REAL repo.
-      const verification = await verifyAgainstGitHub({ repoUrl: realBareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: realBareDir, runtimeExecArgv: [] });
       expect(verification.ok).toBe(true);
       expect(verification.x2MdText).toContain("REAL CONTENT");
       expect(verification.x2MdText).not.toContain("FAKE CONTENT");
@@ -2954,7 +2954,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
       stashEnv("HOME");
       process.env.HOME = maliciousHome;
 
-      const verification = await verifyAgainstGitHub({ repoUrl: realBareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: realBareDir, runtimeExecArgv: [] });
       expect(verification.ok).toBe(true);
       expect(verification.x2MdText).toContain("REAL CONTENT 2");
       expect(verification.x2MdText).not.toContain("FAKE CONTENT 2");
@@ -3001,7 +3001,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
     it("verifyAgainstGitHub's own disposable repo never acquires refs/replace/* from a fetch of a single ref — it is fresh every run", async () => {
       const bareDir = await initUpstreamBare();
       await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
       // A `git replace` in the SOURCE repo is local-only and is never
       // part of what `+refs/heads/main:refs/heads/main` transfers — the
       // disposable repo verifyAgainstGitHub builds is fresh every run, so
@@ -3054,7 +3054,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
     it("verifyAgainstGitHub's disposable repo never has info/grafts (it is created fresh via `git init --bare` every run) — a graft in the SOURCE repo never transfers", async () => {
       const bareDir = await initUpstreamBare();
       await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
       expect(verification.ok).toBe(true);
       await verification.cleanup();
     });
@@ -3076,7 +3076,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
       process.env.GIT_DIR = nodePath.join(unrelatedRepo, ".git");
       process.env.GIT_WORK_TREE = unrelatedRepo;
 
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
       expect(verification.ok).toBe(true);
       expect(verification.x2MdText).toContain("GIT_DIR test");
       await verification.cleanup();
@@ -3131,7 +3131,7 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
     stashEnv("GIT_SSL_NO_VERIFY");
     process.env.GIT_SSL_NO_VERIFY = "1";
     try {
-      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
       expect(verification.ok).toBe(false);
       expect(verification.detail).toMatch(/GIT_SSL_NO_VERIFY/);
       await verification.cleanup();
@@ -3180,7 +3180,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
 
     const bareDir = await initUpstreamBare();
     await pushLedger(bareDir, ledgerJson);
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
     const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
@@ -3211,7 +3211,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
 
     const bareDir = await initUpstreamBare();
     await pushLedger(bareDir, ledgerJson);
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
     const result = await checkLedgerAgainstGit(wrongPath, verification, { canonicalPath: intendedCanonicalPath });
     expect(result.pathIsCanonical).toBe(false);
@@ -3229,7 +3229,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
 
     const bareDir = await initUpstreamBare();
     await pushLedger(bareDir, ledgerJson);
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
     const result = await checkLedgerAgainstGit(ledgerPath, verification);
     expect(result.pathIsCanonical).toBe(false);
@@ -3246,7 +3246,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
 
     const bareDir = await initUpstreamBare();
     await pushLedger(bareDir, ledgerJson);
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
     writeFileSync(
       ledgerPath,
@@ -3268,7 +3268,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
     const { ledgerPath } = await initGitRepo();
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
 
-    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all" });
+    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all", runtimeExecArgv: [] });
     const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
@@ -3292,7 +3292,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
     await execFileAsync("git", ["commit", "-q", "-m", "placeholder"], { cwd: workDir });
     await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
     await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
     const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
@@ -3320,7 +3320,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "v2, not re-verified"], { cwd: dir });
 
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
     const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
@@ -3351,7 +3351,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
 
     const bareDir = await initUpstreamBare();
     await pushLedger(bareDir, v1);
-    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir, runtimeExecArgv: [] });
 
     const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.hiddenByGitFlag).toBe(true);
@@ -3364,7 +3364,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
     const outsideDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-not-a-repo-"));
     const ledgerPath = nodePath.join(outsideDir, "recorded-ledger.json");
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
-    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all" });
+    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all", runtimeExecArgv: [] });
     const result = await checkLedgerAgainstGit(ledgerPath, verification);
     expect(result.clean).toBe(false);
     expect(result.pathIsCanonical).toBe(false);
@@ -3377,7 +3377,7 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "ledger"], { cwd: dir });
 
-    const verification = await verifyAgainstGitHub({ repoUrl: "/nonexistent" });
+    const verification = await verifyAgainstGitHub({ repoUrl: "/nonexistent", runtimeExecArgv: [] });
     expect(verification.ok).toBe(false);
     const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.clean).toBe(false);
