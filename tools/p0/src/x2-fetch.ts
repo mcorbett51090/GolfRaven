@@ -735,6 +735,7 @@ async function main(argv: string[]): Promise<void> {
     ...(renderExtraArgs && renderExtraArgs.length > 0
       ? { renderExtraArgs }
       : {}),
+    ...(flags.ledger ? { ledgerPath: flags.ledger } : {}),
   });
   process.stdout.write(`${renderManifestSummary(manifest)}\n`);
   process.stdout.write(
