@@ -8,14 +8,24 @@ describe("generateContractSchema", () => {
   it("produces a registry with every P1a-scoped top-level entity", () => {
     const generated = generateContractSchema() as { schemas: Record<string, unknown> };
     expect(Object.keys(generated.schemas).sort()).toEqual(
-      ["Course", "Designer", "Facility", "Hole", "Region", "RosterVersion", "Source", "Tee", "Trail"].sort(),
+      [
+        "Course",
+        "Designer",
+        "Facility",
+        "Hole",
+        "OfferTerms",
+        "Region",
+        "RosterVersion",
+        "Source",
+        "Tee",
+        "Trail",
+      ].sort(),
     );
   });
 
-  it("does NOT include AchievementDef or OfferTerms (out of P1a scope)", () => {
+  it("does NOT include AchievementDef (needs RuleExpr, part B)", () => {
     const generated = generateContractSchema() as { schemas: Record<string, unknown> };
     expect(generated.schemas["AchievementDef"]).toBeUndefined();
-    expect(generated.schemas["OfferTerms"]).toBeUndefined();
   });
 });
 

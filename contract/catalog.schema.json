@@ -407,6 +407,15 @@
               ],
               "type": "string"
             },
+            "nameFr": {
+              "enum": [
+                "editor",
+                "operator",
+                "claim",
+                "primary-source"
+              ],
+              "type": "string"
+            },
             "town": {
               "enum": [
                 "editor",
@@ -536,6 +545,47 @@
       "required": [
         "id",
         "number"
+      ],
+      "type": "object"
+    },
+    "OfferTerms": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^oft_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "portal-verify",
+            "code-pool"
+          ],
+          "type": "string"
+        },
+        "terms": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "termsFr": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "trailId": {
+          "pattern": "^trl_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "trailId",
+        "title",
+        "terms",
+        "mode"
       ],
       "type": "object"
     },
