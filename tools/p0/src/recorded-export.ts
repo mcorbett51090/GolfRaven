@@ -36,14 +36,53 @@
  *   after binding, the same as decision 0001 Addendum F requires for K2's
  *   exclusion dating: rewritten LOCAL history (a rebase or amend) is not
  *   detected by anything in this module — a pushed copy on GitHub is the
- *   actual protection. `bindExportHash`'s caller prints "commit and push
- *   docs/p0/X1.md now" after the first bind.
+ *   actual protection.
+ *
+ * **Round-4 Opus-gate correction (post-4279773) — closing a gap in the
+ * first-bind trust limit: binding again after a delete or revert was
+ * silently allowed.** Because only the CURRENT state of `docs/p0/X1.md`
+ * was ever consulted, deleting (or reverting) a bound `sha256:` suffix and
+ * committing that made the OS read as unbound again — so the very next
+ * run would silently bind it to a DIFFERENT export, with no owner ever
+ * deciding that a re-bind was warranted. Three changes close this:
+ *
+ * - **A binding run prints no verdict.** `bindExportHash`'s caller
+ *   (`x1-ios-export`/`x1-verdict`) now stops at "bound: commit and push
+ *   docs/p0/X1.md, then re-run" on the run that performs a first bind —
+ *   it never computes or prints a verdict from data whose binding hasn't
+ *   even been pushed yet. A second, later run (against the now-committed
+ *   bind) is what actually produces the recorded verdict.
+ * - **A second binding is refused.** Before writing a hash,
+ *   `bindExportHash` now scans `docs/p0/X1.md`'s own git history for a
+ *   previous bind of that OS's line (`assertNotPreviouslyBound`, via
+ *   `git log -G`) — even one since deleted/reverted. A non-empty result
+ *   refuses with "re-binding needs an owner decision": deciding to trust
+ *   a DIFFERENT export than the one first bound is exactly the kind of
+ *   call this module cannot make on its own.
+ * - **A verdict comes only from a committed binding.** `assertDocCommitted`
+ *   refuses a recorded run outright while `docs/p0/X1.md` has uncommitted
+ *   changes — a recorded result (bind OR verdict) must always reflect
+ *   what's actually committed, never a modified-but-uncommitted working
+ *   copy that could be discarded right after.
+ *
+ * **If git itself is unavailable, or `docs/p0/X1.md` isn't inside a git
+ * repository, a recorded run refuses outright** (see `runGit` below) —
+ * these checks are load-bearing, not best-effort. The documented limit is
+ * unchanged: a rewritten LOCAL history (rebase/amend) is still not
+ * detected by anything here; a pushed copy on GitHub remains the actual
+ * protection, which is exactly why every bind prints the commit-and-push
+ * reminder.
  */
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { resolveX1DocPath } from "./round-windows.js";
+
+const execFileAsync = promisify(execFile);
 
 export type X1Os = "ios" | "android";
 
