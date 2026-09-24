@@ -12,6 +12,17 @@
 BEGIN;
 SELECT plan(27);
 
+-- S1 restricted-mode fix: the private.has_facility_scope/has_trail_scope/
+-- is_admin calls below are granted to `authenticated` and `service_role`
+-- only (0007) -- under the default harness they "worked" only because the
+-- connecting bootstrap role is a real Postgres superuser, which bypasses
+-- EXECUTE grants entirely (exactly the false-pass S1 warns about). Real
+-- callers of these functions are RLS policies evaluated as `authenticated`
+-- (0008), so authenticate_as('authenticated', ...) here is the accurate
+-- caller identity, not a workaround -- the claim's own uid is irrelevant
+-- since every call below passes its subject uid explicitly as an argument.
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-4000000000d0'::uuid));
+
 -- Actor uuids (see supabase/tests/helpers.sql).
 -- staff_x        = 00000000-0000-0000-0000-1000000000a1
 -- staff_x_revoked= 00000000-0000-0000-0000-1000000000a2

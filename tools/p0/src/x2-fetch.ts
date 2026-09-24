@@ -57,7 +57,7 @@ import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
 } from "./run-dir.js";
-import { renderUrl, type ChromiumLauncher } from "./x2-render.js";
+import { renderUrl, validateRenderExtraArgs, type ChromiumLauncher } from "./x2-render.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -663,6 +663,10 @@ async function main(argv: string[]): Promise<void> {
   // operator sets for the environment they're actually running in.
   const renderExtraArgs =
     process.env.X2_RENDER_CHROMIUM_ARGS?.split(/\s+/).filter(Boolean);
+  // Gate finding: refuse a bad X2_RENDER_CHROMIUM_ARGS value IMMEDIATELY —
+  // before touching config or launching a browser — not as a per-URL
+  // render failure buried in the manifest.
+  validateRenderExtraArgs(renderExtraArgs ?? []);
   const manifest = await runX2Fetch(config, outDir, {
     render,
     ...(renderExtraArgs && renderExtraArgs.length > 0

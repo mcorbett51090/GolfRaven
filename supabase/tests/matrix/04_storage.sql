@@ -37,11 +37,18 @@ SELECT is(
 
 -- Seed one object in each bucket so a real SELECT has a row to (fail to)
 -- return, as service_role (bypasses RLS to set up the fixture).
+-- S1 restricted-mode fix: the comment above always claimed this ran "as
+-- service_role", but no role switch actually preceded these two INSERTs —
+-- they silently relied on the connecting bootstrap role's own superuser
+-- bypass instead. Made real here with an explicit authenticate_as/
+-- clear_actor pair, matching what the comment always said this was.
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 INSERT INTO storage.objects (bucket_id, name, owner)
 VALUES ('receipts', 'receipts/00000000-0000-0000-0000-00000000000b/r1.jpg',
         '00000000-0000-0000-0000-00000000000b');
 INSERT INTO storage.objects (bucket_id, name)
 VALUES ('exports', 'exports/settlement-2026-09.csv');
+SELECT tests.clear_actor();
 
 -- Player A (authenticated) lists receipts/<B's> object -> denied (no
 -- policy) -> the RLS-forced table simply returns 0 rows to a role with no

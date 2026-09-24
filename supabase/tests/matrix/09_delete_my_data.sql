@@ -13,6 +13,18 @@
 BEGIN;
 SELECT plan(13);
 
+-- S1 restricted-mode fix: private.delete_my_data is granted to
+-- service_role only (0015) -- its real production caller (the me-delete
+-- Edge Function). Under the default harness this "worked" only because
+-- the connecting bootstrap role is a superuser and bypasses the EXECUTE
+-- grant, private.pii_retention_policy's SELECT grant (0014), and every
+-- RLS policy outright -- the exact false-pass S1 warns about.
+-- authenticate_as('service_role', ...) here is the accurate caller
+-- identity, and (service_role also has BYPASSRLS, 0009/shim) it is also
+-- what lets the rest of this file's row-count assertions see the TRUE
+-- post-deletion state rather than an RLS-narrowed view of it.
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
 -- Every FK-to-auth.users column in `app` must be classified — this is the
 -- same check `delete_my_data` itself makes at call time, asserted here
 -- independently so a missing classification fails CI even before anyone

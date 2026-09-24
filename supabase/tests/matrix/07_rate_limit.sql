@@ -7,6 +7,14 @@
 BEGIN;
 SELECT plan(4);
 
+-- S1 restricted-mode fix: private.hit_rate_limit is granted to
+-- service_role only (0007) -- its real production caller. Under the
+-- default harness this "worked" only because the connecting bootstrap
+-- role is a superuser and bypasses the EXECUTE grant outright (the exact
+-- false-pass S1 warns about); authenticate_as('service_role', ...) here
+-- is the accurate caller identity.
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
 -- Under the max: succeeds and returns the running count.
 SELECT is(
   private.hit_rate_limit('test:evidence:user-a', interval '1 hour', 60),
