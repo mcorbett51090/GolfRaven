@@ -55,6 +55,21 @@ export function fixesAlong(points: readonly LatLng[], startMs: number, endMs: nu
   }));
 }
 
+/** Pushes `point` further away from `center`, along the center→point
+ * direction, by `extraMeters`. Used to build a "drifted" fix that moves
+ * consistently outward regardless of which side of a polygon it started
+ * near (a fixed-axis offset would push a point on the near edge deeper
+ * inside instead of further out). */
+export function perturbOutward(center: LatLng, point: LatLng, extraMeters: number): LatLng {
+  const lat0 = (center.lat * Math.PI) / 180;
+  const dx = (point.lon - center.lon) * Math.cos(lat0) * (Math.PI / 180) * EARTH_RADIUS_METERS;
+  const dy = (point.lat - center.lat) * (Math.PI / 180) * EARTH_RADIUS_METERS;
+  const length = Math.hypot(dx, dy) || 1;
+  const unitX = dx / length;
+  const unitY = dy / length;
+  return offset(point, unitX * extraMeters, unitY * extraMeters);
+}
+
 /** A closed loop of `n` points tracing the inside of `rect` (a rectangle
  * from `rectangle()`), inset by `insetMeters` so every point stays well
  * clear of the boundary — useful for a clean "route stayed inside" case. */

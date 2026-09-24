@@ -37,6 +37,7 @@ import {
   FACILITY_CONTENT_FIELDS,
   FACILITY_CONTENT_FIELD_TO_PROV_KEY,
   FACILITY_DERIVED_FROM_ALLOWED_KEYS,
+  detectMergeCycle,
   resolveMergedId,
   tzLikelyContainsCoordinates,
   type Course,
@@ -168,6 +169,28 @@ function checkIds(
           ),
         );
       }
+    }
+  }
+}
+
+/**
+ * Nit (gate review round 2): "A `mergedInto` cycle in the ledger must be
+ * reported as an issue, not thrown." `resolveMergedId` itself no longer
+ * throws on a cycle (see its doc in `ledger.ts`) precisely so that every
+ * OTHER check calling it (cross-references, roster-member resolution, …)
+ * degrades gracefully instead of crashing the whole run. This is the one
+ * check whose actual JOB is to surface the cycle as a normal issue.
+ */
+function checkMergeCycles(bundle: CatalogBundle, issues: CatalogIssue[]): void {
+  for (const [id, entry] of Object.entries(bundle.idLedger.entries)) {
+    if (entry.mergedInto !== undefined && detectMergeCycle(bundle.idLedger, id)) {
+      issues.push(
+        issue(
+          "LEDGER_MERGE_CYCLE",
+          `idLedger.entries.${id}.mergedInto`,
+          `ledger entry "${id}"'s mergedInto chain cycles back on itself and never resolves to a live survivor`,
+        ),
+      );
     }
   }
 }
@@ -478,6 +501,22 @@ function checkRosters(
               ),
             );
           }
+          // Nit (gate review round 2): the same "a closed thing should not
+          // sit in the latest roster" principle §4.2's table states for a
+          // Course.closed applies equally to a closed FACILITY — a
+          // facility can close entirely (not just one of its courses), and
+          // a roster that still lists it (whatever unit the member uses)
+          // is stale the same way.
+          const facility = resolveMemberFacility(member, index, bundle.idLedger);
+          if (facility?.closed === true) {
+            issues.push(
+              issue(
+                "ROSTER_LATEST_CONTAINS_CLOSED_FACILITY",
+                `${versionPath}.members[${memberIndex}]`,
+                `the latest published roster version still contains closed facility "${facility.id}"`,
+              ),
+            );
+          }
         });
       }
     });
@@ -586,6 +625,36 @@ function checkLedgerAppendOnly(
           "LEDGER_UNTOMBSTONED",
           `idLedger.entries.${id}.tombstoned`,
           `ledger entry "${id}" was tombstoned in the last published catalog and is no longer tombstoned — an id is never un-tombstoned (§3.5)`,
+        ),
+      );
+    }
+    // Item 2 (gate review round 2): a published slug is first-come and
+    // immutable (§3.5) — the ledger must not change it.
+    if (
+      baseEntry.slug !== undefined &&
+      currentEntry.slug !== undefined &&
+      baseEntry.slug !== currentEntry.slug
+    ) {
+      issues.push(
+        issue(
+          "LEDGER_SLUG_CHANGED",
+          `idLedger.entries.${id}.slug`,
+          `ledger entry "${id}"'s slug changed from "${baseEntry.slug}" to "${currentEntry.slug}" — a slug is first-come and immutable (§3.5)`,
+        ),
+      );
+    }
+    // Item 2: seedRefs[] history is append-only — a re-seed only ever adds
+    // to it (§4.2 G-P1-12); every ref recorded in the last published
+    // catalog must still be present.
+    const removedSeedRefs = (baseEntry.seedRefs ?? []).filter(
+      (ref) => !(currentEntry.seedRefs ?? []).includes(ref),
+    );
+    if (removedSeedRefs.length > 0) {
+      issues.push(
+        issue(
+          "LEDGER_SEEDREFS_REMOVED",
+          `idLedger.entries.${id}.seedRefs`,
+          `ledger entry "${id}" lost seedRef(s) present in the last published catalog: ${removedSeedRefs.join(", ")} — seedRefs[] is append-only (§3.5, §4.2 G-P1-12)`,
         ),
       );
     }
@@ -1029,6 +1098,7 @@ export function verifyCatalog(
   const index = buildIndex(bundle, courses);
 
   checkIds(bundle, courses, issues);
+  checkMergeCycles(bundle, issues);
   checkCrossReferences(bundle, courses, issues);
   checkRosters(bundle, index, issues);
   checkBooking(bundle, options.bookingHostAllowList ?? [], issues);

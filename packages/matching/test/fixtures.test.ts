@@ -12,7 +12,7 @@ import {
   resolveAskUser,
   type CandidateCourse,
 } from "../src/index.js";
-import { fixesAlong, loopInsideRectangle, ORIGIN, offset, rectangle } from "./helpers.js";
+import { fixesAlong, loopInsideRectangle, ORIGIN, offset, perturbOutward, rectangle } from "./helpers.js";
 
 const HOUR = 3_600_000;
 const T0 = Date.parse("2026-06-01T08:00:00Z");
@@ -52,11 +52,11 @@ describe("golden fixture: 36-hole facility", () => {
   });
 
   it("asks the user when the round sat in the overlap between two real (non-shared) polygons", () => {
-    // The two rings overlap in x ∈ [-50, 50]; a loop confined to that band
-    // scores near-1.0 insideRatio against BOTH — a genuine near-tie, not a
-    // `sharedGeometry`-flagged candidate.
-    const overlapCenter = offset(ORIGIN, -50, 0);
-    const points = loopInsideRectangle(overlapCenter, 80, 200, 10, 40);
+    // The two rings overlap in x ∈ [-150, -50]; a loop confined to that
+    // band scores near-1.0 insideRatio against BOTH — a genuine near-tie,
+    // not a `sharedGeometry`-flagged candidate.
+    const overlapCenter = offset(ORIGIN, -100, 0);
+    const points = loopInsideRectangle(overlapCenter, 60, 200, 5, 40);
     const outcome = matchRoute({ fixes: fixesAlong(points, T0, T0 + 4 * HOUR), candidates });
     expect(outcome.kind).toBe("ask_user");
     if (outcome.kind === "ask_user") {
@@ -273,7 +273,9 @@ describe("golden fixture: GPS drift", () => {
 
   it("still matches when a minority of fixes drift outside the buffer", () => {
     const clean = loopInsideRectangle(ORIGIN, 300, 300, 20, 40);
-    const drifted = clean.map((p, i) => (i % 5 === 0 ? offset(p, 60, 0) : p)); // 20% pushed ~60 m off
+    // 20% of fixes pushed ~60 m radially outward from the course center —
+    // past the 30 m buffer regardless of which edge they started near.
+    const drifted = clean.map((p, i) => (i % 5 === 0 ? perturbOutward(ORIGIN, p, 60) : p));
     const outcome = matchRoute({ fixes: fixesAlong(drifted, T0, T0 + 4 * HOUR), candidates });
     expect(outcome.kind).toBe("matched");
     if (outcome.kind === "matched") {
@@ -284,7 +286,8 @@ describe("golden fixture: GPS drift", () => {
 
   it("falls back to typeahead when drift is severe enough to drop insideRatio below 0.6", () => {
     const clean = loopInsideRectangle(ORIGIN, 300, 300, 20, 40);
-    const heavilyDrifted = clean.map((p, i) => (i % 2 === 0 ? offset(p, 80, 0) : p)); // 50% pushed off
+    // 50% of fixes pushed ~80 m radially outward.
+    const heavilyDrifted = clean.map((p, i) => (i % 2 === 0 ? perturbOutward(ORIGIN, p, 80) : p));
     const outcome = matchRoute({ fixes: fixesAlong(heavilyDrifted, T0, T0 + 4 * HOUR), candidates });
     expect(outcome.kind).toBe("typeahead");
   });
