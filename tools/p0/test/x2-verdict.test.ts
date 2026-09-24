@@ -877,9 +877,68 @@ describe("x2-verdict: gate findings — legacy method default, method/httpStatus
         },
       },
     };
-    const result = computeX2Verdict(confirmation, byTrail, ["TN"]);
+    // Gate finding 4: an owner-saved fact needs a corroboration record to
+    // count — without one it is "owner-attested, uncorroborated" and does
+    // not confirm the trail. Supplying Matt's dated acceptance is enough.
+    const corroboration: X2CorroborationFile = {
+      TN: {
+        [rawSha]: { type: "acceptance", acceptedBy: "Matt", date: "2026-09-24" },
+      },
+    };
+    const result = computeX2Verdict(confirmation, byTrail, ["TN"], corroboration);
     expect(result.perTrail.TN?.confirmed).toBe(true);
     expect(result.perTrail.TN?.facts.season?.method).toBe("owner-saved");
+    expect(result.perTrail.TN?.facts.season?.corroboration).toBe(
+      "owner-attested, accepted uncorroborated by Matt on 2026-09-24",
+    );
+  });
+
+  it('gate finding 4: the SAME owner-saved entry, with NO corroboration file supplied, does NOT confirm', async () => {
+    const bytes =
+      "Nine courses make up the Trail. It counts a course. The season runs year-round.";
+    const rawSha = sha(bytes);
+    const entry = baseManifestEntry({
+      sha256: rawSha,
+      rawFile: "raw/x.html",
+      method: "owner-saved",
+      httpStatus: "owner-saved",
+      ownerSavedDate: "2026-09-24",
+    });
+    const manifest: X2FetchManifest = {
+      generatedAt: new Date().toISOString(),
+      outDir: "x2-evidence",
+      trails: { TN: [entry] },
+      draftCandidateNames: { TN: [] },
+    };
+    const byTrail = await buildEvidenceByTrail(manifest, async () =>
+      Buffer.from(bytes),
+    );
+    const confirmation: X2ConfirmationFile = {
+      TN: {
+        roster: [
+          {
+            name: "Nine courses make up",
+            quote: "Nine courses make up the Trail.",
+            evidenceSha: rawSha,
+          },
+        ],
+        completionUnit: {
+          value: "course",
+          quote: "It counts a course.",
+          evidenceSha: rawSha,
+        },
+        season: {
+          value: "year-round",
+          quote: "The season runs year-round.",
+          evidenceSha: rawSha,
+        },
+      },
+    };
+    const result = computeX2Verdict(confirmation, byTrail, ["TN"]);
+    expect(result.perTrail.TN?.confirmed).toBe(false);
+    expect(result.perTrail.TN?.facts.season?.corroboration).toBe(
+      "owner-attested, uncorroborated",
+    );
   });
 
   it("Addendum J correction (first-capture-wins): refuses (throws) a confirmation that cites a NON-RECORDED capture", async () => {
@@ -1037,7 +1096,7 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
           type: "wayback",
           snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
           snapshotSha256: "e".repeat(64),
-          snapshotText: "Pinehurst Creek is a member course of the North Carolina Golf Trail.",
+          snapshotText: "The North Carolina Golf Trail. Pinehurst Creek is a member course.",
         },
       },
     };

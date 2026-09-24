@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(23);
+SELECT plan(21);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -65,11 +65,13 @@ SELECT is(
     JOIN pg_namespace n ON n.oid = cl.relnamespace
     JOIN pg_class target ON target.oid = con.confrelid
     JOIN pg_namespace tn ON tn.oid = target.relnamespace
-    JOIN private.pii_retention_policy pol
-      ON pol.schema_name = tn.nspname AND pol.table_name = target.relname AND pol.action = 'delete_row'
     WHERE con.contype = 'f'
       AND n.nspname = 'app'
       AND NOT (con.condeferrable OR con.confdeltype IN ('c', 'n'))
+      AND EXISTS (
+        SELECT 1 FROM private.pii_retention_policy pol
+        WHERE pol.schema_name = tn.nspname AND pol.table_name = target.relname AND pol.action = 'delete_row'
+      )
   ),
   0,
   'every FK referencing a delete_row table is deferrable or ON DELETE CASCADE/SET NULL (H1)'
@@ -164,6 +166,49 @@ SELECT is(
   (SELECT staff_pseudonym IS NOT NULL AND kind = 'presence' AND cosignal_ok = true FROM app.attestation WHERE id = 'a0000000-0000-0000-0000-000000000001'),
   true,
   'the attestation stays verifiable as "staff-attested" after redaction: staff_pseudonym, kind and cosignal_ok all survive'
+);
+
+-- ---------------------------------------------------------------------------
+-- M5 (post-P3a gate): "Restore the dropped delete_my_data post-condition
+-- tests" — attestation.player_user_id, the shift-log "deleted player"
+-- entry, public_profile_projection removed, no address column; plus the
+-- same discipline for partner_invite, audit_log and fraud_signal. All
+-- asserted against player A's deletion above (both delete_my_data calls
+-- already happened by this point in the file).
+-- ---------------------------------------------------------------------------
+SELECT is(
+  (SELECT count(*)::int FROM app.attestation WHERE id = 'a0000000-0000-0000-0000-000000000001' AND player_user_id IS NULL),
+  1, 'attestation.player_user_id is nulled for the deleted player (line 841)'
+);
+SELECT is(
+  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE facility_id = 'fac_x' AND kind = 'presence' AND player_pseudonym = encode(public.digest('00000000-0000-0000-0000-00000000000a', 'sha256'), 'hex')),
+  'deleted player',
+  'attestation_shift_log.player_handle_snapshot is rewritten to ''deleted player'', matched by the durable pseudonym'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.public_profile_projection WHERE handle = 'player_a'),
+  0, 'the player''s public_profile_projection row is removed'
+);
+SELECT is(
+  (
+    SELECT count(*)::int FROM information_schema.columns
+    WHERE table_schema = 'app' AND table_name IN ('entitlement', 'offer_code')
+      AND (column_name ILIKE '%address%' OR column_name ILIKE '%shipping%')
+  ),
+  0,
+  'no address/shipping column exists on entitlement or offer_code (O9/O10, line 2759: "no address exists to retain")'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.partner_invite WHERE id IN ('11100000-0000-0000-0000-000000000001', '11100000-0000-0000-0000-000000000002')),
+  0, 'both partner_invite rows (sent by A, and received at A''s verified email) are deleted'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.audit_log WHERE subject_id = '30000000-0000-0000-0000-000000000001' AND actor_user_id IS NULL),
+  1, 'audit_log.actor_user_id is redacted for the deleted player''s own historical row'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'manual_review_seed' AND user_id IS NULL),
+  1, 'fraud_signal.user_id is nulled, the row survives (admin fraud record kept)'
 );
 
 SELECT * FROM finish();

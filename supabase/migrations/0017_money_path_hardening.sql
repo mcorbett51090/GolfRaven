@@ -142,6 +142,12 @@ CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
 -- ============================================================================
 ALTER TABLE app.offer ADD CONSTRAINT offer_budget_within_cap
   CHECK (budget_used + budget_reserved <= budget_cap);
+-- should-fix, post-P3a gate: a negative budget_used/budget_reserved
+-- (e.g. a release_offer_budget bug, or a hand-run UPDATE) would otherwise
+-- silently satisfy offer_budget_within_cap above while being nonsense —
+-- the CAP check alone doesn't rule out negative numbers "canceling out".
+ALTER TABLE app.offer ADD CONSTRAINT offer_budget_nonnegative
+  CHECK (budget_used >= 0 AND budget_reserved >= 0);
 
 -- max_redemptions: a row-count check on offer_code, enforced at INSERT
 -- time via trigger (a plain CHECK cannot reference another table's row
@@ -181,16 +187,22 @@ CREATE TRIGGER offer_code_enforce_max_redemptions_trg
 BEFORE INSERT OR UPDATE OF offer_id ON app.offer_code
 FOR EACH ROW EXECUTE FUNCTION app.offer_code_enforce_max_redemptions();
 
--- Reserve-budget function: locks the offer row (SELECT ... FOR UPDATE)
--- before reserving, so two concurrent reservations against the same
--- near-exhausted budget can't both read a stale budget_used/budget_reserved
--- and both succeed (the classic lost-update race a bare UPDATE ... WHERE
--- budget_used + budget_reserved + p_amount <= budget_cap would still be
--- exposed to under READ COMMITTED without the explicit row lock first).
--- Plain SQL/plpgsql, not SECURITY DEFINER: its caller (service_role, an
--- Edge Function) already has full DML + BYPASSRLS on app.offer, so no
--- elevation is needed the way private.* helpers need it for
--- anon/authenticated callers.
+-- Reserve/release/consume-budget functions: each locks the offer row
+-- (SELECT ... FOR UPDATE) before touching it, so two concurrent callers
+-- against the same near-exhausted budget can't both read a stale
+-- budget_used/budget_reserved and both succeed (the classic lost-update
+-- race a bare UPDATE ... WHERE budget_used + budget_reserved + p_amount
+-- <= budget_cap would still be exposed to under READ COMMITTED without
+-- the explicit row lock first). Plain SQL/plpgsql, not SECURITY DEFINER:
+-- their caller (service_role, an Edge Function) already has full DML +
+-- BYPASSRLS on app.offer, so no elevation is needed the way private.*
+-- helpers need it for anon/authenticated callers.
+--
+-- ⛔ FIX (should-fix, post-P3a gate): reserve_offer_budget now also
+-- checks the offer's own status ('live') and validity window
+-- (valid_from/valid_to straddling current_date) — the original version
+-- would happily reserve budget against a draft, paused, or expired
+-- offer, since only the numeric cap was ever checked.
 CREATE OR REPLACE FUNCTION app.reserve_offer_budget(p_offer_id uuid, p_amount numeric)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -199,17 +211,23 @@ DECLARE
   v_cap numeric;
   v_used numeric;
   v_reserved numeric;
+  v_status app.offer_status;
+  v_valid_from date;
+  v_valid_to date;
 BEGIN
   IF p_amount < 0 THEN
     RAISE EXCEPTION 'reserve_offer_budget: p_amount must be >= 0 (got %)', p_amount;
   END IF;
-  SELECT budget_cap, budget_used, budget_reserved
-    INTO v_cap, v_used, v_reserved
+  SELECT budget_cap, budget_used, budget_reserved, status, valid_from, valid_to
+    INTO v_cap, v_used, v_reserved, v_status, v_valid_from, v_valid_to
     FROM app.offer
     WHERE id = p_offer_id
     FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'reserve_offer_budget: no such offer %', p_offer_id;
+  END IF;
+  IF v_status <> 'live' OR current_date < v_valid_from OR current_date > v_valid_to THEN
+    RETURN false;
   END IF;
   IF v_used + v_reserved + p_amount > v_cap THEN
     RETURN false;
@@ -219,8 +237,59 @@ BEGIN
 END;
 $$;
 
+-- release_offer_budget: undoes an UNCONSUMED reservation (e.g. the
+-- redemption it was held for was abandoned/declined) — moves the amount
+-- OUT of budget_reserved without ever touching budget_used. Same lock
+-- discipline; clamps at 0 rather than raising on a caller passing more
+-- than is actually reserved, since "release everything that's left" is
+-- the safe behaviour for a cleanup path.
+CREATE OR REPLACE FUNCTION app.release_offer_budget(p_offer_id uuid, p_amount numeric)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF p_amount < 0 THEN
+    RAISE EXCEPTION 'release_offer_budget: p_amount must be >= 0 (got %)', p_amount;
+  END IF;
+  PERFORM 1 FROM app.offer WHERE id = p_offer_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'release_offer_budget: no such offer %', p_offer_id;
+  END IF;
+  UPDATE app.offer SET budget_reserved = GREATEST(budget_reserved - p_amount, 0) WHERE id = p_offer_id;
+END;
+$$;
+
+-- consume_offer_budget: converts a reservation into an actual spend —
+-- moves the amount from budget_reserved into budget_used (the redemption
+-- actually happened). Same lock discipline; clamps budget_reserved at 0
+-- the same way release does, so a caller consuming slightly more than
+-- was reserved (rounding) can't push it negative and trip
+-- offer_budget_nonnegative.
+CREATE OR REPLACE FUNCTION app.consume_offer_budget(p_offer_id uuid, p_amount numeric)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF p_amount < 0 THEN
+    RAISE EXCEPTION 'consume_offer_budget: p_amount must be >= 0 (got %)', p_amount;
+  END IF;
+  PERFORM 1 FROM app.offer WHERE id = p_offer_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'consume_offer_budget: no such offer %', p_offer_id;
+  END IF;
+  UPDATE app.offer
+  SET budget_reserved = GREATEST(budget_reserved - p_amount, 0),
+      budget_used = budget_used + p_amount
+  WHERE id = p_offer_id;
+END;
+$$;
+
 REVOKE EXECUTE ON FUNCTION app.reserve_offer_budget(uuid, numeric) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.reserve_offer_budget(uuid, numeric) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.release_offer_budget(uuid, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.release_offer_budget(uuid, numeric) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.consume_offer_budget(uuid, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.consume_offer_budget(uuid, numeric) TO service_role;
 
 -- ============================================================================
 -- 5. Receipt dedupe: partial unique index + serialized dedupe function.

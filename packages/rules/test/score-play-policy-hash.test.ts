@@ -1,30 +1,42 @@
 /**
- * M5 (fifth gate): "Add a test that pins a hash of the WEIGHT table,
- * MONEY_MIN and the caps to SCORE_PLAY_POLICY_VERSION, so changing a
- * weight without bumping the version fails CI." Every constant hashed here
- * is the ACTUAL constant the scoring logic reads (`WEIGHT`,
- * `RADIUS_CAP`/`USER_PICK_CAP` inside `applyCourseCaps`,
- * `DEVICE_GPS_SUBTOTAL_CAP`/`OVERALL_SCORE_CAP` inside `combine`,
- * `CORROBORATION_ELIGIBLE_THRESHOLD`/`EVIDENCE_ROW_CAP`/`MAX_DWELL_MINUTES`
- * inside `scorePlay`/`classifyEvidenceRow`, `MONEY_MIN` itself) — not a
- * separately-maintained copy — so this test can only pass by accident if
- * someone changes a VALUE without also changing this file's own expected
- * hash, which is exactly the failure mode this test exists to catch.
+ * M5 (fifth gate) + F5 (sixth gate): "Add a test that pins a hash of the
+ * WEIGHT table, MONEY_MIN and the caps to SCORE_PLAY_POLICY_VERSION" (M5),
+ * then "Hoist every inline policy literal into named constants covered by
+ * the pinned hash" (F5) — every constant hashed here is the ACTUAL
+ * constant the scoring logic reads, not a separately-maintained copy, so
+ * this test can only pass by accident if someone changes a VALUE without
+ * also changing this file's own expected hash, which is exactly the
+ * failure mode this test exists to catch.
  */
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
 import {
+  ACCURACY_METERS_MAX,
+  CONNECT_IQ_ROUTE_MIN_DURATION_MINUTES,
   CORROBORATION_ELIGIBLE_THRESHOLD,
   DEVICE_GPS_SUBTOTAL_CAP,
+  DWELL_THRESHOLD_9_HOLES_MINUTES,
+  DWELL_THRESHOLD_18_HOLES_MINUTES,
   EVIDENCE_ROW_CAP,
+  FILE_IMPORT_MATCHED_WEIGHT,
+  FILE_IMPORT_UNMATCHED_WEIGHT,
+  HEALTH_ROUTE_HIGH_INSIDE_RATIO,
+  HEALTH_ROUTE_HIGH_WEIGHT,
+  HEALTH_ROUTE_LOW_WEIGHT,
+  HEALTH_ROUTE_MID_WEIGHT,
+  HEALTH_ROUTE_MIN_INSIDE_RATIO,
   MAX_DWELL_MINUTES,
   OVERALL_SCORE_CAP,
   RADIUS_CAP,
+  RECEIPT_PENDING_WEIGHT,
+  SIMULATED_PENALTY_MULTIPLIER,
+  STAFF_HARD_WINDOW_MS,
+  UNATTESTABLE_OR_NO_CHALLENGE_PENALTY_MULTIPLIER,
   USER_PICK_CAP,
   WEIGHT,
 } from "../src/internal/classify.js";
-import { MONEY_MIN, SCORE_PLAY_POLICY_VERSION } from "../src/score-play.js";
+import { CORROBORATION_WINDOW_DAYS, MONEY_MIN, ROUND_CORRELATION_WINDOW_MS, SCORE_PLAY_POLICY_VERSION } from "../src/score-play.js";
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -49,6 +61,24 @@ function policyConstants() {
     CORROBORATION_ELIGIBLE_THRESHOLD,
     EVIDENCE_ROW_CAP,
     MAX_DWELL_MINUTES,
+    // F5 (sixth gate) additions:
+    ACCURACY_METERS_MAX,
+    STAFF_HARD_WINDOW_MS,
+    SIMULATED_PENALTY_MULTIPLIER,
+    UNATTESTABLE_OR_NO_CHALLENGE_PENALTY_MULTIPLIER,
+    RECEIPT_PENDING_WEIGHT,
+    HEALTH_ROUTE_MIN_INSIDE_RATIO,
+    HEALTH_ROUTE_HIGH_INSIDE_RATIO,
+    HEALTH_ROUTE_LOW_WEIGHT,
+    HEALTH_ROUTE_MID_WEIGHT,
+    HEALTH_ROUTE_HIGH_WEIGHT,
+    CONNECT_IQ_ROUTE_MIN_DURATION_MINUTES,
+    DWELL_THRESHOLD_9_HOLES_MINUTES,
+    DWELL_THRESHOLD_18_HOLES_MINUTES,
+    FILE_IMPORT_MATCHED_WEIGHT,
+    FILE_IMPORT_UNMATCHED_WEIGHT,
+    ROUND_CORRELATION_WINDOW_MS,
+    CORROBORATION_WINDOW_DAYS,
   };
 }
 
@@ -68,7 +98,15 @@ function hashPolicyConstants(): string {
  * `hashPolicyConstants()` against the real constants — re-derive it the
  * same way for a deliberate, version-bumped change. */
 const POLICY_HASHES: Record<number, string> = {
-  1: "b8d71eb9873f9113bbbfd7d115e2a0416449c09320b2f7724324ea89ad537845",
+  // Re-pinned (sixth gate, F5) — the previous value only covered WEIGHT/
+  // MONEY_MIN/the five pre-existing caps; this one also covers every
+  // literal F5 hoisted (accuracy/window/penalty/threshold/weight
+  // constants across classify.ts and score-play.ts). SCORE_PLAY_POLICY_VERSION
+  // itself did NOT change (still 1) — F5 is a REFACTOR (moving literals
+  // into named constants of the SAME value), not a policy change, so
+  // re-pinning the hash under the same version key is correct: the
+  // ACTUAL scoring behavior is unchanged, only what this test covers.
+  1: "ad89ce3c5157ed62c82d8d8d223142e4d917596c8bd7a17efff8f7dd289431d4",
 };
 
 describe("M5: the scoring policy's constants are content-hash-pinned to SCORE_PLAY_POLICY_VERSION", () => {
@@ -88,6 +126,12 @@ describe("M5: the scoring policy's constants are content-hash-pinned to SCORE_PL
 
   it("mutation guard: changing MONEY_MIN changes the hash", () => {
     const mutated = { ...policyConstants(), MONEY_MIN: 0.5 };
+    const mutatedHash = bytesToHex(sha256(utf8ToBytes(JSON.stringify(canonicalize(mutated)))));
+    expect(mutatedHash).not.toBe(hashPolicyConstants());
+  });
+
+  it("mutation guard: changing a NEWLY-HOISTED F5 constant (STAFF_HARD_WINDOW_MS) changes the hash too", () => {
+    const mutated = { ...policyConstants(), STAFF_HARD_WINDOW_MS: 999 };
     const mutatedHash = bytesToHex(sha256(utf8ToBytes(JSON.stringify(canonicalize(mutated)))));
     expect(mutatedHash).not.toBe(hashPolicyConstants());
   });

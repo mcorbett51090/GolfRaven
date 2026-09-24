@@ -141,7 +141,12 @@ $$;
 -- TRUE` is required explicitly: confirmed empirically this session that a
 -- plain membership grant alone (no SET TRUE) leaves `SET ROLE` itself
 -- denied even with ADMIN OPTION.
-GRANT service_role, anon, authenticated TO migration_owner WITH SET TRUE;
+-- INHERIT FALSE (should-fix, post-P3a gate): migration_owner needs to be
+-- able to `SET ROLE` into these (explicit, deliberate) — it must NOT
+-- automatically inherit their privileges just by holding the membership,
+-- which INHERIT TRUE (the default) would do. Matches private_definer's
+-- own INHERIT FALSE membership grant (0016).
+GRANT service_role, anon, authenticated TO migration_owner WITH INHERIT FALSE, SET TRUE;
 
 -- [unverified — training knowledge of Supabase internals] Supabase's default
 -- grants: usage on `public` is broad, but we do NOT replicate that here,

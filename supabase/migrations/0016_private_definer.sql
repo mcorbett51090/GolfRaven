@@ -46,7 +46,12 @@ BEGIN
 END
 $$;
 GRANT USAGE ON SCHEMA app, private, auth, storage TO private_definer;
-GRANT SELECT ON auth.users TO private_definer;
+-- Column-level, not table-level (should-fix, post-P3a gate): every
+-- private.* function that reads auth.users (delete_my_data's own email
+-- lookup) only ever needs `id`/`email` — a table-wide SELECT grants
+-- every OTHER auth.users column too (raw_user_meta_data included) to a
+-- role whose whole design point is minimal reach.
+GRANT SELECT (id, email) ON auth.users TO private_definer;
 
 -- Whoever is RUNNING this migration must itself be able to `SET ROLE
 -- private_definer` for the `ALTER FUNCTION ... OWNER TO private_definer`
@@ -100,6 +105,17 @@ ALTER FUNCTION private.is_operator_of_facility(uuid, text) OWNER TO private_defi
 ALTER FUNCTION private.hit_rate_limit(text, interval, int) OWNER TO private_definer;
 ALTER FUNCTION private.purge_rate_limit_buckets() OWNER TO private_definer;
 ALTER FUNCTION private.delete_my_data(uuid) OWNER TO private_definer;
+
+-- REVOKE CREATE ON SCHEMA private FROM private_definer (should-fix,
+-- post-P3a gate): CREATE was granted above ONLY so the ownership
+-- transfers just above could succeed (Postgres checks the NEW owner has
+-- CREATE in the object's schema). Every transfer this file makes is now
+-- done -- private_definer keeps USAGE (it still needs to be CALLED,
+-- i.e. resolve names in the schema) but loses the ability to create NEW
+-- objects there, which nothing in its actual job (owning 12 already-
+-- existing functions, reaching tables through the narrow policies below)
+-- ever needs.
+REVOKE CREATE ON SCHEMA private FROM private_definer;
 
 -- ============================================================================
 -- 3. The explicit allow-list (gate round 3 step 5): every policy this
