@@ -194,9 +194,73 @@ function effectiveVoidReason(row: ReceiptRow): "duplicate" | "reviewer" | "fraud
  *    row to out-rank an `approved` one. Smallest `id` is the final
  *    tiebreak, same as before.
  *
+ * **Ninth gate, BLOCKING (score-play.ts:200-250 in that review's line
+ * numbers): the winner comparison above was INTRANSITIVE.** The eighth
+ * gate's winner-selection loop compared `capturedAt` "ONLY when BOTH the
+ * candidate and the CURRENT WINNER happen to carry a `coSignalFix` —
+ * otherwise fall straight through to `id`." That is not one order at
+ * all: WHICH tiebreak rule fires depends on which two rows happen to be
+ * compared against each other, which is exactly how a cycle becomes
+ * possible. Concretely (all three `approved`, same fingerprint): A (has a
+ * fix, `capturedAt` T-2s, id `"z"`), B (no fix, id `"m"`), C (has a fix,
+ * `capturedAt` T-1s, id `"a"`). A vs B: B has no fix, so the comparison
+ * falls through to id — `"m" < "z"`, B wins. C vs B: same — `"a" < "m"`,
+ * C wins. But A vs C: BOTH have a fix, so `capturedAt` decides — A's
+ * earlier `capturedAt` wins. That's A beats C, C beats B, B beats A: a
+ * genuine rock-paper-scissors cycle, and the greedy left-to-right fold
+ * the old code used to pick a "winner" is order-dependent whenever the
+ * candidate set contains one. The exploit: with a fold instead of a
+ * total order, 4 of the 6 permutations of `[A, B, C]` give money and 2
+ * give none, all four under the SAME `inputDigest` (order-independence
+ * only, per F4 — but the actual winner, hence the actual MONEY
+ * determination, still silently varied with array order).
+ *
+ * **The fix: ONE strict total order, applied via a real comparator
+ * (`compareCandidates`, below) and `Array.prototype.sort`, never a
+ * pairwise fold.** A sort's comparator is called on many pairs and their
+ * results must be mutually consistent (transitive) for the sort itself
+ * to be well-defined — which forces the tiebreak rule to be a SINGLE
+ * lexicographic key that never depends on which two rows are being
+ * compared:
+ *   1. status rank, descending (`approved` > `pending`);
+ *   2. HAS a `coSignalFix`, true first (a row with a fix always outranks
+ *      one without, regardless of anything about `capturedAt` — this is
+ *      the piece the eighth gate's fold got wrong: it let "no fix"
+ *      compare directly against "has fix" via id, which is exactly the
+ *      cross-group comparison that created the cycle);
+ *   3. `capturedAt`, ascending (only ever compared between two rows that
+ *      BOTH have a fix, guaranteed by rule 2 already having tied them on
+ *      "has a fix" — so this is always a well-defined, real comparison
+ *      wherever it's reached, never a fabricated default for a fixless
+ *      row);
+ *   4. `id`, ascending — final tiebreak, unchanged.
+ * Sorting by this key is provably transitive (lexicographic order over
+ * four independently well-ordered components), so the winner is now the
+ * SAME regardless of the candidates' array order — no fold, no cycle.
+ *
  * **Order-independent throughout** (F2, sixth gate, preserved): every
  * comparison here is over the SET of a fingerprint's members, never "the
  * first/last in array order." */
+function compareCandidates(a: ReceiptRow, b: ReceiptRow): number {
+  const rankDiff = RECEIPT_STATUS_RANK[b.status] - RECEIPT_STATUS_RANK[a.status]; // descending: approved(2) before pending(1)
+  if (rankDiff !== 0) return rankDiff;
+
+  const aHasFix = a.coSignalFix !== undefined;
+  const bHasFix = b.coSignalFix !== undefined;
+  if (aHasFix !== bHasFix) return aHasFix ? -1 : 1; // a row WITH a fix always sorts first
+
+  if (aHasFix && bHasFix) {
+    // Both have a fix (guaranteed by the check above once we reach here
+    // with aHasFix === bHasFix === true) — capturedAt is always
+    // well-defined for both sides, never a fabricated stand-in.
+    const atDiff = a.coSignalFix!.capturedAt - b.coSignalFix!.capturedAt; // ascending: earliest first
+    if (atDiff !== 0) return atDiff;
+  }
+
+  if (a.id < b.id) return -1; // ascending id, final tiebreak
+  if (a.id > b.id) return 1;
+  return 0;
+}
 function voidDuplicateFingerprints(evidence: Evidence[]): Evidence[] {
   const byFingerprint = new Map<string, ReceiptRow[]>();
   for (const row of evidence) {
@@ -224,29 +288,10 @@ function voidDuplicateFingerprints(evidence: Evidence[]): Evidence[] {
     const candidates = rows.filter((r) => r.status !== "void");
     if (candidates.length === 0) continue; // every copy was a dedup-void; nothing to pick, nothing to poison
 
-    let winner = candidates[0]!;
-    for (const row of candidates) {
-      const rowRank = RECEIPT_STATUS_RANK[row.status];
-      const winnerRank = RECEIPT_STATUS_RANK[winner.status];
-      if (rowRank > winnerRank) {
-        winner = row;
-        continue;
-      }
-      if (rowRank < winnerRank) continue;
-      // Tied on status: earliest capturedAt wins, but ONLY as a tiebreak
-      // between equals — a `pending` row can never reach this branch
-      // against an `approved` one, closing the seventh gate's Case B.
-      if (row.coSignalFix !== undefined && winner.coSignalFix !== undefined) {
-        const rowAt = row.coSignalFix.capturedAt;
-        const winnerAt = winner.coSignalFix.capturedAt;
-        if (rowAt < winnerAt) {
-          winner = row;
-          continue;
-        }
-        if (rowAt > winnerAt) continue;
-      }
-      if (row.id < winner.id) winner = row;
-    }
+    // Ninth gate: a single Array.prototype.sort over the transitive
+    // `compareCandidates` total order — NOT a pairwise fold (see this
+    // function's own doc for exactly why a fold went wrong here).
+    const winner = candidates.slice().sort(compareCandidates)[0]!;
     winnerIdByFingerprint.set(fingerprint, winner.id);
   }
   return evidence.map((row) => {

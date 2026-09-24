@@ -530,13 +530,14 @@ function isWellFormedLooseLocalDate(v: unknown): v is string {
   return isRealCalendarDate(y!, m!, d!);
 }
 
-/** F3, TIGHTENED by eighth gate item 2: a LOOSE, tolerant read of a
- * not-yet-validated row's `facilityId`/`localDate`/`courseId` —
- * deliberately NOT the strict `EvidenceSchema`. This is what decides
- * whether a row is even a CANDIDATE for this play (and therefore eligible
- * for quarantine-on-malformed, rather than being silently excluded as
- * someone else's evidence) — H3's residual rule applies here too: a row
- * with no `courseId` at all is facility-level and always a candidate.
+/** F3, TIGHTENED by eighth gate item 2, TIGHTENED AGAIN by ninth gate item
+ * 2: a LOOSE, tolerant read of a not-yet-validated row's `facilityId`/
+ * `localDate`/`courseId` — deliberately NOT the strict `EvidenceSchema`.
+ * This is what decides whether a row is even a CANDIDATE for this play
+ * (and therefore eligible for quarantine-on-malformed, rather than being
+ * silently excluded as someone else's evidence) — H3's residual rule
+ * applies here too: a row with no `courseId` at all is facility-level and
+ * always a candidate.
  *
  * **The seventh gate's version of this function compared FIRST and never
  * asked whether the value being compared was even well-formed** — so
@@ -550,17 +551,37 @@ function isWellFormedLooseLocalDate(v: unknown): v is string {
  * and routing a malformed on-play row to "off-play" instead of
  * "quarantined" let it skip the quarantine hold (`scorePlay`'s forced
  * `heldReview` + the DB layer's mandatory `fraud_signal`/`review_item`,
- * §3 of the security doc) entirely.
+ * §3 of the security doc) entirely. The eighth gate's fix: check
+ * WELL-FORMEDNESS first, and treat ANY malformed anchor field as making
+ * the row a CANDIDATE unconditionally.
  *
- * The fix checks WELL-FORMEDNESS first: only once every anchor field
- * present is well-formed does a value comparison even happen. A
- * malformed field (wrong type, or a value that fails the exact same
- * check the strict schema will apply) makes the row a CANDIDATE
- * unconditionally — it proceeds to strict `parseEvidence`, which rejects
- * it for that same malformation, landing it in `excludedRows` with
- * `kind: "quarantined"` (never silently dropped as `"off-play"`). Only a
- * WELL-FORMED value that provably differs from the play's own is
- * genuinely "a different play's row, no security significance." */
+ * **Ninth gate, item 2: that eighth-gate fix was ITSELF too blunt — "ANY
+ * malformed anchor ⇒ candidate" ignored every OTHER, well-formed anchor
+ * that might already prove the row belongs to a DIFFERENT play.** A row
+ * with `facilityId: "fac_OTHER"` (well-formed, and plainly NOT this
+ * play's facility) and `courseId: null` (malformed) used to become a
+ * quarantine CANDIDATE purely because of the malformed `courseId` — even
+ * though `facilityId` alone already proves it's someone else's row. The
+ * exploit: 1,001 such rows (genuinely another play's evidence, merely
+ * carrying a stray malformed `courseId`) all became candidates, pushed
+ * `matchingIndices` over `EVIDENCE_ROW_CAP`, and failed the WHOLE,
+ * otherwise-legitimate play (`ok: false`) — a trivial DoS against any
+ * play, using rows that were never this play's evidence in the first
+ * place, once the same malformed courseId shape was known.
+ *
+ * **The fix separates two questions that were conflated into one
+ * `return true`:** "is any PRESENT, WELL-FORMED anchor field a proof this
+ * row belongs elsewhere?" (checked FIRST, independently per field — any
+ * one well-formed mismatch is decisive and short-circuits to `false`,
+ * i.e. off-play, REGARDLESS of what any other anchor field looks like)
+ * versus "given that no well-formed anchor disproves it, is there still
+ * some malformed anchor we can't rule out?" (only reached once every
+ * well-formed anchor has been confirmed to AGREE with the play — in
+ * which case the row is a candidate, and lands in `excludedRows` as
+ * `kind: "quarantined"` if the malformed field then fails strict parse,
+ * exactly as the eighth gate intended for a row that's genuinely
+ * ambiguous). A row where every anchor is well-formed and every one
+ * matches is, as always, a normal on-play candidate. */
 function looseRowMatchesPlay(raw: unknown, ctx: ScorePlayContext): boolean {
   if (raw === null || typeof raw !== "object") return false;
   const r = raw as Record<string, unknown>;
@@ -570,11 +591,20 @@ function looseRowMatchesPlay(raw: unknown, ctx: ScorePlayContext): boolean {
   const courseIdPresent = r.courseId !== undefined;
   const courseWellFormed = !courseIdPresent || isWellFormedIdLike(r.courseId);
 
-  if (!facilityWellFormed || !dateWellFormed || !courseWellFormed) return true;
+  // Ninth gate: ANY well-formed anchor that DISAGREES with the play is
+  // decisive proof this row belongs elsewhere — off-play, no matter what
+  // any OTHER anchor field looks like (malformed or not). Checked before
+  // anything else, one field at a time, so a malformed courseId can never
+  // paper over a well-formed, mismatched facilityId (or vice versa).
+  if (facilityWellFormed && r.facilityId !== ctx.playFacilityId) return false;
+  if (dateWellFormed && r.localDate !== ctx.playLocalDate) return false;
+  if (courseIdPresent && courseWellFormed && r.courseId !== ctx.playCourseId) return false;
 
-  if (r.facilityId !== ctx.playFacilityId) return false;
-  if (r.localDate !== ctx.playLocalDate) return false;
-  if (courseIdPresent && r.courseId !== ctx.playCourseId) return false;
+  // Every WELL-FORMED anchor present agrees with the play (the loop
+  // above would otherwise already have returned false). Either every
+  // anchor was well-formed too (a normal on-play row) or at least one was
+  // malformed (a genuine candidate for quarantine) — both cases are a
+  // candidate; strict `parseEvidence` is what tells them apart.
   return true;
 }
 

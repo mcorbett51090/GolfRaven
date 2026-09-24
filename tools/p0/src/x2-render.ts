@@ -649,6 +649,13 @@ export async function renderUrl(
           await context.close();
         }
       } finally {
-        await browser.close();
+        await cdpSession.detach().catch(() => {
+          // Already detached, or the browser is already closing — nothing
+          // further to do.
+        });
       }
+    } finally {
+      await browser.close();
     }
+  }
+}

@@ -93,19 +93,23 @@ else
 fi
 "${PSQL[@]}" -c "DELETE FROM app.offer WHERE id = '$BUDGET_OFFER_ID';" >/dev/null
 
-echo "tools/db/test-money-path-concurrency.sh: receipt phash dedupe race (M4)"
+echo "tools/db/test-money-path-concurrency.sh: receipt phash dedupe race, SAME user (M4)"
 "${PSQL[@]}" -c "DELETE FROM app.purchase_evidence WHERE id::text LIKE 'c1a00002%'; DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG';" >/dev/null 2>&1 || true
 PE_1="c1a00002-0000-0000-0000-000000000001"
 PE_2="c1a00002-0000-0000-0000-000000000002"
 "${PSQL[@]}" -c "
   INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
   VALUES ('$PE_1'::uuid, '00000000-0000-0000-0000-00000000000a', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid'),
-         ('$PE_2'::uuid, '00000000-0000-0000-0000-00000000000b', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')
+         ('$PE_2'::uuid, '00000000-0000-0000-0000-00000000000a', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')
   ON CONFLICT (id) DO NOTHING;
 " >/dev/null
 
+# ⛔ FIX (post-P3a re-gate, cross-user griefing): dedupe_receipt_fingerprint
+# now only auto-voids a phash match from the SAME user (a genuine retry) --
+# this race proves that path is still race-safe under two REAL concurrent
+# sessions, same as before the fix.
 DEDUPE_1="SELECT app.dedupe_receipt_fingerprint('$PE_1'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, '$TAG', 'fac_x', current_date);"
-DEDUPE_2="SELECT app.dedupe_receipt_fingerprint('$PE_2'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid, '$TAG', 'fac_x', current_date);"
+DEDUPE_2="SELECT app.dedupe_receipt_fingerprint('$PE_2'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, '$TAG', 'fac_x', current_date);"
 "${PSQL[@]}" -c "$DEDUPE_1" >/tmp/mpconc-d1.out 2>/tmp/mpconc-d1.err &
 PID5=$!
 "${PSQL[@]}" -c "$DEDUPE_2" >/tmp/mpconc-d2.out 2>/tmp/mpconc-d2.err &
@@ -113,15 +117,48 @@ PID6=$!
 wait "$PID5" "$PID6" || true
 
 FP_COUNT=$(count "SELECT count(*) FROM app.receipt_fingerprint WHERE phash = '$TAG'")
-VOID_COUNT=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_1', '$PE_2') AND status = 'void'")
+VOID_COUNT=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_1', '$PE_2') AND status = 'void' AND void_reason = 'duplicate'")
 if [ "$FP_COUNT" != "1" ] || [ "$VOID_COUNT" != "1" ]; then
-  echo "FAIL: concurrent dedupe_receipt_fingerprint race left $FP_COUNT fingerprint row(s) and $VOID_COUNT void purchase(s), expected exactly 1 and 1" >&2
+  echo "FAIL: concurrent SAME-USER dedupe_receipt_fingerprint race left $FP_COUNT fingerprint row(s) and $VOID_COUNT void(void_reason=duplicate) purchase(s), expected exactly 1 and 1" >&2
   cat /tmp/mpconc-d1.out /tmp/mpconc-d2.out /tmp/mpconc-d1.err /tmp/mpconc-d2.err >&2 || true
   FAILED=1
 else
-  echo "PASS: concurrent receipt-phash dedupe race -> exactly 1 fingerprint row, exactly 1 purchase voided"
+  echo "PASS: concurrent SAME-USER receipt-phash dedupe race -> exactly 1 fingerprint row, exactly 1 purchase voided (void_reason=duplicate)"
 fi
 "${PSQL[@]}" -c "DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG'; DELETE FROM app.purchase_evidence WHERE id IN ('$PE_1', '$PE_2');" >/dev/null
+
+echo "tools/db/test-money-path-concurrency.sh: receipt phash dedupe race, CROSS user (post-P3a re-gate)"
+TAG_XU="${TAG}-xu"
+"${PSQL[@]}" -c "DELETE FROM app.purchase_evidence WHERE id::text LIKE 'c1a00004%'; DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG_XU'; DELETE FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id::text LIKE 'c1a00004%';" >/dev/null 2>&1 || true
+PE_3="c1a00004-0000-0000-0000-000000000001"
+PE_4="c1a00004-0000-0000-0000-000000000002"
+"${PSQL[@]}" -c "
+  INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+  VALUES ('$PE_3'::uuid, '00000000-0000-0000-0000-00000000000a', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid'),
+         ('$PE_4'::uuid, '00000000-0000-0000-0000-00000000000b', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')
+  ON CONFLICT (id) DO NOTHING;
+" >/dev/null
+
+DEDUPE_3="SELECT app.dedupe_receipt_fingerprint('$PE_3'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, '$TAG_XU', 'fac_x', current_date);"
+DEDUPE_4="SELECT app.dedupe_receipt_fingerprint('$PE_4'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid, '$TAG_XU', 'fac_x', current_date);"
+"${PSQL[@]}" -c "$DEDUPE_3" >/tmp/mpconc-d3.out 2>/tmp/mpconc-d3.err &
+PID7=$!
+"${PSQL[@]}" -c "$DEDUPE_4" >/tmp/mpconc-d4.out 2>/tmp/mpconc-d4.err &
+PID8=$!
+wait "$PID7" "$PID8" || true
+
+FP_COUNT_XU=$(count "SELECT count(*) FROM app.receipt_fingerprint WHERE phash = '$TAG_XU'")
+VOID_COUNT_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4') AND status = 'void'")
+PENDING_COUNT_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4') AND status = 'pending'")
+REVIEW_COUNT_XU=$(count "SELECT count(*) FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_3', '$PE_4')")
+if [ "$FP_COUNT_XU" != "1" ] || [ "$VOID_COUNT_XU" != "0" ] || [ "$PENDING_COUNT_XU" != "2" ] || [ "$REVIEW_COUNT_XU" -lt "1" ]; then
+  echo "FAIL: concurrent CROSS-USER dedupe_receipt_fingerprint race: fp=$FP_COUNT_XU void=$VOID_COUNT_XU pending=$PENDING_COUNT_XU review=$REVIEW_COUNT_XU (expected fp=1 void=0 pending=2 review>=1 -- neither purchase should be auto-voided across users)" >&2
+  cat /tmp/mpconc-d3.out /tmp/mpconc-d4.out /tmp/mpconc-d3.err /tmp/mpconc-d4.err >&2 || true
+  FAILED=1
+else
+  echo "PASS: concurrent CROSS-USER receipt-phash dedupe race -> exactly 1 fingerprint row, ZERO voided, both left pending, review_item opened (no griefing)"
+fi
+"${PSQL[@]}" -c "DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG_XU'; DELETE FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_3', '$PE_4'); DELETE FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4');" >/dev/null
 
 echo "tools/db/test-money-path-concurrency.sh: dedupe_receipt_fingerprint isolation-level guard (M4)"
 # M4 fix 1: dedupe_receipt_fingerprint asserts transaction_isolation =
