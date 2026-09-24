@@ -5,10 +5,10 @@
 // commonly ships as .mts/.mjs, and a bypass file just needs an extension
 // the walker skips).
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { buildConfigIndex } from "./config.js";
-import { lintSource, type LintResult } from "./lint.js";
+import { buildConfigIndex, deriveRepoRoot } from "./config.js";
+import { lintSource, type Finding, type LintResult } from "./lint.js";
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
 
@@ -27,16 +27,57 @@ const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts",
 // differently-located `__fixtures__` is linted like anything else.
 const EXCLUDED_BASENAMES = new Set(["node_modules"]);
 
-function listFiles(root: string): string[] {
+// ⛔ FIX (follow-up, post-P3a re-gate round 2): "the lint walker must
+// track visited real paths. A symlink loop should produce a clear
+// finding (or be skipped), never a stack crash." Same fix as config.ts's
+// own directory walker, applied here too — this is the walker that finds
+// SOURCE files, and a symlink loop under supabase/functions would crash
+// it exactly the same way.
+function listFiles(root: string): { files: string[]; findings: LintResult[] } {
   const out: string[] = [];
+  const problems: LintResult[] = [];
   const ownFixturesDir = resolve(root, "__fixtures__");
+  const visitedRealPaths = new Set<string>();
+  try {
+    visitedRealPaths.add(realpathSync(root));
+  } catch {
+    // root itself unreadable/missing surfaces via readdirSync below.
+  }
   const walk = (dir: string) => {
-    for (const entry of readdirSync(dir)) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
       const full = join(dir, entry);
-      const st = statSync(full);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
       if (st.isDirectory()) {
         if (EXCLUDED_BASENAMES.has(entry)) continue;
         if (resolve(full) === ownFixturesDir) continue;
+        let real: string;
+        try {
+          real = realpathSync(full);
+        } catch {
+          continue;
+        }
+        if (visitedRealPaths.has(real)) {
+          const finding: Finding = {
+            rule: "banned-import-specifier",
+            message: `directory "${relative(root, full)}" resolves to an already-visited real path (a symlink loop or an alias of a directory already walked) -- not walked again`,
+            line: 0,
+            column: 0,
+          };
+          problems.push({ filePath: relative(root, full), findings: [finding] });
+          continue;
+        }
+        visitedRealPaths.add(real);
         walk(full);
       } else if (SOURCE_EXTENSIONS.has(entry.slice(entry.lastIndexOf(".")))) {
         out.push(full);
@@ -44,7 +85,7 @@ function listFiles(root: string): string[] {
     }
   };
   walk(root);
-  return out;
+  return { files: out, findings: problems };
 }
 
 // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "a pinned allow-list of ...
@@ -71,13 +112,23 @@ function loadPinnedImportTargets(): string[] {
 // ⛔ REWRITE (M2 BLOCKING, post-P3a re-gate): the old root+local
 // two-level merge is GONE, replaced entirely by tools/service-role-lint/
 // src/config.ts's directory-walking ConfigIndex — see that module's own
-// header comment for the four confirmed bypasses (n1-n4) this closes.
-export function lintDirectory(functionsRoot: string): LintResult[] {
+// header comment for the confirmed bypasses (n1-n4, then R1-R5 + the
+// lockfile, round 2) this closes.
+//
+// `repoRoot` (round 2, requirement 7): optional — when the caller omits
+// it (every existing caller in this codebase's own tests), it is derived
+// via config.ts's own `deriveRepoRoot` (walks up from functionsRoot
+// looking for `.git`). The real CLI (below) always lets this default
+// apply; a test that needs a SPECIFIC repoRoot (e.g. a synthetic /tmp
+// tree simulating an ancestor config) passes one explicitly.
+export function lintDirectory(functionsRoot: string, repoRoot?: string): LintResult[] {
   const root = resolve(functionsRoot);
   const pinnedImportTargets = new Set(loadPinnedImportTargets());
-  const configIndex = buildConfigIndex(root, pinnedImportTargets);
+  const configIndex = buildConfigIndex(root, pinnedImportTargets, repoRoot ?? deriveRepoRoot(root));
   const results: LintResult[] = [...configIndex.results];
-  for (const file of listFiles(root)) {
+  const { files, findings: walkFindings } = listFiles(root);
+  results.push(...walkFindings);
+  for (const file of files) {
     const source = readFileSync(file, "utf8");
     const relPath = relative(root, file);
     const importMap = configIndex.resolveFor(file);
@@ -89,6 +140,6 @@ export function lintDirectory(functionsRoot: string): LintResult[] {
   return results;
 }
 
-export { buildConfigIndex } from "./config.js";
+export { buildConfigIndex, deriveRepoRoot } from "./config.js";
 export { lintSource } from "./lint.js";
 export type { Finding, LintOptions, LintResult, RuleId } from "./lint.js";

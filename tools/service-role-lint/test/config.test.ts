@@ -18,14 +18,14 @@ const PINNED = new Set(["https://esm.sh/zod@3.23.8"]);
 
 describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless of importers", () => {
   it("n1: flags a `scopes` key in deno.json (never inspected by the old host-trust model)", () => {
-    const index = buildConfigIndex(join(FIXTURES_ROOT, "n1-scopes"), PINNED);
+    const index = buildConfigIndex(join(FIXTURES_ROOT, "n1-scopes"), PINNED, join(FIXTURES_ROOT, "n1-scopes"));
     expect(
       index.results.some((r) => r.findings.some((f) => f.message.includes('disallowed top-level key "scopes"'))),
     ).toBe(true);
   });
 
   it("n2: deno.json AND import_map.json both present is flagged as ambiguous -- neither silently wins", () => {
-    const index = buildConfigIndex(join(FIXTURES_ROOT, "n2-both-present"), PINNED);
+    const index = buildConfigIndex(join(FIXTURES_ROOT, "n2-both-present"), PINNED, join(FIXTURES_ROOT, "n2-both-present"));
     const messages = index.results.flatMap((r) => r.findings.map((f) => f.message));
     expect(messages.some((m) => m.includes("more than one config file present"))).toBe(true);
     // Fails CLOSED: the directory resolves to an EMPTY map, so import_map.json's
@@ -35,7 +35,7 @@ describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless
   });
 
   it("n3: a per-function fn/deno.json is found by walking UP from fn/lib/x.ts (two directory levels), not just checking the file's own directory merged with the root", () => {
-    const results = lintDirectory(join(FIXTURES_ROOT, "n3-nested-function"));
+    const results = lintDirectory(join(FIXTURES_ROOT, "n3-nested-function"), join(FIXTURES_ROOT, "n3-nested-function"));
     const flat = results.flatMap((r) => r.findings);
     expect(
       flat.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list")),
@@ -43,27 +43,27 @@ describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless
   });
 
   it("n4: deno.jsonc is read (was never read at all by the old model)", () => {
-    const index = buildConfigIndex(join(FIXTURES_ROOT, "n4-jsonc"), PINNED);
+    const index = buildConfigIndex(join(FIXTURES_ROOT, "n4-jsonc"), PINNED, join(FIXTURES_ROOT, "n4-jsonc"));
     const messages = index.results.flatMap((r) => r.findings.map((f) => f.message));
     expect(messages.some((m) => m.includes('imports["admin"]') && m.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
   });
 
   it("disallowed-key: an `importMap` key is rejected outright, even alongside an otherwise-clean, pinned `imports` entry", () => {
-    const index = buildConfigIndex(join(FIXTURES_ROOT, "disallowed-key"), PINNED);
+    const index = buildConfigIndex(join(FIXTURES_ROOT, "disallowed-key"), PINNED, join(FIXTURES_ROOT, "disallowed-key"));
     expect(
       index.results.some((r) => r.findings.some((f) => f.message.includes('disallowed top-level key "importMap"'))),
     ).toBe(true);
   });
 
   it("good control: a per-function deno.json whose only target is pinned produces ZERO findings, config or otherwise", () => {
-    const results = lintDirectory(join(FIXTURES_ROOT, "good-control"));
+    const results = lintDirectory(join(FIXTURES_ROOT, "good-control"), join(FIXTURES_ROOT, "good-control"));
     expect(results).toEqual([]);
   });
 });
 
 describe("config.ts — allowed top-level keys", () => {
   it("does not flag compilerOptions/lint/fmt/tasks alongside imports", () => {
-    const index = buildConfigIndex(join(FIXTURES_ROOT, "good-control", "somefn"), PINNED);
+    const index = buildConfigIndex(join(FIXTURES_ROOT, "good-control", "somefn"), PINNED, join(FIXTURES_ROOT, "good-control", "somefn"));
     expect(index.results).toEqual([]);
   });
 });
