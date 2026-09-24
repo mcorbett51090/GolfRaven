@@ -247,11 +247,16 @@ export function lintSource(source: string, filePath: string): Finding[] {
     // Find the root identifier of the member-expression chain
     // (`svc.storage.from(...).upload(...)` -> `svc`).
     let base: TSESTree.Node = callee.object;
-    while (
-      base.type === AST_NODE_TYPES.MemberExpression ||
-      (base.type === AST_NODE_TYPES.CallExpression && base.callee.type === AST_NODE_TYPES.MemberExpression)
-    ) {
-      base = base.type === AST_NODE_TYPES.MemberExpression ? base.object : base.callee.object;
+    for (;;) {
+      if (base.type === AST_NODE_TYPES.MemberExpression) {
+        base = base.object;
+        continue;
+      }
+      if (base.type === AST_NODE_TYPES.CallExpression && base.callee.type === AST_NODE_TYPES.MemberExpression) {
+        base = base.callee.object;
+        continue;
+      }
+      break;
     }
     if (base.type !== AST_NODE_TYPES.Identifier || !serviceRoleIdentifiers.has(base.name)) return;
 

@@ -92,6 +92,51 @@ jobs:
       - name: verify-contract (contract/catalog.schema.json must match packages/catalog's Zod schema)
         run: node tools/catalog/dist/verify-contract.js
 
+  db-tests:
+    # Distinct job id/name from `verify` on purpose — task instruction
+    # ("keep the job id and name distinct, and don't rename the existing
+    # required job") and this repo's own convention (AGENTS.md "Required
+    # status checks"): a NEW job is additive, never a reason to touch an
+    # existing required check's identity.
+    name: player-plane DB (migrations + pgTAP authorization matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install PostgreSQL 16 + PostGIS 3 + pgTAP (apt)
+        # Matches this repo's build-plan-cited local dev setup (build plan
+        # §10 P3, docs/golf-trails/02-build-plan.md:2758): Postgres 16,
+        # PostGIS 3.4, pgTAP, all from Ubuntu's own apt repos — no Docker,
+        # no Supabase CLI (neither is available in this environment either;
+        # supabase/tests/shim.sql is the local stand-in both places).
+        # apt.postgresql.org's PGDG repo is NOT added here: ubuntu-latest's
+        # default apt sources already carry postgresql-16 + the matching
+        # postgis/pgtap packages for that release, confirmed this session
+        # against the exact package set installed in this dev environment.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-16 \
+            postgresql-16-postgis-3 \
+            postgresql-16-postgis-3-scripts \
+            postgresql-16-pgtap \
+            libtap-parser-sourcehandler-pgtap-perl
+
+      - name: Run tools/db/test.sh
+        # The harness owns its own throwaway cluster end to end (initdb,
+        # start, shim, migrations, seed fixtures, pgTAP, teardown) — see
+        # its header comment for the exact sequence. Non-zero exit here
+        # fails the job; no `paths:` filter on this workflow's trigger
+        # (AGENTS.md "Required status checks — never add paths: to a
+        # required workflow"), so this job always evaluates once it is
+        # made required, same as `verify` and `gitleaks`.
+        run: bash tools/db/test.sh
+
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
     runs-on: ubuntu-latest
