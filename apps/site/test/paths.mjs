@@ -1,8 +1,10 @@
 /**
  * Shared build-output locations for the test suite, imported by both
  * `global-setup.mjs` (which produces them) and the `*.test.ts` files
- * (which read them). A FIXED path under the OS temp dir (not `mkdtemp`)
- * so both sides can compute it independently with no manifest file.
+ * (which read them). `TMP_BASE` is a fresh `mkdtemp()` directory per test
+ * run (see `tmp-base.mjs`'s doc for how that path crosses the
+ * globalSetup/test-file process boundary) — never a fixed, shared `/tmp`
+ * path.
  *
  * Three separate builds, because B2/B3 need genuinely different catalog
  * inputs that can't share one `dist/`:
@@ -17,10 +19,14 @@
  *   - `paginated` — the SAME real fixture data, with `REGION_PAGE_SIZE=1`
  *                    (B2: "Run [AT1] with REGION_PAGE_SIZE=1 too").
  */
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readTmpBase } from "./tmp-base.mjs";
 
-export const TMP_BASE = join(tmpdir(), "golfraven-site-tests");
+// Top-level await: resolved once, at import time. `global-setup.mjs` MUST
+// have called `createTmpBase()` (and only then imported this module, or a
+// module that imports it) before any test file's import of this module
+// runs — see `tmp-base.mjs`'s doc.
+export const TMP_BASE = await readTmpBase();
 export const FIXTURE_DATA_DIR = join(TMP_BASE, "data");
 
 export const BUILDS = {

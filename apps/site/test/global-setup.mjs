@@ -4,11 +4,17 @@
  * `package.json`'s `build` script runs (verify-input -> emit-indexability
  * -> astro build -> verify-sitemap), so the test dist trees are built the
  * same way a real build would be, just against different inputs/outDirs.
+ *
+ * Creates a fresh `mkdtemp()` base FIRST (`tmp-base.mjs`'s
+ * `createTmpBase()`) and only THEN imports `paths.mjs` (dynamically, so
+ * the ordering is explicit) — `paths.mjs`'s own top-level `await` reads
+ * the path this just created.
  */
 import { execFileSync } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUILDS, TMP_BASE, FIXTURE_DATA_DIR } from "./paths.mjs";
+import { createTmpBase } from "./tmp-base.mjs";
 import { writeFixtureDataDir } from "./write-fixture-data-dir.mjs";
 
 const siteRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -40,11 +46,19 @@ function runBuild(name, { dist, indexability, env: extraEnv }) {
 }
 
 export default async function setup() {
-  await rm(TMP_BASE, { recursive: true, force: true });
-  await mkdir(FIXTURE_DATA_DIR, { recursive: true });
-  await writeFixtureDataDir(FIXTURE_DATA_DIR);
+  const tmpBase = await createTmpBase();
+  const fixtureDataDir = join(tmpBase, "data");
+  await mkdir(fixtureDataDir, { recursive: true });
+  await writeFixtureDataDir(fixtureDataDir);
+
+  const { BUILDS } = await import("./paths.mjs");
 
   runBuild("real", BUILDS.real);
   runBuild("demo", BUILDS.demo);
   runBuild("paginated", BUILDS.paginated);
+
+  // Teardown: vitest calls the function a globalSetup default-exports.
+  return async () => {
+    await rm(tmpBase, { recursive: true, force: true });
+  };
 }
