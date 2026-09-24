@@ -1,0 +1,30 @@
+{
+  "name": "@golfraven/import",
+  "private": true,
+  "version": "0.0.0",
+  "description": "GolfRaven file import: parse a played round from a FIT, GPX or CSV file entirely on device, then adapt it into @golfraven/matching's matchRoute() input (build plan §7.3 lane 2, §7.4).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@golfraven/matching": "workspace:*",
+    "fit-file-parser": "6.1.2",
+    "sax": "1.4.1"
+  },
+  "devDependencies": {
+    "@types/sax": "1.2.7",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}
