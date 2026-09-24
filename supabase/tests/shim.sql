@@ -191,8 +191,16 @@ AS $$
   SELECT auth.jwt() ->> 'email';
 $$;
 
-GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role, migration_owner;
 GRANT SELECT ON auth.users TO service_role;
+-- migration_owner (S1, gate round 3) needs REFERENCES on auth.users
+-- because several migrations' own tables declare
+-- `... REFERENCES auth.users (id)` FK constraints — creating an FK
+-- requires REFERENCES on the TARGET table for whichever role runs the
+-- CREATE/ALTER TABLE, regardless of RLS (FK enforcement is independent of
+-- RLS and always reads with the referenced table owner's rights, not the
+-- FK-creating role's — REFERENCES is a one-time, DDL-time check).
+GRANT REFERENCES ON auth.users TO migration_owner;
 -- No SELECT for anon/authenticated on auth.users — real Supabase does not
 -- expose it to PostgREST either [unverified — training knowledge].
 GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated, service_role;
@@ -235,12 +243,25 @@ ALTER TABLE storage.buckets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.buckets FORCE ROW LEVEL SECURITY;
 ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.objects FORCE ROW LEVEL SECURITY;
--- No policies created here — the migrations (0011_storage.sql) create the
--- buckets and, per build plan §4.4, deliberately add NO storage.objects
--- policy for anon or authenticated on either bucket. RLS enabled + forced +
--- zero policies for those roles is exactly "denied (no policy)" (§4.7.7).
+-- No CLIENT-facing policies created here — the migrations (0012_storage.sql)
+-- create the buckets and, per build plan §4.4, deliberately add NO
+-- storage.objects policy for anon or authenticated on either bucket. RLS
+-- enabled + forced + zero policies for those roles is exactly "denied (no
+-- policy)" (§4.7.7).
+--
+-- migration_owner IS granted a narrow INSERT-only policy here (S1, gate
+-- round 3, 1a(i) above): 0012_storage.sql's own INSERT INTO storage.buckets
+-- runs as migration_owner in restricted mode, and storage.buckets is owned
+-- by the bootstrap role (created in this file), not migration_owner, so
+-- FORCE ROW LEVEL SECURITY applies to it the same as to anon/authenticated
+-- — no exemption, just an explicit grant for the one legitimate write this
+-- role's migration actually makes. Bucket config only, never storage.objects
+-- (no policy for migration_owner there at all).
+GRANT INSERT ON storage.buckets TO migration_owner;
+CREATE POLICY migration_owner_seed_buckets ON storage.buckets
+  FOR INSERT TO migration_owner WITH CHECK (true);
 
-GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role, migration_owner;
 GRANT SELECT, INSERT, UPDATE, DELETE ON storage.buckets TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON storage.objects TO service_role;
 -- anon/authenticated get table-level SELECT/INSERT grants (matching real

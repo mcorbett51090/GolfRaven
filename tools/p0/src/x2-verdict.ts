@@ -298,6 +298,14 @@ function checkQuote(
         "raw bytes, and belong to the trail citing it).",
     );
   }
+  if (!entry.recorded) {
+    throw new Error(
+      `${label} (trail "${trail}") cites evidenceSha "${fact.evidenceSha}", which is a NON-RECORDED capture ` +
+        "(Addendum J correction's first-capture-wins rule: a later capture of the same URL, ingested with " +
+        "--additional, is stored as real evidence but is never the one a confirmation may cite). Refusing " +
+        "to run — cite the recorded capture's SHA instead.",
+    );
+  }
   const text = entry.text;
   if (text === null) {
     reasons.push(
@@ -329,13 +337,28 @@ function checkQuote(
  * trail's own evidence — so the lookup below is safe by construction; the
  * thrown error here is unreachable in practice and exists only so a future
  * change that stops calling this after `checkQuote` fails loudly instead of
- * silently mislabeling a method. */
-function factMethod(evidence: TrailEvidenceMap, evidenceSha: string): X2Method {
+ * silently mislabeling a method. Gate finding: when the cited evidence's
+ * `method` was DEFAULTED (a legacy manifest entry from before this field
+ * existed), that is recorded into `reasons` — informational, not a
+ * failure, but never silent, so a reader can see a value was assumed
+ * rather than read from the manifest. */
+function factMethod(
+  evidence: TrailEvidenceMap,
+  evidenceSha: string,
+  label: string,
+  reasons: string[],
+): X2Method {
   const entry = evidence.get(evidenceSha);
   if (!entry) {
     throw new Error(
       `internal: evidenceSha "${evidenceSha}" missing from this trail's evidence while building the facts ` +
         "output — this should be unreachable, since checkQuote already validates evidenceSha first.",
+    );
+  }
+  if (entry.methodDefaulted) {
+    reasons.push(
+      `${label}: evidence ${evidenceSha.slice(0, 12)}... has no \`method\` field (legacy manifest) — ` +
+        'defaulted to "direct".',
     );
   }
   return entry.method;
@@ -457,7 +480,7 @@ export function computeX2Verdict(
       facts: {
         roster: (trailConfirmation?.roster ?? []).map((r) => ({
           ...r,
-          method: factMethod(trailEvidence.bySha, r.evidenceSha),
+          method: factMethod(trailEvidence.bySha, r.evidenceSha, `Roster entry "${r.name}"`, reasons),
         })),
         completionUnit: trailConfirmation?.completionUnit
           ? {
@@ -465,6 +488,8 @@ export function computeX2Verdict(
               method: factMethod(
                 trailEvidence.bySha,
                 trailConfirmation.completionUnit.evidenceSha,
+                "completionUnit",
+                reasons,
               ),
             }
           : null,
@@ -474,6 +499,8 @@ export function computeX2Verdict(
               method: factMethod(
                 trailEvidence.bySha,
                 trailConfirmation.season.evidenceSha,
+                "season",
+                reasons,
               ),
             }
           : null,

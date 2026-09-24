@@ -19,12 +19,12 @@
   },
   "dependencies": {
     "entities": "8.1.0",
+    "playwright-core": "1.56.1",
     "sax": "1.4.1",
     "unpdf": "1.8.1"
   },
   "devDependencies": {
     "@types/sax": "1.2.7",
-    "playwright-core": "1.56.1",
     "typescript": "7.0.2",
     "vitest": "5.0.1"
   }

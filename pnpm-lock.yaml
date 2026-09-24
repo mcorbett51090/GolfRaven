@@ -206,6 +206,9 @@ importers:
       entities:
         specifier: 8.1.0
         version: 8.1.0
+      playwright-core:
+        specifier: 1.56.1
+        version: 1.56.1
       sax:
         specifier: 1.4.1
         version: 1.4.1
@@ -216,9 +219,6 @@ importers:
       '@types/sax':
         specifier: 1.2.7
         version: 1.2.7
-      playwright-core:
-        specifier: 1.56.1
-        version: 1.56.1
       typescript:
         specifier: 7.0.2
         version: 7.0.2
