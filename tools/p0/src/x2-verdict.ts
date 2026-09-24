@@ -200,8 +200,18 @@ export interface X2AcceptanceCorroboration {
   date: string;
 }
 export type X2CorroborationRecord = X2WaybackCorroboration | X2AcceptanceCorroboration;
-/** trail name -> evidenceSha -> its corroboration record, if any. */
-export type X2CorroborationFile = Record<string, Record<string, X2CorroborationRecord>>;
+/** trail name -> evidenceSha -> its corroboration record(s), if any.
+ * Gate finding 2 (re-gate): a LIST, not a single record — one owner-saved
+ * capture can legitimately back several DIFFERENT facts (a roster name, a
+ * completionUnit, a season, each read off the same saved page), and each
+ * needs its OWN acceptance, specific to that fact (see
+ * `X2AcceptanceCorroboration.fact`'s own doc) — a single blanket
+ * acceptance covering "whatever gets cited against this SHA, now or
+ * later" is exactly the forgery shape finding 2 closes. A `wayback`
+ * record, by contrast, corroborates the EVIDENCE itself (an independent
+ * re-fetch of the whole page) and so is not fact-specific — realistically
+ * at most one per SHA, but the list shape accommodates it uniformly. */
+export type X2CorroborationFile = Record<string, Record<string, X2CorroborationRecord[]>>;
 
 /**
  * The corroboration data ACTUALLY TRUSTED, after the CLI's own
@@ -261,9 +271,18 @@ export interface ResolvedCorroborationEntry {
 }
 export type X2ResolvedCorroboration = Map<string, ResolvedCorroborationEntry>;
 
-/** The key `X2ResolvedCorroboration` is keyed by, for one fact. */
-export function corroborationResolutionKey(trail: string, evidenceSha: string): string {
-  return `${trail}:${evidenceSha}`;
+/** The key `X2ResolvedCorroboration` is keyed by. Gate finding 2 (re-gate):
+ * `disambiguator` is an `acceptance` record's own `fact` — REQUIRED for
+ * those, since several acceptance records can now share one (trail,
+ * evidenceSha) pair (see `X2CorroborationFile`'s own doc), one per fact.
+ * Omitted for a `wayback` record, which corroborates the evidence as a
+ * whole rather than one specific fact. */
+export function corroborationResolutionKey(
+  trail: string,
+  evidenceSha: string,
+  disambiguator?: string,
+): string {
+  return disambiguator === undefined ? `${trail}:${evidenceSha}` : `${trail}:${evidenceSha}:${disambiguator}`;
 }
 
 /** One trail's own evidence — never merged with another trail's. `text ===
@@ -634,7 +653,7 @@ function checkOwnerSavedCorroboration(
   evidenceSha: string,
   quote: string,
   evidence: TrailEvidenceMap,
-  trailCorroboration: Record<string, X2CorroborationRecord>,
+  trailCorroboration: Record<string, X2CorroborationRecord[]>,
   resolved: X2ResolvedCorroboration,
   label: string,
   reasons: string[],
@@ -651,8 +670,8 @@ function checkOwnerSavedCorroboration(
   if (method !== "owner-saved") {
     return { ok: true, summary: null };
   }
-  const record = trailCorroboration[evidenceSha];
-  if (!record) {
+  const records = trailCorroboration[evidenceSha];
+  if (!records || records.length === 0) {
     reasons.push(
       `${label}: owner-attested, UNCORROBORATED (evidence ${evidenceSha.slice(0, 12)}... is an owner-saved ` +
         "capture with no corroboration record supplied — a Wayback snapshot or Matt's dated acceptance is " +
@@ -660,7 +679,26 @@ function checkOwnerSavedCorroboration(
     );
     return { ok: false, summary: "owner-attested, uncorroborated" };
   }
-  const resolution = resolved.get(corroborationResolutionKey(trail, evidenceSha));
+  // Gate finding 2 (re-gate): several acceptance records can share this
+  // (trail, evidenceSha) pair, one per fact — a `wayback` record (which
+  // corroborates the whole evidence, not one fact) applies regardless of
+  // `factId`; an `acceptance` record applies ONLY when its own `fact`
+  // equals this call site's `factId`.
+  const record: X2CorroborationRecord | undefined =
+    records.find((r) => r.type === "wayback") ?? records.find((r) => r.type === "acceptance" && r.fact === factId);
+  if (!record) {
+    reasons.push(
+      `${label}: owner-attested, UNCORROBORATED FOR THIS FACT (evidence ${evidenceSha.slice(0, 12)}... has ` +
+        `${records.length} corroboration record(s), but none is a Wayback snapshot or an acceptance whose ` +
+        `fact matches ${JSON.stringify(factId)} — an acceptance for a DIFFERENT fact never backs this one ` +
+        "(gate finding 2, re-gate).",
+    );
+    return { ok: false, summary: "owner-attested, uncorroborated for this fact" };
+  }
+  const resolution =
+    record.type === "wayback"
+      ? resolved.get(corroborationResolutionKey(trail, evidenceSha))
+      : resolved.get(corroborationResolutionKey(trail, evidenceSha, record.fact));
   if (record.type === "acceptance") {
     // Gate finding 3 (re-gate): `acceptedBy` must be EXACTLY "Matt".
     if (record.acceptedBy !== "Matt") {
@@ -1321,12 +1359,18 @@ export async function resolveCorroboration(
 ): Promise<X2ResolvedCorroboration> {
   const resolved: X2ResolvedCorroboration = new Map();
   for (const [trail, trailRecords] of Object.entries(corroboration)) {
-    for (const [evidenceSha, record] of Object.entries(trailRecords)) {
-      const key = corroborationResolutionKey(trail, evidenceSha);
-      if (record.type === "wayback") {
-        resolved.set(key, await resolveWaybackRecord(trail, evidenceSha, record, opts));
-      } else {
-        resolved.set(key, await resolveAcceptanceRecord(trail, evidenceSha, record, opts));
+    for (const [evidenceSha, records] of Object.entries(trailRecords)) {
+      for (const record of records) {
+        if (record.type === "wayback") {
+          const key = corroborationResolutionKey(trail, evidenceSha);
+          resolved.set(key, await resolveWaybackRecord(trail, evidenceSha, record, opts));
+        } else {
+          // Gate finding 2 (re-gate): keyed by (trail, evidenceSha,
+          // record.fact) — several acceptance records can share one
+          // (trail, evidenceSha) pair, one per fact.
+          const key = corroborationResolutionKey(trail, evidenceSha, record.fact);
+          resolved.set(key, await resolveAcceptanceRecord(trail, evidenceSha, record, opts));
+        }
       }
     }
   }

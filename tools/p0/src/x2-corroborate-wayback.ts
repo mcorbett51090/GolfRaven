@@ -41,12 +41,48 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractEvidenceText } from "./evidence-extract.js";
-import { normalizeUrlForFirstCapture } from "./x2-recorded-ledger.js";
+import { loadLedger, normalizeUrlForFirstCapture, saveLedger } from "./x2-recorded-ledger.js";
 import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
 } from "./run-dir.js";
-import type { X2WaybackCorroboration } from "./x2-verdict.js";
+import type { X2CorroborationFile, X2WaybackCorroboration } from "./x2-verdict.js";
+
+/**
+ * Gate finding 3 (second re-gate): registers this snapshot in the
+ * canonical ledger under method `"wayback"` — `x2-verdict`'s own
+ * re-validation REQUIRES such an entry to exist before trusting a
+ * `wayback` corroboration record at all, so a hand-crafted record (never
+ * produced by this tool, never registered here) is refused regardless of
+ * how well-formed it otherwise looks. Deliberately NOT `registerCapture`
+ * (first-capture-wins, evidence-registry semantics): a `wayback` entry is
+ * a CORROBORATION record, not competing evidence — the same URL can
+ * legitimately be corroborated more than once (different owner-saved
+ * captures of it, corroborated at different times), so this appends a
+ * new entry for a genuinely new (sha256, url) pair and is a no-op if the
+ * EXACT same one is already there (idempotent re-runs, never a duplicate
+ * row for identical content).
+ */
+async function registerWaybackInLedger(
+  ledgerPath: string,
+  entry: { url: string; sha256: string },
+): Promise<void> {
+  const ledger = await loadLedger(ledgerPath);
+  const normalizedUrl = normalizeUrlForFirstCapture(entry.url);
+  const alreadyThere = ledger.entries.some(
+    (le) => le.method === "wayback" && le.sha256 === entry.sha256 && le.normalizedUrl === normalizedUrl,
+  );
+  if (!alreadyThere) {
+    ledger.entries.push({
+      method: "wayback",
+      normalizedUrl,
+      url: entry.url,
+      sha256: entry.sha256,
+      recordedAt: new Date().toISOString(),
+    });
+    await saveLedger(ledgerPath, ledger);
+  }
+}
 
 const WAYBACK_URL_RE = /^https:\/\/web\.archive\.org\/web\/(\d{14})\/(.+)$/;
 const WAYBACK_TIMESTAMP_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/;
@@ -132,6 +168,16 @@ export interface CorroborateWaybackOptions {
    * `x2-fetch.ts`/`x2-ingest.ts` already use, so `x2-verdict.ts`'s own
    * `readRaw` (already scoped to an evidence dir) can read it back. */
   outDir: string;
+  /** Gate finding 3 (second re-gate): REQUIRED — the canonical ledger to
+   * register this snapshot in, under method `"wayback"`. `x2-verdict`'s
+   * own re-validation pass now REQUIRES a matching ledger entry before it
+   * trusts any `wayback` record, so a caller that forgot this flag would
+   * silently produce a record `x2-verdict` can never actually accept —
+   * making it required here surfaces that at corroboration time, not
+   * later as a confusing verdict failure. Same required-flag discipline
+   * as `--ledger` on `x2-fetch`/`x2-ingest`/`x2-verdict` (gate finding
+   * 2c, re-gate). */
+  ledgerPath: string;
   /** Injectable — defaults to `globalThis.fetch`. Tests inject a fake so
    * this tool's own tests never hit the real network; a real invocation
    * uses the real one (and, per this environment's own proxy rules, may
@@ -233,7 +279,11 @@ export async function corroborateWayback(
   }
 
   const sha256 = createHash("sha256").update(buf).digest("hex");
-  const rawRelPath = path.join("raw", `wayback-${sha256}.html`);
+  // Gate finding 3 (second re-gate): `x2-verdict`'s own re-validation
+  // requires `rawFile` to be exactly `raw/<snapshotSha256>.<ext>` — no
+  // "wayback-" prefix (that shape can never match the required regex, so
+  // it would refuse its OWN output otherwise).
+  const rawRelPath = path.join("raw", `${sha256}.html`);
   await mkdir(path.join(opts.outDir, "raw"), { recursive: true });
   await writeFile(path.join(opts.outDir, rawRelPath), buf);
 
@@ -243,10 +293,16 @@ export async function corroborateWayback(
   const { text } = await extractEvidenceText(buf, "text/html", opts.archiveUrl);
   let textRelPath: string | null = null;
   if (text !== null) {
-    textRelPath = path.join("text", `wayback-${sha256}.txt`);
+    textRelPath = path.join("text", `${sha256}.txt`);
     await mkdir(path.join(opts.outDir, "text"), { recursive: true });
     await writeFile(path.join(opts.outDir, textRelPath), text, "utf8");
   }
+
+  // Gate finding 3 (second re-gate): registers this snapshot in the
+  // canonical ledger under method "wayback" — `x2-verdict`'s own
+  // re-validation REQUIRES this entry to exist before it will trust the
+  // record this function is about to return.
+  await registerWaybackInLedger(opts.ledgerPath, { url: opts.statedUrl, sha256 });
 
   return {
     type: "wayback",
@@ -277,14 +333,16 @@ async function main(argv: string[]): Promise<void> {
   const { url, trail } = flags;
   const statedUrl = flags["stated-url"];
   const ownerSavedDate = flags["owner-saved-date"];
-  if (!url || !statedUrl || !ownerSavedDate || !trail) {
+  if (!url || !statedUrl || !ownerSavedDate || !trail || !flags.ledger) {
     throw new Error(
       "Usage: node dist/x2-corroborate-wayback.js --url <https://web.archive.org/web/…> " +
         "--stated-url <url being corroborated> --owner-saved-date YYYY-MM-DD --trail TN|VI|RTJ " +
-        "--evidence-sha <the owner-saved fact's evidenceSha> [--out-dir <dir>] " +
-        "[--corroboration-file <file.json>] — writes/merges a corroboration record into " +
-        "--corroboration-file (default: <out-dir>/corroboration.json). NODE_USE_ENV_PROXY=1 may be needed " +
-        "for the real fetch, depending on this environment's proxy policy.",
+        "--evidence-sha <the owner-saved fact's evidenceSha> --ledger <path to the canonical ledger> " +
+        "[--out-dir <dir>] [--corroboration-file <file.json>] — writes/merges a corroboration record into " +
+        "--corroboration-file (default: <out-dir>/corroboration.json) and registers the snapshot in " +
+        "--ledger under method \"wayback\" (gate finding 3, second re-gate: x2-verdict's own re-validation " +
+        "requires that ledger entry to exist). NODE_USE_ENV_PROXY=1 may be needed for the real fetch, " +
+        "depending on this environment's proxy policy.",
     );
   }
   const evidenceSha = flags["evidence-sha"];
@@ -300,16 +358,25 @@ async function main(argv: string[]): Promise<void> {
     statedUrl,
     ownerSavedDate,
     outDir,
+    ledgerPath: flags.ledger,
   });
 
   const corroborationFilePath = flags["corroboration-file"] || path.join(outDir, "corroboration.json");
-  let corroboration: Record<string, Record<string, X2WaybackCorroboration>> = {};
+  let corroboration: X2CorroborationFile = {};
   try {
-    corroboration = JSON.parse(await readFile(corroborationFilePath, "utf8"));
+    corroboration = JSON.parse(await readFile(corroborationFilePath, "utf8")) as X2CorroborationFile;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  corroboration[trail] = { ...(corroboration[trail] ?? {}), [evidenceSha]: record };
+  // Gate finding 2 (re-gate): the corroboration file's per-(trail,
+  // evidenceSha) slot is a LIST now — a wayback record is appended
+  // alongside whatever `acceptance` records (each for a different fact)
+  // Matt may already have added by hand, never overwriting them.
+  const trailCorroboration = corroboration[trail] ?? {};
+  const existingForSha = (trailCorroboration[evidenceSha] ?? []).filter(
+    (r) => r.type !== "wayback",
+  );
+  corroboration[trail] = { ...trailCorroboration, [evidenceSha]: [...existingForSha, record] };
   await writeFile(corroborationFilePath, `${JSON.stringify(corroboration, null, 2)}\n`, "utf8");
 
   process.stdout.write(

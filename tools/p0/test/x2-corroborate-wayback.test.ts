@@ -12,6 +12,7 @@ import {
 } from "../src/x2-corroborate-wayback.js";
 
 const OUT_DIR = mkdtempSync(path.join(tmpdir(), "golfraven-p0-wayback-test-"));
+const LEDGER_PATH = path.join(OUT_DIR, "ledger.json");
 
 describe("x2-corroborate-wayback: parseWaybackUrl (gate finding 3, re-gate)", () => {
   it("accepts the exact required form", () => {
@@ -96,6 +97,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
         statedUrl: "https://example.com/golf",
         ownerSavedDate: "2026-06-15",
         outDir: path.join(OUT_DIR, "bad-url-run"),
+        ledgerPath: LEDGER_PATH,
         fetcher,
       }),
     ).rejects.toThrow(/not a Wayback snapshot URL/);
@@ -114,6 +116,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
         statedUrl: "https://example.com/completely-different-page",
         ownerSavedDate: "2026-06-15",
         outDir: path.join(OUT_DIR, "mismatch-run"),
+        ledgerPath: LEDGER_PATH,
         fetcher,
       }),
     ).rejects.toThrow(/does not match --stated-url/);
@@ -127,6 +130,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
       statedUrl: "https://example.com/golf",
       ownerSavedDate: "2026-06-15",
       outDir: path.join(OUT_DIR, "variant-run"),
+      ledgerPath: LEDGER_PATH,
       fetcher,
     });
     expect(record.type).toBe("wayback");
@@ -144,6 +148,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
         statedUrl: "https://example.com/golf",
         ownerSavedDate: "2024-01-01", // wildly different
         outDir: path.join(OUT_DIR, "stale-run"),
+        ledgerPath: LEDGER_PATH,
         fetcher,
       }),
     ).rejects.toThrow(/outside the 90-day tolerance/);
@@ -159,6 +164,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
       statedUrl: "https://example.com/golf",
       ownerSavedDate: "2026-03-18",
       outDir: path.join(OUT_DIR, "boundary-run"),
+      ledgerPath: LEDGER_PATH,
       fetcher,
     });
     expect(record.snapshotSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -172,6 +178,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
         statedUrl: "https://example.com/golf",
         ownerSavedDate: "2026-06-15",
         outDir: path.join(OUT_DIR, "404-run"),
+        ledgerPath: LEDGER_PATH,
         fetcher,
       }),
     ).rejects.toThrow(/HTTP 404/);
@@ -187,6 +194,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
         statedUrl: "https://example.com/golf",
         ownerSavedDate: "2026-06-15",
         outDir: path.join(OUT_DIR, "fetch-fail-run"),
+        ledgerPath: LEDGER_PATH,
         fetcher,
       }),
     ).rejects.toThrow(/fetching the Wayback snapshot failed/);
@@ -200,6 +208,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
         statedUrl: "https://example.com/golf",
         ownerSavedDate: "2026-06-15",
         outDir: path.join(OUT_DIR, "oversized-run"),
+        ledgerPath: LEDGER_PATH,
         fetcher,
         maxBytes: 10 * 1024 * 1024,
       }),
@@ -215,6 +224,7 @@ describe("x2-corroborate-wayback: corroborateWayback (gate finding 3, re-gate â€
       statedUrl: "https://example.com/golf",
       ownerSavedDate: "2026-06-15",
       outDir,
+      ledgerPath: LEDGER_PATH,
       fetcher,
     });
     expect(record).toEqual({
