@@ -2555,133 +2555,141 @@ async function main(argv: string[]): Promise<void> {
     await readFile(confirmationPath, "utf8"),
   ) as X2ConfirmationFile;
   const ledgerPath = flags.ledger;
-  // Gate finding, third re-gate, fix (b): fetch `main` fresh from the
-  // pinned canonical GitHub URL, ONCE, before any check that compares
-  // against it — deleting any leftover/forged ref first. Runs in the
-  // TOOLKIT'S OWN checkout (never a caller-supplied path's directory),
-  // so `checkLedgerAgainstGit`/`blameAcceptRow` only ever see this fresh
-  // ref when THEY are also looking inside that same canonical checkout
-  // (i.e. exactly the case where `--ledger`/`--x2-log` are canonical) —
-  // a run against a scratch/foreign repo never has this ref at all,
-  // regardless of what that scratch repo's own local refs claim.
-  // Network failure here is never silently ignored: it surfaces as
-  // `verifiedMainUnavailable`/an unreachable-commit result below, which
-  // → UNOFFICIAL, never OFFICIAL.
-  const verifiedMainFetch = await fetchVerifiedMainRef(resolveToolkitRepoRoot());
-  // Gate finding 2d/4/third re-gate: the ledger must be at the
-  // TOOLKIT'S OWN canonical path (fix (a)), tracked cleanly by git (no
-  // uncommitted/untracked/hidden-by-flag edit), and its content must
-  // match a freshly-fetched GitHub main (fix (b)). Only ONE case is
-  // ALWAYS a hard refusal, regardless of --allow-dirty-ledger: a `git
-  // ls-files` assume-unchanged/skip-worktree flag (it exists
-  // specifically to hide a local edit from the very diff/status checks
-  // --allow-dirty-ledger is meant to override — bypassing the flag-check
-  // too would defeat the point of having it at all). A wrong ledger path,
-  // or a ledger simply not yet on GitHub main (including a failed
-  // fetch), is NOT a hard-refusing case — both proceed automatically,
-  // marked UNOFFICIAL, without needing the flag ("for an official run,
-  // require realpath(--ledger) to equal <canonical path> — anything else
-  // is UNOFFICIAL"). Everything else dirty (a local uncommitted edit, or
-  // content that DIVERGED from what GitHub main has) still requires the
-  // flag.
-  const ledgerGitCheck = await checkLedgerAgainstGit(ledgerPath);
-  if (ledgerGitCheck.hiddenByGitFlag) {
-    throw new Error(
-      `Refusing: the ledger "${ledgerPath}" — ${ledgerGitCheck.detail} This is never bypassable via ` +
-        "--allow-dirty-ledger (gate finding 4, re-gate): the flag exists specifically to hide a local edit " +
-        "from the checks --allow-dirty-ledger is meant to override.",
-    );
-  }
-  const ledgerNeedsAllowFlag =
-    !ledgerGitCheck.clean && ledgerGitCheck.pathIsCanonical && !ledgerGitCheck.verifiedMainUnavailable;
-  if (ledgerNeedsAllowFlag && !allowDirtyLedger) {
-    throw new Error(
-      `Refusing: the ledger "${ledgerPath}" is not clean in git — ${ledgerGitCheck.detail} Pass ` +
-        "--allow-dirty-ledger to proceed anyway; the output will be marked UNOFFICIAL, and this is never " +
-        "the recommended path for a result meant to stand as the recorded verdict.",
-    );
-  }
-  const ledgerOfficial = ledgerGitCheck.clean;
-  const ledger = await loadLedger(ledgerPath);
-  const evidenceByTrail = await buildEvidenceByTrail(
-    manifest,
-    (rel) => readFile(path.join(evidenceDir, rel)),
-    { ledger },
-  );
-  // Gate finding 4: an optional corroboration file, keyed trail -> evidence
-  // sha256 -> corroboration record, backs every owner-saved fact. Missing
-  // flag -> `{}`, which `computeX2Verdict` treats as "no corroboration
-  // supplied for anything" (every owner-saved fact fails as uncorroborated,
-  // per the gate's rule — not silently skipped).
-  const corroboration: X2CorroborationFile = flags.corroboration
-    ? (JSON.parse(await readFile(flags.corroboration, "utf8")) as X2CorroborationFile)
-    : {};
-  // Gate finding 3/2 (both re-gate): resolve (verify) that corroboration
-  // file BEFORE computeX2Verdict ever sees it — re-reading `wayback`
-  // evidence from THIS evidence dir and re-validating every one of its
-  // rules against the owner-saved fact's OWN claims and the canonical
-  // ledger; checking `acceptance` records against a structured row in
-  // `docs/p0/X2.md`'s own Log section AND its git provenance. A
-  // missing/unreadable X2.md is not a hard refusal (an --evidence-dir far
-  // from a golfraven checkout is a legitimate use), but every
-  // `acceptance` record then resolves to "not logged" — the safe
-  // default.
-  const x2MdPath = flags["x2-log"] || resolveDefaultX2MdPath();
-  let x2Md: { fullText: string; path: string } | null = null;
+  // Gate finding, fourth re-gate: verify against GitHub ONCE, before any
+  // check that compares against it, ENTIRELY inside a disposable, bare,
+  // scrubbed-environment repo this call creates and destroys — never
+  // the toolkit checkout's own local git state (which a caller could
+  // manipulate via `url.<x>.insteadOf` config, `git replace`,
+  // `.git/info/grafts`, `GIT_DIR`/`GIT_WORK_TREE`, or a hook). Its own
+  // `cleanup()` is called in the `finally` below regardless of outcome.
+  // A failed verification is never silently ignored: it flows into
+  // `verifiedMainUnavailable`/`acceptanceLogged: false`/
+  // `waybackVerified: false` below — UNOFFICIAL/not-accepted, never
+  // OFFICIAL/accepted.
+  const githubVerification = await verifyAgainstGitHub();
   try {
-    x2Md = { fullText: await readFile(x2MdPath, "utf8"), path: x2MdPath };
-  } catch {
-    x2Md = null;
-  }
-  const resolvedCorroboration = await resolveCorroboration(corroboration, {
-    evidenceByTrail,
-    readRaw: (rel) => readFile(path.join(evidenceDir, rel)),
-    evidenceDir,
-    ledger,
-    x2Md,
-  });
-  const result = computeX2Verdict(
-    confirmation,
-    evidenceByTrail,
-    X2_SLATE_TRAILS,
-    corroboration,
-    resolvedCorroboration,
-  );
-  const outExplicit = Boolean(flags.out);
-  const outPrefix =
-    flags.out ||
-    path.join(defaultOutsideRepoDir("x2-verdict-result"), "result");
-  assertOutsideRepoUnlessExplicit(path.dirname(outPrefix), outExplicit);
-  await mkdir(path.dirname(outPrefix), { recursive: true });
-  // Gate finding 2d: the ledger's git blob hash and clean/UNOFFICIAL
-  // status are written alongside the verdict itself — a reader of the
-  // JSON result never has to separately go find and re-hash the ledger to
-  // know exactly which version of it produced this verdict.
-  const resultWithLedgerInfo = {
-    ...result,
-    ledger: {
-      path: ledgerPath,
-      blobHash: ledgerGitCheck.blobHash,
-      official: ledgerOfficial,
-      detail: ledgerGitCheck.detail,
-      pathIsCanonical: ledgerGitCheck.pathIsCanonical,
-      verifiedAgainstGithub: ledgerGitCheck.verifiedAgainstGithub,
-      verifiedMainFetch,
-    },
-  };
-  await writeFile(
-    `${outPrefix}.json`,
-    `${JSON.stringify(resultWithLedgerInfo, null, 2)}\n`,
+    // Gate finding 2d/4/third+fourth re-gate: the ledger must be at the
+    // TOOLKIT'S OWN canonical path (fix (a)), tracked cleanly by git (no
+    // uncommitted/untracked/hidden-by-flag edit), and its content must
+    // match GitHub main as `githubVerification` read it (fix (b)). Only
+    // ONE case is ALWAYS a hard refusal, regardless of
+    // --allow-dirty-ledger: a `git ls-files` assume-unchanged/skip-
+    // worktree flag (it exists specifically to hide a local edit from
+    // the very diff/status checks --allow-dirty-ledger is meant to
+    // override — bypassing the flag-check too would defeat the point of
+    // having it at all). A wrong ledger path, or a ledger simply not yet
+    // on GitHub main (including a failed verification), is NOT a
+    // hard-refusing case — both proceed automatically, marked
+    // UNOFFICIAL, without needing the flag ("for an official run,
+    // require realpath(--ledger) to equal <canonical path> — anything
+    // else is UNOFFICIAL"). Everything else dirty (a local uncommitted
+    // edit, or content that DIVERGED from what GitHub main has) still
+    // requires the flag.
+    const ledgerGitCheck = await checkLedgerAgainstGit(ledgerPath, githubVerification);
+    if (ledgerGitCheck.hiddenByGitFlag) {
+      throw new Error(
+        `Refusing: the ledger "${ledgerPath}" — ${ledgerGitCheck.detail} This is never bypassable via ` +
+          "--allow-dirty-ledger (gate finding 4, re-gate): the flag exists specifically to hide a local edit " +
+          "from the checks --allow-dirty-ledger is meant to override.",
+      );
+    }
+    const ledgerNeedsAllowFlag =
+      !ledgerGitCheck.clean && ledgerGitCheck.pathIsCanonical && !ledgerGitCheck.verifiedMainUnavailable;
+    if (ledgerNeedsAllowFlag && !allowDirtyLedger) {
+      throw new Error(
+        `Refusing: the ledger "${ledgerPath}" is not clean in git — ${ledgerGitCheck.detail} Pass ` +
+          "--allow-dirty-ledger to proceed anyway; the output will be marked UNOFFICIAL, and this is never " +
+          "the recommended path for a result meant to stand as the recorded verdict.",
+      );
+    }
+    const ledgerOfficial = ledgerGitCheck.clean;
+    const ledger = await loadLedger(ledgerPath);
+    const evidenceByTrail = await buildEvidenceByTrail(
+      manifest,
+      (rel) => readFile(path.join(evidenceDir, rel)),
+      { ledger },
+    );
+    // Gate finding 4: an optional corroboration file, keyed trail -> evidence
+    // sha256 -> corroboration record, backs every owner-saved fact. Missing
+    // flag -> `{}`, which `computeX2Verdict` treats as "no corroboration
+    // supplied for anything" (every owner-saved fact fails as uncorroborated,
+    // per the gate's rule — not silently skipped).
+    const corroboration: X2CorroborationFile = flags.corroboration
+      ? (JSON.parse(await readFile(flags.corroboration, "utf8")) as X2CorroborationFile)
+      : {};
+    // Gate finding 3/2/fourth re-gate (all re-gate): resolve (verify)
+    // that corroboration file BEFORE computeX2Verdict ever sees it —
+    // re-reading `wayback` evidence from THIS evidence dir and
+    // re-validating every one of its rules against the owner-saved
+    // fact's OWN claims, the canonical ledger, AND requiring the ledger
+    // be OFFICIAL (should-fix, fourth re-gate); checking `acceptance`
+    // records against a structured, VISIBLE row in GitHub main's own
+    // X2.md (per `githubVerification`) AND its git provenance. A
+    // missing/unreadable local X2.md is not a hard refusal (an
+    // --evidence-dir far from a golfraven checkout is a legitimate
+    // use), but every `acceptance` record then resolves to "not
+    // logged" — the safe default.
+    const x2MdPath = flags["x2-log"] || resolveDefaultX2MdPath();
+    let x2Md: { fullText: string; path: string } | null = null;
+    try {
+      x2Md = { fullText: await readFile(x2MdPath, "utf8"), path: x2MdPath };
+    } catch {
+      x2Md = null;
+    }
+    const resolvedCorroboration = await resolveCorroboration(corroboration, {
+      evidenceByTrail,
+      readRaw: (rel) => readFile(path.join(evidenceDir, rel)),
+      evidenceDir,
+      ledger,
+      ledgerOfficial,
+      x2Md,
+      githubVerification,
+    });
+    const result = computeX2Verdict(
+      confirmation,
+      evidenceByTrail,
+      X2_SLATE_TRAILS,
+      corroboration,
+      resolvedCorroboration,
+    );
+    const outExplicit = Boolean(flags.out);
+    const outPrefix =
+      flags.out ||
+      path.join(defaultOutsideRepoDir("x2-verdict-result"), "result");
+    assertOutsideRepoUnlessExplicit(path.dirname(outPrefix), outExplicit);
+    await mkdir(path.dirname(outPrefix), { recursive: true });
+    // Gate finding 2d: the ledger's git blob hash and clean/UNOFFICIAL
+    // status are written alongside the verdict itself — a reader of the
+    // JSON result never has to separately go find and re-hash the ledger to
+    // know exactly which version of it produced this verdict.
+    const resultWithLedgerInfo = {
+      ...result,
+      ledger: {
+        path: ledgerPath,
+        blobHash: ledgerGitCheck.blobHash,
+        official: ledgerOfficial,
+        detail: ledgerGitCheck.detail,
+        pathIsCanonical: ledgerGitCheck.pathIsCanonical,
+        verifiedAgainstGithub: ledgerGitCheck.verifiedAgainstGithub,
+      },
+      githubVerification: { ok: githubVerification.ok, detail: githubVerification.detail },
+    };
+    await writeFile(
+      `${outPrefix}.json`,
+      `${JSON.stringify(resultWithLedgerInfo, null, 2)}\n`,
     "utf8",
   );
-  const ledgerHeader =
-    `Ledger: ${ledgerPath} (blob ${ledgerGitCheck.blobHash ?? "unavailable — git not found"}) — ` +
-    `${ledgerOfficial ? `OFFICIAL (verified against ${GOLFRAVEN_CANONICAL_REPO_URL}'s real main)` : `**UNOFFICIAL** (${ledgerGitCheck.detail})`}\n\n`;
-  const md = ledgerHeader + renderX2VerdictMarkdown(result);
-  await writeFile(`${outPrefix}.md`, `${md}\n`, "utf8");
-  process.stdout.write(`${md}\n`);
-  if (result.anyUnconfirmedWithFailedSource) {
-    process.exitCode = 1;
+    const ledgerHeader =
+      `Ledger: ${ledgerPath} (blob ${ledgerGitCheck.blobHash ?? "unavailable — git not found"}) — ` +
+      `${ledgerOfficial ? `OFFICIAL (verified against ${GOLFRAVEN_CANONICAL_REPO_URL}'s real main)` : `**UNOFFICIAL** (${ledgerGitCheck.detail})`}\n\n`;
+    const md = ledgerHeader + renderX2VerdictMarkdown(result);
+    await writeFile(`${outPrefix}.md`, `${md}\n`, "utf8");
+    process.stdout.write(`${md}\n`);
+    if (result.anyUnconfirmedWithFailedSource) {
+      process.exitCode = 1;
+    }
+  } finally {
+    await githubVerification.cleanup();
   }
 }
 
