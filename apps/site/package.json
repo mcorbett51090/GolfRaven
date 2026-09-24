@@ -3,20 +3,31 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Public site (Astro 5 static, build plan §3.1 row C). P2 stage 1 port from southern-wine-country @ 572ff7e (build plan §5).",
+  "description": "Public site (Astro 5 static, build plan §3.1 row C). P2 stage 1 port from southern-wine-country @ 572ff7e (build plan §5); P2 stage 2 adds the map, OG cards, GolfNow T0 booking links, search, service worker and the analytics PII gate.",
   "scripts": {
     "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
     "verify-input": "node ./scripts/verify-input.mjs",
     "emit-indexability": "node ./scripts/emit-indexability.mjs",
+    "gen-map-data": "node ./scripts/gen-map-data.mjs",
+    "gen-headers": "node ./scripts/gen-headers.mjs",
+    "gen-redirects": "node ./scripts/gen-redirects.mjs",
     "verify-sitemap": "node ./scripts/verify-sitemap.mjs",
-    "build": "pnpm run verify-input && pnpm run emit-indexability && ASTRO_TELEMETRY_DISABLED=1 astro build && pnpm run verify-sitemap",
+    "verify-budget": "node ./scripts/verify-budget.mjs",
+    "verify-a11y-budget": "node ./scripts/verify-a11y-budget.mjs",
+    "build": "pnpm run verify-input && pnpm run emit-indexability && pnpm run gen-map-data && pnpm run gen-headers && pnpm run gen-redirects && ASTRO_TELEMETRY_DISABLED=1 astro build && node ./scripts/pagefind-index.mjs && pnpm run verify-sitemap && pnpm run verify-budget && pnpm run verify-a11y-budget",
     "typecheck": "ASTRO_TELEMETRY_DISABLED=1 astro check",
     "test": "vitest run"
   },
   "dependencies": {
     "@golfraven/catalog": "workspace:*",
     "astro": "5.18.2",
-    "@astrojs/sitemap": "3.7.3"
+    "@astrojs/sitemap": "3.7.3",
+    "@fontsource/cinzel": "5.2.8",
+    "@fontsource/pt-serif": "5.2.8",
+    "maplibre-gl": "5.24.0",
+    "pagefind": "1.5.2",
+    "satori": "0.28.0",
+    "sharp": "0.33.5"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",

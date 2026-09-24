@@ -1,0 +1,140 @@
+---
+/**
+ * SiteSearch.astro — build plan §10 P2 stage-2 scope item 4: "Search.
+ * Pagefind over the built site, lazy-loaded, working under the CSP."
+ *
+ * Pagefind's own generated JS (`/pagefind/pagefind.js`, `scripts/
+ * pagefind-index.mjs`'s postbuild output) is dynamically `import()`ed only
+ * on the visitor's FIRST interaction with the search box (focus or
+ * input) — never on page load, so search never costs anything for the
+ * ~everyone who doesn't use it. Astro hoists this component's `<script>`
+ * into an external, same-origin bundle (see `CourseMap.astro`'s doc for
+ * why that matters for the CSP + AT(7)); Pagefind's own generated chunks
+ * are fetched from `/pagefind/` at runtime, also same-origin.
+ *
+ * Rendered in `BaseLayout.astro`'s header, so it appears on EVERY page —
+ * genuinely site-wide search, matching the scope item's "Pagefind over
+ * the built site" (not scoped to one section).
+ */
+---
+
+<div class="site-search" data-site-search>
+  <label class="sr-only" for="site-search-input">Search GolfRaven</label>
+  <input
+    id="site-search-input"
+    type="search"
+    placeholder="Search courses and trails…"
+    autocomplete="off"
+    data-search-input
+  />
+  <ul class="site-search__results" role="listbox" aria-label="Search results" data-search-results hidden></ul>
+</div>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-site-search]");
+  const input = root?.querySelector<HTMLInputElement>("[data-search-input]");
+  const resultsEl = root?.querySelector<HTMLUListElement>("[data-search-results]");
+  if (!root || !input || !resultsEl) {
+    // Nothing to wire up on this render — fails closed to "no search UI
+    // active" rather than throwing.
+  } else {
+    let pagefind: {
+      search: (q: string) => Promise<{ results: { id: string; data: () => Promise<any> }[] }>;
+    } | null = null;
+    let loading: Promise<void> | null = null;
+
+    function loadPagefind(): Promise<void> {
+      if (pagefind) return Promise.resolve();
+      if (loading) return loading;
+      loading = import(/* @vite-ignore */ "/pagefind/pagefind.js")
+        .then((mod) => {
+          pagefind = mod;
+        })
+        .catch((err) => {
+          console.warn("[search] pagefind failed to load", err);
+        });
+      return loading;
+    }
+
+    let debounceTimer: number | undefined;
+    async function runSearch(query: string) {
+      if (!query.trim()) {
+        resultsEl.hidden = true;
+        resultsEl.innerHTML = "";
+        return;
+      }
+      await loadPagefind();
+      if (!pagefind) return;
+      const { results } = await pagefind.search(query);
+      const top = results.slice(0, 8);
+      const items = await Promise.all(top.map((r) => r.data()));
+      resultsEl.innerHTML = "";
+      if (items.length === 0) {
+        const li = document.createElement("li");
+        li.textContent = "No results.";
+        resultsEl.append(li);
+      } else {
+        for (const item of items) {
+          const li = document.createElement("li");
+          const a = document.createElement("a");
+          a.href = item.url;
+          a.textContent = item.meta?.title ?? item.url;
+          li.append(a);
+          resultsEl.append(li);
+        }
+      }
+      resultsEl.hidden = false;
+    }
+
+    input.addEventListener("focus", () => void loadPagefind(), { once: true });
+    input.addEventListener("input", () => {
+      window.clearTimeout(debounceTimer);
+      const q = input.value;
+      debounceTimer = window.setTimeout(() => void runSearch(q), 200);
+    });
+    document.addEventListener("click", (e) => {
+      if (!root.contains(e.target as Node)) {
+        resultsEl.hidden = true;
+      }
+    });
+  }
+</script>
+
+<style>
+  .site-search {
+    position: relative;
+  }
+  .site-search input[type="search"] {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--ink-soft, #4b5b52);
+    border-radius: 0.35rem;
+    font: inherit;
+  }
+  .site-search__results {
+    position: absolute;
+    z-index: 5;
+    top: 100%;
+    right: 0;
+    margin-top: 0.25rem;
+    min-width: 220px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--surface, #fff);
+    border: 1px solid var(--ink-soft, #4b5b52);
+    border-radius: 0.35rem;
+    padding: 0.25rem 0;
+    list-style: none;
+  }
+  .site-search__results li a {
+    display: block;
+    padding: 0.4rem 0.6rem;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+</style>

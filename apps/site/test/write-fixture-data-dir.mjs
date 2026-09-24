@@ -26,5 +26,15 @@ export async function writeFixtureDataDir(dir) {
     ...trails.map((t) => writeFile(join(dir, "trails", `${t.slug}.json`), JSON.stringify(t))),
     writeFile(join(dir, "designers.json"), JSON.stringify(designers)),
     writeFile(join(dir, "id-ledger.json"), JSON.stringify(idLedger)),
+    // AT(5)/§5.4: "A slug changes only by an explicit rename PR; the
+    // retired slug gets a 301 via data/redirects.json." One synthetic
+    // retired-slug fixture so the real test build exercises
+    // gen-redirects.mjs end to end (test/acceptance.test.ts).
+    writeFile(
+      join(dir, "redirects.json"),
+      JSON.stringify({
+        redirects: [{ from: "/courses/old-ridge-overlook-slug/", to: "/courses/ridge-overlook-golf-club/" }],
+      }),
+    ),
   ]);
 }

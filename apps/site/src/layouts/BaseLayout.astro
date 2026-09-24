@@ -2,6 +2,7 @@
 import "../styles/global.css";
 import { withBase } from "../lib/nav";
 import { jsonLdScript } from "../lib/schema";
+import SiteSearch from "../components/SiteSearch.astro";
 
 interface Alternate {
   /** BCP-47-ish locale tag for `hreflang` (e.g. "en", "fr"). */
@@ -32,6 +33,12 @@ interface Props {
    *  Otherwise the EN page carries `hreflang="en"` only, and there is no
    *  machine-translated filler." */
   alternates?: Alternate[];
+  /** App-absolute path to this page's OG card PNG (stage 2, §5.1
+   *  `og-card.ts`: "OG images for verified pages only"). Only a verified
+   *  course page passes this — every other page emits no `og:image` at
+   *  all, matching SWC's own per-page opt-in (never a site-wide default
+   *  image standing in for a page it isn't). */
+  ogImage?: string;
 }
 const {
   title,
@@ -42,6 +49,7 @@ const {
   demo = false,
   locale = "en",
   alternates = [],
+  ogImage,
 } = Astro.props;
 
 const canonical = new URL(withBase(path), Astro.site).href;
@@ -103,6 +111,8 @@ const xDefaultHref =
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:locale" content={ogLocale} />
+    {ogImage && <meta property="og:image" content={new URL(withBase(ogImage), Astro.site).href} />}
+    {ogImage && <meta name="twitter:card" content="summary_large_image" />}
     {alternates
       .filter((a) => a.locale !== locale)
       .map((a) => (
@@ -120,20 +130,21 @@ const xDefaultHref =
     <a class="skip-link" href="#main-content">Skip to main content</a>
     {
       demo && (
-        <p class="demo-banner" role="alert">
+        <p class="demo-banner" role="alert" data-pagefind-ignore>
           DEMO DATA — not real courses. Every trail and facility on this page is fictional
           (see `apps/site/fixtures/demo-catalog/README.md`).
         </p>
       )
     }
-    <header class="site-header">
+    <header class="site-header" data-pagefind-ignore>
       <a class="brand" href={withBase("/")}>GolfRaven</a>
       <nav aria-label="Primary">
         <a href={withBase("/")}>Trails</a>
       </nav>
+      <SiteSearch />
     </header>
     <slot />
-    <footer class="site-footer">
+    <footer class="site-footer" data-pagefind-ignore>
       <p>
         GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a>.
       </p>

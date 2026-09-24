@@ -11,6 +11,7 @@ import { loadPrimaryTrailOverrides, loadSiteCatalog, verifiedFacilities } from "
 import { withBase } from "../../lib/nav";
 import { facilityMetaDescription } from "../../lib/facility-copy";
 import { siteOrigin, breadcrumbNode, facilityPageNode } from "../../lib/schema";
+import { allowedBookingEntries, loadBookingHostAllowList } from "../../lib/booking-hosts";
 
 export async function getStaticPaths() {
   const { catalog } = await loadSiteCatalog();
@@ -47,8 +48,15 @@ const crumbs = [
   { name, url: `${origin}${path}` },
 ];
 const jsonLd = [breadcrumbNode(crumbs), facilityPageNode(origin, facility)];
+// §5.1 og-card.ts: "OG images for verified pages only" — every page this
+// component renders IS a verified facility (getStaticPaths above), so
+// this is unconditional here.
+const ogImage = `/og/courses/${facility.slug}.png`;
 
 const isPrivate = facility.access === "private";
+// AT(4)/stage-2 scope item 3: only host-gated booking entries ever render.
+const bookingHostAllowList = await loadBookingHostAllowList();
+const bookingLinks = allowedBookingEntries(facility, bookingHostAllowList);
 const appDeepLink = primaryTrail ? `golfraven://trail/${primaryTrail.id}` : undefined;
 const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryTrail.id}` : undefined;
 ---
@@ -60,6 +68,7 @@ const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryT
   jsonLd={jsonLd}
   noindex={thin}
   demo={usedDemoData}
+  ogImage={ogImage}
 >
   <main class="wrap" id="main-content" tabindex="-1">
     <header>
@@ -112,9 +121,9 @@ const universalLink = primaryTrail ? `https://golfraven.example/trail/${primaryT
           Private — play as a member's guest.
         </p>
       ) : (
-        facility.booking.length > 0 && (
+        bookingLinks.length > 0 && (
           <p class="wp__actions">
-            {facility.booking.map((b) => (
+            {bookingLinks.map((b) => (
               <a class="btn" href={b.url} target="_blank" rel="noopener">
                 Book via {b.provider === "course-native" ? "the course" : "GolfNow"} →
               </a>

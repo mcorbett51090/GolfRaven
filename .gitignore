@@ -16,6 +16,13 @@ apps/mobile/ios/
 # Astro (generated types cache — apps/site)
 .astro/
 
+# Build-generated per-country map GeoJSON (apps/site/scripts/gen-map-data.mjs —
+# same pattern southern-wine-country used for public/data/hub-wineries.json)
+apps/site/public/data/map/
+
+# Local stand-in for the §5.2 R2 OG-card object store (apps/site/src/lib/og-store.ts)
+apps/site/.og-store/
+
 # Test / coverage
 coverage/
 

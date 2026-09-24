@@ -41,8 +41,14 @@ function runBuild(name, { dist, indexability, env: extraEnv }) {
   console.log(`\n--- test build "${name}" -> ${dist} ---`);
   run("node", ["./scripts/verify-input.mjs"]);
   run("node", ["./scripts/emit-indexability.mjs"]);
+  run("node", ["./scripts/gen-map-data.mjs"]);
+  run("node", ["./scripts/gen-headers.mjs"]);
+  run("node", ["./scripts/gen-redirects.mjs"]);
   run("./node_modules/.bin/astro", ["build", "--outDir", dist]);
+  run("node", ["./scripts/pagefind-index.mjs", dist]);
   run("node", ["./scripts/verify-sitemap.mjs", dist]);
+  run("node", ["./scripts/verify-budget.mjs", dist]);
+  run("node", ["./scripts/verify-a11y-budget.mjs", dist]);
 }
 
 export default async function setup() {

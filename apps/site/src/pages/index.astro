@@ -6,12 +6,17 @@
 // §5.1 `WineryMap.astro` → `CourseMap.astro`): add the clustered MapLibre
 // map here.
 import BaseLayout from "../layouts/BaseLayout.astro";
+import CourseMap from "../components/CourseMap.astro";
 import { latestRosterVersion } from "@golfraven/catalog";
 import { loadSiteCatalog } from "../lib/derive";
 import { withBase } from "../lib/nav";
 import { siteOrigin } from "../lib/schema";
 
 const { catalog, usedDemoData } = await loadSiteCatalog();
+// §5.1 index.astro: "A trail-first hub: trail cards plus a clustered map."
+const mappedFacilities = catalog.facilities.filter(
+  (f) => typeof f.lat === "number" && typeof f.lng === "number",
+);
 
 const trails = [...catalog.trails].sort(
   (a, b) =>
@@ -65,6 +70,8 @@ const jsonLd = [{ "@type": "WebSite", name: "GolfRaven", url: `${origin}/` }];
         })
       }
     </ul>
+
+    <CourseMap facilities={mappedFacilities} heading="Every course, mapped" />
   </main>
 </BaseLayout>
 
