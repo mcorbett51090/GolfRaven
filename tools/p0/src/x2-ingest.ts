@@ -422,7 +422,7 @@ async function main(argv: string[]): Promise<void> {
   if (!trail || !file || !url || !date) {
     throw new Error(
       "Usage: node dist/x2-ingest.js --trail TN|VI|RTJ --file <owner-saved.html> --url <stated URL> " +
-        "--date YYYY-MM-DD [--config <x2-sources.json>] [--out-dir <dir>] [--additional]",
+        "--date YYYY-MM-DD [--config <x2-sources.json>] [--out-dir <dir>] [--additional] [--ledger <path>]",
     );
   }
   const configPath = flags.config || resolveDefaultX2ConfigPath();
@@ -441,6 +441,7 @@ async function main(argv: string[]): Promise<void> {
     sourceConfig,
     outDir,
     additional,
+    ...(flags.ledger ? { ledgerPath: flags.ledger } : {}),
   });
   process.stdout.write(
     `Ingested owner-saved evidence for ${trail}: ${entry.url} (saved ${entry.ownerSavedDate}, sha256 ` +

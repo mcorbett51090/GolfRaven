@@ -365,7 +365,6 @@ CREATE POLICY migration_owner_seed_function_inventory ON private.function_invent
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
 VALUES
-  ('app', 'play_evidence_user_match', '', false, false, false, 'trigger function (app.play_evidence_user_match_trg) -- never EXECUTEd directly by any role'),
   ('app', 'offer_code_enforce_max_redemptions', '', false, false, false, 'trigger function (app.offer_code_enforce_max_redemptions_trg) -- never EXECUTEd directly by any role'),
   ('app', 'checkin_challenge_used_at_once', '', false, false, false, 'trigger function (app.checkin_challenge_used_at_once_trg) -- never EXECUTEd directly by any role'),
   ('app', 'reserve_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + reserves offer budget; called by the (out-of-scope-this-stage) scorer/redemption Edge Function as service_role'),
