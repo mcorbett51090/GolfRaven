@@ -199,3 +199,143 @@ standing reminder, rather than this limitation only living in a report.
   shape-only regex; `ROSTER_LATEST_CONTAINS_CLOSED_FACILITY` catches a
   closed Facility in the latest roster (previously only `Course.closed`
   was checked).
+
+## `emit-catalog` and `verify-artifact` (P1 part B-2: artifact emitter + signing)
+
+The build plan's artifact emitter and Ed25519 `kid` signing (§3.3 "Catalog
+flow", §3.5 "Signing", §4.1 "ODbL layer split", §4.8 "Keys, secrets and
+rotation", §10 P1 AT(2): "The signature verifies per `kid`, a tampered
+shard fails, and a manifest whose `kid` is in `revokedKids` is refused.").
+Three modules, split by concern:
+
+- `src/manifest.ts` — the `CatalogManifest`/`VersionEntry` shapes,
+  deterministic canonical-JSON (`canonicalStringify`, sorted object keys),
+  and the `versions.json` append-only checks (`assertVersionsAppendOnly`,
+  `appendVersion`).
+- `src/sign.ts` — Ed25519 signing/verification over `node:crypto` only (no
+  dependency added), `signManifest`, and `verifyArtifact(dir, trustedKeys)`
+  — the AT(2) gate itself. Also the `verify-artifact` CLI.
+- `src/emit-catalog.ts` — `emitCatalogArtifact(bundle, opts)`, which writes
+  the signed `catalog/v1/*` tree to a caller-supplied output directory, and
+  the `emit-catalog` CLI.
+
+### Artifact tree
+
+```
+<out>/catalog/v1/
+  manifest.json        # unsigned; contractVersion, catalogVersion, minAppVersion, kid, revokedKids[], shards[]
+  manifest.sig.json     # {catalogVersion, manifestSha, kid, sig} — mirrors §3.3's manifestSig shape
+  versions.json          # append-only: [{version, publishedAt, kid, sha256}, ...]
+  trails.json
+  id-ledger.json         # the FULL ledger, for the import function (§3.3)
+  designers.json          # only if bundle.designers is present
+  offer-terms.json        # only if bundle.offerTerms is present
+  facilities/<ISO-region>.json   # sharded by region (§5.2: "Directory JSON is sharded by ISO region")
+  osm/content.json        # only if bundle.osm is present — separately licensed, ODbL-1.0 (§4.1)
+  osm/ATTRIBUTION.txt      # ditto
+```
+
+Every shard in `manifest.json`'s `shards[]` carries its `path`, `sha256`
+and `bytes`; an `osm/*` shard also carries `license: "ODbL-1.0"`. Output is
+deterministic: object keys are sorted recursively, arrays are sorted by
+`id` (or `path`, for the shard list) before being written, and
+`revokedKids[]` is sorted too — two emits of the same bundle with the same
+options are byte-identical (`test/emit-catalog.test.ts`).
+
+### Signing key (never in the repo)
+
+`emit-catalog` takes the Ed25519 private key from `--key-file <path>` or,
+if that's omitted, the `GOLFRAVEN_CATALOG_SIGNING_KEY` env var (PEM text;
+literal `\n` escapes are un-escaped automatically, since most CI secret
+stores can't hold a real multi-line value in one variable). Neither
+defaults to anywhere inside this repo. **The real signing key lives only
+in a protected CI environment** (§4.8: "Signing runs in a GitHub protected
+environment with required reviewers... Actions are SHA-pinned") — nothing
+here ever writes a key to disk or logs its contents, and every test
+generates its own throwaway keypair in-process
+(`crypto.generateKeyPairSync('ed25519')`).
+
+**Pre-P3 keyset (§3.5).** "P1–P2 ... sign with a pre-P3 keyset that no app
+build ever compiles in." Every `kid` produced by this emitter before the
+P3 gate is one of those pre-P3 keys; at the P3 pre-build gate, the
+production keyset is generated under the §4.8 runbook and every pre-P3
+`kid` is added to `revokedKids[]` before the first app build or production
+import. Nothing in this module hard-codes that transition — it's a
+run-time argument (`--kid`, `--revoked-kids`) supplied by whoever runs the
+emitter at that gate.
+
+### CLI usage
+
+```shell
+# Emit an artifact from a verified bundle (verify-catalog's bundle shape):
+node dist/emit-catalog.js \
+  --bundle path/to/bundle.json \
+  --out dist/artifact \
+  --key-file /path/outside/the/repo/signing-key.pem \
+  --kid pre-p3-key-1 \
+  --min-app-version 0.1.0 \
+  --catalog-version 20260101-abc0001 \
+  --revoked-kids old-kid-1,old-kid-2 \
+  --previous-versions path/to/last-published/versions.json
+
+# Or with the key from the env instead of --key-file:
+GOLFRAVEN_CATALOG_SIGNING_KEY="$(cat signing-key.pem)" node dist/emit-catalog.js \
+  --bundle path/to/bundle.json --out dist/artifact \
+  --kid pre-p3-key-1 --min-app-version 0.1.0 --catalog-version 20260101-abc0001
+
+# Verify a previously emitted artifact against a trusted keyset:
+node dist/sign.js --dir dist/artifact --trusted-keys path/to/trusted-keys.json
+# <trusted-keys.json> is [{"kid": "...", "publicKeyPem": "..."}, ...]
+```
+
+`emit-catalog` never writes anywhere but `--out`; it never defaults `--out`
+to a path inside this repo, and no test in this package writes into
+`dist/catalog` in the repo — every test uses `os.tmpdir()`.
+
+### Tests → AT(2)
+
+`test/sign.test.ts`'s "AT(2) — verifyArtifact over a real emitted
+artifact" suite emits a real artifact (via `emitCatalogArtifact`) and then
+verifies it, covering: a valid verify; a tampered shard; a tampered
+manifest (edited in place, still valid JSON); a signature that fails
+against a swapped-in wrong public key for a trusted `kid`; an unknown
+`kid`; and a manifest whose `kid` is in its own `revokedKids[]` (the
+literal AT(2) fixture) — plus that a *different* `kid` appearing in
+`revokedKids[]` does NOT, by itself, refuse this manifest (see "Resolved
+ambiguities" below). `test/manifest.test.ts` covers `versions.json`
+append-only at the unit level (drop / rewrite / reorder, each refused) and
+`test/emit-catalog.test.ts` covers it at the integration level (two real
+emits into the same `outDir`, and via `--previous-versions`).
+
+### Resolved ambiguities
+
+- **What "a manifest whose `kid` is in `revokedKids` is refused" means.**
+  AT(2)'s wording is literal: `verifyArtifact` refuses a manifest whose OWN
+  signing `kid` appears in that same manifest's `revokedKids[]` (a
+  self-revoking manifest). §3.5/§4.8 also describe `revokedKids[]` as how
+  a *surviving* key tells the app/import function to stop trusting some
+  *other*, compromised `kid` going forward across future manifests — that
+  cross-manifest propagation is the app/import function's own bookkeeping
+  (maintaining a running "don't trust this kid any more" set across
+  imports), not something one `verifyArtifact(dir, trustedKeys)` call over
+  a single directory can determine by itself, since its only inputs are
+  the artifact on disk and the caller-supplied `trustedKeys`.
+- **Shard layout: region, not geohash.** The task's build step names both
+  ("geohash-sharded or per-entity JSON shards, as the plan describes").
+  The plan shards geometry by geohash specifically because raw polygon
+  data can be large per region (§5.2); this bundle format carries no
+  geometry payload (`Course.geometry` is a pointer, not inline polygon
+  data — the geometry pipeline is P1.1+, already out of `bundle.ts`'s
+  scope). `facilities/<ISO-region>.json` shards by region instead, which
+  §5.2 already names directly ("Directory JSON is sharded by ISO region").
+- **`--catalog-version` is a required, explicit flag**, not computed from
+  `git rev-parse` inside the emitter. The plan's format is
+  `yyyymmdd-gitsha7` (§3.5), but making the emitter shell out to git would
+  couple it to running inside a git checkout with a readable `HEAD` for no
+  testability benefit; the CLI's caller (CI) is better positioned to
+  compute it and pass it in.
+- **`versions.json`'s append-only check is scoped to what this run can
+  see** — the file already at `<outDir>/catalog/v1/versions.json`, or
+  `--previous-versions` if given. There's no persistent store this module
+  reads from on its own; a CI pipeline that wants the full history
+  enforced needs to seed one of those two inputs from the last publish.
