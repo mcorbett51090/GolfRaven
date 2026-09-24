@@ -3404,6 +3404,18 @@ describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disp
         expect(detectRuntimeTamper({ NODE_OPTIONS: "--max-old-space-size=8192" }, []).tampered).toBe(false);
       });
 
+      it("round 9: NODE_OPTIONS containing any quote or backslash is refused, even when every quoted flag is benign", () => {
+        for (const opts of [
+          '"--max-old-space-size=100 --title=probe"',
+          "'--max-old-space-size=100 --require x'",
+          "--max-old-space-size=100\\ --require\\ x",
+        ]) {
+          const res = detectRuntimeTamper({ NODE_OPTIONS: opts }, []);
+          expect(res.tampered, opts).toBe(true);
+          expect(res.detail).toMatch(/quote or backslash/);
+        }
+      });
+
       it("a non-empty execArgv is flagged", () => {
         const res = detectRuntimeTamper({}, ["--require", "/tmp/evil.cjs"]);
         expect(res.tampered).toBe(true);

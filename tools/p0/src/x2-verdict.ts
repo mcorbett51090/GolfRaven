@@ -1538,6 +1538,18 @@ export function detectRuntimeTamper(env: NodeJS.ProcessEnv, execArgv: readonly s
   }
   const nodeOptions = env.NODE_OPTIONS;
   if (nodeOptions !== undefined) {
+    // No allow-listed flag ever needs quoting or escaping, and this tokenizer's
+    // quote handling is not guaranteed to match Node's own NODE_OPTIONS parser
+    // (round-9 re-gate). Refuse any quote or backslash outright so the two
+    // parsers can never disagree about what the tokens are.
+    if (/['"\\]/.test(nodeOptions)) {
+      return {
+        tampered: true,
+        detail:
+          `refusing: NODE_OPTIONS ("${nodeOptions}") contains a quote or backslash; none of the allow-listed ` +
+          "flags needs one, so this tool refuses rather than guess how Node will tokenize it (tripwire only).",
+      };
+    }
     const tokens = tokenizeNodeOptions(nodeOptions);
     const badToken = tokens.find((t) => !isNodeOptionTokenAllowed(t));
     if (badToken !== undefined) {
