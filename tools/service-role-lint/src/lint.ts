@@ -1,44 +1,75 @@
 // tools/service-role-lint/src/lint.ts
 //
 // AST-based check over the TS/JS in supabase/functions/** (build plan
-// §4.7.1a, docs/golf-trails/02-build-plan.md:1197-1205), hardened against
-// the bypasses named in the gate-round-2 review (B5):
-//   - aliased and namespace imports;
-//   - re-exports;
-//   - `new SupabaseClient`;
-//   - dynamic `import()`;
-//   - any specifier ending in `supabase-js`, or naming a Postgres driver
-//     (`npm:postgres`, `npm:pg`, `jsr:@db/postgres`, `deno.land/x/postgres`,
-//     plain `pg`/`postgres`/`postgres.js`/`pg-promise`);
-//   - service keys / DB URLs read through a variable, a template, or
-//     concatenation (ANY non-literal env access is flagged, and any
-//     literal naming SERVICE_ROLE / DB_URL);
-//   - `globalThis` access;
-//   - a local `withOwnership` shadowing the real one;
-//   - aliasing a client variable (taint propagates through simple
-//     identifier-to-identifier assignment, transitively).
+// §4.7.1a, docs/golf-trails/02-build-plan.md:1197-1205).
+//
+// ⛔ REWRITE (MEDIUM 3, post-P3a re-gate): the previous version banned a
+// growing list of individual SYNTACTIC SHAPES for reading Deno.env/
+// process.env (a deny-list of bypasses). Every round of hardening added
+// more shapes to the list, and every round left new ones open — the
+// re-gate named twelve that still passed: `(Deno as any).env.get`, a
+// function returning `Deno.env`, `Reflect.get(Deno, "env")`,
+// `Deno["env"]`, `.call`, nested destructuring, spread, `(0,
+// Deno.env.get)`, `eval`, an import-map alias "supabase",
+// `@supabase/postgrest-js`, `(self as any).Deno`. A deny-list of shapes
+// is structurally the wrong tool here: there is no bound on how many
+// shapes JS/TS syntax offers to reach the SAME two global bindings.
+//
+// This version inverts the model to an ALLOW-list: ANY reference to the
+// identifier `Deno` or `process` (or the indirection points `globalThis`/
+// `self`/`window`) is an error, with EXACTLY ONE syntactic exception —
+// `Deno.env.get("<literal>")` where the literal is on a small public
+// allow-list. Nothing else about Deno/process is ever legitimate outside
+// `_shared/privileged.ts`, so nothing else needs a name to be banned by;
+// nothing needs enumerating, and a new syntactic bypass shape has no
+// surface to land on — nSyntax that isn't the one sanctioned shape is,
+// structurally, a reference to a banned identifier, full stop.
+//
+// The five requirements this rewrite implements (post-P3a re-gate,
+// MEDIUM 3):
+//   (1) any reference to `Deno`/`process` is an error unless it is
+//       EXACTLY `Deno.env.get("<literal>")` with the literal on the
+//       public allow-list; `globalThis`/`self`/`window` (indirection
+//       points to reach them) are banned outright, unconditionally.
+//   (2) any string literal or template chunk containing SERVICE_ROLE or
+//       DB_URL (case-insensitive) is an error, everywhere in the file —
+//       independent of (1), so a secret substring inside a completely
+//       different call shape (not even touching Deno) is still caught.
+//   (3) every `@supabase/*` specifier (the whole scope, not a fixed list
+//       of package names under it) and every Postgres driver specifier is
+//       banned, after normalising versioned/CDN/registry-prefixed forms.
+//   (4) deno.json / import_map.json aliases are resolved (by the caller,
+//       via the optional `importMap` parameter — see index.ts) and
+//       checked against the same banned-specifier logic.
+//   (5) `eval(...)`, `new Function(...)`, and `Function(...)` are banned
+//       outright — an indirect way to run string-built code that could
+//       itself reach Deno/process without ever naming them syntactically
+//       in a form this (or any static) analysis could otherwise see.
 //
 // The exemption for `supabase/functions/_shared/privileged.ts` is an
 // EXACT path-segment match, not an `endsWith` string check — a file named
 // e.g. `evil_shared/privileged.ts` must NOT be exempted just because the
 // string "_shared/privileged.ts" is a suffix of its path.
 //
-// Uses a real parser (@typescript-eslint/typescript-estree, pinned) rather
-// than a method-name grep, per the plan's own explicit requirement.
+// Uses a real parser (@typescript-eslint/typescript-estree, pinned)
+// rather than a method-name grep, per the plan's own explicit
+// requirement.
 
 import { AST_NODE_TYPES, parse, type TSESTree } from "@typescript-eslint/typescript-estree";
 
 export type RuleId =
   | "service-role-construction"
   | "privileged-call-outside-withOwnership"
-  | "db-url-or-driver"
   | "banned-import-specifier"
+  | "banned-global-reference"
   | "non-literal-env-access"
   | "literal-secret-env-var"
+  | "secret-substring-in-literal"
   | "globalthis-access"
   | "withownership-shadowed"
   | "reexport-of-privileged-symbol"
   | "raw-fetch-with-secret"
+  | "dynamic-code-execution"
   | "parse-error";
 
 export interface Finding {
@@ -53,22 +84,30 @@ export interface LintResult {
   findings: Finding[];
 }
 
+/** Resolved import-map aliases (bare specifier -> target), per requirement (4). */
+export interface LintOptions {
+  importMap?: Record<string, string>;
+}
+
 /** The one exact file allowed to do any of this (build plan line 1189). */
 const EXEMPT_SEGMENTS = ["supabase", "functions", "_shared", "privileged.ts"];
 
 /** Env var name substrings that mark a client/URL as privileged (case-insensitive). */
 const SECRET_ENV_MARKERS = ["SERVICE_ROLE", "DB_URL"];
 
-// M3 (post-P3a gate): "any env read outside privileged.ts fails unless it
-// is on a small allow-list of public vars." A small, explicit allow-list
-// of names that are genuinely public/non-secret — everything else read
-// from Deno.env / process.env, in ANY syntactic form, is a finding. This
-// deliberately inverts the old default (ban a marker substring, allow
-// everything else) because a substring list is exactly what versioned/
-// aliased/destructured/toObject() access bypassed.
+// Requirement (1): "a small allow-list of public vars" — the ONLY literal
+// keys `Deno.env.get(...)` may ever read outside privileged.ts.
 const PUBLIC_ENV_VAR_ALLOWLIST = new Set(["SUPABASE_URL", "SUPABASE_ANON_KEY", "ENVIRONMENT", "NODE_ENV", "DENO_ENV"]);
 
-function mentionsSecretEnvVar(text: string): boolean {
+// Requirement (1): the two identifiers that are NEVER legitimate outside
+// privileged.ts, except through the one sanctioned shape.
+const BANNED_GLOBAL_IDENTIFIERS = new Set(["Deno", "process"]);
+// Indirection points that can be used to REACH Deno/process (or anything
+// else global) without naming them as a bare identifier reference —
+// banned unconditionally, regardless of what they're used for.
+const INDIRECTION_IDENTIFIERS = new Set(["globalThis", "self", "window"]);
+
+function mentionsSecretSubstring(text: string): boolean {
   const upper = text.toUpperCase();
   return SECRET_ENV_MARKERS.some((m) => upper.includes(m));
 }
@@ -77,16 +116,11 @@ function isPublicEnvVar(name: string): boolean {
   return PUBLIC_ENV_VAR_ALLOWLIST.has(name);
 }
 
-// M3(1) (post-P3a gate): "versioned or URL specifiers ... match by
-// normalised package name, not an anchored regex." The old
-// BANNED_SPECIFIER_PATTERNS anchored regexes (`/^pg$/` etc.) matched the
-// RAW specifier text, so `https://esm.sh/@supabase/supabase-js@2.45.0`,
-// `https://deno.land/x/postgresjs@0.19.0`, and `npm:pg@8` all sailed
-// through — none of them equals the bare, unversioned string the regex
-// anchored to. normalizePackageSpecifier strips a CDN/registry host
-// prefix, a `npm:`/`jsr:` scheme, and a trailing `@<version>`, so the
-// SAME banned-name check catches every dressed-up form of the same
-// package.
+// Requirement (3): "versioned or URL specifiers ... match by normalised
+// package name, not an anchored regex." normalizePackageSpecifier strips
+// a CDN/registry host prefix, a `npm:`/`jsr:` scheme, and a trailing
+// `@<version>`, so the same banned-name/scope check catches every
+// dressed-up form of the same package.
 const KNOWN_REGISTRY_HOST_PREFIXES = [
   "esm.sh/",
   "cdn.skypack.dev/",
@@ -116,20 +150,56 @@ function normalizePackageSpecifier(spec: string): string {
   return pkgName.toLowerCase();
 }
 
-const BANNED_PACKAGE_NAMES = new Set([
-  "@supabase/supabase-js",
+// Requirement (3): every Postgres driver, by normalised bare package
+// name — NOT scoped to @supabase (that whole scope is banned separately,
+// below, so a new @supabase/* package needs no addition here).
+const BANNED_DRIVER_PACKAGE_NAMES = new Set([
   "pg",
   "postgres",
   "postgres.js",
   "postgresjs",
   "pg-promise",
+  "pg-native",
   "@db/postgres",
+  "@neondatabase/serverless",
 ]);
 
 function isBannedSpecifier(spec: string): boolean {
   const normalized = normalizePackageSpecifier(spec);
-  if (BANNED_PACKAGE_NAMES.has(normalized)) return true;
+  // Requirement (3): the WHOLE @supabase/* scope, not a fixed list of
+  // package names under it — closes the `@supabase/postgrest-js` gap (and
+  // any other @supabase/* package named later) in one rule instead of
+  // enumerating packages one at a time.
+  if (normalized.startsWith("@supabase/")) return true;
+  if (BANNED_DRIVER_PACKAGE_NAMES.has(normalized)) return true;
   return normalized.endsWith("supabase-js");
+}
+
+// Requirement (4): resolve a specifier through a deno.json/import_map.json
+// `imports` table (index.ts loads and passes this in). Import-map
+// resolution rules: an EXACT key match wins outright; otherwise the
+// LONGEST prefix key ending in "/" that the specifier starts with is used,
+// with that prefix replaced by its target (the standard import-map
+// "packages within a scope" shape, e.g. `"@supabase/": "npm:@supabase/"`).
+function resolveImportMapAlias(spec: string, importMap: Record<string, string> | undefined): string | undefined {
+  if (!importMap) return undefined;
+  if (Object.prototype.hasOwnProperty.call(importMap, spec)) return importMap[spec];
+  let bestPrefix = "";
+  let bestTarget: string | undefined;
+  for (const [key, target] of Object.entries(importMap)) {
+    if (key.endsWith("/") && spec.startsWith(key) && key.length > bestPrefix.length) {
+      bestPrefix = key;
+      bestTarget = target + spec.slice(key.length);
+    }
+  }
+  return bestTarget;
+}
+
+function isBannedSpecifierOrAlias(spec: string, importMap: Record<string, string> | undefined): { banned: boolean; resolvedVia?: string } {
+  if (isBannedSpecifier(spec)) return { banned: true };
+  const resolved = resolveImportMapAlias(spec, importMap);
+  if (resolved !== undefined && isBannedSpecifier(resolved)) return { banned: true, resolvedVia: resolved };
+  return { banned: false };
 }
 
 function isAllowedFile(filePath: string): boolean {
@@ -174,7 +244,30 @@ function isCreateClientCallee(callee: TSESTree.Expression, createClientLocalName
   return false;
 }
 
-export function lintSource(source: string, filePath: string): Finding[] {
+// The EXACT sanctioned shape from requirement (1): a CallExpression whose
+// callee is precisely `Deno.env.get` (both MemberExpressions
+// non-computed, the innermost object a bare Identifier named "Deno") —
+// nothing else matches, by construction: `Deno["env"].get(...)`,
+// `Deno.env["get"](...)`, `(Deno as any).env.get(...)`, `x.env.get(...)`
+// for any x other than the literal Deno identifier, `Deno.env.get.call(...)`
+// (an extra MemberExpression hop), a destructured/aliased/spread/
+// sequence-expression call — all fail this check by simply not matching
+// the shape, with no per-bypass special-casing needed.
+function isExactDenoEnvGetCall(node: TSESTree.Node): node is TSESTree.CallExpression {
+  if (node.type !== AST_NODE_TYPES.CallExpression) return false;
+  const callee = node.callee;
+  if (callee.type !== AST_NODE_TYPES.MemberExpression) return false;
+  if (callee.computed) return false;
+  if (callee.property.type !== AST_NODE_TYPES.Identifier || callee.property.name !== "get") return false;
+  const inner = callee.object;
+  if (inner.type !== AST_NODE_TYPES.MemberExpression) return false;
+  if (inner.computed) return false;
+  if (inner.property.type !== AST_NODE_TYPES.Identifier || inner.property.name !== "env") return false;
+  if (inner.object.type !== AST_NODE_TYPES.Identifier || inner.object.name !== "Deno") return false;
+  return true;
+}
+
+export function lintSource(source: string, filePath: string, options: LintOptions = {}): Finding[] {
   const findings: Finding[] = [];
   if (isAllowedFile(filePath)) {
     return findings; // privileged.ts is the sanctioned construction site.
@@ -188,47 +281,166 @@ export function lintSource(source: string, filePath: string): Finding[] {
   }
 
   // ---------------------------------------------------------------------
-  // Pass 1: import/re-export/dynamic-import bookkeeping.
+  // Pass 0: identifiers declared by an AMBIENT `declare` statement (e.g.
+  // `declare const Deno: {...}` — every fixture in this suite uses this
+  // purely so a Node-based parser can parse the file without a real Deno
+  // type-definition on hand; it has zero runtime effect and real
+  // production code never carries one, since Deno's own ambient types
+  // come from the runtime itself). These are TYPE positions, not
+  // references, so they are excluded from Pass 1's "any reference to
+  // Deno/process" scan by object identity.
+  // ---------------------------------------------------------------------
+  const declaredAmbientIds = new Set<TSESTree.Node>();
+  walk(ast, (node) => {
+    if (
+      node.type === AST_NODE_TYPES.VariableDeclaration &&
+      node.declare &&
+      node.declarations.length > 0
+    ) {
+      for (const decl of node.declarations) {
+        if (decl.id.type === AST_NODE_TYPES.Identifier) declaredAmbientIds.add(decl.id as unknown as TSESTree.Node);
+      }
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Pass 1 (requirement 1): any reference to Deno/process/globalThis/
+  // self/window, allow-listing EXACTLY `Deno.env.get("<public literal>")`.
+  // ---------------------------------------------------------------------
+  // First, find every exact-shape `Deno.env.get(...)` call and classify
+  // it: sanctioned (literal, on the allow-list) or not. Either way, the
+  // call's OWN callee subtree (the `Deno`/`env`/`get` identifiers) is
+  // "handled" here with a specific, actionable message — the generic
+  // scan below skips node objects already handled, so a bad key gets ONE
+  // clear finding (not a generic one plus a duplicate).
+  const handledNodes = new Set<TSESTree.Node>();
+  walk(ast, (node) => {
+    if (!isExactDenoEnvGetCall(node)) return;
+    const call = node;
+    handledNodes.add(call.callee as unknown as TSESTree.Node);
+    const callee = call.callee as TSESTree.MemberExpression;
+    handledNodes.add(callee.object as unknown as TSESTree.Node); // the `Deno.env` MemberExpression
+    handledNodes.add((callee.object as TSESTree.MemberExpression).object as unknown as TSESTree.Node); // the `Deno` Identifier
+    const arg = call.arguments[0];
+    const literalKey = call.arguments.length === 1 && arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
+    const loc = nodeLoc(call);
+    if (literalKey === undefined) {
+      findings.push({
+        rule: "non-literal-env-access",
+        message: "Deno.env.get(...) with a non-literal, computed, or spread argument — cannot verify it is on the public allow-list",
+        ...loc,
+      });
+    } else if (!isPublicEnvVar(literalKey)) {
+      findings.push({
+        rule: "literal-secret-env-var",
+        message: `Deno.env.get("${literalKey}") reads a key not on the public env-var allow-list (SERVICE_ROLE/DB_URL-shaped or otherwise unlisted secret)`,
+        ...loc,
+      });
+    }
+    // else: sanctioned — no finding.
+  });
+
+  // Generic scan: ANY remaining reference to Deno/process (not already
+  // handled above, not an ambient `declare` id) is banned outright —
+  // this is what makes every OTHER syntactic shape (aliasing, bracket
+  // access, `.call`, `Reflect.get`, nested destructuring, spread, a
+  // sequence-expression callee, a function that merely returns
+  // `Deno.env`, `(Deno as any)...`, and any shape not yet invented) fail
+  // without needing its own rule: it is, structurally, a reference to a
+  // banned identifier that isn't the one sanctioned call shape.
+  // globalThis/self/window are banned unconditionally (requirement 1:
+  // "globalThis/self/window access to them" fails) — this also catches
+  // `(self as any).Deno`/`window.process` etc without special-casing,
+  // since `self`/`window` themselves are always findings.
+  walk(ast, (node) => {
+    if (node.type !== AST_NODE_TYPES.Identifier) return;
+    if (handledNodes.has(node)) return;
+    if (declaredAmbientIds.has(node)) return;
+    if (BANNED_GLOBAL_IDENTIFIERS.has(node.name)) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "banned-global-reference",
+        message: `reference to "${node.name}" outside supabase/functions/_shared/privileged.ts — only the exact call Deno.env.get("<public-allow-listed literal>") is permitted`,
+        ...loc,
+      });
+    } else if (INDIRECTION_IDENTIFIERS.has(node.name)) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "globalthis-access",
+        message: `reference to "${node.name}" outside supabase/functions/_shared/privileged.ts — can be used to reach Deno/process (or stash a privileged client) outside the normal import graph`,
+        ...loc,
+      });
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Pass 2 (requirement 2): any string literal OR template chunk
+  // containing SERVICE_ROLE or DB_URL is an error, everywhere in the
+  // file — independent of Pass 1, so a secret substring surfacing through
+  // a completely different mechanism (not even touching Deno/process
+  // syntactically — e.g. a hand-written comment-adjacent literal, a
+  // hardcoded fallback, a string built into a config object) is still
+  // caught.
+  // ---------------------------------------------------------------------
+  walk(ast, (node) => {
+    if (node.type === AST_NODE_TYPES.Literal && typeof node.value === "string" && mentionsSecretSubstring(node.value)) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "secret-substring-in-literal",
+        message: `string literal "${node.value}" contains SERVICE_ROLE or DB_URL`,
+        ...loc,
+      });
+    }
+    if (node.type === AST_NODE_TYPES.TemplateElement) {
+      const raw = node.value.raw;
+      if (raw && mentionsSecretSubstring(raw)) {
+        const loc = nodeLoc(node);
+        findings.push({
+          rule: "secret-substring-in-literal",
+          message: `template literal chunk "${raw}" contains SERVICE_ROLE or DB_URL`,
+          ...loc,
+        });
+      }
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Pass 3: import/re-export/dynamic-import/require bookkeeping, and the
+  // banned-specifier check (requirements 3 + 4).
   // ---------------------------------------------------------------------
   const createClientLocalNames = new Set<string>(); // e.g. `createClient`, or an alias of it
   const supabaseClientLocalNames = new Set<string>(); // `SupabaseClient` class import, aliased or not
   const namespaceImportNames = new Set<string>(); // `import * as x from "<supabase-js>"`
 
+  function reportBannedSpecifier(node: TSESTree.Node, spec: string, kind: "import" | "dynamic import" | "require" | "re-export"): void {
+    const { banned, resolvedVia } = isBannedSpecifierOrAlias(spec, options.importMap);
+    if (!banned) return;
+    const loc = nodeLoc(node);
+    const viaNote = resolvedVia ? ` (alias resolves via deno.json/import_map.json to "${resolvedVia}")` : "";
+    findings.push({
+      rule: kind === "re-export" ? "reexport-of-privileged-symbol" : "banned-import-specifier",
+      message: `${kind} of a banned specifier "${spec}"${viaNote} (Supabase client scope or raw Postgres driver) outside supabase/functions/_shared/privileged.ts`,
+      ...loc,
+    });
+  }
+
   walk(ast, (node) => {
     if (node.type === AST_NODE_TYPES.ImportDeclaration) {
       const spec = node.source.value;
-      const banned = typeof spec === "string" && isBannedSpecifier(spec);
-      if (typeof spec === "string" && banned) {
-        const loc = nodeLoc(node);
-        findings.push({
-          rule: "banned-import-specifier",
-          message: `import from a banned specifier "${spec}" (Supabase client or raw Postgres driver) outside supabase/functions/_shared/privileged.ts`,
-          ...loc,
-        });
+      if (typeof spec === "string") {
+        reportBannedSpecifier(node, spec, "import");
         for (const spec2 of node.specifiers) {
           if (spec2.type === AST_NODE_TYPES.ImportSpecifier) {
             const importedName = spec2.imported.type === AST_NODE_TYPES.Identifier ? spec2.imported.name : String(spec2.imported.value);
             if (importedName === "createClient") createClientLocalNames.add(spec2.local.name);
             if (importedName === "SupabaseClient") supabaseClientLocalNames.add(spec2.local.name);
           } else if (spec2.type === AST_NODE_TYPES.ImportDefaultSpecifier) {
-            // `import postgres from "postgres"` — the default export IS the
-            // client-constructing function; treat the local binding itself
-            // as a createClient-equivalent name.
+            // `import postgres from "postgres"` — the default export IS
+            // the client-constructing function; treat the local binding
+            // itself as a createClient-equivalent name.
             createClientLocalNames.add(spec2.local.name);
           } else if (spec2.type === AST_NODE_TYPES.ImportNamespaceSpecifier) {
             namespaceImportNames.add(spec2.local.name);
-          }
-        }
-      } else if (typeof spec === "string") {
-        // Not a banned specifier, but still track createClient/SupabaseClient
-        // bindings from ANY import (aliasing doesn't require the specifier
-        // itself to be banned if re-exported through an intermediate
-        // module — best-effort: we still catch the local alias name).
-        for (const spec2 of node.specifiers) {
-          if (spec2.type === AST_NODE_TYPES.ImportSpecifier) {
-            const importedName = spec2.imported.type === AST_NODE_TYPES.Identifier ? spec2.imported.name : String(spec2.imported.value);
-            if (importedName === "createClient") createClientLocalNames.add(spec2.local.name);
-            if (importedName === "SupabaseClient") supabaseClientLocalNames.add(spec2.local.name);
           }
         }
       }
@@ -238,28 +450,17 @@ export function lintSource(source: string, filePath: string): Finding[] {
     if (
       (node.type === AST_NODE_TYPES.ExportNamedDeclaration || node.type === AST_NODE_TYPES.ExportAllDeclaration) &&
       node.source &&
-      typeof node.source.value === "string" &&
-      isBannedSpecifier(node.source.value)
+      typeof node.source.value === "string"
     ) {
-      const loc = nodeLoc(node);
-      findings.push({
-        rule: "reexport-of-privileged-symbol",
-        message: `re-exports from a banned specifier "${node.source.value}" outside supabase/functions/_shared/privileged.ts`,
-        ...loc,
-      });
+      reportBannedSpecifier(node, node.source.value, "re-export");
     }
 
     // Dynamic import(): `import("@supabase/supabase-js")`, `import("npm:pg")`.
     if (node.type === AST_NODE_TYPES.ImportExpression) {
       const arg = node.source;
-      if (arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" && isBannedSpecifier(arg.value)) {
-        const loc = nodeLoc(node);
-        findings.push({
-          rule: "banned-import-specifier",
-          message: `dynamic import("${arg.value}") of a banned specifier outside supabase/functions/_shared/privileged.ts`,
-          ...loc,
-        });
-      } else if (arg.type !== AST_NODE_TYPES.Literal) {
+      if (arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string") {
+        reportBannedSpecifier(node, arg.value, "dynamic import");
+      } else {
         // A dynamic import whose specifier isn't even a literal is
         // inherently unauditable by this static check — flag it too.
         const loc = nodeLoc(node);
@@ -274,24 +475,9 @@ export function lintSource(source: string, filePath: string): Finding[] {
     // require("pg") / require("@supabase/supabase-js") (CJS interop).
     if (node.type === AST_NODE_TYPES.CallExpression && node.callee.type === AST_NODE_TYPES.Identifier && node.callee.name === "require") {
       const arg = node.arguments[0];
-      if (arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" && isBannedSpecifier(arg.value)) {
-        const loc = nodeLoc(node);
-        findings.push({
-          rule: "banned-import-specifier",
-          message: `require("${arg.value}") of a banned specifier outside supabase/functions/_shared/privileged.ts`,
-          ...loc,
-        });
+      if (arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string") {
+        reportBannedSpecifier(node, arg.value, "require");
       }
-    }
-
-    // globalThis access, anywhere.
-    if (node.type === AST_NODE_TYPES.Identifier && node.name === "globalThis") {
-      const loc = nodeLoc(node);
-      findings.push({
-        rule: "globalthis-access",
-        message: "reference to globalThis outside supabase/functions/_shared/privileged.ts",
-        ...loc,
-      });
     }
 
     // A local withOwnership shadowing the real helper (function decl, or
@@ -310,276 +496,7 @@ export function lintSource(source: string, filePath: string): Finding[] {
   });
 
   // ---------------------------------------------------------------------
-  // Pass 2 (M3, post-P3a gate — reworked for bypass-resistance): "Rule:
-  // any env read outside privileged.ts fails unless it is on a small
-  // allow-list of public vars." Every syntactic shape below funnels into
-  // ONE helper, `flagEnvKey`, so the allow-list/secret-vs-non-literal
-  // decision lives in exactly one place — the four probes named in the
-  // gate (destructured env, .toObject(), computed/.KEY access, the
-  // original .get() form) differ only in HOW they locate the key, not in
-  // what happens once one is found.
-  //
-  // Tracks local names bound to Deno's/process's `env` object — via
-  // `Deno.env`/`process.env` directly, an aliased import (`import Deno
-  // ...` isn't real, but `const D = Deno;` is, so track that), OR
-  // destructuring (`const { env } = Deno;`) — so `env.get(...)` on the
-  // destructured local is caught the same as `Deno.env.get(...)`.
-  const envObjectLocalNames = new Set<string>(["Deno", "process"]); // built-ins, always tracked
-  const secretEnvValueIdentifiers = new Set<string>(); // vars assigned from a non-allowlisted env read (M3(4) taint source)
-
-  function flagEnvKey(node: TSESTree.Node, literalKey: string | undefined, sourceDescription: string): void {
-    const loc = nodeLoc(node);
-    if (literalKey === undefined) {
-      findings.push({
-        rule: "non-literal-env-access",
-        message: `${sourceDescription} with a non-literal/unresolvable key — cannot verify it is on the public allow-list`,
-        ...loc,
-      });
-      return;
-    }
-    if (!isPublicEnvVar(literalKey)) {
-      findings.push({
-        rule: "literal-secret-env-var",
-        message: `${sourceDescription} reads "${literalKey}", which is not on the public env-var allow-list (SERVICE_ROLE/DB_URL-shaped or otherwise unlisted secret)`,
-        ...loc,
-      });
-    }
-  }
-
-  // Pass 2a: discover env-object aliases (`const D = Deno;`) and
-  // destructured `env` bindings (`const { env } = Deno;` /
-  // `const { env } = process;`) before scanning for reads, since a read
-  // can precede or follow its alias's declaration in source order but
-  // `walk` is a single pass — two short sub-passes over the whole AST is
-  // simpler and cheaper than reordering.
-  for (let pass = 0; pass < 3; pass++) {
-    let added = false;
-    walk(ast, (node) => {
-      if (
-        node.type === AST_NODE_TYPES.VariableDeclarator &&
-        node.id.type === AST_NODE_TYPES.Identifier &&
-        node.init &&
-        node.init.type === AST_NODE_TYPES.Identifier &&
-        envObjectLocalNames.has(node.init.name) &&
-        !envObjectLocalNames.has(node.id.name)
-      ) {
-        envObjectLocalNames.add(node.id.name);
-        added = true;
-      }
-    });
-    if (!added) break;
-  }
-  const destructuredEnvGetterNames = new Set<string>(); // a local bound to `Deno.env`/`process.env`'s `.get`/`.toObject` itself
-  const envAliasIsDirectEnvObject = new Set<string>(); // a local bound to `Deno.env`/`process.env` itself (e.g. `const { env } = Deno;`)
-  walk(ast, (node) => {
-    if (
-      node.type === AST_NODE_TYPES.VariableDeclarator &&
-      node.id.type === AST_NODE_TYPES.ObjectPattern &&
-      node.init &&
-      node.init.type === AST_NODE_TYPES.Identifier &&
-      envObjectLocalNames.has(node.init.name)
-    ) {
-      // `const { env } = Deno;`
-      for (const prop of node.id.properties) {
-        if (
-          prop.type === AST_NODE_TYPES.Property &&
-          prop.key.type === AST_NODE_TYPES.Identifier &&
-          prop.key.name === "env" &&
-          prop.value.type === AST_NODE_TYPES.Identifier
-        ) {
-          envAliasIsDirectEnvObject.add(prop.value.name);
-        }
-      }
-    }
-    if (
-      node.type === AST_NODE_TYPES.VariableDeclarator &&
-      node.id.type === AST_NODE_TYPES.ObjectPattern &&
-      node.init &&
-      node.init.type === AST_NODE_TYPES.MemberExpression &&
-      node.init.object.type === AST_NODE_TYPES.Identifier &&
-      envObjectLocalNames.has(node.init.object.name) &&
-      node.init.property.type === AST_NODE_TYPES.Identifier &&
-      node.init.property.name === "env"
-    ) {
-      // `const { get } = Deno.env;` / `const { toObject } = Deno.env;`
-      for (const prop of node.id.properties) {
-        if (
-          prop.type === AST_NODE_TYPES.Property &&
-          prop.key.type === AST_NODE_TYPES.Identifier &&
-          (prop.key.name === "get" || prop.key.name === "toObject") &&
-          prop.value.type === AST_NODE_TYPES.Identifier
-        ) {
-          destructuredEnvGetterNames.add(prop.value.name);
-        }
-      }
-    }
-  });
-
-  walk(ast, (node) => {
-    // <envObject>.env.get(<arg>) or <destructuredEnvLocal>.get(<arg>) —
-    // Deno.env.get(...), an aliased env object, or `const {env}=Deno;
-    // env.get(...)`.
-    const isEnvGetCall =
-      node.type === AST_NODE_TYPES.CallExpression &&
-      node.callee.type === AST_NODE_TYPES.MemberExpression &&
-      node.callee.property.type === AST_NODE_TYPES.Identifier &&
-      node.callee.property.name === "get" &&
-      ((node.callee.object.type === AST_NODE_TYPES.MemberExpression &&
-        node.callee.object.property.type === AST_NODE_TYPES.Identifier &&
-        node.callee.object.property.name === "env" &&
-        node.callee.object.object.type === AST_NODE_TYPES.Identifier &&
-        envObjectLocalNames.has(node.callee.object.object.name)) ||
-        (node.callee.object.type === AST_NODE_TYPES.Identifier && envAliasIsDirectEnvObject.has(node.callee.object.name)));
-    // `const { get } = Deno.env; get(<arg>)` — a bare call, not a member call.
-    const isDestructuredEnvGetCall =
-      node.type === AST_NODE_TYPES.CallExpression &&
-      node.callee.type === AST_NODE_TYPES.Identifier &&
-      destructuredEnvGetterNames.has(node.callee.name) &&
-      node.callee.name !== "toObject"; // toObject handled separately below (its own args are irrelevant)
-    if (isEnvGetCall || isDestructuredEnvGetCall) {
-      const call = node as TSESTree.CallExpression;
-      const arg = call.arguments[0];
-      const literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
-      flagEnvKey(node, literalKey, "environment variable read (.env.get(...))");
-    }
-
-    // <envObject>.env.toObject() — grabs EVERY env var at once, so no
-    // per-key allow-list check is even possible; always a finding.
-    // `.toObject()[...]` / `.toObject().KEY` is flagged too (the outer
-    // access), so both the acquisition and the specific read are named.
-    if (
-      node.type === AST_NODE_TYPES.CallExpression &&
-      node.callee.type === AST_NODE_TYPES.MemberExpression &&
-      node.callee.property.type === AST_NODE_TYPES.Identifier &&
-      node.callee.property.name === "toObject" &&
-      ((node.callee.object.type === AST_NODE_TYPES.MemberExpression &&
-        node.callee.object.property.type === AST_NODE_TYPES.Identifier &&
-        node.callee.object.property.name === "env" &&
-        node.callee.object.object.type === AST_NODE_TYPES.Identifier &&
-        envObjectLocalNames.has(node.callee.object.object.name)) ||
-        (node.callee.object.type === AST_NODE_TYPES.Identifier && envAliasIsDirectEnvObject.has(node.callee.object.name)))
-    ) {
-      const loc = nodeLoc(node);
-      findings.push({
-        rule: "non-literal-env-access",
-        message: "Deno.env.toObject() reads every environment variable at once — cannot verify no secret is read; use .get(<allow-listed literal>) instead",
-        ...loc,
-      });
-    }
-    if (
-      node.type === AST_NODE_TYPES.CallExpression &&
-      node.callee.type === AST_NODE_TYPES.Identifier &&
-      destructuredEnvGetterNames.has(node.callee.name) &&
-      node.callee.name === "toObject"
-    ) {
-      const loc = nodeLoc(node);
-      findings.push({
-        rule: "non-literal-env-access",
-        message: "destructured toObject() (from Deno.env) reads every environment variable at once — cannot verify no secret is read",
-        ...loc,
-      });
-    }
-
-    // process.env.FOO (static member) / process.env["FOO"] or
-    // process.env[x] (computed) — and the same for any tracked env-object
-    // alias, e.g. `const D = Deno; D.env.FOO`.
-    if (
-      node.type === AST_NODE_TYPES.MemberExpression &&
-      node.object.type === AST_NODE_TYPES.MemberExpression &&
-      node.object.property.type === AST_NODE_TYPES.Identifier &&
-      node.object.property.name === "env" &&
-      node.object.object.type === AST_NODE_TYPES.Identifier &&
-      envObjectLocalNames.has(node.object.object.name) &&
-      !(node.property.type === AST_NODE_TYPES.Identifier && (node.property.name === "get" || node.property.name === "toObject"))
-    ) {
-      if (!node.computed && node.property.type === AST_NODE_TYPES.Identifier) {
-        flagEnvKey(node, node.property.name, `${node.object.object.name}.env.${node.property.name}`);
-      } else if (node.computed) {
-        const prop = node.property;
-        const literalKey = prop.type === AST_NODE_TYPES.Literal && typeof prop.value === "string" ? prop.value : undefined;
-        flagEnvKey(node, literalKey, `${node.object.object.name}.env[...]`);
-      }
-    }
-    // Same for a bare destructured `env` local: `env.FOO` / `env["FOO"]`.
-    if (
-      node.type === AST_NODE_TYPES.MemberExpression &&
-      node.object.type === AST_NODE_TYPES.Identifier &&
-      envAliasIsDirectEnvObject.has(node.object.name) &&
-      !(node.property.type === AST_NODE_TYPES.Identifier && node.property.name === "get") &&
-      !(node.property.type === AST_NODE_TYPES.Identifier && node.property.name === "toObject")
-    ) {
-      if (!node.computed && node.property.type === AST_NODE_TYPES.Identifier) {
-        flagEnvKey(node, node.property.name, `${node.object.name}.${node.property.name} (destructured env)`);
-      } else if (node.computed) {
-        const prop = node.property;
-        const literalKey = prop.type === AST_NODE_TYPES.Literal && typeof prop.value === "string" ? prop.value : undefined;
-        flagEnvKey(node, literalKey, `${node.object.name}[...] (destructured env)`);
-      }
-    }
-  });
-
-  // Pass 2b: populate secretEnvValueIdentifiers — every variable assigned
-  // DIRECTLY from a non-allowlisted env read, in any of the same shapes
-  // Pass 2 just scanned for. Feeds Pass 5's "fetch() using a service key
-  // read from env" check (M3(4)). A dedicated declarator-shaped pass
-  // (rather than reusing Pass 2's per-node hits) sidesteps needing parent
-  // pointers, which typescript-estree's plain-object AST does not carry.
-  walk(ast, (node) => {
-    if (node.type !== AST_NODE_TYPES.VariableDeclarator || node.id.type !== AST_NODE_TYPES.Identifier || !node.init) return;
-    const init = node.init;
-    let literalKey: string | undefined;
-    let isEnvRead = false;
-    if (
-      init.type === AST_NODE_TYPES.CallExpression &&
-      init.callee.type === AST_NODE_TYPES.MemberExpression &&
-      init.callee.property.type === AST_NODE_TYPES.Identifier &&
-      init.callee.property.name === "get" &&
-      init.callee.object.type === AST_NODE_TYPES.MemberExpression &&
-      init.callee.object.property.type === AST_NODE_TYPES.Identifier &&
-      init.callee.object.property.name === "env" &&
-      init.callee.object.object.type === AST_NODE_TYPES.Identifier &&
-      envObjectLocalNames.has(init.callee.object.object.name)
-    ) {
-      isEnvRead = true;
-      const arg = init.arguments[0];
-      literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
-    } else if (
-      init.type === AST_NODE_TYPES.CallExpression &&
-      init.callee.type === AST_NODE_TYPES.Identifier &&
-      destructuredEnvGetterNames.has(init.callee.name)
-    ) {
-      isEnvRead = true;
-      const arg = init.arguments[0];
-      literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
-    } else if (
-      init.type === AST_NODE_TYPES.MemberExpression &&
-      !init.computed &&
-      init.property.type === AST_NODE_TYPES.Identifier &&
-      init.object.type === AST_NODE_TYPES.MemberExpression &&
-      init.object.property.type === AST_NODE_TYPES.Identifier &&
-      init.object.property.name === "env" &&
-      init.object.object.type === AST_NODE_TYPES.Identifier &&
-      envObjectLocalNames.has(init.object.object.name)
-    ) {
-      isEnvRead = true;
-      literalKey = init.property.name;
-    } else if (
-      init.type === AST_NODE_TYPES.MemberExpression &&
-      !init.computed &&
-      init.property.type === AST_NODE_TYPES.Identifier &&
-      init.object.type === AST_NODE_TYPES.Identifier &&
-      envAliasIsDirectEnvObject.has(init.object.name)
-    ) {
-      isEnvRead = true;
-      literalKey = init.property.name;
-    }
-    if (isEnvRead && (literalKey === undefined || !isPublicEnvVar(literalKey))) {
-      secretEnvValueIdentifiers.add(node.id.name);
-    }
-  });
-
-  // ---------------------------------------------------------------------
-  // Pass 3: service-role client construction (createClient / new
+  // Pass 4: service-role client construction (createClient / new
   // SupabaseClient), with alias-taint propagated transitively.
   // ---------------------------------------------------------------------
   const serviceRoleIdentifiers = new Set<string>();
@@ -591,8 +508,8 @@ export function lintSource(source: string, filePath: string): Finding[] {
         let found = false;
         walk(arg, (n) => {
           if (found) return;
-          if (n.type === AST_NODE_TYPES.Literal && typeof n.value === "string" && mentionsSecretEnvVar(n.value)) found = true;
-          if (n.type === AST_NODE_TYPES.Identifier && mentionsSecretEnvVar(n.name)) found = true;
+          if (n.type === AST_NODE_TYPES.Literal && typeof n.value === "string" && mentionsSecretSubstring(n.value)) found = true;
+          if (n.type === AST_NODE_TYPES.Identifier && mentionsSecretSubstring(n.name)) found = true;
         });
         return found;
       });
@@ -649,8 +566,26 @@ export function lintSource(source: string, filePath: string): Finding[] {
   });
 
   // Alias propagation: `const alias = client;` taints `alias` too, for any
-  // identifier already known to hold a service-role client. Fixed-point
-  // over a few passes (handles chained aliasing: a -> b -> c).
+  // identifier already known to hold a service-role client. Also used to
+  // track a secret-env-value identifier (`const key = Deno.env.get(...)`,
+  // when that read wasn't allow-listed) for Pass 6's raw-fetch check.
+  // Fixed-point over a few passes (handles chained aliasing: a -> b -> c).
+  const secretEnvValueIdentifiers = new Set<string>();
+  walk(ast, (node) => {
+    if (
+      node.type === AST_NODE_TYPES.VariableDeclarator &&
+      node.id.type === AST_NODE_TYPES.Identifier &&
+      node.init &&
+      isExactDenoEnvGetCall(node.init)
+    ) {
+      const call = node.init;
+      const arg = call.arguments[0];
+      const literalKey = call.arguments.length === 1 && arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
+      if (literalKey === undefined || !isPublicEnvVar(literalKey)) {
+        secretEnvValueIdentifiers.add(node.id.name);
+      }
+    }
+  });
   for (let pass = 0; pass < 5; pass++) {
     let added = false;
     walk(ast, (node) => {
@@ -675,9 +610,6 @@ export function lintSource(source: string, filePath: string): Finding[] {
         serviceRoleIdentifiers.add(node.left.name);
         added = true;
       }
-      // Same fixed-point propagation for secret-env-value identifiers
-      // (M3(4)'s taint source — a raw fetch() using a service key read
-      // from env, not necessarily via createClient at all).
       if (
         node.type === AST_NODE_TYPES.VariableDeclarator &&
         node.id.type === AST_NODE_TYPES.Identifier &&
@@ -709,7 +641,7 @@ export function lintSource(source: string, filePath: string): Finding[] {
   };
 
   // ---------------------------------------------------------------------
-  // Pass 4: any call on a privileged (service-role) handle outside a
+  // Pass 5: any call on a privileged (service-role) handle outside a
   // withOwnership callback.
   // ---------------------------------------------------------------------
   walk(ast, (node) => {
@@ -755,30 +687,9 @@ export function lintSource(source: string, filePath: string): Finding[] {
   });
 
   // ---------------------------------------------------------------------
-  // Pass 5: raw Postgres driver import / SUPABASE_DB_URL reference
-  // (independent of the specifier check above — this also catches an
-  // in-file textual reference that isn't tied to an import).
-  // ---------------------------------------------------------------------
-  walk(ast, (node) => {
-    if (
-      (node.type === AST_NODE_TYPES.Literal && typeof node.value === "string" && node.value.toUpperCase().includes("DB_URL")) ||
-      (node.type === AST_NODE_TYPES.Identifier && node.name.toUpperCase().includes("DB_URL"))
-    ) {
-      const loc = nodeLoc(node);
-      findings.push({
-        rule: "db-url-or-driver",
-        message: "reference to a DB_URL-named environment variable outside supabase/functions/_shared/privileged.ts",
-        ...loc,
-      });
-    }
-  });
-
-  // ---------------------------------------------------------------------
-  // Pass 6 (M3(4), post-P3a gate): "a raw fetch using a service key read
-  // from env." Flags any `fetch(...)` call whose argument tree references
-  // a secretEnvValueIdentifiers-tainted variable, OR inlines an env
-  // secret read directly as an argument — a privileged HTTP call built by
-  // hand instead of going through privileged.ts's own client.
+  // Pass 6 (requirement 2, continued): a raw fetch() carrying a
+  // secret-env value read straight from env — no createClient/
+  // SupabaseClient construction at all, so Pass 4 never sees it.
   // ---------------------------------------------------------------------
   walk(ast, (node) => {
     if (
@@ -794,20 +705,7 @@ export function lintSource(source: string, filePath: string): Finding[] {
           usesSecret = true;
           return;
         }
-        // An inline env read as a direct fetch() argument (no intermediate
-        // variable): `fetch(url, { headers: { Authorization: `Bearer
-        // ${Deno.env.get("SERVICE_ROLE_KEY")}` } })`.
-        if (
-          n.type === AST_NODE_TYPES.CallExpression &&
-          n.callee.type === AST_NODE_TYPES.MemberExpression &&
-          n.callee.property.type === AST_NODE_TYPES.Identifier &&
-          n.callee.property.name === "get" &&
-          n.callee.object.type === AST_NODE_TYPES.MemberExpression &&
-          n.callee.object.property.type === AST_NODE_TYPES.Identifier &&
-          n.callee.object.property.name === "env" &&
-          n.callee.object.object.type === AST_NODE_TYPES.Identifier &&
-          envObjectLocalNames.has(n.callee.object.object.name)
-        ) {
+        if (isExactDenoEnvGetCall(n)) {
           const a = n.arguments[0];
           const literalKey = a && a.type === AST_NODE_TYPES.Literal && typeof a.value === "string" ? a.value : undefined;
           if (literalKey === undefined || !isPublicEnvVar(literalKey)) usesSecret = true;
@@ -822,6 +720,25 @@ export function lintSource(source: string, filePath: string): Finding[] {
         message: "fetch(...) call references a service-role/secret env value directly — build privileged HTTP calls through supabase/functions/_shared/privileged.ts instead",
         ...loc,
       });
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Pass 7 (requirement 5): eval(...), new Function(...), Function(...).
+  // ---------------------------------------------------------------------
+  walk(ast, (node) => {
+    if (node.type === AST_NODE_TYPES.CallExpression && node.callee.type === AST_NODE_TYPES.Identifier) {
+      if (node.callee.name === "eval") {
+        const loc = nodeLoc(node);
+        findings.push({ rule: "dynamic-code-execution", message: "eval(...) — dynamically executed code cannot be statically audited for a privileged reference", ...loc });
+      } else if (node.callee.name === "Function") {
+        const loc = nodeLoc(node);
+        findings.push({ rule: "dynamic-code-execution", message: "Function(...) constructor call — dynamically executed code cannot be statically audited for a privileged reference", ...loc });
+      }
+    }
+    if (node.type === AST_NODE_TYPES.NewExpression && node.callee.type === AST_NODE_TYPES.Identifier && node.callee.name === "Function") {
+      const loc = nodeLoc(node);
+      findings.push({ rule: "dynamic-code-execution", message: "new Function(...) — dynamically executed code cannot be statically audited for a privileged reference", ...loc });
     }
   });
 
