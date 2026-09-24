@@ -155,3 +155,33 @@ after an Opus-tier review found real bugs in it.
       constant `MAX_GAP_SECONDS`") reads as intentionally non-tunable, and
       keeping them fixed avoids widening the public API for a parameter
       pair whose whole point is closing a specific exploit shape.
+
+**Round 4 (should-fix items after the gate passed on 21bceda):**
+
+15. **Connect IQ sampling constraint, made explicit for a consumer that
+    doesn't read this package's source.** `MAX_GAP_SECONDS` (300 s) and
+    `MIN_OBSERVED_COVERAGE` (0.5) together impose a real constraint on
+    *any* recorder that wants its route to be matchable, not just on
+    matching's own internals — and the Connect IQ "Trail Check-in"
+    recorder (build plan §3.1 row I, §7.3, `apps/ciq/`) is the one shape
+    in this codebase most likely to sample sparsely (a watch, batching
+    fixes over Garmin's companion messaging). Restated here, and in
+    `apps/ciq/README.md`, so whoever builds that recorder sees it without
+    having to reconstruct the math:
+    - **Sample at least every 5 minutes.** Below `MAX_GAP_SECONDS`, every
+      interval counts in full — no coverage is lost at all.
+    - **Never less often than every 10 minutes, on a 4-hour round.**
+      At exactly 10-minute intervals over 4 hours, every gap is capped
+      (600 s → 300 s), and the capped total divided by the raw span lands
+      **exactly** on the 0.5 floor (24 × 300 s ÷ 14,400 s = 0.5) — the
+      last interval that can still match. One minute sparser (11 minutes)
+      already falls under it (21 × 300 s ÷ 13,860 s ≈ 0.4545) and the
+      route becomes `typeahead`, however clean the geometry ratio looked
+      over what little was actually observed. A shorter round has less
+      margin, not more: the 10-minute figure is for the longest matchable
+      round (6 h); anything shorter reaches the floor at a
+      proportionally shorter interval.
+    - The 8-fix golden fixture (`test/gate-fixes-3.test.ts`) keeps a
+      concretely too-sparse trace (~25.7 min between fixes) as a fixture
+      precisely so this ceiling has a runnable, named example, not just
+      prose.
