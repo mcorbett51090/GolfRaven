@@ -291,5 +291,17 @@ None of the pass bars change. Each rule below closes a reading that was still op
   is entered as lower = upper. R5's identical-range rule then applies literally, to points as well as to
   ranges. A lower bound above the upper bound is an error.
 
+- **The read date is real.** A K1 or K3 read is dated with the day it is actually performed. A read, or an as-of
+  date, later than today (UTC) is refused, and so is a date that is not a real calendar date.
+- **Sponsor dates.** A sponsor conversation dated before that sponsor's contacted date is an error, like an
+  acceptance or an LOI.
+- **Log integrity.** Every row of the K1 log (§(g)) and of the K3 input tables is read. A row that cannot be read
+  is an error, never skipped.
+- **Name alias.** In the K1 log, "Hammock Coast Golf Trail" and R2's "Hammock Coast" name the same operator.
+  Logging it under both names is an error.
+- **Search Console property id.** The property id recorded under R4 is either a domain property
+  (`sc-domain:<host>`) or a URL-prefix property (`https://…` or `http://…`). Anything else is not a recorded
+  property id.
+
 Drafted by an agent, working on unblocked items at the owner's instruction (2026-09-24), before any K1 or K3 data exists. Matt may
 amend any of these **before** the first K1 log entry or K3 read. After that point they are fixed.
