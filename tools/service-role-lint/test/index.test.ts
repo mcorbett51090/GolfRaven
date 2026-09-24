@@ -31,8 +31,9 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     writeFileSync(join(distDir, "index.js"), BAD_SOURCE);
 
     const results = lintDirectory(tmpRoot);
-    expect(results.length).toBe(1);
-    expect(results[0].findings.some((f) => f.rule === "service-role-construction")).toBe(true);
+    expect(results).toHaveLength(1);
+    const [result] = results;
+    expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
   });
 
   it("LINTS a `__fixtures__` directory that is NOT the lint's own top-level one", () => {
@@ -42,8 +43,9 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     writeFileSync(join(nestedFixtures, "leak.ts"), BAD_SOURCE);
 
     const results = lintDirectory(tmpRoot);
-    expect(results.length).toBe(1);
-    expect(results[0].findings.some((f) => f.rule === "service-role-construction")).toBe(true);
+    expect(results).toHaveLength(1);
+    const [result] = results;
+    expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
   });
 
   it("still EXCLUDES the lint's own top-level __fixtures__ directory, matched by exact path", () => {

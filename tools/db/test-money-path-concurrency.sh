@@ -123,6 +123,34 @@ else
 fi
 "${PSQL[@]}" -c "DELETE FROM app.receipt_fingerprint WHERE phash = '$TAG'; DELETE FROM app.purchase_evidence WHERE id IN ('$PE_1', '$PE_2');" >/dev/null
 
+echo "tools/db/test-money-path-concurrency.sh: dedupe_receipt_fingerprint isolation-level guard (M4)"
+# M4 fix 1: dedupe_receipt_fingerprint asserts transaction_isolation =
+# read committed and raises otherwise -- pgTAP cannot exercise this (its
+# whole matrix runs in one already-open transaction, and
+# `SET TRANSACTION ISOLATION LEVEL` must be the first statement of a
+# transaction), so it's checked here, on a real, fresh session that sets
+# REPEATABLE READ *before* opening its transaction via `-c`'s own BEGIN.
+PE_ISO="c1a00003-0000-0000-0000-000000000001"
+"${PSQL[@]}" -c "DELETE FROM app.purchase_evidence WHERE id = '$PE_ISO'::uuid;" >/dev/null 2>&1 || true
+"${PSQL[@]}" -c "
+  INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+  VALUES ('$PE_ISO'::uuid, '00000000-0000-0000-0000-00000000000a', 'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')
+  ON CONFLICT (id) DO NOTHING;
+" >/dev/null
+ISO_ERR=$(psql -v ON_ERROR_STOP=1 -A -t -q \
+  -c "SET ROLE service_role;" \
+  -c "BEGIN ISOLATION LEVEL REPEATABLE READ;" \
+  -c "SELECT app.dedupe_receipt_fingerprint('$PE_ISO'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, '$TAG-iso', 'fac_x', current_date);" \
+  -c "COMMIT;" 2>&1) || true
+if echo "$ISO_ERR" | grep -qi "read committed"; then
+  echo "PASS: dedupe_receipt_fingerprint rejects a call under REPEATABLE READ isolation"
+else
+  echo "FAIL: dedupe_receipt_fingerprint did not reject a call under REPEATABLE READ isolation" >&2
+  echo "$ISO_ERR" >&2
+  FAILED=1
+fi
+"${PSQL[@]}" -c "DELETE FROM app.purchase_evidence WHERE id = '$PE_ISO'::uuid;" >/dev/null
+
 rm -f /tmp/mpconc-*.out /tmp/mpconc-*.err 2>/dev/null || true
 
 if [ "$FAILED" -ne 0 ]; then

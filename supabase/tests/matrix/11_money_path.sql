@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(53);
+SELECT plan(62);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -280,6 +280,75 @@ SELECT is(
   ),
   true,
   'dedupe_receipt_fingerprint returns true (and records the fingerprint) for a genuinely new phash'
+);
+
+-- M4 fix 4 (post-P3a gate): p_user_id checked against the purchase
+-- evidence's OWN user_id.
+SELECT throws_ok(
+  $$SELECT app.dedupe_receipt_fingerprint(
+      '91000000-0000-0000-0000-000000000099'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid,
+      'phash-mismatched-caller', 'fac_x', current_date
+    )$$,
+  NULL,
+  NULL,
+  'dedupe_receipt_fingerprint rejects a p_user_id that does not match the purchase_evidence row''s own user_id (91000000-...-99 belongs to player B, not A)'
+);
+
+-- M4 fix 2 (post-P3a gate): UNIQUE(purchase_evidence_id) makes a retry
+-- idempotent -- the SAME call twice must not error the second time, and
+-- must not mint a second fingerprint row.
+SELECT lives_ok(
+  $$INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+    VALUES ('91000000-0000-0000-0000-000000000098', '00000000-0000-0000-0000-00000000000b',
+            'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')$$,
+  'setup: a third purchase_evidence row (player B), for the idempotent-retry test'
+);
+SELECT is(
+  app.dedupe_receipt_fingerprint(
+    '91000000-0000-0000-0000-000000000098'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid,
+    'phash-retry-me', 'fac_x', current_date
+  ),
+  true,
+  'dedupe_receipt_fingerprint (retry test): first call succeeds'
+);
+SELECT lives_ok(
+  $$SELECT app.dedupe_receipt_fingerprint(
+      '91000000-0000-0000-0000-000000000098'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid,
+      'phash-retry-me', 'fac_x', current_date
+    )$$,
+  'dedupe_receipt_fingerprint (retry test): a SECOND call with the SAME purchase_evidence_id/phash does not error (UNIQUE(purchase_evidence_id) + ON CONFLICT DO NOTHING makes the retry idempotent)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.receipt_fingerprint WHERE purchase_evidence_id = '91000000-0000-0000-0000-000000000098'),
+  1,
+  'dedupe_receipt_fingerprint (retry test): exactly one fingerprint row exists after the retry, not two'
+);
+
+-- M4 fix 3 (post-P3a gate): an OCR-index collision is handled (void +
+-- fraud_signal) like a phash duplicate, not surfaced as a raw 23505.
+SELECT lives_ok(
+  $$INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+    VALUES ('91000000-0000-0000-0000-000000000097', '00000000-0000-0000-0000-00000000000b',
+            'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')$$,
+  'setup: a fourth purchase_evidence row (player B), for the OCR-collision test'
+);
+SELECT is(
+  app.dedupe_receipt_fingerprint(
+    '91000000-0000-0000-0000-000000000097'::uuid, '00000000-0000-0000-0000-00000000000b'::uuid,
+    'phash-ocr-collision-test', 'fac_x', current_date, 'OCR-DUPE-1'
+  ),
+  false,
+  'dedupe_receipt_fingerprint returns false (not a 23505 exception) on an OCR-index collision (OCR-DUPE-1 already claimed above by a different purchase)'
+);
+SELECT is(
+  (SELECT status::text FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000097'),
+  'void',
+  'an OCR-duplicate purchase is voided by dedupe_receipt_fingerprint, same as a phash duplicate'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_ocr_duplicate' AND user_id = '00000000-0000-0000-0000-00000000000b'),
+  1,
+  'an OCR-duplicate purchase writes exactly one fraud_signal row (kind=receipt_ocr_duplicate)'
 );
 
 -- ---------------------------------------------------------------------------
