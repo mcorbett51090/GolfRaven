@@ -1,8 +1,8 @@
 # 0003 — Stage P1.0: a no-regret slice of P1 that may start before P0 all-pass
 
-- **Status:** **Proposed** (Matt has not decided). Nothing in this record is built until Matt accepts it. To
-  accept, change this line to `Accepted`, fill in the Decider line **and the start option** (A or B, below),
-  and merge.
+- **Status:** **Superseded** by decision 0004 (2026-09-24). The owner chose to build the full product
+  before any outreach, so all of P1 starts now and the question this record asked, whether a slice may start
+  early, no longer arises. The record is kept for its invariance analysis.
 - **Date:** 2026-09-24
 - **Decider:** _(blank until accepted)_
 - **Start option:** _(A or B, blank until accepted)_
