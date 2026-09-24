@@ -40,8 +40,13 @@ import {
   readLoggedRoundWindows,
   type RoundWindow,
 } from "./round-windows.js";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
+  assertExportDateMatches,
   assertRecordedExportDateLogged,
+  bindExportHash,
+  extractCalendarDate,
   informationalBanner,
   readRecordedExportDates,
   type X1Os,
@@ -76,14 +81,23 @@ export interface X1IosWorkoutRecord {
 
 /** Decision 0005 "Every counted workout is listed with its date and
  * source. ... The memo shows, per source, the newest counted workout's
- * date.": one row per distinct `sourceName` among the counted workouts. */
+ * date.": one row per distinct `sourceName` among the counted workouts.
+ * Should-fix (Opus gate, post-d0de4b8): "newest counted workout date"
+ * covers only workouts that count TOWARD THE VERDICT — golf (already
+ * filtered to only golf workouts by the time this runs) with a route
+ * present — so `newestStartDate` only considers `verdict === "pass"`
+ * workouts; a route-less workout's date is tracked separately in
+ * `newestStartDateWithoutRoute`, never conflated with the verdict-bearing
+ * one. */
 export interface X1IosSourceSummary {
   sourceName: string;
   count: number;
-  /** The most recent (by parsed `startDate`) counted workout's `startDate`
-   * for this source, or `null` if every workout of this source had a
-   * missing/unparseable `startDate`. */
+  /** The most recent (by parsed `startDate`) counted workout WITH A ROUTE
+   * for this source, or `null` if none had a route (or none parsed). */
   newestStartDate: string | null;
+  /** The most recent counted workout WITHOUT a route for this source, or
+   * `null` if every workout of this source had a route (or none parsed). */
+  newestStartDateWithoutRoute: string | null;
 }
 
 export interface X1IosExportResult {
@@ -100,6 +114,17 @@ export interface X1IosExportResult {
   /** Decision 0005: per-source counted-workout summary, including the
    * newest counted workout's date per source. */
   sourceSummaries: X1IosSourceSummary[];
+  /** Opus-gate correction (post-d0de4b8): the raw `<ExportDate value="...">`
+   * from `export.xml` (`[unverified — training knowledge]`, same footing as
+   * `health-export-xml.ts`'s other export.xml-shape assumptions), or `null`
+   * if the file has none. Compared to `docs/p0/X1.md`'s logged
+   * recorded-export date for a recorded run (decision 0005 "Bind the
+   * recorded run to one specific export"). */
+  exportDate: string | null;
+  /** Opus-gate correction (post-d0de4b8): SHA-256 of `export.xml`'s raw
+   * bytes, bound into `docs/p0/X1.md` on the first recorded run and
+   * checked against on every later one (decision 0005). */
+  exportSha256: string;
   warnings: string[];
 }
 
@@ -128,10 +153,29 @@ function toRecord(
   };
 }
 
+/** Newest (by `Date.parse`) `startDate` among `list`, or `null` if none
+ * parse. A workout with a missing/unparseable `startDate` is skipped, not
+ * treated as "newest". */
+function newestOf(list: X1IosWorkoutRecord[]): string | null {
+  let newest: string | null = null;
+  let newestTime = -Infinity;
+  for (const w of list) {
+    if (!w.startDate) continue;
+    const t = Date.parse(w.startDate);
+    if (!Number.isNaN(t) && t > newestTime) {
+      newestTime = t;
+      newest = w.startDate;
+    }
+  }
+  return newest;
+}
+
 /** Decision 0005: groups counted workouts by `sourceName` and finds each
- * source's newest `startDate` (parsed with `Date.parse`; a workout whose
- * `startDate` is missing/unparseable is counted but doesn't affect the
- * newest-date comparison). Sorted by `sourceName` for stable output. */
+ * source's newest WITH-A-ROUTE `startDate` and newest WITHOUT-A-ROUTE
+ * `startDate` separately (should-fix, Opus gate post-d0de4b8: the
+ * verdict-bearing "newest counted workout date" must never be silently
+ * pulled forward by a route-less workout). Sorted by `sourceName` for
+ * stable output. */
 export function computeSourceSummaries(
   workouts: X1IosWorkoutRecord[],
 ): X1IosSourceSummary[] {
@@ -147,19 +191,29 @@ export function computeSourceSummaries(
   }
   const summaries: X1IosSourceSummary[] = [];
   for (const [sourceName, list] of bySource) {
-    let newestStartDate: string | null = null;
-    let newestTime = -Infinity;
-    for (const w of list) {
-      if (!w.startDate) continue;
-      const t = Date.parse(w.startDate);
-      if (!Number.isNaN(t) && t > newestTime) {
-        newestTime = t;
-        newestStartDate = w.startDate;
-      }
-    }
-    summaries.push({ sourceName, count: list.length, newestStartDate });
+    summaries.push({
+      sourceName,
+      count: list.length,
+      newestStartDate: newestOf(list.filter((w) => w.routePresent)),
+      newestStartDateWithoutRoute: newestOf(list.filter((w) => !w.routePresent)),
+    });
   }
   return summaries.sort((a, b) => a.sourceName.localeCompare(b.sourceName));
+}
+
+/** Streams `filePath` and returns the lowercase-hex SHA-256 of its raw
+ * bytes — used to bind a recorded run to one specific `export.xml`
+ * (decision 0005, Opus-gate correction post-d0de4b8). Read as raw bytes
+ * (no `encoding` option), not the decoded-text stream `parseHealthExportXml`
+ * uses, so the hash matches the file exactly as it sits on disk. */
+export function hashFile(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk as Buffer));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", (err) => reject(err));
+  });
 }
 
 /** Resolves an export.xml `FileReference path` (e.g.
@@ -268,6 +322,8 @@ export async function runX1IosExport(
     );
   }
 
+  const exportSha256 = await hashFile(xmlPath);
+
   return {
     generatedAt: new Date().toISOString(),
     exportDir,
@@ -277,6 +333,8 @@ export async function runX1IosExport(
     golfWorkoutCount: workouts.length,
     workouts,
     sourceSummaries: computeSourceSummaries(workouts),
+    exportDate: parsed.exportDate,
+    exportSha256,
     warnings,
   };
 }
@@ -315,12 +373,14 @@ export function renderMarkdownTable(result: X1IosExportResult): string {
  * workout's date." */
 export function renderSourceSummaryMarkdown(result: X1IosExportResult): string {
   const header =
-    "| Source | Counted workouts | Newest counted workout date |\n" + "|---|---|---|";
+    "| Source | Counted workouts | Newest counted workout date (with route) | Newest workout without a route |\n" +
+    "|---|---|---|---|";
   if (result.sourceSummaries.length === 0) {
-    return `${header}\n| _(none)_ | 0 | — |`;
+    return `${header}\n| _(none)_ | 0 | — | — |`;
   }
   const rows = result.sourceSummaries.map(
-    (s) => `| ${s.sourceName} | ${s.count} | ${s.newestStartDate ?? "(unknown)"} |`,
+    (s) =>
+      `| ${s.sourceName} | ${s.count} | ${s.newestStartDate ?? "(none)"} | ${s.newestStartDateWithoutRoute ?? "(none)"} |`,
   );
   return [header, ...rows].join("\n");
 }
@@ -374,6 +434,16 @@ function parseArgs(argv: string[]): CliArgs {
         `--os ${os}. The Android pass uses the Health Connect reader in apps/mobile, not this tool.`,
     );
   }
+  if (since !== undefined && !informational) {
+    // Decision 0005: "No recency limit." --since is a recency limit chosen
+    // at run time, which the decision forbids for a recorded run — it's
+    // only available on an --informational dry run.
+    throw new Error(
+      "--since is refused on a recorded run (decision 0005: \"No recency limit\" — an old round counts the " +
+        "same as a new one). Pass --informational if you genuinely want a date-limited, non-recorded dry run.",
+    );
+  }
+
   return {
     exportDir,
     outPrefix,
@@ -396,6 +466,25 @@ async function main(argv: string[]): Promise<void> {
     roundWindows,
     ...(args.since !== undefined ? { since: args.since } : {}),
   });
+
+  // Opus-gate correction (post-d0de4b8), decision 0005 "Bind the recorded
+  // run to one specific export": a recorded run is refused if export.xml
+  // has no ExportDate at all (nothing to bind against), if that date
+  // doesn't match what's logged, or if its SHA-256 doesn't match what was
+  // already bound there. --informational skips all of this — it is never
+  // checked or bound.
+  if (recorded) {
+    if (result.exportDate === null) {
+      throw new Error(
+        "export.xml has no <ExportDate> element — refusing a recorded run: decision 0005 requires binding " +
+          "the recorded run to one specific export, and there is nothing to compare against docs/p0/X1.md's " +
+          "logged date. Pass --informational to run anyway.",
+      );
+    }
+    const exportCalendarDate = extractCalendarDate(result.exportDate);
+    assertExportDateMatches(recordedExportDates, args.os, exportCalendarDate);
+    await bindExportHash(source.path, recordedExportDates, args.os, result.exportSha256);
+  }
 
   const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
   const md =

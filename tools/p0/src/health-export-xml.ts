@@ -86,6 +86,13 @@ export interface ParseHealthExportResult {
   rootTag: string;
   totalWorkoutElementsSeen: number;
   workouts: RawIosWorkout[];
+  /** Opus-gate correction (post-d0de4b8), decision 0005 "Bind the recorded
+   * run to one specific export": the raw `<ExportDate value="...">` seen at
+   * the top of `export.xml`, or `null` if the file has none
+   * `[unverified — training knowledge, same footing as the rest of this
+   * module's export.xml-shape assumptions]`. `x1-ios-export.ts` compares
+   * this to `docs/p0/X1.md`'s logged recorded-export date. */
+  exportDate: string | null;
 }
 
 /**
@@ -164,6 +171,7 @@ export function parseHealthExportXml(
     let totalWorkoutElementsSeen = 0;
     let totalWorkoutElementsWithActivityType = 0;
     const workouts: RawIosWorkout[] = [];
+    let exportDate: string | null = null;
 
     // Nesting state: while inside a <Workout>, and while inside that
     // Workout's <WorkoutRoute>, we look for a <FileReference path="...">.
@@ -190,6 +198,13 @@ export function parseHealthExportXml(
                   `result silently.`,
               ),
             );
+          }
+          return;
+        }
+
+        if (node.name === "ExportDate") {
+          if (exportDate === null && node.attributes.value) {
+            exportDate = node.attributes.value;
           }
           return;
         }
@@ -285,11 +300,13 @@ export function parseHealthExportXml(
         // Captured as a const: TS's null-narrowing of the mutable `rootTag`
         // doesn't survive into the async `.then()` closure below.
         const resolvedRootTag: string = rootTag;
+        const resolvedExportDate = exportDate;
         if (!opts.checkUnreferencedGpxFiles) {
           succeed({
             rootTag: resolvedRootTag,
             totalWorkoutElementsSeen,
             workouts,
+            exportDate: resolvedExportDate,
           });
           return;
         }
@@ -315,6 +332,7 @@ export function parseHealthExportXml(
               rootTag: resolvedRootTag,
               totalWorkoutElementsSeen,
               workouts,
+              exportDate: resolvedExportDate,
             });
           })
           .catch((err: unknown) =>
