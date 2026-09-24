@@ -9,13 +9,19 @@ import { lintDirectory } from "../src/index.js";
 // diverges from what Deno actually loads." Each fixture directory below
 // reproduces one of the reviewer's four confirmed real-Deno-2.5.2
 // bypasses (n1-n4), plus the disallowed-key case and a good control —
-// supabase/functions/__fixtures__/m2-config/<case>/, pointed at directly
-// as its own `functionsRoot` (these live under the lint's own excluded
-// __fixtures__ directory, so they are never picked up by a real
-// `lintDirectory(supabase/functions)` run — exercised here explicitly
-// instead).
+// tools/service-role-lint/test/fixtures/m2-config/<case>/, pointed at
+// directly as its own `functionsRoot` (these live under this package's
+// OWN test fixtures dir, never under a real supabase/functions tree at
+// all — see index.ts's MEDIUM-2 note — so a real
+// `lintDirectory(supabase/functions)` run never touches them; exercised
+// here explicitly instead).
+//
+// ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): moved from
+// supabase/functions/__fixtures__/m2-config to
+// tools/service-role-lint/test/fixtures/m2-config (fixtures no longer
+// live anywhere under supabase/functions).
 
-const FIXTURES_ROOT = join(import.meta.dirname, "..", "..", "..", "supabase", "functions", "__fixtures__", "m2-config");
+const FIXTURES_ROOT = join(import.meta.dirname, "fixtures", "m2-config");
 const PINNED = new Set(["https://esm.sh/zod@3.23.8"]);
 
 describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless of importers", () => {

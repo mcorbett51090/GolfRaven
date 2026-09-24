@@ -9,6 +9,10 @@ import { lintDirectory } from "../src/index.js";
 // exactly." These exercise listFiles()/lintDirectory() directly (not
 // lintSource()) against a real filesystem tree, since the bug lived in
 // the WALKER's directory-exclusion logic, not in lintSource itself.
+//
+// ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): the "lint's own fixtures
+// dir, matched exactly" carve-out named above is GONE -- see the last
+// test in this describe block for the superseding assertion.
 
 const BAD_SOURCE = `
   import { createClient } from "@supabase/supabase-js";
@@ -48,14 +52,28 @@ describe("lintDirectory — directory-exclusion fix (M3)", () => {
     expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
   });
 
-  it("still EXCLUDES the lint's own top-level __fixtures__ directory, matched by exact path", () => {
+  // ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): SUPERSEDES the prior
+  // version of this test, which asserted the OPPOSITE -- that a
+  // top-level `__fixtures__` directory under the linted root was
+  // excluded by exact path (the lint's OWN fixtures dir, back when it
+  // lived under supabase/functions/__fixtures__). That exclusion is what
+  // let a real function `import` a relative path INTO it and bypass the
+  // lint entirely (repro: `fn/index.ts` importing
+  // `../__fixtures__/bad/g1-pinned-build-esm-sh.ts`). The fix is
+  // structural, not a smarter exclusion rule: the lint's own fixtures no
+  // longer live anywhere under a linted functions root at all (moved to
+  // tools/service-role-lint/test/fixtures/**) -- so NO directory named
+  // `__fixtures__`, top-level or nested, is ever excluded here now.
+  it("LINTS a top-level `__fixtures__` directory too, now that nothing under the linted root is ever excluded by that name", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-own-fixtures-"));
     const ownFixtures = join(tmpRoot, "__fixtures__");
     mkdirSync(ownFixtures, { recursive: true });
     writeFileSync(join(ownFixtures, "leak.ts"), BAD_SOURCE);
 
     const results = lintDirectory(tmpRoot);
-    expect(results.length).toBe(0);
+    expect(results).toHaveLength(1);
+    const [result] = results;
+    expect(result?.findings.some((f) => f.rule === "service-role-construction")).toBe(true);
   });
 
   it("still excludes node_modules", () => {

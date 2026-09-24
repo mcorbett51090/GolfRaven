@@ -12,8 +12,15 @@ import { lintSource } from "../src/lint.js";
 // `withOwnership`, and alias-chained client variables — each its own
 // must-fail fixture.
 
-const FIXTURES_ROOT = join(import.meta.dirname, "..", "..", "..", "supabase", "functions", "__fixtures__");
-const FUNCTIONS_ROOT = join(FIXTURES_ROOT, "..");
+// ⛔ FIX (MEDIUM-2, post-P3a re-gate round 3): fixtures moved out of the
+// deployable tree entirely (supabase/functions/__fixtures__ -> tools/
+// service-role-lint/test/fixtures) -- see index.ts's own note on this.
+// FUNCTIONS_ROOT used to be FIXTURES_ROOT's parent (simulating "supabase/
+// functions" containing an excluded __fixtures__ child); now the fixtures
+// dir IS its own self-contained functions root, so the two are the same
+// path.
+const FIXTURES_ROOT = join(import.meta.dirname, "fixtures");
+const FUNCTIONS_ROOT = FIXTURES_ROOT;
 
 function lintFixture(relPath: string) {
   const full = join(FIXTURES_ROOT, relPath);
