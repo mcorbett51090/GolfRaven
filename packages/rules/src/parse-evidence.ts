@@ -99,6 +99,25 @@ function safeQuote(value: string): string {
   return JSON.stringify(truncated);
 }
 
+/** Seventh gate, item 6: "Bound `capturedAt` and `scanAt` to a plausible
+ * epoch range... so the message is correct." `.finite()` alone accepts
+ * any real JS number, including a timestamp from the year 1 or the year
+ * 300,000 — technically finite, never a real device capture, and the
+ * resulting tz-cross-check message ("capturedAt resolves to 0001-02-03…")
+ * reads as a confusing bug report rather than the honest "this input is
+ * out of range" it should be. `2020-01-01` predates the earliest
+ * plausible real evidence row this package would ever score (the
+ * program's own launch); `2100-01-01` is a generous forward bound (covers
+ * clock-skew and pre-dated test fixtures) without being so wide it stops
+ * meaning anything. */
+const PLAUSIBLE_EPOCH_MIN_MS = Date.parse("2020-01-01T00:00:00.000Z");
+const PLAUSIBLE_EPOCH_MAX_MS = Date.parse("2100-01-01T00:00:00.000Z");
+const PlausibleEpochMsSchema = z
+  .number()
+  .finite()
+  .min(PLAUSIBLE_EPOCH_MIN_MS, "must be a plausible epoch-ms timestamp (on or after 2020-01-01)")
+  .max(PLAUSIBLE_EPOCH_MAX_MS, "must be a plausible epoch-ms timestamp (before 2100-01-01)");
+
 const ChallengeKindSchema = z.enum(["live", "prefetched", "none"]);
 const GeometryKindSchema = z.enum(["polygon", "radius"]);
 const VerificationTierSchema = z.enum(["unverified", "listed-verified", "play-verified"]);
@@ -397,7 +416,7 @@ function zodIssuesToReasons(issues: readonly { path: PropertyKey[]; message: str
  */
 export function parseEvidence(raw: unknown, tz: string): EvidenceParseResult {
   if (!isValidFacilityTimeZone(tz)) {
-    return { success: false, reasons: [`facilityTz "${tz}" is not a real IANA Area/Location timezone name`] };
+    return { success: false, reasons: [`facilityTz ${safeQuote(tz)} is not a real IANA Area/Location timezone name`] };
   }
   const canonicalTz = canonicalizeFacilityTimeZone(tz);
   const parsed = EvidenceSchema.safeParse(raw);
