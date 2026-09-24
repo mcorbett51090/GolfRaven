@@ -81,10 +81,11 @@ wait "$PID3" "$PID4" || true
 RESERVED=$(count "SELECT budget_reserved FROM app.offer WHERE id = '$BUDGET_OFFER_ID'")
 # Two concurrent reservations of 60 against a cap of 100: at most ONE can
 # succeed (60 <= 100, but 60+60=120 > 100) -- budget_reserved must land at
-# exactly 60, never 120 (both succeeding) and never 0 (both failing when
-# one legitimately should have succeeded).
-if [ "$RESERVED" != "60" ]; then
-  echo "FAIL: concurrent reserve_offer_budget race left budget_reserved=$RESERVED, expected exactly 60 (one success, one rejection)" >&2
+# exactly 60.00, never 120.00 (both succeeding) and never 0.00 (both
+# failing when one legitimately should have succeeded). budget_reserved
+# is numeric(10,2), so the raw text is "60.00", not "60".
+if [ "$RESERVED" != "60.00" ]; then
+  echo "FAIL: concurrent reserve_offer_budget race left budget_reserved=$RESERVED, expected exactly 60.00 (one success, one rejection)" >&2
   cat /tmp/mpconc-r1.out /tmp/mpconc-r2.out /tmp/mpconc-r1.err /tmp/mpconc-r2.err >&2 || true
   FAILED=1
 else
