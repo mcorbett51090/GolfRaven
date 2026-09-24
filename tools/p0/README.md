@@ -29,26 +29,44 @@ Export All Health Data** on the iPhone, then unzipping `export.zip`
 and reports every `HKWorkoutActivityTypeGolf` workout it finds, per source, with route evidence.
 
 ```shell
-node dist/x1-ios-export.js /path/to/apple_health_export --since 2026-09-15 --out x1-ios-export-result
+node dist/x1-ios-export.js /path/to/apple_health_export --os ios --since 2026-09-15 --out x1-ios-export-result
 ```
 
 - `<path>` — the directory that directly contains `export.xml` and `workout-routes/`.
-- `--since YYYY-MM-DD` (optional) — an extra, coarser pre-filter on top of the round window below.
+- `--os ios` (**required**) — this tool only ever reads an Apple Health export, so `ios` is the
+  only accepted value; passing `--os android` throws. It names which OS's `docs/p0/X1.md` "##
+  Recorded export" date is checked (see below).
+- `--since YYYY-MM-DD` (optional) — an extra, coarser pre-filter, applied before everything else.
+- `--informational` (optional) — runs even if iOS's recorded-export date is blank. The output is
+  then marked `recorded: false`, with a loud "INFORMATIONAL — NOT THE RECORDED X1 RESULT" banner
+  in the markdown — never the recorded P0 result.
 - `--out <prefix>` (optional, default `x1-ios-export-result`) — writes `<prefix>.json` and
   `<prefix>.md`.
 
-**Round windows (decision 0001 Addendum F, gate finding B-7) — REQUIRED, no override flag.** Before
-running, the CLI always reads the repo's own `docs/p0/X1.md` "## Round windows" section for the
-logged UTC start/end time of each test round, and **refuses to run if it's still blank** — never
-silently treats every workout on the device as in-round. Only a workout whose start time falls
-inside a logged window, with 60 minutes of slack either side, counts; older workouts on the device
-are excluded (with a warning naming how many). Log the window(s) in `docs/p0/X1.md` before reading
-the export.
+**Decision 0005 (2026-09-24) — round windows are LABELS, not a filter; every workout counts.**
+Every `HKWorkoutActivityTypeGolf` workout in the export counts, whenever it was played — historical
+rounds on Matt's Garmin Approach S62 count the same as a newly-played one (route still required).
+The CLI still reads `docs/p0/X1.md`'s "## Round windows" section for the logged UTC start/end
+time of each test round, but only to TAG a matching workout `testRound: true` (60-minute slack);
+it is never a reason to exclude a workout, and the CLI no longer refuses to run when that section
+is blank (superseding decision 0001 Addendum F's refusal). Each workout's `testRound` label, plus
+its `sourceVersion`/`device` (from `export.xml`, when present) is in the per-workout listing; the
+result's `sourceSummaries` gives each source's counted-workout count and newest counted workout
+date.
+
+**Recorded-export rule (decision 0005) — REQUIRED, this is what now gates the CLI.** Before
+running (without `--informational`), the CLI reads `docs/p0/X1.md`'s "## Recorded export" section
+and **refuses to run if the `iOS:` line is still blank** — the first export actually read, with its
+date logged there BEFORE it's read, is the recorded one; a later export is informational only. Log
+that date in `docs/p0/X1.md` before reading the export, or pass `--informational` to dry-run
+without it (see above). The output stamps the source `docs/p0/X1.md` file's path and SHA-256
+(`source`), plus `os` and `recorded`, mirroring `k1-verdict`'s provenance stamp.
 
 **Feeds:** the JSON is one of `x1-verdict`'s two inputs. The markdown table's columns match
-`docs/owner/x1-k4b-device-protocol.md` §4's results table (Source / OS / Workout written? / Route
-present? / CONSENT_REQUIRED column (always "N/A (iOS)" here) / Source id / Verdict) — copy rows
-straight into that table, then into `docs/p0/X1.md` MEASURED VALUE once the round is run.
+`docs/owner/x1-k4b-device-protocol.md` §4's results table (Source / OS / Start date / Test round? /
+Workout written? / Route present? / CONSENT_REQUIRED column (always "N/A (iOS)" here) / Source id /
+Source version / Device / Verdict) — copy rows straight into that table, then into `docs/p0/X1.md`
+MEASURED VALUE once the round is run.
 
 **Loud-failure contract:** if `export.xml`'s root element isn't `<HealthData>`, `<Workout>`
 elements exist but none carry a `workoutActivityType` attribute, or a `<WorkoutRoute>` appears as a
@@ -69,6 +87,7 @@ node dist/x1-verdict.js \
   --ios x1-ios-export-result.json \
   --android health-connect-reader-result.json \
   --source-map source-map.json \
+  --os ios \
   --follow-ups android-route-follow-ups.json \
   --out x1-verdict-result
 ```
@@ -105,12 +124,27 @@ node dist/x1-verdict.js \
 "routePointCount": n } }` for any Android session Health Connect reported as `CONSENT_REQUIRED`,
   from a follow-up `requestExerciseRoute(recordId)` call (R6). A `CONSENT_REQUIRED` session with no
   entry here defaults to "not present," per R6.
+- `--os ios|android` (**required**) — names which OS's `docs/p0/X1.md` "## Recorded export" date
+  gates this run (see below). The verdict itself always combines both OSes' input data, exactly as
+  before; `--os` only decides which recorded-export date this particular run stands on.
+- `--informational` (optional) — runs even if that OS's recorded-export date is blank. The output
+  is then marked `recorded: false`, with a loud "INFORMATIONAL — NOT THE RECORDED X1 RESULT" banner
+  — never the recorded P0 result.
 
-**Round windows — REQUIRED (same as `x1-ios-export` above).** The CLI also always reads
-`docs/p0/X1.md`'s logged round window(s) and refuses to run if none is logged. It re-applies the
-window filter to both the `--ios` and `--android` inputs itself (gate finding B-7) — independent of
-whatever filtering already happened upstream — so a stale or hand-edited JSON file can't silently
-widen the verdict.
+**Decision 0005 (2026-09-24) — round windows are LABELS, not a filter; every workout/session
+counts.** The CLI no longer refuses to run when no round window is logged (superseding decision
+0001 Addendum F's refusal), and no longer excludes any workout/session by date — every one counts
+toward the verdict, whenever it was played. `docs/p0/X1.md`'s logged round window(s) are used only
+to tag each counted entry `testRound: true`/`false` in the result's `countedEntries` (one entry per
+counted workout/session, per source, with its date, source id, and — iOS only — version/device);
+`newestCountedWorkoutDateBySource` gives each source's newest counted date, per OS.
+
+**Recorded-export rule (decision 0005) — REQUIRED, this is what now gates the CLI.** Before running
+(without `--informational`), the CLI reads `docs/p0/X1.md`'s "## Recorded export" section and
+**refuses to run if the line for `--os`'s OS is still blank.** Log that date there before reading
+the export, or pass `--informational` to dry-run without it. The output stamps the source
+`docs/p0/X1.md` file's path and SHA-256 (`source`), plus `os` and `recorded`, mirroring
+`k1-verdict`'s provenance stamp.
 
 **The "≥ 1 OS" bar, made exact (decision 0001 Addendum F, gate finding B-6).** X1 passes only if
 there is **one** operating system on which **≥ 2 of the 3 sources** pass. Sources that pass on

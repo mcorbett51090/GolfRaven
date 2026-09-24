@@ -5,7 +5,21 @@
  * and reports every `HKWorkoutActivityTypeGolf` workout it finds, per
  * source, with route (`HKWorkoutRoute` / GPX) evidence.
  *
- * Usage: node dist/x1-ios-export.js <path-to-unzipped-apple_health_export-dir> [--since YYYY-MM-DD] [--out <prefix>]
+ * Usage: node dist/x1-ios-export.js <path-to-unzipped-apple_health_export-dir> --os ios
+ *   [--since YYYY-MM-DD] [--informational] [--out <prefix>]
+ *
+ * **Decision 0005 (2026-09-24):** every golf workout counts, whenever it
+ * was played — a logged round window (`docs/p0/X1.md` "## Round windows")
+ * only TAGS a workout `testRound: true` when its start time falls inside
+ * one (60-minute slack); it no longer excludes anything, and this tool no
+ * longer refuses to run when no window is logged. In its place, decision
+ * 0005's **recorded-export rule** governs what counts as the P0 verdict:
+ * `docs/p0/X1.md`'s "## Recorded export" section holds, per OS, the date
+ * Matt logged BEFORE reading that OS's export. `--os ios` (the only value
+ * this tool accepts — it only ever reads an Apple Health export) checks
+ * that date; a blank date refuses (throws) unless `--informational` is
+ * passed, in which case the run proceeds and the output is stamped
+ * `recorded: false` with a loud banner in the markdown.
  *
  * See `tools/p0/README.md` for what this feeds and exact commands, and
  * `src/health-export-xml.ts` for the `[unverified — training knowledge]`
@@ -26,6 +40,12 @@ import {
   readLoggedRoundWindows,
   type RoundWindow,
 } from "./round-windows.js";
+import {
+  assertRecordedExportDateLogged,
+  informationalBanner,
+  readRecordedExportDates,
+  type X1Os,
+} from "./recorded-export.js";
 
 export interface X1IosWorkoutRecord {
   sourceName: string;
@@ -47,19 +67,39 @@ export interface X1IosWorkoutRecord {
    * route. The cross-source 2-of-3 bar is `x1-verdict`'s job, not this
    * tool's — this is just "written AND route present" for this one row. */
   verdict: "pass" | "fail";
+  /** Decision 0005: true when `startDate` falls inside a logged
+   * `docs/p0/X1.md` round window (60-minute slack) — a LABEL only. It does
+   * not affect `verdict` or whether this workout is counted: every golf
+   * workout counts, whenever it was played. */
+  testRound: boolean;
+}
+
+/** Decision 0005 "Every counted workout is listed with its date and
+ * source. ... The memo shows, per source, the newest counted workout's
+ * date.": one row per distinct `sourceName` among the counted workouts. */
+export interface X1IosSourceSummary {
+  sourceName: string;
+  count: number;
+  /** The most recent (by parsed `startDate`) counted workout's `startDate`
+   * for this source, or `null` if every workout of this source had a
+   * missing/unparseable `startDate`. */
+  newestStartDate: string | null;
 }
 
 export interface X1IosExportResult {
   generatedAt: string;
   exportDir: string;
   since: string | null;
-  /** Decision 0001 Addendum F: the logged round window(s) this run was
-   * filtered against — recorded for auditability. Always non-empty (a run
-   * with none logged refuses outright — see `runX1IosExport`). */
+  /** Decision 0005: the logged round window(s) this run tagged `testRound`
+   * against — recorded for auditability. May be empty (no window logged is
+   * now a normal, not a refused, state). */
   roundWindows: RoundWindow[];
   totalWorkoutElementsSeen: number;
   golfWorkoutCount: number;
   workouts: X1IosWorkoutRecord[];
+  /** Decision 0005: per-source counted-workout summary, including the
+   * newest counted workout's date per source. */
+  sourceSummaries: X1IosSourceSummary[];
   warnings: string[];
 }
 
@@ -67,6 +107,7 @@ function toRecord(
   raw: RawIosWorkout,
   routeFileExists: boolean,
   routeTrackpointCount: number,
+  testRound: boolean,
 ): X1IosWorkoutRecord {
   const routePresent =
     raw.hasWorkoutRoute && routeFileExists && routeTrackpointCount > 0;
@@ -83,7 +124,42 @@ function toRecord(
     routeTrackpointCount,
     routePresent,
     verdict: routePresent ? "pass" : "fail",
+    testRound,
   };
+}
+
+/** Decision 0005: groups counted workouts by `sourceName` and finds each
+ * source's newest `startDate` (parsed with `Date.parse`; a workout whose
+ * `startDate` is missing/unparseable is counted but doesn't affect the
+ * newest-date comparison). Sorted by `sourceName` for stable output. */
+export function computeSourceSummaries(
+  workouts: X1IosWorkoutRecord[],
+): X1IosSourceSummary[] {
+  const bySource = new Map<string, X1IosWorkoutRecord[]>();
+  for (const w of workouts) {
+    const key = w.sourceName || "(unknown)";
+    const list = bySource.get(key);
+    if (list) {
+      list.push(w);
+    } else {
+      bySource.set(key, [w]);
+    }
+  }
+  const summaries: X1IosSourceSummary[] = [];
+  for (const [sourceName, list] of bySource) {
+    let newestStartDate: string | null = null;
+    let newestTime = -Infinity;
+    for (const w of list) {
+      if (!w.startDate) continue;
+      const t = Date.parse(w.startDate);
+      if (!Number.isNaN(t) && t > newestTime) {
+        newestTime = t;
+        newestStartDate = w.startDate;
+      }
+    }
+    summaries.push({ sourceName, count: list.length, newestStartDate });
+  }
+  return summaries.sort((a, b) => a.sourceName.localeCompare(b.sourceName));
 }
 
 /** Resolves an export.xml `FileReference path` (e.g.
@@ -97,18 +173,12 @@ function resolveRoutePath(exportDir: string, referencePath: string): string {
 
 export async function runX1IosExport(
   exportDir: string,
-  opts: { since?: string; roundWindows: RoundWindow[] },
+  opts: { since?: string; roundWindows?: RoundWindow[] },
 ): Promise<X1IosExportResult> {
-  // Decision 0001 Addendum F: refuse outright if no round window is
-  // logged, rather than silently treating every workout on the device as
-  // in-round. This check runs BEFORE touching the (possibly huge) export.
-  if (!opts.roundWindows || opts.roundWindows.length === 0) {
-    throw new Error(
-      "runX1IosExport requires at least one round window (decision 0001 Addendum F) — refusing to run with " +
-        "no logged window. Log the UTC start/end time of each test round in docs/p0/X1.md's \"## Round " +
-        'windows" section first.',
-    );
-  }
+  // Decision 0005: round windows are labels, not a filter — no refusal and
+  // no exclusion on an empty/missing list. `roundWindows` defaults to []
+  // (every workout is then tagged testRound: false).
+  const roundWindows = opts.roundWindows ?? [];
 
   const xmlPath = path.join(exportDir, "export.xml");
   if (!existsSync(exportDir)) {
@@ -158,27 +228,11 @@ export async function runX1IosExport(
     return start.getTime() >= sinceDate.getTime();
   });
 
-  // Decision 0001 Addendum F / gate finding B-7: the AUTHORITATIVE filter —
-  // only a workout whose start time falls inside a logged round window
-  // (±60 min) counts. Unlike --since above, a missing/unparseable start
-  // time does NOT get the benefit of the doubt here: it cannot be shown to
-  // be in-round, so it is excluded, with a warning naming how many were.
-  let excludedByWindow = 0;
-  const filtered = sinceFiltered.filter((w) => {
-    if (isWithinRoundWindow(w.startDate, opts.roundWindows)) return true;
-    excludedByWindow += 1;
-    return false;
-  });
-  if (excludedByWindow > 0) {
-    warnings.push(
-      `${excludedByWindow} golf workout(s) excluded: start time (or a missing/unparseable start time) falls ` +
-        'outside every logged round window (±60 min) in docs/p0/X1.md\'s "Round windows" section (decision ' +
-        "0001 Addendum F).",
-    );
-  }
-
+  // Decision 0005: every workout in sinceFiltered counts — no round-window
+  // exclusion. A logged window only TAGS a matching workout testRound:
+  // true (below); it never removes anything.
   const workouts: X1IosWorkoutRecord[] = [];
-  for (const w of filtered) {
+  for (const w of sinceFiltered) {
     let routeFileExists = false;
     let routeTrackpointCount = 0;
     if (w.hasWorkoutRoute && w.routeFileReferencePath) {
@@ -202,7 +256,8 @@ export async function runX1IosExport(
           `element but no FileReference path attribute.`,
       );
     }
-    workouts.push(toRecord(w, routeFileExists, routeTrackpointCount));
+    const testRound = isWithinRoundWindow(w.startDate, roundWindows);
+    workouts.push(toRecord(w, routeFileExists, routeTrackpointCount, testRound));
   }
 
   if (golf.length === 0) {
@@ -217,10 +272,11 @@ export async function runX1IosExport(
     generatedAt: new Date().toISOString(),
     exportDir,
     since: opts.since ?? null,
-    roundWindows: opts.roundWindows,
+    roundWindows,
     totalWorkoutElementsSeen: parsed.totalWorkoutElementsSeen,
     golfWorkoutCount: workouts.length,
     workouts,
+    sourceSummaries: computeSourceSummaries(workouts),
     warnings,
   };
 }
@@ -232,19 +288,40 @@ export async function runX1IosExport(
  * output. "Source id" uses `sourceName` — export.xml does not appear to
  * expose `HKSource.bundleIdentifier` directly `[unverified — training
  * knowledge]`; `x1-verdict`'s source-map config matches on `sourceName` for
- * the same reason (see its README section). */
+ * the same reason (see its README section).
+ *
+ * Decision 0005 "Every counted workout is listed with its date and
+ * source ... the source version and device when the export records
+ * them": this is already ONE ROW PER WORKOUT (not per source), so adding
+ * Start date / Source version / Device / Test round columns makes it the
+ * per-workout listing decision 0005 requires. */
 export function renderMarkdownTable(result: X1IosExportResult): string {
   const header =
-    "| Source | OS | Workout/exercise written? | Route present? | CONSENT_REQUIRED + follow-up read | Source id (bundleIdentifier/dataOrigin) | Verdict |\n" +
-    "|---|---|---|---|---|---|---|";
+    "| Source | OS | Start date | Test round? | Workout/exercise written? | Route present? | CONSENT_REQUIRED + follow-up read | Source id (bundleIdentifier/dataOrigin) | Source version | Device | Verdict |\n" +
+    "|---|---|---|---|---|---|---|---|---|---|---|";
   if (result.workouts.length === 0) {
-    return `${header}\n| _(no golf workouts found)_ | iOS | — | — | N/A (iOS) | — | — |`;
+    return `${header}\n| _(no golf workouts found)_ | iOS | — | — | — | — | N/A (iOS) | — | — | — | — |`;
   }
   const rows = result.workouts.map((w) => {
     const written = "Yes";
     const route = w.routePresent ? "Yes" : "No";
-    return `| ${w.sourceName || "(unknown)"} | iOS | ${written} | ${route} | N/A (iOS) | ${w.sourceName || "(unknown)"} | ${w.verdict} |`;
+    const testRound = w.testRound ? "Yes" : "No";
+    return `| ${w.sourceName || "(unknown)"} | iOS | ${w.startDate ?? "(unknown)"} | ${testRound} | ${written} | ${route} | N/A (iOS) | ${w.sourceName || "(unknown)"} | ${w.sourceVersion ?? "(none)"} | ${w.device ?? "(none)"} | ${w.verdict} |`;
   });
+  return [header, ...rows].join("\n");
+}
+
+/** Decision 0005: "The memo shows, per source, the newest counted
+ * workout's date." */
+export function renderSourceSummaryMarkdown(result: X1IosExportResult): string {
+  const header =
+    "| Source | Counted workouts | Newest counted workout date |\n" + "|---|---|---|";
+  if (result.sourceSummaries.length === 0) {
+    return `${header}\n| _(none)_ | 0 | — |`;
+  }
+  const rows = result.sourceSummaries.map(
+    (s) => `| ${s.sourceName} | ${s.count} | ${s.newestStartDate ?? "(unknown)"} |`,
+  );
   return [header, ...rows].join("\n");
 }
 
@@ -252,49 +329,92 @@ interface CliArgs {
   exportDir: string;
   since?: string;
   outPrefix: string;
+  os: X1Os;
+  informational: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const positional: string[] = [];
   let since: string | undefined;
   let outPrefix = "x1-ios-export-result";
+  let os: string | undefined;
+  let informational = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--since") {
       since = argv[++i];
     } else if (arg === "--out") {
       outPrefix = argv[++i] ?? outPrefix;
+    } else if (arg === "--os") {
+      os = argv[++i];
+    } else if (arg === "--informational") {
+      informational = true;
     } else if (arg && !arg.startsWith("--")) {
       positional.push(arg);
     }
   }
   const exportDir = positional[0];
-  if (!exportDir) {
+  if (!exportDir || !os) {
     throw new Error(
-      "Usage: node dist/x1-ios-export.js <path-to-unzipped-apple_health_export-dir> [--since YYYY-MM-DD] [--out <prefix>]",
+      "Usage: node dist/x1-ios-export.js <path-to-unzipped-apple_health_export-dir> --os ios " +
+        "[--since YYYY-MM-DD] [--informational] [--out <prefix>]",
     );
   }
-  return { exportDir, outPrefix, ...(since !== undefined ? { since } : {}) };
+  if (os !== "ios" && os !== "android") {
+    throw new Error(`--os must be "ios" or "android", got "${os}".`);
+  }
+  if (os !== "ios") {
+    // This tool only ever reads an Apple Health export.xml — it cannot
+    // produce an Android result. Accepting the flag (per decision 0005:
+    // "The CLIs take --os ios|android") and validating it here, rather
+    // than silently ignoring the value, is what makes that requirement
+    // meaningful for a tool that is inherently single-OS.
+    throw new Error(
+      `x1-ios-export only produces iOS results (it reads an Apple Health export.xml) — pass --os ios, not ` +
+        `--os ${os}. The Android pass uses the Health Connect reader in apps/mobile, not this tool.`,
+    );
+  }
+  return {
+    exportDir,
+    outPrefix,
+    os,
+    informational,
+    ...(since !== undefined ? { since } : {}),
+  };
 }
 
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const roundWindows = await readLoggedRoundWindows();
+  const { dates: recordedExportDates, source } = await readRecordedExportDates();
+  if (!args.informational) {
+    assertRecordedExportDateLogged(recordedExportDates, args.os);
+  }
+  const recorded = !args.informational;
+
   const result = await runX1IosExport(args.exportDir, {
     roundWindows,
     ...(args.since !== undefined ? { since: args.since } : {}),
   });
-  const md = renderMarkdownTable(result);
+
+  const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
+  const md =
+    banner +
+    renderMarkdownTable(result) +
+    "\n\n### Newest counted workout date, per source\n\n" +
+    renderSourceSummaryMarkdown(result);
+  const output = { ...result, os: args.os, recorded, source };
 
   const outDir = path.dirname(path.resolve(args.outPrefix));
   await mkdir(outDir, { recursive: true });
   const jsonPath = `${args.outPrefix}.json`;
   const mdPath = `${args.outPrefix}.md`;
-  await writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  await writeFile(jsonPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
   await writeFile(mdPath, `${md}\n`, "utf8");
 
   process.stdout.write(
-    `x1-ios-export: ${result.golfWorkoutCount} golf workout(s) found (of ${result.totalWorkoutElementsSeen} total <Workout> elements).\n` +
+    `x1-ios-export: ${result.golfWorkoutCount} golf workout(s) found (of ${result.totalWorkoutElementsSeen} total <Workout> elements). ` +
+      `recorded=${recorded}\n` +
       `Wrote ${jsonPath} and ${mdPath}.\n`,
   );
   if (result.warnings.length > 0) {

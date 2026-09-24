@@ -23,6 +23,20 @@
  * only looks at workouts/sessions whose identifying name is listed in the
  * caller's source map. Anything else in the input data is ignored for
  * verdict purposes (not reported as a source).
+ *
+ * **Decision 0005 (2026-09-24)** changes two things here:
+ * - **Round windows are labels, not a filter.** Every counted golf
+ *   workout/session — historical or not — now feeds the verdict; a logged
+ *   `docs/p0/X1.md` round window only tags a matching entry `testRound:
+ *   true` in `countedEntries` below. `computeX1Verdict` no longer refuses
+ *   when no window is logged, and no longer excludes anything by date.
+ * - **The recorded-export rule** (see `recorded-export.ts`) replaces the
+ *   round-window refusal as the CLI's gate: `--os ios|android` names which
+ *   OS's `docs/p0/X1.md` "## Recorded export" date this run is standing on;
+ *   a blank date refuses unless `--informational` is passed, in which case
+ *   the output is marked `recorded: false` with a loud banner. The verdict
+ *   itself always combines both OSes' input data, as before — `--os` only
+ *   decides which OS's recorded-export date gates this particular run.
  */
 import { readFile, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -32,6 +46,12 @@ import {
   readLoggedRoundWindows,
   type RoundWindow,
 } from "./round-windows.js";
+import {
+  assertRecordedExportDateLogged,
+  informationalBanner,
+  readRecordedExportDates,
+  type X1Os,
+} from "./recorded-export.js";
 
 /** Minimal shape of the Android Health Connect reader's per-session record
  * (`apps/mobile/src/health-connect/types.ts` `GolfSessionSummary`),
@@ -98,6 +118,31 @@ export interface PhoneAppSourceVerdict extends SourceVerdict {
   appUsed: "18Birdies" | "Hole19";
 }
 
+/** Decision 0005 "Every counted workout is listed with its date and
+ * source ... the source version and device when the export records
+ * them": one entry per counted iOS workout / Android session matched to a
+ * source. `sourceVersion`/`device` are iOS-only — the Android reader's
+ * `GolfSessionSummary` (`apps/mobile/src/health-connect/types.ts`) does not
+ * carry them `[unverified — this package only has the minimal duplicated
+ * shape; see the module doc]`. */
+export interface X1CountedEntry {
+  os: "ios" | "android";
+  start: string | null;
+  sourceBundleId: string | null;
+  sourceVersion: string | null;
+  device: string | null;
+  routePresent: boolean;
+  /** Decision 0005: true when `start` falls inside a logged
+   * `docs/p0/X1.md` round window (60-minute slack) — a LABEL only; it does
+   * not affect whether this entry is counted. */
+  testRound: boolean;
+}
+
+export interface X1NewestDateByOs {
+  ios: string | null;
+  android: string | null;
+}
+
 export interface X1VerdictResult {
   generatedAt: string;
   perSource: {
@@ -119,6 +164,21 @@ export interface X1VerdictResult {
    * failing independently also triggers the statement and is not
    * reflected here. */
   garminWrittenStatementTriggeredByX1: boolean;
+  /** Decision 0005: every counted workout/session matched to one of the 3
+   * sources, listed with its date, source id, and (iOS only) version and
+   * device — the per-workout listing. */
+  countedEntries: {
+    garmin: X1CountedEntry[];
+    appleWatch: X1CountedEntry[];
+    phoneApp: X1CountedEntry[];
+  };
+  /** Decision 0005: "The memo shows, per source, the newest counted
+   * workout's date" — per source, per OS. */
+  newestCountedWorkoutDateBySource: {
+    garmin: X1NewestDateByOs;
+    appleWatch: X1NewestDateByOs;
+    phoneApp: X1NewestDateByOs;
+  };
   warnings: string[];
 }
 
@@ -131,15 +191,12 @@ export interface X1VerdictInput {
    * or returned nothing). */
   androidRouteFollowUps?: Record<string, AndroidRouteFollowUp>;
   sourceMap: SourceMap;
-  /** Decision 0001 Addendum F: the logged round window(s) from
-   * docs/p0/X1.md's "## Round windows" section — REQUIRED, and enforced
-   * here independently of whatever filtering `x1-ios-export` already did,
-   * so a stale/unfiltered `ios` JSON can't silently widen the verdict
-   * (gate finding B-7). A workout/session whose start time falls outside
-   * every window (±60 min) is excluded before any per-source verdict is
-   * computed. Empty (no window logged) is a refusal, not a permissive
-   * default. */
-  roundWindows: RoundWindow[];
+  /** Decision 0005: the logged round window(s) from docs/p0/X1.md's "##
+   * Round windows" section, used ONLY to tag matching entries `testRound:
+   * true` in `countedEntries` — never to exclude anything. Optional; an
+   * empty/omitted list is a normal state (every entry is then tagged
+   * `testRound: false`), not a refusal. */
+  roundWindows?: RoundWindow[];
 }
 
 function iosVerdictFor(
@@ -204,16 +261,69 @@ function containsOtherAppHint(names: string[], hint: string): boolean {
   return names.some((n) => n.toLowerCase().includes(hint));
 }
 
-export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
-  // Decision 0001 Addendum F: refuse outright with no logged round window
-  // — never silently compute a verdict from every workout/session on the
-  // device.
-  if (!input.roundWindows || input.roundWindows.length === 0) {
-    throw new Error(
-      "computeX1Verdict requires at least one round window (decision 0001 Addendum F) — refusing to compute " +
-        'a verdict with no round window logged in docs/p0/X1.md\'s "## Round windows" section.',
-    );
+/** Decision 0005: the counted-workout listing, iOS side — one entry per
+ * matching workout, tagged `testRound` from the (label-only) round
+ * windows. */
+function iosCountedEntries(
+  workouts: X1IosWorkoutRecord[],
+  sourceNames: string[],
+  roundWindows: RoundWindow[],
+): X1CountedEntry[] {
+  return workouts
+    .filter((w) => sourceNames.includes(w.sourceName))
+    .map((w) => ({
+      os: "ios",
+      start: w.startDate,
+      sourceBundleId: w.sourceName || null,
+      sourceVersion: w.sourceVersion,
+      device: w.device,
+      routePresent: w.routePresent,
+      testRound: isWithinRoundWindow(w.startDate, roundWindows),
+    }));
+}
+
+/** Decision 0005: the counted-workout listing, Android side. The
+ * duplicated `GolfSessionSummary` shape has no source version/device
+ * fields, so those are always `null` here. */
+function androidCountedEntries(
+  sessions: AndroidGolfSessionSummary[],
+  dataOrigins: string[],
+  roundWindows: RoundWindow[],
+): X1CountedEntry[] {
+  return sessions
+    .filter((s) => dataOrigins.includes(s.dataOrigin))
+    .map((s) => ({
+      os: "android",
+      start: s.start,
+      sourceBundleId: s.dataOrigin || null,
+      sourceVersion: null,
+      device: null,
+      routePresent: s.routePresent,
+      testRound: isWithinRoundWindow(s.start, roundWindows),
+    }));
+}
+
+/** Newest (by `Date.parse`) `start` among `entries`, or `null` if none
+ * parse. An entry with a missing/unparseable `start` is skipped, not
+ * treated as "newest". */
+function newestStart(entries: X1CountedEntry[]): string | null {
+  let newest: string | null = null;
+  let newestTime = -Infinity;
+  for (const e of entries) {
+    if (!e.start) continue;
+    const t = Date.parse(e.start);
+    if (!Number.isNaN(t) && t > newestTime) {
+      newestTime = t;
+      newest = e.start;
+    }
   }
+  return newest;
+}
+
+export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
+  // Decision 0005: round windows are labels, not a filter — no refusal on
+  // an empty/missing list, and no exclusion of anything by date.
+  const roundWindows = input.roundWindows ?? [];
 
   const warnings: string[] = [...input.ios.warnings];
   const followUps = input.androidRouteFollowUps ?? {};
@@ -249,40 +359,18 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
     );
   }
 
-  // Gate finding B-7: enforce the round window HERE too, independently of
-  // whatever filtering x1-ios-export already did to its JSON — a stale or
-  // hand-edited export.json must not widen the verdict.
-  const iosWorkoutsInWindow = input.ios.workouts.filter((w) =>
-    isWithinRoundWindow(w.startDate, input.roundWindows),
-  );
-  const androidSessionsInWindow = input.android.sessions.filter((s) =>
-    isWithinRoundWindow(s.start, input.roundWindows),
-  );
-  // Gate finding F-N5: this filter can silently drop older/out-of-window
-  // records with no trace — count what it dropped so a suspiciously-large
-  // drop (e.g. every workout, from a mis-logged window) is visible.
-  const iosDropped = input.ios.workouts.length - iosWorkoutsInWindow.length;
-  const androidDropped =
-    input.android.sessions.length - androidSessionsInWindow.length;
-  if (iosDropped > 0) {
-    warnings.push(
-      `${iosDropped} iOS workout(s) fell outside the logged round window(s) and were excluded.`,
-    );
-  }
-  if (androidDropped > 0) {
-    warnings.push(
-      `${androidDropped} Android session(s) fell outside the logged round window(s) and were excluded.`,
-    );
-  }
-
+  // Decision 0005: every workout/session counts — no round-window
+  // exclusion. `input.ios.workouts` / `input.android.sessions` are used
+  // directly (previously `iosWorkoutsInWindow` / `androidSessionsInWindow`
+  // were filtered by the window first).
   const garminIos = iosVerdictFor(
-    iosWorkoutsInWindow,
+    input.ios.workouts,
     input.sourceMap.garmin.iosSourceNames,
     warnings,
     "Garmin (iOS)",
   );
   const garminAndroid = androidVerdictFor(
-    androidSessionsInWindow,
+    input.android.sessions,
     input.sourceMap.garmin.androidDataOrigins,
     followUps,
     warnings,
@@ -290,7 +378,7 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   );
 
   const appleWatchIos = iosVerdictFor(
-    iosWorkoutsInWindow,
+    input.ios.workouts,
     input.sourceMap.appleWatch.iosSourceNames,
     warnings,
     "Apple Watch (iOS)",
@@ -299,18 +387,48 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
   const appleWatchAndroid: SourceOsVerdict = "not-applicable";
 
   const phoneAppIos = iosVerdictFor(
-    iosWorkoutsInWindow,
+    input.ios.workouts,
     input.sourceMap.phoneApp.iosSourceNames,
     warnings,
     `Phone app ${phoneApp.appUsed} (iOS)`,
   );
   const phoneAppAndroid = androidVerdictFor(
-    androidSessionsInWindow,
+    input.android.sessions,
     input.sourceMap.phoneApp.androidDataOrigins,
     followUps,
     warnings,
     `Phone app ${phoneApp.appUsed} (Android)`,
   );
+
+  // Decision 0005: the per-workout listing + newest-date-per-source, built
+  // from the SAME (unfiltered) input arrays as the verdicts above.
+  const countedEntries = {
+    garmin: [
+      ...iosCountedEntries(input.ios.workouts, input.sourceMap.garmin.iosSourceNames, roundWindows),
+      ...androidCountedEntries(input.android.sessions, input.sourceMap.garmin.androidDataOrigins, roundWindows),
+    ],
+    appleWatch: iosCountedEntries(input.ios.workouts, input.sourceMap.appleWatch.iosSourceNames, roundWindows),
+    phoneApp: [
+      ...iosCountedEntries(input.ios.workouts, input.sourceMap.phoneApp.iosSourceNames, roundWindows),
+      ...androidCountedEntries(input.android.sessions, input.sourceMap.phoneApp.androidDataOrigins, roundWindows),
+    ],
+  };
+  const iosOf = (entries: X1CountedEntry[]) => entries.filter((e) => e.os === "ios");
+  const androidOf = (entries: X1CountedEntry[]) => entries.filter((e) => e.os === "android");
+  const newestCountedWorkoutDateBySource = {
+    garmin: {
+      ios: newestStart(iosOf(countedEntries.garmin)),
+      android: newestStart(androidOf(countedEntries.garmin)),
+    },
+    appleWatch: {
+      ios: newestStart(iosOf(countedEntries.appleWatch)),
+      android: null,
+    },
+    phoneApp: {
+      ios: newestStart(iosOf(countedEntries.phoneApp)),
+      android: newestStart(androidOf(countedEntries.phoneApp)),
+    },
+  };
 
   const garmin: SourceVerdict = {
     ios: garminIos,
@@ -361,6 +479,8 @@ export function computeX1Verdict(input: X1VerdictInput): X1VerdictResult {
     sourcesPassingByOs,
     overallVerdict,
     garminWrittenStatementTriggeredByX1,
+    countedEntries,
+    newestCountedWorkoutDateBySource,
     warnings,
   };
 }
@@ -389,6 +509,44 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
   lines.push(
     `**K4 Garmin written statement triggered by X1: ${result.garminWrittenStatementTriggeredByX1 ? "YES" : "no"}** (K4b failing independently also triggers it; not assessed by this tool).`,
   );
+
+  // Decision 0005: newest counted workout date, per source per OS.
+  lines.push("");
+  lines.push("## Newest counted workout date, per source");
+  lines.push("| Source | Newest iOS date | Newest Android date |");
+  lines.push("|---|---|---|");
+  for (const [label, key] of [
+    ["Garmin watch + Connect Mobile", "garmin"],
+    ["Apple Watch Workout", "appleWatch"],
+    [`Phone app (${result.perSource.phoneApp.appUsed})`, "phoneApp"],
+  ] as const) {
+    const d = result.newestCountedWorkoutDateBySource[key];
+    lines.push(`| ${label} | ${d.ios ?? "(none)"} | ${d.android ?? "(none)"} |`);
+  }
+
+  // Decision 0005 "every counted workout is listed" — the per-workout
+  // listing, one row per counted entry across all 3 sources.
+  lines.push("");
+  lines.push("## Counted workouts/sessions");
+  lines.push("| Source | OS | Start | Source id | Source version | Device | Route present? | Test round? |");
+  lines.push("|---|---|---|---|---|---|---|---|");
+  const allEntries: [string, X1CountedEntry][] = [
+    ...result.countedEntries.garmin.map((e): [string, X1CountedEntry] => ["Garmin watch + Connect Mobile", e]),
+    ...result.countedEntries.appleWatch.map((e): [string, X1CountedEntry] => ["Apple Watch Workout", e]),
+    ...result.countedEntries.phoneApp.map((e): [string, X1CountedEntry] => [
+      `Phone app (${result.perSource.phoneApp.appUsed})`,
+      e,
+    ]),
+  ];
+  if (allEntries.length === 0) {
+    lines.push("| _(none)_ | — | — | — | — | — | — | — |");
+  } else {
+    for (const [label, e] of allEntries) {
+      lines.push(
+        `| ${label} | ${e.os === "ios" ? "iOS" : "Android"} | ${e.start ?? "(unknown)"} | ${e.sourceBundleId ?? "(none)"} | ${e.sourceVersion ?? "(none)"} | ${e.device ?? "(none)"} | ${e.routePresent ? "Yes" : "No"} | ${e.testRound ? "Yes" : "No"} |`,
+      );
+    }
+  }
   return lines.join("\n");
 }
 
@@ -398,12 +556,19 @@ interface CliArgs {
   followUpsPath?: string;
   sourceMapPath: string;
   outPrefix: string;
+  os: X1Os;
+  informational: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const opts: Record<string, string> = {};
+  const flags = new Set<string>();
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === "--informational") {
+      flags.add("informational");
+      continue;
+    }
     if (arg && arg.startsWith("--")) {
       opts[arg.slice(2)] = argv[i + 1] ?? "";
       i += 1;
@@ -415,18 +580,25 @@ function parseArgs(argv: string[]): CliArgs {
     "follow-ups": followUps,
     "source-map": sourceMap,
     out,
+    os,
   } = opts;
-  if (!ios || !android || !sourceMap) {
+  if (!ios || !android || !sourceMap || !os) {
     throw new Error(
       "Usage: node dist/x1-verdict.js --ios <x1-ios-export.json> --android <health-connect-reader.json> " +
-        "--source-map <source-map.json> [--follow-ups <follow-ups.json>] [--out <prefix>]",
+        "--source-map <source-map.json> --os ios|android [--follow-ups <follow-ups.json>] " +
+        "[--informational] [--out <prefix>]",
     );
+  }
+  if (os !== "ios" && os !== "android") {
+    throw new Error(`--os must be "ios" or "android", got "${os}".`);
   }
   return {
     iosPath: ios,
     androidPath: android,
     sourceMapPath: sourceMap,
     outPrefix: out || "x1-verdict-result",
+    os,
+    informational: flags.has("informational"),
     ...(followUps ? { followUpsPath: followUps } : {}),
   };
 }
@@ -449,6 +621,11 @@ async function main(argv: string[]): Promise<void> {
       >)
     : undefined;
   const roundWindows = await readLoggedRoundWindows();
+  const { dates: recordedExportDates, source } = await readRecordedExportDates();
+  if (!args.informational) {
+    assertRecordedExportDateLogged(recordedExportDates, args.os);
+  }
+  const recorded = !args.informational;
 
   const result = computeX1Verdict({
     ios,
@@ -457,18 +634,18 @@ async function main(argv: string[]): Promise<void> {
     roundWindows,
     ...(androidRouteFollowUps ? { androidRouteFollowUps } : {}),
   });
+  const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
+  const md = banner + renderVerdictMarkdown(result);
+  const output = { ...result, os: args.os, recorded, source };
+
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
     `${args.outPrefix}.json`,
-    `${JSON.stringify(result, null, 2)}\n`,
+    `${JSON.stringify(output, null, 2)}\n`,
     "utf8",
   );
-  await writeFile(
-    `${args.outPrefix}.md`,
-    `${renderVerdictMarkdown(result)}\n`,
-    "utf8",
-  );
-  process.stdout.write(`${renderVerdictMarkdown(result)}\n`);
+  await writeFile(`${args.outPrefix}.md`, `${md}\n`, "utf8");
+  process.stdout.write(`${md}\n`);
 }
 
 /** Gate finding B-11 (the N7 symlink bug, again): real-path comparison —

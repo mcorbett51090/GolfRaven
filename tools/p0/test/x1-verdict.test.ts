@@ -17,6 +17,7 @@ function iosWorkout(overrides: Partial<X1IosWorkoutRecord>): X1IosWorkoutRecord 
     routeTrackpointCount: 10,
     routePresent: true,
     verdict: "pass",
+    testRound: false,
     ...overrides,
   };
 }
@@ -30,6 +31,7 @@ function iosResult(workouts: X1IosWorkoutRecord[]): X1IosExportResult {
     totalWorkoutElementsSeen: workouts.length,
     golfWorkoutCount: workouts.length,
     workouts,
+    sourceSummaries: [],
     warnings: [],
   };
 }
@@ -167,25 +169,34 @@ describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decisi
   });
 });
 
-describe("x1-verdict: round window (decision 0001 Addendum F, gate finding B-7)", () => {
-  it("refuses (throws) when roundWindows is empty", () => {
+describe("x1-verdict: round windows are labels, not a filter (decision 0005, superseding Addendum F)", () => {
+  it("does NOT throw when roundWindows is empty — an unlogged window is a normal state now", () => {
     const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect" })]);
     const android = androidResult([]);
-    expect(() => computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: [] })).toThrow(
-      /round window/,
-    );
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: [] });
+    expect(result.perSource.garmin.ios).toBe("pass");
   });
 
-  it("excludes an iOS workout outside every window, even though x1-ios-export's own JSON already claims a verdict for it", () => {
-    // Defense in depth: the verdict re-applies the window filter itself,
-    // independent of whatever filtering produced the `ios` JSON.
+  it("does NOT throw when roundWindows is omitted entirely", () => {
+    const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect" })]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    expect(result.perSource.garmin.ios).toBe("pass");
+  });
+
+  it("a historical iOS workout OUTSIDE every window still counts toward the verdict (decision 0005)", () => {
+    // Under the old Addendum F rule this workout would have been excluded
+    // and the source would read fail-not-written; decision 0005 counts it.
     const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect", startDate: "2020-01-01 09:00:00 -0400" })]);
     const android = androidResult([]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.perSource.garmin.ios).toBe("fail-not-written");
+    expect(result.perSource.garmin.ios).toBe("pass");
+    // Tagged as NOT a test round — it falls outside the logged window.
+    const entry = result.countedEntries.garmin.find((e) => e.os === "ios");
+    expect(entry?.testRound).toBe(false);
   });
 
-  it("excludes an Android session outside every window", () => {
+  it("a historical Android session OUTSIDE every window still counts toward the verdict", () => {
     const ios = iosResult([]);
     const android = androidResult([
       {
@@ -199,7 +210,39 @@ describe("x1-verdict: round window (decision 0001 Addendum F, gate finding B-7)"
       },
     ]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.perSource.garmin.android).toBe("fail-not-written");
+    expect(result.perSource.garmin.android).toBe("pass");
+    const entry = result.countedEntries.garmin.find((e) => e.os === "android");
+    expect(entry?.testRound).toBe(false);
+  });
+
+  it("a workout INSIDE a logged window is tagged testRound: true", () => {
+    const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect", startDate: "2026-09-20 09:00:00 -0400" })]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    const entry = result.countedEntries.garmin.find((e) => e.os === "ios");
+    expect(entry?.testRound).toBe(true);
+  });
+
+  it("newestCountedWorkoutDateBySource reports the newest start date per source per OS", () => {
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2020-01-01 09:00:00 -0400" }),
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2026-09-20 09:00:00 -0400" }),
+    ]);
+    const android = androidResult([
+      {
+        recordId: "r1",
+        start: "2021-05-01T09:00:00Z",
+        end: "2021-05-01T13:00:00Z",
+        dataOrigin: "com.garmin.android.apps.connectmobile",
+        routePresent: true,
+        routePointCount: 50,
+        routeRequiresConsent: false,
+      },
+    ]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.newestCountedWorkoutDateBySource.garmin.ios).toBe("2026-09-20 09:00:00 -0400");
+    expect(result.newestCountedWorkoutDateBySource.garmin.android).toBe("2021-05-01T09:00:00Z");
+    expect(result.newestCountedWorkoutDateBySource.appleWatch).toEqual({ ios: null, android: null });
   });
 });
 

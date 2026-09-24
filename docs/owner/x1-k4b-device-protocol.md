@@ -30,14 +30,24 @@ Record the day-5 decision (borrow succeeded / upgrade path taken / running on pa
 
 ## 2. X1 round protocol, per source
 
-**Log the round window FIRST (decision 0001 Addendum F).** Before teeing off, note the round's start time
-(UTC), and its end time once it's over — then add BOTH to `docs/p0/X1.md`'s "## Round windows" section
-(one bullet, `<START> to <END>`, strict `YYYY-MM-DDThh:mm:ssZ`) **before** the export is read on either
-device. `x1-ios-export` and `x1-verdict` both **refuse to run** if this is still blank — they no longer
-trust every workout already on a device to be "the round"; only a workout/session whose start time falls
-inside a logged window, with 60 minutes of slack either side, counts, and older workouts on the device are
-ignored. Do this once per round (iOS pass and Android pass each get their own window/bullet if they happen
-on different days).
+**Log the round window (decision 0001 Addendum F) — now a LABEL, not a gate (decision 0005).** Before
+teeing off, note the round's start time (UTC), and its end time once it's over — then add BOTH to
+`docs/p0/X1.md`'s "## Round windows" section (one bullet, `<START> to <END>`, strict
+`YYYY-MM-DDThh:mm:ssZ`), ideally before the export is read on either device, though this no longer
+gates anything. `x1-ios-export` and `x1-verdict` **no longer refuse to run** if this is blank
+(decision 0005 supersedes Addendum F's refusal): every golf workout already on the device counts, not
+just ones from this round — a workout/session whose start time falls inside a logged window, with 60
+minutes of slack either side, is only tagged `testRound: true` in the output, and everything else is
+tagged `testRound: false`. Do this once per round (iOS pass and Android pass each get their own
+window/bullet if they happen on different days) if you want the tagging; skipping it just means every
+workout reads `testRound: false`.
+
+**Log the "Recorded export" date FIRST instead (decision 0005) — this is what now gates the tools.**
+Before reading either OS's export, add that OS's date to `docs/p0/X1.md`'s "## Recorded export"
+section. `x1-ios-export --os ios` and `x1-verdict --os ios|android` both refuse to produce the
+RECORDED X1 result for an OS whose date there is still blank; pass `--informational` to run anyway
+(the output is then marked `recorded: false` with a loud banner — useful for a dry run against real
+data before the recorded round, never the P0 verdict itself).
 
 Play **one real round (~4 h)** carrying all three iOS sources simultaneously where possible (Garmin watch +
 Apple Watch + phone with a golf app), so one round covers all three:

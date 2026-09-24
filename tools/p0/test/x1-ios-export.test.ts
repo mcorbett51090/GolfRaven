@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runX1IosExport, renderMarkdownTable } from "../src/x1-ios-export.js";
+import {
+  runX1IosExport,
+  renderMarkdownTable,
+  renderSourceSummaryMarkdown,
+} from "../src/x1-ios-export.js";
 import {
   HealthExportShapeError,
   countGpxTrackpoints,
@@ -16,10 +20,10 @@ const FIXTURES = path.join(__dirname, "fixtures");
  * relative to the export dir — so FIXTURES itself is "the export dir". */
 const GOOD_EXPORT_DIR = FIXTURES;
 
-/** Covers every golf workout in export.xml EXCEPT the 2026-08-01 Garmin one
- * (decision 0001 Addendum F round-window filtering — gate finding B-7),
- * so these tests reproduce the pre-Addendum-F fixture behavior except for
- * that one, deliberately-excluded old workout. */
+/** Tags every 2026-09-15..09-21 golf workout `testRound: true` — the
+ * 2026-08-01 Garmin workout falls outside it and is tagged `testRound:
+ * false`, but (decision 0005) still counts toward the result; nothing is
+ * excluded by this list any more. */
 const GOOD_ROUND_WINDOWS: RoundWindow[] = [
   { startIso: "2026-09-15T00:00:00Z", endIso: "2026-09-21T00:00:00Z" },
 ];
@@ -30,15 +34,17 @@ const TIGHT_ROUND_WINDOWS: RoundWindow[] = [
 ];
 
 describe("x1-ios-export: parsing a well-formed export.xml", () => {
-  it("finds all golf workouts within the round window and filters out non-golf ones", async () => {
+  it("finds ALL golf workouts, regardless of round window, and filters out non-golf ones (decision 0005)", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: GOOD_ROUND_WINDOWS,
     });
-    expect(result.totalWorkoutElementsSeen).toBe(6); // 5 golf + 1 running (unaffected by window filter)
-    expect(result.golfWorkoutCount).toBe(4); // the 2026-08-01 Garmin workout is outside every window
+    expect(result.totalWorkoutElementsSeen).toBe(6); // 5 golf + 1 running
+    // Decision 0005: the 2026-08-01 Garmin workout (outside every window) STILL counts.
+    expect(result.golfWorkoutCount).toBe(5);
     const sources = result.workouts.map((w) => w.sourceName).sort();
     expect(sources).toEqual([
       "18Birdies",
+      "Garmin Connect",
       "Garmin Connect",
       "Hole19",
       "Matt's Apple Watch",
@@ -114,43 +120,70 @@ describe("x1-ios-export: parsing a well-formed export.xml", () => {
     expect(result.golfWorkoutCount).toBe(4);
   });
 
-  it("renders a markdown table with the memo's columns", async () => {
+  it("renders a markdown table with the memo's columns, including Test round?", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: GOOD_ROUND_WINDOWS,
     });
     const md = renderMarkdownTable(result);
     expect(md).toContain(
-      "| Source | OS | Workout/exercise written? | Route present? |",
+      "| Source | OS | Start date | Test round? | Workout/exercise written? | Route present? |",
     );
     expect(md).toContain("CONSENT_REQUIRED + follow-up read");
-    expect(md).toContain("| Garmin Connect | iOS | Yes | Yes |");
     expect(md).toContain("N/A (iOS)");
+    // The recent (2026-09-20) Garmin workout is inside GOOD_ROUND_WINDOWS -> testRound Yes.
+    expect(md).toMatch(/\| Garmin Connect \| iOS \| 2026-09-20[^|]*\| Yes \| Yes \| Yes \|/);
+  });
+
+  it("renders the per-source newest-counted-workout-date table", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
+      roundWindows: GOOD_ROUND_WINDOWS,
+    });
+    const md = renderSourceSummaryMarkdown(result);
+    expect(md).toContain("| Source | Counted workouts | Newest counted workout date |");
+    const garminRow = md.split("\n").find((l) => l.startsWith("| Garmin Connect"));
+    expect(garminRow).toBeDefined();
+    expect(garminRow).toContain("2026-09-20");
   });
 });
 
-describe("x1-ios-export: round window (decision 0001 Addendum F, gate finding B-7)", () => {
-  it("refuses (throws) when roundWindows is empty — never runs unwindowed", async () => {
-    await expect(
-      runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: [] }),
-    ).rejects.toThrow(/round window/);
+describe("x1-ios-export: round windows are labels, not a filter (decision 0005, superseding Addendum F)", () => {
+  it("does NOT throw when roundWindows is empty — every workout still counts, tagged testRound: false", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: [] });
+    expect(result.golfWorkoutCount).toBe(5);
+    expect(result.workouts.every((w) => w.testRound === false)).toBe(true);
   });
 
-  it("excludes a workout outside every logged window, with a warning naming how many", async () => {
+  it("does NOT throw when roundWindows is omitted entirely", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, {});
+    expect(result.golfWorkoutCount).toBe(5);
+  });
+
+  it("a historical workout (the 2026-08-01 Garmin one, outside every window) counts, tagged testRound: false", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: TIGHT_ROUND_WINDOWS,
     });
-    // Only the 2026-09-20 cluster (3 workouts) is inside TIGHT_ROUND_WINDOWS;
-    // the 2026-08-01 Garmin workout and the 2026-09-15 Hole19 workout are not.
-    expect(result.golfWorkoutCount).toBe(3);
-    expect(result.workouts.some((w) => w.sourceName === "Hole19")).toBe(false);
-    expect(
-      result.warnings.some(
-        (w) => w.includes("excluded") && w.includes("round window"),
-      ),
-    ).toBe(true);
+    // Decision 0005: nothing is excluded by date. All 5 golf workouts count.
+    expect(result.golfWorkoutCount).toBe(5);
+    const old = result.workouts.find((w) => w.startDate?.startsWith("2026-08-01"));
+    expect(old).toBeDefined();
+    expect(old!.testRound).toBe(false);
+    const hole19 = result.workouts.find((w) => w.sourceName === "Hole19");
+    expect(hole19).toBeDefined();
+    expect(hole19!.testRound).toBe(false);
   });
 
-  it("a workout starting 59 minutes before the window (within the 60-min slack) still counts", async () => {
+  it("a workout INSIDE the logged window is tagged testRound: true", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
+      roundWindows: TIGHT_ROUND_WINDOWS,
+    });
+    const garminRecent = result.workouts.find(
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
+    );
+    expect(garminRecent).toBeDefined();
+    expect(garminRecent!.testRound).toBe(true);
+  });
+
+  it("a workout starting 59 minutes before the window (within the 60-min slack) is tagged testRound: true", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       // Garmin's 2026-09-20 workout starts at 13:00:00Z; a window starting
       // 13:59:00Z is 59 minutes later — within the ±60 min slack.
@@ -158,28 +191,24 @@ describe("x1-ios-export: round window (decision 0001 Addendum F, gate finding B-
         { startIso: "2026-09-20T13:59:00Z", endIso: "2026-09-20T14:30:00Z" },
       ],
     });
-    expect(
-      result.workouts.some(
-        (w) =>
-          w.sourceName === "Garmin Connect" &&
-          w.startDate?.startsWith("2026-09-20"),
-      ),
-    ).toBe(true);
+    const w = result.workouts.find(
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
+    );
+    expect(w).toBeDefined();
+    expect(w!.testRound).toBe(true);
   });
 
-  it("a workout starting 61 minutes before the window (outside the 60-min slack) does not count", async () => {
+  it("a workout starting 61 minutes before the window (outside the 60-min slack) is tagged testRound: false, but still counts", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: [
         { startIso: "2026-09-20T14:01:00Z", endIso: "2026-09-20T14:30:00Z" },
       ],
     });
-    expect(
-      result.workouts.some(
-        (w) =>
-          w.sourceName === "Garmin Connect" &&
-          w.startDate?.startsWith("2026-09-20"),
-      ),
-    ).toBe(false);
+    const w = result.workouts.find(
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
+    );
+    expect(w).toBeDefined();
+    expect(w!.testRound).toBe(false);
   });
 });
 

@@ -56,17 +56,48 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     expect(stdout).toMatch(/X5 coverage: 1\/2 \(50\.0%\) vs 60% bar — KILL/);
   });
 
-  // Decision 0001 Addendum F: the CLI ALWAYS reads the repo's own real
-  // docs/p0/X1.md for its logged round window(s) — there is no override
-  // flag (same philosophy as the K2 CLI's no-`--k2-doc` rule). Pre-round,
-  // that section is genuinely blank, so this is a real end-to-end proof the
-  // refusal is wired all the way through the built CLI, not just unit-level.
-  it("x1-ios-export CLI refuses (non-zero exit) against the real, pre-round docs/p0/X1.md with no round window logged", async () => {
+  // Decision 0005: the CLI ALWAYS reads the repo's own real docs/p0/X1.md
+  // for its recorded-export date(s) — there is no override flag (same
+  // philosophy as the K2 CLI's no-`--k2-doc` rule). Pre-round, that section
+  // is genuinely blank, so this is a real end-to-end proof the refusal is
+  // wired all the way through the built CLI, not just unit-level. (The
+  // OLD refusal here was "no round window logged" — decision 0005
+  // supersedes it; round windows no longer gate anything.)
+  it("x1-ios-export CLI refuses (non-zero exit) against the real, pre-round docs/p0/X1.md with no recorded-export date logged", async () => {
     const outPrefix = path.join(OUT_DIR, "x1-ios-export-result");
     await expect(
-      execFileAsync("node", [path.join(DIST, "x1-ios-export.js"), FIXTURES, "--out", outPrefix]),
-    ).rejects.toMatchObject({ stderr: expect.stringContaining("round window") });
+      execFileAsync("node", [
+        path.join(DIST, "x1-ios-export.js"),
+        FIXTURES,
+        "--os",
+        "ios",
+        "--out",
+        outPrefix,
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
     expect(existsSync(`${outPrefix}.json`)).toBe(false);
+  });
+
+  // Decision 0005: --informational runs anyway, against the same blank
+  // real docs/p0/X1.md, marked recorded: false with a loud banner.
+  it("x1-ios-export CLI --informational runs against the real, pre-round docs/p0/X1.md and marks recorded: false", async () => {
+    const outPrefix = path.join(OUT_DIR, "x1-ios-export-informational-result");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "x1-ios-export.js"),
+      FIXTURES,
+      "--os",
+      "ios",
+      "--informational",
+      "--out",
+      outPrefix,
+    ]);
+    expect(stdout).toContain("recorded=false");
+    const json = JSON.parse(readFileSync(`${outPrefix}.json`, "utf8"));
+    expect(json.recorded).toBe(false);
+    expect(json.os).toBe("ios");
+    expect(json.source.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const md = readFileSync(`${outPrefix}.md`, "utf8");
+    expect(md).toContain("INFORMATIONAL — NOT THE RECORDED X1 RESULT");
   });
 
   // NOTE: hitting the real default Overpass endpoint is deliberately NOT
