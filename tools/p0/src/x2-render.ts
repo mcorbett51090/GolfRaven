@@ -303,19 +303,6 @@ export async function renderUrl(
         if (totalBytes > byteCap) capExceeded = true;
       });
 
-      // Gate finding: a popup (window.open) is a SEPARATE page in this
-      // SAME context. Close it immediately — and, regardless of whether
-      // the close races a script that already ran, the capture still
-      // fails outright; a popup opening at all is never silently
-      // tolerated just because it was closed.
-      context.on("page", (popup) => {
-        if (popup === mainPage) return;
-        popupOpened = popup.url();
-        popup.close().catch(() => {
-          // Already closed/closing — nothing further to do.
-        });
-      });
-
       // Gate finding: off-host WebSockets never reach the page's script
       // at all — closed before any message exchange, same-host ones pass
       // through untouched (real site functionality is preserved).
@@ -390,6 +377,21 @@ export async function renderUrl(
 
       const page = await context.newPage();
       mainPage = page;
+      // Gate finding: registered AFTER our own page exists — `context.
+      // newPage()` itself fires this SAME "page" event internally (for
+      // its own about:blank -> navigating transition), racing any
+      // identity check against a `mainPage` variable assigned only once
+      // `newPage()` resolves back to us. Registering the listener only
+      // once we already have our own page sidesteps the race entirely:
+      // by construction, every "page" event this listener ever sees from
+      // here on is a genuine popup (`window.open()` from in-page script),
+      // never our own page's creation.
+      context.on("page", (popup) => {
+        popupOpened = popup.url();
+        popup.close().catch(() => {
+          // Already closed/closing — nothing further to do.
+        });
+      });
       try {
         const response = await page.goto(url, {
           waitUntil: "networkidle",

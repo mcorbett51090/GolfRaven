@@ -566,6 +566,52 @@ describe("x2-render: renderUrl — popup (window.open) handling (gate finding, p
       /opened a popup/,
     );
   });
+
+  it("regression (found live against real Chromium): does NOT false-positive on the context's own newPage() call, which fires the SAME 'page' event Playwright uses for a real popup", async () => {
+    // A minimal, hand-built ContextLike that reproduces the exact real
+    // Playwright quirk that broke this once: `context.newPage()` itself
+    // emits a "page" event synchronously, for its OWN page, BEFORE the
+    // `newPage()` promise resolves back to the caller. A naive `popup ===
+    // mainPage` identity check races that resolution and false-positives
+    // on every single render. The fix (verified live in real Chromium via
+    // the gate's probe) is registering the "page" listener only AFTER
+    // `context.newPage()` has already resolved — this test proves that
+    // ordering, not just the identity check, is what makes it safe.
+    let pageHandler: ((page: PageLike) => void) | null = null;
+    const ownPage: PageLike = {
+      async goto(url) {
+        return { status: () => 200, url: () => url, headers: () => ({}) };
+      },
+      async content() {
+        return "<p>ok, no false-positive popup failure</p>";
+      },
+      async close() {},
+      url() {
+        return SAME_HOST_URL;
+      },
+      mainFrame() {
+        return { main: true };
+      },
+    };
+    const context: ContextLike = {
+      async newPage() {
+        // Fires BEFORE this promise resolves — exactly like real
+        // Playwright does for the page's own about:blank -> navigating
+        // transition.
+        if (pageHandler) pageHandler(ownPage);
+        return ownPage;
+      },
+      async route(_pattern, _handler) {},
+      async routeWebSocket() {},
+      on(event, handler) {
+        if (event === "page") pageHandler = handler as (page: PageLike) => void;
+      },
+      async close() {},
+    };
+    const { launch } = fakeLauncher(context);
+    const result = await renderUrl(SAME_HOST_URL, { userAgent: "ua", launch });
+    expect(result.html).toContain("no false-positive popup failure");
+  });
 });
 
 describe("x2-render: renderUrl — subresource byte cap (best-effort, gate finding)", () => {
