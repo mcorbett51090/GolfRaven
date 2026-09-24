@@ -138,6 +138,11 @@ function normalizePackageSpecifier(spec: string): string {
       break;
     }
   }
+  // esm.sh pinned-build tag, e.g. "esm.sh/v135/@supabase/supabase-js@2" —
+  // confirmed this round as a real bypass (post-P3a re-gate M1, case g1):
+  // without stripping this, the FIRST path segment after the host prefix
+  // becomes "v135", not the package name.
+  s = s.replace(/^v\d+\//, "");
   s = s.replace(/^npm:/, "").replace(/^jsr:/, "");
   // Strip a trailing "@<version>" — but not a LEADING "@scope" (atIdx must
   // be > 0 so "@supabase/supabase-js" itself is untouched when there is no
@@ -195,10 +200,107 @@ function resolveImportMapAlias(spec: string, importMap: Record<string, string> |
   return bestTarget;
 }
 
-function isBannedSpecifierOrAlias(spec: string, importMap: Record<string, string> | undefined): { banned: boolean; resolvedVia?: string } {
+// ⛔ FIX (post-P3a re-gate M1): "reject any specifier containing
+// `@supabase/` or `supabase-js` anywhere in the raw string." Independent
+// of, and evaluated BEFORE, normalizePackageSpecifier — g1
+// (esm.sh/v135/@supabase/supabase-js@2.45.0/dist/module/index.js), g2a
+// (ga.jspm.io/npm:@supabase/supabase-js@...), and g2b
+// (esm.sh/*@supabase/supabase-js@2) all confirmed empirically this round
+// that normalization has edge cases (a pinned-build "vNNN/" segment, an
+// npm: scheme embedded after an unrecognized host, a "*" external-deps
+// marker) that can shift which path segment gets taken as "the package
+// name". A raw substring match has no such edge case: the banned text is
+// either present in the specifier or it is not, regardless of what
+// surrounds it.
+function containsSupabaseSubstring(spec: string): boolean {
+  const upper = spec.toUpperCase();
+  return upper.includes("@SUPABASE/") || upper.includes("SUPABASE-JS");
+}
+
+// ⛔ FIX (post-P3a re-gate M1, requirement: "switch remote imports to an
+// allow-list of hosts and package names. No more deny-list."): a URL
+// specifier's host must be on this list, or it is banned outright —
+// independent of whether the PACKAGE it names looks dangerous by name
+// (g6: https://example.com/evil/mod.ts is not @supabase/anything and not
+// a named Postgres driver, so the old deny-list-only model never even
+// looked at the host and let it straight through). This governs only
+// specifiers that are themselves a URL (http/https) — a bare package
+// name or an `npm:`/`jsr:` scheme specifier has no "host" and is instead
+// governed by the banned-package-name/raw-substring checks above.
+const ALLOWED_REMOTE_HOSTS = new Set(["esm.sh", "cdn.skypack.dev", "cdn.jsdelivr.net", "unpkg.com", "deno.land", "jsr.io"]);
+
+function remoteHostOf(spec: string): string | undefined {
+  const m = /^https?:\/\/([^/]+)/i.exec(spec);
+  return m ? m[1].toLowerCase() : undefined;
+}
+
+function isDisallowedRemoteHost(spec: string): boolean {
+  const host = remoteHostOf(spec);
+  return host !== undefined && !ALLOWED_REMOTE_HOSTS.has(host);
+}
+
+// ⛔ FIX (post-P3a re-gate M1, g4): `data:`/`blob:` specifiers can smuggle
+// arbitrary source (a Worker, a dynamic import) with no importable file
+// on disk or a real remote host to review at all.
+function isDataOrBlobSpecifier(spec: string): boolean {
+  const trimmed = spec.trim();
+  return /^(data|blob):/i.test(trimmed);
+}
+
+/**
+ * ⛔ FIX (post-P3a re-gate M1, g5): "resolve relative imports and fail if
+ * they escape supabase/functions." Node's `path.resolve`-equivalent,
+ * hand-rolled (no filesystem access from lint.ts itself — index.ts is the
+ * only place with `node:fs`/`node:path`, so this stays a pure string
+ * operation lintSource can run standalone/in tests too): resolves a
+ * relative specifier against the linted file's own directory and checks
+ * the result still starts with functionsRoot. `functionsRoot` is optional
+ * (a plain `lintSource(source, path)` call with no root configured simply
+ * skips this specific check, same as before) — index.ts always supplies
+ * it for a real directory-walk run.
+ */
+function resolvesOutsideFunctionsRoot(spec: string, filePath: string, functionsRoot: string | undefined): boolean {
+  if (!functionsRoot) return false;
+  if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+  const fileDirSegments = filePath.split(/[\\/]/).filter(Boolean);
+  fileDirSegments.pop(); // drop the file's own basename, keep its directory
+  const rootSegments = functionsRoot.split(/[\\/]/).filter(Boolean);
+  const specSegments = spec.split("/").filter((s) => s.length > 0 && s !== ".");
+  const resolved = [...fileDirSegments];
+  for (const seg of specSegments) {
+    if (seg === "..") {
+      if (resolved.length === 0) return true; // walked off the filesystem root itself
+      resolved.pop();
+    } else {
+      resolved.push(seg);
+    }
+  }
+  if (resolved.length < rootSegments.length) return true;
+  for (let i = 0; i < rootSegments.length; i++) {
+    if (resolved[i] !== rootSegments[i]) return true;
+  }
+  return false;
+}
+
+function isBannedSpecifierOrAlias(
+  spec: string,
+  importMap: Record<string, string> | undefined,
+  filePath: string,
+  functionsRoot: string | undefined,
+): { banned: boolean; reason?: string; resolvedVia?: string } {
+  if (containsSupabaseSubstring(spec)) return { banned: true, reason: "contains '@supabase/' or 'supabase-js'" };
   if (isBannedSpecifier(spec)) return { banned: true };
+  if (isDataOrBlobSpecifier(spec)) return { banned: true, reason: "data:/blob: specifier" };
+  if (isDisallowedRemoteHost(spec)) return { banned: true, reason: `host "${remoteHostOf(spec)}" is not on the allow-list` };
+  if (resolvesOutsideFunctionsRoot(spec, filePath, functionsRoot)) {
+    return { banned: true, reason: "relative import resolves outside supabase/functions" };
+  }
   const resolved = resolveImportMapAlias(spec, importMap);
-  if (resolved !== undefined && isBannedSpecifier(resolved)) return { banned: true, resolvedVia: resolved };
+  if (resolved !== undefined) {
+    if (containsSupabaseSubstring(resolved)) return { banned: true, reason: "alias resolves to a specifier containing '@supabase/' or 'supabase-js'", resolvedVia: resolved };
+    if (isBannedSpecifier(resolved)) return { banned: true, resolvedVia: resolved };
+    if (isDisallowedRemoteHost(resolved)) return { banned: true, reason: `alias resolves to a host not on the allow-list`, resolvedVia: resolved };
+  }
   return { banned: false };
 }
 

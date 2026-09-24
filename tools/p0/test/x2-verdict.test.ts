@@ -1651,12 +1651,14 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
   it("an owner-saved fact backed by a VERIFIED Wayback snapshot whose re-derived text does NOT contain the quote fails corroboration", () => {
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "wayback",
-          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
-          snapshotSha256: "f".repeat(64),
-          rawFile: "raw/wayback-f.html",
-        },
+        [SHA_OWNER]: [
+          {
+            type: "wayback",
+            snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
+            snapshotSha256: "f".repeat(64),
+            rawFile: "raw/wayback-f.html",
+          },
+        ],
       },
     };
     const resolved: X2ResolvedCorroboration = new Map([
@@ -1677,12 +1679,14 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
   it("gate finding 3 (re-gate): a Wayback record whose evidence FAILED re-verification (SHA mismatch/unreadable) is UNVERIFIABLE, regardless of what text a forger might claim", () => {
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "wayback",
-          snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
-          snapshotSha256: "a".repeat(64),
-          rawFile: "raw/wayback-a.html",
-        },
+        [SHA_OWNER]: [
+          {
+            type: "wayback",
+            snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/nc-trail",
+            snapshotSha256: "a".repeat(64),
+            rawFile: "raw/wayback-a.html",
+          },
+        ],
       },
     };
     // No resolved map entry (as the CLI's own pass would produce if the
@@ -1754,21 +1758,18 @@ describe("x2-verdict: gate finding 4 — owner-saved facts require corroboration
     const { renderX2VerdictMarkdown } = await import("../src/x2-verdict.js");
     const corroboration: X2CorroborationFile = {
       NC: {
-        [SHA_OWNER]: {
-          type: "acceptance",
-          id: "NC-2026-09-20-acceptance",
-          acceptedBy: "Matt",
-          date: "2026-09-20",
-        },
+        [SHA_OWNER]: [
+          { type: "acceptance", fact: "roster:Pinehurst Creek", acceptedBy: "Matt", date: "2026-09-20" },
+        ],
       },
     };
     const resolved: X2ResolvedCorroboration = new Map([
-      [corroborationResolutionKey("NC", SHA_OWNER), { acceptanceLogged: true }],
+      [corroborationResolutionKey("NC", SHA_OWNER, "roster:Pinehurst Creek"), { acceptanceLogged: true }],
     ]);
     const result = computeX2Verdict(ncConfirmation(), ownerEvidenceByTrail(), ["NC"], corroboration, resolved);
     const md = renderX2VerdictMarkdown(result);
     expect(md).toMatch(
-      /corroboration: owner-attested, accepted by Matt on 2026-09-20 \(logged in X2\.md, id "NC-2026-09-20-acceptance"\)/,
+      /corroboration: owner-attested, accepted by Matt on 2026-09-20 \(X2\.md Log row, commit unavailable\)/,
     );
   });
 });
