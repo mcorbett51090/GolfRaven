@@ -31,7 +31,30 @@ import {
 /* ------------------------------------------------------------------ */
 
 const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const LocalDateSchema = z.string().regex(LOCAL_DATE_RE, "must be a YYYY-MM-DD calendar date");
+
+/** F6 (sixth gate): "localDate must be a real calendar date... so
+ * '2026-02-31' is rejected." `Date.UTC`'s own round-trip (construct from
+ * the components, read them back) is what catches this — `Date.parse`/
+ * `new Date(...)` silently ROLL an invalid date over instead of rejecting
+ * it (`2026-02-31` parses cleanly as March 3rd) — same technique as
+ * `@golfraven/import`'s `timestamps.ts#isRealCalendarDate`, duplicated
+ * here for the same "stay scoped to packages/rules" reason as
+ * `localDateForTz` below. */
+function isRealCalendarDate(year: number, month: number, day: number): boolean {
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day;
+}
+
+const LocalDateSchema = z
+  .string()
+  .regex(LOCAL_DATE_RE, "must be a YYYY-MM-DD calendar date")
+  .refine(
+    (s) => {
+      const [y, m, d] = s.split("-").map(Number);
+      return isRealCalendarDate(y!, m!, d!);
+    },
+    { message: "must be a REAL calendar date (e.g. not 2026-02-31)" },
+  );
 
 /** M1 (fifth gate): `fixId`/`paymentRef` "must be non-empty strings; reject
  * objects and other shapes." `z.string().min(1)` does both — Zod's

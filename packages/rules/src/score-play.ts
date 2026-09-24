@@ -115,6 +115,15 @@ export const MONEY_MIN = 0.85;
  * unmodified test pins at 0. */
 export const SCORE_PLAY_POLICY_VERSION = 1;
 
+/** F5 (sixth gate): `deriveGroups`'s "same round" correlation window
+ * (`health_route`/`file_import`, both already filtered to
+ * `ctx.playFacilityId`) — hoisted from an inline `15 * 60_000` literal. */
+export const ROUND_CORRELATION_WINDOW_MS = 15 * 60_000;
+
+/** F5 (sixth gate): `corroborationApplies`'s purchase-corroboration
+ * window, in days — hoisted from an inline `<= 7` literal. */
+export const CORROBORATION_WINDOW_DAYS = 7;
+
 /* ------------------------------------------------------------------ */
 /* Receipt fingerprint voiding (should-fix, §4.4/§4.5 line 996)         */
 /* ------------------------------------------------------------------ */
@@ -254,7 +263,7 @@ function deriveGroups(evidence: Evidence[], contributions: ScorePlayContribution
     for (let b = a + 1; b < roundRows.length; b += 1) {
       if (
         roundRows[a]!.facilityId === roundRows[b]!.facilityId &&
-        windowMs(roundRows[a]!.startedAt, roundRows[b]!.startedAt, 15 * 60_000)
+        windowMs(roundRows[a]!.startedAt, roundRows[b]!.startedAt, ROUND_CORRELATION_WINDOW_MS)
       ) {
         dsu.union(roundRows[a]!.i, roundRows[b]!.i);
       }
@@ -635,7 +644,7 @@ function daysBetween(a: string, b: string): number {
 
 function corroborationApplies(ctx: ScorePlayContext): boolean {
   const purchases = ctx.purchases ?? [];
-  return purchases.some((p) => p.facilityId === ctx.playFacilityId && daysBetween(p.localDate, ctx.playLocalDate) <= 7);
+  return purchases.some((p) => p.facilityId === ctx.playFacilityId && daysBetween(p.localDate, ctx.playLocalDate) <= CORROBORATION_WINDOW_DAYS);
 }
 
 /* ------------------------------------------------------------------ */
