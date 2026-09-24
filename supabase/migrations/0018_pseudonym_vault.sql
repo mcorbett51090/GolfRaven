@@ -121,22 +121,41 @@ CREATE TABLE private.pseudonym_key_registry (
 ALTER TABLE private.pseudonym_key_registry ENABLE ROW LEVEL SECURITY;
 ALTER TABLE private.pseudonym_key_registry FORCE ROW LEVEL SECURITY;
 
+-- ⛔ FIX (should-fix 1, post-P3a re-gate): "split pd_pseudonym_key_
+-- registry_all (FOR ALL USING true) into separate FOR SELECT and FOR
+-- INSERT policies." A single FOR ALL policy applies to every command
+-- (including UPDATE/DELETE) with the SAME permissive `true` clause --
+-- there is no INTENDED UPDATE/DELETE path for private_definer on this
+-- table at all (it is written once, by INSERT, and never again), so a
+-- FOR ALL grant was wider than the actual access pattern, not just wider
+-- than necessary defensively.
 GRANT SELECT, INSERT ON private.pseudonym_key_registry TO private_definer;
-CREATE POLICY pd_pseudonym_key_registry_all ON private.pseudonym_key_registry
-  FOR ALL TO private_definer USING (true) WITH CHECK (true);
+CREATE POLICY pd_pseudonym_key_registry_select ON private.pseudonym_key_registry
+  FOR SELECT TO private_definer USING (true);
+CREATE POLICY pd_pseudonym_key_registry_insert ON private.pseudonym_key_registry
+  FOR INSERT TO private_definer WITH CHECK (true);
 
--- service_role gets SELECT/INSERT/DELETE directly (BYPASSRLS, per 0009 --
--- the FORCE RLS policy above never even applies to it) so it can do
--- legitimate operational cleanup of a permanently-retired key's registry
--- row without needing a bespoke SECURITY DEFINER maintenance function for
--- that one narrow case; this is NOT a replay-style risk the way
--- private.consumed_nonce's DELETE grant was (should-fix 2, 0017) -- a
--- registry row records only "this key id was once used", and removing it
--- just means delete_my_data will no longer try to resolve that
--- particular key (a correctness/availability concern, not a PII-leak
--- one: pairing CHECK + the write-time trigger above are what actually
--- prevent a leak, independent of this table's own contents).
-GRANT SELECT, INSERT, DELETE ON private.pseudonym_key_registry TO service_role;
+-- ⛔ FIX (M1 BLOCKING, post-P3a re-gate correction): the comment this
+-- replaces was WRONG, and its claim was disproven by a direct repro this
+-- round: `DELETE FROM private.pseudonym_key_registry WHERE key_id = <key
+-- 1's id>` (service_role held DELETE), then `delete_my_data(A)` returned
+-- true but player_a's data SURVIVED (the discovery loop in 0015 simply
+-- never tried that key any more) -- an unqualified PII-LEAK path, not
+-- "a correctness/availability concern" as the old comment claimed.
+-- INSERTing a bogus key_id (service_role held INSERT too) is the mirror
+-- failure: the discovery loop is table-wide and unscoped by user, so one
+-- bogus row makes EVERY user's deletion raise. Neither shape is a
+-- legitimate "operational cleanup" for service_role to be able to
+-- trigger on its own -- service_role now gets NO grant on this table at
+-- all. Only private.validate_and_register_pseudonym_hmac_id (SECURITY
+-- DEFINER, owned by private_definer, below) ever writes to it, from
+-- inside the write-time trigger; nothing outside private_definer ever
+-- needs to read it directly either. The FK constraints added further
+-- below (M1) are the structural backstop beneath this grant revocation:
+-- even a private_definer-level (or superuser) DELETE of a key_id still
+-- REFERENCED by a live row now fails outright, independent of any grant
+-- — see the FK constraints and their own comment for why the registry is
+-- append-only by construction, not merely by policy.
 
 -- The write-time validator + registrar: SECURITY DEFINER, owned by
 -- private_definer (the only role vault.decrypted_secrets and this
@@ -240,15 +259,48 @@ VALUES
   ('app', 'attestation_shift_log_validate_hmac_id', '', false, false, false, 'trigger function (app.attestation_shift_log_validate_hmac_id_trg) -- never EXECUTEd directly by any role'),
   ('app', 'attestation_validate_hmac_ids', '', false, false, false, 'trigger function (app.attestation_validate_hmac_ids_trg) -- never EXECUTEd directly by any role');
 
--- Register pd_pseudonym_key_registry_all in private.definer_policy_
--- allowlist (0016) -- 0017 already revoked the CURRENT_USER INSERT/UPDATE
--- grant its own temporary seeding policy needed, so this migration redoes
--- the same narrow, self-revoked pattern for its own new row.
+-- ⛔ FIX (M1 BLOCKING, post-P3a re-gate): "add FKs from attestation_
+-- shift_log.player_pseudonym_hmac_id, attestation.player_pseudonym_
+-- hmac_id and attestation.staff_pseudonym_hmac_id to private.
+-- pseudonym_key_registry(key_id)." NOT DEFERRABLE (the coordinator's own
+-- conditional: "otherwise the trigger must register BEFORE the row is
+-- written") -- the write-time trigger functions above are plain BEFORE
+-- INSERT OR UPDATE triggers, so private.validate_and_register_pseudonym_
+-- hmac_id's own INSERT into the registry always completes BEFORE the
+-- triggering row itself is written; by the time Postgres checks this FK
+-- (immediately, right after that same statement), the registry row is
+-- already there. Immediate (not deferred) checking is also the STRONGER
+-- choice here: it closes the exact window the coordinator's repro
+-- exploited structurally, not just via the grant revocation above --
+-- even if some future bug re-granted DELETE, or ran as a superuser bypass
+-- entirely, deleting a key_id still referenced by a live row now fails
+-- outright as a plain FK violation, unconditionally. The direction this
+-- does NOT cover -- deleting the underlying vault.secrets row while its
+-- id is still registered -- is deliberately left possible (0018's own
+-- earlier note explains why: no FK into Vault's own schema) and is
+-- exactly the should-fix-4 "missing key" scenario delete_my_data's own
+-- runtime RAISE still exists to catch; see should-fix 2's new docs note
+-- (docs/security/p3-money-path-requirements.md) for the resulting
+-- operational rule this creates: a Vault key referenced by the registry
+-- must never itself be deleted.
+ALTER TABLE app.attestation_shift_log ADD CONSTRAINT attestation_shift_log_pseudonym_hmac_id_registry_fk
+  FOREIGN KEY (player_pseudonym_hmac_id) REFERENCES private.pseudonym_key_registry (key_id);
+ALTER TABLE app.attestation ADD CONSTRAINT attestation_player_pseudonym_hmac_id_registry_fk
+  FOREIGN KEY (player_pseudonym_hmac_id) REFERENCES private.pseudonym_key_registry (key_id);
+ALTER TABLE app.attestation ADD CONSTRAINT attestation_staff_pseudonym_hmac_id_registry_fk
+  FOREIGN KEY (staff_pseudonym_hmac_id) REFERENCES private.pseudonym_key_registry (key_id);
+
+-- Register pd_pseudonym_key_registry_select/_insert in private.
+-- definer_policy_allowlist (0016) -- 0017 already revoked the
+-- CURRENT_USER INSERT/UPDATE grant its own temporary seeding policy
+-- needed, so this migration redoes the same narrow, self-revoked pattern
+-- for its own new rows (should-fix 1: two rows now, not one).
 GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_seed_definer_policy_allowlist_0018 ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
-  ('private', 'pseudonym_key_registry', 'pd_pseudonym_key_registry_all', 'ALL', false, 'M1/should-fix 2 (post-P3a re-gate): private_definer''s own registry table -- a key id here is provenance metadata only (which vault key wrote SOME row, never who), so full access for private_definer is safe and matches the table''s own narrow purpose');
+  ('private', 'pseudonym_key_registry', 'pd_pseudonym_key_registry_select', 'SELECT', false, 'M1/should-fix 1/2 (post-P3a re-gate): private_definer''s own registry table -- a key id here is provenance metadata only (which vault key wrote SOME row, never who), so full read access for private_definer is safe and matches the table''s own narrow purpose'),
+  ('private', 'pseudonym_key_registry', 'pd_pseudonym_key_registry_insert', 'INSERT', false, 'M1/should-fix 1/2 (post-P3a re-gate): the write-time validator (private.validate_and_register_pseudonym_hmac_id) is the ONLY writer, via ON CONFLICT DO NOTHING -- no UPDATE/DELETE policy exists for private_definer at all, the registry is append-only by design');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
@@ -256,7 +308,7 @@ FROM pg_policy pol
 JOIN pg_class cl ON cl.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = cl.relnamespace
 WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
-  AND al.policy_name = 'pd_pseudonym_key_registry_all';
+  AND al.policy_name IN ('pd_pseudonym_key_registry_select', 'pd_pseudonym_key_registry_insert');
 DROP POLICY current_user_seed_definer_policy_allowlist_0018 ON private.definer_policy_allowlist;
 REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 

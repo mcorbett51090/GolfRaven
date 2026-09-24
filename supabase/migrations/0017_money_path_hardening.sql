@@ -247,8 +247,44 @@ FOR EACH ROW EXECUTE FUNCTION app.play_deleted_detach_play_id();
 -- firing queued for the same row converges on the SAME fresh read, so
 -- this stays correct (if slightly redundant) even with multiple firings
 -- queued for one row in one transaction.
-CREATE OR REPLACE FUNCTION app.offer_code_play_guard() RETURNS trigger
-LANGUAGE plpgsql
+-- ⛔ FIX (M3 BLOCKING, post-P3a re-gate): "guard RLS fail-open." The
+-- should-fix-4 re-read above fixed STALENESS but not WHOSE RLS it reads
+-- under: as a plain (invoker-rights) function, `SELECT * INTO v_row FROM
+-- app.offer_code WHERE id = NEW.id` runs as whatever role is active AT
+-- THE MOMENT this DEFERRED trigger actually fires (commit, or SET
+-- CONSTRAINTS IMMEDIATE) -- NOT necessarily the role that did the
+-- original INSERT/UPDATE. Confirmed empirically this round: service_role
+-- inserts an `earned` offer_code for a HELD play (bypasses RLS, so the
+-- INSERT itself succeeds and the deferred check queues), then
+-- `tests.authenticate_as` switches the session to player B BEFORE
+-- commit -- when the deferred trigger fires, its own re-read runs AS
+-- PLAYER B, whose OWN row-scoped RLS (`play_select_own`-style, "your own
+-- rows only") can't see PLAYER E's offer_code row at all, so the re-read
+-- gets NOT FOUND -- and should-fix 4's "NOT FOUND means deleted, nothing
+-- to guard, RETURN NULL" treats an INVISIBLE row exactly the same as a
+-- GENUINELY DELETED one. The commit then succeeds with `earned` under a
+-- held play -- RLS visibility, not the row's actual existence, decided
+-- the guard's outcome.
+--
+-- Fix: the guard function itself is now SECURITY DEFINER, owned by
+-- private_definer (not a separate directly-callable helper -- a trigger
+-- function can never be invoked as an ordinary SQL call regardless of
+-- EXECUTE grants, "trigger functions can only be called as triggers", so
+-- there is no new callable surface to expose to anon/authenticated by
+-- making it SECURITY DEFINER). Its own re-read now runs as
+-- private_definer, through THREE new, narrowly-scoped-to-this-one-
+-- purpose SELECT policies (app.offer_code/app.entitlement/app.play,
+-- below) that are unconditional (`USING (true)`) -- narrowed not by ROW
+-- (this fix's whole point is that row-scoped visibility is exactly what
+-- broke it) but by REACHABILITY: nothing outside this one SECURITY
+-- DEFINER trigger function context can ever exercise them. "Treat NOT
+-- FOUND as deleted only when that definer-level read confirms it" --
+-- since the re-read itself now IS the definer-level read, a genuine NOT
+-- FOUND from it means the row is actually, unconditionally gone, not
+-- merely invisible to whoever happens to be committing.
+CREATE OR REPLACE FUNCTION private.offer_code_play_guard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   v_row app.offer_code%ROWTYPE;
@@ -256,7 +292,7 @@ DECLARE
 BEGIN
   SELECT * INTO v_row FROM app.offer_code WHERE id = NEW.id;
   IF NOT FOUND THEN
-    RETURN NULL; -- the row is gone by the time this (possibly stale) deferred check fires; nothing to guard
+    RETURN NULL; -- definer-level read confirms the row is genuinely gone, not merely invisible to the committing role
   END IF;
   IF v_row.play_id IS NULL THEN
     RETURN NULL;
@@ -281,21 +317,47 @@ BEGIN
 END;
 $$;
 
+-- ⛔ FIX (found empirically this round, H2_MODE=approximation): CREATE
+-- TRIGGER/CREATE CONSTRAINT TRIGGER itself needs EXECUTE on the function
+-- it names, checked for the CONNECTING role at DDL time -- unlike
+-- ACTUALLY FIRING a trigger (which bypasses EXECUTE checks entirely, the
+-- reasoning every OTHER trigger function in this migration set relies
+-- on). Every prior private_definer-owned function's "REVOKE/GRANT EXECUTE
+-- BEFORE the OWNER TO transfer" ordering rule assumed the connecting role
+-- only ever needed EXECUTE to be checked once, at the point the function
+-- itself is created/altered -- this is the FIRST private_definer-owned
+-- function this migration set also attaches as a trigger, and attaching
+-- it is a SEPARATE DDL statement that runs AFTER ownership has already
+-- moved to private_definer if it comes after the transfer, at which point
+-- the connecting role (migration_owner under HARNESS_MODE=restricted;
+-- h2_approx_postgres, a DIFFERENTLY-NAMED role with no special grant,
+-- under H2_MODE=approximation) no longer owns the function and holds no
+-- EXECUTE either, and CREATE CONSTRAINT TRIGGER 42501s. The fix is
+-- ordering, not a grant: attach the trigger FIRST, while the connecting
+-- role still owns the function outright (regardless of that role's own
+-- name), THEN revoke PUBLIC's default EXECUTE and transfer ownership —
+-- an already-attached trigger needs no ongoing EXECUTE privilege to fire.
 CREATE CONSTRAINT TRIGGER offer_code_play_guard_trg
 AFTER INSERT OR UPDATE OF play_id, user_id, state ON app.offer_code
 DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION app.offer_code_play_guard();
+FOR EACH ROW EXECUTE FUNCTION private.offer_code_play_guard();
 
-CREATE OR REPLACE FUNCTION app.entitlement_play_guard() RETURNS trigger
-LANGUAGE plpgsql
+REVOKE EXECUTE ON FUNCTION private.offer_code_play_guard() FROM PUBLIC;
+GRANT CREATE ON SCHEMA private TO private_definer;
+ALTER FUNCTION private.offer_code_play_guard() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+CREATE OR REPLACE FUNCTION private.entitlement_play_guard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   v_row app.entitlement%ROWTYPE;
   v_play_held boolean;
 BEGIN
-  -- should-fix 4 (post-P3a re-gate): re-read the row by id instead of
-  -- trusting the (possibly stale, by commit time) captured NEW -- same
-  -- reasoning as app.offer_code_play_guard above.
+  -- M3 BLOCKING (post-P3a re-gate): SECURITY DEFINER, same reasoning as
+  -- private.offer_code_play_guard above -- the re-read must run as
+  -- private_definer, not as whichever role happens to be committing.
   SELECT * INTO v_row FROM app.entitlement WHERE id = NEW.id;
   IF NOT FOUND THEN
     RETURN NULL;
@@ -319,10 +381,53 @@ BEGIN
 END;
 $$;
 
+-- Same ordering fix as private.offer_code_play_guard above: attach the
+-- trigger FIRST (needs EXECUTE, which the connecting role still holds via
+-- ownership at this point), THEN revoke PUBLIC's default and transfer
+-- ownership.
 CREATE CONSTRAINT TRIGGER entitlement_play_guard_trg
 AFTER INSERT OR UPDATE OF play_id, user_id, state ON app.entitlement
 DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION app.entitlement_play_guard();
+FOR EACH ROW EXECUTE FUNCTION private.entitlement_play_guard();
+
+REVOKE EXECUTE ON FUNCTION private.entitlement_play_guard() FROM PUBLIC;
+GRANT CREATE ON SCHEMA private TO private_definer;
+ALTER FUNCTION private.entitlement_play_guard() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- The three narrowly-purposed SELECT policies the two guard functions'
+-- own re-reads need. `USING (true)`: unconditional by ROW (that is this
+-- fix's whole point -- see the note above), but reachable ONLY from
+-- inside a SECURITY DEFINER trigger function that nothing external can
+-- invoke directly. GRANT SELECT already exists for private_definer on
+-- all three tables (0016); only the POLICY was missing.
+CREATE POLICY pd_offer_code_guard_read ON app.offer_code
+  FOR SELECT TO private_definer USING (true);
+CREATE POLICY pd_entitlement_guard_read ON app.entitlement
+  FOR SELECT TO private_definer USING (true);
+CREATE POLICY pd_play_guard_read ON app.play
+  FOR SELECT TO private_definer USING (true);
+
+-- Register the three new guard-read policies in private.definer_policy_
+-- allowlist (0016) -- same narrow, self-revoked CURRENT_USER pattern used
+-- throughout this migration set.
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0017b ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
+  ('app', 'offer_code', 'pd_offer_code_guard_read', 'SELECT', false, 'M3 (post-P3a re-gate): private.offer_code_play_guard''s own re-read, unconditional by row (the fix''s whole point) but reachable only from inside that one SECURITY DEFINER trigger function'),
+  ('app', 'entitlement', 'pd_entitlement_guard_read', 'SELECT', false, 'M3 (post-P3a re-gate): private.entitlement_play_guard''s own re-read, same reasoning'),
+  ('app', 'play', 'pd_play_guard_read', 'SELECT', false, 'M3 (post-P3a re-gate): both guards'' held_review lookup on the backing play row, same reasoning');
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+  AND al.policy_name IN ('pd_offer_code_guard_read', 'pd_entitlement_guard_read', 'pd_play_guard_read');
+DROP POLICY current_user_seed_definer_policy_allowlist_0017b ON private.definer_policy_allowlist;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 
 -- M2(a): bypass (a), "the play is placed on hold AFTER the code was
 -- issued" — when app.play.held_review flips false->true, move every
@@ -1254,8 +1359,8 @@ INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
 VALUES
   ('app', 'offer_code_enforce_max_redemptions', '', false, false, false, 'trigger function (app.offer_code_enforce_max_redemptions_trg) -- never EXECUTEd directly by any role'),
-  ('app', 'offer_code_play_guard', '', false, false, false, 'trigger function (app.offer_code_play_guard_trg) -- never EXECUTEd directly by any role'),
-  ('app', 'entitlement_play_guard', '', false, false, false, 'trigger function (app.entitlement_play_guard_trg) -- never EXECUTEd directly by any role'),
+  ('private', 'offer_code_play_guard', '', false, false, false, 'trigger function (app.offer_code_play_guard_trg) -- SECURITY DEFINER, owned by private_definer (M3, post-P3a re-gate: the re-read must run under private_definer''s own RLS, not the committing role''s); moved to schema private for that reason -- still never EXECUTEd directly by any role (a trigger function cannot be called as an ordinary SQL function at all)'),
+  ('private', 'entitlement_play_guard', '', false, false, false, 'trigger function (app.entitlement_play_guard_trg) -- SECURITY DEFINER, owned by private_definer, same reasoning as private.offer_code_play_guard'),
   ('app', 'play_deleted_detach_play_id', '', false, false, false, 'trigger function (app.play_deleted_detach_play_id_trg) -- never EXECUTEd directly by any role'),
   ('app', 'play_held_review_cascade', '', false, false, false, 'trigger function (app.play_held_review_cascade_trg) -- never EXECUTEd directly by any role'),
   ('app', 'checkin_challenge_used_at_once', '', false, false, false, 'trigger function (app.checkin_challenge_used_at_once_trg) -- never EXECUTEd directly by any role'),

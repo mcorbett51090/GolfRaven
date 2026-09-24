@@ -650,14 +650,47 @@ export function lintSource(source: string, filePath: string, options: LintOption
   // content-agnostic by design: it flags the SHAPE (a computed access
   // whose key is built, not named), not any particular resulting string,
   // which is what makes it resistant to the next renamed variant.
+  // ⛔ FIX (should-fix 3, post-P3a re-gate): "flag computed member keys
+  // held in a variable when the variable is const-initialised from a
+  // string-building expression." Repro shape: `const k = "constr" +
+  // "uctor"; obj[k]` — the pass above only looks at the property
+  // EXPRESSION directly (`obj["constr" + "uctor"]`); a `const` holding
+  // the SAME built value one step removed was invisible to it. A
+  // same-scope-only const lookup (collected in ONE flat pass over the
+  // whole file, not real lexical scope analysis — a shadowing `const` of
+  // the same name in a nested scope, or a name reused for something else
+  // entirely, is not distinguished) is the accepted design here: it
+  // catches the direct, single-hop indirection this repro names without
+  // building a scope resolver. The residual gap — moving the
+  // string-build further away (a second hop, a function return, a
+  // property of an object, `let`/reassignment) — is a real, ACCEPTED
+  // one-file obfuscation residual: a sufficiently motivated single-file
+  // rewrite can still hide a built key from this or any static check that
+  // does not itself execute the code, and docs/security/
+  // p3-money-path-requirements.md's own "what it is and isn't" section
+  // says this explicitly, not just here.
+  const stringBuiltConstNames = new Set<string>();
+  walk(ast, (node) => {
+    if (node.type !== AST_NODE_TYPES.VariableDeclaration || node.kind !== "const") return;
+    for (const decl of node.declarations) {
+      if (decl.id.type === AST_NODE_TYPES.Identifier && decl.init && isStringBuildingExpression(decl.init)) {
+        stringBuiltConstNames.add(decl.id.name);
+      }
+    }
+  });
+
   walk(ast, (node) => {
     if (node.type !== AST_NODE_TYPES.MemberExpression || !node.computed) return;
-    if (!isStringBuildingExpression(node.property)) return;
+    const prop = node.property;
+    const isDirectBuild = isStringBuildingExpression(prop);
+    const isConstLookup = !isDirectBuild && prop.type === AST_NODE_TYPES.Identifier && stringBuiltConstNames.has(prop.name);
+    if (!isDirectBuild && !isConstLookup) return;
     const loc = nodeLoc(node);
     findings.push({
       rule: "dynamic-code-execution",
-      message:
-        "computed member access whose key is built from an expression (concatenation/template/.concat()/.join()/String.fromCharCode()) outside supabase/functions/_shared/privileged.ts — the resulting property name is never a static string, which is exactly how a `.constructor`-style gadget hides from a name-based check",
+      message: isDirectBuild
+        ? "computed member access whose key is built from an expression (concatenation/template/.concat()/.join()/String.fromCharCode()) outside supabase/functions/_shared/privileged.ts — the resulting property name is never a static string, which is exactly how a `.constructor`-style gadget hides from a name-based check"
+        : `computed member access using "${(prop as TSESTree.Identifier).name}" — a same-scope const initialised from a string-building expression outside supabase/functions/_shared/privileged.ts — holding a built key in a variable one hop away from the access does not make the resulting property name any more static`,
       ...loc,
     });
   });

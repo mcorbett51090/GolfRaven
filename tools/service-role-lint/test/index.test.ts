@@ -88,9 +88,16 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
     writeFileSync(join(fnDir, "index.ts"), ALIASED_IMPORT_SOURCE);
 
     const results = lintDirectory(tmpRoot);
-    expect(results).toHaveLength(1);
-    const [result] = results;
+    // M2 (post-P3a re-gate): config files are now validated in their own
+    // right, "regardless of importers" -- this deno.json's own
+    // npm:@supabase/supabase-js@2 target is ALSO flagged as its own
+    // config-level finding, a SEPARATE result entry from the importing
+    // source file's own per-specifier finding.
+    expect(results).toHaveLength(2);
+    const result = results.find((r) => r.filePath.endsWith("index.ts"));
     expect(result?.findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("supabase"))).toBe(true);
+    const configResult = results.find((r) => r.filePath.endsWith("deno.json"));
+    expect(configResult?.findings.some((f) => f.message.includes("supabase"))).toBe(true);
   });
 
   it("resolves a SHARED ROOT import_map.json alias (functions/import_map.json, no per-function file)", () => {
@@ -101,9 +108,11 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
     writeFileSync(join(fnDir, "index.ts"), ALIASED_IMPORT_SOURCE);
 
     const results = lintDirectory(tmpRoot);
-    expect(results).toHaveLength(1);
-    const [result] = results;
+    expect(results).toHaveLength(2);
+    const result = results.find((r) => r.filePath.endsWith("index.ts"));
     expect(result?.findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("supabase"))).toBe(true);
+    const configResult = results.find((r) => r.filePath.endsWith("import_map.json"));
+    expect(configResult?.findings.some((f) => f.message.includes("supabase"))).toBe(true);
   });
 
   // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): SUPERSEDES the prior version of
@@ -156,12 +165,18 @@ describe("pinned import-target allow-list (M2)", () => {
     writeFileSync(join(fnDir, "index.ts"), `import leftPad from "left-pad"; export const p = leftPad;`);
 
     const results = lintDirectory(tmpRoot);
-    expect(results).toHaveLength(1);
-    const [result] = results;
+    // M2: the deno.json's own unpinned target is ALSO its own config-level
+    // finding now, a separate result entry from the importing source file.
+    expect(results).toHaveLength(2);
+    const result = results.find((r) => r.filePath.endsWith("index.ts"));
     expect(
       result?.findings.some(
         (f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list"),
       ),
+    ).toBe(true);
+    const configResult = results.find((r) => r.filePath.endsWith("deno.json"));
+    expect(
+      configResult?.findings.some((f) => f.message.includes("not on the committed pinned-import-targets allow-list")),
     ).toBe(true);
   });
 });

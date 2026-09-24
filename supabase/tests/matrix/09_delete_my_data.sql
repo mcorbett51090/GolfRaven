@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(26);
+SELECT plan(31);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -368,6 +368,73 @@ SELECT throws_ok(
   NULL,
   'M1: an hmac_id that does not resolve to any real vault.decrypted_secrets row is rejected at write time (the write-time validation trigger, 0018) -- a bad/unknown key id can never be written in the first place'
 );
+
+-- ---------------------------------------------------------------------------
+-- M1 BLOCKING (post-P3a re-gate correction): "service_role can edit the
+-- key registry, so deletion silently leaves PII behind." Repro this round:
+-- with service_role holding SELECT/INSERT/DELETE, `DELETE FROM private.
+-- pseudonym_key_registry WHERE key_id = <key 1's id>` then
+-- `delete_my_data(A)` returned true while player_a's data SURVIVED
+-- (discovery simply stopped trying that key); inserting a bogus key_id
+-- made EVERY user's deletion raise. Two independent layers now close
+-- this: service_role holds NO grant on the table at all (0018), and even
+-- a role that bypasses RLS entirely (the table owner) cannot delete a
+-- REFERENCED key_id -- the FK itself blocks it, not a policy or a grant.
+-- ---------------------------------------------------------------------------
+SELECT throws_ok(
+  $$DELETE FROM private.pseudonym_key_registry WHERE key_id = 'a0000000-1111-0000-0000-000000000001'$$,
+  '42501',
+  NULL,
+  'M1: service_role cannot DELETE from private.pseudonym_key_registry at all (no grant, post-P3a re-gate correction) -- the exact repro (delete key 1, then delete_my_data(A) "succeeds" while player_a survives) is closed at the privilege layer'
+);
+SELECT throws_ok(
+  $$INSERT INTO private.pseudonym_key_registry (key_id) VALUES ('99999999-9999-9999-9999-999999999999')$$,
+  '42501',
+  NULL,
+  'M1: service_role cannot INSERT into private.pseudonym_key_registry at all (no grant) -- the mirror repro (a bogus key_id making every deletion raise) is closed the same way'
+);
+-- "even as the definer or owner, because of the FK": private_definer
+-- itself is ALSO blocked before ever reaching the FK -- should-fix 1's
+-- split policies grant it SELECT/INSERT only, no DELETE policy exists at
+-- all, so a DELETE as private_definer fails on RLS default-deny (FORCE
+-- RLS, no matching policy), same class of failure as service_role's
+-- missing grant, just enforced at a different layer. The role that
+-- actually BYPASSES RLS and holds full privileges on this table by
+-- construction is its OWNER (the connecting role itself, tests.
+-- clear_actor() below reverts to it -- migration_owner under
+-- HARNESS_MODE=restricted, postgres under HARNESS_MODE=superuser) -- this
+-- is the one path that genuinely reaches the FK check, and it is what
+-- this next assertion proves fails on: the FK itself, independent of any
+-- policy or grant.
+SELECT tests.clear_actor();
+-- private.pseudonym_key_registry has FORCE ROW LEVEL SECURITY (0018) --
+-- which means even the TABLE OWNER is subject to its RLS policies (that
+-- is precisely what FORCE means), so the owner has NO visibility into
+-- this table at all right now (only private_definer's own SELECT/INSERT
+-- policies exist, and this connecting role is not private_definer). A
+-- bare DELETE as the owner would therefore match ZERO rows and succeed
+-- silently -- proving nothing about the FK at all, only that RLS hid the
+-- row first. A temporary, test-only, self-granted policy (the owner CAN
+-- create one -- CREATE POLICY is gated by ownership, not by RLS itself)
+-- makes the row genuinely VISIBLE to this role, so the DELETE attempt
+-- actually reaches the FK check -- proving the FK itself blocks it,
+-- independent of any policy or grant, not merely that RLS never let the
+-- attempt get that far.
+SELECT lives_ok(
+  $$CREATE POLICY current_user_registry_delete_m1_test ON private.pseudonym_key_registry FOR ALL TO CURRENT_USER USING (true)$$,
+  'setup (M1 test): a temporary, test-only policy so the connecting role (table owner) can see the row it is about to try deleting'
+);
+SELECT throws_ok(
+  $$DELETE FROM private.pseudonym_key_registry WHERE key_id = 'a0000000-1111-0000-0000-000000000001'$$,
+  '23503',
+  NULL,
+  'M1: even AS THE TABLE OWNER, WITH explicit visibility into the row (the temporary policy above), deleting a key_id still REFERENCED by a live attestation_shift_log row fails on the FK itself'
+);
+SELECT lives_ok(
+  $$DROP POLICY current_user_registry_delete_m1_test ON private.pseudonym_key_registry$$,
+  'cleanup (M1 test): drop the temporary test-only policy'
+);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 SELECT * FROM finish();
 ROLLBACK;

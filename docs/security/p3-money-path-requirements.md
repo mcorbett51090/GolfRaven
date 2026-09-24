@@ -242,3 +242,54 @@ action from succeeding, regardless of what code path — reviewed or not, inside
 and earlier: catch an accidental or unreviewed privileged-access shape in Edge Function
 code *before* it ships, as a second, in-loop signal alongside code review — not to be
 the boundary review substitutes for.
+
+**A named, accepted residual (should-fix 3, post-P3a re-gate): the dynamic-code-key
+checks stop at one hop.** The lint flags a computed member access whose key is built
+directly from a string-building expression (`obj["constr" + "uctor"]`), and — should-fix
+3 — a computed access whose key is a `const` in the SAME flat pass over the file,
+initialised from such an expression (`const k = "constr" + "uctor"; obj[k]`), via a
+same-scope-only name lookup, not real lexical scope analysis. This is explicitly a
+one-hop heuristic, not a data-flow analysis: moving the string-build a second hop away
+(through a function return, an object property, a `let`/reassignment, a destructure, or
+simply a same-named `const` shadowed in a nested scope this flat lookup cannot
+distinguish from the outer one) defeats it. **This residual is accepted, not treated as
+a bug to keep chasing** — the reviewer's own M2 finding is instructive here: every round
+of closing one more single-file obfuscation shape has been met with a next one, because
+there is no bound on how many hops JS/TS syntax offers before a static check without a
+real data-flow/points-to analysis runs out of syntactic shapes to enumerate. A
+sufficiently motivated single-file rewrite can still hide a built key from this (or
+almost any static AST) check; the DB-side controls in the paragraph above are what
+actually stop the resulting privileged action from succeeding regardless.
+
+## Ops note: a Vault key referenced by the pseudonym key registry must never be deleted (should-fix 2, post-P3a re-gate)
+
+`private.pseudonym_key_registry` (`supabase/migrations/0018_pseudonym_vault.sql`) is
+**append-only by construction**, not merely by policy: `app.attestation`/
+`app.attestation_shift_log`'s `*_hmac_id` columns carry a `NOT DEFERRABLE` foreign key
+into it, so once a key id is registered, no role — not `service_role`, not
+`private_definer`, not even a superuser bypassing RLS entirely — can remove that row
+from the registry while any live row still references it (M1 BLOCKING, post-P3a
+re-gate). This is deliberate: the earlier design let `service_role` delete a registry
+row directly, which is exactly what let a single `DELETE` silently drop a key from
+`private.delete_my_data`'s discovery loop and leave that key's rows undeleted after a
+"successful" account deletion.
+
+**The operational consequence:** deleting the *underlying Vault secret itself*
+(`vault.secrets`) for a key id that is still referenced by the registry is **not**
+blocked by this FK (there is deliberately no FK from the registry into Vault's own
+schema — see `0018`'s own note on Vault-upgrade fragility) — but doing so makes
+**every** account deletion fail closed, not just the one row that used that key.
+`private.delete_my_data`'s discovery loop iterates the *whole* registry unscoped by
+user (it has to — it doesn't know which rows belong to the target user until it tries
+each key), so a single Vault key that no longer resolves (`vault.decrypted_secrets`
+returns no row, or a secret shorter than 32 bytes) raises for **every** subsequent
+`private.delete_my_data(uuid)` call, for **every** user, until the key is restored or
+its secret value is put back.
+
+**Before retiring or rotating out a `pseudonym_hmac_*` key in Vault:** confirm no
+`app.attestation`/`app.attestation_shift_log` row still carries that key's id in
+`player_pseudonym_hmac_id`/`staff_pseudonym_hmac_id` (or accept that deletion becomes
+fail-closed system-wide until the key is restored). There is currently no supported
+"deregister a key" operation — the registry has no legitimate delete path at all, by
+design (see M1's own migration comment). A real key-retirement workflow, if one is ever
+needed, is a live follow-up, not something to route around this constraint for.

@@ -5,8 +5,9 @@
 // commonly ships as .mts/.mjs, and a bypass file just needs an extension
 // the walker skips).
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { buildConfigIndex } from "./config.js";
 import { lintSource, type LintResult } from "./lint.js";
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
@@ -46,41 +47,6 @@ function listFiles(root: string): string[] {
   return out;
 }
 
-// M3(4) (post-P3a re-gate): "resolve deno.json/import_map.json aliases
-// and check what they point to." A Supabase Edge Function's import map
-// can live at the function's own directory (`supabase/functions/<fn>/
-// deno.json` or `import_map.json`) or be shared at the functions root
-// (`supabase/functions/deno.json` / `import_map.json`) — both shapes are
-// real: per-function config is the Supabase CLI default when scaffolding
-// a function, a shared root one is common when several functions share
-// the same aliases. Both are read and merged (per-function entries win
-// on a key collision) rather than picking one location and missing an
-// alias declared in the other.
-//
-// deno.json nests the map under a top-level `imports` key; import_map.json
-// (the bare JSON import-map format) IS that object at the top level —
-// both are read the same way here since deno.json's `imports` field uses
-// the identical {specifier: target} shape.
-function readImportMapFile(path: string): Record<string, string> {
-  if (!existsSync(path)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    const imports = typeof parsed === "object" && parsed !== null && typeof parsed.imports === "object" && parsed.imports !== null ? parsed.imports : parsed;
-    const out: Record<string, string> = {};
-    if (typeof imports === "object" && imports !== null) {
-      for (const [k, v] of Object.entries(imports)) {
-        if (typeof v === "string") out[k] = v;
-      }
-    }
-    return out;
-  } catch {
-    // A malformed deno.json/import_map.json is a separate problem (JSON
-    // validity is caught elsewhere in CI); the lint fails safe here by
-    // resolving no aliases from it rather than crashing the whole run.
-    return {};
-  }
-}
-
 // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): "a pinned allow-list of ...
 // exact target strings, kept as a committed fixture file compared by the
 // lint, so adding a dependency is a reviewed diff." Read once, relative
@@ -102,33 +68,20 @@ function loadPinnedImportTargets(): string[] {
   }
 }
 
-const importMapCache = new Map<string, Record<string, string>>();
-
-function resolveImportMapForDir(dir: string, functionsRoot: string): Record<string, string> {
-  const cached = importMapCache.get(dir);
-  if (cached) return cached;
-  const rootMap: Record<string, string> = {
-    ...readImportMapFile(join(functionsRoot, "deno.json")),
-    ...readImportMapFile(join(functionsRoot, "import_map.json")),
-  };
-  const localMap: Record<string, string> =
-    resolve(dir) === resolve(functionsRoot)
-      ? {}
-      : { ...readImportMapFile(join(dir, "deno.json")), ...readImportMapFile(join(dir, "import_map.json")) };
-  const merged = { ...rootMap, ...localMap };
-  importMapCache.set(dir, merged);
-  return merged;
-}
-
+// ⛔ REWRITE (M2 BLOCKING, post-P3a re-gate): the old root+local
+// two-level merge is GONE, replaced entirely by tools/service-role-lint/
+// src/config.ts's directory-walking ConfigIndex — see that module's own
+// header comment for the four confirmed bypasses (n1-n4) this closes.
 export function lintDirectory(functionsRoot: string): LintResult[] {
-  importMapCache.clear();
-  const pinnedImportTargets = loadPinnedImportTargets();
-  const results: LintResult[] = [];
-  for (const file of listFiles(functionsRoot)) {
+  const root = resolve(functionsRoot);
+  const pinnedImportTargets = new Set(loadPinnedImportTargets());
+  const configIndex = buildConfigIndex(root, pinnedImportTargets);
+  const results: LintResult[] = [...configIndex.results];
+  for (const file of listFiles(root)) {
     const source = readFileSync(file, "utf8");
-    const relPath = relative(functionsRoot, file);
-    const importMap = resolveImportMapForDir(dirname(file), functionsRoot);
-    const findings = lintSource(source, file, { importMap, functionsRoot: resolve(functionsRoot), pinnedImportTargets });
+    const relPath = relative(root, file);
+    const importMap = configIndex.resolveFor(file);
+    const findings = lintSource(source, file, { importMap, functionsRoot: root, pinnedImportTargets: [...pinnedImportTargets] });
     if (findings.length > 0) {
       results.push({ filePath: relPath, findings });
     }
@@ -136,5 +89,6 @@ export function lintDirectory(functionsRoot: string): LintResult[] {
   return results;
 }
 
+export { buildConfigIndex } from "./config.js";
 export { lintSource } from "./lint.js";
 export type { Finding, LintOptions, LintResult, RuleId } from "./lint.js";

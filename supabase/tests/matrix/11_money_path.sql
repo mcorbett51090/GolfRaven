@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(146);
+SELECT plan(152);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -860,31 +860,30 @@ SELECT throws_ok(
   NULL,
   'delete_my_data raises when a REFERENCED pseudonym_hmac in the vault is shorter than 32 bytes'
 );
--- cleanup: detach the dedicated row from the now-removed throwaway key so
--- it doesn't block every OTHER remaining delete_my_data call in this file.
+-- cleanup: detach the dedicated row from the throwaway key.
 SELECT lives_ok(
   $$DELETE FROM app.attestation_shift_log WHERE player_pseudonym_hmac_id = 'a0000000-1111-0000-0000-000000000098'$$,
-  'cleanup: remove the dedicated attestation_shift_log row (its key is being removed next)'
+  'cleanup: remove the dedicated attestation_shift_log row'
 );
+-- ⛔ FIX (M1 BLOCKING, post-P3a re-gate correction): the PRIOR version of
+-- this cleanup DELETEd the throwaway key from vault.secrets outright,
+-- then DELETEd its row from private.pseudonym_key_registry directly as
+-- service_role -- exactly the M1 finding: service_role holding
+-- INSERT/DELETE on the registry let a key be silently dropped from
+-- future deletions' discovery, and this round's fix REMOVES that grant
+-- and REVOKEs private_definer's own DELETE policy on the table too (the
+-- registry is now append-only, by design: nothing but the write-time
+-- SECURITY DEFINER validator ever inserts, and NOTHING ever deletes).
+-- There is therefore no longer any privileged path in this test (or in
+-- production) to remove a registry row at all -- cleanup instead
+-- RESTORES the vault key to a valid (>=32 byte) secret, so any LATER
+-- delete_my_data call that resolves this now-permanent registry entry
+-- succeeds (a harmless no-op against it -- no OTHER row's pseudonym will
+-- ever match a key computed under THIS throwaway secret) instead of
+-- raising "does not resolve".
 SELECT lives_ok(
-  $$DELETE FROM vault.secrets WHERE id = 'a0000000-1111-0000-0000-000000000098'$$,
-  'cleanup: remove the throwaway key'
-);
--- should-fix 2 (post-P3a re-gate): private.delete_my_data now iterates
--- private.pseudonym_key_registry (0018), not a live scan of
--- attestation_shift_log -- the write-time trigger registered this
--- throwaway key id the moment the row above was inserted (before it was
--- deleted from vault.secrets), and a registry row is NOT removed just
--- because the shift-log row that first referenced it is gone (the
--- registry is "every key id ever seen", not a live derived view).
--- Without this cleanup, every LATER delete_my_data call in this same
--- transaction (the rotation test right below) would find this now-
--- permanently-unresolvable key still in the registry and raise on IT
--- instead of completing normally -- service_role holds DELETE on the
--- registry directly (0018) for exactly this kind of operational cleanup.
-SELECT lives_ok(
-  $$DELETE FROM private.pseudonym_key_registry WHERE key_id = 'a0000000-1111-0000-0000-000000000098'$$,
-  'cleanup: remove the throwaway key''s registry row too, so it does not block every later delete_my_data call in this file'
+  $$UPDATE vault.secrets SET secret = 'shim-test-only-pseudonym-hmac-throwaway-restored-32bytes-min-yyyyyyyyyyyy' WHERE id = 'a0000000-1111-0000-0000-000000000098'$$,
+  'cleanup: restore the throwaway key to a valid secret (>=32 bytes) instead of deleting it -- its private.pseudonym_key_registry row can never be removed now, by design (M1, post-P3a re-gate correction)'
 );
 
 -- rotation: a row written with key 1 is still found after key 2 AND a
@@ -1091,6 +1090,58 @@ SELECT is(
   (SELECT state::text FROM app.entitlement WHERE id = '54000000-0000-0000-0000-000000000001'),
   'void',
   'player F''s entitlement (special_marker, was redeemable) is voided by delete_my_data as normal -- the stale-NEW fix did not change the deletion''s own outcome, only stopped it from spuriously raising'
+);
+
+-- ---------------------------------------------------------------------------
+-- M3 BLOCKING (post-P3a re-gate): "guard RLS fail-open." Repro:
+-- service_role (bypasses RLS) inserts an `earned` offer_code for an
+-- ALREADY-held play -- the deferred guard check queues, unrun. BEFORE it
+-- ever fires, the active role switches to player B, an unrelated
+-- authenticated user whose OWN row-scoped RLS cannot see player G's
+-- offer_code at all. Forcing the deferred check now (AS PLAYER B) is
+-- exactly the moment the OLD (should-fix-4-only) re-read broke: it ran
+-- under player B's RLS, got NOT FOUND, and (wrongly) concluded the row
+-- was deleted. Player G, dedicated -- the play guard trigger was forced
+-- to IMMEDIATE for the REST of this transaction by the M2 bypass tests
+-- above, so it is switched back to DEFERRED for this one block only.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+  $$SET CONSTRAINTS app.offer_code_play_guard_trg DEFERRED$$,
+  'setup (M3): switch the offer_code play guard back to DEFERRED for this repro (every earlier test in this file left it forced IMMEDIATE)'
+);
+SELECT lives_ok(
+  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-100000000001', 'player-g@example.test')$$,
+  'setup: player G''s auth.users row (M3 test)'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status, held_review)
+    VALUES ('47000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-100000000001',
+            'crs_x1', 'fac_x', current_date - 1, 'v1', 'confirmed', true)$$,
+  'setup: a play row for player G, ALREADY held_review=true at insert time'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
+    VALUES ('74000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002',
+            '00000000-0000-0000-0000-100000000001', 'fac_x', 'earned', '47000000-0000-0000-0000-000000000001')$$,
+  'M3 repro step 1 (as service_role, bypasses RLS): insert an earned offer_code for the ALREADY-held play -- the deferred guard check queues, not yet run'
+);
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000b'::uuid));
+SELECT is(
+  (SELECT count(*)::int FROM app.offer_code WHERE id = '74000000-0000-0000-0000-000000000001'),
+  0,
+  'precondition confirms the fail-open mechanism is real: player B''s OWN row-scoped RLS genuinely cannot see player G''s offer_code row at all'
+);
+SELECT throws_ok(
+  $$SET CONSTRAINTS app.offer_code_play_guard_trg IMMEDIATE$$,
+  '23514',
+  NULL,
+  'M3 FIXED: forcing the deferred guard check now, AS PLAYER B (not the role that inserted the row), still raises -- the guard''s own re-read is SECURITY DEFINER (private_definer), independent of the committing role''s RLS, so a row merely INVISIBLE to player B is correctly never treated as "deleted"'
+);
+SELECT tests.clear_actor();
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT lives_ok(
+  $$UPDATE app.offer_code SET state = 'held_review' WHERE id = '74000000-0000-0000-0000-000000000001'$$,
+  'cleanup (M3): resolve player G''s offer_code to held_review so it does not leave an unresolved held row dangling for the rest of this file'
 );
 
 SELECT tests.clear_actor();
