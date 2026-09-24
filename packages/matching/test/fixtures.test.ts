@@ -219,7 +219,11 @@ describe("golden fixture: Health routes of 1.6 h and 5.5 h", () => {
   const candidates: CandidateCourse[] = [
     { id: "crs_health_window", facilityId: "fac_health", verificationTier: "play-verified", polygon: rectangle(ORIGIN, 400, 400) },
   ];
-  const points = loopInsideRectangle(ORIGIN, 400, 400, 20, 30);
+  // Dense enough that even the 5.5 h case keeps every inter-fix gap under
+  // MAX_GAP_SECONDS (300 s) — realistic for a phone-recorded Health route,
+  // and required since gate fix "cap the gaps" would otherwise read a
+  // sparse, evenly-spread synthetic fixture as mostly unobserved.
+  const points = loopInsideRectangle(ORIGIN, 400, 400, 20, 150);
 
   it.each([1.6, 5.5])("matches at %s h, inside the 1.5–6 h acceptance window", (hours) => {
     const outcome = matchRoute({ fixes: fixesAlong(points, T0, T0 + hours * HOUR), candidates });
@@ -325,7 +329,11 @@ describe("golden fixture: a Connect IQ fix trace", () => {
     const candidates: CandidateCourse[] = [
       { id: "crs_ciq", facilityId: "fac_ciq", verificationTier: "play-verified", polygon: rectangle(ORIGIN, 300, 300) },
     ];
-    const points = loopInsideRectangle(ORIGIN, 300, 300, 30, 8); // sparse: 8 points
+    // "Sparse" relative to a phone's continuous tracking (no accuracy, no
+    // simulated flag, few points per hole) — but still frequent enough to
+    // keep every gap under MAX_GAP_SECONDS (300 s), which a real Connect
+    // IQ recorder sampling every couple of minutes would be.
+    const points = loopInsideRectangle(ORIGIN, 300, 300, 30, 60);
     const fixes = fixesAlong(points, T0, T0 + 3 * HOUR).map((f) => ({ point: f.point, timestamp: f.timestamp }));
     const outcome = matchRoute({ fixes, candidates });
     expect(outcome.kind).toBe("matched");

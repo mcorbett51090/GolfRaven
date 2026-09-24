@@ -177,6 +177,13 @@ export interface MatchSummaryFields {
   startedAt: number;
   endedAt: number;
   durationHours: number;
+  /** Fraction of the route's wall-clock span actually covered by fixes,
+   * after capping each inter-fix gap at `MAX_GAP_SECONDS` (build plan gate
+   * fix: cap the gaps in the time-weighting — see `inside-ratio.ts`).
+   * Below `MIN_OBSERVED_COVERAGE`, a route can never be `matched` via a
+   * polygon candidate, however high its geometry-only ratio looks over
+   * what little was actually observed. */
+  observedCoverage: number;
 }
 
 export interface MatchedCourse {

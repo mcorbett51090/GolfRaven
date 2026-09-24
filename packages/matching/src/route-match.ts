@@ -8,7 +8,11 @@ import { candidatesWithinRadius } from "./candidates.js";
 import { computeDurationHours, isWithinDurationWindow } from "./duration.js";
 import { validateFixesOrThrow, stableSortByTimestamp } from "./fixes.js";
 import { haversineMeters, roundTo } from "./geo.js";
-import { computeTimeWeightedInsideRatio } from "./inside-ratio.js";
+import {
+  computeObservedCoverage,
+  computeTimeWeightedInsideRatio,
+  MIN_OBSERVED_COVERAGE,
+} from "./inside-ratio.js";
 import { preparePolygonGeometry } from "./polygon.js";
 import { simplifyToMaxPoints } from "./simplify.js";
 import type {
@@ -58,12 +62,16 @@ function scoreCandidate(
   bufferMeters: number,
   acceptInsideRatio: number,
   durationHours: number,
+  observedCoverage: number,
+  minObservedCoverage: number,
 ): ScoredCandidate | undefined {
   if (candidate.polygon) {
     const prepared = preparePolygonGeometry(candidate.polygon);
     if (!prepared) return undefined;
     const insideRatio = computeTimeWeightedInsideRatio(sortedTimestampedPoints, prepared, bufferMeters);
-    const qualifiesGeometrically = roundTo(insideRatio, 9) >= roundTo(acceptInsideRatio, 9);
+    const qualifiesRatio = roundTo(insideRatio, 9) >= roundTo(acceptInsideRatio, 9);
+    const qualifiesCoverage = roundTo(observedCoverage, 9) >= roundTo(minObservedCoverage, 9);
+    const qualifiesGeometrically = qualifiesRatio && qualifiesCoverage;
     const qualifiesDuration = isWithinDurationWindow(durationHours, candidate.holes);
     return {
       candidate,
@@ -152,6 +160,7 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
   const endedAt = sortedFixes[sortedFixes.length - 1]!.timestamp;
   const durationHours = computeDurationHours(sortedFixes);
   const anySimulated = sortedFixes.some((f) => f.simulated === true);
+  const observedCoverage = computeObservedCoverage(sortedFixes);
 
   const summary: MatchSummaryFields = {
     matcherVersion: MATCHER_VERSION,
@@ -165,13 +174,24 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
     startedAt,
     endedAt,
     durationHours,
+    observedCoverage,
   };
 
   const nearby = candidatesWithinRadius(simplifiedPoints, candidates, candidateRadiusMeters);
 
   const scored = nearby
     .map((c) =>
-      scoreCandidate(c, sortedFixes, start, end, insideRatioBufferMeters, acceptInsideRatio, durationHours),
+      scoreCandidate(
+        c,
+        sortedFixes,
+        start,
+        end,
+        insideRatioBufferMeters,
+        acceptInsideRatio,
+        durationHours,
+        observedCoverage,
+        MIN_OBSERVED_COVERAGE,
+      ),
     )
     .filter((s): s is ScoredCandidate => s !== undefined);
 

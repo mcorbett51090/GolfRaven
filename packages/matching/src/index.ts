@@ -40,7 +40,12 @@ export {
 } from "./polygon.js";
 export type { PreparedPolygonGeometry } from "./polygon.js";
 
-export { computeTimeWeightedInsideRatio } from "./inside-ratio.js";
+export {
+  computeTimeWeightedInsideRatio,
+  computeObservedCoverage,
+  MAX_GAP_SECONDS,
+  MIN_OBSERVED_COVERAGE,
+} from "./inside-ratio.js";
 
 export { simplifyToMaxPoints } from "./simplify.js";
 

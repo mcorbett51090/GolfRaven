@@ -123,3 +123,35 @@ after an Opus-tier review found real bugs in it.
     this was never in the build plan's scope, and a correct fix is a
     non-trivial geodesy undertaking — so it's recorded here rather than
     silently left for someone to rediscover.
+
+**Round 3 (a second gate re-review, one more real bug):**
+
+14. **The gap problem, and the fix.** Round 2's time-weighting (ambiguity 8
+    above) summed *every* inter-fix interval uncapped. That reopened a
+    narrower but real exploit: one inside fix, a multi-hour gap, then one
+    more inside fix could make that whole unobserved gap count as
+    "inside" time, because nothing bounded how large a single interval's
+    contribution could be. Two matcher parameters close this
+    (`inside-ratio.ts`, restated in `version.ts`):
+    - `MAX_GAP_SECONDS = 300` (5 min) — the cap on any single interval's
+      contribution to the time-weighted totals. Time beyond the cap is
+      **unobserved**: left out of both the inside and the overall total,
+      never counted as "outside" either.
+    - `MIN_OBSERVED_COVERAGE = 0.5` — reported as
+      `MatchSummaryFields.observedCoverage` (observed time ÷ wall-clock
+      span) on every outcome; below it, a polygon candidate can never be
+      `matched`, only `typeahead`, however clean its ratio looks over the
+      fraction that was actually observed.
+    - Scoped to polygon matching only. A radius-fallback match is still
+      decided purely by start/end containment (§4.2) — neither parameter
+      touches it, since the build plan's rule there was never
+      ratio-based to begin with.
+    - A route with 0 or 1 fix, or where every fix shares one timestamp,
+      has no wall-clock span to miss anything from, so it's defined as
+      fully observed (`observedCoverage = 1`) by convention rather than
+      dividing by zero.
+    - Both constants are fixed (not exposed on `MatchRouteInput`), unlike
+      `acceptInsideRatio`/`tieThreshold`/etc. — the gate's wording ("a
+      constant `MAX_GAP_SECONDS`") reads as intentionally non-tunable, and
+      keeping them fixed avoids widening the public API for a parameter
+      pair whose whole point is closing a specific exploit shape.
