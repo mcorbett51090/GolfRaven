@@ -6,17 +6,18 @@
  * validator. Pure TS, no I/O — authoritative on the server, preview-only on
  * device.
  *
- * **`POLICY_VERSION` below is intentionally left at its P0 value (0),
- * UNCHANGED.** The existing test `test/index.test.ts` pins it there
- * ("exports POLICY_VERSION = 0 until P1/§8 defines real rules") and this
- * task's own Done criterion is "the existing tests are unchanged" — so this
- * placeholder is left exactly as P0/P1 left it rather than reinterpreting
- * its doc comment's "for that later work to land on" as licence to bump it.
- * `scorePlay`'s own `policyVersion` output (§4.5's "policy v1") is instead
- * `score-play.ts`'s own, independent `SCORE_PLAY_POLICY_VERSION` constant —
- * see that file's doc for why the two are kept separate.
+ * **M5 (fifth gate): the `POLICY_VERSION = 0` placeholder that used to live
+ * here is REMOVED.** It had exactly one consumer — `test/index.test.ts`'s
+ * own pin — and existing beside `score-play.ts`'s real, independently
+ * versioned `SCORE_PLAY_POLICY_VERSION` (currently 1) was a footgun: two
+ * same-package "policy version" constants, one of them permanently frozen
+ * at a P0 placeholder value, inviting a future caller to read the wrong
+ * one. `SCORE_PLAY_POLICY_VERSION` (`score-play.js`) is the only policy
+ * version this package now exports, and it's the one whose CONTENTS are
+ * actually pinned — see `test/score-play-policy-hash.test.ts`, which fails
+ * CI if the weight table, `MONEY_MIN` or any of the scoring caps change
+ * without a matching version bump.
  */
-export const POLICY_VERSION = 0;
 
 export * from "./rule-expr-check.js";
 export * from "./completion.js";
