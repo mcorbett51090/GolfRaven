@@ -1676,11 +1676,20 @@ export interface ResolveCorroborationOptions {
    * re-gate) for its corroboration to count at all; `x2-corroborate-
    * wayback` is the only tool that writes such an entry. */
   ledger: RecordedLedger;
-  /** `docs/p0/X2.md`'s FULL text (not just the Log section — a matched
-   * row's line number is handed to `git blame` against the real, on-disk
-   * file) plus the path it was read from. `null` when the file could not
-   * be read — every `acceptance` record then resolves to "not logged",
-   * the safe default (gate finding 2, re-gate). */
+  /** Should-fix, fourth re-gate: whether THIS run's `--ledger` is
+   * OFFICIAL (`checkLedgerAgainstGit(...).clean`) — a `wayback` record
+   * is only ever trusted when it is, the same standard `acceptance`
+   * already required. Round 5's exploit A3 showed a `wayback` record
+   * still reading "corroborated" under an UNOFFICIAL ledger header;
+   * this closes that. */
+  ledgerOfficial: boolean;
+  /** The LOCAL on-disk `docs/p0/X2.md` — its full text and the path it
+   * was read from. `null` when the file could not be read. Used ONLY to
+   * check the LOCAL `--x2-log` resolves to this toolkit's own canonical
+   * path (gate finding, third re-gate, fix (a)) — the actual `ACCEPT`
+   * row text and provenance always come from `githubVerification`
+   * instead (gate finding, fourth re-gate: never the local working
+   * tree). */
   x2Md: { fullText: string; path: string } | null;
   /** TEST-ONLY seam (gate finding, third re-gate, fix (a)) — `main()`
    * never overrides this; defaults to `canonicalX2MdAbsPath()`. An
@@ -1691,12 +1700,14 @@ export interface ResolveCorroborationOptions {
    * exercise the canonical-path-match logic against an isolated scratch
    * fixture. */
   canonicalX2MdPath?: string;
-  /** TEST-ONLY seam (gate finding, third re-gate, fix (b)) — `main()`
-   * never overrides this; defaults to `GOLFRAVEN_VERIFIED_MAIN_REF`.
-   * Passed straight through to `blameAcceptRow`'s own reachability
-   * check, so a test can point it at a ref it created locally (no
-   * network) instead of the real fetched ref. */
-  verifiedMainRefName?: string;
+  /** Gate finding, fourth re-gate: the result of `verifyAgainstGitHub`,
+   * computed ONCE by the caller before `resolveCorroboration` runs (a
+   * disposable-repo GitHub fetch is too expensive, and too security-
+   * sensitive, to redo per record). `null` only if the caller never ran
+   * it at all — treated as equivalent to `{ok: false}` (every
+   * `acceptance`/`wayback` record then resolves to "not logged"/
+   * "unverified", the safe default). */
+  githubVerification: GitHubVerification | null;
 }
 
 async function resolveWaybackRecord(
@@ -1705,6 +1716,21 @@ async function resolveWaybackRecord(
   record: X2WaybackCorroboration,
   opts: ResolveCorroborationOptions,
 ): Promise<ResolvedCorroborationEntry> {
+  // Should-fix, fourth re-gate: a `wayback` record is only ever trusted
+  // against an OFFICIAL ledger — the SAME standard `acceptance` already
+  // requires. Round 5's exploit A3 registered a self-authored file under
+  // method "wayback" in a ledger that was correctly labelled UNOFFICIAL,
+  // yet the fact still read "corroborated by Wayback" — this closes
+  // that: an UNOFFICIAL ledger's content is never trusted for anything,
+  // not just excluded from the top-level "official" label.
+  if (!opts.ledgerOfficial) {
+    return {
+      waybackVerified: false,
+      waybackDetail:
+        "this run's ledger is not OFFICIAL (verified against GitHub main) — a Wayback corroboration can " +
+        "only be trusted when the ledger registering it is (should-fix, fourth re-gate).",
+    };
+  }
   // Gate finding 3 (second re-gate): the verdict RE-VALIDATES every rule
   // itself — never trusts that a record shaped like a wayback record was
   // actually produced by `x2-corroborate-wayback`.
@@ -1887,15 +1913,25 @@ async function resolveAcceptanceRecord(
   record: X2AcceptanceCorroboration,
   opts: ResolveCorroborationOptions,
 ): Promise<ResolvedCorroborationEntry> {
-  if (!opts.x2Md) {
-    return { acceptanceLogged: false, acceptanceDetail: "docs/p0/X2.md could not be read." };
+  // Gate finding, fourth re-gate: nothing here is trusted unless a
+  // GitHub verification actually succeeded THIS run, in the disposable
+  // repo, under the scrubbed environment — never the toolkit checkout's
+  // own local git state.
+  if (!opts.githubVerification || !opts.githubVerification.ok) {
+    return {
+      acceptanceLogged: false,
+      acceptanceDetail: opts.githubVerification
+        ? `GitHub verification did not succeed this run: ${opts.githubVerification.detail}`
+        : "GitHub verification was never run this call.",
+    };
   }
-  // Gate finding, third re-gate, fix (a): an `ACCEPT` row is only ever
-  // trusted from the TOOLKIT'S OWN canonical X2.md — never from a
-  // `--x2-log` pointed at a scratch/forged copy elsewhere, no matter how
-  // well-formed its content looks. This is a hard requirement, not a
-  // label: there is no legitimate reason for a real acceptance to live
-  // anywhere else.
+  if (!opts.x2Md) {
+    return { acceptanceLogged: false, acceptanceDetail: "docs/p0/X2.md could not be read locally." };
+  }
+  // Gate finding, third re-gate, fix (a): the LOCAL `--x2-log` is only
+  // ever trusted as an INPUT POINTER when it resolves to the TOOLKIT'S
+  // OWN canonical X2.md — never a `--x2-log` pointed at a scratch/forged
+  // copy elsewhere, no matter how well-formed its content looks.
   const expectedX2MdPath = opts.canonicalX2MdPath ?? canonicalX2MdAbsPath();
   const x2MdIsCanonical = await isCanonicalPath(opts.x2Md.path, expectedX2MdPath);
   if (!x2MdIsCanonical) {
@@ -1907,41 +1943,37 @@ async function resolveAcceptanceRecord(
         "re-gate, fix (a)).",
     };
   }
-  // Gate finding, third re-gate, fix (c): only a VISIBLE row counts —
-  // `findAcceptRowLine` itself now skips fenced code blocks, HTML
-  // comments (including multi-line), and indented code blocks.
-  const match = findAcceptRowLine(opts.x2Md.fullText, trail, record.fact, evidenceSha, record.date);
+  // Gate finding, fourth re-gate: the row is matched against GITHUB'S
+  // OWN X2.md text (`git show refs/heads/main:docs/p0/X2.md`, read
+  // inside the disposable repo by `verifyAgainstGitHub`) — NEVER the
+  // local working tree, which is only used above to confirm `--x2-log`
+  // POINTS at the right place. A row that exists only locally (never
+  // pushed) is never found here, by construction.
+  //
+  // Gate finding, third re-gate, fix (c) (extended, should-fix, fourth
+  // re-gate): only a VISIBLE row counts — `findAcceptRowLine` skips
+  // fenced code blocks, HTML comments, indented code blocks, and now
+  // raw HTML blocks / `hidden`/`style`-attributed elements too.
+  const githubText = opts.githubVerification.x2MdText ?? "";
+  const match = findAcceptRowLine(githubText, trail, record.fact, evidenceSha, record.date);
   if (!match) {
     return {
       acceptanceLogged: false,
       acceptanceDetail:
         `no VISIBLE line reading exactly "${acceptRowLiteral(trail, record.fact, evidenceSha, record.date)}" ` +
-        'was found in the "## Log" section (a row hidden inside a fenced code block, an HTML comment, or an ' +
-        "indented code block does not count).",
+        'was found in GitHub main\'s own "## Log" section (a row hidden inside a fenced code block, an HTML ' +
+        "comment/block, or an indented code block does not count).",
     };
   }
-  // Gate finding, third re-gate, fix (b): reachability is checked
-  // against `GOLFRAVEN_VERIFIED_MAIN_REF`, which the CALLER (`main()`)
-  // is responsible for having freshly fetched, THIS SAME RUN, from the
-  // pinned GitHub URL before ever reaching here — never the editable
-  // local `origin/main`.
-  const blame = await blameAcceptRow(
-    opts.x2Md.path,
-    match.lineNumber,
-    opts.verifiedMainRefName ?? GOLFRAVEN_VERIFIED_MAIN_REF,
-  );
+  // Gate finding, fourth re-gate: `git blame` runs INSIDE the disposable
+  // repo, directly against `refs/heads/main` — the commit it finds is,
+  // by construction, already part of that ref's own fetched history, so
+  // there is no separate reachability check left to spoof with a local
+  // `git replace`/`.git/info/grafts` the way the third re-gate's fix
+  // still could be.
+  const blame = await opts.githubVerification.blameX2MdLine(match.lineNumber);
   if (!blame.ok) {
     return { acceptanceLogged: false, acceptanceDetail: blame.detail };
-  }
-  if (!blame.provenance.reachableFromVerifiedMain) {
-    return {
-      acceptanceLogged: false,
-      acceptanceProvenance: blame.provenance,
-      acceptanceDetail:
-        `commit ${blame.provenance.commit} (git blame's answer for who introduced this Log row) is not ` +
-        `reachable from a freshly-fetched ${GOLFRAVEN_VERIFIED_MAIN_REF} (${GOLFRAVEN_CANONICAL_REPO_URL}) — ` +
-        "not yet on GitHub's own main, or the fetch itself failed this run.",
-    };
   }
   // Should-fix: the acceptance date must be on/after the evidence's own
   // ownerSavedDate (an acceptance cannot predate the thing it accepts)
@@ -1986,7 +2018,7 @@ async function resolveAcceptanceRecord(
   return {
     acceptanceLogged: true,
     acceptanceProvenance: blame.provenance,
-    acceptanceDetail: `logged in X2.md's Log section, on a commit reachable from a freshly-fetched ${GOLFRAVEN_VERIFIED_MAIN_REF}.`,
+    acceptanceDetail: `logged in GitHub main's own X2.md Log section (commit ${blame.provenance.commit}).`,
   };
 }
 
@@ -2169,78 +2201,6 @@ export function findAcceptRowLine(
     }
   }
   return null;
-}
-
-/** Gate finding 2 (re-gate)/gate finding, third re-gate, fix (b): finds
- * the commit that introduced the given line of `x2MdPath` (`git blame
- * --porcelain`), then requires it reachable from `refName` — by
- * default `GOLFRAVEN_VERIFIED_MAIN_REF`, which the CALLER is
- * responsible for having freshly fetched (`fetchVerifiedMainRef`) in
- * THIS SAME RUN before ever calling this function; never the editable
- * local `origin/main`, which a caller can point anywhere or forge
- * outright with `git update-ref`. Never throws; a git failure of any
- * kind (including the ref simply not existing, e.g. because the fetch
- * failed or was never run) comes back as `{ok: false, detail}` or
- * `reachableFromVerifiedMain: false`, the same house style as
- * `checkLedgerAgainstGit`. Author/date/signature come from `git show`;
- * see `AcceptRowGitProvenance`'s own doc for what this can and cannot
- * prove. `refName` is a TEST-ONLY seam — `main()`/`resolveAcceptanceRecord`
- * never override it. */
-export async function blameAcceptRow(
-  x2MdPath: string,
-  lineNumber: number,
-  refName: string = GOLFRAVEN_VERIFIED_MAIN_REF,
-): Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }> {
-  const cwd = path.dirname(path.resolve(x2MdPath));
-  let sha: string;
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["blame", "-L", `${lineNumber},${lineNumber}`, "--porcelain", "--", x2MdPath],
-      { cwd },
-    );
-    const firstLine = stdout.split("\n")[0] ?? "";
-    const candidate = firstLine.split(" ")[0] ?? "";
-    if (!/^[0-9a-f]{40}$/.test(candidate)) {
-      return {
-        ok: false,
-        detail: `git blame did not return a commit hash for line ${lineNumber} of "${x2MdPath}" (got: ${JSON.stringify(firstLine)}).`,
-      };
-    }
-    sha = candidate;
-  } catch (err) {
-    return { ok: false, detail: `git blame failed: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  let author = "";
-  let authorDate = "";
-  let signatureStatus = "";
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["show", "-s", "--format=%an%x1f%aI%x1f%G?", sha],
-      { cwd },
-    );
-    const [an, aI, gStatus] = stdout.trim().split("\x1f");
-    author = an ?? "";
-    authorDate = aI ?? "";
-    signatureStatus = gStatus ?? "";
-  } catch (err) {
-    return {
-      ok: false,
-      detail: `git show failed for commit ${sha}: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  let reachableFromVerifiedMain = false;
-  try {
-    await execFileAsync("git", ["merge-base", "--is-ancestor", sha, refName], { cwd });
-    reachableFromVerifiedMain = true;
-  } catch {
-    reachableFromVerifiedMain = false;
-  }
-  return {
-    ok: true,
-    provenance: { commit: sha, author, authorDate, signatureStatus, reachableFromVerifiedMain },
-  };
 }
 
 // ---------------------------------------------------------------------------
