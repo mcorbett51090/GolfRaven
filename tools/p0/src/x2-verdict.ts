@@ -54,6 +54,12 @@ import {
   type RecordedLedger,
 } from "./x2-recorded-ledger.js";
 import {
+  daysBetween,
+  parseWaybackUrl,
+  waybackTimestampToDate,
+  WAYBACK_TIMESTAMP_TOLERANCE_DAYS,
+} from "./x2-corroborate-wayback.js";
+import {
   assertOutsideRepoUnlessExplicit,
   defaultOutsideRepoDir,
 } from "./run-dir.js";
