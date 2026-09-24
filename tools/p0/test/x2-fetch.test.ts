@@ -414,27 +414,52 @@ describe("x2-fetch: gate finding 2c — the recorded-captures ledger (first-capt
     expect(secondEntry?.recorded).toBe(false); // ...but never the recorded one.
   });
 
-  it("a shared --ledger path across two different out-dirs refuses a duplicate capture (the run FAILS loudly, not silently)", async () => {
+  it("a shared --ledger path across two different out-dirs is what makes cross-run duplicate detection possible at all — without it, two separate out-dirs would each see a 'first' capture", async () => {
     const ledgerPath = path.join(OUT_DIR, "shared-ledger", "recorded-ledger.json");
     const outDirA = path.join(OUT_DIR, "ledger-shared-a");
     vi.stubGlobal(
       "fetch",
       okHtmlFetch({ "https://example.com/shared-trail": "<h1>Shared trail</h1>" }),
     );
-    await runX2Fetch({ TN: ["https://example.com/shared-trail"] }, outDirA, {
-      ledgerPath,
-    });
+    const manifestA = await runX2Fetch(
+      { TN: ["https://example.com/shared-trail"] },
+      outDirA,
+      { ledgerPath },
+    );
+    expect(manifestA.trails.TN?.[0]?.recorded).toBe(true);
 
     const outDirB = path.join(OUT_DIR, "ledger-shared-b");
     vi.stubGlobal(
       "fetch",
       okHtmlFetch({ "https://example.com/shared-trail": "<h1>Shared trail, again</h1>" }),
     );
-    await expect(
-      runX2Fetch({ TN: ["https://example.com/shared-trail"] }, outDirB, {
-        ledgerPath,
-      }),
-    ).rejects.toThrow(/already exists in the ledger/);
+    const manifestB = await runX2Fetch(
+      { TN: ["https://example.com/shared-trail"] },
+      outDirB,
+      { ledgerPath },
+    );
+    // Direct/render re-captures (unlike owner-saved --additional) are never
+    // hard-refused — a legitimate re-verification fetch must still work —
+    // but the SECOND out-dir's capture must come back recorded: false,
+    // because it shares run A's ledger and can see run A's entry.
+    expect(manifestB.trails.TN?.[0]?.recorded).toBe(false);
+
+    // Without a SHARED ledger (i.e. each out-dir using its own default
+    // ledger), the same scenario would wrongly mark BOTH as recorded:
+    // true — that is exactly the bug gate finding 2c called out. Prove
+    // the negative case too, so this test would fail if `ledgerPath`
+    // sharing were ever silently dropped.
+    const outDirC = path.join(OUT_DIR, "ledger-unshared-c");
+    vi.stubGlobal(
+      "fetch",
+      okHtmlFetch({ "https://example.com/unshared-trail": "<h1>Unshared</h1>" }),
+    );
+    const manifestC = await runX2Fetch(
+      { TN: ["https://example.com/unshared-trail"] },
+      outDirC,
+      // no ledgerPath — falls back to outDirC's own default ledger
+    );
+    expect(manifestC.trails.TN?.[0]?.recorded).toBe(true);
   });
 });
 

@@ -398,3 +398,30 @@ describe("H2: scorePlay integrates the parser — a STRUCTURAL parse failure fai
     expect(c.inputDigest).toBe(d.inputDigest);
   });
 });
+
+describe("F4: inputDigest is independent of the evidence ARRAY'S OWN ORDER", () => {
+  it("the SAME three rows, in every one of the 6 permutations, all produce the IDENTICAL inputDigest", () => {
+    const rowA = staffPresence({ id: "row_a", coSignalFix: goodFix({ fixId: "fix_a" }) });
+    const rowB = { id: "row_b", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
+    const rowC = { id: "row_c", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "health_workout" as const };
+    const rows = [rowA, rowB, rowC];
+
+    function permutations<T>(arr: T[]): T[][] {
+      if (arr.length <= 1) return [arr];
+      const out: T[][] = [];
+      for (let i = 0; i < arr.length; i += 1) {
+        const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+        for (const p of permutations(rest)) out.push([arr[i]!, ...p]);
+      }
+      return out;
+    }
+
+    const digests = permutations(rows).map((order) => scorePlayOrThrow(order as any, baseCtx()).inputDigest);
+    const first = digests[0];
+    for (const d of digests) expect(d).toBe(first);
+    // Sanity: this isn't vacuous — a DIFFERENT set of rows gives a
+    // DIFFERENT digest.
+    const different = scorePlayOrThrow([rowA], baseCtx()).inputDigest;
+    expect(different).not.toBe(first);
+  });
+});

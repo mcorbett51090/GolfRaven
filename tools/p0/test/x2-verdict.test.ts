@@ -9,6 +9,7 @@ import {
   type X2CorroborationFile,
 } from "../src/x2-verdict.js";
 import type { X2FetchEntry, X2FetchManifest } from "../src/x2-fetch.js";
+import type { RecordedLedger } from "../src/x2-recorded-ledger.js";
 
 function sha(bytes: string): string {
   return createHash("sha256").update(bytes).digest("hex");

@@ -137,6 +137,74 @@ ALTER TABLE app.entitlement ADD COLUMN play_id uuid REFERENCES app.play (id)
 ALTER TABLE app.entitlement ADD COLUMN policy_version text;
 CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
 
+-- should-fix (post-P3a gate): "offer_code.play_id and entitlement.play_id
+-- need an owner-match check. Add a DB guard so a play with
+-- held_review=true cannot back a non-held code or entitlement." Both
+-- state enums (app.offer_code_state / app.entitlement_state) already
+-- have a `held_review` value (0005/0006) — the guard is that a
+-- held_review PLAY can only be backing an offer_code/entitlement that is
+-- ITSELF held_review, not something freely redeemable while the play
+-- that justified it is still under fraud review.
+CREATE OR REPLACE FUNCTION app.offer_code_play_guard() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_play_user uuid;
+  v_play_held boolean;
+BEGIN
+  IF NEW.play_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT user_id, held_review INTO v_play_user, v_play_held FROM app.play WHERE id = NEW.play_id;
+  IF NOT FOUND THEN
+    RETURN NEW; -- the deferred FK catches a genuinely missing play at commit
+  END IF;
+  IF v_play_user IS DISTINCT FROM NEW.user_id THEN
+    RAISE EXCEPTION 'offer_code: play_id % belongs to a different user than offer_code.user_id (%)', NEW.play_id, NEW.user_id
+      USING ERRCODE = '23514';
+  END IF;
+  IF v_play_held AND NEW.state <> 'held_review' THEN
+    RAISE EXCEPTION 'offer_code: play_id % is held_review, so this offer_code must be state=held_review too (got %)', NEW.play_id, NEW.state
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER offer_code_play_guard_trg
+BEFORE INSERT OR UPDATE OF play_id, state ON app.offer_code
+FOR EACH ROW EXECUTE FUNCTION app.offer_code_play_guard();
+
+CREATE OR REPLACE FUNCTION app.entitlement_play_guard() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_play_user uuid;
+  v_play_held boolean;
+BEGIN
+  IF NEW.play_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT user_id, held_review INTO v_play_user, v_play_held FROM app.play WHERE id = NEW.play_id;
+  IF NOT FOUND THEN
+    RETURN NEW;
+  END IF;
+  IF v_play_user IS DISTINCT FROM NEW.user_id THEN
+    RAISE EXCEPTION 'entitlement: play_id % belongs to a different user than entitlement.user_id (%)', NEW.play_id, NEW.user_id
+      USING ERRCODE = '23514';
+  END IF;
+  IF v_play_held AND NEW.state <> 'held_review' THEN
+    RAISE EXCEPTION 'entitlement: play_id % is held_review, so this entitlement must be state=held_review too (got %)', NEW.play_id, NEW.state
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER entitlement_play_guard_trg
+BEFORE INSERT OR UPDATE OF play_id, state ON app.entitlement
+FOR EACH ROW EXECUTE FUNCTION app.entitlement_play_guard();
+
 -- ============================================================================
 -- 4. Offer budgets: CHECK, max_redemptions enforcement, locked reserve fn.
 -- ============================================================================
@@ -472,6 +540,62 @@ BEFORE UPDATE ON app.checkin_challenge
 FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_used_at_once();
 
 -- ============================================================================
+-- should-fix (post-P3a gate): "Add a consumed-nonce tombstone ledger for
+-- checkin_challenge.nonce_hash and attestation.token_jti, so DELETE then
+-- re-INSERT can't replay." A plain table-level UNIQUE constraint (both
+-- already have one) only stops a DUPLICATE while the original row still
+-- exists — delete the row, then re-insert the identical nonce/jti, and
+-- the UNIQUE constraint has nothing left to object to. A separate,
+-- append-only ledger that nothing ever deletes from closes that: every
+-- nonce/jti that was EVER inserted stays blocked forever, row or no row.
+-- ============================================================================
+CREATE TABLE private.consumed_nonce (
+  nonce_hash text PRIMARY KEY,
+  source text NOT NULL,
+  consumed_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE private.consumed_nonce ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.consumed_nonce FORCE ROW LEVEL SECURITY;
+-- No client policy at all (nobody but the two trigger functions below
+-- ever touches it) — service_role gets the table-level grants it needs
+-- (it bypasses RLS entirely regardless, 0009/shim).
+GRANT INSERT, SELECT ON private.consumed_nonce TO service_role;
+
+CREATE OR REPLACE FUNCTION app.checkin_challenge_tombstone_nonce() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM private.consumed_nonce WHERE nonce_hash = NEW.nonce_hash) THEN
+    RAISE EXCEPTION 'checkin_challenge: nonce_hash % was already consumed (tombstoned) and cannot be reused', NEW.nonce_hash
+      USING ERRCODE = '23514';
+  END IF;
+  INSERT INTO private.consumed_nonce (nonce_hash, source) VALUES (NEW.nonce_hash, 'checkin_challenge');
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER checkin_challenge_tombstone_nonce_trg
+BEFORE INSERT ON app.checkin_challenge
+FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_tombstone_nonce();
+
+CREATE OR REPLACE FUNCTION app.attestation_tombstone_nonce() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM private.consumed_nonce WHERE nonce_hash = NEW.token_jti) THEN
+    RAISE EXCEPTION 'attestation: token_jti % was already consumed (tombstoned) and cannot be reused', NEW.token_jti
+      USING ERRCODE = '23514';
+  END IF;
+  INSERT INTO private.consumed_nonce (nonce_hash, source) VALUES (NEW.token_jti, 'attestation');
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER attestation_tombstone_nonce_trg
+BEFORE INSERT ON app.attestation
+FOR EACH ROW EXECUTE FUNCTION app.attestation_tombstone_nonce();
+
+-- ============================================================================
 -- S1 close-out follow-through: register the two new triggers' owning
 -- functions + app.reserve_offer_budget/app.dedupe_receipt_fingerprint in
 -- private.function_inventory (10_function_inventory.sql's own inventory
@@ -506,7 +630,11 @@ INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
 VALUES
   ('app', 'offer_code_enforce_max_redemptions', '', false, false, false, 'trigger function (app.offer_code_enforce_max_redemptions_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'offer_code_play_guard', '', false, false, false, 'trigger function (app.offer_code_play_guard_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'entitlement_play_guard', '', false, false, false, 'trigger function (app.entitlement_play_guard_trg) -- never EXECUTEd directly by any role'),
   ('app', 'checkin_challenge_used_at_once', '', false, false, false, 'trigger function (app.checkin_challenge_used_at_once_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'checkin_challenge_tombstone_nonce', '', false, false, false, 'trigger function (app.checkin_challenge_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'attestation_tombstone_nonce', '', false, false, false, 'trigger function (app.attestation_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
   ('app', 'reserve_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + reserves offer budget (checks status/validity window too); called by the (out-of-scope-this-stage) scorer/redemption Edge Function as service_role'),
   ('app', 'release_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + releases an unconsumed reservation; service_role-only'),
   ('app', 'consume_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + moves a reservation into budget_used; service_role-only'),

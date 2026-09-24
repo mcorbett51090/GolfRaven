@@ -237,7 +237,45 @@ describe("x2-ingest: gate findings — date bounds (Addendum J correction)", () 
         sourceConfig: TN_CONFIG,
         outDir: path.join(OUT_DIR, "future-date-run"),
       }),
-    ).rejects.toThrow(/after the ingestion time/);
+    ).rejects.toThrow(/is after the latest possible "today" anywhere on Earth/);
+  });
+
+  it("should-fix: the future bound uses the LATEST timezone on Earth (UTC+14), not bare UTC — a date that is still 'today' in UTC+14 but already 'tomorrow' in UTC is accepted", async () => {
+    const file = writeFixtureHtml("tn-utc14.html", "<h1>x</h1>");
+    // "Tomorrow" in UTC is still "today" somewhere between UTC and
+    // UTC+14 for up to 14 hours after UTC midnight — this stated date
+    // must NOT be refused just because bare UTC has already rolled over.
+    const nowUtcPlus14 = new Date(Date.now() + 14 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const { entry } = await ingestOwnerSavedPage({
+      trail: "TN",
+      filePath: file,
+      statedUrl: "https://www.tnstateparks.com/golf",
+      statedDate: nowUtcPlus14,
+      sourceConfig: TN_CONFIG,
+      outDir: path.join(OUT_DIR, "utc14-boundary-run"),
+    });
+    expect(entry.ownerSavedDate).toBe(nowUtcPlus14);
+  });
+
+  it("should-fix: one day beyond the UTC+14 bound is still refused as a future date", async () => {
+    const file = writeFixtureHtml("tn-utc14-over.html", "<h1>x</h1>");
+    const oneDayBeyondUtc14 = new Date(
+      Date.now() + 14 * 60 * 60 * 1000 + 24 * 60 * 60 * 1000,
+    )
+      .toISOString()
+      .slice(0, 10);
+    await expect(
+      ingestOwnerSavedPage({
+        trail: "TN",
+        filePath: file,
+        statedUrl: "https://www.tnstateparks.com/golf",
+        statedDate: oneDayBeyondUtc14,
+        sourceConfig: TN_CONFIG,
+        outDir: path.join(OUT_DIR, "utc14-over-run"),
+      }),
+    ).rejects.toThrow(/is after the latest possible "today" anywhere on Earth/);
   });
 
   it("refuses a date earlier than 2026-09-01", async () => {
