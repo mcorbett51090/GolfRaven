@@ -1471,6 +1471,10 @@ export async function blameAcceptRow(
 
 const execFileAsync = promisify(execFile);
 
+/** Repo-relative path (from a repo's toplevel) the canonical ledger must
+ * live at — gate finding 4 (re-gate). */
+export const CANONICAL_LEDGER_REPO_RELATIVE_PATH = "docs/p0/x2-recorded-ledger.json";
+
 export interface LedgerGitCheck {
   /** `git hash-object <ledgerPath>` — the blob hash the ledger's CURRENT
    * on-disk content would have if committed as-is, printed regardless of
@@ -1478,33 +1482,78 @@ export interface LedgerGitCheck {
    * produced this verdict. `null` only when `git` itself is unavailable
    * (not installed / not on PATH). */
   blobHash: string | null;
-  /** True only when `git diff --quiet -- <ledgerPath>` reports no
-   * uncommitted changes AND the file is not untracked/staged — i.e. the
-   * ledger's on-disk content is EXACTLY what git history already has, so
-   * this verdict is reproducible from the committed record alone. */
+  /** True only once EVERY hard requirement (gate finding 4, re-gate)
+   * passes: the path is exactly `<toplevel>/docs/p0/x2-recorded-ledger.json`,
+   * the file is tracked cleanly (no uncommitted/untracked changes, no
+   * assume-unchanged/skip-worktree flag), AND its content is
+   * byte-identical to what `origin/main` already has at that path
+   * (proven PUSHED, not merely committed) — `originMainMissingPath` is a
+   * DELIBERATE exception: a ledger never yet pushed is not "dirty" in the
+   * same sense, so it fails `clean` here but does not hard-refuse the CLI
+   * on its own (see `main()`). */
   clean: boolean;
   /** Human-readable reason for `clean: false`, or a plain "clean"
    * confirmation. */
   detail: string;
+  /** Gate finding 4: `ledgerPath`, resolved, equals exactly
+   * `<git rev-parse --show-toplevel>/docs/p0/x2-recorded-ledger.json` —
+   * false for any other location, in this repo or any other. */
+  pathIsCanonical: boolean;
+  /** Gate finding 4: `git hash-object <ledgerPath>` equals
+   * `git rev-parse origin/main:docs/p0/x2-recorded-ledger.json` — proves
+   * the ledger's content was actually PUSHED, not merely committed
+   * locally. */
+  pushedToOriginMain: boolean;
+  /** Gate finding 4: true when `origin/main` has no such path at all yet
+   * (a brand-new ledger, or no `origin` remote/`main` branch resolvable)
+   * — the specific, NON-hard-refusing case the finding calls out: mark
+   * UNOFFICIAL and say why, rather than treat it as ordinary dirtiness. */
+  originMainMissingPath: boolean;
+  /** Gate finding 4: `git ls-files -v -- <ledgerPath>` showed the
+   * lowercase `h` (assume-unchanged) or `S` (skip-worktree) flag — a way
+   * to hide a local edit from `git diff`/`git status` entirely. Always a
+   * hard refusal in `main()`, never bypassable via `--allow-dirty-ledger`
+   * (bypassing the very check that exists to defeat this bypass would
+   * defeat the point). */
+  hiddenByGitFlag: boolean;
+  /** Gate finding 4: the most recent commit that touched the ledger
+   * (`git log -1 -- <path>`), printed so a reader never has to separately
+   * run `git log` to audit it. `null` when unavailable. */
+  lastCommit: { hash: string; author: string; date: string } | null;
 }
 
 /**
- * Gate finding 2d: `docs/p0/x2-recorded-ledger.json` is the CANONICAL
+ * Gate finding 2d/4: `docs/p0/x2-recorded-ledger.json` is the CANONICAL
  * ledger — living in the repo means every edit to it shows in `git log`,
  * unlike a `/tmp` file nobody else can audit. This checks that the ledger
- * a verdict run is ABOUT TO USE is exactly what git already has on record
- * (no uncommitted edit could have snuck in a bogus entry between commit
- * and this run), and reports the blob hash so the verdict output names
- * EXACTLY which ledger content it read — never "trust me," always
- * checkable against `git show <blobHash>` or `git log -p -- <path>`.
- * Never throws: a git failure (not a repo, git missing, path outside any
- * repo) comes back as `clean: false` with the reason in `detail` — the
- * caller decides whether that refuses the run or only marks it UNOFFICIAL
- * (this repo's own house style per `recorded-export.ts`'s `runGit`: a
- * git-check failure is never silently treated as "assume clean").
+ * a verdict run is ABOUT TO USE is: at the canonical path; tracked
+ * cleanly by git (no uncommitted/untracked/hidden-by-flag edit could have
+ * snuck in a bogus entry); and byte-identical to what `origin/main`
+ * already has there (gate finding 4, re-gate: "committed" was too weak a
+ * bar — a local-only commit on an unshared branch is invisible to anyone
+ * else, so this now requires PUSHED). Reports the blob hash and the last
+ * commit that touched the file, so the verdict output names EXACTLY
+ * which ledger content it read and who last changed it — never "trust
+ * me," always checkable against `git show <blobHash>` or `git log -p --
+ * <path>`. Never throws: any git failure comes back as `clean: false`
+ * with the reason in `detail` — the caller (`main()`) decides whether
+ * that hard-refuses the run or only marks it UNOFFICIAL (this repo's own
+ * house style per `recorded-export.ts`'s `runGit`: a git-check failure is
+ * never silently treated as "assume clean").
  */
 export async function checkLedgerAgainstGit(ledgerPath: string): Promise<LedgerGitCheck> {
-  const cwd = path.dirname(path.resolve(ledgerPath));
+  const resolvedLedgerPath = path.resolve(ledgerPath);
+  const cwd = path.dirname(resolvedLedgerPath);
+  const notCanonical = (detail: string): LedgerGitCheck => ({
+    blobHash,
+    clean: false,
+    detail,
+    pathIsCanonical: false,
+    pushedToOriginMain: false,
+    originMainMissingPath: false,
+    hiddenByGitFlag: false,
+    lastCommit: null,
+  });
   let blobHash: string | null = null;
   try {
     const { stdout } = await execFileAsync("git", ["hash-object", ledgerPath]);
@@ -1512,52 +1561,181 @@ export async function checkLedgerAgainstGit(ledgerPath: string): Promise<LedgerG
   } catch {
     blobHash = null;
   }
+
+  // Gate finding 4: the ledger path must be EXACTLY
+  // <toplevel>/docs/p0/x2-recorded-ledger.json — a caller pointing
+  // --ledger at some OTHER file (right name, wrong directory; a /tmp
+  // copy; a different repo) is refused outright, never silently treated
+  // as if it were the canonical record.
+  let toplevel: string | null = null;
   try {
-    // Exit 0 = no diff between working tree and index for this path.
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd });
+    toplevel = stdout.trim();
+  } catch {
+    toplevel = null;
+  }
+  const canonicalAbsPath = toplevel
+    ? path.join(toplevel, ...CANONICAL_LEDGER_REPO_RELATIVE_PATH.split("/"))
+    : null;
+  if (!toplevel || !canonicalAbsPath || resolvedLedgerPath !== canonicalAbsPath) {
+    return notCanonical(
+      toplevel
+        ? `"${resolvedLedgerPath}" is not the canonical ledger path — expected exactly ` +
+          `"${canonicalAbsPath}" (gate finding 4, re-gate).`
+        : `could not resolve this repo's toplevel to check the ledger path is canonical (git rev-parse ` +
+          "--show-toplevel failed — is this path inside a git repository at all?).",
+    );
+  }
+
+  // Local cleanliness (unchanged in substance from the first re-gate):
+  // `git diff --quiet` catches an uncommitted edit against the index;
+  // `git status --porcelain` also catches a file that was never `git
+  // add`ed at all (an untracked file has no index entry for `git diff`
+  // to compare against).
+  try {
     await execFileAsync("git", ["diff", "--quiet", "--", ledgerPath], { cwd });
   } catch (err) {
     const code = (err as { code?: number }).code;
-    if (code === 1) {
-      return {
-        blobHash,
-        clean: false,
-        detail: `"${ledgerPath}" has uncommitted changes against the index (git diff is non-empty).`,
-      };
-    }
     return {
       blobHash,
       clean: false,
       detail:
-        `could not verify "${ledgerPath}" is clean in git: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+        code === 1
+          ? `"${ledgerPath}" has uncommitted changes against the index (git diff is non-empty).`
+          : `could not verify "${ledgerPath}" is clean in git: ${err instanceof Error ? err.message : String(err)}`,
+      pathIsCanonical: true,
+      pushedToOriginMain: false,
+      originMainMissingPath: false,
+      hiddenByGitFlag: false,
+      lastCommit: null,
     };
   }
-  // `git diff` alone says nothing about an UNTRACKED file (never added at
-  // all) — that would wrongly read as "clean". `git status --porcelain`
-  // catches that too (an untracked file shows as `??`).
   try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["status", "--porcelain", "--", ledgerPath],
-      { cwd },
-    );
+    const { stdout } = await execFileAsync("git", ["status", "--porcelain", "--", ledgerPath], { cwd });
     if (stdout.trim().length > 0) {
       return {
         blobHash,
         clean: false,
         detail: `"${ledgerPath}" is untracked or has staged-but-uncommitted changes (git status: "${stdout.trim()}").`,
+        pathIsCanonical: true,
+        pushedToOriginMain: false,
+        originMainMissingPath: false,
+        hiddenByGitFlag: false,
+        lastCommit: null,
       };
     }
   } catch (err) {
     return {
       blobHash,
       clean: false,
-      detail:
-        `could not verify "${ledgerPath}"'s git status: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+      detail: `could not verify "${ledgerPath}"'s git status: ${err instanceof Error ? err.message : String(err)}`,
+      pathIsCanonical: true,
+      pushedToOriginMain: false,
+      originMainMissingPath: false,
+      hiddenByGitFlag: false,
+      lastCommit: null,
     };
   }
-  return { blobHash, clean: true, detail: "clean — no uncommitted changes." };
+
+  // Gate finding 4: `git ls-files -v` — an `h` (assume-unchanged) or `S`
+  // (skip-worktree) flag makes git itself HIDE a local edit from both
+  // `git diff` and `git status`, i.e. exactly the checks just above —
+  // always refused, regardless of --allow-dirty-ledger (see `main()`).
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "-v", "--", ledgerPath], { cwd });
+    const line = stdout.trim();
+    if (line && /^[hS] /.test(line)) {
+      return {
+        blobHash,
+        clean: false,
+        detail:
+          `"${ledgerPath}" is marked assume-unchanged or skip-worktree in git (git ls-files -v: ` +
+          `"${line}") — either flag can hide a local edit from git diff/status entirely; refusing ` +
+          "regardless of --allow-dirty-ledger (gate finding 4, re-gate).",
+        pathIsCanonical: true,
+        pushedToOriginMain: false,
+        originMainMissingPath: false,
+        hiddenByGitFlag: true,
+        lastCommit: null,
+      };
+    }
+  } catch {
+    // `git ls-files` failing outright is covered by the untracked-file
+    // check above already having run (and passed) — nothing further to
+    // do here; the diff/status checks are the primary defense.
+  }
+
+  // Gate finding 4: the last commit that touched the ledger — printed
+  // whenever available, regardless of the outcome below.
+  let lastCommit: { hash: string; author: string; date: string } | null = null;
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["log", "-1", "--format=%H%x1f%an%x1f%aI", "--", ledgerPath],
+      { cwd },
+    );
+    const [hash, author, date] = stdout.trim().split("\x1f");
+    if (hash) lastCommit = { hash, author: author ?? "", date: date ?? "" };
+  } catch {
+    lastCommit = null;
+  }
+
+  // Gate finding 4: proves the ledger's content was actually PUSHED, not
+  // merely committed locally — `git rev-parse origin/main:<path>` reads
+  // the blob origin/main has at that path right now.
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["rev-parse", `origin/main:${CANONICAL_LEDGER_REPO_RELATIVE_PATH}`],
+      { cwd },
+    );
+    const originBlobHash = stdout.trim();
+    if (blobHash === null || originBlobHash !== blobHash) {
+      return {
+        blobHash,
+        clean: false,
+        detail:
+          `the ledger's content (blob ${blobHash ?? "unavailable"}) does not match what origin/main already ` +
+          `has at "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" (blob ${originBlobHash}) — locally diverged from ` +
+          "the pushed record; pass --allow-dirty-ledger to proceed anyway (result marked UNOFFICIAL) (gate " +
+          "finding 4, re-gate).",
+        pathIsCanonical: true,
+        pushedToOriginMain: false,
+        originMainMissingPath: false,
+        hiddenByGitFlag: false,
+        lastCommit,
+      };
+    }
+  } catch {
+    // Gate finding 4's own carve-out: origin/main doesn't have this path
+    // yet (or origin/main itself is unresolvable — no such remote, or no
+    // main branch on it) — NOT the same as "dirty"; `main()` marks this
+    // UNOFFICIAL without requiring --allow-dirty-ledger.
+    return {
+      blobHash,
+      clean: false,
+      detail:
+        `origin/main does not yet have "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" (or origin/main itself could ` +
+        "not be resolved — no such remote, or no main branch on it) — this ledger has not been pushed yet; " +
+        "marking UNOFFICIAL rather than refusing (gate finding 4, re-gate).",
+      pathIsCanonical: true,
+      pushedToOriginMain: false,
+      originMainMissingPath: true,
+      hiddenByGitFlag: false,
+      lastCommit,
+    };
+  }
+
+  return {
+    blobHash,
+    clean: true,
+    detail: "clean — committed, pushed to origin/main, canonical path, no hidden-edit flags.",
+    pathIsCanonical: true,
+    pushedToOriginMain: true,
+    originMainMissingPath: false,
+    hiddenByGitFlag: false,
+    lastCommit,
+  };
 }
 
 function parseFlags(argv: string[]): Record<string, string> {
