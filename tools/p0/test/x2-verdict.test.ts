@@ -1181,7 +1181,12 @@ describe("x2-verdict: gate finding 2c — buildEvidenceByTrail's `recorded` is L
       entries: [
         {
           method: "direct",
-          normalizedUrl: "www.tnstateparks.com/golf",
+          // www. is stripped by normalizeUrlForFirstCapture — this must
+          // match EXACTLY what the manifest entry's own URL normalises
+          // to, per gate finding 2b (re-gate): a mismatched normalizedUrl
+          // here would no longer match, by design (see the mismatch test
+          // right after this one).
+          normalizedUrl: "tnstateparks.com/golf",
           url: "https://www.tnstateparks.com/golf",
           sha256: rawSha,
           recordedAt: new Date().toISOString(),
@@ -1216,7 +1221,7 @@ describe("x2-verdict: gate finding 2c — buildEvidenceByTrail's `recorded` is L
       entries: [
         {
           method: "direct",
-          normalizedUrl: "www.tnstateparks.com/golf",
+          normalizedUrl: "tnstateparks.com/golf",
           url: "https://www.tnstateparks.com/golf",
           sha256: rawSha,
           recordedAt: new Date().toISOString(),
