@@ -149,10 +149,16 @@ wait "$PID7" "$PID8" || true
 
 FP_COUNT_XU=$(count "SELECT count(*) FROM app.receipt_fingerprint WHERE phash = '$TAG_XU'")
 VOID_COUNT_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4') AND status = 'void'")
+# should-fix (post-P3a re-gate): the EARLIER (already-'valid') purchase is
+# now left alone, not demoted to pending -- only the NEW (losing) call's
+# own submission moves to pending. So exactly one of the two ends up
+# 'pending' and the other stays 'valid' (whichever won the advisory-lock
+# race and inserted the fingerprint first never gets touched at all).
 PENDING_COUNT_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4') AND status = 'pending'")
+VALID_COUNT_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_3', '$PE_4') AND status = 'valid'")
 REVIEW_COUNT_XU=$(count "SELECT count(*) FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_3', '$PE_4')")
-if [ "$FP_COUNT_XU" != "1" ] || [ "$VOID_COUNT_XU" != "0" ] || [ "$PENDING_COUNT_XU" != "2" ] || [ "$REVIEW_COUNT_XU" -lt "1" ]; then
-  echo "FAIL: concurrent CROSS-USER dedupe_receipt_fingerprint race: fp=$FP_COUNT_XU void=$VOID_COUNT_XU pending=$PENDING_COUNT_XU review=$REVIEW_COUNT_XU (expected fp=1 void=0 pending=2 review>=1 -- neither purchase should be auto-voided across users)" >&2
+if [ "$FP_COUNT_XU" != "1" ] || [ "$VOID_COUNT_XU" != "0" ] || [ "$PENDING_COUNT_XU" != "1" ] || [ "$VALID_COUNT_XU" != "1" ] || [ "$REVIEW_COUNT_XU" -lt "1" ]; then
+  echo "FAIL: concurrent CROSS-USER dedupe_receipt_fingerprint race: fp=$FP_COUNT_XU void=$VOID_COUNT_XU pending=$PENDING_COUNT_XU valid=$VALID_COUNT_XU review=$REVIEW_COUNT_XU (expected fp=1 void=0 pending=1 valid=1 review>=1 -- neither purchase should be auto-voided across users, and the already-valid earlier one is left alone)" >&2
   cat /tmp/mpconc-d3.out /tmp/mpconc-d4.out /tmp/mpconc-d3.err /tmp/mpconc-d4.err >&2 || true
   FAILED=1
 else
@@ -189,10 +195,12 @@ wait "$PID9" "$PID10" || true
 
 FP_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.receipt_fingerprint WHERE receipt_number_ocr = '$TAG_OCR_XU'")
 VOID_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_5', '$PE_6') AND status = 'void'")
+# should-fix (post-P3a re-gate): same reasoning as the phash race above.
 PENDING_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_5', '$PE_6') AND status = 'pending'")
+VALID_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.purchase_evidence WHERE id IN ('$PE_5', '$PE_6') AND status = 'valid'")
 REVIEW_COUNT_OCR_XU=$(count "SELECT count(*) FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id IN ('$PE_5', '$PE_6')")
-if [ "$FP_COUNT_OCR_XU" != "1" ] || [ "$VOID_COUNT_OCR_XU" != "0" ] || [ "$PENDING_COUNT_OCR_XU" != "2" ] || [ "$REVIEW_COUNT_OCR_XU" -lt "1" ]; then
-  echo "FAIL: concurrent CROSS-USER OCR dedupe race: fp=$FP_COUNT_OCR_XU void=$VOID_COUNT_OCR_XU pending=$PENDING_COUNT_OCR_XU review=$REVIEW_COUNT_OCR_XU (expected fp=1 void=0 pending=2 review>=1)" >&2
+if [ "$FP_COUNT_OCR_XU" != "1" ] || [ "$VOID_COUNT_OCR_XU" != "0" ] || [ "$PENDING_COUNT_OCR_XU" != "1" ] || [ "$VALID_COUNT_OCR_XU" != "1" ] || [ "$REVIEW_COUNT_OCR_XU" -lt "1" ]; then
+  echo "FAIL: concurrent CROSS-USER OCR dedupe race: fp=$FP_COUNT_OCR_XU void=$VOID_COUNT_OCR_XU pending=$PENDING_COUNT_OCR_XU valid=$VALID_COUNT_OCR_XU review=$REVIEW_COUNT_OCR_XU (expected fp=1 void=0 pending=1 valid=1 review>=1)" >&2
   cat /tmp/mpconc-d5.out /tmp/mpconc-d6.out /tmp/mpconc-d5.err /tmp/mpconc-d6.err >&2 || true
   FAILED=1
 else

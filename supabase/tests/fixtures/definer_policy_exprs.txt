@@ -25,12 +25,6 @@
 #     ORDER BY schema_name,table_name,policy_name,command;" > supabase/tests/fixtures/definer_policy_exprs.txt
 # (then re-add this header, which the ORDER BY query does not produce).
 #
-# Compared by tools/db/verify-function-inventory.mjs (test 9's companion
-# check — see that script's own comment on why the comparison lives
-# there rather than inside the pgTAP suite: COPY-from-file in plain SQL
-# needs server-filesystem read privilege migration_owner does not have
-# under HARNESS_MODE=restricted, and pg_prove's default driver does not
-# go through psql's \copy meta-command either).
 {"command": "DELETE", "table_name": "admin_user", "using_expr": "(user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid)", "policy_name": "pd_delete_admin_user_user_id", "schema_name": "app", "with_check_expr": null}
 {"command": "SELECT", "table_name": "admin_user", "using_expr": "(user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid)", "policy_name": "pd_delete_admin_user_user_id_r", "schema_name": "app", "with_check_expr": null}
 {"command": "SELECT", "table_name": "admin_user", "using_expr": "true", "policy_name": "pd_read_admin_user", "schema_name": "app", "with_check_expr": null}
@@ -41,6 +35,7 @@
 {"command": "SELECT", "table_name": "attestation", "using_expr": "((player_user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid) OR (player_user_id IS NULL))", "policy_name": "pd_attestation_player_update_r", "schema_name": "app", "with_check_expr": null}
 {"command": "UPDATE", "table_name": "attestation", "using_expr": "(staff_user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid)", "policy_name": "pd_setnull_attestation_staff_user_id", "schema_name": "app", "with_check_expr": "(staff_user_id IS NULL)"}
 {"command": "SELECT", "table_name": "attestation", "using_expr": "((staff_user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid) OR (staff_user_id IS NULL))", "policy_name": "pd_setnull_attestation_staff_user_id_r", "schema_name": "app", "with_check_expr": null}
+{"command": "SELECT", "table_name": "attestation_shift_log", "using_expr": "true", "policy_name": "pd_shift_log_discover_hmac_id", "schema_name": "app", "with_check_expr": null}
 {"command": "UPDATE", "table_name": "attestation_shift_log", "using_expr": "((player_pseudonym = current_setting('app.delete_my_data.target_pseudonym'::text, true)) OR ((player_pseudonym IS NULL) AND (player_handle_snapshot = current_setting('app.delete_my_data.target_handle'::text, true))))", "policy_name": "pd_shift_log_update", "schema_name": "app", "with_check_expr": "(player_handle_snapshot = 'deleted player'::text)"}
 {"command": "SELECT", "table_name": "attestation_shift_log", "using_expr": "((player_pseudonym = current_setting('app.delete_my_data.target_pseudonym'::text, true)) OR ((player_pseudonym IS NULL) AND (player_handle_snapshot = current_setting('app.delete_my_data.target_handle'::text, true))) OR (player_handle_snapshot = 'deleted player'::text))", "policy_name": "pd_shift_log_update_r", "schema_name": "app", "with_check_expr": null}
 {"command": "INSERT", "table_name": "audit_log", "using_expr": null, "policy_name": "pd_audit_log_insert", "schema_name": "app", "with_check_expr": "true"}
@@ -117,6 +112,8 @@
 {"command": "SELECT", "table_name": "staff_activity", "using_expr": "(staff_user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid)", "policy_name": "pd_delete_staff_activity_staff_user_id_r", "schema_name": "app", "with_check_expr": null}
 {"command": "DELETE", "table_name": "user_achievement", "using_expr": "(user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid)", "policy_name": "pd_delete_user_achievement_user_id", "schema_name": "app", "with_check_expr": null}
 {"command": "SELECT", "table_name": "user_achievement", "using_expr": "(user_id = (current_setting('app.delete_my_data.target_user_id'::text, true))::uuid)", "policy_name": "pd_delete_user_achievement_user_id_r", "schema_name": "app", "with_check_expr": null}
+{"command": "DELETE", "table_name": "consumed_nonce", "using_expr": "(COALESCE(expires_at, consumed_at) < (now() - '7 days'::interval))", "policy_name": "pd_purge_consumed_nonce_expired", "schema_name": "private", "with_check_expr": null}
+{"command": "SELECT", "table_name": "consumed_nonce", "using_expr": "(COALESCE(expires_at, consumed_at) < (now() - '7 days'::interval))", "policy_name": "pd_purge_consumed_nonce_expired_r", "schema_name": "private", "with_check_expr": null}
 {"command": "SELECT", "table_name": "pii_retention_policy", "using_expr": "true", "policy_name": "pd_read_pii_retention_policy", "schema_name": "private", "with_check_expr": null}
 {"command": "INSERT", "table_name": "rate_limit_bucket", "using_expr": null, "policy_name": "pd_rate_limit_insert", "schema_name": "private", "with_check_expr": "true"}
 {"command": "DELETE", "table_name": "rate_limit_bucket", "using_expr": "true", "policy_name": "pd_rate_limit_purge", "schema_name": "private", "with_check_expr": null}
