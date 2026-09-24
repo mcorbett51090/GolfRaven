@@ -121,7 +121,7 @@ describe("bad fixtures (must fail) — gate-round-2 bypass vectors (B5)", () => 
     ).toBe(true);
   });
 
-  it("flags process.env static/computed access to a secret name", () => {
+  it("flags EVERY process.env access — process has no sanctioned path at all (MEDIUM 3, post-P3a re-gate: only Deno.env.get(<allow-listed literal>) is ever permitted)", () => {
     const source = `
       const a = process.env.SUPABASE_SERVICE_ROLE_KEY;
       const b = process.env["SUPABASE_DB_URL"];
@@ -129,8 +129,10 @@ describe("bad fixtures (must fail) — gate-round-2 bypass vectors (B5)", () => 
       const c = process.env[name];
     `;
     const findings = lintSource(source, "/repo/supabase/functions/leaky/index.ts");
-    expect(findings.filter((f) => f.rule === "literal-secret-env-var").length).toBe(2);
-    expect(findings.some((f) => f.rule === "non-literal-env-access")).toBe(true);
+    // Three bare `process` references (one per statement) — each is its
+    // own banned-global-reference finding, regardless of which key (or
+    // no key at all) it was reaching for.
+    expect(findings.filter((f) => f.rule === "banned-global-reference" && f.message.includes('"process"')).length).toBe(3);
   });
 
   it("flags require() of a banned specifier (CJS interop)", () => {
@@ -150,16 +152,16 @@ describe("bad fixtures (must fail) — M3, post-P3a gate (bypass-resistant rewor
     expect(bannedImports.some((f) => f.message.includes("npm:pg@8"))).toBe(true);
   });
 
-  it("flags a destructured `const { env } = Deno; env.get(...)` read", () => {
+  it("flags a destructured `const { env } = Deno; env.get(...)` read (MEDIUM 3: any Deno reference other than the exact Deno.env.get(<literal>) call is banned outright)", () => {
     const findings = lintFixture("bad/destructured-env.ts");
-    expect(findings.some((f) => f.rule === "literal-secret-env-var")).toBe(true);
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
   });
 
-  it("flags Deno.env.toObject()[...] and .toObject().KEY reads", () => {
+  it("flags Deno.env.toObject()[...] and .toObject().KEY reads (MEDIUM 3: .toObject() is not the sanctioned .env.get(<literal>) shape, so the bare Deno reference is banned)", () => {
     const findings = lintFixture("bad/env-to-object.ts");
-    // Both the acquisition (.toObject() itself) and the specific computed
-    // read are flagged, so this fixture alone produces several findings.
-    expect(findings.some((f) => f.rule === "non-literal-env-access" && f.message.includes("toObject"))).toBe(true);
+    const denoRefs = findings.filter((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'));
+    // One finding per `Deno.env.toObject()` call site in the fixture (two).
+    expect(denoRefs.length).toBe(2);
   });
 
   it("flags a raw fetch() carrying a service-role key read from env", () => {
@@ -178,6 +180,94 @@ describe("bad fixtures (must fail) — M3, post-P3a gate (bypass-resistant rewor
     expect(findings.filter((f) => f.rule === "literal-secret-env-var" || f.rule === "non-literal-env-access")).toEqual([]);
   });
 
+});
+
+describe("bad fixtures (must fail) — MEDIUM 3, post-P3a re-gate (allow-list rework, 12 named bypasses)", () => {
+  it("bypass 1: flags `(Deno as any).env.get(...)`", () => {
+    const findings = lintFixture("bad/as-any-env-get.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it("bypass 2: flags a function that returns `Deno.env`", () => {
+    const findings = lintFixture("bad/returns-deno-env.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it('bypass 3: flags `Reflect.get(Deno, "env")`', () => {
+    const findings = lintFixture("bad/reflect-get-deno.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it('bypass 4: flags `Deno["env"]` (bracket access)', () => {
+    const findings = lintFixture("bad/bracket-env.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it("bypass 5: flags `Deno.env.get.call(...)`", () => {
+    const findings = lintFixture("bad/env-get-dot-call.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it("bypass 6: flags nested destructuring (`const { env: { get: g } } = Deno;`)", () => {
+    const findings = lintFixture("bad/nested-destructure-env.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it("bypass 7: flags `Deno.env.get(...spread)` (non-literal argument, still a finding, not a silent pass)", () => {
+    const findings = lintFixture("bad/env-get-spread.ts");
+    expect(findings.some((f) => f.rule === "non-literal-env-access")).toBe(true);
+  });
+
+  it("bypass 8: flags `(0, Deno.env.get)(...)` (sequence-expression callee)", () => {
+    const findings = lintFixture("bad/sequence-expression-call.ts");
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it("bypass 9 + requirement 5: flags eval(...), new Function(...), and Function(...)", () => {
+    const findings = lintFixture("bad/eval-and-function-ctor.ts");
+    const dynamicExec = findings.filter((f) => f.rule === "dynamic-code-execution");
+    expect(dynamicExec.length).toBe(3);
+    expect(dynamicExec.some((f) => f.message.includes("eval"))).toBe(true);
+    expect(dynamicExec.some((f) => f.message.includes("new Function"))).toBe(true);
+    expect(dynamicExec.some((f) => f.message.includes("Function(...) constructor call"))).toBe(true);
+  });
+
+  it("bypass 10: flags an import-map ALIAS resolving to a banned specifier (unit-level — see index.test.ts for the real deno.json end-to-end case)", () => {
+    const source = readFileSync(join(FIXTURES_ROOT, "bad/import-map-alias.ts"), "utf8");
+    const findingsWithoutMap = lintSource(source, join(FIXTURES_ROOT, "bad/import-map-alias.ts"));
+    // Without a resolved import map, the bare specifier "supabase" isn't
+    // itself banned — this documents the gap the alias resolution closes.
+    expect(findingsWithoutMap.some((f) => f.rule === "banned-import-specifier")).toBe(false);
+    const findingsWithMap = lintSource(source, join(FIXTURES_ROOT, "bad/import-map-alias.ts"), {
+      importMap: { supabase: "npm:@supabase/supabase-js@2" },
+    });
+    expect(
+      findingsWithMap.some((f) => f.rule === "banned-import-specifier" && f.message.includes("resolves via deno.json/import_map.json")),
+    ).toBe(true);
+  });
+
+  it("bypass 11: flags `@supabase/postgrest-js` (the whole @supabase/* scope is banned, not a fixed package list)", () => {
+    const findings = lintFixture("bad/postgrest-js-import.ts");
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("@supabase/postgrest-js"))).toBe(true);
+  });
+
+  it("bypass 12: flags `(self as any).Deno`", () => {
+    const findings = lintFixture("bad/self-as-any-deno.ts");
+    expect(findings.some((f) => f.rule === "globalthis-access" && f.message.includes('"self"'))).toBe(true);
+    expect(findings.some((f) => f.rule === "banned-global-reference" && f.message.includes('"Deno"'))).toBe(true);
+  });
+
+  it("requirement 2: flags a SERVICE_ROLE/DB_URL substring in a literal that never touches Deno/process at all", () => {
+    const source = `export const NOTE = "do not hardcode SERVICE_ROLE here";`;
+    const findings = lintSource(source, "/repo/supabase/functions/note/index.ts");
+    expect(findings.some((f) => f.rule === "secret-substring-in-literal")).toBe(true);
+  });
+
+  it("requirement 2: flags a SERVICE_ROLE/DB_URL substring inside a TEMPLATE LITERAL chunk", () => {
+    const source = "export const NOTE = `the SUPABASE_DB_URL var must never appear here`;";
+    const findings = lintSource(source, "/repo/supabase/functions/note2/index.ts");
+    expect(findings.some((f) => f.rule === "secret-substring-in-literal")).toBe(true);
+  });
 });
 
 describe("clean fixtures (must pass)", () => {
