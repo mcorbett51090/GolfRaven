@@ -684,29 +684,79 @@ BEGIN
       (p_purchase_evidence_id, p_user_id, p_phash, p_receipt_number_ocr, p_facility_id, p_local_date)
     ON CONFLICT (purchase_evidence_id) WHERE purchase_evidence_id IS NOT NULL DO NOTHING;
   EXCEPTION WHEN unique_violation THEN
-    -- receipt_fingerprint_ocr_facility_uniq: a DIFFERENT receipt already
-    -- claimed this (receipt_number_ocr, facility_id) pair. An OCR number
-    -- is a real, near-unique printed identifier (not an approximate
-    -- perceptual hash), so — unlike the phash path above — a collision
-    -- here stays a same-user-shaped auto-void regardless of who the
-    -- other purchase belongs to: two different people's receipts
-    -- legitimately sharing the identical OCR'd receipt number at the
-    -- identical facility/date is not a realistic "shared photo" scenario
-    -- the way a phash collision is.
-    UPDATE app.purchase_evidence SET status = 'void', void_reason = 'duplicate' WHERE id = p_purchase_evidence_id;
-    UPDATE app.marker_credit SET purchase_evidence_id = NULL
-      WHERE purchase_evidence_id = p_purchase_evidence_id AND status <> 'credited';
-    INSERT INTO app.fraud_signal (user_id, kind, detail)
-    VALUES (
-      p_user_id,
-      'receipt_ocr_duplicate',
-      jsonb_build_object(
-        'purchase_evidence_id', p_purchase_evidence_id,
-        'receipt_number_ocr', p_receipt_number_ocr,
-        'facility_id', p_facility_id,
-        'local_date', p_local_date
-      )
-    );
+    -- ⛔ FIX (post-P3a re-gate, correction): receipt_fingerprint_ocr_
+    -- facility_uniq — a DIFFERENT receipt already claimed this
+    -- (receipt_number_ocr, facility_id) pair. This round's FIRST version
+    -- of this fix reasoned an OCR collision is never a "shared photo"
+    -- scenario and so stayed same-user-shaped regardless of owner — WRONG:
+    -- if two users photograph the SAME physical receipt, the OCR'd number
+    -- collides too, not just the phash — that is exactly the same
+    -- griefing vector the phash path above closes, on the same paper
+    -- receipt. So: same owner check, same branching, mirroring the phash
+    -- path exactly (look up who actually holds the conflicting
+    -- (receipt_number_ocr, facility_id) row, since the failed INSERT
+    -- itself never got far enough to tell us).
+    SELECT id, user_id, purchase_evidence_id INTO v_dupe_id, v_dupe_user_id, v_dupe_purchase_evidence_id
+    FROM app.receipt_fingerprint
+    WHERE receipt_number_ocr = p_receipt_number_ocr AND facility_id = p_facility_id
+    LIMIT 1;
+
+    IF v_dupe_user_id IS NOT DISTINCT FROM p_user_id THEN
+      -- SAME USER: a genuine retry/duplicate submission.
+      UPDATE app.purchase_evidence SET status = 'void', void_reason = 'duplicate' WHERE id = p_purchase_evidence_id;
+      UPDATE app.marker_credit SET purchase_evidence_id = NULL
+        WHERE purchase_evidence_id = p_purchase_evidence_id AND status <> 'credited';
+      INSERT INTO app.fraud_signal (user_id, kind, detail)
+      VALUES (
+        p_user_id,
+        'receipt_ocr_duplicate',
+        jsonb_build_object(
+          'purchase_evidence_id', p_purchase_evidence_id,
+          'duplicate_of_receipt_fingerprint_id', v_dupe_id,
+          'receipt_number_ocr', p_receipt_number_ocr,
+          'facility_id', p_facility_id,
+          'local_date', p_local_date
+        )
+      );
+    ELSE
+      -- CROSS USER: same treatment as a cross-user phash match — no
+      -- auto-void either side, review_item + fraud_signal, both pending.
+      UPDATE app.purchase_evidence SET status = 'pending' WHERE id = p_purchase_evidence_id AND status <> 'void';
+      IF v_dupe_purchase_evidence_id IS NOT NULL THEN
+        UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status <> 'void';
+      END IF;
+      INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
+      VALUES (
+        'receipt_cross_user_match',
+        'purchase_evidence',
+        p_purchase_evidence_id,
+        jsonb_build_object(
+          'purchase_evidence_id', p_purchase_evidence_id,
+          'user_id', p_user_id,
+          'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+          'matched_user_id', v_dupe_user_id,
+          'matched_receipt_fingerprint_id', v_dupe_id,
+          'match_basis', 'receipt_number_ocr',
+          'receipt_number_ocr', p_receipt_number_ocr,
+          'facility_id', p_facility_id,
+          'local_date', p_local_date
+        )
+      );
+      INSERT INTO app.fraud_signal (user_id, kind, detail)
+      VALUES (
+        p_user_id,
+        'receipt_cross_user_match',
+        jsonb_build_object(
+          'purchase_evidence_id', p_purchase_evidence_id,
+          'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+          'matched_user_id', v_dupe_user_id,
+          'match_basis', 'receipt_number_ocr',
+          'receipt_number_ocr', p_receipt_number_ocr,
+          'facility_id', p_facility_id,
+          'local_date', p_local_date
+        )
+      );
+    END IF;
     RETURN false;
   END;
   RETURN true;

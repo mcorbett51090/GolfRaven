@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(112);
+SELECT plan(120);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -452,6 +452,55 @@ SELECT is(
   (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_ocr_duplicate' AND user_id = '00000000-0000-0000-0000-00000000000b'),
   1,
   'an OCR-duplicate purchase writes exactly one fraud_signal row (kind=receipt_ocr_duplicate)'
+);
+SELECT is(
+  (SELECT void_reason::text FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000097'),
+  'duplicate',
+  'SAME-USER OCR match: void_reason is ''duplicate'''
+);
+
+-- ⛔ FIX (post-P3a re-gate, correction): a CROSS-USER OCR collision is the
+-- SAME griefing vector as a cross-user phash match -- if two users
+-- photograph the SAME physical receipt, the printed OCR number matches
+-- too, not just the phash. Must NOT auto-void either side.
+SELECT lives_ok(
+  $$INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
+    VALUES ('91000000-0000-0000-0000-000000000094', '00000000-0000-0000-0000-00000000000a',
+            'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid')$$,
+  'setup: a purchase_evidence row for player A, for the CROSS-USER OCR-collision test'
+);
+SELECT is(
+  app.dedupe_receipt_fingerprint(
+    '91000000-0000-0000-0000-000000000094'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid,
+    'phash-ocr-collision-cross-user', 'fac_x', current_date, 'OCR-DUPE-1'
+  ),
+  false,
+  'CROSS-USER OCR match: dedupe_receipt_fingerprint returns false (OCR-DUPE-1 belongs to player B, this call is player A)'
+);
+SELECT is(
+  (SELECT status::text FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000094'),
+  'pending',
+  'CROSS-USER OCR match: the NEW (player A) purchase is left pending, NOT voided'
+);
+SELECT is(
+  (SELECT void_reason FROM app.purchase_evidence WHERE id = '91000000-0000-0000-0000-000000000094'),
+  NULL,
+  'CROSS-USER OCR match: void_reason stays NULL (never voided at all)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.review_item WHERE kind = 'receipt_cross_user_match' AND subject_id = '91000000-0000-0000-0000-000000000094' AND detail->>'match_basis' = 'receipt_number_ocr'),
+  1,
+  'CROSS-USER OCR match: exactly one review_item opened, tagged match_basis=receipt_number_ocr'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_cross_user_match' AND user_id = '00000000-0000-0000-0000-00000000000a' AND detail->>'match_basis' = 'receipt_number_ocr'),
+  1,
+  'CROSS-USER OCR match: exactly one receipt_cross_user_match fraud_signal, tagged match_basis=receipt_number_ocr'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'receipt_ocr_duplicate' AND user_id = '00000000-0000-0000-0000-00000000000a'),
+  0,
+  'CROSS-USER OCR match: does NOT write a receipt_ocr_duplicate (same-user-only) fraud_signal'
 );
 
 -- ---------------------------------------------------------------------------
