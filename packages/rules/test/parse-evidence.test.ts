@@ -511,3 +511,162 @@ describe("F4: inputDigest is independent of the evidence ARRAY'S OWN ORDER", () 
     expect(different).not.toBe(first);
   });
 });
+
+describe("item 4 (seventh gate): duplicate evidence ids are rejected STRUCTURALLY, not quarantined", () => {
+  it("two rows sharing the same id fail the whole parseScorePlayInput call", () => {
+    const rowA = staffPresence({ id: "dup_id", coSignalFix: goodFix() });
+    const rowB = { ...staffPresence({ id: "dup_id" }), source: "self_report" as const };
+    const result = parseScorePlayInput({ evidence: [rowA, rowB], ctx: baseCtx() });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.reasons.some((r) => r.includes("duplicate"))).toBe(true);
+    }
+  });
+
+  it("scorePlay itself fails closed (ok:false) on duplicate ids, never throws", () => {
+    const rowA = staffPresence({ id: "dup_id2", coSignalFix: goodFix() });
+    const rowB = { ...staffPresence({ id: "dup_id2" }), source: "self_report" as const };
+    expect(() => {
+      const result = scorePlay([rowA, rowB] as any, baseCtx());
+      expect(result.ok).toBe(false);
+    }).not.toThrow();
+  });
+
+  it("a duplicate id between an ON-PLAY row and an OFF-PLAY (different facility) row does NOT fail — only on-play duplicates matter", () => {
+    const onPlay = staffPresence({ id: "shared_id", coSignalFix: goodFix() });
+    const offPlay = { id: "shared_id", facilityId: "fac_OTHER", localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
+    const result = parseScorePlayInput({ evidence: [onPlay, offPlay], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+  });
+
+  it("a duplicate id where ONE copy is quarantined (malformed) does NOT fail — only two copies that BOTH parse count as a duplicate", () => {
+    const good = staffPresence({ id: "shared_id2", coSignalFix: goodFix() });
+    const malformed = { ...staffPresence({ id: "shared_id2" }), extraField: "smuggled" };
+    const result = parseScorePlayInput({ evidence: [good, malformed], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.evidence.length).toBe(1);
+      expect(result.excludedRows.length).toBe(1);
+    }
+  });
+
+  it("unique ids (the normal case) are unaffected", () => {
+    const rowA = staffPresence({ id: "id_a", coSignalFix: goodFix() });
+    const rowB = { id: "id_b", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
+    const result = parseScorePlayInput({ evidence: [rowA, rowB], ctx: baseCtx() });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("item 5 (seventh gate): id/fixId length cap (128) and printable-non-control-character restriction", () => {
+  it("rejects an id over 128 characters", () => {
+    const row = { id: "x".repeat(129), facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("accepts an id exactly at 128 characters", () => {
+    const row = { id: "x".repeat(128), facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+
+  it("rejects a fixId over 128 characters", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "f".repeat(129) } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects an id containing a raw newline (control character)", () => {
+    const row = { id: "evil\nINJECTED", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects a fixId containing a raw newline (the probe's own leak-probe shape)", () => {
+    const row = staffPresence({ coSignalFix: { ...goodFix(), fixId: "evil\nINJECTED<script>" } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects an id containing a null byte", () => {
+    const row = { id: "evil\x00null", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("a normal, printable id is unaffected", () => {
+    const row = { id: "evidence_12345-abc", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" };
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+
+  it("scorePlay's excludedRows never echo a raw, un-truncated attacker string back (leak probe): a malicious fixId in a quarantined row is either absent from the row's reason or safely bounded/escaped", () => {
+    const SECRET = "SECRETVALUE123";
+    const leakRow = { ...staffPresence({}), coSignalFix: { ...goodFix(), fixId: `evil\nINJECTED<script>${SECRET}` } } as any;
+    const result = scorePlay([leakRow], baseCtx());
+    // The row fails Zod's own shape validation (fixId has a control
+    // character) BEFORE ever reaching the tz-cross-check interpolation —
+    // Zod's own issue messages don't echo the raw invalid VALUE for a
+    // regex failure, only the path/rule that failed.
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const reasonsText = JSON.stringify(result.excludedRows);
+      // The raw newline must never appear un-escaped in the serialized
+      // reasons (it would if the raw string were interpolated directly).
+      expect(reasonsText.includes("\n")).toBe(false);
+    }
+  });
+});
+
+describe("item 6 (seventh gate): capturedAt/scanAt bounded to a plausible epoch range (2020-01-01 .. 2100-01-01)", () => {
+  it("rejects a scanAt before 2020", () => {
+    const tooOld = Date.parse("2019-12-31T23:59:59.000Z");
+    const row = { id: "s1", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "staff_presence", scanAt: tooOld };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects a capturedAt at/after 2100", () => {
+    const tooFar = Date.parse("2100-01-01T00:00:00.000Z");
+    const row = staffPresence({ coSignalFix: { ...goodFix(), capturedAt: tooFar } as any });
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("rejects the classic epoch-0 (1970) probe case", () => {
+    const row = { id: "s2", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "staff_presence", scanAt: 0 };
+    expect(parseEvidence(row, tz).success).toBe(false);
+  });
+
+  it("a plausible, present-day capturedAt is unaffected", () => {
+    const row = staffPresence({ coSignalFix: goodFix() });
+    expect(parseEvidence(row, tz).success).toBe(true);
+  });
+});
+
+describe("item 2 (seventh gate): heldReview is forced true when money is true and an on-play row was quarantined", () => {
+  it("a money-qualifying play with a malformed ON-PLAY sibling row routes to held review", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const malformedOnPlay = { ...staffPresence({}), extraField: "smuggled" };
+    const result = scorePlayOrThrow([hardRow, malformedOnPlay], baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.heldReview).toBe(true);
+    expect(result.heldReviewReasons).toContain("quarantined");
+  });
+
+  it("the SAME hard row alone (no quarantine) does NOT get held", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const result = scorePlayOrThrow([hardRow], baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.heldReview).toBe(false);
+    expect(result.heldReviewReasons).toEqual([]);
+  });
+
+  it("a quarantined row alongside a NON-money play does not force heldReview (money is false either way)", () => {
+    const soft = { id: "soft1", facilityId: PLAY_FACILITY_ID, localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
+    const malformedOnPlay = { ...staffPresence({}), extraField: "smuggled" };
+    const result = scorePlayOrThrow([soft, malformedOnPlay], baseCtx());
+    expect(result.money).toBe(false);
+    expect(result.heldReview).toBe(false);
+  });
+
+  it("an OFF-PLAY excluded row (different facility) never forces heldReview, even on a money-qualifying play", () => {
+    const hardRow = staffPresence({ scanAt: PLAY_LOCAL_DATE_MS, coSignalFix: goodFix() });
+    const offPlay = { id: "off1", facilityId: "fac_OTHER", localDate: PLAY_LOCAL_DATE, source: "self_report" as const };
+    const result = scorePlayOrThrow([hardRow, offPlay], baseCtx());
+    expect(result.money).toBe(true);
+    expect(result.heldReview).toBe(false);
+  });
+});

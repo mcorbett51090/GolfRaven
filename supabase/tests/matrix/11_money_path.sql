@@ -570,6 +570,103 @@ SELECT lives_ok(
   'cleanup: remove the rotation test''s key 3'
 );
 
+-- ---------------------------------------------------------------------------
+-- M2 (post-P3a re-gate): held_review/owner guard, all four bypasses, both
+-- tables.
+-- ---------------------------------------------------------------------------
+SELECT lives_ok(
+  $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000e0000001', 'player-e@example.test')$$,
+  'setup: player E''s auth.users row (M2 tests)'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
+    VALUES ('44000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000e0000001',
+            'crs_x1', 'fac_x', current_date - 3, 'v1', 'confirmed')$$,
+  'setup: a play row for player E, held_review=false'
+);
+
+-- (a) the play is placed on hold AFTER the code/entitlement was issued.
+SELECT lives_ok(
+  $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
+    VALUES ('73000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002',
+            '00000000-0000-0000-0000-0000e0000001', 'fac_x', 'earned', '44000000-0000-0000-0000-000000000001')$$,
+  'setup: an offer_code for player E, backed by the NOT-YET-held play, state=earned'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, play_id)
+    VALUES ('53000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000e0000001',
+            'special_marker', 'trl_u', 'redeemable', '44000000-0000-0000-0000-000000000001')$$,
+  'setup: an entitlement for player E, backed by the SAME play, state=redeemable'
+);
+SELECT lives_ok(
+  $$UPDATE app.play SET held_review = true WHERE id = '44000000-0000-0000-0000-000000000001'$$,
+  'M2 bypass (a) setup: the play is placed on hold AFTER both were issued'
+);
+SELECT is(
+  (SELECT state::text FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000001'),
+  'held_review',
+  'M2 bypass (a) CLOSED: offer_code moved into held_review when its backing play went on hold, without offer_code itself ever being touched directly'
+);
+SELECT is(
+  (SELECT state::text FROM app.entitlement WHERE id = '53000000-0000-0000-0000-000000000001'),
+  'held_review',
+  'M2 bypass (a) CLOSED: entitlement moved into held_review the same way'
+);
+
+-- Force the composite FKs + constraint triggers to check immediately for
+-- the rest of these tests (same reasoning as M1's own use of this,
+-- above) — otherwise a violation from an UPDATE/INSERT alone would not
+-- raise until COMMIT, which this file's outer transaction never reaches.
+SELECT lives_ok(
+  $$SET CONSTRAINTS app.offer_code_play_user_fk, app.entitlement_play_user_fk,
+      app.offer_code_play_guard_trg, app.entitlement_play_guard_trg IMMEDIATE$$,
+  'setup: check the M2 composite FKs + constraint triggers immediately for the bypass tests below'
+);
+
+-- (b) deferred insert ordering: play_id pointing at a play that, at
+-- INSERT time, does not exist yet. Under the OLD plain-BEFORE-trigger
+-- design this silently passed (NOT FOUND -> RETURN NEW); the composite
+-- FK + CONSTRAINT TRIGGER design raises once checked.
+SELECT throws_ok(
+  $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
+    VALUES ('73000000-0000-0000-0000-000000000099', '60000000-0000-0000-0000-000000000002',
+            '00000000-0000-0000-0000-0000e0000001', 'fac_x', 'earned', '44000000-0000-0000-0000-000000000099')$$,
+  '23503',
+  NULL,
+  'M2 bypass (b) CLOSED (offer_code): a play_id pointing at a non-existent play is rejected once checked, not silently passed through'
+);
+SELECT throws_ok(
+  $$INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, play_id)
+    VALUES ('53000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-0000e0000001',
+            'special_marker', 'trl_t', 'redeemable', '44000000-0000-0000-0000-000000000099')$$,
+  '23503',
+  NULL,
+  'M2 bypass (b) CLOSED (entitlement): same, for entitlement'
+);
+
+-- (c) UPDATE offer_code.user_id / entitlement.user_id to a different
+-- owner without touching play_id at all.
+SELECT throws_ok(
+  $$UPDATE app.offer_code SET user_id = '00000000-0000-0000-0000-00000000000a' WHERE id = '73000000-0000-0000-0000-000000000001'$$,
+  '23503',
+  NULL,
+  'M2 bypass (c) CLOSED (offer_code): re-owning offer_code.user_id while it still has a linked play_id is rejected (composite FK)'
+);
+SELECT throws_ok(
+  $$UPDATE app.entitlement SET user_id = '00000000-0000-0000-0000-00000000000a' WHERE id = '53000000-0000-0000-0000-000000000001'$$,
+  '23503',
+  NULL,
+  'M2 bypass (c) CLOSED (entitlement): same, for entitlement'
+);
+
+-- (d) UPDATE play.user_id without touching offer_code/entitlement at all.
+SELECT throws_ok(
+  $$UPDATE app.play SET user_id = '00000000-0000-0000-0000-00000000000a' WHERE id = '44000000-0000-0000-0000-000000000001'$$,
+  '23503',
+  NULL,
+  'M2 bypass (d) CLOSED: re-owning play.user_id while offer_code AND entitlement still reference it is rejected (composite FK ON UPDATE)'
+);
+
 SELECT tests.clear_actor();
 SELECT * FROM finish();
 ROLLBACK;

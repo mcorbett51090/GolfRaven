@@ -127,7 +127,9 @@ describe("x2-ingest: ingestOwnerSavedPage", () => {
           }),
       ),
     );
-    await runX2Fetch({ TN: ["https://www.tnstateparks.com/golf"] }, outDir);
+    await runX2Fetch({ TN: ["https://www.tnstateparks.com/golf"] }, outDir, {
+      ledgerPath: ledgerFor(outDir),
+    });
     vi.unstubAllGlobals();
 
     const file = writeFixtureHtml(
@@ -521,6 +523,7 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
           statedDate: "2026-09-24",
           sourceConfig: TN_CONFIG,
           outDir: path.join(OUT_DIR, `proto-run-${badTrail}`),
+          ledgerPath: ledgerFor(path.join(OUT_DIR, `proto-run-${badTrail}`)),
         }),
       ).rejects.toThrow(/refused outright/);
     }
@@ -558,5 +561,56 @@ describe("x2-ingest: gate findings — 10 MB file cap, extract-before-write orde
       readFileSync(path.join(outDir, "manifest.json"), "utf8"),
     ) as X2FetchManifest;
     expect(onDisk.generatedAt).toBe(originalGeneratedAt);
+  });
+});
+
+describe("x2-ingest: gate finding 2a (re-gate) — exact configured-URL match, not just an allowed host", () => {
+  it("accepts a stated URL that is a bypass-shaped VARIANT of a configured URL (normalises to an exact match)", async () => {
+    const file = writeFixtureHtml("tn-variant.html", "<h1>x</h1>");
+    const outDir = path.join(OUT_DIR, "variant-match-run");
+    // www.tnstateparks.com/golf -> tnstateparks.com/golf/.  with a doubled
+    // slash and a ;param — still normalises to EXACTLY the configured URL.
+    const { entry } = await ingestOwnerSavedPage({
+      trail: "TN",
+      filePath: file,
+      statedUrl: "https://www.tnstateparks.com//golf;x",
+      statedDate: "2026-09-24",
+      sourceConfig: TN_CONFIG,
+      outDir,
+      ledgerPath: ledgerFor(outDir),
+    });
+    expect(entry.status).toBe("fetched");
+  });
+
+  it("refuses a stated URL differing from every configured URL only by PATH CASE (case-sensitive path, by design)", async () => {
+    const file = writeFixtureHtml("tn-case.html", "<h1>x</h1>");
+    const outDir = path.join(OUT_DIR, "case-mismatch-run");
+    await expect(
+      ingestOwnerSavedPage({
+        trail: "TN",
+        filePath: file,
+        statedUrl: "https://www.tnstateparks.com/GOLF",
+        statedDate: "2026-09-24",
+        sourceConfig: TN_CONFIG,
+        outDir,
+        ledgerPath: ledgerFor(outDir),
+      }),
+    ).rejects.toThrow(/does not exactly match .* configured list/);
+  });
+
+  it("refuses a stated URL on an allowed host but a non-default PORT (a genuinely different resource)", async () => {
+    const file = writeFixtureHtml("tn-port.html", "<h1>x</h1>");
+    const outDir = path.join(OUT_DIR, "port-mismatch-run");
+    await expect(
+      ingestOwnerSavedPage({
+        trail: "TN",
+        filePath: file,
+        statedUrl: "https://www.tnstateparks.com:8443/golf",
+        statedDate: "2026-09-24",
+        sourceConfig: TN_CONFIG,
+        outDir,
+        ledgerPath: ledgerFor(outDir),
+      }),
+    ).rejects.toThrow(/does not exactly match .* configured list/);
   });
 });

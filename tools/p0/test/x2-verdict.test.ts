@@ -9,7 +9,43 @@ import {
   type X2CorroborationFile,
 } from "../src/x2-verdict.js";
 import type { X2FetchEntry, X2FetchManifest } from "../src/x2-fetch.js";
-import type { RecordedLedger } from "../src/x2-recorded-ledger.js";
+import {
+  normalizeUrlForFirstCapture,
+  type RecordedLedger,
+} from "../src/x2-recorded-ledger.js";
+
+/** Gate finding 2c (re-gate): `buildEvidenceByTrail`'s `ledger` option is
+ * now REQUIRED — most tests in this file build a manifest they already
+ * fully trust (synthetic fixtures, not a real multi-session capture
+ * history) and just want every "fetched" entry to come back `recorded:
+ * true`, exactly as the removed manifest-field fallback used to give
+ * them. This derives a matching ledger straight from the manifest's own
+ * entries, so each test keeps its EXACT prior behaviour while still
+ * exercising the real, ledger-authoritative code path (never a shortcut
+ * that skips it). Tests that specifically exercise ledger MISmatches
+ * build their own bespoke ledger instead of calling this. */
+function ledgerFromManifest(manifest: X2FetchManifest): RecordedLedger {
+  const entries: RecordedLedger["entries"] = [];
+  for (const trailEntries of Object.values(manifest.trails)) {
+    for (const e of trailEntries) {
+      if (e.status !== "fetched" || !e.sha256) continue;
+      let normalizedUrl: string;
+      try {
+        normalizedUrl = normalizeUrlForFirstCapture(e.url);
+      } catch {
+        continue;
+      }
+      entries.push({
+        method: e.method ?? "direct",
+        normalizedUrl,
+        url: e.url,
+        sha256: e.sha256,
+        recordedAt: e.fetchedAt,
+      });
+    }
+  }
+  return { entries };
+}
 
 function sha(bytes: string): string {
   return createHash("sha256").update(bytes).digest("hex");

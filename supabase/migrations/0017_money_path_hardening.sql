@@ -126,16 +126,55 @@ ALTER TABLE app.play ADD COLUMN input_digest text;
 -- delete_my_data's own multi-table deletes keep working in any statement
 -- order, not just this one. delete_my_data also nulls both explicitly,
 -- belt-and-suspenders (0015).
-ALTER TABLE app.offer_code ADD COLUMN play_id uuid REFERENCES app.play (id)
-  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+-- ⛔ FIX (M2, post-P3a re-gate): the single-column `play_id REFERENCES
+-- app.play (id)` form let three of the four confirmed bypasses through:
+-- (c) UPDATE offer_code.user_id and (d) UPDATE play.user_id both left
+-- play_id untouched, so neither ever re-checked ownership; the FK itself
+-- says nothing about WHOSE row play_id points at, only that it exists.
+-- A composite FK against app.play's `(id, user_id)` unique pair (0017
+-- §1, `play_id_user_id_key`) closes both structurally, the same
+-- mechanism M1 already uses for app.play_evidence: (c) is blocked
+-- because changing JUST user_id would point this row at an (id,user_id)
+-- pair that doesn't exist in app.play; (d) is blocked because changing
+-- play.user_id while a composite FK still references its OLD (id,
+-- user_id) pair is itself a violation (default ON UPDATE NO ACTION).
+ALTER TABLE app.offer_code ADD COLUMN play_id uuid;
 ALTER TABLE app.offer_code ADD COLUMN policy_version text;
 ALTER TABLE app.offer_code ADD COLUMN basis jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE app.offer_code
+  ADD CONSTRAINT offer_code_play_user_fk FOREIGN KEY (play_id, user_id)
+    REFERENCES app.play (id, user_id) DEFERRABLE INITIALLY DEFERRED;
 CREATE INDEX offer_code_play_idx ON app.offer_code (play_id);
 
-ALTER TABLE app.entitlement ADD COLUMN play_id uuid REFERENCES app.play (id)
-  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.entitlement ADD COLUMN play_id uuid;
 ALTER TABLE app.entitlement ADD COLUMN policy_version text;
+ALTER TABLE app.entitlement
+  ADD CONSTRAINT entitlement_play_user_fk FOREIGN KEY (play_id, user_id)
+    REFERENCES app.play (id, user_id) DEFERRABLE INITIALLY DEFERRED;
 CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
+
+-- H1's ON DELETE SET NULL is EXPRESSED HERE, not on the FK itself
+-- (composite FKs support ON DELETE SET NULL fine, but a bare SET NULL on
+-- a two-column FK nulls BOTH columns together, including user_id — never
+-- what we want here; only play_id should null out when the play is
+-- deleted). An AFTER DELETE trigger on app.play does the equivalent,
+-- narrowly: null play_id only. delete_my_data's own explicit
+-- `UPDATE ... SET play_id = NULL` (0015) stays as belt-and-suspenders,
+-- unchanged.
+CREATE OR REPLACE FUNCTION app.play_deleted_detach_play_id() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE app.offer_code SET play_id = NULL WHERE play_id = OLD.id;
+  UPDATE app.entitlement SET play_id = NULL WHERE play_id = OLD.id;
+  RETURN OLD;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER play_deleted_detach_play_id_trg
+AFTER DELETE ON app.play
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION app.play_deleted_detach_play_id();
 
 -- should-fix (post-P3a gate): "offer_code.play_id and entitlement.play_id
 -- need an owner-match check. Add a DB guard so a play with
@@ -145,22 +184,34 @@ CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
 -- held_review PLAY can only be backing an offer_code/entitlement that is
 -- ITSELF held_review, not something freely redeemable while the play
 -- that justified it is still under fraud review.
+--
+-- ⛔ FIX (M2(a)/(b), post-P3a re-gate): bypass (a) — "the play is placed
+-- on hold AFTER the code was issued" — is closed by the SEPARATE
+-- app.play trigger below (this guard alone only ever fires when
+-- offer_code/entitlement's OWN row changes, never when the PLAY changes
+-- out from under it). Bypass (b) — "deferred insert ordering" — is
+-- closed by making this a genuine DEFERRABLE INITIALLY DEFERRED
+-- CONSTRAINT TRIGGER (AFTER, not BEFORE — Postgres constraint triggers
+-- are always AFTER) instead of a plain BEFORE trigger: it now runs at
+-- the SAME deferred-checking point as the composite FK above, so a
+-- play_id that resolves to a row inserted LATER in the same transaction
+-- is guaranteed to be visible by the time this fires, and NOT FOUND is
+-- now a hard RAISE (fail-closed) rather than a silent pass-through — the
+-- composite FK guarantees existence by commit time too, so this is
+-- belt-and-suspenders against constraint-check ordering not being
+-- guaranteed, not a live gap on its own anymore.
 CREATE OR REPLACE FUNCTION app.offer_code_play_guard() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_play_user uuid;
   v_play_held boolean;
 BEGIN
   IF NEW.play_id IS NULL THEN
     RETURN NEW;
   END IF;
-  SELECT user_id, held_review INTO v_play_user, v_play_held FROM app.play WHERE id = NEW.play_id;
+  SELECT held_review INTO v_play_held FROM app.play WHERE id = NEW.play_id AND user_id = NEW.user_id;
   IF NOT FOUND THEN
-    RETURN NEW; -- the deferred FK catches a genuinely missing play at commit
-  END IF;
-  IF v_play_user IS DISTINCT FROM NEW.user_id THEN
-    RAISE EXCEPTION 'offer_code: play_id % belongs to a different user than offer_code.user_id (%)', NEW.play_id, NEW.user_id
+    RAISE EXCEPTION 'offer_code: play_id % (user_id %) was not found in app.play at constraint-check time', NEW.play_id, NEW.user_id
       USING ERRCODE = '23514';
   END IF;
   IF v_play_held AND NEW.state <> 'held_review' THEN
@@ -171,26 +222,23 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER offer_code_play_guard_trg
-BEFORE INSERT OR UPDATE OF play_id, state ON app.offer_code
+CREATE CONSTRAINT TRIGGER offer_code_play_guard_trg
+AFTER INSERT OR UPDATE OF play_id, user_id, state ON app.offer_code
+DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION app.offer_code_play_guard();
 
 CREATE OR REPLACE FUNCTION app.entitlement_play_guard() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_play_user uuid;
   v_play_held boolean;
 BEGIN
   IF NEW.play_id IS NULL THEN
     RETURN NEW;
   END IF;
-  SELECT user_id, held_review INTO v_play_user, v_play_held FROM app.play WHERE id = NEW.play_id;
+  SELECT held_review INTO v_play_held FROM app.play WHERE id = NEW.play_id AND user_id = NEW.user_id;
   IF NOT FOUND THEN
-    RETURN NEW;
-  END IF;
-  IF v_play_user IS DISTINCT FROM NEW.user_id THEN
-    RAISE EXCEPTION 'entitlement: play_id % belongs to a different user than entitlement.user_id (%)', NEW.play_id, NEW.user_id
+    RAISE EXCEPTION 'entitlement: play_id % (user_id %) was not found in app.play at constraint-check time', NEW.play_id, NEW.user_id
       USING ERRCODE = '23514';
   END IF;
   IF v_play_held AND NEW.state <> 'held_review' THEN
@@ -201,9 +249,41 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER entitlement_play_guard_trg
-BEFORE INSERT OR UPDATE OF play_id, state ON app.entitlement
+CREATE CONSTRAINT TRIGGER entitlement_play_guard_trg
+AFTER INSERT OR UPDATE OF play_id, user_id, state ON app.entitlement
+DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION app.entitlement_play_guard();
+
+-- M2(a): bypass (a), "the play is placed on hold AFTER the code was
+-- issued" — when app.play.held_review flips false->true, move every
+-- backing offer_code/entitlement INTO the held_review state, so the
+-- guard above (which only checks state AT THE TIME offer_code/
+-- entitlement itself changes) can never be stale. Choice made here,
+-- documented: move to 'held_review', not void — held_review is a REVIEW
+-- state (money-path-security-requirements.md's own §3 vocabulary), not a
+-- final denial, so the backing code/entitlement should freeze pending
+-- review, not be destroyed; a human/process resolving the review can
+-- still redeem or void it afterward. Terminal states (redeemed/void, and
+-- offer_code's expired) are left alone — they are already resolved, and
+-- moving a REDEEMED code backward into held_review would be wrong (the
+-- money already moved).
+CREATE OR REPLACE FUNCTION app.play_held_review_cascade() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.held_review AND NOT OLD.held_review THEN
+    UPDATE app.offer_code SET state = 'held_review'
+      WHERE play_id = NEW.id AND state NOT IN ('held_review', 'redeemed', 'void', 'expired');
+    UPDATE app.entitlement SET state = 'held_review'
+      WHERE play_id = NEW.id AND state NOT IN ('held_review', 'redeemed', 'void');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER play_held_review_cascade_trg
+AFTER UPDATE OF held_review ON app.play
+FOR EACH ROW EXECUTE FUNCTION app.play_held_review_cascade();
 
 -- ============================================================================
 -- 4. Offer budgets: CHECK, max_redemptions enforcement, locked reserve fn.
@@ -632,6 +712,8 @@ VALUES
   ('app', 'offer_code_enforce_max_redemptions', '', false, false, false, 'trigger function (app.offer_code_enforce_max_redemptions_trg) -- never EXECUTEd directly by any role'),
   ('app', 'offer_code_play_guard', '', false, false, false, 'trigger function (app.offer_code_play_guard_trg) -- never EXECUTEd directly by any role'),
   ('app', 'entitlement_play_guard', '', false, false, false, 'trigger function (app.entitlement_play_guard_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'play_deleted_detach_play_id', '', false, false, false, 'trigger function (app.play_deleted_detach_play_id_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'play_held_review_cascade', '', false, false, false, 'trigger function (app.play_held_review_cascade_trg) -- never EXECUTEd directly by any role'),
   ('app', 'checkin_challenge_used_at_once', '', false, false, false, 'trigger function (app.checkin_challenge_used_at_once_trg) -- never EXECUTEd directly by any role'),
   ('app', 'checkin_challenge_tombstone_nonce', '', false, false, false, 'trigger function (app.checkin_challenge_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
   ('app', 'attestation_tombstone_nonce', '', false, false, false, 'trigger function (app.attestation_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
