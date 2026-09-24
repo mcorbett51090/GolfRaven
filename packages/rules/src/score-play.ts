@@ -8,17 +8,22 @@
  * marketing incentive, so every rule below cites the exact plan line it
  * implements.
  *
- * **Post-gate rework (this revision).** The Opus command-review gate on
- * commit 0ff5cd7 found 4 blocking money-path gaps in the previous
- * revision: (1) cross-row combination trusted a caller-supplied
- * `correlationId` instead of deriving correlation from the data itself;
- * (2) `foreground_checkin`/`foreground_dwell` skipped several fix-quality
- * checks (`fromApp`, `foreground`, finite accuracy) that a co-signal
- * requires; (3) nothing checked a fix's or a row's facility against the
- * play being scored; (4) same-date checks were anchored to a ROW's own
- * date instead of `ctx.playLocalDate`. All four are fixed below, each
- * cited at its own site; see `test/score-play-regression.test.ts` for the
- * failing-first reproduction of each.
+ * **Fourth re-gate (commit 68d9139), blocking finding 1: the per-row
+ * classifier moved to `./internal/classify.js`.** It used to be exported
+ * directly from this file, which made it PUBLIC API via `index.ts`'s
+ * `export *` — reachable WITHOUT `scorePlay`'s own top-level facility/date
+ * filter, so a caller could get `hard: true, moneyEligible: true` back for
+ * a row whose facility/date plainly disagreed with the play, as long as
+ * its embedded fix happened to carry the right facility/date. This file
+ * now `import`s `classifyEvidenceRow` (and the low-level quality-gate
+ * predicates it shares with `deriveGroups`/`resolveGroups` below) from
+ * that internal module and never re-exports the function name — see that
+ * module's own doc for the defence-in-depth row-level checks it ALSO
+ * added. Every type this file's own public API needs (`AppFix`,
+ * `Evidence`, `ScorePlayContext`, `ScorePlayContribution`, …) is defined
+ * in the internal module and re-exported HERE, by name — the dependency
+ * runs one way only (this file depends on the internal module, never the
+ * reverse), so there is no import cycle.
  *
  * **Scope boundary (stated once, so it isn't re-litigated per class).**
  * `scorePlay` computes the two scores, `presence_signal`, `money` and a
@@ -34,13 +39,49 @@
  * already attributed to ONE `play`. `ctx.playFacilityId` /
  * `ctx.playLocalDate` are the play's own anchors — EVERY facility and date
  * check in this module is anchored to these two fields, never to a row's
- * or a fix's own copies of them (finding 4). A row whose own
- * `facilityId` disagrees with `ctx.playFacilityId` is dropped before
- * scoring (finding 3) — it is evidence for a DIFFERENT facility and must
- * not silently contribute to this play.
+ * or a fix's own copies of them. A row whose own `facilityId`/`localDate`
+ * disagrees with `ctx.playFacilityId`/`ctx.playLocalDate` is dropped
+ * before scoring — it is evidence for a DIFFERENT play and must not
+ * silently contribute to this one.
  */
-import type { GeometryKind, VerificationTier } from "@golfraven/matching";
-import type { CourseDisambiguatedBy } from "./completion.js";
+import {
+  bookingFixSatisfiesHardWindow,
+  classifyEvidenceRow,
+  finish,
+  GROUP,
+  isQualityCoSignalFix,
+  resolveFixGrade,
+  staffFixSatisfiesHardWindow,
+  WEIGHT,
+  windowMs,
+  type AppFix,
+  type ChallengeKind,
+  type Evidence,
+  type EvidenceClassId,
+  type EvidenceGroup,
+  type FixGrade,
+  type PurchaseCorroboration,
+  type ScorePlayContext,
+  type ScorePlayContribution,
+  type TokenState,
+} from "./internal/classify.js";
+
+/** Re-exported, by name, from the internal classification module — this is
+ * the package's real public type/value surface for these; see this file's
+ * module doc for why the dependency runs this direction only. */
+export type {
+  AppFix,
+  ChallengeKind,
+  Evidence,
+  EvidenceClassId,
+  EvidenceGroup,
+  FixGrade,
+  PurchaseCorroboration,
+  ScorePlayContext,
+  ScorePlayContribution,
+  TokenState,
+};
+export { resolveFixGrade };
 
 /** §4.5's money-only floor. A CODE CONSTANT (A2-05): "No catalog or DB
  * datum can lower it." Every money decision in this module reads this
@@ -51,733 +92,6 @@ export const MONEY_MIN = 0.85;
  * separate from `index.ts`'s `POLICY_VERSION`, which an existing,
  * unmodified test pins at 0. */
 export const SCORE_PLAY_POLICY_VERSION = 1;
-
-/* ------------------------------------------------------------------ */
-/* Attestation grade (G3-08)                                           */
-/* ------------------------------------------------------------------ */
-
-export type FixGrade = "attested" | "unattestable" | "failed";
-
-export type TokenState =
-  | { present: true; grade: FixGrade }
-  | { present: false; hardwareSupportsAttestation: boolean };
-
-/** G3-08's intake-grading rule, applied verbatim. */
-export function resolveFixGrade(token: TokenState): FixGrade {
-  if (token.present) return token.grade;
-  return token.hardwareSupportsAttestation ? "failed" : "unattestable";
-}
-
-/* ------------------------------------------------------------------ */
-/* The co-signal fix (§4.5 "Co-signal" definition)                     */
-/* ------------------------------------------------------------------ */
-
-export type ChallengeKind = "live" | "prefetched" | "none";
-
-export interface AppFix {
-  /** A caller-assigned identity for the PHYSICAL fix (not the evidence
-   * row). Finding 1(b): two rows that embed the same `fixId` are, by
-   * definition, proof of the SAME underlying capture (a staff scan and a
-   * check-in reusing one fix; a dwell and the check-in that opened it) —
-   * this is the only thing `scorePlay` trusts for that specific
-   * correlation, never a row-level `correlationId`. */
-  fixId: string;
-  /** Finding 3: the facility this fix was matched against. Every
-   * co-signal/hard-class/presence check requires this to equal
-   * `ctx.playFacilityId` — a fix captured at a different facility is never
-   * evidence for THIS play, however good its other attributes are. */
-  facilityId: string;
-  /** Taken by our app (never true for a Health route, a file import, a
-   * Connect IQ fix, a GHIN post or a vendor round — §4.5 line 908). */
-  fromApp: boolean;
-  /** iOS `isSimulatedBySoftware` / Android mock-location (§4.5 caps). */
-  simulated: boolean;
-  foreground: boolean;
-  /** "taken against a server challenge: live, or prefetched ≤24h ahead...
-   * `none` = no challenge at all — never a co-signal. */
-  challenge: ChallengeKind;
-  token: TokenState;
-  /** Facility verification tier of the facility this fix was matched
-   * against (`@golfraven/matching`'s own vocabulary). A co-signal requires
-   * `'play-verified'` — "a radius-fallback circle never qualifies" is
-   * exactly `geometryKind !== 'polygon'` OR `verificationTier !==
-   * 'play-verified'`. Deliberately decoupled from `geometryKind` (a
-   * `play-verified` facility can still produce a `radius`-kind fix, e.g. a
-   * temporary geometry gap) — both are checked independently. */
-  verificationTier: VerificationTier;
-  geometryKind: GeometryKind;
-  /** Raw geometric containment: inside the polygon+50m buffer, or inside
-   * the radius-fallback circle+50m — whichever `geometryKind` names. */
-  insideBuffer: boolean;
-  accuracyMeters: number;
-  /** Epoch ms the fix was captured. */
-  capturedAt: number;
-  /** Facility-local calendar date (`YYYY-MM-DD`) the fix was captured on. */
-  localDate: string;
-}
-
-function finiteInRange(x: number, min: number, max: number): boolean {
-  // NaN-safe by construction: every comparison below is written so a NaN
-  // input fails to satisfy it (Number.isFinite(NaN) === false short-circuits
-  // before any `<=`/`>=` on NaN could silently pass).
-  return Number.isFinite(x) && x >= min && x <= max;
-}
-
-/**
- * The co-signal FIX-QUALITY gate (§4.5 "Co-signal" bullets 1-3, plus
- * finding 3's facility anchor). `playFacilityId` is REQUIRED — every call
- * site anchors to `ctx.playFacilityId`, never to a row's own copy.
- * `grade !== 'failed'` is folded in here because §4.5 line 920 states it as
- * part of the same definition: "A `failed` fix is never a co-signal."
- * Accuracy is checked with `finiteInRange` so `NaN`/`Infinity`/a negative
- * value all fail closed rather than silently passing a `<=` comparison.
- */
-function isQualityCoSignalFix(fix: AppFix, playFacilityId: string): boolean {
-  return (
-    fix.facilityId === playFacilityId &&
-    fix.fromApp &&
-    !fix.simulated &&
-    fix.foreground &&
-    fix.challenge !== "none" &&
-    finiteInRange(fix.accuracyMeters, 0, 50) &&
-    fix.geometryKind === "polygon" &&
-    fix.verificationTier === "play-verified" &&
-    fix.insideBuffer &&
-    resolveFixGrade(fix.token) !== "failed"
-  );
-}
-
-/**
- * Re-gate finding 1/2: staff_presence's ±10 min hard-window, as ONE shared
- * predicate — used identically by `classify` (the row's own inline fix)
- * AND `resolveGroups` (a fix absorbed from elsewhere in the same derived
- * group), so the two can never drift apart the way they did before (the
- * gate that found this duplication was itself evidence of the risk).
- * Requires the fix's OWN date to match `ctx.playLocalDate` — NOT merely
- * that it falls within ±10 min of `scanAt` — because a scan and a fix
- * that are both mis-dated (or a scan whose own `scanAt` epoch happens to
- * be close to a fix on a genuinely different calendar day, e.g. a
- * malformed or adversarial input) must not resolve hard just because the
- * millisecond delta between two absolute timestamps happens to be small.
- */
-function staffFixSatisfiesHardWindow(fix: AppFix, scanAt: number, ctx: ScorePlayContext): boolean {
-  return (
-    isQualityCoSignalFix(fix, ctx.playFacilityId) &&
-    fix.localDate === ctx.playLocalDate &&
-    windowMs(fix.capturedAt, scanAt, 10 * 60_000)
-  );
-}
-
-/** Same idea for `booking`'s same-day-presence hard-window (a whole-day
- * window, not a minute delta — so this needs no `scanAt`-analogue). */
-function bookingFixSatisfiesHardWindow(fix: AppFix, ctx: ScorePlayContext): boolean {
-  return isQualityCoSignalFix(fix, ctx.playFacilityId) && fix.localDate === ctx.playLocalDate;
-}
-
-/* ------------------------------------------------------------------ */
-/* Evidence classes (§4.5's class table, 16 rows incl. corroboration)  */
-/* ------------------------------------------------------------------ */
-
-export type EvidenceClassId =
-  | "staff_presence_hard"
-  | "staff_presence_soft"
-  | "vendor_sensor"
-  | "self_posted"
-  | "booking_hard"
-  | "booking_alone"
-  | "receipt_green_fee"
-  | "health_route"
-  | "connect_iq_route"
-  | "connect_iq_checkin"
-  | "foreground_dwell"
-  | "file_import"
-  | "foreground_checkin"
-  | "health_workout"
-  | "self_report"
-  | "purchase_corroboration";
-
-export type EvidenceGroup =
-  | "partner"
-  | "vendor"
-  | "self-posted"
-  | "booking"
-  | "review"
-  | "device-gps"
-  | "self"
-  | "corroboration";
-
-interface EvidenceBase {
-  /** Caller-assigned, unique within one `scorePlay` call. */
-  id: string;
-  /** Finding 3: every row is checked against `ctx.playFacilityId` before
-   * scoring — a row whose own facility disagrees is dropped entirely. */
-  facilityId: string;
-  courseId?: string;
-  /** This row's own facility-local date. Finding 4: this is used only
-   * where the plan itself compares a ROW's date to something — every
-   * same-date CHECK in this module (booking's same-day presence, a
-   * receipt's same-date co-signal) is anchored to `ctx.playLocalDate`
-   * directly, never to this field compared against a fix's date. */
-  localDate: string;
-  /** §4.3 A2-01 user-pick cap — applied to EVERY class uniformly (not just
-   * device-GPS ones; should-fix item, plan line 956: "the course credit"
-   * is not class-scoped in the plan's own wording). */
-  courseDisambiguatedBy?: CourseDisambiguatedBy;
-  /** Optional, NEVER trusted for combination (finding 1). A caller may set
-   * this for its own tracing/debugging; `scorePlay` derives every real
-   * correlation from the data itself (`deriveCorrelationGroups` below) and
-   * ignores this field entirely when deciding how rows combine. */
-  correlationId?: string;
-}
-
-export type Evidence =
-  | (EvidenceBase & {
-      source: "staff_presence";
-      scanAt: number;
-      coSignalFix?: AppFix;
-    })
-  | (EvidenceBase & {
-      source: "arccos" | "garmin";
-      vendorCourseMapped: boolean;
-      sensorProvenance: boolean;
-    })
-  | (EvidenceBase & { source: "ghin" })
-  | (EvidenceBase & {
-      source: "booking";
-      presenceFix?: AppFix;
-      /** Finding 1(b): "a booking and the receipt for the SAME booking or
-       * prepay id" — the data-derived correlation key, never a
-       * `correlationId`. */
-      paymentRef?: string;
-    })
-  | (EvidenceBase & {
-      source: "receipt_green_fee";
-      status: "approved" | "pending" | "void";
-      coSignalFix?: AppFix;
-      paymentRef?: string;
-      /** Should-fix: a receipt fingerprint. A second row (in the SAME
-       * `evidence[]` call) sharing a non-empty fingerprint with an earlier
-       * one is treated as void (§4.4: "duplicate-fingerprint receipts are
-       * void", §4.5 line 996), regardless of its own `status`. */
-      fingerprint?: string;
-    })
-  | (EvidenceBase & {
-      source: "health_route";
-      sourceAllowListed: boolean;
-      insideRatio: number;
-      simulated: boolean;
-      geometryKind: GeometryKind;
-      /** Finding 1(b): epoch ms, for the "same round" correlation with a
-       * `file_import` of the same round (start ±15 min, same facility). */
-      startedAt?: number;
-    })
-  | (EvidenceBase & {
-      source: "connect_iq";
-      variant: "route" | "checkin";
-      k4bPassed: boolean;
-      insidePolygon: boolean;
-      durationMinutes: number;
-      simulated: boolean;
-    })
-  | (EvidenceBase & {
-      source: "foreground_dwell";
-      checkinFix: AppFix;
-      checkoutFix: AppFix;
-      apartMinutes: number;
-      holes: 9 | 18;
-    })
-  | (EvidenceBase & {
-      source: "file_import";
-      matchedRoute: boolean;
-      geometryKind?: GeometryKind;
-      startedAt?: number;
-    })
-  | (EvidenceBase & { source: "foreground_checkin"; fix: AppFix })
-  | (EvidenceBase & { source: "health_workout" })
-  | (EvidenceBase & { source: "self_report" });
-
-/** The §4.6 purchase-corroboration leg (a `purchase_evidence.valid` row) —
- * a DIFFERENT table than `app.evidence`, so it travels on `ctx`. */
-export interface PurchaseCorroboration {
-  facilityId: string;
-  localDate: string;
-}
-
-export interface ScorePlayContext {
-  playFacilityId: string;
-  playLocalDate: string;
-  purchases?: PurchaseCorroboration[];
-}
-
-/* ------------------------------------------------------------------ */
-/* Weights (§4.5's class table, verbatim)                               */
-/* ------------------------------------------------------------------ */
-
-const WEIGHT: Record<EvidenceClassId, number> = {
-  staff_presence_hard: 0.95,
-  staff_presence_soft: 0.8,
-  vendor_sensor: 0.85,
-  self_posted: 0.4,
-  booking_hard: 0.9,
-  booking_alone: 0.7,
-  receipt_green_fee: 0.8,
-  health_route: 0.6,
-  connect_iq_route: 0.5,
-  connect_iq_checkin: 0.3,
-  foreground_dwell: 0.5,
-  file_import: 0.4,
-  foreground_checkin: 0.3,
-  health_workout: 0.15,
-  self_report: 0.1,
-  purchase_corroboration: 0.3,
-};
-
-const GROUP: Record<EvidenceClassId, EvidenceGroup> = {
-  staff_presence_hard: "partner",
-  staff_presence_soft: "partner",
-  vendor_sensor: "vendor",
-  self_posted: "self-posted",
-  booking_hard: "booking",
-  booking_alone: "booking",
-  receipt_green_fee: "review",
-  health_route: "device-gps",
-  connect_iq_route: "device-gps",
-  connect_iq_checkin: "device-gps",
-  foreground_dwell: "device-gps",
-  file_import: "device-gps",
-  foreground_checkin: "device-gps",
-  health_workout: "self",
-  self_report: "self",
-  purchase_corroboration: "corroboration",
-};
-
-const HARD: ReadonlySet<EvidenceClassId> = new Set(["staff_presence_hard", "booking_hard"]);
-
-const MONEY_ELIGIBLE_BASE: ReadonlySet<EvidenceClassId> = new Set([
-  "staff_presence_hard",
-  "vendor_sensor",
-  "booking_hard",
-  "booking_alone",
-  "receipt_green_fee",
-  "foreground_checkin",
-  "foreground_dwell",
-]);
-
-/* ------------------------------------------------------------------ */
-/* Device-row full fix-quality gate (finding 2)                        */
-/* ------------------------------------------------------------------ */
-
-/**
- * `foreground_checkin`/`foreground_dwell` are the classes THAT PRODUCE a
- * co-signal fix, so their own fix must pass the FULL co-signal-quality
- * gate as a hard entry condition — not merely a weight multiplier. A fix
- * that fails `fromApp`/`foreground`/accuracy/`insideBuffer`/facility is not
- * a valid capture at all and contributes NOTHING (weight 0), exactly like
- * a `failed` grade. `requireChallenge` is `true` for `foreground_dwell`
- * (plan line 1000: "both against a challenge" is a DEFINING condition, not
- * a penalty — "a `none` challenge makes the dwell ineligible, not ×0.6")
- * and `false` for `foreground_checkin` (a `none` challenge there stays a
- * ×0.6 penalty via `deviceFixMultiplier`, unchanged).
- */
-function deviceRowFixGateOk(
-  fix: AppFix,
-  playFacilityId: string,
-  playLocalDate: string,
-  requireChallenge: boolean,
-): boolean {
-  if (fix.facilityId !== playFacilityId) return false;
-  // Re-gate finding 1: the fix's own date must match the play's date — a
-  // check-in/dwell fix from another day is not evidence for THIS play,
-  // however good its other attributes are.
-  if (fix.localDate !== playLocalDate) return false;
-  // Should-fix: fail closed on an unverified facility. `listed-verified`
-  // (the radius-fallback tier) is deliberately still allowed THROUGH the
-  // gate — a radius-matched check-in/dwell is a legitimate, reduced-weight
-  // contribution (capped separately, by `geometryKind`, in `classify`);
-  // only `unverified` is a hard exclusion here.
-  if (fix.verificationTier === "unverified") return false;
-  if (!fix.fromApp) return false;
-  if (!fix.foreground) return false;
-  if (!finiteInRange(fix.accuracyMeters, 0, 50)) return false;
-  if (!fix.insideBuffer) return false;
-  if (requireChallenge && fix.challenge === "none") return false;
-  if (resolveFixGrade(fix.token) === "failed") return false;
-  return true;
-}
-
-/** The `simulated`×0.3 and `unattestable`/no-challenge×0.6 penalties,
- * applied only AFTER `deviceRowFixGateOk` has already passed. */
-function deviceFixMultiplier(fix: Pick<AppFix, "simulated" | "token" | "challenge">): number {
-  let m = 1;
-  if (fix.simulated) m *= 0.3;
-  const grade = resolveFixGrade(fix.token);
-  if (grade === "unattestable" || fix.challenge === "none") m *= 0.6;
-  return m;
-}
-
-/**
- * Finding 2's "not simulated for money": a simulated fix is never a
- * co-signal (§4.5 line 1010-1011) — `foreground_checkin`/`foreground_dwell`
- * are money-eligible only because they otherwise act as a co-signal, so a
- * simulated one is excluded from money OUTRIGHT, not merely weight-reduced
- * (weight-reduction alone still applies to `score_badge`).
- *
- * Third re-gate, should-fix: ALSO require `verificationTier ===
- * 'play-verified'` here, strictly — never derive money-eligibility from
- * `geometryKind` alone. Build plan §4.2's own tier table: "`play-verified`
- * | `listed-verified` + a polygon... | Everything, including route
- * matching at full weight and **money** (every programme facility must be
- * `play-verified`)." `play-verified` is DEFINED as `listed-verified` PLUS
- * a polygon — so a fix reporting `verificationTier: 'listed-verified'`
- * with `geometryKind: 'polygon'` is an inconsistent/adversarial
- * combination that should never occur in honest data (a facility with a
- * matchable polygon is, by that definition, already `play-verified`).
- * Without this check, `applyCourseCaps`'s radius cap (keyed on
- * `geometryKind`, not `verificationTier`) would wave it through at full
- * weight and full money-eligibility purely because `geometryKind` says
- * `'polygon'` — the exact gap the third re-gate found (fixture #14 + a
- * `listed-verified`/`polygon` check-in reached 0.86 with `money: true`).
- */
-function deviceRowMoneyEligible(fix: AppFix): boolean {
-  return !fix.simulated && fix.verificationTier === "play-verified";
-}
-
-/** §4.5's radius-fallback cap and the §4.3/A2-01 user-pick cap. Applied
- * uniformly to every class now (should-fix): `courseDisambiguatedBy` lives
- * on every row, and the plan's own wording ("the course credit") is not
- * class-scoped. */
-function applyCourseCaps(
-  badgeWeight: number,
-  geometryKind: GeometryKind | undefined,
-  courseDisambiguatedBy: CourseDisambiguatedBy | undefined,
-  moneyEligible: boolean,
-): { badgeWeight: number; moneyEligible: boolean } {
-  let w = badgeWeight;
-  let money = moneyEligible;
-  if (geometryKind === "radius") {
-    w = Math.min(w, 0.5);
-    money = false;
-  }
-  if (courseDisambiguatedBy === "user") {
-    w = Math.min(w, 0.5);
-    money = false;
-  }
-  return { badgeWeight: w, moneyEligible: money };
-}
-
-/* ------------------------------------------------------------------ */
-/* Per-row classification                                              */
-/* ------------------------------------------------------------------ */
-
-export interface ScorePlayContribution {
-  evidenceId: string;
-  classId: EvidenceClassId;
-  group: EvidenceGroup;
-  hard: boolean;
-  badgeWeight: number;
-  moneyEligible: boolean;
-  moneyWeight: number;
-  /** Blocking finding 4: the attestation grade of the SPECIFIC fix that
-   * backs this contribution's hard/money status (the staff scan's or
-   * booking's winning co-signal, a check-in's own fix, a dwell's
-   * worse-of-two-fixes grade, a receipt's co-signal when money-eligible).
-   * `undefined` for a class with no single governing fix (vendor, ghin,
-   * health_route, connect_iq, file_import, self/health_workout, a
-   * `booking_alone`/soft `staff_presence` with no qualifying fix). Used by
-   * `computeHeldReview` — scoped to ONLY the fix(es) that actually
-   * established the winning result, never any unrelated fix elsewhere in
-   * the same evidence set. */
-  governingGrade?: FixGrade;
-}
-
-function windowMs(aMs: number, bMs: number, ms: number): boolean {
-  // NaN-safe: Math.abs(NaN) is NaN, and `NaN <= ms` is false, so a NaN
-  // timestamp never satisfies a window.
-  return Math.abs(aMs - bMs) <= ms;
-}
-
-function finish(
-  row: Evidence,
-  fields: Omit<ScorePlayContribution, "evidenceId" | "moneyWeight">,
-): ScorePlayContribution {
-  const capped = applyCourseCaps(
-    fields.badgeWeight,
-    undefined, // geometry-kind caps are already applied per-class before this call
-    row.courseDisambiguatedBy,
-    fields.moneyEligible,
-  );
-  return {
-    evidenceId: row.id,
-    ...fields,
-    badgeWeight: capped.badgeWeight,
-    // Blocking finding 3: `hard` is a MONEY-path signal only (it never
-    // affects `score_badge`, which is driven by `badgeWeight` alone) — so
-    // a user-picked course, which `applyCourseCaps` already strips of
-    // money-eligibility, must ALSO lose its `hard` flag. Leaving `hard:
-    // true` here let `hardSignal` bypass the money-eligibility cap
-    // entirely (`money = presence && (hardSignal || score >= MONEY_MIN)`),
-    // so a user-picked staff-scan/booking could still reach `money: true`
-    // through the `hardSignal` branch even though its OWN contribution was
-    // correctly excluded from `score_monetary`.
-    hard: fields.hard && capped.moneyEligible,
-    moneyEligible: capped.moneyEligible,
-    moneyWeight: capped.moneyEligible ? capped.badgeWeight : 0,
-  };
-}
-
-/**
- * Exported (third re-gate, should-fix) so the CLASS-LEVEL date/facility
- * anchors inside each `case` below (e.g. `foreground_checkin`'s own
- * `row.localDate === ctx.playLocalDate` check) can be unit-tested
- * DIRECTLY, bypassing `scorePlay`'s top-level row filter. Those anchors
- * are otherwise unreachable from `scorePlay`'s own entry point (the
- * top-level filter already drops an off-date/off-facility row before
- * `classify` ever sees it) — kept anyway as defence in depth (a future
- * change to the top-level filter, or a caller that invokes `classify`
- * some other way, should not silently lose this protection), which only
- * has real meaning if something actually exercises them. Not part of
- * `scorePlay`'s own contract — a normal caller uses `scorePlay`, not this.
- */
-export function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
-  switch (row.source) {
-    case "staff_presence": {
-      // §4.5 line 990: "a co-signal within ±10 min", now including the
-      // fix's OWN date matching `ctx.playLocalDate` (finding 1/re-gate) —
-      // see `staffFixSatisfiesHardWindow`, shared with `resolveGroups`.
-      const hasCoSignal = row.coSignalFix !== undefined && staffFixSatisfiesHardWindow(row.coSignalFix, row.scanAt, ctx);
-      const classId: EvidenceClassId = hasCoSignal ? "staff_presence_hard" : "staff_presence_soft";
-      const badgeWeight = WEIGHT[classId];
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: HARD.has(classId),
-        badgeWeight,
-        moneyEligible: hasCoSignal,
-        ...(hasCoSignal ? { governingGrade: resolveFixGrade(row.coSignalFix!.token) } : {}),
-      });
-    }
-    case "arccos":
-    case "garmin": {
-      const isSensorVendor = row.vendorCourseMapped && row.sensorProvenance;
-      const classId: EvidenceClassId = isSensorVendor ? "vendor_sensor" : "self_posted";
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: WEIGHT[classId],
-        moneyEligible: isSensorVendor,
-      });
-    }
-    case "ghin": {
-      const classId: EvidenceClassId = "self_posted";
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: WEIGHT[classId],
-        moneyEligible: false,
-      });
-    }
-    case "booking": {
-      // Finding 4: anchored to `ctx.playLocalDate`, never to `row.localDate`
-      // compared against the fix — see `bookingFixSatisfiesHardWindow`,
-      // shared with `resolveGroups`.
-      const hasPresence =
-        row.localDate === ctx.playLocalDate &&
-        row.presenceFix !== undefined &&
-        bookingFixSatisfiesHardWindow(row.presenceFix, ctx);
-      const classId: EvidenceClassId = hasPresence ? "booking_hard" : "booking_alone";
-      const badgeWeight = WEIGHT[classId];
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: HARD.has(classId),
-        badgeWeight,
-        moneyEligible: true, // both booking classes count in score_monetary (line 947)
-        ...(hasPresence ? { governingGrade: resolveFixGrade(row.presenceFix!.token) } : {}),
-      });
-    }
-    case "receipt_green_fee": {
-      const classId: EvidenceClassId = "receipt_green_fee";
-      const badgeWeight = row.status === "approved" ? WEIGHT[classId] : row.status === "pending" ? 0.2 : 0;
-      // Finding 4: anchored to `ctx.playLocalDate`.
-      const moneyEligible =
-        row.status !== "void" &&
-        row.localDate === ctx.playLocalDate &&
-        row.coSignalFix !== undefined &&
-        isQualityCoSignalFix(row.coSignalFix, ctx.playFacilityId) &&
-        row.coSignalFix.localDate === ctx.playLocalDate;
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight,
-        moneyEligible,
-        ...(moneyEligible ? { governingGrade: resolveFixGrade(row.coSignalFix!.token) } : {}),
-      });
-    }
-    case "health_route": {
-      const classId: EvidenceClassId = "health_route";
-      // Should-fix: insideRatio below 0.6, or non-finite, scores 0.
-      if (!Number.isFinite(row.insideRatio) || row.insideRatio < 0.6) {
-        return finish(row, {
-          classId,
-          group: GROUP[classId],
-          hard: false,
-          badgeWeight: 0,
-          moneyEligible: false,
-        });
-      }
-      const base = !row.sourceAllowListed ? 0.1 : row.insideRatio >= 0.8 ? 0.6 : 0.4;
-      const badgeWeight0 = row.simulated ? base * 0.3 : base;
-      const capped = applyCourseCaps(badgeWeight0, row.geometryKind, row.courseDisambiguatedBy, false);
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: capped.badgeWeight,
-        moneyEligible: false, // excluded (line 953)
-      });
-    }
-    case "connect_iq": {
-      const classId: EvidenceClassId = row.variant === "route" ? "connect_iq_route" : "connect_iq_checkin";
-      let badgeWeight: number;
-      if (row.variant === "route") {
-        badgeWeight =
-          row.k4bPassed && row.insidePolygon && Number.isFinite(row.durationMinutes) && row.durationMinutes >= 90
-            ? WEIGHT[classId]
-            : 0;
-      } else {
-        badgeWeight = WEIGHT[classId];
-      }
-      if (row.simulated) badgeWeight *= 0.3;
-      const capped = applyCourseCaps(badgeWeight, undefined, row.courseDisambiguatedBy, false);
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: capped.badgeWeight,
-        moneyEligible: false, // excluded (line 954, FM-30)
-      });
-    }
-    case "foreground_dwell": {
-      const classId: EvidenceClassId = "foreground_dwell";
-      const threshold = row.holes === 9 ? 50 : 90; // line 1000
-      // Should-fix: derive `apartMinutes` from the two fixes' OWN
-      // `capturedAt` rather than trusting the stored field — if they
-      // disagree, the derived value wins (both are always present on a
-      // `foreground_dwell` row, so this is unconditional, not a fallback:
-      // a client-computed `apartMinutes` that doesn't match the fixes it
-      // was supposedly computed from is exactly the kind of stored-value
-      // drift this guards against).
-      const derivedApart = Math.abs(row.checkoutFix.capturedAt - row.checkinFix.capturedAt) / 60_000;
-      // Finding 2: `!(apart >= threshold)` so a NaN derived duration fails
-      // (`NaN >= threshold` is false, so a NaIVE `apart < threshold` guard
-      // would have let NaN silently pass).
-      const durationOk = !(!(derivedApart >= threshold));
-      // Finding 1: the row's OWN date must match the play's date too, not
-      // just each fix's own date (checked inside `deviceRowFixGateOk`).
-      const rowDateOk = row.localDate === ctx.playLocalDate;
-      const openOk = deviceRowFixGateOk(row.checkinFix, ctx.playFacilityId, ctx.playLocalDate, true);
-      const closeOk = deviceRowFixGateOk(row.checkoutFix, ctx.playFacilityId, ctx.playLocalDate, true);
-      if (!durationOk || !rowDateOk || !openOk || !closeOk) {
-        return finish(row, {
-          classId,
-          group: GROUP[classId],
-          hard: false,
-          badgeWeight: 0,
-          moneyEligible: false,
-        });
-      }
-      const openM = deviceFixMultiplier(row.checkinFix);
-      const closeM = deviceFixMultiplier(row.checkoutFix);
-      const badgeWeight0 = WEIGHT[classId] * Math.min(openM, closeM);
-      const bothPolygon = row.checkinFix.geometryKind === "polygon" && row.checkoutFix.geometryKind === "polygon";
-      const geometryKind: GeometryKind = bothPolygon ? "polygon" : "radius";
-      const moneyBase =
-        MONEY_ELIGIBLE_BASE.has(classId) && deviceRowMoneyEligible(row.checkinFix) && deviceRowMoneyEligible(row.checkoutFix);
-      const capped = applyCourseCaps(badgeWeight0, geometryKind, row.courseDisambiguatedBy, moneyBase);
-      // The "worse" of the two fixes' grades — a dwell that rests even
-      // PARTLY on an unattestable fix should route to held_review; only if
-      // BOTH fixes are attested does the whole dwell count as attested.
-      const openGrade = resolveFixGrade(row.checkinFix.token);
-      const closeGrade = resolveFixGrade(row.checkoutFix.token);
-      const governingGrade: FixGrade = openGrade === "unattestable" || closeGrade === "unattestable" ? "unattestable" : openGrade;
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: capped.badgeWeight,
-        moneyEligible: capped.moneyEligible,
-        governingGrade,
-      });
-    }
-    case "file_import": {
-      const classId: EvidenceClassId = "file_import";
-      const badgeWeight0 = row.matchedRoute ? 0.4 : 0.1;
-      const group: EvidenceGroup = row.matchedRoute ? "device-gps" : "self";
-      const capped = applyCourseCaps(
-        badgeWeight0,
-        row.matchedRoute ? row.geometryKind : undefined,
-        row.courseDisambiguatedBy,
-        false,
-      );
-      return finish(row, {
-        classId,
-        group,
-        hard: false,
-        badgeWeight: capped.badgeWeight,
-        moneyEligible: false, // excluded (line 954)
-      });
-    }
-    case "foreground_checkin": {
-      const classId: EvidenceClassId = "foreground_checkin";
-      // Finding 1: the row's own date must match too, not just the fix's.
-      const rowDateOk = row.localDate === ctx.playLocalDate;
-      const gateOk = rowDateOk && deviceRowFixGateOk(row.fix, ctx.playFacilityId, ctx.playLocalDate, false);
-      if (!gateOk) {
-        return finish(row, {
-          classId,
-          group: GROUP[classId],
-          hard: false,
-          badgeWeight: 0,
-          moneyEligible: false,
-        });
-      }
-      const badgeWeight0 = WEIGHT[classId] * deviceFixMultiplier(row.fix);
-      const moneyBase = MONEY_ELIGIBLE_BASE.has(classId) && deviceRowMoneyEligible(row.fix);
-      const capped = applyCourseCaps(badgeWeight0, row.fix.geometryKind, row.courseDisambiguatedBy, moneyBase);
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: capped.badgeWeight,
-        moneyEligible: capped.moneyEligible,
-        governingGrade: resolveFixGrade(row.fix.token),
-      });
-    }
-    case "health_workout": {
-      const classId: EvidenceClassId = "health_workout";
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: WEIGHT[classId],
-        moneyEligible: false,
-      });
-    }
-    case "self_report": {
-      const classId: EvidenceClassId = "self_report";
-      return finish(row, {
-        classId,
-        group: GROUP[classId],
-        hard: false,
-        badgeWeight: WEIGHT[classId],
-        moneyEligible: false,
-      });
-    }
-  }
-}
 
 /* ------------------------------------------------------------------ */
 /* Receipt fingerprint voiding (should-fix, §4.4/§4.5 line 996)         */
@@ -987,6 +301,28 @@ function deriveGroups(evidence: Evidence[], contributions: ScorePlayContribution
   return evidence.map((_, i) => dsu.find(i));
 }
 
+/** Fourth re-gate, should-fix: picks ONE fix among every fix in `fixes`
+ * that satisfies `satisfies`, preferring an `attested` one when any exists
+ * — deterministic regardless of array order. When no `attested` candidate
+ * exists, every remaining satisfying fix is `unattestable` (a `failed`
+ * grade never satisfies `staffFixSatisfiesHardWindow`/
+ * `bookingFixSatisfiesHardWindow`, both of which require
+ * `isQualityCoSignalFix`), so the GRADE of whichever one is returned is
+ * itself order-independent even though the specific fix OBJECT picked
+ * among several unattestable ones is not — and grade is the only thing
+ * `governingGrade` (and therefore `computeHeldReview`) ever reads. Fixes
+ * the order-dependence the gate found: `[staffPresence({}),
+ * checkin(unattestable, +1 min), checkin(attested, +2 min)]` previously
+ * picked whichever check-in's fix came FIRST in the flattened search
+ * order (the unattestable one), while the reverse row order picked the
+ * attested one — both must resolve to the SAME `governingGrade`. */
+function pickBestSatisfyingFix(fixes: AppFix[], satisfies: (fix: AppFix) => boolean): AppFix | undefined {
+  const satisfying = fixes.filter(satisfies);
+  if (satisfying.length === 0) return undefined;
+  const attested = satisfying.find((fix) => resolveFixGrade(fix.token) === "attested");
+  return attested ?? satisfying[0];
+}
+
 /**
  * Collapses each derived group down to ONE contribution: if the group
  * contains (after absorption) a hard-eligible `staff_presence`/`booking`
@@ -1036,12 +372,14 @@ function resolveGroups(
     // the time we're here, "search the whole group" and "search only rows
     // legitimately correlated with this one" are the same set.
     //
-    // Should-fix (order dependence): collect every candidate first, then
-    // pick ONE winner by a rule that doesn't depend on which order the
-    // rows were passed in — the highest class WEIGHT (`staff_presence_hard`
-    // 0.95 beats `booking_hard` 0.90). The previous "last one processed
-    // wins" rule made `[staffHard, booking]` and `[booking, staffHard]`
-    // score differently for the identical evidence, just reordered.
+    // Should-fix (order dependence, group-level): collect every candidate
+    // first, then pick ONE winner by a rule that doesn't depend on which
+    // order the rows were passed in — the highest class WEIGHT
+    // (`staff_presence_hard` 0.95 beats `booking_hard` 0.90).
+    //
+    // Should-fix (order dependence, fix-level, fourth re-gate): the
+    // SATISFYING FIX itself is picked via `pickBestSatisfyingFix`
+    // (prefers `attested`), not `.find` — see that function's doc.
     interface HardCandidate {
       row: Evidence;
       contribution: ScorePlayContribution;
@@ -1053,12 +391,16 @@ function resolveGroups(
       const row = evidence[i]!;
       const contribution = contributions[i]!;
       if (row.source === "staff_presence") {
-        const satisfyingFix = idxs
-          .flatMap((j) => fixesOfRow(evidence[j]!))
-          .find((fix) => staffFixSatisfiesHardWindow(fix, row.scanAt, ctx));
+        const satisfyingFix = pickBestSatisfyingFix(
+          idxs.flatMap((j) => fixesOfRow(evidence[j]!)),
+          (fix) => staffFixSatisfiesHardWindow(fix, row.scanAt, ctx),
+        );
         if (satisfyingFix) candidates.push({ row, contribution, classId: "staff_presence_hard", satisfyingFix });
       } else if (row.source === "booking" && row.localDate === ctx.playLocalDate) {
-        const satisfyingFix = idxs.flatMap((j) => fixesOfRow(evidence[j]!)).find((fix) => bookingFixSatisfiesHardWindow(fix, ctx));
+        const satisfyingFix = pickBestSatisfyingFix(
+          idxs.flatMap((j) => fixesOfRow(evidence[j]!)),
+          (fix) => bookingFixSatisfiesHardWindow(fix, ctx),
+        );
         if (satisfyingFix) candidates.push({ row, contribution, classId: "booking_hard", satisfyingFix });
       }
     }
@@ -1070,17 +412,18 @@ function resolveGroups(
     const outputGroupId = resolved.length;
     if (candidates.length > 0) {
       // Should-fix: apply the §4.3 A2-01 user-pick exclusion BEFORE
-      // picking a winner, not after. `finish()` (below) strips
-      // `hard`/`moneyEligible` from a user-picked row's contribution — but
-      // the winner-selection comparison ran on the RAW class weight
-      // (0.95/0.90), so a user-picked staff-scan candidate could win over
-      // a non-user-picked booking candidate on raw weight, then get
-      // reduced to non-hard/non-money by `finish()`, DISCARDING the
-      // legitimate booking candidate along with it (each group produces
-      // exactly one contribution). A user-picked candidate's effective
-      // weight is treated as below every real weight (never `0` — two
-      // user-picked candidates still need to compare against each other
-      // for the `hard: false` fallthrough to at least be deterministic).
+      // picking a winner, not after. `finish()` (in `internal/classify.ts`)
+      // strips `hard`/`moneyEligible` from a user-picked row's
+      // contribution — but the winner-selection comparison ran on the RAW
+      // class weight (0.95/0.90), so a user-picked staff-scan candidate
+      // could win over a non-user-picked booking candidate on raw weight,
+      // then get reduced to non-hard/non-money by `finish()`, DISCARDING
+      // the legitimate booking candidate along with it (each group
+      // produces exactly one contribution). A user-picked candidate's
+      // effective weight is treated as below every real weight (never
+      // `0` — two user-picked candidates still need to compare against
+      // each other for the `hard: false` fallthrough to at least be
+      // deterministic).
       const effectiveWeight = (c: HardCandidate) => (c.row.courseDisambiguatedBy === "user" ? -1 : WEIGHT[c.classId]);
       let winner = candidates[0]!;
       for (const c of candidates) if (effectiveWeight(c) > effectiveWeight(winner)) winner = c;
@@ -1203,26 +546,6 @@ function qualifyingPresenceFixes(evidence: Evidence[], ctx: ScorePlayContext): A
 }
 
 /**
- * Should-fix / §7.5 row 3 / blocking finding 4: "the reward rests on an
- * `unattestable` co-signal -> `held_review` (C5 item 3)... it is never
- * refused." Scoped to ONLY the fix(es) that actually established the
- * winning result — never any unrelated fix sitting elsewhere in
- * `evidence[]` — per the gate's own wording: "compute the grade from the
- * fixes that actually establish hard status or the winning score."
- *
- *   - If `hardSignal` is what makes `money` true, look at ONLY the hard
- *     contribution's own `governingGrade` (the specific fix that satisfied
- *     its window — inline or absorbed, per `resolveGroups`).
- *   - Otherwise (money via `score_monetary >= MONEY_MIN`, no hard class),
- *     look at ONLY the contributions `combine`'s MONEY pipeline actually
- *     merged into that score (`moneyMerged`) — if any of THOSE grades
- *     `unattestable` and none grades `attested`, held.
- *
- * An unrelated attested fix elsewhere in the play (e.g. a check-in hours
- * later that has nothing to do with why this play reached `money`) must
- * never cancel this — that was the exact bug the gate found.
- */
-/**
  * Third re-gate, finding 1: `money = presence_signal && (hardSignal ||
  * score_monetary >= MONEY_MIN)` — `presence_signal` is an UNCONDITIONAL
  * requirement of `money`, not merely an optional booster, so whichever
@@ -1311,20 +634,20 @@ export interface ScorePlayResult {
  * §4.5's scorer, policy v1. Pure, deterministic, no I/O.
  */
 export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
-  // Finding 3 + blocking finding 2: drop any row whose OWN facility OR
-  // OWN date disagrees with the play being scored, before anything else
-  // runs — this is what stops a vendor round or a staff scan dated on a
-  // DIFFERENT day (no per-class date check ever ran for those classes)
-  // from contributing to this play at all. Every class-specific date check
-  // elsewhere in this module (booking's same-day presence, a receipt's
-  // same-date co-signal, a device row's own fix date) is additional,
-  // narrower anchoring on top of this blanket row-level filter — not a
-  // substitute for it.
+  // Finding 3 + blocking finding 2 (second re-gate): drop any row whose OWN
+  // facility OR OWN date disagrees with the play being scored, before
+  // anything else runs — this is what stops a vendor round or a staff scan
+  // dated on a DIFFERENT day from contributing to this play at all. Every
+  // class-specific date check elsewhere (booking's same-day presence, a
+  // receipt's same-date co-signal, a device row's own fix date, and now
+  // `classifyEvidenceRow`'s own `rowOk` defence-in-depth check) is
+  // additional, narrower anchoring on top of this blanket row-level filter
+  // — not a substitute for it.
   const evidence = voidDuplicateFingerprints(evidenceIn).filter(
     (row) => row.facilityId === ctx.playFacilityId && row.localDate === ctx.playLocalDate,
   );
 
-  const rawContributions = evidence.map((row) => classify(row, ctx));
+  const rawContributions = evidence.map((row) => classifyEvidenceRow(row, ctx));
   const groups = deriveGroups(evidence, rawContributions, ctx);
   const resolved = resolveGroups(evidence, rawContributions, groups, ctx);
   const playContributions = resolved.map((r) => r.contribution);

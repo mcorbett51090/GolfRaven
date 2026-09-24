@@ -4,7 +4,7 @@
  * fix in `src/score-play.ts` / `test/score-play-oracle.ts`.
  */
 import { describe, expect, it } from "vitest";
-import { classify, scorePlay, type Evidence } from "../src/score-play.js";
+import { scorePlay, type Evidence } from "../src/score-play.js";
 import {
   PLAY_FACILITY_ID,
   PLAY_LOCAL_DATE,
@@ -185,30 +185,11 @@ describe("Should-fix: the hard winner is chosen AFTER the user-pick cap, not bef
   });
 });
 
-describe("Defence-in-depth: class-level date/facility anchors inside classify(), unit-tested directly (bypassing scorePlay's top-level filter)", () => {
-  it("classify() alone rejects a booking row whose OWN localDate disagrees with ctx.playLocalDate", () => {
-    const row: Evidence = booking({ localDate: OFF_DATE, presenceFix: goodFix({ localDate: OFF_DATE, capturedAt: PLAY_LOCAL_DATE_MS - 24 * 60 * 60 * 1000 }) });
-    const contribution = classify(row, baseCtx());
-    expect(contribution.classId).toBe("booking_alone");
-    expect(contribution.hard).toBe(false);
-  });
-
-  it("classify() alone rejects a receipt row whose OWN localDate disagrees with ctx.playLocalDate", () => {
-    const row: Evidence = {
-      id: "r_off",
-      facilityId: PLAY_FACILITY_ID,
-      localDate: OFF_DATE,
-      source: "receipt_green_fee",
-      status: "approved",
-      coSignalFix: goodFix({ localDate: OFF_DATE, capturedAt: PLAY_LOCAL_DATE_MS - 24 * 60 * 60 * 1000 }),
-    };
-    const contribution = classify(row, baseCtx());
-    expect(contribution.moneyEligible).toBe(false);
-  });
-
-  it("classify() alone rejects a foreground_checkin row whose OWN localDate disagrees with ctx.playLocalDate", () => {
-    const row: Evidence = checkin({ localDate: OFF_DATE, fix: goodFix({ localDate: OFF_DATE, capturedAt: PLAY_LOCAL_DATE_MS - 24 * 60 * 60 * 1000 }) });
-    const contribution = classify(row, baseCtx());
-    expect(contribution.badgeWeight).toBe(0);
-  });
-});
+// Fourth re-gate: the defence-in-depth "class-level anchor, unit-tested
+// directly" block that used to live here moved to
+// `score-play-internal-classify.test.ts` (which also proves the classifier
+// is NOT part of the package's public surface) — those three tests were
+// rewritten there so the fix itself stays genuinely on-date/on-facility,
+// isolating the ROW-level anchor specifically (this file's old versions set
+// the FIX off-date too, so the fix-level check caught them first and the
+// row-level anchor was never actually exercised).
