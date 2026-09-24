@@ -20,3 +20,20 @@ append-only record.
 OSM via `scripts/seed-osm.mjs` (which will write `unverified` facility/course
 stubs here and their OSM content to `data/osm/`), verified and gated through
 `tools/catalog`'s `verify-catalog` (build plan §4, §10, §15).
+
+**`data/achievements/*.json` (part B, §8.1).** Unlike the rest of this
+directory, these 18 files ARE real, standalone content — one file per
+§8.1 badge threshold (`AchievementDefSchema`, `packages/catalog/src/rule-expr.ts`),
+every `rule` a `RuleExpr` written out exactly as §8.1 gives it (R-01–R-13;
+R-14, the §9.5 offer, is not here — its `RuleExpr` lives on the DB-side
+offer instance, never in `AchievementDef`). They reference synthetic
+trail/course/designer ids (no real trail/facility content exists yet to
+reference), so they are validated INDEPENDENTLY of the ledger/bundle
+pipeline the rest of this file's content will eventually go through —
+`validateAchievementFile` (`tools/catalog/src/verify-catalog.ts`) checks
+each file's schema and its `RuleExpr` static-checker verdict (`badge`
+mode) only, with no cross-record/ledger requirement. See
+`tools/catalog/test/achievements-data.test.ts`, which scans this real
+directory the same way `verify-contract.test.ts` scans the real committed
+contract file. Once real trail/facility content exists, these files'
+synthetic ids should be repointed at real ones.

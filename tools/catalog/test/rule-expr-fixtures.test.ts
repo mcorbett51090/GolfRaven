@@ -16,14 +16,20 @@
  * against `data/achievements/*.json` — see `achievements-data.test.ts`.
  */
 import { describe, expect, it } from "vitest";
-import { RuleExprSchema, mintId, type RuleExpr } from "@golfraven/catalog";
+import {
+  RuleExprSchema,
+  mintId,
+  type CourseId,
+  type DesignerId,
+  type RuleExpr,
+  type TrailId,
+} from "@golfraven/catalog";
 import { checkRuleExpr } from "@golfraven/rules";
 
-const TRL = mintId("trl");
-const TRL2 = mintId("trl");
-const CRS = mintId("crs");
-const CRS_F = mintId("crs");
-const DSG = mintId("dsg");
+const TRL = mintId("trl") as TrailId;
+const CRS = mintId("crs") as CourseId;
+const CRS_F = mintId("crs") as CourseId;
+const DSG = mintId("dsg") as DesignerId;
 
 interface Verdict {
   ok: boolean;
