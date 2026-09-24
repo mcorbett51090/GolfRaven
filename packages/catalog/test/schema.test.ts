@@ -4,6 +4,7 @@ import {
   CourseSchema,
   FacilitySchema,
   OfferTermsSchema,
+  RegionCodeSchema,
   RosterMemberSchema,
   RosterVersionSchema,
   SourceSchema,
@@ -322,5 +323,36 @@ describe("S6: OfferTermsSchema (no RuleExpr field — see schema.ts module doc)"
       rule: { and: [] },
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("round 2 (gate review): composite rejects the same course twice", () => {
+  it("accepts two distinct courses", () => {
+    expect(
+      CompositeSchema.safeParse([
+        "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "crs_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      ]).success,
+    ).toBe(true);
+  });
+  it("rejects [X, X] — the same course composed with itself", () => {
+    expect(
+      CompositeSchema.safeParse([
+        "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "crs_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      ]).success,
+    ).toBe(false);
+  });
+});
+
+describe("round 2 (gate review): RegionCodeSchema validates against a pinned list", () => {
+  it("accepts a real US state code", () => {
+    expect(RegionCodeSchema.safeParse("US-TN").success).toBe(true);
+  });
+  it("accepts a real Canadian province code", () => {
+    expect(RegionCodeSchema.safeParse("CA-QC").success).toBe(true);
+  });
+  it("rejects a shape-valid but non-existent code (US-ZZ)", () => {
+    expect(RegionCodeSchema.safeParse("US-ZZ").success).toBe(false);
   });
 });

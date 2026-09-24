@@ -159,3 +159,43 @@ correct. They do not exercise the real `scripts/seed-osm.mjs` pipeline
 actually emits never overwrites a verified field`, is left in that file
 under exactly that name so it shows up in `vitest run`'s skip list as a
 standing reminder, rather than this limitation only living in a report.
+
+## Round 2 (gate review, post-2ad202f)
+
+- **Time zones.** `packages/catalog/src/geo.ts`'s `tzLikelyContainsCoordinates`
+  now (1) canonicalizes both `tz-lookup`'s answer and the facility's
+  declared `tz` through a vendored tzdb backward-links table
+  (`packages/catalog/src/tzdb-backward-links.json`, pinned to tzdb
+  `2026d`, sourced from the `tzdata-backward` npm package), so a legacy
+  alias (`America/Indianapolis`) or a pre-2022-merge Canadian name
+  `tz-lookup`'s bundled data still returns (`America/Thunder_Bay`,
+  `America/Pangnirtung`) compares equal to its modern canonical name; and
+  (2) accepts a ~5 km border tolerance by also looking up 4 points offset
+  north/south/east/west of the declared coordinate, so a point `tz-lookup`'s
+  simplified polygons misattribute near a real boundary (Rainy River, ON
+  reads as `America/Chicago`) still passes if the correct zone shows up
+  within 5 km. `IanaTimeZoneSchema` no longer uses
+  `Intl.supportedValuesOf('timeZone')`.
+- **`TZ_UNVERIFIABLE`.** A facility with no coordinates of its own AND no
+  OSM join now fails closed with this code, instead of the tz check being
+  silently skipped.
+- **Merge re-parenting (§4.2 row 2).** `mergeIntoSurvivor` now moves a
+  merged facility's course(s) under the survivor (updates each course's
+  `facilityId` link; the course's own id never changes).
+  `findLedgerIdBySeedRef` prefers the course entry that actually carries a
+  ref (resolved through its own `mergedInto`), so a survivor with more
+  than one course (its own + a re-parented one) resolves each ref to the
+  RIGHT course, not just "any" course under that facility.
+- **Ledger append-only, extended.** `checkLedgerAppendOnly` also forbids
+  changing a published slug (`LEDGER_SLUG_CHANGED`) and removing/rewriting
+  a `seedRefs[]` entry (`LEDGER_SEEDREFS_REMOVED`) vs `--base`.
+- **`LEDGER_MERGE_CYCLE`.** `resolveMergedId` no longer throws on a cycle
+  (it stops and returns a best-effort id); `detectMergeCycle` + a new
+  `checkMergeCycles` gate check report a cycle as an ordinary issue
+  instead of crashing the run.
+- **Nits.** `CompositeSchema` rejects `[X, X]`; `RegionCodeSchema` now
+  validates against a pinned ISO 3166-2 US/CA list
+  (`packages/catalog/src/region-codes.json`, 69 codes) instead of a
+  shape-only regex; `ROSTER_LATEST_CONTAINS_CLOSED_FACILITY` catches a
+  closed Facility in the latest roster (previously only `Course.closed`
+  was checked).

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  detectMergeCycle,
   emptyLedger,
+  findLedgerIdBySeedRef,
   mergeIntoSurvivor,
   mintSlug,
   mintStubFacility,
@@ -438,5 +440,85 @@ describe("S9 (gate review post-e9b3ab0): proximity without a name match is ambig
       [candidate],
     );
     expect(outcome.kind).toBe("ambiguous");
+  });
+});
+
+describe("item 3 (gate review round 2): merge re-parenting (§4.2 row 2)", () => {
+  it("mergeIntoSurvivor re-parents the merged facility's course(s) under the survivor", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    expect(b.ledger.entries[b.courseId]?.facilityId).toBe(b.facilityId);
+
+    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+
+    // The course's own id is unchanged; only its facilityId link moves.
+    expect(merged.entries[b.courseId]).toBeDefined();
+    expect(merged.entries[b.courseId]?.facilityId).toBe(a.facilityId);
+    expect(merged.entries[b.facilityId]?.tombstoned).toBe(true);
+  });
+
+  it("findLedgerIdBySeedRef resolves a merged facility's ref to {survivor facility, ORIGINAL course}", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+
+    const found = findLedgerIdBySeedRef(merged, "way/2");
+    expect(found?.facilityId).toBe(a.facilityId); // the survivor
+    expect(found?.courseId).toBe(b.courseId); // b's OWN course, re-parented — not a.courseId
+  });
+
+  it("does not confuse the survivor's own course with the re-parented one when both exist", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+
+    // The survivor "a" now has TWO courses under it: its own (a.courseId)
+    // and the re-parented one (b.courseId). Looking up each ref must
+    // return the course that ref actually belongs to, not just "any"
+    // course under the survivor facility.
+    expect(findLedgerIdBySeedRef(merged, "way/1")?.courseId).toBe(a.courseId);
+    expect(findLedgerIdBySeedRef(merged, "way/2")?.courseId).toBe(b.courseId);
+  });
+
+  it("splitCourse's siblings inherit the kept course's facilityId (unaffected by re-parenting)", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const { ledger, siblingIds } = splitCourse(a.ledger, a.courseId, 2, meta);
+    for (const siblingId of siblingIds) {
+      expect(ledger.entries[siblingId]?.facilityId).toBe(a.facilityId);
+    }
+  });
+});
+
+describe("nit (gate review round 2): a mergedInto cycle is reported, not thrown", () => {
+  it("resolveMergedId stops and returns a value instead of throwing on a self-cycle", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const corrupted: IdLedger = {
+      entries: {
+        ...a.ledger.entries,
+        [a.facilityId]: {
+          ...a.ledger.entries[a.facilityId]!,
+          mergedInto: a.facilityId,
+          tombstoned: true,
+        },
+      },
+    };
+    expect(() => resolveMergedId(corrupted, a.facilityId)).not.toThrow();
+    expect(resolveMergedId(corrupted, a.facilityId)).toBe(a.facilityId);
+  });
+
+  it("detectMergeCycle reports true for a self-cycle and false for a normal chain", () => {
+    const a = mintStubFacility(emptyLedger(), { osmRef: "way/1", desiredSlug: "site-a", ...meta });
+    const b = mintStubFacility(a.ledger, { osmRef: "way/2", desiredSlug: "site-b", ...meta });
+    const merged = mergeIntoSurvivor(b.ledger, [b.facilityId], a.facilityId, meta);
+    expect(detectMergeCycle(merged, b.facilityId)).toBe(false);
+
+    const corrupted: IdLedger = {
+      entries: {
+        ...merged.entries,
+        [a.facilityId]: { ...merged.entries[a.facilityId]!, mergedInto: b.facilityId },
+      },
+    };
+    // Now a -> b -> a: a genuine cycle.
+    expect(detectMergeCycle(corrupted, a.facilityId)).toBe(true);
   });
 });

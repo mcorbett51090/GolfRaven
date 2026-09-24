@@ -362,4 +362,62 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
     expectExactFail("mf-bundle-cannot-self-allow-booking-host", [
       { code: "SCHEMA_INVALID", path: "<root>" },
     ]));
+
+  // --- Round 2 (gate review) ---
+
+  it("item 2: the ledger must not change a published slug vs --base", () =>
+    expectExactFail(
+      "mf-ledger-slug-changed",
+      [
+        {
+          code: "LEDGER_SLUG_CHANGED",
+          path: "idLedger.entries.fac_01M39GMFJZYF7W9HXMEC5V7FJ8.slug",
+        },
+      ],
+      { base: "mf-ledger-slug-changed.base" },
+    ));
+
+  it("item 2: the ledger must not remove a seedRef vs --base", () =>
+    expectExactFail(
+      "mf-ledger-seedrefs-removed",
+      [
+        {
+          code: "LEDGER_SEEDREFS_REMOVED",
+          path: "idLedger.entries.fac_01M39GMFJZYF7W9HXMEC5V7FJ8.seedRefs",
+        },
+      ],
+      { base: "mf-ledger-seedrefs-removed.base" },
+    ));
+
+  it("nit: a closed FACILITY in the latest roster fails, not just a closed course", () =>
+    expectExactFail("mf-closed-facility-in-latest", [
+      {
+        code: "ROSTER_LATEST_CONTAINS_CLOSED_FACILITY",
+        path: "trails[0].rosterVersions[0].members[0]",
+      },
+    ]));
+
+  it("nit: composite rejects the same course listed twice", () =>
+    expectExactFail("mf-composite-same-course", [
+      { code: "SCHEMA_INVALID", path: "facilities[0].courses[0].composite" },
+    ]));
+
+  it("nit: region code validated against the pinned US/CA list (US-ZZ)", () =>
+    expectExactFail("mf-region-not-pinned", [
+      { code: "SCHEMA_INVALID", path: "facilities[0].region" },
+    ]));
+
+  it("nit: a mergedInto cycle is reported as an issue, never thrown", () =>
+    expectExactFail("mf-ledger-merge-cycle", [
+      { code: "REUSED_TOMBSTONED_ID", path: "facilities[0].courses[0].id" },
+      {
+        code: "LEDGER_MERGE_CYCLE",
+        path: "idLedger.entries.crs_01M39GMFJZ2P89V3ZZXPPH671T.mergedInto",
+      },
+    ]));
+
+  it("item 4: a stub with no coordinates and no OSM join fails closed (TZ_UNVERIFIABLE)", () =>
+    expectExactFail("mf-tz-unverifiable", [
+      { code: "TZ_UNVERIFIABLE", path: "facilities[0].tz" },
+    ]));
 });

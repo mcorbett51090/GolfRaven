@@ -2,7 +2,7 @@
   "name": "@golfraven/catalog",
   "private": true,
   "version": "0.0.0",
-  "description": "GolfRaven catalog schema SSOT: the §4.1 Zod schema (Facility/Course/Trail/RosterVersion/etc.) plus the ID ledger, minted by tools/catalog's verify-contract into contract/catalog.schema.json (build plan §3.1 row A, §4.1). P1a scope: AchievementDef/OfferTerms and loadCatalog() are not yet implemented (part B / a later P1 step).",
+  "description": "GolfRaven catalog schema SSOT: the §4.1 Zod schema (Facility/Course/Trail/RosterVersion/OfferTerms/etc.) plus the ID ledger, minted by tools/catalog's verify-contract into contract/catalog.schema.json (build plan §3.1 row A, §4.1). Includes vendored tzdb-backward-links.json and region-codes.json for pinned tz/region validation. P1a scope: AchievementDef and loadCatalog() are not yet implemented (part B / a later P1 step).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

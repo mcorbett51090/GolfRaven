@@ -429,7 +429,6 @@
           "type": "object"
         },
         "region": {
-          "pattern": "^(US|CA)-[A-Z]{2,3}$",
           "type": "string"
         },
         "seed": {
@@ -594,7 +593,6 @@
       "additionalProperties": false,
       "properties": {
         "code": {
-          "pattern": "^(US|CA)-[A-Z]{2,3}$",
           "type": "string"
         },
         "country": {
@@ -1027,7 +1025,6 @@
         },
         "regions": {
           "items": {
-            "pattern": "^(US|CA)-[A-Z]{2,3}$",
             "type": "string"
           },
           "minItems": 1,
