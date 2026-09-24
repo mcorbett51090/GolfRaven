@@ -246,6 +246,19 @@ CREATE TABLE IF NOT EXISTS storage.objects (
   metadata jsonb
 );
 
+-- migration_owner (S1, gate round 3) is made the OWNER of storage.objects
+-- (not storage.buckets, which needs no policy of its own for
+-- private_definer -- see the grant+policy pair below instead): CREATE
+-- POLICY requires the CURRENT role to own the target table (confirmed
+-- empirically this session -- "must be owner of table objects" without
+-- this), and 0016_private_definer.sql, running as migration_owner in
+-- restricted mode, creates private_definer's own storage.objects policy
+-- (delete_my_data's receipt-object cleanup). This changes nothing for
+-- anon/authenticated/service_role's own grants below, and nothing under
+-- HARNESS_MODE=superuser (postgres bypasses ownership checks for DDL
+-- regardless of who owns the table).
+ALTER TABLE storage.objects OWNER TO migration_owner;
+
 ALTER TABLE storage.buckets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.buckets FORCE ROW LEVEL SECURITY;
 ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
