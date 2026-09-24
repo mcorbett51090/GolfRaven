@@ -248,6 +248,25 @@ export function assertInformationalInputAllowed(
   }
 }
 
+/**
+ * Round-3 Opus-gate correction (post-8e5a29b): refuses (throws) when `os`
+ * is already bound (has a SHA-256 recorded) but its input wasn't supplied
+ * this run (`inputProvided: false`) — decision 0005 needs every bound OS's
+ * input recomputed, every time; the overall result is never guessed from a
+ * partial picture. A no-op when `os` isn't bound (nothing to recompute) or
+ * when its input WAS supplied.
+ */
+export function assertBoundInputProvided(dates: RecordedExportDates, os: X1Os, inputProvided: boolean): void {
+  if (!inputProvided && dates[os].sha256 !== null) {
+    const osLabel = osLabelOf(os);
+    throw new Error(
+      `docs/p0/X1.md shows ${osLabel} as already bound (a SHA-256 is recorded), but its input was not ` +
+        "supplied this run — refusing a recorded run: decision 0005 needs every bound OS's input recomputed, " +
+        "every time.",
+    );
+  }
+}
+
 /** Extracts a `YYYY-MM-DD` UTC calendar date out of any string `Date` can
  * parse (Apple's `ExportDate` value, e.g. "2026-09-21 09:00:00 -0400", or
  * the Android reader's ISO `generatedAt`). Throws on an unparseable

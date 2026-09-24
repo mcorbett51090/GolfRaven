@@ -42,6 +42,12 @@ export interface GolfSessionSummary {
 
 /** The full result written out as the X1 memo's evidence JSON. */
 export interface GolfSessionReadResult {
+  /** Which OS produced this read — literal `"android"`, since this is the
+   * Health Connect (Android) reader. Emitted by the reader itself so a
+   * downstream consumer (P0-X1's `x1-verdict`) can bind and verify the
+   * OS a raw output file came from without a hand-added annotation
+   * (decision 0005, round-3 correction). */
+  os: "android";
   /** ISO 8601 timestamp of when this read ran. */
   generatedAt: string;
   /** How many days back the read window covered. */

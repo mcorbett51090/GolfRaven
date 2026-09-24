@@ -88,6 +88,7 @@ import {
   type RoundWindow,
 } from "./round-windows.js";
 import {
+  assertBoundInputProvided,
   assertExportDateMatches,
   assertInformationalInputAllowed,
   assertRecordedExportDateLogged,
@@ -715,12 +716,11 @@ export function renderVerdictMarkdown(result: X1VerdictResult): string {
 }
 
 interface CliArgs {
-  iosPath: string;
-  androidPath: string;
+  iosExportDir: string | undefined;
+  androidPath: string | undefined;
   followUpsPath?: string;
   sourceMapPath: string;
   outPrefix: string;
-  os: X1Os;
   informational: boolean;
 }
 
@@ -739,29 +739,24 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
   const {
-    ios,
-    android,
+    "ios-export": iosExportDir,
+    android: androidPath,
     "follow-ups": followUps,
     "source-map": sourceMap,
     out,
-    os,
   } = opts;
-  if (!ios || !android || !sourceMap || !os) {
+  if (!sourceMap || (!iosExportDir && !androidPath)) {
     throw new Error(
-      "Usage: node dist/x1-verdict.js --ios <x1-ios-export.json> --android <health-connect-reader.json> " +
-        "--source-map <source-map.json> --os ios|android [--follow-ups <follow-ups.json>] " +
-        "[--informational] [--out <prefix>]",
+      "Usage: node dist/x1-verdict.js [--ios-export <apple_health_export-dir>] [--android <health-connect-reader.json>] " +
+        "--source-map <source-map.json> [--follow-ups <follow-ups.json>] [--informational] [--out <prefix>] " +
+        "(at least one of --ios-export / --android is required)",
     );
   }
-  if (os !== "ios" && os !== "android") {
-    throw new Error(`--os must be "ios" or "android", got "${os}".`);
-  }
   return {
-    iosPath: ios,
-    androidPath: android,
+    iosExportDir: iosExportDir || undefined,
+    androidPath: androidPath || undefined,
     sourceMapPath: sourceMap,
     outPrefix: out || "x1-verdict-result",
-    os,
     informational: flags.has("informational"),
     ...(followUps ? { followUpsPath: followUps } : {}),
   };
@@ -775,16 +770,44 @@ function osLabel(os: X1Os): string {
   return os === "ios" ? "iOS" : "Android";
 }
 
+/**
+ * Round-3 Opus-gate correction (post-8e5a29b): "The overall result is a
+ * pass if any bound OS recomputes to a pass" — combines whatever this run
+ * actually recomputed (never read back from a markdown line). `boundResults`
+ * holds 0, 1, or 2 entries (`main()` refuses a recorded run with 0 before
+ * this is ever called).
+ */
+export function computeOverallFromBoundResults(boundResults: Partial<Record<X1Os, "pass" | "kill">>): "pass" | "kill" {
+  return Object.values(boundResults).includes("pass") ? "pass" : "kill";
+}
+
+const EMPTY_IOS: X1IosExportResult = {
+  generatedAt: new Date(0).toISOString(),
+  exportDir: "",
+  since: null,
+  roundWindows: [],
+  totalWorkoutElementsSeen: 0,
+  golfWorkoutCount: 0,
+  workouts: [],
+  sourceSummaries: [],
+  exportDate: null,
+  exportSha256: "",
+  warnings: [],
+};
+
+const EMPTY_ANDROID: X1VerdictInput["android"] = {
+  generatedAt: new Date(0).toISOString(),
+  windowDays: 0,
+  sessionCount: 0,
+  sessions: [],
+  os: "android",
+};
+
 async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const { resolve, join } = await import("node:path");
+  const { runX1IosExport } = await import("./x1-ios-export.js");
 
-  // Opus-gate correction (post-d0de4b8), stamp EVERY input file's path +
-  // SHA-256 into the output provenance, not just docs/p0/X1.md.
-  const iosRaw = await readFile(args.iosPath, "utf8");
-  const ios = JSON.parse(iosRaw) as X1VerdictInput["ios"];
-  const androidRaw = await readFile(args.androidPath, "utf8");
-  const android = JSON.parse(androidRaw) as X1VerdictInput["android"];
   const sourceMapRaw = await readFile(args.sourceMapPath, "utf8");
   const sourceMap = JSON.parse(sourceMapRaw) as SourceMap;
   let followUpsRaw: string | undefined;
@@ -795,156 +818,156 @@ async function main(argv: string[]): Promise<void> {
       >)
     : undefined;
 
-  // Round-2 Opus-gate correction: "The Android reader output must carry os
-  // and generatedAt" — a basic shape/operator-error guard (NOT a trust
-  // mechanism; see the module doc), checked unconditionally.
-  if (android.os !== "android") {
-    throw new Error(
-      `--android's JSON has os = ${JSON.stringify(android.os)}, not "android" — this doesn't look like the ` +
-        "Android Health Connect reader's output (wrong file passed to --android?).",
-    );
-  }
-
   const roundWindows = await readLoggedRoundWindows();
   const { dates: recordedExportDates, source: x1DocSource } = await readRecordedExportDates();
   const recorded = !args.informational;
-  if (recorded) {
-    assertRecordedExportDateLogged(recordedExportDates, args.os);
-  } else {
-    // Round-2 Opus-gate correction: refuse --informational too, in the
-    // window between the UTC date being logged and its hash being bound.
-    assertNoInformationalPeeking(recordedExportDates, args.os);
+
+  // Round-3 Opus-gate correction (post-8e5a29b): no `--os` flag any more —
+  // each OS is processed if (and only if) its input flag was supplied.
+  // `iosData`/`androidData` feed the INFORMATIONAL combined view below,
+  // regardless of recorded/informational; `boundResults` holds only what
+  // was actually verified-and-recomputed THIS run, for a recorded run.
+  let iosData: X1IosExportResult | null = null;
+  let androidData: X1VerdictInput["android"] | null = null;
+  let androidRaw: string | null = null;
+  const boundResults: Partial<Record<X1Os, "pass" | "kill">> = {};
+  let iosBoundThisRun = false;
+  let androidBoundThisRun = false;
+  let exportXmlProvenance: { path: string; sha256: string } | null = null;
+
+  if (args.iosExportDir) {
+    if (!recorded) {
+      // No informational runs on real data while iOS is unbound (whether
+      // its UTC date is blank or logged) — fixtures only.
+      assertInformationalInputAllowed(recordedExportDates, "ios", args.iosExportDir);
+    }
+    const freshIos = await runX1IosExport(args.iosExportDir, { roundWindows });
+    iosData = freshIos;
+    exportXmlProvenance = { path: join(args.iosExportDir, "export.xml"), sha256: freshIos.exportSha256 };
+
+    if (recorded) {
+      assertRecordedExportDateLogged(recordedExportDates, "ios");
+      if (freshIos.exportDate === null) {
+        throw new Error(
+          `export.xml at ${join(args.iosExportDir, "export.xml")} has no <ExportDate> element — refusing a ` +
+            "recorded run: decision 0005 requires binding to one specific export, and there is nothing to " +
+            "compare against docs/p0/X1.md's logged UTC date. Pass --informational to run anyway.",
+        );
+      }
+      // Re-hash export.xml and check it against the bound SHA-256, THEN
+      // (only once that's confirmed) use its re-parsed workouts.
+      assertExportDateMatches(recordedExportDates, "ios", extractCalendarDate(freshIos.exportDate));
+      const { written } = await bindExportHash(x1DocSource.path, "ios", freshIos.exportSha256);
+      iosBoundThisRun = written;
+      const r = computeX1Verdict({ ios: freshIos, android: EMPTY_ANDROID, sourceMap, roundWindows });
+      boundResults.ios = r.recordedVerdicts.ios.verdict;
+    }
+  } else if (recorded) {
+    // iOS is bound but its input wasn't supplied — refusing rather than
+    // guessing the overall result from a partial picture.
+    assertBoundInputProvided(recordedExportDates, "ios", false);
   }
 
+  if (args.androidPath) {
+    // Basic shape validation runs FIRST, regardless of recorded/
+    // informational — a structurally wrong file is refused before any
+    // trust-related check even considers it.
+    androidRaw = await readFile(args.androidPath, "utf8");
+    const androidParsed = JSON.parse(androidRaw) as X1VerdictInput["android"];
+    if (androidParsed.os !== "android") {
+      throw new Error(
+        `--android's JSON has os = ${JSON.stringify(androidParsed.os)}, not "android" — this doesn't look ` +
+          "like the Android Health Connect reader's output (wrong file passed to --android?).",
+      );
+    }
+    if (!androidParsed.generatedAt) {
+      throw new Error(
+        "--android's JSON has no generatedAt — this doesn't look like the Android Health Connect reader's " +
+          "output (wrong file passed to --android?).",
+      );
+    }
+    if (!recorded) {
+      assertInformationalInputAllowed(recordedExportDates, "android", args.androidPath);
+    }
+    androidData = androidParsed;
+
+    if (recorded) {
+      assertRecordedExportDateLogged(recordedExportDates, "android");
+      // Re-hash the reader-output JSON and check it against the bound
+      // SHA-256, THEN (only once that's confirmed) use its parsed sessions.
+      assertExportDateMatches(recordedExportDates, "android", extractCalendarDate(androidParsed.generatedAt));
+      const { written } = await bindExportHash(x1DocSource.path, "android", sha256Of(androidRaw));
+      androidBoundThisRun = written;
+      const r = computeX1Verdict({ ios: EMPTY_IOS, android: androidParsed, sourceMap, roundWindows });
+      boundResults.android = r.recordedVerdicts.android.verdict;
+    }
+  } else if (recorded) {
+    assertBoundInputProvided(recordedExportDates, "android", false);
+  }
+
+  if (recorded && Object.keys(boundResults).length === 0) {
+    throw new Error(
+      "Nothing to record: no OS has both a logged UTC date and its input supplied this run. Log a UTC date " +
+        'in docs/p0/X1.md\'s "## Recorded export" section for the OS you\'re binding, and pass its ' +
+        "--ios-export/--android input.",
+    );
+  }
+
+  // INFORMATIONAL combined view (perSource/sourcesPassingByOs/countedEntries/
+  // etc.) — always computed, from whichever real data was supplied (an
+  // omitted OS renders as an empty placeholder, informationally harmless).
   const result = computeX1Verdict({
-    ios,
-    android,
+    ios: iosData ?? EMPTY_IOS,
+    android: androidData ?? EMPTY_ANDROID,
     sourceMap,
     roundWindows,
     ...(androidRouteFollowUps ? { androidRouteFollowUps } : {}),
   });
 
-  // Round-2 Opus-gate correction (post-67bdb27): a recorded run evaluates
-  // ONLY its own OS. The OTHER os's input, whatever it claims, is never
-  // checked, never bound, and never treated as recorded here — it only
-  // ever appears in `result`'s informational sections.
-  let thisOsResult: X1RecordedResult | null = null;
-  let recordedOverall: X1RecordedResult | "pending" | null = null;
-  let boundSomething = false;
-  let freshExportXmlSha256: string | null = null;
-  if (recorded) {
-    // Bind THIS os's export to one specific file, computing its calendar
-    // date and SHA-256 FRESH from the real source — never trusting a
-    // self-reported `exportDate`/`exportSha256`/`recorded`/`os` field
-    // inside the --ios/--android JSON (point 4, "don't trust the JSON's
-    // own fields").
-    let exportCalendarDate: string;
-    let exportSha256: string;
-    // Should-fix 4's deeper form: for iOS, the SHA-256 covers export.xml,
-    // a DIFFERENT file from --ios's JSON — so hash-binding alone does NOT
-    // catch a --ios JSON whose `workouts` field was hand-edited while
-    // `exportDir` still points at the real, unmodified export.xml. Closing
-    // that gap means never trusting `ios.workouts` for the recorded
-    // verdict either: re-derive it, completely fresh, from export.xml
-    // itself (`runX1IosExport`, ignoring the passed-in --ios JSON's own
-    // `workouts`/`sourceSummaries`/etc. entirely for this computation).
-    let freshIosForVerdict: X1IosExportResult | null = null;
-    if (args.os === "ios") {
-      const { parseHealthExportXml } = await import("./health-export-xml.js");
-      const { runX1IosExport } = await import("./x1-ios-export.js");
-      const xmlPath = join(ios.exportDir, "export.xml");
-      const parsed = await parseHealthExportXml(xmlPath);
-      if (parsed.exportDate === null) {
-        throw new Error(
-          `export.xml at ${xmlPath} (from --ios's exportDir) has no <ExportDate> element — refusing a ` +
-            "recorded run: decision 0005 requires binding to one specific export, freshly re-read, and there " +
-            "is nothing to compare against docs/p0/X1.md's logged date. Pass --informational to run anyway.",
-        );
-      }
-      exportCalendarDate = extractCalendarDate(parsed.exportDate);
-      exportSha256 = await hashFile(xmlPath);
-      freshExportXmlSha256 = exportSha256;
-      freshIosForVerdict = await runX1IosExport(ios.exportDir, { roundWindows });
-    } else {
-      exportCalendarDate = extractCalendarDate(android.generatedAt);
-      exportSha256 = sha256Of(androidRaw);
-    }
-    assertExportDateMatches(recordedExportDates, args.os, exportCalendarDate);
-    await assertGitIntegrity(x1DocSource.path, args.os);
-    const { written: hashWritten } = await bindExportHash(x1DocSource.path, args.os, exportSha256);
-
-    // This OS's own recorded X1 verdict — computed from THIS OS's data
-    // alone. For Android, the whole --android FILE is what's hashed and
-    // bound, so any tampering of its `sessions` is already caught by the
-    // hash check above on a re-run; `result.recordedVerdicts.android` is
-    // safe to reuse. For iOS, recompute against the FRESH, independently
-    // re-parsed export.xml data instead of `result.recordedVerdicts.ios`
-    // (which came from the possibly-tampered --ios JSON's own `workouts`).
-    if (args.os === "ios") {
-      const androidPlaceholder: X1VerdictInput["android"] = {
-        generatedAt: new Date(0).toISOString(),
-        windowDays: 0,
-        sessionCount: 0,
-        sessions: [],
-        os: "android",
-      };
-      const freshResult = computeX1Verdict({
-        ios: freshIosForVerdict!,
-        android: androidPlaceholder,
-        sourceMap,
-        roundWindows,
-      });
-      assertIosWorkoutDataNotTampered(result.recordedVerdicts.ios.verdict, freshResult.recordedVerdicts.ios.verdict);
-      thisOsResult = freshResult.recordedVerdicts.ios.verdict;
-    } else {
-      thisOsResult = result.recordedVerdicts.android.verdict;
-    }
-    // Written once, durably, so it combines with the OTHER os's run
-    // without either ever seeing the other's data.
-    const { written: resultWritten } = await writeRecordedResult(x1DocSource.path, args.os, thisOsResult);
-    boundSomething = hashWritten || resultWritten;
-
-    const { dates: finalDates } = await readRecordedExportDates(x1DocSource.path);
-    recordedOverall = computeOverallX1Result(finalDates);
-  }
-
   let recordedSection = "";
   if (recorded) {
-    recordedSection =
-      `## Recorded verdict, per OS\n\n` +
-      `**X1 recorded on ${osLabel(args.os)}: ${thisOsResult!.toUpperCase()}** (this OS's own data alone, ` +
-      "git-verified export binding).\n\n" +
-      `**X1 overall recorded result: ${recordedOverall!.toUpperCase()}** (combines this run's just-recorded ` +
-      `result with whatever docs/p0/X1.md already had stored for the other OS — "pending" means the other ` +
-      "OS hasn't recorded a result yet; pass if either OS's own recorded run passed).\n\n" +
-      (boundSomething
-        ? "This run bound new state into docs/p0/X1.md — **commit docs/p0/X1.md now**.\n\n"
-        : "");
+    const lines: string[] = ["## Recorded verdict, per OS", ""];
+    for (const os of ["ios", "android"] as const) {
+      const r = boundResults[os];
+      lines.push(
+        r !== undefined
+          ? `**X1 recorded on ${osLabel(os)}: ${r.toUpperCase()}** (recomputed fresh from the bound file this run).`
+          : `**X1 recorded on ${osLabel(os)}: not attempted this run** (no bound hash, and no input supplied).`,
+      );
+    }
+    const overall = computeOverallFromBoundResults(boundResults);
+    lines.push("");
+    lines.push(
+      `**X1 overall recorded result: ${overall.toUpperCase()}** (pass if any bound OS recomputes to a pass).`,
+    );
+    if (iosBoundThisRun || androidBoundThisRun) {
+      lines.push("");
+      lines.push("This run bound new state into docs/p0/X1.md — **commit and push docs/p0/X1.md now**.");
+    }
+    recordedSection = `${lines.join("\n")}\n\n`;
   }
-  const banner = recorded ? "" : `${informationalBanner(args.os)}\n\n`;
+  const banner = recorded
+    ? ""
+    : "> **INFORMATIONAL — NOT THE RECORDED X1 RESULT.**\n" +
+      "> Decision 0005: this run never binds or verifies anything against docs/p0/X1.md; it never replaces " +
+      "the recorded result and is not the P0 verdict.\n\n";
   const md = recordedSection + banner + renderVerdictMarkdown(result);
 
   const provenance = {
     x1Doc: x1DocSource,
-    iosJson: { path: resolve(args.iosPath), sha256: sha256Of(iosRaw) },
-    androidJson: { path: resolve(args.androidPath), sha256: sha256Of(androidRaw) },
+    exportXml: exportXmlProvenance,
+    androidJson:
+      args.androidPath && androidRaw !== null
+        ? { path: resolve(args.androidPath), sha256: sha256Of(androidRaw) }
+        : null,
     sourceMapJson: { path: resolve(args.sourceMapPath), sha256: sha256Of(sourceMapRaw) },
     followUpsJson:
       args.followUpsPath && followUpsRaw !== undefined
         ? { path: resolve(args.followUpsPath), sha256: sha256Of(followUpsRaw) }
         : null,
-    // Prefer the value THIS run freshly re-derived (a recorded --os ios
-    // run); otherwise fall back to the --ios JSON's own self-reported
-    // field, informational only (never trust-critical for a run that
-    // isn't itself binding iOS).
-    exportXml:
-      freshExportXmlSha256 !== null
-        ? { path: join(ios.exportDir, "export.xml"), sha256: freshExportXmlSha256 }
-        : ios.exportSha256 !== undefined
-          ? { path: `${ios.exportDir}/export.xml`, sha256: ios.exportSha256 }
-          : null,
   };
-  const output = { ...result, os: args.os, recorded, thisOsResult, recordedOverall, provenance };
+  const recordedOverall: "pass" | "kill" | null = recorded ? computeOverallFromBoundResults(boundResults) : null;
+  const output = { ...result, recorded, boundResults, recordedOverall, provenance };
 
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
@@ -955,6 +978,7 @@ async function main(argv: string[]): Promise<void> {
   await writeFile(`${args.outPrefix}.md`, `${md}\n`, "utf8");
   process.stdout.write(`${md}\n`);
 }
+
 
 /** Gate finding B-11 (the N7 symlink bug, again): real-path comparison —
  * see x1-ios-export.ts's identical fix for why the naive comparison this

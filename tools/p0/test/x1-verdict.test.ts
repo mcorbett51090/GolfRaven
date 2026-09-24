@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  assertIosWorkoutDataNotTampered,
+  computeOverallFromBoundResults,
   computeX1Verdict,
   type AndroidGolfSessionReadResult,
   type SourceMap,
@@ -544,18 +544,31 @@ describe("x1-verdict: newest-date excludes route-less workouts (should-fix, Opus
   });
 });
 
-describe("assertIosWorkoutDataNotTampered (should-fix 4, round-2 Opus-gate correction) — 'a JSON edited to recorded:true with the bound hash but different workout data is refused'", () => {
-  it("does not throw when the claimed and fresh verdicts agree", () => {
-    expect(() => assertIosWorkoutDataNotTampered("pass", "pass")).not.toThrow();
-    expect(() => assertIosWorkoutDataNotTampered("kill", "kill")).not.toThrow();
+// Round-3 Opus-gate correction (post-8e5a29b): `assertIosWorkoutDataNotTampered`
+// and its tests are gone — x1-verdict no longer reads a separate `--ios`
+// JSON to distrust. `--ios-export <dir>` is always parsed fresh, in the
+// same call that verifies its hash, so there is nothing left to tamper
+// with independently of the bound file itself. See x1-verdict.ts's module
+// doc and `tools/p0/README.md` for the simplified mechanism.
+
+describe("computeOverallFromBoundResults (round-3 Opus-gate correction, post-8e5a29b) — 'the overall result is a pass if any bound OS recomputes to a pass'", () => {
+  it("pass when the only bound OS recomputed to pass", () => {
+    expect(computeOverallFromBoundResults({ ios: "pass" })).toBe("pass");
   });
 
-  it("throws when the --ios JSON's claimed verdict disagrees with a fresh re-parse of its bound export.xml", () => {
-    // This is main()'s actual check: the --ios JSON's own `workouts` claim
-    // "pass" while re-parsing the SAME (hash-verified) export.xml — which
-    // the SHA-256 binding alone does not protect, since it covers
-    // export.xml, a different file from the --ios JSON — says "kill".
-    expect(() => assertIosWorkoutDataNotTampered("pass", "kill")).toThrow(/disagrees with a fresh re-parse/);
-    expect(() => assertIosWorkoutDataNotTampered("kill", "pass")).toThrow(/disagrees with a fresh re-parse/);
+  it("kill when the only bound OS recomputed to kill", () => {
+    expect(computeOverallFromBoundResults({ ios: "kill" })).toBe("kill");
+  });
+
+  it("iOS bound as kill and Android bound as pass -> overall pass, only when both bound files verify (i.e. both are present in boundResults)", () => {
+    expect(computeOverallFromBoundResults({ ios: "kill", android: "pass" })).toBe("pass");
+  });
+
+  it("kill when both bound OSes recomputed to kill", () => {
+    expect(computeOverallFromBoundResults({ ios: "kill", android: "kill" })).toBe("kill");
+  });
+
+  it("pass when both bound OSes recomputed to pass", () => {
+    expect(computeOverallFromBoundResults({ ios: "pass", android: "pass" })).toBe("pass");
   });
 });

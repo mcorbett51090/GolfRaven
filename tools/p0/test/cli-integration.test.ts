@@ -135,30 +135,13 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     expect(stdout).toContain("recorded=false");
   });
 
-  // Opus-gate correction (post-d0de4b8), point 1: `x1-verdict` refuses a
-  // recorded run per OS, tested separately for each --os value, against
-  // the same real, pre-round (blank) docs/p0/X1.md. Minimal-but-valid
-  // --ios/--android/--source-map fixtures are used so the CLI gets past
-  // parsing those files and reaches the recorded-export-date check.
-  const minimalIosJson = path.join(OUT_DIR, "x1-verdict-minimal-ios.json");
+  // Round-3 Opus-gate correction (post-8e5a29b): `x1-verdict` no longer
+  // takes `--ios`/`--os`; it takes `--ios-export <dir>` (the raw Apple
+  // Health export directory — FIXTURES itself, same as x1-ios-export's own
+  // tests) and/or `--android <json>`, and refuses to run without at least
+  // one of them.
   const minimalAndroidJson = path.join(OUT_DIR, "x1-verdict-minimal-android.json");
   const minimalSourceMapJson = path.join(OUT_DIR, "x1-verdict-minimal-source-map.json");
-  writeFileSync(
-    minimalIosJson,
-    JSON.stringify({
-      generatedAt: new Date().toISOString(),
-      exportDir: "/fake",
-      since: null,
-      roundWindows: [],
-      totalWorkoutElementsSeen: 0,
-      golfWorkoutCount: 0,
-      workouts: [],
-      sourceSummaries: [],
-      exportDate: "2026-09-20 09:00:00 -0400",
-      exportSha256: "e".repeat(64),
-      warnings: [],
-    }),
-  );
   writeFileSync(
     minimalAndroidJson,
     JSON.stringify({
@@ -178,45 +161,48 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     }),
   );
 
-  it("x1-verdict CLI refuses (non-zero exit) for --os ios against the real, blank recorded-export date", async () => {
+  it("x1-verdict CLI refuses when neither --ios-export nor --android is supplied", async () => {
     await expect(
       execFileAsync("node", [
         path.join(DIST, "x1-verdict.js"),
-        "--ios",
-        minimalIosJson,
-        "--android",
-        minimalAndroidJson,
         "--source-map",
         minimalSourceMapJson,
-        "--os",
-        "ios",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-refuse-no-input-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("Usage:") });
+  });
+
+  it("x1-verdict CLI refuses (non-zero exit) a recorded run for iOS against the real, blank recorded-export date", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--ios-export",
+        FIXTURES,
+        "--source-map",
+        minimalSourceMapJson,
         "--out",
         path.join(OUT_DIR, "x1-verdict-refuse-ios-result"),
       ]),
     ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
   });
 
-  it("x1-verdict CLI refuses (non-zero exit) for --os android against the real, blank recorded-export date", async () => {
+  it("x1-verdict CLI refuses (non-zero exit) a recorded run for Android against the real, blank recorded-export date", async () => {
     await expect(
       execFileAsync("node", [
         path.join(DIST, "x1-verdict.js"),
-        "--ios",
-        minimalIosJson,
         "--android",
         minimalAndroidJson,
         "--source-map",
         minimalSourceMapJson,
-        "--os",
-        "android",
         "--out",
         path.join(OUT_DIR, "x1-verdict-refuse-android-result"),
       ]),
     ).rejects.toMatchObject({ stderr: expect.stringContaining("Recorded export") });
   });
 
-  // Round-2 Opus-gate correction: "The Android reader output must carry os
-  // and generatedAt" — a basic shape check, refused unconditionally (even
-  // for --informational, and even before the real X1.md is consulted).
+  // Round-3 Opus-gate correction: "The Android reader output must carry os
+  // and generatedAt" — a basic shape check, refused unconditionally.
   it("x1-verdict CLI refuses when --android's JSON has no os field", async () => {
     const badAndroidJson = path.join(OUT_DIR, "x1-verdict-android-no-os.json");
     writeFileSync(
@@ -226,14 +212,10 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     await expect(
       execFileAsync("node", [
         path.join(DIST, "x1-verdict.js"),
-        "--ios",
-        minimalIosJson,
         "--android",
         badAndroidJson,
         "--source-map",
         minimalSourceMapJson,
-        "--os",
-        "ios",
         "--informational",
         "--out",
         path.join(OUT_DIR, "x1-verdict-bad-android-os-result"),
@@ -241,26 +223,39 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     ).rejects.toMatchObject({ stderr: expect.stringContaining('not "android"') });
   });
 
-  it("x1-verdict CLI --informational runs against the real, blank recorded-export date and marks recorded: false", async () => {
+  // Round-3 Opus-gate correction: "No informational runs on real data while
+  // an OS is unbound" — minimalAndroidJson is a real (non-fixture) path,
+  // and Android has no bound hash in the real, blank docs/p0/X1.md.
+  it("x1-verdict CLI refuses --informational on a real (non-fixture) Android path while unbound", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--android",
+        minimalAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--informational",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-informational-real-refuse-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("no informational runs on real data") });
+  });
+
+  it("x1-verdict CLI --informational allows a fixture path (--ios-export FIXTURES) and marks recorded: false", async () => {
     const outPrefix = path.join(OUT_DIR, "x1-verdict-informational-result");
     const { stdout } = await execFileAsync("node", [
       path.join(DIST, "x1-verdict.js"),
-      "--ios",
-      minimalIosJson,
-      "--android",
-      minimalAndroidJson,
+      "--ios-export",
+      FIXTURES,
       "--source-map",
       minimalSourceMapJson,
-      "--os",
-      "ios",
       "--informational",
       "--out",
       outPrefix,
     ]);
     const json = JSON.parse(readFileSync(`${outPrefix}.json`, "utf8"));
     expect(json.recorded).toBe(false);
-    expect(json.provenance.iosJson.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(json.provenance.androidJson.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(json.provenance.exportXml.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(json.provenance.sourceMapJson.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(json.provenance.x1Doc.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(stdout).toContain("INFORMATIONAL — NOT THE RECORDED X1 RESULT");

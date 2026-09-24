@@ -61,25 +61,25 @@ running (without `--informational`), the CLI reads `docs/p0/X1.md`'s "## Recorde
 and **refuses to run if the `iOS:` line has no UTC date logged** — the first export actually read,
 with its UTC date logged there BEFORE it's read, is the recorded one; a later export is
 informational only. Log that UTC date in `docs/p0/X1.md` before reading the export, or pass
-`--informational` to dry-run without it. **`--informational` is itself refused** in the window
-between the UTC date being logged and its hash being bound (round-2 Opus-gate correction, post-67bdb27,
-"no informational peeking before binding") — use a synthetic test fixture for a dry run in that
-window, or run before the date is logged. The output stamps the source `docs/p0/X1.md` file's path
-and SHA-256 (`source`), plus `os` and `recorded`, mirroring `k1-verdict`'s provenance stamp.
+`--informational` to dry-run without it. **`--informational` on real (non-fixture) data is refused
+while iOS is unbound at all** (round-3 Opus-gate correction, post-8e5a29b, superseding round 2's
+narrower "only in the logged-but-unbound gap": now it's "no informational runs on real data while
+unbound," whether the date is blank or already logged) — pass a directory under
+`tools/p0/test/fixtures/` for a dry run before binding, or run before the date is logged. Once iOS
+is bound, `--informational` may run against any path, real or fixture. The output stamps the source
+`docs/p0/X1.md` file's path and SHA-256 (`source`), plus `os` and `recorded`, mirroring
+`k1-verdict`'s provenance stamp.
 
 **Bound to one specific export (post-d0de4b8 Opus-gate correction).** A recorded run also refuses if
 `export.xml`'s own `<ExportDate>` doesn't fall on the SAME UTC calendar date as the one logged in
 `docs/p0/X1.md`, or if `export.xml`'s SHA-256 (`exportSha256` in the output) doesn't match the hash
 already bound there. On the FIRST recorded run, that hash is written into `docs/p0/X1.md` next to
-the date automatically, and the CLI prints **"commit docs/p0/X1.md now"**. `--informational` skips
-all of this. `exportDate`/`exportSha256` are always in the JSON output, recorded or not.
-
-**Git-history + working-tree integrity (should-fix, post-67bdb27 Opus-gate correction).** Before
-binding, a recorded run also refuses in a shallow git clone, when `docs/p0/X1.md` has uncommitted
-changes, or when its full git history (`git log -G"sha256:[0-9a-f]{64}"`) shows the bound hash for
-iOS was ever changed or removed after being set — the same integrity discipline decision 0001
-Addendum F applies to K2's exclusion dating (`git log -S`), adapted here to `-G` since a value SWAP
-(not just an add/remove of the literal substring) is exactly what this needs to catch.
+the date automatically, and the CLI prints **"commit and push docs/p0/X1.md now"** — pushing right
+away is the real protection here, since local git history can be rewritten (rebase/amend) without
+this tooling detecting it (round-3 Opus-gate correction, post-8e5a29b — a git-history tampering scan
+was tried in round 2 and removed as unneeded machinery once the design stopped storing anything to
+tamper with; see `x1-verdict`'s section below). `--informational` skips all of this.
+`exportDate`/`exportSha256` are always in the JSON output, recorded or not.
 
 **Feeds:** the JSON is one of `x1-verdict`'s two inputs. The markdown table's columns match
 `docs/owner/x1-k4b-device-protocol.md` §4's results table (Source / OS / Start date / Test round? /
@@ -103,17 +103,36 @@ Pure function (`computeX1Verdict`, importable from `dist/index.js`) plus a CLI w
 
 ```shell
 node dist/x1-verdict.js \
-  --ios x1-ios-export-result.json \
+  --ios-export /path/to/apple_health_export \
   --android health-connect-reader-result.json \
   --source-map source-map.json \
-  --os ios \
   --follow-ups android-route-follow-ups.json \
   --out x1-verdict-result
 ```
 
-- `--ios` — `x1-ios-export`'s JSON output.
-- `--android` — the Android Health Connect reader's JSON output
-  (`apps/mobile/src/health-connect/` — a `GolfSessionReadResult`; run it on the Android round).
+**Round-3 Opus-gate correction (post-8e5a29b) — this interface is simplified from an earlier design.**
+There is no `--os` flag any more, and no `--ios <json>` (a pre-computed `x1-ios-export` result). Pass
+`--ios-export <dir>` (the raw Apple Health export directory itself — `x1-verdict` parses it fresh, the
+same way `x1-ios-export` does), `--android <json>` (the reader's raw output), or both; at least one is
+required, or the CLI refuses with a Usage error. For each one supplied, on a recorded run, `x1-verdict`
+verifies its UTC date and SHA-256 against `docs/p0/X1.md` (binding on the first run for that OS) and
+then RECOMPUTES that OS's pass/kill straight from the verified data, in this same call — there is no
+separate "claimed" JSON left to disagree with a fresh re-parse, so round 2's
+`assertIosWorkoutDataNotTampered` tamper-detection path is gone; there's nothing left to tamper with
+independently of the bound file. **If `docs/p0/X1.md` already shows an OS as bound but its input isn't
+supplied this run, the run is refused outright** — a recorded verdict is never computed from a partial
+picture.
+
+- `--ios-export <dir>` — the same unzipped `apple_health_export/` directory `x1-ios-export` reads (NOT
+  its JSON output).
+- `--android <json>` — the Android Health Connect reader's JSON output
+  (`apps/mobile/src/health-connect/` — a `GolfSessionReadResult`; run it on the Android round). The
+  reader itself now stamps `os: "android"` and `generatedAt` as part of its own real output (round-3
+  Opus-gate correction, post-8e5a29b — no more hand-annotating the file before passing it here); a file
+  missing either field is refused as a basic shape/operator-error check ("wrong file passed to
+  `--android`?"), not a trust mechanism — **whichever file is bound first for an OS is trusted as that
+  device's genuine output; nothing here verifies it further, on either OS** (the first-bind trust
+  limit, same on iOS).
 - `--source-map` — a small JSON file you write once per round, mapping each of the 3 sources to the
   `sourceName` values (iOS) / `dataOrigin` package names (Android) that identify it, e.g.:
 
@@ -143,13 +162,11 @@ node dist/x1-verdict.js \
 "routePointCount": n } }` for any Android session Health Connect reported as `CONSENT_REQUIRED`,
   from a follow-up `requestExerciseRoute(recordId)` call (R6). A `CONSENT_REQUIRED` session with no
   entry here defaults to "not present," per R6.
-- `--os ios|android` (**required**) — names which OS this run claims to produce THE RECORDED result
-  for. A recorded run evaluates and binds **only** that OS (round-2 Opus-gate correction, post-67bdb27
-  — supersedes an earlier paragraph here about stamping `recorded: true` by hand; see below).
-- `--informational` (optional) — runs even if that OS's recorded-export date is blank, and skips
-  every check below. The output is then marked `recorded: false`, with a loud "INFORMATIONAL — NOT
-  THE RECORDED X1 RESULT" banner — never the recorded P0 result. **Refused** in the specific window
-  where a UTC date is logged but its hash isn't bound yet ("no informational peeking before binding").
+- `--informational` (optional) — runs even if a supplied OS's recorded-export date is blank, and skips
+  the date/hash checks for that OS. The output is then marked `recorded: false`, with a loud
+  "INFORMATIONAL — NOT THE RECORDED X1 RESULT" banner — never the recorded P0 result. **Refused on
+  real (non-fixture) data for any OS that isn't already bound** (round-3 Opus-gate correction,
+  post-8e5a29b — use a directory/file under `tools/p0/test/fixtures/` for a dry run before binding).
 
 **Decision 0005 — round windows are LABELS, not a filter; every workout/session counts.** The CLI
 no longer refuses to run when no round window is logged, and no longer excludes any workout/session
@@ -157,45 +174,44 @@ by date — every one counts toward the INFORMATIONAL per-source view, whenever 
 `docs/p0/X1.md`'s logged round window(s) tag each counted entry `testRound: true`/`false` in the
 result's `countedEntries`.
 
-**Round-2 Opus-gate correction (post-67bdb27) — a recorded run evaluates ONLY its own OS, verified
-independently, never from a stamp.** `computeX1Verdict` (the pure function) has no "eligible"/trust
-concept at all any more — it can't verify anything (no filesystem/git access), so `recordedVerdicts.ios`
-/ `.android` are always computed purely from that OS's own data, ignoring any `recorded`/`os` field an
-input might carry (a hand-edited JSON claiming `recorded: true` has **zero** effect — this is what
-closes the leak the previous design still had). The CLI (`main()`) is what actually decides what's
-recorded, and it does so per OS: for `--os ios`, it re-reads `export.xml` from the `--ios` JSON's
-`exportDir` completely fresh — both to bind its date/hash (see below) **and** to recompute the iOS
-verdict itself, discarding the `--ios` JSON's own `workouts` field entirely (a JSON edited to claim a
-different result than a fresh re-parse of its own bound `export.xml` produces is **refused**, not
-silently corrected). For `--os android`, the whole `--android` JSON file is what's hashed and bound,
-so any tampering of its `sessions` is already caught by the hash check on a re-run. The `--android`
-input must carry `os: "android"` (a basic shape/operator-error check, not a trust mechanism — the
-apps/mobile reader doesn't stamp this itself, so add it by hand the same lightweight way
-`x1-ios-export` stamps `os: "ios"` onto its own output).
+**Round-3 Opus-gate correction (post-8e5a29b) — nothing about a recorded verdict is ever stored;
+every recorded run recomputes from the bound file, fresh, every time.** `computeX1Verdict` (the pure
+function) still has no "eligible"/trust concept at all — it can't verify anything (no
+filesystem/git access), so `recordedVerdicts.ios` / `.android` are always computed purely from
+whatever data this call is given, ignoring any `recorded`/`os` field an input might carry. The CLI
+(`main()`) is what actually decides what's recorded: for a supplied, bound `--ios-export`, it
+verifies `export.xml`'s date/hash against `docs/p0/X1.md` and then parses it fresh to compute iOS's
+verdict, in the same call; for a supplied, bound `--android`, it verifies the JSON file's date/hash
+the same way and then parses it to compute Android's verdict. **Neither OS's result is ever written
+back into `docs/p0/X1.md`** — only its UTC date and SHA-256 are. The CLI's own `recordedOverall`
+output field is computed in-process, this call, from whichever bound OS(es) were supplied — "pass" if
+any of them came back "pass" — never by reading anything back out of the markdown file. This module's
+own `overallVerdict` field stays purely informational (this call's two inputs, unconditionally
+combined); don't confuse it with the CLI's `recordedOverall`.
 
-**The recorded result is written PER OS into `docs/p0/X1.md`, so two separate runs combine without
-ever sharing data.** After binding, `x1-verdict --os ios` writes iOS's own verdict as `result:pass` or
-`result:kill` on iOS's "## Recorded export" line (refusing to silently overwrite a different value
-later). The CLI's own `recordedOverall` output field then reads BOTH OSes' `result:` fields back out
-of `docs/p0/X1.md` — never from this call's two inputs — and reports `"pass"` if either is `"pass"`,
-`"kill"` if both are recorded and neither passed, `"pending"` if the other OS hasn't run yet. This
-module's own `overallVerdict` field stays purely informational (this call's two inputs only); don't
-confuse it with the CLI's `recordedOverall`.
-
-**Git-history + working-tree integrity (should-fix, post-67bdb27).** Before binding, the CLI also
-refuses in a shallow clone, when `docs/p0/X1.md` has uncommitted changes, or when its full git history
-(`git log -G"sha256:[0-9a-f]{64}"`) shows the bound hash for that OS was ever changed or removed after
-being set. On the run that performs the first bind, the CLI prints **"commit docs/p0/X1.md now"**.
+**What detecting tampering used to look like, and why it's simpler now (post-8e5a29b, superseding
+round 2's post-67bdb27 design).** Round 2 stored each OS's `result:pass`/`result:kill` in
+`docs/p0/X1.md` and added a git-history tampering scan (`git log -G"sha256:[0-9a-f]{64}"`) plus
+shallow-clone/uncommitted-file refusals to protect that stored value. Round 3's gate asked for this to
+be simplified rather than have more integrity machinery added to it: with nothing durable stored to
+tamper with — the file only ever holds a date and a hash, and the verdict is recomputed fresh every
+time — that scan had nothing left to protect, so it's gone. **What's left, and documented rather than
+enforced:** local git history CAN still be rewritten (rebase/amend) without this tooling detecting it.
+The actual protection is committing AND PUSHING `docs/p0/X1.md` immediately after a binding run
+(decision 0001 Addendum F's own K2 precedent) — the CLI prints **"commit and push docs/p0/X1.md
+now"** on the run that performs a first bind, precisely to prompt that.
 
 **Recorded-export rule (decision 0005), plus binding to one specific export — REQUIRED, this is what
 else gates the CLI.** Before running (without `--informational`), the CLI reads `docs/p0/X1.md`'s "##
-Recorded export" section and refuses if the line for `--os`'s OS has no UTC date logged. It then also
-refuses if that OS's export's own UTC date (Apple's `ExportDate`, freshly re-read from `export.xml`
-for iOS; the Android reader's `generatedAt` for Android) doesn't fall on the logged date, or if its
-SHA-256 (freshly re-hashed — `export.xml`'s bytes for iOS, the `--android` JSON file's bytes for
-Android; **never** a self-reported field) doesn't match what's already bound — writing it on the first
-recorded run. **Every input file is stamped into the output's `provenance`** (path + SHA-256):
-`x1Doc`, `iosJson`, `androidJson`, `sourceMapJson`, `followUpsJson`, and `exportXml`.
+Recorded export" section and, for each OS it's given input for, refuses if that OS's line has no UTC
+date logged. It then also refuses if that OS's export's own UTC date (Apple's `ExportDate`, freshly
+re-read from `export.xml` for iOS; the Android reader's own `generatedAt` for Android) doesn't fall on
+the logged date, or if its SHA-256 (freshly re-hashed — `export.xml`'s bytes for iOS, the `--android`
+JSON file's bytes for Android; **never** a self-reported field) doesn't match what's already bound —
+writing it on the first recorded run. **If an OS is already bound in `docs/p0/X1.md` but its input
+isn't supplied this run, the run refuses outright.** Every input file is stamped into the output's
+`provenance` (path + SHA-256): `x1Doc`, `exportXml` (when `--ios-export` given), `androidJson` (when
+`--android` given), `sourceMapJson`, `followUpsJson`.
 
 **The "≥ 1 OS" bar, made exact (decision 0001 Addendum F, gate finding B-6).** Within one OS's data,
 X1 passes only when **≥ 2 of the 3 sources** pass. Sources that pass on _different_ OSes (e.g. Apple
