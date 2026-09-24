@@ -177,6 +177,9 @@ describe("golden fixture: identical radius circles at a 36-hole site", () => {
     if (outcome.kind === "ask_user") {
       expect(outcome.reason).toBe("shared_geometry");
       expect(outcome.tied.every((t) => t.geometryKind === "radius")).toBe(true);
+      expect(outcome.tied.every((t) => t.insideRatio === null)).toBe(true);
+      expect(outcome.tied.every((t) => t.radiusStartEndInside === true)).toBe(true);
+      expect(outcome.tied.map((t) => t.courseId)).toEqual(["crs_radius_r1", "crs_radius_r2"]); // sorted by id
     }
   });
 });
@@ -202,8 +205,12 @@ describe("golden fixture: radius fallback, route leaves the circle mid-round but
     if (outcome.kind === "matched") {
       expect(outcome.course.courseId).toBe("crs_radius_leaves");
       expect(outcome.course.geometryKind).toBe("radius");
-      // Informational only — acceptance did not depend on this being ≥ 0.6.
-      expect(outcome.course.insideRatio).toBeLessThan(0.6);
+      // Gate fix 2: a radius match is never ranked on the insideRatio
+      // scale — the field is null, with a separate boolean instead, so
+      // the §4.5 scorer's 0.6/0.8 bands can never read a radius number.
+      expect(outcome.course.insideRatio).toBeNull();
+      expect(outcome.course.radiusStartEndInside).toBe(true);
+      expect(outcome.course.holes).toBe(18);
     }
   });
 });

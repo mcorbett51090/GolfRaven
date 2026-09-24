@@ -1,11 +1,15 @@
 /**
- * Route matching (build plan §7.4 steps 1–4): simplify the route, collect
- * nearby candidates, score each against its geometry, and apply the
- * acceptance / ask_user / typeahead rules.
+ * Route matching (build plan §7.4 steps 1–4): simplify the route (for the
+ * transmitted summary only), collect nearby candidates, score each
+ * against its geometry, and apply the acceptance / ask_user / typeahead
+ * rules.
  */
 import { candidatesWithinRadius } from "./candidates.js";
 import { computeDurationHours, isWithinDurationWindow } from "./duration.js";
-import { computeInsideRatio, computeInsideRatioForCircle, haversineMeters } from "./geo.js";
+import { validateFixesOrThrow, stableSortByTimestamp } from "./fixes.js";
+import { haversineMeters, roundTo } from "./geo.js";
+import { computeTimeWeightedInsideRatio } from "./inside-ratio.js";
+import { preparePolygonGeometry } from "./polygon.js";
 import { simplifyToMaxPoints } from "./simplify.js";
 import type {
   AskUserReason,
@@ -30,54 +34,61 @@ const DEFAULT_ACCEPT_INSIDE_RATIO = 0.6;
 interface ScoredCandidate {
   candidate: CandidateCourse;
   geometryKind: GeometryKind;
-  /** The `insideRatio` value reported in output. For a radius match this
-   * is informational only (see `computeInsideRatioForCircle`'s doc
-   * comment). */
-  insideRatio: number;
-  /** The value compared for acceptance and for the 0.15 tie threshold.
-   * For a polygon match this equals `insideRatio`. For a radius match it
-   * is a boolean-derived 1 (qualifies) or 0 (doesn't) — build plan §4.2:
-   * a radius match is decided by start/end containment, "not by
-   * insideRatio", so it has no continuous score to compare. Two
-   * qualifying radius candidates therefore always tie (score 1 vs 1),
-   * which is exactly the outcome build plan §7.4 step 4 wants for
-   * "identical radius circles at a 36-hole site" — and, as a side effect,
-   * for any two genuinely distinct radius-fallback courses whose circles
-   * both happen to contain the route's start and end (see the handback
-   * report's ambiguity list). */
-  matchScore: number;
+  /** `null` for a radius candidate — see `MatchedCourse.insideRatio`'s
+   * doc comment: a radius match is never ranked on the polygon's
+   * insideRatio scale (build plan gate fix 2). */
+  insideRatio: number | null;
+  radiusStartEndInside: boolean;
+  /** The value compared for ranking and for the tie threshold. Only ever
+   * compared *within* one geometry tier (see `matchRoute`): polygon
+   * candidates are scored by `insideRatio`, and are ranked strictly ahead
+   * of every radius candidate regardless of any radius candidate's own
+   * `score`, which exists only so multiple qualifying radius candidates
+   * can be gap-compared against each other. */
+  score: number;
   qualifiesGeometrically: boolean;
+  qualifies: boolean;
 }
 
 function scoreCandidate(
   candidate: CandidateCourse,
-  points: readonly LatLng[],
+  sortedTimestampedPoints: readonly { point: LatLng; timestamp: number }[],
   start: LatLng,
   end: LatLng,
   bufferMeters: number,
   acceptInsideRatio: number,
+  durationHours: number,
 ): ScoredCandidate | undefined {
-  if (candidate.polygon && candidate.polygon.length >= 3) {
-    const insideRatio = computeInsideRatio(points, candidate.polygon, bufferMeters);
+  if (candidate.polygon) {
+    const prepared = preparePolygonGeometry(candidate.polygon);
+    if (!prepared) return undefined;
+    const insideRatio = computeTimeWeightedInsideRatio(sortedTimestampedPoints, prepared, bufferMeters);
+    const qualifiesGeometrically = roundTo(insideRatio, 9) >= roundTo(acceptInsideRatio, 9);
+    const qualifiesDuration = isWithinDurationWindow(durationHours, candidate.holes);
     return {
       candidate,
       geometryKind: "polygon",
       insideRatio,
-      matchScore: insideRatio,
-      qualifiesGeometrically: insideRatio >= acceptInsideRatio,
+      radiusStartEndInside: false,
+      score: insideRatio,
+      qualifiesGeometrically,
+      qualifies: qualifiesGeometrically && qualifiesDuration,
     };
   }
   if (candidate.radiusFallback) {
     const { center, radiusMeters } = candidate.radiusFallback;
-    const startInside = haversineMeters(start, center) <= radiusMeters;
-    const endInside = haversineMeters(end, center) <= radiusMeters;
-    const qualifies = startInside && endInside;
+    const startInside = roundTo(haversineMeters(start, center), 2) <= roundTo(radiusMeters, 2);
+    const endInside = roundTo(haversineMeters(end, center), 2) <= roundTo(radiusMeters, 2);
+    const qualifiesGeometrically = startInside && endInside;
+    const qualifiesDuration = isWithinDurationWindow(durationHours, candidate.holes);
     return {
       candidate,
       geometryKind: "radius",
-      insideRatio: computeInsideRatioForCircle(points, center, radiusMeters),
-      matchScore: qualifies ? 1 : 0,
-      qualifiesGeometrically: qualifies,
+      insideRatio: null,
+      radiusStartEndInside: qualifiesGeometrically,
+      score: qualifiesGeometrically ? 1 : 0,
+      qualifiesGeometrically,
+      qualifies: qualifiesGeometrically && qualifiesDuration,
     };
   }
   return undefined;
@@ -90,8 +101,23 @@ function toTiedSummary(s: ScoredCandidate): TiedCandidateSummary {
     verificationTier: s.candidate.verificationTier,
     geometryKind: s.geometryKind,
     insideRatio: s.insideRatio,
+    ...(s.geometryKind === "radius" ? { radiusStartEndInside: true as const } : {}),
     sharedGeometry: s.candidate.sharedGeometry === true,
   };
+}
+
+/** Ordinal (not locale-aware) string comparison, so candidate ordering
+ * never depends on ICU/locale differences between JS engines (build plan
+ * gate fix: determinism). */
+function compareIds(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function byScoreThenId(a: ScoredCandidate, b: ScoredCandidate): number {
+  const scoreDiff = roundTo(b.score, 9) - roundTo(a.score, 9);
+  if (scoreDiff !== 0) return scoreDiff;
+  return compareIds(a.candidate.id, b.candidate.id);
 }
 
 /**
@@ -115,13 +141,17 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
   if (fixes.length === 0) {
     throw new RangeError("matchRoute requires at least one fix");
   }
+  validateFixesOrThrow(fixes);
 
-  const rawPoints = fixes.map((f) => f.point);
+  const sortedFixes = stableSortByTimestamp(fixes);
+  const rawPoints = sortedFixes.map((f) => f.point);
   const simplifiedPoints = simplifyToMaxPoints(rawPoints, maxSimplifiedPoints);
   const start = rawPoints[0]!;
   const end = rawPoints[rawPoints.length - 1]!;
-  const durationHours = computeDurationHours(fixes);
-  const anySimulated = fixes.some((f) => f.simulated === true);
+  const startedAt = sortedFixes[0]!.timestamp;
+  const endedAt = sortedFixes[sortedFixes.length - 1]!.timestamp;
+  const durationHours = computeDurationHours(sortedFixes);
+  const anySimulated = sortedFixes.some((f) => f.simulated === true);
 
   const summary: MatchSummaryFields = {
     matcherVersion: MATCHER_VERSION,
@@ -132,29 +162,47 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
     rawPointCount: rawPoints.length,
     start,
     end,
+    startedAt,
+    endedAt,
     durationHours,
   };
 
   const nearby = candidatesWithinRadius(simplifiedPoints, candidates, candidateRadiusMeters);
 
   const scored = nearby
-    .map((c) => scoreCandidate(c, simplifiedPoints, start, end, insideRatioBufferMeters, acceptInsideRatio))
+    .map((c) =>
+      scoreCandidate(c, sortedFixes, start, end, insideRatioBufferMeters, acceptInsideRatio, durationHours),
+    )
     .filter((s): s is ScoredCandidate => s !== undefined);
 
-  const qualifying = scored.filter(
-    (s) => s.qualifiesGeometrically && isWithinDurationWindow(durationHours, s.candidate.holes),
-  );
+  // Gate fix 2: a qualifying polygon candidate always outranks every
+  // radius candidate. Radius candidates are only even considered when no
+  // polygon candidate qualifies — never compared on the same numeric
+  // scale.
+  const qualifyingPolygon = scored.filter((s) => s.geometryKind === "polygon" && s.qualifies);
+  const qualifyingRadius = scored.filter((s) => s.geometryKind === "radius" && s.qualifies);
+  const activeTier = qualifyingPolygon.length > 0 ? qualifyingPolygon : qualifyingRadius;
 
-  if (qualifying.length === 0) {
-    return { kind: "typeahead", summary };
+  if (activeTier.length === 0) {
+    return {
+      kind: "typeahead",
+      nearbyCandidateIds: nearby.map((c) => c.id).sort(compareIds),
+      summary,
+    };
   }
 
-  qualifying.sort((a, b) => b.matchScore - a.matchScore);
-  const top = qualifying[0]!;
-  const tied = qualifying.filter((s) => top.matchScore - s.matchScore <= tieThreshold);
+  const ranked = activeTier.slice().sort(byScoreThenId);
+  const top = ranked[0]!;
+  let tied = ranked.filter((s) => roundTo(top.score - s.score, 9) <= roundTo(tieThreshold, 9));
 
-  if (tied.length > 1) {
-    const sameFacility = tied.every((s) => s.candidate.facilityId === top.candidate.facilityId);
+  // Should-fix 4: if the sole surviving candidate is itself flagged
+  // `sharedGeometry`, geometry alone cannot vouch for it even though no
+  // sibling is present in this call (e.g. a sibling was filtered out by
+  // the duration window) — route to ask_user rather than auto-accepting.
+  const soloShared = tied.length === 1 && tied[0]!.candidate.sharedGeometry === true;
+
+  if (tied.length > 1 || soloShared) {
+    const sameFacility = tied.every((s) => s.candidate.facilityId === tied[0]!.candidate.facilityId);
     const anySharedGeometry = tied.some((s) => s.candidate.sharedGeometry === true);
     const reason: AskUserReason = sameFacility && anySharedGeometry ? "shared_geometry" : "close_scores";
     return {
@@ -165,15 +213,18 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
     };
   }
 
+  const winner = tied[0]!;
   return {
     kind: "matched",
     course: {
-      courseId: top.candidate.id,
-      facilityId: top.candidate.facilityId,
-      verificationTier: top.candidate.verificationTier as VerificationTier,
-      geometryKind: top.geometryKind,
-      insideRatio: top.insideRatio,
+      courseId: winner.candidate.id,
+      facilityId: winner.candidate.facilityId,
+      verificationTier: winner.candidate.verificationTier as VerificationTier,
+      geometryKind: winner.geometryKind,
+      insideRatio: winner.insideRatio,
+      ...(winner.geometryKind === "radius" ? { radiusStartEndInside: true as const } : {}),
       courseDisambiguatedBy: "geometry",
+      holes: winner.candidate.holes ?? 18,
     },
     summary,
   };
@@ -185,8 +236,8 @@ export function matchRoute(input: MatchRouteInput): MatchOutcome {
  * one-pick-per-facility-per-date guard: "one pick per facility per date …
  * a second, different pick on the same date replaces the first (audited)"
  * (build plan §4.3). Applied uniformly to every `ask_user` resolution,
- * not only the `shared_geometry` reason — see the handback report's
- * ambiguity list for why.
+ * not only the `shared_geometry` reason — see `README.md`'s ambiguity
+ * list for why.
  *
  * Pure function: `priorPicks` is read-only input and the (possibly
  * updated) list is returned for the caller to persist. This package does
@@ -202,7 +253,8 @@ export function resolveAskUser(
     facilityId: string;
     verificationTier: VerificationTier;
     geometryKind: GeometryKind;
-    insideRatio: number;
+    insideRatio: number | null;
+    radiusStartEndInside?: true;
     courseDisambiguatedBy: "user";
   };
   updatedPicks: FacilityDatePick[];
@@ -230,6 +282,7 @@ export function resolveAskUser(
       verificationTier: pick.verificationTier,
       geometryKind: pick.geometryKind,
       insideRatio: pick.insideRatio,
+      ...(pick.geometryKind === "radius" ? { radiusStartEndInside: true as const } : {}),
       courseDisambiguatedBy: "user",
     },
     updatedPicks,

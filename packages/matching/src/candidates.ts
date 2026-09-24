@@ -1,36 +1,37 @@
-import { distanceToPolygonMeters, haversineMeters } from "./geo.js";
+import { haversineMeters } from "./geo.js";
+import { isWithinDistanceOfPrepared, preparePolygonGeometry } from "./polygon.js";
 import type { CandidateCourse, LatLng } from "./types.js";
 
-/** Distance in meters from the nearest of `points` to `candidate`'s
- * geometry (0 if any point is inside it). A candidate with neither a
- * polygon nor a radius-fallback circle can never be matched geometrically
- * and is reported as infinitely far away, so it never enters the
- * candidate set. */
-export function minDistanceMetersToGeometry(
+/** True if any of `points` is within `radiusMeters` of `candidate`'s
+ * geometry (0 m = inside it). Prepares the candidate's polygon geometry
+ * once (projected + bbox) and reuses it across every point, bbox-
+ * prefiltered, instead of re-deriving a projector per point (build plan
+ * gate fix: project each polygon once per match). Breaks out on the
+ * first point found within range. A candidate with neither a polygon nor
+ * a radius-fallback circle can never be matched geometrically and is
+ * never "within range". */
+export function isCandidateWithinRadius(
   points: readonly LatLng[],
   candidate: CandidateCourse,
-): number {
-  if (points.length === 0) return Infinity;
-  if (candidate.polygon && candidate.polygon.length >= 3) {
-    let min = Infinity;
+  radiusMeters: number,
+): boolean {
+  if (points.length === 0) return false;
+  if (candidate.polygon) {
+    const prepared = preparePolygonGeometry(candidate.polygon);
+    if (!prepared) return false;
     for (const p of points) {
-      const d = distanceToPolygonMeters(p, candidate.polygon);
-      if (d < min) min = d;
-      if (min === 0) break;
+      if (isWithinDistanceOfPrepared(p, prepared, radiusMeters)) return true;
     }
-    return min;
+    return false;
   }
   if (candidate.radiusFallback) {
-    const { center, radiusMeters } = candidate.radiusFallback;
-    let min = Infinity;
+    const { center, radiusMeters: circleRadius } = candidate.radiusFallback;
     for (const p of points) {
-      const d = Math.max(0, haversineMeters(p, center) - radiusMeters);
-      if (d < min) min = d;
-      if (min === 0) break;
+      if (haversineMeters(p, center) - circleRadius <= radiusMeters) return true;
     }
-    return min;
+    return false;
   }
-  return Infinity;
+  return false;
 }
 
 /** Candidates within `radiusMeters` of any point on the (simplified)
@@ -43,5 +44,5 @@ export function candidatesWithinRadius(
   candidates: readonly CandidateCourse[],
   radiusMeters: number,
 ): CandidateCourse[] {
-  return candidates.filter((c) => minDistanceMetersToGeometry(points, c) <= radiusMeters);
+  return candidates.filter((c) => isCandidateWithinRadius(points, c, radiusMeters));
 }

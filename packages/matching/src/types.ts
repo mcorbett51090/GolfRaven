@@ -7,7 +7,9 @@
  * catalog. Whoever wires this package up (the app, the server replay path)
  * is responsible for projecting catalog rows into `CandidateCourse` before
  * calling in. Keep this interface narrow — it is meant to be trivially
- * adaptable once the catalog schema settles (build plan §3.1 row D).
+ * adaptable once the catalog schema settles (build plan §3.1 row D). See
+ * `README.md` for the full ambiguity list this package resolved while
+ * doing that adaptation.
  */
 
 /** A geodetic point. Longitude/latitude order follows GeoJSON convention
@@ -17,6 +19,36 @@ export interface LatLng {
   lat: number;
   lon: number;
 }
+
+/** A closed ring of points (outer boundary or a hole), lat/lng. Does not
+ * need to be explicitly closed (first point repeated as the last) — every
+ * ring is treated as closed regardless. */
+export type Ring = LatLng[];
+
+/** One polygon: an outer boundary ring followed by zero or more hole
+ * rings. A point inside a hole is outside the polygon (build plan gate
+ * fix: "Points inside holes are outside"). `rings[0]` is always the outer
+ * ring. */
+export type PolygonWithHoles = Ring[];
+
+/** Several disjoint (or non-overlapping) polygons that together make up
+ * one course's playable area — e.g. two separate landmasses of the same
+ * course around a water hazard, or a composite course's several
+ * non-adjacent nines. */
+export type MultiPolygon = PolygonWithHoles[];
+
+/**
+ * What `CandidateCourse.polygon` accepts, in increasing generality:
+ *  - `LatLng[]` — a single outer ring, no holes (the original, still-
+ *    supported shape).
+ *  - `Ring[]` — one polygon's outer ring plus its holes.
+ *  - `MultiPolygon` — several such polygons.
+ * `normalizePolygon` (in `polygon.ts`) turns any of these into the
+ * canonical `MultiPolygon` form by inspecting nesting depth at runtime;
+ * see that function's doc comment for exactly how the three shapes are
+ * told apart.
+ */
+export type PolygonInput = LatLng[] | Ring[] | MultiPolygon;
 
 /** A radius-fallback circle for a `listed-verified` course with no polygon
  * (build plan §4.2). Every course at a multi-course site shares the same
@@ -36,21 +68,22 @@ export type VerificationTier = "unverified" | "listed-verified" | "play-verified
  * id, whether the geometry is shared).
  *
  * Exactly one of `polygon` / `radiusFallback` should be set:
- *  - `polygon` set → geometry-kind `'polygon'`, matched with `insideRatio`
- *    (build plan §7.4 step 3, §4.5 co-signal definition: "the facility
- *    must be `play-verified`; a radius-fallback circle never qualifies").
+ *  - `polygon` set → geometry-kind `'polygon'`, matched with a time-
+ *    weighted `insideRatio` (build plan §7.4 step 3, §4.5 co-signal
+ *    definition: "the facility must be `play-verified`; a radius-fallback
+ *    circle never qualifies").
  *  - `radiusFallback` set, `polygon` absent → geometry-kind `'radius'`,
  *    matched by start/end containment only (§4.2 "Routes against a
- *    circle").
+ *    circle") — never ranked on the `insideRatio` scale (README
+ *    ambiguity: radius vs. polygon ranking).
  * A candidate with neither is dropped from the candidate search (it
  * cannot be matched geometrically at all).
  *
  * `holes` is an addition beyond the design constraint's literal field
- * list — see the package README / handback report, "ambiguity 1": the
- * acceptance duration window in build plan §7.4 step 4 depends on whether
- * the candidate is a 9-hole course, so the matcher needs *some* signal
- * for that. It is optional and defaults to 18 holes (the 1.5–6 h window)
- * when omitted.
+ * list — see `README.md` "ambiguity 1": the acceptance duration window
+ * in build plan §7.4 step 4 depends on whether the candidate is a 9-hole
+ * course, so the matcher needs *some* signal for that. It is optional and
+ * defaults to 18 holes (the 1.5–6 h window) when omitted.
  */
 export interface CandidateCourse {
   /** The course's own `crs_` id — including an unverified stub's id (build
@@ -62,11 +95,8 @@ export interface CandidateCourse {
    * keyed on this). */
   facilityId: string;
   verificationTier: VerificationTier;
-  /** Outer ring of the course polygon, lat/lng. Does not need to be
-   * explicitly closed (first point repeated as the last) — the ring is
-   * treated as closed regardless. Absent when the course relies on the
-   * radius fallback. */
-  polygon?: LatLng[];
+  /** Absent when the course relies on the radius fallback. */
+  polygon?: PolygonInput;
   /** Present when there is no polygon (build plan §4.2 radius fallback).
    * Mutually exclusive with `polygon` in practice; if both are set,
    * `polygon` takes precedence (a play-verified course always prefers its
@@ -78,8 +108,10 @@ export interface CandidateCourse {
    * circle (identical for every course at the site, §4.2/§4.3) — cannot
    * by itself tell this course apart from a sibling course at the same
    * facility. Geometry alone can never resolve a match among candidates
-   * flagged this way; the matcher routes those to `ask_user`
-   * (build plan §4.3, §7.4 step 4).
+   * flagged this way, so the matcher routes to `ask_user` whenever the
+   * top candidate carries this flag — even when it is the only candidate
+   * left standing, e.g. because a sibling was filtered out by the
+   * duration window (build plan §4.3, §7.4 step 4).
    */
   sharedGeometry?: boolean;
   /** Hole count, when known. Defaults to 18 (see the doc comment above).
@@ -133,12 +165,17 @@ export interface MatchSummaryFields {
   sourceBundle?: string;
   /** True if *any* fix in the route was flagged simulated. */
   simulated: boolean;
-  /** Point count after simplification (build plan §7.4 step 1). */
+  /** Point count after simplification (build plan §7.4 step 1). Used only
+   * for the transmitted summary/geometry — `insideRatio` is computed from
+   * the raw, unsimplified, time-sorted fixes (gate fix 1). */
   pointCount: number;
   /** Point count before simplification, for observability. */
   rawPointCount: number;
   start: LatLng;
   end: LatLng;
+  /** Epoch milliseconds of the earliest and latest fix, after sorting. */
+  startedAt: number;
+  endedAt: number;
   durationHours: number;
 }
 
@@ -147,13 +184,27 @@ export interface MatchedCourse {
   facilityId: string;
   verificationTier: VerificationTier;
   geometryKind: GeometryKind;
-  /** Fraction of the (simplified) route inside the polygon + 30 m buffer
-   * (build plan §7.4 step 3). For a `'radius'` match this is informational
-   * only — acceptance for a radius match is decided by start/end
-   * containment, not by this ratio (build plan §4.2 "Routes against a
-   * circle"). */
-  insideRatio: number;
+  /**
+   * Time-weighted fraction of the route's *duration* spent inside the
+   * polygon + 30 m buffer (build plan §7.4 step 3; gate fix 1) — computed
+   * from the raw, time-sorted fixes, never from post-simplification
+   * vertex counts.
+   *
+   * `null` for a `'radius'` match: a radius match is decided by start/end
+   * containment only, never by a ratio (build plan §4.2 "Routes against a
+   * circle"), and is never ranked against a polygon candidate's
+   * `insideRatio` scale (gate fix 2) — the §4.5 scorer's 0.6/0.8 bands
+   * must never see a radius-derived number here. See
+   * `radiusStartEndInside` instead.
+   */
+  insideRatio: number | null;
+  /** Present (and `true`) only for a `'radius'` match: both the route's
+   * start and end fell inside the circle. */
+  radiusStartEndInside?: true;
   courseDisambiguatedBy: "geometry";
+  /** The candidate's hole count, defaulted to 18 when the candidate didn't
+   * state one (see `CandidateCourse.holes`). */
+  holes: number;
 }
 
 export interface TiedCandidateSummary {
@@ -161,7 +212,9 @@ export interface TiedCandidateSummary {
   facilityId: string;
   verificationTier: VerificationTier;
   geometryKind: GeometryKind;
-  insideRatio: number;
+  /** Same nullability rule as `MatchedCourse.insideRatio` — see there. */
+  insideRatio: number | null;
+  radiusStartEndInside?: true;
   sharedGeometry: boolean;
 }
 
@@ -175,7 +228,14 @@ export type MatchOutcome =
       tied: TiedCandidateSummary[];
       summary: MatchSummaryFields;
     }
-  | { kind: "typeahead"; summary: MatchSummaryFields };
+  | {
+      kind: "typeahead";
+      /** Candidate ids that were within the search radius but didn't
+       * geometrically-and-durationally qualify, sorted ascending — a seed
+       * list for a typeahead search UI (gate fix, output contract). */
+      nearbyCandidateIds: string[];
+      summary: MatchSummaryFields;
+    };
 
 export interface MatchRouteInput {
   fixes: RouteFix[];
@@ -188,7 +248,9 @@ export interface MatchRouteInput {
   candidateRadiusMeters?: number;
   /** `insideRatio` buffer in meters (build plan §7.4 step 3: 30 m). */
   insideRatioBufferMeters?: number;
-  /** Route simplification cap (build plan §7.4 step 1: 500). */
+  /** Route simplification cap (build plan §7.4 step 1: 500) — applied only
+   * to the transmitted summary, never to the `insideRatio` computation
+   * (gate fix 1). */
   maxSimplifiedPoints?: number;
   /** Score-gap tie threshold (build plan §7.4 step 4: 0.15). */
   tieThreshold?: number;
@@ -207,7 +269,17 @@ export interface FacilityDatePick {
 }
 
 /** A single fix used for the foreground check-in match (build plan §7.4
- * step 5). */
+ * step 5).
+ *
+ * The declared types below (`number`, `boolean`) are the honest contract
+ * for a well-behaved caller, but this struct also arrives over
+ * `POST /v1/evidence` and from server replay of stored JSON (build plan
+ * §3.1 row D, §3.3) — an untrusted boundary where TypeScript's types are
+ * erased and a hostile or buggy client can send anything, including
+ * `null`, `NaN` (which round-trips through `JSON.stringify` as `null`),
+ * or an omitted field. `matchCheckIn` validates every field at runtime
+ * regardless of what the type declares, and fails closed on anything that
+ * doesn't strictly conform (gate fix: "Check-in fails closed"). */
 export interface CheckInFix {
   point: LatLng;
   accuracyMeters: number;
@@ -231,4 +303,7 @@ export type CheckInResult =
       timestamp: number;
       attestationAssertion?: string;
     }
-  | { accepted: false; reason: "simulated" | "inaccurate" | "outside_polygon" | "no_geometry" };
+  | {
+      accepted: false;
+      reason: "simulated" | "inaccurate" | "outside_polygon" | "no_geometry" | "invalid_fix";
+    };
