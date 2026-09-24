@@ -12,6 +12,7 @@ import {
   simplifyToMaxPoints,
   stableSortByTimestamp,
   type CandidateCourse,
+  type PolygonInput,
 } from "../src/index.js";
 import { fixesAlong, loopInsideRectangle, ORIGIN, offset, rectangle } from "./helpers.js";
 
@@ -439,7 +440,7 @@ describe("mutation-catching boundary fixtures", () => {
     // i*50 <= maxX + 30. Choosing maxX = (count-1)*50 includes exactly
     // `count` points (i = 0..count-1) with a comfortable margin before
     // the next excluded point (>= 50 m - 30 m = 20 m clearance).
-    function boxCoveringCount(count: number): CandidateCourse["polygon"] {
+    function boxCoveringCount(count: number): PolygonInput {
       const maxX = (count - 1) * 50;
       return [
         offset(ORIGIN, -50, -50),
