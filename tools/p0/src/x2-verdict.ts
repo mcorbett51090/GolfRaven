@@ -521,11 +521,15 @@ function checkRosterEntryName(
 
 /** Decision 0001 Addendum G, applied literally. `slateTrails` defaults to
  * the pilot slate (TN/VI/RTJ); pass it explicitly to evaluate a swapped-in
- * reserve trail instead. */
+ * reserve trail instead. `corroboration` (gate finding 4, default `{}` —
+ * an empty one, under which EVERY owner-saved fact is uncorroborated and
+ * so cannot confirm a trail on its own) supplies the Wayback-snapshot or
+ * Matt's-acceptance records an owner-saved fact needs to count. */
 export function computeX2Verdict(
   confirmation: X2ConfirmationFile,
   evidenceByTrail: EvidenceByTrail,
   slateTrails: readonly string[] = X2_SLATE_TRAILS,
+  corroboration: X2CorroborationFile = {},
 ): X2VerdictResult {
   const perTrail: Record<string, X2TrailVerdict> = {};
   for (const trail of slateTrails) {
@@ -535,6 +539,15 @@ export function computeX2Verdict(
       failedSources: [],
     };
     const trailConfirmation = confirmation[trail];
+    const trailCorroboration = corroboration[trail] ?? {};
+
+    // Gate finding 4: corroboration summaries are computed ONCE per fact,
+    // here, and reused both for the confirmed/not decision below AND for
+    // the `facts` output — never re-derived (and never re-reasoned-about,
+    // which would duplicate `reasons` entries).
+    const rosterCorroboration = new Map<string, string | null>();
+    let completionUnitCorroboration: string | null = null;
+    let seasonCorroboration: string | null = null;
 
     let ok = Boolean(trailConfirmation);
     if (!trailConfirmation) {
@@ -558,38 +571,78 @@ export function computeX2Verdict(
             trailEvidence.bySha,
             reasons,
           );
-          if (!quoteOk || !nameOk) ok = false;
+          let corroborationOk = true;
+          if (quoteOk) {
+            const result = checkOwnerSavedCorroboration(
+              rosterEntry.evidenceSha,
+              trail,
+              rosterEntry.quote,
+              trailEvidence.bySha,
+              trailCorroboration,
+              `Roster entry "${rosterEntry.name}"`,
+              reasons,
+            );
+            corroborationOk = result.ok;
+            rosterCorroboration.set(rosterEntry.name, result.summary);
+          }
+          if (!quoteOk || !nameOk || !corroborationOk) ok = false;
         }
       }
 
       if (!trailConfirmation.completionUnit) {
         reasons.push("completionUnit is missing.");
         ok = false;
-      } else if (
-        !checkQuote(
+      } else {
+        const quoteOk = checkQuote(
           trailConfirmation.completionUnit,
           trail,
           trailEvidence.bySha,
           "completionUnit",
           reasons,
-        )
-      ) {
-        ok = false;
+        );
+        let corroborationOk = true;
+        if (quoteOk) {
+          const result = checkOwnerSavedCorroboration(
+            trailConfirmation.completionUnit.evidenceSha,
+            trail,
+            trailConfirmation.completionUnit.quote,
+            trailEvidence.bySha,
+            trailCorroboration,
+            "completionUnit",
+            reasons,
+          );
+          corroborationOk = result.ok;
+          completionUnitCorroboration = result.summary;
+        }
+        if (!quoteOk || !corroborationOk) ok = false;
       }
 
       if (!trailConfirmation.season) {
         reasons.push("season is missing.");
         ok = false;
-      } else if (
-        !checkQuote(
+      } else {
+        const quoteOk = checkQuote(
           trailConfirmation.season,
           trail,
           trailEvidence.bySha,
           "season",
           reasons,
-        )
-      ) {
-        ok = false;
+        );
+        let corroborationOk = true;
+        if (quoteOk) {
+          const result = checkOwnerSavedCorroboration(
+            trailConfirmation.season.evidenceSha,
+            trail,
+            trailConfirmation.season.quote,
+            trailEvidence.bySha,
+            trailCorroboration,
+            "season",
+            reasons,
+          );
+          corroborationOk = result.ok;
+          seasonCorroboration = result.summary;
+        }
+        if (!quoteOk || !corroborationOk) ok = false;
       }
     }
 
@@ -615,6 +668,7 @@ export function computeX2Verdict(
             `Roster entry "${r.name}"`,
             reasons,
           ),
+          corroboration: rosterCorroboration.get(r.name) ?? null,
         })),
         completionUnit: trailConfirmation?.completionUnit
           ? {
@@ -625,11 +679,13 @@ export function computeX2Verdict(
                 "completionUnit",
                 reasons,
               ),
+              corroboration: completionUnitCorroboration,
             }
           : null,
         season: trailConfirmation?.season
           ? {
               ...trailConfirmation.season,
+              corroboration: seasonCorroboration,
               method: factMethod(
                 trailEvidence.bySha,
                 trailConfirmation.season.evidenceSha,

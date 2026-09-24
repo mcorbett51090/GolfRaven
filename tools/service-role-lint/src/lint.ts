@@ -309,69 +309,214 @@ export function lintSource(source: string, filePath: string): Finding[] {
   });
 
   // ---------------------------------------------------------------------
-  // Pass 2: env var access — non-literal (any) and literal-secret.
-  // ---------------------------------------------------------------------
+  // Pass 2 (M3, post-P3a gate — reworked for bypass-resistance): "Rule:
+  // any env read outside privileged.ts fails unless it is on a small
+  // allow-list of public vars." Every syntactic shape below funnels into
+  // ONE helper, `flagEnvKey`, so the allow-list/secret-vs-non-literal
+  // decision lives in exactly one place — the four probes named in the
+  // gate (destructured env, .toObject(), computed/.KEY access, the
+  // original .get() form) differ only in HOW they locate the key, not in
+  // what happens once one is found.
+  //
+  // Tracks local names bound to Deno's/process's `env` object — via
+  // `Deno.env`/`process.env` directly, an aliased import (`import Deno
+  // ...` isn't real, but `const D = Deno;` is, so track that), OR
+  // destructuring (`const { env } = Deno;`) — so `env.get(...)` on the
+  // destructured local is caught the same as `Deno.env.get(...)`.
+  const envObjectLocalNames = new Set<string>(["Deno", "process"]); // built-ins, always tracked
+  const secretEnvValueIdentifiers = new Set<string>(); // vars assigned from a non-allowlisted env read (M3(4) taint source)
+
+  function flagEnvKey(node: TSESTree.Node, literalKey: string | undefined, sourceDescription: string): void {
+    const loc = nodeLoc(node);
+    if (literalKey === undefined) {
+      findings.push({
+        rule: "non-literal-env-access",
+        message: `${sourceDescription} with a non-literal/unresolvable key — cannot verify it is on the public allow-list`,
+        ...loc,
+      });
+      return;
+    }
+    if (!isPublicEnvVar(literalKey)) {
+      findings.push({
+        rule: "literal-secret-env-var",
+        message: `${sourceDescription} reads "${literalKey}", which is not on the public env-var allow-list (SERVICE_ROLE/DB_URL-shaped or otherwise unlisted secret)`,
+        ...loc,
+      });
+    }
+  }
+
+  // Pass 2a: discover env-object aliases (`const D = Deno;`) and
+  // destructured `env` bindings (`const { env } = Deno;` /
+  // `const { env } = process;`) before scanning for reads, since a read
+  // can precede or follow its alias's declaration in source order but
+  // `walk` is a single pass — two short sub-passes over the whole AST is
+  // simpler and cheaper than reordering.
+  for (let pass = 0; pass < 3; pass++) {
+    let added = false;
+    walk(ast, (node) => {
+      if (
+        node.type === AST_NODE_TYPES.VariableDeclarator &&
+        node.id.type === AST_NODE_TYPES.Identifier &&
+        node.init &&
+        node.init.type === AST_NODE_TYPES.Identifier &&
+        envObjectLocalNames.has(node.init.name) &&
+        !envObjectLocalNames.has(node.id.name)
+      ) {
+        envObjectLocalNames.add(node.id.name);
+        added = true;
+      }
+    });
+    if (!added) break;
+  }
+  const destructuredEnvGetterNames = new Set<string>(); // a local bound to `Deno.env`/`process.env`'s `.get`/`.toObject` itself
   walk(ast, (node) => {
-    // <obj>.env.get(<arg>) — Deno.env.get(...) or an aliased/namespaced form.
     if (
+      node.type === AST_NODE_TYPES.VariableDeclarator &&
+      node.id.type === AST_NODE_TYPES.ObjectPattern &&
+      node.init &&
+      node.init.type === AST_NODE_TYPES.Identifier &&
+      envObjectLocalNames.has(node.init.name)
+    ) {
+      // `const { env } = Deno;`
+      for (const prop of node.id.properties) {
+        if (
+          prop.type === AST_NODE_TYPES.Property &&
+          prop.key.type === AST_NODE_TYPES.Identifier &&
+          prop.key.name === "env" &&
+          prop.value.type === AST_NODE_TYPES.Identifier
+        ) {
+          envAliasIsDirectEnvObject.add(prop.value.name);
+        }
+      }
+    }
+    if (
+      node.type === AST_NODE_TYPES.VariableDeclarator &&
+      node.id.type === AST_NODE_TYPES.ObjectPattern &&
+      node.init &&
+      node.init.type === AST_NODE_TYPES.MemberExpression &&
+      node.init.object.type === AST_NODE_TYPES.Identifier &&
+      envObjectLocalNames.has(node.init.object.name) &&
+      node.init.property.type === AST_NODE_TYPES.Identifier &&
+      node.init.property.name === "env"
+    ) {
+      // `const { get } = Deno.env;` / `const { toObject } = Deno.env;`
+      for (const prop of node.id.properties) {
+        if (
+          prop.type === AST_NODE_TYPES.Property &&
+          prop.key.type === AST_NODE_TYPES.Identifier &&
+          (prop.key.name === "get" || prop.key.name === "toObject") &&
+          prop.value.type === AST_NODE_TYPES.Identifier
+        ) {
+          destructuredEnvGetterNames.add(prop.value.name);
+        }
+      }
+    }
+  });
+
+  walk(ast, (node) => {
+    // <envObject>.env.get(<arg>) or <destructuredEnvLocal>.get(<arg>) —
+    // Deno.env.get(...), an aliased env object, or `const {env}=Deno;
+    // env.get(...)`.
+    const isEnvGetCall =
       node.type === AST_NODE_TYPES.CallExpression &&
       node.callee.type === AST_NODE_TYPES.MemberExpression &&
       node.callee.property.type === AST_NODE_TYPES.Identifier &&
       node.callee.property.name === "get" &&
-      node.callee.object.type === AST_NODE_TYPES.MemberExpression &&
-      node.callee.object.property.type === AST_NODE_TYPES.Identifier &&
-      node.callee.object.property.name === "env"
-    ) {
-      const arg = node.arguments[0];
-      const loc = nodeLoc(node);
-      if (!arg || arg.type !== AST_NODE_TYPES.Literal || typeof arg.value !== "string") {
-        findings.push({
-          rule: "non-literal-env-access",
-          message: "environment variable read with a non-literal argument (variable, template, or concatenation) — cannot verify which secret this reads",
-          ...loc,
-        });
-      } else if (mentionsSecretEnvVar(arg.value)) {
-        findings.push({
-          rule: "literal-secret-env-var",
-          message: `environment variable read names a service-role/DB-URL secret ("${arg.value}")`,
-          ...loc,
-        });
+      ((node.callee.object.type === AST_NODE_TYPES.MemberExpression &&
+        node.callee.object.property.type === AST_NODE_TYPES.Identifier &&
+        node.callee.object.property.name === "env" &&
+        node.callee.object.object.type === AST_NODE_TYPES.Identifier &&
+        envObjectLocalNames.has(node.callee.object.object.name)) ||
+        (node.callee.object.type === AST_NODE_TYPES.Identifier && envAliasIsDirectEnvObject.has(node.callee.object.name)));
+    // `const { get } = Deno.env; get(<arg>)` — a bare call, not a member call.
+    const isDestructuredEnvGetCall =
+      node.type === AST_NODE_TYPES.CallExpression &&
+      node.callee.type === AST_NODE_TYPES.Identifier &&
+      destructuredEnvGetterNames.has(node.callee.name) &&
+      node.callee.name !== "toObject"; // toObject handled separately below (its own args are irrelevant)
+    if (isEnvGetCall || isDestructuredEnvGetCall) {
+      const call = node as TSESTree.CallExpression;
+      const arg = call.arguments[0];
+      const literalKey = arg && arg.type === AST_NODE_TYPES.Literal && typeof arg.value === "string" ? arg.value : undefined;
+      flagEnvKey(node, literalKey, "environment variable read (.env.get(...))");
+      if (literalKey !== undefined && !isPublicEnvVar(literalKey)) {
+        const parent = (node as unknown as { parent?: TSESTree.Node }).parent;
+        if (parent && parent.type === AST_NODE_TYPES.VariableDeclarator && parent.id.type === AST_NODE_TYPES.Identifier) {
+          secretEnvValueIdentifiers.add(parent.id.name);
+        }
       }
     }
 
-    // process.env.FOO (static member) / process.env["FOO"] or process.env[x] (computed).
+    // <envObject>.env.toObject() — grabs EVERY env var at once, so no
+    // per-key allow-list check is even possible; always a finding.
+    // `.toObject()[...]` / `.toObject().KEY` is flagged too (the outer
+    // access), so both the acquisition and the specific read are named.
+    if (
+      node.type === AST_NODE_TYPES.CallExpression &&
+      node.callee.type === AST_NODE_TYPES.MemberExpression &&
+      node.callee.property.type === AST_NODE_TYPES.Identifier &&
+      node.callee.property.name === "toObject" &&
+      ((node.callee.object.type === AST_NODE_TYPES.MemberExpression &&
+        node.callee.object.property.type === AST_NODE_TYPES.Identifier &&
+        node.callee.object.property.name === "env" &&
+        node.callee.object.object.type === AST_NODE_TYPES.Identifier &&
+        envObjectLocalNames.has(node.callee.object.object.name)) ||
+        (node.callee.object.type === AST_NODE_TYPES.Identifier && envAliasIsDirectEnvObject.has(node.callee.object.name)))
+    ) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "non-literal-env-access",
+        message: "Deno.env.toObject() reads every environment variable at once — cannot verify no secret is read; use .get(<allow-listed literal>) instead",
+        ...loc,
+      });
+    }
+    if (
+      node.type === AST_NODE_TYPES.CallExpression &&
+      node.callee.type === AST_NODE_TYPES.Identifier &&
+      destructuredEnvGetterNames.has(node.callee.name) &&
+      node.callee.name === "toObject"
+    ) {
+      const loc = nodeLoc(node);
+      findings.push({
+        rule: "non-literal-env-access",
+        message: "destructured toObject() (from Deno.env) reads every environment variable at once — cannot verify no secret is read",
+        ...loc,
+      });
+    }
+
+    // process.env.FOO (static member) / process.env["FOO"] or
+    // process.env[x] (computed) — and the same for any tracked env-object
+    // alias, e.g. `const D = Deno; D.env.FOO`.
     if (
       node.type === AST_NODE_TYPES.MemberExpression &&
       node.object.type === AST_NODE_TYPES.MemberExpression &&
       node.object.property.type === AST_NODE_TYPES.Identifier &&
-      node.object.property.name === "env"
+      node.object.property.name === "env" &&
+      node.object.object.type === AST_NODE_TYPES.Identifier &&
+      envObjectLocalNames.has(node.object.object.name)
     ) {
-      const loc = nodeLoc(node);
       if (!node.computed && node.property.type === AST_NODE_TYPES.Identifier) {
-        if (mentionsSecretEnvVar(node.property.name)) {
-          findings.push({
-            rule: "literal-secret-env-var",
-            message: `process.env.${node.property.name} names a service-role/DB-URL secret`,
-            ...loc,
-          });
-        }
+        flagEnvKey(node, node.property.name, `${node.object.object.name}.env.${node.property.name}`);
       } else if (node.computed) {
         const prop = node.property;
-        if (prop.type === AST_NODE_TYPES.Literal && typeof prop.value === "string") {
-          if (mentionsSecretEnvVar(prop.value)) {
-            findings.push({
-              rule: "literal-secret-env-var",
-              message: `process.env["${prop.value}"] names a service-role/DB-URL secret`,
-              ...loc,
-            });
-          }
-        } else {
-          findings.push({
-            rule: "non-literal-env-access",
-            message: "process.env[...] accessed with a non-literal key — cannot verify which secret this reads",
-            ...loc,
-          });
-        }
+        const literalKey = prop.type === AST_NODE_TYPES.Literal && typeof prop.value === "string" ? prop.value : undefined;
+        flagEnvKey(node, literalKey, `${node.object.object.name}.env[...]`);
+      }
+    }
+    // Same for a bare destructured `env` local: `env.FOO` / `env["FOO"]`.
+    if (
+      node.type === AST_NODE_TYPES.MemberExpression &&
+      node.object.type === AST_NODE_TYPES.Identifier &&
+      envAliasIsDirectEnvObject.has(node.object.name) &&
+      !(node.property.type === AST_NODE_TYPES.Identifier && node.property.name === "get") &&
+      !(node.property.type === AST_NODE_TYPES.Identifier && node.property.name === "toObject")
+    ) {
+      if (!node.computed && node.property.type === AST_NODE_TYPES.Identifier) {
+        flagEnvKey(node, node.property.name, `${node.object.name}.${node.property.name} (destructured env)`);
+      } else if (node.computed) {
+        const prop = node.property;
+        const literalKey = prop.type === AST_NODE_TYPES.Literal && typeof prop.value === "string" ? prop.value : undefined;
+        flagEnvKey(node, literalKey, `${node.object.name}[...] (destructured env)`);
       }
     }
   });
