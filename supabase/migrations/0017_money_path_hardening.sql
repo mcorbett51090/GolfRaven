@@ -262,7 +262,15 @@ CREATE OR REPLACE FUNCTION app.checkin_challenge_used_at_once() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF OLD.used_at IS NOT NULL AND NEW.used_at IS DISTINCT FROM OLD.used_at THEN
+  -- Reject ANY further UPDATE once used_at is set, even one that would
+  -- (re-)write the identical value: `now()` is stable for the whole
+  -- transaction in Postgres, not per-statement, so "set it to now() a
+  -- second time" can otherwise look like a no-op change and slip past an
+  -- `IS DISTINCT FROM` check entirely (confirmed empirically this
+  -- session). A consumed challenge must never be touched again, full
+  -- stop -- that is the actual replay-protection contract, not merely
+  -- "can't change to a different value".
+  IF OLD.used_at IS NOT NULL THEN
     RAISE EXCEPTION 'checkin_challenge: used_at is already set (%) and cannot be changed (id=%)', OLD.used_at, OLD.id
       USING ERRCODE = '23514';
   END IF;
