@@ -16,7 +16,7 @@
     "verify-budget": "node ./scripts/verify-budget.mjs",
     "verify-a11y-budget": "node ./scripts/verify-a11y-budget.mjs",
     "build": "bash -c 'export GOLFRAVEN_BUILD_STARTED_MS=$(node -e \"process.stdout.write(String(Date.now()))\"); pnpm run verify-input && pnpm run emit-indexability && pnpm run gen-map-data && ASTRO_TELEMETRY_DISABLED=1 astro build && pnpm run gen-headers && pnpm run gen-redirects && pnpm run gen-sw && node ./scripts/pagefind-index.mjs && pnpm run verify-sitemap && pnpm run verify-budget && pnpm run verify-a11y-budget'",
-    "typecheck": "pnpm run emit-indexability && ASTRO_TELEMETRY_DISABLED=1 astro check",
+    "typecheck": "ASTRO_TELEMETRY_DISABLED=1 astro check",
     "test": "vitest run && node ./scripts/run-e2e.mjs"
   },
   "dependencies": {
