@@ -73,6 +73,42 @@ export type X2ConfirmationFile = Record<string, X2TrailConfirmation>;
 export const X2_SLATE_TRAILS = SLATE_TRAILS;
 export const X2_PASS_BAR_CONFIRMED = 2;
 
+/**
+ * Gate finding 4: the owner-saved rule was not enforced. Every fact whose
+ * evidence has `method: "owner-saved"` rests on the owner's WORD alone —
+ * nothing about ingestion verifies the bytes ever touched the stated URL
+ * (the Addendum J correction's own point). Such a fact is
+ * "owner-attested, uncorroborated" by default and does NOT count toward
+ * confirmation UNLESS ONE of these is supplied, keyed by the SAME
+ * `evidenceSha` the fact cites:
+ *
+ *  - `{ type: "wayback", snapshotUrl, snapshotSha256, snapshotText }` — a
+ *    web.archive.org snapshot of the SAME stated URL. `snapshotText` is
+ *    the text a human (or a future live-render helper) actually extracted
+ *    from that snapshot — `x2-verdict` checks the SAME quote against it,
+ *    with the SAME verbatim-after-whitespace-collapsing rule, rather than
+ *    fetching the network itself (this stays a pure function, and never
+ *    invents a quote it hasn't been handed).
+ *  - `{ type: "acceptance", acceptedBy, date }` — Matt's own dated,
+ *    written acceptance that this specific owner-attested fact counts
+ *    without a Wayback snapshot (the Addendum J correction's own escape
+ *    hatch for a page that was never archived).
+ */
+export interface X2WaybackCorroboration {
+  type: "wayback";
+  snapshotUrl: string;
+  snapshotSha256: string;
+  snapshotText: string;
+}
+export interface X2AcceptanceCorroboration {
+  type: "acceptance";
+  acceptedBy: string;
+  date: string;
+}
+export type X2CorroborationRecord = X2WaybackCorroboration | X2AcceptanceCorroboration;
+/** trail name -> evidenceSha -> its corroboration record, if any. */
+export type X2CorroborationFile = Record<string, Record<string, X2CorroborationRecord>>;
+
 /** One trail's own evidence — never merged with another trail's. `text ===
  * null` means the evidence EXISTS but has no extracted text (should not
  * happen for HTML/PDF with a working extractor, but can for an opaque

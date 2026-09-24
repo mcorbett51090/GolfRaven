@@ -268,8 +268,9 @@ function localDateForTz(ms: number, tz: string): string | undefined {
  * facility tz... Reject a mismatch." Applied to EVERY `AppFix` embedded in
  * a row (`fixesOfEvidenceRow`), not merely a top-level field — the probe
  * case is a `coSignalFix.capturedAt` three days after its own
- * `coSignalFix.localDate`. `tz` defaults to `"UTC"` when the caller's `ctx`
- * doesn't carry one (`ScorePlayContext.facilityTz`'s own doc). */
+ * `coSignalFix.localDate`. `tz` is `ctx.facilityTz` (F1, sixth gate: now
+ * REQUIRED, no silent UTC default — see `ScorePlayContextSchema`'s own
+ * doc for the exploit that closed). */
 function tzCrossCheckIssues(row: Evidence, tz: string): string[] {
   const issues: string[] = [];
   for (const fix of fixesOfEvidenceRow(row)) {
@@ -305,13 +306,18 @@ function zodIssuesToReasons(issues: readonly { path: PropertyKey[]; message: str
 
 /**
  * Parses ONE not-yet-typed `app.evidence` row. `tz` (the facility's IANA
- * timezone, `ScorePlayContext.facilityTz`) is optional and defaults to
- * `"UTC"` — pass it to also run H2's capturedAt/localDate cross-check;
- * omit it only when the caller genuinely has no timezone context (the
- * cross-check still runs, against UTC, since skipping it silently would
- * defeat the point).
+ * timezone, `ScorePlayContext.facilityTz`) is now REQUIRED (F1, sixth
+ * gate) — there is no default, silent or otherwise; `parseScorePlayInput`
+ * always supplies its already-validated `ctx.facilityTz`, and a caller
+ * using `parseEvidence` standalone must supply a real one too. `tz` is
+ * re-validated here (not just trusted from the caller) so this function is
+ * safe even when called directly, bypassing `parseScorePlayInput`'s own
+ * `ScorePlayContextSchema` check.
  */
-export function parseEvidence(raw: unknown, tz = "UTC"): EvidenceParseResult {
+export function parseEvidence(raw: unknown, tz: string): EvidenceParseResult {
+  if (!isValidIanaTimeZone(tz)) {
+    return { success: false, reasons: [`facilityTz "${tz}" is not a real IANA Area/Location timezone name`] };
+  }
   const parsed = EvidenceSchema.safeParse(raw);
   if (!parsed.success) {
     return { success: false, reasons: zodIssuesToReasons(parsed.error.issues) };

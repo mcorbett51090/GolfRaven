@@ -58,18 +58,78 @@ const EXEMPT_SEGMENTS = ["supabase", "functions", "_shared", "privileged.ts"];
 /** Env var name substrings that mark a client/URL as privileged (case-insensitive). */
 const SECRET_ENV_MARKERS = ["SERVICE_ROLE", "DB_URL"];
 
-/** Import specifiers that construct or re-expose a Supabase / raw-Postgres client. */
-const BANNED_SPECIFIER_PATTERNS: RegExp[] = [
-  /supabase-js$/, // any specifier ending in "supabase-js" (covers esm.sh/jsr/npm: prefixes too)
-  /^npm:postgres$/,
-  /^npm:pg$/,
-  /^jsr:@db\/postgres$/,
-  /^deno\.land\/x\/postgres/,
-  /^pg$/,
-  /^postgres$/,
-  /^postgres\.js$/,
-  /^pg-promise$/,
+// M3 (post-P3a gate): "any env read outside privileged.ts fails unless it
+// is on a small allow-list of public vars." A small, explicit allow-list
+// of names that are genuinely public/non-secret — everything else read
+// from Deno.env / process.env, in ANY syntactic form, is a finding. This
+// deliberately inverts the old default (ban a marker substring, allow
+// everything else) because a substring list is exactly what versioned/
+// aliased/destructured/toObject() access bypassed.
+const PUBLIC_ENV_VAR_ALLOWLIST = new Set(["SUPABASE_URL", "SUPABASE_ANON_KEY", "ENVIRONMENT", "NODE_ENV", "DENO_ENV"]);
+
+function mentionsSecretEnvVar(text: string): boolean {
+  const upper = text.toUpperCase();
+  return SECRET_ENV_MARKERS.some((m) => upper.includes(m));
+}
+
+function isPublicEnvVar(name: string): boolean {
+  return PUBLIC_ENV_VAR_ALLOWLIST.has(name);
+}
+
+// M3(1) (post-P3a gate): "versioned or URL specifiers ... match by
+// normalised package name, not an anchored regex." The old
+// BANNED_SPECIFIER_PATTERNS anchored regexes (`/^pg$/` etc.) matched the
+// RAW specifier text, so `https://esm.sh/@supabase/supabase-js@2.45.0`,
+// `https://deno.land/x/postgresjs@0.19.0`, and `npm:pg@8` all sailed
+// through — none of them equals the bare, unversioned string the regex
+// anchored to. normalizePackageSpecifier strips a CDN/registry host
+// prefix, a `npm:`/`jsr:` scheme, and a trailing `@<version>`, so the
+// SAME banned-name check catches every dressed-up form of the same
+// package.
+const KNOWN_REGISTRY_HOST_PREFIXES = [
+  "esm.sh/",
+  "cdn.skypack.dev/",
+  "cdn.jsdelivr.net/npm/",
+  "unpkg.com/",
+  "deno.land/x/",
+  "jsr.io/",
 ];
+
+function normalizePackageSpecifier(spec: string): string {
+  let s = spec.replace(/^https?:\/\//, "");
+  for (const prefix of KNOWN_REGISTRY_HOST_PREFIXES) {
+    if (s.startsWith(prefix)) {
+      s = s.slice(prefix.length);
+      break;
+    }
+  }
+  s = s.replace(/^npm:/, "").replace(/^jsr:/, "");
+  // Strip a trailing "@<version>" — but not a LEADING "@scope" (atIdx must
+  // be > 0 so "@supabase/supabase-js" itself is untouched when there is no
+  // version suffix at all).
+  const atIdx = s.lastIndexOf("@");
+  if (atIdx > 0) s = s.slice(0, atIdx);
+  // Strip a trailing sub-path (e.g. a deno.land/x style "pkg/mod.ts").
+  const slashIdx = s.indexOf("/", s.startsWith("@") ? s.indexOf("/") + 1 : 0);
+  const pkgName = slashIdx > 0 && !s.startsWith("@supabase/") ? s.slice(0, slashIdx) : s;
+  return pkgName.toLowerCase();
+}
+
+const BANNED_PACKAGE_NAMES = new Set([
+  "@supabase/supabase-js",
+  "pg",
+  "postgres",
+  "postgres.js",
+  "postgresjs",
+  "pg-promise",
+  "@db/postgres",
+]);
+
+function isBannedSpecifier(spec: string): boolean {
+  const normalized = normalizePackageSpecifier(spec);
+  if (BANNED_PACKAGE_NAMES.has(normalized)) return true;
+  return normalized.endsWith("supabase-js");
+}
 
 function isAllowedFile(filePath: string): boolean {
   const segments = filePath.split(/[\\/]/).filter(Boolean);
