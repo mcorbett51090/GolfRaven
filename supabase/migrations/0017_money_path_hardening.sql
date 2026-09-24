@@ -939,6 +939,46 @@ REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce(interval) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce(interval) TO service_role;
 
 -- ============================================================================
+-- should-fix (post-P3a re-gate): "The H1 catalog test must require
+-- CASCADE or SET NULL. Deferrable NO ACTION alone is not enough unless an
+-- explicit null-out is registered." offer_code_play_user_fk/
+-- entitlement_play_user_fk (above, M2) are exactly this shape: DEFERRABLE
+-- NO ACTION, not ON DELETE SET NULL on the FK itself (a bare SET NULL on
+-- a two-column composite FK would null BOTH columns, including user_id —
+-- see the play_deleted_detach_play_id comment above for why). Their
+-- explicit null-out is the app.play_deleted_detach_play_id BEFORE DELETE
+-- trigger, registered here by name so 09_delete_my_data.sql's H1 catalog
+-- test can verify a REAL, present trigger stands behind the "deferrable
+-- alone is not enough" exception, not just a comment's say-so — a
+-- migration that drops the trigger without also removing this row still
+-- fails the catalog test (see that test's own EXISTS-a-real-trigger
+-- clause).
+-- ============================================================================
+CREATE TABLE private.fk_explicit_detach_allowlist (
+  schema_name text NOT NULL,
+  table_name text NOT NULL,
+  constraint_name text NOT NULL,
+  detach_trigger_schema text NOT NULL,
+  detach_trigger_name text NOT NULL,
+  reason text NOT NULL,
+  PRIMARY KEY (schema_name, table_name, constraint_name)
+);
+ALTER TABLE private.fk_explicit_detach_allowlist ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.fk_explicit_detach_allowlist FORCE ROW LEVEL SECURITY;
+GRANT SELECT ON private.fk_explicit_detach_allowlist TO service_role;
+GRANT INSERT ON private.fk_explicit_detach_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_fk_explicit_detach_allowlist ON private.fk_explicit_detach_allowlist
+  FOR INSERT TO CURRENT_USER WITH CHECK (true);
+
+INSERT INTO private.fk_explicit_detach_allowlist
+  (schema_name, table_name, constraint_name, detach_trigger_schema, detach_trigger_name, reason)
+VALUES
+  ('app', 'offer_code', 'offer_code_play_user_fk', 'app', 'play_deleted_detach_play_id_trg',
+   'composite FK to app.play(id,user_id) is DEFERRABLE NO ACTION, not ON DELETE SET NULL, because a bare SET NULL on a 2-column composite FK would also null user_id -- app.play_deleted_detach_play_id (BEFORE DELETE ON app.play) nulls ONLY play_id explicitly instead'),
+  ('app', 'entitlement', 'entitlement_play_user_fk', 'app', 'play_deleted_detach_play_id_trg',
+   'same as offer_code_play_user_fk above -- the same trigger detaches both tables in one pass');
+
+-- ============================================================================
 -- S1 close-out follow-through: register the two new triggers' owning
 -- functions + app.reserve_offer_budget/app.dedupe_receipt_fingerprint in
 -- private.function_inventory (10_function_inventory.sql's own inventory
