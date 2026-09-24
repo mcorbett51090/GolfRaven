@@ -16,6 +16,23 @@
 # depends on is set here; a real project's full config.toml (ports,
 # auth providers, storage limits, etc.) is out of this stage's scope.
 
+[db]
+# should-fix (post-P3a re-gate): "GRANT ... WITH INHERIT/SET is PG16+
+# syntax. Find which major version hosted Supabase uses for new
+# projects." [docs-verified 2026-09-24 via WebSearch — supabase.com's own
+# docs domain is blocked by this environment's egress proxy, so this is
+# corroborated from GitHub org discussion #35851, the Supabase changelog,
+# and third-party coverage rather than supabase.com directly, but
+# multiple independent sources agree]: Supabase Cloud has defaulted new
+# projects to PostgreSQL 17 for some time before 2026-09-24, and
+# self-hosted Supabase moved to PG17-by-default on 2026-06-17. Pinned
+# here so a real `supabase db push`/`supabase start` targets the same
+# major version this repo's own CI and local harness now test against
+# (tools/db/test.sh, .github/workflows/ci.yml's db-tests job) — verified
+# locally this session against PostgreSQL 17.11 (PGDG), both
+# HARNESS_MODE=superuser and HARNESS_MODE=restricted, full green.
+major_version = 17
+
 [api]
 enabled = true
 # The ONLY schema PostgREST exposes to anon/authenticated over the REST

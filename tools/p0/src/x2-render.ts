@@ -657,6 +657,5 @@ export async function renderUrl(
     } finally {
       await browser.close();
     }
-  }
 }
 
