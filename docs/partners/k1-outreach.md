@@ -213,18 +213,24 @@ Matt [Last Name], [Entity name — TBD]
 
 Columns fixed 2026-09-24, before any outreach was sent — `tools/p0`'s `k1-verdict` reads this table
 directly (`src/k1-log.ts`); every input it needs (acceptance date, LOI date, fee willingness, the OK
-swap activation, and the three sponsor qualifiers) is its own column, ISO dates or `Y`/`N` values, so
-nothing is inferred from free text. Do not rename, reorder or add columns without updating that parser.
+swap activation, and the sponsor qualifiers) is its own column, ISO dates or `Y`/`N` values, so
+nothing is inferred from free text. The "Sponsor conversation date" column was added 2026-09-24, per
+decision 0001 Addendum I, while the table was still empty. Do not rename, reorder or add columns
+without updating that parser.
 
-| Target | Type | Contacted date | Call accepted date | LOI date | Fee willingness (Y/N) | OK swap replaces | Sponsor: decision-maker named (Y/N) | Sponsor: budget range stated (Y/N) | Sponsor: attribution interest (Y/N) | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Tennessee Golf Trail | Operator (slate) | | | | | | | | | |
-| Vancouver Island Golf Trail | Operator (slate) | | | | | | | | | |
-| Robert Trent Jones Golf Trail | Operator (slate) | | | | | | | | | |
-| Oklahoma Golf Trail | Operator (reserve) | | | | | | | | | |
-| Hammock Coast Golf Trail | Operator (co-op reserve) | | | | | | | | | |
-| Canadian Rockies Golf Consortium | Operator (co-op reserve) | | | | | | | | | |
-| Alabama Tourism Department | Sponsor | | | | | | | | | |
-| Tourism Vancouver Island | Sponsor | | | | | | | | | |
-| Callaway Brands | Sponsor | | | | | | | | | |
-| Bushnell Golf | Sponsor | | | | | | | | | |
+**Alias:** the Target "Hammock Coast" (as decision 0001 Addendum D R2 names it) and this table's own
+row "Hammock Coast Golf Trail" are the same operator — `k1-verdict` accepts either spelling and
+canonicalizes to "Hammock Coast Golf Trail" (decision 0001, Addendum I).
+
+| Target | Type | Contacted date | Call accepted date | LOI date | Fee willingness (Y/N) | OK swap replaces | Sponsor: decision-maker named (Y/N) | Sponsor: budget range stated (Y/N) | Sponsor: attribution interest (Y/N) | Sponsor conversation date | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Tennessee Golf Trail | Operator (slate) | | | | | | | | | | |
+| Vancouver Island Golf Trail | Operator (slate) | | | | | | | | | | |
+| Robert Trent Jones Golf Trail | Operator (slate) | | | | | | | | | | |
+| Oklahoma Golf Trail | Operator (reserve) | | | | | | | | | | |
+| Hammock Coast Golf Trail | Operator (co-op reserve) | | | | | | | | | | |
+| Canadian Rockies Golf Consortium | Operator (co-op reserve) | | | | | | | | | | |
+| Alabama Tourism Department | Sponsor | | | | | | | | | | |
+| Tourism Vancouver Island | Sponsor | | | | | | | | | | |
+| Callaway Brands | Sponsor | | | | | | | | | | |
+| Bushnell Golf | Sponsor | | | | | | | | | | |

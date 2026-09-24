@@ -4,13 +4,19 @@
  * table in `docs/partners/k1-outreach.md` §(g)"). The table's columns were
  * restructured 2026-09-24, before any outreach, precisely so `k1-verdict`
  * can read every input as its own column rather than parsing free text —
- * see the note committed directly above the table in that file.
+ * see the note committed directly above the table in that file. The
+ * "Sponsor conversation date" column was added 2026-09-24 too (decision
+ * 0001, Addendum I), while the table was still empty.
  *
- * Strict, loud-failure parsing (task instruction, tool 1 "The parser must
- * be strict"): an unknown operator name, a malformed date, an unexpected
- * column, or a malformed Y/N cell all THROW. A blank cell means "not yet"
- * and is never an error — the whole point of reading a table that is
- * genuinely empty pre-outreach.
+ * Strict, loud-failure parsing: an unknown operator name, a malformed
+ * date, an unexpected column, a malformed Y/N cell, a sponsor row whose
+ * target matches a known operator name, or a table row separated from the
+ * table by a blank line all THROW. A blank cell means "not yet" and is
+ * never an error — the whole point of reading a table that is genuinely
+ * empty pre-outreach. "Hammock Coast" is accepted as an alias of
+ * "Hammock Coast Golf Trail" (decision 0001, Addendum I; R2 names it
+ * "Hammock Coast", the table's own row has always read "Hammock Coast Golf
+ * Trail") and canonicalized to the latter before any matching happens.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -39,6 +45,16 @@ export const K1_KNOWN_OPERATOR_NAMES = [
   "Canadian Rockies Golf Consortium",
   "Oklahoma Golf Trail",
 ] as const;
+
+/** decision 0001, Addendum I: accept both spellings for a Target cell,
+ * canonicalized to the table's own row name before any matching. */
+const OPERATOR_ALIASES: Readonly<Record<string, string>> = {
+  "Hammock Coast": "Hammock Coast Golf Trail",
+};
+
+function canonicalizeTarget(raw: string): string {
+  return OPERATOR_ALIASES[raw] ?? raw;
+}
 
 /** The 3 pilot-slate trails Oklahoma Golf Trail can replace via the X2
  * swap rule (decision 0001, Addendum D, R2 / K1.md METHOD step 1). */
@@ -71,6 +87,10 @@ export interface K1Row {
   sponsorDecisionMakerNamed: "Y" | "N" | null;
   sponsorBudgetStated: "Y" | "N" | null;
   sponsorAttributionInterest: "Y" | "N" | null;
+  /** Decision 0001, Addendum I: a qualified sponsor conversation also
+   * needs a recorded date, checked against the same 2026-11-30 full-gate
+   * cutoff as the LOIs. */
+  sponsorConversationDate: string | null;
   notes: string;
 }
 
@@ -85,6 +105,7 @@ const EXPECTED_HEADERS = [
   "Sponsor: decision-maker named (Y/N)",
   "Sponsor: budget range stated (Y/N)",
   "Sponsor: attribution interest (Y/N)",
+  "Sponsor conversation date",
   "Notes",
 ];
 
@@ -133,16 +154,36 @@ function parseYNOrNull(raw: string, context: string): "Y" | "N" | null {
   );
 }
 
+/** Decision 0001, Addendum I ("Rows must never be silently dropped"): once
+ * the contiguous table ends, keep scanning forward — stopping only at the
+ * next heading — and throw if any further line starts with "|". A pipe
+ * row separated from the table by a blank line (or anything else) is a
+ * data-loss bug in the document, not a legitimate end of table. */
+function assertNoStrayRowsAfterTable(lines: string[], fromIdx: number, label: string): void {
+  for (let i = fromIdx; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (headingText(line) !== null) return;
+    if (line.trim().startsWith("|")) {
+      throw new Error(
+        `${label} has a table row separated from the table by a blank line (or other content): ` +
+          `"${line.trim()}" — rows must be contiguous with the table; move it back in.`,
+      );
+    }
+  }
+}
+
 /**
  * Parses `docs/partners/k1-outreach.md`'s "## (g)" table into strict
  * `K1Row[]`. Throws on: a missing "(g)" heading or table, a header row
  * that doesn't match the fixed column list exactly (gate: "an unexpected
  * column"), a row with the wrong cell count, an unrecognized `Type`, an
  * operator-type row whose `Target` isn't one of the 6 known operator names
- * (gate: "an unknown operator name"), a malformed date or Y/N cell, an
- * `okSwapReplaces` value set on any row other than "Oklahoma Golf Trail",
- * an `okSwapReplaces` value that isn't one of the 3 slate trail names, or
- * a missing required operator row (the table lost a row it must keep).
+ * (gate: "an unknown operator name"), a sponsor row whose `Target` matches
+ * a known operator name, a malformed date or Y/N cell, an `okSwapReplaces`
+ * value set on any row other than "Oklahoma Golf Trail", an
+ * `okSwapReplaces` value that isn't one of the 3 slate trail names, a
+ * missing required operator row, a duplicate operator row, or a table row
+ * separated from the table by a blank line.
  */
 export function parseK1Table(markdown: string): K1Row[] {
   const lines = markdown.split("\n");
@@ -185,9 +226,9 @@ export function parseK1Table(markdown: string): K1Row[] {
     dataStart += 1;
   }
   const rows: K1Row[] = [];
-  for (let i = dataStart; i < lines.length; i += 1) {
+  let i = dataStart;
+  while (i < lines.length && lines[i]!.trim().startsWith("|")) {
     const line = lines[i]!;
-    if (!line.trim().startsWith("|")) break;
     const cells = splitRow(line);
     if (cells.length !== EXPECTED_HEADERS.length) {
       throw new Error(
@@ -195,7 +236,7 @@ export function parseK1Table(markdown: string): K1Row[] {
       );
     }
     const [
-      target,
+      targetRaw,
       typeRaw,
       contactedRaw,
       callAcceptedRaw,
@@ -205,10 +246,12 @@ export function parseK1Table(markdown: string): K1Row[] {
       dmRaw,
       budgetRaw,
       attributionRaw,
+      sponsorConversationRaw,
       notes,
     ] = cells as [
-      string, string, string, string, string, string, string, string, string, string, string,
+      string, string, string, string, string, string, string, string, string, string, string, string,
     ];
+    const target = canonicalizeTarget(targetRaw);
     if (target === "") {
       throw new Error(`docs/partners/k1-outreach.md §(g) has a row with a blank Target.`);
     }
@@ -225,6 +268,12 @@ export function parseK1Table(markdown: string): K1Row[] {
         `docs/partners/k1-outreach.md §(g) has an unknown operator name "${target}" — ` +
           `expected one of the 5 named operators (decision 0001, Addendum D, R2) or "Oklahoma Golf Trail": ` +
           `${K1_KNOWN_OPERATOR_NAMES.join(", ")}.`,
+      );
+    }
+    if (!isOperatorType && K1_KNOWN_OPERATOR_NAMES.includes(target as (typeof K1_KNOWN_OPERATOR_NAMES)[number])) {
+      throw new Error(
+        `docs/partners/k1-outreach.md §(g) has a Sponsor row named "${target}", which matches a known ` +
+          "operator name — sponsor and operator rows must use distinct names.",
       );
     }
     const contactedDate = parseIsoDateOrNull(contactedRaw, `${target}: Contacted date`);
@@ -251,6 +300,10 @@ export function parseK1Table(markdown: string): K1Row[] {
     const sponsorDecisionMakerNamed = parseYNOrNull(dmRaw, `${target}: Sponsor decision-maker named`);
     const sponsorBudgetStated = parseYNOrNull(budgetRaw, `${target}: Sponsor budget range stated`);
     const sponsorAttributionInterest = parseYNOrNull(attributionRaw, `${target}: Sponsor attribution interest`);
+    const sponsorConversationDate = parseIsoDateOrNull(
+      sponsorConversationRaw,
+      `${target}: Sponsor conversation date`,
+    );
     rows.push({
       target,
       type,
@@ -262,9 +315,12 @@ export function parseK1Table(markdown: string): K1Row[] {
       sponsorDecisionMakerNamed,
       sponsorBudgetStated,
       sponsorAttributionInterest,
+      sponsorConversationDate,
       notes,
     });
+    i += 1;
   }
+  assertNoStrayRowsAfterTable(lines, i, 'docs/partners/k1-outreach.md §(g)');
   const seen = new Set<string>();
   for (const row of rows) {
     if (row.type === "Sponsor") continue;

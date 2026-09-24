@@ -80,11 +80,30 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
   // docs is a real end-to-end check that the refusal/pass-through wiring
   // reaches all the way from the CLI to `docs/partners/k1-outreach.md` and
   // `docs/p0/K3.md`.
-  it("k1-verdict CLI runs cleanly against the real, pre-outreach k1-outreach.md (0/5, early miss)", async () => {
+  // Decision 0001, Addendum I: before the early-read window closes
+  // (2026-10-20), the CLI's own default --as-of (today's UTC date, which
+  // is 2026-09-24 in this repo's fixed "today") reports PENDING, not a
+  // miss — the read is genuinely not due yet. An explicit --as-of past
+  // both window closes proves the miss/pending distinction end to end.
+  it("k1-verdict CLI runs cleanly against the real, pre-outreach k1-outreach.md (default as-of: pending)", async () => {
     const outPrefix = path.join(OUT_DIR, "k1-verdict-result");
     const { stdout } = await execFileAsync("node", [path.join(DIST, "k1-verdict.js"), "--out", outPrefix]);
-    expect(stdout).toContain("Consequence branch: early-miss");
+    expect(stdout).toContain("PENDING");
+    expect(stdout).toContain("Full gate state: pending");
     expect(existsSync(`${outPrefix}.json`)).toBe(true);
+  });
+
+  it("k1-verdict CLI --as-of past both windows reports early-read MISS and full-gate operator-miss", async () => {
+    const outPrefix = path.join(OUT_DIR, "k1-verdict-result-later");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "k1-verdict.js"),
+      "--as-of",
+      "2026-12-01",
+      "--out",
+      outPrefix,
+    ]);
+    expect(stdout).toContain("MISS");
+    expect(stdout).toContain("Full gate state: operator-miss");
   });
 
   it("k3-verdict CLI refuses (non-zero exit) against the real, pre-read K3.md (blank property id)", async () => {

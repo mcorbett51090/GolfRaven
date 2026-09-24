@@ -8,17 +8,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const realMarkdown = readFileSync(path.join(__dirname, "..", "..", "..", "docs", "p0", "K3.md"), "utf8");
 
 const PROPERTY_SECTION = (body: string) => `## SWC Search Console property\n\n${body}\n`;
-const SC_HEADER = "| Month | Total organic clicks |";
-const SC_SEP = "|---|---|";
-const KW_HEADER = "| Term | Lower bound | Upper bound | Point value |";
-const KW_SEP = "|---|---|---|---|";
+const SC_HEADER = "| Month | Total organic clicks | Read date |";
+const SC_SEP = "|---|---|---|";
+const KW_HEADER = "| Term | Lower bound | Upper bound |";
+const KW_SEP = "|---|---|---|";
 
-function scRow(month: string, clicks = ""): string {
-  return `| ${month} | ${clicks} |`;
+function scRow(month: string, clicks = "", readDate = ""): string {
+  return `| ${month} | ${clicks} | ${readDate} |`;
 }
 
-function kwRow(term: string, lower = "", upper = "", point = ""): string {
-  return `| ${term} | ${lower} | ${upper} | ${point} |`;
+function kwRow(term: string, lower = "", upper = ""): string {
+  return `| ${term} | ${lower} | ${upper} |`;
 }
 
 const DEFAULT_SC_ROWS = [scRow("2026-07"), scRow("2026-08"), scRow("2026-09")];
@@ -62,13 +62,13 @@ describe("parseK3Log", () => {
   it("parses the real, pre-read docs/p0/K3.md without throwing, all blank", () => {
     const log = parseK3Log(realMarkdown);
     expect(log.propertyId).toBe("");
+    expect(log.readDate).toBeNull();
     expect(log.searchConsole).toHaveLength(3);
     for (const r of log.searchConsole) expect(r.clicks).toBeNull();
     expect(log.keywords).toHaveLength(6);
     for (const k of log.keywords) {
       expect(k.lowerBound).toBeNull();
       expect(k.upperBound).toBeNull();
-      expect(k.pointValue).toBeNull();
     }
   });
 
@@ -77,28 +77,50 @@ describe("parseK3Log", () => {
     expect(log.propertyId).toBe("sc-domain:southernwinecountry.com");
   });
 
-  it("reads filled Search Console and Keyword Planner rows", () => {
+  it("reads filled Search Console rows, a read date recorded on one row, and keyword ranges", () => {
     const log = parseK3Log(
       buildK3({
-        scRows: [scRow("2026-07", "1200"), scRow("2026-08", "900"), scRow("2026-09", "1100")],
+        scRows: [
+          scRow("2026-07", "1200", "2026-10-05"),
+          scRow("2026-08", "900"),
+          scRow("2026-09", "1100"),
+        ],
         kwRows: [
           kwRow("golf trail", "1000", "10000"),
           kwRow("golf trails", "500", "5000"),
-          kwRow("robert trent jones golf trail", "", "", "50"),
-          kwRow("tennessee golf trail", "", "", "40"),
-          kwRow("vancouver island golf trail", "", "", "30"),
-          kwRow("oklahoma golf trail", "", "", "20"),
+          kwRow("robert trent jones golf trail", "50", "50"), // point value as lower=upper
+          kwRow("tennessee golf trail", "40", "40"),
+          kwRow("vancouver island golf trail", "30", "30"),
+          kwRow("oklahoma golf trail", "20", "20"),
         ],
       }),
     );
     expect(log.searchConsole.find((r) => r.month === "2026-07")!.clicks).toBe(1200);
+    expect(log.readDate).toBe("2026-10-05");
     expect(log.keywords.find((k) => k.term === "golf trail")).toEqual({
       term: "golf trail",
       lowerBound: 1000,
       upperBound: 10000,
-      pointValue: null,
     });
-    expect(log.keywords.find((k) => k.term === "robert trent jones golf trail")!.pointValue).toBe(50);
+    expect(log.keywords.find((k) => k.term === "robert trent jones golf trail")).toEqual({
+      term: "robert trent jones golf trail",
+      lowerBound: 50,
+      upperBound: 50,
+    });
+  });
+
+  it("throws when the Read date is recorded on more than one row", () => {
+    expect(() =>
+      parseK3Log(
+        buildK3({
+          scRows: [
+            scRow("2026-07", "1200", "2026-10-05"),
+            scRow("2026-08", "900", "2026-10-06"),
+            scRow("2026-09", "1100"),
+          ],
+        }),
+      ),
+    ).toThrow(/more than one row/);
   });
 
   it("throws when a Search Console month is missing", () => {
@@ -125,6 +147,37 @@ describe("parseK3Log", () => {
     ).toThrow(/malformed number/);
   });
 
+  it("throws on a malformed Read date", () => {
+    expect(() =>
+      parseK3Log(buildK3({ scRows: [scRow("2026-07", "", "10/05/2026"), scRow("2026-08"), scRow("2026-09")] })),
+    ).toThrow(/malformed date/);
+  });
+
+  it("throws when a table row is separated from the table by a blank line", () => {
+    const markdown = [
+      "## SWC Search Console property",
+      "",
+      "_(blank)_",
+      "",
+      "## Search Console read",
+      "",
+      SC_HEADER,
+      SC_SEP,
+      scRow("2026-07"),
+      scRow("2026-08"),
+      "",
+      scRow("2026-09"), // stray, separated by the blank line above
+      "",
+      "## Keyword Planner read",
+      "",
+      KW_HEADER,
+      KW_SEP,
+      ...DEFAULT_KW_ROWS,
+      "",
+    ].join("\n");
+    expect(() => parseK3Log(markdown)).toThrow(/separated from the table by a blank line/);
+  });
+
   it("throws on an off-list keyword term", () => {
     const rows = [...DEFAULT_KW_ROWS.slice(0, 5), kwRow("golf courses near me")];
     expect(() => parseK3Log(buildK3({ kwRows: rows }))).toThrow(/off-list term/);
@@ -140,17 +193,14 @@ describe("parseK3Log", () => {
     expect(() => parseK3Log(buildK3({ kwRows: rows }))).toThrow(/duplicate row/);
   });
 
-  it("throws when a keyword row has BOTH a range and a point value", () => {
-    const rows = [
-      kwRow("golf trail", "1000", "2000", "1500"),
-      ...DEFAULT_KW_ROWS.slice(1),
-    ];
-    expect(() => parseK3Log(buildK3({ kwRows: rows }))).toThrow(/BOTH a point value and a range/);
-  });
-
   it("throws when only one of lower/upper bound is filled", () => {
     const rows = [kwRow("golf trail", "1000"), ...DEFAULT_KW_ROWS.slice(1)];
     expect(() => parseK3Log(buildK3({ kwRows: rows }))).toThrow(/needs both bounds/);
+  });
+
+  it("throws when lower bound is greater than upper bound", () => {
+    const rows = [kwRow("golf trail", "2000", "1000"), ...DEFAULT_KW_ROWS.slice(1)];
+    expect(() => parseK3Log(buildK3({ kwRows: rows }))).toThrow(/greater than Upper bound/);
   });
 
   it("throws when the Search Console read table is missing", () => {
@@ -166,7 +216,9 @@ describe("parseK3Log", () => {
   });
 
   it("throws on an unexpected Search Console column layout", () => {
-    expect(() => parseK3Log(buildK3({ scHeader: "| Month | Clicks |" }))).toThrow(/unexpected column layout/);
+    expect(() => parseK3Log(buildK3({ scHeader: "| Month | Clicks | Read date |" }))).toThrow(
+      /unexpected column layout/,
+    );
   });
 
   it("throws on an unexpected Keyword Planner column layout", () => {

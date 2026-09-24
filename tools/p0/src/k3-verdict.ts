@@ -5,22 +5,25 @@
  *
  * - **Search Console**: median of the three fixed-month organic-click
  *   totals (decision 0001, Addendum A), compared to **M = 1,000**. Refuses
- *   to run if the SWC property id memo is blank (K3.md METHOD step 1), OR
- *   if any of the three months' clicks is blank — a blank month is "not
- *   read yet," and silently treating it as 0 clicks would be exactly the
- *   "silently count zero" the loud-failure contract forbids, so a partial
- *   read refuses rather than computing a wrong median. This generalizes
- *   the task's explicit "refuse to run when a pre-registered input is
- *   blank" instruction from the property id (the one case named
- *   explicitly) to the clicks themselves, for the same reason.
+ *   to run if the SWC property id memo is blank, doesn't look like a real
+ *   Search Console property (decision 0001, Addendum I — must read
+ *   `sc-domain:<host>` or an `https://` URL-prefix property, never e.g.
+ *   "TBD"), if any of the three months' clicks is blank, or if the read
+ *   date is blank or earlier than **2026-10-01** (decision 0001, Addendum
+ *   I: a read before that date would lock in a partial September). A
+ *   blank month is "not read yet," and silently treating it as 0 clicks
+ *   would be exactly the "silently count zero" the loud-failure contract
+ *   forbids, so a partial read refuses rather than computing a wrong
+ *   median.
  * - **Keyword Planner**: sum of the six closed-list terms' lower bounds,
  *   compared to **≥ 5,000**, applying decision 0001 Addendum D R5's
  *   "identical range counted once" rule EXACTLY as stated — two terms
  *   sharing the identical (lower, upper) range contribute that lower
- *   bound only once to the sum; a point-value term is not a "range" under
- *   R5's wording and is never deduplicated against anything. Refuses to
- *   run if any of the six terms has neither a range nor a point value
- *   recorded, for the same "never silently count zero" reason as above.
+ *   bound only once to the sum. A point value is entered as
+ *   `lower = upper` (decision 0001, Addendum I — the table has no
+ *   separate "Point value" column), so R5's dedup applies to a shared
+ *   point value exactly as it does to a shared range. Refuses to run if
+ *   any of the six terms has no range recorded at all.
  */
 import { readK3Log, K3_KEYWORD_TERMS, type K3Log } from "./k3-log.js";
 
@@ -28,6 +31,12 @@ import { readK3Log, K3_KEYWORD_TERMS, type K3Log } from "./k3-log.js";
 export const K3_SEARCH_CONSOLE_BAR = 1000;
 /** Decision 0001, Addendum B / O7. */
 export const K3_KEYWORD_BAR = 5000;
+/** Decision 0001, Addendum I: a read before this date would lock in a
+ * partial September 2026. */
+export const K3_MIN_READ_DATE = "2026-10-01";
+/** Decision 0001, Addendum I: the property id must look like a real
+ * Search Console property, not a placeholder like "TBD". */
+const PROPERTY_ID_RE = /^(sc-domain:\S+|https:\/\/\S+)$/i;
 
 export const K3_CONSEQUENCE_BOTH_MISS =
   "Both miss → the directory is scoped as a partner-facing asset, not a growth engine, and operator " +
@@ -42,9 +51,10 @@ export type K3CombinedBranch = "both-miss" | "disagree" | "both-pass";
 
 export interface K3KeywordContribution {
   term: string;
-  kind: "range" | "point";
+  lowerBound: number;
+  upperBound: number;
   value: number;
-  /** For a range term, the other term(s) that shared its identical range
+  /** The other term(s) that shared this identical (lower, upper) range
    * and so did NOT contribute separately (R5's dedup). Empty otherwise. */
   dedupedWith: string[];
 }
@@ -53,6 +63,7 @@ export interface K3VerdictResult {
   generatedAt: string;
   propertyId: string;
   searchConsole: {
+    readDate: string;
     monthlyTotals: { month: string; clicks: number }[];
     median: number;
     bar: number;
@@ -82,6 +93,26 @@ export function computeK3Verdict(log: K3Log): K3VerdictResult {
         'refusing to run with docs/p0/K3.md\'s "## SWC Search Console property" section still blank.',
     );
   }
+  if (!PROPERTY_ID_RE.test(propertyId)) {
+    throw new Error(
+      `computeK3Verdict: the recorded property id "${propertyId}" doesn't look like a Search Console ` +
+        'property — expected "sc-domain:<host>" or an "https://" URL-prefix property (decision 0001, ' +
+        "Addendum I). A placeholder like \"TBD\" is refused.",
+    );
+  }
+
+  if (log.readDate === null) {
+    throw new Error(
+      "computeK3Verdict requires a recorded Search Console read date (decision 0001, Addendum I) — " +
+        'refusing to run with docs/p0/K3.md\'s "## Search Console read" table\'s Read date still blank.',
+    );
+  }
+  if (log.readDate < K3_MIN_READ_DATE) {
+    throw new Error(
+      `computeK3Verdict: the recorded read date "${log.readDate}" is before ${K3_MIN_READ_DATE} (decision ` +
+        "0001, Addendum I) — a read that early would lock in a partial September 2026; refusing to run.",
+    );
+  }
 
   const missingMonths = log.searchConsole.filter((r) => r.clicks === null).map((r) => r.month);
   if (missingMonths.length > 0) {
@@ -94,51 +125,46 @@ export function computeK3Verdict(log: K3Log): K3VerdictResult {
   const median = median3(monthlyTotals.map((r) => r.clicks));
   const searchConsolePass = median >= K3_SEARCH_CONSOLE_BAR;
 
-  const missingTerms = log.keywords
-    .filter((r) => r.pointValue === null && r.lowerBound === null)
-    .map((r) => r.term);
+  const missingTerms = log.keywords.filter((r) => r.lowerBound === null).map((r) => r.term);
   if (missingTerms.length > 0) {
     throw new Error(
-      `computeK3Verdict requires a volume (range or point value) for all six closed-list terms — missing: ` +
+      `computeK3Verdict requires a range (lower + upper bound) for all six closed-list terms — missing: ` +
         `${missingTerms.join(", ")}. Refusing rather than silently treating a blank cell as 0 volume.`,
     );
   }
 
-  // Decision 0001, Addendum D, R5: "if two of the six terms return the
-  // identical range, count that range once." Group range terms by their
-  // exact (lower, upper) pair; a point-value term is never grouped.
-  const rangeGroups = new Map<string, { value: number; terms: string[] }>();
-  const contributions: K3KeywordContribution[] = [];
+  // Decision 0001, Addendum D, R5 (as restated by Addendum I): "if two of
+  // the six terms return the identical range, count that range once" —
+  // applied literally to every term, including a degenerate range
+  // (lower === upper) that represents a point value.
+  const rangeGroups = new Map<string, { lower: number; upper: number; terms: string[] }>();
   for (const row of log.keywords) {
-    if (row.pointValue !== null) {
-      contributions.push({ term: row.term, kind: "point", value: row.pointValue, dedupedWith: [] });
-      continue;
-    }
     const key = `${row.lowerBound}-${row.upperBound}`;
     const existing = rangeGroups.get(key);
     if (existing) {
       existing.terms.push(row.term);
     } else {
-      rangeGroups.set(key, { value: row.lowerBound!, terms: [row.term] });
+      rangeGroups.set(key, { lower: row.lowerBound!, upper: row.upperBound!, terms: [row.term] });
     }
   }
-  for (const { value, terms } of rangeGroups.values()) {
+  const contributions: K3KeywordContribution[] = [];
+  let combinedVolume = 0;
+  for (const { lower, upper, terms } of rangeGroups.values()) {
+    combinedVolume += lower;
     for (const term of terms) {
-      const dedupedWith = terms.filter((t) => t !== term);
-      contributions.push({ term, kind: "range", value, dedupedWith });
+      contributions.push({
+        term,
+        lowerBound: lower,
+        upperBound: upper,
+        value: lower,
+        dedupedWith: terms.filter((t) => t !== term),
+      });
     }
   }
-  // Restore K3_KEYWORD_TERMS order for a stable, readable output.
   contributions.sort(
     (a, b) => K3_KEYWORD_TERMS.indexOf(a.term as (typeof K3_KEYWORD_TERMS)[number]) -
       K3_KEYWORD_TERMS.indexOf(b.term as (typeof K3_KEYWORD_TERMS)[number]),
   );
-
-  let combinedVolume = 0;
-  for (const { value } of rangeGroups.values()) combinedVolume += value;
-  for (const row of log.keywords) {
-    if (row.pointValue !== null) combinedVolume += row.pointValue;
-  }
   const keywordPass = combinedVolume >= K3_KEYWORD_BAR;
 
   const bothMiss = !searchConsolePass && !keywordPass;
@@ -154,7 +180,13 @@ export function computeK3Verdict(log: K3Log): K3VerdictResult {
   return {
     generatedAt: new Date().toISOString(),
     propertyId,
-    searchConsole: { monthlyTotals, median, bar: K3_SEARCH_CONSOLE_BAR, pass: searchConsolePass },
+    searchConsole: {
+      readDate: log.readDate,
+      monthlyTotals,
+      median,
+      bar: K3_SEARCH_CONSOLE_BAR,
+      pass: searchConsolePass,
+    },
     keyword: { contributions, combinedVolume, bar: K3_KEYWORD_BAR, pass: keywordPass },
     combinedBranch,
     consequenceText,
@@ -165,6 +197,7 @@ export function computeK3Verdict(log: K3Log): K3VerdictResult {
 export function renderK3VerdictMarkdown(result: K3VerdictResult): string {
   const lines: string[] = [];
   lines.push(`**SWC property:** ${result.propertyId}`);
+  lines.push(`**Read date:** ${result.searchConsole.readDate}`);
   lines.push("");
   lines.push("## Search Console");
   lines.push("| Month | Organic clicks |");
@@ -177,10 +210,12 @@ export function renderK3VerdictMarkdown(result: K3VerdictResult): string {
   );
   lines.push("");
   lines.push("## Keyword Planner");
-  lines.push("| Term | Kind | Value | Deduped with |");
-  lines.push("|---|---|---|---|");
+  lines.push("| Term | Lower | Upper | Value | Deduped with |");
+  lines.push("|---|---|---|---|---|");
   for (const c of result.keyword.contributions) {
-    lines.push(`| ${c.term} | ${c.kind} | ${c.value} | ${c.dedupedWith.join(", ") || "—"} |`);
+    lines.push(
+      `| ${c.term} | ${c.lowerBound} | ${c.upperBound} | ${c.value} | ${c.dedupedWith.join(", ") || "—"} |`,
+    );
   }
   lines.push("");
   lines.push(

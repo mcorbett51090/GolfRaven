@@ -447,41 +447,54 @@ running `node dist/x5-overpass.js n-osm` against the real default endpoint was e
 this environment's proxy. See the task report for the exact error text this session got — it was
 not worked around, per the task's own instruction.
 
-## 8. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdict
+## 8. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdicts
 
 ```shell
 node dist/k1-verdict.js
-node dist/k1-verdict.js --out k1-verdict-result
+node dist/k1-verdict.js --as-of 2026-11-15 --out k1-verdict-result
 ```
 
-No input flags: the CLI always reads the repo's own `docs/partners/k1-outreach.md` §(g) tracking
-table — the single K1 log (decision 0001, Addendum D, R2) — same no-override philosophy as
-`x1-ios-export`'s round windows. That table's columns were restructured 2026-09-24, before any
-outreach, so every input `k1-verdict` needs (acceptance date, LOI date, fee willingness, the Oklahoma
-Golf Trail swap activation, and the three sponsor qualifiers) is its own column — see the note above
-the table in that file, and `src/k1-log.ts`'s strict parser.
+The CLI always reads the repo's own `docs/partners/k1-outreach.md` §(g) tracking table — the single
+K1 log (decision 0001, Addendum D, R2) — same no-override philosophy as `x1-ios-export`'s round
+windows. `--as-of YYYY-MM-DD` (default: today's UTC date) is its only input flag (decision 0001,
+Addendum I): it gates both verdicts' pending state and is the ceiling every logged date is checked
+against. That table's columns were restructured 2026-09-24 (and got a "Sponsor conversation date"
+column 2026-09-24, Addendum I), so every input `k1-verdict` needs is its own column — see the note
+above the table in that file, and `src/k1-log.ts`'s strict parser. "Hammock Coast" is accepted as an
+alias of the table's own "Hammock Coast Golf Trail" row.
 
-- **Early read** (decision 0001, Addendum D, R1): count of the 5 named operators whose acceptance of
-  an exploratory call is dated on or before **2026-10-19**. Pass ≥ 2.
-- **Full gate** (decision 0001, Addendum C, window closing 2026-11-30): count of the same 5 with a
-  signed non-binding LOI, including recorded fee willingness, dated on or before **2026-11-30**. Pass
-  needs ≥ 2 of those, **and** ≥ 1 sponsor row with all three qualifiers recorded (named decision-maker,
-  stated season budget range, interest in special-marker attribution).
+**Two separate verdicts, never merged (decision 0001, Addendum I):**
+
+- **Early read** (Addendum D, R1): count of the 5 named operators whose acceptance of an exploratory
+  call is dated on or before **2026-10-19**. Pass ≥ 2. **Before 2026-10-20** this reads `pending (n so
+  far)` regardless of the count — the window hasn't closed.
+- **Full gate** (Addendum C, cutoff **2026-11-30**): count of the same 5 with a signed non-binding
+  LOI (fee willingness recorded) dated on or before the cutoff — pass needs ≥ 2 — **and** ≥ 1 sponsor
+  row with all three qualifiers recorded **and** a sponsor conversation date on or before the same
+  cutoff — pass needs ≥ 1. **Before 2026-12-01** this reads `pending` regardless of counts. Once
+  closed, **operator miss is evaluated before sponsor miss**: `operator-miss` if the operator bar
+  isn't met, else `sponsor-miss` if the sponsor bar isn't met, else `pass`.
+- A full-gate result is never hidden by an early-read miss, and the reverse is also true — both are
+  always computed and reported.
 - **Oklahoma Golf Trail** counts only when its "OK swap replaces" cell names one of the 3 slate trails
   (the X2 swap rule activated) — it then replaces that trail in the 5, never a 6th contact (K1.md
-  METHOD step 1).
+  METHOD step 1); a warning fires if the replaced trail's own row already had data logged.
 
-**Parser strictness (`src/k1-log.ts`):** an unknown operator name, a malformed date, an unexpected
-column layout, or a malformed Y/N cell all throw. A blank cell means "not yet" and is never an error —
-`k1-verdict` is designed to run cleanly against the table in its current, genuinely empty state.
+**Date sanity (Addendum I):** every logged date must be on or after **2026-09-23** and on or before
+`--as-of` — a later date is refused outright, not just excluded. An acceptance or LOI dated before its
+own row's Contacted date is also refused. Dates are plain calendar dates, no timezone conversion.
 
-**Output:** each read's count/pass, which entries are late (dated after their cutoff, listed but not
-counted), which LOIs lack recorded fee willingness, which sponsor rows are partially qualified, and
-the pre-written consequence branch — `early-miss`, `operator-full-miss`,
-`sponsor-miss-operators-pass`, or `pass` — with K1.md's Kill-consequence text quoted verbatim (a full
-pass has no kill-consequence text to quote; the tool says so rather than inventing any).
+**Parser strictness (`src/k1-log.ts`):** an unknown operator name, a sponsor row whose name matches a
+known operator, a malformed date, an unexpected column layout, a malformed Y/N cell, or a table row
+separated from the table by a blank line (rows are never silently dropped) all throw. A blank cell
+means "not yet" and is never an error on its own.
 
-**Feeds:** `consequenceBranch`/`consequenceText` → `docs/p0/K1.md` MEASURED VALUE and VERDICT.
+**Output:** each verdict's own count/pass/pending state, which entries are late (listed, not counted),
+which LOIs lack fee willingness, which sponsor rows are partially qualified, and each verdict's own
+verbatim K1.md consequence quote (a pass or a still-pending read has no kill-consequence text to quote;
+the tool says so rather than inventing any).
+
+**Feeds:** `earlyRead`/`fullGate` → `docs/p0/K1.md` MEASURED VALUE and VERDICT (as two distinct reads).
 
 ## 9. `k3-verdict` — K3 SEO-signal verdict
 
@@ -496,17 +509,23 @@ the existing "## SWC Search Console property" memo.
 
 - **Search Console:** the median of the three fixed months' (July/August/September 2026, decision
   0001 Addendum D R4) total organic clicks (Addendum A's method), compared to **M = 1,000**. Refuses
-  to run if the property id memo is blank, or if any month's clicks total is blank — a blank cell is
-  "not read yet," and the loud-failure contract forbids silently treating that as 0 clicks.
+  to run if the property id is blank or doesn't look like a real property (decision 0001, Addendum I —
+  must read `sc-domain:<host>` or an `https://` URL-prefix property; a placeholder like "TBD" is
+  refused), if the Search Console table's "Read date" cell (Addendum I) is blank or earlier than
+  **2026-10-01** (a read that early would lock in a partial September), or if any month's clicks total
+  is blank — a blank cell is "not read yet," and the loud-failure contract forbids silently treating
+  that as 0 clicks.
 - **Keyword Planner:** the sum of the six closed-list terms' (decision 0001 Addendum B) lower bounds,
   compared to **≥ 5,000**, applying Addendum D R5's "identical range counted once" rule exactly: two
-  terms that report the identical `(lower, upper)` range contribute that lower bound only once; a
-  point-value term is never deduplicated (R5 only names "range"). Refuses to run if any term has
-  neither a range nor a point value recorded.
+  terms that report the identical `(lower, upper)` range contribute that lower bound only once. There
+  is no separate "Point value" column (Addendum I) — a point value is entered as `lower = upper`, so
+  R5's dedup applies to a shared point exactly as it does to a shared range. Refuses to run if any term
+  has no range recorded at all.
 
 **Parser strictness (`src/k3-log.ts`):** an off-list or missing keyword term, an unexpected/missing/
-duplicate month or term row, a malformed number, or a row with both a range and a point value (or only
-one of the two bounds) all throw.
+duplicate month or term row, a malformed number, a half-filled range, a lower bound above the upper
+bound, a "Read date" recorded on more than one row, or a table row separated from its table by a
+blank line (rows are never silently dropped) all throw.
 
 **Output:** both raw numbers, each individual pass/miss against its own bar, the combined branch
 (`both-miss` / `disagree` / `both-pass`), and K3.md's Kill-consequence text quoted verbatim (plus the
@@ -557,17 +576,22 @@ board, including the BLOCKED row for a fake fetch that throws a `"CONNECT tunnel
 that IS the proxy's own denial page, vs. one that's the destination site's own 403) and the
 PARTIAL-BLOCKED row for a partial failure/indeterminate result (gate S5).
 
-**K1/K3 coverage:** `k1-verdict` — 0/1/2/5 acceptance counts, a late acceptance (dated after the
-2026-10-19 cutoff) excluded and reported, a 6th contact (Oklahoma Golf Trail) NOT counting while its
-swap is inactive, the Oklahoma swap correctly replacing its named slate trail in the 5 (never a 6th),
-an LOI without recorded fee willingness not counting, an LOI dated after the 2026-11-30 full-gate
-cutoff not counting, a sponsor row missing one of its three qualifiers not counting, every
-consequence branch (`early-miss` / `operator-full-miss` / `sponsor-miss-operators-pass` / `pass`) with
-its quoted text, and the parser throwing on an unknown operator name, a malformed date, a malformed
-Y/N cell, an unexpected column layout, a misplaced or invalid "OK swap replaces" value, and a missing
-or duplicate required row. `k3-verdict` — a blank property id and a blank month/term value all
-refusing; the median computed correctly regardless of input order; Addendum D R5's duplicate-range
-rule counting an identical range once while never deduplicating point values; all three combined
-branches (`both-miss` / `disagree` / `both-pass`) with quoted consequence text; and the parser
-throwing on an off-list or missing keyword term, a missing/duplicate/unexpected month or term row, a
-malformed number, and an ambiguous range-plus-point (or half-filled range) cell.
+**K1/K3 coverage:** `k1-verdict` — 0/1/2/5 acceptance counts, the early-read cutoff boundary (2026-10-19
+counts, 2026-10-20 doesn't), a 6th contact (Oklahoma Golf Trail) NOT counting while its swap is
+inactive, the Oklahoma swap correctly replacing its named slate trail in the 5 (with a warning when
+that trail's own row had data), an LOI without recorded fee willingness not counting, a sponsor row
+missing a qualifier or its conversation date not counting, the full-gate priority (operator miss
+evaluated before sponsor miss), the `pending` state at both as-of boundaries (2026-10-19 and
+2026-11-30), the probe case where a 0-acceptance early miss coexists with a passing full gate (both
+visible, never merged), every consequence branch with its quoted text, date-sanity refusals (before
+2026-09-23, after `--as-of`, an acceptance/LOI before its row's Contacted date), the "Hammock Coast"
+alias, a sponsor row named after a known operator throwing, and a table row separated from the table
+by a blank line throwing (never silently dropped). `k3-verdict` — a blank or malformed ("TBD") property
+id refusing, a blank or too-early (2026-09-30) read date refusing, a blank month/term value refusing,
+the median computed correctly regardless of input order, Addendum D R5's duplicate-range rule (as
+restated by Addendum I) deduplicating an identical range OR an identical point value exactly once, the
+5,000 keyword-sum boundary (4,999 misses, 5,000 passes), all three combined branches with quoted
+consequence text, and the parser throwing on an off-list or missing keyword term, a
+missing/duplicate/unexpected month or term row, a malformed number, a lower bound above the upper
+bound, a half-filled range, a Read date recorded on more than one row, and a stray row after the table
+ends.
