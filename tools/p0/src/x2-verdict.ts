@@ -731,17 +731,17 @@ export function renderX2VerdictMarkdown(result: X2VerdictResult): string {
     lines.push(`**${trail} facts checked** (gate S8):`);
     for (const r of v.facts.roster) {
       lines.push(
-        `- roster: "${r.name}" — quote: "${r.quote}" (evidence ${r.evidenceSha.slice(0, 12)}..., method: ${r.method})`,
+        `- roster: "${r.name}" — quote: "${r.quote}" (evidence ${r.evidenceSha.slice(0, 12)}..., method: ${r.method}${r.corroboration ? `, corroboration: ${r.corroboration}` : ""})`,
       );
     }
     if (v.facts.completionUnit) {
       lines.push(
-        `- completionUnit: "${v.facts.completionUnit.value}" — quote: "${v.facts.completionUnit.quote}" (evidence ${v.facts.completionUnit.evidenceSha.slice(0, 12)}..., method: ${v.facts.completionUnit.method})`,
+        `- completionUnit: "${v.facts.completionUnit.value}" — quote: "${v.facts.completionUnit.quote}" (evidence ${v.facts.completionUnit.evidenceSha.slice(0, 12)}..., method: ${v.facts.completionUnit.method}${v.facts.completionUnit.corroboration ? `, corroboration: ${v.facts.completionUnit.corroboration}` : ""})`,
       );
     }
     if (v.facts.season) {
       lines.push(
-        `- season: "${v.facts.season.value}" — quote: "${v.facts.season.quote}" (evidence ${v.facts.season.evidenceSha.slice(0, 12)}..., method: ${v.facts.season.method})`,
+        `- season: "${v.facts.season.value}" — quote: "${v.facts.season.quote}" (evidence ${v.facts.season.evidenceSha.slice(0, 12)}..., method: ${v.facts.season.method}${v.facts.season.corroboration ? `, corroboration: ${v.facts.season.corroboration}` : ""})`,
       );
     }
     lines.push("");

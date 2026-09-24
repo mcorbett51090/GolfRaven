@@ -38,6 +38,7 @@ export type RuleId =
   | "globalthis-access"
   | "withownership-shadowed"
   | "reexport-of-privileged-symbol"
+  | "raw-fetch-with-secret"
   | "parse-error";
 
 export interface Finding {
@@ -671,6 +672,30 @@ export function lintSource(source: string, filePath: string): Finding[] {
         !serviceRoleIdentifiers.has(node.left.name)
       ) {
         serviceRoleIdentifiers.add(node.left.name);
+        added = true;
+      }
+      // Same fixed-point propagation for secret-env-value identifiers
+      // (M3(4)'s taint source — a raw fetch() using a service key read
+      // from env, not necessarily via createClient at all).
+      if (
+        node.type === AST_NODE_TYPES.VariableDeclarator &&
+        node.id.type === AST_NODE_TYPES.Identifier &&
+        node.init &&
+        node.init.type === AST_NODE_TYPES.Identifier &&
+        secretEnvValueIdentifiers.has(node.init.name) &&
+        !secretEnvValueIdentifiers.has(node.id.name)
+      ) {
+        secretEnvValueIdentifiers.add(node.id.name);
+        added = true;
+      }
+      if (
+        node.type === AST_NODE_TYPES.AssignmentExpression &&
+        node.left.type === AST_NODE_TYPES.Identifier &&
+        node.right.type === AST_NODE_TYPES.Identifier &&
+        secretEnvValueIdentifiers.has(node.right.name) &&
+        !secretEnvValueIdentifiers.has(node.left.name)
+      ) {
+        secretEnvValueIdentifiers.add(node.left.name);
         added = true;
       }
     });

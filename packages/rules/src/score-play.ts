@@ -788,27 +788,25 @@ export type ScorePlayOutcome = ScorePlaySuccess | ScorePlayFailure;
  * earned on it") — that IS a scoring effect — but the accompanying
  * `fraud_signal` is not.
  */
-export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
+export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayOutcome {
   // H2 (fifth gate): the parser runs FIRST, always — see this function's
-  // own TRUST TABLE doc for exactly what it closes. A parse failure
-  // returns the safe "nothing happened" default (`money: false`, empty
-  // `contributions`) plus `reasons`, and NEVER throws — the scoring logic
-  // below never runs on unparsed/untrusted data.
+  // own TRUST TABLE doc for exactly what it closes. F3 (sixth gate): a
+  // STRUCTURAL parse failure returns `{ok: false, reasons}` and NEVER
+  // throws — the scoring logic below never runs on unparsed/untrusted
+  // data. A per-ROW problem is no longer structural (see
+  // `parseScorePlayInput`'s own doc) — it comes back as a successful
+  // parse whose `excludedRows` lists the quarantined row instead.
   const parsed = parseScorePlayInput({ evidence: evidenceIn, ctx });
   if (!parsed.success) {
-    return {
-      score_badge: 0,
-      score_monetary: 0,
-      presence_signal: false,
-      money: false,
-      heldReview: false,
-      policyVersion: SCORE_PLAY_POLICY_VERSION,
-      contributions: [],
-      reasons: parsed.reasons,
-    };
+    return { ok: false, reasons: parsed.reasons };
   }
   const result = scorePlayOnParsedInput(parsed.evidence, parsed.ctx);
-  return { ...result, inputDigest: computeInputDigest(parsed.evidence, parsed.ctx) };
+  return {
+    ok: true,
+    ...result,
+    excludedRows: parsed.excludedRows,
+    inputDigest: computeInputDigest(parsed.evidence, parsed.ctx),
+  };
 }
 
 /** Canonical (sorted-key) JSON serialization — the same value serializes
@@ -831,6 +829,14 @@ function canonicalize(value: unknown): unknown {
  * validated it, so this digest is over trusted, shape-checked data, never
  * the raw pre-parse bytes.
  *
+ * **F4 (sixth gate): sorted by `id` first, so the digest is independent
+ * of the EVIDENCE ARRAY'S OWN ORDER.** `evidence` is a caller-assembled
+ * array (typically a DB query result) whose row order carries no meaning
+ * `scorePlay` itself assigns anywhere else — `deriveGroups`/`resolveGroups`
+ * are already order-independent (fourth/fifth gate); the digest must be
+ * too, or the SAME validated evidence set could produce two different
+ * digests depending on how the caller happened to fetch it.
+ *
  * **Deliberately `@noble/hashes`, never `node:crypto`.** This package's
  * own module doc says it plainly: "authoritative on the server,
  * preview-only on DEVICE" — the device is the React Native app, which has
@@ -839,7 +845,8 @@ function canonicalize(value: unknown): unknown {
  * stays host-neutral rather than silently gaining a Node-only dependency
  * the app build can't satisfy. */
 function computeInputDigest(evidence: Evidence[], ctx: ScorePlayContext): string {
-  const canonical = JSON.stringify(canonicalize({ evidence, ctx }));
+  const sortedEvidence = [...evidence].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const canonical = JSON.stringify(canonicalize({ evidence: sortedEvidence, ctx }));
   // `utf8ToBytes` (not the DOM-only `TextEncoder`, which this package's
   // "ES2022"-only `lib` doesn't type and which isn't guaranteed on every
   // host this pure-TS package runs on) — same `@noble/hashes` package as
