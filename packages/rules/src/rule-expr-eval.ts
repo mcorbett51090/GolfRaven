@@ -210,12 +210,38 @@ function evalNumeric(
   return value;
 }
 
-/** `useMoney`: §4.1 line 638-640 — money mode AND a positive occurrence is
+/**
+ * `useMoney`: §4.1 line 638-640 — money mode AND a positive occurrence is
  * the only combination that restricts to money-rule-qualifying plays;
  * everything else (badge mode always, or a negative occurrence even in
- * money mode) uses the badge-level threshold. B2: `programmeStartsOn` is
- * folded into `EvalOptions` only when `useMoney` — never on the
- * negative-occurrence path. */
+ * money mode) uses the badge-level threshold.
+ *
+ * **Re-gate item 1: `programmeStartsOn` is required for `useMoney`.**
+ * `requireProgrammeStartsOn` throws if `ctx.programmeStartsOn` is missing
+ * — "for any money-mode evaluation" (item 1) means any ACTUAL
+ * money-qualifying computation, i.e. exactly the `useMoney` branch; a
+ * negative occurrence never reads `programmeStartsOn` at all (B2), so it
+ * has nothing to require.
+ *
+ * **Re-gate item 2: `badgeThreshold` is forwarded ONLY for a POSITIVE
+ * occurrence evaluated in badge mode.** A negative occurrence ALWAYS uses
+ * the fixed §4.1 0.50 floor (`completion.ts`'s own `BADGE_THRESHOLD`
+ * default), whatever the caller's `badgeThreshold` — whether that negative
+ * occurrence sits inside a money-mode rule (`mode === "money"` but
+ * `!useMoney`, where there is no achievement context to draw a custom
+ * threshold from anyway) OR inside a genuine badge-mode `RuleExpr` (e.g.
+ * `!trailComplete(T)` under an achievement with a raised `minConfidence` —
+ * the negative leg must not inherit that raised bar).
+ */
+function requireProgrammeStartsOn(ctx: RuleExprEvalContext): string {
+  if (ctx.programmeStartsOn === undefined) {
+    throw new Error(
+      "evalAggregate: a positive occurrence in a money-mode RuleExpr requires ctx.programmeStartsOn (§4.6) — refusing to evaluate without one",
+    );
+  }
+  return ctx.programmeStartsOn;
+}
+
 function evalAggregate(
   expr: AggregateCall,
   ctx: RuleExprEvalContext,
@@ -223,13 +249,14 @@ function evalAggregate(
   occurrencePositive: boolean,
 ): number | boolean {
   const useMoney = mode === "money" && occurrencePositive;
-  const opts: EvalOptions = {
-    money: useMoney,
-    ...(useMoney && ctx.programmeStartsOn !== undefined
-      ? { programmeStartsOn: ctx.programmeStartsOn }
-      : {}),
-    ...(ctx.badgeThreshold !== undefined ? { badgeThreshold: ctx.badgeThreshold } : {}),
-  };
+  const opts: EvalOptions = useMoney
+    ? { money: true, programmeStartsOn: requireProgrammeStartsOn(ctx) }
+    : {
+        money: false,
+        ...(mode === "badge" && occurrencePositive && ctx.badgeThreshold !== undefined
+          ? { badgeThreshold: ctx.badgeThreshold }
+          : {}),
+      };
   const versionsOf = (trailId: string): RosterVersion[] => ctx.trails[trailId] ?? [];
   switch (expr.name) {
     case "played":

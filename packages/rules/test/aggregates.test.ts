@@ -17,7 +17,7 @@ describe("S3: field aggregates resolve mergedInto before deduping", () => {
     const designerId = nextId("dsg") as DesignerId;
     const ctx: AggregateContext = {
       courses: {
-        [y]: { id: y, facilityId, region: "CA-NB", country: "CA", designers: [designerId] },
+        [y]: { id: y, facilityId, region: "CA-NB", country: "CA", designers: [designerId], verified: true },
       },
       ledger: {
         entries: {
@@ -49,7 +49,7 @@ describe("S3: field aggregates resolve mergedInto before deduping", () => {
     const x = nextId("crs") as CourseId;
     const y = nextId("crs") as CourseId;
     const ctx: AggregateContext = {
-      courses: { [y]: { id: y, facilityId } },
+      courses: { [y]: { id: y, facilityId, verified: true } },
       ledger: {
         entries: {
           [x]: { id: x, kind: "crs", transitions: [], tombstoned: true, mergedInto: y },

@@ -464,7 +464,10 @@ export const AchievementDefSchema = z.strictObject({
   titleFr: z.string().optional(),
   tier: AchievementTierSchema,
   rule: RuleExprSchema,
-  minConfidence: z.number().min(0).max(1),
+  // Re-gate item 2: a badge threshold below the fixed §4.1 0.50 floor is
+  // never valid data — the floor is fixed, not a per-achievement choice
+  // that could be set lower than the platform minimum.
+  minConfidence: z.number().min(0.5).max(1),
   scope: AchievementScopeSchema,
   active: z.boolean(),
 });

@@ -11,8 +11,10 @@
 import { describe, expect, it } from "vitest";
 import { type CourseId, type FacilityId, type RosterMember, type RosterVersion } from "@golfraven/catalog";
 import {
+  deriveRemovedOn,
   evaluateVersionCompletion,
   markerRosterOf,
+  physicalIdentityOfMember,
   uniqueCourses,
   type CompletionContext,
   type Play,
@@ -37,7 +39,7 @@ describe("AT(3): RTJ fixture — 26 courses / 11 facilities → marker roster of
       const courseId = nextId("crs") as CourseId;
       const facilityId = facilityIds[facilityIndex % 11]!;
       courseIds.push(courseId);
-      courses[courseId] = { id: courseId, facilityId };
+      courses[courseId] = { id: courseId, facilityId, verified: true };
       facilityIndex += 1;
     }
     const version: RosterVersion = {
@@ -99,9 +101,9 @@ describe("AT(3): a 27-hole composite fixture (A2-18)", () => {
     const composite18 = nextId("crs") as CourseId;
 
     const courses: CompletionContext["courses"] = {
-      [nineA]: { id: nineA, facilityId },
-      [nineB]: { id: nineB, facilityId },
-      [composite18]: { id: composite18, facilityId, composite: [nineA, nineB] },
+      [nineA]: { id: nineA, facilityId, verified: true },
+      [nineB]: { id: nineB, facilityId, verified: true },
+      [composite18]: { id: composite18, facilityId, composite: [nineA, nineB], verified: true },
     };
     const ctx: CompletionContext = { courses };
 
@@ -133,5 +135,45 @@ describe("AT(3): a 27-hole composite fixture (A2-18)", () => {
     const result = evaluateVersionCompletion(version, [version], plays, ctx);
     expect(result.satisfiedCount).toBe(2);
     expect(result.complete).toBe(true);
+  });
+
+  // Re-gate item 4: a LATER version that lists only the composite still
+  // covers each nine's own identity — `isIdentityPresentIn` must check the
+  // reverse direction too (a nine's identity, covered by a member listing
+  // the composite), not just "a play on the composite satisfies a nine
+  // member". Without that, a nine would wrongly show `removed_on` set the
+  // moment the roster switches to listing the composite alone.
+  it("a version listing only the composite still covers a nine's identity — no removed_on for it (A2-18)", () => {
+    const facilityId = nextId("fac") as FacilityId;
+    const nineA = nextId("crs") as CourseId;
+    const nineB = nextId("crs") as CourseId;
+    const composite18 = nextId("crs") as CourseId;
+    const courses: CompletionContext["courses"] = {
+      [nineA]: { id: nineA, facilityId, verified: true },
+      [nineB]: { id: nineB, facilityId, verified: true },
+      [composite18]: { id: composite18, facilityId, composite: [nineA, nineB], verified: true },
+    };
+    const ctx: CompletionContext = { courses };
+    const v1: RosterVersion = {
+      version: 1,
+      effectiveFrom: "2026-01-01",
+      source: { url: "https://example.com/composite", retrieved: "2026-01-01" },
+      verifiedAt: "2026-01-01",
+      completionUnit: "course",
+      markerUnit: "facility",
+      completionRule: { kind: "all" },
+      markerRule: { kind: "all" },
+      members: [{ unit: "course", courseId: nineA }],
+    };
+    // V2 (later, effectiveFrom AFTER v1) lists only the composite — not
+    // nineA by name.
+    const v2: RosterVersion = {
+      ...v1,
+      version: 2,
+      effectiveFrom: "2026-06-01",
+      members: [{ unit: "course", courseId: composite18 }],
+    };
+    const identity = physicalIdentityOfMember(v1.members[0]!, ctx);
+    expect(deriveRemovedOn(identity, 1, [v1, v2], ctx)).toBeUndefined();
   });
 });

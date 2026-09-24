@@ -451,4 +451,14 @@ describe("verify-catalog — must-fail fixtures (AT(1), exact issue sets — S5)
     expectExactFail("mf-nofm-exceeds-member-count", [
       { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].completionRule.n" },
     ]));
+
+  // Re-gate item 3: pins the marker n-of-m gate to markerRosterSize (distinct
+  // FACILITIES), not the raw member count. Two course members share ONE
+  // facility here (markerRosterSize=1, memberCount=2) with markerRule.n=2 —
+  // n exceeds markerRosterSize but NOT memberCount, so a mutation that
+  // compares against memberCount instead would wrongly let this pass.
+  it("N-gate: markerRule n-of-m with n greater than the DISTINCT-FACILITY marker roster (but not the raw member count)", () =>
+    expectExactFail("mf-nofm-exceeds-marker-roster", [
+      { code: "ROSTER_NOFM_EXCEEDS_MEMBER_COUNT", path: "trails[0].rosterVersions[0].markerRule.n" },
+    ]));
 });

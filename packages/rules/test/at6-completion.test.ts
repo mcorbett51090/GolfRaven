@@ -73,6 +73,12 @@ function makeCoursesOneFacilityEach(n: number): {
   return { courseIds, courses };
 }
 
+/** Re-gate item 1: `programmeStartsOn` is now required for any money-mode
+ * evaluation. Every fixture in this file that isn't specifically testing
+ * the B2 boundary itself uses this "programme has always been running"
+ * constant — well before any play/purchase date these fixtures use. */
+const EARLY_PROGRAMME_START = "2020-01-01";
+
 function courseVersion(
   version: number,
   courseIds: CourseId[],
@@ -321,15 +327,52 @@ describe("AT(6): B1 — the O19 money leg is judged per completion member, not p
       play(b, "2026-02-02", { scoreBadge: 0.5, moneyQualifies: false }),
     ];
     const purchases: MarkerPurchase[] = [{ facilityId, localDate: "2026-02-01" }];
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     // A facility-level check would wrongly say "the one facility has SOME
     // money play" and call it entitled — the fix judges the money leg via
     // evaluateVersionCompletion (per-member, under completionRule), which
     // correctly sees B's member as unsatisfied in money mode.
     expect(entitlement.entitled).toBe(false);
-    expect(isTrailComplete([v1], plays, ctx, { money: true })).toBe(false);
+    expect(isTrailComplete([v1], plays, ctx, { money: true, programmeStartsOn: EARLY_PROGRAMME_START })).toBe(false);
     // The badge itself is still fine (badge mode ignores moneyQualifies).
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
+  });
+
+  // Re-gate item 3, bullet 4: names the missing member DIRECTLY. Three
+  // members across TWO facilities — A1/A2 share facility fA, B is alone at
+  // facility fB — so a per-facility (rather than per-member) money check
+  // cannot hide behind "the whole roster shares one facility" the way the
+  // test above does. Only A1 (not A2) has a money play; B has one too. A
+  // per-facility mutation sees fA credited (via A1's play) and wrongly
+  // clears A2 as well; the correct per-member check leaves A2 — and ONLY
+  // A2's facility, fA — missing.
+  it("O19 per-member (not per-facility): A1 has a money play, A2 (same facility) does not -> missingMoneyPlays names exactly fA", () => {
+    const fA = nextId("fac") as FacilityId;
+    const fB = nextId("fac") as FacilityId;
+    const a1 = nextId("crs") as CourseId;
+    const a2 = nextId("crs") as CourseId;
+    const b = nextId("crs") as CourseId;
+    const courses: CompletionContext["courses"] = {
+      [a1]: { id: a1, facilityId: fA, verified: true },
+      [a2]: { id: a2, facilityId: fA, verified: true },
+      [b]: { id: b, facilityId: fB, verified: true },
+    };
+    const v1 = courseVersion(1, [a1, a2, b]);
+    const ctx: CompletionContext = { courses };
+    const plays: Play[] = [
+      play(a1, "2026-02-01", { moneyQualifies: true }),
+      // a2: no money play at all (only A1 does, though both share fA).
+      play(b, "2026-02-01", { moneyQualifies: true }),
+    ];
+    const purchases: MarkerPurchase[] = [
+      { facilityId: fA, localDate: "2026-02-01" },
+      { facilityId: fB, localDate: "2026-02-01" },
+    ];
+    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, {
+      programmeStartsOn: EARLY_PROGRAMME_START,
+    });
+    expect(entitlement.entitled).toBe(false);
+    expect(entitlement.missingMoneyPlays).toEqual([fA]);
   });
 });
 
@@ -377,6 +420,27 @@ describe("AT(6): B2 — programmeStartsOn is a separate, money-only bound", () =
       programmeStartsOn: "2026-06-01",
     });
     expect(entitledLater.entitled).toBe(true);
+  });
+
+  // Re-gate item 3, bullet 2: pins `hasPurchase` to `programmeStartsOn`
+  // SPECIFICALLY — isolated from the money-play leg, which the fixtures
+  // above always fail/pass in lockstep with the purchase leg (so a mutation
+  // that drops just `hasPurchase`'s own date check wouldn't be caught by
+  // them). Here the money play clears programmeStartsOn cleanly; only the
+  // purchase predates it.
+  it("a purchase predating programmeStartsOn does not satisfy the O19 purchase leg, even with a qualifying money play", () => {
+    const { courseIds, courses } = makeCoursesOneFacilityEach(1);
+    const facilityId = courses[courseIds[0]!]!.facilityId;
+    const v1 = courseVersion(1, courseIds);
+    const ctx: CompletionContext = { courses };
+    const purchases: MarkerPurchase[] = [{ facilityId, localDate: "2019-05-01" }];
+    const plays: Play[] = [play(courseIds[0]!, "2026-02-01", { moneyQualifies: true })];
+    const entitled = specialMarkerEntitlement([v1], plays, purchases, ctx, true, {
+      programmeStartsOn: EARLY_PROGRAMME_START,
+    });
+    expect(entitled.entitled).toBe(false);
+    expect(entitled.missingPurchases).toEqual([facilityId]);
+    expect(entitled.missingMoneyPlays).toEqual([]);
   });
 });
 
@@ -488,7 +552,7 @@ describe("AT(6): S1 — removed_on is keyed on the member's physical unit (cours
       play(a, "2026-02-01", { moneyQualifies: true }),
       play(b, "2026-02-02", { moneyQualifies: true }),
     ];
-    const entitlement = specialMarkerEntitlement(allVersions, plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement(allVersions, plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingPurchases).toContain(fA);
   });
@@ -508,7 +572,7 @@ describe("AT(6): marker vs completion parity", () => {
       facilityId: courses[c]!.facilityId,
       localDate: "2026-01-01",
     }));
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(true);
     expect(isTrailComplete([v1], plays, ctx)).toBe(true);
   });
@@ -532,7 +596,7 @@ describe("AT(6): marker vs completion parity", () => {
     const v1 = courseVersion(1, courseIds);
     const ctx: CompletionContext = { courses };
     const purchases: MarkerPurchase[] = facilityIds.map((f) => ({ facilityId: f, localDate: "2026-01-01" }));
-    const entitlement = specialMarkerEntitlement([v1], [], purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement([v1], [], purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingMoneyPlays.length).toBe(2);
   });
@@ -552,7 +616,7 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
     const plays: Play[] = courseIds
       .slice(0, 8)
       .map((c, i) => play(c, `2026-02-0${i + 1}`, { moneyQualifies: true }));
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingMoneyPlays).toEqual([facilityIds[8]]);
     expect(entitlement.missingPurchases).toEqual([]);
@@ -567,7 +631,7 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
       .slice(0, 8)
       .map((f) => ({ facilityId: f, localDate: "2026-01-01" }));
     const plays: Play[] = courseIds.map((c, i) => play(c, `2026-02-0${(i % 9) + 1}`, { moneyQualifies: true }));
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingPurchases).toEqual([facilityIds[8]]);
     expect(entitlement.missingMoneyPlays).toEqual([]);
@@ -583,7 +647,7 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
       play(courseIds[0]!, "2026-02-01", { moneyQualifies: true }),
       play(courseIds[1]!, "2026-02-02", { moneyQualifies: false, scoreBadge: 0.6 }), // badge-level only
     ];
-    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement([v1], plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(false);
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
   });
@@ -599,7 +663,7 @@ describe("AT(6): O19 default (marker_requires_completion: true)", () => {
     const ctx: CompletionContext = { courses };
     const purchases: MarkerPurchase[] = v1FacilityIds.map((f) => ({ facilityId: f, localDate: "2026-02-01" }));
     const plays: Play[] = v2CourseIds.map((c, i) => play(c, `2026-07-0${i + 1}`, { moneyQualifies: true }));
-    const entitlement = specialMarkerEntitlement(allVersions, plays, purchases, ctx, true);
+    const entitlement = specialMarkerEntitlement(allVersions, plays, purchases, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
     expect(entitlement.entitled).toBe(false);
     expect(entitlement.missingMoneyPlays.length + entitlement.missingPurchases.length).toBeGreaterThan(0);
   });
@@ -637,7 +701,7 @@ describe("AT(6): the user-pick member (A2-01)", () => {
       }),
     ];
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(true);
-    expect(trailProgress([v1], plays, ctx, { money: true })).toBe(0);
+    expect(trailProgress([v1], plays, ctx, { money: true, programmeStartsOn: EARLY_PROGRAMME_START })).toBe(0);
   });
 
   it("the one-pick-per-facility-per-date guard: a second, different user pick on the same date replaces the first", () => {
@@ -697,7 +761,7 @@ describe("AT(6): S4 — AchievementDef.minConfidence and the verified-course gat
     const ctx: CompletionContext = { courses };
     const plays: Play[] = [play(courseId, "2026-01-01", { moneyQualifies: true })];
     expect(evaluateVersionCompletion(v1, [v1], plays, ctx).complete).toBe(false);
-    expect(evaluateVersionCompletion(v1, [v1], plays, ctx, { money: true }).complete).toBe(false);
+    expect(evaluateVersionCompletion(v1, [v1], plays, ctx, { money: true, programmeStartsOn: EARLY_PROGRAMME_START }).complete).toBe(false);
   });
 });
 
@@ -809,16 +873,20 @@ describe("S7 mutation-kill fixtures", () => {
     expect(monthlyStreak(plays, ctx)).toBe(1);
   });
 
-  it("a purchase before the version's trackingStartsOn does not satisfy the O19 purchase leg", () => {
+  // Re-gate nit: `hasPurchase` is bounded by `programmeStartsOn` ONLY
+  // (§4.6) — never `version.trackingStartsOn` (the BADGE bound, §8.2). A
+  // purchase before trackingStartsOn but AFTER programmeStartsOn still
+  // satisfies the O19 purchase leg — a purchase has no "badge" to backdate.
+  it("a purchase before the version's trackingStartsOn (but after programmeStartsOn) DOES satisfy the O19 purchase leg", () => {
     const { courseIds, courses } = makeCoursesOneFacilityEach(1);
     const facilityId = courses[courseIds[0]!]!.facilityId;
     const v1 = courseVersion(1, courseIds, { trackingStartsOn: "2026-06-01" });
     const ctx: CompletionContext = { courses };
     const earlyPurchase: MarkerPurchase[] = [{ facilityId, localDate: "2026-01-01" }];
     const play_: Play[] = [play(courseIds[0]!, "2026-07-01", { moneyQualifies: true })];
-    const entitlement = specialMarkerEntitlement([v1], play_, earlyPurchase, ctx, true);
-    expect(entitlement.entitled).toBe(false);
-    expect(entitlement.missingPurchases).toContain(facilityId);
+    const entitlement = specialMarkerEntitlement([v1], play_, earlyPurchase, ctx, true, { programmeStartsOn: EARLY_PROGRAMME_START });
+    expect(entitlement.entitled).toBe(true);
+    expect(entitlement.missingPurchases).toEqual([]);
   });
 
   it("maxCountBy counts one COURSE once even when it was played twice (never counts plays)", () => {

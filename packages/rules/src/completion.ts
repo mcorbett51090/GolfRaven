@@ -119,21 +119,37 @@ export interface CompletionContext {
 /**
  * Shared knobs every completion/aggregate function below accepts (gate
  * review B2/S4 — see this module's doc for the full qualification rule).
+ *
+ * **Re-gate item 1: `programmeStartsOn` is REQUIRED whenever `money` is
+ * true — a type error, not just documentation.** A flat `{money?,
+ * programmeStartsOn?}` shape let a caller write `{money: true}` and
+ * silently evaluate with no programme-start bound at all. `EvalOptions` is
+ * now a discriminated union on `money`: the `money: true` branch makes
+ * `programmeStartsOn` non-optional, so omitting it is a compile error at
+ * every direct call site. `playQualifies` below is the runtime backstop
+ * for a caller that reaches this from untyped JS.
  */
-export interface EvalOptions {
-  /** Use money-qualifying plays (and `programmeStartsOn`) instead of
-   * badge-level ones. Default `false`. */
-  money?: boolean;
-  /** B2: an additional lower bound applied ONLY when `money` is true, in
-   * ADDITION to (never instead of) each version's own `trackingStartsOn`.
-   * Never applied in non-money mode. */
-  programmeStartsOn?: IsoDate;
+export interface BadgeEvalOptions {
+  money?: false;
   /** S4: `AchievementDef.minConfidence` — the `score_badge` threshold a
-   * play must meet to qualify in non-money mode. Defaults to
-   * `BADGE_THRESHOLD` (0.50). Never applied in money mode (money mode
-   * uses the already-thresholded `moneyQualifies` boolean directly). */
+   * play must meet to qualify in badge mode. Defaults to `BADGE_THRESHOLD`
+   * (0.50) when omitted. Re-gate item 2: this is a BADGE-MODE-ONLY knob —
+   * a money-mode rule's NEGATIVE occurrence also lands in this branch
+   * (`money: false`) at evaluation time, and `rule-expr-eval.ts` never
+   * forwards `ctx.badgeThreshold` for that case, specifically so a
+   * negative occurrence always sees the fixed §4.1 0.50 floor regardless
+   * of any achievement-specific override — see that module's own doc. */
   badgeThreshold?: number;
 }
+export interface MoneyEvalOptions {
+  money: true;
+  /** B2/re-gate item 1: REQUIRED. §4.6's `trail_programme.starts_on`, the
+   * money-only bound kept separate from `RosterVersion.trackingStartsOn`
+   * ("a backdated badge never backdates an offer or a marker", §8.2 line
+   * ≈1956). Never defaulted, never inferred. */
+  programmeStartsOn: IsoDate;
+}
+export type EvalOptions = BadgeEvalOptions | MoneyEvalOptions;
 
 function resolveId(ctx: CompletionContext, id: string): string {
   return ctx.ledger ? resolveMergedId(ctx.ledger, id) : id;
@@ -148,9 +164,15 @@ function facilityOfCourse(ctx: CompletionContext, courseId: string): FacilityId 
   return courseMeta(ctx, courseId)?.facilityId;
 }
 
+/** Re-gate item 1: "money inputs fail closed" — a course with NO
+ * `CourseMeta` entry at all, or one whose `verified` field is absent or
+ * `undefined`, is treated as UNVERIFIED, not verified-by-default. §4.1
+ * line ≈589 / G3-01: "Qualifying... at a verified course; stub-course
+ * plays qualify only after promotion" — the only way a play at a course
+ * qualifies (badge OR money, module doc) is an EXPLICIT `verified: true`. */
 function isCourseVerified(ctx: CompletionContext, courseId: string): boolean {
   const meta = courseMeta(ctx, courseId);
-  return meta?.verified !== false;
+  return meta?.verified === true;
 }
 
 /**
@@ -172,8 +194,17 @@ export function playQualifies(
   if (!isCourseVerified(ctx, play.courseId)) return false;
   if (trackingStartsOn && play.localDate < trackingStartsOn) return false;
   if (opts.money) {
+    // Runtime refusal (re-gate item 1): the type already makes
+    // `programmeStartsOn` non-optional on `MoneyEvalOptions`, but a
+    // caller reaching this from untyped JS (or a value computed and cast
+    // around the type checker) must not silently evaluate with no bound.
+    if (opts.programmeStartsOn === undefined) {
+      throw new Error(
+        "playQualifies: money-mode evaluation requires opts.programmeStartsOn (§4.6) — refusing to evaluate without one",
+      );
+    }
     if (play.moneyQualifies !== true) return false;
-    if (opts.programmeStartsOn && play.localDate < opts.programmeStartsOn) return false;
+    if (play.localDate < opts.programmeStartsOn) return false;
     return true;
   }
   const threshold = opts.badgeThreshold ?? BADGE_THRESHOLD;
@@ -338,8 +369,17 @@ function deriveFacilityRemovedOn(
 
 /**
  * Whether `courseId` (a bare course id) is the/a physical unit `member`
- * names, under `unit`. Handles the composite case (A2-18): the composite
- * course id itself covers each of its two nines' course-unit members.
+ * names, under `unit`. Handles the composite case (A2-18) SYMMETRICALLY
+ * (re-gate item 4): the composite course id covers each of its two nines'
+ * course-unit members (queried course = the composite, member = a nine —
+ * a PLAY on the composite satisfying a nine-member), AND a nine's identity
+ * is covered by a member that lists the composite (queried course = a
+ * nine, member = the composite — a LATER VERSION that lists only the
+ * composite still covers each nine's own identity, so `deriveRemovedOn`
+ * never wrongly marks a nine "dropped" just because the roster switched
+ * to listing the composite). `Course.composite` is only ever stamped on
+ * the composite's OWN record, never on a nine's, so both directions have
+ * to be checked explicitly — neither side can assume it holds the field.
  */
 export function memberCoversCourseId(
   courseId: string,
@@ -352,8 +392,15 @@ export function memberCoversCourseId(
     courseIds.some((id) => {
       const resolved = resolveId(ctx, id);
       if (resolved === resolvedCourseId) return true;
-      const composite = courseMeta(ctx, resolvedCourseId)?.composite;
-      return composite !== undefined && composite.includes(resolved as CourseId);
+      const queriedComposite = courseMeta(ctx, resolvedCourseId)?.composite;
+      if (queriedComposite !== undefined && queriedComposite.includes(resolved as CourseId)) {
+        return true;
+      }
+      const memberComposite = courseMeta(ctx, resolved)?.composite;
+      return (
+        memberComposite !== undefined &&
+        memberComposite.includes(resolvedCourseId as CourseId)
+      );
     });
 
   switch (unit) {
@@ -658,6 +705,11 @@ export interface SpecialMarkerEntitlementResult {
  *
  * With `markerRequiresCompletion: false`, only the purchase leg is
  * required (§4.6's per-trail toggle).
+ *
+ * Re-gate item 1: `opts.programmeStartsOn` is a REQUIRED parameter (no
+ * default) — this function is ALWAYS a money-mode evaluation (both legs),
+ * so "for any money-mode evaluation" (item 1) applies unconditionally
+ * here, not just when a caller happens to pass one.
  */
 export function specialMarkerEntitlement(
   allVersions: RosterVersion[],
@@ -665,7 +717,7 @@ export function specialMarkerEntitlement(
   purchases: MarkerPurchase[],
   ctx: CompletionContext,
   markerRequiresCompletion = true,
-  opts: Omit<EvalOptions, "money"> = {},
+  opts: { programmeStartsOn: IsoDate; badgeThreshold?: number },
 ): SpecialMarkerEntitlementResult {
   let bestMissingPurchases: FacilityId[] = [];
   let bestMissingMoneyPlays: FacilityId[] = [];
@@ -722,18 +774,22 @@ export function specialMarkerEntitlement(
 
 /** A purchase leg check respecting `removed_on` (S1) and `programmeStartsOn`
  * (B2) for the facility, on top of the version's own `trackingStartsOn`. */
+/**
+ * Nit (re-gate): a purchase is dated against `programmeStartsOn` ONLY
+ * (§4.6) — never `version.trackingStartsOn`, which is the BADGE bound
+ * (§8.2). A purchase has no "badge" concept to backdate.
+ */
 function hasPurchase(
   facilityId: FacilityId,
   version: RosterVersion,
   allVersions: RosterVersion[],
   purchases: MarkerPurchase[],
   ctx: CompletionContext,
-  opts: Omit<EvalOptions, "money">,
+  opts: { programmeStartsOn: IsoDate },
 ): boolean {
   const removedOn = deriveFacilityRemovedOn(facilityId, version.version, allVersions, ctx);
   return purchases.some((p) => {
-    if (version.trackingStartsOn && p.localDate < version.trackingStartsOn) return false;
-    if (opts.programmeStartsOn && p.localDate < opts.programmeStartsOn) return false;
+    if (p.localDate < opts.programmeStartsOn) return false;
     if (removedOn && !(p.localDate < removedOn)) return false;
     return p.facilityId === facilityId;
   });
