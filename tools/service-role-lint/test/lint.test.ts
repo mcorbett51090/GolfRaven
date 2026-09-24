@@ -140,6 +140,46 @@ describe("bad fixtures (must fail) — gate-round-2 bypass vectors (B5)", () => 
   });
 });
 
+describe("bad fixtures (must fail) — M3, post-P3a gate (bypass-resistant rework)", () => {
+  it("flags versioned/URL specifiers (esm.sh, deno.land/x, npm: with @version) by normalised package name", () => {
+    const findings = lintFixture("bad/versioned-specifier.ts");
+    const bannedImports = findings.filter((f) => f.rule === "banned-import-specifier");
+    expect(bannedImports.length).toBe(3);
+    expect(bannedImports.some((f) => f.message.includes("esm.sh"))).toBe(true);
+    expect(bannedImports.some((f) => f.message.includes("deno.land/x/postgresjs"))).toBe(true);
+    expect(bannedImports.some((f) => f.message.includes("npm:pg@8"))).toBe(true);
+  });
+
+  it("flags a destructured `const { env } = Deno; env.get(...)` read", () => {
+    const findings = lintFixture("bad/destructured-env.ts");
+    expect(findings.some((f) => f.rule === "literal-secret-env-var")).toBe(true);
+  });
+
+  it("flags Deno.env.toObject()[...] and .toObject().KEY reads", () => {
+    const findings = lintFixture("bad/env-to-object.ts");
+    // Both the acquisition (.toObject() itself) and the specific computed
+    // read are flagged, so this fixture alone produces several findings.
+    expect(findings.some((f) => f.rule === "non-literal-env-access" && f.message.includes("toObject"))).toBe(true);
+  });
+
+  it("flags a raw fetch() carrying a service-role key read from env", () => {
+    const findings = lintFixture("bad/raw-fetch-with-secret.ts");
+    expect(findings.some((f) => f.rule === "raw-fetch-with-secret")).toBe(true);
+  });
+
+  it("does NOT flag a read of a public, allow-listed env var (SUPABASE_URL)", () => {
+    const source = `
+      export function readUrl() {
+        return Deno.env.get("SUPABASE_URL");
+      }
+      declare const Deno: { env: { get(name: string): string | undefined } };
+    `;
+    const findings = lintSource(source, "/repo/supabase/functions/public-var/index.ts");
+    expect(findings.filter((f) => f.rule === "literal-secret-env-var" || f.rule === "non-literal-env-access")).toEqual([]);
+  });
+
+});
+
 describe("clean fixtures (must pass)", () => {
   it("passes a function that only touches the client inside withOwnership()", () => {
     expect(lintFixture("good/evidence-insert.ts")).toEqual([]);

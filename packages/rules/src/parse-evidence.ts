@@ -454,7 +454,13 @@ export function parseScorePlayInput(raw: unknown): ScorePlayInputParseResult {
     };
   }
 
-  const tz = parsedCtx.facilityTz;
+  // `ScorePlayContext.facilityTz` is typed OPTIONAL on the interface (it's
+  // meaningless to `classifyEvidenceRow`/`scorePlay`'s own scoring logic,
+  // which never reads it — only this parser does) even though
+  // `ScorePlayContextSchema` REQUIRES it at runtime; read it from the
+  // zod-inferred (pre-cast) data, which correctly types it as `string`,
+  // rather than a non-null assertion on the interface-typed `parsedCtx`.
+  const tz: string = ctxParsed.data.facilityTz;
   const parsedEvidence: Evidence[] = [];
   for (const i of matchingIndices) {
     const result = parseEvidence(evidence[i], tz);

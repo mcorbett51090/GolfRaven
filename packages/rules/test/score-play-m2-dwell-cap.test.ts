@@ -5,8 +5,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { MAX_DWELL_MINUTES, classifyEvidenceRow } from "../src/internal/classify.js";
-import { scorePlay, type Evidence } from "../src/score-play.js";
-import { PLAY_LOCAL_DATE_MS, baseCtx, dwell, goodFix } from "./score-play-helpers.js";
+import type { Evidence } from "../src/score-play.js";
+import { PLAY_LOCAL_DATE_MS, baseCtx, dwell, goodFix, scorePlayOrThrow } from "./score-play-helpers.js";
 
 describe("M2: foreground_dwell — Infinity/1e300 capturedAt never produces an eligible dwell", () => {
   it("checkoutFix.capturedAt: Infinity — classifyEvidenceRow never throws, contributes 0 (probe 7)", () => {
@@ -23,9 +23,9 @@ describe("M2: foreground_dwell — Infinity/1e300 capturedAt never produces an e
     expect(c.moneyEligible).toBe(false);
   });
 
-  it("scorePlay's own top-level call is safe for both — never throws, fails closed via the parser", () => {
+  it("scorePlay's own top-level call is safe for both — never throws; the row is quarantined (not a whole-play failure), money stays false", () => {
     for (const capturedAt of [Infinity, 1e300]) {
-      const result = scorePlay(
+      const result = scorePlayOrThrow(
         [dwell({ checkoutFix: goodFix({ capturedAt }) }) as Evidence],
         baseCtx(),
       );

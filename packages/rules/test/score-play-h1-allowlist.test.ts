@@ -82,7 +82,7 @@ describe("H1: a staff_presence row with a garbage token never becomes hard/money
     expect(c.moneyEligible).toBe(false);
   });
 
-  it("SAME shapes, through the public scorePlay entry point, all fail closed via the parser (H2)", () => {
+  it("SAME shapes, through the public scorePlay entry point, all get QUARANTINED via the parser (H2/F3) — the play still scores (just without that row), never a whole-play failure", () => {
     for (const token of [
       { present: true },
       { present: true, grade: "bogus" },
@@ -92,8 +92,11 @@ describe("H1: a staff_presence row with a garbage token never becomes hard/money
         [staffPresence({ coSignalFix: { ...goodFix(), token } as any }) as any],
         baseCtx(),
       );
-      expect(result.money).toBe(false);
-      expect(result.reasons).toBeDefined();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.money).toBe(false);
+        expect(result.excludedRows.length).toBe(1);
+      }
     }
   });
 });

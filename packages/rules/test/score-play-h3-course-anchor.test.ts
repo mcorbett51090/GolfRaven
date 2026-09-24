@@ -8,14 +8,21 @@
  */
 import { describe, expect, it } from "vitest";
 import { classifyEvidenceRow } from "../src/internal/classify.js";
-import { scorePlay, type Evidence, type ScorePlayContext } from "../src/score-play.js";
-import { PLAY_FACILITY_ID, PLAY_LOCAL_DATE, PLAY_LOCAL_DATE_MS, goodFix } from "./score-play-helpers.js";
+import type { Evidence, ScorePlayContext } from "../src/score-play.js";
+import {
+  PLAY_FACILITY_ID,
+  PLAY_FACILITY_TZ,
+  PLAY_LOCAL_DATE,
+  PLAY_LOCAL_DATE_MS,
+  goodFix,
+  scorePlayOrThrow,
+} from "./score-play-helpers.js";
 
 const COURSE_A = "course_front9";
 const COURSE_B = "course_back9";
 
 function ctxFor(playCourseId: string): ScorePlayContext {
-  return { playFacilityId: PLAY_FACILITY_ID, playLocalDate: PLAY_LOCAL_DATE, playCourseId };
+  return { playFacilityId: PLAY_FACILITY_ID, playLocalDate: PLAY_LOCAL_DATE, playCourseId, facilityTz: PLAY_FACILITY_TZ };
 }
 
 function staffRowAt(courseId: string): Evidence {
@@ -34,8 +41,8 @@ describe("H3: the gate's own required scenario — 2 plays at a 36-hole facility
   it("the SAME evidence row, scored against each play's own ctx.playCourseId, only pays out for the matching course", () => {
     const row = staffRowAt(COURSE_A);
 
-    const playA = scorePlay([row], ctxFor(COURSE_A));
-    const playB = scorePlay([row], ctxFor(COURSE_B));
+    const playA = scorePlayOrThrow([row], ctxFor(COURSE_A));
+    const playB = scorePlayOrThrow([row], ctxFor(COURSE_B));
 
     expect(playA.money).toBe(true);
     expect(playA.score_badge).toBe(0.95);

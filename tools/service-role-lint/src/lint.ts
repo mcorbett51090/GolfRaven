@@ -489,7 +489,8 @@ export function lintSource(source: string, filePath: string): Finding[] {
       node.object.property.type === AST_NODE_TYPES.Identifier &&
       node.object.property.name === "env" &&
       node.object.object.type === AST_NODE_TYPES.Identifier &&
-      envObjectLocalNames.has(node.object.object.name)
+      envObjectLocalNames.has(node.object.object.name) &&
+      !(node.property.type === AST_NODE_TYPES.Identifier && (node.property.name === "get" || node.property.name === "toObject"))
     ) {
       if (!node.computed && node.property.type === AST_NODE_TYPES.Identifier) {
         flagEnvKey(node, node.property.name, `${node.object.object.name}.env.${node.property.name}`);
