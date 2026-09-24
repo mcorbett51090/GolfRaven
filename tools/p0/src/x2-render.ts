@@ -145,10 +145,33 @@ export interface RequestLike {
   /** Throws for some early navigation requests, per Playwright's own docs
    * — callers must guard this with try/catch (this module does). */
   frame(): unknown;
+  /** Gate finding 1 (re-gate), defense in depth: modern Chromium sends
+   * `Sec-Fetch-Dest: worker`/`sharedworker` on the request that fetches a
+   * (shared) Worker's OWN script (Fetch Metadata Request Headers spec) —
+   * checked to abort a worker-script load outright, alongside (never
+   * instead of) failing the whole capture the moment `page.on("worker")`
+   * fires (below), since a worker's OWN network activity is not reliably
+   * covered by this context's `route()`/`routeWebSocket()` at all. */
+  headers(): Record<string, string>;
 }
 export interface WebSocketRouteLike {
   url(): string;
   close(options?: { code?: number; reason?: string }): Promise<void> | void;
+  /** Gate finding, should-fix (re-gate): a routed WebSocket does NOT
+   * connect to the real server by default (Playwright mocks it entirely
+   * unless this is called) — a same-host WebSocket that is merely left
+   * "unhandled" never receives real server messages at all, breaking any
+   * real trail-site functionality that depends on one. Calling this for
+   * the same-host case is what makes a same-host WebSocket behave like a
+   * normal, unrouted one (messages auto-forward both directions once
+   * connected, since neither side ever calls `onMessage`). */
+  connectToServer(): unknown;
+}
+/** Gate finding 1 (re-gate): the minimal Playwright `Worker` surface this
+ * module needs — a dedicated Worker's own `url()`, for the error message
+ * when one is detected. */
+export interface WorkerLike {
+  url(): string;
 }
 
 /** The minimal Playwright `Page` surface this module needs. Deliberately
@@ -166,6 +189,14 @@ export interface PageLike {
   close(): Promise<void>;
   url(): string;
   mainFrame(): unknown;
+  /** Gate finding 1 (re-gate): a dedicated Worker created by this page —
+   * Playwright's own `Page.on("worker", …)` event. There is NO equivalent
+   * `BrowserContext`-level event for workers (checked against the pinned
+   * `playwright-core@1.56.1` type definitions — `on(event: 'worker', …)`
+   * exists only on `Page`, never on `BrowserContext`), unlike `"page"`
+   * (popups), which IS a context-level event — this is why worker
+   * detection has to be wired per-page, not once at the context level. */
+  on(event: "worker", handler: (worker: WorkerLike) => void): void;
 }
 
 /** The minimal Playwright `BrowserContext` surface this module needs. */
@@ -294,6 +325,7 @@ export async function renderUrl(
       let offHostNavigation: string | null = null;
       let insecureHop: string | null = null;
       let popupOpened: string | null = null;
+      let workerOpened: string | null = null;
       let mainPage: PageLike | null = null;
 
       context.on("response", (response) => {
@@ -304,8 +336,15 @@ export async function renderUrl(
       });
 
       // Gate finding: off-host WebSockets never reach the page's script
-      // at all — closed before any message exchange, same-host ones pass
-      // through untouched (real site functionality is preserved).
+      // at all — closed before any message exchange. Gate finding,
+      // should-fix (re-gate, corrected comment at what was line 321): a
+      // same-host WebSocket must call `connectToServer()` to actually
+      // reach the real server — a ROUTED WebSocket is, by Playwright's
+      // own default, NOT connected to anything at all ("you can mock
+      // entire WebSocket communication") until this is called; merely
+      // leaving it "unhandled" does NOT connect it, it silently mocks it
+      // into a dead end, breaking any real site functionality that
+      // depends on it. This is the fix — not a no-op.
       await context.routeWebSocket(
         () => true,
         (ws) => {
@@ -317,14 +356,33 @@ export async function renderUrl(
           }
           if (wsHost !== requestedHost) {
             void ws.close();
+            return;
           }
-          // Same-host: leave unhandled — Playwright connects it to the
-          // real server, matching normal page behavior.
+          ws.connectToServer();
         },
       );
 
       await context.route("**/*", async (route, request) => {
-        if (capExceeded || popupOpened) {
+        if (capExceeded || popupOpened || workerOpened) {
+          await route.abort();
+          return;
+        }
+        // Gate finding 1 (re-gate), defense in depth: abort a request for
+        // a (shared) Worker's OWN script outright, via the Fetch Metadata
+        // `Sec-Fetch-Dest` header Chromium sends for it — belt-and-
+        // suspenders alongside (never instead of) failing the whole
+        // capture the moment `page.on("worker")` fires below, since a
+        // worker's OWN subsequent network activity (e.g. a WebSocket it
+        // opens) is not reliably covered by this context's own
+        // `route()`/`routeWebSocket()` at all — the root-cause fix is
+        // "no worker gets to run in the first place," not interception.
+        let destHeader: string | undefined;
+        try {
+          destHeader = request.headers()["sec-fetch-dest"];
+        } catch {
+          destHeader = undefined;
+        }
+        if (destHeader === "worker" || destHeader === "sharedworker") {
           await route.abort();
           return;
         }
@@ -392,6 +450,19 @@ export async function renderUrl(
           // Already closed/closing — nothing further to do.
         });
       });
+      // Gate finding 1 (re-gate): a dedicated Worker is per-PAGE, not
+      // per-context (see `PageLike.on`'s own doc for why) — registered on
+      // OUR page, immediately after it exists, same timing reasoning as
+      // the popup listener above. There is nothing to "close" a Worker
+      // with (Playwright's `Worker` object has no `close()`); a Worker's
+      // own network activity is not reliably interceptable at all (the
+      // very bypass this finding is about), so the only sound fix is
+      // failing the WHOLE capture the instant one is created — never
+      // trying to let it run and hoping the request-routing catches
+      // everything it does.
+      page.on("worker", (worker) => {
+        workerOpened = worker.url();
+      });
       try {
         const response = await page.goto(url, {
           waitUntil: "networkidle",
@@ -409,6 +480,14 @@ export async function renderUrl(
           throw new Error(
             `render of "${url}" opened a popup ("${popupOpened}") — closed immediately, but a popup opening ` +
               "at all fails the capture rather than being silently tolerated.",
+          );
+        }
+        if (workerOpened) {
+          throw new Error(
+            `render of "${url}" created a dedicated Worker ("${workerOpened}") — a Worker's own network ` +
+              "activity (e.g. a WebSocket it opens) is not reliably interceptable by this context's " +
+              "route()/routeWebSocket() at all (gate finding 1, re-gate), so a Worker being created at all " +
+              "fails the capture; a plain page renders fine without one.",
           );
         }
         if (insecureHop) {
@@ -442,11 +521,35 @@ export async function renderUrl(
           );
         }
 
+        // Should-fix (re-gate): re-check immediately before reading
+        // content — `waitUntil: "networkidle"` resolving is not a hard
+        // barrier against a popup/worker created by a script that kept
+        // running (a `setTimeout`, a delayed event handler) after
+        // `goto()` returned but before `page.content()` actually runs;
+        // the checks above only caught one taken right after `goto()`.
+        if (popupOpened || workerOpened) {
+          throw new Error(
+            `render of "${url}" opened a ${popupOpened ? `popup ("${popupOpened}")` : `Worker ("${workerOpened}")`} ` +
+              "just before content() was read — caught by the late re-check, not the earlier one.",
+          );
+        }
+
         const html = await withTimeout(
           page.content(),
           opts.contentTimeoutMs ?? DEFAULT_RENDER_CONTENT_TIMEOUT_MS,
           `page.content() for "${url}"`,
         );
+
+        // Should-fix (re-gate): AND right after content() resolves too —
+        // content() itself can take time (DEFAULT_RENDER_CONTENT_TIMEOUT_MS
+        // worth), long enough for a delayed popup/worker to appear WHILE
+        // it was running; a check only before it would miss that window.
+        if (popupOpened || workerOpened) {
+          throw new Error(
+            `render of "${url}" opened a ${popupOpened ? `popup ("${popupOpened}")` : `Worker ("${workerOpened}")`} ` +
+              "while content() was being read — caught by the late re-check.",
+          );
+        }
         return { status: response.status(), finalUrl, html, argsUsed: extraArgs };
       } finally {
         await page.close();
