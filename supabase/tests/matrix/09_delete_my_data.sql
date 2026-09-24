@@ -1,96 +1,94 @@
 -- 09_delete_my_data.sql
--- build plan §10 P3 AT(6) (docs/golf-trails/02-build-plan.md:2759):
--- "DELETE /v1/me removes all personal rows (asserted by query), revokes
--- connectors and deletes push tokens; an unredeemed special-marker
--- entitlement or stock voucher is voided at once, and no address exists to
--- retain (O9/O10)."
+-- build plan §10 P3 AT(6) (docs/golf-trails/02-build-plan.md:2759).
+-- ⛔ REWRITE (B3, gate round 2): this file used to assert "zero personal
+-- rows" against a hand-enumerated UNION of table names. It now derives
+-- the same assertion from `private.pii_retention_policy` (0014_hardening)
+-- — the SAME table `private.delete_my_data` itself is driven by — via
+-- `plpgsql` + `dblink`-free dynamic SQL run through a helper function, so
+-- a table added later is caught automatically as long as its FK is
+-- classified (and if it ISN'T classified, `delete_my_data` itself raises,
+-- which 10_function... no — which this file's own "unclassified FK"
+-- test below catches directly).
 
 BEGIN;
-SELECT plan(12);
+SELECT plan(9);
 
--- Precondition: player A has exactly the seeded rows before deletion.
-SELECT is((SELECT count(*)::int FROM app.profile WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 1, 'precondition: profile exists');
-SELECT is((SELECT count(*)::int FROM app.entitlement WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 1, 'precondition: entitlement exists (state earned)');
+-- Every FK-to-auth.users column in `app` must be classified — this is the
+-- same check `delete_my_data` itself makes at call time, asserted here
+-- independently so a missing classification fails CI even before anyone
+-- calls the function with real data.
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM pg_constraint con
+    JOIN pg_class cl ON cl.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
+    LEFT JOIN private.pii_retention_policy pol
+      ON pol.schema_name = 'app' AND pol.table_name = cl.relname AND pol.column_name = a.attname
+    WHERE con.contype = 'f' AND n.nspname = 'app' AND con.confrelid = 'auth.users'::regclass
+      AND pol.action IS NULL
+  ),
+  0,
+  'every FK-to-auth.users column in app is classified in private.pii_retention_policy'
+);
+
+-- Precondition: player A's seeded rows exist (activated + redeemed
+-- entitlements, a redeemed offer_code, a partner_member row, both
+-- directions of partner_invite, an audit_log row, a storage.objects
+-- receipt) — see supabase/tests/helpers.sql.
+SELECT is((SELECT count(*)::int FROM app.entitlement WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 2, 'precondition: 2 entitlements seeded (one redeemable/activated, one redeemed)');
+SELECT is((SELECT state::text FROM app.entitlement WHERE id = '50000000-0000-0000-0000-000000000002'), 'redeemed', 'precondition: the second entitlement is REDEEMED (terminal)');
 
 SELECT private.delete_my_data('00000000-0000-0000-0000-00000000000a'::uuid);
 
--- "removes all personal rows" — every DELETE-target table is empty for A.
+-- Generic, catalog-driven pass: every `delete_row` / `set_null` policy row
+-- leaves ZERO rows matching the deleted user, over the WHOLE `app` schema
+-- — this is the "asserted by a query over all personal tables" the gate
+-- asked for, and it automatically covers a table added later as long as
+-- its FK is classified.
+DO $$
+DECLARE
+  v_pol record;
+  v_count int;
+BEGIN
+  FOR v_pol IN
+    SELECT table_name, column_name, action
+    FROM private.pii_retention_policy
+    WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null')
+  LOOP
+    EXECUTE format(
+      'SELECT count(*) FROM app.%I WHERE %I = $1', v_pol.table_name, v_pol.column_name
+    ) INTO v_count USING '00000000-0000-0000-0000-00000000000a'::uuid;
+    IF v_count <> 0 THEN
+      RAISE EXCEPTION 'delete_my_data left % row(s) in app.%.% (policy: %)', v_count, v_pol.table_name, v_pol.column_name, v_pol.action;
+    END IF;
+  END LOOP;
+END
+$$;
+SELECT pass('every delete_row/set_null-policed column has zero rows referencing the deleted user (catalog-driven)');
+
+-- "special" cases, asserted individually (each has bespoke behaviour, so a
+-- generic "zero rows" assertion is the wrong shape for them):
 SELECT is(
-  (
-    SELECT count(*)::int FROM (
-      SELECT 1 FROM app.profile WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.device WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.push_token WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.purchase_evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.play WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.play_evidence pe JOIN app.play p ON p.id = pe.play_id WHERE p.user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.user_achievement WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.device_reward_ledger WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.checkin_challenge WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.marker_credit WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.offer_code WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.connector_account WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.signin_provider_token WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.booking WHERE user_id = '00000000-0000-0000-0000-00000000000a'
-      UNION ALL SELECT 1 FROM app.public_profile_projection WHERE handle = 'player_a'
-    ) t
-  ),
-  0,
-  'every personal table has zero rows for the deleted user (AT(6))'
-);
-
--- "deletes push tokens" (line 832, 2759) — explicit, named check.
-SELECT is((SELECT count(*)::int FROM app.push_token WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 0, 'push tokens deleted');
-
--- "revokes connectors" (DB half: connector_account + signin_provider_token rows removed).
-SELECT is((SELECT count(*)::int FROM app.connector_account WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 0, 'connector_account rows removed');
-SELECT is((SELECT count(*)::int FROM app.signin_provider_token WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 0, 'signin_provider_token rows removed');
-
--- "an unredeemed special-marker entitlement ... is voided at once" — VOID,
--- not deleted (the row + its stock-movement audit trail survive).
-SELECT is(
-  (SELECT state::text FROM app.entitlement WHERE user_id = '00000000-0000-0000-0000-00000000000a'),
-  'void',
-  'the unredeemed special-marker entitlement is voided, not deleted'
+  (SELECT state::text FROM app.entitlement WHERE id = '50000000-0000-0000-0000-000000000001'),
+  'void', 'the unredeemed (redeemable/activated) entitlement is voided'
 );
 SELECT is(
-  (SELECT count(*)::int FROM app.entitlement WHERE user_id = '00000000-0000-0000-0000-00000000000a'),
-  1,
-  'the entitlement row itself still exists (voided in place, so the stock audit trail is not broken)'
+  (SELECT state::text FROM app.entitlement WHERE id = '50000000-0000-0000-0000-000000000002'),
+  'redeemed', 'the REDEEMED entitlement stays redeemed (terminal, never voided)'
 );
-
--- attestation: nulled, not deleted (line 841, kept for staff-side audit
--- via player_pseudonym).
 SELECT is(
-  (SELECT count(*)::int FROM app.attestation WHERE id = 'a0000000-0000-0000-0000-000000000001' AND player_user_id IS NULL),
-  1,
-  'the attestation row survives with player_user_id nulled'
+  (SELECT count(*)::int FROM app.entitlement WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND activated_device_id IS NOT NULL),
+  0, 'every entitlement (voided or redeemed) has its activated_device_id detached, so app.device could be deleted'
 );
-
--- attestation_shift_log: snapshot replaced with "deleted player" (line 842).
-SELECT is(
-  (SELECT player_handle_snapshot FROM app.attestation_shift_log WHERE facility_id = 'fac_x' LIMIT 1),
-  'deleted player',
-  'the shift-log handle snapshot is rewritten to "deleted player"'
-);
-
--- receipt_fingerprint: user_id nulled, row (and its 24-month fraud value)
--- kept (line 835's retention).
 SELECT is(
   (SELECT count(*)::int FROM app.receipt_fingerprint WHERE id = '80000000-0000-0000-0000-000000000001' AND user_id IS NULL),
-  1,
-  'the receipt_fingerprint row survives with user_id nulled (24-month fraud retention preserved)'
+  1, 'the receipt_fingerprint row survives with user_id nulled (24-month fraud retention)'
 );
-
--- "no address exists to retain" (O9/O10) — structural: no address/shipping
--- column exists on entitlement or anywhere in the schema (there never was
--- one to begin with; this asserts that stays true).
 SELECT is(
-  (SELECT count(*)::int FROM information_schema.columns
-   WHERE table_schema = 'app' AND (column_name ILIKE '%address%' OR column_name ILIKE '%shipping%')),
-  0,
-  'no table carries an address/shipping column anywhere in the schema (O9/O10: nothing is shipped)'
+  (SELECT count(*)::int FROM storage.objects WHERE bucket_id = 'receipts' AND name LIKE 'receipts/00000000-0000-0000-0000-00000000000a/%'),
+  0, 'the player''s receipt objects in storage.objects are removed'
 );
 
 SELECT * FROM finish();

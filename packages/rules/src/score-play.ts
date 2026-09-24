@@ -147,6 +147,33 @@ function isQualityCoSignalFix(fix: AppFix, playFacilityId: string): boolean {
   );
 }
 
+/**
+ * Re-gate finding 1/2: staff_presence's ±10 min hard-window, as ONE shared
+ * predicate — used identically by `classify` (the row's own inline fix)
+ * AND `resolveGroups` (a fix absorbed from elsewhere in the same derived
+ * group), so the two can never drift apart the way they did before (the
+ * gate that found this duplication was itself evidence of the risk).
+ * Requires the fix's OWN date to match `ctx.playLocalDate` — NOT merely
+ * that it falls within ±10 min of `scanAt` — because a scan and a fix
+ * that are both mis-dated (or a scan whose own `scanAt` epoch happens to
+ * be close to a fix on a genuinely different calendar day, e.g. a
+ * malformed or adversarial input) must not resolve hard just because the
+ * millisecond delta between two absolute timestamps happens to be small.
+ */
+function staffFixSatisfiesHardWindow(fix: AppFix, scanAt: number, ctx: ScorePlayContext): boolean {
+  return (
+    isQualityCoSignalFix(fix, ctx.playFacilityId) &&
+    fix.localDate === ctx.playLocalDate &&
+    windowMs(fix.capturedAt, scanAt, 10 * 60_000)
+  );
+}
+
+/** Same idea for `booking`'s same-day-presence hard-window (a whole-day
+ * window, not a minute delta — so this needs no `scanAt`-analogue). */
+function bookingFixSatisfiesHardWindow(fix: AppFix, ctx: ScorePlayContext): boolean {
+  return isQualityCoSignalFix(fix, ctx.playFacilityId) && fix.localDate === ctx.playLocalDate;
+}
+
 /* ------------------------------------------------------------------ */
 /* Evidence classes (§4.5's class table, 16 rows incl. corroboration)  */
 /* ------------------------------------------------------------------ */
@@ -352,8 +379,23 @@ const MONEY_ELIGIBLE_BASE: ReadonlySet<EvidenceClassId> = new Set([
  * and `false` for `foreground_checkin` (a `none` challenge there stays a
  * ×0.6 penalty via `deviceFixMultiplier`, unchanged).
  */
-function deviceRowFixGateOk(fix: AppFix, playFacilityId: string, requireChallenge: boolean): boolean {
+function deviceRowFixGateOk(
+  fix: AppFix,
+  playFacilityId: string,
+  playLocalDate: string,
+  requireChallenge: boolean,
+): boolean {
   if (fix.facilityId !== playFacilityId) return false;
+  // Re-gate finding 1: the fix's own date must match the play's date — a
+  // check-in/dwell fix from another day is not evidence for THIS play,
+  // however good its other attributes are.
+  if (fix.localDate !== playLocalDate) return false;
+  // Should-fix: fail closed on an unverified facility. `listed-verified`
+  // (the radius-fallback tier) is deliberately still allowed THROUGH the
+  // gate — a radius-matched check-in/dwell is a legitimate, reduced-weight
+  // contribution (capped separately, by `geometryKind`, in `classify`);
+  // only `unverified` is a hard exclusion here.
+  if (fix.verificationTier === "unverified") return false;
   if (!fix.fromApp) return false;
   if (!fix.foreground) return false;
   if (!finiteInRange(fix.accuracyMeters, 0, 50)) return false;
@@ -417,6 +459,17 @@ export interface ScorePlayContribution {
   badgeWeight: number;
   moneyEligible: boolean;
   moneyWeight: number;
+  /** Blocking finding 4: the attestation grade of the SPECIFIC fix that
+   * backs this contribution's hard/money status (the staff scan's or
+   * booking's winning co-signal, a check-in's own fix, a dwell's
+   * worse-of-two-fixes grade, a receipt's co-signal when money-eligible).
+   * `undefined` for a class with no single governing fix (vendor, ghin,
+   * health_route, connect_iq, file_import, self/health_workout, a
+   * `booking_alone`/soft `staff_presence` with no qualifying fix). Used by
+   * `computeHeldReview` — scoped to ONLY the fix(es) that actually
+   * established the winning result, never any unrelated fix elsewhere in
+   * the same evidence set. */
+  governingGrade?: FixGrade;
 }
 
 function windowMs(aMs: number, bMs: number, ms: number): boolean {
@@ -439,6 +492,16 @@ function finish(
     evidenceId: row.id,
     ...fields,
     badgeWeight: capped.badgeWeight,
+    // Blocking finding 3: `hard` is a MONEY-path signal only (it never
+    // affects `score_badge`, which is driven by `badgeWeight` alone) — so
+    // a user-picked course, which `applyCourseCaps` already strips of
+    // money-eligibility, must ALSO lose its `hard` flag. Leaving `hard:
+    // true` here let `hardSignal` bypass the money-eligibility cap
+    // entirely (`money = presence && (hardSignal || score >= MONEY_MIN)`),
+    // so a user-picked staff-scan/booking could still reach `money: true`
+    // through the `hardSignal` branch even though its OWN contribution was
+    // correctly excluded from `score_monetary`.
+    hard: fields.hard && capped.moneyEligible,
     moneyEligible: capped.moneyEligible,
     moneyWeight: capped.moneyEligible ? capped.badgeWeight : 0,
   };
@@ -447,14 +510,10 @@ function finish(
 function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
   switch (row.source) {
     case "staff_presence": {
-      // §4.5 line 990: "a co-signal within ±10 min." Finding 4: the window
-      // anchor is `row.scanAt` itself (a timestamp, not a calendar date) —
-      // unaffected by the date-anchoring fix, which is about DATE
-      // comparisons specifically.
-      const hasCoSignal =
-        row.coSignalFix !== undefined &&
-        isQualityCoSignalFix(row.coSignalFix, ctx.playFacilityId) &&
-        windowMs(row.coSignalFix.capturedAt, row.scanAt, 10 * 60_000);
+      // §4.5 line 990: "a co-signal within ±10 min", now including the
+      // fix's OWN date matching `ctx.playLocalDate` (finding 1/re-gate) —
+      // see `staffFixSatisfiesHardWindow`, shared with `resolveGroups`.
+      const hasCoSignal = row.coSignalFix !== undefined && staffFixSatisfiesHardWindow(row.coSignalFix, row.scanAt, ctx);
       const classId: EvidenceClassId = hasCoSignal ? "staff_presence_hard" : "staff_presence_soft";
       const badgeWeight = WEIGHT[classId];
       return finish(row, {
@@ -463,6 +522,7 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
         hard: HARD.has(classId),
         badgeWeight,
         moneyEligible: hasCoSignal,
+        ...(hasCoSignal ? { governingGrade: resolveFixGrade(row.coSignalFix!.token) } : {}),
       });
     }
     case "arccos":
@@ -488,14 +548,13 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
       });
     }
     case "booking": {
-      // Finding 4: anchored to `ctx.playLocalDate`, not to `row.localDate`
-      // compared against the fix — a booking row (or its fix) dated off
-      // the actual play's date can never manufacture same-day presence.
+      // Finding 4: anchored to `ctx.playLocalDate`, never to `row.localDate`
+      // compared against the fix — see `bookingFixSatisfiesHardWindow`,
+      // shared with `resolveGroups`.
       const hasPresence =
         row.localDate === ctx.playLocalDate &&
         row.presenceFix !== undefined &&
-        isQualityCoSignalFix(row.presenceFix, ctx.playFacilityId) &&
-        row.presenceFix.localDate === ctx.playLocalDate;
+        bookingFixSatisfiesHardWindow(row.presenceFix, ctx);
       const classId: EvidenceClassId = hasPresence ? "booking_hard" : "booking_alone";
       const badgeWeight = WEIGHT[classId];
       return finish(row, {
@@ -504,6 +563,7 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
         hard: HARD.has(classId),
         badgeWeight,
         moneyEligible: true, // both booking classes count in score_monetary (line 947)
+        ...(hasPresence ? { governingGrade: resolveFixGrade(row.presenceFix!.token) } : {}),
       });
     }
     case "receipt_green_fee": {
@@ -522,6 +582,7 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
         hard: false,
         badgeWeight,
         moneyEligible,
+        ...(moneyEligible ? { governingGrade: resolveFixGrade(row.coSignalFix!.token) } : {}),
       });
     }
     case "health_route": {
@@ -571,13 +632,24 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
     case "foreground_dwell": {
       const classId: EvidenceClassId = "foreground_dwell";
       const threshold = row.holes === 9 ? 50 : 90; // line 1000
-      // Finding 2: `!(apart >= threshold)` so a NaN `apartMinutes` fails
-      // (`NaN >= threshold` is false, so a NaIVE `apartMinutes < threshold`
-      // guard would have let NaN silently pass).
-      const durationOk = !(!(row.apartMinutes >= threshold));
-      const openOk = deviceRowFixGateOk(row.checkinFix, ctx.playFacilityId, true);
-      const closeOk = deviceRowFixGateOk(row.checkoutFix, ctx.playFacilityId, true);
-      if (!durationOk || !openOk || !closeOk) {
+      // Should-fix: derive `apartMinutes` from the two fixes' OWN
+      // `capturedAt` rather than trusting the stored field — if they
+      // disagree, the derived value wins (both are always present on a
+      // `foreground_dwell` row, so this is unconditional, not a fallback:
+      // a client-computed `apartMinutes` that doesn't match the fixes it
+      // was supposedly computed from is exactly the kind of stored-value
+      // drift this guards against).
+      const derivedApart = Math.abs(row.checkoutFix.capturedAt - row.checkinFix.capturedAt) / 60_000;
+      // Finding 2: `!(apart >= threshold)` so a NaN derived duration fails
+      // (`NaN >= threshold` is false, so a NaIVE `apart < threshold` guard
+      // would have let NaN silently pass).
+      const durationOk = !(!(derivedApart >= threshold));
+      // Finding 1: the row's OWN date must match the play's date too, not
+      // just each fix's own date (checked inside `deviceRowFixGateOk`).
+      const rowDateOk = row.localDate === ctx.playLocalDate;
+      const openOk = deviceRowFixGateOk(row.checkinFix, ctx.playFacilityId, ctx.playLocalDate, true);
+      const closeOk = deviceRowFixGateOk(row.checkoutFix, ctx.playFacilityId, ctx.playLocalDate, true);
+      if (!durationOk || !rowDateOk || !openOk || !closeOk) {
         return finish(row, {
           classId,
           group: GROUP[classId],
@@ -594,12 +666,19 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
       const moneyBase =
         MONEY_ELIGIBLE_BASE.has(classId) && deviceRowMoneyEligible(row.checkinFix) && deviceRowMoneyEligible(row.checkoutFix);
       const capped = applyCourseCaps(badgeWeight0, geometryKind, row.courseDisambiguatedBy, moneyBase);
+      // The "worse" of the two fixes' grades — a dwell that rests even
+      // PARTLY on an unattestable fix should route to held_review; only if
+      // BOTH fixes are attested does the whole dwell count as attested.
+      const openGrade = resolveFixGrade(row.checkinFix.token);
+      const closeGrade = resolveFixGrade(row.checkoutFix.token);
+      const governingGrade: FixGrade = openGrade === "unattestable" || closeGrade === "unattestable" ? "unattestable" : openGrade;
       return finish(row, {
         classId,
         group: GROUP[classId],
         hard: false,
         badgeWeight: capped.badgeWeight,
         moneyEligible: capped.moneyEligible,
+        governingGrade,
       });
     }
     case "file_import": {
@@ -622,7 +701,9 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
     }
     case "foreground_checkin": {
       const classId: EvidenceClassId = "foreground_checkin";
-      const gateOk = deviceRowFixGateOk(row.fix, ctx.playFacilityId, false);
+      // Finding 1: the row's own date must match too, not just the fix's.
+      const rowDateOk = row.localDate === ctx.playLocalDate;
+      const gateOk = rowDateOk && deviceRowFixGateOk(row.fix, ctx.playFacilityId, ctx.playLocalDate, false);
       if (!gateOk) {
         return finish(row, {
           classId,
@@ -641,6 +722,7 @@ function classify(row: Evidence, ctx: ScorePlayContext): ScorePlayContribution {
         hard: false,
         badgeWeight: capped.badgeWeight,
         moneyEligible: capped.moneyEligible,
+        governingGrade: resolveFixGrade(row.fix.token),
       });
     }
     case "health_workout": {
@@ -824,39 +906,48 @@ function deriveGroups(evidence: Evidence[], contributions: ScorePlayContribution
   }
 
   // Should-fix: hard-class absorption via an external, non-inline fix —
-  // but ONLY as a fallback when the row carries NO inline fix of its own
-  // at all (`presenceFix` undefined). A row that DOES embed its own fix is
-  // making a SPECIFIC claim about what proves it, and that claim is judged
-  // on its own merits, never broadened by an unrelated fix elsewhere in
-  // the same evidence set — this is what keeps "a booking dated D whose
-  // OWN presence fix is on D+1, plus an unrelated check-in on D" at
-  // `booking_alone` (0.79 combined with the check-in) rather than wrongly
-  // promoting it to `booking_hard` (finding 4's regression test). Fixture
-  // #10's NATURAL two-row encoding (a bare `booking({})` with no inline
-  // fix, plus a separate `foreground_dwell` on the booking's date) is
-  // exactly the case this fallback exists for.
+  // but ONLY as a FALLBACK when the row carries NO inline fix of its own
+  // at all (`coSignalFix`/`presenceFix` undefined). A row that DOES embed
+  // its own fix is making a SPECIFIC claim about what proves it, and that
+  // claim is judged on its own merits, never broadened by an unrelated fix
+  // elsewhere in the same evidence set — this is what keeps "a booking
+  // dated D whose OWN presence fix is on D+1, plus an unrelated check-in on
+  // D" at `booking_alone` (0.79 combined with the check-in) rather than
+  // wrongly promoting it to `booking_hard` (finding 4's regression test).
+  // Fixture #10's NATURAL two-row encoding (a bare `booking({})` with no
+  // inline fix, plus a separate `foreground_dwell` on the booking's date)
+  // is exactly the case this fallback exists for — and, symmetrically, a
+  // bare `staffPresence({})` plus an external fix within ±10 min of
+  // `scanAt` (should-fix item, re-gate).
   //
-  // BOOKING ONLY, deliberately NOT `staff_presence` — a booking's
-  // same-DAY window is a wide, date-grained window where "some qualifying
-  // fix exists that day" is a plausible corroboration signal; a staff
-  // scan's ±10-MINUTE window is narrow enough that an unrelated device
-  // fix (e.g. an independent dwell's check-in, from a totally different
-  // evidentiary flow) can coincidentally land inside it in realistic data
-  // — money golden fixture #3 ("staff scan without co-signal + Health
-  // route + dwell", verbatim table result 0.96, `staff_presence_soft`)
-  // depends on exactly this NOT happening: extending absorption to staff
-  // scans made that fixture wrongly resolve to `staff_presence_hard`
-  // (0.98) by coincidentally absorbing the dwell's opening fix, which sits
-  // at the same default test timestamp purely by construction, not by any
-  // real relationship to the scan.
+  // Booking-with-a-BAD-inline-fix is handled SEPARATELY, unconditionally,
+  // by the `byPayment` union ABOVE: a booking correlates with a receipt
+  // sharing its `paymentRef` regardless of whether the booking's own
+  // inline fix succeeded (plan line 967) — that union already ran, so by
+  // the time `resolveGroups` searches a group's members, a payment-
+  // correlated receipt is already IN it even when this fallback doesn't
+  // fire for the booking row itself.
+  //
+  // Money golden fixture #3 ("staff scan without co-signal + Health route
+  // + dwell", 0.96, `staff_presence_soft`) is NOT at risk from re-enabling
+  // staff absorption: its own fixture data was corrected (the dwell's
+  // opening fix moved outside the ±10 min window) specifically so it no
+  // longer coincidentally collides with the default `scanAt` — see
+  // `score-play-golden.test.ts`.
   evidence.forEach((row, i) => {
+    if (row.source === "staff_presence" && row.coSignalFix === undefined) {
+      for (let j = 0; j < n; j += 1) {
+        if (j === i) continue;
+        for (const fix of fixesOfRow(evidence[j]!)) {
+          if (staffFixSatisfiesHardWindow(fix, row.scanAt, ctx)) dsu.union(i, j);
+        }
+      }
+    }
     if (row.source === "booking" && row.presenceFix === undefined && row.localDate === ctx.playLocalDate) {
       for (let j = 0; j < n; j += 1) {
         if (j === i) continue;
         for (const fix of fixesOfRow(evidence[j]!)) {
-          if (isQualityCoSignalFix(fix, ctx.playFacilityId) && fix.localDate === ctx.playLocalDate) {
-            dsu.union(i, j);
-          }
+          if (bookingFixSatisfiesHardWindow(fix, ctx)) dsu.union(i, j);
         }
       }
     }
@@ -903,31 +994,41 @@ function resolveGroups(
 
   const resolved: ResolvedContribution[] = [];
   for (const idxs of byGroup.values()) {
-    // Hard absorption: does this group contain a `booking` row whose
-    // hard-window is satisfied by SOME fix among the group's own rows
-    // (inline or absorbed)? `staff_presence` is deliberately excluded here
-    // too — see `deriveGroups`'s matching comment (money golden fixture
-    // #3). A row WITH its own inline fix is judged on that fix alone.
-    let hardWinner: { row: Evidence; contribution: ScorePlayContribution } | undefined;
+    // Hard candidates: every `staff_presence`/`booking` row in this group
+    // whose hard-window is satisfied by SOME fix among the group's OWN
+    // members (inline or absorbed) — searched over the WHOLE group
+    // unconditionally now. This is sound because `deriveGroups` already
+    // decided group MEMBERSHIP correctly: a row with its own (possibly
+    // bad) inline fix stays in a singleton group unless a LEGITIMATE
+    // correlation (same fixId, same `paymentRef`, same round, or the
+    // no-inline-fix absorption fallback) put something else in it — so by
+    // the time we're here, "search the whole group" and "search only rows
+    // legitimately correlated with this one" are the same set.
+    //
+    // Should-fix (order dependence): collect every candidate first, then
+    // pick ONE winner by a rule that doesn't depend on which order the
+    // rows were passed in — the highest class WEIGHT (`staff_presence_hard`
+    // 0.95 beats `booking_hard` 0.90). The previous "last one processed
+    // wins" rule made `[staffHard, booking]` and `[booking, staffHard]`
+    // score differently for the identical evidence, just reordered.
+    interface HardCandidate {
+      row: Evidence;
+      contribution: ScorePlayContribution;
+      classId: EvidenceClassId;
+      satisfyingFix: AppFix;
+    }
+    const candidates: HardCandidate[] = [];
     for (const i of idxs) {
       const row = evidence[i]!;
       const contribution = contributions[i]!;
       if (row.source === "staff_presence") {
-        // Inline-only (no absorption) — see the module-level comment above.
-        const satisfied =
-          row.coSignalFix !== undefined &&
-          isQualityCoSignalFix(row.coSignalFix, ctx.playFacilityId) &&
-          windowMs(row.coSignalFix.capturedAt, row.scanAt, 10 * 60_000);
-        if (satisfied) hardWinner = { row, contribution };
+        const satisfyingFix = idxs
+          .flatMap((j) => fixesOfRow(evidence[j]!))
+          .find((fix) => staffFixSatisfiesHardWindow(fix, row.scanAt, ctx));
+        if (satisfyingFix) candidates.push({ row, contribution, classId: "staff_presence_hard", satisfyingFix });
       } else if (row.source === "booking" && row.localDate === ctx.playLocalDate) {
-        const ownFix = row.presenceFix;
-        const searchIdxs = ownFix === undefined ? idxs : [i];
-        const satisfied = searchIdxs.some((j) =>
-          fixesOfRow(evidence[j]!).some(
-            (fix) => isQualityCoSignalFix(fix, ctx.playFacilityId) && fix.localDate === ctx.playLocalDate,
-          ),
-        );
-        if (satisfied) hardWinner = { row, contribution };
+        const satisfyingFix = idxs.flatMap((j) => fixesOfRow(evidence[j]!)).find((fix) => bookingFixSatisfiesHardWindow(fix, ctx));
+        if (satisfyingFix) candidates.push({ row, contribution, classId: "booking_hard", satisfyingFix });
       }
     }
     // Every group gets its own fresh id in the OUTPUT (`resolved`'s own
@@ -936,15 +1037,17 @@ function resolveGroups(
     // doesn't matter (nothing else shares it); a non-hard group's members
     // all share THIS SAME id so `combine` can pick a max per pipeline.
     const outputGroupId = resolved.length;
-    if (hardWinner) {
-      const classId: EvidenceClassId = hardWinner.row.source === "staff_presence" ? "staff_presence_hard" : "booking_hard";
+    if (candidates.length > 0) {
+      let winner = candidates[0]!;
+      for (const c of candidates) if (WEIGHT[c.classId] > WEIGHT[winner.classId]) winner = c;
       resolved.push({
-        contribution: finish(hardWinner.row, {
-          classId,
-          group: GROUP[classId],
+        contribution: finish(winner.row, {
+          classId: winner.classId,
+          group: GROUP[winner.classId],
           hard: true,
-          badgeWeight: WEIGHT[classId],
+          badgeWeight: WEIGHT[winner.classId],
           moneyEligible: true,
+          governingGrade: resolveFixGrade(winner.satisfyingFix.token),
         }),
         groupId: outputGroupId,
       });
@@ -999,11 +1102,18 @@ function pickMaxPerGroup(contributions: ScorePlayContribution[], groups: number[
   return out;
 }
 
-function combine(
-  contributions: ScorePlayContribution[],
-  groups: number[],
-  pipeline: "badge" | "money",
-): number {
+interface CombineResult {
+  score: number;
+  /** Blocking finding 4: the exact contributions that fed the final
+   * noisy-OR sum for this pipeline — `computeHeldReview` reads
+   * `governingGrade` from ONLY these (never from any other fix elsewhere
+   * in `evidence[]`), so an unrelated attested fix that never actually
+   * entered the winning combination can't paper over an unattestable one
+   * that did. */
+  merged: ScorePlayContribution[];
+}
+
+function combine(contributions: ScorePlayContribution[], groups: number[], pipeline: "badge" | "money"): CombineResult {
   const weightOf = (c: ScorePlayContribution) => (pipeline === "badge" ? c.badgeWeight : c.moneyWeight);
   const indices = contributions
     .map((_, i) => i)
@@ -1018,7 +1128,7 @@ function combine(
     const subtotal = Math.min(noisyOr(deviceGps.map(weightOf)), 0.8);
     finalWeights.push(subtotal);
   }
-  return Math.min(noisyOr(finalWeights), 0.99);
+  return { score: Math.min(noisyOr(finalWeights), 0.99), merged };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1040,18 +1150,39 @@ function computePresenceSignal(evidence: Evidence[], ctx: ScorePlayContext): boo
   );
 }
 
-/** Should-fix / §7.5 row 3: "the reward rests on an `unattestable`
- * co-signal -> `held_review` (C5 item 3)... it is never refused." True
- * when `money` is only reachable because the qualifying fix(es) grade
- * `unattestable` — i.e. no `attested` qualifying fix exists, but an
- * `unattestable` one does. */
-function computeHeldReview(evidence: Evidence[], ctx: ScorePlayContext, money: boolean): boolean {
+/**
+ * Should-fix / §7.5 row 3 / blocking finding 4: "the reward rests on an
+ * `unattestable` co-signal -> `held_review` (C5 item 3)... it is never
+ * refused." Scoped to ONLY the fix(es) that actually established the
+ * winning result — never any unrelated fix sitting elsewhere in
+ * `evidence[]` — per the gate's own wording: "compute the grade from the
+ * fixes that actually establish hard status or the winning score."
+ *
+ *   - If `hardSignal` is what makes `money` true, look at ONLY the hard
+ *     contribution's own `governingGrade` (the specific fix that satisfied
+ *     its window — inline or absorbed, per `resolveGroups`).
+ *   - Otherwise (money via `score_monetary >= MONEY_MIN`, no hard class),
+ *     look at ONLY the contributions `combine`'s MONEY pipeline actually
+ *     merged into that score (`moneyMerged`) — if any of THOSE grades
+ *     `unattestable` and none grades `attested`, held.
+ *
+ * An unrelated attested fix elsewhere in the play (e.g. a check-in hours
+ * later that has nothing to do with why this play reached `money`) must
+ * never cancel this — that was the exact bug the gate found.
+ */
+function computeHeldReview(
+  playContributions: ScorePlayContribution[],
+  moneyMerged: ScorePlayContribution[],
+  hardSignal: boolean,
+  money: boolean,
+): boolean {
   if (!money) return false;
-  const qualifying = collectFixes(evidence).filter(
-    (fix) => isQualityCoSignalFix(fix, ctx.playFacilityId) && fix.localDate === ctx.playLocalDate,
-  );
-  const hasAttested = qualifying.some((fix) => resolveFixGrade(fix.token) === "attested");
-  const hasUnattestable = qualifying.some((fix) => resolveFixGrade(fix.token) === "unattestable");
+  if (hardSignal) {
+    const hardOne = playContributions.find((c) => c.hard);
+    return hardOne?.governingGrade === "unattestable";
+  }
+  const hasAttested = moneyMerged.some((c) => c.governingGrade === "attested");
+  const hasUnattestable = moneyMerged.some((c) => c.governingGrade === "unattestable");
   return !hasAttested && hasUnattestable;
 }
 
@@ -1090,9 +1221,18 @@ export interface ScorePlayResult {
  * §4.5's scorer, policy v1. Pure, deterministic, no I/O.
  */
 export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScorePlayResult {
-  // Finding 3: drop any row whose OWN facility disagrees with the play
-  // being scored, before anything else runs.
-  const evidence = voidDuplicateFingerprints(evidenceIn).filter((row) => row.facilityId === ctx.playFacilityId);
+  // Finding 3 + blocking finding 2: drop any row whose OWN facility OR
+  // OWN date disagrees with the play being scored, before anything else
+  // runs — this is what stops a vendor round or a staff scan dated on a
+  // DIFFERENT day (no per-class date check ever ran for those classes)
+  // from contributing to this play at all. Every class-specific date check
+  // elsewhere in this module (booking's same-day presence, a receipt's
+  // same-date co-signal, a device row's own fix date) is additional,
+  // narrower anchoring on top of this blanket row-level filter — not a
+  // substitute for it.
+  const evidence = voidDuplicateFingerprints(evidenceIn).filter(
+    (row) => row.facilityId === ctx.playFacilityId && row.localDate === ctx.playLocalDate,
+  );
 
   const rawContributions = evidence.map((row) => classify(row, ctx));
   const groups = deriveGroups(evidence, rawContributions, ctx);
@@ -1100,7 +1240,7 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
   const playContributions = resolved.map((r) => r.contribution);
   const playGroups = resolved.map((r) => r.groupId);
 
-  const playClassesBadge = combine(playContributions, playGroups, "badge");
+  const playClassesBadge = combine(playContributions, playGroups, "badge").score;
   const hasPlayClass = playContributions.length > 0;
   const corroborationEligible = hasPlayClass && playClassesBadge >= 0.5 && corroborationApplies(ctx);
 
@@ -1121,12 +1261,13 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
     ? Math.min(noisyOr([playClassesBadge, WEIGHT.purchase_corroboration]), 0.99)
     : playClassesBadge;
 
-  const scoreMonetary = combine(playContributions, playGroups, "money");
+  const moneyCombined = combine(playContributions, playGroups, "money");
+  const scoreMonetary = moneyCombined.score;
 
   const presenceSignal = computePresenceSignal(evidence, ctx);
   const hardSignal = playContributions.some((c) => c.hard);
   const money = presenceSignal && (hardSignal || scoreMonetary >= MONEY_MIN);
-  const heldReview = computeHeldReview(evidence, ctx, money);
+  const heldReview = computeHeldReview(playContributions, moneyCombined.merged, hardSignal, money);
 
   return {
     score_badge: round2(scoreBadge),

@@ -94,20 +94,45 @@ VALUES ('trl_t', 'fac_x', 'in_stock');
 -- "player B reads A's X" has something real to fail to read.
 INSERT INTO app.device (id, user_id, platform) VALUES
   ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'ios');
-INSERT INTO app.evidence (id, user_id, device_id, source, status, catalog_version)
+INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
 VALUES ('30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
-        '20000000-0000-0000-0000-000000000001', 'foreground_checkin', 'accepted', 1);
+        '20000000-0000-0000-0000-000000000001', 'foreground_checkin', 'checkin-seed-1', 'accepted', 1);
 INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
 VALUES ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
         'crs_x1', 'fac_x', current_date, 'v1', 'confirmed');
-INSERT INTO app.entitlement (id, user_id, kind, trail_id, state)
+-- Second trail (trl_u) so player A can hold a SECOND entitlement row —
+-- unique(user_id, kind, trail_id) forbids two under the same trail. Used
+-- to seed both an ACTIVATED (redeemable, device-attached) and a REDEEMED
+-- entitlement, per the gate's B3 instruction ("must seed activated and
+-- redeemed rows").
+INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES ('trl_u', 'trail', 'verified', 1);
+INSERT INTO app.catalog_trail (id, slug, name, catalog_version) VALUES ('trl_u', 'trail-u', 'Trail U', 1);
+
+-- entitlement #1: ACTIVATED (redeemable, device-attached) — exercises the
+-- RESTRICT FK on activated_device_id (B3).
+INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, activated_device_id, activated_at)
 VALUES ('50000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
-        'special_marker', 'trl_t', 'earned');
+        'special_marker', 'trl_t', 'redeemable', '20000000-0000-0000-0000-000000000001', now());
+-- entitlement #2: REDEEMED (terminal) — must survive delete_my_data
+-- unvoided, with its device link still detached.
+INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, activated_device_id, redeemed_at, redeemed_facility_id, redeemed_by_staff, redemption_method, redemption_jti)
+VALUES ('50000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a',
+        'special_marker', 'trl_u', 'redeemed', '20000000-0000-0000-0000-000000000001', now(),
+        'fac_x', '00000000-0000-0000-0000-1000000000a1', 'staff_scan', 'jti-redeem-1');
+
 INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, valid_from, valid_to, status)
 VALUES ('60000000-0000-0000-0000-000000000001', 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 100, current_date, current_date + 30, 'live');
+INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, valid_from, valid_to, status)
+VALUES ('60000000-0000-0000-0000-000000000002', 'trl_u', 'fac_x', '{}'::jsonb, 'operator', 100, current_date, current_date + 30, 'live');
+-- offer_code #1: earned (untouched state)
 INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state)
 VALUES ('70000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000001',
         '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned');
+-- offer_code #2: REDEEMED, device-attached (B3's "seed ... redeemed rows").
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, activated_device_id, activated_at, redeemed_at, redeemed_by_staff)
+VALUES ('70000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000002',
+        '00000000-0000-0000-0000-00000000000a', 'fac_x', 'redeemed', '20000000-0000-0000-0000-000000000001',
+        now(), now(), '00000000-0000-0000-0000-1000000000a1');
 INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, qr_variant, local_date, status)
 VALUES ('90000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
         'fac_x', 'trl_t', 'course_qr', 'rotating', current_date, 'valid');
@@ -116,13 +141,22 @@ INSERT INTO app.receipt_fingerprint (id, purchase_evidence_id, user_id, phash, f
 VALUES ('80000000-0000-0000-0000-000000000001', '90000000-0000-0000-0000-000000000001',
         '00000000-0000-0000-0000-00000000000a', 'phash1', 'fac_x', current_date);
 
+-- player_pseudonym = HMAC[unverified — training knowledge: a keyed HMAC
+-- per §4.8; simplified here to an unkeyed digest, since Vault key
+-- management is out of scope] of user_id (line 841), NOT of the handle —
+-- it must stay derivable from user_id alone so delete_my_data can find it
+-- without depending on a handle that may have since changed (B3, gate
+-- round 2).
 INSERT INTO app.attestation (id, facility_id, staff_user_id, player_user_id, player_pseudonym, kind, token_jti, cosignal_ok)
 VALUES ('a0000000-0000-0000-0000-000000000001', 'fac_x', '00000000-0000-0000-0000-1000000000a1',
-        '00000000-0000-0000-0000-00000000000a', encode(digest('player_a', 'sha256'), 'hex'),
+        '00000000-0000-0000-0000-00000000000a',
+        encode(digest('00000000-0000-0000-0000-00000000000a', 'sha256'), 'hex'),
         'presence', 'jti-1', true);
 
-INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, staff_handle)
-VALUES ('fac_x', 'presence', 'player_a', 'staff_x_handle');
+INSERT INTO app.attestation_shift_log (facility_id, kind, player_handle_snapshot, player_pseudonym, staff_handle)
+VALUES ('fac_x', 'presence', 'player_a',
+        encode(digest('00000000-0000-0000-0000-00000000000a', 'sha256'), 'hex'),
+        'staff_x_handle');
 
 INSERT INTO app.staff_activity (staff_user_id, facility_id, day, attests, activations)
 VALUES ('00000000-0000-0000-0000-1000000000a1', 'fac_x', current_date, 1, 0);
@@ -167,6 +201,22 @@ VALUES ('00000000-0000-0000-0000-00000000000a', 'ach_first_round', '', '{}'::jso
 INSERT INTO app.booking (id, user_id, provider, provider_ref, facility_id, tee_time)
 VALUES ('f0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
         'golfnow', 'ref-1', 'fac_x', now() + interval '1 day');
+
+-- B3 gate-round-2 additions: partner_member / partner_invite / audit_log /
+-- storage.objects rows for player A, so delete_my_data's coverage of each
+-- is actually exercised, not merely asserted against nothing.
+INSERT INTO app.partner_member (user_id, org_id, role, invited_by) VALUES
+  ('00000000-0000-0000-0000-00000000000a', '10000000-0000-0000-0000-000000000001', 'staff',
+   '00000000-0000-0000-0000-1000000000a1');
+INSERT INTO app.partner_invite (id, org_id, role, invited_by, invitee_email, token_hash, expires_at) VALUES
+  ('11100000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'staff',
+   '00000000-0000-0000-0000-00000000000a', 'staff-y@example.test', 'th-a-invites-y', now() + interval '7 days'),
+  ('11100000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', 'staff',
+   '00000000-0000-0000-0000-1000000000a3', 'player-a@example.test', 'th-y-invites-a', now() + interval '7 days');
+INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES
+  ('00000000-0000-0000-0000-00000000000a', 'evidence.insert', 'app.evidence', '30000000-0000-0000-0000-000000000001');
+INSERT INTO storage.objects (bucket_id, name, owner) VALUES
+  ('receipts', 'receipts/00000000-0000-0000-0000-00000000000a/r1.jpg', '00000000-0000-0000-0000-00000000000a');
 
 COMMIT;
 

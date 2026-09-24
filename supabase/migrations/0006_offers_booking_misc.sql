@@ -141,7 +141,10 @@ CREATE TABLE app.webhook_event (
 -- "insert-only" is a DB invariant, not just a house rule.
 CREATE TABLE app.audit_log (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  actor_user_id uuid REFERENCES auth.users (id),
+  -- ON DELETE SET NULL (B3, gate round 2): lets private.delete_my_data
+  -- redact the actor without deleting or blocking-on this insert-only
+  -- audit row — see the trigger's narrow redaction exception below.
+  actor_user_id uuid REFERENCES auth.users (id) ON DELETE SET NULL,
   action text NOT NULL,
   subject_table text,
   subject_id text,
@@ -149,11 +152,35 @@ CREATE TABLE app.audit_log (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- ⛔ SECURITY/CORRECTNESS FIX (B3, gate round 2): the original trigger
+-- blocked EVERY update or delete unconditionally — including the one
+-- update account deletion legitimately needs (redacting `actor_user_id`
+-- to NULL on the deleted user's own past audit rows, since app.audit_log
+-- doesn't get a row deleted or its user_id nulled by the generic
+-- FK-driven pass; it needs its OWN narrow carve-out because it must stay
+-- insert-only for everything else). This version allows exactly one
+-- shape of UPDATE — nulling `actor_user_id` and changing nothing else —
+-- and still rejects every DELETE and every other UPDATE unconditionally.
 CREATE OR REPLACE FUNCTION app.audit_log_no_mutation() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  RAISE EXCEPTION 'app.audit_log is insert-only (build plan line 859)';
+  IF TG_OP = 'UPDATE'
+    AND NEW.actor_user_id IS NULL
+    AND OLD.actor_user_id IS NOT NULL
+    AND NEW.id = OLD.id
+    AND NEW.action = OLD.action
+    AND NEW.subject_table IS NOT DISTINCT FROM OLD.subject_table
+    AND NEW.subject_id IS NOT DISTINCT FROM OLD.subject_id
+    AND NEW.detail = OLD.detail
+    AND NEW.created_at = OLD.created_at
+  THEN
+    -- The one allowed mutation: redacting the actor on account deletion.
+    -- A PII-free tombstone — the row, action and detail survive; only the
+    -- identity of who did it is removed.
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'app.audit_log is insert-only, except redacting actor_user_id to NULL (build plan line 859; §10 AT(6))';
 END;
 $$;
 

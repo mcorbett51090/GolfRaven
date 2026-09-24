@@ -52,11 +52,25 @@ describe("scorePlay — §4.5 money golden fixtures (P3 AT(4))", () => {
   });
 
   it("#3: Staff scan without co-signal + Health route + dwell", () => {
+    // Should-fix (re-gate): staff-scan hard-class absorption from an
+    // external fix is now enabled (mirroring booking's), so this
+    // fixture's dwell must NOT coincidentally open within the staff
+    // scan's own ±10 min window — that would make it "WITH co-signal"
+    // (hard), contradicting this row's own stated meaning. The dwell's
+    // check-in fix is moved 30 min after the default scan time, well
+    // outside the window, while every other quality attribute (and the
+    // 95 min apart-duration) is unchanged.
+    const dwellStart = PLAY_LOCAL_DATE_MS + 30 * 60_000;
     const result = scorePlay(
       [
         staffPresence({}),
         healthRoute({ insideRatio: 0.85 }),
-        dwell({ apartMinutes: 95, holes: 18 }),
+        dwell({
+          checkinFix: goodFix({ capturedAt: dwellStart }),
+          checkoutFix: goodFix({ capturedAt: dwellStart + 95 * 60_000 }),
+          apartMinutes: 95,
+          holes: 18,
+        }),
       ],
       baseCtx(),
     );

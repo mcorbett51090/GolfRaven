@@ -78,7 +78,19 @@ CREATE TABLE app.evidence (
   user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
   device_id uuid REFERENCES app.device (id),
   source app.evidence_source NOT NULL,
-  source_ref text,
+  -- ⛔ SECURITY FIX (B4, gate round 2): NOT NULL, not merely present. A
+  -- nullable source_ref made `unique(user_id, source, source_ref)`
+  -- (line 833) NOT an idempotency key for any source with no natural ref
+  -- (e.g. self_report) — Postgres's default NULLS DISTINCT semantics treat
+  -- every NULL as unique, so a replayed self_report (or any submission
+  -- whose caller omitted the field) inserted a fresh row every time,
+  -- defeating "a replayed evidence payload yields one row" (§10 P3 AT(3)).
+  -- The ingestion path (out of this stage's scope) must always compute a
+  -- ref — a client-supplied id where one exists (health/device event id,
+  -- staff scan token, receipt id), otherwise a server-side content hash of
+  -- the normalized payload — before insert; the constraint is the backstop
+  -- that makes skipping that step a hard failure, not a silent gap.
+  source_ref text NOT NULL,
   source_bundle text,
   course_id text REFERENCES app.catalog_course (id),
   facility_id text REFERENCES app.catalog_facility (id),

@@ -145,8 +145,21 @@ CREATE TABLE app.attestation_shift_log (
   created_at timestamptz NOT NULL DEFAULT now(),
   kind app.attestation_kind NOT NULL,
   player_handle_snapshot text NOT NULL,
+  -- B3 fix (gate round 2): a keyed HMAC of the player's user_id, same
+  -- scheme as `attestation.player_pseudonym` (line 841) — NOT the user id
+  -- itself (the table still holds "no user id" per the plan, line 842).
+  -- Its only purpose is so `private.delete_my_data` can find "this
+  -- player's" rows by a durable identifier instead of matching the
+  -- CURRENT `handle` string, which breaks the moment a handle is reused
+  -- by a different account after the original owner frees it, or simply
+  -- changes. Nullable: the write path (an Edge Function, out of this
+  -- stage's scope) populates it; a row written before that lands can't be
+  -- redacted by user id and is redacted by handle as a fallback (see
+  -- delete_my_data, 0014).
+  player_pseudonym text,
   staff_handle text NOT NULL
 );
+CREATE INDEX attestation_shift_log_pseudonym_idx ON app.attestation_shift_log (player_pseudonym);
 CREATE INDEX attestation_shift_log_facility_idx ON app.attestation_shift_log (facility_id, created_at);
 
 -- staff_activity — build plan line 843. "counts and evidence ids only;

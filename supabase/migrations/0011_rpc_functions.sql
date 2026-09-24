@@ -52,16 +52,36 @@ AS $$
     );
 $$;
 
+-- S3 (gate round 2): mirrors `api.offer`'s column masking exactly — a
+-- player must not read budget/eligibility through this RPC either. Returns
+-- the same shape as `api.offer` (not `SETOF app.offer`, which would have
+-- carried every raw column unmasked).
 CREATE OR REPLACE FUNCTION api.my_offers()
-RETURNS SETOF app.offer
+RETURNS TABLE (
+  id uuid, terms_id text, trail_id text, facility_id text, funder app.offer_funder,
+  sponsorship_id uuid, valid_from date, valid_to date, status app.offer_status,
+  eligibility jsonb, budget_cap numeric, budget_used numeric, budget_reserved numeric,
+  max_redemptions int
+)
 LANGUAGE sql STABLE
 AS $$
-  -- Offers the caller already holds a code for, or that are live and not
-  -- yet claimed. `app.offer` itself carries no eligibility evaluation
-  -- (RuleExpr evaluation is packages/rules, out of scope here) — this is
-  -- the reference-data list a client filters/evaluates against, same as
-  -- `api.offer` but limited to `live` status.
-  SELECT o.*
+  -- Live, currently-valid offers. `app.offer` itself carries no
+  -- eligibility evaluation (RuleExpr evaluation is packages/rules, out of
+  -- scope here) — this is the reference-data list a client filters/
+  -- evaluates against.
+  SELECT
+    o.id, o.terms_id, o.trail_id, o.facility_id, o.funder, o.sponsorship_id,
+    o.valid_from, o.valid_to, o.status,
+    CASE WHEN private.has_facility_scope(auth.uid(), o.facility_id) OR private.has_trail_scope(auth.uid(), o.trail_id, ARRAY['operator']::app.partner_role[])
+      THEN o.eligibility ELSE NULL END,
+    CASE WHEN private.has_facility_scope(auth.uid(), o.facility_id) OR private.has_trail_scope(auth.uid(), o.trail_id, ARRAY['operator']::app.partner_role[])
+      THEN o.budget_cap ELSE NULL END,
+    CASE WHEN private.has_facility_scope(auth.uid(), o.facility_id) OR private.has_trail_scope(auth.uid(), o.trail_id, ARRAY['operator']::app.partner_role[])
+      THEN o.budget_used ELSE NULL END,
+    CASE WHEN private.has_facility_scope(auth.uid(), o.facility_id) OR private.has_trail_scope(auth.uid(), o.trail_id, ARRAY['operator']::app.partner_role[])
+      THEN o.budget_reserved ELSE NULL END,
+    CASE WHEN private.has_facility_scope(auth.uid(), o.facility_id) OR private.has_trail_scope(auth.uid(), o.trail_id, ARRAY['operator']::app.partner_role[])
+      THEN o.max_redemptions ELSE NULL END
   FROM app.offer o
   WHERE o.status = 'live'
     AND (o.valid_from IS NULL OR o.valid_from <= current_date)

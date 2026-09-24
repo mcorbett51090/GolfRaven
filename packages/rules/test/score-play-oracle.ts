@@ -20,6 +20,17 @@
  * facility THAT IS THE PLAY'S OWN FACILITY; on the play's facility-local
  * date. (Gate finding 3: the facility clause is load-bearing, not
  * implicit — see `oracleFixQualifies`.)
+ *
+ * **P3b re-gate (commit b95bbfc), two more independent checks added:**
+ * (1) the ROW carrying the fix must itself be dated/located at the play
+ * (mirrors `scorePlay`'s own row-level filter, re-derived here rather than
+ * assumed — `evidence[]` can legitimately contain an off-date or
+ * off-facility ROW even when its embedded fix's OWN fields look fine); (2)
+ * a fix on a `courseDisambiguatedBy: 'user'` row is excluded — a
+ * user-picked course can never back a money reward (blocking finding 3),
+ * so the oracle's own "a qualifying fix exists" claim must not be true
+ * for one, or the oracle would be a strictly WEAKER, less useful
+ * restatement of the money rule than the code it's checking.
  */
 import type {
   AppFix,
@@ -38,34 +49,52 @@ function oracleGrade(
   return token.hardwareSupportsAttestation ? "failed" : "unattestable";
 }
 
+interface OracleFix {
+  fix: AppFix;
+  /** The row's own facility (may legitimately differ from `fix.facilityId`
+   * in malformed/adversarial input — both are checked, independently). */
+  rowFacilityId: string;
+  rowLocalDate: string;
+  rowUserPicked: boolean;
+}
+
 /** Every fix a raw `Evidence` row could carry, found by walking the union
- * shape directly — not by calling `score-play.ts`'s own `collectFixes`. */
-function oracleFixesOf(evidence: Evidence[]): AppFix[] {
-  const fixes: AppFix[] = [];
+ * shape directly — not by calling `score-play.ts`'s own `collectFixes` —
+ * paired with the ROW-level facts (`facilityId`, `localDate`,
+ * `courseDisambiguatedBy`) the P3b re-gate's row-level checks need. */
+function oracleFixesOf(evidence: Evidence[]): OracleFix[] {
+  const out: OracleFix[] = [];
+  const push = (row: Evidence, fix: AppFix | undefined) => {
+    if (!fix) return;
+    out.push({
+      fix,
+      rowFacilityId: row.facilityId,
+      rowLocalDate: row.localDate,
+      rowUserPicked: row.courseDisambiguatedBy === "user",
+    });
+  };
   for (const row of evidence) {
-    if (row.source === "staff_presence" && row.coSignalFix)
-      fixes.push(row.coSignalFix);
-    if (row.source === "booking" && row.presenceFix)
-      fixes.push(row.presenceFix);
-    if (row.source === "receipt_green_fee" && row.coSignalFix)
-      fixes.push(row.coSignalFix);
-    if (row.source === "foreground_dwell")
-      fixes.push(row.checkinFix, row.checkoutFix);
-    if (row.source === "foreground_checkin") fixes.push(row.fix);
+    if (row.source === "staff_presence") push(row, row.coSignalFix);
+    if (row.source === "booking") push(row, row.presenceFix);
+    if (row.source === "receipt_green_fee") push(row, row.coSignalFix);
+    if (row.source === "foreground_dwell") {
+      push(row, row.checkinFix);
+      push(row, row.checkoutFix);
+    }
+    if (row.source === "foreground_checkin") push(row, row.fix);
   }
-  return fixes;
+  return out;
 }
 
 /** The oracle's single fix predicate — the six AT(4) conditions, PLUS the
- * facility anchor (gate finding 3: "Update the oracle too, independently:
- * its facility check is missing" — an earlier revision of this file
- * incorrectly argued the check away as redundant with "one call = one
- * play"; that argument was wrong precisely because `evidence[]` can
- * legitimately contain a row/fix for a DIFFERENT facility, which
- * `scorePlay` must reject and this independent oracle must reject too, on
- * its own logic, not by assuming the input is already clean). */
-function oracleFixQualifies(fix: AppFix, playFacilityId: string, playLocalDate: string): boolean {
+ * facility anchor (gate finding 3), PLUS (P3b re-gate) the fix's date,
+ * the ROW's own facility/date, and the user-pick exclusion. */
+function oracleFixQualifies(entry: OracleFix, playFacilityId: string, playLocalDate: string): boolean {
+  const { fix } = entry;
   return (
+    entry.rowFacilityId === playFacilityId &&
+    entry.rowLocalDate === playLocalDate &&
+    !entry.rowUserPicked &&
     fix.facilityId === playFacilityId &&
     fix.fromApp === true &&
     (fix.challenge === "live" || fix.challenge === "prefetched") &&
@@ -79,9 +108,10 @@ function oracleFixQualifies(fix: AppFix, playFacilityId: string, playLocalDate: 
   );
 }
 
-/** `oracle(E)` — true iff SOME fix in `evidence` satisfies every AT(4)
- * condition at the play's own facility, on the play's own facility-local
- * date. */
+/** `oracle(E)` — true iff SOME fix in `evidence`, on a row that is itself
+ * at the play's facility and date and NOT a user pick, satisfies every
+ * AT(4) condition at the play's own facility, on the play's own
+ * facility-local date. */
 export function oracle(evidence: Evidence[], ctx: ScorePlayContext): boolean {
-  return oracleFixesOf(evidence).some((fix) => oracleFixQualifies(fix, ctx.playFacilityId, ctx.playLocalDate));
+  return oracleFixesOf(evidence).some((entry) => oracleFixQualifies(entry, ctx.playFacilityId, ctx.playLocalDate));
 }

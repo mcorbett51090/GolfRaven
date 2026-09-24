@@ -83,12 +83,17 @@ CREATE POLICY public_profile_projection_read ON app.public_profile_projection
   FOR SELECT TO authenticated USING (true);
 
 -- operator_rollup_<metric> — "api.operator_*, scoped by has_trail_scope in
--- the view's own WHERE" (line 826). No user id in the table; the view does
--- the trail-scoping, so table-level RLS only needs to keep it authenticated
--- and non-PII.
+-- the view's own WHERE" (line 826). No user id in the table, so an
+-- unscoped read leaks no PII by itself, but ⛔ SECURITY FIX (S3, gate
+-- round 2): "scoped ... in the view" was the ONLY layer — the base table
+-- policy was `USING (true)`, so anything that ever queried `app.
+-- operator_rollup` directly (a future admin tool, a mis-written function)
+-- got every trail's numbers with no scope check at all. The scope check
+-- now lives here too, not only in `api.operator_rollup`'s WHERE.
 ALTER TABLE app.operator_rollup ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.operator_rollup FORCE ROW LEVEL SECURITY;
-CREATE POLICY operator_rollup_read ON app.operator_rollup FOR SELECT TO authenticated USING (true);
+CREATE POLICY operator_rollup_read ON app.operator_rollup FOR SELECT TO authenticated
+  USING (private.has_trail_scope(auth.uid(), trail_id));
 
 -- ============================================================================
 -- device — "own" (line 827).
@@ -113,8 +118,10 @@ ALTER TABLE app.course_qr_token FORCE ROW LEVEL SECURITY;
 -- facility_qr (O5) — "admin / operator" (line 831).
 ALTER TABLE app.facility_qr ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.facility_qr FORCE ROW LEVEL SECURITY;
+-- B7 fix: reader is literally "admin / operator" (line 831) — no
+-- staff/manager. private.is_operator_of_facility excludes them.
 CREATE POLICY facility_qr_read ON app.facility_qr FOR SELECT TO authenticated
-  USING (private.has_facility_scope(auth.uid(), facility_id));
+  USING (private.is_operator_of_facility(auth.uid(), facility_id));
 
 -- push_token — "own" (line 832).
 ALTER TABLE app.push_token ENABLE ROW LEVEL SECURITY;
@@ -183,8 +190,9 @@ CREATE POLICY partner_invite_select_member ON app.partner_invite FOR SELECT TO a
 -- ============================================================================
 ALTER TABLE app.facility_programme ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.facility_programme FORCE ROW LEVEL SECURITY;
+-- B7 fix: reader is "admin / operator" (line 840), not staff/manager.
 CREATE POLICY facility_programme_read ON app.facility_programme FOR SELECT TO authenticated
-  USING (private.has_trail_scope(auth.uid(), trail_id) OR private.has_facility_scope(auth.uid(), facility_id));
+  USING (private.has_trail_scope(auth.uid(), trail_id) OR private.is_operator_of_facility(auth.uid(), facility_id));
 
 -- ============================================================================
 -- attestation — "the player sees own rows only; no client role reads
@@ -202,15 +210,21 @@ CREATE POLICY attestation_select_own_player ON app.attestation FOR SELECT TO aut
 -- view's own WHERE" (line 842).
 ALTER TABLE app.attestation_shift_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.attestation_shift_log FORCE ROW LEVEL SECURITY;
+-- B7 fix: this projection carries player HANDLES (player-identifying) —
+-- reader is "staff and managers of that facility" ONLY (line 842); an
+-- operator reading it would violate the matrix's "operator@T reads any
+-- player-level row through any view -> 0 rows" (line 1357).
 CREATE POLICY attestation_shift_log_read ON app.attestation_shift_log FOR SELECT TO authenticated
-  USING (private.has_facility_scope(auth.uid(), facility_id));
+  USING (private.is_staff_or_manager_of_facility(auth.uid(), facility_id));
 
 -- staff_activity — "the one listed exception" (line 843, G3-06): manager
--- and operator of that facility/trail; admin.
+-- and operator of that facility/trail; admin. NOT staff (B7 fix — staff
+-- got this via the old, role-blind has_facility_scope; the plan's own
+-- reader column for this row never lists staff).
 ALTER TABLE app.staff_activity ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.staff_activity FORCE ROW LEVEL SECURITY;
 CREATE POLICY staff_activity_read ON app.staff_activity FOR SELECT TO authenticated
-  USING (private.has_facility_scope(auth.uid(), facility_id));
+  USING (private.is_manager_or_operator_of_facility(auth.uid(), facility_id));
 
 -- ============================================================================
 -- trail_programme — "public copy via the catalog" (line 844). Read here at
@@ -228,8 +242,10 @@ CREATE POLICY trail_programme_read ON app.trail_programme FOR SELECT TO authenti
 -- ============================================================================
 ALTER TABLE app.marker_code_batch ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.marker_code_batch FORCE ROW LEVEL SECURITY;
+-- B7 fix: reader is literally "admin / operator" (line 845) — no
+-- staff/manager.
 CREATE POLICY marker_code_batch_read ON app.marker_code_batch FOR SELECT TO authenticated
-  USING (private.has_trail_scope(auth.uid(), trail_id) OR private.has_facility_scope(auth.uid(), facility_id));
+  USING (private.has_trail_scope(auth.uid(), trail_id) OR private.is_operator_of_facility(auth.uid(), facility_id));
 
 -- marker_code — "nobody" (line 846).
 ALTER TABLE app.marker_code ENABLE ROW LEVEL SECURITY;
@@ -278,9 +294,19 @@ CREATE POLICY sponsorship_read ON app.sponsorship FOR SELECT TO authenticated
 -- player must be able to browse for api.my_offers() (§4.7 item 5, line
 -- 1302); offer_code is "own (no plaintext in portal-verify mode, G-P2-04)"
 -- (line 853).
+-- ⛔ SECURITY FIX (S3, gate round 2): a player may see a `live` offer's
+-- ROW (still no budget/eligibility columns — those are masked in
+-- `api.offer`, 0010); a `draft`/`approved`/`ended` offer is visible only
+-- to that facility/trail's staff, or admin — "Players must not read
+-- drafts". The old `USING (true)` exposed every offer to every player.
 ALTER TABLE app.offer ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.offer FORCE ROW LEVEL SECURITY;
-CREATE POLICY offer_read ON app.offer FOR SELECT TO authenticated USING (true);
+CREATE POLICY offer_read ON app.offer FOR SELECT TO authenticated
+  USING (
+    status = 'live'
+    OR private.has_facility_scope(auth.uid(), facility_id)
+    OR private.has_trail_scope(auth.uid(), trail_id, ARRAY['operator']::app.partner_role[])
+  );
 
 ALTER TABLE app.offer_code ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.offer_code FORCE ROW LEVEL SECURITY;

@@ -26,7 +26,35 @@ CREATE VIEW api.catalog_roster_member WITH (security_invoker = true) AS SELECT *
 CREATE VIEW api.catalog_achievement_def WITH (security_invoker = true) AS SELECT * FROM app.catalog_achievement_def;
 CREATE VIEW api.trail_programme WITH (security_invoker = true) AS SELECT * FROM app.trail_programme;
 CREATE VIEW api.special_marker_availability WITH (security_invoker = true) AS SELECT * FROM app.special_marker_availability;
-CREATE VIEW api.offer WITH (security_invoker = true) AS SELECT * FROM app.offer;
+
+-- ⛔ SECURITY FIX (S3, gate round 2): `api.offer` was `SELECT *` gated only
+-- by a `USING (true)` table policy — every player could read every
+-- offer's row (drafts included) and every column (budget_cap, budget_used,
+-- budget_reserved, and the eligibility RuleExpr included). "Players must
+-- not read drafts, budgets or eligibility" is now enforced twice:
+--   - ROW: the base table's own RLS policy (0008) now requires
+--     `status = 'live'` for a non-staff reader — a draft/approved-but-not-
+--     live offer is invisible to a player at the table level, not only
+--     hidden by this view's WHERE.
+--   - COLUMN: this view masks `eligibility`/`budget_cap`/`budget_used`/
+--     `budget_reserved`/`max_redemptions` to NULL for anyone who is not
+--     staff/manager/operator of the offer's facility/trail (or admin) —
+--     even reading a live offer, a player never sees the operator's
+--     budget or the raw RuleExpr.
+CREATE VIEW api.offer WITH (security_invoker = true, security_barrier = true) AS
+  SELECT
+    id, terms_id, trail_id, facility_id, funder, sponsorship_id, valid_from, valid_to, status,
+    CASE WHEN private.has_facility_scope(auth.uid(), facility_id) OR private.has_trail_scope(auth.uid(), trail_id, ARRAY['operator']::app.partner_role[])
+      THEN eligibility ELSE NULL END AS eligibility,
+    CASE WHEN private.has_facility_scope(auth.uid(), facility_id) OR private.has_trail_scope(auth.uid(), trail_id, ARRAY['operator']::app.partner_role[])
+      THEN budget_cap ELSE NULL END AS budget_cap,
+    CASE WHEN private.has_facility_scope(auth.uid(), facility_id) OR private.has_trail_scope(auth.uid(), trail_id, ARRAY['operator']::app.partner_role[])
+      THEN budget_used ELSE NULL END AS budget_used,
+    CASE WHEN private.has_facility_scope(auth.uid(), facility_id) OR private.has_trail_scope(auth.uid(), trail_id, ARRAY['operator']::app.partner_role[])
+      THEN budget_reserved ELSE NULL END AS budget_reserved,
+    CASE WHEN private.has_facility_scope(auth.uid(), facility_id) OR private.has_trail_scope(auth.uid(), trail_id, ARRAY['operator']::app.partner_role[])
+      THEN max_redemptions ELSE NULL END AS max_redemptions
+  FROM app.offer;
 
 -- ---------------------------------------------------------------------------
 -- Player-facing "own row" views — every WHERE repeats user_id = auth.uid()
@@ -91,31 +119,38 @@ CREATE VIEW api.my_attestation WITH (security_invoker = true) AS
 CREATE VIEW api.public_profile WITH (security_invoker = true) AS
   SELECT handle, public_achievements, updated_at FROM app.public_profile_projection;
 
--- staff_shift_log — "staff and managers of that facility, scoped by
--- has_facility_scope in the view's own WHERE" (line 842, G3-06).
-CREATE VIEW api.staff_shift_log WITH (security_invoker = true) AS
+-- staff_shift_log — "staff and managers of that facility" (line 842,
+-- G3-06). B7 fix: this projection is player-identifying (handles), so it
+-- uses the NARROW staff/manager-only helper, not the broad
+-- has_facility_scope (which also matches operator — the exact leak the
+-- matrix's "operator@T reads any player-level row -> 0 rows" forbids,
+-- line 1357). `security_barrier=true` (S3) so the WHERE clause's scope
+-- check cannot be defeated by a cost-based reordering of a
+-- caller-supplied predicate against this view.
+CREATE VIEW api.staff_shift_log WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.attestation_shift_log
-  WHERE private.has_facility_scope(auth.uid(), facility_id);
+  WHERE private.is_staff_or_manager_of_facility(auth.uid(), facility_id);
 
--- staff_activity — "the one listed exception ... scoped in the view's own
--- WHERE (has_facility_scope / has_trail_scope); admin" (line 843).
-CREATE VIEW api.staff_activity WITH (security_invoker = true) AS
+-- staff_activity — "the one listed exception ... manager and operator"
+-- (line 843). B7 fix: staff must NOT read this (plan's reader column
+-- never lists staff for this row).
+CREATE VIEW api.staff_activity WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.staff_activity
-  WHERE private.has_facility_scope(auth.uid(), facility_id);
+  WHERE private.is_manager_or_operator_of_facility(auth.uid(), facility_id);
 
 -- operator_rollup_<metric> — "api.operator_*... WHERE has_trail_scope(...)
--- AND cohort_n >= 10 in the view itself" (line 1257-1258). The table's own
--- CHECK already forbids cohort_n < 10 rows from existing at all; the
--- `cohort_n >= 10` clause here is kept anyway so the view's WHERE matches
--- the plan sentence literally, defense in depth against a future relaxed
--- CHECK.
-CREATE VIEW api.operator_rollup WITH (security_invoker = true) AS
+-- AND cohort_n >= 10 in the view itself" (line 1257-1258). S3: the scope
+-- check now ALSO lives in the base table's own RLS policy (0008), not
+-- only here — this view's WHERE is a second, redundant layer, and
+-- `security_barrier=true` stops the two layers from being reordered
+-- around each other.
+CREATE VIEW api.operator_rollup WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.operator_rollup
   WHERE private.has_trail_scope(auth.uid(), trail_id) AND cohort_n >= 10;
 
 -- sponsor_rollup_<metric> (O11; read from P6) — "api.sponsor_*... WHERE
 -- has_sponsorship_scope(...)" (line 1260-1262).
-CREATE VIEW api.sponsor_rollup WITH (security_invoker = true) AS
+CREATE VIEW api.sponsor_rollup WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.sponsor_rollup
   WHERE private.has_sponsorship_scope(auth.uid(), sponsorship_id) AND cohort_n >= 10;
 
@@ -134,26 +169,29 @@ CREATE VIEW api.my_partner_scope WITH (security_invoker = true) AS
 CREATE VIEW api.my_partner_invite WITH (security_invoker = true) AS
   SELECT * FROM app.partner_invite WHERE private.is_org_member(auth.uid(), org_id);
 
-CREATE VIEW api.facility_programme WITH (security_invoker = true) AS
+-- B7 fix: reader is "admin / operator" (line 840) — no staff/manager.
+CREATE VIEW api.facility_programme WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.facility_programme
-  WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.has_facility_scope(auth.uid(), facility_id);
+  WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.is_operator_of_facility(auth.uid(), facility_id);
 
-CREATE VIEW api.facility_qr WITH (security_invoker = true) AS
-  SELECT * FROM app.facility_qr WHERE private.has_facility_scope(auth.uid(), facility_id);
+-- B7 fix (nit): "admin and operator only" — no staff/manager.
+CREATE VIEW api.facility_qr WITH (security_invoker = true, security_barrier = true) AS
+  SELECT * FROM app.facility_qr WHERE private.is_operator_of_facility(auth.uid(), facility_id);
 
-CREATE VIEW api.marker_code_batch WITH (security_invoker = true) AS
+-- B7 fix (nit): "admin and operator only" — no staff/manager.
+CREATE VIEW api.marker_code_batch WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.marker_code_batch
-  WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.has_facility_scope(auth.uid(), facility_id);
+  WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.is_operator_of_facility(auth.uid(), facility_id);
 
-CREATE VIEW api.special_marker_stock WITH (security_invoker = true) AS
+CREATE VIEW api.special_marker_stock WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.special_marker_stock
   WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.has_facility_scope(auth.uid(), facility_id);
 
-CREATE VIEW api.special_marker_stock_movement WITH (security_invoker = true) AS
+CREATE VIEW api.special_marker_stock_movement WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.special_marker_stock_movement
   WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.has_facility_scope(auth.uid(), facility_id);
 
-CREATE VIEW api.sponsorship WITH (security_invoker = true) AS
+CREATE VIEW api.sponsorship WITH (security_invoker = true, security_barrier = true) AS
   SELECT * FROM app.sponsorship
   WHERE private.has_trail_scope(auth.uid(), trail_id) OR private.has_sponsorship_scope(auth.uid(), id);
 
