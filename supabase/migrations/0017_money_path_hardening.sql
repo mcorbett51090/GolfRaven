@@ -418,18 +418,27 @@ GRANT CREATE ON SCHEMA private TO private_definer;
 ALTER FUNCTION private.entitlement_play_guard() OWNER TO private_definer;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
 
--- The three narrowly-purposed SELECT policies the two guard functions'
--- own re-reads need. `USING (true)`: unconditional by ROW (that is this
--- fix's whole point -- see the note above), but reachable ONLY from
--- inside a SECURITY DEFINER trigger function that nothing external can
--- invoke directly. GRANT SELECT already exists for private_definer on
--- all three tables (0016); only the POLICY was missing.
+-- ⛔ FIX (follow-up, post-P3a re-gate round 2): "narrow the three
+-- guard-read policies using the GUC pattern." SUPERSEDES the original
+-- `USING (true)` shape -- unconditional-by-row was reachable only from
+-- inside a SECURITY DEFINER trigger function nothing external can invoke
+-- directly, but that meant private_definer's OWN visibility into these
+-- tables was still unconditional the moment anything (a bug, a future
+-- migration, a different SECURITY DEFINER function reusing this grant)
+-- queried them outside the guard's own narrow WHERE clause. Scoped now to
+-- exactly the id the currently-running guard invocation set via
+-- set_config() immediately before its own read (and clears immediately
+-- after) -- nullif(..., '') turns an unset/cleared GUC into NULL, and
+-- `id = NULL` is never true, so private_definer sees ZERO rows of any of
+-- these three tables outside that one narrow window. GRANT SELECT
+-- already exists for private_definer on all three tables (0016); only
+-- the POLICY changes.
 CREATE POLICY pd_offer_code_guard_read ON app.offer_code
-  FOR SELECT TO private_definer USING (true);
+  FOR SELECT TO private_definer USING (id = nullif(current_setting('app.guard.offer_code_id', true), '')::uuid);
 CREATE POLICY pd_entitlement_guard_read ON app.entitlement
-  FOR SELECT TO private_definer USING (true);
+  FOR SELECT TO private_definer USING (id = nullif(current_setting('app.guard.entitlement_id', true), '')::uuid);
 CREATE POLICY pd_play_guard_read ON app.play
-  FOR SELECT TO private_definer USING (true);
+  FOR SELECT TO private_definer USING (id = nullif(current_setting('app.guard.play_id', true), '')::uuid);
 
 -- Register the three new guard-read policies in private.definer_policy_
 -- allowlist (0016) -- same narrow, self-revoked CURRENT_USER pattern used
@@ -438,9 +447,9 @@ GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_seed_definer_policy_allowlist_0017b ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
-  ('app', 'offer_code', 'pd_offer_code_guard_read', 'SELECT', false, 'M3 (post-P3a re-gate): private.offer_code_play_guard''s own re-read, unconditional by row (the fix''s whole point) but reachable only from inside that one SECURITY DEFINER trigger function'),
-  ('app', 'entitlement', 'pd_entitlement_guard_read', 'SELECT', false, 'M3 (post-P3a re-gate): private.entitlement_play_guard''s own re-read, same reasoning'),
-  ('app', 'play', 'pd_play_guard_read', 'SELECT', false, 'M3 (post-P3a re-gate): both guards'' held_review lookup on the backing play row, same reasoning');
+  ('app', 'offer_code', 'pd_offer_code_guard_read', 'SELECT', true, 'M3 (post-P3a re-gate); narrowed to a GUC-scoped id match (follow-up, round 2): private.offer_code_play_guard sets app.guard.offer_code_id to the exact row it is reading immediately before, and clears it immediately after -- private_definer has no visibility outside that window'),
+  ('app', 'entitlement', 'pd_entitlement_guard_read', 'SELECT', true, 'M3 (post-P3a re-gate); narrowed to a GUC-scoped id match (follow-up, round 2), same as private.offer_code_play_guard above'),
+  ('app', 'play', 'pd_play_guard_read', 'SELECT', true, 'M3 (post-P3a re-gate); narrowed to a GUC-scoped id match (follow-up, round 2): both guards'' held_review lookup on the backing play row, same pattern -- app.guard.play_id');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)

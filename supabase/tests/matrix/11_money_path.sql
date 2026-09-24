@@ -7,7 +7,7 @@
 -- 09_delete_my_data.sql's own reasoning for the same choice.
 
 BEGIN;
-SELECT plan(152);
+SELECT plan(159);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -1143,6 +1143,65 @@ SELECT lives_ok(
   $$UPDATE app.offer_code SET state = 'held_review' WHERE id = '74000000-0000-0000-0000-000000000001'$$,
   'cleanup (M3): resolve player G''s offer_code to held_review so it does not leave an unresolved held row dangling for the rest of this file'
 );
+
+-- ---------------------------------------------------------------------------
+-- Follow-up (post-P3a re-gate round 2): "narrow the three guard-read
+-- policies using the GUC pattern ... add a test that private_definer
+-- can't read other rows outside the guard context." migration_owner
+-- (HARNESS_MODE=restricted) / postgres (HARNESS_MODE=superuser) both hold
+-- SET-only membership in private_definer (`GRANT private_definer TO
+-- CURRENT_USER WITH INHERIT FALSE, SET TRUE`, 0016) -- ASSUMING it
+-- directly, with no app.guard.* GUC ever set in this fresh SET ROLE
+-- context, proves the narrowed policies genuinely admit ZERO rows
+-- outside the one window each guard function itself controls, not merely
+-- that the guard's OWN re-read (already proven above) still works.
+-- ---------------------------------------------------------------------------
+-- app.offer_code/app.entitlement ALSO carry OTHER, pre-existing
+-- private_definer SELECT policies for delete_my_data's own purposes
+-- (pd_setnull_offer_code_redeemed_by_staff_r /
+-- pd_setnull_entitlement_redeemed_by_staff_r), each with its own "OR
+-- redeemed_by_staff IS NULL" branch that is GUC-independent and matches
+-- most fixture rows regardless of this round's change -- a whole-table
+-- count would conflate THEIR pre-existing visibility with the guard-read
+-- policy this test is actually about. Isolate player G's own rows from
+-- that unrelated branch first (a non-NULL, non-matching redeemed_by_staff)
+-- so the ONLY policy left that could possibly admit them is the new
+-- guard-scoped one.
+SELECT lives_ok(
+  $$UPDATE app.offer_code SET redeemed_by_staff = '00000000-0000-0000-0000-1000000000a1' WHERE id = '74000000-0000-0000-0000-000000000001'$$,
+  'setup (follow-up test): isolate player G''s offer_code from the unrelated pd_setnull_offer_code_redeemed_by_staff_r policy''s own OR-IS-NULL branch'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, redeemed_by_staff)
+    VALUES ('55000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-100000000001',
+            'special_marker', 'trl_u', 'redeemable', '00000000-0000-0000-0000-1000000000a1')$$,
+  'setup (follow-up test): a dedicated entitlement for player G, redeemed_by_staff set the same way to isolate it from pd_setnull_entitlement_redeemed_by_staff_r'
+);
+SELECT tests.clear_actor();
+SELECT lives_ok(
+  $$SET ROLE private_definer$$,
+  'setup (follow-up test): assume private_definer directly (migration_owner/postgres holds SET-only membership, 0016) to probe its own RLS visibility with no guard context active'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.offer_code WHERE id = '74000000-0000-0000-0000-000000000001'),
+  0,
+  'private_definer cannot see player G''s offer_code row via the guard-read policy with no app.guard.offer_code_id GUC set, once isolated from the unrelated redeemed-by-staff policy (follow-up, post-P3a re-gate round 2)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.entitlement WHERE id = '55000000-0000-0000-0000-000000000001'),
+  0,
+  'same for the dedicated entitlement row, via app.guard.entitlement_id'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.play WHERE id = '47000000-0000-0000-0000-000000000001'),
+  0,
+  'same for player G''s play row, via app.guard.play_id (app.play carries no OTHER private_definer SELECT policy that could also admit it here)'
+);
+SELECT lives_ok(
+  $$RESET ROLE$$,
+  'cleanup (follow-up test): return to the connecting role'
+);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 SELECT tests.clear_actor();
 SELECT * FROM finish();
