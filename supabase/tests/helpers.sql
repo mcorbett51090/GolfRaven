@@ -107,6 +107,15 @@ VALUES ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000
 -- redeemed rows").
 INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES ('trl_u', 'trail', 'verified', 1);
 INSERT INTO app.catalog_trail (id, slug, name, catalog_version) VALUES ('trl_u', 'trail-u', 'Trail U', 1);
+-- trl_v: a THIRD trail, minimal (same shape as trl_u — just the catalog_
+-- trail/catalog_id_ledger pair, no roster/fee/programme rows, since
+-- entitlement.trail_id only FKs to app.catalog_trail directly). Reserved
+-- for tests that need a trail neither player A's own seeded entitlements
+-- (trl_t, trl_u) already occupy — 11_money_path.sql's M2 tests re-own an
+-- entitlement to player A and would otherwise collide with player A's own
+-- UNIQUE(user_id, kind, trail_id) row on trl_t or trl_u.
+INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES ('trl_v', 'trail', 'verified', 1);
+INSERT INTO app.catalog_trail (id, slug, name, catalog_version) VALUES ('trl_v', 'trail-v', 'Trail V', 1);
 
 -- entitlement #1: ACTIVATED (redeemable, device-attached) — exercises the
 -- RESTRICT FK on activated_device_id (B3).

@@ -257,8 +257,18 @@ export async function buildEvidenceByTrail(
      * (any caller that omitted a ledger silently got the exact
      * hard-coded-`recorded:true` trust the ledger exists to replace). */
     ledger: RecordedLedger;
+    /** Gate finding, should-fix (re-gate): the rendered route was adopted
+     * (Addendum J(a)(i), and its own correction) for VI's specific
+     * static-HTML-has-no-body-text problem — it was never part of Matt's
+     * choice for any other trail. Defaults to `["VI"]`; a `"rendered"`
+     * entry for a trail NOT on this list refuses the whole run outright
+     * (the same hard-integrity style as the SHA/method checks below),
+     * rather than silently accepting rendered evidence for a trail whose
+     * owner never chose that route. */
+    renderedAllowedTrails?: readonly string[];
   },
 ): Promise<EvidenceByTrail> {
+  const renderedAllowedTrails = opts.renderedAllowedTrails ?? ["VI"];
   const byTrail: EvidenceByTrail = {};
   for (const [trail, entries] of Object.entries(manifest.trails)) {
     const bySha: TrailEvidenceMap = new Map();
@@ -298,6 +308,19 @@ export async function buildEvidenceByTrail(
       const method: X2Method = methodDefaulted
         ? "direct"
         : (rawMethod as X2Method);
+
+      // Gate finding, should-fix (re-gate): the rendered route is
+      // per-trail-opted-into, not blanket-available — see this
+      // parameter's own doc above.
+      if (method === "rendered" && !renderedAllowedTrails.includes(trail)) {
+        throw new Error(
+          `Evidence entry for trail "${trail}", url "${e.url}" has method "rendered", but "${trail}" is not ` +
+            `on the rendered-route allow-list (${renderedAllowedTrails.join(", ") || "(none)"}) — the ` +
+            "rendered route was adopted for VI's own static-HTML-has-no-body-text problem, never as a " +
+            "blanket option for every trail; refusing rather than silently accepting rendered evidence a " +
+            "trail's owner never chose (should-fix, re-gate).",
+        );
+      }
 
       // Gate finding: cross-check method against httpStatus — an
       // "owner-saved" entry must carry the literal httpStatus "owner-saved"

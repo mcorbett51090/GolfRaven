@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import nodePath from "node:path";
+import { promisify } from "node:util";
 import {
   buildEvidenceByTrail,
+  checkLedgerAgainstGit,
   computeX2Verdict,
   corroborationResolutionKey,
   extractX2MdLogSection,
@@ -12,6 +18,8 @@ import {
   type X2CorroborationFile,
   type X2ResolvedCorroboration,
 } from "../src/x2-verdict.js";
+
+const execFileAsync = promisify(execFile);
 import type { X2FetchEntry, X2FetchManifest } from "../src/x2-fetch.js";
 import {
   normalizeUrlForFirstCapture,
@@ -1710,5 +1718,75 @@ describe("x2-verdict: resolveCorroboration (gate finding 3, re-gate)", () => {
     expect(
       resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE))?.acceptanceLogged,
     ).toBe(false);
+  });
+});
+
+describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d)", () => {
+  async function initGitRepo(): Promise<string> {
+    const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-git-test-"));
+    await execFileAsync("git", ["init", "-q"], { cwd: dir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: dir });
+    return dir;
+  }
+
+  it("a COMMITTED, unmodified ledger is reported clean, with its git blob hash", async () => {
+    const dir = await initGitRepo();
+    const ledgerPath = nodePath.join(dir, "recorded-ledger.json");
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
+
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.clean).toBe(true);
+    expect(result.blobHash).toMatch(/^[0-9a-f]{40}$/);
+
+    const { stdout } = await execFileAsync("git", ["hash-object", "recorded-ledger.json"], { cwd: dir });
+    expect(result.blobHash).toBe(stdout.trim());
+  });
+
+  it("a committed ledger with an UNCOMMITTED edit is reported dirty, with a reason", async () => {
+    const dir = await initGitRepo();
+    const ledgerPath = nodePath.join(dir, "recorded-ledger.json");
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
+
+    // Edit it WITHOUT committing — simulates a hand-edited ledger row
+    // (e.g. the gate's own `edited-ledger.json` bypass attempt) that
+    // never went through review/commit.
+    writeFileSync(
+      ledgerPath,
+      '{"entries": [{"method": "rendered", "normalizedUrl": "x", "url": "x", "sha256": "' +
+        "a".repeat(64) +
+        '", "recordedAt": "2026-01-01T00:00:00Z"}]}\n',
+      "utf8",
+    );
+
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.clean).toBe(false);
+    expect(result.detail).toMatch(/uncommitted changes/);
+    // The blob hash is still reported (of the CURRENT, dirty content) —
+    // never withheld just because the ledger is dirty.
+    expect(result.blobHash).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("an UNTRACKED ledger file (never git-added at all) is reported dirty — `git diff` alone would miss this", async () => {
+    const dir = await initGitRepo();
+    const ledgerPath = nodePath.join(dir, "recorded-ledger.json");
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    // Deliberately never `git add`ed or committed.
+
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.clean).toBe(false);
+    expect(result.detail).toMatch(/untracked/);
+  });
+
+  it("a path outside any git repository (or a missing file) resolves to NOT clean, never silently 'clean'", async () => {
+    const outsideDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-not-a-repo-"));
+    const ledgerPath = nodePath.join(outsideDir, "recorded-ledger.json");
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    const result = await checkLedgerAgainstGit(ledgerPath);
+    expect(result.clean).toBe(false);
   });
 });

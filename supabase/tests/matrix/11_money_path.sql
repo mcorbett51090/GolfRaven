@@ -526,9 +526,17 @@ SELECT lives_ok(
   $$INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000d0000002', 'player-d2@example.test')$$,
   'setup: player D2''s auth.users row'
 );
+-- RENAME out of the pseudonym_key% match, not DELETE: app.attestation's
+-- player_pseudonym_key_id/staff_pseudonym_key_id (0018) FK to
+-- vault.secrets(id), and helpers.sql's seeded attestation row references
+-- key 1 — a real DELETE here hits a 23503, not the "no active key"
+-- 23514/fail-closed path this test wants (confirmed empirically this
+-- session). Renaming makes delete_my_data's own `name LIKE
+-- 'pseudonym_key%'` lookup find nothing, without touching referential
+-- integrity at all.
 SELECT lives_ok(
-  $$DELETE FROM vault.secrets WHERE name LIKE 'pseudonym_key%'$$,
-  'setup: remove every pseudonym_key from the vault'
+  $$UPDATE vault.secrets SET name = name || '_hidden_for_test' WHERE name LIKE 'pseudonym_key%'$$,
+  'setup: hide every pseudonym_key from the vault (renamed, not deleted)'
 );
 SELECT throws_ok(
   $$SELECT private.delete_my_data('00000000-0000-0000-0000-0000d0000002'::uuid)$$,
@@ -553,12 +561,12 @@ SELECT lives_ok(
   'cleanup: remove the short key'
 );
 SELECT lives_ok(
-  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000001', 'pseudonym_key_1', 'shim-test-only-pseudonym-key-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx')$$,
-  'cleanup: restore pseudonym_key_1 (removed above for the missing-key test)'
+  $$UPDATE vault.secrets SET name = 'pseudonym_key_1' WHERE id = 'a0000000-1111-0000-0000-000000000001'$$,
+  'cleanup: restore pseudonym_key_1''s name (hidden above for the missing-key test)'
 );
 SELECT lives_ok(
-  $$INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-000000000002', 'pseudonym_key_2', 'shim-test-only-pseudonym-key-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy')$$,
-  'cleanup: restore pseudonym_key_2'
+  $$UPDATE vault.secrets SET name = 'pseudonym_key_2' WHERE id = 'a0000000-1111-0000-0000-000000000002'$$,
+  'cleanup: restore pseudonym_key_2''s name'
 );
 
 -- rotation: a row written with key 1 is still found after key 2 (already
@@ -604,16 +612,25 @@ SELECT lives_ok(
 );
 
 -- (a) the play is placed on hold AFTER the code/entitlement was issued.
+-- Offer #3 (60000000-...-3), not offer #2 — helpers.sql already seeds
+-- player A an offer_code against offer #2 (70000000-...-2), so bypass (c)
+-- below (re-owning this row TO player A) would otherwise collide with
+-- UNIQUE(user_id, offer_id) instead of raising the FK violation it's
+-- testing for (confirmed empirically this session).
 SELECT lives_ok(
   $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
-    VALUES ('73000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002',
+    VALUES ('73000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000003',
             '00000000-0000-0000-0000-0000e0000001', 'fac_x', 'earned', '44000000-0000-0000-0000-000000000001')$$,
   'setup: an offer_code for player E, backed by the NOT-YET-held play, state=earned'
 );
+-- trl_v, not trl_t/trl_u — helpers.sql already seeds player A entitlements
+-- on BOTH of those trails, so bypass (c) below (re-owning this row TO
+-- player A) would otherwise collide with UNIQUE(user_id, kind, trail_id)
+-- instead of raising the FK violation it's testing for.
 SELECT lives_ok(
   $$INSERT INTO app.entitlement (id, user_id, kind, trail_id, state, play_id)
     VALUES ('53000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000e0000001',
-            'special_marker', 'trl_u', 'redeemable', '44000000-0000-0000-0000-000000000001')$$,
+            'special_marker', 'trl_v', 'redeemable', '44000000-0000-0000-0000-000000000001')$$,
   'setup: an entitlement for player E, backed by the SAME play, state=redeemable'
 );
 SELECT lives_ok(
@@ -645,14 +662,16 @@ SELECT lives_ok(
 -- INSERT time, does not exist yet. Under the OLD plain-BEFORE-trigger
 -- design this silently passed (NOT FOUND -> RETURN NEW); the composite
 -- FK + CONSTRAINT TRIGGER design raises once checked.
--- Offer #3 (60000000-...-3), not offer #2 (already claimed by player E's
+-- Offer #2 (60000000-...-2), not offer #3 (already claimed by player E's
 -- (a)-test offer_code above) — a second offer_code for the SAME
 -- (user_id, offer_id) pair would hit UNIQUE(user_id, offer_id) before the
 -- FK check even gets a chance to run, masking the 23503 this test wants
--- (confirmed empirically this session).
+-- (confirmed empirically this session). Player A separately holds an
+-- offer_code against offer #2 too, but that's a different user_id, so it
+-- doesn't collide with player E's (user_id, offer_id) pair here.
 SELECT throws_ok(
   $$INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, play_id)
-    VALUES ('73000000-0000-0000-0000-000000000099', '60000000-0000-0000-0000-000000000003',
+    VALUES ('73000000-0000-0000-0000-000000000099', '60000000-0000-0000-0000-000000000002',
             '00000000-0000-0000-0000-0000e0000001', 'fac_x', 'earned', '44000000-0000-0000-0000-000000000099')$$,
   '23503',
   NULL,
