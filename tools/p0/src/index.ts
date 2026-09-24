@@ -5,6 +5,7 @@
  */
 export * from "./health-export-xml.js";
 export * from "./round-windows.js";
+export * from "./recorded-export.js";
 export * from "./x1-ios-export.js";
 export * from "./x1-verdict.js";
 export * from "./overpass-geo.js";

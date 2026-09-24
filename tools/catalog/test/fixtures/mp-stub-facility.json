@@ -1,0 +1,81 @@
+{
+  "contractVersion": 0,
+  "facilities": [
+    {
+      "id": "fac_01M39GMFJZ7V57ACYY7K448M4N",
+      "slug": "riverside-municipal",
+      "region": "US-TN",
+      "tz": "America/Chicago",
+      "derivedFrom": {
+        "region": "osm",
+        "tz": "osm",
+        "slug": "osm"
+      },
+      "verification": {
+        "status": "unverified"
+      },
+      "seed": {
+        "origin": "osm",
+        "osmRef": "way/500"
+      },
+      "booking": [],
+      "courses": [
+        {
+          "id": "crs_01M39GMFJZ7JP34CBPBB415NG9",
+          "slug": "riverside-municipal-course",
+          "derivedFrom": {
+            "slug": "osm"
+          },
+          "seed": {
+            "osmRef": "way/500"
+          }
+        }
+      ]
+    }
+  ],
+  "trails": [],
+  "idLedger": {
+    "entries": {
+      "fac_01M39GMFJZ7V57ACYY7K448M4N": {
+        "id": "fac_01M39GMFJZ7V57ACYY7K448M4N",
+        "kind": "fac",
+        "slug": "riverside-municipal",
+        "status": "stub",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/500"
+        ]
+      },
+      "crs_01M39GMFJZ7JP34CBPBB415NG9": {
+        "id": "crs_01M39GMFJZ7JP34CBPBB415NG9",
+        "kind": "crs",
+        "status": "stub",
+        "facilityId": "fac_01M39GMFJZ7V57ACYY7K448M4N",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "20260101-abc0001",
+            "date": "2026-01-01"
+          }
+        ],
+        "seedRefs": [
+          "way/500"
+        ]
+      }
+    }
+  },
+  "osm": {
+    "way/500": {
+      "lat": 36.17,
+      "lng": -86.8,
+      "name": "Riverside Municipal",
+      "holes": 18
+    }
+  }
+}

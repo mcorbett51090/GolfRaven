@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { computeX1Verdict, type AndroidGolfSessionReadResult, type SourceMap } from "../src/x1-verdict.js";
-import type { X1IosExportResult, X1IosWorkoutRecord } from "../src/x1-ios-export.js";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  computeOverallFromBoundResults,
+  computeX1Verdict,
+  runX1VerdictCli,
+  type AndroidGolfSessionReadResult,
+  type SourceMap,
+  type X1VerdictInput,
+} from "../src/x1-verdict.js";
+import type { X1IosWorkoutRecord } from "../src/x1-ios-export.js";
 import type { RoundWindow } from "../src/round-windows.js";
 
 function iosWorkout(overrides: Partial<X1IosWorkoutRecord>): X1IosWorkoutRecord {
@@ -17,11 +28,19 @@ function iosWorkout(overrides: Partial<X1IosWorkoutRecord>): X1IosWorkoutRecord 
     routeTrackpointCount: 10,
     routePresent: true,
     verdict: "pass",
+    testRound: false,
     ...overrides,
   };
 }
 
-function iosResult(workouts: X1IosWorkoutRecord[]): X1IosExportResult {
+/** Round-2 Opus-gate correction (post-67bdb27): `computeX1Verdict` has no
+ * "eligible"/trust concept any more — it cannot verify anything (no
+ * filesystem/git access), so `recordedVerdicts` is always computed purely
+ * from data. These helpers reflect that: no `recorded`/`os` stamp param on
+ * `iosResult` at all (it would mean nothing); `androidResult`'s `os` is
+ * REQUIRED (a basic shape field the real Android reader output must carry
+ * — see the module doc) but likewise carries no eligibility weight. */
+function iosResult(workouts: X1IosWorkoutRecord[]): X1VerdictInput["ios"] {
   return {
     generatedAt: new Date().toISOString(),
     exportDir: "/fake",
@@ -30,14 +49,24 @@ function iosResult(workouts: X1IosWorkoutRecord[]): X1IosExportResult {
     totalWorkoutElementsSeen: workouts.length,
     golfWorkoutCount: workouts.length,
     workouts,
+    sourceSummaries: [],
+    exportDate: "2026-09-20 09:00:00 -0400",
+    exportSha256: "e".repeat(64),
     warnings: [],
   };
 }
 
 function androidResult(
   sessions: AndroidGolfSessionReadResult["sessions"],
-): AndroidGolfSessionReadResult {
-  return { generatedAt: new Date().toISOString(), windowDays: 7, sessionCount: sessions.length, sessions };
+  os: "ios" | "android" = "android",
+): X1VerdictInput["android"] {
+  return {
+    generatedAt: new Date().toISOString(),
+    windowDays: 7,
+    sessionCount: sessions.length,
+    sessions,
+    os,
+  };
 }
 
 /** Covers both the iOS fixture workouts ("2026-09-20 09:00:00 -0400" =
@@ -167,25 +196,34 @@ describe("x1-verdict: source-level verdicts and the 2-of-3-on-one-OS bar (decisi
   });
 });
 
-describe("x1-verdict: round window (decision 0001 Addendum F, gate finding B-7)", () => {
-  it("refuses (throws) when roundWindows is empty", () => {
+describe("x1-verdict: round windows are labels, not a filter (decision 0005, superseding Addendum F)", () => {
+  it("does NOT throw when roundWindows is empty — an unlogged window is a normal state now", () => {
     const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect" })]);
     const android = androidResult([]);
-    expect(() => computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: [] })).toThrow(
-      /round window/,
-    );
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: [] });
+    expect(result.perSource.garmin.ios).toBe("pass");
   });
 
-  it("excludes an iOS workout outside every window, even though x1-ios-export's own JSON already claims a verdict for it", () => {
-    // Defense in depth: the verdict re-applies the window filter itself,
-    // independent of whatever filtering produced the `ios` JSON.
+  it("does NOT throw when roundWindows is omitted entirely", () => {
+    const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect" })]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP });
+    expect(result.perSource.garmin.ios).toBe("pass");
+  });
+
+  it("a historical iOS workout OUTSIDE every window still counts toward the verdict (decision 0005)", () => {
+    // Under the old Addendum F rule this workout would have been excluded
+    // and the source would read fail-not-written; decision 0005 counts it.
     const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect", startDate: "2020-01-01 09:00:00 -0400" })]);
     const android = androidResult([]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.perSource.garmin.ios).toBe("fail-not-written");
+    expect(result.perSource.garmin.ios).toBe("pass");
+    // Tagged as NOT a test round — it falls outside the logged window.
+    const entry = result.countedEntries.garmin.find((e) => e.os === "ios");
+    expect(entry?.testRound).toBe(false);
   });
 
-  it("excludes an Android session outside every window", () => {
+  it("a historical Android session OUTSIDE every window still counts toward the verdict", () => {
     const ios = iosResult([]);
     const android = androidResult([
       {
@@ -199,7 +237,39 @@ describe("x1-verdict: round window (decision 0001 Addendum F, gate finding B-7)"
       },
     ]);
     const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
-    expect(result.perSource.garmin.android).toBe("fail-not-written");
+    expect(result.perSource.garmin.android).toBe("pass");
+    const entry = result.countedEntries.garmin.find((e) => e.os === "android");
+    expect(entry?.testRound).toBe(false);
+  });
+
+  it("a workout INSIDE a logged window is tagged testRound: true", () => {
+    const ios = iosResult([iosWorkout({ sourceName: "Garmin Connect", startDate: "2026-09-20 09:00:00 -0400" })]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    const entry = result.countedEntries.garmin.find((e) => e.os === "ios");
+    expect(entry?.testRound).toBe(true);
+  });
+
+  it("newestCountedWorkoutDateBySource reports the newest start date per source per OS", () => {
+    const ios = iosResult([
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2020-01-01 09:00:00 -0400" }),
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2026-09-20 09:00:00 -0400" }),
+    ]);
+    const android = androidResult([
+      {
+        recordId: "r1",
+        start: "2021-05-01T09:00:00Z",
+        end: "2021-05-01T13:00:00Z",
+        dataOrigin: "com.garmin.android.apps.connectmobile",
+        routePresent: true,
+        routePointCount: 50,
+        routeRequiresConsent: false,
+      },
+    ]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.newestCountedWorkoutDateBySource.garmin.ios).toBe("2026-09-20 09:00:00 -0400");
+    expect(result.newestCountedWorkoutDateBySource.garmin.android).toBe("2021-05-01T09:00:00Z");
+    expect(result.newestCountedWorkoutDateBySource.appleWatch).toEqual({ ios: null, android: null });
   });
 });
 
@@ -348,5 +418,221 @@ describe("x1-verdict: decision 0001 Addendum D R6 — the phone-app source and t
     const ios = iosResult([iosWorkout({ sourceName: "18Birdies" })]);
     const android = androidResult([]);
     expect(() => computeX1Verdict({ ios, android, sourceMap, roundWindows: ROUND_WINDOWS })).toThrow(/OTHER app/);
+  });
+});
+
+const THREE_PASSING_IOS_WORKOUTS = [
+  iosWorkout({ sourceName: "Garmin Connect" }),
+  iosWorkout({ sourceName: "Matt's Apple Watch" }),
+  iosWorkout({ sourceName: "18Birdies" }),
+];
+
+function twoOfThreePassingAndroidSessions(): AndroidGolfSessionReadResult["sessions"] {
+  return [
+    {
+      recordId: "a",
+      start: "2026-09-21T09:00:00Z",
+      end: "2026-09-21T13:00:00Z",
+      dataOrigin: "com.garmin.android.apps.connectmobile",
+      routePresent: true,
+      routePointCount: 5,
+      routeRequiresConsent: false,
+    },
+    {
+      recordId: "b",
+      start: "2026-09-21T09:00:00Z",
+      end: "2026-09-21T13:00:00Z",
+      dataOrigin: "com.eighteenbirdies.android",
+      routePresent: true,
+      routePointCount: 5,
+      routeRequiresConsent: false,
+    },
+  ];
+}
+
+describe("x1-verdict: recordedVerdicts is purely data-driven — stamps are IGNORED entirely (round-2 Opus-gate correction, post-67bdb27, reflects x1probe2.mjs)", () => {
+  it("recordedVerdicts and overallVerdict are the SAME regardless of any recorded/os field the inputs carry", () => {
+    // The exact shape of x1probe2.mjs's 3 scenarios: identical underlying
+    // data, only the (now-irrelevant) recorded/os stamps differ.
+    const iosData = [
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2019-05-01 10:00:00 +0000", routePresent: true, verdict: "pass" }),
+      iosWorkout({ sourceName: "Garmin Connect", startDate: "2026-09-20 10:00:00 +0000", routePresent: false, verdict: "fail" }),
+    ];
+    const androidData = twoOfThreePassingAndroidSessions();
+
+    const scenarios: Array<[string, X1VerdictInput["ios"], X1VerdictInput["android"]]> = [
+      ["no stamps at all", iosResult(iosData), androidResult(androidData)],
+      [
+        "hand-stamped recorded:true on both (as JSON someone could edit by hand)",
+        { ...iosResult(iosData), recorded: true, os: "ios" } as X1VerdictInput["ios"],
+        { ...androidResult(androidData), recorded: true } as X1VerdictInput["android"],
+      ],
+      [
+        "hand-stamped recorded:true, no os field",
+        { ...iosResult(iosData), recorded: true } as X1VerdictInput["ios"],
+        androidResult(androidData),
+      ],
+    ];
+
+    const results = scenarios.map(([, ios, android]) =>
+      computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS }),
+    );
+    // All 3 must agree — proving the stamps have ZERO effect.
+    for (const r of results) {
+      expect(r.recordedVerdicts.ios.verdict).toBe(results[0]!.recordedVerdicts.ios.verdict);
+      expect(r.recordedVerdicts.android.verdict).toBe(results[0]!.recordedVerdicts.android.verdict);
+      expect(r.overallVerdict).toBe(results[0]!.overallVerdict);
+    }
+    // And the actual values are purely data-driven: garmin passes on iOS
+    // (the old 2019 workout has a route), garmin+phoneApp pass on Android.
+    expect(results[0]!.recordedVerdicts.ios.verdict).toBe("kill"); // only garmin (1/3) on iOS
+    expect(results[0]!.recordedVerdicts.android.verdict).toBe("pass"); // 2/3 on Android
+    expect(results[0]!.overallVerdict).toBe("pass");
+  });
+
+  it("recordedVerdicts has no eligible/ineligibleReason field — verdict is always populated", () => {
+    const ios = iosResult(THREE_PASSING_IOS_WORKOUTS);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.recordedVerdicts.ios).not.toHaveProperty("eligible");
+    expect(result.recordedVerdicts.ios).not.toHaveProperty("ineligibleReason");
+    expect(result.recordedVerdicts.ios.verdict).toBe("pass");
+    expect(result.recordedVerdicts.android.verdict).toBe("kill");
+  });
+
+  it("recordedVerdicts[os].sourcesPassing mirrors sourcesPassingByOs[os]", () => {
+    const ios = iosResult(THREE_PASSING_IOS_WORKOUTS);
+    const android = androidResult(twoOfThreePassingAndroidSessions());
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.recordedVerdicts.ios.sourcesPassing).toBe(result.sourcesPassingByOs.ios);
+    expect(result.recordedVerdicts.android.sourcesPassing).toBe(result.sourcesPassingByOs.android);
+  });
+});
+
+describe("x1-verdict: newest-date excludes route-less workouts (should-fix, Opus gate post-d0de4b8)", () => {
+  it("newestCountedWorkoutDateBySource only considers route-present entries; a NEWER route-less workout does not pull it forward", () => {
+    const ios = iosResult([
+      iosWorkout({
+        sourceName: "Garmin Connect",
+        startDate: "2026-09-20 09:00:00 -0400",
+        routePresent: true,
+        verdict: "pass",
+      }),
+      iosWorkout({
+        sourceName: "Garmin Connect",
+        startDate: "2026-09-22 09:00:00 -0400",
+        routePresent: false,
+        verdict: "fail",
+        hasWorkoutRoute: false,
+      }),
+    ]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.newestCountedWorkoutDateBySource.garmin.ios).toBe("2026-09-20 09:00:00 -0400");
+    expect(result.newestRouteLessWorkoutDateBySource.garmin.ios).toBe("2026-09-22 09:00:00 -0400");
+  });
+
+  it("a source with only route-less workouts has a null newestCountedWorkoutDate but a populated newestRouteLessWorkoutDate", () => {
+    const ios = iosResult([
+      iosWorkout({
+        sourceName: "18Birdies",
+        startDate: "2026-09-20 09:00:00 -0400",
+        routePresent: false,
+        verdict: "fail",
+        hasWorkoutRoute: false,
+      }),
+    ]);
+    const android = androidResult([]);
+    const result = computeX1Verdict({ ios, android, sourceMap: BASE_SOURCE_MAP, roundWindows: ROUND_WINDOWS });
+    expect(result.newestCountedWorkoutDateBySource.phoneApp.ios).toBeNull();
+    expect(result.newestRouteLessWorkoutDateBySource.phoneApp.ios).toBe("2026-09-20 09:00:00 -0400");
+  });
+});
+
+// Round-3 Opus-gate correction (post-8e5a29b): `assertIosWorkoutDataNotTampered`
+// and its tests are gone — x1-verdict no longer reads a separate `--ios`
+// JSON to distrust. `--ios-export <dir>` is always parsed fresh, in the
+// same call that verifies its hash, so there is nothing left to tamper
+// with independently of the bound file itself. See x1-verdict.ts's module
+// doc and `tools/p0/README.md` for the simplified mechanism.
+
+describe("computeOverallFromBoundResults (round-3 Opus-gate correction, post-8e5a29b) — 'the overall result is a pass if any bound OS recomputes to a pass'", () => {
+  it("pass when the only bound OS recomputed to pass", () => {
+    expect(computeOverallFromBoundResults({ ios: "pass" })).toBe("pass");
+  });
+
+  it("kill when the only bound OS recomputed to kill", () => {
+    expect(computeOverallFromBoundResults({ ios: "kill" })).toBe("kill");
+  });
+
+  it("iOS bound as kill and Android bound as pass -> overall pass, only when both bound files verify (i.e. both are present in boundResults)", () => {
+    expect(computeOverallFromBoundResults({ ios: "kill", android: "pass" })).toBe("pass");
+  });
+
+  it("kill when both bound OSes recomputed to kill", () => {
+    expect(computeOverallFromBoundResults({ ios: "kill", android: "kill" })).toBe("kill");
+  });
+
+  it("pass when both bound OSes recomputed to pass", () => {
+    expect(computeOverallFromBoundResults({ ios: "pass", android: "pass" })).toBe("pass");
+  });
+});
+
+const GIT_TEST_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], { cwd, encoding: "utf8" });
+}
+
+function tmpGitX1Doc(body: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-verdict-cli-"));
+  git(dir, ["init", "-q"]);
+  const file = path.join(dir, "X1.md");
+  writeFileSync(file, `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`, "utf8");
+  git(dir, ["add", "X1.md"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+  return file;
+}
+
+function tmpMinimalSourceMap(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-verdict-cli-inputs-"));
+  const file = path.join(dir, "source-map.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      garmin: { iosSourceNames: [], androidDataOrigins: [] },
+      appleWatch: { iosSourceNames: [] },
+      phoneApp: { iosSourceNames: [], androidDataOrigins: [], appUsed: "18Birdies" },
+    }),
+    "utf8",
+  );
+  return file;
+}
+
+function tmpMinimalAndroidJson(dir: string, generatedAt = "2026-09-20T09:00:00Z"): string {
+  const file = path.join(dir, "android.json");
+  writeFileSync(
+    file,
+    JSON.stringify({ generatedAt, windowDays: 7, sessionCount: 0, sessions: [], os: "android" }),
+    "utf8",
+  );
+  return file;
+}
+
+describe("runX1VerdictCli (round-4 Opus-gate correction, post-4279773) — 'verdicts come only from a committed binding'", () => {
+  it("refuses a recorded run while docs/p0/X1.md has uncommitted changes", async () => {
+    const x1DocPath = tmpGitX1Doc("- iOS: \n- Android: 2026-09-20\n");
+    // An UNCOMMITTED edit — never staged/committed — is what must refuse.
+    writeFileSync(x1DocPath, "# X1\n\n## Recorded export\n\n- iOS: \n- Android: 2026-09-21\n\n## METHOD\n", "utf8");
+    const androidJson = tmpMinimalAndroidJson(path.dirname(x1DocPath));
+    const sourceMapPath = tmpMinimalSourceMap();
+    const outPrefix = path.join(mkdtempSync(path.join(tmpdir(), "golfraven-x1-verdict-out-")), "result");
+
+    await expect(
+      runX1VerdictCli(
+        { iosExportDir: undefined, androidPath: androidJson, sourceMapPath, outPrefix, informational: false },
+        x1DocPath,
+      ),
+    ).rejects.toThrow(/uncommitted changes/);
   });
 });

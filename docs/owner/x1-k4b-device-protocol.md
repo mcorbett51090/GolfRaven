@@ -30,14 +30,44 @@ Record the day-5 decision (borrow succeeded / upgrade path taken / running on pa
 
 ## 2. X1 round protocol, per source
 
-**Log the round window FIRST (decision 0001 Addendum F).** Before teeing off, note the round's start time
-(UTC), and its end time once it's over — then add BOTH to `docs/p0/X1.md`'s "## Round windows" section
-(one bullet, `<START> to <END>`, strict `YYYY-MM-DDThh:mm:ssZ`) **before** the export is read on either
-device. `x1-ios-export` and `x1-verdict` both **refuse to run** if this is still blank — they no longer
-trust every workout already on a device to be "the round"; only a workout/session whose start time falls
-inside a logged window, with 60 minutes of slack either side, counts, and older workouts on the device are
-ignored. Do this once per round (iOS pass and Android pass each get their own window/bullet if they happen
-on different days).
+**Log the round window (decision 0001 Addendum F) — now a LABEL, not a gate (decision 0005).** Before
+teeing off, note the round's start time (UTC), and its end time once it's over — then add BOTH to
+`docs/p0/X1.md`'s "## Round windows" section (one bullet, `<START> to <END>`, strict
+`YYYY-MM-DDThh:mm:ssZ`), ideally before the export is read on either device, though this no longer
+gates anything. `x1-ios-export` and `x1-verdict` **no longer refuse to run** if this is blank
+(decision 0005 supersedes Addendum F's refusal): every golf workout already on the device counts, not
+just ones from this round — a workout/session whose start time falls inside a logged window, with 60
+minutes of slack either side, is only tagged `testRound: true` in the output, and everything else is
+tagged `testRound: false`. Do this once per round (iOS pass and Android pass each get their own
+window/bullet if they happen on different days) if you want the tagging; skipping it just means every
+workout reads `testRound: false`.
+
+**Log the "Recorded export" UTC date FIRST instead (decision 0005) — this is what now gates the
+tools.** Before reading either OS's export, add that OS's UTC date to `docs/p0/X1.md`'s "## Recorded
+export" section. `x1-ios-export --os ios` and `x1-verdict` (which now takes `--ios-export <dir>`
+and/or `--android <json>` — no `--os` flag any more) both refuse to produce the RECORDED X1 result for
+an OS whose date there is still blank; pass `--informational` to run anyway, but **only against a
+synthetic fixture under `tools/p0/test/fixtures/`, never real device data, while that OS is unbound**
+(round-3 Opus-gate correction, post-8e5a29b, superseding round 2's narrower "only in the logged-but-
+unbound gap" — now it's "no informational runs on real data while unbound," full stop; once an OS is
+bound, `--informational` may run against any path). Each tool binds ITS OWN OS's export by a fresh UTC
+date + SHA-256 match. **A recorded X1 verdict is decided per OS, RECOMPUTED FRESH from that OS's bound
+file every single time `x1-verdict` runs — nothing about the result is ever stored in
+`docs/p0/X1.md` or read back from it** (round-3 Opus-gate correction, post-8e5a29b, simplifying round
+2's `result:pass`/`result:kill`-line design and its accompanying git-history tampering scan, per the
+gate's explicit "fix by simplifying" instruction). Run `x1-verdict --ios-export <dir>` after the iOS
+pass and `x1-verdict --android <json>` after the Android pass (or both together, once both are
+bound) — each call verifies and recomputes whichever OS(es) it's given, and the overall result is
+"pass if any of them recomputed to pass." **The run that performs an OS's FIRST bind prints no verdict
+at all (round-4 Opus-gate correction, post-4279773)** — it stops at "bound: commit and push
+docs/p0/X1.md, then re-run" without computing or writing anything else; commit, push, then run the
+SAME command again to get the actual result. Deleting/reverting a bound `sha256:` line does **not**
+quietly reopen that OS for a re-bind — the tools check `docs/p0/X1.md`'s own git history first and
+refuse with "re-binding needs an owner decision" if it was ever bound before; ask Matt before trying
+to force one. Every recorded run also refuses outright if `docs/p0/X1.md` has uncommitted changes, or
+if git itself isn't available. **The real protection against a rewritten local git history is
+procedural, not automatic:** commit AND PUSH `docs/p0/X1.md` to GitHub immediately after any run that
+binds a new hash — the same discipline decision 0001 Addendum F relies on for K2's exclusion dating.
 
 Play **one real round (~4 h)** carrying all three iOS sources simultaneously where possible (Garmin watch +
 Apple Watch + phone with a golf app), so one round covers all three:

@@ -1,7 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync as fsWriteFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runX1IosExport, renderMarkdownTable } from "../src/x1-ios-export.js";
+import {
+  runX1IosExport,
+  runX1IosExportCli,
+  renderMarkdownTable,
+  renderSourceSummaryMarkdown,
+} from "../src/x1-ios-export.js";
 import {
   HealthExportShapeError,
   countGpxTrackpoints,
@@ -16,10 +24,10 @@ const FIXTURES = path.join(__dirname, "fixtures");
  * relative to the export dir — so FIXTURES itself is "the export dir". */
 const GOOD_EXPORT_DIR = FIXTURES;
 
-/** Covers every golf workout in export.xml EXCEPT the 2026-08-01 Garmin one
- * (decision 0001 Addendum F round-window filtering — gate finding B-7),
- * so these tests reproduce the pre-Addendum-F fixture behavior except for
- * that one, deliberately-excluded old workout. */
+/** Tags every 2026-09-15..09-21 golf workout `testRound: true` — the
+ * 2026-08-01 Garmin workout falls outside it and is tagged `testRound:
+ * false`, but (decision 0005) still counts toward the result; nothing is
+ * excluded by this list any more. */
 const GOOD_ROUND_WINDOWS: RoundWindow[] = [
   { startIso: "2026-09-15T00:00:00Z", endIso: "2026-09-21T00:00:00Z" },
 ];
@@ -30,15 +38,17 @@ const TIGHT_ROUND_WINDOWS: RoundWindow[] = [
 ];
 
 describe("x1-ios-export: parsing a well-formed export.xml", () => {
-  it("finds all golf workouts within the round window and filters out non-golf ones", async () => {
+  it("finds ALL golf workouts, regardless of round window, and filters out non-golf ones (decision 0005)", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: GOOD_ROUND_WINDOWS,
     });
-    expect(result.totalWorkoutElementsSeen).toBe(6); // 5 golf + 1 running (unaffected by window filter)
-    expect(result.golfWorkoutCount).toBe(4); // the 2026-08-01 Garmin workout is outside every window
+    expect(result.totalWorkoutElementsSeen).toBe(6); // 5 golf + 1 running
+    // Decision 0005: the 2026-08-01 Garmin workout (outside every window) STILL counts.
+    expect(result.golfWorkoutCount).toBe(5);
     const sources = result.workouts.map((w) => w.sourceName).sort();
     expect(sources).toEqual([
       "18Birdies",
+      "Garmin Connect",
       "Garmin Connect",
       "Hole19",
       "Matt's Apple Watch",
@@ -114,43 +124,99 @@ describe("x1-ios-export: parsing a well-formed export.xml", () => {
     expect(result.golfWorkoutCount).toBe(4);
   });
 
-  it("renders a markdown table with the memo's columns", async () => {
+  it("renders a markdown table with the memo's columns, including Test round?", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: GOOD_ROUND_WINDOWS,
     });
     const md = renderMarkdownTable(result);
     expect(md).toContain(
-      "| Source | OS | Workout/exercise written? | Route present? |",
+      "| Source | OS | Start date | Test round? | Workout/exercise written? | Route present? |",
     );
     expect(md).toContain("CONSENT_REQUIRED + follow-up read");
-    expect(md).toContain("| Garmin Connect | iOS | Yes | Yes |");
     expect(md).toContain("N/A (iOS)");
+    // The recent (2026-09-20) Garmin workout is inside GOOD_ROUND_WINDOWS -> testRound Yes.
+    expect(md).toMatch(/\| Garmin Connect \| iOS \| 2026-09-20[^|]*\| Yes \| Yes \| Yes \|/);
+  });
+
+  it("renders the per-source newest-counted-workout-date table", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
+      roundWindows: GOOD_ROUND_WINDOWS,
+    });
+    const md = renderSourceSummaryMarkdown(result);
+    expect(md).toContain(
+      "| Source | Counted workouts | Newest counted workout date (with route) | Newest workout without a route |",
+    );
+    const garminRow = md.split("\n").find((l) => l.startsWith("| Garmin Connect"));
+    expect(garminRow).toBeDefined();
+    expect(garminRow).toContain("2026-09-20");
   });
 });
 
-describe("x1-ios-export: round window (decision 0001 Addendum F, gate finding B-7)", () => {
-  it("refuses (throws) when roundWindows is empty — never runs unwindowed", async () => {
-    await expect(
-      runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: [] }),
-    ).rejects.toThrow(/round window/);
+describe("x1-ios-export: exportDate/exportSha256 binding (Opus-gate correction, post-d0de4b8)", () => {
+  it("parses the ExportDate from the fixture export.xml", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    expect(result.exportDate).toBe("2026-09-21 09:00:00 -0400");
   });
 
-  it("excludes a workout outside every logged window, with a warning naming how many", async () => {
+  it("computes a SHA-256 of export.xml", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    expect(result.exportSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("computeSourceSummaries: newestStartDate only considers route-present workouts", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: GOOD_ROUND_WINDOWS });
+    const garmin = result.sourceSummaries.find((s) => s.sourceName === "Garmin Connect");
+    expect(garmin).toBeDefined();
+    // The 2026-09-20 Garmin workout has a route (2 trackpoints); the older
+    // 2026-08-01 one has none — so it must not win "newest WITH a route".
+    expect(garmin!.newestStartDate).toBe("2026-09-20 09:00:00 -0400");
+    expect(garmin!.newestStartDateWithoutRoute).toBe("2026-08-01 09:00:00 -0400");
+    const appleWatch = result.sourceSummaries.find((s) => s.sourceName === "Matt's Apple Watch");
+    expect(appleWatch).toBeDefined();
+    // Apple Watch's only workout has no route at all.
+    expect(appleWatch!.newestStartDate).toBeNull();
+    expect(appleWatch!.newestStartDateWithoutRoute).toBe("2026-09-20 09:01:00 -0400");
+  });
+});
+
+describe("x1-ios-export: round windows are labels, not a filter (decision 0005, superseding Addendum F)", () => {
+  it("does NOT throw when roundWindows is empty — every workout still counts, tagged testRound: false", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, { roundWindows: [] });
+    expect(result.golfWorkoutCount).toBe(5);
+    expect(result.workouts.every((w) => w.testRound === false)).toBe(true);
+  });
+
+  it("does NOT throw when roundWindows is omitted entirely", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, {});
+    expect(result.golfWorkoutCount).toBe(5);
+  });
+
+  it("a historical workout (the 2026-08-01 Garmin one, outside every window) counts, tagged testRound: false", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: TIGHT_ROUND_WINDOWS,
     });
-    // Only the 2026-09-20 cluster (3 workouts) is inside TIGHT_ROUND_WINDOWS;
-    // the 2026-08-01 Garmin workout and the 2026-09-15 Hole19 workout are not.
-    expect(result.golfWorkoutCount).toBe(3);
-    expect(result.workouts.some((w) => w.sourceName === "Hole19")).toBe(false);
-    expect(
-      result.warnings.some(
-        (w) => w.includes("excluded") && w.includes("round window"),
-      ),
-    ).toBe(true);
+    // Decision 0005: nothing is excluded by date. All 5 golf workouts count.
+    expect(result.golfWorkoutCount).toBe(5);
+    const old = result.workouts.find((w) => w.startDate?.startsWith("2026-08-01"));
+    expect(old).toBeDefined();
+    expect(old!.testRound).toBe(false);
+    const hole19 = result.workouts.find((w) => w.sourceName === "Hole19");
+    expect(hole19).toBeDefined();
+    expect(hole19!.testRound).toBe(false);
   });
 
-  it("a workout starting 59 minutes before the window (within the 60-min slack) still counts", async () => {
+  it("a workout INSIDE the logged window is tagged testRound: true", async () => {
+    const result = await runX1IosExport(GOOD_EXPORT_DIR, {
+      roundWindows: TIGHT_ROUND_WINDOWS,
+    });
+    const garminRecent = result.workouts.find(
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
+    );
+    expect(garminRecent).toBeDefined();
+    expect(garminRecent!.testRound).toBe(true);
+  });
+
+  it("a workout starting 59 minutes before the window (within the 60-min slack) is tagged testRound: true", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       // Garmin's 2026-09-20 workout starts at 13:00:00Z; a window starting
       // 13:59:00Z is 59 minutes later — within the ±60 min slack.
@@ -158,28 +224,24 @@ describe("x1-ios-export: round window (decision 0001 Addendum F, gate finding B-
         { startIso: "2026-09-20T13:59:00Z", endIso: "2026-09-20T14:30:00Z" },
       ],
     });
-    expect(
-      result.workouts.some(
-        (w) =>
-          w.sourceName === "Garmin Connect" &&
-          w.startDate?.startsWith("2026-09-20"),
-      ),
-    ).toBe(true);
+    const w = result.workouts.find(
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
+    );
+    expect(w).toBeDefined();
+    expect(w!.testRound).toBe(true);
   });
 
-  it("a workout starting 61 minutes before the window (outside the 60-min slack) does not count", async () => {
+  it("a workout starting 61 minutes before the window (outside the 60-min slack) is tagged testRound: false, but still counts", async () => {
     const result = await runX1IosExport(GOOD_EXPORT_DIR, {
       roundWindows: [
         { startIso: "2026-09-20T14:01:00Z", endIso: "2026-09-20T14:30:00Z" },
       ],
     });
-    expect(
-      result.workouts.some(
-        (w) =>
-          w.sourceName === "Garmin Connect" &&
-          w.startDate?.startsWith("2026-09-20"),
-      ),
-    ).toBe(false);
+    const w = result.workouts.find(
+      (w) => w.sourceName === "Garmin Connect" && w.startDate?.startsWith("2026-09-20"),
+    );
+    expect(w).toBeDefined();
+    expect(w!.testRound).toBe(false);
   });
 });
 
@@ -335,5 +397,88 @@ describe("countGpxTrackpoints", () => {
       path.join(FIXTURES, "workout-routes", "route_hole19_empty.gpx"),
     );
     expect(result).toEqual({ exists: true, count: 0 });
+  });
+});
+
+const GIT_TEST_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", [...GIT_TEST_IDENTITY, ...args], { cwd, encoding: "utf8" });
+}
+
+/** A fresh temp git repo with `X1.md` written and committed — the
+ * round-4 Opus-gate correction (post-4279773) baseline `runX1IosExportCli`
+ * now needs, since a recorded run requires both a real git repo AND a
+ * clean (committed) working tree. */
+function tmpGitX1Doc(body: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-cli-"));
+  git(dir, ["init", "-q"]);
+  const file = path.join(dir, "X1.md");
+  fsWriteFileSync(file, `# X1\n\n## Recorded export\n\n${body}\n## METHOD\n`, "utf8");
+  git(dir, ["add", "X1.md"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+  return file;
+}
+
+describe("runX1IosExportCli (round-4 Opus-gate correction, post-4279773) — 'a binding run binds and prints no verdict'", () => {
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  });
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+  });
+
+  it("the run that performs the first bind prints only the bind message — no verdict, no per-source detail, no output files", async () => {
+    // The fixture export.xml's <ExportDate> is 2026-09-21 09:00:00 -0400,
+    // whose UTC calendar date is 2026-09-21 — must match what's logged.
+    const x1DocPath = tmpGitX1Doc("- iOS: 2026-09-21\n- Android: \n");
+    const outDir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-out-"));
+    const outPrefix = path.join(outDir, "result");
+
+    await runX1IosExportCli(
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
+      x1DocPath,
+    );
+
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    expect(printed).toContain("bound: commit and push docs/p0/X1.md, then re-run");
+    // No verdict/per-source detail was ever computed or printed.
+    expect(printed).not.toMatch(/golf workout\(s\) found/);
+    expect(printed).not.toContain("recorded=");
+    expect(printed).not.toContain("|"); // no markdown table row
+    expect(existsSync(`${outPrefix}.json`)).toBe(false);
+    expect(existsSync(`${outPrefix}.md`)).toBe(false);
+
+    // The bind itself DID happen — docs/p0/X1.md now carries the hash.
+    const updatedDoc = readFileSync(x1DocPath, "utf8");
+    expect(updatedDoc).toMatch(/- iOS: 2026-09-21 sha256:[0-9a-f]{64}/);
+  });
+
+  it("a later run against the now-committed bind DOES print the recorded verdict", async () => {
+    const x1DocPath = tmpGitX1Doc("- iOS: 2026-09-21\n- Android: \n");
+    const outDir = mkdtempSync(path.join(tmpdir(), "golfraven-x1-ios-export-out-"));
+    const outPrefix = path.join(outDir, "result");
+
+    // First run: binds, prints no verdict (as above).
+    await runX1IosExportCli(
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
+      x1DocPath,
+    );
+    // Commit the bind — the real "commit and push docs/p0/X1.md now" step.
+    git(path.dirname(x1DocPath), ["add", "X1.md"]);
+    git(path.dirname(x1DocPath), ["commit", "-q", "-m", "bind iOS"]);
+    stdoutSpy.mockClear();
+
+    // Second run: the hash already matches — this run recomputes and
+    // prints the actual result.
+    await runX1IosExportCli(
+      { exportDir: GOOD_EXPORT_DIR, outPrefix, os: "ios", informational: false },
+      x1DocPath,
+    );
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    expect(printed).toMatch(/golf workout\(s\) found/);
+    expect(printed).not.toContain("bound: commit and push");
+    expect(existsSync(`${outPrefix}.json`)).toBe(true);
   });
 });

@@ -1,0 +1,55 @@
+{
+  "contractVersion": 0,
+  "facilities": [
+    {
+      "id": "fac_01M39GMFJZHP68D672R2K8XZXS",
+      "slug": "no-coords-facility",
+      "region": "US-TN",
+      "tz": "America/Chicago",
+      "verification": {
+        "status": "unverified"
+      },
+      "seed": {
+        "origin": "manual"
+      },
+      "booking": [],
+      "courses": [
+        {
+          "id": "crs_01M39GMFJZE103WTBYR0QYRY3B",
+          "slug": "no-coords-course"
+        }
+      ]
+    }
+  ],
+  "trails": [],
+  "idLedger": {
+    "entries": {
+      "fac_01M39GMFJZHP68D672R2K8XZXS": {
+        "id": "fac_01M39GMFJZHP68D672R2K8XZXS",
+        "kind": "fac",
+        "slug": "no-coords-facility",
+        "status": "stub",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "v1",
+            "date": "2026-01-01"
+          }
+        ]
+      },
+      "crs_01M39GMFJZE103WTBYR0QYRY3B": {
+        "id": "crs_01M39GMFJZE103WTBYR0QYRY3B",
+        "kind": "crs",
+        "status": "stub",
+        "facilityId": "fac_01M39GMFJZHP68D672R2K8XZXS",
+        "transitions": [
+          {
+            "type": "minted",
+            "catalogVersion": "v1",
+            "date": "2026-01-01"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -94,6 +94,11 @@ describe("shapeGolfSessions", () => {
     expect(result.generatedAt).toBe(NOW.toISOString());
     expect(result.windowDays).toBe(14);
   });
+
+  it("stamps os: 'android' as part of its own output (decision 0005, round-3)", () => {
+    const result = shapeGolfSessions([golfRecord()], 14, NOW);
+    expect(result.os).toBe("android");
+  });
 });
 
 // CONSENT_REQUIRED follow-up read (decision 0001, Addendum D, R6): a

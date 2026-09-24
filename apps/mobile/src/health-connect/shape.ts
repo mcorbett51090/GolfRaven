@@ -81,6 +81,7 @@ export function shapeGolfSessions(
     .map(shapeOneSession);
 
   return {
+    os: "android",
     generatedAt: now.toISOString(),
     windowDays,
     sessionCount: sessions.length,

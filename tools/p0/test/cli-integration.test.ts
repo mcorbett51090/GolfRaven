@@ -8,7 +8,7 @@
  * needing a build).
  */
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,17 +56,238 @@ describe.skipIf(!distBuilt)("CLI integration (requires `pnpm build` first)", () 
     expect(stdout).toMatch(/X5 coverage: 1\/2 \(50\.0%\) vs 60% bar — KILL/);
   });
 
-  // Decision 0001 Addendum F: the CLI ALWAYS reads the repo's own real
-  // docs/p0/X1.md for its logged round window(s) — there is no override
-  // flag (same philosophy as the K2 CLI's no-`--k2-doc` rule). Pre-round,
-  // that section is genuinely blank, so this is a real end-to-end proof the
-  // refusal is wired all the way through the built CLI, not just unit-level.
-  it("x1-ios-export CLI refuses (non-zero exit) against the real, pre-round docs/p0/X1.md with no round window logged", async () => {
+  // Decision 0005: the CLI ALWAYS reads the repo's own real docs/p0/X1.md
+  // for its recorded-export date(s) — there is no override flag (same
+  // philosophy as the K2 CLI's no-`--k2-doc` rule). Pre-round, that section
+  // is genuinely blank, so this is a real end-to-end proof the refusal is
+  // wired all the way through the built CLI, not just unit-level. (The
+  // OLD refusal here was "no round window logged" — decision 0005
+  // supersedes it; round windows no longer gate anything.) Round-4 Opus-gate
+  // correction (post-4279773) added an EARLIER-firing check — a recorded
+  // run also refuses while docs/p0/X1.md has uncommitted changes — so
+  // which message actually fires here now depends on this checkout's own
+  // ambient git state (this repo is under active development elsewhere in
+  // the same session); the assertion accepts either refusal, since both
+  // prove the run was correctly refused end-to-end.
+  it("x1-ios-export CLI refuses (non-zero exit) against the real, pre-round docs/p0/X1.md with no recorded-export date logged", async () => {
     const outPrefix = path.join(OUT_DIR, "x1-ios-export-result");
     await expect(
-      execFileAsync("node", [path.join(DIST, "x1-ios-export.js"), FIXTURES, "--out", outPrefix]),
-    ).rejects.toMatchObject({ stderr: expect.stringContaining("round window") });
+      execFileAsync("node", [
+        path.join(DIST, "x1-ios-export.js"),
+        FIXTURES,
+        "--os",
+        "ios",
+        "--out",
+        outPrefix,
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringMatching(/Recorded export|uncommitted changes/) });
     expect(existsSync(`${outPrefix}.json`)).toBe(false);
+  });
+
+  // Decision 0005: --informational runs anyway, against the same blank
+  // real docs/p0/X1.md, marked recorded: false with a loud banner.
+  it("x1-ios-export CLI --informational runs against the real, pre-round docs/p0/X1.md and marks recorded: false", async () => {
+    const outPrefix = path.join(OUT_DIR, "x1-ios-export-informational-result");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "x1-ios-export.js"),
+      FIXTURES,
+      "--os",
+      "ios",
+      "--informational",
+      "--out",
+      outPrefix,
+    ]);
+    expect(stdout).toContain("recorded=false");
+    const json = JSON.parse(readFileSync(`${outPrefix}.json`, "utf8"));
+    expect(json.recorded).toBe(false);
+    expect(json.os).toBe("ios");
+    expect(json.source.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const md = readFileSync(`${outPrefix}.md`, "utf8");
+    expect(md).toContain("INFORMATIONAL — NOT THE RECORDED X1 RESULT");
+  });
+
+  // Opus-gate correction (post-d0de4b8), decision 0005 "No recency limit":
+  // --since is refused on a recorded run. This never touches docs/p0/X1.md
+  // at all (the check runs in argument parsing, before any file is read),
+  // so it's a safe, isolated CLI test.
+  it("x1-ios-export CLI refuses --since without --informational", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-ios-export.js"),
+        FIXTURES,
+        "--os",
+        "ios",
+        "--since",
+        "2026-09-15",
+        "--out",
+        path.join(OUT_DIR, "x1-ios-export-since-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("--since is refused") });
+  });
+
+  it("x1-ios-export CLI allows --since WITH --informational", async () => {
+    const outPrefix = path.join(OUT_DIR, "x1-ios-export-since-informational-result");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "x1-ios-export.js"),
+      FIXTURES,
+      "--os",
+      "ios",
+      "--since",
+      "2026-09-15",
+      "--informational",
+      "--out",
+      outPrefix,
+    ]);
+    expect(stdout).toContain("recorded=false");
+  });
+
+  // Round-3 Opus-gate correction (post-8e5a29b): `x1-verdict` no longer
+  // takes `--ios`/`--os`; it takes `--ios-export <dir>` (the raw Apple
+  // Health export directory — FIXTURES itself, same as x1-ios-export's own
+  // tests) and/or `--android <json>`, and refuses to run without at least
+  // one of them.
+  const minimalAndroidJson = path.join(OUT_DIR, "x1-verdict-minimal-android.json");
+  const minimalSourceMapJson = path.join(OUT_DIR, "x1-verdict-minimal-source-map.json");
+  writeFileSync(
+    minimalAndroidJson,
+    JSON.stringify({
+      generatedAt: "2026-09-20T09:00:00Z",
+      windowDays: 7,
+      sessionCount: 0,
+      sessions: [],
+      os: "android",
+    }),
+  );
+  writeFileSync(
+    minimalSourceMapJson,
+    JSON.stringify({
+      garmin: { iosSourceNames: [], androidDataOrigins: [] },
+      appleWatch: { iosSourceNames: [] },
+      phoneApp: { iosSourceNames: [], androidDataOrigins: [], appUsed: "18Birdies" },
+    }),
+  );
+
+  it("x1-verdict CLI refuses when neither --ios-export nor --android is supplied", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--source-map",
+        minimalSourceMapJson,
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-refuse-no-input-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("Usage:") });
+  });
+
+  it("x1-verdict CLI refuses (non-zero exit) a recorded run for iOS against the real, blank recorded-export date", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--ios-export",
+        FIXTURES,
+        "--source-map",
+        minimalSourceMapJson,
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-refuse-ios-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringMatching(/Recorded export|uncommitted changes/) });
+  });
+
+  it("x1-verdict CLI refuses (non-zero exit) a recorded run for Android against the real, blank recorded-export date", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--android",
+        minimalAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-refuse-android-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringMatching(/Recorded export|uncommitted changes/) });
+  });
+
+  // Round-3 Opus-gate correction: "The Android reader output must carry os
+  // and generatedAt" — a basic shape check, refused unconditionally.
+  it("x1-verdict CLI refuses when --android's JSON has no os field", async () => {
+    const badAndroidJson = path.join(OUT_DIR, "x1-verdict-android-no-os.json");
+    writeFileSync(
+      badAndroidJson,
+      JSON.stringify({ generatedAt: "2026-09-20T09:00:00Z", windowDays: 7, sessionCount: 0, sessions: [] }),
+    );
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--android",
+        badAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--informational",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-bad-android-os-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining('not "android"') });
+  });
+
+  // Round-3 Opus-gate correction: same shape check, the other required
+  // field — "os and generatedAt" (Tests item: "Android JSON without os/
+  // generatedAt fields is refused").
+  it("x1-verdict CLI refuses when --android's JSON has no generatedAt field", async () => {
+    const badAndroidJson = path.join(OUT_DIR, "x1-verdict-android-no-generated-at.json");
+    writeFileSync(
+      badAndroidJson,
+      JSON.stringify({ os: "android", windowDays: 7, sessionCount: 0, sessions: [] }),
+    );
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--android",
+        badAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--informational",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-bad-android-generated-at-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("no generatedAt") });
+  });
+
+  // Round-3 Opus-gate correction: "No informational runs on real data while
+  // an OS is unbound" — minimalAndroidJson is a real (non-fixture) path,
+  // and Android has no bound hash in the real, blank docs/p0/X1.md.
+  it("x1-verdict CLI refuses --informational on a real (non-fixture) Android path while unbound", async () => {
+    await expect(
+      execFileAsync("node", [
+        path.join(DIST, "x1-verdict.js"),
+        "--android",
+        minimalAndroidJson,
+        "--source-map",
+        minimalSourceMapJson,
+        "--informational",
+        "--out",
+        path.join(OUT_DIR, "x1-verdict-informational-real-refuse-result"),
+      ]),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining("no informational runs on real data") });
+  });
+
+  it("x1-verdict CLI --informational allows a fixture path (--ios-export FIXTURES) and marks recorded: false", async () => {
+    const outPrefix = path.join(OUT_DIR, "x1-verdict-informational-result");
+    const { stdout } = await execFileAsync("node", [
+      path.join(DIST, "x1-verdict.js"),
+      "--ios-export",
+      FIXTURES,
+      "--source-map",
+      minimalSourceMapJson,
+      "--informational",
+      "--out",
+      outPrefix,
+    ]);
+    const json = JSON.parse(readFileSync(`${outPrefix}.json`, "utf8"));
+    expect(json.recorded).toBe(false);
+    expect(json.provenance.exportXml.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(json.provenance.sourceMapJson.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(json.provenance.x1Doc.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(stdout).toContain("INFORMATIONAL — NOT THE RECORDED X1 RESULT");
   });
 
   // NOTE: hitting the real default Overpass endpoint is deliberately NOT

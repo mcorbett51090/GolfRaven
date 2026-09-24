@@ -1,12 +1,22 @@
 /**
  * `docs/p0/X1.md`'s "Round windows" section (decision 0001 Addendum F: "X1
- * round window"): before the export is read, Matt logs the UTC start/end
- * time of each test round there. Only a workout/session whose start time
- * falls inside a logged window, with 60 minutes of slack either side,
- * counts — "Older workouts on the device are ignored." Both `x1-ios-export`
- * and `x1-verdict` (gate findings B-6/B-7) honor this, and both refuse to
- * run at all if no window is logged, rather than silently treating every
- * workout on the device as in-round.
+ * round window"; **superseded by decision 0005**, see below).
+ *
+ * **Decision 0005 (2026-09-24): round windows are labels, not a filter.**
+ * Matt owns a Garmin Approach S62 and has historical rounds on it that he
+ * wants to count toward the X1 verdict. So a logged round window no longer
+ * excludes anything — it only TAGS a workout/session whose start time falls
+ * inside it (60 minutes of slack either side) as `testRound: true` in the
+ * tools' output. Every other golf workout still counts, tagged
+ * `testRound: false`. Nothing is excluded because of its date, and
+ * `x1-ios-export`/`x1-verdict` no longer refuse to run when no window is
+ * logged — an empty/blank "Round windows" section is a normal, permanent
+ * state now, not just a pre-round one. `parseRoundWindows` and
+ * `isWithinRoundWindow` are unchanged: the parsing/matching logic decision
+ * 0001 Addendum F fixed is exactly what decides the `testRound` label under
+ * decision 0005; only the "refuse on empty" / "exclude what's outside"
+ * behavior (formerly in `readLoggedRoundWindows`, `runX1IosExport` and
+ * `computeX1Verdict`) is gone.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -217,20 +227,15 @@ export function resolveX1DocPath(): string {
 
 /**
  * Reads and parses the repo's own `docs/p0/X1.md` for its logged round
- * window(s), and REFUSES (throws) if none are logged — decision 0001
- * Addendum F: "refuse if no window is logged," never silently run
- * unwindowed against every workout the device happens to hold.
+ * window(s). **Decision 0005 supersedes decision 0001 Addendum F's refusal
+ * here:** an empty result (no window logged) is returned as `[]`, same as
+ * the pure parser — it is a normal state, not a reason to refuse. Callers
+ * use the returned windows only to tag matching workouts `testRound: true`
+ * (`isWithinRoundWindow`), never to exclude anything.
  */
 export async function readLoggedRoundWindows(
   x1DocPath: string = resolveX1DocPath(),
 ): Promise<RoundWindow[]> {
   const markdown = await readFile(x1DocPath, "utf8");
-  const windows = parseRoundWindows(markdown);
-  if (windows.length === 0) {
-    throw new Error(
-      `No round window is logged in ${x1DocPath}'s "## Round windows" section — decision 0001 Addendum F: ` +
-        "Matt logs the UTC start/end time of each test round there BEFORE the export is read. Refusing to run.",
-    );
-  }
-  return windows;
+  return parseRoundWindows(markdown);
 }
