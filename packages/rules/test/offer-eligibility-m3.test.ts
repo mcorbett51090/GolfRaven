@@ -99,12 +99,12 @@ describe("M3: node count is capped independently of depth — a very WIDE tree r
         right: { kind: "literal", value: 1 },
       })),
     };
-    const t0 = performance.now();
+    const t0 = Date.now();
     let result: ReturnType<typeof validateOfferEligibility> | undefined;
     expect(() => {
       result = validateOfferEligibility(wide);
     }).not.toThrow();
-    const elapsedMs = performance.now() - t0;
+    const elapsedMs = Date.now() - t0;
     expect(result?.valid).toBe(false);
     // A generous ceiling — the point of the cap is to bound this well
     // under a second, not to pin an exact number.
