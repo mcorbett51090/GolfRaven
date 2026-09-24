@@ -166,10 +166,13 @@ SELECT throws_ok(
 );
 SELECT lives_ok(
   $$INSERT INTO app.receipt_fingerprint (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
-    VALUES (NULL, '00000000-0000-0000-0000-00000000000b', 'phash-null-ocr-a', NULL, 'fac_x', current_date);
-   INSERT INTO app.receipt_fingerprint (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
+    VALUES (NULL, '00000000-0000-0000-0000-00000000000b', 'phash-null-ocr-a', NULL, 'fac_x', current_date)$$,
+  'setup: a receipt_fingerprint row with a NULL receipt_number_ocr'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.receipt_fingerprint (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
     VALUES (NULL, '00000000-0000-0000-0000-00000000000b', 'phash-null-ocr-b', NULL, 'fac_x', current_date)$$,
-  'receipt_fingerprint: two NULL receipt_number_ocr rows do NOT collide (partial index excludes NULL)'
+  'receipt_fingerprint: a SECOND NULL receipt_number_ocr row does NOT collide with the first (partial index excludes NULL)'
 );
 
 SELECT lives_ok(

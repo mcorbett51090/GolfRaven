@@ -535,6 +535,13 @@ export const EVIDENCE_ROW_CAP = 200;
  * direction — checkout before checkin) is ineligible outright, never
  * merely a large multiplier input. */
 export const MAX_DWELL_MINUTES = 12 * 60;
+/** `combine`'s (`score-play.ts`) device-GPS noisy-OR subtotal cap. */
+export const DEVICE_GPS_SUBTOTAL_CAP = 0.8;
+/** `combine`'s overall noisy-OR cap (both pipelines) and the
+ * purchase-corroboration combination's own cap (`scorePlay`). */
+export const OVERALL_SCORE_CAP = 0.99;
+/** `scorePlay`'s purchase-corroboration eligibility floor (badge score). */
+export const CORROBORATION_ELIGIBLE_THRESHOLD = 0.5;
 
 /** §4.5's radius-fallback cap and the §4.3/A2-01 user-pick cap. Applied
  * uniformly to every class now (should-fix): `courseDisambiguatedBy` lives

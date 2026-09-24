@@ -44,12 +44,18 @@
  * before scoring — it is evidence for a DIFFERENT play and must not
  * silently contribute to this one.
  */
+import { createHash } from "node:crypto";
 import {
   bookingFixSatisfiesHardWindow,
   classifyEvidenceRow,
+  CORROBORATION_ELIGIBLE_THRESHOLD,
+  DEVICE_GPS_SUBTOTAL_CAP,
+  EVIDENCE_ROW_CAP,
   finish,
+  fixesOfEvidenceRow,
   GROUP,
   isQualityCoSignalFix,
+  OVERALL_SCORE_CAP,
   resolveFixGrade,
   staffFixSatisfiesHardWindow,
   WEIGHT,
@@ -65,6 +71,13 @@ import {
   type ScorePlayContribution,
   type TokenState,
 } from "./internal/classify.js";
+import { parseScorePlayInput } from "./parse-evidence.js";
+
+export { parseEvidence, parseScorePlayInput } from "./parse-evidence.js";
+export type {
+  EvidenceParseResult,
+  ScorePlayInputParseResult,
+} from "./parse-evidence.js";
 
 /** Re-exported, by name, from the internal classification module — this is
  * the package's real public type/value surface for these; see this file's
@@ -145,22 +158,11 @@ function correlationFixIdsOfRow(row: Evidence): string[] {
   }
 }
 
-function fixesOfRow(row: Evidence): AppFix[] {
-  switch (row.source) {
-    case "staff_presence":
-      return row.coSignalFix ? [row.coSignalFix] : [];
-    case "booking":
-      return row.presenceFix ? [row.presenceFix] : [];
-    case "receipt_green_fee":
-      return row.coSignalFix ? [row.coSignalFix] : [];
-    case "foreground_dwell":
-      return [row.checkinFix, row.checkoutFix];
-    case "foreground_checkin":
-      return [row.fix];
-    default:
-      return [];
-  }
-}
+/** Fifth gate: now just `internal/classify.ts`'s shared
+ * `fixesOfEvidenceRow`, under this file's existing local name — see that
+ * export's own doc for why it moved (avoiding drift with
+ * `parse-evidence.ts`'s identical need). */
+const fixesOfRow = fixesOfEvidenceRow;
 
 class Dsu {
   private readonly parent: number[];
@@ -512,10 +514,10 @@ function combine(contributions: ScorePlayContribution[], groups: number[], pipel
   const rest = merged.filter((c) => c.group !== "device-gps");
   const finalWeights = rest.map(weightOf);
   if (deviceGps.length > 0) {
-    const subtotal = Math.min(noisyOr(deviceGps.map(weightOf)), 0.8);
+    const subtotal = Math.min(noisyOr(deviceGps.map(weightOf)), DEVICE_GPS_SUBTOTAL_CAP);
     finalWeights.push(subtotal);
   }
-  return { score: Math.min(noisyOr(finalWeights), 0.99), merged };
+  return { score: Math.min(noisyOr(finalWeights), OVERALL_SCORE_CAP), merged };
 }
 
 /* ------------------------------------------------------------------ */
@@ -677,7 +679,8 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
 
   const playClassesBadge = combine(playContributions, playGroups, "badge").score;
   const hasPlayClass = playContributions.length > 0;
-  const corroborationEligible = hasPlayClass && playClassesBadge >= 0.5 && corroborationApplies(ctx);
+  const corroborationEligible =
+    hasPlayClass && playClassesBadge >= CORROBORATION_ELIGIBLE_THRESHOLD && corroborationApplies(ctx);
 
   const allContributions: ScorePlayContribution[] = [...playContributions];
   if (corroborationApplies(ctx)) {
@@ -693,7 +696,7 @@ export function scorePlay(evidenceIn: Evidence[], ctx: ScorePlayContext): ScoreP
   }
 
   const scoreBadge = corroborationEligible
-    ? Math.min(noisyOr([playClassesBadge, WEIGHT.purchase_corroboration]), 0.99)
+    ? Math.min(noisyOr([playClassesBadge, WEIGHT.purchase_corroboration]), OVERALL_SCORE_CAP)
     : playClassesBadge;
 
   const moneyCombined = combine(playContributions, playGroups, "money");
