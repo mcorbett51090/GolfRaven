@@ -452,12 +452,27 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   untracked edit — `git diff --quiet` / `git status --porcelain`); it must carry no
   `git ls-files -v` assume-unchanged/skip-worktree flag (either can hide a local edit from the two
   checks just named, so this is refused regardless of `--allow-dirty-ledger`); and its content must
-  be byte-identical to what a FRESHLY FETCHED `main` already has at that path. That fetch is the
-  other half of the fix: every run deletes then re-fetches `refs/x2-verdict/verified-main` from the
-  hard-coded canonical URL `https://github.com/mcorbett51090/GolfRaven` (`git fetch --no-tags <url>
-  +refs/heads/main:refs/x2-verdict/verified-main`) — never the local, editable `origin` remote a
-  caller can point anywhere, or forge outright with a bare `git update-ref`. A network failure or a
-  fetch error gives UNOFFICIAL, never OFFICIAL — never silently treated as "assume it checks out."
+  be byte-identical to what GitHub's real `main` already has at that path. That fetch is the other
+  half of the fix, and it is the ONLY place any GitHub-verification git command runs (fifth
+  re-gate, round 6, "verification trusts the toolkit checkout's own local git state"): every run
+  creates a fresh, disposable, BARE repository (`mkdtemp` + `git init --bare`, removed on exit) and
+  fetches `main` from the hard-coded canonical URL `https://github.com/mcorbett51090/GolfRaven` into
+  it, under an EXPLICITLY CONSTRUCTED, minimal environment — never the caller's own `process.env` —
+  with `HOME`/`GIT_DIR` both pinned to that disposable repo, `GIT_NO_REPLACE_OBJECTS=1`,
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, and `-c core.hooksPath=/dev/null -c
+  protocol.file.allow=never -c protocol.ext.allow=never` on every invocation. This closes a class of
+  exploit the fourth re-gate's fix (running these commands inside the toolkit's own persistent
+  checkout, with the caller's environment inherited wholesale) left open: `git config
+  url.<fake>.insteadOf <real>` redirection (via local, global, SYSTEM config, or the
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` environment-variable channel — caught
+  pre-fetch by a `git ls-remote --get-url` canary too), `git replace`, a `.git/info/grafts` entry,
+  a `.git/hooks` script, and a `GIT_DIR`/`GIT_WORK_TREE` set in the caller's own environment. Full
+  history is always fetched (no `--depth`) and a shallow result refused. The ledger's blob AND
+  `docs/p0/X2.md`'s own text are both read with `git show <ref>:<path>` INSIDE that disposable repo
+  — never the local working tree — so content authority is GitHub's real `main`, full stop. A
+  network failure or a fetch error gives UNOFFICIAL, never OFFICIAL — never silently treated as
+  "assume it checks out." See `docs/p0/X2.md`'s own "Scope statement (fifth re-gate, round 6)" for
+  exactly what this does and does not defend against.
   If the ledger simply isn't on GitHub's real `main` yet (a ledger never pushed), that specific case
   does NOT hard-refuse — the run proceeds and the output is marked UNOFFICIAL with the reason,
   without needing `--allow-dirty-ledger`. Any other dirtiness (an uncommitted edit, or content that
@@ -479,12 +494,19 @@ node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmatio
   **`--x2-log` is pinned the SAME way `--ledger` is:** an acceptance is only ever trusted when
   `--x2-log` resolves to this toolkit's OWN canonical `docs/p0/X2.md` — a well-formed row in any
   other file, however git-reachable, is never counted, no matter how convincing it looks. Finding
-  a visible row at the right path is not enough on its own: `x2-verdict` runs `git blame` to find
-  the commit that introduced it and REQUIRES that commit reachable from the same freshly-fetched
-  `refs/x2-verdict/verified-main` the ledger check uses, printing the commit hash, author, date and
-  `%G?` signature status in its output for a human to audit. Should-fix: the acceptance date must
-  be on/after the evidence's own `ownerSavedDate`, and no more than 1 day after the commit's own
-  date. **Honest limit, corrected at the third re-gate:** agents in this environment act with
+  a visible row at the right path is not enough on its own: `x2-verdict` runs `git blame` directly
+  against `refs/heads/main` INSIDE the same disposable, scrubbed-environment repo the ledger check
+  uses (`verifyAgainstGitHub`) — reachability is true BY CONSTRUCTION there (fifth re-gate, round
+  6), so there is no separate ancestor check left to subvert — printing the commit hash, author,
+  date and `%G?` signature status in its output for a human to audit. **A row hidden inside a raw
+  HTML block** (CommonMark's own block-tag rule — `<details>`, `<div>`, `<table>`, etc., ending at
+  the next blank line) **or carrying a `hidden`/`style` attribute does not count either** (should-fix,
+  round 6 — the same class of forgery the fence/comment/indented-code rules already closed).
+  Should-fix: the acceptance date must be on/after the evidence's own `ownerSavedDate`, and no more
+  than 1 day after the commit's own date. **A Wayback corroboration additionally requires THIS
+  RUN's own ledger to be OFFICIAL** (should-fix, round 6) — a self-authored `wayback`-method ledger
+  row backed only by a locally forgeable ref no longer corroborates anything once the ledger itself
+  reads UNOFFICIAL. **Honest limit, corrected at the third re-gate:** agents in this environment act with
   Matt's own GitHub credentials, and even an API-made commit is GitHub-signed — so neither
   `git blame`'s author field nor `%G?` proves a commit is Matt's rather than an agent's; a prior
   round overstated this. What the fix genuinely buys: a forgery now has to land in GitHub's own

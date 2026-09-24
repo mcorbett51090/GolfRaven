@@ -1194,40 +1194,57 @@ async function isCanonicalPath(candidate: string, canonical: string): Promise<bo
 }
 
 // ---------------------------------------------------------------------------
-// GitHub verification (gate finding, fourth re-gate: "verification trusts
-// the toolkit checkout's own local git state")
+// Addendum J re-gate round 6 ("verification trusts the toolkit checkout's
+// own local git state"): round 5's `fetchVerifiedMainRef` fetched into a
+// ref INSIDE the toolkit's own checkout, with `process.env` inherited
+// wholesale. Three exploits confirmed TN from a local, unsigned "Matt"
+// commit: (I) `git config url.<fake>.insteadOf <real URL>` — local,
+// global, SYSTEM config, or the GIT_CONFIG_COUNT/KEY/VALUE env-var
+// channel, which needs no config file at all — silently redirects the
+// "real main" fetch to an attacker's own repo; (R) `git replace <real>
+// <forged>` makes every git command that reads the real commit
+// transparently read the forged one instead (blame, merge-base
+// --is-ancestor — everything), unless GIT_NO_REPLACE_OBJECTS=1; (G) a
+// `.git/info/grafts` line rewrites a commit's parent history, making a
+// forged commit an ancestor of "real main". GIT_DIR/GIT_WORK_TREE in the
+// caller's env, and a `.git/hooks` script (e.g. `reference-transaction`),
+// are the same class: local state a caller controls, silently trusted.
 //
-// Round 3's fix pinned the trust root to the toolkit's own checkout and
-// fetched `main` fresh from a hard-coded URL — but it ran that fetch, and
-// every later comparison against it, INSIDE the toolkit's own working
-// checkout, with `process.env` inherited wholesale. That checkout's own
-// git state is not itself trustworthy: `url.<x>.insteadOf` (local,
-// global, or injected via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/
-// `GIT_CONFIG_VALUE_*` env vars — a THIRD config channel needing no file
-// at all) can silently redirect "the real main" fetch to a forged
-// repository; `git replace` or `.git/info/grafts` can make a forged,
-// locally-committed "Matt" commit read as an ancestor of the genuinely
-// fetched main; `GIT_DIR`/`GIT_WORK_TREE` in the caller's own environment
-// can point every git command somewhere else entirely; a hook (e.g.
-// `reference-transaction`) could run arbitrary code on ref updates. Every
-// one of these lives in, or is reachable from, the checkout's OWN local
-// git state — which this fix stops trusting.
-//
-// The fix: every GitHub-verification git command runs inside a FRESH,
-// DISPOSABLE, BARE repository this module creates and destroys per run,
-// with a MINIMAL, EXPLICITLY CONSTRUCTED environment (never `{...
-// process.env}`) that starts empty and only ever adds back what git
-// genuinely needs (PATH, HOME pinned to that same disposable directory,
-// and the proxy/CA variables this environment's own outbound HTTPS
-// needs) plus a fixed set of safety settings
-// (`GIT_NO_REPLACE_OBJECTS`/`GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=
-// /dev/null`, `-c core.hooksPath=/dev/null`). Every OTHER `GIT_*`
-// variable — including `GIT_DIR`/`GIT_WORK_TREE` and the
-// `GIT_CONFIG_COUNT`/`KEY`/`VALUE` family — is dropped by construction,
-// not by an exclusion list, so a NEW `GIT_*` variable this module has
-// never heard of is dropped too.
+// Fix: every GitHub-verification git command below runs inside a
+// disposable, freshly-created, BARE repo (`mkdtemp` + `git init --bare`,
+// removed on exit) under an EXPLICITLY CONSTRUCTED, minimal environment
+// — never `{...process.env}` — with HOME and GIT_DIR both pinned to that
+// same disposable directory, GIT_NO_REPLACE_OBJECTS=1,
+// GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null, and per-command
+// `-c core.hooksPath=/dev/null -c protocol.file.allow=never -c
+// protocol.ext.allow=never`. A `git ls-remote --get-url` canary (which
+// resolves git's own config-rewriting logic WITHOUT a network
+// connection) catches `insteadOf` redirection before any fetch happens;
+// full history (no `--depth`) is fetched and a shallow result refused;
+// `info/grafts` and `refs/replace/*` in the fresh temp repo are refused
+// outright as belt-and-braces even though a brand-new repo cannot
+// acquire either on its own. Reachability drops out for free: blame runs
+// directly against `refs/heads/main` inside this repo, so whatever
+// commit it finds is by construction already part of that ref's own
+// history — there is no separate `merge-base --is-ancestor` step to
+// subvert. Content authority also moves to GitHub: both the ledger blob
+// and X2.md's own text are read with `git show <ref>:<path>` INSIDE the
+// disposable repo, never from the local working tree — the local files
+// are used only to confirm `--ledger`/`--x2-log` POINT at this toolkit's
+// own canonical path (fix (a), unchanged), never for their CONTENT. This
+// also neutralises a symlinked-docs/p0 trick: a local symlink no longer
+// matters for what is actually trusted.
 // ---------------------------------------------------------------------------
 
+/** Environment variables ALLOWED to pass through into a disposable
+ * verification repo's git invocations — everything else in
+ * `process.env` is dropped, specifically including every OTHER `GIT_*`
+ * variable (GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_COUNT/KEY_n/VALUE_n,
+ * GIT_ALTERNATE_OBJECT_DIRECTORIES, etc.) — a caller's env can carry any
+ * of these, and none of them may reach a command this module treats as
+ * "verified against GitHub". Proxy/CA variables are allow-listed because
+ * this environment's outbound HTTPS goes through a TLS-intercepting
+ * proxy the fetch genuinely needs to succeed through. */
 const GIT_ENV_ALLOWLIST = [
   "PATH",
   "HTTPS_PROXY",
@@ -1241,12 +1258,14 @@ const GIT_ENV_ALLOWLIST = [
   "NODE_EXTRA_CA_CERTS",
 ] as const;
 
-/** Builds the MINIMAL, explicit environment every disposable-repo git
- * command runs under — see this section's own doc above for why. `HOME`
- * and `GIT_DIR` both point at the SAME disposable directory: even if
- * `GIT_CONFIG_GLOBAL=/dev/null` were somehow bypassed, `$HOME/.gitconfig`
- * still resolves inside a directory this run just created and nothing
- * external has ever touched. */
+/** Builds the EXPLICIT, minimal environment every disposable-repo git
+ * command runs under — constructed from an empty object, never
+ * `{...process.env}`. `HOME` and `GIT_DIR` are both pinned to `tmpDir`
+ * (the disposable bare repo itself), so no ambient `~/.gitconfig`, and
+ * no caller-set `GIT_DIR`/`GIT_WORK_TREE`, can point these commands at
+ * anything else. `GIT_NO_REPLACE_OBJECTS=1` defeats exploit R;
+ * `GIT_CONFIG_NOSYSTEM=1` + `GIT_CONFIG_GLOBAL=/dev/null` defeat
+ * SYSTEM/global `insteadOf` redirection (exploit I). */
 function scrubbedGitEnv(tmpDir: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of GIT_ENV_ALLOWLIST) {
@@ -1261,14 +1280,15 @@ function scrubbedGitEnv(tmpDir: string): NodeJS.ProcessEnv {
   return env;
 }
 
-/** `-c` flags applied to every disposable-repo git command. Hooks are
- * disabled outright. `file`/`ext` transports are refused UNLESS
- * `allowFileProtocol` — the TEST-ONLY seam (`verifyAgainstGitHub`'s
- * `repoUrl` override) needs a local bare repo reachable by path; the
- * REAL CLI path (the hard-coded, always-HTTPS GitHub URL) never sets
- * this, so even a redirected URL that somehow survived the env-scrubbing
- * above could never be satisfied by a local file or an external
- * protocol handler either. */
+/** Per-command `-c` flags every disposable-repo git invocation carries:
+ * no hooks (`core.hooksPath=/dev/null` — defeats a `.git/hooks/
+ * reference-transaction` or similar running arbitrary code), no `file://`
+ * or `ext::` transports (defeats a redirect to a local path or an
+ * arbitrary shelled-out "remote helper") EXCEPT under the test-only seam
+ * (`opts.repoUrl` in `verifyAgainstGitHub`), which needs `file://` to
+ * point at a local bare repo standing in for GitHub with zero real
+ * network access. `protocol.ext.allow` stays `never` unconditionally —
+ * no seam ever needs it. */
 function gitSafeConfigArgs(allowFileProtocol: boolean): string[] {
   return [
     "-c",
@@ -1292,42 +1312,40 @@ async function runDisposableGit(
   return { stdout };
 }
 
-/** The result of `verifyAgainstGitHub` — everything downstream (the
- * ledger check, `ACCEPT`-row matching and provenance) reads from THIS,
- * never from the toolkit checkout's own local git state. `ok: false`
- * means the whole run is UNOFFICIAL; every field is `null`/a fixed
- * failure and `blameX2MdLine` always returns `{ok: false}}` in that
- * case, so a caller that forgets to check `ok` first still fails closed
- * rather than silently trusting stale/absent data. `cleanup` MUST be
- * called exactly once when done, regardless of `ok` — it removes the
- * disposable directory. */
+/** The result of a `verifyAgainstGitHub` run — everything downstream
+ * (`checkLedgerAgainstGit`, `resolveAcceptanceRecord`, `resolveWaybackRecord`
+ * via `ledgerOfficial`) reads GitHub's own state ONLY through this
+ * object, never by running its own git commands against the caller's
+ * environment. `cleanup()` removes the disposable temp repo — callers
+ * MUST call it (`main()` does so in a `finally`). */
 export interface GitHubVerification {
   ok: boolean;
+  /** Human-readable reason for `ok: false`, or a plain confirmation. */
   detail: string;
-  /** The blob hash GitHub's real `main` has at
-   * `CANONICAL_LEDGER_REPO_RELATIVE_PATH`, or `null` if `ok` is `false`
-   * or that path doesn't exist there yet. */
+  /** `git rev-parse refs/heads/main:docs/p0/x2-recorded-ledger.json`,
+   * read inside the disposable repo — `null` when verification failed or
+   * GitHub main does not yet have that path. */
   ledgerBlobHash: string | null;
-  /** The blob hash GitHub's real `main` has at
-   * `CANONICAL_X2MD_REPO_RELATIVE_PATH`, or `null`. */
+  /** Same, for `docs/p0/X2.md`. */
   x2MdBlobHash: string | null;
-  /** The FULL TEXT of `docs/p0/X2.md` AS IT EXISTS ON GITHUB'S REAL
-   * `main` (`git show refs/heads/main:docs/p0/X2.md` inside the
-   * disposable repo) — never the local working tree. `null` if `ok` is
-   * `false`. This is what `ACCEPT`-row matching runs against. */
+  /** `git show refs/heads/main:docs/p0/X2.md`'s own text, read inside
+   * the disposable repo — the AUTHORITATIVE source for ACCEPT-row
+   * matching (never the local working tree — see this section's own
+   * banner comment). `null` when verification failed or the path does
+   * not exist on GitHub main. */
   x2MdText: string | null;
-  /** Blames one line of GitHub main's own X2.md, INSIDE the disposable
-   * repo, directly against `refs/heads/main` — the commit `git blame`
-   * finds is, by construction, already part of that ref's own history
-   * (blame traces a ref's history to find it), so no separate
-   * reachability check is needed the way a local-file blame would have
-   * required. `reachableFromVerifiedMain` is always `true` when `ok` is
-   * `true` here, for exactly that reason. */
+  /** Blames `docs/p0/X2.md` at `lineNumber` directly against
+   * `refs/heads/main` INSIDE the disposable repo. Because the blame
+   * target IS that ref, whatever commit it finds is by construction
+   * already part of that ref's own history — `reachableFromVerifiedMain`
+   * is therefore always `true` when `ok` is `true` here; there is no
+   * separate ancestor check left to subvert (round 6's own
+   * simplification). */
   blameX2MdLine: (
     lineNumber: number,
   ) => Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }>;
-  /** Removes the disposable directory. Idempotent; safe to call even
-   * after a failure partway through `verifyAgainstGitHub`. */
+  /** Removes the disposable temp repo. Safe to call more than once;
+   * never throws. */
   cleanup: () => Promise<void>;
 }
 
@@ -1343,290 +1361,265 @@ function failedGitHubVerification(detail: string, tmpDir: string | null): GitHub
       detail: "GitHub verification did not succeed this run — nothing is trusted.",
     }),
     cleanup: async () => {
-      if (tmpDir) {
-        await rm(tmpDir, { recursive: true, force: true }).catch(() => {
-          // Best-effort — a leftover temp dir under the OS tmp
-          // directory is not itself a trust issue.
-        });
-      }
+      if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     },
   };
 }
 
 /**
- * Gate finding, fourth re-gate, the fix: the ONLY function in this
- * module that touches the network, and the ONLY place any GitHub-derived
- * trust decision is computed. Runs entirely inside a FRESH, DISPOSABLE,
- * BARE repository (never the toolkit's own checkout), under the
- * `scrubbedGitEnv` environment (never inherited `process.env`), with
- * `gitSafeConfigArgs` applied to every command. In order:
+ * Gate finding (fourth re-gate, Addendum J round 6): the ONLY function in
+ * this module that touches the network, and the ONLY place any
+ * GitHub-verification git command ever runs — always inside a fresh
+ * disposable bare repo, always under `scrubbedGitEnv`. See this
+ * section's own banner comment for the full rationale and the exploits
+ * (I/R/G/GIT_DIR/hooks) this closes. Never throws: any failure (a
+ * redirected fetch canary, `sslVerify` disabled, a shallow result, a
+ * `grafts`/`replace` finding, a network error) comes back as
+ * `{ok: false}` — the caller then treats the run as UNOFFICIAL, never
+ * OFFICIAL.
  *
- *  1. Refuses outright if `GIT_SSL_NO_VERIFY` is present in THIS
- *     PROCESS'S OWN environment — even though it is never propagated
- *     into the scrubbed env below, its presence signals this
- *     environment's own intent to disable TLS verification somewhere,
- *     which this check treats as untrustworthy on its own.
- *  2. Creates the disposable bare repo (`mkdtemp` + `git init --bare`).
- *  3. Asserts `git ls-remote --get-url <repoUrl>` prints `repoUrl` back
- *     UNCHANGED — a `url.<x>.insteadOf`-style redirection (had one
- *     somehow survived the env-scrubbing) would change this.
- *  4. Refuses if `http.sslVerify` resolves to `false` under this run's
- *     own (scrubbed, fresh-repo) config.
- *  5. Fetches `main` with FULL history (no `--depth`) into
- *     `refs/heads/main`.
- *  6. Refuses if the result is a shallow repository, or if it
- *     unexpectedly has `info/grafts` or any `refs/replace/*` entries
- *     (belt and braces alongside `GIT_NO_REPLACE_OBJECTS=1` — a FRESH
- *     repo we just created and fetched one ref into should never have
- *     either).
- *  7. Reads the ledger's and X2.md's blob hashes, and X2.md's full text,
- *     from `refs/heads/main` directly.
- *
- * Never throws: any failure along the way comes back as `{ok: false}`
- * with a `detail` naming the step — the caller (`main()`) then treats
- * the run as UNOFFICIAL, never OFFICIAL.
- *
- * `repoUrl` is a TEST-ONLY seam: `main()` NEVER passes it (no CLI flag
- * exposes this), so the only way to point this at something other than
- * the real, pinned GitHub URL is to call it directly from test code,
- * never through the shipped CLI. Passing it ALSO relaxes
- * `protocol.file.allow` for this call only, so a test can fetch from a
- * local bare repo without touching the network — the real CLI path
- * (`repoUrl` omitted) never gets that relaxation.
+ * `opts.repoUrl` is a TEST-ONLY seam: `main()` NEVER passes it (no CLI
+ * flag reaches this function's own arguments), so the only way to point
+ * this at something other than the real, pinned GitHub URL — and the
+ * only way `protocol.file.allow` is ever relaxed — is to call this
+ * directly from test code, against a local bare repo standing in for
+ * GitHub, never through the shipped CLI.
  */
 export async function verifyAgainstGitHub(opts: { repoUrl?: string } = {}): Promise<GitHubVerification> {
   const repoUrl = opts.repoUrl ?? GOLFRAVEN_CANONICAL_REPO_URL;
   const allowFileProtocol = opts.repoUrl !== undefined;
 
+  // Checked BEFORE even creating the temp dir: an original environment
+  // that has already disabled TLS verification for git makes any fetch
+  // below untrustworthy regardless of what the disposable repo does.
   if (process.env.GIT_SSL_NO_VERIFY !== undefined) {
     return failedGitHubVerification(
-      "GIT_SSL_NO_VERIFY is set in this process's own environment — refusing to verify against GitHub " +
-        "rather than risk trusting a result that could have been produced under disabled TLS verification.",
+      "refusing: GIT_SSL_NO_VERIFY is set in this process's own environment — a fetch under a disabled-TLS-" +
+        "verification environment cannot be trusted as genuinely from GitHub (fourth re-gate).",
       null,
     );
   }
 
-  let tmpDir: string;
+  let tmpDir: string | null = null;
   try {
-    tmpDir = await mkdtemp(path.join(os.tmpdir(), "golfraven-x2-github-verify-"));
-  } catch (err) {
-    return failedGitHubVerification(
-      `could not create a disposable directory for GitHub verification: ${err instanceof Error ? err.message : String(err)}`,
-      null,
-    );
-  }
+    tmpDir = await mkdtemp(path.join(os.tmpdir(), "x2-verdict-verify-"));
+    await execFileAsync("git", ["init", "--quiet", "--bare", tmpDir], {
+      env: scrubbedGitEnv(tmpDir),
+    });
 
-  try {
-    await runDisposableGit(tmpDir, allowFileProtocol, ["init", "-q", "--bare", tmpDir]);
-  } catch (err) {
-    return failedGitHubVerification(
-      `could not initialise the disposable bare repo: ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
-
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, ["ls-remote", "--get-url", repoUrl]);
-    if (stdout.trim() !== repoUrl) {
-      return failedGitHubVerification(
-        `git ls-remote --get-url resolved "${repoUrl}" to "${stdout.trim()}" instead of leaving it ` +
-          "unchanged — refusing (possible URL redirection via git config).",
-        tmpDir,
-      );
-    }
-  } catch (err) {
-    return failedGitHubVerification(
-      `git ls-remote --get-url failed: ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
-
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-      "config",
-      "--get",
-      "http.sslVerify",
-    ]);
-    if (stdout.trim() === "false") {
-      return failedGitHubVerification(
-        "http.sslVerify resolves to false under this run's own config — refusing to verify against GitHub.",
-        tmpDir,
-      );
-    }
-  } catch {
-    // `git config --get` exits non-zero when the key is unset — the
-    // default (verify) applies; nothing to refuse.
-  }
-
-  try {
-    await runDisposableGit(tmpDir, allowFileProtocol, [
-      "fetch",
-      "--no-tags",
+    // Step 3: `git ls-remote --get-url` resolves git's OWN config
+    // rewriting logic (insteadOf, local/global/SYSTEM config, and the
+    // GIT_CONFIG_COUNT/KEY_n/VALUE_n env-var channel) WITHOUT making a
+    // network connection — the canary that catches exploit I before any
+    // fetch happens. `scrubbedGitEnv` has already dropped every
+    // GIT_CONFIG_* variable from the caller's own env and pointed
+    // GIT_CONFIG_GLOBAL at /dev/null with GIT_CONFIG_NOSYSTEM=1, so this
+    // check is really asserting those took effect, belt-and-braces.
+    const { stdout: resolvedUrl } = await runDisposableGit(tmpDir, allowFileProtocol, [
+      "ls-remote",
+      "--get-url",
       repoUrl,
-      "+refs/heads/main:refs/heads/main",
     ]);
-  } catch (err) {
-    return failedGitHubVerification(
-      `fetching main from ${repoUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
-
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-      "rev-parse",
-      "--is-shallow-repository",
-    ]);
-    if (stdout.trim() === "true") {
+    if (resolvedUrl.trim() !== repoUrl) {
       return failedGitHubVerification(
-        "the fetched history is shallow — refusing (a shallow boundary commit can misrepresent ancestor " +
-          "reachability).",
+        `refusing: "git ls-remote --get-url ${repoUrl}" resolved to "${resolvedUrl.trim()}" instead of the ` +
+          "URL itself — this means some config is rewriting the URL (insteadOf, via local/global/SYSTEM " +
+          "config or GIT_CONFIG_COUNT/KEY/VALUE env vars) even inside the scrubbed environment (fourth " +
+          "re-gate, exploit I).",
         tmpDir,
       );
     }
-  } catch (err) {
-    return failedGitHubVerification(
-      `could not check whether the fetched repository is shallow: ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
 
-  try {
-    await access(path.join(tmpDir, "info", "grafts"));
-    return failedGitHubVerification(
-      "the disposable repo unexpectedly has an info/grafts file after a fresh init+fetch — refusing.",
-      tmpDir,
-    );
-  } catch {
-    // Good — does not exist, as a freshly created repo should have.
-  }
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, ["for-each-ref", "refs/replace"]);
-    if (stdout.trim().length > 0) {
+    // Refuse if the ORIGINAL environment's git config resolves
+    // http.sslVerify to false — a caller-set `-c http.sslVerify=false`
+    // (or GIT_SSL_NO_VERIFY, checked above) means TLS was not actually
+    // verified for whatever proxy/MITM sits between here and GitHub.
+    try {
+      const { stdout } = await execFileAsync("git", ["config", "--get", "http.sslVerify"]);
+      if (stdout.trim() === "false") {
+        return failedGitHubVerification(
+          "refusing: this environment's own git config resolves http.sslVerify to false — a fetch under " +
+            "disabled TLS verification cannot be trusted as genuinely from GitHub (fourth re-gate).",
+          tmpDir,
+        );
+      }
+    } catch {
+      // No such config key set anywhere — the normal, expected case
+      // (verification defaults to on); nothing to refuse.
+    }
+
+    // Step 4: fetch `main` with FULL history (no --depth) into the
+    // disposable repo's own refs/heads/main.
+    try {
+      await runDisposableGit(tmpDir, allowFileProtocol, [
+        "fetch",
+        "--no-tags",
+        repoUrl,
+        "+refs/heads/main:refs/heads/main",
+      ]);
+    } catch (err) {
       return failedGitHubVerification(
-        "the disposable repo unexpectedly has refs/replace entries after a fresh init+fetch — refusing.",
+        `fetching main from ${repoUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
         tmpDir,
       );
     }
-  } catch (err) {
-    return failedGitHubVerification(
-      `could not check for replace refs: ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
 
-  let ledgerBlobHash: string;
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-      "rev-parse",
-      `refs/heads/main:${CANONICAL_LEDGER_REPO_RELATIVE_PATH}`,
-    ]);
-    ledgerBlobHash = stdout.trim();
-  } catch (err) {
-    return failedGitHubVerification(
-      `GitHub main does not yet have "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}": ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
-  let x2MdBlobHash: string;
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-      "rev-parse",
-      `refs/heads/main:${CANONICAL_X2MD_REPO_RELATIVE_PATH}`,
-    ]);
-    x2MdBlobHash = stdout.trim();
-  } catch (err) {
-    return failedGitHubVerification(
-      `GitHub main does not yet have "${CANONICAL_X2MD_REPO_RELATIVE_PATH}": ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
-  let x2MdText: string;
-  try {
-    const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-      "show",
-      `refs/heads/main:${CANONICAL_X2MD_REPO_RELATIVE_PATH}`,
-    ]);
-    x2MdText = stdout;
-  } catch (err) {
-    return failedGitHubVerification(
-      `could not read "${CANONICAL_X2MD_REPO_RELATIVE_PATH}" from GitHub main: ${err instanceof Error ? err.message : String(err)}`,
-      tmpDir,
-    );
-  }
-
-  const blameX2MdLine = async (
-    lineNumber: number,
-  ): Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }> => {
-    let sha: string;
+    // Refuse a shallow result outright — a shallow boundary commit can
+    // misrepresent ancestor-reachability.
     try {
       const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-        "blame",
-        "-L",
-        `${lineNumber},${lineNumber}`,
-        "--porcelain",
-        "refs/heads/main",
-        "--",
-        CANONICAL_X2MD_REPO_RELATIVE_PATH,
+        "rev-parse",
+        "--is-shallow-repository",
       ]);
-      const firstLine = stdout.split("\n")[0] ?? "";
-      const candidate = firstLine.split(" ")[0] ?? "";
-      if (!/^[0-9a-f]{40}$/.test(candidate)) {
+      if (stdout.trim() === "true") {
+        return failedGitHubVerification(
+          "refusing: the fetched repository is shallow (--is-shallow-repository) — a shallow boundary commit " +
+            "can misrepresent ancestor-reachability (fourth re-gate).",
+          tmpDir,
+        );
+      }
+    } catch (err) {
+      return failedGitHubVerification(
+        `could not check --is-shallow-repository: ${err instanceof Error ? err.message : String(err)}`,
+        tmpDir,
+      );
+    }
+
+    // Belt-and-braces (this is a brand-new disposable repo, so neither
+    // should be reachable at all — but check anyway, cheaply, in case a
+    // future change to this function ever reuses a repo or a git
+    // implementation detail smuggles one in).
+    try {
+      await access(path.join(tmpDir, "info", "grafts"));
+      return failedGitHubVerification(
+        "refusing: the disposable verification repo has an info/grafts file (belt-and-braces — this should " +
+          "be unreachable in a fresh repo; fourth re-gate, exploit G).",
+        tmpDir,
+      );
+    } catch {
+      // Expected: no grafts file.
+    }
+    try {
+      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, ["for-each-ref", "refs/replace/"]);
+      if (stdout.trim().length > 0) {
+        return failedGitHubVerification(
+          "refusing: the disposable verification repo has refs/replace/* entries (belt-and-braces — should " +
+            "be unreachable in a fresh repo with GIT_NO_REPLACE_OBJECTS=1; fourth re-gate, exploit R).",
+          tmpDir,
+        );
+      }
+    } catch (err) {
+      return failedGitHubVerification(
+        `could not list refs/replace/: ${err instanceof Error ? err.message : String(err)}`,
+        tmpDir,
+      );
+    }
+
+    // Step 5: read the ledger and X2.md CONTENT straight from
+    // refs/heads/main's own tree — never the local working tree.
+    let ledgerBlobHash: string | null = null;
+    try {
+      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
+        "rev-parse",
+        `refs/heads/main:${CANONICAL_LEDGER_REPO_RELATIVE_PATH}`,
+      ]);
+      ledgerBlobHash = stdout.trim();
+    } catch {
+      ledgerBlobHash = null; // GitHub main simply doesn't have this path yet.
+    }
+    let x2MdBlobHash: string | null = null;
+    let x2MdText: string | null = null;
+    try {
+      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
+        "rev-parse",
+        `refs/heads/main:${CANONICAL_X2MD_REPO_RELATIVE_PATH}`,
+      ]);
+      x2MdBlobHash = stdout.trim();
+      const { stdout: text } = await runDisposableGit(tmpDir, allowFileProtocol, [
+        "show",
+        `refs/heads/main:${CANONICAL_X2MD_REPO_RELATIVE_PATH}`,
+      ]);
+      x2MdText = text;
+    } catch {
+      x2MdBlobHash = null;
+      x2MdText = null;
+    }
+
+    const finalTmpDir = tmpDir;
+    const blameX2MdLine = async (
+      lineNumber: number,
+    ): Promise<{ ok: true; provenance: AcceptRowGitProvenance } | { ok: false; detail: string }> => {
+      let sha: string;
+      try {
+        const { stdout } = await runDisposableGit(finalTmpDir, allowFileProtocol, [
+          "blame",
+          "-L",
+          `${lineNumber},${lineNumber}`,
+          "--porcelain",
+          "refs/heads/main",
+          "--",
+          CANONICAL_X2MD_REPO_RELATIVE_PATH,
+        ]);
+        const firstLine = stdout.split("\n")[0] ?? "";
+        const candidate = firstLine.split(" ")[0] ?? "";
+        if (!/^[0-9a-f]{40}$/.test(candidate)) {
+          return {
+            ok: false,
+            detail: `git blame did not return a commit hash for line ${lineNumber} of GitHub main's own docs/p0/X2.md (got: ${JSON.stringify(firstLine)}).`,
+          };
+        }
+        sha = candidate;
+      } catch (err) {
+        return { ok: false, detail: `git blame failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      let author = "";
+      let authorDate = "";
+      let signatureStatus = "";
+      try {
+        const { stdout } = await runDisposableGit(finalTmpDir, allowFileProtocol, [
+          "show",
+          "-s",
+          "--format=%an%x1f%aI%x1f%G?",
+          sha,
+        ]);
+        const [an, aI, gStatus] = stdout.trim().split("\x1f");
+        author = an ?? "";
+        authorDate = aI ?? "";
+        signatureStatus = gStatus ?? "";
+      } catch (err) {
         return {
           ok: false,
-          detail: `git blame did not return a commit hash for line ${lineNumber} of GitHub main's X2.md (got: ${JSON.stringify(firstLine)}).`,
+          detail: `git show failed for commit ${sha}: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
-      sha = candidate;
-    } catch (err) {
+      // Reachability is TRUE BY CONSTRUCTION: this blame ran directly
+      // against refs/heads/main, so whatever commit it found is already
+      // part of that ref's own history — no separate merge-base
+      // --is-ancestor step exists to subvert (round 6's simplification;
+      // see this section's own banner comment).
       return {
-        ok: false,
-        detail: `git blame (on GitHub main, inside the disposable repo) failed: ${err instanceof Error ? err.message : String(err)}`,
+        ok: true,
+        provenance: { commit: sha, author, authorDate, signatureStatus, reachableFromVerifiedMain: true },
       };
-    }
-    let author = "";
-    let authorDate = "";
-    let signatureStatus = "";
-    try {
-      const { stdout } = await runDisposableGit(tmpDir, allowFileProtocol, [
-        "show",
-        "-s",
-        "--format=%an%x1f%aI%x1f%G?",
-        sha,
-      ]);
-      const [an, aI, gStatus] = stdout.trim().split("\x1f");
-      author = an ?? "";
-      authorDate = aI ?? "";
-      signatureStatus = gStatus ?? "";
-    } catch (err) {
-      return {
-        ok: false,
-        detail: `git show failed for commit ${sha}: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-    // Blamed DIRECTLY against refs/heads/main inside the disposable
-    // repo — the found commit is, by construction, already part of
-    // that ref's own history, so reachability is true here, not a
-    // separate fact to check.
+    };
+
     return {
       ok: true,
-      provenance: { commit: sha, author, authorDate, signatureStatus, reachableFromVerifiedMain: true },
+      detail: `verified against GitHub main (${repoUrl}), disposable repo + scrubbed environment.`,
+      ledgerBlobHash,
+      x2MdBlobHash,
+      x2MdText,
+      blameX2MdLine,
+      cleanup: async () => {
+        await rm(finalTmpDir, { recursive: true, force: true }).catch(() => {});
+      },
     };
-  };
-
-  return {
-    ok: true,
-    detail: `verified against ${repoUrl}'s real main.`,
-    ledgerBlobHash,
-    x2MdBlobHash,
-    x2MdText,
-    blameX2MdLine,
-    cleanup: async () => {
-      await rm(tmpDir, { recursive: true, force: true }).catch(() => {
-        // Best-effort.
-      });
-    },
-  };
+  } catch (err) {
+    return failedGitHubVerification(
+      `unexpected error verifying against GitHub: ${err instanceof Error ? err.message : String(err)}`,
+      tmpDir,
+    );
+  }
 }
 
 /**
@@ -1666,20 +1659,19 @@ export interface ResolveCorroborationOptions {
    * re-gate) for its corroboration to count at all; `x2-corroborate-
    * wayback` is the only tool that writes such an entry. */
   ledger: RecordedLedger;
-  /** Should-fix, fourth re-gate: whether THIS run's `--ledger` is
-   * OFFICIAL (`checkLedgerAgainstGit(...).clean`) — a `wayback` record
-   * is only ever trusted when it is, the same standard `acceptance`
-   * already required. Round 5's exploit A3 showed a `wayback` record
-   * still reading "corroborated" under an UNOFFICIAL ledger header;
-   * this closes that. */
+  /** Gate finding, should-fix (fourth re-gate): whether THIS RUN's ledger
+   * itself resolved OFFICIAL (`checkLedgerAgainstGit(...).clean`) —
+   * threaded through from `main()`. A Wayback corroboration can only be
+   * trusted when the ledger registering it is itself verified against
+   * GitHub main (see `resolveWaybackRecord`'s own gate). */
   ledgerOfficial: boolean;
-  /** The LOCAL on-disk `docs/p0/X2.md` — its full text and the path it
-   * was read from. `null` when the file could not be read. Used ONLY to
-   * check the LOCAL `--x2-log` resolves to this toolkit's own canonical
-   * path (gate finding, third re-gate, fix (a)) — the actual `ACCEPT`
-   * row text and provenance always come from `githubVerification`
-   * instead (gate finding, fourth re-gate: never the local working
-   * tree). */
+  /** Local `docs/p0/X2.md` — used ONLY to confirm `--x2-log` points at
+   * the toolkit's own canonical file (fix (a), below); its CONTENT is
+   * never trusted — `acceptance` records are matched against
+   * `githubVerification.x2MdText` instead (GitHub main's own text, gate
+   * finding fourth re-gate). `null` when the local file could not be
+   * read at all — every `acceptance` record then resolves to "not
+   * logged," the safe default. */
   x2Md: { fullText: string; path: string } | null;
   /** TEST-ONLY seam (gate finding, third re-gate, fix (a)) — `main()`
    * never overrides this; defaults to `canonicalX2MdAbsPath()`. An
@@ -1690,13 +1682,14 @@ export interface ResolveCorroborationOptions {
    * exercise the canonical-path-match logic against an isolated scratch
    * fixture. */
   canonicalX2MdPath?: string;
-  /** Gate finding, fourth re-gate: the result of `verifyAgainstGitHub`,
-   * computed ONCE by the caller before `resolveCorroboration` runs (a
-   * disposable-repo GitHub fetch is too expensive, and too security-
-   * sensitive, to redo per record). `null` only if the caller never ran
-   * it at all — treated as equivalent to `{ok: false}` (every
-   * `acceptance`/`wayback` record then resolves to "not logged"/
-   * "unverified", the safe default). */
+  /** Gate finding, fourth re-gate: the pre-computed `GitHubVerification`
+   * this call (or `checkLedgerAgainstGit`) reads GitHub main's own
+   * content and blame through — `main()` computes this ONCE per run
+   * (`verifyAgainstGitHub()`) and threads it through everywhere; a test
+   * builds its own (real, against a local bare repo via `repoUrl`, or a
+   * hand-built fake). `null` only when verification was never run at
+   * all (distinct from `ok: false`, which is a verification that ran and
+   * failed) — every `acceptance` record then refuses outright. */
   githubVerification: GitHubVerification | null;
 }
 
@@ -1706,13 +1699,13 @@ async function resolveWaybackRecord(
   record: X2WaybackCorroboration,
   opts: ResolveCorroborationOptions,
 ): Promise<ResolvedCorroborationEntry> {
-  // Should-fix, fourth re-gate: a `wayback` record is only ever trusted
-  // against an OFFICIAL ledger — the SAME standard `acceptance` already
-  // requires. Round 5's exploit A3 registered a self-authored file under
-  // method "wayback" in a ledger that was correctly labelled UNOFFICIAL,
-  // yet the fact still read "corroborated by Wayback" — this closes
-  // that: an UNOFFICIAL ledger's content is never trusted for anything,
-  // not just excluded from the top-level "official" label.
+  // Should-fix (fourth re-gate): a Wayback corroboration can only be
+  // trusted when THIS RUN's own ledger is OFFICIAL (verified against
+  // GitHub main) — round 5's exploit A3 (a self-authored `method:
+  // "wayback"` ledger row plus local ref forgery) still reported
+  // `waybackVerified: true` under an UNOFFICIAL ledger header, because
+  // this function only ever checked the ledger's CONTENT (does it have a
+  // matching row?), never whether that ledger was itself trustworthy.
   if (!opts.ledgerOfficial) {
     return {
       waybackVerified: false,
@@ -1903,25 +1896,29 @@ async function resolveAcceptanceRecord(
   record: X2AcceptanceCorroboration,
   opts: ResolveCorroborationOptions,
 ): Promise<ResolvedCorroborationEntry> {
-  // Gate finding, fourth re-gate: nothing here is trusted unless a
-  // GitHub verification actually succeeded THIS run, in the disposable
-  // repo, under the scrubbed environment — never the toolkit checkout's
-  // own local git state.
-  if (!opts.githubVerification || !opts.githubVerification.ok) {
+  // Gate finding, fourth re-gate: no verified GitHub state at all —
+  // never OFFICIAL. Distinguished from a verification that ran and
+  // failed, purely for a clearer message.
+  if (!opts.githubVerification) {
+    return { acceptanceLogged: false, acceptanceDetail: "GitHub verification was never run this call." };
+  }
+  if (!opts.githubVerification.ok) {
     return {
       acceptanceLogged: false,
-      acceptanceDetail: opts.githubVerification
-        ? `GitHub verification did not succeed this run: ${opts.githubVerification.detail}`
-        : "GitHub verification was never run this call.",
+      acceptanceDetail: `GitHub verification did not succeed this run: ${opts.githubVerification.detail}`,
     };
   }
   if (!opts.x2Md) {
     return { acceptanceLogged: false, acceptanceDetail: "docs/p0/X2.md could not be read locally." };
   }
-  // Gate finding, third re-gate, fix (a): the LOCAL `--x2-log` is only
-  // ever trusted as an INPUT POINTER when it resolves to the TOOLKIT'S
-  // OWN canonical X2.md — never a `--x2-log` pointed at a scratch/forged
-  // copy elsewhere, no matter how well-formed its content looks.
+  // Gate finding, third re-gate, fix (a): an `ACCEPT` row is only ever
+  // trusted when `--x2-log` POINTS at the TOOLKIT'S OWN canonical X2.md
+  // — never from a `--x2-log` pointed at a scratch/forged copy
+  // elsewhere. This is now purely a path check: the row's CONTENT is
+  // read from `githubVerification.x2MdText` (GitHub main's own text),
+  // never from `opts.x2Md.fullText` (gate finding, fourth re-gate — this
+  // also neutralises a symlinked-docs/p0 trick, since the local file's
+  // content no longer matters for what is trusted).
   const expectedX2MdPath = opts.canonicalX2MdPath ?? canonicalX2MdAbsPath();
   const x2MdIsCanonical = await isCanonicalPath(opts.x2Md.path, expectedX2MdPath);
   if (!x2MdIsCanonical) {
@@ -1933,17 +1930,11 @@ async function resolveAcceptanceRecord(
         "re-gate, fix (a)).",
     };
   }
-  // Gate finding, fourth re-gate: the row is matched against GITHUB'S
-  // OWN X2.md text (`git show refs/heads/main:docs/p0/X2.md`, read
-  // inside the disposable repo by `verifyAgainstGitHub`) — NEVER the
-  // local working tree, which is only used above to confirm `--x2-log`
-  // POINTS at the right place. A row that exists only locally (never
-  // pushed) is never found here, by construction.
-  //
-  // Gate finding, third re-gate, fix (c) (extended, should-fix, fourth
-  // re-gate): only a VISIBLE row counts — `findAcceptRowLine` skips
-  // fenced code blocks, HTML comments, indented code blocks, and now
-  // raw HTML blocks / `hidden`/`style`-attributed elements too.
+  // Gate finding, third re-gate, fix (c) / should-fix (fourth re-gate):
+  // only a VISIBLE row counts — `findAcceptRowLine` skips fenced code
+  // blocks, HTML comments (including multi-line), indented code blocks,
+  // and (fourth re-gate) any line inside a raw HTML block or carrying a
+  // `hidden`/`style` attribute. Matched against GitHub main's OWN text.
   const githubText = opts.githubVerification.x2MdText ?? "";
   const match = findAcceptRowLine(githubText, trail, record.fact, evidenceSha, record.date);
   if (!match) {
@@ -1955,12 +1946,11 @@ async function resolveAcceptanceRecord(
         "comment/block, or an indented code block does not count).",
     };
   }
-  // Gate finding, fourth re-gate: `git blame` runs INSIDE the disposable
-  // repo, directly against `refs/heads/main` — the commit it finds is,
-  // by construction, already part of that ref's own fetched history, so
-  // there is no separate reachability check left to spoof with a local
-  // `git replace`/`.git/info/grafts` the way the third re-gate's fix
-  // still could be.
+  // Gate finding, fourth re-gate: blame runs directly against
+  // `refs/heads/main` inside the disposable, scrubbed-environment repo —
+  // the matched commit is reachable from GitHub main BY CONSTRUCTION
+  // (see `GitHubVerification.blameX2MdLine`'s own doc), so there is no
+  // separate ancestor check left here.
   const blame = await opts.githubVerification.blameX2MdLine(match.lineNumber);
   if (!blame.ok) {
     return { acceptanceLogged: false, acceptanceDetail: blame.detail };
@@ -2080,34 +2070,80 @@ export interface AcceptRowMatch {
   line: string;
 }
 
-/** Gate finding, third re-gate, fix (c): marks each line of `text` as
- * VISIBLE prose (`true`) or not. A line is NOT visible when it is inside
- * a fenced code block (``` ` ``` or `~~~`, any length ≥ 3, closed only
- * by a matching-or-longer fence of the SAME character — the fence lines
- * themselves are also not visible, they're syntax, not content), inside
- * an HTML comment (`<!-- ... -->`, tracked across as many lines as it
- * takes to find the closing `-->` — a comment opened and closed on one
- * line hides only that line), or an indented code block (4+ leading
- * spaces, or a leading tab). Computed over the WHOLE text, never just a
- * bounded section, so state that opens before the section in question
- * and closes after it is still tracked correctly.
+/** CommonMark's own list of block-level tag names (the "type 6" HTML
+ * block condition) — a line starting (after up to 3 leading spaces) with
+ * `<` or `</` followed by one of these, then a space/tab/`>`/`/>`/EOL,
+ * opens a raw HTML block that swallows every following line up to (not
+ * including) the next blank line. Should-fix, fourth re-gate: "treat
+ * `<details>`, any line inside a raw HTML block ... as hidden." */
+const HTML_BLOCK_TAG_NAMES =
+  "address|article|aside|base|basefont|blockquote|body|button|canvas|caption|center|col|colgroup|dd|" +
+  "details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|" +
+  "h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|" +
+  "param|section|summary|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|track|ul";
+const HTML_BLOCK_OPEN_RE = new RegExp(`^ {0,3}</?(${HTML_BLOCK_TAG_NAMES})(?:[ \\t>]|/>|$)`, "i");
+
+/** Should-fix, fourth re-gate: a `hidden` or `style` HTML attribute
+ * anywhere on a line marks JUST THAT LINE invisible, independent of the
+ * block-level state above (a one-line `<span hidden>ACCEPT ...</span>`
+ * or a `style="display:none"` row is never inside a "block" by the
+ * CommonMark rule above, but is exactly the hidden-row shape the gate
+ * asked to close). Matches a `<tag ... hidden ...>` or `<tag ...
+ * style=...>` anywhere on the line, case-insensitive. */
+const HTML_HIDDEN_ATTR_RE = /<[a-zA-Z][^>]*[\s"'](?:hidden\b|style\s*=)/i;
+
+/** Gate finding, third re-gate, fix (c) / should-fix, fourth re-gate:
+ * marks each line of `text` as VISIBLE prose (`true`) or not. A line is
+ * NOT visible when it is inside a fenced code block (``` ` ``` or `~~~`,
+ * any length ≥ 3, closed only by a matching-or-longer fence of the SAME
+ * character — the fence lines themselves are also not visible, they're
+ * syntax, not content), inside an HTML comment (`<!-- ... -->`, tracked
+ * across as many lines as it takes to find the closing `-->` — a comment
+ * opened and closed on one line hides only that line), an indented code
+ * block (4+ leading spaces, or a leading tab), inside a raw HTML block
+ * (should-fix, fourth re-gate: CommonMark's own block-level-tag rule,
+ * `HTML_BLOCK_OPEN_RE` — e.g. `<details>`, ended only by the next blank
+ * line, never by a matching close tag, matching CommonMark's own type-6
+ * "ends at blank line" rule and erring toward hiding MORE), or carries a
+ * `hidden`/`style` HTML attribute on that line specifically
+ * (`HTML_HIDDEN_ATTR_RE`, independent of block state). Computed over the
+ * WHOLE text, never just a bounded section, so state that opens before
+ * the section in question and closes after it is still tracked
+ * correctly.
  *
  * Deliberately errs toward treating MORE as hidden, never less: a
  * genuine row mis-classified as hidden merely fails to register (an
- * inconvenience — unindent it, or move it out of the fence/comment); a
- * HIDDEN, forged row mis-classified as visible would be the dangerous
- * direction, and is exactly what this closes (a gate review found
- * `ACCEPT` rows sitting inside an HTML comment, and inside a fenced
- * code block, both silently counted as logged before this existed). */
+ * inconvenience — unindent it, or move it out of the fence/comment/HTML
+ * block); a HIDDEN, forged row mis-classified as visible would be the
+ * dangerous direction, and is exactly what this closes (a gate review
+ * found `ACCEPT` rows sitting inside an HTML comment, and inside a
+ * fenced code block, both silently counted as logged before this
+ * existed; the fourth re-gate added `<details>`/raw-HTML-block/
+ * `hidden`/`style` to the same list). */
 export function computeMarkdownLineVisibility(text: string): boolean[] {
   const lines = text.split("\n");
   const visible: boolean[] = new Array(lines.length).fill(true);
   let fenceChar: string | null = null;
   let fenceLen = 0;
   let inComment = false;
+  let inHtmlBlock = false;
   for (let i = 0; i < lines.length; i += 1) {
     const raw = lines[i] ?? "";
     const trimmed = raw.trim();
+
+    if (inHtmlBlock) {
+      // CommonMark type-6 HTML blocks end at the next BLANK line — the
+      // blank line itself is outside the block.
+      if (trimmed.length === 0) {
+        inHtmlBlock = false;
+        // Fall through: a blank line is ordinary prose (still subject
+        // to the other checks below, none of which a blank line can
+        // ever match).
+      } else {
+        visible[i] = false;
+        continue;
+      }
+    }
 
     if (inComment) {
       visible[i] = false;
@@ -2142,6 +2178,22 @@ export function computeMarkdownLineVisibility(text: string): boolean[] {
     }
 
     if (/^( {4,}|\t)/.test(raw)) {
+      visible[i] = false;
+      continue;
+    }
+
+    // Should-fix, fourth re-gate: a raw HTML block (`<details>`, `<div>`,
+    // `<table>`, etc.) opens here and swallows this line plus every
+    // following line up to the next blank line.
+    if (HTML_BLOCK_OPEN_RE.test(raw)) {
+      inHtmlBlock = true;
+      visible[i] = false;
+      continue;
+    }
+
+    // Should-fix, fourth re-gate: a `hidden`/`style` attribute hides
+    // just this one line, independent of any block state.
+    if (HTML_HIDDEN_ATTR_RE.test(raw)) {
       visible[i] = false;
       continue;
     }
@@ -2205,7 +2257,7 @@ export const CANONICAL_LEDGER_REPO_RELATIVE_PATH = "docs/p0/x2-recorded-ledger.j
 
 /** Repo-relative path (from a repo's toplevel) the canonical X2.md must
  * live at — gate finding, fourth re-gate: the same repo-relative path
- * `verifyAgainstGitHub` reads from GitHub's real `main` directly. */
+ * `verifyAgainstGitHub` reads directly from GitHub's real `main`. */
 export const CANONICAL_X2MD_REPO_RELATIVE_PATH = "docs/p0/X2.md";
 
 export interface LedgerGitCheck {
@@ -2221,13 +2273,14 @@ export interface LedgerGitCheck {
    * (a) — never a caller-supplied path's own repo toplevel), the file
    * is tracked cleanly (no uncommitted/untracked changes, no
    * assume-unchanged/skip-worktree flag), AND its content is
-   * byte-identical to what `verifyAgainstGitHub` read from GitHub's real
-   * `main` (gate finding, fourth re-gate — inside a disposable, scrubbed
-   * repo, never the toolkit checkout's own local git state) —
-   * `verifiedMainUnavailable` is a DELIBERATE exception: a ledger never
-   * yet on GitHub main (or a verification that itself failed) is not
-   * "dirty" in the same sense, so it fails `clean` here but does not
-   * hard-refuse the CLI on its own (see `main()`). */
+   * byte-identical to what a FRESHLY FETCHED `GOLFRAVEN_VERIFIED_MAIN_REF`
+   * already has at that path (gate finding, third re-gate, fix (b) —
+   * fetched from the pinned GitHub URL this same run, never the
+   * editable local `origin` remote) — `verifiedMainUnavailable` is a
+   * DELIBERATE exception: a ledger never yet on GitHub main (or a fetch
+   * that itself failed) is not "dirty" in the same sense, so it fails
+   * `clean` here but does not hard-refuse the CLI on its own (see
+   * `main()`). */
   clean: boolean;
   /** Human-readable reason for `clean: false`, or a plain "clean"
    * confirmation. */
@@ -2238,20 +2291,19 @@ export interface LedgerGitCheck {
    * --show-toplevel` run from the ledger's own (potentially
    * caller-controlled, e.g. a scratch repo's) directory. */
   pathIsCanonical: boolean;
-  /** Gate finding, fourth re-gate: `git hash-object <ledgerPath>` equals
-   * the `ledgerBlobHash` a SUCCESSFUL `verifyAgainstGitHub` read from
-   * GitHub's real `main` — proves the ledger's content is actually on
-   * GitHub's real main, not merely committed to some local/forged ref
-   * of a similar name, and not merely "whatever the toolkit checkout's
-   * own local git state happens to say." */
+  /** Gate finding, third re-gate, fix (b): `git hash-object <ledgerPath>`
+   * equals `git rev-parse <verified-main ref>:docs/p0/x2-recorded-ledger.json`,
+   * where that ref was FRESHLY FETCHED, this same run, from the pinned
+   * canonical GitHub URL — proves the ledger's content is actually on
+   * GitHub's real `main`, not merely committed to some local/forged ref
+   * of a similar name. */
   verifiedAgainstGithub: boolean;
-  /** Gate finding, fourth re-gate: true when `verifyAgainstGitHub` did
-   * not succeed this run (network failure, redirected/refused URL,
-   * shallow history, unexpected grafts/replace refs — "must give
-   * UNOFFICIAL, never OFFICIAL") OR GitHub main simply doesn't have this
-   * path yet (a brand-new ledger) — the specific, NON-hard-refusing
-   * case: mark UNOFFICIAL and say why, rather than treat it as ordinary
-   * dirtiness. */
+  /** Gate finding, third re-gate, fix (b): true when the freshly-fetched
+   * verified-main ref has no such path at all yet (a brand-new ledger),
+   * OR the fetch itself failed this run (network failure, unreachable
+   * host — "must give UNOFFICIAL, never OFFICIAL") — the specific,
+   * NON-hard-refusing case: mark UNOFFICIAL and say why, rather than
+   * treat it as ordinary dirtiness. */
   verifiedMainUnavailable: boolean;
   /** Gate finding 4: `git ls-files -v -- <ledgerPath>` showed the
    * lowercase `h` (assume-unchanged) or `S` (skip-worktree) flag — a way
@@ -2267,22 +2319,17 @@ export interface LedgerGitCheck {
 }
 
 /**
- * Gate finding 2d/4/third+fourth re-gate: `docs/p0/x2-recorded-ledger.json`
- * is the CANONICAL ledger. This checks that the ledger a verdict run is
+ * Gate finding 2d/4/third re-gate: `docs/p0/x2-recorded-ledger.json` is
+ * the CANONICAL ledger. This checks that the ledger a verdict run is
  * ABOUT TO USE is: at the TOOLKIT'S OWN canonical path (fix (a) — never
  * merely "some repo's own toplevel + the same relative path," which a
  * caller-controlled scratch repo trivially satisfies for itself);
  * tracked cleanly by git (no uncommitted/untracked/hidden-by-flag edit
- * could have snuck in a bogus entry); and byte-identical to what
- * `verification` (a `verifyAgainstGitHub` result the CALLER computed
- * ONCE, this same run, in a disposable+scrubbed repo — see that
- * function's own doc) says GitHub's real `main` has there. This
- * function itself runs NO GitHub-touching git commands at all — it only
- * compares against the ALREADY-COMPUTED `verification`, and only ever
- * touches the LOCAL ledger file's own git state (diff/status/ls-files/
- * log), which is a different, narrower question ("is this file clean in
- * the caller's own checkout") than "does this match GitHub" (which
- * `verification` alone answers). Reports the blob hash and the last
+ * could have snuck in a bogus entry); and byte-identical to what a
+ * FRESHLY FETCHED `GOLFRAVEN_VERIFIED_MAIN_REF` already has there (fix
+ * (b) — fetched from the pinned GitHub URL, this same run, never the
+ * editable local `origin` remote a caller can point anywhere or forge
+ * outright with `git update-ref`). Reports the blob hash and the last
  * commit that touched the file, so the verdict output names EXACTLY
  * which ledger content it read and who last changed it — never "trust
  * me," always checkable against `git show <blobHash>` or `git log -p --
@@ -2291,6 +2338,14 @@ export interface LedgerGitCheck {
  * that hard-refuses the run or only marks it UNOFFICIAL (this repo's own
  * house style per `recorded-export.ts`'s `runGit`: a git-check failure is
  * never silently treated as "assume clean").
+ *
+ * `verification` (gate finding, fourth re-gate) is a PRE-COMPUTED
+ * `GitHubVerification` — the caller (`main()`) runs `verifyAgainstGitHub()`
+ * ONCE per invocation and passes the same object everywhere; this
+ * function itself never touches the network or spawns a verification
+ * git command of its own — it only reads `verification`'s already-
+ * fetched `ledgerBlobHash`. A test builds its own (real, against a local
+ * bare repo via `verifyAgainstGitHub({repoUrl})`, or a hand-built fake).
  */
 export interface CheckLedgerAgainstGitOptions {
   /** TEST-ONLY seam — `main()` never overrides this; defaults to
@@ -2436,21 +2491,20 @@ export async function checkLedgerAgainstGit(
   }
 
   // Gate finding, fourth re-gate: proves the ledger's content is
-  // actually on GitHub's real `main` — using the ALREADY-COMPUTED
-  // `verification` (a disposable-repo, scrubbed-env fetch the CALLER ran
-  // once, this same run) rather than running any GitHub-touching git
-  // command here. `verification.ok === false` (network failure,
-  // redirected/refused URL, shallow history, unexpected grafts/replace)
-  // fails this the SAME way as "GitHub main doesn't have this path yet"
-  // — both are UNOFFICIAL, never a hard refusal, and a failed
-  // verification specifically must never read as OFFICIAL.
+  // actually on GitHub's real `main` — reads `verification.ledgerBlobHash`,
+  // computed ONCE per run by `verifyAgainstGitHub()` inside a disposable,
+  // scrubbed-environment repo (see that function's own doc). A
+  // verification that did not succeed at all, or a fresh main with no
+  // such path yet, is UNOFFICIAL, never a hard refusal — and network
+  // failure specifically must never read as OFFICIAL.
   if (!verification.ok) {
     return {
       blobHash,
       clean: false,
-      detail: `GitHub verification did not succeed this run: ${verification.detail} — marking UNOFFICIAL ` +
-        "rather than refusing (gate finding, fourth re-gate: a failed verification must give UNOFFICIAL, " +
-        "never OFFICIAL).",
+      detail:
+        `GitHub verification did not succeed this run: ${verification.detail} — marking UNOFFICIAL rather ` +
+        "than refusing (gate finding, fourth re-gate: a failed verification must give UNOFFICIAL, never " +
+        "OFFICIAL).",
       pathIsCanonical: true,
       verifiedAgainstGithub: false,
       verifiedMainUnavailable: true,
@@ -2464,7 +2518,7 @@ export async function checkLedgerAgainstGit(
       clean: false,
       detail:
         `GitHub main does not yet have "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" — marking UNOFFICIAL rather ` +
-        "than refusing (gate finding, fourth re-gate).",
+        "than refusing (a brand-new ledger not yet on GitHub main is not the same as a dirty one).",
       pathIsCanonical: true,
       verifiedAgainstGithub: false,
       verifiedMainUnavailable: true,
@@ -2480,7 +2534,7 @@ export async function checkLedgerAgainstGit(
         `the ledger's content (blob ${blobHash ?? "unavailable"}) does not match what GitHub's real main ` +
         `already has at "${CANONICAL_LEDGER_REPO_RELATIVE_PATH}" (blob ${verification.ledgerBlobHash}) — ` +
         "locally diverged from GitHub's own main; pass --allow-dirty-ledger to proceed anyway (result " +
-        "marked UNOFFICIAL) (gate finding, fourth re-gate).",
+        "marked UNOFFICIAL) (gate finding, third re-gate).",
       pathIsCanonical: true,
       verifiedAgainstGithub: false,
       verifiedMainUnavailable: false,
@@ -2492,8 +2546,7 @@ export async function checkLedgerAgainstGit(
   return {
     blobHash,
     clean: true,
-    detail: `clean — committed, verified against GitHub's real main (${GOLFRAVEN_CANONICAL_REPO_URL}, ` +
-      "disposable+scrubbed verification), canonical path, no hidden-edit flags.",
+    detail: `clean — committed, verified against GitHub's real main (${GOLFRAVEN_CANONICAL_REPO_URL}, disposable repo + scrubbed environment), canonical path, no hidden-edit flags.`,
     pathIsCanonical: true,
     verifiedAgainstGithub: true,
     verifiedMainUnavailable: false,
@@ -2555,36 +2608,30 @@ async function main(argv: string[]): Promise<void> {
     await readFile(confirmationPath, "utf8"),
   ) as X2ConfirmationFile;
   const ledgerPath = flags.ledger;
-  // Gate finding, fourth re-gate: verify against GitHub ONCE, before any
-  // check that compares against it, ENTIRELY inside a disposable, bare,
-  // scrubbed-environment repo this call creates and destroys — never
-  // the toolkit checkout's own local git state (which a caller could
-  // manipulate via `url.<x>.insteadOf` config, `git replace`,
-  // `.git/info/grafts`, `GIT_DIR`/`GIT_WORK_TREE`, or a hook). Its own
-  // `cleanup()` is called in the `finally` below regardless of outcome.
-  // A failed verification is never silently ignored: it flows into
-  // `verifiedMainUnavailable`/`acceptanceLogged: false`/
-  // `waybackVerified: false` below — UNOFFICIAL/not-accepted, never
-  // OFFICIAL/accepted.
+  // Gate finding, fourth re-gate: verify against GitHub's real main
+  // EXACTLY ONCE per invocation, inside a disposable, scrubbed-environment
+  // repo (see `verifyAgainstGitHub`'s own doc, and this module's "Addendum
+  // J re-gate round 6" banner comment above it) — the caller's own
+  // process.env, GIT_DIR, local git config/replace-objects/grafts/hooks
+  // never reach it. The result is threaded through everywhere downstream
+  // (`checkLedgerAgainstGit`, `resolveCorroboration`) rather than each
+  // call re-deriving it — one verification, one truth, this run.
   const githubVerification = await verifyAgainstGitHub();
   try {
     // Gate finding 2d/4/third+fourth re-gate: the ledger must be at the
     // TOOLKIT'S OWN canonical path (fix (a)), tracked cleanly by git (no
     // uncommitted/untracked/hidden-by-flag edit), and its content must
-    // match GitHub main as `githubVerification` read it (fix (b)). Only
-    // ONE case is ALWAYS a hard refusal, regardless of
-    // --allow-dirty-ledger: a `git ls-files` assume-unchanged/skip-
-    // worktree flag (it exists specifically to hide a local edit from
-    // the very diff/status checks --allow-dirty-ledger is meant to
-    // override — bypassing the flag-check too would defeat the point of
-    // having it at all). A wrong ledger path, or a ledger simply not yet
-    // on GitHub main (including a failed verification), is NOT a
-    // hard-refusing case — both proceed automatically, marked
-    // UNOFFICIAL, without needing the flag ("for an official run,
-    // require realpath(--ledger) to equal <canonical path> — anything
-    // else is UNOFFICIAL"). Everything else dirty (a local uncommitted
-    // edit, or content that DIVERGED from what GitHub main has) still
-    // requires the flag.
+    // match GitHub's real main (fix (b), now via `githubVerification`).
+    // Only ONE case is ALWAYS a hard refusal, regardless of
+    // --allow-dirty-ledger: a `git ls-files` assume-unchanged/skip-worktree
+    // flag (it exists specifically to hide a local edit from the very
+    // diff/status checks --allow-dirty-ledger is meant to override —
+    // bypassing the flag-check too would defeat the point of having it at
+    // all). A wrong ledger path, or a ledger simply not yet on GitHub main
+    // (including a failed verification), is NOT a hard-refusing case —
+    // both proceed automatically, marked UNOFFICIAL, without needing the
+    // flag. Everything else dirty (a local uncommitted edit, or content
+    // that DIVERGED from what GitHub main has) still requires the flag.
     const ledgerGitCheck = await checkLedgerAgainstGit(ledgerPath, githubVerification);
     if (ledgerGitCheck.hiddenByGitFlag) {
       throw new Error(
@@ -2617,18 +2664,16 @@ async function main(argv: string[]): Promise<void> {
     const corroboration: X2CorroborationFile = flags.corroboration
       ? (JSON.parse(await readFile(flags.corroboration, "utf8")) as X2CorroborationFile)
       : {};
-    // Gate finding 3/2/fourth re-gate (all re-gate): resolve (verify)
+    // Gate finding 3/2 (both re-gate)/fourth re-gate: resolve (verify)
     // that corroboration file BEFORE computeX2Verdict ever sees it —
     // re-reading `wayback` evidence from THIS evidence dir and
-    // re-validating every one of its rules against the owner-saved
-    // fact's OWN claims, the canonical ledger, AND requiring the ledger
-    // be OFFICIAL (should-fix, fourth re-gate); checking `acceptance`
-    // records against a structured, VISIBLE row in GitHub main's own
-    // X2.md (per `githubVerification`) AND its git provenance. A
-    // missing/unreadable local X2.md is not a hard refusal (an
-    // --evidence-dir far from a golfraven checkout is a legitimate
-    // use), but every `acceptance` record then resolves to "not
-    // logged" — the safe default.
+    // re-validating every one of its rules against the owner-saved fact's
+    // OWN claims and the canonical ledger; checking `acceptance` records
+    // against a structured row in GitHub main's own X2.md Log section AND
+    // its git provenance (via `githubVerification`). A missing/unreadable
+    // local X2.md is not a hard refusal (an --evidence-dir far from a
+    // golfraven checkout is a legitimate use), but every `acceptance`
+    // record then resolves to "not logged" — the safe default.
     const x2MdPath = flags["x2-log"] || resolveDefaultX2MdPath();
     let x2Md: { fullText: string; path: string } | null = null;
     try {
@@ -2677,8 +2722,8 @@ async function main(argv: string[]): Promise<void> {
     await writeFile(
       `${outPrefix}.json`,
       `${JSON.stringify(resultWithLedgerInfo, null, 2)}\n`,
-    "utf8",
-  );
+      "utf8",
+    );
     const ledgerHeader =
       `Ledger: ${ledgerPath} (blob ${ledgerGitCheck.blobHash ?? "unavailable — git not found"}) — ` +
       `${ledgerOfficial ? `OFFICIAL (verified against ${GOLFRAVEN_CANONICAL_REPO_URL}'s real main)` : `**UNOFFICIAL** (${ledgerGitCheck.detail})`}\n\n`;

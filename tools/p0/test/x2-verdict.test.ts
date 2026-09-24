@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { promisify } from "node:util";
@@ -12,11 +12,12 @@ import {
   computeX2Verdict,
   corroborationResolutionKey,
   extractX2MdLogSection,
-  fetchVerifiedMainRef,
   findAcceptRowLine,
   resolveCorroboration,
   sameConfiguredHost,
+  verifyAgainstGitHub,
   type EvidenceByTrail,
+  type GitHubVerification,
   type X2ConfirmationFile,
   type X2CorroborationFile,
   type X2ResolvedCorroboration,
@@ -145,6 +146,30 @@ function tnConfirmation(overrides: Partial<X2ConfirmationFile["TN"]> = {}) {
       quote: "The season runs year-round.",
       evidenceSha: SHA_TN,
     },
+    ...overrides,
+  };
+}
+
+/** Round 6: a hand-built `GitHubVerification` stand-in for tests that
+ * don't exercise the real disposable-repo verification mechanism itself
+ * (that mechanism has its own dedicated describe blocks further down,
+ * against real local bare repos via `verifyAgainstGitHub({repoUrl})`).
+ * Every field defaults to a benign "verification succeeded, nothing
+ * relevant on GitHub main" shape; pass `overrides` to tune one field
+ * (e.g. `ok: false`, or a `blameX2MdLine` that returns a specific
+ * provenance) without repeating the rest. */
+function fakeGitHubVerification(overrides: Partial<GitHubVerification> = {}): GitHubVerification {
+  return {
+    ok: true,
+    detail: "fake verification (test-only)",
+    ledgerBlobHash: null,
+    x2MdBlobHash: null,
+    x2MdText: null,
+    blameX2MdLine: async () => ({
+      ok: false,
+      detail: "fakeGitHubVerification: blameX2MdLine not configured for this test.",
+    }),
+    cleanup: async () => {},
     ...overrides,
   };
 }
@@ -1951,6 +1976,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger,
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(true);
@@ -1976,6 +2003,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2001,6 +2030,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2027,6 +2058,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2052,6 +2085,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2087,6 +2122,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
           ],
         },
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2114,6 +2151,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] }, // empty — never registered
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2151,6 +2190,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger,
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
@@ -2190,43 +2231,149 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger,
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
       expect(entry?.waybackVerified).toBe(false);
     });
   });
 
-  describe("acceptance (gate finding 2, re-gate; gate finding third re-gate — trust root + visibility + date rules)", () => {
-    const SCRATCH_VERIFIED_REF = "refs/heads/scratch-verified-main";
+  describe("should-fix (fourth re-gate): a Wayback corroboration requires an OFFICIAL ledger", () => {
+    it("resolveWaybackRecord refuses (waybackVerified: false) when ledgerOfficial is false, even though the record itself is otherwise fully valid — round 5's exploit A3 shape", async () => {
+      const html = "<html><body><p>Real snapshot content, fetched for real.</p></body></html>";
+      const buf = Buffer.from(html);
+      const shaOfBuf = sha(html);
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: shaOfBuf,
+              rawFile: `raw/${shaOfBuf}.html`,
+            },
+          ],
+        },
+      };
+      const ledger: RecordedLedger = {
+        entries: [
+          {
+            method: "wayback",
+            normalizedUrl: "example.com/x",
+            url: OWNER_STATED_URL,
+            sha256: shaOfBuf,
+            recordedAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => buf,
+        evidenceDir: EVIDENCE_DIR,
+        ledger,
+        x2Md: null,
+        ledgerOfficial: false, // <-- the should-fix gate under test
+        githubVerification: fakeGitHubVerification(),
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(false);
+      expect(entry?.waybackDetail).toMatch(/ledger is not OFFICIAL/);
+    });
 
-    /** A scratch git repo — NOT a clone of, or otherwise connected to,
-     * the real golfraven checkout or GitHub. Every test below either
-     * (a) injects `canonicalX2MdPath`/`verifiedMainRefName` pointing AT
-     * this scratch repo's own files/refs, to test the content/visibility/
-     * date logic in isolation, or (b) deliberately OMITS the override,
-     * to prove a scratch repo can never pass the real pin on its own
-     * (gate finding, third re-gate, fix (a)/(b) — exploits A/A2/A3). No
-     * network, no `origin` remote, no real fetch — `SCRATCH_VERIFIED_REF`
-     * is created directly with `git update-ref`, standing in for what a
-     * real `fetchVerifiedMainRef` would have produced. */
-    async function initScratchRepo(): Promise<string> {
-      const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2md-scratch-"));
-      await execFileAsync("git", ["init", "-q"], { cwd: dir });
-      await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
-      await execFileAsync("git", ["config", "user.name", "Test"], { cwd: dir });
-      return dir;
+    it("the SAME record resolves waybackVerified: true when ledgerOfficial is true (control — proves the gate above fails for officialness, not some other reason)", async () => {
+      const html = "<html><body><p>Real snapshot content, fetched for real.</p></body></html>";
+      const buf = Buffer.from(html);
+      const shaOfBuf = sha(html);
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [
+            {
+              type: "wayback",
+              snapshotUrl: "https://web.archive.org/web/20260101000000/https://example.com/x",
+              snapshotSha256: shaOfBuf,
+              rawFile: `raw/${shaOfBuf}.html`,
+            },
+          ],
+        },
+      };
+      const ledger: RecordedLedger = {
+        entries: [
+          {
+            method: "wayback",
+            normalizedUrl: "example.com/x",
+            url: OWNER_STATED_URL,
+            sha256: shaOfBuf,
+            recordedAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: ownerEvidenceByTrail(),
+        readRaw: async () => buf,
+        evidenceDir: EVIDENCE_DIR,
+        ledger,
+        x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification(),
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE));
+      expect(entry?.waybackVerified).toBe(true);
+    });
+  });
+
+  describe("acceptance (gate finding 2, re-gate; gate finding third+fourth re-gate — trust root + visibility + date rules)", () => {
+    /** Round 6: a local BARE repo stands in for "GitHub's real main" —
+     * `verifyAgainstGitHub({repoUrl: bareDir})` fetches from it exactly
+     * the way the real CLI fetches from GOLFRAVEN_CANONICAL_REPO_URL,
+     * through the SAME disposable-repo + scrubbed-environment machinery.
+     * No network, no real GitHub. */
+    async function initUpstreamBare(): Promise<string> {
+      const bareDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2-upstream-"));
+      await execFileAsync("git", ["init", "-q", "--bare", bareDir]);
+      return bareDir;
     }
 
-    async function commitX2Md(dir: string, fullText: string, message = "log"): Promise<string> {
-      const x2MdPath = nodePath.join(dir, "X2.md");
+    /** Pushes `X2.md` to `bareDir`'s `main` — the ONLY way content in
+     * these tests ever becomes part of what `verifyAgainstGitHub` will
+     * read (gate finding, fourth re-gate: content authority is GitHub
+     * main, never a local, un-pushed working tree). Returns the local
+     * work tree's own X2.md path too, since `--x2-log`/`canonicalX2MdPath`
+     * still need a LOCAL file to exist (used only to confirm the flag
+     * POINTS at the right place — never for its content). */
+    async function pushX2Md(
+      bareDir: string,
+      fullText: string,
+      message = "log",
+    ): Promise<{ workDir: string; x2MdPath: string }> {
+      const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2-work-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+      await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+      // Round 6: verifyAgainstGitHub always reads
+      // CANONICAL_X2MD_REPO_RELATIVE_PATH ("docs/p0/X2.md") from
+      // refs/heads/main — the pushed file MUST live at that exact
+      // repo-relative path, not at the repo root.
+      mkdirSync(nodePath.join(workDir, "docs", "p0"), { recursive: true });
+      const x2MdPath = nodePath.join(workDir, "docs", "p0", "X2.md");
       writeFileSync(x2MdPath, fullText, "utf8");
-      await execFileAsync("git", ["add", "X2.md"], { cwd: dir });
-      await execFileAsync("git", ["commit", "-q", "-m", message], { cwd: dir });
-      return x2MdPath;
+      await execFileAsync("git", ["add", "docs/p0/X2.md"], { cwd: workDir });
+      await execFileAsync("git", ["commit", "-q", "-m", message], { cwd: workDir });
+      await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
+      await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
+      return { workDir, x2MdPath };
     }
 
-    async function markVerified(dir: string, refName: string = SCRATCH_VERIFIED_REF): Promise<void> {
-      await execFileAsync("git", ["update-ref", refName, "HEAD"], { cwd: dir });
+    /** A local X2.md that exists on disk (so `canonicalX2MdPath` can point
+     * at it and `realpath` succeeds) but was NEVER pushed anywhere —
+     * simulates "a row that looks right locally but never reached GitHub
+     * main" (gate finding, fourth re-gate: local content is never
+     * trusted). */
+    function localOnlyX2Md(fullText: string): { workDir: string; x2MdPath: string } {
+      const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2-localonly-"));
+      const x2MdPath = nodePath.join(workDir, "X2.md");
+      writeFileSync(x2MdPath, fullText, "utf8");
+      return { workDir, x2MdPath };
     }
 
     function evidenceWithOwnerSavedDate(ownerSavedDate: string | null): EvidenceByTrail {
@@ -2250,11 +2397,12 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       };
     }
 
-    it("resolves logged: true when the row exists, its x2Md.path is the (test-injected) canonical path, and its commit is reachable from the (test-injected) verified-main ref", async () => {
-      const dir = await initScratchRepo();
+    it("resolves logged: true when the row is on GitHub main (the bare upstream), x2Md.path is the (test-injected) canonical path, and blame runs against refs/heads/main", async () => {
+      const bareDir = await initUpstreamBare();
       const fullText = `# X2\n\n## Log\n\nACCEPT NC roster:Pinehurst Creek ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-      const x2MdPath = await commitX2Md(dir, fullText);
-      await markVerified(dir);
+      const { x2MdPath } = await pushX2Md(bareDir, fullText);
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      expect(verification.ok).toBe(true);
 
       const corroboration: X2CorroborationFile = {
         NC: {
@@ -2270,7 +2418,8 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         ledger: { entries: [] },
         x2Md: { fullText, path: x2MdPath },
         canonicalX2MdPath: x2MdPath,
-        verifiedMainRefName: SCRATCH_VERIFIED_REF,
+        ledgerOfficial: true,
+        githubVerification: verification,
       });
       const entry = resolved.get(
         corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "roster:Pinehurst Creek"),
@@ -2279,42 +2428,44 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
       expect(entry?.acceptanceProvenance?.reachableFromVerifiedMain).toBe(true);
       expect(entry?.acceptanceProvenance?.commit).toMatch(/^[0-9a-f]{40}$/);
       expect(entry?.acceptanceProvenance?.author).toBe("Test");
+      await verification.cleanup();
     });
 
-    it("gate finding, third re-gate, fix (a): a well-formed, git-reachable row is STILL refused when x2Md.path is NOT the canonical path — a scratch repo can never pass this on its own", async () => {
-      const dir = await initScratchRepo();
+    it("gate finding, third re-gate, fix (a): a well-formed, GitHub-reachable row is STILL refused when x2Md.path is NOT the canonical path", async () => {
+      const bareDir = await initUpstreamBare();
       const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-      const x2MdPath = await commitX2Md(dir, fullText);
-      await markVerified(dir);
+      const { x2MdPath } = await pushX2Md(bareDir, fullText);
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
 
       const corroboration: X2CorroborationFile = {
         NC: {
           [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
         },
       };
-      // Deliberately NO `canonicalX2MdPath` override — this scratch
-      // x2MdPath will never equal the real toolkit's canonical X2.md,
-      // so this must refuse regardless of `verifiedMainRefName`.
+      // Deliberately NO `canonicalX2MdPath` override.
       const resolved = await resolveCorroboration(corroboration, {
         evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
         readRaw: async () => Buffer.from(""),
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
         x2Md: { fullText, path: x2MdPath },
-        verifiedMainRefName: SCRATCH_VERIFIED_REF,
+        ledgerOfficial: true,
+        githubVerification: verification,
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
       expect(entry?.acceptanceLogged).toBe(false);
       expect(entry?.acceptanceDetail).toMatch(/is not this toolkit's own canonical docs\/p0\/X2\.md/);
+      await verification.cleanup();
     });
 
-    it("resolves logged: false when the matching row exists and the path is canonical, but its commit is NOT reachable from the verified-main ref (never marked verified)", async () => {
-      const dir = await initScratchRepo();
-      const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-      const x2MdPath = await commitX2Md(dir, fullText);
-      // Deliberately never marks SCRATCH_VERIFIED_REF — simulates a
-      // `fetchVerifiedMainRef` that never ran, or that failed and left
-      // the ref deleted.
+    it("gate finding, fourth re-gate: a matching row that exists LOCALLY but was NEVER PUSHED to GitHub main is not counted — local content is never trusted", async () => {
+      const bareDir = await initUpstreamBare();
+      // The upstream has SOME content, but not the row we're about to cite.
+      await pushX2Md(bareDir, "# X2\n\n## Log\n\nunrelated\n");
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+      const localFullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+      const { x2MdPath } = localOnlyX2Md(localFullText);
 
       const corroboration: X2CorroborationFile = {
         NC: {
@@ -2326,47 +2477,23 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         readRaw: async () => Buffer.from(""),
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
-        x2Md: { fullText, path: x2MdPath },
+        x2Md: { fullText: localFullText, path: x2MdPath },
         canonicalX2MdPath: x2MdPath,
-        verifiedMainRefName: SCRATCH_VERIFIED_REF,
-      });
-      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
-      expect(entry?.acceptanceLogged).toBe(false);
-      expect(entry?.acceptanceDetail).toMatch(/not reachable from a freshly-fetched/);
-    });
-
-    it("resolves logged: false when no matching structured row exists at all", async () => {
-      const dir = await initScratchRepo();
-      const fullText = "# X2\n\n## Log\n\nsome unrelated line, not an ACCEPT row\n";
-      const x2MdPath = await commitX2Md(dir, fullText);
-      await markVerified(dir);
-
-      const corroboration: X2CorroborationFile = {
-        NC: {
-          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
-        },
-      };
-      const resolved = await resolveCorroboration(corroboration, {
-        evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-        readRaw: async () => Buffer.from(""),
-        evidenceDir: EVIDENCE_DIR,
-        ledger: { entries: [] },
-        x2Md: { fullText, path: x2MdPath },
-        canonicalX2MdPath: x2MdPath,
-        verifiedMainRefName: SCRATCH_VERIFIED_REF,
+        ledgerOfficial: true,
+        githubVerification: verification,
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
       expect(entry?.acceptanceLogged).toBe(false);
       expect(entry?.acceptanceDetail).toMatch(/no VISIBLE line reading exactly/);
+      expect(entry?.acceptanceDetail).toMatch(/GitHub main/);
+      await verification.cleanup();
     });
 
-    it("gate finding 2 (re-gate), should-fix: a row matching everything but sitting AFTER the next '## ' heading (outside the bounded Log section) does not count", async () => {
-      const dir = await initScratchRepo();
-      const fullText =
-        "# X2\n\n## Log\n\nunrelated\n\n## Later Section\n\n" +
-        `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-      const x2MdPath = await commitX2Md(dir, fullText);
-      await markVerified(dir);
+    it("resolves logged: false when no matching structured row exists on GitHub main at all", async () => {
+      const bareDir = await initUpstreamBare();
+      const fullText = "# X2\n\n## Log\n\nsome unrelated line, not an ACCEPT row\n";
+      const { x2MdPath } = await pushX2Md(bareDir, fullText);
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
 
       const corroboration: X2CorroborationFile = {
         NC: {
@@ -2380,13 +2507,44 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         ledger: { entries: [] },
         x2Md: { fullText, path: x2MdPath },
         canonicalX2MdPath: x2MdPath,
-        verifiedMainRefName: SCRATCH_VERIFIED_REF,
+        ledgerOfficial: true,
+        githubVerification: verification,
       });
       const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
       expect(entry?.acceptanceLogged).toBe(false);
+      expect(entry?.acceptanceDetail).toMatch(/no VISIBLE line reading exactly/);
+      await verification.cleanup();
     });
 
-    it("a null x2Md (X2.md unreadable) resolves logged: false, never throws", async () => {
+    it("gate finding 2 (re-gate), should-fix: a row matching everything but sitting AFTER the next '## ' heading (outside the bounded Log section) does not count", async () => {
+      const bareDir = await initUpstreamBare();
+      const fullText =
+        "# X2\n\n## Log\n\nunrelated\n\n## Later Section\n\n" +
+        `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+      const { x2MdPath } = await pushX2Md(bareDir, fullText);
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
+        },
+      };
+      const resolved = await resolveCorroboration(corroboration, {
+        evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText, path: x2MdPath },
+        canonicalX2MdPath: x2MdPath,
+        ledgerOfficial: true,
+        githubVerification: verification,
+      });
+      const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
+      expect(entry?.acceptanceLogged).toBe(false);
+      await verification.cleanup();
+    });
+
+    it("a null local x2Md (X2.md unreadable locally) resolves logged: false, never throws", async () => {
       const corroboration: X2CorroborationFile = {
         NC: {
           [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
@@ -2398,213 +2556,184 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
         evidenceDir: EVIDENCE_DIR,
         ledger: { entries: [] },
         x2Md: null,
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification({ ok: true, x2MdText: "" }),
       });
       expect(
         resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
       ).toBe(false);
     });
 
-    describe("gate finding, third re-gate, fix (c): only a VISIBLE row counts (exploits A/A2)", () => {
-      it("exploit A: a row hidden inside a multi-line HTML comment is NOT counted, even though it's git-reachable and the path is canonical", async () => {
-        const dir = await initScratchRepo();
+    it("gate finding, fourth re-gate: a null/failed githubVerification resolves logged: false, never throws", async () => {
+      const corroboration: X2CorroborationFile = {
+        NC: {
+          [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
+        },
+      };
+      const resolvedNull = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText: "anything", path: "/does/not/matter" },
+        ledgerOfficial: true,
+        githubVerification: null,
+      });
+      expect(
+        resolvedNull.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
+      ).toBe(false);
+
+      const resolvedFailed = await resolveCorroboration(corroboration, {
+        evidenceByTrail: {},
+        readRaw: async () => Buffer.from(""),
+        evidenceDir: EVIDENCE_DIR,
+        ledger: { entries: [] },
+        x2Md: { fullText: "anything", path: "/does/not/matter" },
+        ledgerOfficial: true,
+        githubVerification: fakeGitHubVerification({ ok: false, detail: "simulated failure" }),
+      });
+      expect(
+        resolvedFailed.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
+      ).toBe(false);
+      expect(
+        resolvedFailed.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceDetail,
+      ).toMatch(/simulated failure/);
+    });
+
+    describe("gate finding, third re-gate, fix (c) / should-fix (fourth re-gate): only a VISIBLE row counts", () => {
+      /** Runs one visibility scenario end-to-end: pushes `fullText`
+       * (which embeds the ACCEPT row inside whatever hiding construct the
+       * test wants to check) to a real bare upstream, verifies against
+       * it, and resolves the acceptance record. */
+      async function resolveHiddenRowScenario(fullText: string, fact = "season"): Promise<boolean | undefined> {
+        const bareDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-x2-hidden-upstream-"));
+        await execFileAsync("git", ["init", "-q", "--bare", bareDir]);
+        const { x2MdPath } = await pushX2Md(bareDir, fullText, "forged, as Matt");
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+        const corroboration: X2CorroborationFile = {
+          NC: {
+            [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact, acceptedBy: "Matt", date: "2026-09-20" }],
+          },
+        };
+        const resolved = await resolveCorroboration(corroboration, {
+          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
+          readRaw: async () => Buffer.from(""),
+          evidenceDir: EVIDENCE_DIR,
+          ledger: { entries: [] },
+          x2Md: { fullText, path: x2MdPath },
+          canonicalX2MdPath: x2MdPath,
+          ledgerOfficial: true,
+          githubVerification: verification,
+        });
+        const logged = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, fact))?.acceptanceLogged;
+        await verification.cleanup();
+        return logged;
+      }
+
+      it("exploit A: a row hidden inside a multi-line HTML comment is NOT counted", async () => {
         const fullText =
           "# X2\n\n## Log\n\n<!--\n" +
           `ACCEPT NC roster:Course A ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` +
           "-->\n\n## Other\n";
-        const x2MdPath = await commitX2Md(dir, fullText, "forged, as Matt");
-        await markVerified(dir);
-
-        const corroboration: X2CorroborationFile = {
-          NC: {
-            [SHA_OWNER_FOR_RESOLVE]: [
-              { type: "acceptance", fact: "roster:Course A", acceptedBy: "Matt", date: "2026-09-20" },
-            ],
-          },
-        };
-        const resolved = await resolveCorroboration(corroboration, {
-          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-          readRaw: async () => Buffer.from(""),
-          evidenceDir: EVIDENCE_DIR,
-          ledger: { entries: [] },
-          x2Md: { fullText, path: x2MdPath },
-          canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
-        });
-        const entry = resolved.get(
-          corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "roster:Course A"),
-        );
-        expect(entry?.acceptanceLogged).toBe(false);
-        expect(entry?.acceptanceDetail).toMatch(/no VISIBLE line reading exactly/);
+        expect(await resolveHiddenRowScenario(fullText, "roster:Course A")).toBe(false);
       });
 
       it("a row hidden inside a SINGLE-line HTML comment is NOT counted", async () => {
-        const dir = await initScratchRepo();
         const fullText =
-          "# X2\n\n## Log\n\n" +
-          `<!-- ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt -->\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
-        const corroboration: X2CorroborationFile = {
-          NC: {
-            [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
-          },
-        };
-        const resolved = await resolveCorroboration(corroboration, {
-          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-          readRaw: async () => Buffer.from(""),
-          evidenceDir: EVIDENCE_DIR,
-          ledger: { entries: [] },
-          x2Md: { fullText, path: x2MdPath },
-          canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
-        });
-        expect(
-          resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
-        ).toBe(false);
+          "# X2\n\n## Log\n\n" + `<!-- ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt -->\n`;
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
       });
 
       it("exploit A2: a row hidden inside a fenced code block (```) is NOT counted", async () => {
-        const dir = await initScratchRepo();
         const fullText =
           "# X2\n\n## Log\n\n```\n" +
           `ACCEPT NC completionUnit ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` +
           "```\n";
-        const x2MdPath = await commitX2Md(dir, fullText, "forged, fenced");
-        await markVerified(dir);
-        const corroboration: X2CorroborationFile = {
-          NC: {
-            [SHA_OWNER_FOR_RESOLVE]: [
-              { type: "acceptance", fact: "completionUnit", acceptedBy: "Matt", date: "2026-09-20" },
-            ],
-          },
-        };
-        const resolved = await resolveCorroboration(corroboration, {
-          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-          readRaw: async () => Buffer.from(""),
-          evidenceDir: EVIDENCE_DIR,
-          ledger: { entries: [] },
-          x2Md: { fullText, path: x2MdPath },
-          canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
-        });
-        expect(
-          resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "completionUnit"))
-            ?.acceptanceLogged,
-        ).toBe(false);
+        expect(await resolveHiddenRowScenario(fullText, "completionUnit")).toBe(false);
       });
 
       it("a row hidden inside a tilde-fenced code block (~~~) is NOT counted", async () => {
-        const dir = await initScratchRepo();
         const fullText =
-          "# X2\n\n## Log\n\n~~~\n" +
-          `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` +
-          "~~~\n";
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
-        const corroboration: X2CorroborationFile = {
-          NC: {
-            [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
-          },
-        };
-        const resolved = await resolveCorroboration(corroboration, {
-          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-          readRaw: async () => Buffer.from(""),
-          evidenceDir: EVIDENCE_DIR,
-          ledger: { entries: [] },
-          x2Md: { fullText, path: x2MdPath },
-          canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
-        });
-        expect(
-          resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
-        ).toBe(false);
+          "# X2\n\n## Log\n\n~~~\n" + `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` + "~~~\n";
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
       });
 
       it("a row hidden inside an INDENTED code block (4+ leading spaces) is NOT counted", async () => {
-        const dir = await initScratchRepo();
-        const fullText =
-          "# X2\n\n## Log\n\n" + `    ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
-        const corroboration: X2CorroborationFile = {
-          NC: {
-            [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
-          },
-        };
-        const resolved = await resolveCorroboration(corroboration, {
-          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-          readRaw: async () => Buffer.from(""),
-          evidenceDir: EVIDENCE_DIR,
-          ledger: { entries: [] },
-          x2Md: { fullText, path: x2MdPath },
-          canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
-        });
-        expect(
-          resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
-        ).toBe(false);
+        const fullText = "# X2\n\n## Log\n\n" + `    ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
       });
 
-      it("the SAME row, NOT hidden (plain prose), DOES count — proves the fence/comment tests above fail for visibility, not some other reason", async () => {
-        const dir = await initScratchRepo();
+      it("should-fix, fourth re-gate: a row hidden inside a <details> raw HTML block is NOT counted", async () => {
+        // CommonMark's own rule for this HTML-block type: it runs until
+        // the next BLANK line, never until a matching close tag — so
+        // (deliberately, matching real Markdown renderers) there must be
+        // NO blank line between <details> and the row for it to still be
+        // "inside" the block by this rule.
+        const fullText =
+          "# X2\n\n## Log\n\n<details>\n<summary>old</summary>\n" +
+          `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` +
+          "</details>\n";
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
+      });
+
+      it("should-fix, fourth re-gate: a row hidden inside any other raw HTML block (a <div>) is NOT counted", async () => {
+        const fullText =
+          "# X2\n\n## Log\n\n<div>\n" + `ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n` + "</div>\n";
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
+      });
+
+      it("should-fix, fourth re-gate: a row carrying a `hidden` attribute is NOT counted", async () => {
+        const fullText =
+          "# X2\n\n## Log\n\n" +
+          `<span hidden>ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt</span>\n`;
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
+      });
+
+      it("should-fix, fourth re-gate: a row carrying a `style` attribute is NOT counted", async () => {
+        const fullText =
+          "# X2\n\n## Log\n\n" +
+          `<span style="display:none">ACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt</span>\n`;
+        expect(await resolveHiddenRowScenario(fullText)).toBe(false);
+      });
+
+      it("the SAME row, NOT hidden (plain prose), DOES count — proves the hiding tests above fail for visibility, not some other reason", async () => {
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
-        const corroboration: X2CorroborationFile = {
-          NC: {
-            [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
-          },
-        };
-        const resolved = await resolveCorroboration(corroboration, {
-          evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-19"),
-          readRaw: async () => Buffer.from(""),
-          evidenceDir: EVIDENCE_DIR,
-          ledger: { entries: [] },
-          x2Md: { fullText, path: x2MdPath },
-          canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
-        });
-        expect(
-          resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
-        ).toBe(true);
+        expect(await resolveHiddenRowScenario(fullText)).toBe(true);
       });
     });
 
     describe("should-fix: acceptance date rules", () => {
       it("refuses when the acceptance date is BEFORE the evidence's own ownerSavedDate", async () => {
-        const dir = await initScratchRepo();
+        const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-01-01 Matt\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
+        const { x2MdPath } = await pushX2Md(bareDir, fullText);
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-01-01" }],
           },
         };
         const resolved = await resolveCorroboration(corroboration, {
-          // The evidence claims it was owner-saved on 2026-09-20 — LATER
-          // than the acceptance date above, which cannot be right.
           evidenceByTrail: evidenceWithOwnerSavedDate("2026-09-20"),
           readRaw: async () => Buffer.from(""),
           evidenceDir: EVIDENCE_DIR,
           ledger: { entries: [] },
           x2Md: { fullText, path: x2MdPath },
           canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
+          ledgerOfficial: true,
+          githubVerification: verification,
         });
         const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
         expect(entry?.acceptanceLogged).toBe(false);
         expect(entry?.acceptanceDetail).toMatch(/is BEFORE the evidence's own ownerSavedDate/);
+        await verification.cleanup();
       });
 
       it("refuses when the acceptance date is more than 1 day after the commit date that introduced the row", async () => {
-        const dir = await initScratchRepo();
-        // A wildly future-dated acceptance — the commit introducing it
-        // happens "now" (test run time), so any date far in the future
-        // is more than 1 day past the commit's own date.
+        const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2099-01-01 Matt\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
+        const { x2MdPath } = await pushX2Md(bareDir, fullText);
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2099-01-01" }],
@@ -2617,18 +2746,20 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
           ledger: { entries: [] },
           x2Md: { fullText, path: x2MdPath },
           canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
+          ledgerOfficial: true,
+          githubVerification: verification,
         });
         const entry = resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"));
         expect(entry?.acceptanceLogged).toBe(false);
         expect(entry?.acceptanceDetail).toMatch(/is more than 1 day after the commit date/);
+        await verification.cleanup();
       });
 
       it("accepts when the date equals the evidence's ownerSavedDate exactly, and the commit is dated today (the normal case)", async () => {
-        const dir = await initScratchRepo();
+        const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
+        const { x2MdPath } = await pushX2Md(bareDir, fullText);
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
@@ -2641,18 +2772,20 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
           ledger: { entries: [] },
           x2Md: { fullText, path: x2MdPath },
           canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
+          ledgerOfficial: true,
+          githubVerification: verification,
         });
         expect(
           resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
         ).toBe(true);
+        await verification.cleanup();
       });
 
       it("does not refuse on the date rule when the evidence has no ownerSavedDate recorded at all (legacy/unknown — the rule simply doesn't apply)", async () => {
-        const dir = await initScratchRepo();
+        const bareDir = await initUpstreamBare();
         const fullText = `# X2\n\n## Log\n\nACCEPT NC season ${SHA_OWNER_FOR_RESOLVE} 2026-09-20 Matt\n`;
-        const x2MdPath = await commitX2Md(dir, fullText);
-        await markVerified(dir);
+        const { x2MdPath } = await pushX2Md(bareDir, fullText);
+        const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
         const corroboration: X2CorroborationFile = {
           NC: {
             [SHA_OWNER_FOR_RESOLVE]: [{ type: "acceptance", fact: "season", acceptedBy: "Matt", date: "2026-09-20" }],
@@ -2665,125 +2798,368 @@ describe("x2-verdict: resolveCorroboration (gate finding 3 second re-gate / find
           ledger: { entries: [] },
           x2Md: { fullText, path: x2MdPath },
           canonicalX2MdPath: x2MdPath,
-          verifiedMainRefName: SCRATCH_VERIFIED_REF,
+          ledgerOfficial: true,
+          githubVerification: verification,
         });
         expect(
           resolved.get(corroborationResolutionKey("NC", SHA_OWNER_FOR_RESOLVE, "season"))?.acceptanceLogged,
         ).toBe(true);
+        await verification.cleanup();
       });
-    });
-  });
-
-  describe("gate finding, third re-gate, fix (b): fetchVerifiedMainRef (no network — a local path stands in for the GitHub URL)", () => {
-    async function initBareRepoWithCommit(): Promise<{ bareDir: string; sha: string }> {
-      const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-src-"));
-      await execFileAsync("git", ["init", "-q"], { cwd: workDir });
-      await execFileAsync("git", ["config", "user.email", "t@e.com"], { cwd: workDir });
-      await execFileAsync("git", ["config", "user.name", "T"], { cwd: workDir });
-      writeFileSync(nodePath.join(workDir, "f.txt"), "hello\n", "utf8");
-      await execFileAsync("git", ["add", "f.txt"], { cwd: workDir });
-      await execFileAsync("git", ["commit", "-q", "-m", "init"], { cwd: workDir });
-      await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
-      const bareDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-bare-"));
-      await execFileAsync("git", ["init", "-q", "--bare"], { cwd: bareDir });
-      await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
-      const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workDir });
-      return { bareDir, sha: stdout.trim() };
-    }
-
-    it("fetches main from the given repoUrl into refName, with no prior ref", async () => {
-      const { bareDir, sha } = await initBareRepoWithCommit();
-      const cwd = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-dst-"));
-      await execFileAsync("git", ["init", "-q"], { cwd });
-      const refName = "refs/x2-verdict/verified-main";
-      const result = await fetchVerifiedMainRef(cwd, { repoUrl: bareDir, refName });
-      expect(result.ok).toBe(true);
-      const { stdout } = await execFileAsync("git", ["rev-parse", refName], { cwd });
-      expect(stdout.trim()).toBe(sha);
-    });
-
-    it("deletes a PRE-EXISTING (possibly forged) ref before fetching — the caller never reads a stale/forged ref", async () => {
-      const { bareDir, sha } = await initBareRepoWithCommit();
-      const cwd = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-dst-"));
-      await execFileAsync("git", ["init", "-q"], { cwd });
-      await execFileAsync("git", ["config", "user.email", "t@e.com"], { cwd });
-      await execFileAsync("git", ["config", "user.name", "T"], { cwd });
-      // Forge an UNRELATED commit under the SAME ref name a caller with
-      // write access to this checkout could set directly.
-      writeFileSync(nodePath.join(cwd, "forged.txt"), "forged\n", "utf8");
-      await execFileAsync("git", ["add", "forged.txt"], { cwd });
-      await execFileAsync("git", ["commit", "-q", "-m", "forged"], { cwd });
-      const refName = "refs/x2-verdict/verified-main";
-      await execFileAsync("git", ["update-ref", refName, "HEAD"], { cwd });
-      const { stdout: forgedSha } = await execFileAsync("git", ["rev-parse", refName], { cwd });
-      expect(forgedSha.trim()).not.toBe(sha);
-
-      const result = await fetchVerifiedMainRef(cwd, { repoUrl: bareDir, refName });
-      expect(result.ok).toBe(true);
-      const { stdout } = await execFileAsync("git", ["rev-parse", refName], { cwd });
-      expect(stdout.trim()).toBe(sha); // the forged commit is gone, replaced by the real fetch
-    });
-
-    it("a fetch failure (bad/unreachable repoUrl) gives ok: false and leaves no usable ref behind — never OFFICIAL", async () => {
-      const cwd = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-dst-"));
-      await execFileAsync("git", ["init", "-q"], { cwd });
-      const refName = "refs/x2-verdict/verified-main";
-      const result = await fetchVerifiedMainRef(cwd, {
-        repoUrl: "/this/path/does/not/exist/at/all",
-        refName,
-      });
-      expect(result.ok).toBe(false);
-      expect(result.detail).toMatch(/failed/);
-      await expect(execFileAsync("git", ["rev-parse", refName], { cwd })).rejects.toThrow();
-    });
-
-    it("a fetch failure deletes a PRE-EXISTING forged ref too — a failure never leaves a stale ref readable", async () => {
-      const cwd = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-dst-"));
-      await execFileAsync("git", ["init", "-q"], { cwd });
-      await execFileAsync("git", ["config", "user.email", "t@e.com"], { cwd });
-      await execFileAsync("git", ["config", "user.name", "T"], { cwd });
-      writeFileSync(nodePath.join(cwd, "forged.txt"), "forged\n", "utf8");
-      await execFileAsync("git", ["add", "forged.txt"], { cwd });
-      await execFileAsync("git", ["commit", "-q", "-m", "forged"], { cwd });
-      const refName = "refs/x2-verdict/verified-main";
-      await execFileAsync("git", ["update-ref", refName, "HEAD"], { cwd });
-
-      const result = await fetchVerifiedMainRef(cwd, { repoUrl: "/nonexistent", refName });
-      expect(result.ok).toBe(false);
-      await expect(execFileAsync("git", ["rev-parse", refName], { cwd })).rejects.toThrow();
-    });
-
-    it("gate finding, third re-gate, fix (b): a fetch failure flows through to checkLedgerAgainstGit as verifiedMainUnavailable — never a false OFFICIAL", async () => {
-      const cwd = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-verified-integration-"));
-      await execFileAsync("git", ["init", "-q"], { cwd });
-      await execFileAsync("git", ["config", "user.email", "t@e.com"], { cwd });
-      await execFileAsync("git", ["config", "user.name", "T"], { cwd });
-      const ledgerPath = nodePath.join(cwd, "recorded-ledger.json");
-      writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
-      await execFileAsync("git", ["add", "recorded-ledger.json"], { cwd });
-      await execFileAsync("git", ["commit", "-q", "-m", "ledger"], { cwd });
-      const refName = "refs/x2-verdict/verified-main";
-
-      // Simulate the real main()'s sequence: fetch (fails), then check —
-      // never letting the ledger check trust a ref that was never
-      // actually fetched this run.
-      const fetchResult = await fetchVerifiedMainRef(cwd, { repoUrl: "/nonexistent", refName });
-      expect(fetchResult.ok).toBe(false);
-      const result = await checkLedgerAgainstGit(ledgerPath, { refName, canonicalPath: ledgerPath });
-      expect(result.clean).toBe(false);
-      expect(result.verifiedMainUnavailable).toBe(true);
-      expect(result.verifiedAgainstGithub).toBe(false);
     });
   });
 });
 
-describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / gate finding third re-gate)", () => {
-  /** No `origin` remote, no network — `SCRATCH_VERIFIED_REF` is created
-   * directly with `git update-ref`, standing in for what a real
-   * `fetchVerifiedMainRef` would have produced this run. Every test
-   * passes `canonicalPath`/`refName` as the TEST-ONLY seam (gate
-   * finding, third re-gate, fix (a)/(b)) — `main()` itself never does. */
-  const SCRATCH_VERIFIED_REF = "refs/heads/scratch-verified-main";
+describe("x2-verdict: verifyAgainstGitHub (gate finding, fourth re-gate — disposable repo + scrubbed environment)", () => {
+  async function initUpstreamBare(): Promise<string> {
+    const bareDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-upstream-"));
+    await execFileAsync("git", ["init", "-q", "--bare", bareDir]);
+    return bareDir;
+  }
+
+  async function pushDocs(
+    bareDir: string,
+    files: { x2Md?: string; ledger?: string },
+    message = "update",
+  ): Promise<{ workDir: string; sha: string }> {
+    const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-work-"));
+    await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+    mkdirSync(nodePath.join(workDir, "docs", "p0"), { recursive: true });
+    if (files.x2Md !== undefined) {
+      writeFileSync(nodePath.join(workDir, "docs", "p0", "X2.md"), files.x2Md, "utf8");
+    }
+    if (files.ledger !== undefined) {
+      writeFileSync(nodePath.join(workDir, "docs", "p0", "x2-recorded-ledger.json"), files.ledger, "utf8");
+    }
+    if (files.x2Md === undefined && files.ledger === undefined) {
+      writeFileSync(nodePath.join(workDir, "README.md"), "placeholder\n", "utf8");
+    }
+    await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+    await execFileAsync("git", ["commit", "-q", "-m", message], { cwd: workDir });
+    await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
+    await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workDir });
+    return { workDir, sha: stdout.trim() };
+  }
+
+  const savedEnv: Record<string, string | undefined> = {};
+  function stashEnv(...keys: string[]): void {
+    for (const k of keys) savedEnv[k] = process.env[k];
+  }
+  function restoreEnv(): void {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+
+  it("succeeds against a real (local, bare-repo-standing-in-for-GitHub) main, reading the ledger and X2.md blobs directly from refs/heads/main", async () => {
+    const bareDir = await initUpstreamBare();
+    await pushDocs(bareDir, { x2Md: "# X2\n\nhello\n", ledger: '{"entries": []}\n' });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    expect(verification.ok).toBe(true);
+    expect(verification.x2MdText).toBe("# X2\n\nhello\n");
+    expect(verification.x2MdBlobHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(verification.ledgerBlobHash).toMatch(/^[0-9a-f]{40}$/);
+    await verification.cleanup();
+  });
+
+  it("a bad/unreachable repoUrl gives ok: false, never throws", async () => {
+    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all" });
+    expect(verification.ok).toBe(false);
+    expect(verification.ledgerBlobHash).toBeNull();
+    await verification.cleanup();
+  });
+
+  it("a source repo missing docs/p0/X2.md or the ledger resolves ok: true with those blob hashes null, never a hard failure", async () => {
+    const bareDir = await initUpstreamBare();
+    await pushDocs(bareDir, {}); // placeholder commit, no docs/p0 files
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    expect(verification.ok).toBe(true);
+    expect(verification.ledgerBlobHash).toBeNull();
+    expect(verification.x2MdBlobHash).toBeNull();
+    expect(verification.x2MdText).toBeNull();
+    await verification.cleanup();
+  });
+
+  it("refuses a SHALLOW source (rev-parse --is-shallow-repository) rather than trust a boundary commit", async () => {
+    const bareDir = await initUpstreamBare();
+    const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-shallow-src-"));
+    await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+    writeFileSync(nodePath.join(workDir, "a.txt"), "1\n", "utf8");
+    await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+    await execFileAsync("git", ["commit", "-q", "-m", "c1"], { cwd: workDir });
+    writeFileSync(nodePath.join(workDir, "a.txt"), "2\n", "utf8");
+    await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+    await execFileAsync("git", ["commit", "-q", "-m", "c2"], { cwd: workDir });
+    await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
+    await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
+
+    // A SHALLOW clone of bareDir, used as the "repoUrl" — git can re-serve
+    // from a shallow repo, producing a shallow result on our end too.
+    const shallowDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-shallow-clone-"));
+    await execFileAsync("git", ["clone", "-q", "--depth", "1", bareDir, shallowDir]);
+
+    const verification = await verifyAgainstGitHub({ repoUrl: shallowDir });
+    expect(verification.ok).toBe(false);
+    expect(verification.detail).toMatch(/shallow/);
+    await verification.cleanup();
+  });
+
+  describe("exploit I: insteadOf URL redirection", () => {
+    afterEach(() => {
+      restoreEnv();
+    });
+
+    it("GIT_CONFIG_COUNT/KEY/VALUE env-var redirection in the CALLING process has NO EFFECT — scrubbedGitEnv drops every GIT_CONFIG_* variable", async () => {
+      const realBareDir = await initUpstreamBare();
+      await pushDocs(realBareDir, { x2Md: "# X2\n\nREAL CONTENT\n" });
+      const fakeBareDir = await initUpstreamBare();
+      await pushDocs(fakeBareDir, { x2Md: "# X2\n\nFAKE CONTENT (attacker's own repo)\n" });
+
+      stashEnv("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0");
+      process.env.GIT_CONFIG_COUNT = "1";
+      process.env.GIT_CONFIG_KEY_0 = `url.${fakeBareDir}.insteadOf`;
+      process.env.GIT_CONFIG_VALUE_0 = realBareDir;
+
+      // Confirms the cause: an UNPROTECTED git invocation that inherits
+      // this env DOES get redirected.
+      const { stdout: unprotectedUrl } = await execFileAsync("git", ["ls-remote", "--get-url", realBareDir]);
+      expect(unprotectedUrl.trim()).toBe(fakeBareDir);
+
+      // The fix: verifyAgainstGitHub is unaffected — it reads the REAL repo.
+      const verification = await verifyAgainstGitHub({ repoUrl: realBareDir });
+      expect(verification.ok).toBe(true);
+      expect(verification.x2MdText).toContain("REAL CONTENT");
+      expect(verification.x2MdText).not.toContain("FAKE CONTENT");
+      await verification.cleanup();
+    });
+
+    it("a malicious GLOBAL config (via a forged HOME) has NO EFFECT — HOME and GIT_CONFIG_GLOBAL are both pinned inside verifyAgainstGitHub", async () => {
+      const realBareDir = await initUpstreamBare();
+      await pushDocs(realBareDir, { x2Md: "# X2\n\nREAL CONTENT 2\n" });
+      const fakeBareDir = await initUpstreamBare();
+      await pushDocs(fakeBareDir, { x2Md: "# X2\n\nFAKE CONTENT 2\n" });
+
+      const maliciousHome = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-malicious-home-"));
+      writeFileSync(
+        nodePath.join(maliciousHome, ".gitconfig"),
+        `[url "${fakeBareDir}"]\n\tinsteadOf = ${realBareDir}\n`,
+        "utf8",
+      );
+      stashEnv("HOME");
+      process.env.HOME = maliciousHome;
+
+      const verification = await verifyAgainstGitHub({ repoUrl: realBareDir });
+      expect(verification.ok).toBe(true);
+      expect(verification.x2MdText).toContain("REAL CONTENT 2");
+      expect(verification.x2MdText).not.toContain("FAKE CONTENT 2");
+      await verification.cleanup();
+    });
+  });
+
+  describe("exploit R: git replace", () => {
+    it("confirms the cause: an UNPROTECTED git command substitutes a `git replace`d object; GIT_NO_REPLACE_OBJECTS=1 defeats it", async () => {
+      const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-replace-src-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+      await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+      writeFileSync(nodePath.join(workDir, "f.txt"), "real\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+      await execFileAsync("git", ["commit", "-q", "-m", "real commit"], { cwd: workDir });
+      const { stdout: realSha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workDir });
+
+      writeFileSync(nodePath.join(workDir, "f.txt"), "forged\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+      await execFileAsync("git", ["commit", "-q", "-m", "forged commit"], { cwd: workDir });
+      const { stdout: forgedSha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workDir });
+
+      await execFileAsync("git", ["replace", realSha.trim(), forgedSha.trim()], { cwd: workDir });
+
+      // Confirms the cause: unprotected, the replaced object is what a
+      // reader sees.
+      const { stdout: unprotectedShow } = await execFileAsync(
+        "git",
+        ["show", "-s", "--format=%s", realSha.trim()],
+        { cwd: workDir },
+      );
+      expect(unprotectedShow.trim()).toBe("forged commit");
+
+      // The fix's own ingredient: GIT_NO_REPLACE_OBJECTS=1 defeats it.
+      const { stdout: protectedShow } = await execFileAsync(
+        "git",
+        ["show", "-s", "--format=%s", realSha.trim()],
+        { cwd: workDir, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" } },
+      );
+      expect(protectedShow.trim()).toBe("real commit");
+    });
+
+    it("verifyAgainstGitHub's own disposable repo never acquires refs/replace/* from a fetch of a single ref — it is fresh every run", async () => {
+      const bareDir = await initUpstreamBare();
+      await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      // A `git replace` in the SOURCE repo is local-only and is never
+      // part of what `+refs/heads/main:refs/heads/main` transfers — the
+      // disposable repo verifyAgainstGitHub builds is fresh every run, so
+      // this simply succeeds normally.
+      expect(verification.ok).toBe(true);
+      await verification.cleanup();
+    });
+  });
+
+  describe("exploit G: .git/info/grafts", () => {
+    it("confirms the cause: an UNPROTECTED reader honours a graft that rewrites parentage, making a forged commit an ancestor", async () => {
+      const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-grafts-src-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+      await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+      writeFileSync(nodePath.join(workDir, "f.txt"), "1\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+      await execFileAsync("git", ["commit", "-q", "-m", "genuine root"], { cwd: workDir });
+      const { stdout: c1 } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workDir });
+
+      // A forged, UNRELATED commit — no real ancestry relationship to c1.
+      const forgedDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-grafts-forged-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: forgedDir });
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: forgedDir });
+      await execFileAsync("git", ["config", "user.name", "Test"], { cwd: forgedDir });
+      writeFileSync(nodePath.join(forgedDir, "g.txt"), "forged\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: forgedDir });
+      await execFileAsync("git", ["commit", "-q", "-m", "forged, as Matt"], { cwd: forgedDir });
+      const { stdout: forgedSha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: forgedDir });
+      await execFileAsync("git", ["fetch", "-q", forgedDir, "HEAD:refs/forged"], { cwd: workDir });
+
+      // Before the graft: NOT an ancestor.
+      await expect(
+        execFileAsync("git", ["merge-base", "--is-ancestor", forgedSha.trim(), c1.trim()], { cwd: workDir }),
+      ).rejects.toThrow();
+
+      mkdirSync(nodePath.join(workDir, ".git", "info"), { recursive: true });
+      writeFileSync(
+        nodePath.join(workDir, ".git", "info", "grafts"),
+        `${c1.trim()} ${forgedSha.trim()}\n`,
+        "utf8",
+      );
+
+      // Confirms the cause: WITH the graft, git now reports it reachable.
+      await expect(
+        execFileAsync("git", ["merge-base", "--is-ancestor", forgedSha.trim(), c1.trim()], { cwd: workDir }),
+      ).resolves.toBeDefined();
+    });
+
+    it("verifyAgainstGitHub's disposable repo never has info/grafts (it is created fresh via `git init --bare` every run) — a graft in the SOURCE repo never transfers", async () => {
+      const bareDir = await initUpstreamBare();
+      await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      expect(verification.ok).toBe(true);
+      await verification.cleanup();
+    });
+  });
+
+  describe("GIT_DIR / GIT_WORK_TREE in the caller's own environment", () => {
+    afterEach(() => {
+      restoreEnv();
+    });
+
+    it("a caller-set GIT_DIR pointing at an unrelated repo has NO EFFECT — scrubbedGitEnv always overrides GIT_DIR to the disposable repo itself", async () => {
+      const unrelatedRepo = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-unrelated-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: unrelatedRepo });
+
+      const bareDir = await initUpstreamBare();
+      await pushDocs(bareDir, { x2Md: "# X2\n\nGIT_DIR test\n" });
+
+      stashEnv("GIT_DIR", "GIT_WORK_TREE");
+      process.env.GIT_DIR = nodePath.join(unrelatedRepo, ".git");
+      process.env.GIT_WORK_TREE = unrelatedRepo;
+
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      expect(verification.ok).toBe(true);
+      expect(verification.x2MdText).toContain("GIT_DIR test");
+      await verification.cleanup();
+    });
+  });
+
+  describe(".git/hooks", () => {
+    it("a hook that WOULD run on an unprotected ref update does not fire under core.hooksPath=/dev/null (the flag verifyAgainstGitHub always passes)", async () => {
+      const repo = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-gh-hooks-"));
+      await execFileAsync("git", ["init", "-q"], { cwd: repo });
+      writeFileSync(nodePath.join(repo, "f.txt"), "1\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: repo });
+      await execFileAsync(
+        "git",
+        ["-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-q", "-m", "c"],
+        { cwd: repo },
+      );
+
+      const marker = nodePath.join(repo, "hook-ran.marker");
+      mkdirSync(nodePath.join(repo, ".git", "hooks"), { recursive: true });
+      writeFileSync(
+        nodePath.join(repo, ".git", "hooks", "reference-transaction"),
+        `#!/bin/sh\ntouch "${marker}"\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      // Confirms the cause: an unprotected ref update runs the hook.
+      await execFileAsync("git", ["update-ref", "refs/heads/y", "HEAD"], { cwd: repo });
+      expect(existsSync(marker)).toBe(true);
+
+      // The fix: the SAME kind of ref update, but with
+      // core.hooksPath=/dev/null (exactly what verifyAgainstGitHub always
+      // passes), never runs it.
+      const marker2 = nodePath.join(repo, "hook-ran-2.marker");
+      writeFileSync(
+        nodePath.join(repo, ".git", "hooks", "reference-transaction"),
+        `#!/bin/sh\ntouch "${marker2}"\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      await execFileAsync(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/z", "HEAD"],
+        { cwd: repo },
+      );
+      expect(existsSync(marker2)).toBe(false);
+    });
+  });
+
+  it("GIT_SSL_NO_VERIFY set in the ORIGINAL environment refuses outright, before any fetch", async () => {
+    const bareDir = await initUpstreamBare();
+    await pushDocs(bareDir, { x2Md: "# X2\n\nok\n" });
+    stashEnv("GIT_SSL_NO_VERIFY");
+    process.env.GIT_SSL_NO_VERIFY = "1";
+    try {
+      const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+      expect(verification.ok).toBe(false);
+      expect(verification.detail).toMatch(/GIT_SSL_NO_VERIFY/);
+      await verification.cleanup();
+    } finally {
+      restoreEnv();
+    }
+  });
+});
+
+describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / gate finding third+fourth re-gate)", () => {
+  async function initUpstreamBare(): Promise<string> {
+    const bareDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-upstream-"));
+    await execFileAsync("git", ["init", "-q", "--bare", bareDir]);
+    return bareDir;
+  }
+
+  async function pushLedger(bareDir: string, ledgerJson: string, message = "add ledger"): Promise<void> {
+    const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-work-"));
+    await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+    mkdirSync(nodePath.join(workDir, "docs", "p0"), { recursive: true });
+    writeFileSync(nodePath.join(workDir, "docs", "p0", "x2-recorded-ledger.json"), ledgerJson, "utf8");
+    await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+    await execFileAsync("git", ["commit", "-q", "-m", message], { cwd: workDir });
+    await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
+    await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
+  }
 
   async function initGitRepo(): Promise<{ dir: string; ledgerPath: string }> {
     const dir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-git-test-"));
@@ -2795,21 +3171,18 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
     return { dir, ledgerPath };
   }
 
-  async function markVerifiedAtHead(dir: string, refName: string = SCRATCH_VERIFIED_REF): Promise<void> {
-    await execFileAsync("git", ["update-ref", refName, "HEAD"], { cwd: dir });
-  }
-
-  it("gate finding 4, probe A: a canonical-path, committed ledger VERIFIED against the (test-injected) ref is reported clean, with its git blob hash and last commit", async () => {
+  it("gate finding 4, probe A: a canonical-path, committed ledger VERIFIED against GitHub main (the bare upstream) is reported clean, with its git blob hash and last commit", async () => {
     const { dir, ledgerPath } = await initGitRepo();
-    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    const ledgerJson = '{"entries": []}\n';
+    writeFileSync(ledgerPath, ledgerJson, "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
-    await markVerifiedAtHead(dir);
 
-    const result = await checkLedgerAgainstGit(ledgerPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: ledgerPath,
-    });
+    const bareDir = await initUpstreamBare();
+    await pushLedger(bareDir, ledgerJson);
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.verifiedAgainstGithub).toBe(true);
     expect(result.verifiedMainUnavailable).toBe(false);
@@ -2825,51 +3198,56 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
       { cwd: dir },
     );
     expect(result.blobHash).toBe(stdout.trim());
+    await verification.cleanup();
   });
 
   it("gate finding, third re-gate, fix (a): a WRONG-location ledger (right repo, right filename, wrong directory) is refused as not canonical, never treated as if it were, even when otherwise clean and verified", async () => {
     const { dir, ledgerPath: intendedCanonicalPath } = await initGitRepo();
-    const wrongPath = nodePath.join(dir, "x2-recorded-ledger.json"); // repo root, not docs/p0/
-    writeFileSync(wrongPath, '{"entries": []}\n', "utf8");
+    const wrongPath = nodePath.join(dir, "x2-recorded-ledger.json");
+    const ledgerJson = '{"entries": []}\n';
+    writeFileSync(wrongPath, ledgerJson, "utf8");
     await execFileAsync("git", ["add", "x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "wrong location"], { cwd: dir });
-    await markVerifiedAtHead(dir);
 
-    const result = await checkLedgerAgainstGit(wrongPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: intendedCanonicalPath, // the CORRECT path, deliberately not where the file is
-    });
+    const bareDir = await initUpstreamBare();
+    await pushLedger(bareDir, ledgerJson);
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+    const result = await checkLedgerAgainstGit(wrongPath, verification, { canonicalPath: intendedCanonicalPath });
     expect(result.pathIsCanonical).toBe(false);
     expect(result.clean).toBe(false);
     expect(result.detail).toMatch(/is not the canonical ledger path/);
+    await verification.cleanup();
   });
 
   it("gate finding, third re-gate, fix (a): with NO canonicalPath override, a scratch repo's own docs/p0/x2-recorded-ledger.json never matches the REAL toolkit's canonical path — exploit A3's own shape", async () => {
     const { dir, ledgerPath } = await initGitRepo();
-    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    const ledgerJson = '{"entries": []}\n';
+    writeFileSync(ledgerPath, ledgerJson, "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "scratch, forged"], { cwd: dir });
-    await markVerifiedAtHead(dir);
 
-    // Deliberately NO `canonicalPath` override — this exercises the REAL
-    // default (`canonicalLedgerAbsPath()`, pinned to THIS toolkit's own
-    // checkout via `import.meta.url`), which a scratch repo's own
-    // `docs/p0/x2-recorded-ledger.json` can never equal.
-    const result = await checkLedgerAgainstGit(ledgerPath, { refName: SCRATCH_VERIFIED_REF });
+    const bareDir = await initUpstreamBare();
+    await pushLedger(bareDir, ledgerJson);
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+    const result = await checkLedgerAgainstGit(ledgerPath, verification);
     expect(result.pathIsCanonical).toBe(false);
     expect(result.clean).toBe(false);
+    await verification.cleanup();
   });
 
   it("a committed, canonical-path ledger with an UNCOMMITTED edit is reported dirty, with a reason", async () => {
     const { dir, ledgerPath } = await initGitRepo();
-    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    const ledgerJson = '{"entries": []}\n';
+    writeFileSync(ledgerPath, ledgerJson, "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
-    await markVerifiedAtHead(dir);
 
-    // Edit it WITHOUT committing — simulates a hand-edited ledger row
-    // (e.g. the gate's own `edited-ledger.json` bypass attempt) that
-    // never went through review/commit.
+    const bareDir = await initUpstreamBare();
+    await pushLedger(bareDir, ledgerJson);
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
     writeFileSync(
       ledgerPath,
       '{"entries": [{"method": "rendered", "normalizedUrl": "x", "url": "x", "sha256": "' +
@@ -2878,94 +3256,91 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
       "utf8",
     );
 
-    const result = await checkLedgerAgainstGit(ledgerPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: ledgerPath,
-    });
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.detail).toMatch(/uncommitted changes/);
-    // The blob hash is still reported (of the CURRENT, dirty content) —
-    // never withheld just because the ledger is dirty.
     expect(result.blobHash).toMatch(/^[0-9a-f]{40}$/);
+    await verification.cleanup();
   });
 
   it("an UNTRACKED ledger file (never git-added at all) is reported dirty — `git diff` alone would miss this", async () => {
-    const { dir, ledgerPath } = await initGitRepo();
+    const { ledgerPath } = await initGitRepo();
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
-    // Deliberately never `git add`ed or committed.
 
-    const result = await checkLedgerAgainstGit(ledgerPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: ledgerPath,
-    });
+    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all" });
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.detail).toMatch(/untracked/);
+    await verification.cleanup();
   });
 
-  it("gate finding 4, probe D: a canonical, committed ledger that the verified-main ref does NOT have yet is marked UNOFFICIAL (verifiedMainUnavailable), never a plain dirty refusal", async () => {
+  it("gate finding 4, probe D: a canonical, committed ledger that GitHub main does NOT have yet is marked UNOFFICIAL (verifiedMainUnavailable), never a plain dirty refusal", async () => {
     const { dir, ledgerPath } = await initGitRepo();
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "add ledger, never verified"], { cwd: dir });
-    // Deliberately never marked verified — simulates a fetch that never
-    // ran, or one that failed (and so deleted any stale ref).
 
-    const result = await checkLedgerAgainstGit(ledgerPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: ledgerPath,
-    });
+    const bareDir = await initUpstreamBare();
+    const workDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-ledger-empty-upstream-"));
+    await execFileAsync("git", ["init", "-q"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: workDir });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: workDir });
+    writeFileSync(nodePath.join(workDir, "README.md"), "x\n", "utf8");
+    await execFileAsync("git", ["add", "-A"], { cwd: workDir });
+    await execFileAsync("git", ["commit", "-q", "-m", "placeholder"], { cwd: workDir });
+    await execFileAsync("git", ["branch", "-M", "main"], { cwd: workDir });
+    await execFileAsync("git", ["push", "-q", bareDir, "HEAD:main"], { cwd: workDir });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.verifiedAgainstGithub).toBe(false);
     expect(result.verifiedMainUnavailable).toBe(true);
-    expect(result.detail).toMatch(/does not yet have|the ref itself is absent/);
+    await verification.cleanup();
   });
 
-  it("gate finding 4, probe D: a canonical, committed ledger whose content DIVERGED from what the verified-main ref already has is refused as dirty (not the missing-path carve-out)", async () => {
+  it("gate finding 4, probe D: a canonical, committed ledger whose content DIVERGED from what GitHub main already has is refused as dirty (not the missing-path carve-out)", async () => {
     const { dir, ledgerPath } = await initGitRepo();
-    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    const v1 = '{"entries": []}\n';
+    writeFileSync(ledgerPath, v1, "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "v1"], { cwd: dir });
-    await markVerifiedAtHead(dir); // ref now points at v1
 
-    // A second, LOCAL-ONLY commit changes the ledger's content without
-    // re-verifying — the ref still points at v1's content.
-    writeFileSync(
-      ledgerPath,
+    const bareDir = await initUpstreamBare();
+    await pushLedger(bareDir, v1);
+
+    const v2 =
       '{"entries": [{"method": "direct", "normalizedUrl": "x", "url": "x", "sha256": "' +
-        "b".repeat(64) +
-        '", "recordedAt": "2026-01-01T00:00:00Z"}]}\n',
-      "utf8",
-    );
+      "b".repeat(64) +
+      '", "recordedAt": "2026-01-01T00:00:00Z"}]}\n';
+    writeFileSync(ledgerPath, v2, "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "v2, not re-verified"], { cwd: dir });
 
-    const result = await checkLedgerAgainstGit(ledgerPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: ledgerPath,
-    });
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.pathIsCanonical).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.verifiedAgainstGithub).toBe(false);
     expect(result.verifiedMainUnavailable).toBe(false);
-    expect(result.detail).toMatch(/locally diverged from GitHub's own main/);
+    expect(result.detail).toMatch(/does not match what GitHub's real main/);
+    await verification.cleanup();
   });
 
   it("gate finding 4, probe E: a ledger marked assume-unchanged in git is refused (hiddenByGitFlag), even though git diff/status report it clean", async () => {
     const { dir, ledgerPath } = await initGitRepo();
-    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    const v1 = '{"entries": []}\n';
+    writeFileSync(ledgerPath, v1, "utf8");
     await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
     await execFileAsync("git", ["commit", "-q", "-m", "add ledger"], { cwd: dir });
-    await markVerifiedAtHead(dir);
     await execFileAsync(
       "git",
       ["update-index", "--assume-unchanged", "docs/p0/x2-recorded-ledger.json"],
       { cwd: dir },
     );
-    // Edit the file AFTER marking it assume-unchanged — git diff/status
-    // will NOT see this edit at all (that is the whole point of the flag).
     writeFileSync(
       ledgerPath,
       '{"entries": [{"method": "direct", "normalizedUrl": "hidden", "url": "hidden", "sha256": "' +
@@ -2974,24 +3349,40 @@ describe("x2-verdict: checkLedgerAgainstGit (gate finding 2d / gate finding 4 / 
       "utf8",
     );
 
-    const result = await checkLedgerAgainstGit(ledgerPath, {
-      refName: SCRATCH_VERIFIED_REF,
-      canonicalPath: ledgerPath,
-    });
+    const bareDir = await initUpstreamBare();
+    await pushLedger(bareDir, v1);
+    const verification = await verifyAgainstGitHub({ repoUrl: bareDir });
+
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
     expect(result.hiddenByGitFlag).toBe(true);
     expect(result.clean).toBe(false);
     expect(result.detail).toMatch(/assume-unchanged or skip-worktree/);
+    await verification.cleanup();
   });
 
   it("a path outside any git repository (or a missing file) resolves to NOT clean, never silently 'clean'", async () => {
     const outsideDir = mkdtempSync(nodePath.join(tmpdir(), "golfraven-p0-not-a-repo-"));
     const ledgerPath = nodePath.join(outsideDir, "recorded-ledger.json");
     writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
-    // No `canonicalPath` override — this exercises the REAL default
-    // (pinned to THIS toolkit's own checkout), which an arbitrary /tmp
-    // path can never equal.
-    const result = await checkLedgerAgainstGit(ledgerPath);
+    const verification = await verifyAgainstGitHub({ repoUrl: "/this/path/does/not/exist/at/all" });
+    const result = await checkLedgerAgainstGit(ledgerPath, verification);
     expect(result.clean).toBe(false);
     expect(result.pathIsCanonical).toBe(false);
+    await verification.cleanup();
+  });
+
+  it("gate finding, fourth re-gate: a verification that itself failed (ok: false) flows through as UNOFFICIAL, never a false OFFICIAL", async () => {
+    const { dir, ledgerPath } = await initGitRepo();
+    writeFileSync(ledgerPath, '{"entries": []}\n', "utf8");
+    await execFileAsync("git", ["add", "docs/p0/x2-recorded-ledger.json"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "ledger"], { cwd: dir });
+
+    const verification = await verifyAgainstGitHub({ repoUrl: "/nonexistent" });
+    expect(verification.ok).toBe(false);
+    const result = await checkLedgerAgainstGit(ledgerPath, verification, { canonicalPath: ledgerPath });
+    expect(result.clean).toBe(false);
+    expect(result.verifiedMainUnavailable).toBe(true);
+    expect(result.verifiedAgainstGithub).toBe(false);
+    await verification.cleanup();
   });
 });
