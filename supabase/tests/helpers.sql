@@ -98,9 +98,18 @@ INSERT INTO app.device (id, user_id, platform) VALUES
 -- see that migration's own comment. This seed row predates that column;
 -- pinned to the SAME play_date the seeded app.play row below uses so the
 -- two stay consistent with each other.
-INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
+-- input_hash: NOT NULL since 0019's own P3c gate round 3 fix (blocking
+-- HIGH 1+2, "replay handling") — a placeholder, deterministic value
+-- derived from this row's own immutable source_ref (the SAME fallback
+-- 0019's own backfill UPDATE uses for a pre-existing row), since this
+-- seed row was never a real client submission with a raw payload to
+-- hash for real. Repo#evidence.findExisting is looked up by (user,
+-- source, source_ref) — this row is never reached through that lookup
+-- with a DIFFERENT source_ref, so a hash that doesn't match any real
+-- client-submitted content never matters for it.
+INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
 VALUES ('30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
-        '20000000-0000-0000-0000-000000000001', 'foreground_checkin', 'checkin-seed-1', 'accepted', 1, current_date);
+        '20000000-0000-0000-0000-000000000001', 'foreground_checkin', 'checkin-seed-1', encode(digest('checkin-seed-1', 'sha256'), 'hex'), 'accepted', 1, current_date);
 INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
 VALUES ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
         'crs_x1', 'fac_x', current_date, 'v1', 'confirmed');

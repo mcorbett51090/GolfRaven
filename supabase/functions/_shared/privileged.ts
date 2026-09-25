@@ -85,12 +85,14 @@
 // the lint's own design, not an oversight to "remove".
 import postgres from "postgres";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { Errors } from "./http.ts";
 
 import type {
   Actor,
   CatalogVersionRow,
   ChallengeRow,
   ConsumedCheckinToken,
+  ExistingEvidenceRow,
   InsertEvidenceResult,
   LedgerRow,
   MatchResult,
@@ -122,8 +124,14 @@ export interface Op<T> {
  * transaction-scoped tagged-template `sql.begin()` hands its callback,
  * NEVER the top-level pool (see `withOwnership`'s own doc, P3c gate
  * round 2 item 2: "every statement autocommits... run each withOwnership
- * callback in ONE sql.begin()"). */
-type TxSql = ReturnType<typeof postgres>;
+ * callback in ONE sql.begin()"). Typed as `postgres.TransactionSql`
+ * (the namespace member `postgres`'s own `.d.ts` merges onto the default
+ * export, per `deno.land/x/postgresjs`'s own types) rather than the
+ * looser `ReturnType<typeof postgres>` (P3c gate round 3, blocking
+ * MEDIUM 4) — `TransactionSql` is the one that actually declares
+ * `.savepoint(...)`, which `withOwnershipBatch` below needs typed, not
+ * cast through `any`. */
+type TxSql = postgres.TransactionSql;
 
 let _sql: ReturnType<typeof postgres> | null = null;
 
@@ -206,7 +214,7 @@ function advisoryLockKeys(namespace: number, id: string): [number, number] {
   return [namespace, h | 0];
 }
 
-function buildRepo(trx: TxSql, actor: Actor): Repo {
+function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): Repo {
   const uid = actor.uid;
   return {
     now(): Date {
@@ -231,16 +239,50 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         // Postgres cluster with two distinct actors — no fake/unit test
         // exercised two actors racing the SAME literal bucket key.
         const scopedBucketKey = `${uid}:${bucketKey}`;
-        try {
-          const rows = await trx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
-          return { ok: true, count: Number(rows[0]?.count ?? 0) };
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          if (message.includes("rate_limit_exceeded") || (err as { code?: string })?.code === "P0429") {
-            return { ok: false, count: max + 1, retryAfterSeconds: windowSeconds };
+        // ⛔ FIX (P3c gate round 3, blocking MEDIUM 3: "rate-limit hits
+        // roll back on 4xx"). This used to run inside the SAME `trx` as
+        // every other write for the request — 80 x catalog_forged 422s
+        // left the bucket at 0 because `withOwnership`'s single
+        // `db.begin()` rolled the WHOLE transaction back on every one of
+        // those (the handler throws an HttpError, which propagates out of
+        // `op(repo)`, which is what `db.begin` itself rolls back on any
+        // rejection) — the rate-limit hit inside it was undone along with
+        // everything else, so a rejected request never actually counted
+        // against its own bucket. `private.hit_rate_limit` is now called
+        // in its OWN short transaction, opened directly on the top-level
+        // pool (`db`, not `trx`), so it commits independently of whatever
+        // the REST of the request's transaction later does — every
+        // attempt counts, accepted or rejected alike. `SET LOCAL ROLE
+        // service_role` is required again here: it is LOCAL to its own
+        // transaction (Postgres discards a LOCAL setting at that
+        // transaction's own end), so the outer `trx`'s activation of it
+        // does not carry over to this separate one.
+        //
+        // ⛔ Also required, and not merely a nicety (0020_rate_limit_no_
+        // raise.sql): the OLD `private.hit_rate_limit` raised on
+        // over-limit, in the SAME statement that did the increment —
+        // isolating the CALL into its own transaction does not, by
+        // itself, make the increment survive that raise, because a
+        // single statement's own effects are what an uncaught RAISE
+        // EXCEPTION discards when it aborts the (here, one-statement)
+        // transaction it ran in. The function no longer raises at all —
+        // it always returns the post-increment count, so the increment
+        // always commits and THIS code decides ok/not-ok from the
+        // returned count. See that migration's own header for the full
+        // reasoning.
+        return db.begin(async (rateTrx: TxSql) => {
+          await rateTrx`set local role service_role`;
+          const check = await rateTrx`select current_user as u`;
+          if (check[0]?.u !== "service_role") {
+            throw new Error(`rateLimit.hit: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
           }
-          throw err;
-        }
+          const rows = await rateTrx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
+          const count = Number(rows[0]?.count ?? 0);
+          if (count > max) {
+            return { ok: false, count, retryAfterSeconds: windowSeconds };
+          }
+          return { ok: true, count };
+        }) as Promise<RateLimitResult>;
       },
     },
 
@@ -356,22 +398,64 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       async insertIdempotent(row: NewEvidenceRow): Promise<InsertEvidenceResult> {
         const inserted = await trx`
           insert into app.evidence (
-            user_id, device_id, source, source_ref, course_id, facility_id,
+            user_id, device_id, source, source_ref, input_hash, course_id, facility_id,
             started_at, ended_at, local_date, summary, integrity, cosignal,
             attestation_grade, matcher_version, catalog_version, status
           ) values (
-            ${uid}, ${row.deviceId}, ${row.source}::app.evidence_source, ${row.sourceRef}, ${row.courseId}, ${row.facilityId},
+            ${uid}, ${row.deviceId}, ${row.source}::app.evidence_source, ${row.sourceRef}, ${row.inputHash}, ${row.courseId}, ${row.facilityId},
             ${row.startedAt}, ${row.endedAt}, ${row.localDate}, ${trx.json(row.summary as never)}, ${trx.json(row.integrity as never)}, ${trx.json(row.cosignal as never)},
             ${row.attestationGrade}::app.attestation_grade, ${row.matcherVersion}, ${row.catalogVersion}, ${row.status}::app.evidence_status
           )
           on conflict (user_id, source, source_ref) do nothing
-          returning id, status`;
+          returning id, status, input_hash`;
         if (inserted[0]) {
-          return { id: inserted[0].id, wasNew: true, status: inserted[0].status };
+          return { id: inserted[0].id, wasNew: true, status: inserted[0].status, inputHash: inserted[0].input_hash };
         }
-        const existing = await trx`select id, status from app.evidence where user_id = ${uid} and source = ${row.source}::app.evidence_source and source_ref = ${row.sourceRef}`;
+        // ⛔ P3c gate round 3, blocking HIGH 1+2's own post-insert
+        // race-safety note: `handler.ts` already calls
+        // `evidence.findExisting` BEFORE this insert is ever attempted, so
+        // reaching the ON CONFLICT branch here means a concurrent request
+        // for the SAME (user, source, source_ref) won the race between
+        // that lookup and this insert — the SAME kind of narrow window
+        // `device.ensureOwn`'s own ON CONFLICT fallback already closes.
+        // handler.ts re-checks `input_hash` against what IT computed
+        // before treating this as its own row.
+        const existing = await trx`select id, status, input_hash from app.evidence where user_id = ${uid} and source = ${row.source}::app.evidence_source and source_ref = ${row.sourceRef}`;
         if (!existing[0]) throw new Error("insertIdempotent: conflict reported but no existing row found");
-        return { id: existing[0].id, wasNew: false, status: existing[0].status };
+        return { id: existing[0].id, wasNew: false, status: existing[0].status, inputHash: existing[0].input_hash };
+      },
+
+      async findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null> {
+        // ⛔ P3c gate round 3, blocking HIGH 1+2 ("replay handling"):
+        // called by handler.ts BEFORE any side effect (token consumption,
+        // a fraud signal, a rate-limit hit, a device row) — the whole
+        // point of this method existing at all. A `null` result is the
+        // ONLY signal that lets handler.ts proceed into the side-effecting
+        // pipeline; any row here means either an idempotent replay (exact
+        // `input_hash` match) or a rejected conflict (mismatch), decided
+        // entirely by handler.ts from the row this returns.
+        const rows = await trx`
+          select id, status, input_hash, facility_id, course_id, local_date
+          from app.evidence
+          where user_id = ${uid} and source = ${source}::app.evidence_source and source_ref = ${sourceRef}`;
+        const r = rows[0];
+        if (!r) return null;
+        // ⛔ FIX (found via the P3c gate round 3 Deno integration suite):
+        // `local_date` is a Postgres `date` column — postgres.js parses
+        // it back as a JS `Date` object, NOT a string, unlike every OTHER
+        // column this repo already returns as a bare string. `buildReplayResult`
+        // (handler.ts) feeds this straight into `scorePlay`'s own strict
+        // `ctx.playLocalDate` (a zod-validated STRING field, unlike a
+        // per-row Evidence's own `localDate`, which scorePlay accepts
+        // more leniently) — a raw `Date` object fails that validation
+        // outright ("expected string, received Date"), reachable only by
+        // actually running this against a real Postgres column of this
+        // type; no fake/unit test's plain-string fixture data could ever
+        // produce a real `Date` instance to catch it. Normalized to
+        // `YYYY-MM-DD` here, at the repo boundary, same as every other
+        // method's own local_date already IS everywhere else it's read.
+        const localDate = r.local_date instanceof Date ? r.local_date.toISOString().slice(0, 10) : r.local_date;
+        return { id: r.id, status: r.status, inputHash: r.input_hash, facilityId: r.facility_id, courseId: r.course_id, localDate };
       },
 
       async listForPlay(facilityId: string, courseId: string, localDate: string): Promise<StoredEvidenceRow[]> {
@@ -550,7 +634,21 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
           returning id`;
         if (inserted[0]) return { id: inserted[0].id };
         const existing = await trx`select id from app.device where id = ${id} and user_id = ${uid}`;
-        if (!existing[0]) throw new Error("ensureOwn: conflict reported but no existing row found for this user");
+        // ⛔ FIX (P3c gate round 3, should-fix: "ensureOwn on another
+        // user's device id: return 409, not 500"). `id` is either the
+        // caller's OWN deviceId or a freshly minted one, so reaching an ON
+        // CONFLICT with no row found FOR THIS USER means the SAME id
+        // already belongs to a DIFFERENT user's app.device row (a plain
+        // client id collision, or a stale id replayed against the wrong
+        // account — not a server bug). The bare `throw new Error(...)`
+        // this used to be surfaced as an uncaught exception -> a generic
+        // 500 (http.ts#handleRequest's own catch-all), leaking nothing
+        // useful and mis-classifying a client-caused, expected-shape
+        // conflict as a server fault. `Errors.conflict` (409) matches
+        // every other identity-conflict shape this round already uses.
+        if (!existing[0]) {
+          throw Errors.conflict("device_owned_by_other_user", "this deviceId is already registered to a different account");
+        }
         return { id: existing[0].id };
       },
       async countForUser(): Promise<number> {
@@ -639,21 +737,47 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       async consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
         // ⛔ FIX (P3c gate round 2, item 4): ONE atomic statement enforces
         // ownership (user_id), single use (consumed_at IS NULL), the
-        // submitting device matching the token's own device_id, AND the
-        // challenge-window clamp (issued_at <= capturedAt <= expires_at)
-        // — no separate read-then-decide-then-write race window.
+        // submitting device matching the token's own device_id, AND a
+        // window clamp — no separate read-then-decide-then-write race
+        // window.
+        //
+        // ⛔ FIX (P3c gate round 3, should-fix "clamp live fixes to the
+        // CHALLENGE window, not the token's"). The prior version clamped
+        // capturedAt against the TOKEN's own issued_at/expires_at — but
+        // the token's own TTL is the 15-minute grace window a device has
+        // to actually SUBMIT the fix after redeeming a challenge for a
+        // token (checkin/token-handler.ts's TOKEN_TTL_SECONDS), not the
+        // window during which the ATTESTATION the token represents is
+        // meaningful. That window is the CHALLENGE's own, narrower one:
+        // 120s for a live challenge, 24h for a prefetched one
+        // (checkin/challenge-handler.ts's LIVE_TTL_SECONDS /
+        // PREFETCH_TTL_SECONDS) — clamping to the token's own 15-minute
+        // TTL let a capturedAt up to ~13 minutes stale (long past a live
+        // challenge's real 120s attestation window, though still inside
+        // the token's own separate 15-minute redemption TTL) pass as a
+        // valid co-signal. This now joins app.checkin_challenge (via the
+        // token's own challenge_id FK, 0019) and clamps against ITS
+        // issued_at/expires_at instead — automatically correct for
+        // whichever kind (live or prefetched) the challenge actually was,
+        // since it reads that row's own real values rather than assuming
+        // one TTL. Every column below is explicitly table-qualified: both
+        // tables share user_id/device_id/facility_id/expires_at column
+        // names, so an unqualified reference would be ambiguous (or worse,
+        // silently resolve to the wrong table's column).
         const capturedAt = new Date(capturedAtMs);
         const rows = await trx`
           update app.checkin_token
           set consumed_at = now()
-          where jti = ${jti}
-            and user_id = ${uid}
-            and device_id = ${submittingDeviceId}
-            and consumed_at is null
-            and expires_at > now()
-            and issued_at <= ${capturedAt}
-            and ${capturedAt} <= expires_at
-          returning facility_id, attestation_grade, challenge_kind`;
+          from app.checkin_challenge cc
+          where checkin_token.challenge_id = cc.id
+            and checkin_token.jti = ${jti}
+            and checkin_token.user_id = ${uid}
+            and checkin_token.device_id = ${submittingDeviceId}
+            and checkin_token.consumed_at is null
+            and checkin_token.expires_at > now()
+            and cc.issued_at <= ${capturedAt}
+            and ${capturedAt} <= cc.expires_at
+          returning checkin_token.facility_id, checkin_token.attestation_grade, checkin_token.challenge_kind`;
         const r = rows[0];
         if (!r) return null;
         return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
@@ -699,7 +823,64 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
     if (check[0]?.u !== "service_role") {
       throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
     }
-    const repo = buildRepo(trx, actor);
+    const repo = buildRepo(db, trx, actor);
     return op(repo);
   }) as Promise<T>;
+}
+
+/**
+ * The batch counterpart to `withOwnership` (P3c gate round 3, blocking
+ * MEDIUM 4: "Batch: one failing item aborts the whole transaction").
+ * `evidence-batch/index.ts` is the one caller — every item runs inside
+ * its OWN `trx.savepoint(...)` of the SAME outer transaction: a failing
+ * item's writes roll back to just before its own savepoint (postgres.js's
+ * own `savepoint()` semantics — see this repo's own confirmation of that
+ * behaviour in the round-3 report), while every EARLIER item's already
+ * -committed-to-the-outer-transaction work is untouched, and later items
+ * still run. This is deliberately a SEPARATE export from `withOwnership`
+ * rather than a `Repo`-level escape hatch (a raw "give me a savepoint"
+ * method would break the "named methods over fixed tables... never the
+ * supabase-js client" narrow-repo discipline this file's own header
+ * documents) — the ONE place that needs per-item transactional isolation
+ * gets a purpose-built entry point instead.
+ *
+ * `perItem`'s own rate-limit call (`repo.rateLimit.hit`, P3c gate round 3
+ * blocking MEDIUM 3) already runs in ITS OWN separate top-level
+ * transaction regardless of where in `perItem` it's called from — so it
+ * is unaffected by, and does not need to be sequenced around, this
+ * function's per-item savepoints at all; every attempt still counts
+ * whether or not the item's own savepoint later rolls back.
+ */
+export async function withOwnershipBatch<T>(
+  actor: Actor,
+  itemCount: number,
+  perItem: (repo: Repo, index: number) => Promise<T>,
+): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
+  const db = sql();
+  return db.begin(async (trx: TxSql) => {
+    await trx`set local role service_role`;
+    const check = await trx`select current_user as u`;
+    if (check[0]?.u !== "service_role") {
+      throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+    }
+    const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
+    for (let i = 0; i < itemCount; i++) {
+      try {
+        // Same `UnwrapPromiseArray<T>` quirk as `withOwnership`'s own
+        // `db.begin()` cast above — `.savepoint`'s generic is a SEPARATE
+        // one from this function's own `T`, and TS can't prove the
+        // unwrap is `T` for every possible instantiation. Every caller
+        // here always passes a plain (non-array, non-nested-Promise)
+        // value through `perItem`, so the cast is sound in practice.
+        const value = (await trx.savepoint(async (sp: TxSql) => {
+          const repo = buildRepo(db, sp, actor);
+          return perItem(repo, i);
+        })) as T;
+        out.push({ ok: true, value });
+      } catch (err) {
+        out.push({ ok: false, error: err });
+      }
+    }
+    return out;
+  }) as Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>>;
 }

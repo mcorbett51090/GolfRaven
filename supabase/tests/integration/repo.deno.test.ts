@@ -45,6 +45,7 @@ Deno.test("item 2: a throw inside withOwnership rolls back every write the callb
       const device = await repo.device.ensureOwn(null, "ios");
       await repo.evidence.insertIdempotent({
         sourceRef,
+        inputHash: `hash-${sourceRef}`,
         source: "self_report",
         facilityId: FAC_X,
         courseId: null,
@@ -94,8 +95,10 @@ Deno.test("item 5: evidence.countOpenQueued/listForPlay are scoped per actor", D
 
   await withOwnership(a.actor, async (repo) => {
     const device = await seedDevice(repo);
+    const evqSourceRef = `evq-${freshUuid()}`;
     await repo.evidence.insertIdempotent({
-      sourceRef: `evq-${freshUuid()}`,
+      sourceRef: evqSourceRef,
+      inputHash: `hash-${evqSourceRef}`,
       source: "self_report",
       facilityId: FAC_X,
       courseId: null,
@@ -302,8 +305,10 @@ Deno.test("item 8: concurrent countOpenQueued + insert never overshoots MAX_OPEN
     withOwnership(a.actor, async (repo) => {
       const open = await repo.evidence.countOpenQueued();
       if (open >= CAP) return false;
+      const queuedRaceSourceRef = `queued-race-${freshUuid()}`;
       await repo.evidence.insertIdempotent({
-        sourceRef: `queued-race-${freshUuid()}`,
+        sourceRef: queuedRaceSourceRef,
+        inputHash: `hash-${queuedRaceSourceRef}`,
         source: "self_report",
         facilityId: FAC_X,
         courseId: null,

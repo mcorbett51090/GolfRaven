@@ -154,7 +154,18 @@ describe("handleEvidenceIntake", () => {
   it("security doc §3: clock skew > 24h raises a fraud_signal", async () => {
     const state = makeFakeState();
     const repo = makeFakeRepo(state, "user-a");
-    const skewed = checkinBody({ fix: { ...(checkinBody().fix as object), capturedAt: state.now.getTime() - 30 * 60 * 60 * 1000 } });
+    // P3c gate round 3, blocking MEDIUM 5: `localDate` must now match the
+    // server-derived (facility-tz) date of this SAME skewed capturedAt —
+    // 2026-05-31T06:00:00Z is still 2026-05-31 in America/Chicago
+    // (UTC-5) — or the request 422s on `local_date_mismatch` before ever
+    // reaching the clock-skew check this test means to exercise. The
+    // skew itself (>24h from state.now, 2026-06-01T12:00:00Z) is
+    // unaffected by which calendar date it lands on.
+    const skewedCapturedAt = state.now.getTime() - 30 * 60 * 60 * 1000;
+    const skewed = checkinBody({
+      localDate: "2026-05-31",
+      fix: { ...(checkinBody().fix as object), capturedAt: skewedCapturedAt },
+    });
     await handleEvidenceIntake(skewed, repo);
     expect(state.fraudSignals.some((s) => s.kind === "clock_skew")).toBe(true);
   });
@@ -311,6 +322,99 @@ describe("handleEvidenceIntake", () => {
     const result = await handleEvidenceIntake(checkinBody(), repo);
     expect(result.status).toBe("accepted");
     if (result.status === "accepted") expect(result.play.presenceSignal).toBe(false);
+  });
+
+  // ⛔ P3c gate round 3, blocking HIGH 1 ("changed-replay bypass").
+  // Repro from the gate report: fixId Z on day 1 with no token, replayed
+  // as fixId Z on day 2 with a live token — the OLD check only compared
+  // content when the stored row showed up in THAT call's own
+  // listForPlay window, which a changed localDate skips entirely. This
+  // now conflicts unconditionally: `findExisting` matches on
+  // (user, source, source_ref) alone (unaffected by localDate), so a
+  // content difference is caught however it differs.
+  it("P3c gate round 3, blocking HIGH 1: a replay with the SAME fixId but a DIFFERENT localDate is a 409 conflict, never scored under the new content", async () => {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    await handleEvidenceIntake(checkinBody(), repo); // day 1: fix_1 @ 2026-06-01
+    const replayedOnADifferentDay = checkinBody({
+      localDate: "2026-06-02",
+      fix: { ...(checkinBody().fix as object), capturedAt: Date.parse("2026-06-02T12:00:00.000Z") },
+    });
+    await expect(handleEvidenceIntake(replayedOnADifferentDay, repo)).rejects.toMatchObject({ code: "evidence_conflict" });
+    expect(state.evidence.size).toBe(1); // no second row was ever inserted
+  });
+
+  // ⛔ P3c gate round 3, blocking HIGH 2 ("AT 3 regression"). The OLD
+  // `consumeTokenForFix` ran BEFORE the replay check, so an IDENTICAL
+  // retry of a token-bearing check-in (e.g. an outbox retry after a
+  // dropped response) saw its own token already consumed and produced a
+  // false conflict. `findExisting` now runs FIRST — an exact-hash match
+  // never touches the token at all; `buildReplayResult` re-derives the
+  // SAME response purely from what's already stored.
+  it("P3c gate round 3, blocking HIGH 2: an IDENTICAL retry of a token-bearing check-in succeeds with the same response, without re-consuming the token", async () => {
+    const state = makeFakeState();
+    const chalId = "chal_3";
+    state.challenges.set(chalId, { id: chalId, userId: "user-a", staffUserId: null, deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", nonceHash: "n3", kind: "live", expiresAt: "2099-01-01T00:00:00.000Z", usedAt: null });
+    state.checkinTokens.set("jti_3", {
+      jti: "jti_3",
+      userId: "user-a",
+      deviceId: FAKE_DEVICE_ID,
+      facilityId: "fac_x",
+      attestationGrade: "attested",
+      challengeKind: "live",
+      challengeId: chalId,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      issuedAt: "2020-01-01T00:00:00.000Z",
+      consumedAt: null,
+    });
+    state.matches.set("crs_x1", { verificationTier: "play-verified", geometryKind: "polygon", insideBuffer: true });
+    const repo = makeFakeRepo(state, "user-a");
+    const body = checkinBody({ fix: { ...(checkinBody().fix as object), checkinTokenJti: "jti_3" } });
+
+    const first = await handleEvidenceIntake(body, repo);
+    const second = await handleEvidenceIntake(body, repo); // identical retry
+
+    expect(first.status).toBe("accepted");
+    expect(second.status).toBe("accepted");
+    if (first.status === "accepted" && second.status === "accepted") {
+      expect(first.play.presenceSignal).toBe(true);
+      expect(second.play.presenceSignal).toBe(true); // not re-derived from a now-consumed token
+      expect(second.replay).toBe(true);
+    }
+    expect(state.evidence.size).toBe(1);
+    expect(state.checkinTokens.get("jti_3")?.consumedAt).not.toBeNull(); // consumed exactly once, by the FIRST call
+  });
+
+  // ⛔ P3c gate round 3, blocking MEDIUM 5: "local_date comes from the
+  // client label, not the server."
+  it("P3c gate round 3, blocking MEDIUM 5: 422 local_date_mismatch when the client's label doesn't match the fix's own server-derived facility-local date", async () => {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    // capturedAt is 2026-06-01T12:00:00Z (07:00 local in America/Chicago)
+    // -- the client claims a DIFFERENT calendar date.
+    const body = checkinBody({ localDate: "2026-06-02" });
+    await expect(handleEvidenceIntake(body, repo)).rejects.toMatchObject({ code: "local_date_mismatch" });
+  });
+
+  it("P3c gate round 3, blocking MEDIUM 5: the UTC-date-traveller case gets the correct LOCAL date and no fraud signal", async () => {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    // 2026-06-02T02:00:00Z is already June 2 in UTC, but only
+    // 2026-06-01T21:00:00-05:00 in the facility's own America/Chicago tz
+    // -- the CORRECT client label is the facility-LOCAL date, never the
+    // UTC one.
+    const capturedAt = Date.parse("2026-06-02T02:00:00.000Z");
+    const body = checkinBody({ localDate: "2026-06-01", fix: { ...(checkinBody().fix as object), capturedAt } });
+    const result = await handleEvidenceIntake(body, repo);
+    expect(result.status).toBe("accepted");
+    expect(state.fraudSignals.length).toBe(0);
+  });
+
+  it("P3c gate round 3, blocking MEDIUM 5: 422 local_date_out_of_window for a self_report far outside the facility-local window", async () => {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    const body = { source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", localDate: "2020-01-01", catalogVersion: 1 };
+    await expect(handleEvidenceIntake(body, repo)).rejects.toMatchObject({ code: "local_date_out_of_window" });
   });
 
   // ⛔ FIX (P3c gate round 2, item 6): connect_iq/health_route/file_import

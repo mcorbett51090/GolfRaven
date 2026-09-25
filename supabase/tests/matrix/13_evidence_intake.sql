@@ -170,9 +170,9 @@ SELECT is(
 --     that Repo#evidence.listForPlay filters on directly — proven here as
 --     the exact query shape, not the fail-open coalesce it replaced.
 -- ============================================================================
-INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
-VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-localdate-day1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, '2026-06-01'),
-       ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-localdate-day2', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, '2026-06-02');
+INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
+VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-localdate-day1', encode(digest('p3c-localdate-day1', 'sha256'), 'hex'), 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, '2026-06-01'),
+       ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-localdate-day2', encode(digest('p3c-localdate-day2', 'sha256'), 'hex'), 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, '2026-06-02');
 SELECT is(
   (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND facility_id = 'fac_x'
      AND (course_id = 'crs_x1' OR course_id IS NULL) AND local_date = '2026-06-01' AND status = 'accepted'
@@ -193,8 +193,8 @@ SELECT is(
 --    ON CONFLICT (user_id, source, source_ref) DO NOTHING shape) — AT(3):
 --    "a replayed evidence payload yields one row and one play."
 -- ============================================================================
-INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
-VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, current_date)
+INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
+VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', encode(digest('p3c-test-ref-1', 'sha256'), 'hex'), 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, current_date)
 ON CONFLICT (user_id, source, source_ref) DO NOTHING;
 SELECT is(
   (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND source = 'self_report' AND source_ref = 'p3c-test-ref-1'),
@@ -202,8 +202,8 @@ SELECT is(
   'first insert of a (user, source, source_ref) triple succeeds'
 );
 -- REPLAY: the exact same insert again.
-INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
-VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, current_date)
+INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
+VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', encode(digest('p3c-test-ref-1', 'sha256'), 'hex'), 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, current_date)
 ON CONFLICT (user_id, source, source_ref) DO NOTHING;
 SELECT is(
   (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND source = 'self_report' AND source_ref = 'p3c-test-ref-1'),

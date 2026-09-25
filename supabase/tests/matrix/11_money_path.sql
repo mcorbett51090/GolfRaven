@@ -29,9 +29,9 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 -- for player A, so a NEW evidence row is used here to isolate each
 -- assertion cleanly rather than colliding with that existing pair.
 SELECT lives_ok(
-  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
     VALUES ('32000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a2', 'accepted', 1, current_date)$$,
+            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a2', encode(digest('money-path-seed-a2', 'sha256'), 'hex'), 'accepted', 1, current_date)$$,
   'setup: a second evidence row owned by player A'
 );
 SELECT lives_ok(
@@ -67,9 +67,9 @@ SELECT lives_ok(
 
 -- A play for player B, evidence for player A: ownership mismatch.
 SELECT lives_ok(
-  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
     VALUES ('31000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000b',
-            NULL, 'self_report', 'money-path-seed-b', 'accepted', 1, current_date)$$,
+            NULL, 'self_report', 'money-path-seed-b', encode(digest('money-path-seed-b', 'sha256'), 'hex'), 'accepted', 1, current_date)$$,
   'setup: an evidence row owned by player B'
 );
 -- A THIRD evidence row for player A, not yet linked to anything (30000000-
@@ -77,9 +77,9 @@ SELECT lives_ok(
 -- would trip the UNIQUE(evidence_id) constraint first and mask the FK
 -- violation these two tests are isolating).
 SELECT lives_ok(
-  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
     VALUES ('33000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a3', 'accepted', 1, current_date)$$,
+            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a3', encode(digest('money-path-seed-a3', 'sha256'), 'hex'), 'accepted', 1, current_date)$$,
   'setup: a THIRD evidence row owned by player A, not yet linked'
 );
 

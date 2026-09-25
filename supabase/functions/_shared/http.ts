@@ -64,6 +64,15 @@ export const Errors = {
   payloadTooLarge: () => new HttpError(413, "payload_too_large", `request body exceeds ${MAX_BODY_BYTES} bytes`),
   unsupportedMediaType: (message = "expected application/json") => new HttpError(415, "unsupported_media_type", message),
   unprocessable: (code: string, message: string, details?: unknown) => new HttpError(422, code, message, details),
+  /** P3c gate round 3, blocking HIGH 1+2 ("Fix Errors to have a 409"): a
+   * changed-replay (same (user, source, source_ref), different content —
+   * evidence/handler.ts's own `computeInputHash` mismatches the stored
+   * `input_hash`) is a genuine conflict, distinct from a validation
+   * failure (422) or an auth failure (401/403) — the client is telling
+   * the server two different things happened under the one identity that
+   * must be unique. Also used for a cross-user device-id conflict
+   * (privileged.ts#device.ensureOwn, should-fix). */
+  conflict: (code: string, message: string, details?: unknown) => new HttpError(409, code, message, details),
   tooManyRequests: (message: string, retryAfterSeconds?: number) =>
     new HttpError(429, "rate_limited", message, retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined),
   internal: (message = "internal error") => new HttpError(500, "internal_error", message),

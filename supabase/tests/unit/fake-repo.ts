@@ -20,6 +20,7 @@ import type {
   CatalogVersionRow,
   ChallengeRow,
   ConsumedCheckinToken,
+  ExistingEvidenceRow,
   InsertEvidenceResult,
   LedgerRow,
   MatchResult,
@@ -197,12 +198,26 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
       async insertIdempotent(row: NewEvidenceRow): Promise<InsertEvidenceResult> {
         for (const existing of state.evidence.values()) {
           if (existing.userId === uid && existing.source === row.source && existing.sourceRef === row.sourceRef) {
-            return { id: existing.id, wasNew: false, status: existing.status };
+            return { id: existing.id, wasNew: false, status: existing.status, inputHash: existing.inputHash };
           }
         }
         const id = freshId("ev");
         state.evidence.set(id, { ...row, id, userId: uid });
-        return { id, wasNew: true, status: row.status };
+        return { id, wasNew: true, status: row.status, inputHash: row.inputHash };
+      },
+      // ⛔ P3c gate round 3, blocking HIGH 1+2 ("replay handling"): mirrors
+      // privileged.ts#evidence.findExisting's own (user, source,
+      // source_ref) lookup — evidence/handler.ts calls this BEFORE any
+      // side effect, so the fake must support it for every unit test that
+      // exercises `handleEvidenceIntake` at all (every one of them, since
+      // it is now the FIRST repo call the handler makes).
+      async findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null> {
+        for (const row of state.evidence.values()) {
+          if (row.userId === uid && row.source === source && row.sourceRef === sourceRef) {
+            return { id: row.id, status: row.status, inputHash: row.inputHash, facilityId: row.facilityId, courseId: row.courseId, localDate: row.localDate };
+          }
+        }
+        return null;
       },
       async listForPlay(facilityId: string, courseId: string, localDate: string): Promise<StoredEvidenceRow[]> {
         // ⛔ FIX (P3c gate round 2, item 1): filters on the row's own REAL

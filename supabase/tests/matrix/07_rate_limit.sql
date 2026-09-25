@@ -5,7 +5,7 @@
 -- limits are tested in pgTAP under concurrency."
 
 BEGIN;
-SELECT plan(4);
+SELECT plan(5);
 
 -- S1 restricted-mode fix: private.hit_rate_limit is granted to
 -- service_role only (0007) -- its real production caller. Under the
@@ -27,19 +27,24 @@ SELECT is(
   'second hit in the same window returns count 2'
 );
 
--- At the max: the (max+1)th hit raises.
-DO $$
-BEGIN
-  PERFORM private.hit_rate_limit('test:tight:user-a', interval '1 hour', 1);
-  BEGIN
-    PERFORM private.hit_rate_limit('test:tight:user-a', interval '1 hour', 1);
-    RAISE EXCEPTION 'expected hit_rate_limit to raise on the 2nd call with max=1';
-  EXCEPTION WHEN SQLSTATE 'P0429' THEN
-    -- expected
-  END;
-END
-$$;
-SELECT pass('hit_rate_limit raises once a bucket exceeds its max (P0429)');
+-- At the max: the (max+1)th hit still INCREMENTS and returns the count
+-- (P3c gate round 3, blocking MEDIUM 3, 0020_rate_limit_no_raise.sql) --
+-- it no longer raises. A raise-on-overlimit design necessarily discards
+-- the SAME statement's own increment when the transaction that call ran
+-- in aborts, which is exactly how "80 rejected requests left the bucket
+-- at 0" happened; the caller (privileged.ts#rateLimit.hit) now compares
+-- the returned count to its own max instead of relying on the SQL layer
+-- to fail the call.
+SELECT is(
+  private.hit_rate_limit('test:tight:user-a', interval '1 hour', 1),
+  1,
+  'first hit against a max=1 bucket returns count 1 (under/at the max)'
+);
+SELECT is(
+  private.hit_rate_limit('test:tight:user-a', interval '1 hour', 1),
+  2,
+  'the (max+1)th hit still increments and returns count 2 -- never raises (P3c gate round 3)'
+);
 
 -- A different bucket_key is independent (per-user / per-endpoint
 -- isolation, line 1401-1413's per-user/per-device/per-IP dimensions).

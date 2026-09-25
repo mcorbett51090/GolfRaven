@@ -184,15 +184,88 @@ COMMENT ON COLUMN app.checkin_challenge.kind IS
 --    coalesce(..., localDate) fail-open must go"). Existing table from
 --    0003_player_core.sql (gate-passed) — altered here for the same
 --    "0019 is the live unmerged migration for this feature" reason as
---    checkin_challenge.kind above. NOT NULL with no default: the table is
---    empty at this point in migration order (never deployed, no real
---    data), so every future INSERT (Repo#evidence.insertIdempotent) must
---    supply it — there is no silent fallback left to write.
+--    checkin_challenge.kind above.
+--
+--    ⛔ FIX (P3c gate round 3, should-fix): "ADD COLUMN local_date date
+--    NOT NULL fails on a non-empty table. Add it nullable, backfill from
+--    summary->>'localDate' (or capturedAt plus tz), then set NOT NULL."
+--    This environment's own app.evidence is always empty at this point in
+--    migration order (never deployed) — the original NOT-NULL-with-no-
+--    default ALTER worked here for that reason alone — but 0019 is a
+--    migration file, not a fact about THIS checkout only: once it is
+--    applied against a real deploy that already has rows (even from an
+--    EARLIER, non-P3c version of this same table), the bare NOT NULL
+--    form fails outright. The nullable -> backfill -> NOT NULL sequence
+--    below is correct regardless of how many rows exist at apply time.
 -- ============================================================================
-ALTER TABLE app.evidence ADD COLUMN local_date date NOT NULL;
+ALTER TABLE app.evidence ADD COLUMN local_date date;
+-- Backfill priority: the row's own summary.localDate (what evidence/
+-- handler.ts already wrote into summary for every pre-0019 row, per
+-- 0003's own "incl. course_disambiguated_by, geometry_kind, local_date"
+-- comment on that column), then started_at's own calendar date, then
+-- today — the same "never leave a NULL a NOT NULL ALTER would reject"
+-- discipline every other nullable-then-backfill migration in this schema
+-- already uses.
+UPDATE app.evidence
+SET local_date = COALESCE((summary ->> 'localDate')::date, started_at::date, CURRENT_DATE)
+WHERE local_date IS NULL;
+ALTER TABLE app.evidence ALTER COLUMN local_date SET NOT NULL;
+-- ⛔ FIX (P3c gate round 3, should-fix: "fix the 0019 column comment to
+-- match reality"). The PRIOR comment said only "server-derived at intake"
+-- without saying HOW — P3c gate round 3's own item 5 fix
+-- (evidence/handler.ts) makes that precise and source-dependent: for a
+-- FIX-BEARING submission (foreground_checkin/foreground_dwell) this is
+-- computed from the fix's own capturedAt resolved into the FACILITY's
+-- real IANA tz (app.catalog_facility.tz) — the client's OWN localDate
+-- label is validated against that computed value and the request is
+-- rejected (422 local_date_mismatch) on any mismatch, never silently
+-- overridden. For a DATE-ONLY submission (self_report/health_workout,
+-- which carry no client-controlled capturedAt to derive a date from at
+-- all) the client's own label IS what is stored, after a window check
+-- (facility-local today minus 30 days, plus 1 day — see handler.ts's own
+-- SELF_REPORT_WINDOW_DAYS_BACK/FORWARD constants and their own comment
+-- for why 30 specifically).
 COMMENT ON COLUMN app.evidence.local_date IS
-  'The evidence row''s own facility-local date (server-derived at intake — evidence/handler.ts). A REAL column, not read out of summary jsonb: Repo#evidence.listForPlay (privileged.ts) filters on it directly, closing the P3c gate round 2 "day-2 evidence" bug (a fail-open coalesce(summary->>''localDate'', $queriedDate) made every prior row match every date queried, unboundedly, across every day).';
+  'The evidence row''s own facility-local date. For a fix-bearing source (foreground_checkin/foreground_dwell) this is SERVER-COMPUTED from the fix''s own capturedAt resolved into the facility''s real tz -- the client''s own localDate label is validated against it and the submission is rejected on mismatch, never silently overridden (P3c gate round 3, item 5). For a date-only source (self_report/health_workout) the client''s own label is stored as-is, after a facility-local-today +-window check. A REAL column, not read out of summary jsonb: Repo#evidence.listForPlay (privileged.ts) filters on it directly, closing the P3c gate round 2 "day-2 evidence" bug (a fail-open coalesce(summary->>''localDate'', $queriedDate) made every prior row match every date queried, unboundedly, across every day).';
 CREATE INDEX evidence_user_facility_localdate_idx ON app.evidence (user_id, facility_id, local_date);
+
+-- ============================================================================
+-- 7. app.evidence gets a REAL `input_hash text` column (P3c gate round 3,
+--    blocking HIGH 1+2, "replay handling" — one fix covering both the
+--    changed-replay bypass and the AT 3 regression). A canonical SHA-256
+--    hash (hex) of the ENTIRE parsed, validated client submission
+--    (evidence/handler.ts's own `computeInputHash`), stored once at
+--    insert. Every later request that resolves to the SAME
+--    (user_id, source, source_ref) is checked against THIS column,
+--    BEFORE any side effect (token consumption, a fraud_signal, a rate-
+--    limit hit, a device row) — an exact match returns the ALREADY-
+--    PERSISTED outcome (idempotent replay, no new side effects at all,
+--    closing the AT 3 regression where an identical retry saw its own
+--    token already consumed and got a false 409); a mismatch is rejected
+--    outright (409 evidence_conflict) before anything about the NEW,
+--    different content is ever acted on (closing the changed-replay
+--    bypass, where a replay under a different localDate/course skipped
+--    the OLD content-comparison entirely because it queried a
+--    listForPlay window the original row was never in).
+--    Nullable-then-backfill-then-NOT-NULL for the SAME "a real deploy may
+--    not have an empty table" reason as local_date above — pre-existing
+--    rows (none in this environment) get a placeholder hash derived from
+--    their own immutable source_ref, which is deterministic and unique
+--    per row even though it is not a REAL hash of their original raw
+--    submission (that raw submission was never captured for a row this
+--    column predates); this only matters for a row from BEFORE this
+--    column existed, and such a row is unreachable through
+--    Repo#evidence.findExisting's own (user, source, source_ref) lookup
+--    replaying it would use — that lookup already only ever finds a row
+--    among the ones an actual client Might replay against.
+-- ============================================================================
+ALTER TABLE app.evidence ADD COLUMN input_hash text;
+UPDATE app.evidence
+SET input_hash = encode(digest(source_ref, 'sha256'), 'hex')
+WHERE input_hash IS NULL;
+ALTER TABLE app.evidence ALTER COLUMN input_hash SET NOT NULL;
+COMMENT ON COLUMN app.evidence.input_hash IS
+  'A canonical SHA-256 hash (hex) of the ENTIRE parsed, validated client submission that produced this row (evidence/handler.ts''s computeInputHash) -- compared against on every later request resolving to the SAME (user_id, source, source_ref) so a replay can be told apart from a content-changed resubmission under the same natural id, BEFORE any side effect runs (P3c gate round 3, blocking HIGH 1+2).';
 
 -- ============================================================================
 -- 6. app.checkin_challenge / app.checkin_token: `is_uuid_or_null`-shaped

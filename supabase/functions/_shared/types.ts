@@ -90,6 +90,12 @@ export interface StoredEvidenceRow {
 
 export interface NewEvidenceRow {
   sourceRef: string;
+  /** P3c gate round 3, blocking HIGH 1+2: SHA-256 hex of the entire
+   * parsed, validated client submission (handler.ts's own
+   * `computeInputHash`) — stored once at insert, compared on every later
+   * request that resolves to the same (user, source, source_ref) BEFORE
+   * any side effect. See the 0019 migration's own column comment. */
+  inputHash: string;
   source: string;
   facilityId: string;
   courseId: string | null;
@@ -110,6 +116,22 @@ export interface InsertEvidenceResult {
   id: string;
   wasNew: boolean;
   status: string;
+  inputHash: string;
+}
+
+/** What `Repo#evidence.findExisting` returns — just enough for
+ * `handler.ts`'s replay-vs-conflict decision (P3c gate round 3, blocking
+ * HIGH 1+2) without pulling in the full scoring-relevant shape
+ * `StoredEvidenceRow` carries; the replay path re-fetches through
+ * `listForPlay` (unchanged) once it knows a match is safe to build from
+ * already-persisted rows only. */
+export interface ExistingEvidenceRow {
+  id: string;
+  status: string;
+  inputHash: string;
+  facilityId: string;
+  courseId: string | null;
+  localDate: string;
 }
 
 export interface UpsertPlayInput {
@@ -179,10 +201,15 @@ export interface Repo {
   now(): Date;
 
   rateLimit: {
-    /** `private.hit_rate_limit` (build plan §4.7 item 8). Resolves to
-     * `{ok: true, count}` under the limit, `{ok: false, count}` with the
-     * exception caught server-side (never throws `P0429` up to the
-     * caller — the handler decides how to respond). */
+    /** `private.hit_rate_limit` (build plan §4.7 item 8), run in its own
+     * short transaction, committed independently of whatever the rest of
+     * the request's transaction later does (P3c gate round 3, blocking
+     * MEDIUM 3: "rate-limit hits roll back on 4xx" — every attempt must
+     * count, accepted or rejected). Resolves to `{ok: true, count}` under
+     * the limit, `{ok: false, count}` over it — the underlying SQL
+     * function (0020_rate_limit_no_raise.sql) never raises at all any
+     * more, so this never throws for an ordinary over-limit outcome; the
+     * caller decides how to respond from `ok`. */
     hit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult>;
   };
 
@@ -224,6 +251,13 @@ export interface Repo {
      * every prior row match every date queried. Capped at
      * `ABSOLUTE_ROW_CAP` (packages/rules' own DoS bound). */
     listForPlay(facilityId: string, courseId: string, localDate: string): Promise<StoredEvidenceRow[]>;
+    /** P3c gate round 3, blocking HIGH 1+2: looks up an existing row by
+     * the actor-scoped (source, source_ref) BEFORE any side effect —
+     * `handler.ts` calls this first, unconditionally, so a replay (same
+     * identity) is detected before a token is consumed, a fraud signal
+     * fires, a rate-limit bucket is hit, or a device row is created.
+     * `null` means genuinely new. */
+    findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null>;
   };
 
   play: {

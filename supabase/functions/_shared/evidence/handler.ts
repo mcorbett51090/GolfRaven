@@ -27,16 +27,55 @@
 //   6. connect_iq/health_route/file_import rejected at request-shape.ts;
 //      `holes` derived from `Repo#catalog.courseHoleCount`, never the
 //      client.
-//   9. Replay-with-changed-payload: `assertReplayPayloadUnchanged` below.
+//   9. Replay-with-changed-payload: superseded by P3c gate round 3's
+//      `findExisting`/`input_hash` design below — see that section.
 //  11. Tombstoned-id rewrite: `reconstructEvidenceForScoring` now uses the
 //      RESOLVED (survivor) ids, never the raw submitted ones.
 //  should-fix: quarantine fraud_signal includes `play_id`; scorer
 //      `reasons` are logged server-side only, never returned to the
 //      client.
+//
+// P3c gate round 3 (b7c41cc) fixes, blocking HIGH 1+2 ("replay
+// handling" — one fix covers both a changed-replay bypass and an AT 3
+// regression) and blocking MEDIUM 5 ("local_date comes from the client
+// label, not the server"):
+//
+//   HIGH 1 (changed-replay bypass) + HIGH 2 (AT 3 regression, one fix):
+//   the OLD replay check (round 2's item 9, `assertReplayPayloadUnchanged`
+//   -shaped logic inlined at the bottom of the pipeline) only ran when
+//   the stored row showed up in `listForPlay`'s OWN (facility, course,
+//   localDate) window — change `localDate` on a replay and the check was
+//   skipped entirely, letting new, unstored content score under the old
+//   evidence id (Bug 1). Separately, `consumeTokenForFix` ran BEFORE
+//   that check, so an IDENTICAL retry of a token-bearing check-in saw its
+//   own token already consumed and produced a false `challenge:none` /
+//   422 `evidence_conflict` (Bug 2 — every outbox retry broke). Both are
+//   closed the same way: `repo.evidence.findExisting(source, sourceRef)`
+//   is now the FIRST repo call this function makes, before rate-limiting,
+//   device resolution, token consumption, or any fraud signal. A match
+//   whose `input_hash` (a canonical SHA-256 of the ENTIRE parsed
+//   submission — `computeInputHash` below) equals this call's own hash is
+//   an idempotent replay: `buildReplayResult` re-derives the response
+//   PURELY from already-persisted rows, with zero new side effects (no
+//   token consumption, no rate-limit hit, no fresh insert). A mismatch is
+//   `Errors.conflict` (409 `evidence_conflict`) — rejected before
+//   anything about the NEW, different content is ever acted on. Only a
+//   genuinely new (user, source, source_ref) proceeds into the
+//   side-effecting pipeline below.
+//
+//   MEDIUM 5 (local_date from the client): for a fix-bearing source
+//   (foreground_checkin/foreground_dwell), `localDate` is now derived
+//   server-side from the ANCHOR fix's own `capturedAt` resolved into the
+//   facility's real IANA tz (`localDateInTz`, `anchorCapturedAtMs`) — a
+//   mismatching client label is rejected with 422 `local_date_mismatch`,
+//   never silently overridden. For a date-only source (self_report/
+//   health_workout, which carry no client-controlled capturedAt to
+//   derive a date from at all), the client's own label is accepted only
+//   inside a facility-local-today window (`assertSelfReportDateWindow`).
 
 // @deno-types="../scoring/scoring-types.d.ts"
 import { scorePlay } from "../scoring/vendor/score-play.js";
-import type { Repo, StoredEvidenceRow } from "../types.ts";
+import type { Repo, StoredEvidenceRow, ExistingEvidenceRow } from "../types.ts";
 import { HttpError, Errors } from "../http.ts";
 import { parseEvidenceSubmission, type EvidenceSubmission, type FixSubmission } from "./request-shape.ts";
 import { deriveSourceRef } from "./source-ref.ts";
@@ -49,6 +88,20 @@ const CLOCK_SKEW_MAX_MS = 24 * 60 * 60 * 1000; // security doc §3
 const RATE_LIMIT_EVIDENCE_PER_USER_HOUR = 60; // build plan §4.7 item 8
 const RATE_LIMIT_EVIDENCE_PER_DEVICE_DAY = 200;
 const MAX_DEVICES_PER_USER = 20; // P3c gate round 2, item 7 (should-fix cap, no plan-stated number)
+// P3c gate round 3, blocking MEDIUM 5: a date-only source (self_report/
+// health_workout) carries no server-verifiable capturedAt to derive a
+// date from at all, so its client-submitted `localDate` label is bounded
+// by a window instead of cross-checked exactly. docs/golf-trails/
+// 02-build-plan.md is not present in this checkout to verify a
+// plan-stated number against (confirmed via grep/find, same as
+// MAX_DEVICES_PER_USER's own identical footnote above) — 30 days back /
+// 1 day forward is this round's own documented, conservative default:
+// generous enough for a round played off-app and logged from memory a
+// few weeks later, tight enough that it can't backdate into a wildly
+// different scoring period or postdate past "tomorrow" (a device's own
+// clock can be a day ahead across a timezone boundary at local midnight).
+const SELF_REPORT_WINDOW_DAYS_BACK = 30;
+const SELF_REPORT_WINDOW_DAYS_FORWARD = 1;
 
 export interface EvidenceIntakeSuccess {
   status: "accepted";
@@ -116,11 +169,10 @@ async function resolveCourseAnchor(repo: Repo, courseId: string | undefined): Pr
   return { kind: "resolved", id: resolved.id };
 }
 
-/** Canonical JSON (sorted keys, recursively) — used both by
- * source-ref.ts's content-hash fallback and here, to compare a REPLAYED
- * submission's derived content against what's already persisted (item
- * 9). Order-independent so the SAME logical content always compares
- * equal regardless of client key ordering. */
+/** Canonical JSON (sorted keys, recursively) — used by `computeInputHash`
+ * below (P3c gate round 3) and by `source-ref.ts`'s own content-hash
+ * fallback. Order-independent so the SAME logical content always hashes
+ * the same regardless of client key ordering. */
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value && typeof value === "object") {
@@ -133,8 +185,107 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-function stableStringify(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
+function toHex(buf: ArrayBuffer): string {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export type DigestFn = (algorithm: "SHA-256", data: BufferSource) => Promise<ArrayBuffer>;
+
+/** P3c gate round 3, blocking HIGH 1+2: a canonical SHA-256 hash (hex) of
+ * the ENTIRE parsed, validated client submission — stored once at insert
+ * (`app.evidence.input_hash`, 0019) and compared against every later
+ * request that resolves to the SAME (user, source, source_ref), BEFORE
+ * any side effect. Unlike `source-ref.ts#deriveSourceRef` (which, for a
+ * fix-bearing source, derives a NATURAL ref from just the fixId(s) — so
+ * two submissions with the SAME fixId but different localDate/course
+ * collide on `source_ref` even though their CONTENT differs), this hash
+ * covers the WHOLE submission, so any content difference is caught even
+ * when `source_ref` alone could not distinguish the two calls. Same
+ * canonicalization discipline as `deriveSourceRef` (sorted keys,
+ * recursively) so the SAME logical payload always hashes to the SAME
+ * bytes regardless of client key ordering. */
+export async function computeInputHash(submission: EvidenceSubmission, digestHex: DigestFn = crypto.subtle.digest.bind(crypto.subtle)): Promise<string> {
+  const canonical = JSON.stringify(canonicalize(submission));
+  const bytes = new TextEncoder().encode(canonical);
+  const digest = await digestHex("SHA-256", bytes.slice());
+  return toHex(digest);
+}
+
+/** IANA-tz calendar date (YYYY-MM-DD) for an epoch-ms instant (P3c gate
+ * round 3, blocking MEDIUM 5) — the same derivation `app.evidence.
+ * local_date`'s own column comment (0019/0020) documents as the source
+ * of truth for a fix-bearing row. `Intl.DateTimeFormat`'s "en-CA" locale
+ * already formats as YYYY-MM-DD, so no extra dependency (beyond
+ * `tz-lookup`, already used elsewhere in this tree to resolve a
+ * facility's own tz in the first place) is needed here. */
+export function localDateInTz(epochMs: number, tz: string): string {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  return fmt.format(new Date(epochMs));
+}
+
+/** Which fix's `capturedAt` anchors a fix-bearing submission's own
+ * facility-local date (P3c gate round 3, blocking MEDIUM 5) — server
+ * -derived, never the client's own `localDate` label. `foreground_dwell`
+ * anchors on the CHECK-IN fix (the round begins there, before the
+ * checkout fix's own, later, capturedAt); `foreground_checkin` has only
+ * the one fix. Returns `null` for a date-only source (self_report/
+ * health_workout), which has no client-controlled capturedAt to derive a
+ * date from at all — `assertSelfReportDateWindow` validates that case
+ * instead. */
+function anchorCapturedAtMs(submission: EvidenceSubmission): number | null {
+  switch (submission.source) {
+    case "foreground_checkin":
+      return submission.fix.capturedAt;
+    case "foreground_dwell":
+      return submission.checkinFix.capturedAt;
+    default:
+      return null;
+  }
+}
+
+/** P3c gate round 3, blocking MEDIUM 5: a date-only source's own
+ * client-submitted `localDate` is accepted only within a bounded window
+ * of the facility-local "today" (`repo.now()` resolved into the
+ * facility's own tz, the same way a fix-bearing source's date is
+ * derived) — see `SELF_REPORT_WINDOW_DAYS_BACK`/`_FORWARD`'s own doc for
+ * why 30/1. Throws 422 `local_date_out_of_window` outside it. */
+function assertSelfReportDateWindow(localDate: string, facilityTz: string, now: Date): void {
+  const today = localDateInTz(now.getTime(), facilityTz);
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  const claimedMs = Date.parse(`${localDate}T00:00:00Z`);
+  const daysDiff = Math.round((claimedMs - todayMs) / 86_400_000);
+  if (daysDiff < -SELF_REPORT_WINDOW_DAYS_BACK || daysDiff > SELF_REPORT_WINDOW_DAYS_FORWARD) {
+    throw Errors.unprocessable(
+      "local_date_out_of_window",
+      `localDate "${localDate}" is outside the accepted window (facility-local today -${SELF_REPORT_WINDOW_DAYS_BACK}..+${SELF_REPORT_WINDOW_DAYS_FORWARD} days)`,
+    );
+  }
+}
+
+/** P3c gate round 3, blocking MEDIUM 5: for a fix-bearing submission,
+ * `localDate` must equal the server-derived facility-local date of its
+ * own anchor fix — a mismatch is rejected (422 `local_date_mismatch`),
+ * never silently overridden (the OLD behaviour this replaces stored
+ * whatever the client sent, unverified). For a date-only submission, the
+ * client's own label is accepted only inside a bounded window of
+ * "today" (`assertSelfReportDateWindow`). Called AFTER facility
+ * resolution (needs the facility's real tz) and BEFORE any of this
+ * request's writes (token consumption, the evidence insert, a fraud
+ * signal) — a genuinely new submission never reaches those with an
+ * unverified date. */
+function assertServerDerivableLocalDate(submission: EvidenceSubmission, facilityTz: string, now: Date): void {
+  const anchorMs = anchorCapturedAtMs(submission);
+  if (anchorMs === null) {
+    assertSelfReportDateWindow(submission.localDate, facilityTz, now);
+    return;
+  }
+  const serverLocalDate = localDateInTz(anchorMs, facilityTz);
+  if (serverLocalDate !== submission.localDate) {
+    throw Errors.unprocessable(
+      "local_date_mismatch",
+      `localDate "${submission.localDate}" does not match the server-derived facility-local date "${serverLocalDate}" for this submission's own capturedAt`,
+    );
+  }
 }
 
 export interface HandleEvidenceIntakeOptions {
@@ -145,12 +296,110 @@ export interface HandleEvidenceIntakeOptions {
   skipLiveRateLimit?: boolean;
 }
 
+/** P3c gate round 3, blocking HIGH 1+2: rebuilds this function's own
+ * response PURELY from already-persisted rows — zero new side effects
+ * (no token consumption, no rate-limit hit, no fresh insert, no fraud
+ * signal). The ONLY re-computation this does is a re-score from rows
+ * that are already on file, which is idempotent by construction (same
+ * stored inputs, same scorer, same output) — "no re-score beyond what's
+ * idempotent," per the gate's own fix description. Handles both
+ * `status` shapes this handler ever actually persists:
+ * `queued_catalog` (nothing further to score at all) and `accepted`
+ * (facility-level rows short-circuit the same way a fresh facility-level
+ * submission already does; course-anchored rows re-run `scorePlay`
+ * against `listForPlay`'s own already-stored set). */
+async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow): Promise<EvidenceIntakeResult> {
+  if (existing.status === "queued_catalog") {
+    return { status: "queued_catalog", evidenceId: existing.id };
+  }
+  if (existing.courseId === null) {
+    return {
+      status: "accepted",
+      evidenceId: existing.id,
+      replay: true,
+      play: { id: "", scoreBadge: 0, scoreMonetary: 0, presenceSignal: false, money: false, heldReview: false },
+    };
+  }
+  const facilityTz = await repo.catalog.facilityTz(existing.facilityId);
+  if (!facilityTz) {
+    // The ledger/catalog said this facility existed when the ORIGINAL
+    // submission was scored; reaching here on a REPLAY with no tz on
+    // file now is an inconsistent catalog state, not a client fault —
+    // fail closed rather than scoring against an unknown tz.
+    throw Errors.internal();
+  }
+  const priorRows = await repo.evidence.listForPlay(existing.facilityId, existing.courseId, existing.localDate);
+  const evidenceForScoring = reconstructEvidenceFromStoredRows(priorRows);
+
+  const outcome = scorePlay(evidenceForScoring, {
+    playFacilityId: existing.facilityId,
+    playLocalDate: existing.localDate,
+    playCourseId: existing.courseId,
+    facilityTz,
+  });
+  if (!outcome.ok) {
+    console.error(`scorePlay rejected a replay's already-stored rows: ${outcome.reasons.join("; ")}`);
+    throw Errors.internal();
+  }
+
+  const contributedIds = new Set(outcome.contributions.map((c) => c.evidenceId));
+  const evidenceIdsToLink = priorRows.map((r) => r.id).filter((id) => contributedIds.has(id) || id === existing.id);
+
+  const play = await repo.play.upsertFromScore({
+    courseId: existing.courseId,
+    facilityId: existing.facilityId,
+    playDate: existing.localDate,
+    courseDisambiguatedBy: null,
+    scoreBadge: outcome.score_badge,
+    scoreMonetary: outcome.score_monetary,
+    hardSignal: outcome.contributions.some((c) => c.hard),
+    presenceSignal: outcome.presence_signal,
+    money: outcome.money,
+    heldReview: outcome.heldReview,
+    policyVersion: String(outcome.policyVersion),
+    inputDigest: outcome.inputDigest,
+    evidenceIds: evidenceIdsToLink,
+  });
+
+  return {
+    status: "accepted",
+    evidenceId: existing.id,
+    replay: true,
+    play: { id: play.id, scoreBadge: outcome.score_badge, scoreMonetary: outcome.score_monetary, presenceSignal: outcome.presence_signal, money: outcome.money, heldReview: outcome.heldReview },
+  };
+}
+
 export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options: HandleEvidenceIntakeOptions = {}): Promise<EvidenceIntakeResult> {
   const parsed = parseEvidenceSubmission(rawBody);
   if (!parsed.ok) {
     throw Errors.badRequest("invalid evidence submission", { issues: parsed.issues });
   }
   const submission = parsed.value;
+
+  // Computed ONCE, reused everywhere below this point — both are pure
+  // functions of `submission` alone.
+  const sourceRef = await deriveSourceRef(submission);
+  const inputHash = await computeInputHash(submission);
+
+  // ⛔ P3c gate round 3, blocking HIGH 1+2 ("replay handling"): looked up
+  // BEFORE ANY side effect — token consumption, a fraud signal, a
+  // rate-limit hit, a device row — verbatim per the gate's own fix list.
+  // A match here means this (user, source, source_ref) already has a
+  // row on file; the ONLY question left is whether this call's content
+  // is the SAME as what's stored (an idempotent replay, handled with
+  // zero new side effects by `buildReplayResult`) or DIFFERENT (a
+  // genuine conflict, rejected outright before any of the new content is
+  // ever acted on).
+  const existing = await repo.evidence.findExisting(submission.source, sourceRef);
+  if (existing) {
+    if (existing.inputHash === inputHash) {
+      return buildReplayResult(repo, existing);
+    }
+    throw Errors.conflict("evidence_conflict", "a replay of this evidence id was submitted with different content than what is already on file");
+  }
+
+  // ---- Everything below only ever runs for a GENUINELY NEW submission
+  // (no existing row for this (user, source, source_ref) at all). ----
 
   // ⛔ FIX (P3c gate round 2, item 7): rate-limit BEFORE any write —
   // including BEFORE ensureOwn, which otherwise creates a device row
@@ -234,9 +483,9 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     if (openCount >= MAX_OPEN_QUEUED_PER_USER) {
       throw Errors.tooManyRequests(`this account already has ${MAX_OPEN_QUEUED_PER_USER} open queued_catalog evidence rows`);
     }
-    const sourceRef = await deriveSourceRef(submission);
     const inserted = await repo.evidence.insertIdempotent({
       sourceRef,
+      inputHash,
       source: submission.source,
       facilityId: submission.facilityId,
       courseId: submission.courseId ?? null,
@@ -252,6 +501,20 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
       status: "queued_catalog",
       deviceId: device.id,
     });
+    // ⛔ P3c gate round 3, blocking HIGH 1+2's own race-safety note:
+    // `findExisting` above already confirmed no row existed moments ago
+    // — reaching `!wasNew` here means a CONCURRENT request for the SAME
+    // (user, source, source_ref) won a narrow race against THIS one.
+    // Resolve it exactly like the top-of-function check would have: an
+    // exact hash match is the other request's own row, safe to report as
+    // this call's own (idempotent) outcome; a mismatch is a genuine
+    // conflict.
+    if (!inserted.wasNew) {
+      if (inserted.inputHash !== inputHash) {
+        throw Errors.conflict("evidence_conflict", "a concurrent replay of this evidence id was submitted with different content than what is already on file");
+      }
+      return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: submission.facilityId, courseId: submission.courseId ?? null, localDate: submission.localDate });
+    }
     return { status: "queued_catalog", evidenceId: inserted.id };
   }
 
@@ -297,6 +560,14 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     }
     resolvedCourseId = ledgerRow.id;
   }
+
+  // ⛔ FIX (P3c gate round 3, blocking MEDIUM 5): "local_date comes from
+  // the client label, not the server." Runs the moment `facilityTz` is
+  // known and BEFORE any of this request's own writes (clock-skew's own
+  // fraud signal, token consumption, the evidence insert) — a genuinely
+  // new submission with an unverified/out-of-window date never reaches
+  // any of those.
+  assertServerDerivableLocalDate(submission, facilityTz, repo.now());
 
   // ---- Clock skew (security doc §3). ----
   const fixes = fixesOf(submission);
@@ -366,9 +637,9 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   }
   Object.assign(summary, fixPayload);
 
-  const sourceRef = await deriveSourceRef(submission);
   const inserted = await repo.evidence.insertIdempotent({
     sourceRef,
+    inputHash,
     source: submission.source,
     facilityId: resolvedFacilityId,
     courseId: resolvedCourseId,
@@ -385,6 +656,23 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     deviceId: device.id,
   });
 
+  // ⛔ P3c gate round 3, blocking HIGH 1+2's own race-safety note: same
+  // reasoning as the queued_catalog branch above — `findExisting`
+  // already confirmed no row existed moments ago, so `!wasNew` here
+  // means a concurrent request for the SAME (user, source, source_ref)
+  // won a narrow race. This call's own token consumption / fraud signals
+  // above ALREADY happened by this point (they are this call's own,
+  // legitimate side effects for what it believed was a new submission,
+  // not something to undo) — what matters now is which response this
+  // call itself returns: the winner's stored outcome on a hash match, or
+  // a conflict on a mismatch.
+  if (!inserted.wasNew) {
+    if (inserted.inputHash !== inputHash) {
+      throw Errors.conflict("evidence_conflict", "a concurrent replay of this evidence id was submitted with different content than what is already on file");
+    }
+    return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: resolvedFacilityId, courseId: resolvedCourseId, localDate: submission.localDate });
+  }
+
   // ---- Score the play: gather every OTHER accepted row for this
   // (user, facility, date) too, so a play already backed by prior
   // evidence gets re-scored with the new row folded in. ----
@@ -397,31 +685,12 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     return {
       status: "accepted",
       evidenceId: inserted.id,
-      replay: !inserted.wasNew,
+      replay: false,
       play: { id: "", scoreBadge: 0, scoreMonetary: 0, presenceSignal: false, money: false, heldReview: false },
     };
   }
 
   const priorRows = await repo.evidence.listForPlay(resolvedFacilityId, resolvedCourseId, submission.localDate);
-
-  // ⛔ FIX (P3c gate round 2, item 9): "replay with a changed payload."
-  // If this call's own row was NOT new (a replay of an existing
-  // source_ref), the row on file might have been derived from a
-  // DIFFERENT payload than this call's own submission would produce
-  // (e.g. the client retried with different accuracy/lat/lng under the
-  // same fixId) — 409, rather than silently re-scoring from the new
-  // (unpersisted) content while the stored row itself never changed.
-  if (!inserted.wasNew) {
-    const storedRow = priorRows.find((r) => r.id === inserted.id);
-    if (storedRow) {
-      const freshComparable = stableStringify(summary);
-      const storedComparable = stableStringify(storedRow.summary);
-      if (freshComparable !== storedComparable) {
-        throw Errors.unprocessable("evidence_conflict", "a replay of this evidence id was submitted with different content than what is already on file");
-      }
-    }
-  }
-
   const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes);
 
   const outcome = scorePlay(evidenceForScoring, {
@@ -479,18 +748,42 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   return {
     status: "accepted",
     evidenceId: inserted.id,
-    replay: !inserted.wasNew,
+    replay: false,
     play: { id: play.id, scoreBadge: outcome.score_badge, scoreMonetary: outcome.score_monetary, presenceSignal: outcome.presence_signal, money: outcome.money, heldReview: outcome.heldReview },
   };
+}
+
+/** Rebuilds one `scorePlay` `Evidence[]` ROW from an already-stored
+ * `StoredEvidenceRow` — the shared shape both `reconstructEvidenceForScoring`
+ * (a NEW submission's prior rows) and `buildReplayResult` (a replay's
+ * ENTIRE row set, including what was originally "this" row) use. */
+function reconstructOneStoredRow(row: StoredEvidenceRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    facilityId: row.facilityId,
+    courseId: row.courseId ?? undefined,
+    localDate: row.localDate,
+    source: row.source,
+    ...row.summary,
+  };
+}
+
+/** P3c gate round 3: the replay path's own scoring input — EVERY row
+ * comes from `listForPlay` (already persisted), unlike
+ * `reconstructEvidenceForScoring` below, which also assembles one FRESH
+ * (not-yet-persisted) row for a genuinely new submission. */
+function reconstructEvidenceFromStoredRows(rows: StoredEvidenceRow[]): Record<string, unknown>[] {
+  return rows.map(reconstructOneStoredRow);
 }
 
 /** Rebuilds the `scorePlay` `Evidence[]` input from: every PRIOR stored
  * row for this play (as persisted — already server-derived, since only
  * this handler ever writes them) plus the row THIS call just inserted
- * (built fresh from `submission`/`derivedFixesByFixId`, since a replay's
- * `priorRows` read already includes the row from ITS OWN earlier
- * insert — reconstructing it again here would double count it; dedup by
- * id).
+ * (built fresh from `submission`/`derivedFixesByFixId` — a genuinely NEW
+ * submission's own row is never yet in `priorRows`, since `listForPlay`
+ * only runs AFTER this call's own insert already committed, and
+ * P3c gate round 3's own `findExisting` guard means this function is
+ * only ever reached for a submission that had no prior row at all).
  *
  * ⛔ FIX (P3c gate round 2, item 11): the fresh row's own `facilityId`/
  * `courseId` are the RESOLVED (survivor) ids passed in, never
@@ -509,18 +802,7 @@ function reconstructEvidenceForScoring(
   resolvedCourseId: string,
   holes: 9 | 18,
 ): Record<string, unknown>[] {
-  const rows: Record<string, unknown>[] = [];
-  for (const row of priorRows) {
-    if (row.id === insertedId) continue; // this call's own row — added fresh below
-    rows.push({
-      id: row.id,
-      facilityId: row.facilityId,
-      courseId: row.courseId ?? undefined,
-      localDate: row.localDate,
-      source: row.source,
-      ...row.summary,
-    });
-  }
+  const rows: Record<string, unknown>[] = priorRows.filter((row) => row.id !== insertedId).map(reconstructOneStoredRow);
   const fresh: Record<string, unknown> = {
     id: insertedId,
     facilityId: resolvedFacilityId,

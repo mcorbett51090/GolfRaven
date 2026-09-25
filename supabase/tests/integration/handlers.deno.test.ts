@@ -93,17 +93,32 @@ Deno.test("item 1: a facility-level (no courseId) row is visible to a SECOND cou
   const secondCourse = `crs_hdl_${freshUuid().slice(0, 8)}`;
   await createCourseAtFacX(secondCourse);
 
-  const facLevel = await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: "2026-06-01", catalogVersion: 1 });
+  // P3c gate round 3, blocking MEDIUM 5: a date-only source's (self_report)
+  // localDate is now window-checked against the FACILITY-LOCAL "today"
+  // (repo.now(), real wall-clock time in this suite — unlike the fake-
+  // repo unit tests, which run on a fixed fake clock) — a hardcoded
+  // "2026-06-01" fails that check once this suite runs on any OTHER real
+  // date. A fix-bearing source's own localDate must independently match
+  // ITS OWN capturedAt's server-derived date. Using "today" (facility
+  // -local) for all three keeps every row on the SAME shared date this
+  // test's own listForPlay assertions depend on, regardless of which
+  // real calendar date this suite happens to run on.
+  const todayInFacilityTz = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+
+  const facLevel = await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: todayInFacilityTz, catalogVersion: 1 });
   assertEquals(facLevel.status, "accepted");
 
-  const playA = await evidence(actor, checkinBody({ courseId: CRS_X1 }));
-  const playB = await evidence(actor, checkinBody({ courseId: secondCourse, fix: { ...checkinBody().fix as object, fixId: `fix_b_${freshUuid()}` } }));
+  const playA = await evidence(actor, checkinBody({ courseId: CRS_X1, localDate: todayInFacilityTz, fix: { ...checkinBody().fix as object, capturedAt: Date.now() } }));
+  const playB = await evidence(
+    actor,
+    checkinBody({ courseId: secondCourse, localDate: todayInFacilityTz, fix: { ...checkinBody().fix as object, fixId: `fix_b_${freshUuid()}`, capturedAt: Date.now() } }),
+  );
   assertEquals(playA.status, "accepted");
   assertEquals(playB.status, "accepted");
 
   if (facLevel.status !== "accepted") throw new Error("unreachable");
-  const rowsForA = await withOwnership(actor, (repo) => repo.evidence.listForPlay(FAC_X, CRS_X1, "2026-06-01"));
-  const rowsForB = await withOwnership(actor, (repo) => repo.evidence.listForPlay(FAC_X, secondCourse, "2026-06-01"));
+  const rowsForA = await withOwnership(actor, (repo) => repo.evidence.listForPlay(FAC_X, CRS_X1, todayInFacilityTz));
+  const rowsForB = await withOwnership(actor, (repo) => repo.evidence.listForPlay(FAC_X, secondCourse, todayInFacilityTz));
   assert(rowsForA.some((r) => r.id === facLevel.evidenceId), "the facility-level row must be a listForPlay candidate for course A's play");
   assert(rowsForB.some((r) => r.id === facLevel.evidenceId), "the facility-level row must ALSO be a listForPlay candidate for course B's play, the SAME day");
 });
@@ -170,6 +185,143 @@ Deno.test("item 9: a replay of the SAME fixId with DIFFERENT fix content is reje
   }
   assert(threw instanceof HttpError);
   assertEquals((threw as HttpError).code, "evidence_conflict");
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3c gate round 3, blocking HIGH 1+2 ("replay handling") — against the
+// REAL Repo/Postgres, not just the fake one already covered at unit
+// level.
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3c gate round 3, blocking HIGH 1: a replay with the SAME fixId but a DIFFERENT localDate is a 409 conflict, not a rescore under the new content", DT, async () => {
+  const actor = await withFreshUser("replay-changed-date");
+  const body = checkinBody();
+  const first = await evidence(actor, body);
+  assertEquals(first.status, "accepted");
+
+  const replayedOnADifferentDay = {
+    ...body,
+    localDate: "2026-06-02",
+    fix: { ...(body.fix as object), capturedAt: Date.parse("2026-06-02T12:00:00.000Z") },
+  };
+  let threw: unknown = null;
+  try {
+    await evidence(actor, replayedOnADifferentDay);
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof HttpError, "expected an HttpError");
+  assertEquals((threw as HttpError).code, "evidence_conflict");
+
+  const n = await rawCount(`select count(*)::int as n from app.evidence where source_ref = 'fix:${(body.fix as { fixId: string }).fixId}'`);
+  assertEquals(n, 1, "the changed-date replay must never have inserted a second row");
+});
+
+Deno.test("P3c gate round 3, blocking HIGH 2: an IDENTICAL retry of a token-bearing check-in returns the SAME response, without re-consuming the token or double-scoring", DT, async () => {
+  const actor = await withFreshUser("replay-identical-token");
+  const courseId = `crs_replay_${freshUuid().slice(0, 8)}`;
+  await createCourseWithPolygonAtFacX(courseId);
+  const deviceId = freshUuid();
+
+  const challenges = await withOwnership(actor, (repo) => handleChallengeRequest({ deviceId, facilityId: FAC_X }, repo, randomBytes, digestHex));
+  const token = await withOwnership(actor, (repo) =>
+    handleTokenRequest({ challengeId: challenges[0].id, nonce: challenges[0].nonce, hardwareSupportsAttestation: false }, repo, digestHex),
+  );
+
+  const todayInFacilityTz = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const body = checkinBody({
+    deviceId,
+    courseId,
+    localDate: todayInFacilityTz,
+    fix: { ...checkinBody().fix as object, checkinTokenJti: token.jti, capturedAt: Date.now() },
+  });
+
+  const first = await evidence(actor, body);
+  const second = await evidence(actor, body); // identical retry — e.g. a dropped-response outbox retry
+
+  assertEquals(first.status, "accepted");
+  assertEquals(second.status, "accepted");
+  if (first.status === "accepted" && second.status === "accepted") {
+    assertEquals(first.play.presenceSignal, true);
+    assertEquals(second.play.presenceSignal, true, "the retry must return the SAME outcome, not a fresh (token-less) rescore");
+    assertEquals(second.evidenceId, first.evidenceId);
+    assertEquals(second.play.id, first.play.id);
+    assertEquals(second.replay, true);
+  }
+
+  const evidenceCount = await rawCount(`select count(*)::int as n from app.evidence where facility_id = 'fac_x' and device_id = '${deviceId}'`);
+  assertEquals(evidenceCount, 1, "the retry must never have inserted a second evidence row");
+  const consumedCount = await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${token.jti}' and consumed_at is not null`);
+  assertEquals(consumedCount, 1, "the token must show consumed exactly once — the retry must never re-consume it");
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3c gate round 3, blocking MEDIUM 5 ("local_date comes from the client
+// label, not the server") — against the REAL Repo/Postgres.
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3c gate round 3, blocking MEDIUM 5: 422 local_date_mismatch when the client's label doesn't match the fix's own server-derived facility-local date", DT, async () => {
+  const actor = await withFreshUser("local-date-mismatch");
+  let threw: unknown = null;
+  try {
+    // capturedAt is 2026-06-01T12:00:00Z (07:00 local in America/Chicago)
+    // -- the client claims a DIFFERENT calendar date.
+    await evidence(actor, checkinBody({ localDate: "2026-06-02" }));
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof HttpError);
+  assertEquals((threw as HttpError).code, "local_date_mismatch");
+});
+
+/** The most recent real occurrence of `hour:minute` UTC — always <24h in
+ * the past, so a test anchored to it can never accidentally trip the
+ * (unrelated) clock-skew check, on whatever real calendar date this
+ * suite actually runs. Chicago is UTC-5 (CDT) -- an instant at 02:00 UTC
+ * is always 21:00 the PREVIOUS calendar day in America/Chicago, giving a
+ * genuine UTC-vs-local calendar-date mismatch deterministically, without
+ * hardcoding a specific date that would itself go stale. */
+function mostRecentInstantAtUtcHour(hour: number, minute = 0): Date {
+  const now = new Date();
+  const candidate = new Date(now);
+  candidate.setUTCHours(hour, minute, 0, 0);
+  if (candidate.getTime() > now.getTime()) candidate.setUTCDate(candidate.getUTCDate() - 1);
+  return candidate;
+}
+
+Deno.test("P3c gate round 3, blocking MEDIUM 5: the UTC-date-traveller case gets the correct LOCAL date accepted, not the UTC one", DT, async () => {
+  const actor = await withFreshUser("utc-traveller");
+  const capturedAtDate = mostRecentInstantAtUtcHour(2);
+  const capturedAt = capturedAtDate.getTime();
+  const utcDate = capturedAtDate.toISOString().slice(0, 10);
+  const localDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(capturedAtDate);
+  assert(localDate !== utcDate, "test setup invariant: 02:00 UTC must land on the PREVIOUS calendar day in America/Chicago");
+
+  // The facility-LOCAL date is accepted...
+  const accepted = await evidence(actor, checkinBody({ localDate, fix: { ...checkinBody().fix as object, capturedAt, fixId: `fix_local_${freshUuid()}` } }));
+  assertEquals(accepted.status, "accepted", `expected the facility-local date "${localDate}" to be accepted for a capturedAt of ${capturedAtDate.toISOString()}`);
+
+  // ...but the NAIVE UTC date (what a client that forgot to convert to
+  // the facility's own tz would send) is rejected — proving this isn't
+  // merely "any date is accepted," but specifically the CORRECT one.
+  let threw: unknown = null;
+  try {
+    await evidence(actor, checkinBody({ localDate: utcDate, fix: { ...checkinBody().fix as object, capturedAt, fixId: `fix_utc_${freshUuid()}` } }));
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof HttpError);
+  assertEquals((threw as HttpError).code, "local_date_mismatch");
+});
+
+Deno.test("P3c gate round 3, blocking MEDIUM 5: 422 local_date_out_of_window for a self_report far outside the facility-local window", DT, async () => {
+  const actor = await withFreshUser("self-report-window");
+  let threw: unknown = null;
+  try {
+    await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: "2020-01-01", catalogVersion: 1 });
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof HttpError);
+  assertEquals((threw as HttpError).code, "local_date_out_of_window");
 });
 
 // ─────────────────────────────────────────────────────────────────────────

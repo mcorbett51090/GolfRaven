@@ -30,8 +30,25 @@
 //     one bad item's rollback undo far more work than necessary. A
 //     client importing a full 2,000-item/day history sends it across
 //     multiple requests.
+//
+// ⛔ FIX (P3c gate round 3, blocking MEDIUM 4: "one failing item aborts
+// the whole transaction"). With the daily count at 1999, a 2-item batch
+// used to return 500 and keep 0 rows, forever — `withOwnership` runs the
+// ENTIRE callback in one `db.begin()`, and once ANY statement inside it
+// errors (the 2nd item's rate-limit RAISE, pre-round-3; or any later
+// per-item failure in general), Postgres marks the WHOLE transaction
+// aborted — every earlier item's already-written rows are lost along
+// with the failing one, not merely the failing item's own. This now
+// calls `withOwnershipBatch` (privileged.ts) instead: each item runs
+// inside its OWN `trx.savepoint(...)` of that same outer transaction, so
+// a failing item's writes roll back to JUST that item's own savepoint —
+// every earlier item's work stays committed to the outer transaction,
+// and later items still run. Items after the daily cap is reached are
+// still reported `rate_limited` (`repo.rateLimit.hit`, per-item, now
+// itself immune to any of this by running in its own separate
+// transaction — P3c gate round 3, blocking MEDIUM 3, privileged.ts).
 
-import { getActorFromRequest, withOwnership } from "../_shared/privileged.ts";
+import { getActorFromRequest, withOwnershipBatch } from "../_shared/privileged.ts";
 import { errorResponse, handleRequest, okResponse, readJsonBody, Errors, HttpError, MAX_BODY_BYTES } from "../_shared/http.ts";
 import { handleEvidenceIntake } from "../_shared/evidence/handler.ts";
 import { serve } from "std/http/server";
@@ -55,27 +72,28 @@ serve((req) => handleRequest(async () => {
     return Errors.badRequest(`items must be at most ${MAX_BATCH_ITEMS_PER_REQUEST} per request`).toResponse();
   }
 
-  const results = await withOwnership(actor, async (repo) => {
-    const out: Array<{ index: number; ok: boolean; result?: unknown; error?: { code: string; message: string } }> = [];
-    for (let i = 0; i < items.length; i++) {
-      const rateLimit = await repo.rateLimit.hit(`evidence-batch:user`, 86400, RATE_LIMIT_PER_USER_DAY);
-      if (!rateLimit.ok) {
-        out.push({ index: i, ok: false, error: { code: "rate_limited", message: "evidence-batch daily rate limit exceeded" } });
-        continue;
-      }
-      try {
-        const result = await handleEvidenceIntake(items[i], repo, { skipLiveRateLimit: true });
-        out.push({ index: i, ok: true, result });
-      } catch (err) {
-        if (err instanceof HttpError) {
-          out.push({ index: i, ok: false, error: { code: err.code, message: err.message } });
-        } else {
-          console.error(`evidence-batch: item ${i} failed unexpectedly`, err);
-          out.push({ index: i, ok: false, error: { code: "internal_error", message: "internal error" } });
-        }
-      }
+  const outcomes = await withOwnershipBatch(actor, items.length, async (repo, i) => {
+    // Rate-limit check FIRST, before this item's own savepoint-wrapped
+    // work — a cap-crossing item is rejected as rate_limited without
+    // ever attempting its (pointless, since it will be discarded) writes.
+    // `repo.rateLimit.hit` commits in its own separate transaction
+    // regardless (privileged.ts), so this counts unconditionally, even
+    // though it runs from inside this item's own savepoint scope.
+    const rateLimit = await repo.rateLimit.hit(`evidence-batch:user`, 86400, RATE_LIMIT_PER_USER_DAY);
+    if (!rateLimit.ok) {
+      throw Errors.tooManyRequests("evidence-batch daily rate limit exceeded");
     }
-    return out;
+    return handleEvidenceIntake(items[i], repo, { skipLiveRateLimit: true });
+  });
+
+  const results = outcomes.map((outcome, i) => {
+    if (outcome.ok) return { index: i, ok: true, result: outcome.value };
+    const err = outcome.error;
+    if (err instanceof HttpError) {
+      return { index: i, ok: false, error: { code: err.code, message: err.message } };
+    }
+    console.error(`evidence-batch: item ${i} failed unexpectedly`, err);
+    return { index: i, ok: false, error: { code: "internal_error", message: "internal error" } };
   });
 
   return okResponse(200, { results, maxBodyBytes: MAX_BODY_BYTES });
