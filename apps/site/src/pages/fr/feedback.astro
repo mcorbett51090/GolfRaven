@@ -2,11 +2,12 @@
 /**
  * /fr/feedback/ — FR-CA chrome for the feedback form. Same reasoning as
  * `fr/claim.astro`: hand-written chrome translation, field `name`
- * attributes stay English.
+ * attributes stay English. Same `method="post"` (re-gate S-b) and static
+ * unconfigured-notice (re-gate S-a) treatment as `../claim.astro`.
  */
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import SecureFormScript from "../../components/SecureFormScript.astro";
-import { FORMS_CONFIG } from "../../config/forms-config.mjs";
+import { FORMS_CONFIG, isFormsConfigured } from "../../config/forms-config.mjs";
 import { loadSiteCatalog } from "../../lib/derive";
 
 const MESSAGE_MAX = 2000;
@@ -30,6 +31,7 @@ const TURNSTILE_TIMEOUT_MESSAGE =
     : "Revenez bientôt.");
 
 const { usedDemoData } = await loadSiteCatalog();
+const formsConfigured = isFormsConfigured(FORMS_CONFIG);
 ---
 
 <BaseLayout
@@ -52,14 +54,21 @@ const { usedDemoData } = await loadSiteCatalog();
       </p>
     </header>
 
-    <!--
-      B1 (gate review, blocking) : pas de method="post" ici,
-      volontairement — voir claim.astro (version EN) et le module doc de
-      SecureFormScript.astro. Le <fieldset disabled> ci-dessous est la
-      VRAIE protection.
-    -->
+    {/* S-a (re-gate, should-fix) : voir claim.astro (version EN). */}
+    {!formsConfigured && (
+      <p class="claim__notice" data-unconfigured-notice role="note">
+        {UNPROVISIONED_MESSAGE}
+      </p>
+    )}
+
+    {/*
+      B1 (gate review, blocking) / S-b (re-gate, should-fix) : method="post"
+      EST présent ci-dessous (restauré) — voir claim.astro (version EN). Le
+      <fieldset disabled> ci-dessous reste la VRAIE protection.
+    */}
     <form
       class="claim__form"
+      method="post"
       data-secure-form
       novalidate
       data-worker-url={FORMS_CONFIG.workerUrl}
@@ -137,16 +146,20 @@ const { usedDemoData } = await loadSiteCatalog();
       <button class="btn btn--primary" type="submit">Envoyer</button>
       </fieldset>
 
-      <p class="claim__fineprint">
-        Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un
-        fournisseur tiers) et nous parvient par courriel.{" "}
-        {FORMS_CONFIG.contactEmail && (
-          <>
-            Vous préférez nous écrire directement? Courriel :{" "}
-            <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
-          </>
-        )}
-      </p>
+      {/* S-a (re-gate, should-fix) : voir claim.astro (version EN). */}
+      {(formsConfigured || FORMS_CONFIG.contactEmail) && (
+        <p class="claim__fineprint">
+          {formsConfigured && (
+            <>Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un fournisseur tiers) et nous parvient par courriel.{" "}</>
+          )}
+          {FORMS_CONFIG.contactEmail && (
+            <>
+              Vous préférez nous écrire directement? Courriel :{" "}
+              <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+            </>
+          )}
+        </p>
+      )}
     </form>
   </main>
 </BaseLayout>
@@ -183,6 +196,18 @@ const { usedDemoData } = await loadSiteCatalog();
   }
   .page__lead {
     color: var(--ink-soft);
+  }
+
+  /* S-a (re-gate, should-fix) : voir claim.astro (version EN). */
+  .claim__notice {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    padding: 0.65em 0.85em;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
   }
 
   .claim__form {

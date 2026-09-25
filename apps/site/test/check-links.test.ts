@@ -19,6 +19,8 @@ import {
   isPrivateIp,
   isPrivateIpv6,
   isPrivateV4,
+  probeControlHost,
+  runLinkChecks,
 } from "../../../scripts/check-links.mjs";
 
 describe("check-links.mjs SSRF hardening: isPrivateV4 / isPrivateIp", () => {
@@ -157,23 +159,39 @@ describe("classifyError (pure — no network)", () => {
     expect(classifyError({ code: "NOT_ALLOW_LISTED", hop: 1 })).toBe("redirect-off-host");
     expect(classifyError({ code: "NOT_ALLOW_LISTED", hop: 3 })).toBe("redirect-off-host");
   });
-  it("a network-unreachable error (undici's own .cause.code shape) => 'no-network'", () => {
-    expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "ENOTFOUND" } }))).toBe(
-      "no-network",
-    );
+  it("a network-unreachable error (undici's own .cause.code shape) => 'no-network' — but ENOTFOUND is NOT one of these (re-gate R1)", () => {
     expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }))).toBe(
       "no-network",
     );
+    expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "ENETUNREACH" } }))).toBe(
+      "no-network",
+    );
+    expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "EAI_AGAIN" } }))).toBe(
+      "no-network",
+    );
     expect(classifyError(new Error("EGRESS_BLOCKED by sandbox proxy"))).toBe("no-network");
+    // Re-gate R1 (blocking): ENOTFOUND used to be folded into "no-network"
+    // here too — that was the regression. A resolver that POSITIVELY
+    // answers "no such domain" is telling us the DOMAIN is dead, not that
+    // the network is unreachable; see the next test.
+    expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "ENOTFOUND" } }))).not.toBe(
+      "no-network",
+    );
   });
-  it("gate review S4a: a real assertPublicHost-shaped DNS failure (Object.assign with .code, as assertPublicHost now throws) => 'no-network'", () => {
-    // The EXACT shape `assertPublicHost()` throws after the S4a fix:
+  it("gate review R1 (blocking correction of S4a): a real assertPublicHost-shaped ENOTFOUND (NXDOMAIN) => 'dead', NEVER 'no-network'", () => {
+    // The EXACT shape `assertPublicHost()` throws:
     // `Object.assign(new Error(\`dns-fail:${e.code}\`), { code: e.code })` —
     // `.code` lives on the error object itself, not folded only into the
     // message text.
-    expect(classifyError(Object.assign(new Error("dns-fail:ENOTFOUND"), { code: "ENOTFOUND" }))).toBe(
-      "no-network",
-    );
+    //
+    // R1 repro: `node scripts/check-links.mjs --live --demo` — the first
+    // link (ridge-overlook.example.com) fails DNS with ENOTFOUND, and the
+    // OLD code classified that as "no-network", aborting the whole run
+    // ("no network reachable ... stopping") instead of recording ONE dead
+    // link and checking the rest of the catalog.
+    expect(classifyError(Object.assign(new Error("dns-fail:ENOTFOUND"), { code: "ENOTFOUND" }))).toBe("dead");
+  });
+  it("gate review R1: EAI_AGAIN (the resolver itself unreachable/timed out — NOT 'no such name') is still 'no-network'", () => {
     expect(classifyError(Object.assign(new Error("dns-fail:EAI_AGAIN"), { code: "EAI_AGAIN" }))).toBe(
       "no-network",
     );
@@ -306,5 +324,192 @@ describe("hardenedCheck + checkLink end-to-end, with an injected fetchImpl (no r
       assertPublicHost: noopAssertPublicHost,
     });
     expect(result).toEqual({ ok: true, status: 200 });
+  });
+});
+
+// ---------------------------------------------------------------------
+// Re-gate R1 (blocking): `probeControlHost` + `runLinkChecks`'s
+// abort-vs-continue decision. "Add tests: NXDOMAIN on the first link lets
+// the run continue and classes it `dead`; the control succeeding means no
+// abort; the control failing means abort." All three, plus
+// `probeControlHost` in direct isolation, below — every one injects a fake
+// `fetchImpl`/`assertPublicHost`, no real network or DNS.
+// ---------------------------------------------------------------------
+
+describe("probeControlHost (pure decision logic — no network)", () => {
+  const CONTROL = "www.golfnow.com";
+
+  it("the control host resolving/responding successfully => true (network is reachable)", async () => {
+    const fetchImpl = async () => fakeResponse(200);
+    const ok = await probeControlHost(CONTROL, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(ok).toBe(true);
+  });
+
+  it("the control host failing for a NON-network reason (e.g. 404) => still true — that's not this checker's network being down", async () => {
+    const fetchImpl = async () => fakeResponse(404);
+    const ok = await probeControlHost(CONTROL, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(ok).toBe(true);
+  });
+
+  it("the control host itself failing with a no-network-shaped error => false (network really is unreachable)", async () => {
+    const assertPublicHost = async () => {
+      throw Object.assign(new Error("dns-fail:EAI_AGAIN"), { code: "EAI_AGAIN" });
+    };
+    const fetchImpl = async () => fakeResponse(200); // never reached — assertPublicHost throws first
+    const ok = await probeControlHost(CONTROL, 1000, { fetchImpl, assertPublicHost });
+    expect(ok).toBe(false);
+  });
+
+  it("no control host configured => false, fail closed (nothing to probe)", async () => {
+    const fetchImpl = async () => fakeResponse(200);
+    const ok = await probeControlHost(null, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(ok).toBe(false);
+  });
+});
+
+describe("runLinkChecks abort-vs-continue (re-gate R1, blocking)", () => {
+  const CONFIGURED_HOSTS = ["www.golfnow.com"];
+  function makeLink(url: string, overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      facilitySlug: "test-course",
+      facilityName: "Test Course",
+      facilityUrl: null,
+      trail: null,
+      provider: "golfnow",
+      url,
+      checkedAt: "2026-01-01",
+      ...overrides,
+    };
+  }
+
+  it("R1 repro: NXDOMAIN on the FIRST link classifies it 'dead' and the run CONTINUES to check every remaining link (never aborts)", async () => {
+    const links = [
+      makeLink("https://ridge-overlook.example.com/book"), // this file's own repro host — never allow-listed for real, but the assertPublicHost DNS failure fires before the allow-list check even matters here since it's injected directly below
+      makeLink("https://www.golfnow.com/example/test-course"),
+    ];
+    // Allow-list both hosts so the SECOND link's own allow-list check
+    // never masks whether checking continued.
+    const allowList = ["ridge-overlook.example.com", "www.golfnow.com"];
+    let assertCalls = 0;
+    const assertPublicHost = async (hostname: string) => {
+      assertCalls += 1;
+      if (hostname === "ridge-overlook.example.com") {
+        throw Object.assign(new Error("dns-fail:ENOTFOUND"), { code: "ENOTFOUND" });
+      }
+      // second link's host resolves fine
+    };
+    const fetchImpl = async () => fakeResponse(200);
+    const { results, networkUnreachable, controlHost } = await runLinkChecks(
+      links,
+      allowList,
+      1000,
+      { fetchImpl, assertPublicHost },
+    );
+    expect(networkUnreachable).toBe(false);
+    expect(controlHost).toBe(null);
+    expect(results).toHaveLength(2);
+    expect(results[0].classification).toBe("dead");
+    expect(results[0].detail).toBe("nxdomain");
+    expect(results[1].classification).toBe("ok");
+    // ENOTFOUND on the first link is never even eligible for a control
+    // probe (only a "no-network" classification triggers one) — so
+    // assertPublicHost is called exactly once per link, never a 3rd time
+    // for a control host.
+    expect(assertCalls).toBe(2);
+  });
+
+  it("first link classifies 'no-network' AND the control host succeeds => NO abort, every link still gets checked", async () => {
+    const links = [
+      makeLink("https://www.golfnow.com/example/test-course"),
+      makeLink("https://www.golfnow.com/example/second-course"),
+    ];
+    let call = 0;
+    const assertPublicHost = async () => {
+      call += 1;
+      if (call === 1) {
+        // first link's own resolution: no-network-shaped
+        throw Object.assign(new Error("dns-fail:EAI_AGAIN"), { code: "EAI_AGAIN" });
+      }
+      // the control-host probe (call 2) and the second link (call 3) both resolve fine
+    };
+    const fetchImpl = async () => fakeResponse(200);
+    const { results, networkUnreachable, controlHost } = await runLinkChecks(
+      links,
+      CONFIGURED_HOSTS,
+      1000,
+      { fetchImpl, assertPublicHost },
+    );
+    expect(networkUnreachable).toBe(false);
+    expect(controlHost).toBe(null);
+    expect(results).toHaveLength(2);
+    expect(results[0].classification).toBe("no-network");
+    // The run continued past the first link's own no-network finding and
+    // checked the second link too.
+    expect(results[1].classification).toBe("ok");
+    expect(call).toBe(3); // link 1, control probe, link 2
+  });
+
+  it("first link classifies 'no-network' AND the control host ALSO fails => abort, only the first link's finding is returned", async () => {
+    const links = [
+      makeLink("https://www.golfnow.com/example/test-course"),
+      makeLink("https://www.golfnow.com/example/second-course"),
+    ];
+    let secondLinkChecked = false;
+    const assertPublicHost = async () => {
+      throw Object.assign(new Error("dns-fail:EAI_AGAIN"), { code: "EAI_AGAIN" });
+    };
+    const fetchImpl = async (url: string) => {
+      if (url.includes("second-course")) secondLinkChecked = true;
+      return fakeResponse(200);
+    };
+    const { results, networkUnreachable, controlHost } = await runLinkChecks(
+      links,
+      CONFIGURED_HOSTS,
+      1000,
+      { fetchImpl, assertPublicHost },
+    );
+    expect(networkUnreachable).toBe(true);
+    expect(controlHost).toBe("www.golfnow.com");
+    expect(results).toHaveLength(1);
+    expect(results[0].classification).toBe("no-network");
+    expect(secondLinkChecked).toBe(false);
+  });
+
+  it("a no-network classification on a link OTHER than the first does NOT trigger a control probe or abort", async () => {
+    const links = [
+      makeLink("https://www.golfnow.com/example/test-course"),
+      makeLink("https://www.golfnow.com/example/second-course"),
+    ];
+    let call = 0;
+    const assertPublicHost = async () => {
+      call += 1;
+      if (call === 2) {
+        throw Object.assign(new Error("dns-fail:EAI_AGAIN"), { code: "EAI_AGAIN" });
+      }
+    };
+    const fetchImpl = async () => fakeResponse(200);
+    const { results, networkUnreachable } = await runLinkChecks(links, CONFIGURED_HOSTS, 1000, {
+      fetchImpl,
+      assertPublicHost,
+    });
+    expect(networkUnreachable).toBe(false);
+    expect(results).toHaveLength(2);
+    expect(results[0].classification).toBe("ok");
+    expect(results[1].classification).toBe("no-network");
+    // Only 2 assertPublicHost calls (one per link) — no control probe was made.
+    expect(call).toBe(2);
+  });
+
+  it("onResult is called once per checked link, in order, with the running index", async () => {
+    const links = [makeLink("https://www.golfnow.com/example/a"), makeLink("https://www.golfnow.com/example/b")];
+    const fetchImpl = async () => fakeResponse(200);
+    const seen: Array<[string, number]> = [];
+    await runLinkChecks(links, CONFIGURED_HOSTS, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost }, (record, i) => {
+      seen.push([record.classification as string, i]);
+    });
+    expect(seen).toEqual([
+      ["ok", 0],
+      ["ok", 1],
+    ]);
   });
 });

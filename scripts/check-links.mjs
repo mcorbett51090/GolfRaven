@@ -43,15 +43,21 @@
  *     `booking-hosts.ts`/`verify-catalog` use (`config/booking-hosts.json`),
  *     plus (for a `course-native` entry) the facility's own `url` host —
  *     a link that shouldn't RENDER is also never REQUESTED.
- *   - **Exits non-zero when the network is unreachable** — the previous
- *     version of this script exited 0 on a network-unreachable
- *     environment (reasoning: a sandboxed session with no network isn't
- *     a tool failure). The gate review corrected this: a WEEKLY checker
- *     that silently reports "success" when it never actually reached the
- *     network would mask exactly the failure mode it exists to catch.
- *     `--live` now exits 1 on a network-unreachable first request,
- *     printing why — still never attempted in CI (this script is never
- *     invoked there at all, `--live` or not).
+ *   - **Exits non-zero when the network is unreachable — but only once a
+ *     CONTROL HOST confirms it** (re-gate R1, blocking correction): a
+ *     first-link failure that classifies as `"no-network"` no longer
+ *     aborts the run on its own — `www.golfnow.com` (the catalog's own
+ *     first allow-listed host) is probed through the identical
+ *     DNS+fetch path first (`probeControlHost()`), and the run only
+ *     stops if THAT also fails. A single genuinely-dead domain
+ *     (`ENOTFOUND`/NXDOMAIN — now classified `"dead"`, never
+ *     `"no-network"`, see `classifyError()`) was previously
+ *     indistinguishable from "this sandbox has no network at all", which
+ *     silently skipped checking every OTHER link in the catalog over one
+ *     unrelated domain's own DNS failure. `--live` still exits 1 when the
+ *     control confirms the network really is down, printing why — never
+ *     attempted in CI (this script is never invoked there at all,
+ *     `--live` or not).
  *
  * Usage:
  *   node scripts/check-links.mjs                # dry run (default) — lists links, no network
@@ -459,14 +465,24 @@ function allowListFor(link, configuredHosts) {
   return configuredHosts;
 }
 
+/**
+ * Re-gate correction (R1, blocking): `ENOTFOUND` is DELIBERATELY NOT here
+ * any more. `ENOTFOUND` means DNS resolved (the resolver answered) and
+ * said "no such name" — that's a genuinely DEAD domain, not proof the
+ * network itself is unreachable (see `classifyError()`, which now maps
+ * `ENOTFOUND` to `"dead"` before this function is ever consulted). Only
+ * these four mean "the network path itself is broken", matching
+ * `EAI_AGAIN` (resolver itself unreachable/timed out — NOT "no such
+ * name"), `ENETUNREACH`, `ECONNREFUSED`, and this sandboxed environment's
+ * own `EGRESS_BLOCKED` marker.
+ */
 function looksLikeNoNetwork(err) {
   const code = err?.cause?.code ?? err?.code;
   return (
-    code === "ENOTFOUND" ||
     code === "EAI_AGAIN" ||
     code === "ECONNREFUSED" ||
     code === "ENETUNREACH" ||
-    /EGRESS_BLOCKED|network/i.test(String(err?.message ?? ""))
+    /EGRESS_BLOCKED/i.test(String(err?.message ?? ""))
   );
 }
 
@@ -492,7 +508,11 @@ function looksLikeNoNetwork(err) {
 //   - "dead"               hardenedCheck resolved but !ok, and the status
 //                          is NOT one of the "blocked" codes above
 //                          (other 4xx/5xx, too-many-redirects,
-//                          redirect-no-location).
+//                          redirect-no-location) — OR the DNS resolver
+//                          positively answered "no such domain"
+//                          (ENOTFOUND/NXDOMAIN, detail "nxdomain"; re-gate
+//                          R1: this is proof THIS domain is dead, not
+//                          that the network is unreachable).
 //   - "not-allow-listed"   the link's OWN host was never on the allow-list
 //                          (NOT_ALLOW_LISTED at hop 0)
 //   - "redirect-off-host"  an ALLOWED starting host redirected somewhere
@@ -515,8 +535,24 @@ export function classifyError(err) {
   if (err?.code === "NOT_ALLOW_LISTED") {
     return err.hop === 0 ? "not-allow-listed" : "redirect-off-host";
   }
+  // Re-gate correction (R1, blocking): a resolver that positively answers
+  // "no such domain" (ENOTFOUND) is telling us THIS domain is dead — not
+  // that the network is unreachable. Checked BEFORE looksLikeNoNetwork so
+  // it's never shadowed by that function's own (now-narrower) rules.
+  if (err?.code === "ENOTFOUND") return "dead";
   if (looksLikeNoNetwork(err)) return "no-network";
   return "error";
+}
+
+/**
+ * The `detail` a report shows for a THROWN error — mostly the error's own
+ * message, except `ENOTFOUND`, which reads as the plain, well-known term
+ * "nxdomain" (re-gate R1) rather than the internal `dns-fail:ENOTFOUND`
+ * wrapper text.
+ */
+function detailForError(err) {
+  if (err?.code === "ENOTFOUND") return "nxdomain";
+  return String(err?.message ?? err);
 }
 
 /** Classifies a RESOLVED `hardenedCheck()` result (`{ ok, status, reason? }`) — never a thrown error. */
@@ -547,9 +583,89 @@ export async function checkLink(link, allowList, timeoutMs, opts = {}) {
       ...link,
       classification: classifyError(err),
       status: null,
-      detail: String(err?.message ?? err),
+      detail: detailForError(err),
     };
   }
+}
+
+/**
+ * Re-gate correction (R1, blocking): "Before aborting on a first-link
+ * failure, probe one allow-listed control host ... through the same
+ * injectable lookup/fetch. Conclude 'no network' only if that control
+ * also fails."
+ *
+ * Probes `host` (a real, well-known, always-allow-listed host — the
+ * catalog's own `configuredHosts[0]`, never a booking link's own,
+ * possibly-genuinely-dead host) with the SAME `hardenedCheck()` used for
+ * real links, so it exercises the identical DNS/fetch path (and accepts
+ * the same injectable `opts.fetchImpl`/`opts.assertPublicHost` a test
+ * provides — no real network in tests).
+ *
+ * Returns `true` when the network appears reachable (the control
+ * succeeded, OR failed for a reason that ISN'T itself "no-network" —
+ * e.g. the control host is momentarily down for an unrelated reason;
+ * that's not this checker's network being unreachable). Returns `false`
+ * — "the network really is unreachable" — only when `host` is missing
+ * (nothing to probe, fail closed) or the control itself classifies as
+ * `"no-network"`.
+ */
+export async function probeControlHost(host, timeoutMs, opts = {}) {
+  if (!host) return false;
+  try {
+    await hardenedCheck(`https://${host}/`, [host], timeoutMs, opts);
+    return true;
+  } catch (err) {
+    return classifyError(err) !== "no-network";
+  }
+}
+
+/**
+ * Checks every link in order, applying the SAME first-link no-network
+ * abort logic `main()` always has — extracted into its own, fully
+ * unit-testable function (injectable `opts.fetchImpl`/
+ * `opts.assertPublicHost`, no real network/DNS/catalog needed) so the
+ * abort-vs-continue decision itself has direct test coverage, not just
+ * the classification it's built on.
+ *
+ * `onResult(record, index)` — optional — is called once per link, in
+ * order, as each result comes in; `main()` uses it to print progress
+ * live, tests simply omit it.
+ *
+ * Returns `{ results, networkUnreachable, controlHost }`. When
+ * `networkUnreachable` is true, `results` holds only the first link's own
+ * (already-recorded) finding — checking stopped there, exactly as before.
+ * Otherwise every link was checked, INCLUDING one whose own classification
+ * is still `"no-network"` (the control probe only decides whether to
+ * ABORT the whole run, never rewrites that one link's own finding).
+ *
+ * @param {Array<Record<string, unknown>>} links
+ * @param {string[]} configuredHosts
+ * @param {number} timeoutMs
+ * @param {{ fetchImpl?: Function, assertPublicHost?: Function }} [opts]
+ * @param {(record: Record<string, unknown>, index: number) => void} [onResult]
+ */
+export async function runLinkChecks(links, configuredHosts, timeoutMs, opts = {}, onResult = () => {}) {
+  const results = [];
+  for (const [i, link] of links.entries()) {
+    const allowList = allowListFor(link, configuredHosts);
+    const record = await checkLink(link, allowList, timeoutMs, opts);
+    results.push(record);
+    onResult(record, i);
+
+    if (record.classification === "no-network" && i === 0) {
+      const controlHost = configuredHosts[0] ?? null;
+      const networkOk = await probeControlHost(controlHost, timeoutMs, opts);
+      if (!networkOk) {
+        return { results, networkUnreachable: true, controlHost };
+      }
+      // The control succeeded (or failed for a non-network reason): the
+      // network itself is fine — this first link's own "no-network"
+      // finding stands (a transient/host-specific resolution issue for
+      // THAT domain specifically), but the run continues to every
+      // remaining link rather than aborting the whole thing over it.
+    }
+  }
+  return { results, networkUnreachable: false, controlHost: null };
 }
 
 async function writeReport(reportPath, payload) {
@@ -580,36 +696,39 @@ async function main() {
   console.log(
     `--live: checking ${links.length} link(s), ${args.timeoutMs}ms timeout each, https-only, SSRF-hardened...\n`,
   );
-  const results = [];
-  for (const [i, link] of links.entries()) {
-    const allowList = allowListFor(link, configuredHosts);
-    const record = await checkLink(link, allowList, args.timeoutMs);
-    results.push(record);
-
-    if (record.classification === "no-network" && i === 0) {
-      console.error(
-        `check-links: no network reachable (${record.detail}) — stopping without checking the ` +
-          `remaining ${links.length - 1} link(s). A weekly checker that silently reported success ` +
-          `here would be worse than an honest failure, so this exits non-zero.`,
+  const { results, networkUnreachable, controlHost } = await runLinkChecks(
+    links,
+    configuredHosts,
+    args.timeoutMs,
+    {},
+    (record) => {
+      const mark = record.classification === "ok" ? "ok  " : "FAIL";
+      console.log(
+        `  ${mark} [${record.classification}${record.status ? `:${record.status}` : ""}] ${record.facilityName} -> ${record.url}`,
       );
-      if (args.reportPath) {
-        await writeReport(args.reportPath, {
-          generatedAt: new Date().toISOString(),
-          totalLinks: links.length,
-          checked: results.length,
-          noNetwork: true,
-          findings: results,
-        });
-        console.error(`check-links: wrote ${args.reportPath}`);
-      }
-      process.exitCode = 1;
-      return;
-    }
+    },
+  );
 
-    const mark = record.classification === "ok" ? "ok  " : "FAIL";
-    console.log(
-      `  ${mark} [${record.classification}${record.status ? `:${record.status}` : ""}] ${record.facilityName} -> ${record.url}`,
+  if (networkUnreachable) {
+    const first = results[0];
+    console.error(
+      `check-links: first link classified no-network (${first?.detail}); the control host ` +
+        `(${controlHost ?? "none configured"}) also failed — the network itself really is unreachable. ` +
+        `Stopping without checking the remaining ${links.length - 1} link(s). A weekly checker that ` +
+        `silently reported success here would be worse than an honest failure, so this exits non-zero.`,
     );
+    if (args.reportPath) {
+      await writeReport(args.reportPath, {
+        generatedAt: new Date().toISOString(),
+        totalLinks: links.length,
+        checked: results.length,
+        noNetwork: true,
+        findings: results,
+      });
+      console.error(`check-links: wrote ${args.reportPath}`);
+    }
+    process.exitCode = 1;
+    return;
   }
 
   const findings = results.filter((r) => r.classification !== "ok");

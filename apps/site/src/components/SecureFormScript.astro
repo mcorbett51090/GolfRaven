@@ -247,8 +247,8 @@ const unprovisioned =
     // S1 (gate review): `workerUrl` is ALSO re-validated here with
     // `isValidWorkerUrl` — the SAME shape check `forms-config.mjs`'s
     // `assertValidFormsConfig()` enforces at build time (https: only, no
-    // userinfo, no non-default port, a plain `[a-z0-9.-]+` hostname, no
-    // wildcard). A build-time-valid value read back from a DOM attribute
+    // userinfo, no non-default port, no path/query/hash, a plain
+    // `[a-z0-9.-]+` hostname, no wildcard). A build-time-valid value read back from a DOM attribute
     // is re-checked here rather than trusted blind, before it is ever
     // used to build a `fetch()` target — the exact defense that stops a
     // scheme-less value like "raven-secure-upload.workers.dev" from
@@ -259,16 +259,6 @@ const unprovisioned =
       isValidWorkerUrl(workerUrl) &&
       !isPlaceholderValue(siteId) &&
       !isPlaceholderValue(turnstileSiteKey);
-
-    // B1: enable the fieldset EXACTLY ONCE, on load, and ONLY when the
-    // form is genuinely configured. While unprovisioned (or misconfigured
-    // — an invalid workerUrl counts as unprovisioned here), it stays
-    // disabled exactly as the server rendered it, forever, for this page
-    // view — no native submission of any kind can ever carry field
-    // values off this page.
-    if (fieldset && formConfigured) {
-      fieldset.disabled = false;
-    }
 
     // The page's own `data-unprovisioned-message`/`data-generic-error-message`
     // (see this component's module doc) carry the LOCALIZED text — a French
@@ -474,6 +464,28 @@ const unprovisioned =
         setBusy(false);
       }
     });
+
+    // B1: enable the fieldset EXACTLY ONCE, on load, and ONLY when the
+    // form is genuinely configured. While unprovisioned (or misconfigured
+    // — an invalid workerUrl counts as unprovisioned here), it stays
+    // disabled exactly as the server rendered it, forever, for this page
+    // view — no native submission of any kind can ever carry field
+    // values off this page.
+    //
+    // S-b (re-gate): this runs AFTER `form.addEventListener("submit", ...)`
+    // above, deliberately — not before. Both statements are synchronous
+    // and run in the same task before the browser can ever dispatch a
+    // "submit" event (there is no `await` between them), so this ordering
+    // makes no behavioural difference to whether the listener is attached
+    // in time. It matters for a different reason: reading top-to-bottom,
+    // the listener that will actually handle a real submission is now
+    // established before the one statement that makes the form
+    // submittable at all — so a reviewer (or a future edit) never has a
+    // window where the fieldset could read as "enabled, but nothing is
+    // listening yet" from the source order alone.
+    if (fieldset && formConfigured) {
+      fieldset.disabled = false;
+    }
   });
 </script>
 

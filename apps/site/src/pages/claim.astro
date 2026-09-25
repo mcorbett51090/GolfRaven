@@ -45,12 +45,24 @@
  * JS binds, or while unprovisioned.** All of it sits inside a
  * `<fieldset disabled data-form-fieldset>` — see `SecureFormScript.astro`'s
  * own module doc for why a disabled fieldset (not just a disabled submit
- * button) is what makes a native submission structurally impossible, and
- * why `method="post"` is dropped from the `<form>` tag entirely.
+ * button) is what makes a native submission structurally impossible. The
+ * `<form>` tag carries `method="post"` (re-gate S-b: restored — a POST
+ * fallback is safer than a GET one, which would put field values in the
+ * URL; see the frontmatter comment just above the `<form>` tag below for
+ * the full reasoning).
+ *
+ * **S-a (re-gate, should-fix): a static, no-JS-required "forms aren't live
+ * yet" notice renders above the form whenever `!isFormsConfigured()`** —
+ * the disabled fieldset already stops a submission either way, but with JS
+ * off (or before it binds) nothing previously EXPLAINED that to a visitor;
+ * SecureFormScript's own `<noscript>` only covers the "no JS at all" case,
+ * not "JS is on, the fieldset is just disabled and empty of explanation".
+ * This is plain server-rendered markup, so it shows with JS on AND off,
+ * and doesn't depend on the client script running at all.
  */
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SecureFormScript from "../components/SecureFormScript.astro";
-import { FORMS_CONFIG } from "../config/forms-config.mjs";
+import { FORMS_CONFIG, isFormsConfigured } from "../config/forms-config.mjs";
 import { loadSiteCatalog } from "../lib/derive";
 
 /** Every real slug this site mints matches this — see this page's own
@@ -67,6 +79,8 @@ const rawFacilitySlug = Astro.url.searchParams.get("facility")?.trim() ?? "";
 const rawTrailSlug = Astro.url.searchParams.get("trail")?.trim() ?? "";
 const facilitySlug = SLUG_PATTERN.test(rawFacilitySlug) ? rawFacilitySlug : "";
 const trailSlug = SLUG_PATTERN.test(rawTrailSlug) ? rawTrailSlug : "";
+
+const formsConfigured = isFormsConfigured(FORMS_CONFIG);
 
 const title = "Suggest a correction | GolfRaven";
 const description = "Suggest a correction to a course or trail listing, claim it as its operator, or tell us about a course we haven't added yet.";
@@ -133,21 +147,35 @@ const TURNSTILE_TIMEOUT_MESSAGE =
       </p>
     </header>
 
-    <!--
-      B1 (gate review, blocking): NO method="post" here, deliberately —
-      see the <fieldset disabled> below, which is the REAL defense. With
-      no `action` and no `method`, a form defaults to a same-origin GET on
-      itself; that native fallback path is what SecureFormScript.astro's
-      own module doc explains at length. The short version: every
-      descendant of a disabled <fieldset> is excluded from ANY native
-      submission's data set, on any method, per the HTML spec — so even
-      in some hypothetical browser-quirk bypass of the disabled state,
-      dropping method="post" means the fallback (if one could even fire)
-      is the less consequential of the two verbs, not the CSP-allowed
-      form-action='self' POST this repo's own gate review flagged.
-    -->
+    {/* S-a (re-gate, should-fix): static, server-rendered — shows with JS
+        on OR off, and needs no client script to appear. See this page's
+        own module doc above for why the disabled-fieldset alone (B1)
+        wasn't enough: it silently stops a submission but never explained
+        why to a visitor whose JS is on but the form is unprovisioned. */}
+    {!formsConfigured && (
+      <p class="claim__notice" data-unconfigured-notice role="note">
+        {UNPROVISIONED_MESSAGE}
+      </p>
+    )}
+
+    {/*
+      B1 (gate review, blocking) / S-b (re-gate, should-fix): `method="post"`
+      IS present below — restored per the re-gate: a POST fallback is safer
+      than a GET one, which would put every field's value in the URL (and
+      thus browser history / server access logs / a Referer header) if a
+      submission ever reached the browser's own native fallback path. The
+      REAL defense stays the `<fieldset disabled>` below: per the HTML
+      spec, every descendant of a disabled fieldset is excluded from ANY
+      native submission's data set, on ANY method — so no field VALUES
+      ever reach that fallback regardless of which verb it would have
+      used. `method="post"` is belt-and-suspenders on top of that, not a
+      substitute for it, and it also matches the CSP-allowed
+      `form-action 'self'` POST this repo's own gate review already
+      accounts for.
+    */}
     <form
       class="claim__form"
+      method="post"
       data-secure-form
       novalidate
       data-worker-url={FORMS_CONFIG.workerUrl}
@@ -253,16 +281,27 @@ const TURNSTILE_TIMEOUT_MESSAGE =
       <button class="btn btn--primary" type="submit">Send it in</button>
       </fieldset>
 
-      <p class="claim__fineprint">
-        Your message goes directly to our own secure form service (not a third-party form provider) and reaches us
-        by email.{" "}
-        {FORMS_CONFIG.contactEmail && (
-          <>
-            Prefer to write to us yourself? Email{" "}
-            <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
-          </>
-        )}
-      </p>
+      {/* S-a (re-gate, should-fix): this claim ("goes directly to our own
+          secure form service ... reaches us by email") is only TRUE once
+          the form is actually configured — while unconfigured, no
+          submission goes anywhere, so the sentence is dropped rather than
+          left describing a service that isn't live. The "email us
+          directly" invitation below is independent of that (it's about
+          `contactEmail`, not about whether the Worker is wired up) and
+          still shows whenever an address has been published. */}
+      {(formsConfigured || FORMS_CONFIG.contactEmail) && (
+        <p class="claim__fineprint">
+          {formsConfigured && (
+            <>Your message goes directly to our own secure form service (not a third-party form provider) and reaches us by email.{" "}</>
+          )}
+          {FORMS_CONFIG.contactEmail && (
+            <>
+              Prefer to write to us yourself? Email{" "}
+              <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+            </>
+          )}
+        </p>
+      )}
     </form>
   </main>
 </BaseLayout>
@@ -382,6 +421,21 @@ const TURNSTILE_TIMEOUT_MESSAGE =
   }
   .claim__for strong {
     color: var(--ink);
+  }
+
+  /* S-a (re-gate, should-fix): the static "forms aren't live yet" notice —
+     same visual language as SecureFormScript's own `.form-status[data-kind="info"]`
+     so an unconfigured build reads consistently whether the message came
+     from static markup (this) or the client script. */
+  .claim__notice {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    padding: 0.65em 0.85em;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
   }
 
   .claim__form {

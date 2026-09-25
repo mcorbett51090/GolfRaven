@@ -17,13 +17,18 @@
  * aren't live yet" message and makes no network call.
  *
  * B1 (gate review, blocking): see `claim.astro`'s own doc for the full
- * reasoning — the form is inert (a `<fieldset disabled data-form-fieldset>`,
- * no `method="post"`) until `SecureFormScript.astro`'s module script
- * confirms the form is genuinely configured.
+ * reasoning — the form is inert (a `<fieldset disabled data-form-fieldset>`)
+ * until `SecureFormScript.astro`'s module script confirms the form is
+ * genuinely configured. The `<form>` carries `method="post"` (re-gate
+ * S-b — see the frontmatter comment above the `<form>` tag below).
+ *
+ * S-a (re-gate, should-fix): see `claim.astro`'s own doc — a static,
+ * no-JS-required "forms aren't live yet" notice renders above the form
+ * whenever `!isFormsConfigured()`.
  */
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SecureFormScript from "../components/SecureFormScript.astro";
-import { FORMS_CONFIG } from "../config/forms-config.mjs";
+import { FORMS_CONFIG, isFormsConfigured } from "../config/forms-config.mjs";
 import { loadSiteCatalog } from "../lib/derive";
 
 const MESSAGE_MAX = 2000;
@@ -45,6 +50,7 @@ const TURNSTILE_TIMEOUT_MESSAGE =
     : "Please check back soon.");
 
 const { usedDemoData } = await loadSiteCatalog();
+const formsConfigured = isFormsConfigured(FORMS_CONFIG);
 ---
 
 <BaseLayout
@@ -66,16 +72,22 @@ const { usedDemoData } = await loadSiteCatalog();
       </p>
     </header>
 
-    <!--
-      B1 (gate review, blocking): NO method="post" here, deliberately —
-      see claim.astro's own note (same reasoning) and
-      SecureFormScript.astro's module doc for the full explanation. The
-      <fieldset disabled> below is the REAL defense: every descendant of a
-      disabled fieldset is excluded from any native submission's data,
-      whatever HTTP method a hypothetical fallback used.
-    -->
+    {/* S-a (re-gate, should-fix): see claim.astro's own note — static,
+        server-rendered, shows with JS on or off. */}
+    {!formsConfigured && (
+      <p class="claim__notice" data-unconfigured-notice role="note">
+        {UNPROVISIONED_MESSAGE}
+      </p>
+    )}
+
+    {/*
+      B1 (gate review, blocking) / S-b (re-gate, should-fix): `method="post"`
+      IS present below (restored) — see claim.astro's own note for the full
+      reasoning. The REAL defense stays the `<fieldset disabled>` below.
+    */}
     <form
       class="claim__form"
+      method="post"
       data-secure-form
       novalidate
       data-worker-url={FORMS_CONFIG.workerUrl}
@@ -158,16 +170,22 @@ const { usedDemoData } = await loadSiteCatalog();
       <button class="btn btn--primary" type="submit">Send feedback</button>
       </fieldset>
 
-      <p class="claim__fineprint">
-        Your message goes directly to our own secure form service (not a third-party form provider) and reaches us
-        by email.{" "}
-        {FORMS_CONFIG.contactEmail && (
-          <>
-            Prefer to write to us yourself? Email{" "}
-            <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
-          </>
-        )}
-      </p>
+      {/* S-a (re-gate, should-fix): see claim.astro's own note — the
+          "goes directly ... reaches us by email" claim only shows once
+          the form is actually configured. */}
+      {(formsConfigured || FORMS_CONFIG.contactEmail) && (
+        <p class="claim__fineprint">
+          {formsConfigured && (
+            <>Your message goes directly to our own secure form service (not a third-party form provider) and reaches us by email.{" "}</>
+          )}
+          {FORMS_CONFIG.contactEmail && (
+            <>
+              Prefer to write to us yourself? Email{" "}
+              <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+            </>
+          )}
+        </p>
+      )}
     </form>
   </main>
 </BaseLayout>
@@ -209,6 +227,18 @@ const { usedDemoData } = await loadSiteCatalog();
   }
   .page__lead {
     color: var(--ink-soft);
+  }
+
+  /* S-a (re-gate, should-fix): see claim.astro's own note. */
+  .claim__notice {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    padding: 0.65em 0.85em;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
   }
 
   .claim__form {

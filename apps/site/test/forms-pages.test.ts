@@ -179,4 +179,23 @@ describe("claim/feedback pages, parameterized on isFormsConfigured() (gate revie
       expect(offenders).toEqual([]);
     },
   );
+
+  it.each(BUILD_STATES)(
+    "$label: re-gate nit — no built form page ships an HTML comment mentioning 'gate' (gate-review notes must live in frontmatter/JS comments, never `.astro` markup)",
+    async ({ key }) => {
+      // Astro strips `{/* ... */}` template comments and frontmatter `/** */`
+      // doc comments from its output entirely — only a literal `<!-- -->`
+      // markup comment survives into the built HTML. This asserts that
+      // whatever DOES survive never carries a gate-review annotation like
+      // the old `<!-- B1 (gate review, blocking): ... -->` blocks that used
+      // to sit directly above these forms' `<form>` tags.
+      const dist = BUILDS[key as "real" | "configured"].dist;
+      for (const relPath of FORM_PAGES) {
+        const html = await readIn(dist, relPath);
+        const comments = html.match(/<!--[\s\S]*?-->/g) ?? [];
+        const gateComments = comments.filter((c) => /gate/i.test(c));
+        expect(gateComments, `${relPath} gate-review comments: ${JSON.stringify(gateComments)}`).toEqual([]);
+      }
+    },
+  );
 });

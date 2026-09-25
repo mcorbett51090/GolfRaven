@@ -18,6 +18,7 @@ import {
   formsWorkerHost,
   isFormsConfigured,
   isPlaceholderValue,
+  isValidContactEmail,
   isValidWorkerUrl,
   TURNSTILE_HOSTS,
 } from "../src/config/forms-config.mjs";
@@ -177,6 +178,67 @@ describe("isValidWorkerUrl", () => {
     // placeholder as its own, non-error case).
     expect(isValidWorkerUrl("TODO(owner): raven-site-kit secure-upload Worker URL")).toBe(false);
   });
+
+  it("re-gate nit: a path other than '/' (or empty) is rejected — the base URL must be bare", () => {
+    // Without this, `${workerUrl}/submit` (SecureFormScript.astro's fetch
+    // target) would silently request the WRONG endpoint, e.g.
+    // "https://host/foo/submit" instead of the intended
+    // "https://host/submit".
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/foo")).toBe(false);
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/submit")).toBe(false);
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/foo/bar")).toBe(false);
+  });
+
+  it("re-gate nit: a bare '/' path is still fine (this is what a real deployed Worker URL normally has)", () => {
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/")).toBe(true);
+  });
+
+  it("re-gate nit: a query string is rejected, even with an otherwise-bare path", () => {
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/?foo=bar")).toBe(false);
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev?foo=bar")).toBe(false);
+  });
+
+  it("re-gate nit: a hash/fragment is rejected", () => {
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/#frag")).toBe(false);
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev#frag")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Re-gate nit: "Validate GOLFRAVEN_FORMS_CONTACT_EMAIL: a simple address
+// regex with no spaces, quotes, `<` or `>`. If it's invalid, fail the
+// build."
+// ---------------------------------------------------------------------
+
+describe("isValidContactEmail", () => {
+  it("a real, simple address is valid", () => {
+    expect(isValidContactEmail("hello@example.test")).toBe(true);
+    expect(isValidContactEmail("owner+golfraven@example.test")).toBe(true);
+  });
+
+  it("empty/falsy is NOT 'valid' by this function's own contract, but is handled separately (see assertValidFormsConfig below) — 'not set yet' is not the same as 'set and malformed'", () => {
+    expect(isValidContactEmail("")).toBe(false);
+    expect(isValidContactEmail(undefined as unknown as string)).toBe(false);
+    expect(isValidContactEmail(null as unknown as string)).toBe(false);
+  });
+
+  it("a space anywhere is rejected", () => {
+    expect(isValidContactEmail("hello @example.test")).toBe(false);
+    expect(isValidContactEmail("hello@ example.test")).toBe(false);
+    expect(isValidContactEmail("he llo@example.test")).toBe(false);
+  });
+
+  it("quotes or angle brackets are rejected", () => {
+    expect(isValidContactEmail('"hello"@example.test')).toBe(false);
+    expect(isValidContactEmail("hello@example.test'")).toBe(false);
+    expect(isValidContactEmail("<hello@example.test>")).toBe(false);
+    expect(isValidContactEmail("Name <hello@example.test>")).toBe(false);
+  });
+
+  it("missing '@' or missing a dot in the domain is rejected", () => {
+    expect(isValidContactEmail("not-an-email")).toBe(false);
+    expect(isValidContactEmail("hello@localhost")).toBe(false);
+  });
 });
 
 describe("assertValidFormsConfig — throws at build time for a SET-but-invalid workerUrl", () => {
@@ -221,6 +283,44 @@ describe("assertValidFormsConfig — throws at build time for a SET-but-invalid 
 
   it("the REAL, committed FORMS_CONFIG never throws (it's still the placeholder)", () => {
     expect(() => assertValidFormsConfig(FORMS_CONFIG)).not.toThrow();
+  });
+
+  it("re-gate nit: does NOT throw for an EMPTY contactEmail (not yet published is fine)", () => {
+    expect(() =>
+      assertValidFormsConfig({
+        workerUrl: "TODO(owner): raven-site-kit secure-upload Worker URL",
+        siteId: "golfraven",
+        turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
+        contactEmail: "",
+      }),
+    ).not.toThrow();
+  });
+
+  it("re-gate nit: does NOT throw for a real, valid contactEmail", () => {
+    expect(() =>
+      assertValidFormsConfig({
+        workerUrl: "https://secure-upload.example.workers.dev",
+        siteId: "golfraven",
+        turnstileSiteKey: "0xREALKEY",
+        contactEmail: "hello@example.test",
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["a space", "hello @example.test"],
+    ["a quote", '"hello"@example.test'],
+    ["an angle bracket", "<hello@example.test>"],
+    ["no '@' at all", "not-an-email"],
+  ])("re-gate nit: THROWS for a SET-but-invalid contactEmail (%s)", (_label, badEmail) => {
+    expect(() =>
+      assertValidFormsConfig({
+        workerUrl: "TODO(owner): raven-site-kit secure-upload Worker URL",
+        siteId: "golfraven",
+        turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
+        contactEmail: badEmail,
+      }),
+    ).toThrow(/not a valid address/);
   });
 });
 

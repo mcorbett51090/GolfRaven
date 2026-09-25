@@ -42,7 +42,8 @@
  * **While `workerUrl`/`siteId`/`turnstileSiteKey` isn't a complete, VALID
  * set** (S1, gate review: `isFormsConfigured()` now also requires
  * `isValidWorkerUrl(workerUrl)` — real `https:`, no userinfo, no
- * non-default port, a plain `[a-z0-9.-]+` hostname, no wildcard),
+ * non-default port, no path/query/hash (re-gate nit), a plain
+ * `[a-z0-9.-]+` hostname, no wildcard),
  * `isFormsConfigured()` returns `false` and:
  *   - `SecureFormScript.astro` renders no Turnstile widget, loads no
  *     Turnstile script, keeps its fieldset `disabled` (B1, gate review),
@@ -168,9 +169,11 @@ export function isPlaceholderValue(value) {
 
 /**
  * S1 (gate review): "Configured" only if `url` parses as protocol
- * `https:`, with no username or password, no (non-default) port, and a
+ * `https:`, with no username or password, no (non-default) port, a
  * hostname matching `^[a-z0-9.-]+$` (no wildcard, no injected
- * characters). Never throws — returns `false` for anything unparseable,
+ * characters), and (re-gate nit) a bare base URL — `pathname` is `/` or
+ * empty, with no search string and no hash. Never throws — returns
+ * `false` for anything unparseable,
  * including a scheme-less value like `"raven-secure-upload.workers.dev"`
  * (which `new URL()` rejects outright rather than silently treating as
  * relative — the exact case this check exists to catch before it ever
@@ -192,7 +195,35 @@ export function isValidWorkerUrl(url) {
   // rejects an EXPLICIT non-default port, exactly as intended.
   if (parsed.port) return false;
   if (!/^[a-z0-9.-]+$/.test(parsed.hostname)) return false;
+  // Re-gate nit: the Worker's base URL must be bare — a `workerUrl` that
+  // already carries a path/query/hash would silently change what
+  // `${workerUrl}/submit` (SecureFormScript.astro's fetch target) actually
+  // requests, e.g. "https://host/foo" -> "https://host/foo/submit" instead
+  // of the intended "https://host/submit", or a query/hash string riding
+  // along unexpectedly into every request. `pathname` is "/" (not "") for
+  // any absolute URL without an explicit path — WHATWG parsing always
+  // supplies at least "/" — so both are accepted as "no path".
+  if (parsed.pathname !== "/" && parsed.pathname !== "") return false;
+  if (parsed.search) return false;
+  if (parsed.hash) return false;
   return true;
+}
+
+/**
+ * Re-gate nit: "Validate `GOLFRAVEN_FORMS_CONTACT_EMAIL`: a simple address
+ * regex with no spaces, quotes, `<` or `>`. If it's invalid, fail the
+ * build." Deliberately simple (not full RFC 5322) — this only guards
+ * against an obviously-malformed value landing in a `mailto:` href or the
+ * page's own visible text; the Worker backend does no validation of its
+ * own on this value, since it never reads it (`contactEmail` never leaves
+ * the client — see this file's module doc). Empty is NOT validated here
+ * (that's the ordinary "not set yet" state, `isPlaceholderValue`'s
+ * concern) — this only rejects a NON-empty value that's malformed.
+ */
+const CONTACT_EMAIL_PATTERN = /^[^\s'"<>]+@[^\s'"<>]+\.[^\s'"<>]+$/;
+export function isValidContactEmail(value) {
+  if (typeof value !== "string" || !value) return false;
+  return CONTACT_EMAIL_PATTERN.test(value);
 }
 
 /**
@@ -207,9 +238,20 @@ export function assertValidFormsConfig(config = FORMS_CONFIG) {
   if (!isPlaceholderValue(config?.workerUrl) && !isValidWorkerUrl(config.workerUrl)) {
     throw new Error(
       `forms-config.mjs: workerUrl "${config.workerUrl}" is not a valid Worker URL — it must be an ` +
-        "https: URL with no username/password, no non-default port, and a hostname matching " +
-        '/^[a-z0-9.-]+$/ (no wildcard, no injected characters). Fix GOLFRAVEN_FORMS_WORKER_URL (or ' +
-        "the literal in forms-config.mjs), or leave it as the TODO(owner) placeholder until it's ready.",
+        "https: URL with no username/password, no non-default port, no path/query/hash, and a hostname " +
+        'matching /^[a-z0-9.-]+$/ (no wildcard, no injected characters). Fix GOLFRAVEN_FORMS_WORKER_URL ' +
+        "(or the literal in forms-config.mjs), or leave it as the TODO(owner) placeholder until it's ready.",
+    );
+  }
+  // Re-gate nit: contactEmail is empty by default (not a placeholder
+  // string like the other two fields — see this file's own TODO(owner) on
+  // it) so only a genuinely NON-empty, malformed value fails the build; an
+  // empty string is the ordinary "not published yet" state.
+  if (config?.contactEmail && !isValidContactEmail(config.contactEmail)) {
+    throw new Error(
+      `forms-config.mjs: contactEmail "${config.contactEmail}" is not a valid address — it must contain ` +
+        "no spaces, quotes, '<' or '>', and match a simple name@example.test shape. Fix " +
+        "GOLFRAVEN_FORMS_CONTACT_EMAIL, or leave it empty until you're ready to publish an address.",
     );
   }
 }

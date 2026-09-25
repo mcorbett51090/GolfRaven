@@ -11,11 +11,14 @@
  * visible copy is FR.
  *
  * Same `?facility=`/`?trail=` prefill contract as `../claim.astro` — see
- * that file's doc for the static-build hydration note.
+ * that file's doc for the static-build hydration note. Also same
+ * `method="post"` (re-gate S-b) and static unconfigured-notice (re-gate
+ * S-a) treatment as `../claim.astro` — see that file's module doc for the
+ * full reasoning.
  */
 import BaseLayout from "../../layouts/BaseLayout.astro";
 import SecureFormScript from "../../components/SecureFormScript.astro";
-import { FORMS_CONFIG } from "../../config/forms-config.mjs";
+import { FORMS_CONFIG, isFormsConfigured } from "../../config/forms-config.mjs";
 import { loadSiteCatalog } from "../../lib/derive";
 
 /** Every real slug this site mints matches this — see ../claim.astro's
@@ -28,6 +31,8 @@ const rawFacilitySlug = Astro.url.searchParams.get("facility")?.trim() ?? "";
 const rawTrailSlug = Astro.url.searchParams.get("trail")?.trim() ?? "";
 const facilitySlug = SLUG_PATTERN.test(rawFacilitySlug) ? rawFacilitySlug : "";
 const trailSlug = SLUG_PATTERN.test(rawTrailSlug) ? rawTrailSlug : "";
+
+const formsConfigured = isFormsConfigured(FORMS_CONFIG);
 
 const title = "Suggérer une correction | GolfRaven";
 const description =
@@ -98,14 +103,23 @@ const TURNSTILE_TIMEOUT_MESSAGE =
       </p>
     </header>
 
-    <!--
-      B1 (gate review, blocking) : pas de method="post" ici,
-      volontairement — voir claim.astro (version EN) et le module doc de
-      SecureFormScript.astro pour l'explication complète. Le
-      <fieldset disabled> ci-dessous est la VRAIE protection.
-    -->
+    {/* S-a (re-gate, should-fix) : voir claim.astro (version EN) — avis
+        statique, rendu côté serveur, visible avec ou sans JS. */}
+    {!formsConfigured && (
+      <p class="claim__notice" data-unconfigured-notice role="note">
+        {UNPROVISIONED_MESSAGE}
+      </p>
+    )}
+
+    {/*
+      B1 (gate review, blocking) / S-b (re-gate, should-fix) : method="post"
+      EST présent ci-dessous (restauré) — voir claim.astro (version EN)
+      pour l'explication complète. Le <fieldset disabled> ci-dessous reste
+      la VRAIE protection.
+    */}
     <form
       class="claim__form"
+      method="post"
       data-secure-form
       novalidate
       data-worker-url={FORMS_CONFIG.workerUrl}
@@ -201,16 +215,20 @@ const TURNSTILE_TIMEOUT_MESSAGE =
       <button class="btn btn--primary" type="submit">Envoyer</button>
       </fieldset>
 
-      <p class="claim__fineprint">
-        Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un
-        fournisseur tiers) et nous parvient par courriel.{" "}
-        {FORMS_CONFIG.contactEmail && (
-          <>
-            Vous préférez nous écrire directement? Courriel :{" "}
-            <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
-          </>
-        )}
-      </p>
+      {/* S-a (re-gate, should-fix) : voir claim.astro (version EN). */}
+      {(formsConfigured || FORMS_CONFIG.contactEmail) && (
+        <p class="claim__fineprint">
+          {formsConfigured && (
+            <>Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un fournisseur tiers) et nous parvient par courriel.{" "}</>
+          )}
+          {FORMS_CONFIG.contactEmail && (
+            <>
+              Vous préférez nous écrire directement? Courriel :{" "}
+              <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+            </>
+          )}
+        </p>
+      )}
     </form>
   </main>
 </BaseLayout>
@@ -310,6 +328,18 @@ const TURNSTILE_TIMEOUT_MESSAGE =
   }
   .claim__for strong {
     color: var(--ink);
+  }
+
+  /* S-a (re-gate, should-fix) : voir claim.astro (version EN). */
+  .claim__notice {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    padding: 0.65em 0.85em;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
   }
 
   .claim__form {
