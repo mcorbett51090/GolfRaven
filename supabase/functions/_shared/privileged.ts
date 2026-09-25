@@ -1030,7 +1030,41 @@ function mapPgTimeoutError(err: unknown): unknown {
   if (typeof code === "string" && PG_TIMEOUT_SQLSTATES.has(code)) {
     return Errors.serviceUnavailable("the database could not complete this request in time (statement/lock timeout) — safe to retry");
   }
+  // P3d should-fix 1 ("transaction_timeout"): confirmed empirically this
+  // round, against a real PG17 cluster via THIS EXACT driver version —
+  // exceeding `transaction_timeout` is NOT a normal, catchable-and-the-
+  // session-continues ERROR the way statement_timeout/lock_timeout are.
+  // Postgres sends a FATAL ("terminating connection due to transaction
+  // timeout") and closes the TCP connection outright. postgres.js
+  // surfaces that as a plain `Error` with `.code === "CONNECTION_CLOSED"`
+  // (a driver-level socket-error code, never a Postgres SQLSTATE) — NOT
+  // present in `PG_TIMEOUT_SQLSTATES` above, which only ever inspects
+  // `.code` as a SQLSTATE string. Also confirmed: the connection POOL
+  // recovers on its own (a later query opens a fresh connection; proven
+  // by running one immediately afterward in the same test) — this is
+  // safe to treat as "the database gave up in time," the same as the
+  // other two timeouts, not a pool-damaging event.
+  if ((err as { code?: unknown } | null)?.code === "CONNECTION_CLOSED") {
+    return Errors.serviceUnavailable("the database could not complete this request in time (transaction timeout) — safe to retry");
+  }
   return err;
+}
+
+// P3d should-fix 1: `transaction_timeout` is PG17+ only — confirmed
+// empirically this round (`--describe-config` against both this repo's
+// pinned PG16 and PG17 binaries: present on 17, absent on 16). Cached
+// after the first check (one query per cold start, not per transaction)
+// so every write endpoint doesn't pay an extra round trip. `[unverified —
+// the REAL hosted Supabase project's own Postgres major version for this
+// environment; the P3 build plan's own week-1 spike item list already
+// names "the P3 spike confirms" for several PG-version-dependent facts —
+// this joins that list]`.
+let _supportsTransactionTimeout: boolean | null = null;
+async function supportsTransactionTimeout(db: ReturnType<typeof postgres>): Promise<boolean> {
+  if (_supportsTransactionTimeout !== null) return _supportsTransactionTimeout;
+  const rows = await db`select current_setting('server_version_num') as v`;
+  _supportsTransactionTimeout = Number(rows[0]?.v ?? 0) >= 170000;
+  return _supportsTransactionTimeout;
 }
 
 /**
@@ -1051,6 +1085,7 @@ function mapPgTimeoutError(err: unknown): unknown {
  */
 export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
   const db = sql();
+  const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
     // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
     // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
@@ -1078,6 +1113,13 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
       // runtime interpolation here.
       await trx`set local statement_timeout = '10s'`;
       await trx`set local lock_timeout = '5s'`;
+      // P3d should-fix 1: the BACKSTOP for a transaction made of many
+      // short statements, none individually over statement_timeout, but
+      // whose CUMULATIVE duration still exceeds http.ts's 15s request
+      // race — 12s is comfortably under that, and deliberately ABOVE
+      // statement_timeout (10s) so a single long statement is still
+      // reported via ITS OWN, more specific timeout first.
+      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
       const check = await trx`select current_user as u`;
       if (check[0]?.u !== "service_role") {
         throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
@@ -1122,12 +1164,20 @@ export async function withOwnershipBatch<T>(
   perItem: (repo: Repo, index: number) => Promise<T>,
 ): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
   const db = sql();
+  const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
     return await (db.begin(async (trx: TxSql) => {
       await trx`set local role service_role`;
       // Follow-up 13 — same reasoning as withOwnership's own note above.
       await trx`set local statement_timeout = '10s'`;
       await trx`set local lock_timeout = '5s'`;
+      // P3d should-fix 1: THIS is the function the coordinator's own
+      // repro named directly ("a transaction of many short statements
+      // still commits after a 503: 833 of 900 rows committed after seven
+      // 503 batches") — a batch is EXACTLY "many short statements," one
+      // savepoint per item, so the cumulative-duration backstop matters
+      // most here.
+      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
       const check = await trx`select current_user as u`;
       if (check[0]?.u !== "service_role") {
         throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);

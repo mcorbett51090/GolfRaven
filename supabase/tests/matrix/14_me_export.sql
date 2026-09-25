@@ -1,102 +1,172 @@
 -- 14_me_export.sql
--- build plan §4.7.1a inventory ("me-export") — task instruction: "the
--- same row set delete_my_data treats as personal, discovered from the
--- same pii_retention_policy registry... so the two can't drift." This
--- file is the export-side companion to 09_delete_my_data.sql: it proves
--- `private.export_my_data` (0021) stays in lockstep with the SAME
--- registry 09's own first test already proves is complete, and that it
--- is actor-scoped (never leaks another player's rows).
+-- build plan §4.7.1a inventory ("me-export"). Companion to
+-- 09_delete_my_data.sql. Rewritten for the P3d gate's BLOCKING HIGH: the
+-- export must never leak another account's data or secret/token
+-- material — see 0021_export_my_data.sql's own header for the full
+-- account of what was wrong and why.
 
 BEGIN;
-SELECT plan(11);
+SELECT plan(24);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 -- ============================================================================
--- Registry sync: every delete_row/set_null-classified `app.` table has a
--- key present in export_my_data's own result (even if its array is
--- empty) — the SAME structural guarantee 09's own first test makes for
--- delete_my_data, restated for the export function's own output shape.
+-- Local fixtures this file needs that helpers.sql doesn't seed:
+-- connector_account/signin_provider_token (to prove token material is
+-- excluded/omitted) and a review_item resolved by admin, naming player
+-- A's own purchase_evidence as its subject with a non-trivial `detail`
+-- (to prove neither the subject reference nor the detail ever reaches
+-- admin's own export).
+-- ============================================================================
+INSERT INTO app.connector_account (id, user_id, provider, external_user_id, refresh_token_ciphertext, dek_wrapped, kek_id, scopes, status)
+VALUES ('c0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'ghin', 'ext-1', '\xdeadbeef'::bytea, '\xdeadbeef'::bytea, 'kek-export-test', ARRAY['read'], 'active');
+INSERT INTO app.signin_provider_token (user_id, provider, refresh_token_ciphertext, dek_wrapped, kek_id)
+VALUES ('00000000-0000-0000-0000-00000000000a', 'google', '\xfeedface'::bytea, '\xfeedface'::bytea, 'kek-export-test-2');
+INSERT INTO app.review_item (id, kind, subject_table, subject_id, detail, resolved_at, resolved_by)
+VALUES ('d0000000-0000-0000-0000-000000000001', 'receipt_review', 'app.purchase_evidence', '90000000-0000-0000-0000-000000000001',
+        jsonb_build_object('player_a_uuid_in_detail', '00000000-0000-0000-0000-00000000000a', 'note', 'internal reviewer notes'),
+        now(), '00000000-0000-0000-0000-4000000000d0');
+
+-- ============================================================================
+-- Registry sync: every table private.pii_retention_policy classifies at
+-- all (delete_row/set_null/special) has a private.pii_export_policy row
+-- — the fail-closed coverage check export_my_data itself runs, restated
+-- here as a schema-level assertion.
 -- ============================================================================
 SELECT is(
   (
     SELECT count(*)::int
-    FROM (SELECT DISTINCT table_name FROM private.pii_retention_policy WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null')) t
-    WHERE NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) ? t.table_name)
+    FROM (SELECT DISTINCT table_name FROM private.pii_retention_policy WHERE schema_name = 'app') t
+    WHERE NOT EXISTS (SELECT 1 FROM private.pii_export_policy p WHERE p.schema_name = 'app' AND p.table_name = t.table_name)
   ),
   0,
-  'every delete_row/set_null-classified app.* table has a key in export_my_data''s own jsonb result'
+  'every table private.pii_retention_policy classifies at all has a private.pii_export_policy row (export or exclude, with a reason)'
 );
-
--- Every `special`-classified table this file knows to check (the same
--- six export_my_data's own bespoke block reads) is ALSO present.
 SELECT is(
-  (
-    SELECT count(*)::int
-    FROM unnest(ARRAY['attestation', 'entitlement', 'fraud_signal', 'audit_log', 'partner_invite', 'receipt_fingerprint']) t(table_name)
-    WHERE NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) ? t.table_name)
-  ),
+  (SELECT count(*)::int FROM private.pii_export_policy WHERE reason IS NULL OR length(trim(reason)) = 0),
   0,
-  'every special-cased table (attestation/entitlement/fraud_signal/audit_log/partner_invite/receipt_fingerprint) has a key in the export'
+  'every private.pii_export_policy row has a non-empty reason'
 );
 
 -- ============================================================================
--- Content: player A's own seeded rows (supabase/tests/helpers.sql) show
--- up, by id, in the corresponding array.
+-- Player A's own export: her own data is present.
 -- ============================================================================
 SELECT ok(
   (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'evidence') @>
     jsonb_build_array(jsonb_build_object('id', '30000000-0000-0000-0000-000000000001')),
-  'player A''s export includes her own seeded evidence row (30000000-...-0001)'
+  'player A''s export includes her own seeded evidence row'
 );
-
 SELECT ok(
   (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'device') @>
     jsonb_build_array(jsonb_build_object('id', '20000000-0000-0000-0000-000000000001')),
   'player A''s export includes her own seeded device row'
 );
-
 SELECT ok(
   (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'push_token') @>
     jsonb_build_array(jsonb_build_object('device_id', '20000000-0000-0000-0000-000000000001', 'expo_token', 'ExponentPushToken[test]')),
   'player A''s export includes her own seeded push_token row'
 );
-
--- ============================================================================
--- Cross-user isolation: player A's export NEVER contains player B's rows
--- (§4.7.7 mandatory must-fail-cell shape, restated for the export
--- function — "Player A reads B's plays through any view -> 0 rows").
--- ============================================================================
-SELECT is(
-  jsonb_array_length(private.export_my_data('00000000-0000-0000-0000-00000000000b'::uuid) -> 'evidence'),
-  0,
-  'precondition: player B has no seeded evidence rows'
-);
-
 SELECT ok(
-  NOT ((private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'device') @>
-    jsonb_build_array(jsonb_build_object('id', '20000000-0000-0000-0000-000000000002'))),
-  'player A''s export never includes a device id that is not her own'
-);
-
--- Every row returned for evidence/device/push_token under actor A really
--- does carry A's own id — not merely "A's known row is present", but
--- "nothing else snuck in" for these three representative tables.
-SELECT is(
-  (SELECT count(*)::int FROM jsonb_array_elements(private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'evidence') e WHERE (e ->> 'user_id') <> '00000000-0000-0000-0000-00000000000a'),
-  0,
-  'every evidence row in player A''s export carries her own user_id'
-);
-SELECT is(
-  (SELECT count(*)::int FROM jsonb_array_elements(private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'device') d WHERE (d ->> 'user_id') <> '00000000-0000-0000-0000-00000000000a'),
-  0,
-  'every device row in player A''s export carries her own user_id'
+  (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'connector_account') @>
+    jsonb_build_array(jsonb_build_object('id', 'c0000000-0000-0000-0000-000000000001', 'provider', 'ghin')),
+  'player A''s export includes her own connector_account row (without token columns)'
 );
 
 -- ============================================================================
--- Access control: no client role reaches this function directly (same
--- posture as private.delete_my_data — 09_delete_my_data.sql's own
--- access-control cells).
+-- (b) Secret/token material: never present, anywhere, for anyone.
+-- ============================================================================
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'connector_account' -> 0 ? 'refresh_token_ciphertext'),
+  'connector_account export never includes refresh_token_ciphertext'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) ? 'signin_provider_token'),
+  'signin_provider_token is excluded entirely -- the key itself is absent from the export, not merely an empty array'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid)::text ~* 'ciphertext|dek_wrapped|kek_id|token_hash|code_hmac|pepper_kid|nonce_hash'),
+  'player A''s WHOLE export (recursively) contains none of the denylisted secret/hash/pepper/key substrings'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid)::text ~* 'ciphertext|dek_wrapped|kek_id|token_hash|code_hmac|pepper_kid|nonce_hash'),
+  'staff-x''s WHOLE export ALSO contains none of the denylisted substrings'
+);
+
+-- ============================================================================
+-- (a) set_null actor columns never leak another account's row.
+-- offer_code #2 and entitlement #2 (helpers.sql) are player A's own rows,
+-- REDEEMED by staff-x (redeemed_by_staff). Staff-x's own export must
+-- contain neither.
+-- ============================================================================
+SELECT is(
+  jsonb_array_length(private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid) -> 'offer_code'),
+  0,
+  'staff-x''s export has ZERO offer_code rows -- redeeming player A''s offer as staff must not export it under staff-x''s own account'
+);
+SELECT is(
+  jsonb_array_length(private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid) -> 'entitlement'),
+  0,
+  'staff-x''s export has ZERO entitlement rows for the same reason'
+);
+-- Staff-x's own partner_member row (user_id = staff-x) is fine to
+-- export; player A's partner_member row (invited_by = staff-x) must not
+-- appear in staff-x's export.
+SELECT is(
+  (SELECT count(*)::int FROM jsonb_array_elements(private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid) -> 'partner_member') pm WHERE (pm ->> 'user_id') <> '00000000-0000-0000-0000-1000000000a1'),
+  0,
+  'every partner_member row in staff-x''s export carries staff-x''s OWN user_id -- never player A''s row (reached only via invited_by, an actor column)'
+);
+
+-- No account's uuid but the requester's OWN ever appears anywhere in
+-- staff-x's or admin's export -- the strongest form of the "no other
+-- user's uuid anywhere" test, scanning the ENTIRE serialized JSON.
+SELECT ok(
+  private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid)::text NOT ILIKE '%00000000-0000-0000-0000-00000000000a%',
+  'staff-x''s export contains player A''s uuid NOWHERE in the serialized JSON'
+);
+SELECT ok(
+  private.export_my_data('00000000-0000-0000-0000-4000000000d0'::uuid)::text NOT ILIKE '%00000000-0000-0000-0000-00000000000a%',
+  'admin''s export contains player A''s uuid NOWHERE in the serialized JSON (incl. inside review_item, which admin resolved for player A''s own receipt)'
+);
+
+-- ============================================================================
+-- (c) fraud_signal / review_item: kind + created_at only, never detail,
+-- cleared_by or (for review_item) subject_table/subject_id/resolved_by.
+-- ============================================================================
+SELECT ok(
+  (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'fraud_signal') @>
+    jsonb_build_array(jsonb_build_object('kind', 'manual_review_seed')),
+  'player A''s export includes her own fraud_signal row, restricted to kind (+ id/created_at)'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'fraud_signal' -> 0 ? 'detail'),
+  'fraud_signal export never includes detail'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'fraud_signal' -> 0 ? 'cleared_by'),
+  'fraud_signal export never includes cleared_by'
+);
+SELECT ok(
+  (private.export_my_data('00000000-0000-0000-0000-4000000000d0'::uuid) -> 'review_item') @>
+    jsonb_build_array(jsonb_build_object('id', 'd0000000-0000-0000-0000-000000000001', 'kind', 'receipt_review')),
+  'admin''s export includes the review_item admin resolved, restricted to id/kind (+ created_at)'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-4000000000d0'::uuid) -> 'review_item' -> 0 ? 'detail'),
+  'review_item export never includes detail (which named player A''s uuid in this fixture)'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-4000000000d0'::uuid) -> 'review_item' -> 0 ? 'subject_id'),
+  'review_item export never includes subject_id (another row''s identity)'
+);
+SELECT ok(
+  private.export_my_data('00000000-0000-0000-0000-4000000000d0'::uuid)::text NOT ILIKE '%"detail"%',
+  'admin''s WHOLE export contains no "detail" key anywhere (fraud_signal, review_item and audit_log all omit it by construction)'
+);
+
+-- ============================================================================
+-- Access control: unchanged from the original version (no client role
+-- reaches this function directly).
 -- ============================================================================
 SELECT tests.authenticate_as('authenticated', jsonb_build_object('sub', '00000000-0000-0000-0000-00000000000a'));
 SELECT throws_ok(

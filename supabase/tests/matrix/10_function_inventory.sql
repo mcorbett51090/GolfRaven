@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(9);
+SELECT plan(10);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -317,6 +317,55 @@ SELECT is(
   ),
   0,
   'every private.definer_policy_allowlist row still names a real policy applying to private_definer with a matching expression'
+);
+
+-- (11) P3d should-fix 2: every table with a DELETE or UPDATE (or ALL)
+-- policy applying to private_definer also has a SELECT (or ALL) policy
+-- applying to private_definer on that SAME table. This is a table-level
+-- existence check, not an exact naming-convention or expression match
+-- (a legitimate "_r companion" is not always byte-identical to its
+-- delete/update sibling's USING expression -- e.g. a set_null companion
+-- commonly adds an extra "OR (col IS NULL)" clause a bare SELECT
+-- companion wouldn't need). What this guards against: `delete_my_data`
+-- (private.delete_my_data, 0015) deletes/nulls a subject's rows through
+-- private_definer-scoped DELETE/UPDATE policies, then P3d's own
+-- `export_my_data` (0021) and the new post-condition in
+-- `delete_my_data` (0022) both rely on private_definer being able to
+-- SELECT those same rows back to verify they are gone. A DELETE/UPDATE
+-- policy with no SELECT companion lets the write silently no-op (RLS
+-- filters the row set to delete/update down to zero) while any
+-- SELECT-based post-condition ALSO sees zero rows -- reporting success
+-- while the row survives. A from-scratch scan of every private_definer
+-- policy across every migration (this round) found zero live instances
+-- of this gap today; this check exists to keep it that way.
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM (
+      SELECT DISTINCT n.nspname, cl.relname
+      FROM pg_policy pol
+      JOIN pg_class cl ON cl.oid = pol.polrelid
+      JOIN pg_namespace n ON n.oid = cl.relnamespace
+      CROSS JOIN pg_roles pr
+      WHERE pr.rolname = 'private_definer'
+        AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+        AND pol.polcmd IN ('w', 'd', '*')
+    ) wd
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM pg_policy pol2
+      JOIN pg_class cl2 ON cl2.oid = pol2.polrelid
+      JOIN pg_namespace n2 ON n2.oid = cl2.relnamespace
+      CROSS JOIN pg_roles pr2
+      WHERE pr2.rolname = 'private_definer'
+        AND (pr2.oid = ANY (pol2.polroles) OR pol2.polroles @> ARRAY[0]::oid[])
+        AND pol2.polcmd IN ('r', '*')
+        AND n2.nspname = wd.nspname
+        AND cl2.relname = wd.relname
+    )
+  ),
+  0,
+  'every table with a DELETE/UPDATE(/ALL) policy applying to private_definer also has a SELECT(/ALL) "_r companion" policy applying to private_definer on the same table'
 );
 
 SELECT * FROM finish();

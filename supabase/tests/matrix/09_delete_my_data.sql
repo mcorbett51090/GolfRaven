@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(31);
+SELECT plan(33);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -121,7 +121,34 @@ SELECT is(
 SELECT is((SELECT count(*)::int FROM app.entitlement WHERE user_id = '00000000-0000-0000-0000-00000000000a'), 2, 'precondition: 2 entitlements seeded (one redeemable/activated, one redeemed)');
 SELECT is((SELECT state::text FROM app.entitlement WHERE id = '50000000-0000-0000-0000-000000000002'), 'redeemed', 'precondition: the second entitlement is REDEEMED (terminal)');
 
+-- P3d gate round 2, should-fix 3: seed two private.rate_limit_bucket rows
+-- for player A -- an ordinary bucket (must be purged by delete_my_data)
+-- and the in-flight `me-delete:user` bucket itself (must survive, per
+-- this round's own documented choice -- see 0022_delete_my_data_post_
+-- condition.sql's own comment on the exact same block -- so a RETRY of
+-- the deletion call stays rate-limited). service_role already holds
+-- SELECT/INSERT/UPDATE/DELETE on this table directly (0009), no RLS
+-- policy needed for this seed insert.
+INSERT INTO private.rate_limit_bucket (bucket_key, window_start, count) VALUES
+  ('00000000-0000-0000-0000-00000000000a:evidence:device_x', now(), 3),
+  ('00000000-0000-0000-0000-00000000000a:me-delete:user', now(), 1);
+
 SELECT private.delete_my_data('00000000-0000-0000-0000-00000000000a'::uuid);
+
+SELECT is(
+  (
+    SELECT count(*)::int FROM private.rate_limit_bucket
+    WHERE bucket_key LIKE '00000000-0000-0000-0000-00000000000a:%'
+      AND bucket_key <> '00000000-0000-0000-0000-00000000000a:me-delete:user'
+  ),
+  0,
+  'P3d should-fix 3: every OTHER private.rate_limit_bucket key prefixed with the deleted user''s uid is purged by delete_my_data'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key = '00000000-0000-0000-0000-00000000000a:me-delete:user'),
+  1,
+  'P3d should-fix 3: the in-flight me-delete:user bucket itself survives deletion, deliberately, so a retry of THIS SAME call stays rate-limited'
+);
 
 -- Generic, catalog-driven pass: every `delete_row` / `set_null` policy row
 -- leaves ZERO rows matching the deleted user, over the WHOLE `app` schema

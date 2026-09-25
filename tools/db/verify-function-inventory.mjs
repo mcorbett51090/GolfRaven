@@ -429,6 +429,46 @@ for (const { policy, function_name: functionName, prosrc } of policyFunctionRows
   }
 }
 
+// 8. P3d should-fix 2: every table with a DELETE/UPDATE(/ALL) policy
+// applying to private_definer also has a SELECT(/ALL) "_r companion"
+// policy applying to private_definer on the SAME table — the
+// standalone-CLI mirror of 10_function_inventory.sql's own check (11).
+// Table-level existence, not exact naming/expression match — see that
+// check's own comment for why, and for what this guards against
+// (private.delete_my_data's writes AND export_my_data's/the 0022
+// post-condition's reads both depend on the SAME private_definer SELECT
+// visibility; a DELETE/UPDATE policy with no SELECT companion lets a
+// write silently no-op while a SELECT-based post-condition ALSO sees
+// zero rows, reporting success while the row survives).
+const missingRCompanion = psql(`
+  SELECT wd.nspname || '.' || wd.relname
+  FROM (
+    SELECT DISTINCT n.nspname, cl.relname
+    FROM pg_policy pol
+    JOIN pg_class cl ON cl.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    CROSS JOIN pg_roles pr
+    WHERE pr.rolname = 'private_definer'
+      AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+      AND pol.polcmd IN ('w', 'd', '*')
+  ) wd
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_policy pol2
+    JOIN pg_class cl2 ON cl2.oid = pol2.polrelid
+    JOIN pg_namespace n2 ON n2.oid = cl2.relnamespace
+    CROSS JOIN pg_roles pr2
+    WHERE pr2.rolname = 'private_definer'
+      AND (pr2.oid = ANY (pol2.polroles) OR pol2.polroles @> ARRAY[0]::oid[])
+      AND pol2.polcmd IN ('r', '*')
+      AND n2.nspname = wd.nspname
+      AND cl2.relname = wd.relname
+  )
+`);
+for (const [table] of missingRCompanion) {
+  failures.push(`table with a DELETE/UPDATE(/ALL) policy applying to private_definer but no SELECT(/ALL) "_r companion" policy applying to private_definer: ${table}`);
+}
+
 if (failures.length > 0) {
   console.error(`verify-function-inventory: ${failures.length} failure(s):`);
   for (const f of failures) console.error(`  - ${f}`);

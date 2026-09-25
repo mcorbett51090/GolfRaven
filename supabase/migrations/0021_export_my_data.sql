@@ -5,63 +5,169 @@
 -- pii_retention_policy registry or catalog where possible, so the two
 -- can't drift."
 --
--- `private.export_my_data(p_user_id uuid) RETURNS jsonb` is the READ-ONLY
--- twin of `private.delete_my_data` (0015_delete_my_data.sql): it drives
--- itself off the EXACT SAME `private.pii_retention_policy` registry
--- (0014_hardening.sql), walked the SAME way — every FK-to-`auth.users`
--- column in `app`, classified `delete_row` / `set_null` / `special` — so
--- a table added to the registry later is picked up by BOTH functions
--- automatically, and there is only ONE place ("is this column personal
--- data") to get right, not two that could drift apart. Unlike
--- `delete_my_data`, this function never writes anything; every table it
--- touches is read with a plain `SELECT`, not `DELETE`/`UPDATE`.
+-- ⛔ REWRITE (P3d gate, BLOCKING HIGH): the FIRST version of this
+-- function drove itself off `private.pii_retention_policy` generically —
+-- looping over every FK-to-`auth.users` column classified `delete_row`
+-- **or `set_null`**, and exporting the WHOLE matched row via
+-- `to_jsonb(t)`. That was wrong in three ways, all reproduced over HTTP
+-- by the gate:
+--   (a) a `set_null` column names the ACTOR who touched a row that
+--       belongs to someone else, never the row's data subject —
+--       `offer_code.redeemed_by_staff`, `partner_member.invited_by`,
+--       `attestation.staff_user_id`, `marker_code.*`,
+--       `fraud_signal.cleared_by`, `review_item.resolved_by`,
+--       `special_marker_stock_movement.by_member` all leaked another
+--       real account's row (and, for `review_item`, its `detail`) into
+--       the CALLER's own export the moment the caller happened to be the
+--       actor on someone else's row (a staff member, a manager, an
+--       admin).
+--   (b) `to_jsonb(t)` is a blind `SELECT *` in jsonb form — it exported
+--       encrypted token material verbatim: `connector_account`'s
+--       `refresh_token_ciphertext`/`dek_wrapped`/`kek_id`, and all of
+--       `signin_provider_token` (which §4.4 line 857 says is visible to
+--       NOBODY, not even its own owner, for exactly this reason).
+--   (c) `fraud_signal.detail` (which can carry `excludedRows[].reasons` —
+--       security doc §3: "SERVER-SIDE DIAGNOSTIC DATA ONLY... never echo
+--       them into a player-facing UI") and `cleared_by` reached the
+--       subject.
 --
--- ⛔ WHY THIS IS SECURITY DEFINER, OWNED BY `private_definer`, NOT A
--- PLAIN service_role QUERY IN privileged.ts: `delete_my_data` already
--- established the pattern this function follows (S1 close-out, gate
--- round 3, 0016_private_definer.sql: "close S1 with a design that keeps
--- FORCE on every table and gives less privilege, not more"). Even though
--- the OUTER connection (`privileged.ts#withOwnership`) already runs as
--- `service_role`, which BYPASSES RLS entirely, calling INTO a `SECURITY
--- DEFINER` function owned by the NOBYPASSRLS `private_definer` role
--- means the actual row-reading SQL inside this function's body is still
--- subject to real RLS policies, scoped by session-local GUCs to exactly
--- the target user's own rows — defense in depth against a bug in this
--- function's own SQL (a missing WHERE clause, a copy-paste error) ever
--- reading another account's data, not merely trusting this file's own
--- correctness. This is NOT a new, broader policy: it reuses the EXACT
--- SAME SELECT policies 0016 already created as the mandatory read-
--- visibility companions to `delete_my_data`'s own DELETE/UPDATE policies
--- (every `..._r`-suffixed policy in 0016) — see the "GUC reuse" note
--- below for why no NEW RLS policy is added by this migration at all.
+-- THIS version never does a blind `SELECT *`/`to_jsonb(t)` over an
+-- FK-matched row again. Every exported table gets an EXPLICIT,
+-- HAND-WRITTEN column list (never assembled from data), and the function
+-- reads ONLY through columns naming the CALLER as the row's own data
+-- subject — the `delete_row` user columns, plus four "subject special"
+-- columns (`attestation.player_user_id`, `entitlement.user_id`,
+-- `receipt_fingerprint.user_id`, `audit_log.actor_user_id`) — never
+-- through a `set_null` actor column. `fraud_signal` (subject: `user_id`)
+-- and `review_item` (actor: `resolved_by`, an explicit, narrow "actions
+-- you took" exception per the gate's own allowance) are exported too, but
+-- restricted to `id`/`kind`/`created_at` only — never `detail`, never
+-- `cleared_by`/`resolved_by`. Every other `set_null`/actor-only table
+-- (`offer_code.redeemed_by_staff`, `partner_member.invited_by`,
+-- `attestation.staff_user_id`, `marker_code`,
+-- `special_marker_stock_movement`) is simply NOT exported at all — the
+-- gate's own words: "At most include an 'actions you took' list... Keep
+-- it simple; omitting them is acceptable." A handful of ephemeral/
+-- operational `delete_row` tables (`checkin_challenge`, `course_qr_token`,
+-- `device_reward_ledger`, `staff_activity`) and one classified-but-not-
+-- named table (`partner_invite`, classified `special`, not among the
+-- gate's four named subject-specials) are excluded the same way, each
+-- with its own documented reason.
 --
--- ⛔ GUC REUSE (deliberate, not an oversight): this function sets
--- `app.delete_my_data.target_user_id`/`target_email` — the SAME GUC
--- names `delete_my_data` (0015) sets and 0016's policies already read.
--- A differently-named GUC (e.g. `app.export_my_data.target_user_id`)
--- would require an entirely new set of ~25 SELECT policies, one per
--- table, duplicating 0016's own `..._r` policies for no behavioural
--- difference — the hard rule against broadening a policy to make code
--- work cuts the other way too: it is also a reason not to multiply
--- narrow policies that say the exact same thing under a second name.
--- Reusing the existing GUC means this migration adds ZERO new RLS
--- policies to `private.definer_policy_allowlist` — every table this
--- function reads already has a `..._r` SELECT policy scoped to that
--- GUC, created and allow-listed by 0016.
+-- ⛔ FAIL-CLOSED COVERAGE, NOT MERELY A TEST (the gate offered either;
+-- this uses both). `private.pii_export_policy` is a NEW, small registry —
+-- one row per `app.` table this function's own SQL body knows about
+-- (`action = 'export'` with a `reason`, or `action = 'exclude'` with a
+-- `reason` — never merely a placeholder), covering the UNION of every
+-- table `private.pii_retention_policy` classifies at all (delete_row,
+-- set_null AND special — a strict superset of "every delete_row table",
+-- so `review_item`/`fraud_signal`/`marker_code`/etc., which carry only a
+-- `set_null`/`special` row and no `delete_row` row, are covered too).
+-- Before exporting anything, this function itself walks
+-- `pii_retention_policy` the SAME way `delete_my_data` does and RAISES if
+-- any `app.` table it names has no `pii_export_policy` row at all — a
+-- table added to the retention registry later, with no export decision
+-- made for it, makes EVERY export call fail loudly (not silently omit
+-- the new table) until someone classifies it. `10_function_inventory.sql`
+-- / `verify-function-inventory.mjs` independently assert the two
+-- registries stay in lockstep (every `pii_retention_policy` table has a
+-- `pii_export_policy` row, and vice versa) as a schema-level check, so a
+-- gap is caught at CI time too, not only the first time the function is
+-- actually called.
 --
--- ⛔ SCOPE BOUNDARY: `app.attestation_shift_log` is deliberately NOT
--- exported. It has no FK to `auth.users` at all (§4.4 line 842: "no user
--- id") — it is a write-time PROJECTION matched by a computed HMAC
--- pseudonym, handled by `delete_my_data` via a SEPARATE mechanism (the
--- `private.pseudonym_key_registry` loop, 0015/0018) entirely outside the
--- `pii_retention_policy` registry this function walks. It therefore has
--- no row in `pii_retention_policy` at all (confirmed against 0014's own
--- INSERT list before writing this file) and is out of scope for "the
--- same row set... discovered from the pii_retention_policy registry" —
--- this is the "where possible" the task instruction itself allows for,
--- not a gap silently left open. Revisit only if a future round needs the
--- player's own shift-log entries in an export; the read-visibility
--- policy for it already exists (`pd_shift_log_update_r`) if it does.
+-- Same `SECURITY DEFINER` / `private_definer` defense-in-depth as
+-- `delete_my_data` (S1 close-out, 0016) — reusing the EXISTING `..._r`
+-- SELECT policies 0016 already created as every DELETE/UPDATE policy's
+-- mandatory read-visibility companion, under the SAME
+-- `app.delete_my_data.target_user_id`/`target_email` GUCs. Zero new RLS
+-- policies (see the original version's own note, unchanged by this
+-- rewrite — every table this version reads already has a matching `_r`
+-- policy from 0016, since every export path goes through a column 0016
+-- already scoped one to).
+
+CREATE TYPE private.export_action AS ENUM ('export', 'exclude');
+
+CREATE TABLE private.pii_export_policy (
+  schema_name text NOT NULL,
+  table_name text NOT NULL,
+  action private.export_action NOT NULL,
+  reason text NOT NULL,
+  PRIMARY KEY (schema_name, table_name)
+);
+
+INSERT INTO private.pii_export_policy (schema_name, table_name, action, reason) VALUES
+  -- ---- Exported: the caller's own `delete_row` rows -------------------
+  ('app', 'admin_user', 'export', 'own admin-status row (user_id, created_at only)'),
+  ('app', 'app_review_demo_account', 'export', 'own demo-account-status row (user_id only)'),
+  ('app', 'booking', 'export', 'own booking row, mirrors api.my_booking'),
+  ('app', 'connector_account', 'export', 'own connector grant, mirrors api.my_connector_account exactly (no token columns)'),
+  ('app', 'device', 'export', 'own device row, mirrors api.my_device minus devicecheck_token_hash (secret-key denylist)'),
+  ('app', 'evidence', 'export', 'own play evidence, mirrors api.my_evidence'),
+  ('app', 'marker_credit', 'export', 'own marker credit, mirrors the columns api.my_marker_credit would'),
+  ('app', 'offer_code', 'export', 'own offer code, mirrors api.my_offer_code minus code_hmac/pepper_kid/devicecheck_token_hash (secret-key denylist) and redeemed_by_staff (another account''s id)'),
+  ('app', 'partner_member', 'export', 'own membership row, minus invited_by (another account''s id)'),
+  ('app', 'play', 'export', 'own play, mirrors api.my_play'),
+  ('app', 'profile', 'export', 'own profile, mirrors api.my_profile'),
+  ('app', 'purchase_evidence', 'export', 'own purchase evidence, mirrors api.my_purchase_evidence'),
+  ('app', 'push_token', 'export', 'own push token, mirrors api.my_push_token'),
+  ('app', 'user_achievement', 'export', 'own achievement, mirrors api.my_achievement'),
+  -- ---- Excluded (delete_row, but not the subject's own exportable data) ----
+  ('app', 'checkin_challenge', 'exclude', 'ephemeral short-TTL operational row; carries BOTH a subject (user_id) and an actor (staff_user_id) column with no api.my_* view precedent to mirror — omitted per the gate''s "keep it simple" allowance'),
+  ('app', 'checkin_token', 'exclude', 'ephemeral short-TTL (15 min, checkin/token-handler.ts TOKEN_TTL_SECONDS) session token; single-use; same reasoning as checkin_challenge/course_qr_token — no api.my_* view precedent'),
+  ('app', 'course_qr_token', 'exclude', 'ephemeral 120s-TTL operational row; carries BOTH an actor (issued_by_staff) and a subject (used_by_user) column with no view precedent'),
+  ('app', 'device_reward_ledger', 'exclude', 'build plan line 828: client read is "nobody (admin)" — per-reward eligibility bookkeeping, not player-facing data'),
+  ('app', 'signin_provider_token', 'exclude', 'build plan line 857: visible to NOBODY, not even its owner — holds only encrypted OAuth refresh-token material (refresh_token_ciphertext/dek_wrapped/kek_id); excluded entirely, no partial export'),
+  ('app', 'staff_activity', 'exclude', 'operational attest/activation counters for a facility-day, no self-service export precedent (api.staff_activity is manager/operator-scoped, not "own row"); "actions you took" list omitted per the gate''s "keep it simple" allowance'),
+  -- ---- Excluded (set_null / special, actor-only or not a named subject) ----
+  ('app', 'marker_code', 'exclude', 'actor-only columns (activated_by_staff, redeemed_by); no direct subject column at all; supply-chain/operational table'),
+  ('app', 'special_marker_stock_movement', 'exclude', 'actor-only column (by_member, NOT NULL); inventory ledger row, no direct subject column'),
+  ('app', 'partner_invite', 'exclude', 'classified special (not delete_row); matched by inviter (an actor, invited_by) or by invitee_email (text, not a uuid-scoped subject column) in delete_my_data -- not among the gate''s four named subject-specials; omitted per "keep it simple"'),
+  -- ---- Exported: the four named "subject special" columns ------------
+  ('app', 'attestation', 'export', 'subject special (player_user_id) -- mirrors api.my_attestation minus staff_user_id/staff_pseudonym (another account''s identity)'),
+  ('app', 'entitlement', 'export', 'subject special (user_id) -- mirrors api.my_entitlement minus redeemed_by_staff (another account''s id) and devicecheck_token_hash (secret-key denylist)'),
+  ('app', 'receipt_fingerprint', 'export', 'subject special (user_id) -- id/facility_id/local_date/phash/receipt_number_ocr/created_at, no secret material'),
+  ('app', 'audit_log', 'export', 'subject special (actor_user_id) -- id/action/subject_table/subject_id/created_at, never detail (may name another row/account)'),
+  -- ---- Exported, deliberately restricted (the gate's own two named exceptions) ----
+  ('app', 'fraud_signal', 'export', 'subject (user_id) but restricted to id/kind/created_at only -- never detail (security doc S3: server-side diagnostic only) or cleared_by (another account''s id)'),
+  ('app', 'review_item', 'export', 'NOT a subject column -- an explicit "actions you took" exception for resolved_by (an admin''s own past review decisions), restricted to id/kind/created_at only -- never detail, subject_table/subject_id (another row''s identity) or resolved_by itself');
+
+ALTER TABLE private.pii_export_policy ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.pii_export_policy FORCE ROW LEVEL SECURITY;
+GRANT SELECT ON private.pii_export_policy TO service_role;
+-- private_definer needs to read this INSIDE export_my_data (below) for
+-- its own fail-closed coverage check.
+CREATE POLICY pd_read_pii_export_policy ON private.pii_export_policy FOR SELECT TO private_definer USING (true);
+GRANT SELECT ON private.pii_export_policy TO private_definer;
+
+-- Allow-listed the same way 0016_private_definer.sql allow-lists every
+-- OTHER private_definer policy (its own §3/§8) — this is a NEW policy,
+-- so it needs its own row + captured expression text, same mechanism.
+--
+-- ⛔ FIX (found this round, H2 approximation mode): `definer_policy_
+-- allowlist` already has FORCE ROW LEVEL SECURITY on with no policy for
+-- ANY role (0016's own final state) by the time THIS migration runs —
+-- a plain INSERT here fails "permission denied for table
+-- definer_policy_allowlist" under a NON-superuser connecting role
+-- (superuser bypasses RLS regardless, which is why this was invisible
+-- under HARNESS_MODE=superuser). Same self-granting CURRENT_USER
+-- -scoped temporary-policy dance 0017/0019 already use for this EXACT
+-- table (0019's own comment: "definer_policy_allowlist already has
+-- FORCE RLS on by the time this migration runs").
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0021 ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
+  ('private', 'pii_export_policy', 'pd_read_pii_export_policy', 'SELECT', true, 'export_my_data''s own fail-closed coverage check reads this table; governance data, not user-scoped');
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+  AND al.schema_name = 'private' AND al.table_name = 'pii_export_policy' AND al.policy_name = 'pd_read_pii_export_policy';
+DROP POLICY current_user_seed_definer_policy_allowlist_0021 ON private.definer_policy_allowlist;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 
 CREATE OR REPLACE FUNCTION private.export_my_data(p_user_id uuid)
 RETURNS jsonb
@@ -69,81 +175,168 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_email text;
   v_result jsonb := '{}'::jsonb;
-  v_pol record;
-  v_where text;
-  v_table_json jsonb;
+  v_tbl record;
+  v_json jsonb;
 BEGIN
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'export_my_data: user_id is required';
   END IF;
 
-  -- Same ordering rationale as delete_my_data (0015): set the GUC(s)
-  -- BEFORE the first read that depends on a policy checking them.
   PERFORM set_config('app.delete_my_data.target_user_id', p_user_id::text, true);
-  SELECT email INTO v_email FROM auth.users WHERE id = p_user_id;
-  PERFORM set_config('app.delete_my_data.target_email', COALESCE(v_email, ''), true);
 
   -- ==========================================================================
-  -- Generic pass: every table classified delete_row/set_null in
-  -- private.pii_retention_policy, grouped by table (a table can carry
-  -- MORE THAN ONE classified column — e.g. checkin_challenge has both
-  -- user_id and staff_user_id — in which case a row counts if ANY
-  -- classified column matches, mirroring "this row is personal to this
-  -- account through any of its classified columns"). `special` rows are
-  -- excluded here and handled by name below, exactly mirroring
-  -- delete_my_data's own CONTINUE branch.
+  -- Fail-closed coverage check (must run FIRST, before any real export):
+  -- every app. table private.pii_retention_policy classifies at all
+  -- (delete_row/set_null/special) must have a private.pii_export_policy
+  -- row. A personal table added later with no export decision made for
+  -- it fails EVERY export call, loudly, rather than silently vanishing
+  -- from the output.
   -- ==========================================================================
-  FOR v_pol IN
-    SELECT cl.relname AS table_name, array_agg(DISTINCT a.attname) AS column_names
-    FROM pg_constraint con
-    JOIN pg_class cl ON cl.oid = con.conrelid
-    JOIN pg_namespace n ON n.oid = cl.relnamespace
-    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
-    JOIN private.pii_retention_policy pol
-      ON pol.schema_name = 'app' AND pol.table_name = cl.relname AND pol.column_name = a.attname
-    WHERE con.contype = 'f'
-      AND n.nspname = 'app'
-      AND con.confrelid = 'auth.users'::regclass
-      AND pol.action IN ('delete_row', 'set_null')
-    GROUP BY cl.relname
+  FOR v_tbl IN
+    SELECT DISTINCT table_name
+    FROM private.pii_retention_policy
+    WHERE schema_name = 'app'
   LOOP
-    v_where := array_to_string(ARRAY(SELECT format('%I = $1', c) FROM unnest(v_pol.column_names) AS c), ' OR ');
-    EXECUTE format('SELECT coalesce(jsonb_agg(to_jsonb(t)), ''[]''::jsonb) FROM app.%I t WHERE %s', v_pol.table_name, v_where)
-      INTO v_table_json USING p_user_id;
-    v_result := v_result || jsonb_build_object(v_pol.table_name, v_table_json);
+    IF NOT EXISTS (
+      SELECT 1 FROM private.pii_export_policy
+      WHERE schema_name = 'app' AND table_name = v_tbl.table_name
+    ) THEN
+      RAISE EXCEPTION
+        'export_my_data: app.% is classified in private.pii_retention_policy but has no private.pii_export_policy row -- classify it (export/exclude, with a reason) before export can run',
+        v_tbl.table_name;
+    END IF;
   END LOOP;
 
   -- ==========================================================================
-  -- Special cases — same six rows delete_my_data (0015) treats specially,
-  -- read-only here, each using the EXACT SAME read-visibility policy
-  -- 0016 already created as that row's DELETE/UPDATE companion.
+  -- Explicit, hand-written exports. Every SELECT names its own columns —
+  -- never `SELECT *` / `to_jsonb(t)` over a whole row.
   -- ==========================================================================
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_table_json
-    FROM app.attestation t WHERE player_user_id = p_user_id; -- pd_attestation_player_update_r
-  v_result := v_result || jsonb_build_object('attestation', v_table_json);
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT user_id, created_at FROM app.admin_user WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('admin_user', v_json);
 
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_table_json
-    FROM app.entitlement t WHERE user_id = p_user_id; -- pd_entitlement_update_r
-  v_result := v_result || jsonb_build_object('entitlement', v_table_json);
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT user_id FROM app.app_review_demo_account WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('app_review_demo_account', v_json);
 
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_table_json
-    FROM app.fraud_signal t WHERE user_id = p_user_id; -- pd_fraud_signal_update_r
-  v_result := v_result || jsonb_build_object('fraud_signal', v_table_json);
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, provider, provider_ref, facility_id, tee_time, status
+    FROM app.booking WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('booking', v_json);
 
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_table_json
-    FROM app.audit_log t WHERE actor_user_id = p_user_id; -- pd_audit_log_update_r
-  v_result := v_result || jsonb_build_object('audit_log', v_table_json);
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, provider, external_user_id, scopes, status, created_at, revoked_at
+    FROM app.connector_account WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('connector_account', v_json);
 
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_table_json
-    FROM app.partner_invite t
-    WHERE invited_by = p_user_id OR (v_email IS NOT NULL AND invitee_email = v_email); -- pd_partner_invite_delete_r
-  v_result := v_result || jsonb_build_object('partner_invite', v_table_json);
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, platform, attest_key_id, attest_counter, integrity_last, first_seen, last_seen
+    FROM app.device WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('device', v_json);
 
-  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_table_json
-    FROM app.receipt_fingerprint t WHERE user_id = p_user_id; -- pd_receipt_fingerprint_update_r
-  v_result := v_result || jsonb_build_object('receipt_fingerprint', v_table_json);
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, device_id, source, source_ref, input_hash, course_id, facility_id,
+           started_at, ended_at, local_date, summary, integrity, cosignal, attestation_grade,
+           matcher_version, catalog_version, status, created_at
+    FROM app.evidence WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('evidence', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, trail_id, facility_id, purchase_evidence_id, status, created_at
+    FROM app.marker_credit WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('marker_credit', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, offer_id, user_id, facility_id, state, earned_at, activated_device_id,
+           activated_at, expires_at, expiry_paused_at, redeemed_at, redeemed_offline
+    FROM app.offer_code WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('offer_code', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT user_id, org_id, role, revoked_at, created_at
+    FROM app.partner_member WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('partner_member', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, course_id, facility_id, play_date, course_disambiguated_by,
+           score_badge, score_monetary, hard_signal, presence_signal, money, held_review,
+           policy_version, input_digest, status
+    FROM app.play WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('play', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT user_id, handle, locale, home_region, birth_year_bucket, leaderboard_opt_in, created_at
+    FROM app.profile WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('profile', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, facility_id, trail_id, method, qr_variant, ref_id, offline, cosignal,
+           no_cosignal_reason, ip_region_match, local_date, status, created_at
+    FROM app.purchase_evidence WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('purchase_evidence', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT user_id, device_id, expo_token, updated_at
+    FROM app.push_token WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('push_token', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT user_id, achievement_id, award_key, awarded_at, basis, revoked_at, revoke_reason
+    FROM app.user_achievement WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('user_achievement', v_json);
+
+  -- ---- Subject specials (four named columns) --------------------------
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, facility_id, player_user_id, player_pseudonym, kind, token_jti, cosignal_ok, created_at
+    FROM app.attestation WHERE player_user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('attestation', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, user_id, kind, trail_id, roster_version, sponsorship_id, basis, state,
+           activated_device_id, activated_at, redeemed_at, redeemed_facility_id,
+           redemption_method, redemption_jti, redemption_cosignal_ok, voucher_facility_id, voucher_issued_at
+    FROM app.entitlement WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('entitlement', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, facility_id, local_date, phash, receipt_number_ocr, created_at
+    FROM app.receipt_fingerprint WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('receipt_fingerprint', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, action, subject_table, subject_id, created_at
+    FROM app.audit_log WHERE actor_user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('audit_log', v_json);
+
+  -- ---- The gate's two named, deliberately-restricted exceptions ------
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, kind, created_at FROM app.fraud_signal WHERE user_id = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('fraud_signal', v_json);
+
+  SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) INTO v_json FROM (
+    SELECT id, kind, created_at FROM app.review_item WHERE resolved_by = p_user_id
+  ) t;
+  v_result := v_result || jsonb_build_object('review_item', v_json);
 
   RETURN v_result;
 END;
@@ -154,16 +347,11 @@ $$;
 -- client. No GRANT to anon/authenticated — same posture as
 -- private.delete_my_data (0015).
 --
--- ⛔ ORDERING (found by actually running this migration this round, H2
--- approximation mode): these REVOKE/GRANT statements must run BEFORE the
--- OWNER TO transfer below, not after — mirrors 0015/0016's OWN ordering
--- exactly (0015 REVOKEs/GRANTs while it still owns the function it just
--- created; ownership moves to private_definer only later, in 0016). Once
--- ownership transfers to private_definer, the migration-running role no
--- longer OWNS this function, and REVOKE/GRANT on an object you don't own
--- (and aren't a superuser for) fails with "permission denied for
--- function export_my_data" — reproduced this round under H2's
--- NOSUPERUSER approximation role before this ordering fix.
+-- ⛔ ORDERING (found this round, H2 approximation mode, still true after
+-- the rewrite): REVOKE/GRANT run BEFORE the OWNER TO transfer below —
+-- mirrors 0015/0016's own ordering exactly. See the original version's
+-- comment (unchanged reasoning) for why running them AFTER the transfer
+-- fails with "permission denied for function export_my_data".
 REVOKE EXECUTE ON FUNCTION private.export_my_data(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.export_my_data(uuid) TO service_role;
 
@@ -188,4 +376,4 @@ REVOKE CREATE ON SCHEMA private FROM private_definer;
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
 VALUES
-  ('private', 'export_my_data', 'p_user_id uuid', false, false, true, 'me-export Edge Function only (0021) — read-only twin of private.delete_my_data (0015)');
+  ('private', 'export_my_data', 'p_user_id uuid', false, false, true, 'me-export Edge Function only (0021) — read-only twin of private.delete_my_data (0015); explicit per-table column allow-lists, never SELECT *');
