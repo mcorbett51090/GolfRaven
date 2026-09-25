@@ -3,13 +3,21 @@
  * check-links.mjs — the weekly booking-link checker (build plan §10 P2
  * stage-2 scope item 3: "Add `scripts/check-links.mjs`, the weekly link
  * checker. It must never run in CI and has an explicit `--live` flag.
- * With no network, it exits and says so.").
+ * With no network, it exits and says so." — and P2 stage-3 scope: "Add a
+ * scheduled GitHub Actions workflow ... that runs it. It is report-only:
+ * no deploy, no secrets, no issue creation.").
  *
  * Lists every `booking[]` URL in the catalog (real `data/`, or the demo
  * fixture with `--demo` / `GOLFRAVEN_DEMO=1`, for exercising this script
  * without real content). By DEFAULT it is a dry run — it never makes a
- * network request. `--live` is opt-in, and this file is never invoked
- * from `.github/workflows/ci.yml`.
+ * network request. `--live` is opt-in, and this file is still NEVER
+ * invoked from the PR-gating `.github/workflows/ci.yml` — it's a report,
+ * not a merge gate, and a flaky third-party booking host must never block
+ * an unrelated PR. It IS invoked, with `--live`, by the scheduled
+ * `.github/workflows/check-links.yml` (weekly cron + `workflow_dispatch`)
+ * added alongside it — that workflow reads this script's own exit code
+ * and uploads the report file it writes (see `--report` below); it never
+ * deploys anything, never touches a secret, and never opens an issue.
  *
  * **Opus gate should-fix ("check-links") — the `--live` fetch is now
  * SSRF-hardened**, porting the exact technique southern-wine-country's
@@ -50,10 +58,20 @@
  *   node scripts/check-links.mjs --demo          # dry run against the demo catalog
  *   node scripts/check-links.mjs --live          # actually check each link (needs network)
  *   node scripts/check-links.mjs --live --timeout-ms 5000
+ *   node scripts/check-links.mjs --live --report .check-links-report.json
+ *
+ * `--report <path>` (--live only): writes a JSON report of every non-"ok"
+ * finding to `<path>` (default `.check-links-report.json` at the repo
+ * root — gitignored, same convention as `apps/site/.lighthouse-*.json`).
+ * Each finding carries a `classification` of `"dead"`,
+ * `"not-allow-listed"`, `"redirect-off-host"`, `"no-network"` or
+ * `"error"` — see the classification section below for exactly what
+ * produces each. A dry run never writes a report (there is nothing to
+ * report — no request was ever made).
  */
 import dns from "node:dns";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Agent, fetch as undiciFetch } from "undici";
 import { loadCatalog, loadCatalogFromBundle, primaryTrailOf } from "@golfraven/catalog";
@@ -61,6 +79,7 @@ import { loadCatalog, loadCatalogFromBundle, primaryTrailOf } from "@golfraven/c
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const BOOKING_HOSTS_PATH = join(REPO_ROOT, "config", "booking-hosts.json");
+const DEFAULT_REPORT_PATH = join(REPO_ROOT, ".check-links-report.json");
 
 const UA = "Mozilla/5.0 (compatible; GolfRaven-LinkChecker/1.0; +offline weekly ops bot)";
 const MAX_REDIRECTS = 3;
@@ -248,35 +267,62 @@ function validateHttpsUrl(raw) {
 }
 
 /**
+ * The REAL network-calling fetch — undici's own `fetch`, pinned to the
+ * DNS-rebind-hardened agent. See the doc comment above for why this must
+ * be `undiciFetch` (not Node's global `fetch`) paired with `pinnedAgent`.
+ */
+async function realFetchImpl(url, init) {
+  return undiciFetch(url, { ...init, dispatcher: pinnedAgent });
+}
+
+/**
  * Hardened link check — https-only, DNS+private-IP-checked and
  * allow-list-checked on EVERY hop, manual redirects (<= MAX_REDIRECTS).
  * Never follows a redirect off the allow-list, whatever status it 30x'd
  * with.
+ *
+ * **`opts.fetchImpl` / `opts.assertPublicHost` (should-fix, "check-links
+ * classification logic tests"):** both default to the real, network-
+ * calling implementations above, but a caller (this file's own unit
+ * tests) can inject fakes — a `fetchImpl` that returns canned
+ * Response-like objects for given URLs, and a no-op `assertPublicHost`
+ * — to exercise the REAL redirect-following / allow-list / classification
+ * decisions end-to-end against a scripted sequence of responses, with
+ * NO real network or DNS call ever made. Production code (`main()` below)
+ * never passes `opts`, so it always gets the real implementations.
+ *
+ * **`hop` is attached to a `NOT_ALLOW_LISTED` error** — `hop === 0` means
+ * the link's OWN host was never on the allow-list to begin with;
+ * `hop > 0` means a REDIRECT led off the allow-list. `classifyError()`
+ * below is what turns that distinction into "not-allow-listed" vs.
+ * "redirect-off-host" for the report.
  */
-export async function hardenedCheck(startUrl, allowList, timeoutMs) {
+export async function hardenedCheck(startUrl, allowList, timeoutMs, opts = {}) {
+  const fetchImpl = opts.fetchImpl ?? realFetchImpl;
+  const assertHost = opts.assertPublicHost ?? assertPublicHost;
+
   let current = startUrl;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const u = validateHttpsUrl(current);
     if (!allowList.includes(u.host)) {
-      throw Object.assign(new Error(`host-not-allow-listed:${u.host}`), { code: "NOT_ALLOW_LISTED" });
+      throw Object.assign(new Error(`host-not-allow-listed:${u.host}`), {
+        code: "NOT_ALLOW_LISTED",
+        hop,
+        host: u.host,
+      });
     }
-    await assertPublicHost(u.hostname);
+    await assertHost(u.hostname);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
-      // Must be undici's OWN `fetch`, not Node's global one — see the
-      // `pinnedAgent` doc comment above for why the global fetch's
-      // internal (older, bundled) undici rejects a dispatcher built from
-      // the separately-installed undici package.
-      res = await undiciFetch(u.href, {
+      res = await fetchImpl(u.href, {
         method: "HEAD",
         redirect: "manual",
         credentials: "omit",
         signal: controller.signal,
         headers: { "user-agent": UA },
-        dispatcher: pinnedAgent,
       });
     } finally {
       clearTimeout(timer);
@@ -288,13 +334,12 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs) {
       const controller2 = new AbortController();
       const timer2 = setTimeout(() => controller2.abort(), timeoutMs);
       try {
-        res = await undiciFetch(u.href, {
+        res = await fetchImpl(u.href, {
           method: "GET",
           redirect: "manual",
           credentials: "omit",
           signal: controller2.signal,
           headers: { "user-agent": UA },
-          dispatcher: pinnedAgent,
         });
       } finally {
         clearTimeout(timer2);
@@ -323,18 +368,24 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs) {
 // ---------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const args = { live: false, demo: false, timeoutMs: 8000 };
+  // `reportPath` defaults to DEFAULT_REPORT_PATH — a report is written on
+  // every --live run unless explicitly turned off with --no-report.
+  const args = { live: false, demo: false, timeoutMs: 8000, reportPath: DEFAULT_REPORT_PATH };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--live") args.live = true;
     else if (a === "--demo") args.demo = true;
     else if (a === "--timeout-ms") args.timeoutMs = Number(argv[++i]) || args.timeoutMs;
+    else if (a === "--report") args.reportPath = argv[++i] || args.reportPath;
+    else if (a === "--no-report") args.reportPath = null;
     else if (a === "--help" || a === "-h") {
       console.log(
-        "Usage: check-links.mjs [--demo] [--live] [--timeout-ms <n>]\n" +
-          "  (no flags)   dry run against real data/ — lists booking links, no network\n" +
-          "  --demo       use apps/site's synthetic demo catalog instead of data/\n" +
-          "  --live       actually request each link, SSRF-hardened (never done in CI)\n",
+        "Usage: check-links.mjs [--demo] [--live] [--timeout-ms <n>] [--report <path>] [--no-report]\n" +
+          "  (no flags)     dry run against real data/ — lists booking links, no network\n" +
+          "  --demo         use apps/site's synthetic demo catalog instead of data/\n" +
+          "  --live         actually request each link, SSRF-hardened (never done in ci.yml)\n" +
+          `  --report <p>   write findings to <p> as JSON (--live only; default ${DEFAULT_REPORT_PATH})\n` +
+          "  --no-report    skip writing a report file even in --live mode\n",
       );
       process.exit(0);
     }
@@ -397,6 +448,76 @@ function looksLikeNoNetwork(err) {
   );
 }
 
+// ---------------------------------------------------------------------
+// Classification (should-fix, "check-links classification logic tests" —
+// this task's scope item 2: "Report dead links, redirects off-host and
+// non-allow-listed hosts"). Two small, PURE functions — no network, no
+// DNS, no catalog — so they're directly unit-testable against canned
+// `hardenedCheck()` results/errors, and `checkLink()` below is what wires
+// them to the real (or, in a test, an injected) `hardenedCheck()`.
+//
+// The four report categories, and what produces each:
+//   - "ok"                a 2xx (after allowed redirects)
+//   - "dead"               hardenedCheck resolved but !ok (non-2xx,
+//                          too-many-redirects, redirect-no-location)
+//   - "not-allow-listed"   the link's OWN host was never on the allow-list
+//                          (NOT_ALLOW_LISTED at hop 0)
+//   - "redirect-off-host"  an ALLOWED starting host redirected somewhere
+//                          NOT on the allow-list (NOT_ALLOW_LISTED at
+//                          hop > 0) — the exact case a static `verify-
+//                          catalog` publish-time gate can never see, since
+//                          it never follows the link.
+//   - "no-network"         the checker itself couldn't reach the network
+//                          (see looksLikeNoNetwork) — never a false "ok".
+//   - "error"              anything else (timeout, bad scheme, DNS
+//                          failure on a single host, …).
+// ---------------------------------------------------------------------
+
+/** Classifies a THROWN error from `hardenedCheck()` — never a resolved result. */
+export function classifyError(err) {
+  if (err?.code === "NOT_ALLOW_LISTED") {
+    return err.hop === 0 ? "not-allow-listed" : "redirect-off-host";
+  }
+  if (looksLikeNoNetwork(err)) return "no-network";
+  return "error";
+}
+
+/** Classifies a RESOLVED `hardenedCheck()` result (`{ ok, status, reason? }`) — never a thrown error. */
+export function classifyResult(result) {
+  return result.ok ? "ok" : "dead";
+}
+
+/**
+ * Runs `hardenedCheck()` for one link and returns a flat, JSON-report-
+ * ready record: the link's own fields plus `classification`/`status`/
+ * `detail`. `opts` passes straight through to `hardenedCheck()` — a test
+ * injects `{ fetchImpl, assertPublicHost }` here; production code (below)
+ * never does, so it always exercises the real network path.
+ */
+export async function checkLink(link, allowList, timeoutMs, opts = {}) {
+  try {
+    const result = await hardenedCheck(link.url, allowList, timeoutMs, opts);
+    return {
+      ...link,
+      classification: classifyResult(result),
+      status: result.status ?? null,
+      detail: result.reason ?? null,
+    };
+  } catch (err) {
+    return {
+      ...link,
+      classification: classifyError(err),
+      status: null,
+      detail: String(err?.message ?? err),
+    };
+  }
+}
+
+async function writeReport(reportPath, payload) {
+  await mkdir(dirname(reportPath), { recursive: true });
+  await writeFile(reportPath, JSON.stringify(payload, null, 2) + "\n");
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const catalog = await loadLinkCatalog(args.demo);
@@ -417,41 +538,63 @@ async function main() {
     return;
   }
 
-  console.log(`--live: checking ${links.length} link(s), ${args.timeoutMs}ms timeout each, https-only, SSRF-hardened...\n`);
-  const findings = [];
+  console.log(
+    `--live: checking ${links.length} link(s), ${args.timeoutMs}ms timeout each, https-only, SSRF-hardened...\n`,
+  );
+  const results = [];
   for (const [i, link] of links.entries()) {
     const allowList = allowListFor(link, configuredHosts);
-    try {
-      const result = await hardenedCheck(link.url, allowList, args.timeoutMs);
-      const mark = result.ok ? "ok  " : "FAIL";
-      console.log(`  ${mark} [${result.status ?? "?"}] ${link.facilityName} -> ${link.url}`);
-      if (!result.ok) findings.push({ ...link, ...result });
-    } catch (err) {
-      if (i === 0 && looksLikeNoNetwork(err)) {
-        console.error(
-          `check-links: no network reachable (${err?.cause?.code ?? err?.code ?? err?.message}) — ` +
-            `stopping without checking the remaining ${links.length - 1} link(s). A weekly checker that ` +
-            `silently reported success here would be worse than an honest failure, so this exits non-zero.`,
-        );
-        process.exitCode = 1;
-        return;
+    const record = await checkLink(link, allowList, args.timeoutMs);
+    results.push(record);
+
+    if (record.classification === "no-network" && i === 0) {
+      console.error(
+        `check-links: no network reachable (${record.detail}) — stopping without checking the ` +
+          `remaining ${links.length - 1} link(s). A weekly checker that silently reported success ` +
+          `here would be worse than an honest failure, so this exits non-zero.`,
+      );
+      if (args.reportPath) {
+        await writeReport(args.reportPath, {
+          generatedAt: new Date().toISOString(),
+          totalLinks: links.length,
+          checked: results.length,
+          noNetwork: true,
+          findings: results,
+        });
+        console.error(`check-links: wrote ${args.reportPath}`);
       }
-      if (err?.code === "NOT_ALLOW_LISTED") {
-        console.log(`  FAIL [not-allow-listed] ${link.facilityName} -> ${link.url} :: ${err.message}`);
-      } else {
-        console.log(`  FAIL [error] ${link.facilityName} -> ${link.url} :: ${err?.message ?? err}`);
-      }
-      findings.push({ ...link, ok: false, status: null, error: String(err?.message ?? err) });
+      process.exitCode = 1;
+      return;
     }
+
+    const mark = record.classification === "ok" ? "ok  " : "FAIL";
+    console.log(
+      `  ${mark} [${record.classification}${record.status ? `:${record.status}` : ""}] ${record.facilityName} -> ${record.url}`,
+    );
   }
 
+  const findings = results.filter((r) => r.classification !== "ok");
   console.log(`\ncheck-links: ${findings.length} finding(s) of ${links.length} link(s) checked.`);
+  for (const f of findings) {
+    console.log(`  - ${f.facilityName} [${f.provider}] ${f.url} :: ${f.classification} (${f.status ?? f.detail})`);
+  }
+
+  if (args.reportPath) {
+    await writeReport(args.reportPath, {
+      generatedAt: new Date().toISOString(),
+      totalLinks: links.length,
+      checked: results.length,
+      noNetwork: false,
+      findings,
+    });
+    console.log(`check-links: wrote ${args.reportPath} (${findings.length} finding(s))`);
+  }
+
   if (findings.length > 0) {
-    for (const f of findings) {
-      console.log(`  - ${f.facilityName} [${f.provider}] ${f.url} :: ${f.status ?? f.error ?? f.reason}`);
-    }
     // A non-zero exit only in --live mode with real findings — this is an
-    // ops report, not a CI gate (this script "must never run in CI").
+    // ops report, not a PR-gating CI check (see this file's own module
+    // doc: never invoked from ci.yml; the scheduled check-links.yml
+    // workflow that DOES run it treats this exit code as its whole job).
     process.exitCode = 1;
   }
 }

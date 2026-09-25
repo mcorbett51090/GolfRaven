@@ -1,0 +1,82 @@
+name: golfraven weekly link checker
+
+# Build plan §10 P2 scope: "T0 GolfNow + course-native links (X4 bar) and
+# the weekly link checker." Runs `scripts/check-links.mjs --live` — the
+# SAME SSRF-hardened, allow-list-gated checker documented in that file's
+# own module doc — on a weekly schedule, plus on-demand via
+# `workflow_dispatch`. It is REPORT-ONLY: this workflow never deploys
+# anything, never touches a secret (it needs none — every booking link is
+# public catalog data, and `--live` requests are unauthenticated HEAD/GET
+# calls), and never opens an issue. A failing/dead link here does not
+# block any PR — `check-links.mjs` is deliberately never invoked from the
+# PR-gating `ci.yml` (see that script's own module doc).
+#
+# `permissions: contents: read` is the only permission this job needs —
+# it only reads the checked-out repo and makes outbound HTTPS requests to
+# already-allow-listed booking hosts.
+
+on:
+  schedule:
+    # Mondays at 13:00 UTC (a jittered, non-top-of-hour-adjacent time by
+    # convention elsewhere in this org's scheduling — see this repo's
+    # `create_trigger`/`update_trigger` guidance for scheduled jobs
+    # generally; a GitHub Actions `schedule:` cron is evaluated in UTC
+    # regardless).
+    - cron: "0 13 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# A newer scheduled/dispatched run supersedes a still-running one — this
+# is a report, never a merge gate, so there is nothing to preserve by
+# letting an old run finish once a fresher one has started.
+concurrency:
+  group: check-links-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  ASTRO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  check-links:
+    name: check every booking link against the host gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the weekly link checker (--live, report-only — never blocks a PR, uses no secret)
+        # Exits non-zero when there are findings (dead links, redirects
+        # off-host, non-allow-listed hosts) OR when the network itself was
+        # unreachable on the very first request — both cases are real
+        # signal for this job's own status, never silently swallowed. The
+        # report file is still written/uploaded either way (the `if:
+        # always()` step below), so a failed run's findings are visible
+        # without re-running anything.
+        run: node scripts/check-links.mjs --live --report .check-links-report.json
+
+      - name: Upload the report (even on failure — the findings ARE the point of this job)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: check-links-report
+          path: .check-links-report.json
+          if-no-files-found: ignore
+          retention-days: 30

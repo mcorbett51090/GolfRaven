@@ -1,5 +1,9 @@
 {
   "imports": {
-    "zod": "https://esm.sh/zod@3.23.8"
+    "zod": "https://esm.sh/zod@4.6.5",
+    "@noble/hashes/utils.js": "https://esm.sh/@noble/hashes@2.4.0/utils.js",
+    "@noble/hashes/sha2.js": "https://esm.sh/@noble/hashes@2.4.0/sha2.js",
+    "tz-lookup": "https://esm.sh/tz-lookup@6.1.25",
+    "std/http/server": "https://deno.land/std@0.224.0/http/server.ts"
   }
 }

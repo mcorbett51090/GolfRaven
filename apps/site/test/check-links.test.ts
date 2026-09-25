@@ -1,13 +1,25 @@
 /**
  * check-links.test.ts — unit coverage for `scripts/check-links.mjs`'s
- * SSRF-hardening functions (Opus gate should-fix, "check-links"). Lives
- * in `apps/site/test/` (imported by relative path) because
- * `scripts/check-links.mjs` is a repo-root ops script with no workspace
- * package of its own — this is still `pnpm -r test` coverage for it,
- * just hosted in the one package whose test runner already exists.
+ * SSRF-hardening functions (Opus gate should-fix, "check-links") AND its
+ * classification logic (this task's scope item 2: "Unit-test the
+ * checker's classification logic with injected fetch responses. No
+ * network in tests."). Lives in `apps/site/test/` (imported by relative
+ * path) because `scripts/check-links.mjs` is a repo-root ops script with
+ * no workspace package of its own — this is still `pnpm -r test`
+ * coverage for it, just hosted in the one package whose test runner
+ * already exists.
  */
 import { describe, expect, it } from "vitest";
-import { expandIPv6, isPrivateIp, isPrivateIpv6, isPrivateV4 } from "../../../scripts/check-links.mjs";
+import {
+  checkLink,
+  classifyError,
+  classifyResult,
+  expandIPv6,
+  hardenedCheck,
+  isPrivateIp,
+  isPrivateIpv6,
+  isPrivateV4,
+} from "../../../scripts/check-links.mjs";
 
 describe("check-links.mjs SSRF hardening: isPrivateV4 / isPrivateIp", () => {
   it.each([
@@ -83,5 +95,182 @@ describe("check-links.mjs SSRF hardening: isPrivateIpv6 — every range the re-g
   it("isPrivateIp dispatches IPv4 vs IPv6 correctly (no ':' => v4 path)", () => {
     expect(isPrivateIp("8.8.8.8")).toBe(false);
     expect(isPrivateIp("2001:4860:4860::8888")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Classification logic (this task's scope item 2: "Unit-test the
+// checker's classification logic with injected fetch responses. No
+// network in tests."). Every test below injects BOTH `fetchImpl` (a fake
+// standing in for undici's `fetch`) and a no-op `assertPublicHost` into
+// `hardenedCheck()`/`checkLink()` — the real DNS/TCP path is never
+// exercised, only the decision logic: allow-list checks, manual-redirect
+// following, and how a resolved result or a thrown error maps to one of
+// the report's classifications.
+// ---------------------------------------------------------------------
+
+/** A minimal stand-in for the undici Response shape `hardenedCheck` reads:
+ * `.status`, `.ok`, `.headers.get("location")`, `.body.cancel()`. */
+function fakeResponse(status: number, { location }: { location?: string } = {}) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (name: string) => (name.toLowerCase() === "location" ? (location ?? null) : null) },
+    body: { cancel: async () => {} },
+  };
+}
+
+/** No-op — stands in for the real DNS/private-IP pre-flight check so
+ * these tests never touch the network. */
+async function noopAssertPublicHost() {}
+
+describe("classifyResult (pure — no network)", () => {
+  it("ok:true => 'ok'", () => {
+    expect(classifyResult({ ok: true, status: 200 })).toBe("ok");
+  });
+  it("ok:false (any status/reason) => 'dead'", () => {
+    expect(classifyResult({ ok: false, status: 404 })).toBe("dead");
+    expect(classifyResult({ ok: false, status: 500 })).toBe("dead");
+    expect(classifyResult({ ok: false, status: null, reason: "too-many-redirects" })).toBe("dead");
+    expect(classifyResult({ ok: false, status: 301, reason: "redirect-no-location" })).toBe("dead");
+  });
+});
+
+describe("classifyError (pure — no network)", () => {
+  it("NOT_ALLOW_LISTED at hop 0 => 'not-allow-listed' (the link's OWN host was never allowed)", () => {
+    expect(classifyError({ code: "NOT_ALLOW_LISTED", hop: 0 })).toBe("not-allow-listed");
+  });
+  it("NOT_ALLOW_LISTED at hop > 0 => 'redirect-off-host' (an allowed host redirected off-list)", () => {
+    expect(classifyError({ code: "NOT_ALLOW_LISTED", hop: 1 })).toBe("redirect-off-host");
+    expect(classifyError({ code: "NOT_ALLOW_LISTED", hop: 3 })).toBe("redirect-off-host");
+  });
+  it("a network-unreachable error (undici's own .cause.code shape) => 'no-network'", () => {
+    expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "ENOTFOUND" } }))).toBe(
+      "no-network",
+    );
+    expect(classifyError(Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }))).toBe(
+      "no-network",
+    );
+    expect(classifyError(new Error("EGRESS_BLOCKED by sandbox proxy"))).toBe("no-network");
+  });
+  it("anything else => 'error'", () => {
+    expect(classifyError(new Error("timeout"))).toBe("error");
+    expect(classifyError(new Error("bad-scheme:http: (https only)"))).toBe("error");
+  });
+});
+
+describe("hardenedCheck + checkLink end-to-end, with an injected fetchImpl (no real network/DNS)", () => {
+  const ALLOWED = ["www.golfnow.com"];
+  const link = {
+    facilitySlug: "test-course",
+    facilityName: "Test Course",
+    facilityUrl: null,
+    trail: null,
+    provider: "golfnow",
+    url: "https://www.golfnow.com/example/test-course",
+    checkedAt: "2026-01-01",
+  };
+
+  it("a 200 from an allowed host classifies as 'ok'", async () => {
+    const fetchImpl = async () => fakeResponse(200);
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("ok");
+    expect(record.status).toBe(200);
+  });
+
+  it("a 404 from an allowed host classifies as 'dead'", async () => {
+    const fetchImpl = async () => fakeResponse(404);
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("dead");
+    expect(record.status).toBe(404);
+  });
+
+  it("a redirect chain that STAYS on allowed hosts follows through and classifies the final response", async () => {
+    const fetchImpl = async (url: string) => {
+      if (url === "https://www.golfnow.com/example/test-course") {
+        return fakeResponse(301, { location: "https://www.golfnow.com/example/test-course/" });
+      }
+      return fakeResponse(200);
+    };
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("ok");
+    expect(record.status).toBe(200);
+  });
+
+  it("a link whose OWN host is not on the allow-list classifies as 'not-allow-listed' (never fetched)", async () => {
+    let fetchCalled = false;
+    const fetchImpl = async () => {
+      fetchCalled = true;
+      return fakeResponse(200);
+    };
+    const offListLink = { ...link, url: "https://not-allowed.example.com/book" };
+    const record = await checkLink(offListLink, ALLOWED, 1000, {
+      fetchImpl,
+      assertPublicHost: noopAssertPublicHost,
+    });
+    expect(record.classification).toBe("not-allow-listed");
+    // The gate never even fetches a host that was never allowed.
+    expect(fetchCalled).toBe(false);
+  });
+
+  it("an ALLOWED host redirecting OFF the allow-list classifies as 'redirect-off-host' — never followed", async () => {
+    let followedOffHost = false;
+    const fetchImpl = async (url: string) => {
+      if (url === "https://www.golfnow.com/example/test-course") {
+        return fakeResponse(302, { location: "https://evil-redirect.example.net/steal" });
+      }
+      followedOffHost = true;
+      return fakeResponse(200);
+    };
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("redirect-off-host");
+    // The off-list redirect target was validated and rejected, never fetched.
+    expect(followedOffHost).toBe(false);
+  });
+
+  it("more than MAX_REDIRECTS (3) hops on allowed hosts classifies as 'dead' (too-many-redirects)", async () => {
+    let hops = 0;
+    const fetchImpl = async () => {
+      hops += 1;
+      return fakeResponse(302, { location: "https://www.golfnow.com/example/test-course" });
+    };
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("dead");
+    expect(hops).toBeGreaterThan(1);
+  });
+
+  it("a redirect with no Location header classifies as 'dead' (redirect-no-location)", async () => {
+    const fetchImpl = async () => fakeResponse(302, {});
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("dead");
+  });
+
+  it("a host that rejects HEAD (405) is retried as GET on the SAME, already-validated hop", async () => {
+    const calls: string[] = [];
+    const fetchImpl = async (_url: string, init: { method: string }) => {
+      calls.push(init.method);
+      if (init.method === "HEAD") return fakeResponse(405);
+      return fakeResponse(200);
+    };
+    const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("ok");
+    expect(calls).toEqual(["HEAD", "GET"]);
+  });
+
+  it("plain http: (not https:) is refused outright, classified as 'error'", async () => {
+    const fetchImpl = async () => fakeResponse(200);
+    const httpLink = { ...link, url: "http://www.golfnow.com/example/test-course" };
+    const record = await checkLink(httpLink, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+    expect(record.classification).toBe("error");
+    expect(record.detail).toMatch(/https only/);
+  });
+
+  it("hardenedCheck itself (not just checkLink) accepts the same injected opts, for direct testing", async () => {
+    const fetchImpl = async () => fakeResponse(200);
+    const result = await hardenedCheck(link.url, ALLOWED, 1000, {
+      fetchImpl,
+      assertPublicHost: noopAssertPublicHost,
+    });
+    expect(result).toEqual({ ok: true, status: 200 });
   });
 });

@@ -1,3 +1,7 @@
 [
-  "https://esm.sh/zod@3.23.8"
+  "https://esm.sh/zod@4.6.5",
+  "https://esm.sh/@noble/hashes@2.4.0/utils.js",
+  "https://esm.sh/@noble/hashes@2.4.0/sha2.js",
+  "https://esm.sh/tz-lookup@6.1.25",
+  "https://deno.land/std@0.224.0/http/server.ts"
 ]

@@ -120,3 +120,63 @@ describe("resolveHeaders against gen-headers.mjs's REAL generated output", () =>
     expect(rootCsp).not.toContain("wasm-unsafe-eval");
   });
 });
+
+// ---------------------------------------------------------------------
+// Forms config (claim/feedback, this task's scope): "Update the CSP
+// generator so the Worker origin and Turnstile hosts are allowed only
+// when configured. Keep CSP strict otherwise."
+// ---------------------------------------------------------------------
+describe("gen-headers.mjs: the Worker origin + Turnstile hosts are allowed ONLY when forms-config.mjs is configured", () => {
+  it("with the real (TODO(owner)-placeholder) FORMS_CONFIG, the CSP allow-lists neither the Worker nor Turnstile — exactly as strict as before forms existed", async () => {
+    const { buildHeaders } = await import("../scripts/gen-headers.mjs");
+    const text = buildHeaders({}); // second arg defaults to the REAL, committed FORMS_CONFIG
+    expect(text).toContain("forms-config.mjs isFormsConfigured()=false");
+    const blocks = parseHeadersFile(text);
+    const rootCsp = resolveHeaders(blocks, "/index.html")["Content-Security-Policy"];
+    expect(rootCsp).toBe(
+      "default-src 'self'; script-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; form-action 'self'",
+    );
+    expect(rootCsp).not.toContain("challenges.cloudflare.com");
+    expect(rootCsp).not.toContain("connect-src");
+    expect(rootCsp).not.toContain("frame-src");
+  });
+
+  it("with a real (non-placeholder) forms config, the CSP allow-lists exactly the Worker's own host + Turnstile's hosts — nothing broader", async () => {
+    const { buildHeaders } = await import("../scripts/gen-headers.mjs");
+    const configured = {
+      workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
+      siteId: "golfraven",
+      turnstileSiteKey: "0xREALKEY",
+    };
+    const text = buildHeaders({}, configured);
+    expect(text).toContain("forms-config.mjs isFormsConfigured()=true");
+    const blocks = parseHeadersFile(text);
+    const rootCsp = resolveHeaders(blocks, "/index.html")["Content-Security-Policy"];
+    expect(rootCsp).toContain("script-src 'self' https://challenges.cloudflare.com");
+    expect(rootCsp).toContain("frame-src https://challenges.cloudflare.com");
+    expect(rootCsp).toContain(
+      "connect-src 'self' https://raven-secure-upload.matt-769.workers.dev https://challenges.cloudflare.com",
+    );
+    // Never the Turnstile SITE KEY itself, and never a comma-joined double policy.
+    expect(rootCsp).not.toContain("0xREALKEY");
+    expect(rootCsp?.includes(",")).toBe(false);
+    // The /pagefind/* block stays isolated — forms config never leaks into it.
+    const pagefindCsp = resolveHeaders(blocks, "/pagefind/pagefind.js")["Content-Security-Policy"];
+    expect(pagefindCsp).not.toContain("challenges.cloudflare.com");
+    expect(pagefindCsp).not.toContain("raven-secure-upload");
+  });
+
+  it("a partially-configured forms config (one placeholder left) is still treated as unconfigured", async () => {
+    const { buildHeaders } = await import("../scripts/gen-headers.mjs");
+    const halfConfigured = {
+      workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
+      siteId: "golfraven",
+      turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
+    };
+    const text = buildHeaders({}, halfConfigured);
+    expect(text).toContain("forms-config.mjs isFormsConfigured()=false");
+    const rootCsp = resolveHeaders(parseHeadersFile(text), "/index.html")["Content-Security-Policy"];
+    expect(rootCsp).not.toContain("challenges.cloudflare.com");
+    expect(rootCsp).not.toContain("raven-secure-upload");
+  });
+});
