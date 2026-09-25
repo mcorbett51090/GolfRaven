@@ -844,3 +844,23 @@ identity, not merely equal values).
     run only after the transaction's winner is known (losing the "signal every attempt" property this
     round's other fixes deliberately established) or de-duplicating fraud_signal rows by content — a
     genuine design trade-off, not a one-line fix, and left open.
+
+## Accepted follow-ups at the P3c gate PASS (2026-09-25, round 4, `57657e4`)
+
+The P3c security gate passed with no blocking findings. The reviewer drove the real entrypoints over
+HTTP against Postgres. The earlier follow-ups (6–12) still stand. These were added at the pass:
+
+13. **503 after a successful commit (should-fix before real clients use prefetch).**
+    - The 15 s HTTP request race can return 503 while the transaction later commits.
+    - This is safe for evidence: a retry returns `replay:true`.
+    - For `checkin-challenge` and `checkin-token`, secrets are issued but never delivered. A 503'd
+      prefetch can fill the device's 10-challenge cap for 24 hours, and a 503'd token leaves its
+      challenge consumed.
+    - Fix either way:
+      - make the database give up before the HTTP timeout (`SET LOCAL statement_timeout` and
+        `lock_timeout` below 15 s inside `withOwnership`);
+      - or make challenge and token issuance idempotent by a client request id.
+14. **Nits.**
+    - `buildRepo` still takes a `db` parameter it no longer uses.
+    - The CI lockfile tamper step treats any non-zero exit as a pass. It should assert exit 10 or
+      the "Integrity check failed" message, so a lockfile path or parse error can't pass.
