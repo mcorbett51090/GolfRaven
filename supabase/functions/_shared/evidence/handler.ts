@@ -256,6 +256,45 @@ function toHex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** P3d gate round 4, F1 (blocking): "the dedup drops later quarantine
+ * signals on the same play." The prior fraud_signal dedupe (P3d gate
+ * round 3, S2) was keyed on `(kind, playId)` alone — a SECOND finalize
+ * that quarantined a DIFFERENT row (q2) on the SAME play as an earlier
+ * quarantine (q1) was silently swallowed as "already signaled",
+ * violating security doc §3's own requirement that EVERY on-play
+ * quarantine raise a signal naming the play, the row's original index
+ * and its reasons — q2 never got its own signal at all.
+ *
+ * This computes a canonical digest over the FULL SET of currently
+ * quarantined rows (id + reasons) a single scoring pass found, which
+ * `Repo#fraudSignal.insert` (privileged.ts) now dedupes ON, together
+ * with playId, against a real partial unique index (0022) — so a
+ * REPEAT finalize over the EXACT SAME quarantined set is still a no-op
+ * (idempotent, P3d gate round 3's own original ask), but a DIFFERENT
+ * set (q2 newly present, or q1 no longer present) is a DIFFERENT digest
+ * and raises its own signal.
+ *
+ * Double-sorted so the SAME logical quarantine set always canonicalizes
+ * to the SAME bytes regardless of scan order: each row's own `reasons`
+ * array (the scorer/parser gives no ordering guarantee there) AND the
+ * row list itself (by id). `evidenceForScoring[r.index].id` — never the
+ * caller's own `rows`/`priorRows` array directly — because `r.index` is
+ * defined (parse-evidence.ts's own `ExcludedRow.index` doc) as the
+ * position in the array actually HANDED TO the parser, which is exactly
+ * `evidenceForScoring` at both call sites below (each entry already
+ * carries the real stored row's own `id`, via `reconstructOneStoredRow`/
+ * the fresh-row literal). */
+async function computeQuarantineDigest(excludedRows: readonly { index: number; reasons: string[]; kind: string }[], evidenceForScoring: readonly Record<string, unknown>[]): Promise<string> {
+  const entries = excludedRows
+    .filter((r) => r.kind === "quarantined")
+    .map((r) => ({ id: String(evidenceForScoring[r.index]?.id ?? ""), reasons: [...r.reasons].sort() }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const canonical = JSON.stringify(entries);
+  const bytes = new TextEncoder().encode(canonical);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice());
+  return toHex(digest);
+}
+
 export type DigestFn = (algorithm: "SHA-256", data: BufferSource) => Promise<ArrayBuffer>;
 
 /** P3c gate round 3, blocking HIGH 1+2: a canonical SHA-256 hash (hex) of
@@ -897,13 +936,17 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   if (outcome.excludedRows.some((r) => r.kind === "quarantined")) {
     // security doc §3: "Every ON-PLAY quarantine... must raise a
     // fraud_signal or create a review_item." should-fix (P3c gate round
-    // 2): include play_id.
+    // 2): include play_id. P3d gate round 4, F1: quarantineDigest is the
+    // dedupe key (together with playId) `Repo#fraudSignal.insert` uses
+    // against the new partial unique index (0022) — see
+    // `computeQuarantineDigest`'s own doc for why.
     await repo.fraudSignal.insert("quarantined_evidence_row", {
       playId: play.id,
       facilityId: resolvedFacilityId,
       courseId: resolvedCourseId,
       localDate: submission.localDate,
       excludedRows: outcome.excludedRows.filter((r) => r.kind === "quarantined"),
+      quarantineDigest: await computeQuarantineDigest(outcome.excludedRows, evidenceForScoring),
     });
   }
 
@@ -994,6 +1037,7 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
       courseId,
       localDate,
       excludedRows: outcome.excludedRows.filter((r) => r.kind === "quarantined"),
+      quarantineDigest: await computeQuarantineDigest(outcome.excludedRows, evidenceForScoring),
     });
   }
 

@@ -714,30 +714,60 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       // signal on each retry." `finalizeScoringForKey` (evidence/
       // handler.ts) can now genuinely run twice for the SAME play — once
       // from a batch's own phase 2b, once more from `buildReplayResult`'s
-      // new live-retry path (this same round's S2 fix) if a client
-      // retries after an interrupted batch — and both passes independently
-      // decide whether a quarantine signal is warranted from the SAME
-      // underlying evidence rows, so a naive unconditional INSERT would
-      // raise it twice. Deduped on (kind, detail->>'playId') via a single
-      // atomic `INSERT ... SELECT ... WHERE NOT EXISTS` (not a separate
-      // SELECT-then-INSERT, which would leave a race window) whenever the
-      // caller's own `detail` carries a `playId` — every current
-      // `quarantined_evidence_row` call site does. A `detail` with no
-      // `playId` (the `clock_skew` kind, keyed on `fixIds` instead) has no
-      // dedupe key to work from and is left exactly as before — always
-      // inserts, never silently dropped.
+      // live-retry path — and both passes independently decide whether a
+      // quarantine signal is warranted from the SAME underlying evidence
+      // rows, so a naive unconditional INSERT would raise it twice.
+      //
+      // ⛔ FIX (P3d gate round 4, F1, BLOCKING): the round-3 version above
+      // deduped on `(kind, detail->>'playId')` ALONE — found this round to
+      // silently drop a SECOND, genuinely DIFFERENT quarantine signal on
+      // the SAME play (a q2 malformed row found alongside/after an
+      // earlier q1), violating security doc §3's own "every on-play
+      // quarantine... naming the row and its reasons" requirement, and
+      // (independently) `INSERT ... SELECT ... WHERE NOT EXISTS` is not
+      // safe under real concurrency without a backing unique constraint —
+      // two simultaneous finalizes could both pass the NOT EXISTS check
+      // before either commits.
+      //
+      // FIX: dedupe key widened to `(playId, quarantineDigest)` — a
+      // canonical digest over the FULL quarantined-row SET a single
+      // scoring pass found (`evidence/handler.ts#computeQuarantineDigest`,
+      // the ONLY place that knows enough domain shape to compute it — not
+      // duplicated here). Enforced by a REAL partial unique index on
+      // `app.fraud_signal` (0022, `WHERE kind = 'quarantined_evidence_row'`),
+      // via `INSERT ... ON CONFLICT (...) DO NOTHING` against that index —
+      // atomic, so this is now safe under genuine concurrency too (proven
+      // this round: 4 concurrent finalizes of the SAME quarantine set
+      // produce exactly 1 row). A `detail` with no `playId` (the
+      // `clock_skew` kind, keyed on `fixIds` instead) is untouched by any
+      // of this — always inserts, never deduped, same as before.
+      //
+      // Scoped STRICTLY to `kind === "quarantined_evidence_row"`: the
+      // partial index only exists for that kind, so using `ON CONFLICT`
+      // for any other kind would either match nothing (harmless no-op
+      // clause) or, worse, silently mask a real constraint-name typo — a
+      // plain unconditional insert for every OTHER kind is simpler and
+      // exactly as correct.
       async insert(kind: string, detail: Record<string, unknown>): Promise<void> {
-        const playId = typeof detail.playId === "string" ? detail.playId : null;
-        if (playId === null) {
+        if (kind !== "quarantined_evidence_row") {
           await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
           return;
         }
+        const playId = typeof detail.playId === "string" ? detail.playId : null;
+        const quarantineDigest = typeof detail.quarantineDigest === "string" ? detail.quarantineDigest : null;
+        if (playId === null || quarantineDigest === null) {
+          // Every REAL call site (evidence/handler.ts) always computes
+          // both before calling this — a missing one here is this
+          // codebase's own bug, not a client-triggerable shape, and
+          // silently falling back to an undeduped insert would defeat
+          // the entire point of this fix. Fail loud.
+          throw new Error(`Repo#fraudSignal.insert: kind "quarantined_evidence_row" requires detail.playId and detail.quarantineDigest to both be strings (got playId=${JSON.stringify(detail.playId)}, quarantineDigest=${JSON.stringify(detail.quarantineDigest)})`);
+        }
         await trx`
           insert into app.fraud_signal (user_id, kind, detail)
-          select ${uid}, ${kind}, ${trx.json(detail as never)}
-          where not exists (
-            select 1 from app.fraud_signal where kind = ${kind} and detail ->> 'playId' = ${playId}
-          )
+          values (${uid}, ${kind}, ${trx.json(detail as never)})
+          on conflict ((detail ->> 'playId'), (detail ->> 'quarantineDigest')) where kind = 'quarantined_evidence_row'
+          do nothing
         `;
       },
     },

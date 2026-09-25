@@ -732,3 +732,49 @@ RESET ROLE;
 -- Restore 0016's exact hardened end-state — private_definer keeps only
 -- USAGE on schema private, never CREATE, once this migration finishes.
 REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- ============================================================================
+-- P3d gate round 4, F1 (BLOCKING): "the dedup drops later quarantine
+-- signals on the same play." Round 3's own fraud_signal dedupe
+-- (`Repo#fraudSignal.insert`, privileged.ts) was keyed on `(kind,
+-- detail->>'playId')` alone via an application-level `INSERT ... SELECT
+-- ... WHERE NOT EXISTS` — the reviewer's own repro: a malformed row q1
+-- on play P, finalized, raises 1 signal; a DIFFERENT malformed row q2 on
+-- the SAME play P, finalized again, raises... nothing (q1's signal is
+-- read as "already signaled for this play" and q2 is silently dropped),
+-- violating security doc §3's own "every on-play quarantine... naming
+-- the row and its reasons" requirement. Independently, a bare
+-- `WHERE NOT EXISTS` is not safe under real concurrency without a
+-- backing unique constraint: two simultaneous finalizes for the SAME
+-- quarantine set could both pass the check before either commits.
+--
+-- FIX: a REAL partial unique index, on `(detail->>'playId',
+-- detail->>'quarantineDigest')`, scoped to `kind =
+-- 'quarantined_evidence_row'` only (every OTHER fraud_signal kind is
+-- completely unaffected by this index — no predicate of theirs ever
+-- matches it). `quarantineDigest` (evidence/handler.ts's new
+-- `computeQuarantineDigest`) is a canonical digest over the FULL SET of
+-- rows a single scoring pass actually quarantined (id + reasons, doubly
+-- sorted so the SAME logical set always digests to the SAME bytes) — so
+-- REPLAYING the exact same quarantine set is still deduped (idempotent,
+-- round 3's own original ask), while q1-then-q2 (a DIFFERENT set) gets
+-- its own, different digest and therefore its own signal.
+-- `Repo#fraudSignal.insert` now does `INSERT ... ON CONFLICT (...)
+-- WHERE kind = 'quarantined_evidence_row' DO NOTHING` against this exact
+-- index — atomic, so the concurrency gap above is closed too (proven
+-- this round: 4 concurrent finalizes of the SAME quarantine set produce
+-- exactly 1 row, supabase/tests/integration/repo.deno.test.ts).
+--
+-- Existing-data check (before adding a UNIQUE index, since a live
+-- duplicate would make CREATE UNIQUE INDEX itself fail): grepped every
+-- migration (0001-0021, frozen) and supabase/tests/helpers.sql for
+-- `quarantined_evidence_row` — the ONLY fraud_signal fixture row
+-- anywhere (helpers.sql's own M5 seed, `kind = 'manual_review_seed'`)
+-- has a DIFFERENT kind, so it is entirely outside this index's own
+-- partial predicate and cannot conflict.
+CREATE UNIQUE INDEX fraud_signal_quarantine_dedupe_idx
+  ON app.fraud_signal ((detail ->> 'playId'), (detail ->> 'quarantineDigest'))
+  WHERE kind = 'quarantined_evidence_row';
+
+COMMENT ON INDEX app.fraud_signal_quarantine_dedupe_idx IS
+  'P3d gate round 4, F1: the ON CONFLICT arbiter Repo#fraudSignal.insert (privileged.ts) targets for kind = quarantined_evidence_row -- dedupes on (playId, quarantineDigest), never on playId alone, so a DIFFERENT quarantined-row set on the same play still raises its own signal.';

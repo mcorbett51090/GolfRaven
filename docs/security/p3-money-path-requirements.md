@@ -1319,3 +1319,138 @@ closed this round.
   script during THIS session (copying the repo to a separate `/tmp` directory and tampering with the
   copy) was likewise deleted immediately afterward — `git status --short` was re-checked clean of any
   such artifact before this report was written.
+
+## P3d gate round 4 (2026-09-25): F1 (blocking), S-a1, S-a2
+
+The re-review on round 3's own commit (`d7c7127`) confirmed B1 and S1–S4 all fixed, and found one new
+blocking MEDIUM (F1) plus two advisory items (S-a1, S-a2) in the round-3 work itself. All three closed
+this round; 0021 and earlier remain untouched (verified again below), and 0022 (still unmerged) is
+where every schema change in this round went.
+
+- **F1 (BLOCKING): the fraud-signal dedupe dropped a genuinely DIFFERENT quarantine signal on the
+  SAME play — CLOSED.** Round 3's `Repo#fraudSignal.insert` (`privileged.ts`) deduped on `(kind,
+  detail->>'playId')` alone. Reviewer's repro: a malformed row q1 on play P, finalized, raises 1
+  signal; a DIFFERENT malformed row q2 on the SAME play P, finalized again, raised **nothing** — q1's
+  earlier signal was read as "already signaled for this play" and q2 was silently dropped, violating
+  security doc §3's own "every on-play quarantine... naming the row and its reasons" requirement.
+  Independently, the round-3 mechanism (`INSERT ... SELECT ... WHERE NOT EXISTS`) was never safe under
+  real concurrency without a backing unique constraint.
+
+  Fix: `evidence/handler.ts`'s new `computeQuarantineDigest` computes a canonical digest over the FULL
+  SET of rows a single scoring pass actually quarantined — each row's own `id` (resolved via
+  `evidenceForScoring[excludedRow.index].id`, never a separate lookup) plus its `reasons`, doubly
+  sorted (each row's own `reasons` array, then the row list itself by id) so the SAME logical
+  quarantine set always canonicalizes to the SAME SHA-256 hex digest, stored as `detail.quarantineDigest`
+  and computed at BOTH call sites (the single-item scoring tail and `finalizeScoringForKey`).
+  `supabase/migrations/0022_export_and_delete_hardening.sql` (still unmerged, appended to — never
+  0021 or earlier) adds a partial unique index,
+  `fraud_signal_quarantine_dedupe_idx ON app.fraud_signal ((detail->>'playId'), (detail->>'quarantineDigest'))
+  WHERE kind = 'quarantined_evidence_row'` — scoped to that ONE kind only, every other fraud_signal
+  kind (e.g. `clock_skew`) is completely unaffected. `Repo#fraudSignal.insert` now does
+  `INSERT ... ON CONFLICT ((detail->>'playId'), (detail->>'quarantineDigest')) WHERE kind =
+  'quarantined_evidence_row' DO NOTHING` against that exact index — atomic, so a REPLAY of the exact
+  same quarantine set is still idempotent (round 3's own original ask), a DIFFERENT set on the same
+  play raises its own signal, and the whole thing is now genuinely concurrency-safe. A
+  `quarantined_evidence_row` call with no `playId`/`quarantineDigest` (should never happen — every
+  real call site always computes both) throws loudly rather than silently falling back to an undeduped
+  insert.
+
+  Existing-data check before adding the unique index (a live duplicate would make `CREATE UNIQUE
+  INDEX` itself fail): grepped every frozen migration (0001–0021) and `supabase/tests/helpers.sql` for
+  `quarantined_evidence_row` — the only fraud_signal fixture row anywhere (helpers.sql's own M5 seed)
+  has a different kind (`manual_review_seed`), entirely outside this index's partial predicate.
+
+  Tests: `supabase/tests/integration/evidence-batch.deno.test.ts` — the real q1-then-q2 repro through
+  the actual scorer/handler path (two already-stored evidence rows, each corrupted in place via a
+  direct SQL `summary` override — an unpadded `localDate` and a trailing-space `facilityId`, both
+  proven-quarantined shapes from `packages/rules/test/parse-evidence.test.ts`): finalize after q1 →
+  1 signal; finalize after q2 joins → 2 signals, the second one's `excludedRows` naming q2 (its
+  `facilityId` reason text present only in the second, not the first); a third finalize with no new
+  corruption (replaying q1+q2) stays at 2. `supabase/tests/integration/repo.deno.test.ts` — the
+  mechanism-level proof directly against `Repo#fraudSignal.insert`: same digest twice → 1 row;
+  different digest, same play → 2 rows; different play → its own row; a no-playId kind never deduped;
+  and a NEW test, **4 concurrent inserts for the identical `(playId, quarantineDigest)` → exactly 1
+  row** (proving the atomic `ON CONFLICT` closes the concurrency gap the old `WHERE NOT EXISTS` had).
+  pgTAP (`supabase/tests/matrix/13_evidence_intake.sql`, `plan()` 24→28): the partial unique index
+  exists with the right shape (`pg_indexes` introspection), and a live duplicate
+  `INSERT ... ON CONFLICT ... DO NOTHING` against it is a genuine no-op (row count stays 1, not
+  asserted in prose). File:line: `supabase/functions/_shared/evidence/handler.ts`
+  (`computeQuarantineDigest`, right after `toHex`; both call sites' `fraudSignal.insert(...)` calls);
+  `supabase/functions/_shared/privileged.ts` (`fraudSignal.insert`, rewritten);
+  `supabase/migrations/0022_export_and_delete_hardening.sql` (the new index, appended after
+  `delete_my_data`'s `REVOKE CREATE ON SCHEMA private`).
+
+- **S-a1: the immutability gate could pass vacuously on a bad base — CLOSED.**
+  `tools/db/check-migrations-immutable.sh`: `--base` is now validated with
+  `git rev-parse --verify --quiet "$BASE_REF^{commit}"` (not a bare `rev-parse --verify`, so a ref
+  that resolves to something OTHER than a commit is also rejected) and exits 2 if it fails — closes
+  the "a typo'd/unfetched ref silently compares against nothing and reports OK" gap. The `|| true` on
+  the `git ls-tree` call (was line ~146) is gone — a real `ls-tree` failure now propagates (the script
+  already runs under `set -euo pipefail`). The script also now counts how many migration files the
+  base actually lists and fails loudly (exit 2) if that count is zero — a base that resolves cleanly
+  but genuinely has no `supabase/migrations/` files is the same "vacuous pass" shape reached a
+  different way. `--self-test` gained two new must-fail cases, both invoking the real script as a real
+  subprocess (not just asserting the failure mode in prose): a nonexistent `--base`
+  (`refs/heads/this-ref-does-not-exist-...`) and a `--base` built from git's own well-known empty-tree
+  object via `git commit-tree` (a real, valid, but deliberately empty commit — never referenced by any
+  branch/tag/ref, so it neither touches the working tree nor becomes reachable history). File:line:
+  `tools/db/check-migrations-immutable.sh` (the `^{commit}` validation right after `resolve_base_ref`
+  is applied; the `MIGRATION_COUNT` check right after the comparison loop; the two new must-fail cases
+  inside `self_test()`).
+
+- **S-a2: on `push: main` the job compared main against itself — CLOSED.** `.github/workflows/ci.yml`'s
+  `db-tests` job: on a `push` event (this workflow's `on.push.branches: [main]`), `origin/main` at
+  checkout time already equals the just-pushed HEAD — the round-3 step's `--base origin/main` compared
+  the new commit's migrations against themselves and could never fail regardless of what the push
+  actually changed. Fixed: on `push`, the base is now `github.event.before` (main's tip immediately
+  BEFORE this push), passed via `env:` (never interpolated directly into the shell body, per GitHub's
+  own event-context hardening guidance) — skipped ONLY when `before` is the all-zero SHA (a brand-new
+  branch reaching `main` for the first time, or a history rewrite with no real prior tip; nothing to
+  compare against in that one shape). `pull_request` keeps `--base origin/main` unchanged (a PR's base
+  is main's current tip, which the PR's own commits have not landed on yet — the round-3 bug never
+  applied there). Checkout depth: `fetch-depth: 0` (already set round 3) unshallows the WHOLE history,
+  not merely `origin/main`'s tip, so `event.before`'s own commit is always resolvable. Verified locally
+  by simulating both branches of the new shell logic with `GH_EVENT_NAME`/`GH_EVENT_BEFORE` env vars
+  set by hand — the real-base case ran the real check against `origin/main`'s own prior tip
+  successfully, and the all-zero-SHA case printed the skip message without invoking the script at all.
+  File:line: `.github/workflows/ci.yml`, `db-tests` job, the "Migrations are immutable once merged"
+  step (now carries an `env:` block and the `push`/`pull_request` branch).
+
+- **Verify, exact commands and results (re-run after every fix above):**
+  - `HARNESS_MODE=restricted tools/db/test.sh` → exit 0. pgTAP: **432/432 assertions, 14 files, all
+    pass** (up from 428 — `13_evidence_intake.sql`'s 4 new F1 assertions). Deno integration: **50/50
+    tests, 0 failed** (up from 48 — the new q1-then-q2 repro test and the 4-concurrent-finalizes
+    test).
+  - `HARNESS_MODE=superuser tools/db/test.sh` → exit 0, same 432/432 pgTAP, 50/50 Deno.
+    `verify-function-inventory: OK`. `service-role-lint: clean`.
+  - `PG_BIN_DIR=/usr/lib/postgresql/16/bin HARNESS_MODE=superuser tools/db/test.sh` → exit 0, same
+    432/432 pgTAP, 50/50 Deno; transaction_timeout test still self-skips on PG16.
+  - `pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts` →
+    **114/114 tests, 12 files** (unchanged — no unit-level surface touched this round).
+  - `pnpm -r typecheck` → exit 0, 0 errors.
+  - `deno check --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen
+    supabase/tests/integration/` → clean, no lockfile drift.
+  - `node tools/service-role-lint/dist/cli.js supabase/functions` → `clean`. Its own suite
+    (`pnpm --filter @golfraven/service-role-lint test`, after `run build`) → **112/112 tests, 4 files**
+    (unchanged).
+  - `tools/db/check-migrations-immutable.sh --self-test` → OK, including the two NEW must-fail cases
+    (nonexistent base; zero-migration base).
+  - `tools/db/check-migrations-immutable.sh --base origin/main` → OK — 21/21 migration files
+    (0001–0021) byte-identical; confirms 0021 and earlier are STILL untouched this round too.
+  - `gitleaks git . --config .gitleaks.toml --redact --exit-code 1` (checksum-pinned 8.30.1): no leaks
+    found (28 commits scanned).
+  - `gitleaks dir . --config .gitleaks.toml --redact --exit-code 1`: no leaks found (~11.59 MB
+    scanned).
+
+- **Touch-scope / constraint compliance.** Only `supabase/functions/_shared/evidence/handler.ts`,
+  `supabase/functions/_shared/privileged.ts`, `supabase/migrations/0022_export_and_delete_hardening.sql`
+  (still unmerged — schema changes went here, never 0021 or earlier), `supabase/tests/integration/
+  {evidence-batch,repo}.deno.test.ts`, `supabase/tests/matrix/13_evidence_intake.sql`,
+  `tools/db/check-migrations-immutable.sh`, `.github/workflows/ci.yml`, and this append-only doc
+  section were touched. 0023 and later were never referenced or created. `/home/user/golfraven-p3e`
+  and `/tmp/gr-gate*` were never touched (all work stayed under `/home/user/golfraven`, using
+  `/tmp/gitleaks-bin` and `/tmp/check-migrations-immutable-selftest.*` only — the latter cleaned up by
+  the self-test's own `trap ... EXIT`). No FORCE RLS removed, no RLS policy broadened. No mutation-proof marker
+  string or other planted marker left anywhere in the tree — confirmed via
+  a whole-tree grep for the mutation marker (no matches) and a final `git status --short` re-check before writing this
+  report. Nothing committed — HEAD stays at `d7c7127` in the working tree for review.

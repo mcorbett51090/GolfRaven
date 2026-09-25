@@ -19,7 +19,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import { createTestUser, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, CRS_X1 } from "./_helpers.ts";
 import { hitRateLimitForActor, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleEvidenceBatchIntake, RATE_LIMIT_PER_USER_DAY } from "../../functions/_shared/evidence/batch-handler.ts";
-import { handleEvidenceIntake, type EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
+import { handleEvidenceIntake, finalizeScoringForKey, type EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
 import { handleChallengeRequest } from "../../functions/_shared/checkin/challenge-handler.ts";
 import { handleTokenRequest } from "../../functions/_shared/checkin/token-handler.ts";
 
@@ -270,3 +270,74 @@ Deno.test("P3d gate round 3, S2: a live (non-batch) retry after a phase-A-only c
   const afterPlays = await rawCount(`select count(*)::int as n from app.play where course_id = '${courseId}'`);
   assertEquals(afterPlays, 1, "the live retry created exactly one app.play row for the group that was left unscored");
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3d gate round 4, F1 (BLOCKING): "the dedup drops later quarantine
+// signals on the same play." The reviewer's own repro, through the REAL
+// scorer/handler path (not the lower-level Repo#fraudSignal.insert
+// mechanism proof in repo.deno.test.ts): q1 quarantined on play P,
+// finalize → 1 signal; a DIFFERENT malformed row q2 quarantined on the
+// SAME play P, finalize again → 2 signals, the second naming q2. Then:
+// replaying the SAME quarantine set → still 2 (no third signal).
+//
+// Quarantine is forced by corrupting an ALREADY-STORED row's own
+// `summary` jsonb via a direct SQL UPDATE (never by hand-crafting a raw
+// insert from scratch — `summary` is exactly what a real submission
+// produces, this only overrides ONE field of it afterward), reusing two
+// shapes `packages/rules/test/parse-evidence.test.ts` already proves are
+// quarantined-not-off-play: an unpadded `localDate` ("2026-6-1") and a
+// `facilityId` with a trailing space (`reconstructOneStoredRow`'s own
+// `{..., ...row.summary}` spread means a `summary.localDate`/
+// `summary.facilityId` key OVERRIDES the real DB column's value in the
+// object scorePlay actually re-parses).
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3d gate round 4, F1: q1 then q2 on the SAME play — 2 signals, the second naming q2; replaying the same set stays at 2", DT, async () => {
+  const actor = await withFreshUser("f1-q1-q2-repro");
+  const courseId = `crs_f1repro_${freshUuid().slice(0, 8)}`;
+  await createCourseWithPolygonAtFacX(courseId);
+  const localDate = "2026-06-01";
+
+  // One genuinely VALID item, scored normally — keeps the play backed by
+  // at least one clean, contributing row throughout, so every finalize
+  // below still succeeds (never "zero valid evidence") regardless of how
+  // many OTHER rows are quarantined alongside it.
+  const good = await evidenceBody(actor, checkinBody({ courseId, localDate }));
+  assertEquals(good.status, "accepted");
+
+  // q1: inserted via the SAME deferScoring/batchMode shape a batch's own
+  // phase 2a uses (insert-only, no scoring attempt yet), then its OWN
+  // `summary` corrupted in place with a malformed (unpadded) localDate.
+  const q1 = await withOwnership(actor, (repo) => handleEvidenceIntake(checkinBody({ courseId, localDate, deviceId: freshUuid(), fix: { ...(checkinBody().fix as object), fixId: `fix_${freshUuid()}` } }), repo, { deferScoring: true, batchMode: true }));
+  assertEquals(q1.status, "deferred");
+  if (q1.status !== "deferred") throw new Error("unreachable");
+  await rawCount(`with upd as (update app.evidence set summary = summary || '{"localDate":"2026-6-1"}'::jsonb where id = '${q1.evidenceId}' returning 1) select count(*)::int as n from upd`);
+
+  await withOwnership(actor, (repo) => finalizeScoringForKey(repo, FAC_X, courseId, localDate));
+  const nAfterQ1 = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'courseId' = '${courseId}'`);
+  assertEquals(nAfterQ1, 1, "q1 alone quarantined -> exactly 1 signal");
+  const detailAfterQ1 = await rawCount(`select (case when (detail -> 'excludedRows')::text ilike '%facilityId%' then 1 else 0 end)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'courseId' = '${courseId}' order by created_at desc limit 1`);
+  assertEquals(detailAfterQ1, 0, "q1's own signal does not mention facilityId (q2's own reason) yet");
+
+  // q2: a DIFFERENT malformed row (facilityId, trailing space), same
+  // mechanism.
+  const q2 = await withOwnership(actor, (repo) => handleEvidenceIntake(checkinBody({ courseId, localDate, deviceId: freshUuid(), fix: { ...(checkinBody().fix as object), fixId: `fix_${freshUuid()}` } }), repo, { deferScoring: true, batchMode: true }));
+  assertEquals(q2.status, "deferred");
+  if (q2.status !== "deferred") throw new Error("unreachable");
+  await rawCount(`with upd as (update app.evidence set summary = summary || '{"facilityId":"fac_x "}'::jsonb where id = '${q2.evidenceId}' returning 1) select count(*)::int as n from upd`);
+
+  await withOwnership(actor, (repo) => finalizeScoringForKey(repo, FAC_X, courseId, localDate));
+  const nAfterQ2 = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'courseId' = '${courseId}'`);
+  assertEquals(nAfterQ2, 2, "F1's own repro: q2 (a DIFFERENT quarantined row on the SAME play) raises its OWN, second signal — not silently dropped by the dedupe");
+  const secondNamesQ2 = await rawCount(`select (case when (detail -> 'excludedRows')::text ilike '%facilityId%' then 1 else 0 end)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'courseId' = '${courseId}' order by created_at desc limit 1`);
+  assertEquals(secondNamesQ2, 1, "the SECOND signal names q2 (its facilityId reason appears in the most recently created row)");
+
+  // Replaying the exact SAME quarantine set (q1 + q2, no new corruption)
+  // must NOT raise a third signal.
+  await withOwnership(actor, (repo) => finalizeScoringForKey(repo, FAC_X, courseId, localDate));
+  const nAfterReplay = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'courseId' = '${courseId}'`);
+  assertEquals(nAfterReplay, 2, "replaying the SAME quarantine set (q1+q2 again) stays at 2 -- idempotent, round 3's own original ask");
+});
+
+async function evidenceBody(actor: Awaited<ReturnType<typeof withFreshUser>>, body: unknown): Promise<EvidenceIntakeResult> {
+  return withOwnership(actor, (repo) => handleEvidenceIntake(body, repo));
+}
