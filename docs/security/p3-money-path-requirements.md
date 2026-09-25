@@ -398,3 +398,53 @@ these open items as follow-ups. None of them is exploitable against the current 
    Functions ship.
 5. **`attestation_grade`.** It still defaults to `'unattestable'`. Adding a "never graded" enum
    value is deferred until the scoring Edge Function exists.
+
+## P3c status (2026-09-25): the Edge Functions now exist
+
+`POST /v1/evidence`, `POST /v1/evidence/batch`, `POST /v1/checkin/challenge` (incl. prefetch) and
+`checkin-token` are built (`supabase/functions/{evidence,evidence-batch,checkin-challenge,checkin-token}/`).
+Status against this doc's own items:
+
+- **§1 (server-derived fields) — enforced.** `fixId`/`facilityId`/`verificationTier`/`geometryKind`/
+  `insideBuffer`/`challenge`/`token` grade are all derived server-side
+  (`supabase/functions/_shared/evidence/derive-fix.ts`), never taken from the client beyond raw
+  lat/lng/accuracy/timestamps. `insideBuffer` is REAL PostGIS `ST_DWithin` against
+  `app.catalog_course.boundary`/`radius_center` (`Repo#matchFix`, `privileged.ts`) — not a stub.
+  `fixId` is pinned to unpadded base64url at the request-shape layer
+  (`supabase/functions/_shared/evidence/request-shape.ts`).
+- **§2 (each row type from its own path) — enforced.** `staff_presence`/`booking`/`receipt_green_fee`/
+  `arccos`/`garmin`/`ghin` are rejected outright at `POST /v1/evidence` (`request-shape.ts`'s
+  `REJECTED_SOURCES`) — none of their own server paths (partner-attest, the P7 webhook, the receipts
+  endpoint, the P8 connectors) are built yet. `courseId: null` (vs. omitted) is rejected as a
+  structural error, matching the OMITTED-not-null rule.
+- **§3 (limits/fraud signals) — enforced for what's in scope.** Clock skew > 24h, a `failed`-grade
+  fix, and an on-play quarantine (`scorePlay`'s own `excludedRows`) each raise a `fraud_signal` at
+  intake (`evidence/handler.ts`). Rate limits (60/user/h evidence, 200/device/day, 2000/user/day
+  batch, 30/user/h challenges, 10 unused prefetched/device) are wired via `private.hit_rate_limit`.
+- **§4/§5 (persisting, receipts) — money-path columns persisted verbatim** (`money`, `heldReview`,
+  `hardSignal`, `policyVersion`, `inputDigest` from the scorer's own result, never recomputed).
+  Receipts/fingerprints are out of scope this round (no receipt-upload endpoint yet).
+- **Catalog skew (AT 8/15, G3-10) — implemented, with one honest deferral.** Version-window
+  classification (current/within-5-releases-and-30-days / stale / forged) is real
+  (`_shared/catalog/classify-version.ts`). Ed25519 manifest-signature verification is a REAL,
+  unit-tested primitive (`_shared/catalog/signature.ts`, Web Crypto — confirmed working under both
+  Deno 2.5.2 and this session's Node/vitest run) against a new, empty-by-default
+  `app.catalog_signing_key` table (0019 migration) — so every "newer version" claim fails closed to
+  `422 catalog_forged` in THIS environment (no keys are provisioned; the §4.8 key-rotation/
+  registration workflow and the import pipeline are both still out of scope). The 202-queued outcome
+  IS reachable in code (a registered key + a real signature would produce it — see
+  `classify-version.test.ts`), just not exercised by a real signed manifest in this environment.
+- **Deploy `--config` pin (item 4 above) — no longer merely `[unverified]` on the lint side.** This
+  session confirmed directly (`deno check`) that resolution DOES depend on passing
+  `--config supabase/functions/deno.json` explicitly — omitting it, even when invoked from the repo
+  root with the config file present at a fixed relative location, fails import-map resolution. The
+  hosted Edge Runtime's own deploy-time resolution is still unconfirmed; the requirement stands.
+- **Attestation — out of scope, exactly as directed.** `checkin-token` grades every submission via
+  the G3-08 "no token" rule (real App Attest/Play Integrity verification isn't built), so it can only
+  ever produce `unattestable` or `failed` this round, never `attested`.
+- **Dependency pin bump:** `supabase/functions/deno.json`'s `"zod"` entry moved from `3.23.8` to
+  `4.6.5` (matching `packages/rules`' own zod dependency, now that the scoring vendor tree actually
+  imports it for real) — `tools/service-role-lint/pinned-import-targets.json` updated to match, plus
+  three new pins (`@noble/hashes@2.4.0`'s two entry points, `tz-lookup@6.1.25`, and
+  `deno.land/std@0.224.0/http/server.ts` for `Deno.serve` — see `evidence/index.ts` et al.'s own
+  comments on why a direct `Deno.serve` reference doesn't pass the lint outside `privileged.ts`).

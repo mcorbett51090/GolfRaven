@@ -187,6 +187,17 @@ jobs:
         # the `verify` job runs) since nothing else in this job needs it.
         run: pnpm --filter @golfraven/service-role-lint build
 
+      - name: Build @golfraven/rules and its dependencies
+        # P3c: supabase/functions/_shared/scoring/vendor/ is a vendored
+        # copy of packages/rules/dist (+ the packages/catalog/dist slice
+        # it needs) — generate-bundle.sh's own freshness check
+        # (supabase/tests/unit/rules-vendor-freshness.test.ts, run below)
+        # regenerates from these dist/ builds and diffs, so they must
+        # exist and be current. `...` (pnpm filter syntax) pulls in
+        # @golfraven/rules' own workspace dependencies (@golfraven/
+        # catalog, @golfraven/matching) in the right build order.
+        run: pnpm --filter "@golfraven/rules..." build
+
       - name: Run tools/db/test.sh (HARNESS_MODE=superuser)
         # The harness owns its own throwaway cluster end to end (initdb,
         # start, shim, migrations, seed fixtures, pgTAP matrix, B4 replay/
@@ -217,6 +228,49 @@ jobs:
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: restricted
+
+      - name: Run supabase/tests/unit (vitest — P3c pure/DI'd handler modules)
+        # Task instruction: "put handler logic in pure, dependency-injected
+        # modules unit-testable without a live Supabase", tested under
+        # vitest since Deno is not installed by default in this CI image
+        # (mirrors the reviewer's own local session, which downloaded
+        # Deno 2.5.2 into /tmp to run `deno check`/`deno test` directly —
+        # see supabase/tests/vitest.config.ts's own header for why these
+        # tests need a small resolve-alias table at all: supabase/ is
+        # deliberately not a registered pnpm workspace package, so this
+        # runs FROM @golfraven/rules (which already depends on zod/
+        # @noble/hashes/tz-lookup at the exact versions supabase/
+        # functions/deno.json pins) rather than as its own package).
+        run: pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts
+
+      - name: Install Deno 2.5.2 (checksum-pinned) and run deno check
+        # Best-effort second signal alongside vitest: `deno check` type
+        # -checks every Edge Function entrypoint and shared module
+        # against Deno's OWN resolution (deno.json's import map,
+        # confirmed this session to require `--config` explicitly — see
+        # docs/security/p3-money-path-requirements.md's pre-existing
+        # "pin --config at deploy time" unverified flag, which this
+        # confirms is a real, live requirement, not merely theoretical).
+        # `deno test` is NOT run here: no test files are written in Deno's
+        # own test syntax this round (vitest covers the same modules
+        # above) — this step is purely a cross-runtime type-check signal.
+        run: |
+          set -euo pipefail
+          DENO_VERSION="2.5.2"
+          DENO_SHA256="520fd4bc2d18b50b6ac2ea8b7d0f7f6a35588e412754a081e8c6afd4b15264c4"
+          curl -fsSL -o /tmp/deno.zip \
+            "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip"
+          echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c -
+          mkdir -p /tmp/deno-bin
+          unzip -q -o /tmp/deno.zip -d /tmp/deno-bin
+          chmod +x /tmp/deno-bin/deno
+          /tmp/deno-bin/deno check --no-lock --config supabase/functions/deno.json \
+            supabase/functions/evidence/index.ts \
+            supabase/functions/evidence-batch/index.ts \
+            supabase/functions/checkin-challenge/index.ts \
+            supabase/functions/checkin-token/index.ts \
+            supabase/functions/_shared/privileged.ts
+          rm -f deno.lock
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
