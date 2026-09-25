@@ -23,6 +23,7 @@ import {
   insertCatalogVersion,
   insertSigningKey,
   rawCount,
+  rawEvidenceRow,
   FAC_X,
   CRS_X1,
   NASHVILLE,
@@ -209,6 +210,10 @@ Deno.test("item 4 end to end: a live checkin-token session makes a fix a REAL co
   );
   assertEquals(result.status, "accepted");
   if (result.status === "accepted") {
+    if (!result.play.presenceSignal) {
+      const row = await rawEvidenceRow(result.evidenceId);
+      console.error("DEBUG stored evidence row:", JSON.stringify(row, null, 2));
+    }
     assertEquals(result.play.presenceSignal, true, "a real, freshly-consumed live checkin-token + PostGIS-inside fix must be a real co-signal");
   }
 });
