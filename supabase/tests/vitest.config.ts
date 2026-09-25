@@ -31,6 +31,8 @@ function resolveFrom(pkgDir: string, specifier: string): string {
 const RULES_PKG = new URL("../../packages/rules", import.meta.url).pathname;
 const CATALOG_PKG = new URL("../../packages/catalog", import.meta.url).pathname;
 
+const REPO_ROOT = new URL("../..", import.meta.url).pathname;
+
 export default {
   root: new URL(".", import.meta.url).pathname,
   resolve: {
@@ -40,6 +42,9 @@ export default {
       "@noble/hashes/sha2.js": resolveFrom(RULES_PKG, "@noble/hashes/sha2.js"),
       "tz-lookup": resolveFrom(CATALOG_PKG, "tz-lookup"),
     },
+  },
+  server: {
+    fs: { allow: [REPO_ROOT] },
   },
   test: {
     include: ["unit/**/*.test.ts"],
