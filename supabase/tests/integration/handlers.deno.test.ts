@@ -196,7 +196,15 @@ Deno.test("item 4 end to end: a live checkin-token session makes a fix a REAL co
     checkinBody({
       deviceId,
       courseId,
-      fix: { ...checkinBody().fix as object, checkinTokenJti: token.jti },
+      // A live challenge's window is anchored to REAL wall-clock time
+      // (privileged.ts's own `now()`/`clock_timestamp()`) — unlike the
+      // fake-repo unit tests, which run on a fixed fake clock,
+      // checkinBody()'s own hardcoded 2026-06-01 capturedAt would fall
+      // OUTSIDE a challenge issued at the REAL current time, so this
+      // specific test (the only one in this file that actually needs its
+      // fix to land inside a live challenge's short TTL) overrides it to
+      // the real current instant.
+      fix: { ...checkinBody().fix as object, checkinTokenJti: token.jti, capturedAt: Date.now() },
     }),
   );
   assertEquals(result.status, "accepted");
@@ -264,7 +272,7 @@ Deno.test("item 7: device_limit_exceeded end to end once an actor already has 20
 // ─────────────────────────────────────────────────────────────────────────
 Deno.test("AT 15: a revoked-kid current version is 422 catalog_stale, against a REAL catalog_signing_key row", DT, async () => {
   const actor = await withFreshUser("revoked-kid");
-  const version = 900 + Math.floor(Math.random() * 1000);
+  const version = 88001;
   const kid = `kid-revoked-${freshUuid()}`;
   await insertSigningKey(kid, new Date()); // revoked now
   await insertCatalogVersion(version, new Date(), kid);
@@ -281,7 +289,7 @@ Deno.test("AT 15: a revoked-kid current version is 422 catalog_stale, against a 
 
 Deno.test("AT 8: a version far behind the real current is 422 catalog_stale", DT, async () => {
   const actor = await withFreshUser("stale-behind");
-  const version = 900 + Math.floor(Math.random() * 1000);
+  const version = 88002;
   const kid = `kid-fresh-${freshUuid()}`;
   await insertSigningKey(kid, null);
   await insertCatalogVersion(version, new Date(), kid);
