@@ -54,8 +54,9 @@ export const TURNSTILE_HOSTS = ["challenges.cloudflare.com"];
  * TODO(owner): complete `raven-site-kit/secure-upload`'s "Per-site
  * adoption runbook" (its README.md) for `golfraven`, then replace the two
  * `TODO(owner)` values below with the real ones. Nothing else in this
- * file, or in any form page, needs to change once these three values are
- * real.
+ * file, or in any form page, needs to change once those two values are
+ * real. `contactEmail` (below) is independent of that runbook and of
+ * `isFormsConfigured()` — see its own comment.
  */
 export const FORMS_CONFIG = {
   // TODO(owner): the shared secure-upload Worker's deployed URL, no
@@ -73,6 +74,18 @@ export const FORMS_CONFIG = {
   // SITE_SECRETS_JSON, never here, never in this repo). Create
   // golfraven's own Turnstile widget per the runbook's step 2.
   turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
+  // TODO(owner): a PUBLIC contact address for GolfRaven, if/when you want
+  // one published on the site (the claim/feedback forms' "email us
+  // instead" fallback text and mailto link). Deliberately left EMPTY
+  // rather than defaulting to anyone's personal address — publishing a
+  // personal email on a public site/repo is the owner's call, never this
+  // build's default. While empty, every form page renders NO mailto link
+  // and NO email text anywhere; the fallback copy reads "please check
+  // back soon" / "please try again later" instead (English and French).
+  // This is READ INDEPENDENTLY of isFormsConfigured() below — the forms
+  // can go live (workerUrl/turnstileSiteKey provisioned) with this still
+  // empty, and vice versa.
+  contactEmail: "",
 };
 
 /** True for an empty value or one still carrying the literal

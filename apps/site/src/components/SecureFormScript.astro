@@ -1,0 +1,461 @@
+---
+/**
+ * SecureFormScript.astro — whole-form progressive-enhancement wrapper for
+ * the owned secure-upload Cloudflare Worker (build plan §5.1: "Copy
+ * (rename) | same | `SecureFormScript` → the shared Worker with
+ * `siteId: 'golfraven'`"). Ported from `southern-wine-country`'s
+ * `src/components/SecureFormScript.astro` @ 572ff7e, adapted:
+ *   - to this site's design tokens (`src/styles/global.css`'s smaller
+ *     token set — no `--gold`/`--wine`/`--space-*`/`--font-ui`, unlike
+ *     SWC's richer stylesheet);
+ *   - to detect "unprovisioned" via `src/config/forms-config.mjs`'s
+ *     `isPlaceholderValue()` (a grep-able `TODO(owner)` marker) instead of
+ *     SWC's `/^your-/i` convention — both mean the same thing ("this site
+ *     hasn't been provisioned into the shared Worker yet"), the golfraven
+ *     config module's own placeholders just spell it differently (see
+ *     `forms-config.mjs`'s doc for why `workerUrl`/`turnstileSiteKey` are
+ *     the two values that stay owner-only).
+ *
+ * WHAT THIS DOES: one submit sends the WHOLE form to `workerUrl`, in-
+ * website — no mailto, no third-party form service. FIELDS-ONLY (v1, no
+ * file upload): POSTs directly to the Worker's `POST /submit` endpoint
+ * with `{ siteId, turnstileToken, formFields }` — the exact request the
+ * kit's `secure-upload.js submitForm()` builds on its no-files path.
+ * Skipping that helper (all upload/compression machinery a fields-only
+ * form never runs) is why `client/secure-upload.js` is NOT shipped here.
+ *
+ * SECURITY: every control that matters is enforced SERVER-SIDE by the
+ * Worker and is NOT reimplemented here — Turnstile siteverify, per-site
+ * CORS allow-list, rate-limit, and HTML-escaping of fields into the owner
+ * email (`raven-site-kit/secure-upload/README.md`'s security checklist).
+ * The client's whole job is: collect fields, attach the Turnstile token,
+ * and POST once to `workerUrl`. NO SECRETS ship from here — the only
+ * credential-shaped value is the PUBLIC Turnstile site key.
+ *
+ * DEMO/UNPROVISIONED-GUARD (this task's scope: "While the config is
+ * unset, a form must not pretend to submit. It shows a clear 'forms
+ * aren't live yet' state, and the build still passes"). While any of
+ * `workerUrl` / `siteId` / `turnstileSiteKey` is still a placeholder, this
+ * component (a) does NOT render the Turnstile widget or inject its
+ * loader/challenge-iframe hosts, and (b) the submit handler shows a
+ * friendly "forms aren't live yet" message and makes NO network call. The
+ * build stays green and the page stays usable before the owner
+ * provisions the real Worker/Turnstile values.
+ *
+ * USAGE — wrap it in the page's own `<form>` (see `src/pages/claim.astro`).
+ * **The page's `<form>` tag itself must carry the `data-worker-url`
+ * / `data-site-id` / `data-turnstile-site-key` / `data-success-message`
+ * / `data-contact-email` attributes** — set as plain, static HTML
+ * attributes in the page's own markup, NOT stamped on by a script here.
+ * (This repo's own whole-site invariant, `test/acceptance.test.ts`'s
+ * AT(7): no page may ever carry an inline `<script>` with executable
+ * content, JSON-LD aside — SWC's equivalent component used an
+ * `is:inline define:vars` script to stamp its form's config onto the
+ * `<form>` at runtime, which is exactly the shape AT(7) forbids here.
+ * Reading config from static attributes the page already rendered avoids
+ * needing that script at all — the module `<script>` below still reads
+ * `form.dataset.*` at runtime, only the WRITE side moved from a script to
+ * plain markup.)
+ *   <form
+ *     data-secure-form novalidate method="post"
+ *     data-worker-url={FORMS_CONFIG.workerUrl}
+ *     data-site-id={FORMS_CONFIG.siteId}
+ *     data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+ *     data-success-message="..."
+ *     data-unprovisioned-message="..."
+ *     data-generic-error-message="..."
+ *     data-contact-email={FORMS_CONFIG.contactEmail}
+ *   >
+ *     ...your text fields...
+ *     <SecureFormScript
+ *       workerUrl={FORMS_CONFIG.workerUrl}
+ *       siteId={FORMS_CONFIG.siteId}
+ *       turnstileSiteKey={FORMS_CONFIG.turnstileSiteKey}
+ *       contactEmail={FORMS_CONFIG.contactEmail}
+ *     />
+ *     <button type="submit">Send</button>
+ *   </form>
+ *
+ * `FORMS_CONFIG.contactEmail` is EMPTY in this repo today (deliberately —
+ * see `forms-config.mjs`'s own `TODO(owner)` on that field: publishing a
+ * personal address on a public site is the owner's call, not a default
+ * this build makes for them). Every message below is written to degrade
+ * honestly with no address at all: no mailto link, no email text
+ * anywhere, ever — see `data-unprovisioned-message`/
+ * `data-generic-error-message` above, which each page computes from
+ * `FORMS_CONFIG.contactEmail` itself (empty today → the no-email variant;
+ * a real address later → the "email us" variant, automatically).
+ */
+import { isPlaceholderValue } from "../config/forms-config.mjs";
+
+export interface Props {
+  /** Deployed Worker URL, no trailing slash. From `FORMS_CONFIG.workerUrl`.
+   *  Used here only to decide `unprovisioned` (build-time) — the page's own
+   *  `<form data-worker-url={...}>` attribute is what the client reads. */
+  workerUrl: string;
+  /** This site's siteId. From `FORMS_CONFIG.siteId`. Same "decides
+   *  `unprovisioned` only" note as `workerUrl` above. */
+  siteId: string;
+  /** PUBLIC Turnstile site key for this site's widget — decides
+   *  `unprovisioned` AND is rendered onto the widget div's `data-sitekey`. */
+  turnstileSiteKey: string;
+  /** From `FORMS_CONFIG.contactEmail` — empty until the owner sets a
+   *  PUBLIC contact address they're willing to publish (see
+   *  `forms-config.mjs`'s own `TODO(owner)`). When empty, the `<noscript>`
+   *  fallback below renders no mailto link and no email text at all —
+   *  never a hard-coded default address. */
+  contactEmail?: string;
+}
+
+const { workerUrl, siteId, turnstileSiteKey, contactEmail = "" } = Astro.props;
+
+// Build-time mirror of the client-side placeholder check below. A site
+// that hasn't been provisioned yet ships literal `TODO(owner)…` props —
+// in that state, don't render the Turnstile widget div or inject its
+// loader at all: a placeholder key is invalid on every domain and would
+// throw an uncaught `TurnstileError` while shipping dead third-party JS.
+// The unprovisioned-message path (submit handler below) fires on the fast
+// placeholder check alone and needs no live widget.
+const unprovisioned =
+  isPlaceholderValue(workerUrl) || isPlaceholderValue(siteId) || isPlaceholderValue(turnstileSiteKey);
+---
+
+{/* Turnstile renders its challenge into this div once api.js loads — only
+    rendered (and only loaded, see the loader below) once the site carries
+    real config. */}
+{!unprovisioned && <div class="cf-turnstile" data-sitekey={turnstileSiteKey}></div>}
+
+<!-- Honeypot: visually hidden; a checked box means a bot filled every field. -->
+<input type="checkbox" name="botcheck" class="hp" tabindex="-1" autocomplete="off" aria-hidden="true" />
+
+<!--
+  SC 4.1.3 Status Messages: this region is ALWAYS in the DOM and NEVER
+  hidden/display:none — a live region must already exist in the
+  accessibility tree when its text is injected or nothing is announced. It
+  has no visible box until [data-kind] is set (see the scoped style
+  below), so it costs nothing visually while empty.
+-->
+<p class="form-status" data-form-status role="status" aria-live="polite"></p>
+
+<noscript>
+  {/* No mailto link, no email text at all while contactEmail is empty
+      (the current, committed state — see this component's module doc). */}
+  {contactEmail ? (
+    <p class="secure-form__noscript">
+      Sending this form needs JavaScript. Until then, email
+      <a href={`mailto:${contactEmail}`}>{contactEmail}</a> with what you'd like to tell us.
+    </p>
+  ) : (
+    <p class="secure-form__noscript">Sending this form needs JavaScript. Please check back soon.</p>
+  )}
+</noscript>
+
+{/*
+  No Subresource Integrity hash on the Turnstile loader: intentional — the
+  Cloudflare loader is versionless and self-updates, so a pinned hash
+  would break on every rotation. Not injected at all when unprovisioned:
+  there is no widget to hydrate, so loading it would only ship dead bytes
+  and throw against the placeholder key.
+*/}
+{!unprovisioned && <script is:inline src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>}
+
+<script>
+  /**
+   * Whole-form progressive-enhancement submit handler for every
+   * `form[data-secure-form]` on the page. Astro bundles this once per page
+   * regardless of how many <SecureFormScript> instances are present; each
+   * form's config comes from the data-* attributes the PAGE's own <form>
+   * tag was rendered with (see this component's module doc — never a
+   * script here, and not from any value baked in below).
+   *
+   * FIELDS-ONLY (v1): posts directly to the Worker's `POST /submit` with
+   * { siteId, turnstileToken, formFields } — the same request shape the
+   * kit's secure-upload.js submitForm() sends on its no-files path, so
+   * this build carries no dependency on that helper. Every server-side
+   * control (Turnstile siteverify, per-site CORS, rate-limit, field
+   * escaping) stays in the Worker; nothing here reimplements it.
+   */
+  import { isPlaceholderValue } from "../config/forms-config.mjs";
+
+  const forms = document.querySelectorAll<HTMLFormElement>("form[data-secure-form]");
+  forms.forEach((form) => {
+    const status = form.querySelector<HTMLElement>("[data-form-status]");
+    const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    let busy = false;
+
+    const workerUrl = (form.dataset.workerUrl || "").replace(/\/+$/, "");
+    const siteId = form.dataset.siteId || "";
+    const turnstileSiteKey = form.dataset.turnstileSiteKey || "";
+    const successMessage = form.dataset.successMessage || "Thank you — your message has been sent.";
+    // Empty, not a hard-coded address, until the owner sets one (see
+    // forms-config.mjs's TODO(owner) on contactEmail) — every message
+    // below is written to read correctly either way.
+    const contactEmail = form.dataset.contactEmail || "";
+
+    if (!workerUrl || !siteId) {
+      // Fail loud in the console for the site builder, not silently to the visitor.
+      console.error("SecureFormScript: form is missing data-worker-url or data-site-id", form);
+      return;
+    }
+
+    // Placeholder detection: an un-provisioned site ships a literal
+    // `TODO(owner)…` (or empty) value rather than a real Worker/Turnstile
+    // value. `isPlaceholderValue` is the SAME function
+    // `forms-config.mjs`'s own `isFormsConfigured()` uses server-side, and
+    // is imported here (not reimplemented) so the server's and the
+    // client's "is this form live?" checks can never drift apart. Without
+    // it, an un-provisioned form would fetch() a dead placeholder "URL"
+    // and fail deep in the network layer with a confusing generic error
+    // instead of telling the visitor plainly that forms aren't live yet.
+    const isUnprovisioned = isPlaceholderValue;
+
+    // The page's own `data-unprovisioned-message`/`data-generic-error-message`
+    // (see this component's module doc) carry the LOCALIZED text — a French
+    // page sets French copy here. The fallback (only reached if a page ever
+    // omits the attribute) is computed from `contactEmail` itself, never a
+    // hard-coded address: empty → no email mentioned at all.
+    const unprovisionedMessage =
+      form.dataset.unprovisionedMessage ||
+      (contactEmail
+        ? `This form isn't live yet. To reach us, email ${contactEmail} and we'll take care of it.`
+        : "This form isn't live yet. Please check back soon.");
+    const genericErrorMessage =
+      form.dataset.genericErrorMessage ||
+      (contactEmail
+        ? `Something went wrong. Please email ${contactEmail} instead.`
+        : "Something went wrong. Please try again later.");
+
+    function say(msg: string, kind: "ok" | "err" | "info") {
+      if (!status) return;
+      // SC 4.1.3: set the styling attribute before the text, but never
+      // touch hidden/display here — the region is always present in the
+      // accessibility tree (see markup above), so this is purely content.
+      status.dataset.kind = kind;
+      status.textContent = msg;
+    }
+
+    function setBusy(on: boolean) {
+      busy = on;
+      if (!button) return;
+      // Deliberately NOT button.disabled: disabling a focused button drops
+      // focus to <body>, dumping a keyboard/SR user to the top of the
+      // document mid-submit. Keep it focusable; guard with `busy` +
+      // aria-disabled.
+      button.setAttribute("aria-disabled", on ? "true" : "false");
+    }
+
+    function readTurnstileToken(): string {
+      // The Turnstile widget script auto-populates this hidden input on solve.
+      const input = form.querySelector<HTMLInputElement>('input[name="cf-turnstile-response"]');
+      return input ? input.value : "";
+    }
+
+    // How long to give Turnstile to produce a token before treating this
+    // as an un-provisioned/misconfigured deployment. isUnprovisioned()'s
+    // TODO(owner) check only catches the literal placeholder string; a
+    // real-shaped key that is simply misconfigured for this domain sails
+    // past it and never solves — waiting for a token (not inspecting the
+    // key's shape) is what detects that.
+    const TURNSTILE_READY_TIMEOUT_MS = 8000;
+
+    function waitForTurnstileToken(timeoutMs: number): Promise<string> {
+      const existing = readTurnstileToken();
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        const start = Date.now();
+        const poll = window.setInterval(() => {
+          const token = readTurnstileToken();
+          if (token || Date.now() - start >= timeoutMs) {
+            window.clearInterval(poll);
+            resolve(token);
+          }
+        }, 200);
+      });
+    }
+
+    function collectFields(): Record<string, string> {
+      const fields: Record<string, string> = {};
+      // Skip the honeypot and the Turnstile token — the token rides in
+      // the top-level request body, not inside formFields.
+      const skip = new Set(["botcheck", "cf-turnstile-response"]);
+      new FormData(form).forEach((value, key) => {
+        if (skip.has(key) || value instanceof File) return;
+        fields[key] = String(value);
+      });
+      return fields;
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (busy) return;
+
+      // Analytics values are captured HERE, at the top, because
+      // form.reset() runs immediately after the success message and
+      // would blank them. This is a positive, literal pick of exactly the
+      // closed-set fields — never the whole FormData, which also holds
+      // the sender's name, email and free-text message.
+      const _fd = new FormData(form);
+      const _analytics = {
+        request_type: String(_fd.get("request_type") || ""),
+        relationship: String(_fd.get("relationship") || ""),
+        topic: String(_fd.get("topic") || ""),
+      };
+
+      // Honeypot: if the hidden checkbox was checked, silently pretend success.
+      const bot = form.querySelector<HTMLInputElement>('input[name="botcheck"]');
+      if (bot && bot.checked) {
+        say(successMessage, "ok");
+        form.reset();
+        return;
+      }
+
+      // Native validity first.
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+
+      // Fast path: forms aren't live yet → friendly message, NO network call.
+      if (isUnprovisioned(workerUrl) || isUnprovisioned(siteId) || isUnprovisioned(turnstileSiteKey)) {
+        say(unprovisionedMessage, "info");
+        return;
+      }
+
+      setBusy(true);
+      say("Verifying…", "info");
+
+      // Slow path: a real-shaped key misconfigured for this domain sails
+      // past the check above, then never solves — wait for an actual
+      // token (or the ready timeout) instead of trusting the key's shape.
+      const turnstileToken = await waitForTurnstileToken(TURNSTILE_READY_TIMEOUT_MS);
+      if (!turnstileToken) {
+        setBusy(false);
+        say(
+          "This form's spam check didn't complete — its Turnstile key likely isn't configured for this domain yet. " +
+            (contactEmail
+              ? `Meanwhile, please email ${contactEmail} and we'll take care of it.`
+              : "Please check back soon."),
+          "info",
+        );
+        return;
+      }
+
+      say("Sending…", "info");
+
+      try {
+        // FIELDS-ONLY: post straight to the Worker's /submit — the only
+        // host the client ever talks to. No secrets in this body; the
+        // Worker does the siteverify, CORS, and rate-limit.
+        const res = await fetch(`${workerUrl}/submit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            siteId,
+            turnstileToken,
+            formFields: collectFields(),
+          }),
+        });
+        const data = await res.json().catch(() => ({}) as { success?: boolean; message?: string });
+        // Honesty over politeness: success ONLY when the Worker reports it.
+        if (!res.ok || !data.success) {
+          throw new Error(data.message || "Could not send your submission. Please try again shortly.");
+        }
+        say(successMessage, "ok");
+
+        // Conversion — anchored HERE and nowhere else.
+        //
+        // say(successMessage, 'ok') appears TWICE in this file with
+        // identical arguments: once in the honeypot branch above, which
+        // deliberately feigns success for bots, and once here. Anchoring
+        // analytics on that call, on the status element, or on any DOM
+        // mutation would count every bot as a conversion. This point is
+        // reachable ONLY after the Worker returned success:2xx with
+        // data.success true — the honeypot returns far above, the
+        // unprovisioned path returns above, and a failed Turnstile
+        // returns above.
+        //
+        // Emitted BEFORE form.reset(), reading the values hoisted at the
+        // top of this handler, because reset() blanks them.
+        try {
+          const win = window as unknown as {
+            ccAnalytics?: { track: (name: string, params?: Record<string, unknown>) => void };
+          };
+          if (win.ccAnalytics) {
+            if (_analytics.request_type === "feedback") {
+              win.ccAnalytics.track("feedback_submit", { topic: _analytics.topic });
+            } else {
+              win.ccAnalytics.track("generate_lead", {
+                request_type: _analytics.request_type,
+                relationship: _analytics.relationship,
+              });
+            }
+          }
+        } catch (_e) {
+          /* analytics must never affect delivery */
+        }
+
+        form.reset();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "";
+        say(message || genericErrorMessage, "err");
+      } finally {
+        setBusy(false);
+      }
+    });
+  });
+</script>
+
+<style>
+  /* Honeypot — off-screen, unreachable by keyboard, hidden from AT. */
+  .hp {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+
+  /* Status region: no visual footprint until a message exists. Do NOT
+     reach for `.form-status:empty { display:none }` — that removes the
+     region from the accessibility tree at the exact moment content is
+     injected and re-breaks SC 4.1.3 the same way a `hidden` attribute
+     would. */
+  .form-status {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    border-radius: 0.3rem;
+  }
+  .form-status[data-kind] {
+    padding: 0.65em 0.85em;
+  }
+  .form-status[data-kind="ok"] {
+    background: color-mix(in srgb, #2e6b3f 14%, var(--paper));
+    color: #1e4620;
+    border-left: 3px solid #2e6b3f;
+  }
+  .form-status[data-kind="err"] {
+    background: color-mix(in srgb, #b23a3a 12%, var(--paper));
+    color: #7a2323;
+    border-left: 3px solid #b23a3a;
+  }
+  .form-status[data-kind="info"] {
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
+  }
+
+  .secure-form__noscript {
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+  .secure-form__noscript a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* Turnstile widget spacing — sits above the submit button. */
+  .cf-turnstile {
+    margin-block: 0.5rem;
+  }
+</style>

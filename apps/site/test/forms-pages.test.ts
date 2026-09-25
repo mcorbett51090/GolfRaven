@@ -9,13 +9,24 @@
  * so this is exactly the state a real `pnpm build` produces today, not a
  * synthetic fixture.
  */
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BUILDS } from "./paths.mjs";
 
 async function readIn(distDir: string, relPath: string): Promise<string> {
   return readFile(join(distDir, relPath), "utf8");
+}
+
+async function walk(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const out: string[] = [];
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await walk(full)));
+    else out.push(full);
+  }
+  return out;
 }
 
 describe("claim/feedback pages: unconfigured forms never pretend to submit (real build)", () => {
@@ -67,5 +78,39 @@ describe("claim/feedback pages: unconfigured forms never pretend to submit (real
       const html = await readIn(BUILDS.real.dist, relPath);
       expect(html).toMatch(/<meta name="robots" content="noindex, follow"/);
     }
+  });
+
+  it("the ENTIRE built dist/ (every HTML page + every bundled JS chunk) contains NO personal email and NO mailto: link, while FORMS_CONFIG.contactEmail is empty", async () => {
+    // Whole-tree scan, not just the four form pages: the fix this test
+    // guards against was a hard-coded email default baked into
+    // SecureFormScript's bundled client-script CHUNK
+    // (`dist/_astro/SecureFormScript.astro_..._.js`), which no per-page
+    // HTML check would ever catch. Publishing a personal address on a
+    // public site/repo is the owner's call, never a default this build
+    // makes for them (see forms-config.mjs's own TODO(owner) on
+    // contactEmail) — so this asserts the negative directly, across
+    // every file the build produces.
+    // `pagefind/` is the search library's own generated bundle; its language
+    // files credit upstream translators by email. That is third-party
+    // attribution, not an address this site publishes, so it is excluded.
+    const files = (await walk(BUILDS.real.dist)).filter((f) => !/[\\/]pagefind[\\/]/.test(f));
+    const offenders: string[] = [];
+    for (const file of files) {
+      const text = await readFile(file, "utf8").catch(() => "");
+      // `mailto:` alone (with nothing after it) is a legitimate, unrelated
+      // feature elsewhere in this codebase — analytics-runtime.ts checks
+      // `href.startsWith("mailto:")` to classify a contact_method click,
+      // with no address attached at all. What this test actually cares
+      // about is an ADDRESS: any email-shaped string in the built output,
+      // or a real `mailto:` link that carries an "@" (an actual email, not
+      // just the bare URI scheme prefix).
+      const emails = (text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g) ?? []).filter(
+        (e) => !/@(?:example\.(?:test|com|org))$/i.test(e),
+      );
+      if (emails.length > 0 || /mailto:[^"'\s)]*@/i.test(text)) {
+        offenders.push(file);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

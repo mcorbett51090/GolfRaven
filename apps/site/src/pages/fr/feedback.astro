@@ -1,0 +1,252 @@
+---
+/**
+ * /fr/feedback/ — FR-CA chrome for the feedback form. Same reasoning as
+ * `fr/claim.astro`: hand-written chrome translation, field `name`
+ * attributes stay English.
+ */
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import SecureFormScript from "../../components/SecureFormScript.astro";
+import { FORMS_CONFIG } from "../../config/forms-config.mjs";
+import { loadSiteCatalog } from "../../lib/derive";
+
+const MESSAGE_MAX = 2000;
+const SUCCESS_MESSAGE =
+  "Merci — votre commentaire est en route. Nous lisons chaque message et agissons sur ceux que nous pouvons.";
+// Aucun courriel codé en dur : FORMS_CONFIG.contactEmail est vide tant que
+// le propriétaire n'en fournit pas un (forms-config.mjs, TODO(owner)).
+const UNPROVISIONED_MESSAGE = FORMS_CONFIG.contactEmail
+  ? `Ce formulaire n'est pas encore actif. Pour nous joindre, écrivez à ${FORMS_CONFIG.contactEmail} et nous nous en occuperons.`
+  : "Ce formulaire n'est pas encore actif. Revenez bientôt.";
+const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
+  ? `Une erreur est survenue. Veuillez écrire à ${FORMS_CONFIG.contactEmail}.`
+  : "Une erreur est survenue. Veuillez réessayer plus tard.";
+
+const { usedDemoData } = await loadSiteCatalog();
+---
+
+<BaseLayout
+  title="Partagez vos commentaires | GolfRaven"
+  description="Une erreur, un bogue, ou une idée pour améliorer GolfRaven? Envoyez-nous vos commentaires — nous lisons chaque message."
+  path="/fr/feedback/"
+  noindex={true}
+  demo={usedDemoData}
+  locale="fr"
+  alternates={[{ locale: "en", path: "/feedback/" }]}
+>
+  <main class="wrap page" id="main-content" tabindex="-1">
+    <header class="page__head">
+      <p class="eyebrow">Nous vous écoutons</p>
+      <h1>Partagez vos commentaires</h1>
+      <p class="page__lead">
+        GolfRaven est en constante évolution, et chaque commentaire nous aide à l'améliorer. Une correction à
+        signaler, un bogue, ou une idée qui le rendrait plus utile? Envoyez-le-nous — nous lisons chaque message et
+        agissons sur ceux que nous pouvons.
+      </p>
+    </header>
+
+    <!-- method="post" : voir la note dans claim.astro. -->
+    <form
+      class="claim__form"
+      data-secure-form
+      novalidate
+      method="post"
+      data-worker-url={FORMS_CONFIG.workerUrl}
+      data-site-id={FORMS_CONFIG.siteId}
+      data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+      data-success-message={SUCCESS_MESSAGE}
+      data-unprovisioned-message={UNPROVISIONED_MESSAGE}
+      data-generic-error-message={GENERIC_ERROR_MESSAGE}
+      data-contact-email={FORMS_CONFIG.contactEmail}
+    >
+      <input type="hidden" name="request_type" value="feedback" />
+
+      <div class="field">
+        <label for="name">Votre nom</label>
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="120" required />
+      </div>
+
+      <div class="field">
+        <label for="email">Votre courriel</label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autocomplete="email"
+          maxlength="254"
+          required
+          aria-describedby="email-hint"
+        />
+        <p class="field__hint" id="email-hint">Pour vous répondre si nous avons une question. Nous ne l'utiliserons à rien d'autre.</p>
+      </div>
+
+      <div class="field">
+        <label for="topic">Sujet</label>
+        <select id="topic" name="topic" required>
+          <option value="" disabled selected>Choisissez…</option>
+          <option value="general">Commentaire général</option>
+          <option value="problem">Signaler un problème</option>
+          <option value="idea">Une suggestion ou une idée</option>
+          <option value="listing">Commentaire sur une fiche de parcours</option>
+          <option value="other">Autre chose</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <div class="field__labelrow">
+          <label for="message">Votre commentaire</label>
+          <span class="field__count" id="message-count" aria-hidden="true">0 / {MESSAGE_MAX}</span>
+        </div>
+        <textarea
+          id="message"
+          name="message"
+          rows="7"
+          maxlength={MESSAGE_MAX}
+          required
+          aria-describedby="message-hint"></textarea>
+        <p class="field__hint" id="message-hint">
+          Corrections, bogues ou idées — plus il y a de détails, mieux c'est. S'il s'agit d'un parcours ou d'un
+          circuit en particulier, son nom nous aide à le retrouver.
+        </p>
+      </div>
+
+      <SecureFormScript
+        workerUrl={FORMS_CONFIG.workerUrl}
+        siteId={FORMS_CONFIG.siteId}
+        turnstileSiteKey={FORMS_CONFIG.turnstileSiteKey}
+        contactEmail={FORMS_CONFIG.contactEmail}
+      />
+
+      <button class="btn btn--primary" type="submit">Envoyer</button>
+
+      <p class="claim__fineprint">
+        Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un
+        fournisseur tiers) et nous parvient par courriel.{" "}
+        {FORMS_CONFIG.contactEmail && (
+          <>
+            Vous préférez nous écrire directement? Courriel :{" "}
+            <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+          </>
+        )}
+      </p>
+    </form>
+  </main>
+</BaseLayout>
+
+{/* A plain (non-`is:inline`) module script — this repo's AT(7) invariant
+    forbids any inline script content but a single JSON-LD block. */}
+<script>
+  (function () {
+    var taEl = document.getElementById("message") as HTMLTextAreaElement | null;
+    var outEl = document.getElementById("message-count");
+    if (!taEl || !outEl) return;
+    // Captured into fixed, non-null consts: `update()` is a closure, and
+    // TypeScript cannot narrow a `var`-scoped binding across a closure
+    // boundary (it could theoretically have been reassigned by the time
+    // `update` runs) -- these two consts carry that non-null narrowing
+    // into the closure instead.
+    var ta = taEl;
+    var out = outEl;
+    var max = ta.getAttribute("maxlength") || "2000";
+    function update() {
+      out.textContent = ta.value.length + " / " + max;
+    }
+    ta.addEventListener("input", update);
+    update();
+  })();
+</script>
+
+<style>
+  .page {
+    max-width: 46rem;
+  }
+  .page__head {
+    margin-bottom: 1.5rem;
+  }
+  .page__lead {
+    color: var(--ink-soft);
+  }
+
+  .claim__form {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 0.6rem;
+    padding: clamp(1.25rem, 4vw, 2rem);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .field__labelrow {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .field label {
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  .field__count {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  input,
+  select,
+  textarea {
+    font: inherit;
+    font-size: 1rem;
+    color: var(--ink);
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 0.35rem;
+    padding: 0.65em 0.8em;
+    width: 100%;
+  }
+  textarea {
+    resize: vertical;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .field__hint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+  .btn {
+    align-self: flex-start;
+    border: none;
+    border-radius: 0.4rem;
+    padding: 0.65em 1.4em;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn--primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn--primary[aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .claim__fineprint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+  }
+  .claim__fineprint a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+</style>

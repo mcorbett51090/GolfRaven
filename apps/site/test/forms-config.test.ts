@@ -54,6 +54,7 @@ describe("isFormsConfigured", () => {
       workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
       siteId: "golfraven",
       turnstileSiteKey: "0xREALKEY",
+      contactEmail: "",
     };
     expect(isFormsConfigured(base)).toBe(true);
     expect(isFormsConfigured({ ...base, workerUrl: "TODO(owner): worker url" })).toBe(false);
@@ -67,6 +68,7 @@ describe("isFormsConfigured", () => {
         workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
         siteId: "golfraven",
         turnstileSiteKey: "0xREALKEY",
+        contactEmail: "",
       }),
     ).toBe(true);
   });
@@ -83,6 +85,7 @@ describe("formsWorkerHost", () => {
         workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
         siteId: "golfraven",
         turnstileSiteKey: "0xREALKEY",
+        contactEmail: "",
       }),
     ).toBe("raven-secure-upload.matt-769.workers.dev");
   });
@@ -93,6 +96,7 @@ describe("formsWorkerHost", () => {
         workerUrl: "not a url at all",
         siteId: "golfraven",
         turnstileSiteKey: "0xREALKEY",
+        contactEmail: "",
       }),
     ).toBeNull();
   });

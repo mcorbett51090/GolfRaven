@@ -1,0 +1,275 @@
+---
+/**
+ * /feedback/ — "share your feedback" (build plan §10 P2 scope:
+ * "Claim/feedback forms (the verification funnel)"). A utility page:
+ * `noindex` + no sitemap entry, like `/claim/`. A general-purpose inbox
+ * for corrections, bug reports and ideas about the site as a whole (as
+ * distinct from `/claim/`, which is about one course or trail listing).
+ *
+ * Ported from `southern-wine-country`'s `src/pages/feedback.astro` @
+ * 572ff7e, same pattern as this repo's own `claim.astro`: the page owns
+ * the `<form data-secure-form novalidate>`; `<SecureFormScript>` renders
+ * the honeypot + aria-live status region (+ Turnstile widget once
+ * provisioned) and owns the whole submit — one POST to the owned
+ * Cloudflare Worker, no mailto, no third-party form service. Until the
+ * owner provisions real Worker/Turnstile values
+ * (`src/config/forms-config.mjs`), the unprovisioned-guard shows a "forms
+ * aren't live yet" message and makes no network call.
+ */
+import BaseLayout from "../layouts/BaseLayout.astro";
+import SecureFormScript from "../components/SecureFormScript.astro";
+import { FORMS_CONFIG } from "../config/forms-config.mjs";
+import { loadSiteCatalog } from "../lib/derive";
+
+const MESSAGE_MAX = 2000;
+const SUCCESS_MESSAGE = "Thank you — your feedback is on its way. We read every note and act on the ones we can.";
+// No hard-coded email anywhere: FORMS_CONFIG.contactEmail is empty until
+// the owner opts in (forms-config.mjs's TODO(owner)).
+const UNPROVISIONED_MESSAGE = FORMS_CONFIG.contactEmail
+  ? `This form isn't live yet. To reach us, email ${FORMS_CONFIG.contactEmail} and we'll take care of it.`
+  : "This form isn't live yet. Please check back soon.";
+const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
+  ? `Something went wrong. Please email ${FORMS_CONFIG.contactEmail} instead.`
+  : "Something went wrong. Please try again later.";
+
+const { usedDemoData } = await loadSiteCatalog();
+---
+
+<BaseLayout
+  title="Share your feedback | GolfRaven"
+  description="Found a mistake, hit a bug, or have an idea to make GolfRaven better? Send us your feedback and we'll read every word."
+  path="/feedback/"
+  noindex={true}
+  demo={usedDemoData}
+  alternates={[{ locale: "fr", path: "/fr/feedback/" }]}
+>
+  <main class="wrap page" id="main-content" tabindex="-1">
+    <header class="page__head">
+      <p class="eyebrow">We're listening</p>
+      <h1>Share your feedback</h1>
+      <p class="page__lead">
+        GolfRaven is a work in progress, and it gets better every time someone tells us what's off. Spotted a
+        correction, hit a bug, or have an idea that would make it more useful? Send it our way — we read every note
+        and act on the ones we can.
+      </p>
+    </header>
+
+    <!-- method="post": see the note in claim.astro. Without it, a submit
+         handler that fails to BIND falls back to a native GET, putting
+         the sender's name, email and message in the URL. <noscript> does
+         not cover that case. -->
+    <form
+      class="claim__form"
+      data-secure-form
+      novalidate
+      method="post"
+      data-worker-url={FORMS_CONFIG.workerUrl}
+      data-site-id={FORMS_CONFIG.siteId}
+      data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+      data-success-message={SUCCESS_MESSAGE}
+      data-unprovisioned-message={UNPROVISIONED_MESSAGE}
+      data-generic-error-message={GENERIC_ERROR_MESSAGE}
+      data-contact-email={FORMS_CONFIG.contactEmail}
+    >
+      {/* Tags this submission in the owner email so feedback is easy to
+          triage apart from /claim/ correction/new-listing requests
+          (analytics-schema.json's feedback_submit event). */}
+      <input type="hidden" name="request_type" value="feedback" />
+
+      <div class="field">
+        <label for="name">Your name</label>
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="120" required />
+      </div>
+
+      <div class="field">
+        <label for="email">Your email</label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autocomplete="email"
+          maxlength="254"
+          required
+          aria-describedby="email-hint"
+        />
+        <p class="field__hint" id="email-hint">
+          So we can follow up if we have a question. We won't use it for anything else.
+        </p>
+      </div>
+
+      <div class="field">
+        <label for="topic">Topic</label>
+        <select id="topic" name="topic" required>
+          <option value="" disabled selected>Select one…</option>
+          <option value="general">General feedback</option>
+          <option value="problem">Report a problem</option>
+          <option value="idea">A suggestion or idea</option>
+          <option value="listing">Feedback on a course listing</option>
+          <option value="other">Something else</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <div class="field__labelrow">
+          <label for="message">Your feedback</label>
+          <span class="field__count" id="message-count" aria-hidden="true">0 / {MESSAGE_MAX}</span>
+        </div>
+        <textarea
+          id="message"
+          name="message"
+          rows="7"
+          maxlength={MESSAGE_MAX}
+          required
+          aria-describedby="message-hint"></textarea>
+        <p class="field__hint" id="message-hint">
+          Corrections, bug reports, or ideas — the more detail, the better. If it's about a specific course or
+          trail, its name helps us find it.
+        </p>
+      </div>
+
+      <SecureFormScript
+        workerUrl={FORMS_CONFIG.workerUrl}
+        siteId={FORMS_CONFIG.siteId}
+        turnstileSiteKey={FORMS_CONFIG.turnstileSiteKey}
+        contactEmail={FORMS_CONFIG.contactEmail}
+      />
+
+      <button class="btn btn--primary" type="submit">Send feedback</button>
+
+      <p class="claim__fineprint">
+        Your message goes directly to our own secure form service (not a third-party form provider) and reaches us
+        by email.{" "}
+        {FORMS_CONFIG.contactEmail && (
+          <>
+            Prefer to write to us yourself? Email{" "}
+            <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+          </>
+        )}
+      </p>
+    </form>
+  </main>
+</BaseLayout>
+
+{/* Character-count nicety — purely progressive. aria-hidden so a screen
+    reader relies on the native maxlength rather than a chatty live count;
+    with JS off the counter simply reads "0 / 2000" and the textarea still
+    enforces the cap. A plain (non-`is:inline`) module script — this
+    repo's AT(7) invariant forbids any inline script content but a single
+    JSON-LD block; see `claim.astro`'s copy-swap script for the same
+    reasoning at more length. */}
+<script>
+  (function () {
+    var taEl = document.getElementById("message") as HTMLTextAreaElement | null;
+    var outEl = document.getElementById("message-count");
+    if (!taEl || !outEl) return;
+    // Captured into fixed, non-null consts: `update()` is a closure, and
+    // TypeScript cannot narrow a `var`-scoped binding across a closure
+    // boundary (it could theoretically have been reassigned by the time
+    // `update` runs) -- these two consts carry that non-null narrowing
+    // into the closure instead.
+    var ta = taEl;
+    var out = outEl;
+    var max = ta.getAttribute("maxlength") || "2000";
+    function update() {
+      out.textContent = ta.value.length + " / " + max;
+    }
+    ta.addEventListener("input", update);
+    update();
+  })();
+</script>
+
+<style>
+  .page {
+    max-width: 46rem;
+  }
+  .page__head {
+    margin-bottom: 1.5rem;
+  }
+  .page__lead {
+    color: var(--ink-soft);
+  }
+
+  .claim__form {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 0.6rem;
+    padding: clamp(1.25rem, 4vw, 2rem);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .field__labelrow {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .field label {
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  .field__count {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  input,
+  select,
+  textarea {
+    font: inherit;
+    font-size: 1rem;
+    color: var(--ink);
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 0.35rem;
+    padding: 0.65em 0.8em;
+    width: 100%;
+  }
+  textarea {
+    resize: vertical;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .field__hint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+  .btn {
+    align-self: flex-start;
+    border: none;
+    border-radius: 0.4rem;
+    padding: 0.65em 1.4em;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn--primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn--primary[aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .claim__fineprint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+  }
+  .claim__fineprint a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+</style>

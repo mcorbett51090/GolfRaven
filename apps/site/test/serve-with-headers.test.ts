@@ -147,6 +147,7 @@ describe("gen-headers.mjs: the Worker origin + Turnstile hosts are allowed ONLY 
       workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
       siteId: "golfraven",
       turnstileSiteKey: "0xREALKEY",
+      contactEmail: "",
     };
     const text = buildHeaders({}, configured);
     expect(text).toContain("forms-config.mjs isFormsConfigured()=true");
@@ -172,6 +173,7 @@ describe("gen-headers.mjs: the Worker origin + Turnstile hosts are allowed ONLY 
       workerUrl: "https://raven-secure-upload.matt-769.workers.dev",
       siteId: "golfraven",
       turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
+      contactEmail: "",
     };
     const text = buildHeaders({}, halfConfigured);
     expect(text).toContain("forms-config.mjs isFormsConfigured()=false");
