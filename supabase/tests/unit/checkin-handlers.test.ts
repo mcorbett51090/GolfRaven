@@ -9,9 +9,9 @@
 // `digestHex` the challenge issuance used, so every test that consumes a
 // token now threads the nonce through instead of the bare challenge id.
 import { describe, expect, it } from "vitest";
-import { handleChallengeRequest } from "../../functions/_shared/checkin/challenge-handler.js";
+import { handleChallengeRequest, RATE_LIMIT_PER_USER_HOUR as CHALLENGE_RATE_LIMIT_PER_USER_HOUR } from "../../functions/_shared/checkin/challenge-handler.js";
 import { handleTokenRequest } from "../../functions/_shared/checkin/token-handler.js";
-import { makeFakeRepo, makeFakeState } from "./fake-repo.js";
+import { fakeHitRateLimitForActor, makeFakeRepo, makeFakeState, type FakeState } from "./fake-repo.js";
 import { HttpError } from "../../functions/_shared/http.js";
 
 const randomBytes = (n: number) => new Uint8Array(n).map((_, i) => i);
@@ -45,10 +45,25 @@ describe("handleChallengeRequest", () => {
     await expect(handleChallengeRequest({ deviceId: "dev_1", prefetchCount: 1 }, repo, randomBytes, digestHex)).rejects.toThrow(HttpError);
   });
 
+  // ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+  // the pool"): rate-limiting moved OUT of `handleChallengeRequest`
+  // entirely — checkin-challenge/index.ts now hits `checkin-challenge:
+  // user` via `hitRateLimitForActor` BEFORE ever calling the handler
+  // (privileged.ts#hitRateLimitForActor's own doc has the full
+  // reasoning). This test mirrors that real call shape with the fake
+  // equivalent, `fakeHitRateLimitForActor`, instead of relying on the
+  // handler to rate-limit internally.
+  async function precheckThenChallenge(state: FakeState, uid: string, repo: ReturnType<typeof makeFakeRepo>, body: Parameters<typeof handleChallengeRequest>[0]) {
+    const r = await fakeHitRateLimitForActor(state, uid, "checkin-challenge:user", 3600, CHALLENGE_RATE_LIMIT_PER_USER_HOUR);
+    if (!r.ok) throw Object.assign(new Error("checkin-challenge rate limit exceeded"), { code: "rate_limited" });
+    return handleChallengeRequest(body, repo, randomBytes, digestHex);
+  }
+
   it("429s past 30 challenge requests/user/hour", async () => {
-    const repo = makeFakeRepo(makeFakeState(), "user-a");
-    for (let i = 0; i < 30; i++) await handleChallengeRequest({ deviceId: "dev_1" }, repo, randomBytes, digestHex);
-    await expect(handleChallengeRequest({ deviceId: "dev_1" }, repo, randomBytes, digestHex)).rejects.toMatchObject({ code: "rate_limited" });
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    for (let i = 0; i < 30; i++) await precheckThenChallenge(state, "user-a", repo, { deviceId: "dev_1" });
+    await expect(precheckThenChallenge(state, "user-a", repo, { deviceId: "dev_1" })).rejects.toMatchObject({ code: "rate_limited" });
   });
 
   // ⛔ FIX (P3c gate round 2, item 7): "cap the number of devices per

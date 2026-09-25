@@ -10,12 +10,12 @@
 // handlers.deno.test.ts's own header).
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createTestUser, createCourseWithPolygonAtFacX, freshUuid, makeActor, FAC_X, CRS_X1 } from "./_helpers.ts";
-import { withOwnership, withOwnershipBatch } from "../../functions/_shared/privileged.ts";
-import { handleEvidenceIntake, type EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
+import { hitRateLimitForActor, withOwnership, withOwnershipBatch } from "../../functions/_shared/privileged.ts";
+import { handleEvidenceIntake, planEvidenceRateLimitChecks, type EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
 import { handleChallengeRequest } from "../../functions/_shared/checkin/challenge-handler.ts";
 import { handleTokenRequest } from "../../functions/_shared/checkin/token-handler.ts";
-import { Errors, HttpError } from "../../functions/_shared/http.ts";
-import type { Repo } from "../../functions/_shared/types.ts";
+import { HttpError } from "../../functions/_shared/http.ts";
+import type { Actor } from "../../functions/_shared/types.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 
@@ -55,17 +55,59 @@ function checkinBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** The SAME shape `evidence-batch/index.ts` itself passes to
- * `withOwnershipBatch` — rate-limit FIRST (its own separate transaction,
- * P3c gate round 3 blocking MEDIUM 3), then the real handler. Factored
- * out so every test below exercises the ACTUAL call shape, not a
- * simplified stand-in. */
-function batchPerItem(items: unknown[], bucketKey: string, cap = RATE_LIMIT_PER_USER_DAY) {
-  return async (repo: Repo, i: number): Promise<EvidenceIntakeResult> => {
-    const rateLimit = await repo.rateLimit.hit(bucketKey, 86400, cap);
-    if (!rateLimit.ok) throw Errors.tooManyRequests("evidence-batch daily rate limit exceeded");
-    return handleEvidenceIntake(items[i], repo, { skipLiveRateLimit: true });
-  };
+type ItemOutcome = { ok: true; value: EvidenceIntakeResult } | { ok: false; error: unknown };
+
+/** Mirrors evidence-batch/index.ts's OWN two-phase orchestration exactly
+ * (P3c gate round 4, blocking HIGH: "5 concurrent requests deadlock the
+ * pool" — rate-limiting moved to a phase BEFORE any transaction opens):
+ * phase 1 hits the batch-level cap (`bucketKey`) for EVERY item slot,
+ * then each item's own device-level check, entirely before any
+ * `withOwnershipBatch` call; phase 2 runs the transactional work, in one
+ * shared transaction with per-item savepoints, ONLY for items that
+ * passed phase 1. Factored out so every test below exercises the ACTUAL
+ * two-phase shape, not a simplified stand-in. */
+async function runBatch(actor: Actor, items: unknown[], bucketKey: string, cap = RATE_LIMIT_PER_USER_DAY): Promise<ItemOutcome[]> {
+  const results: ItemOutcome[] = new Array(items.length);
+  const readyIndices: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const batchRateLimit = await hitRateLimitForActor(actor, bucketKey, 86400, cap);
+    if (!batchRateLimit.ok) {
+      results[i] = { ok: false, error: { code: "rate_limited" } };
+      continue;
+    }
+    let planned: ReturnType<typeof planEvidenceRateLimitChecks>;
+    try {
+      planned = planEvidenceRateLimitChecks(items[i], { skipLiveRateLimit: true });
+    } catch (err) {
+      results[i] = { ok: false, error: err };
+      continue;
+    }
+    let deviceOk = true;
+    for (const check of planned.checks) {
+      const r = await hitRateLimitForActor(actor, check.bucketKey, check.windowSeconds, check.max);
+      if (!r.ok) {
+        deviceOk = false;
+        break;
+      }
+    }
+    if (!deviceOk) {
+      results[i] = { ok: false, error: { code: "rate_limited" } };
+      continue;
+    }
+    readyIndices.push(i);
+  }
+  if (readyIndices.length > 0) {
+    const outcomes = await withOwnershipBatch(actor, readyIndices.length, async (repo, j) => {
+      const i = readyIndices[j];
+      return handleEvidenceIntake(items[i], repo);
+    });
+    for (let j = 0; j < readyIndices.length; j++) {
+      const i = readyIndices[j];
+      const outcome = outcomes[j];
+      results[i] = outcome.ok ? { ok: true, value: outcome.value as EvidenceIntakeResult } : { ok: false, error: outcome.error };
+    }
+  }
+  return results;
 }
 
 Deno.test("P3c gate round 3, blocking MEDIUM 4: one bad item among good ones — earlier AND later items still commit, only the bad one is reported failed", DT, async () => {
@@ -75,7 +117,7 @@ Deno.test("P3c gate round 3, blocking MEDIUM 4: one bad item among good ones —
     { source: "foreground_checkin", deviceId: freshUuid() }, // structurally invalid: no facilityId/localDate/catalogVersion/fix
     checkinBody(),
   ];
-  const outcomes = await withOwnershipBatch(actor, items.length, batchPerItem(items, `bad-item-${freshUuid()}`));
+  const outcomes = await runBatch(actor, items, `bad-item-${freshUuid()}`);
 
   assertEquals(outcomes.length, 3);
   assertEquals(outcomes[0].ok, true, "item 0 (good) must commit");
@@ -93,7 +135,7 @@ Deno.test("P3c gate round 3, blocking MEDIUM 4: items after the per-user daily c
   const items = Array.from({ length: 5 }, () => checkinBody());
   const bucketKey = `cap-cross-${freshUuid()}`;
 
-  const outcomes = await withOwnershipBatch(actor, items.length, batchPerItem(items, bucketKey, CAP));
+  const outcomes = await runBatch(actor, items, bucketKey, CAP);
 
   const okCount = outcomes.filter((o) => o.ok).length;
   assertEquals(okCount, CAP, `expected exactly ${CAP} items to succeed before the cap — got ${okCount}`);
@@ -101,7 +143,8 @@ Deno.test("P3c gate round 3, blocking MEDIUM 4: items after the per-user daily c
     assertEquals(outcomes[i].ok, false, `item ${i} (past the cap) must be rejected`);
     const outcome = outcomes[i];
     if (!outcome.ok) {
-      assert(outcome.error instanceof HttpError && outcome.error.code === "rate_limited", `item ${i} should be rate_limited, got ${JSON.stringify(outcome.error)}`);
+      const err = outcome.error as { code?: string };
+      assert(err?.code === "rate_limited", `item ${i} should be rate_limited, got ${JSON.stringify(outcome.error)}`);
     }
   }
 });
@@ -110,7 +153,7 @@ Deno.test("P3c gate round 3, blocking HIGH 1+2 (batch mode): an identical item s
   const actor = await withFreshUser("batch-replay-plain");
   const body = checkinBody();
   const items = [body, body];
-  const outcomes = await withOwnershipBatch(actor, items.length, batchPerItem(items, `batch-replay-plain-${freshUuid()}`));
+  const outcomes = await runBatch(actor, items, `batch-replay-plain-${freshUuid()}`);
 
   assertEquals(outcomes[0].ok, true);
   assertEquals(outcomes[1].ok, true);
@@ -145,7 +188,7 @@ Deno.test("P3c gate round 3, blocking HIGH 2 (batch mode): an identical TOKEN-BE
   });
   const items = [body, body];
 
-  const outcomes = await withOwnershipBatch(actor, items.length, batchPerItem(items, `batch-token-replay-${freshUuid()}`));
+  const outcomes = await runBatch(actor, items, `batch-token-replay-${freshUuid()}`);
 
   assertEquals(outcomes[0].ok, true, outcomes[0].ok ? "" : String((outcomes[0] as { error: unknown }).error));
   assertEquals(outcomes[1].ok, true, outcomes[1].ok ? "" : String((outcomes[1] as { error: unknown }).error));

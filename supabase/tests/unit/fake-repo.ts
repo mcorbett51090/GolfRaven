@@ -29,6 +29,7 @@ import type {
   Repo,
   SigningKeyRow,
   StoredEvidenceRow,
+  StoredPlayRow,
   UpsertPlayInput,
   UpsertPlayResult,
 } from "../../functions/_shared/types.js";
@@ -52,8 +53,14 @@ interface FakeDeviceRow {
 
 interface FakeChallengeRow {
   id: string;
-  /** null for a staff-issued challenge (input.staffUserId set) — mirrors
-   * privileged.ts's own `user_id = input.staffUserId ? null : uid`. */
+  // ⛔ FIX (P3c gate round 4): `staffUserId` removed from the real
+  // `challenge.insert` input — dead weight, since staff/partner-attest
+  // issuance is out of this round's scope and no real call site ever
+  // passed anything but null. `userId`/`staffUserId` stay on this
+  // INTERNAL fake-state row shape (always `uid`/`null` respectively now)
+  // to mirror `app.checkin_challenge`'s own CHECK constraint (0005:
+  // exactly one of user_id/staff_user_id set) without narrowing the
+  // fixture's own shape.
   userId: string | null;
   staffUserId: string | null;
   deviceId: string;
@@ -128,22 +135,30 @@ export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
  * P3c gate round 2 fix: "validate deviceId as a UUID"). */
 export const FAKE_DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 
+/** P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock the
+ * pool"): mirrors `privileged.ts#hitRateLimitForActor`'s own signature
+ * and behavior, standalone — NOT a `Repo` method any more (see types.ts's
+ * own note: `Repo` has no `rateLimit` member at all now, structurally,
+ * so nothing can call a rate-limit hit from inside an already-open
+ * transaction). Unit tests that exercise the pre-transaction rate-limit
+ * precheck (`evidence/handler.ts#planEvidenceRateLimitChecks` and its
+ * checks) call this directly, the same way a real Edge Function
+ * entrypoint calls `hitRateLimitForActor` before ever opening
+ * `withOwnership`. */
+export async function fakeHitRateLimitForActor(state: FakeState, actorUid: string, bucketKey: string, _windowSeconds: number, max: number): Promise<RateLimitResult> {
+  const key = `${actorUid}:${bucketKey}`;
+  const count = (state.rateLimits.get(key) ?? 0) + 1;
+  state.rateLimits.set(key, count);
+  if (count > max) return { ok: false, count, retryAfterSeconds: 3600 };
+  return { ok: true, count };
+}
+
 export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
   const uid = actorUid;
   const freshId = (prefix: string) => `${prefix}_${state.nextId++}`;
 
   return {
     now: () => state.now,
-
-    rateLimit: {
-      async hit(bucketKey: string, _windowSeconds: number, max: number): Promise<RateLimitResult> {
-        const key = `${uid}:${bucketKey}`;
-        const count = (state.rateLimits.get(key) ?? 0) + 1;
-        state.rateLimits.set(key, count);
-        if (count > max) return { ok: false, count, retryAfterSeconds: 3600 };
-        return { ok: true, count };
-      },
-    },
 
     catalog: {
       async currentVersion(): Promise<CatalogVersionRow | null> {
@@ -265,6 +280,12 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         }
         return { id, created: !existing };
       },
+      async getForDate(courseId: string, playDate: string): Promise<StoredPlayRow | null> {
+        const key = `${uid}:${courseId}:${playDate}`;
+        const row = state.plays.get(key);
+        if (!row) return null;
+        return { id: row.id, scoreBadge: row.scoreBadge, scoreMonetary: row.scoreMonetary, presenceSignal: row.presenceSignal, money: row.money, heldReview: row.heldReview };
+      },
     },
 
     fraudSignal: {
@@ -298,10 +319,13 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
     challenge: {
       async insert(input) {
         const id = freshId("chal");
+        // ⛔ FIX (P3c gate round 4): staffUserId removed from the real
+        // input shape — every challenge is issued to the authenticated
+        // actor themselves now, always.
         state.challenges.set(id, {
           id,
-          userId: input.staffUserId ? null : uid,
-          staffUserId: input.staffUserId,
+          userId: uid,
+          staffUserId: null,
           deviceId: input.deviceId,
           facilityId: input.facilityId,
           nonceHash: input.nonceHash,

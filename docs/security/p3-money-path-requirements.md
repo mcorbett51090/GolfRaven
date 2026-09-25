@@ -758,3 +758,89 @@ entry is left as originally written; this is the CURRENT, more precise statement
     and restated in `privileged.ts`'s own header, already covers the `--config` half of this; this note
     covers the LOCKFILE half specifically). Deploy-time pinning verification is a pre-deploy item, not
     something this round's test-time lockfile discipline substitutes for.
+
+## P3c gate round 4 fixes (`a2e7e00` re-gate: 1 blocking HIGH + 1 blocking MEDIUM)
+
+Round 2's five blockers were confirmed fixed and reproduced as fixed. This round's own two findings, both
+in the round-3 rate-limit/replay refactor itself:
+
+**Blocking HIGH ("5 concurrent requests deadlock the pool").** `privileged.ts`'s round-3 `Repo#rateLimit.hit`
+opened its own `db.begin()` (a SECOND pooled connection) from INSIDE a `buildRepo` callback that already
+held one (the request's own `withOwnership`/`withOwnershipBatch` transaction) — against a `max: 5` pool,
+5+ concurrent requests each waiting on a 6th connection that would never free up is a real deadlock
+(postgres.js has no acquire timeout at all). Fixed by moving EVERY rate-limit hit to a pre-transaction
+phase:
+
+- `Repo` no longer has a `rateLimit` member at all — a structural removal (`types.ts`), not a
+  deprecation, so nothing can reintroduce the deadlock by calling it from inside a transaction again.
+- `privileged.ts`'s new top-level `hitRateLimitForActor(actor, bucketKey, windowSeconds, max)` — the
+  ONE place a rate-limit hit opens its own connection, designed to be called BEFORE
+  `withOwnership`/`withOwnershipBatch` even opens.
+- `evidence/handler.ts`'s new `planEvidenceRateLimitChecks(rawBody, options)` — parses the submission and
+  returns the bucket checks to hit, pure, no DB access, computable entirely from `actor.uid` (the
+  caller's own concern) and the client-supplied `deviceId` (always present, never a DB-resolved value).
+- `evidence/index.ts`, `checkin-challenge/index.ts`, `checkin-token/index.ts` all call
+  `hitRateLimitForActor` before their own `withOwnership` call.
+- `evidence-batch/index.ts` rewritten as an explicit two-phase flow: phase 1 hits every item's rate
+  limit(s) with no transaction open at all (preserving "one hit per item slot, even a structurally
+  -invalid one"); phase 2 runs `withOwnershipBatch` (per-item savepoints, unchanged from round 3) only for
+  items that passed phase 1.
+- Defense in depth, not the fix itself: `privileged.ts`'s pool now sets `connect_timeout: 10` (seconds)
+  and `connection.idle_in_transaction_session_timeout: 30_000` (ms); `http.ts#handleRequest` now races
+  every request against a 15s timeout, returning 503 (`Errors.serviceUnavailable`) if exceeded.
+- Integration test: `supabase/tests/integration/repo.deno.test.ts`, "P3c gate round 4, blocking HIGH: 2x
+  pool max concurrent withOwnership calls, each ALSO hitting a rate limit, complete within a bound (no
+  deadlock)" — 10 concurrent requests (2x the real pool's `max: 5`) against a 20s bound; completed in
+  under 50ms in both harness modes.
+
+**Blocking MEDIUM ("replays skip every rate limit").** The round-3 `findExisting` check ran BEFORE any
+rate-limit hit, so a replay flood (150 replays in the reviewer's own repro) never touched its bucket at
+all, and each replay still re-scored and re-upserted the play row. Both closed by the SAME HIGH fix above:
+rate-limiting now happens in the pre-transaction phase, before `handleEvidenceIntake` — and therefore
+`findExisting` — is ever reached, replay or not; and `buildReplayResult` no longer re-scores or re-upserts
+at all — it reads the already-persisted `app.play` row back via a new, plain-SELECT `Repo#play.getForDate`.
+Integration/unit tests: `supabase/tests/unit/evidence-handler.test.ts` ("a rate-limit check runs even for
+a replay"; "a replay reads the play row back, it never re-upserts it" — proven by object-reference
+identity, not merely equal values).
+
+**Also done:**
+- CI comment corrected: the round-3 pin-proof step's own comment claimed `deno check --frozen` "ALSO"
+  catches a tampered hash, based on tampering one `deno.land` `.js` file that happens to be its own type
+  source. The round-4 reviewer reproduced that this does NOT generalize to an esm.sh `.mjs` reached only
+  through a separate `.d.ts` (`supabase-js.mjs`) — `deno check --frozen` left that untouched at exit 0,
+  `deno cache --frozen` correctly failed at exit 10. This session independently reproduced the same result
+  and corrected the comment (`.github/workflows/ci.yml`).
+- A REAL tamper test added to CI (not merely a comment claim): a new "deno cache --frozen tamper test"
+  step copies the lockfile, flips one byte of the `supabase-js.mjs` hash, and asserts `deno cache --frozen`
+  exits non-zero against it — failing the build if it does NOT (`.github/workflows/ci.yml`).
+- `Repo#challenge.insert`'s dead `staffUserId` parameter removed (`types.ts`, `privileged.ts`,
+  `checkin/challenge-handler.ts`, `fake-repo.ts`) — staff/partner-attest issuance is out of this round's
+  scope and no real call site ever passed anything but `null`.
+
+**Accepted follow-ups (append-only):**
+
+11. **Batch history import (AT 10) doesn't work this round.** `evidence-batch`'s own items go through the
+    SAME `local_date` derivation as a live submission: a fix-bearing item's `localDate` must exactly match
+    its own `capturedAt` resolved into the facility's tz, and a date-only item's `localDate` is bounded to
+    facility-local-today ±30/+1 days (`evidence/handler.ts`'s `assertServerDerivableLocalDate`). Neither
+    shape fits a REAL historic import (a fix-bearing item genuinely captured weeks or months ago; a
+    date-only item legitimately outside a 30-day window) — and clock-skew (`> 24h from server "now"`)
+    would raise a `clock_skew` fraud signal on every genuinely old, correctly-dated fix in a real historic
+    batch, which is exactly wrong for backfilled data. Revisit the ±30-day window and the clock-skew check
+    on historic/late-synced batch fixes once `file_import`/`health_route` (currently rejected outright,
+    `request-shape.ts`'s `REJECTED_SOURCES`) return with a real server-side verification path — batch
+    should move to event-time-only checks (build plan §4.7 item 8's own "items are scored with event-time
+    velocity only," out of this round's scope) rather than the live-submission clock/date rules it
+    currently reuses.
+12. **A concurrent duplicate FIRST-submission can still write a duplicate `clock_skew` signal (low).** Two
+    truly concurrent requests for the SAME genuinely-new (user, source, source_ref) — a real race, since
+    `findExisting` returns null for BOTH before either has committed — both independently compute clock
+    skew and, if skewed, both call `fraudSignal.insert("clock_skew", ...)` before either knows it lost the
+    `insertIdempotent` race. The LOSER's own race-safety branch (`evidence/handler.ts`, the `!inserted.
+    wasNew` path) deliberately does not undo side effects it already made in good faith (see that branch's
+    own comment) — so a duplicate `clock_skew` row can land for the same real event. Low severity: `app.
+    fraud_signal` is an audit/review trail, not a money-path enforcement point, so a duplicate entry is
+    review-queue noise, not a security gap. Closing it would mean either moving the clock-skew check to
+    run only after the transaction's winner is known (losing the "signal every attempt" property this
+    round's other fixes deliberately established) or de-duplicating fraud_signal rows by content — a
+    genuine design trade-off, not a one-line fix, and left open.

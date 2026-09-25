@@ -35,26 +35,50 @@
 // the whole transaction"). With the daily count at 1999, a 2-item batch
 // used to return 500 and keep 0 rows, forever — `withOwnership` runs the
 // ENTIRE callback in one `db.begin()`, and once ANY statement inside it
-// errors (the 2nd item's rate-limit RAISE, pre-round-3; or any later
-// per-item failure in general), Postgres marks the WHOLE transaction
-// aborted — every earlier item's already-written rows are lost along
-// with the failing one, not merely the failing item's own. This now
-// calls `withOwnershipBatch` (privileged.ts) instead: each item runs
-// inside its OWN `trx.savepoint(...)` of that same outer transaction, so
-// a failing item's writes roll back to JUST that item's own savepoint —
-// every earlier item's work stays committed to the outer transaction,
-// and later items still run. Items after the daily cap is reached are
-// still reported `rate_limited` (`repo.rateLimit.hit`, per-item, now
-// itself immune to any of this by running in its own separate
-// transaction — P3c gate round 3, blocking MEDIUM 3, privileged.ts).
+// errors, Postgres marks the WHOLE transaction aborted — every earlier
+// item's already-written rows are lost along with the failing one, not
+// merely the failing item's own. This calls `withOwnershipBatch`
+// (privileged.ts): each item runs inside its OWN `trx.savepoint(...)` of
+// that same outer transaction, so a failing item's writes roll back to
+// JUST that item's own savepoint — every earlier item's work stays
+// committed to the outer transaction, and later items still run.
+//
+// ⛔ FIX (P3c gate round 4, blocking HIGH: "5 concurrent requests
+// deadlock the pool"). Round 3's own per-item `repo.rateLimit.hit` call
+// (inside `withOwnershipBatch`'s per-item closure) had the SAME
+// deadlock shape as evidence/handler.ts's own: it opened a SECOND
+// pooled connection from inside a callback that already holds ONE (the
+// whole batch's own outer transaction). Rate-limiting is now a
+// SEPARATE, PRE-TRANSACTION phase (phase 1 below) — every item's rate
+// -limit check(s) are hit via `hitRateLimitForActor`, in order, BEFORE
+// `withOwnershipBatch` is even called, preserving the original "one hit
+// per item slot, even a structurally-invalid one" semantics (should-fix,
+// P3c gate round 2: "batch limits") without ever holding two pooled
+// connections for the same request at once. Only items that pass phase
+// 1 proceed into phase 2's transactional work (savepoint-isolated, as
+// before); items decided in phase 1 (rate_limited or bad_request) never
+// touch the transaction at all.
 
-import { getActorFromRequest, withOwnershipBatch } from "../_shared/privileged.ts";
+import { getActorFromRequest, hitRateLimitForActor, withOwnershipBatch } from "../_shared/privileged.ts";
 import { errorResponse, handleRequest, okResponse, readJsonBody, Errors, HttpError, MAX_BODY_BYTES } from "../_shared/http.ts";
-import { handleEvidenceIntake } from "../_shared/evidence/handler.ts";
+import { handleEvidenceIntake, planEvidenceRateLimitChecks } from "../_shared/evidence/handler.ts";
 import { serve } from "std/http/server";
 
 const MAX_BATCH_ITEMS_PER_REQUEST = 100;
 const RATE_LIMIT_PER_USER_DAY = 2000;
+
+interface ItemResult {
+  index: number;
+  ok: boolean;
+  result?: unknown;
+  error?: { code: string; message: string };
+}
+
+function toErrorResult(index: number, err: unknown): ItemResult {
+  if (err instanceof HttpError) return { index, ok: false, error: { code: err.code, message: err.message } };
+  console.error(`evidence-batch: item ${index} failed unexpectedly`, err);
+  return { index, ok: false, error: { code: "internal_error", message: "internal error" } };
+}
 
 serve((req) => handleRequest(async () => {
   if (req.method !== "POST") return errorResponse(405, "method_not_allowed", "POST only");
@@ -72,29 +96,56 @@ serve((req) => handleRequest(async () => {
     return Errors.badRequest(`items must be at most ${MAX_BATCH_ITEMS_PER_REQUEST} per request`).toResponse();
   }
 
-  const outcomes = await withOwnershipBatch(actor, items.length, async (repo, i) => {
-    // Rate-limit check FIRST, before this item's own savepoint-wrapped
-    // work — a cap-crossing item is rejected as rate_limited without
-    // ever attempting its (pointless, since it will be discarded) writes.
-    // `repo.rateLimit.hit` commits in its own separate transaction
-    // regardless (privileged.ts), so this counts unconditionally, even
-    // though it runs from inside this item's own savepoint scope.
-    const rateLimit = await repo.rateLimit.hit(`evidence-batch:user`, 86400, RATE_LIMIT_PER_USER_DAY);
-    if (!rateLimit.ok) {
-      throw Errors.tooManyRequests("evidence-batch daily rate limit exceeded");
+  // ---- Phase 1: pre-transaction rate limiting, for EVERY item, in
+  // order — no transaction open at all yet. ----
+  const results: ItemResult[] = new Array(items.length);
+  const readyIndices: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    // The daily batch cap is hit FIRST, unconditionally, per item slot —
+    // even a structurally-invalid item still consumes one unit of it
+    // (matches the pre-round-4 behavior: the cap was always checked
+    // before the item's own content was ever examined).
+    const batchRateLimit = await hitRateLimitForActor(actor, `evidence-batch:user`, 86400, RATE_LIMIT_PER_USER_DAY);
+    if (!batchRateLimit.ok) {
+      results[i] = { index: i, ok: false, error: { code: "rate_limited", message: "evidence-batch daily rate limit exceeded" } };
+      continue;
     }
-    return handleEvidenceIntake(items[i], repo, { skipLiveRateLimit: true });
-  });
+    let planned: ReturnType<typeof planEvidenceRateLimitChecks>;
+    try {
+      planned = planEvidenceRateLimitChecks(items[i], { skipLiveRateLimit: true });
+    } catch (err) {
+      results[i] = toErrorResult(i, err);
+      continue;
+    }
+    let deviceRateLimitOk = true;
+    for (const check of planned.checks) {
+      const r = await hitRateLimitForActor(actor, check.bucketKey, check.windowSeconds, check.max);
+      if (!r.ok) {
+        deviceRateLimitOk = false;
+        break;
+      }
+    }
+    if (!deviceRateLimitOk) {
+      results[i] = { index: i, ok: false, error: { code: "rate_limited", message: "evidence rate limit exceeded for this device" } };
+      continue;
+    }
+    readyIndices.push(i);
+  }
 
-  const results = outcomes.map((outcome, i) => {
-    if (outcome.ok) return { index: i, ok: true, result: outcome.value };
-    const err = outcome.error;
-    if (err instanceof HttpError) {
-      return { index: i, ok: false, error: { code: err.code, message: err.message } };
+  // ---- Phase 2: transactional work, ONLY for items that passed phase 1
+  // — one outer transaction, one savepoint per ready item (P3c gate
+  // round 3, blocking MEDIUM 4). ----
+  if (readyIndices.length > 0) {
+    const outcomes = await withOwnershipBatch(actor, readyIndices.length, async (repo, j) => {
+      const i = readyIndices[j];
+      return handleEvidenceIntake(items[i], repo);
+    });
+    for (let j = 0; j < readyIndices.length; j++) {
+      const i = readyIndices[j];
+      const outcome = outcomes[j];
+      results[i] = outcome.ok ? { index: i, ok: true, result: outcome.value } : toErrorResult(i, outcome.error);
     }
-    console.error(`evidence-batch: item ${i} failed unexpectedly`, err);
-    return { index: i, ok: false, error: { code: "internal_error", message: "internal error" } };
-  });
+  }
 
   return okResponse(200, { results, maxBodyBytes: MAX_BODY_BYTES });
 }));

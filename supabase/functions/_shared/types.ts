@@ -159,6 +159,20 @@ export interface UpsertPlayResult {
   created: boolean;
 }
 
+/** P3c gate round 4, blocking MEDIUM ("replays skip every rate limit" —
+ * fix item "make the replay path read-only"): what `Repo#play.getForDate`
+ * reads back, unscored, from an already-persisted `app.play` row — the
+ * exact fields `evidence/handler.ts#buildReplayResult` needs to answer a
+ * replay without re-running `scorePlay`/`upsertFromScore` at all. */
+export interface StoredPlayRow {
+  id: string;
+  scoreBadge: number;
+  scoreMonetary: number;
+  presenceSignal: boolean;
+  money: boolean;
+  heldReview: boolean;
+}
+
 export interface RateLimitResult {
   ok: boolean;
   count: number;
@@ -200,18 +214,17 @@ export interface ConsumedCheckinToken {
 export interface Repo {
   now(): Date;
 
-  rateLimit: {
-    /** `private.hit_rate_limit` (build plan §4.7 item 8), run in its own
-     * short transaction, committed independently of whatever the rest of
-     * the request's transaction later does (P3c gate round 3, blocking
-     * MEDIUM 3: "rate-limit hits roll back on 4xx" — every attempt must
-     * count, accepted or rejected). Resolves to `{ok: true, count}` under
-     * the limit, `{ok: false, count}` over it — the underlying SQL
-     * function (0020_rate_limit_no_raise.sql) never raises at all any
-     * more, so this never throws for an ordinary over-limit outcome; the
-     * caller decides how to respond from `ok`. */
-    hit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult>;
-  };
+  // ⛔ REMOVED (P3c gate round 4, blocking HIGH: "5 concurrent requests
+  // deadlock the pool"). There is deliberately NO `rateLimit` member on
+  // `Repo` any more — a Repo method is only ever reachable from inside
+  // an already-open `withOwnership`/`withOwnershipBatch` transaction,
+  // which already holds one of the pool's limited connections; a method
+  // that opened a SECOND one from there (round 3's own `rateLimit.hit`)
+  // is exactly what deadlocked the pool under real concurrency. Every
+  // rate-limit hit now goes through `privileged.ts#hitRateLimitForActor`
+  // directly, called BEFORE the transaction opens — see that function's
+  // own doc for the full reasoning. This is a structural removal, not a
+  // deprecation: nothing on `Repo` should ever open its own connection.
 
   catalog: {
     currentVersion(): Promise<CatalogVersionRow | null>;
@@ -262,6 +275,14 @@ export interface Repo {
 
   play: {
     upsertFromScore(input: UpsertPlayInput): Promise<UpsertPlayResult>;
+    /** P3c gate round 4, blocking MEDIUM: a plain, unscored read of the
+     * already-persisted play row for (courseId, playDate) — no advisory
+     * lock, no write. Used by a replay's own response reconstruction,
+     * which must never re-score or re-upsert. `null` if no play row
+     * exists yet for this (user, courseId, playDate) — see
+     * `buildReplayResult`'s own doc for why that should be unreachable
+     * in practice. */
+    getForDate(courseId: string, playDate: string): Promise<StoredPlayRow | null>;
   };
 
   fraudSignal: {
@@ -282,7 +303,12 @@ export interface Repo {
   };
 
   challenge: {
-    insert(input: { staffUserId: string | null; deviceId: string; facilityId: string | null; nonceHash: string; kind: "live" | "prefetched"; expiresAt: string }): Promise<{ id: string; expiresAt: string }>;
+    /** ⛔ FIX (P3c gate round 4): `staffUserId` removed — dead weight,
+     * since staff/partner-attest issuance is out of this round's scope
+     * and no real call site ever passed anything but `null`. Every
+     * challenge this round is issued to the authenticated actor
+     * themselves. */
+    insert(input: { deviceId: string; facilityId: string | null; nonceHash: string; kind: "live" | "prefetched"; expiresAt: string }): Promise<{ id: string; expiresAt: string }>;
     countOpenPrefetched(deviceId: string): Promise<number>;
     /** Actor-scoped: only ever returns a row this actor OR the matching
      * staff account owns. */

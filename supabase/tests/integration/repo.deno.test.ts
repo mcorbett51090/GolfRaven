@@ -15,7 +15,7 @@
 // every socket.
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { adminSql, createTestUser, createCourseWithRadiusAtFacX, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, NASHVILLE } from "./_helpers.ts";
-import { withOwnership } from "../../functions/_shared/privileged.ts";
+import { hitRateLimitForActor, withOwnership } from "../../functions/_shared/privileged.ts";
 import type { Repo } from "../../functions/_shared/types.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
@@ -129,7 +129,6 @@ Deno.test("item 5: challenge.getOwn / checkinToken.consumeForFix are scoped per 
   const challengeId = await withOwnership(a.actor, async (repo) => {
     const device = await seedDevice(repo);
     const issued = await repo.challenge.insert({
-      staffUserId: null,
       deviceId: device,
       facilityId: FAC_X,
       nonceHash: `nh-${freshUuid()}`,
@@ -147,12 +146,19 @@ Deno.test("item 5: challenge.getOwn / checkinToken.consumeForFix are scoped per 
 });
 
 // ⛔ FIX found BY this suite (not in the coordinator's list, but the same
-// class of bug as item 5): rateLimit.hit's bucket key was never scoped by
-// actor at all — see privileged.ts's own fix comment. Proven here with
-// TWO real actors hammering the exact same literal bucket key: without
-// the fix, actor B would inherit actor A's count and get rate-limited
-// far below the real per-user limit.
-Deno.test("item 5 (found by this suite): rateLimit.hit is scoped per actor, not a shared global bucket", DT, async () => {
+// class of bug as item 5): the bucket key was never scoped by actor at
+// all — see privileged.ts's own fix comment. Proven here with TWO real
+// actors hammering the exact same literal bucket key: without the fix,
+// actor B would inherit actor A's count and get rate-limited far below
+// the real per-user limit.
+//
+// ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+// the pool"): rewritten against `hitRateLimitForActor` directly, NOT
+// through `withOwnership`/`Repo` — `Repo` no longer has a `rateLimit`
+// member at all (it was exactly the deadlock's own root cause; see
+// privileged.ts#hitRateLimitForActor's own doc). This is now a
+// standalone function, callable with no transaction open.
+Deno.test("item 5 (found by this suite): hitRateLimitForActor is scoped per actor, not a shared global bucket", DT, async () => {
   const a = await withFreshUser("rl-a");
   const b = await withFreshUser("rl-b");
   const bucketKey = `shared-literal-bucket-${freshUuid()}`;
@@ -160,14 +166,55 @@ Deno.test("item 5 (found by this suite): rateLimit.hit is scoped per actor, not 
   // Actor A hits the SAME literal bucket key 5 times, max 5 — should be
   // fine on its own.
   for (let i = 0; i < 5; i++) {
-    const r = await withOwnership(a.actor, (repo) => repo.rateLimit.hit(bucketKey, 3600, 5));
+    const r = await hitRateLimitForActor(a.actor, bucketKey, 3600, 5);
     assert(r.ok, `actor A's hit ${i} should be ok`);
   }
   // Actor B, using the EXACT SAME bucket key, must start its OWN count
   // from zero — not inherit actor A's 5 hits and immediately fail.
-  const bFirstHit = await withOwnership(b.actor, (repo) => repo.rateLimit.hit(bucketKey, 3600, 5));
+  const bFirstHit = await hitRateLimitForActor(b.actor, bucketKey, 3600, 5);
   assert(bFirstHit.ok, "actor B's first hit on the SAME literal bucket key must not be pre-exhausted by actor A's own hits");
   assertEquals(bFirstHit.count, 1, "actor B's count must start at 1, not continue from actor A's 5");
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3c gate round 4, blocking HIGH: "5 concurrent requests deadlock the
+// pool" — the reviewer's own repro and root-cause diagnosis (a
+// rate-limit hit opening a SECOND pooled connection from inside an
+// already-open request transaction, against a max: 5 pool).
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3c gate round 4, blocking HIGH: 2x pool max concurrent withOwnership calls, each ALSO hitting a rate limit, complete within a bound (no deadlock)", DT, async () => {
+  const POOL_MAX = 5; // matches privileged.ts#sql()'s own `max: 5`
+  const CONCURRENCY = POOL_MAX * 2; // "at least max+1, better 2x max"
+  const users = await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => withFreshUser(`deadlock-${i}`)));
+
+  const start = Date.now();
+  const attempts = users.map(async (u) => {
+    // The EXACT shape a real request now takes: hit its own rate limit
+    // FIRST, with NO transaction open at all, THEN open withOwnership.
+    // Before this round's fix, the rate-limit hit happened INSIDE the
+    // withOwnership callback instead — this ordering is the fix under
+    // test, not incidental to it.
+    const rl = await hitRateLimitForActor(u.actor, `deadlock-test-${u.uid}`, 3600, 100);
+    assert(rl.ok, `rate-limit hit for ${u.uid} should be ok (fresh bucket, well under max)`);
+    return withOwnership(u.actor, (repo) => repo.device.ensureOwn(null, "ios"));
+  });
+
+  // A generous bound: real, correctly-ordered concurrent traffic should
+  // finish in well under a second (the reviewer's own /tmp prototype did
+  // 25 concurrent in 197ms) — 20s is the reviewer's own repro threshold
+  // for "this hung," used here as the bound a CORRECT implementation
+  // must beat by a wide margin, not a tight performance assertion.
+  const DEADLOCK_BOUND_MS = 20_000;
+  const results = await Promise.race([
+    Promise.all(attempts),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`DEADLOCK: ${CONCURRENCY} concurrent requests (2x pool max) did not complete within ${DEADLOCK_BOUND_MS}ms`)), DEADLOCK_BOUND_MS)),
+  ]);
+  const elapsedMs = Date.now() - start;
+
+  assertEquals(results.length, CONCURRENCY);
+  for (const r of results) assert(typeof r.id === "string" && r.id.length > 0);
+  assert(elapsedMs < DEADLOCK_BOUND_MS, `expected ${CONCURRENCY} concurrent requests to complete well under ${DEADLOCK_BOUND_MS}ms — took ${elapsedMs}ms`);
+  console.log(`P3c gate round 4 deadlock test: ${CONCURRENCY} concurrent requests (2x pool max ${POOL_MAX}) completed in ${elapsedMs}ms`);
 });
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -180,7 +227,6 @@ Deno.test("item 4: consumeForFix rejects a device that does not match the token'
     const device = await seedDevice(repo);
     const otherDeviceId = freshUuid(); // not a real device row, but the WHERE clause should reject it regardless
     const challenge = await repo.challenge.insert({
-      staffUserId: null,
       deviceId: device,
       facilityId: FAC_X,
       nonceHash: `nh-${freshUuid()}`,
@@ -205,7 +251,6 @@ Deno.test("item 4: consumeForFix rejects a capturedAt outside [issued_at, expire
   const result = await withOwnership(a.actor, async (repo) => {
     const device = await seedDevice(repo);
     const challenge = await repo.challenge.insert({
-      staffUserId: null,
       deviceId: device,
       facilityId: FAC_X,
       nonceHash: `nh-${freshUuid()}`,
@@ -231,7 +276,6 @@ Deno.test("item 4: consumeForFix succeeds exactly once (single-use), then fails 
   const { device, jti } = await withOwnership(a.actor, async (repo) => {
     const device = await seedDevice(repo);
     const challenge = await repo.challenge.insert({
-      staffUserId: null,
       deviceId: device,
       facilityId: FAC_X,
       nonceHash: `nh-${freshUuid()}`,
@@ -278,7 +322,6 @@ Deno.test("item 8: concurrent countOpenPrefetched + insert never overshoots the 
       const open = await repo.challenge.countOpenPrefetched(deviceId);
       if (open >= CAP) return false;
       await repo.challenge.insert({
-        staffUserId: null,
         deviceId,
         facilityId: FAC_X,
         nonceHash: `nh-${freshUuid()}`,

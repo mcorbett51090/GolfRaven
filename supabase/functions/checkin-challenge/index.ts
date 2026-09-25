@@ -4,9 +4,9 @@
 // inventory: "checkin-challenge"). Thin entrypoint over
 // _shared/checkin/challenge-handler.ts.
 
-import { getActorFromRequest, withOwnership } from "../_shared/privileged.ts";
+import { getActorFromRequest, hitRateLimitForActor, withOwnership } from "../_shared/privileged.ts";
 import { errorResponse, handleRequest, okResponse, readJsonBody, Errors } from "../_shared/http.ts";
-import { handleChallengeRequest, type ChallengeRequest } from "../_shared/checkin/challenge-handler.ts";
+import { handleChallengeRequest, RATE_LIMIT_PER_USER_HOUR, type ChallengeRequest } from "../_shared/checkin/challenge-handler.ts";
 import { serve } from "std/http/server";
 
 function isChallengeRequest(v: unknown): v is ChallengeRequest {
@@ -26,6 +26,12 @@ serve((req) => handleRequest(async () => {
 
   const body = await readJsonBody(req);
   if (!isChallengeRequest(body)) throw Errors.badRequest('body must be {"deviceId": string, "facilityId"?: string, "prefetchCount"?: number}');
+
+  // ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+  // the pool"): hit BEFORE withOwnership opens — see privileged.ts#
+  // hitRateLimitForActor's own doc.
+  const rateLimit = await hitRateLimitForActor(actor, "checkin-challenge:user", 3600, RATE_LIMIT_PER_USER_HOUR);
+  if (!rateLimit.ok) return Errors.tooManyRequests("checkin-challenge rate limit exceeded", rateLimit.retryAfterSeconds).toResponse();
 
   const challenges = await withOwnership(actor, (repo) =>
     handleChallengeRequest(

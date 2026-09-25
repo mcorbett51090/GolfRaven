@@ -41,7 +41,12 @@ import type { Repo } from "../types.ts";
 import { Errors } from "../http.ts";
 
 const TOKEN_TTL_SECONDS = 15 * 60; // generous enough to cover a full round's checkin/evidence flow within one QR session
-const RATE_LIMIT_PER_USER_HOUR = 60; // should-fix (P3c gate round 2): "add one on checkin-token"
+// P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock the
+// pool"): exported so checkin-token/index.ts can hit this bucket via
+// `privileged.ts#hitRateLimitForActor` BEFORE calling `withOwnership` —
+// see this file's own `handleTokenRequest` for why the hit no longer
+// happens in here.
+export const RATE_LIMIT_PER_USER_HOUR = 60; // should-fix (P3c gate round 2): "add one on checkin-token"
 
 export interface TokenRequest {
   challengeId: string;
@@ -71,9 +76,13 @@ function fromBase64Url(b64url: string): Uint8Array {
 }
 
 export async function handleTokenRequest(body: TokenRequest, repo: Repo, digestHex: DigestHexFn): Promise<IssuedToken> {
-  const rateLimit = await repo.rateLimit.hit(`checkin-token:user`, 3600, RATE_LIMIT_PER_USER_HOUR);
-  if (!rateLimit.ok) throw Errors.tooManyRequests("checkin-token rate limit exceeded", rateLimit.retryAfterSeconds);
-
+  // ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+  // the pool"): the rate-limit hit used to happen HERE, via
+  // `repo.rateLimit.hit` — removed. `Repo` no longer has a `rateLimit`
+  // member at all (types.ts). checkin-token/index.ts now hits
+  // `checkin-token:user` via `hitRateLimitForActor` BEFORE calling
+  // `withOwnership`, so this function is only ever reached once that has
+  // already succeeded.
   const challenge = await repo.challenge.getOwn(body.challengeId);
   if (!challenge) throw Errors.notFound("no such challenge for this account");
   if (challenge.usedAt !== null) throw Errors.unprocessable("challenge_used", "this challenge has already been consumed");

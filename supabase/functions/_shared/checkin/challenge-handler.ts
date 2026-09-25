@@ -25,7 +25,12 @@
 import type { Repo } from "../types.ts";
 import { Errors } from "../http.ts";
 
-const RATE_LIMIT_PER_USER_HOUR = 30; // build plan §4.7 item 8
+// P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock the
+// pool"): exported so checkin-challenge/index.ts can hit this bucket via
+// `privileged.ts#hitRateLimitForActor` BEFORE calling `withOwnership` —
+// see this file's own `handleChallengeRequest` for why the hit no longer
+// happens in here.
+export const RATE_LIMIT_PER_USER_HOUR = 30; // build plan §4.7 item 8
 const MAX_OPEN_PREFETCHED_PER_DEVICE = 10;
 const LIVE_TTL_SECONDS = 120; // matches the rotating-course-QR ≤120s window's order of magnitude for a live in-session challenge
 const PREFETCH_TTL_SECONDS = 24 * 60 * 60;
@@ -61,11 +66,14 @@ function toBase64Url(bytes: Uint8Array): string {
 }
 
 export async function handleChallengeRequest(body: ChallengeRequest, repo: Repo, randomBytes: RandomBytesFn, digestHex: DigestHexFn): Promise<IssuedChallenge[]> {
-  // Rate-limit BEFORE any write (P3c gate round 2, item 7's own
-  // reasoning, applied here too).
-  const rateLimit = await repo.rateLimit.hit(`checkin-challenge:user`, 3600, RATE_LIMIT_PER_USER_HOUR);
-  if (!rateLimit.ok) throw Errors.tooManyRequests("checkin-challenge rate limit exceeded", rateLimit.retryAfterSeconds);
-
+  // ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+  // the pool"): the rate-limit hit used to happen HERE, via
+  // `repo.rateLimit.hit` — removed. `Repo` no longer has a `rateLimit`
+  // member at all (types.ts). checkin-challenge/index.ts now hits
+  // `checkin-challenge:user` via `hitRateLimitForActor` BEFORE calling
+  // `withOwnership`, so this function is only ever reached once that has
+  // already succeeded — see privileged.ts#hitRateLimitForActor's own doc
+  // for the full reasoning.
   const knownDevice = await repo.device.findOwn(body.deviceId);
   if (!knownDevice) {
     const existingDeviceCount = await repo.device.countForUser();
@@ -80,7 +88,7 @@ export async function handleChallengeRequest(body: ChallengeRequest, repo: Repo,
     const nonce = randomBytes(32);
     const nonceHash = await digestHex(nonce);
     const expiresAt = new Date(repo.now().getTime() + LIVE_TTL_SECONDS * 1000).toISOString();
-    const inserted = await repo.challenge.insert({ staffUserId: null, deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, kind: "live", expiresAt });
+    const inserted = await repo.challenge.insert({ deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, kind: "live", expiresAt });
     return [{ id: inserted.id, nonce: toBase64Url(nonce), expiresAt: inserted.expiresAt, kind: "live" }];
   }
 
@@ -98,7 +106,7 @@ export async function handleChallengeRequest(body: ChallengeRequest, repo: Repo,
   for (let i = 0; i < toIssue; i++) {
     const nonce = randomBytes(32);
     const nonceHash = await digestHex(nonce);
-    const inserted = await repo.challenge.insert({ staffUserId: null, deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, kind: "prefetched", expiresAt });
+    const inserted = await repo.challenge.insert({ deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, kind: "prefetched", expiresAt });
     issued.push({ id: inserted.id, nonce: toBase64Url(nonce), expiresAt: inserted.expiresAt, kind: "prefetched" });
   }
   return issued;

@@ -72,6 +72,40 @@
 //   health_workout, which carry no client-controlled capturedAt to
 //   derive a date from at all), the client's own label is accepted only
 //   inside a facility-local-today window (`assertSelfReportDateWindow`).
+//
+// P3c gate round 4 fixes, blocking HIGH ("5 concurrent requests deadlock
+// the pool") and blocking MEDIUM ("replays skip every rate limit"):
+//
+//   Blocking HIGH's own fix moved EVERY rate-limit hit for evidence
+//   intake OUT of this file's own pipeline entirely — `handleEvidenceIntake`
+//   no longer calls anything rate-limit-shaped at all. The reviewer's own
+//   diagnosis: `Repo#rateLimit.hit` (round 3) opened a SECOND pooled
+//   connection from inside a `buildRepo` callback that already holds ONE
+//   (the request's own transaction) — under real concurrency (5+
+//   simultaneous requests against a `max: 5` pool), every one of them
+//   blocked forever waiting for a connection that would never free up.
+//   `planEvidenceRateLimitChecks` below is the new seam: it parses the
+//   submission and returns the bucket checks that must be hit —
+//   UNCONDITIONALLY, replay or not — with NO transaction open at all.
+//   The caller (evidence/index.ts, evidence-batch/index.ts) hits each
+//   one via `privileged.ts#hitRateLimitForActor` BEFORE ever calling
+//   `withOwnership`/`withOwnershipBatch`, closing both findings at once:
+//   no request ever holds two pooled connections (blocking HIGH), and
+//   every attempt — replay included — counts against its bucket, since
+//   the hit now happens before `findExisting` is even reachable
+//   (blocking MEDIUM).
+//
+//   Blocking MEDIUM's OTHER fix item ("make the replay path read-only")
+//   rewrote `buildReplayResult`: it no longer re-runs `scorePlay` or
+//   `upsertFromScore` at all for a course-anchored replay — it reads the
+//   ALREADY-STORED `app.play` row back via the new `Repo#play.getForDate`
+//   (a plain SELECT, no scoring, no write) and returns exactly that. The
+//   original, genuinely-new submission that created the evidence row
+//   already scored and upserted its play row, atomically, in the SAME
+//   transaction (P3c gate round 2, item 2) — a replay of that SAME
+//   content has nothing new to contribute, so this is not merely
+//   cheaper, it is the literal "no re-score beyond what's idempotent"
+//   contract, made unconditional instead of merely idempotent-in-practice.
 
 // @deno-types="../scoring/scoring-types.d.ts"
 import { scorePlay } from "../scoring/vendor/score-play.js";
@@ -288,26 +322,71 @@ function assertServerDerivableLocalDate(submission: EvidenceSubmission, facility
   }
 }
 
-export interface HandleEvidenceIntakeOptions {
-  /** should-fix (P3c gate round 2): "batch items must not consume the
-   * live 60/h limit." evidence-batch/index.ts sets this true — its OWN
-   * per-item call into the 2,000/day batch bucket is what gates a batch
-   * submission instead (see that file). */
-  skipLiveRateLimit?: boolean;
+export interface RateLimitCheck {
+  bucketKey: string;
+  windowSeconds: number;
+  max: number;
+}
+
+/** P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock the
+ * pool") + blocking MEDIUM ("replays skip every rate limit"): parses the
+ * submission and returns the rate-limit checks that MUST be hit —
+ * unconditionally, replay or not — before this submission's own
+ * transaction (`findExisting` onward) ever opens. Pure: needs no DB
+ * access of its own. `actor.uid` is the caller's own concern (not
+ * threaded through here at all); the device-scoped bucket key uses the
+ * CLIENT-SUPPLIED `deviceId` directly — always present, request-shape.ts's
+ * `CommonFields` — never the DB-resolved device row's own id, so this
+ * needs no DB round trip either (the two are guaranteed equal:
+ * `Repo#device.ensureOwn` always stores the id it's given, P3c gate
+ * round 2's own device-identity fix). The caller hits each check via
+ * `privileged.ts#hitRateLimitForActor` BEFORE calling `withOwnership`,
+ * so no request ever holds the request transaction's own pooled
+ * connection AND a rate-limit connection at the same time, and every
+ * attempt (replay included) counts, since this runs before
+ * `handleEvidenceIntake`'s own `findExisting` is even reachable. */
+export function planEvidenceRateLimitChecks(rawBody: unknown, options: { skipLiveRateLimit?: boolean } = {}): { submission: EvidenceSubmission; checks: RateLimitCheck[] } {
+  const parsed = parseEvidenceSubmission(rawBody);
+  if (!parsed.ok) {
+    throw Errors.badRequest("invalid evidence submission", { issues: parsed.issues });
+  }
+  const submission = parsed.value;
+  const checks: RateLimitCheck[] = [];
+  // should-fix (P3c gate round 2): "batch items must not consume the
+  // live 60/h limit." evidence-batch/index.ts sets this true — its OWN
+  // per-item call into the 2,000/day batch bucket is what gates a batch
+  // submission instead (see that file).
+  if (!options.skipLiveRateLimit) {
+    checks.push({ bucketKey: "evidence:user", windowSeconds: 3600, max: RATE_LIMIT_EVIDENCE_PER_USER_HOUR });
+  }
+  checks.push({ bucketKey: `evidence:device:${submission.deviceId}`, windowSeconds: 86400, max: RATE_LIMIT_EVIDENCE_PER_DEVICE_DAY });
+  return { submission, checks };
 }
 
 /** P3c gate round 3, blocking HIGH 1+2: rebuilds this function's own
  * response PURELY from already-persisted rows — zero new side effects
  * (no token consumption, no rate-limit hit, no fresh insert, no fraud
- * signal). The ONLY re-computation this does is a re-score from rows
- * that are already on file, which is idempotent by construction (same
- * stored inputs, same scorer, same output) — "no re-score beyond what's
- * idempotent," per the gate's own fix description. Handles both
- * `status` shapes this handler ever actually persists:
- * `queued_catalog` (nothing further to score at all) and `accepted`
- * (facility-level rows short-circuit the same way a fresh facility-level
- * submission already does; course-anchored rows re-run `scorePlay`
- * against `listForPlay`'s own already-stored set). */
+ * signal). Handles both `status` shapes this handler ever actually
+ * persists: `queued_catalog` (nothing further to score at all) and
+ * `accepted` (facility-level rows short-circuit the same way a fresh
+ * facility-level submission already does).
+ *
+ * ⛔ FIX (P3c gate round 4, blocking MEDIUM's own fix item: "make the
+ * replay path read-only... If a re-score is genuinely needed for
+ * correctness, say why"). A course-anchored replay used to re-run
+ * `scorePlay` against `listForPlay`'s own already-stored set and then
+ * `upsertFromScore` the result — a REAL re-score and a REAL write, on
+ * every single replay, which is how 150 replays in 757ms each still did
+ * real work even though the rate-limit bucket (this file's OTHER round-4
+ * fix) now also catches the volume. Genuinely not needed: the ORIGINAL,
+ * new submission that created this evidence row already scored and
+ * upserted its play row, atomically, in the SAME transaction (P3c gate
+ * round 2, item 2) — nothing about a byte-for-byte-identical replay
+ * (guaranteed by the caller's own `input_hash` match, the only way this
+ * function is ever reached) could produce a DIFFERENT score from the
+ * SAME already-persisted inputs. `Repo#play.getForDate` is a plain
+ * SELECT of that already-computed row — no scoring, no advisory lock, no
+ * write of any kind. */
 async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow): Promise<EvidenceIntakeResult> {
   if (existing.status === "queued_catalog") {
     return { status: "queued_catalog", evidenceId: existing.id };
@@ -320,61 +399,41 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow): Pro
       play: { id: "", scoreBadge: 0, scoreMonetary: 0, presenceSignal: false, money: false, heldReview: false },
     };
   }
-  const facilityTz = await repo.catalog.facilityTz(existing.facilityId);
-  if (!facilityTz) {
-    // The ledger/catalog said this facility existed when the ORIGINAL
-    // submission was scored; reaching here on a REPLAY with no tz on
-    // file now is an inconsistent catalog state, not a client fault —
-    // fail closed rather than scoring against an unknown tz.
+  const play = await repo.play.getForDate(existing.courseId, existing.localDate);
+  if (!play) {
+    // Should be unreachable: the original submission that created this
+    // evidence row always upserts its play row in the SAME atomic
+    // transaction (P3c gate round 2, item 2), so a course-anchored
+    // evidence row and its play row either both exist or neither does.
+    // Reaching here means a genuine data inconsistency, not a normal
+    // race — fail closed rather than fabricate a play outcome.
+    console.error(`buildReplayResult: no app.play row found for an existing, course-anchored evidence row (evidenceId=${existing.id}, courseId=${existing.courseId}, localDate=${existing.localDate})`);
     throw Errors.internal();
   }
-  const priorRows = await repo.evidence.listForPlay(existing.facilityId, existing.courseId, existing.localDate);
-  const evidenceForScoring = reconstructEvidenceFromStoredRows(priorRows);
-
-  const outcome = scorePlay(evidenceForScoring, {
-    playFacilityId: existing.facilityId,
-    playLocalDate: existing.localDate,
-    playCourseId: existing.courseId,
-    facilityTz,
-  });
-  if (!outcome.ok) {
-    console.error(`scorePlay rejected a replay's already-stored rows: ${outcome.reasons.join("; ")}`);
-    throw Errors.internal();
-  }
-
-  const contributedIds = new Set(outcome.contributions.map((c) => c.evidenceId));
-  const evidenceIdsToLink = priorRows.map((r) => r.id).filter((id) => contributedIds.has(id) || id === existing.id);
-
-  const play = await repo.play.upsertFromScore({
-    courseId: existing.courseId,
-    facilityId: existing.facilityId,
-    playDate: existing.localDate,
-    courseDisambiguatedBy: null,
-    scoreBadge: outcome.score_badge,
-    scoreMonetary: outcome.score_monetary,
-    hardSignal: outcome.contributions.some((c) => c.hard),
-    presenceSignal: outcome.presence_signal,
-    money: outcome.money,
-    heldReview: outcome.heldReview,
-    policyVersion: String(outcome.policyVersion),
-    inputDigest: outcome.inputDigest,
-    evidenceIds: evidenceIdsToLink,
-  });
-
   return {
     status: "accepted",
     evidenceId: existing.id,
     replay: true,
-    play: { id: play.id, scoreBadge: outcome.score_badge, scoreMonetary: outcome.score_monetary, presenceSignal: outcome.presence_signal, money: outcome.money, heldReview: outcome.heldReview },
+    play: { id: play.id, scoreBadge: play.scoreBadge, scoreMonetary: play.scoreMonetary, presenceSignal: play.presenceSignal, money: play.money, heldReview: play.heldReview },
   };
 }
 
-export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options: HandleEvidenceIntakeOptions = {}): Promise<EvidenceIntakeResult> {
+export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promise<EvidenceIntakeResult> {
   const parsed = parseEvidenceSubmission(rawBody);
   if (!parsed.ok) {
     throw Errors.badRequest("invalid evidence submission", { issues: parsed.issues });
   }
   const submission = parsed.value;
+
+  // ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+  // the pool"): rate-limiting used to happen HERE, via
+  // `repo.rateLimit.hit` — removed entirely. The caller (evidence/
+  // index.ts, evidence-batch/index.ts) already hit every check
+  // `planEvidenceRateLimitChecks` returned, via `hitRateLimitForActor`,
+  // BEFORE `withOwnership` was even called — see this file's own header
+  // for the full reasoning. By the time `repo` exists at all (this
+  // function's own second parameter), rate-limiting for this request has
+  // already happened, unconditionally, replay or not.
 
   // Computed ONCE, reused everywhere below this point — both are pure
   // functions of `submission` alone.
@@ -401,14 +460,6 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   // ---- Everything below only ever runs for a GENUINELY NEW submission
   // (no existing row for this (user, source, source_ref) at all). ----
 
-  // ⛔ FIX (P3c gate round 2, item 7): rate-limit BEFORE any write —
-  // including BEFORE ensureOwn, which otherwise creates a device row
-  // even for a request this same call is about to reject.
-  if (!options.skipLiveRateLimit) {
-    const rateLimitUser = await repo.rateLimit.hit(`evidence:user`, 3600, RATE_LIMIT_EVIDENCE_PER_USER_HOUR);
-    if (!rateLimitUser.ok) throw Errors.tooManyRequests("evidence rate limit exceeded for this account", rateLimitUser.retryAfterSeconds);
-  }
-
   // ⛔ FIX (P3c gate round 2, item 7): device cap checked BEFORE anything
   // is written. `findOwn` never creates a row — only a genuinely NEW
   // device (not already this actor's own) is subject to the cap, and a
@@ -423,9 +474,6 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     }
   }
   const device = knownDevice ?? (await repo.device.ensureOwn(submission.deviceId, null));
-
-  const rateLimitDevice = await repo.rateLimit.hit(`evidence:device:${device.id}`, 86400, RATE_LIMIT_EVIDENCE_PER_DEVICE_DAY);
-  if (!rateLimitDevice.ok) throw Errors.tooManyRequests("evidence rate limit exceeded for this device", rateLimitDevice.retryAfterSeconds);
 
   // ---- Catalog skew (AT 8 / AT 15 / G3-10) — BEFORE any id lookup. ----
   const currentVersion = await repo.catalog.currentVersion();

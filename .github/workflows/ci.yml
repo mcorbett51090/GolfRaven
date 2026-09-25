@@ -315,30 +315,31 @@ jobs:
         # and confirm a tampered hash fails it in /tmp. Don't overstate it
         # in the step name."
         #
-        # [unverified — training-knowledge premise, re-tested this round
-        # and NOT reproduced]: this session independently tested the
-        # PREMISE directly (a copy of the lockfile with one remote
-        # entry's hash byte-flipped, run against BOTH a bone-dry empty
-        # DENO_DIR and an already-warm one, via BOTH `deno check --frozen`
-        # and `deno cache --frozen`) — in Deno 2.5.2, `deno check
-        # --frozen` ALSO failed with `error: Integrity check failed for
-        # remote specifier` (exit 10) in every one of those combinations,
-        # not merely `deno cache --frozen`. The step above may already be
-        # sufficient proof on ITS OWN, on this Deno version. This
-        # dedicated step is added anyway, for three reasons the
-        # `check`-only step doesn't cover by itself: (1) it isolates the
-        # PROOF from type-checking — a future change that makes `check`
-        # skip re-verification of an already-cached module (a real,
-        # previously-changed area of Deno's own caching semantics across
-        # versions) would silently stop proving anything here without
-        # ALSO breaking a completely unrelated type error, and this step
-        # would still catch it on its own; (2) `deno cache` is the
-        # narrower, purpose-built command for exactly this ("fetch and
-        # verify against the lockfile," nothing else), so its own success
-        # or failure is unambiguous about what it's asserting; (3) it
-        # documents, in CI itself, the exact tamper-test this comment
-        # describes running once in this session's own throwaway /tmp
-        # sandbox — reproducible by anyone, not merely asserted here.
+        # ⛔ CORRECTED (P3c gate round 4): this step's own comment
+        # previously claimed "`deno check --frozen` ALSO failed... in
+        # every combination tested," based on tampering ONE file
+        # (`deno.land/x/postgresjs@v3.4.5/mod.js`) — a plain `.js` module
+        # that is ALSO its own type source, so `deno check` happens to
+        # need its real bytes for type info and therefore re-verifies
+        # them. That claim did not generalize and was wrong: the P3c gate
+        # round 4 reviewer reproduced that `deno check --frozen` does
+        # NOT catch a tampered hash for an esm.sh `.mjs` module reached
+        # only through a SEPARATE `.d.ts` type declaration (`ws.mjs`,
+        # `supabase-js.mjs`) — `deno check` only needs the `.d.ts` for
+        # type-checking, never touches the `.mjs` runtime bytes at all,
+        # so a tampered `.mjs` hash is silently invisible to it. This
+        # session independently reproduced the SAME result: a
+        # byte-flipped hash for `@supabase/supabase-js@2.45.4/denonext/
+        # supabase-js.mjs` left `deno check --frozen` at exit 0 (no
+        # error at all) while `deno cache --frozen` correctly failed at
+        # exit 10. So the step above (`deno check`) is NOT sufficient
+        # proof on its own, for every class of pinned dependency this
+        # repo has — THIS step is the one actually doing the pin-proof
+        # work, not a secondary belt-and-suspenders addition to the one
+        # above. The next step below runs the SAME kind of tamper test
+        # this comment describes, every CI invocation, rather than
+        # resting on a comment's one-off manual claim (which is exactly
+        # how the ORIGINAL wrong claim here went unnoticed for a round).
         # Step name says "hashes," never "supply chain" or "pinned
         # versions are safe" — this proves byte-for-byte integrity
         # against the LOCKFILE's own recorded hash, nothing about whether
@@ -353,6 +354,61 @@ jobs:
             supabase/functions/checkin-challenge/index.ts \
             supabase/functions/checkin-token/index.ts \
             supabase/functions/_shared/privileged.ts
+
+      - name: deno cache --frozen tamper test (proves the pin-proof step itself catches a real tamper)
+        # P3c gate round 4: "Add a real tamper test to CI: copy the lock
+        # to a temp dir, flip one byte in one JS module entry (e.g. the
+        # ws or supabase-js .mjs), and assert deno cache --frozen exits
+        # non-zero." This is that test, run every invocation — not a
+        # comment asserting a manual one-off (see the previous step's
+        # own corrected comment for why a stale manual claim is
+        # dangerous here specifically). Targets the exact class of entry
+        # shown to be invisible to `deno check --frozen` (an esm.sh
+        # `.mjs` reached only via its own separate `.d.ts`), so this
+        # proves the thing that actually needs proving, not merely
+        # re-proving what the `postgresjs` file already showed in the
+        # step above. A PASSING (exit 0) `deno cache --frozen` against
+        # the tampered copy would mean the pin-proof mechanism ITSELF is
+        # broken — this step fails the build in that case, distinctly
+        # from an ordinary tamper detection.
+        run: |
+          set -euo pipefail
+          export TAMPER_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TAMPER_DIR"' EXIT
+          # Deliberately every line at the SAME indentation (no nested
+          # Python block) — a YAML block scalar dedents this whole `run:`
+          # block by its own uniform base indentation before bash ever
+          # sees it, so an indented `with`/`if` body here would land at
+          # an arbitrary, easy-to-get-wrong column once YAML is done with
+          # it. One-line compound statements sidestep that entirely.
+          python3 - <<'PY'
+          import json, os, sys
+          f = open("supabase/tests/deno.lock"); data = json.load(f); f.close()
+          remote = data["remote"]
+          # If this specific pin ever moves/changes, update this target
+          # alongside it — same discipline as every other pinned
+          # reference in this repo (deno.json's import map,
+          # pinned-import-targets.json).
+          target = "https://esm.sh/@supabase/supabase-js@2.45.4/denonext/supabase-js.mjs"
+          if target not in remote: sys.exit(f"tamper test setup: {target!r} not found in supabase/tests/deno.lock -- the pin moved; update this script's own target to match")
+          orig_hash = remote[target]
+          remote[target] = ("0" if orig_hash[0] != "0" else "1") + orig_hash[1:]
+          out = open(os.path.join(os.environ["TAMPER_DIR"], "tampered.lock"), "w"); json.dump(data, out); out.close()
+          PY
+          set +e
+          deno cache --config supabase/functions/deno.json --lock="$TAMPER_DIR/tampered.lock" --frozen \
+            supabase/functions/evidence/index.ts \
+            supabase/functions/evidence-batch/index.ts \
+            supabase/functions/checkin-challenge/index.ts \
+            supabase/functions/checkin-token/index.ts \
+            supabase/functions/_shared/privileged.ts
+          TAMPER_EXIT=$?
+          set -e
+          if [ "$TAMPER_EXIT" -eq 0 ]; then
+            echo "FAILED: 'deno cache --frozen' exited 0 against a lockfile with a deliberately tampered esm.sh .mjs hash -- the pin-proof step is not actually verifying integrity for this class of dependency." >&2
+            exit 1
+          fi
+          echo "deno cache --frozen tamper test: PASS (tampered hash correctly rejected, deno exit code $TAMPER_EXIT)"
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)

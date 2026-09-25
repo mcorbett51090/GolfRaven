@@ -101,6 +101,7 @@ import type {
   Repo,
   SigningKeyRow,
   StoredEvidenceRow,
+  StoredPlayRow,
   UpsertPlayInput,
   UpsertPlayResult,
 } from "./types.ts";
@@ -144,8 +145,87 @@ function sql(): ReturnType<typeof postgres> {
   _sql = postgres(dbUrl, {
     max: 5,
     prepare: true,
+    // ⛔ FIX (P3c gate round 4, blocking HIGH's own fix list, items 3-4):
+    // "Set a connect/acquire timeout... Set idle_in_transaction_session_
+    // timeout." Neither of these is the ROOT fix (see `hitRateLimitForActor`'s
+    // own doc for that) — postgres.js has no acquire-timeout at all (a
+    // request queued waiting for a free pooled connection waits forever;
+    // `connect_timeout` below bounds only the TCP+auth handshake for a
+    // NEW physical connection, not a wait for a pool SLOT), so neither
+    // setting can, by itself, prevent the deadlock this round's own
+    // reviewer reproduced. They are defense in depth: `connect_timeout`
+    // fails fast if the DATABASE itself is unreachable/slow, rather than
+    // hanging silently forever the same way an exhausted pool did;
+    // `idle_in_transaction_session_timeout` bounds how long ANY
+    // connection (this pool's or a future one) can sit idle inside an
+    // open transaction before Postgres itself kills it, a backstop
+    // against a DIFFERENT future bug of the same shape (something else
+    // holding a transaction open indefinitely), not a fix for THIS one.
+    connect_timeout: 10, // seconds
+    connection: {
+      idle_in_transaction_session_timeout: 30_000, // ms
+    },
   });
   return _sql;
+}
+
+/**
+ * P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock the
+ * pool"): the reviewer's own repro and diagnosis — `Repo#rateLimit.hit`
+ * (round 3's own fix) opened its own `db.begin()` (a SECOND pooled
+ * connection) from INSIDE a `buildRepo` callback that only ever exists
+ * while `withOwnership`/`withOwnershipBatch` ALREADY holds one pooled
+ * connection open for the request's own transaction. With `max: 5`, once
+ * 5 concurrent requests each hold their own outer-transaction connection
+ * and then EACH ALSO calls `repo.rateLimit.hit`, every one of them blocks
+ * forever waiting for a 6th connection that will never free up (nothing
+ * releases a connection until ITS OWN rate-limit hit completes, which
+ * never happens) — a real deadlock, reproduced by the reviewer at 12
+ * concurrent requests (5 sessions stuck `idle in transaction` forever;
+ * postgres.js queues a blocked `db.begin()` with no acquire timeout at
+ * all).
+ *
+ * The fix is ORDERING, not a bigger pool: this function is the ONE
+ * place a rate-limit hit opens its own connection, and it is designed to
+ * be called BEFORE any `withOwnership`/`withOwnershipBatch` call for the
+ * SAME request even STARTS — never from inside a `Repo` method, so no
+ * request can ever hold two connections from this pool at once. `Repo`
+ * itself no longer has a `rateLimit` member at all (removed, not merely
+ * deprecated) — the removal is deliberate and structural: keeping a
+ * `Repo`-level rate-limit method around, even unused, is exactly the
+ * footgun that let a future change re-introduce a call to it from inside
+ * an open transaction. Every current caller (evidence/handler.ts's
+ * `planEvidenceRateLimitChecks`, checkin/challenge-handler.ts, checkin/
+ * token-handler.ts) computes its bucket key(s) from data available
+ * BEFORE any DB access at all (`actor.uid`, plus a client-supplied
+ * `deviceId` — always present, request-shape.ts's `CommonFields` — never
+ * a value that requires resolving something inside the transaction
+ * first), so none of them have a genuine need to rate-limit from inside
+ * a transaction in the first place.
+ */
+export async function hitRateLimitForActor(actor: Actor, bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
+  const db = sql();
+  const scopedBucketKey = `${actor.uid}:${bucketKey}`;
+  // Same reasoning as the round-3 fix this replaces (blocking MEDIUM 3,
+  // "rate-limit hits roll back on 4xx"): its own short transaction, on
+  // the top-level pool, so it commits independently of whatever the
+  // request's own (not-yet-open, with this fix) transaction later does.
+  // `private.hit_rate_limit` itself never raises (0020_rate_limit_no_
+  // raise.sql) — the increment always commits; this code decides
+  // ok/not-ok from the returned count.
+  return db.begin(async (rateTrx: TxSql) => {
+    await rateTrx`set local role service_role`;
+    const check = await rateTrx`select current_user as u`;
+    if (check[0]?.u !== "service_role") {
+      throw new Error(`hitRateLimitForActor: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+    }
+    const rows = await rateTrx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
+    const count = Number(rows[0]?.count ?? 0);
+    if (count > max) {
+      return { ok: false, count, retryAfterSeconds: windowSeconds };
+    }
+    return { ok: true, count };
+  }) as Promise<RateLimitResult>;
 }
 
 /**
@@ -221,70 +301,14 @@ function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): R
       return new Date();
     },
 
-    rateLimit: {
-      async hit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
-        // ⛔ FIX (found via the P3c gate round 2 Deno integration suite,
-        // item 5's own class of bug: "withOwnership ignores the actor").
-        // Every caller (evidence/handler.ts, checkin/challenge-handler.ts,
-        // checkin/token-handler.ts, evidence-batch/index.ts) passes a
-        // BARE bucket key like "evidence:user" or "checkin-token:user" —
-        // it relies on THIS method to scope it per actor, exactly like
-        // every other Repo method closes over `uid` itself. Without the
-        // prefix below, every user on the platform shared the SAME
-        // "evidence:user" bucket in private.rate_limit_bucket — a global
-        // rate limit, not a per-user one (the device-keyed bucket,
-        // `evidence:device:${device.id}`, already happened to be
-        // per-device by construction, but the per-USER buckets were not
-        // per-user at all). Caught only by running this against a real
-        // Postgres cluster with two distinct actors — no fake/unit test
-        // exercised two actors racing the SAME literal bucket key.
-        const scopedBucketKey = `${uid}:${bucketKey}`;
-        // ⛔ FIX (P3c gate round 3, blocking MEDIUM 3: "rate-limit hits
-        // roll back on 4xx"). This used to run inside the SAME `trx` as
-        // every other write for the request — 80 x catalog_forged 422s
-        // left the bucket at 0 because `withOwnership`'s single
-        // `db.begin()` rolled the WHOLE transaction back on every one of
-        // those (the handler throws an HttpError, which propagates out of
-        // `op(repo)`, which is what `db.begin` itself rolls back on any
-        // rejection) — the rate-limit hit inside it was undone along with
-        // everything else, so a rejected request never actually counted
-        // against its own bucket. `private.hit_rate_limit` is now called
-        // in its OWN short transaction, opened directly on the top-level
-        // pool (`db`, not `trx`), so it commits independently of whatever
-        // the REST of the request's transaction later does — every
-        // attempt counts, accepted or rejected alike. `SET LOCAL ROLE
-        // service_role` is required again here: it is LOCAL to its own
-        // transaction (Postgres discards a LOCAL setting at that
-        // transaction's own end), so the outer `trx`'s activation of it
-        // does not carry over to this separate one.
-        //
-        // ⛔ Also required, and not merely a nicety (0020_rate_limit_no_
-        // raise.sql): the OLD `private.hit_rate_limit` raised on
-        // over-limit, in the SAME statement that did the increment —
-        // isolating the CALL into its own transaction does not, by
-        // itself, make the increment survive that raise, because a
-        // single statement's own effects are what an uncaught RAISE
-        // EXCEPTION discards when it aborts the (here, one-statement)
-        // transaction it ran in. The function no longer raises at all —
-        // it always returns the post-increment count, so the increment
-        // always commits and THIS code decides ok/not-ok from the
-        // returned count. See that migration's own header for the full
-        // reasoning.
-        return db.begin(async (rateTrx: TxSql) => {
-          await rateTrx`set local role service_role`;
-          const check = await rateTrx`select current_user as u`;
-          if (check[0]?.u !== "service_role") {
-            throw new Error(`rateLimit.hit: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-          }
-          const rows = await rateTrx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
-          const count = Number(rows[0]?.count ?? 0);
-          if (count > max) {
-            return { ok: false, count, retryAfterSeconds: windowSeconds };
-          }
-          return { ok: true, count };
-        }) as Promise<RateLimitResult>;
-      },
-    },
+    // ⛔ REMOVED (P3c gate round 4, blocking HIGH: "5 concurrent requests
+    // deadlock the pool"). `Repo` no longer has a `rateLimit` member at
+    // all — see `hitRateLimitForActor`'s own doc, above `sql()`, for the
+    // full reasoning and its replacement. A rate-limit hit is now always
+    // made via `hitRateLimitForActor(actor, ...)`, called BEFORE
+    // `withOwnership`/`withOwnershipBatch` even opens, never through a
+    // `Repo` method reachable only from inside an already-open
+    // transaction.
 
     catalog: {
       async currentVersion(): Promise<CatalogVersionRow | null> {
@@ -576,6 +600,39 @@ function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): R
         }
         return { id: playId, created: Boolean(r.inserted) };
       },
+
+      async getForDate(courseId: string, playDate: string): Promise<StoredPlayRow | null> {
+        // ⛔ ADDED (P3c gate round 4, blocking MEDIUM: "replays skip
+        // every rate limit" — fix item "make the replay path read-only:
+        // return the stored evidence and play outcome without
+        // re-scoring or upserting"). A plain SELECT of the ALREADY
+        // -PERSISTED play row — no scoring, no advisory lock, no write
+        // of any kind. `evidence/handler.ts#buildReplayResult` uses this
+        // instead of re-running `scorePlay` + `upsertFromScore` against
+        // the SAME already-stored rows: the original, genuinely-new
+        // submission that created this evidence row already scored and
+        // upserted its play row, atomically, in the SAME transaction
+        // (P3c gate round 2, item 2) — a later replay of that SAME
+        // content has nothing new to contribute, so reading the
+        // existing row back is not merely cheaper, it's the CORRECT
+        // "no re-score beyond what's idempotent" behaviour, made
+        // literal (no re-score AT ALL) rather than "re-score and get
+        // the same answer."
+        const rows = await trx`
+          select id, score_badge, score_monetary, presence_signal, money, held_review
+          from app.play
+          where user_id = ${uid} and course_id = ${courseId} and play_date = ${playDate}`;
+        const r = rows[0];
+        if (!r) return null;
+        return {
+          id: r.id,
+          scoreBadge: Number(r.score_badge),
+          scoreMonetary: Number(r.score_monetary),
+          presenceSignal: Boolean(r.presence_signal),
+          money: Boolean(r.money),
+          heldReview: Boolean(r.held_review),
+        };
+      },
     },
 
     fraudSignal: {
@@ -682,9 +739,23 @@ function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): R
         // ran" `expires_at` was already computed from, keeping the two
         // internally consistent regardless of how long this specific
         // transaction waited on the advisory lock beforehand.
+        // ⛔ FIX (P3c gate round 4: "remove the leftover staffUserId
+        // parameter from challenge.insert"). staff_presence/partner
+        // -attest routes are out of this round's scope and were never
+        // built (request-shape.ts's own REJECTED_SOURCES) — every real
+        // call site (checkin/challenge-handler.ts) always passed
+        // `staffUserId: null`, so the parameter was dead weight (and a
+        // structural temptation for a future caller to pass something
+        // else without a real staff-issuance path behind it). Every
+        // challenge this round is issued to the authenticated actor
+        // themselves — `user_id = uid, staff_user_id = NULL` always.
+        // `app.checkin_challenge`'s own CHECK (0005) still requires
+        // exactly one of the two to be set; that invariant is trivially
+        // satisfied by never inserting a staff-issued row at all, not by
+        // this function branching on a parameter nothing supplies.
         const rows = await trx`
           insert into app.checkin_challenge (user_id, staff_user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at)
-          values (${input.staffUserId ? null : uid}, ${input.staffUserId}, ${input.deviceId}, ${input.facilityId}, ${input.nonceHash}, ${input.kind}, clock_timestamp(), ${input.expiresAt})
+          values (${uid}, null, ${input.deviceId}, ${input.facilityId}, ${input.nonceHash}, ${input.kind}, clock_timestamp(), ${input.expiresAt})
           returning id, expires_at`;
         return { id: rows[0].id, expiresAt: rows[0].expires_at.toISOString() };
       },
@@ -844,12 +915,15 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
  * documents) — the ONE place that needs per-item transactional isolation
  * gets a purpose-built entry point instead.
  *
- * `perItem`'s own rate-limit call (`repo.rateLimit.hit`, P3c gate round 3
- * blocking MEDIUM 3) already runs in ITS OWN separate top-level
- * transaction regardless of where in `perItem` it's called from — so it
- * is unaffected by, and does not need to be sequenced around, this
- * function's per-item savepoints at all; every attempt still counts
- * whether or not the item's own savepoint later rolls back.
+ * ⛔ P3c gate round 4, blocking HIGH: `perItem` must NEVER call
+ * `hitRateLimitForActor` (or anything that opens a second pooled
+ * connection) — by the time `perItem` runs, this function's own
+ * `db.begin()` is already holding one of the pool's `max: 5`
+ * connections, so a second `db.begin()` from inside it deadlocks the
+ * SAME way `Repo#rateLimit.hit` used to (see `hitRateLimitForActor`'s
+ * own doc). `evidence-batch/index.ts` hits every rate limit for every
+ * item BEFORE calling this function at all, precisely so `perItem` here
+ * only ever needs the ONE connection this transaction already holds.
  */
 export async function withOwnershipBatch<T>(
   actor: Actor,

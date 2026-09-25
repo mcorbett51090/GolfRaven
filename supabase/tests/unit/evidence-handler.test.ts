@@ -1,7 +1,7 @@
 // supabase/tests/unit/evidence-handler.test.ts
 import { describe, expect, it } from "vitest";
-import { handleEvidenceIntake } from "../../functions/_shared/evidence/handler.js";
-import { FAKE_DEVICE_ID, makeFakeRepo, makeFakeState } from "./fake-repo.js";
+import { handleEvidenceIntake, planEvidenceRateLimitChecks } from "../../functions/_shared/evidence/handler.js";
+import { FAKE_DEVICE_ID, fakeHitRateLimitForActor, makeFakeRepo, makeFakeState } from "./fake-repo.js";
 import { HttpError } from "../../functions/_shared/http.js";
 
 function checkinBody(overrides: Record<string, unknown> = {}) {
@@ -48,6 +48,31 @@ describe("handleEvidenceIntake", () => {
     if (second.status === "accepted") expect(second.replay).toBe(true);
     expect(state.evidence.size).toBe(1);
     expect(state.plays.size).toBe(1);
+  });
+
+  // ⛔ P3c gate round 4, blocking MEDIUM ("make the replay path
+  // read-only... no re-score beyond what's idempotent"): the replay must
+  // not WRITE the play row at all — `Repo#play.getForDate` is a plain
+  // read. Proven here by identity: `upsertFromScore` always replaces the
+  // stored object (`state.plays.set(key, {...input, id, userId})`), so a
+  // genuine re-score/re-upsert would produce a NEW object reference even
+  // if every field's VALUE happened to come out the same; a read-only
+  // replay leaves the ORIGINAL object in place.
+  it("P3c gate round 4, blocking MEDIUM: a replay reads the play row back, it never re-upserts it", async () => {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    const body = checkinBody();
+    await handleEvidenceIntake(body, repo);
+    const key = `user-a:crs_x1:2026-06-01`;
+    const storedBeforeReplay = state.plays.get(key);
+    expect(storedBeforeReplay).toBeDefined();
+
+    const replay = await handleEvidenceIntake(body, repo);
+    expect(replay.status).toBe("accepted");
+    if (replay.status === "accepted") expect(replay.replay).toBe(true);
+
+    const storedAfterReplay = state.plays.get(key);
+    expect(storedAfterReplay).toBe(storedBeforeReplay); // SAME object reference — never replaced by a write
   });
 
   // ⛔ FIX (P3c gate round 2, item 9): "replay with a changed payload."
@@ -128,13 +153,46 @@ describe("handleEvidenceIntake", () => {
     ).rejects.toMatchObject({ code: "catalog_forged" });
   });
 
+  // ⛔ P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock
+  // the pool"): rate-limiting moved OUT of `handleEvidenceIntake`
+  // entirely, into `planEvidenceRateLimitChecks` — the caller (evidence/
+  // index.ts in production; this precheck helper here) hits it BEFORE
+  // ever calling the handler. This test now mirrors that real call
+  // shape instead of relying on the handler to rate-limit internally.
+  async function precheckThenIntake(state: ReturnType<typeof makeFakeState>, uid: string, repo: ReturnType<typeof makeFakeRepo>, body: unknown) {
+    const { checks } = planEvidenceRateLimitChecks(body);
+    for (const check of checks) {
+      const r = await fakeHitRateLimitForActor(state, uid, check.bucketKey, check.windowSeconds, check.max);
+      if (!r.ok) throw Object.assign(new Error("evidence rate limit exceeded"), { code: "rate_limited" });
+    }
+    return handleEvidenceIntake(body, repo);
+  }
+
   it("429: per-user evidence rate limit", async () => {
     const state = makeFakeState();
     const repo = makeFakeRepo(state, "user-a");
     for (let i = 0; i < 60; i++) {
-      await handleEvidenceIntake(checkinBody({ fix: { ...(checkinBody().fix as object), fixId: `fix_rl_${i}` } }), repo);
+      await precheckThenIntake(state, "user-a", repo, checkinBody({ fix: { ...(checkinBody().fix as object), fixId: `fix_rl_${i}` } }));
     }
-    await expect(handleEvidenceIntake(checkinBody({ fix: { ...(checkinBody().fix as object), fixId: "fix_rl_last" } }), repo)).rejects.toMatchObject({ code: "rate_limited" });
+    await expect(precheckThenIntake(state, "user-a", repo, checkinBody({ fix: { ...(checkinBody().fix as object), fixId: "fix_rl_last" } }))).rejects.toMatchObject({ code: "rate_limited" });
+  });
+
+  it("P3c gate round 4, blocking MEDIUM: a rate-limit check runs even for a replay (planEvidenceRateLimitChecks is unconditional)", async () => {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    const body = checkinBody();
+    // First (genuinely new) submission, then N replays of the exact same
+    // body — every one of them must still hit the SAME rate-limit
+    // buckets planEvidenceRateLimitChecks returns, since that check now
+    // runs BEFORE handleEvidenceIntake (and therefore before
+    // findExisting) is ever reached, replay or not.
+    await precheckThenIntake(state, "user-a", repo, body);
+    const bucketKey = `user-a:evidence:user`;
+    const before = state.rateLimits.get(bucketKey) ?? 0;
+    await precheckThenIntake(state, "user-a", repo, body);
+    await precheckThenIntake(state, "user-a", repo, body);
+    const after = state.rateLimits.get(bucketKey) ?? 0;
+    expect(after).toBe(before + 2); // each replay still counted
   });
 
   // ⛔ FIX (P3c gate round 2, item 7): "cap the number of devices per

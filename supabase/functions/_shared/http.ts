@@ -76,6 +76,11 @@ export const Errors = {
   tooManyRequests: (message: string, retryAfterSeconds?: number) =>
     new HttpError(429, "rate_limited", message, retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined),
   internal: (message = "internal error") => new HttpError(500, "internal_error", message),
+  /** P3c gate round 4, blocking HIGH's own fix list: "a request-level
+   * timeout that returns 503." Used by `handleRequest`'s own timeout
+   * backstop below — see its doc for what this is and, just as
+   * importantly, what it is NOT a substitute for. */
+  serviceUnavailable: (message = "request timed out") => new HttpError(503, "service_unavailable", message),
 };
 
 /** Reads a `Request` body, enforcing MAX_BODY_BYTES with a RUNNING byte
@@ -145,14 +150,57 @@ export async function readJsonBody(req: Request): Promise<unknown> {
   return parsed;
 }
 
+// P3c gate round 4, blocking HIGH's own fix list: "Set a connect/acquire
+// timeout... plus a request-level timeout that returns 503." Bounds an
+// Edge Function's own wall-clock time as the LAST line of defense — not
+// the fix for the pool deadlock itself (privileged.ts#
+// hitRateLimitForActor's own doc has that: rate-limit hits BEFORE the
+// request transaction opens, so no request holds two pooled connections
+// at once and there's nothing left to hang on under normal operation).
+// This is what turns an UNEXPECTED future hang (a regression that
+// reintroduces contention, a slow/wedged database, anything else that
+// can make a request wait indefinitely) into a clean 503 instead of a
+// connection the CLIENT waits on forever. 15s is comfortably above this
+// round's own real numbers (25 concurrent requests in ~200ms once
+// ordered correctly; the reviewer's own repro hung past 20s specifically
+// BECAUSE of the deadlock this round fixes) while still bounding the
+// worst case to something a caller can reasonably retry against.
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+
+/** Races `promise` against a timer that rejects with `Errors.
+ * serviceUnavailable()` after `ms`. Honest limitation, stated once here
+ * rather than at every call site: this does NOT cancel `promise` itself
+ * (JS/Deno has no general-purpose promise cancellation) — if the
+ * underlying operation is, say, a DB write that is genuinely still
+ * running when the timer fires, that write keeps running in the
+ * background and may still complete (or fail) AFTER the client has
+ * already been told 503. That's an inherent property of a race-based
+ * timeout, not a bug in this one; the client's own 503-triggered retry
+ * is itself made SAFE by this round's other fix (rate-limit hits happen
+ * before the transaction, and replays are read-only), not by this
+ * timeout pretending to cancel anything. */
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Errors.serviceUnavailable(`request exceeded ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Runs an async handler and turns a thrown `HttpError` (or any other
  * error, mapped to 500 with no leaked internals) into the right
  * `Response`. Every Edge Function entrypoint's `Deno.serve` callback is a
  * one-line call to this, so the error-shape discipline lives in one
- * place, not copy-pasted per function. */
-export async function handleRequest(fn: () => Promise<Response>): Promise<Response> {
+ * place, not copy-pasted per function. Also the ONE place the
+ * request-level timeout backstop (above) is wired in, uniformly, rather
+ * than per endpoint. */
+export async function handleRequest(fn: () => Promise<Response>, timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS): Promise<Response> {
   try {
-    return await fn();
+    return await withTimeout(fn(), timeoutMs);
   } catch (err) {
     if (err instanceof HttpError) return err.toResponse();
     // Never leak internals (stack traces, DB error text) to the client —
