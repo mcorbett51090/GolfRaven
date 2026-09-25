@@ -41,7 +41,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SUPABASE_DIR="$ROOT_DIR/supabase"
 INTEGRATION_DIR="$SUPABASE_DIR/tests/integration"
 DENO_CONFIG="$SUPABASE_DIR/functions/deno.json"
-DENO_LOCK="$ROOT_DIR/deno.lock"
+# supabase/tests/, deliberately NOT supabase/functions/ (tools/service-
+# role-lint's own point 8 validates every deno.lock found UNDER
+# functionsRoot against a strict "every remote key is itself an exact
+# pinned target" rule — unsatisfiable for a REAL lockfile's full
+# transitive graph, confirmed this round) and NOT the repo root or any
+# other ancestor of supabase/functions/ up to it (the SAME lint's point 7
+# bans a config/lockfile's mere PRESENCE anywhere on that path,
+# regardless of content — also confirmed this round, and the repo root IS
+# on that path). supabase/tests/ is a SIBLING of supabase/functions/, so
+# it is invisible to both checks while still being an obvious, discoverable
+# place next to the other test-only assets.
+DENO_LOCK="$SUPABASE_DIR/tests/deno.lock"
 
 : "${PGHOST:?tools/db/test-deno-integration.sh: PGHOST must be set (see the header comment in this file)}"
 : "${PGPORT:?tools/db/test-deno-integration.sh: PGPORT must be set}"

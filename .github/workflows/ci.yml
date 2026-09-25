@@ -180,6 +180,33 @@ jobs:
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      - name: Install Deno 2.5.2 (checksum-pinned)
+        # ⛔ MOVED (P3c gate round 2, item 0 — required first): "the CI
+        # blind spot" — every HIGH/MEDIUM item that gate round found was
+        # discoverable ONLY by running the REAL privileged.ts (and the
+        # handlers built on it) under Deno against a real Postgres
+        # cluster, and nothing in this job used to do that (pgTAP
+        # exercises raw SQL directly; vitest runs against an in-memory
+        # FAKE Repo). Deno used to be installed near the END of this job,
+        # after both tools/db/test.sh runs already finished — moved here,
+        # BEFORE them, so it is on PATH when tools/db/test.sh calls
+        # tools/db/test-deno-integration.sh (supabase/tests/integration/)
+        # against each harness's own live cluster, in EITHER
+        # HARNESS_MODE. Exported to $GITHUB_PATH so both test.sh
+        # invocations below (and this job's own later `deno check` step)
+        # find it as plain `deno`, no separate re-install needed.
+        run: |
+          set -euo pipefail
+          DENO_VERSION="2.5.2"
+          DENO_SHA256="520fd4bc2d18b50b6ac2ea8b7d0f7f6a35588e412754a081e8c6afd4b15264c4"
+          curl -fsSL -o /tmp/deno.zip \
+            "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip"
+          echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c -
+          mkdir -p /tmp/deno-bin
+          unzip -q -o /tmp/deno.zip -d /tmp/deno-bin
+          chmod +x /tmp/deno-bin/deno
+          echo "/tmp/deno-bin" >> "$GITHUB_PATH"
+
       - name: Build @golfraven/service-role-lint
         # tools/db/test.sh's last step runs this package's built CLI (B5)
         # over supabase/functions — build it before the harness needs it.
@@ -201,15 +228,18 @@ jobs:
       - name: Run tools/db/test.sh (HARNESS_MODE=superuser)
         # The harness owns its own throwaway cluster end to end (initdb,
         # start, shim, migrations, seed fixtures, pgTAP matrix, B4 replay/
-        # concurrency check, B2 function-inventory check, B5 service-role
-        # lint, teardown) — see its header comment for the exact sequence.
+        # concurrency check, the P3c gate round 2 Deno integration suite
+        # (item 0), B2 function-inventory check, B5 service-role lint,
+        # teardown) — see its header comment for the exact sequence.
         # Non-zero exit here fails the job; no `paths:` filter on this
         # workflow's trigger (AGENTS.md "Required status checks — never
         # add paths: to a required workflow"), so this job always
         # evaluates once it is made required, same as `verify` and
         # `gitleaks`. This run connects as the cluster bootstrap role (a
         # true Postgres superuser) — the harness's original behaviour,
-        # unchanged; HARNESS_MODE defaults to `superuser` when unset.
+        # unchanged; HARNESS_MODE defaults to `superuser` when unset. Deno
+        # is already on PATH (installed above) for the harness's own
+        # tools/db/test-deno-integration.sh step.
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: superuser
@@ -221,56 +251,63 @@ jobs:
         # independent run of the SAME harness against a FRESH throwaway
         # cluster (tools/db/test.sh tears its own cluster down on exit, so
         # the two runs never share state) connects migrations/fixtures/
-        # pgTAP as `migration_owner` instead — LOGIN, CREATEDB, CREATEROLE,
-        # explicitly NOSUPERUSER NOBYPASSRLS (supabase/tests/shim.sql).
-        # Extension installation stays on the step above (bootstrap-as-
-        # superuser in either mode, per the harness's own header comment).
+        # pgTAP/the Deno integration suite as `migration_owner` instead —
+        # LOGIN, CREATEDB, CREATEROLE, explicitly NOSUPERUSER NOBYPASSRLS
+        # (supabase/tests/shim.sql) — proving "Conditions on the
+        # BYPASSRLS design"'s own `SET LOCAL ROLE service_role`
+        # activation works from a connecting role that is NOT already
+        # service_role, in BOTH harness shapes. Extension installation
+        # stays on the step above (bootstrap-as-superuser in either mode,
+        # per the harness's own header comment).
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: restricted
 
       - name: Run supabase/tests/unit (vitest — P3c pure/DI'd handler modules)
         # Task instruction: "put handler logic in pure, dependency-injected
-        # modules unit-testable without a live Supabase", tested under
-        # vitest since Deno is not installed by default in this CI image
-        # (mirrors the reviewer's own local session, which downloaded
-        # Deno 2.5.2 into /tmp to run `deno check`/`deno test` directly —
-        # see supabase/tests/vitest.config.ts's own header for why these
-        # tests need a small resolve-alias table at all: supabase/ is
-        # deliberately not a registered pnpm workspace package, so this
-        # runs FROM @golfraven/rules (which already depends on zod/
-        # @noble/hashes/tz-lookup at the exact versions supabase/
-        # functions/deno.json pins) rather than as its own package).
+        # modules unit-testable without a live Supabase" — run under
+        # vitest against an in-memory FAKE Repo (supabase/tests/unit/
+        # fake-repo.ts), complementary to (not a replacement for) the
+        # Deno integration suite above, which runs the SAME handler
+        # modules against the REAL privileged.ts and a real Postgres
+        # cluster (P3c gate round 2, item 0's own point: the fake Repo
+        # alone missed real bugs a real DB catches). Deno IS installed in
+        # this job (moved earlier, above) — vitest runs regardless, since
+        # it is a cross-runtime signal in its own right, not merely a
+        # Deno-unavailable fallback (see supabase/tests/vitest.config.ts's
+        # own header for why these tests need a small resolve-alias table
+        # at all: supabase/ is deliberately not a registered pnpm
+        # workspace package, so this runs FROM @golfraven/rules, which
+        # already depends on zod/@noble/hashes/tz-lookup at the exact
+        # versions supabase/functions/deno.json pins, rather than as its
+        # own package).
         run: pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts
 
-      - name: Install Deno 2.5.2 (checksum-pinned) and run deno check
-        # Best-effort second signal alongside vitest: `deno check` type
-        # -checks every Edge Function entrypoint and shared module
-        # against Deno's OWN resolution (deno.json's import map,
-        # confirmed this session to require `--config` explicitly — see
-        # docs/security/p3-money-path-requirements.md's pre-existing
-        # "pin --config at deploy time" unverified flag, which this
-        # confirms is a real, live requirement, not merely theoretical).
-        # `deno test` is NOT run here: no test files are written in Deno's
-        # own test syntax this round (vitest covers the same modules
-        # above) — this step is purely a cross-runtime type-check signal.
+      - name: deno check (frozen lockfile)
+        # Best-effort second signal alongside vitest AND the Deno
+        # integration suite above: `deno check` type-checks every Edge
+        # Function entrypoint and shared module against Deno's OWN
+        # resolution (deno.json's import map, confirmed this session to
+        # require `--config` explicitly — see docs/security/
+        # p3-money-path-requirements.md's pre-existing "pin --config at
+        # deploy time" unverified flag, which this confirms is a real,
+        # live requirement, not merely theoretical).
+        # ⛔ FIX (P3c gate round 2, should-fix "supply chain"): runs
+        # against the committed supabase/tests/deno.lock with --frozen
+        # now, instead of --no-lock — so transitive drift (e.g. a
+        # dependency's own dependency quietly moving underneath a pinned
+        # top-level URL) fails loudly here instead of resolving silently.
+        # Deno itself is already installed + on PATH (moved earlier in
+        # this job, so the Deno integration suite step above can use it
+        # too) — this step only runs the check.
         run: |
           set -euo pipefail
-          DENO_VERSION="2.5.2"
-          DENO_SHA256="520fd4bc2d18b50b6ac2ea8b7d0f7f6a35588e412754a081e8c6afd4b15264c4"
-          curl -fsSL -o /tmp/deno.zip \
-            "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip"
-          echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c -
-          mkdir -p /tmp/deno-bin
-          unzip -q -o /tmp/deno.zip -d /tmp/deno-bin
-          chmod +x /tmp/deno-bin/deno
-          /tmp/deno-bin/deno check --no-lock --config supabase/functions/deno.json \
+          deno check --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen \
             supabase/functions/evidence/index.ts \
             supabase/functions/evidence-batch/index.ts \
             supabase/functions/checkin-challenge/index.ts \
             supabase/functions/checkin-token/index.ts \
             supabase/functions/_shared/privileged.ts
-          rm -f deno.lock
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
