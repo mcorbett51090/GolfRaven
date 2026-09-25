@@ -23,7 +23,6 @@ import {
   insertCatalogVersion,
   insertSigningKey,
   rawCount,
-  rawEvidenceRow,
   FAC_X,
   CRS_X1,
   NASHVILLE,
@@ -192,28 +191,31 @@ Deno.test("item 4 end to end: a live checkin-token session makes a fix a REAL co
   );
   assertEquals(token.attestationGrade, "unattestable");
 
+  // A live challenge's window is anchored to REAL wall-clock time
+  // (privileged.ts's own now()/clock_timestamp()) — unlike the fake-repo
+  // unit tests, which run on a fixed fake clock, checkinBody()'s own
+  // hardcoded 2026-06-01 capturedAt/localDate would fall OUTSIDE a
+  // challenge issued at the REAL current time. Both capturedAt AND
+  // localDate need to move together: packages/rules' own scorer
+  // cross-checks that capturedAt, resolved into the FACILITY's own tz
+  // (fac_x = America/Chicago, supabase/tests/helpers.sql), lands on the
+  // SAME calendar date the submission claims as localDate — a mismatch
+  // quarantines the row (excludedRows, kind: "quarantined") rather than
+  // scoring it, which this suite's own first attempt at this test
+  // discovered by feeding the exact stored row back into scorePlay
+  // directly and reading its own excludedRows reason.
+  const todayInFacilityTz = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const result = await evidence(
     actor,
     checkinBody({
       deviceId,
       courseId,
-      // A live challenge's window is anchored to REAL wall-clock time
-      // (privileged.ts's own `now()`/`clock_timestamp()`) — unlike the
-      // fake-repo unit tests, which run on a fixed fake clock,
-      // checkinBody()'s own hardcoded 2026-06-01 capturedAt would fall
-      // OUTSIDE a challenge issued at the REAL current time, so this
-      // specific test (the only one in this file that actually needs its
-      // fix to land inside a live challenge's short TTL) overrides it to
-      // the real current instant.
+      localDate: todayInFacilityTz,
       fix: { ...checkinBody().fix as object, checkinTokenJti: token.jti, capturedAt: Date.now() },
     }),
   );
   assertEquals(result.status, "accepted");
   if (result.status === "accepted") {
-    if (!result.play.presenceSignal) {
-      const row = await rawEvidenceRow(result.evidenceId);
-      console.error("DEBUG stored evidence row:", JSON.stringify(row, null, 2));
-    }
     assertEquals(result.play.presenceSignal, true, "a real, freshly-consumed live checkin-token + PostGIS-inside fix must be a real co-signal");
   }
 });
