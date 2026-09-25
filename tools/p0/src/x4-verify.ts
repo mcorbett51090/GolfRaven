@@ -17,7 +17,13 @@
  *    `/tee-times/facility/<id>-` for the SAME `<id>` the configured URL
  *    named (gate B2 — the old check matched the pattern ANYWHERE in the
  *    URL string, including the query string, against ANY id); course name
- *    present under Addendum F normalisation.
+ *    present under Addendum F normalisation. **Decision 0001 Addendum J(b)
+ *    (2026-09-24, written AFTER the first X4 run showed every RTJ facility
+ *    URL 301-redirecting to this new shape) also counts a final URL PATH
+ *    that STARTS WITH `/courses/<id>-` for the SAME `<id>`** — GolfNow's
+ *    current course-details page — with the same host and course-name
+ *    requirements; the old `/tee-times/facility/<id>-` shape still counts
+ *    too, unchanged.
  *  - NOT COVERED (definitive) — no URL configured, HTTP 404/410, or a
  *    resolved HTTP 200 page that fails the live test (wrong id, generic
  *    search page, foreign host, name absent).
@@ -34,9 +40,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { namesMatch } from "./overpass-geo.js";
 import { stripHtmlToText } from "./text-extract.js";
-import { buildAsciiUserAgent, DEFAULT_MAX_RESPONSE_BYTES, fetchWithBlockDetection, readBodyCapped } from "./net.js";
+import {
+  buildAsciiUserAgent,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  fetchWithBlockDetection,
+  readBodyCapped,
+} from "./net.js";
 import { SLATE_TRAILS } from "./slate.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
 
 export const X4_DEFAULT_TIMEOUT_MS = 30_000;
 export const X4_PASS_BAR_PCT = 80;
@@ -86,7 +100,8 @@ export type X4Classification = "live" | "not-live" | "indeterminate";
 /** Decision 0001 Addendum H's three-way per-course outcome, applied
  * literally. `facilityId` is the id parsed from the CONFIGURED url (gate
  * B2) — the final URL's path must contain `/tee-times/facility/<that same
- * id>-`, not just any id. */
+ * id>-` (Addendum G/H) OR start with `/courses/<that same id>-` (Addendum
+ * J(b)), not just any id. */
 export function isLiveFacilityPage(
   status: number,
   finalUrl: string,
@@ -95,7 +110,10 @@ export function isLiveFacilityPage(
   facilityId: string,
 ): { status: X4Classification; reason: string } {
   if (status === 404 || status === 410) {
-    return { status: "not-live", reason: `HTTP ${status} — not covered (definitive, Addendum H)` };
+    return {
+      status: "not-live",
+      reason: `HTTP ${status} — not covered (definitive, Addendum H)`,
+    };
   }
   if (status === 403 || status === 429 || (status >= 500 && status < 600)) {
     return {
@@ -113,7 +131,10 @@ export function isLiveFacilityPage(
   try {
     final = new URL(finalUrl);
   } catch {
-    return { status: "not-live", reason: `final URL "${finalUrl}" is not a valid URL — not live` };
+    return {
+      status: "not-live",
+      reason: `final URL "${finalUrl}" is not a valid URL — not live`,
+    };
   }
   if (final.hostname !== REQUIRED_HOST) {
     return {
@@ -121,13 +142,21 @@ export function isLiveFacilityPage(
       reason: `final host "${final.hostname}" is not exactly "${REQUIRED_HOST}" (gate B2)`,
     };
   }
-  if (!final.pathname.includes(`/tee-times/facility/${facilityId}-`)) {
+  // Decision 0001 Addendum G/H's original shape, OR Addendum J(b)'s
+  // GolfNow-restructure shape — either is "live" for the SAME id. Gate B2
+  // still applies to both: a match elsewhere in the URL (e.g. the query
+  // string) or for a DIFFERENT id does not count for either shape.
+  const oldShape = final.pathname.includes(
+    `/tee-times/facility/${facilityId}-`,
+  );
+  const newShape = final.pathname.startsWith(`/courses/${facilityId}-`);
+  if (!oldShape && !newShape) {
     return {
       status: "not-live",
       reason:
-        `final URL path "${final.pathname}" does not contain /tee-times/facility/${facilityId}- for the ` +
-        "SAME id that was requested — a match elsewhere in the URL (e.g. the query string) or for a " +
-        "different id does not count (gate B2)",
+        `final URL path "${final.pathname}" does not contain /tee-times/facility/${facilityId}- (Addendum G/H) ` +
+        `and does not start with /courses/${facilityId}- (Addendum J(b)) for the SAME id that was requested — ` +
+        "a match elsewhere in the URL (e.g. the query string) or for a different id does not count (gate B2)",
     };
   }
   if (!namesMatch(pageText, courseName)) {
@@ -191,7 +220,9 @@ export function computeX4Coverage(
   const perTrail: Record<string, X4TrailCoverage> = {};
   for (const [trail, group] of byTrail) {
     const rosterSize = group.length;
-    const indeterminateCount = group.filter((c) => c.status === "indeterminate").length;
+    const indeterminateCount = group.filter(
+      (c) => c.status === "indeterminate",
+    ).length;
     const liveCount = group.filter((c) => c.status === "live").length;
     if (indeterminateCount > 0) {
       perTrail[trail] = {
@@ -240,7 +271,8 @@ async function checkOneCourse(
       trail: entry.trail,
       url: null,
       status: "no-url",
-      reason: "no GolfNow facility URL supplied — counts as not covered (definitive)",
+      reason:
+        "no GolfNow facility URL supplied — counts as not covered (definitive)",
       httpStatus: null,
       finalUrl: null,
       blocked: false,
@@ -355,7 +387,13 @@ async function checkOneCourse(
     }
   }
 
-  const classification = isLiveFacilityPage(status, finalUrl, bodyText, course, facilityId);
+  const classification = isLiveFacilityPage(
+    status,
+    finalUrl,
+    bodyText,
+    course,
+    facilityId,
+  );
   return {
     course,
     trail: entry.trail,
@@ -413,7 +451,9 @@ export async function runX4Verify(
   for (const c of perCourse) {
     if (c.status === "indeterminate") warnings.push(`${c.course}: ${c.reason}`);
   }
-  const anyIndeterminate = Object.values(perTrail).some((tc) => tc.verdict === "not-run");
+  const anyIndeterminate = Object.values(perTrail).some(
+    (tc) => tc.verdict === "not-run",
+  );
   const result: X4VerifyResult = {
     generatedAt: new Date().toISOString(),
     perCourse,
@@ -441,7 +481,9 @@ export function renderX4Summary(result: X4VerifyResult): string {
   const lines: string[] = [];
   for (const [trail, tc] of Object.entries(result.perTrail)) {
     if (tc.verdict === "not-run") {
-      lines.push(`${trail}: not run — indeterminate (${tc.indeterminateCount})`);
+      lines.push(
+        `${trail}: not run — indeterminate (${tc.indeterminateCount})`,
+      );
       continue;
     }
     lines.push(
@@ -494,20 +536,25 @@ async function main(argv: string[]): Promise<void> {
     await readFile(flags.courses, "utf8"),
   ) as X4CourseMap;
   const responses = flags.responses
-    ? (JSON.parse(
-        await readFile(flags.responses, "utf8"),
-      ) as Record<string, X4SavedEnvelope>)
+    ? (JSON.parse(await readFile(flags.responses, "utf8")) as Record<
+        string,
+        X4SavedEnvelope
+      >)
     : undefined;
   const outDirExplicit = Boolean(flags["out-dir"]);
   const outDir = flags["out-dir"] || defaultOutsideRepoDir("x4-verify-result");
   assertOutsideRepoUnlessExplicit(outDir, outDirExplicit);
-  const slateTrails = flags.slate ? flags.slate.split(",").map((s) => s.trim()) : undefined;
+  const slateTrails = flags.slate
+    ? flags.slate.split(",").map((s) => s.trim())
+    : undefined;
   const result = await runX4Verify(courseMap, outDir, {
     ...(responses ? { responses } : {}),
     ...(slateTrails ? { slateTrails } : {}),
   });
   process.stdout.write(`${renderX4Summary(result)}\n`);
-  process.stdout.write(`Result written to ${path.join(outDir, "result.json")}\n`);
+  process.stdout.write(
+    `Result written to ${path.join(outDir, "result.json")}\n`,
+  );
   if (result.anyIndeterminate) {
     process.exitCode = 1;
   }

@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "entities": "8.1.0",
+    "playwright-core": "1.56.1",
     "sax": "1.4.1",
     "unpdf": "1.8.1"
   },

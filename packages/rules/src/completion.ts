@@ -155,12 +155,18 @@ function resolveId(ctx: CompletionContext, id: string): string {
   return ctx.ledger ? resolveMergedId(ctx.ledger, id) : id;
 }
 
-function courseMeta(ctx: CompletionContext, courseId: string): CourseMeta | undefined {
+function courseMeta(
+  ctx: CompletionContext,
+  courseId: string,
+): CourseMeta | undefined {
   const resolved = resolveId(ctx, courseId);
   return ctx.courses[resolved] ?? ctx.courses[courseId];
 }
 
-function facilityOfCourse(ctx: CompletionContext, courseId: string): FacilityId | undefined {
+function facilityOfCourse(
+  ctx: CompletionContext,
+  courseId: string,
+): FacilityId | undefined {
   return courseMeta(ctx, courseId)?.facilityId;
 }
 
@@ -226,7 +232,10 @@ export function playQualifies(
  * subject to this. "Replaces" is read as last-write-wins on **input
  * order**.
  */
-export function applyUserPickGuard(plays: Play[], ctx: CompletionContext): Play[] {
+export function applyUserPickGuard(
+  plays: Play[],
+  ctx: CompletionContext,
+): Play[] {
   const latestUserPickIndex = new Map<string, number>();
   plays.forEach((play, i) => {
     if ((play.courseDisambiguatedBy ?? "geometry") !== "user") return;
@@ -274,8 +283,12 @@ export function physicalIdentityOfMember(
       return { kind: "facility", facilityId: resolved };
     }
     case "course": {
-      if ("courseId" in member) return { kind: "course", courseIds: [resolveId(ctx, member.courseId)] };
-      return { kind: "course", courseIds: member.anyOf.map((id) => resolveId(ctx, id)) };
+      if ("courseId" in member)
+        return { kind: "course", courseIds: [resolveId(ctx, member.courseId)] };
+      return {
+        kind: "course",
+        courseIds: member.anyOf.map((id) => resolveId(ctx, id)),
+      };
     }
     case "hole":
       return { kind: "course", courseIds: [resolveId(ctx, member.courseId)] };
@@ -292,7 +305,9 @@ export function physicalFacilityIdOfMember(
 ): FacilityId | undefined {
   switch (member.unit) {
     case "facility":
-      return (resolveId(ctx, member.facilityId) as FacilityId) ?? member.facilityId;
+      return (
+        (resolveId(ctx, member.facilityId) as FacilityId) ?? member.facilityId
+      );
     case "course": {
       if ("courseId" in member) return facilityOfCourse(ctx, member.courseId);
       for (const courseId of member.anyOf) {
@@ -314,10 +329,14 @@ function isIdentityPresentIn(
   ctx: CompletionContext,
 ): boolean {
   if (identity.kind === "facility") {
-    return version.members.some((m) => physicalFacilityIdOfMember(m, ctx) === identity.facilityId);
+    return version.members.some(
+      (m) => physicalFacilityIdOfMember(m, ctx) === identity.facilityId,
+    );
   }
   return identity.courseIds.some((courseId) =>
-    version.members.some((m) => memberCoversCourseId(courseId, m, version.completionUnit, ctx)),
+    version.members.some((m) =>
+      memberCoversCourseId(courseId, m, version.completionUnit, ctx),
+    ),
   );
 }
 
@@ -360,7 +379,12 @@ function deriveFacilityRemovedOn(
   allVersions: RosterVersion[],
   ctx: CompletionContext,
 ): IsoDate | undefined {
-  return deriveRemovedOn({ kind: "facility", facilityId }, fromVersion, allVersions, ctx);
+  return deriveRemovedOn(
+    { kind: "facility", facilityId },
+    fromVersion,
+    allVersions,
+    ctx,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -393,7 +417,10 @@ export function memberCoversCourseId(
       const resolved = resolveId(ctx, id);
       if (resolved === resolvedCourseId) return true;
       const queriedComposite = courseMeta(ctx, resolvedCourseId)?.composite;
-      if (queriedComposite !== undefined && queriedComposite.includes(resolved as CourseId)) {
+      if (
+        queriedComposite !== undefined &&
+        queriedComposite.includes(resolved as CourseId)
+      ) {
         return true;
       }
       const memberComposite = courseMeta(ctx, resolved)?.composite;
@@ -458,7 +485,12 @@ export function isMemberSatisfied(
   opts: EvalOptions = {},
 ): MemberSatisfactionResult {
   const identity = physicalIdentityOfMember(member, ctx);
-  const removedOn = deriveRemovedOn(identity, version.version, allVersions, ctx);
+  const removedOn = deriveRemovedOn(
+    identity,
+    version.version,
+    allVersions,
+    ctx,
+  );
   const qualifyingDates: IsoDate[] = [];
   for (const play of plays) {
     if (!playQualifies(play, ctx, opts, version.trackingStartsOn)) continue;
@@ -467,8 +499,13 @@ export function isMemberSatisfied(
     qualifyingDates.push(play.localDate);
   }
   qualifyingDates.sort();
-  if (qualifyingDates.length === 0) return { satisfied: false, qualifyingDates: [] };
-  return { satisfied: true, qualifyingDates, earliestQualifyingDate: qualifyingDates[0]! };
+  if (qualifyingDates.length === 0)
+    return { satisfied: false, qualifyingDates: [] };
+  return {
+    satisfied: true,
+    qualifyingDates,
+    earliestQualifyingDate: qualifyingDates[0]!,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -497,10 +534,20 @@ export function evaluateVersionCompletion(
   ctx: CompletionContext,
   opts: EvalOptions = {},
 ): VersionCompletionResult {
-  const members = version.members.map((m) => isMemberSatisfied(m, version, allVersions, plays, ctx, opts));
+  const members = version.members.map((m) =>
+    isMemberSatisfied(m, version, allVersions, plays, ctx, opts),
+  );
   const satisfiedCount = members.filter((r) => r.satisfied).length;
-  const requiredCount = requiredCountOf(version.completionRule, version.members.length);
-  return { complete: satisfiedCount >= requiredCount, satisfiedCount, requiredCount, members };
+  const requiredCount = requiredCountOf(
+    version.completionRule,
+    version.members.length,
+  );
+  return {
+    complete: satisfiedCount >= requiredCount,
+    satisfiedCount,
+    requiredCount,
+    members,
+  };
 }
 
 /** `trailComplete(trailId)`: "∃V complete" (§4.1 line 597). */
@@ -510,7 +557,9 @@ export function isTrailComplete(
   ctx: CompletionContext,
   opts: EvalOptions = {},
 ): boolean {
-  return allVersions.some((v) => evaluateVersionCompletion(v, allVersions, plays, ctx, opts).complete);
+  return allVersions.some(
+    (v) => evaluateVersionCompletion(v, allVersions, plays, ctx, opts).complete,
+  );
 }
 
 /**
@@ -527,7 +576,10 @@ export function trailProgress(
   let best = 0;
   for (const v of allVersions) {
     const result = evaluateVersionCompletion(v, allVersions, plays, ctx, opts);
-    const share = result.requiredCount === 0 ? 0 : result.satisfiedCount / result.requiredCount;
+    const share =
+      result.requiredCount === 0
+        ? 0
+        : result.satisfiedCount / result.requiredCount;
     if (share > best) best = share;
   }
   return Math.min(best, 1);
@@ -559,7 +611,8 @@ export function trailCompleteWithin(
     if (!result.complete) return false;
     const points: { memberIndex: number; date: IsoDate }[] = [];
     result.members.forEach((m, i) => {
-      for (const date of m.qualifyingDates) points.push({ memberIndex: i, date });
+      for (const date of m.qualifyingDates)
+        points.push({ memberIndex: i, date });
     });
     points.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
@@ -623,7 +676,10 @@ export function inOrder(
 
 /** "the marker roster of version V is the set of **distinct facilities**
  * that host a member of V" (§4.3 line 738). */
-export function markerRosterOf(version: RosterVersion, ctx: CompletionContext): FacilityId[] {
+export function markerRosterOf(
+  version: RosterVersion,
+  ctx: CompletionContext,
+): FacilityId[] {
   const seen = new Set<string>();
   const out: FacilityId[] = [];
   for (const member of version.members) {
@@ -646,7 +702,12 @@ export function isFacilityCreditedByPlay(
   ctx: CompletionContext,
   opts: EvalOptions = {},
 ): boolean {
-  const removedOn = deriveFacilityRemovedOn(facilityId, version.version, allVersions, ctx);
+  const removedOn = deriveFacilityRemovedOn(
+    facilityId,
+    version.version,
+    allVersions,
+    ctx,
+  );
   return plays.some((play) => {
     if (!playQualifies(play, ctx, opts, version.trackingStartsOn)) return false;
     if (removedOn && !(play.localDate < removedOn)) return false;
@@ -729,10 +790,16 @@ export function specialMarkerEntitlement(
 
     let missingMoneyPlays: FacilityId[] = [];
     if (markerRequiresCompletion) {
-      const moneyResult = evaluateVersionCompletion(v, allVersions, plays, ctx, {
-        ...opts,
-        money: true,
-      });
+      const moneyResult = evaluateVersionCompletion(
+        v,
+        allVersions,
+        plays,
+        ctx,
+        {
+          ...opts,
+          money: true,
+        },
+      );
       const missingFacilities = new Set<string>();
       v.members.forEach((member, i) => {
         if (moneyResult.members[i]!.satisfied) return;
@@ -754,7 +821,12 @@ export function specialMarkerEntitlement(
     }
 
     if (missingPurchases.length === 0 && missingMoneyPlays.length === 0) {
-      return { entitled: true, version: v.version, missingPurchases: [], missingMoneyPlays: [] };
+      return {
+        entitled: true,
+        version: v.version,
+        missingPurchases: [],
+        missingMoneyPlays: [],
+      };
     }
     if (
       bestMissingPurchases.length + bestMissingMoneyPlays.length === 0 ||
@@ -787,7 +859,12 @@ function hasPurchase(
   ctx: CompletionContext,
   opts: { programmeStartsOn: IsoDate },
 ): boolean {
-  const removedOn = deriveFacilityRemovedOn(facilityId, version.version, allVersions, ctx);
+  const removedOn = deriveFacilityRemovedOn(
+    facilityId,
+    version.version,
+    allVersions,
+    ctx,
+  );
   return purchases.some((p) => {
     if (p.localDate < opts.programmeStartsOn) return false;
     if (removedOn && !(p.localDate < removedOn)) return false;
@@ -815,7 +892,11 @@ export function played(
 
 /** `uniqueCourses`: "Distinct qualifying played courses; a composite play
  * counts once" (§4.1 line 600). */
-export function uniqueCourses(plays: Play[], ctx: CompletionContext, opts: EvalOptions = {}): number {
+export function uniqueCourses(
+  plays: Play[],
+  ctx: CompletionContext,
+  opts: EvalOptions = {},
+): number {
   const set = new Set<string>();
   for (const p of plays) {
     if (!playQualifies(p, ctx, opts, undefined)) continue;
@@ -826,7 +907,11 @@ export function uniqueCourses(plays: Play[], ctx: CompletionContext, opts: EvalO
 
 /** `monthlyStreak`: "The longest run of consecutive calendar months, in
  * facility-local dates, with ≥ 1 qualifying play" (§4.1 line 606). */
-export function monthlyStreak(plays: Play[], ctx: CompletionContext, opts: EvalOptions = {}): number {
+export function monthlyStreak(
+  plays: Play[],
+  ctx: CompletionContext,
+  opts: EvalOptions = {},
+): number {
   const months = new Set<string>();
   for (const p of plays) {
     if (!playQualifies(p, ctx, opts, undefined)) continue;

@@ -9,7 +9,12 @@
  * … passport`).
  */
 import { describe, expect, it } from "vitest";
-import { type CourseId, type FacilityId, type RosterMember, type RosterVersion } from "@golfraven/catalog";
+import {
+  type CourseId,
+  type FacilityId,
+  type RosterMember,
+  type RosterVersion,
+} from "@golfraven/catalog";
 import {
   deriveRemovedOn,
   evaluateVersionCompletion,
@@ -51,7 +56,10 @@ describe("AT(3): RTJ fixture — 26 courses / 11 facilities → marker roster of
       markerUnit: "facility",
       completionRule: { kind: "all" },
       markerRule: { kind: "all" },
-      members: facilityIds.map((facilityId): RosterMember => ({ unit: "facility", facilityId })),
+      members: facilityIds.map((facilityId): RosterMember => ({
+        unit: "facility",
+        facilityId,
+      })),
     };
     const ctx: CompletionContext = { courses };
     const roster = markerRosterOf(version, ctx);
@@ -75,13 +83,11 @@ describe("AT(3): Great Okanagan — hole unit → 18 courses", () => {
       markerUnit: "facility",
       completionRule: { kind: "all" },
       markerRule: { kind: "all" },
-      members: courseIds.map(
-        (courseId, i): RosterMember => ({
-          unit: "hole",
-          holeId: nextId("hol") as never,
-          courseId,
-        }),
-      ),
+      members: courseIds.map((courseId, i): RosterMember => ({
+        unit: "hole",
+        holeId: nextId("hol") as never,
+        courseId,
+      })),
     };
     expect(version.members.length).toBe(18);
     const distinctCourses = new Set(
@@ -103,7 +109,12 @@ describe("AT(3): a 27-hole composite fixture (A2-18)", () => {
     const courses: CompletionContext["courses"] = {
       [nineA]: { id: nineA, facilityId, verified: true },
       [nineB]: { id: nineB, facilityId, verified: true },
-      [composite18]: { id: composite18, facilityId, composite: [nineA, nineB], verified: true },
+      [composite18]: {
+        id: composite18,
+        facilityId,
+        composite: [nineA, nineB],
+        verified: true,
+      },
     };
     const ctx: CompletionContext = { courses };
 
@@ -151,7 +162,12 @@ describe("AT(3): a 27-hole composite fixture (A2-18)", () => {
     const courses: CompletionContext["courses"] = {
       [nineA]: { id: nineA, facilityId, verified: true },
       [nineB]: { id: nineB, facilityId, verified: true },
-      [composite18]: { id: composite18, facilityId, composite: [nineA, nineB], verified: true },
+      [composite18]: {
+        id: composite18,
+        facilityId,
+        composite: [nineA, nineB],
+        verified: true,
+      },
     };
     const ctx: CompletionContext = { courses };
     const v1: RosterVersion = {

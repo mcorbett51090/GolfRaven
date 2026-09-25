@@ -108,7 +108,10 @@ export function evaluateRuleExpr(
 ): boolean {
   // N6: apply the user-pick guard exactly once, here, before any
   // aggregate reads the play list.
-  const guardedCtx: RuleExprEvalContext = { ...ctx, plays: applyUserPickGuard(ctx.plays, ctx) };
+  const guardedCtx: RuleExprEvalContext = {
+    ...ctx,
+    plays: applyUserPickGuard(ctx.plays, ctx),
+  };
   return evalBoolean(expr, guardedCtx, mode, false);
 }
 
@@ -126,8 +129,14 @@ function evalBoolean(
     case "not":
       return !evalNotArg(expr.arg, ctx, mode, !negated);
     case "compare": {
-      const leftPositive = polarity(baselinePositiveForOp(expr.op, "left"), negated);
-      const rightPositive = polarity(baselinePositiveForOp(expr.op, "right"), negated);
+      const leftPositive = polarity(
+        baselinePositiveForOp(expr.op, "left"),
+        negated,
+      );
+      const rightPositive = polarity(
+        baselinePositiveForOp(expr.op, "right"),
+        negated,
+      );
       const left = evalNumeric(expr.left, ctx, mode, leftPositive);
       const right = evalNumeric(expr.right, ctx, mode, rightPositive);
       switch (expr.op) {
@@ -190,7 +199,9 @@ const NUMERIC_NAMES = new Set<string>([
   "markerCredits",
   "monthlyStreak",
 ]);
-function isNumericAggregateCall(agg: AggregateCall): agg is NumericAggregateCall {
+function isNumericAggregateCall(
+  agg: AggregateCall,
+): agg is NumericAggregateCall {
   return NUMERIC_NAMES.has(agg.name);
 }
 
@@ -253,11 +264,14 @@ function evalAggregate(
     ? { money: true, programmeStartsOn: requireProgrammeStartsOn(ctx) }
     : {
         money: false,
-        ...(mode === "badge" && occurrencePositive && ctx.badgeThreshold !== undefined
+        ...(mode === "badge" &&
+        occurrencePositive &&
+        ctx.badgeThreshold !== undefined
           ? { badgeThreshold: ctx.badgeThreshold }
           : {}),
       };
-  const versionsOf = (trailId: string): RosterVersion[] => ctx.trails[trailId] ?? [];
+  const versionsOf = (trailId: string): RosterVersion[] =>
+    ctx.trails[trailId] ?? [];
   switch (expr.name) {
     case "played":
       return played(expr.courseId, ctx.plays, ctx, opts);
@@ -278,10 +292,21 @@ function evalAggregate(
     case "trailComplete":
       return isTrailComplete(versionsOf(expr.trailId), ctx.plays, ctx, opts);
     case "trailCompleteWithin":
-      return trailCompleteWithinOf(versionsOf(expr.trailId), ctx.plays, ctx, expr.days, opts);
+      return trailCompleteWithinOf(
+        versionsOf(expr.trailId),
+        ctx.plays,
+        ctx,
+        expr.days,
+        opts,
+      );
     case "inOrder":
       return inOrderOf(versionsOf(expr.trailId), ctx.plays, ctx, opts);
     case "markerSetComplete":
-      return markerSetCompleteOf(versionsOf(expr.trailId), ctx.plays, ctx, opts);
+      return markerSetCompleteOf(
+        versionsOf(expr.trailId),
+        ctx.plays,
+        ctx,
+        opts,
+      );
   }
 }

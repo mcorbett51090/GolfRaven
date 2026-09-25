@@ -7,7 +7,7 @@ confirmation file first, and the **K1** (operator + sponsor signal) and **K3** (
 tools. See `docs/p0/X1.md`, `docs/p0/X2.md`, `docs/p0/X4.md`, `docs/p0/X5.md`, `docs/p0/K1.md`,
 `docs/p0/K3.md`, `docs/partners/k1-outreach.md`, `docs/owner/x1-k4b-device-protocol.md`,
 `docs/p0/K4.md`, and decision `docs/decisions/0001-owner-decisions-and-p0-thresholds.md` Addenda A, B,
-C, D (R1, R2, R4, R5, R6), E, F, G and H for the checks these implement — this README only covers
+C, D (R1, R2, R4, R5, R6), E, F, G, H and J for the checks these implement — this README only covers
 running the tools.
 
 ## Build
@@ -16,10 +16,11 @@ running the tools.
 pnpm --filter @golfraven/p0-tools build
 ```
 
-Produces `dist/x1-ios-export.js`, `dist/x1-verdict.js`, `dist/x2-fetch.js`, `dist/x2-verdict.js`,
-`dist/x4-verify.js`, `dist/x5-overpass.js`, `dist/p0-desk.js`, `dist/k1-verdict.js`,
-`dist/k3-verdict.js` (plus `dist/index.js`, the library entry point re-exporting every tool's pure
-functions/types).
+Produces `dist/x1-ios-export.js`, `dist/x1-verdict.js`, `dist/x2-fetch.js`, `dist/x2-ingest.js`,
+`dist/x2-verdict.js`, `dist/x4-verify.js`, `dist/x5-overpass.js`, `dist/p0-desk.js`,
+`dist/k1-verdict.js`, `dist/k3-verdict.js` (plus `dist/index.js`, the library entry point
+re-exporting every tool's pure functions/types, and `dist/x2-render.js`, imported by `x2-fetch.js`
+rather than run directly).
 
 ## 1. `x1-ios-export` — iOS Health export reader
 
@@ -267,10 +268,15 @@ tool has no K4b data and does not assess that half).
 ## 3. `x2-fetch` — pilot-slate roster/rules direct-fetch, evidence gathering
 
 ```shell
-node dist/x2-fetch.js
-node dist/x2-fetch.js --config config/x2-sources.json --out-dir x2-evidence
+node dist/x2-fetch.js --ledger docs/p0/x2-recorded-ledger.json
+node dist/x2-fetch.js --config config/x2-sources.json --out-dir x2-evidence --ledger docs/p0/x2-recorded-ledger.json
 ```
 
+- `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate): the recorded-captures ledger every
+  capture is checked against for first-capture-wins. There is no more per-directory default — the
+  canonical ledger for TN/VI/RTJ's own captures is `docs/p0/x2-recorded-ledger.json` (gate finding
+  2d — committed to the repo so any edit shows in `git log`); pass the SAME explicit path across
+  every run that captures evidence for the same URL set, whatever `--out-dir` each run uses.
 - `--config <file>` (default: this package's own `config/x2-sources.json`) — trail name → list of
   official URLs to fetch (seeded from the URL table in `docs/p0/X2.md`: TN tries
   `tnstateparks.com/golf`, `tngolftrail.net` and `tn.gov` candidates — the exact `tngolftrail.net`/
@@ -311,15 +317,247 @@ text are extracted into a per-trail, deduplicated list, printed to stdout clearl
 the confirmation file below — **never itself a confirmation**; only `x2-verdict`, checking a
 human-written confirmation file against the stored evidence text, confirms a roster.
 
-**Feeds:** the evidence dir (raw + text + `manifest.json`) is `x2-verdict`'s first input.
+**Every evidence entry now also carries a `method`** (decision 0001 Addendum J(a), 2026-09-24,
+written AFTER the first X2 run showed TN blocked by the site's WAF and VI a JS-only SPA with no
+extractable static text): `"direct"` for this section's own fetch path, `"rendered"` for `--render`
+below, or `"owner-saved"` for `x2-ingest`. The verbatim-quote rule is unchanged for every method —
+only the ROUTE the bytes arrived by widens; what counts as a confirmed fact does not.
 
-## 4. `x2-verdict` — X2 pass/kill verdict from a human-written confirmation
+**`--render` (decision 0001 Addendum J(a)(i)).**
 
 ```shell
-node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmation.json --out x2-verdict-result
+node dist/x2-fetch.js --render --config config/x2-sources.json --out-dir x2-render-evidence --ledger docs/p0/x2-recorded-ledger.json
+```
+
+**Rendered evidence is VI-only by default (should-fix, re-gate).** The rendered route was adopted
+for VI's own static-HTML-has-no-body-text problem, never as a blanket option — `x2-verdict`'s
+`buildEvidenceByTrail` refuses (throws) a `"rendered"` entry for any trail not on its
+`renderedAllowedTrails` allow-list (default `["VI"]`); a deliberate, documented exception passes
+that option explicitly.
+
+For a page whose static HTML carries no body text (VI's case), `--render` boots headless Chromium
+(`x2-render.ts`, `playwright-core`, pinned at the exact same version as `apps/site`'s
+`@playwright/test`) at `executablePath: "/opt/pw-browsers/chromium"` (this environment's own
+pre-installed pin — `PLAYWRIGHT_BROWSERS_PATH` is already set; **never run `playwright install`**)
+instead of a direct `fetch()`, for every URL in the SAME `--config`. It stores the rendered
+`page.content()` bytes plus their extracted text through the identical `storeEvidenceBytes` helper
+the direct-fetch path uses (same sha256/text/DRAFT-name handling), with `method: "rendered"`. It
+keeps the tool's own bot-identifying User-Agent (`buildX2UserAgent()`, never a browser UA — a site's
+WAF block is not something this tool evades) and the same https-only rule (gate N6); it never
+navigates anywhere outside that trail's own configured URL list — the "host allow-list" Addendum
+J(a) refers to is exactly that config, the same one the direct-fetch path already reads.
+
+## 4. `x2-ingest` — owner-saved evidence (decision 0001 Addendum J(a)(ii))
+
+```shell
+node dist/x2-ingest.js --trail TN --file /path/to/owner-saved.html \
+  --url https://www.tnstateparks.com/golf --date 2026-09-24 \
+  --config config/x2-sources.json --out-dir x2-evidence \
+  --ledger docs/p0/x2-recorded-ledger.json
+```
+
+For a page a direct fetch cannot reach at all (TN's WAF 403s the tool's own polite User-Agent),
+Matt saves the page from his own browser ("Save Page As", HTML) and this tool ingests it as
+evidence with `method: "owner-saved"`. It never fetches anything itself and never spoofs a browser
+User-Agent — the owner's browser already did the fetching, entirely outside this tool.
+
+- `--trail` — which slate trail this evidence belongs to.
+- `--file` — the local owner-saved HTML file.
+- `--url` — the URL the OWNER states the page came from. Must be `https:` (gate N6) and must
+  EXACTLY match (after normalisation) one of that trail's OWN configured URLs in
+  `--config`/`config/x2-sources.json` (decision 0001 Addendum J(a)'s allow-list; gate finding 2a,
+  re-gate — a host-only check used to let a stated URL name ANY path on an allowed host; it must now
+  be one of the trail's own configured URLs, not merely share a host). Normalisation (shared with
+  first-capture-wins — `x2-recorded-ledger.ts`'s `normalizeUrlForFirstCapture`) lowercases the host,
+  drops a leading `www.`, a non-default port aside, drops the fragment/query, decodes unreserved
+  percent-encoding, collapses doubled path slashes, and drops `;param` segments — but leaves path
+  CASE untouched, so `/GOLF` is a genuinely different (refused) URL from `/golf`.
+- `--date` — the date the OWNER states they saved the page, a real `YYYY-MM-DD` calendar date.
+  Stored as `ownerSavedDate`, distinct from `fetchedAt` (this tool's own ingestion time).
+- `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate) — same as `x2-fetch`'s own `--ledger`;
+  see there for why the per-directory default was removed.
+- `--out-dir` (default: a fresh directory under the OS temp dir, gate S7) — writing into an EXISTING
+  `x2-fetch`/`x2-fetch --render` evidence dir MERGES this entry into that trail's array and rewrites
+  `manifest.json` in place, so a confirmation file can cite an owner-saved SHA exactly like a
+  direct-fetch or rendered one.
+
+The stored record keeps everything Addendum G already requires: raw bytes, the final URL (the
+stated URL itself — there is no redirect to follow), the HTTP status (the literal string
+`"owner-saved"`, since there is no real HTTP exchange this tool witnessed), the retrieval time in
+UTC, and a SHA-256.
+
+**Feeds:** the evidence dir (raw + text + `manifest.json`, from any mix of `x2-fetch`, `x2-fetch
+--render` and `x2-ingest`) is `x2-verdict`'s first input.
+
+## 4b. `x2-corroborate-wayback` — the ONLY way to make a `wayback` corroboration record (gate finding 3, twice re-gated)
+
+```shell
+node dist/x2-corroborate-wayback.js \
+  --url "https://web.archive.org/web/20260615120000/https://example.com/golf" \
+  --stated-url https://example.com/golf --owner-saved-date 2026-06-15 \
+  --trail TN --evidence-sha <the owner-saved fact's evidenceSha> \
+  --ledger docs/p0/x2-recorded-ledger.json \
+  --out-dir x2-wayback-evidence --corroboration-file corroboration.json
+```
+
+A gate review found the corroboration file's `wayback` record type forgeable outright — its
+`snapshotText` used to be free text a human typed directly into JSON, never checked against
+anything real. This tool closes that: it is the ONLY thing that produces a `wayback` record. It
+requires `--url` in the EXACT form `https://web.archive.org/web/<14-digit timestamp>/<url>`;
+requires the embedded `<url>` to normalise to the same thing as `--stated-url` (a snapshot of a
+DIFFERENT page can never corroborate this fact); requires the timestamp within ±90 days of
+`--owner-saved-date`; then ACTUALLY FETCHES the snapshot (an injectable fetcher — see
+`x2-corroborate-wayback.ts`'s own doc — real invocations use `global.fetch`, which may need
+`NODE_USE_ENV_PROXY=1` depending on this environment's proxy policy; **web.archive.org was
+confirmed NOT reachable from this session's own environment** — a connect timeout/reset through
+the agent proxy, checked directly on two separate gate rounds now, not assumed); stores the
+fetched bytes as real evidence (`raw/<sha256>.html` — no prefix; the plain shape `x2-verdict`'s
+re-validation requires, gate finding 3 second re-gate); registers the snapshot in `--ledger`
+(**REQUIRED**) under method `"wayback"`; and writes a corroboration record citing ONLY that SHA
+and the raw file's path — never inline text.
+
+**`x2-verdict` re-validates every one of this tool's own rules itself, from scratch, before
+trusting a `wayback` record for anything** (gate finding 3, second re-gate — a hand-crafted record
+that merely LOOKS like this tool's output is not enough): the URL form; the embedded URL
+normalises to the owner-saved fact's OWN stated URL (not just what the record claims); the
+timestamp is within ±90 days of that fact's OWN `ownerSavedDate`; `rawFile` resolves, INSIDE the
+evidence dir, to exactly `raw/<snapshotSha256>.<ext>` (any path-escape attempt, e.g.
+`../../outside.html`, can never match this shape and is refused outright); the snapshot's SHA
+DIFFERS from the owner-saved fact's own SHA (an identical SHA is the owner-saved bytes relabelled
+as their own corroboration, refused); the snapshot is registered in the canonical ledger under
+method `wayback` (never trusting a record nothing actually registered); and finally, the raw bytes
+recompute to the cited SHA and the text is re-derived with the same extractor every other evidence
+route uses. This tool's own output is not the trust boundary — that full re-validation is.
+
+**web.archive.org is unreachable from this environment.** No Wayback corroboration can currently
+be produced here at all — see `docs/p0/X2.md`'s own statement of this, and its two live paths for
+a TN owner-saved fact that needs corroborating.
+
+## 5. `x2-verdict` — X2 pass/kill verdict from a human-written confirmation
+
+```shell
+node dist/x2-verdict.js --evidence-dir x2-evidence --confirmation x2-confirmation.json \
+  --ledger docs/p0/x2-recorded-ledger.json --out x2-verdict-result
 ```
 
 - `--evidence-dir <dir>` — an `x2-fetch` output dir (reads its `manifest.json`).
+- `--ledger <path>` — **REQUIRED** (gate finding 2c, re-gate) — the same ledger `x2-fetch`/
+  `x2-ingest` wrote the captures being verified against, and for an OFFICIAL run it must resolve
+  (`realpath`) to EXACTLY this toolkit's OWN checkout's `docs/p0/x2-recorded-ledger.json` — pinned
+  via this module's own `import.meta.url`, never derived from wherever `--ledger` happens to
+  point. **Third re-gate, "trust root is the caller's repo plus local refs":** a prior round pinned
+  the canonical path via `git rev-parse --show-toplevel` run FROM THE LEDGER'S OWN DIRECTORY —
+  trivially satisfied by a caller's own scratch repo, for itself. `x2-verdict` checks the ledger
+  four ways: it must resolve to that ONE real path; it must be tracked cleanly (no uncommitted or
+  untracked edit — `git diff --quiet` / `git status --porcelain`); it must carry no
+  `git ls-files -v` assume-unchanged/skip-worktree flag (either can hide a local edit from the two
+  checks just named, so this is refused regardless of `--allow-dirty-ledger`); and its content must
+  be byte-identical to what GitHub's real `main` already has at that path. That fetch is the other
+  half of the fix, and it is the ONLY place any GitHub-verification git command runs (fifth
+  re-gate, round 6, "verification trusts the toolkit checkout's own local git state"): every run
+  creates a fresh, disposable, BARE repository (`mkdtemp` + `git init --bare`, removed on exit) and
+  fetches `main` from the hard-coded canonical URL `https://github.com/mcorbett51090/GolfRaven` into
+  it, under an EXPLICITLY CONSTRUCTED, minimal environment — never the caller's own `process.env` —
+  with `HOME`/`GIT_DIR` both pinned to that disposable repo, `GIT_NO_REPLACE_OBJECTS=1`,
+  `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, and `-c core.hooksPath=/dev/null -c
+  protocol.file.allow=never -c protocol.ext.allow=never` on every invocation. This closes a class of
+  exploit the fourth re-gate's fix (running these commands inside the toolkit's own persistent
+  checkout, with the caller's environment inherited wholesale) left open: `git config
+  url.<fake>.insteadOf <real>` redirection (via local, global, SYSTEM config, or the
+  `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` environment-variable channel — caught
+  pre-fetch by a `git ls-remote --get-url` canary too), `git replace`, a `.git/info/grafts` entry,
+  a `.git/hooks` script, and a `GIT_DIR`/`GIT_WORK_TREE` set in the caller's own environment. Full
+  history is always fetched (no `--depth`) and a shallow result refused. The ledger's blob AND
+  `docs/p0/X2.md`'s own text are both read with `git show <ref>:<path>` INSIDE that disposable repo
+  — never the local working tree — so content authority is GitHub's real `main`, full stop. A
+  network failure or a fetch error gives UNOFFICIAL, never OFFICIAL — never silently treated as
+  "assume it checks out." **Sixth re-gate, round 7 ("an agent that controls the verdict process's
+  runtime environment still gets OFFICIAL with a forged acceptance"):** round 6's fix still resolved
+  the literal string `"git"` through PATH — a fake `git` shim placed earlier on PATH, or PATH itself
+  rewritten, was silently trusted — and ran inside the SAME Node process the caller launched, so
+  code injected into that process could make every "scrubbed" git invocation transparently run
+  through attacker code regardless of what env/args this module built for it. Closed two ways that
+  still hold: `git` is now resolved to a verified ABSOLUTE path (`/usr/bin/git`, falling back to
+  `/bin/git`), refused outright unless owned by root and not group-/world-writable; and every child
+  git process's own `PATH` is fixed to `/usr/bin:/bin`, never the caller's. Round 7 ALSO added
+  `detectRuntimeTamper`, refusing (UNOFFICIAL) when the verdict process's OWN original environment
+  shows `LD_PRELOAD`/`LD_LIBRARY_PATH`/`GIT_EXEC_PATH`/`DYLD_*`/a `NODE_OPTIONS` loader flag/
+  non-empty `execArgv` — and CLAIMED this defended against those. **Seventh re-gate, round 8's own
+  correction: that claim was false, and no code change can make it true.** The round-8 gate fixture
+  extended its NODE_OPTIONS-preload payload with `delete process.env.NODE_OPTIONS;
+  process.execArgv.length = 0;` at its very top — preload code runs before a single line of this
+  module's own code, including before `detectRuntimeTamper` itself, so it erased the evidence before
+  the check could look. Live-confirmed this round: the verdict came back OFFICIAL with TN confirmed,
+  identically to no attack at all. `detectRuntimeTamper` is downgraded, honestly, to **a TRIPWIRE FOR
+  NAIVE, NON-SELF-HIDING injection only** — kept in place as defense in depth against an attempt that
+  doesn't bother erasing its own tracks (confirmed this round: the SAME payload, without the
+  self-erasing line, is still refused), never claimed as a defense against a deliberate one. Round 8
+  also widened the tripwire itself, cheaply, while it's honestly only a tripwire: `LD_*` is now a
+  PREFIX check (was a fixed `LD_PRELOAD`/`LD_LIBRARY_PATH` list that missed `LD_AUDIT`, which the
+  gate's own probe used to load native code — live-confirmed this round, the library genuinely
+  loaded); `NODE_OPTIONS` moved from a denylist of known-dangerous flags to an ALLOW-LIST of
+  known-benign ones (`--max-*`/`--stack-size`/`--unhandled-rejections=*`/`--no-warnings`/
+  `--enable-source-maps`/`--trace-warnings`, via a proper tokenizer handling quoted values and both
+  `--flag=value`/`--flag value` forms) — refusing every flag not explicitly vetted, including
+  `--inspect*`/`--env-file`/`--conditions`/`--openssl-config`/`--preserve-symlinks*`/any
+  `--experimental-*` flag, none of which round 7's denylist had named. This environment's own
+  ambient `--max-old-space-size=8192` NODE_OPTIONS still passes, confirmed live this round. **None of
+  this is a sandbox**, and it does not defend against an agent with enough privilege to defeat the
+  git-binary check itself, a concurrent same-user process racing to write into the disposable repo
+  between its creation and use, an agent editing the toolkit's own source, or — the round-8 finding,
+  now residual #1's own explicit scope — any code injected into the verdict process at all, including
+  through the very variables `detectRuntimeTamper` checks, since injected code runs first and can
+  erase what it would have found. `NODE_EXTRA_CA_CERTS` (a TLS-trust residual: it's on this module's
+  own proxy/CA allow-list for legitimate reasons, but controls a trust anchor for the fetch) and
+  `NODE_PATH` (a module-resolution-hijack residual, the same class as `NODE_OPTIONS`/`--require` via
+  a different mechanism) belong to this same residual, named explicitly. See `docs/p0/X2.md`'s own
+  "Scope statement (seventh re-gate, round 8)" for the full, current list of what this does and does
+  not defend against — treat any statement here that goes further as stale.
+  If the ledger simply isn't on GitHub's real `main` yet (a ledger never pushed), that specific case
+  does NOT hard-refuse — the run proceeds and the output is marked UNOFFICIAL with the reason,
+  without needing `--allow-dirty-ledger`. Any other dirtiness (an uncommitted edit, or content that
+  diverged from what's already on GitHub) still refuses unless `--allow-dirty-ledger` is passed, in
+  which case the output is marked UNOFFICIAL. The verdict's own JSON/markdown output names the
+  ledger's git blob hash and the last commit that touched it either way, so a reader always knows
+  exactly which ledger content produced it and who last changed it.
+- `--corroboration <file>` — optional; a JSON file backing owner-saved facts (gate finding 4, see
+  below), keyed `trail -> evidenceSha -> [corroboration record, ...]` — a LIST, since one
+  owner-saved capture can back several DIFFERENT facts (a roster name, a completionUnit, a
+  season), each needing its OWN, fact-specific acceptance (gate finding 2, re-gate: a blanket
+  acceptance covering "whatever gets cited against this SHA" is exactly the forgery shape this
+  closes). An `acceptance` record now carries `fact` (`"completionUnit"`, `"season"`, or
+  `"roster:<name>"`) instead of a free-text `id`, and must be backed by an EXACT structured row —
+  `ACCEPT <trail> <fact> <full evidenceSha256> <YYYY-MM-DD> Matt` — in `--x2-log`'s (default: this
+  checkout's own `docs/p0/X2.md`) `## Log` section (bounded at the next `## ` heading). **A row
+  hidden inside a fenced code block, an HTML comment, or an indented code block does not count**
+  (third re-gate, fix (c) — a gate review found both silently accepted before this existed).
+  **`--x2-log` is pinned the SAME way `--ledger` is:** an acceptance is only ever trusted when
+  `--x2-log` resolves to this toolkit's OWN canonical `docs/p0/X2.md` — a well-formed row in any
+  other file, however git-reachable, is never counted, no matter how convincing it looks. Finding
+  a visible row at the right path is not enough on its own: `x2-verdict` runs `git blame` directly
+  against `refs/heads/main` INSIDE the same disposable, scrubbed-environment repo the ledger check
+  uses (`verifyAgainstGitHub`) — reachability is true BY CONSTRUCTION there (fifth re-gate, round
+  6), so there is no separate ancestor check left to subvert — printing the commit hash, author,
+  date and `%G?` signature status in its output for a human to audit. **A row hidden inside a raw
+  HTML block** (CommonMark's own block-tag rule — `<div>`, `<table>`, etc., ending at the next blank
+  line) **or carrying a `hidden`/`style` attribute does not count either** (should-fix, round 6 — the
+  same class of forgery the fence/comment/indented-code rules already closed). **`<details>` gets a
+  STRICTER rule than the generic one** (round 7 follow-up): it stays hidden from its opening tag all
+  the way to its OWN closing `</details>`, even across blank lines — GitHub's own renderer keeps a
+  `<details>` section collapsed across internal blank lines/paragraph breaks, so the generic
+  "ends at the first blank line" rule would have let a forged row placed after such a blank line
+  read as "visible" here while still being inside the collapsed section on GitHub.
+  Should-fix: the acceptance date must be on/after the evidence's own `ownerSavedDate`, and no more
+  than 1 day after the commit's own date. **A Wayback corroboration additionally requires THIS
+  RUN's own ledger to be OFFICIAL** (should-fix, round 6) — a self-authored `wayback`-method ledger
+  row backed only by a locally forgeable ref no longer corroborates anything once the ledger itself
+  reads UNOFFICIAL. **Honest limit, corrected at the third re-gate:** agents in this environment act with
+  Matt's own GitHub credentials, and even an API-made commit is GitHub-signed — so neither
+  `git blame`'s author field nor `%G?` proves a commit is Matt's rather than an agent's; a prior
+  round overstated this. What the fix genuinely buys: a forgery now has to land in GitHub's own
+  shared, public history for `main`, not a disposable local repo nobody else ever sees. The real
+  control remains procedural: **agents must never write an `ACCEPT` row; only Matt adds one, by
+  hand.** See `docs/p0/X2.md`'s own statement of this.
 - `--confirmation <file>` — a JSON object, **per trail** (`"TN"`/`"VI"`/`"RTJ"`):
 
   ```json
@@ -382,7 +620,7 @@ CLI also exits non-zero when a trail is unconfirmed while one of its sources fai
 **Feeds:** `overallVerdict` → `docs/p0/X2.md` VERDICT; `perTrail` reasons → the log entry explaining
 each trail's confirmed/unconfirmed status.
 
-## 5. `x4-verify` — GolfNow facility-page coverage, per trail
+## 6. `x4-verify` — GolfNow facility-page coverage, per trail
 
 ```shell
 # Live
@@ -398,7 +636,10 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 
   ```json
   {
-    "Grand National": { "trail": "RTJ", "golfnowFacilityUrl": "https://www.golfnow.com/tee-times/facility/2360-grand-national/search" },
+    "Grand National": {
+      "trail": "RTJ",
+      "golfnowFacilityUrl": "https://www.golfnow.com/tee-times/facility/2360-grand-national/search"
+    },
     "Some TN Course": { "trail": "TN", "golfnowFacilityUrl": null }
   }
   ```
@@ -423,10 +664,12 @@ node dist/x4-verify.js --courses x4-course-map.json --responses x4-verify-result
 old two-way live/not-live read):
 
 - **live** — HTTP 200, the final URL's **host is exactly `www.golfnow.com`**, its **path** contains
-  `/tee-times/facility/<id>-` for the **SAME `<id>`** parsed from the *configured* URL (gate B2 — a
-  match in the query string, or for a different id, does NOT count), and the page text contains the
-  course's name under Addendum F's normalisation (`namesMatch`, reused verbatim from
-  `overpass-geo.ts`).
+  `/tee-times/facility/<id>-` (Addendum G/H) **or starts with `/courses/<id>-`** (decision 0001
+  Addendum J(b), 2026-09-24, written AFTER the first X4 run found every RTJ facility URL
+  301-redirecting to this new shape — GolfNow's current course-details page) — either way for the
+  **SAME `<id>`** parsed from the _configured_ URL (gate B2 — a match in the query string, or for a
+  different id, does NOT count, under EITHER shape), and the page text contains the course's name
+  under Addendum F's normalisation (`namesMatch`, reused verbatim from `overpass-geo.ts`).
 - **not covered (definitive)** — no URL configured, HTTP 404/410, or a resolved HTTP 200 page that
   fails the live test above (wrong id, generic search page, foreign host, name absent).
 - **indeterminate** — a network-policy block, timeout, connection error, HTTP 403/429/any 5xx, or
@@ -448,7 +691,7 @@ consequence ("course-native link becomes primary for `<trail>`").
 combined figure). A `"not-run"` trail is not a verdict at all — re-run once its indeterminate
 course(s) resolve.
 
-## 6. `p0-desk` — one-command desk check + status board
+## 7. `p0-desk` — one-command desk check + status board
 
 ```shell
 node dist/p0-desk.js
@@ -466,21 +709,21 @@ ran, `x4-verify/`.
 
 Prints a status board, one row per check, with `state`:
 
-| State | Meaning |
-|---|---|
-| `ran` | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail). |
-| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`. |
-| `verdict` | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate). |
-| `partial-blocked` | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`. |
-| `skipped` | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure). |
-| `blocked` | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
-| `error` | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc). |
+| State                | Meaning                                                                                                                                                                                                                                        |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ran`                | The check ran and produced its own measurement (only `x5-overpass n-osm`, a pace measurement — no pass/fail).                                                                                                                                  |
+| `needs-confirmation` | Evidence gathered (`x2-fetch`), ALL sources fetched cleanly; a human must still write a confirmation file and run `x2-verdict`.                                                                                                                |
+| `verdict`            | The check computed its own clean pass/kill for every trail (`x4-verify`, per trail — never used when any trail is indeterminate).                                                                                                              |
+| `partial-blocked`    | **Gate S5/B1: some, but not all, sources failed/were blocked** (`x2-fetch`), or **some trail is indeterminate under Addendum H** (`x4-verify`) — never reads as a clean `needs-confirmation`/`verdict`.                                        |
+| `skipped`            | Nothing to run yet — e.g. no `x4` course-map file (X4's own precondition, not a failure).                                                                                                                                                      |
+| `blocked`            | **Every** attempted source for that check hit a network-policy block — surfaced as `"BLOCKED — network policy (<host>)"` (see `net.ts`'s detection of both observed shapes: a resolved 403 denial page, or a thrown CONNECT/tunnel 403 error). |
+| `error`              | Some other failure (a malformed config file, an unexpected non-200 that isn't a policy block, etc).                                                                                                                                            |
 
 **Exits non-zero if any check's state is `blocked`, `partial-blocked` or `error`** — a legitimately
 `skipped` check (no course-map file yet) is not treated as a failure to run. `status.json` in the
 run dir carries the same rows machine-readably.
 
-## 7. `x5-overpass` — Overpass OSM coverage
+## 8. `x5-overpass` — Overpass OSM coverage
 
 ```shell
 # N_osm (pace measurement, not pass/fail)
@@ -587,7 +830,7 @@ running `node dist/x5-overpass.js n-osm` against the real default endpoint was e
 this environment's proxy. See the task report for the exact error text this session got — it was
 not worked around, per the task's own instruction.
 
-## 8. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdicts
+## 9. `k1-verdict` — K1 operator + sponsor early-read and full-gate verdicts
 
 ```shell
 node dist/k1-verdict.js
@@ -610,7 +853,7 @@ accepted as an alias of the table's own "Hammock Coast Golf Trail" row (decision
 
 - **Early read** (Addendum D, R1): count of the 5 named operators whose acceptance of an exploratory
   call is dated on or before **2026-10-19**. Pass ≥ 2. **Before 2026-10-20** this reads `pending (n so
-  far)` regardless of the count — the window hasn't closed. The markdown output never prints MISS or
+far)` regardless of the count — the window hasn't closed. The markdown output never prints MISS or
   PASS while pending; it prints the count so far instead.
 - **Full gate** (Addendum C, cutoff **2026-11-30**): count of the same 5 with a signed non-binding
   LOI (fee willingness recorded) dated on or before the cutoff — pass needs ≥ 2 — **and** ≥ 1 sponsor
@@ -641,7 +884,7 @@ the tool says so rather than inventing any).
 
 **Feeds:** `earlyRead`/`fullGate` → `docs/p0/K1.md` MEASURED VALUE and VERDICT (as two distinct reads).
 
-## 9. `k3-verdict` — K3 SEO-signal verdict
+## 10. `k3-verdict` — K3 SEO-signal verdict
 
 ```shell
 node dist/k3-verdict.js
@@ -716,11 +959,31 @@ trail boundary; X4's three-way live/not-live/indeterminate outcome (decision 000
 a redirect to a different facility id, a match only in the query string, a foreign host, a 200 page
 missing the course name (all NOT live); a block/timeout/403/429/5xx (all indeterminate, never not
 covered, gate B1); a stale replay refused (gate N1) — and its 80%-per-trail boundary (exactly 80%
-passes, just under fails), never computed while any course is indeterminate; and `p0-desk`'s status
-board, including the BLOCKED row for a fake fetch that throws a `"CONNECT tunnel failed, response
-403"`-shaped error (`net.test.ts` also covers the other observed shape — a resolved 403 response
-that IS the proxy's own denial page, vs. one that's the destination site's own 403) and the
-PARTIAL-BLOCKED row for a partial failure/indeterminate result (gate S5).
+passes, just under fails), never computed while any course is indeterminate; **decision 0001
+Addendum J(b)'s `/courses/<id>-` shape** — a same-id redirect to it counts as live, a different-id
+redirect and a name-missing page under it do not, and the OLD `/tee-times/facility/<id>-` shape
+still counts, unchanged; and `p0-desk`'s status board, including the BLOCKED row for a fake fetch
+that throws a `"CONNECT tunnel failed, response 403"`-shaped error (`net.test.ts` also covers the
+other observed shape — a resolved 403 response that IS the proxy's own denial page, vs. one that's
+the destination site's own 403) and the PARTIAL-BLOCKED row for a partial failure/indeterminate
+result (gate S5).
+
+**`x2-fetch --render` / `x2-ingest` coverage (decision 0001 Addendum J(a), `x2-render.test.ts` /
+`x2-fetch.test.ts` / `x2-ingest.test.ts`):** `renderUrl` launched against an INJECTED fake Chromium
+launcher (`BrowserLike`/`PageLike`, never a real browser) — the pinned default `executablePath`, a
+custom one, the tool's own User-Agent header reaching `setExtraHTTPHeaders` (never a browser UA),
+gate N6's https-only refusal before ever launching, a navigation producing no response, and the
+page/browser still closing when navigation throws; `x2-fetch --render` storing the rendered
+`page.content()` bytes and extracted text with `method: "rendered"`, its own https-only refusal, and
+a render failure recorded FAILED (never skipped) with `method: "rendered"` still set; a direct
+(non-`--render`) run stamping `method: "direct"` on every entry; `x2-ingest`'s host allow-list
+(`trailConfiguredHosts`/`statedHostAllowed`) accepting an exact or `www.`-prefix host match and
+refusing a foreign host, gate N6's https-only refusal, a malformed or calendar-impossible stated
+date, an unknown trail, a missing file, and — merging into an EXISTING `x2-fetch` evidence dir's
+`manifest.json` rather than overwriting it, so a `direct` and an `owner-saved` entry for the same
+trail coexist; and `x2-verdict` carrying a fact's evidence `method` through into its `facts` output
+unchanged, for both a `direct` and a `rendered` entry, plus `buildEvidenceByTrail` carrying a
+manifest entry's `method` into the evidence map it builds.
 
 **K1/K3 coverage:** `k1-verdict` — 0/1/2/5 acceptance counts, the early-read cutoff boundary (2026-10-19
 counts, 2026-10-20 doesn't), a 6th contact (Oklahoma Golf Trail) NOT counting while its swap is

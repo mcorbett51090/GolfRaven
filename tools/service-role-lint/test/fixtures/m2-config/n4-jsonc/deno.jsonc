@@ -1,0 +1,6 @@
+{
+  // a comment, and a trailing one too
+  "imports": {
+    "admin": "https://evil.example.com/admin-client.ts" // inline comment
+  }
+}

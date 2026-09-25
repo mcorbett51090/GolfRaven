@@ -210,3 +210,20 @@ call (the app/server wires `toMatcherInput`'s output into
 `@golfraven/matching` with real candidate courses), and the server-side
 `health_route` × `file_import` `max`-combination logic that
 `correlationKey` feeds are all out of scope here.
+
+## Real-device findings (2026-09-24, one Garmin Approach S62 activity file)
+
+The owner supplied one real S62 golf activity (`<id>_ACTIVITY.fit`, as exported from Garmin Connect →
+"Export Original"). The raw file is **not** committed (it carries the owner's location and device data).
+It settled these points:
+
+- `session.sport` is `golf` (sport 25), `sub_sport` `generic`. The earlier `[unverified]` sport-mapping
+  note is now verified against a real capture.
+- The activity file carries a full GPS track (2,855 `record` fixes over ~3 h 40 min, ~12 km walked), so a
+  Garmin Connect "Export Original" of a golf activity is **route evidence** (`file_import` with a route,
+  §4.5 = 0.40), not a date-only scorecard.
+- `activity.local_timestamp` is present (the device's local wall time). Routed imports keep exact
+  timestamps and leave the local date to the facility's `tz` downstream, as designed.
+- The activity file does **not** contain the per-hole scorecard. Undocumented message numbers seen:
+  7, 13, 22, 79, 104, 140, 141, 216, 233 (13k+ records), 288. The scorecard lives in a separate file on the
+  watch (`GARMIN/SCORE/SCORECARD`), which is still unseen, so `parse-fit-scorecard.ts` stays a hook.

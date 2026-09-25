@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes a still-running run; pushes to main
+# are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # S5: telemetry stays off in CI, same as any other non-interactive build.
   ASTRO_TELEMETRY_DISABLED: "1"
@@ -91,6 +97,126 @@ jobs:
 
       - name: verify-contract (contract/catalog.schema.json must match packages/catalog's Zod schema)
         run: node tools/catalog/dist/verify-contract.js
+
+  db-tests:
+    # Distinct job id/name from `verify` on purpose — task instruction
+    # ("keep the job id and name distinct, and don't rename the existing
+    # required job") and this repo's own convention (AGENTS.md "Required
+    # status checks"): a NEW job is additive, never a reason to touch an
+    # existing required check's identity.
+    name: player-plane DB (migrations + pgTAP authorization matrix)
+    runs-on: ubuntu-latest
+    # Bumped from 15 (S1, gate round 3): the harness now runs twice —
+    # HARNESS_MODE=superuser and HARNESS_MODE=restricted, each a full
+    # initdb/migrate/seed/pgTAP/teardown cycle — so the old single-run
+    # budget is too tight.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install PostgreSQL 17 + PostGIS 3 + pgTAP (PGDG apt, key-checked)
+        # Postgres 17, PostGIS 3, pgTAP (build plan §10 P3,
+        # docs/golf-trails/02-build-plan.md:2758). No Docker, no Supabase
+        # CLI: supabase/tests/shim.sql is the local stand-in in both places.
+        #
+        # ⛔ FIX (should-fix, post-P3a re-gate): switched from PostgreSQL 16
+        # to 17 — `GRANT ... WITH INHERIT/SET` (0016_private_definer.sql,
+        # H2's fix) is PG16+ syntax, and the pinned major
+        # (supabase/config.toml `[db] major_version = 17`) is what a real
+        # `supabase db push`/`supabase start` targets: Supabase Cloud has
+        # defaulted new projects to PostgreSQL 17 for some time before
+        # 2026-09-24, and self-hosted Supabase moved to PG17-by-default on
+        # 2026-06-17 [docs-verified 2026-09-24 via WebSearch — see
+        # config.toml's own note on why this is corroborated rather than
+        # cited to supabase.com directly]. Verified locally this session
+        # against PostgreSQL 17.11 (PGDG), both HARNESS_MODE=superuser and
+        # HARNESS_MODE=restricted, full green — this step mirrors that
+        # exact install.
+        #
+        # S4 (gate round 2), still the reason this installs from PGDG
+        # directly rather than pinning an exact `pkg=version`: the runner
+        # image's own preinstalled PostgreSQL build changes over time and
+        # an exact version pin fails outright the moment it's superseded
+        # ("Package postgresql-16 is not available" on the first CI run of
+        # that gate round). PGDG prunes superseded builds from its pool,
+        # so versions stay pinned to the MAJOR line (PostgreSQL 17,
+        # PostGIS 3) and the exact installed builds are printed below for
+        # the record, rather than pinned exactly.
+        run: |
+          set -euo pipefail
+          PGDG_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/pgdg.asc
+          got=$(gpg --show-keys --with-colons /tmp/pgdg.asc | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ "$got" != "$PGDG_FPR" ]; then
+            echo "PGDG key fingerprint mismatch: $got" >&2
+            exit 1
+          fi
+          gpg --dearmor < /tmp/pgdg.asc | sudo tee /usr/share/keyrings/pgdg.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-17 \
+            postgresql-17-postgis-3 \
+            postgresql-17-postgis-3-scripts \
+            postgresql-17-pgtap \
+            libtap-parser-sourcehandler-pgtap-perl
+          dpkg-query -W -f='${Package} ${Version}\n' \
+            postgresql-17 postgresql-17-postgis-3 postgresql-17-pgtap libtap-parser-sourcehandler-pgtap-perl
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @golfraven/service-role-lint
+        # tools/db/test.sh's last step runs this package's built CLI (B5)
+        # over supabase/functions — build it before the harness needs it.
+        # Scoped to just this package (not the whole-repo `pnpm -r build`
+        # the `verify` job runs) since nothing else in this job needs it.
+        run: pnpm --filter @golfraven/service-role-lint build
+
+      - name: Run tools/db/test.sh (HARNESS_MODE=superuser)
+        # The harness owns its own throwaway cluster end to end (initdb,
+        # start, shim, migrations, seed fixtures, pgTAP matrix, B4 replay/
+        # concurrency check, B2 function-inventory check, B5 service-role
+        # lint, teardown) — see its header comment for the exact sequence.
+        # Non-zero exit here fails the job; no `paths:` filter on this
+        # workflow's trigger (AGENTS.md "Required status checks — never
+        # add paths: to a required workflow"), so this job always
+        # evaluates once it is made required, same as `verify` and
+        # `gitleaks`. This run connects as the cluster bootstrap role (a
+        # true Postgres superuser) — the harness's original behaviour,
+        # unchanged; HARNESS_MODE defaults to `superuser` when unset.
+        run: bash tools/db/test.sh
+        env:
+          HARNESS_MODE: superuser
+
+      - name: Run tools/db/test.sh (HARNESS_MODE=restricted)
+        # S1 close-out (gate round 3): "add a harness mode where tests run
+        # as a NOSUPERUSER NOBYPASSRLS owner/test role ... An RLS test
+        # that only passes under superuser is a false pass." This second,
+        # independent run of the SAME harness against a FRESH throwaway
+        # cluster (tools/db/test.sh tears its own cluster down on exit, so
+        # the two runs never share state) connects migrations/fixtures/
+        # pgTAP as `migration_owner` instead — LOGIN, CREATEDB, CREATEROLE,
+        # explicitly NOSUPERUSER NOBYPASSRLS (supabase/tests/shim.sql).
+        # Extension installation stays on the step above (bootstrap-as-
+        # superuser in either mode, per the harness's own header comment).
+        run: bash tools/db/test.sh
+        env:
+          HARNESS_MODE: restricted
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)

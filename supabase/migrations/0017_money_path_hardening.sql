@@ -1,0 +1,1407 @@
+-- 0017_money_path_hardening.sql
+-- Money-path security review queue (post-S1, gate round 3 follow-up).
+-- Six items, each addressed below in its own numbered section, each with
+-- matching pgTAP coverage in supabase/tests/matrix/11_money_path.sql.
+--
+-- ⛔ ONE FLAGGED INTERPRETIVE CALL (item 3): the directive asked for a
+-- `hard_signal text` column on app.play, but app.play (0003) ALREADY has
+-- a `hard_signal boolean NOT NULL DEFAULT false` column — the literal
+-- name collides with an existing column of a different type. Renaming or
+-- retyping that existing column would be a breaking change to a column
+-- every existing pgTAP fixture and RLS assumption already depends on, so
+-- rather than guess which was intended, this migration ADDS a new,
+-- differently-named column — `hard_signal_reason text` — that carries
+-- what a `text`-typed "which hard signal fired" field would: a category
+-- string (e.g. 'device_mismatch', 'geofence_fail'), independent of the
+-- existing boolean flag. Flagged here and in the handback report; a
+-- rename/retype is a one-line follow-up if a different design was meant.
+
+-- ============================================================================
+-- 1. play_evidence: UNIQUE(evidence_id) + play.user_id = evidence.user_id
+-- ============================================================================
+-- UNIQUE(evidence_id): a piece of evidence can back at most one play (the
+-- PK is already (play_id, evidence_id), which only prevents the exact
+-- same pair from repeating — it does NOT stop the same evidence_id being
+-- attached to two DIFFERENT plays, which is the actual money-path risk
+-- (one real evidence event backing two separate reward claims).
+ALTER TABLE app.play_evidence ADD CONSTRAINT play_evidence_evidence_id_key UNIQUE (evidence_id);
+
+-- ⛔ FIX (M1, post-P3a gate): the original version used a BEFORE
+-- INSERT/UPDATE plpgsql trigger doing two independent SELECTs, which was
+-- bypassable two ways, both reproduced empirically: (1) deferred-FK
+-- ordering — if play_id/evidence_id pointed at NOT-YET-COMMITTED or
+-- deleted rows within the same deferred-FK transaction, the SELECT ...
+-- INTO found nothing, v_play_user/v_evidence_user were both NULL, and
+-- `NULL IS DISTINCT FROM NULL` is FALSE — the mismatch check silently
+-- passed; (2) re-owning — the trigger only checked ownership AT LINK
+-- TIME; nothing stopped play.user_id or evidence.user_id being changed
+-- to a DIFFERENT user AFTERWARD, silently detaching the pair without
+-- ever re-checking.
+--
+-- Replaced with the composite-FK design: app.play and app.evidence each
+-- get `UNIQUE (id, user_id)` (a trivial derivation of their existing PK
+-- plus one column), play_evidence gains its own `user_id` column, and
+-- TWO composite foreign keys pin it to BOTH parents' (id, user_id) pairs
+-- at once. This closes both bypasses structurally, not by a trigger that
+-- can be out-raced or skipped: (1) a composite FK's NULL semantics only
+-- exempt a referencING row with a NULL in one of ITS OWN key columns
+-- (MATCH SIMPLE) — play_evidence.play_id/evidence_id/user_id are all NOT
+-- NULL, so there is no NULL-lookup escape hatch at all, deferred or not;
+-- (2) re-owning is blocked at the SOURCE: changing app.play.user_id or
+-- app.evidence.user_id while a play_evidence row still references that
+-- (id, user_id) pair is itself an FK violation (default ON UPDATE NO
+-- ACTION) — Postgres refuses the re-own, it does not silently let the
+-- child go stale.
+ALTER TABLE app.play ADD CONSTRAINT play_id_user_id_key UNIQUE (id, user_id);
+ALTER TABLE app.evidence ADD CONSTRAINT evidence_id_user_id_key UNIQUE (id, user_id);
+
+ALTER TABLE app.play_evidence ADD COLUMN user_id uuid;
+-- Backfill from app.play (an existing play_evidence row's play_id always
+-- resolves to a real play; the play's own user_id is definitionally the
+-- correct value here, since play_evidence's original intent — and the
+-- FK we're about to add — is exactly "this evidence backs THIS user's
+-- play").
+UPDATE app.play_evidence pe SET user_id = p.user_id FROM app.play p WHERE p.id = pe.play_id;
+ALTER TABLE app.play_evidence ALTER COLUMN user_id SET NOT NULL;
+
+ALTER TABLE app.play_evidence
+  ADD CONSTRAINT play_evidence_play_user_fk FOREIGN KEY (play_id, user_id)
+    REFERENCES app.play (id, user_id) DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT play_evidence_evidence_user_fk FOREIGN KEY (evidence_id, user_id)
+    REFERENCES app.evidence (id, user_id) DEFERRABLE INITIALLY DEFERRED;
+-- DEFERRABLE INITIALLY DEFERRED matches every other app-internal FK's
+-- contract (0014 §3) so delete_my_data's multi-table deletes keep
+-- working in any statement order — play_evidence rows are deleted
+-- transitively (ON DELETE CASCADE from both play_id and evidence_id,
+-- 0003), so by the time either FK is actually checked at commit the
+-- referencing play_evidence row is already gone in the normal
+-- delete_my_data path; deferring just removes any dependency on which
+-- of play/evidence/play_evidence the generic loop happens to delete
+-- first.
+
+-- ============================================================================
+-- 2. Attestation grade: typed column, not evidence.integrity jsonb
+-- ============================================================================
+-- app.attestation_grade already exists (0003:73: 'attested',
+-- 'unattestable', 'failed'). evidence.integrity stays (it may still carry
+-- other integrity signals the grade itself doesn't capture), but the
+-- GRADE specifically now has its own typed, NOT NULL, indexed column —
+-- a jsonb bucket lets an ingestion bug silently omit or mistype the grade
+-- with nothing to catch it; a typed column can't.
+ALTER TABLE app.evidence ADD COLUMN attestation_grade app.attestation_grade NOT NULL DEFAULT 'unattestable';
+COMMENT ON COLUMN app.evidence.attestation_grade IS
+  'Typed replacement for storing the attestation grade inside integrity jsonb (money-path security review). integrity jsonb may still carry other, non-grade integrity signals. MUST be written from server-side verification only, never client-supplied. The enum has no explicit "pending/never graded" state distinct from unattestable -- see docs/security/p3-money-path-requirements.md addendum for why, and what to do when the P3 scoring Edge Function is built.';
+CREATE INDEX evidence_attestation_grade_idx ON app.evidence (attestation_grade);
+
+-- ============================================================================
+-- 3. Scorer decision persisted on play; play_id/policy_version/basis on
+--    offer_code and entitlement.
+-- ============================================================================
+-- play.hard_signal (boolean) and play.policy_version (text) already exist
+-- (0003) — reused, not duplicated. New: money, held_review,
+-- hard_signal_reason (see the flagged note at the top of this file),
+-- input_digest (the scorer's own input-hash, for replay/audit — the same
+-- "compute a ref before insert" discipline 0003's evidence.source_ref
+-- comment already documents, applied to the scorer's own decision this
+-- time).
+ALTER TABLE app.play ADD COLUMN money boolean NOT NULL DEFAULT false;
+ALTER TABLE app.play ADD COLUMN held_review boolean NOT NULL DEFAULT false;
+ALTER TABLE app.play ADD COLUMN hard_signal_reason text;
+ALTER TABLE app.play ADD COLUMN input_digest text;
+
+-- offer_code: had none of the three. entitlement: already has `basis
+-- jsonb` (0005) — only play_id/policy_version are new there.
+--
+-- ⛔ FIX (H1, post-P3a gate): the ADD COLUMN ... REFERENCES app.play (id)
+-- form (no ON DELETE, not deferrable) defaults to NO ACTION,
+-- non-deferrable — reproduced empirically: `private.delete_my_data`
+-- deleting app.play for a user with a play_id-linked offer_code/
+-- entitlement row failed at 0015:99 ("DELETE FROM app.%I WHERE %I = $1"
+-- against app.play) with an FK violation, even though 0014's own
+-- DEFERRABLE-INITIALLY-DEFERRED pass (§3) runs on every app-internal FK
+-- that existed AT THAT TIME — these two didn't exist yet (0017 postdates
+-- 0014). ON DELETE SET NULL closes the gap structurally (a deleted play
+-- detaches, not blocks, the offer_code/entitlement it backed); DEFERRABLE
+-- INITIALLY DEFERRED matches every other app-internal FK's contract so
+-- delete_my_data's own multi-table deletes keep working in any statement
+-- order, not just this one. delete_my_data also nulls both explicitly,
+-- belt-and-suspenders (0015).
+-- ⛔ FIX (M2, post-P3a re-gate): the single-column `play_id REFERENCES
+-- app.play (id)` form let three of the four confirmed bypasses through:
+-- (c) UPDATE offer_code.user_id and (d) UPDATE play.user_id both left
+-- play_id untouched, so neither ever re-checked ownership; the FK itself
+-- says nothing about WHOSE row play_id points at, only that it exists.
+-- A composite FK against app.play's `(id, user_id)` unique pair (0017
+-- §1, `play_id_user_id_key`) closes both structurally, the same
+-- mechanism M1 already uses for app.play_evidence: (c) is blocked
+-- because changing JUST user_id would point this row at an (id,user_id)
+-- pair that doesn't exist in app.play; (d) is blocked because changing
+-- play.user_id while a composite FK still references its OLD (id,
+-- user_id) pair is itself a violation (default ON UPDATE NO ACTION).
+ALTER TABLE app.offer_code ADD COLUMN play_id uuid;
+ALTER TABLE app.offer_code ADD COLUMN policy_version text;
+ALTER TABLE app.offer_code ADD COLUMN basis jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE app.offer_code
+  ADD CONSTRAINT offer_code_play_user_fk FOREIGN KEY (play_id, user_id)
+    REFERENCES app.play (id, user_id) DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX offer_code_play_idx ON app.offer_code (play_id);
+
+ALTER TABLE app.entitlement ADD COLUMN play_id uuid;
+ALTER TABLE app.entitlement ADD COLUMN policy_version text;
+ALTER TABLE app.entitlement
+  ADD CONSTRAINT entitlement_play_user_fk FOREIGN KEY (play_id, user_id)
+    REFERENCES app.play (id, user_id) DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX entitlement_play_idx ON app.entitlement (play_id);
+
+-- H1's ON DELETE SET NULL is EXPRESSED HERE, not on the FK itself
+-- (composite FKs support ON DELETE SET NULL fine, but a bare SET NULL on
+-- a two-column FK nulls BOTH columns together, including user_id — never
+-- what we want here; only play_id should null out when the play is
+-- deleted). A trigger on app.play does the equivalent, narrowly: null
+-- play_id only. delete_my_data's own explicit `UPDATE ... SET play_id =
+-- NULL` (0015) stays as belt-and-suspenders, unchanged.
+--
+-- ⛔ FIX (post-P3a re-gate, found while regression-testing M2): this MUST
+-- be a plain BEFORE DELETE trigger, not an AFTER ... DEFERRABLE
+-- CONSTRAINT TRIGGER as first written. Reasoning, confirmed empirically
+-- this session: Postgres fires same-timing AFTER ROW triggers on one
+-- event in ALPHABETICAL trigger-name order, and queues deferred events in
+-- that same order for whenever they're later checked (COMMIT or SET
+-- CONSTRAINTS IMMEDIATE) — the composite FK's own auto-generated
+-- delete-side enforcement trigger is named `RI_ConstraintTrigger_a_...`,
+-- which sorts BEFORE any lowercase name (byte/ASCII comparison: 'R' <
+-- 'p'). So an AFTER DEFERRABLE version of this trigger would always fire
+-- AFTER the FK's own "is it still referenced" check — which finds it
+-- STILL referenced (this trigger hasn't nulled anything out yet) and
+-- raises, even though this trigger's own job is to make that check
+-- unnecessary. This isn't a test-only ordering quirk: it would raise at
+-- real COMMIT time too, for every real delete_my_data(user) call whose
+-- user has a play with a live offer_code/entitlement still attached.
+-- A plain BEFORE DELETE trigger sidesteps trigger-firing-order entirely:
+-- it nulls play_id out of every referencing row BEFORE the DELETE of
+-- app.play itself proceeds, so by the time the FK's own delete-side check
+-- runs (immediately or deferred, doesn't matter), nothing references the
+-- row being deleted any more. Non-deferrable and always-immediate is
+-- correct here — this trigger enforces no external contract a caller
+-- might need to defer past; it is pure bookkeeping tied to the DELETE
+-- statement itself.
+CREATE OR REPLACE FUNCTION app.play_deleted_detach_play_id() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE app.offer_code SET play_id = NULL WHERE play_id = OLD.id;
+  UPDATE app.entitlement SET play_id = NULL WHERE play_id = OLD.id;
+  RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER play_deleted_detach_play_id_trg
+BEFORE DELETE ON app.play
+FOR EACH ROW EXECUTE FUNCTION app.play_deleted_detach_play_id();
+
+-- should-fix (post-P3a gate): "offer_code.play_id and entitlement.play_id
+-- need an owner-match check. Add a DB guard so a play with
+-- held_review=true cannot back a non-held code or entitlement." Both
+-- state enums (app.offer_code_state / app.entitlement_state) already
+-- have a `held_review` value (0005/0006) — the guard is that a
+-- held_review PLAY can only be backing an offer_code/entitlement that is
+-- ITSELF held_review, not something freely redeemable while the play
+-- that justified it is still under fraud review.
+--
+-- ⛔ FIX (M2(a)/(b), post-P3a re-gate): bypass (a) — "the play is placed
+-- on hold AFTER the code was issued" — is closed by the SEPARATE
+-- app.play trigger below (this guard alone only ever fires when
+-- offer_code/entitlement's OWN row changes, never when the PLAY changes
+-- out from under it). Bypass (b) — "deferred insert ordering" — is
+-- closed by making this a genuine DEFERRABLE INITIALLY DEFERRED
+-- CONSTRAINT TRIGGER (AFTER, not BEFORE — Postgres constraint triggers
+-- are always AFTER) instead of a plain BEFORE trigger: it now runs at
+-- the SAME deferred-checking point as the composite FK above, so a
+-- play_id that resolves to a row inserted LATER in the same transaction
+-- is guaranteed to be visible by the time this fires, and NOT FOUND is
+-- now a hard RAISE (fail-closed) rather than a silent pass-through — the
+-- composite FK guarantees existence by commit time too, so this is
+-- belt-and-suspenders against constraint-check ordering not being
+-- guaranteed, not a live gap on its own anymore.
+-- ⛔ FIX (should-fix 4, post-P3a re-gate: "stale NEW guard"): these are
+-- DEFERRABLE INITIALLY DEFERRED constraint triggers -- NEW here is the
+-- row image captured AT THE TIME OF THE TRIGGERING STATEMENT, which can
+-- be STALE by the time this actually fires (COMMIT, or SET CONSTRAINTS
+-- IMMEDIATE): if a LATER statement in the SAME transaction further
+-- changes this row, the earlier deferred firing still queues and still
+-- runs, checking values the row no longer has. Confirmed empirically
+-- this session: `UPDATE app.entitlement SET play_id = <X>` (queues a
+-- deferred check with NEW.play_id = X), immediately followed in the SAME
+-- transaction by private.delete_my_data (which detaches play_id back to
+-- NULL via its own UPDATE, THEN deletes the now-unreferenced app.play row
+-- outright) -- at commit, the FIRST deferred firing (still holding the
+-- STALE NEW.play_id = X) ran its own fresh `SELECT ... FROM app.play
+-- WHERE id = X`, found NOT FOUND (the row is genuinely gone by then), and
+-- raised "was not found in app.play at constraint-check time" for an
+-- entirely legitimate deletion. Re-reading the row BY ID and checking ITS
+-- CURRENT (not the captured NEW) state fixes both directions this can go
+-- wrong: the row may have been further updated since (a stale NEW could
+-- pass OR fail incorrectly relative to its real final state), or deleted
+-- outright (nothing left to guard -- exit quietly rather than raising
+-- over a row that no longer exists by commit time). Every deferred
+-- firing queued for the same row converges on the SAME fresh read, so
+-- this stays correct (if slightly redundant) even with multiple firings
+-- queued for one row in one transaction.
+-- ⛔ FIX (M3 BLOCKING, post-P3a re-gate): "guard RLS fail-open." The
+-- should-fix-4 re-read above fixed STALENESS but not WHOSE RLS it reads
+-- under: as a plain (invoker-rights) function, `SELECT * INTO v_row FROM
+-- app.offer_code WHERE id = NEW.id` runs as whatever role is active AT
+-- THE MOMENT this DEFERRED trigger actually fires (commit, or SET
+-- CONSTRAINTS IMMEDIATE) -- NOT necessarily the role that did the
+-- original INSERT/UPDATE. Confirmed empirically this round: service_role
+-- inserts an `earned` offer_code for a HELD play (bypasses RLS, so the
+-- INSERT itself succeeds and the deferred check queues), then
+-- `tests.authenticate_as` switches the session to player B BEFORE
+-- commit -- when the deferred trigger fires, its own re-read runs AS
+-- PLAYER B, whose OWN row-scoped RLS (`play_select_own`-style, "your own
+-- rows only") can't see PLAYER E's offer_code row at all, so the re-read
+-- gets NOT FOUND -- and should-fix 4's "NOT FOUND means deleted, nothing
+-- to guard, RETURN NULL" treats an INVISIBLE row exactly the same as a
+-- GENUINELY DELETED one. The commit then succeeds with `earned` under a
+-- held play -- RLS visibility, not the row's actual existence, decided
+-- the guard's outcome.
+--
+-- Fix: the guard function itself is now SECURITY DEFINER, owned by
+-- private_definer (not a separate directly-callable helper -- a trigger
+-- function can never be invoked as an ordinary SQL call regardless of
+-- EXECUTE grants, "trigger functions can only be called as triggers", so
+-- there is no new callable surface to expose to anon/authenticated by
+-- making it SECURITY DEFINER). Its own re-read now runs as
+-- private_definer, through THREE new, narrowly-scoped-to-this-one-
+-- purpose SELECT policies (app.offer_code/app.entitlement/app.play,
+-- below) that are unconditional (`USING (true)`) -- narrowed not by ROW
+-- (this fix's whole point is that row-scoped visibility is exactly what
+-- broke it) but by REACHABILITY: nothing outside this one SECURITY
+-- DEFINER trigger function context can ever exercise them. "Treat NOT
+-- FOUND as deleted only when that definer-level read confirms it" --
+-- since the re-read itself now IS the definer-level read, a genuine NOT
+-- FOUND from it means the row is actually, unconditionally gone, not
+-- merely invisible to whoever happens to be committing.
+CREATE OR REPLACE FUNCTION private.offer_code_play_guard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_row app.offer_code%ROWTYPE;
+  v_play_held boolean;
+BEGIN
+  -- ⛔ FIX (follow-up, post-P3a re-gate round 2): "narrow the three
+  -- guard-read policies using the GUC pattern." The prior `USING (true)`
+  -- policy made every row of app.offer_code visible to private_definer
+  -- unconditionally -- correct for THIS re-read (which already scopes
+  -- itself to exactly NEW.id via its own WHERE clause) but wider than it
+  -- needed to be at the RLS layer itself: private_definer could read
+  -- EVERY row through this policy from anywhere, not just from inside
+  -- this one guarded lookup. The GUC is set to the SPECIFIC id being
+  -- checked immediately before the read, and cleared immediately after
+  -- -- the policy (below) only ever admits a row whose id matches the
+  -- current value of that GUC, so private_definer has NO visibility into
+  -- this table at all outside the narrow window this function itself
+  -- controls.
+  PERFORM set_config('app.guard.offer_code_id', NEW.id::text, true);
+  SELECT * INTO v_row FROM app.offer_code WHERE id = NEW.id;
+  PERFORM set_config('app.guard.offer_code_id', '', true);
+  IF NOT FOUND THEN
+    RETURN NULL; -- definer-level read confirms the row is genuinely gone, not merely invisible to the committing role
+  END IF;
+  IF v_row.play_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+  PERFORM set_config('app.guard.play_id', v_row.play_id::text, true);
+  SELECT held_review INTO v_play_held FROM app.play WHERE id = v_row.play_id AND user_id = v_row.user_id;
+  PERFORM set_config('app.guard.play_id', '', true);
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'offer_code: play_id % (user_id %) was not found in app.play at constraint-check time', v_row.play_id, v_row.user_id
+      USING ERRCODE = '23514';
+  END IF;
+  -- should-fix (post-P3a re-gate): "a reviewer cannot set offer_code/
+  -- entitlement to void or expired while it is held." A held play's
+  -- backing offer_code may ALSO resolve straight to a terminal state
+  -- (void/expired) without first round-tripping through held_review --
+  -- those are exactly the outcomes a reviewer clearing a held item picks
+  -- between, and blocking them here made a genuine reviewer action
+  -- impossible, not just a bypass.
+  IF v_play_held AND v_row.state NOT IN ('held_review', 'void', 'expired') THEN
+    RAISE EXCEPTION 'offer_code: play_id % is held_review, so this offer_code must be state=held_review (pending review) or a terminal void/expired (resolved by review) -- got %', v_row.play_id, v_row.state
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+-- ⛔ FIX (found empirically this round, H2_MODE=approximation): CREATE
+-- TRIGGER/CREATE CONSTRAINT TRIGGER itself needs EXECUTE on the function
+-- it names, checked for the CONNECTING role at DDL time -- unlike
+-- ACTUALLY FIRING a trigger (which bypasses EXECUTE checks entirely, the
+-- reasoning every OTHER trigger function in this migration set relies
+-- on). Every prior private_definer-owned function's "REVOKE/GRANT EXECUTE
+-- BEFORE the OWNER TO transfer" ordering rule assumed the connecting role
+-- only ever needed EXECUTE to be checked once, at the point the function
+-- itself is created/altered -- this is the FIRST private_definer-owned
+-- function this migration set also attaches as a trigger, and attaching
+-- it is a SEPARATE DDL statement that runs AFTER ownership has already
+-- moved to private_definer if it comes after the transfer, at which point
+-- the connecting role (migration_owner under HARNESS_MODE=restricted;
+-- h2_approx_postgres, a DIFFERENTLY-NAMED role with no special grant,
+-- under H2_MODE=approximation) no longer owns the function and holds no
+-- EXECUTE either, and CREATE CONSTRAINT TRIGGER 42501s. The fix is
+-- ordering, not a grant: attach the trigger FIRST, while the connecting
+-- role still owns the function outright (regardless of that role's own
+-- name), THEN revoke PUBLIC's default EXECUTE and transfer ownership —
+-- an already-attached trigger needs no ongoing EXECUTE privilege to fire.
+CREATE CONSTRAINT TRIGGER offer_code_play_guard_trg
+AFTER INSERT OR UPDATE OF play_id, user_id, state ON app.offer_code
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION private.offer_code_play_guard();
+
+REVOKE EXECUTE ON FUNCTION private.offer_code_play_guard() FROM PUBLIC;
+GRANT CREATE ON SCHEMA private TO private_definer;
+ALTER FUNCTION private.offer_code_play_guard() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+CREATE OR REPLACE FUNCTION private.entitlement_play_guard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_row app.entitlement%ROWTYPE;
+  v_play_held boolean;
+BEGIN
+  -- M3 BLOCKING (post-P3a re-gate): SECURITY DEFINER, same reasoning as
+  -- private.offer_code_play_guard above -- the re-read must run as
+  -- private_definer, not as whichever role happens to be committing.
+  -- Follow-up (round 2): same GUC-scoped narrow-read pattern as
+  -- private.offer_code_play_guard above.
+  PERFORM set_config('app.guard.entitlement_id', NEW.id::text, true);
+  SELECT * INTO v_row FROM app.entitlement WHERE id = NEW.id;
+  PERFORM set_config('app.guard.entitlement_id', '', true);
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+  IF v_row.play_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+  PERFORM set_config('app.guard.play_id', v_row.play_id::text, true);
+  SELECT held_review INTO v_play_held FROM app.play WHERE id = v_row.play_id AND user_id = v_row.user_id;
+  PERFORM set_config('app.guard.play_id', '', true);
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'entitlement: play_id % (user_id %) was not found in app.play at constraint-check time', v_row.play_id, v_row.user_id
+      USING ERRCODE = '23514';
+  END IF;
+  -- should-fix (post-P3a re-gate): same reasoning as offer_code_play_guard
+  -- above -- app.entitlement_state has no separate 'expired' (only
+  -- 'void'), so only that terminal is added.
+  IF v_play_held AND v_row.state NOT IN ('held_review', 'void') THEN
+    RAISE EXCEPTION 'entitlement: play_id % is held_review, so this entitlement must be state=held_review (pending review) or terminal void (resolved by review) -- got %', v_row.play_id, v_row.state
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+-- Same ordering fix as private.offer_code_play_guard above: attach the
+-- trigger FIRST (needs EXECUTE, which the connecting role still holds via
+-- ownership at this point), THEN revoke PUBLIC's default and transfer
+-- ownership.
+CREATE CONSTRAINT TRIGGER entitlement_play_guard_trg
+AFTER INSERT OR UPDATE OF play_id, user_id, state ON app.entitlement
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION private.entitlement_play_guard();
+
+REVOKE EXECUTE ON FUNCTION private.entitlement_play_guard() FROM PUBLIC;
+GRANT CREATE ON SCHEMA private TO private_definer;
+ALTER FUNCTION private.entitlement_play_guard() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- ⛔ FIX (follow-up, post-P3a re-gate round 2): "narrow the three
+-- guard-read policies using the GUC pattern." SUPERSEDES the original
+-- `USING (true)` shape -- unconditional-by-row was reachable only from
+-- inside a SECURITY DEFINER trigger function nothing external can invoke
+-- directly, but that meant private_definer's OWN visibility into these
+-- tables was still unconditional the moment anything (a bug, a future
+-- migration, a different SECURITY DEFINER function reusing this grant)
+-- queried them outside the guard's own narrow WHERE clause. Scoped now to
+-- exactly the id the currently-running guard invocation set via
+-- set_config() immediately before its own read (and clears immediately
+-- after) -- nullif(..., '') turns an unset/cleared GUC into NULL, and
+-- `id = NULL` is never true, so private_definer sees ZERO rows of any of
+-- these three tables outside that one narrow window. GRANT SELECT
+-- already exists for private_definer on all three tables (0016); only
+-- the POLICY changes.
+CREATE POLICY pd_offer_code_guard_read ON app.offer_code
+  FOR SELECT TO private_definer USING (id = nullif(current_setting('app.guard.offer_code_id', true), '')::uuid);
+CREATE POLICY pd_entitlement_guard_read ON app.entitlement
+  FOR SELECT TO private_definer USING (id = nullif(current_setting('app.guard.entitlement_id', true), '')::uuid);
+CREATE POLICY pd_play_guard_read ON app.play
+  FOR SELECT TO private_definer USING (id = nullif(current_setting('app.guard.play_id', true), '')::uuid);
+
+-- Register the three new guard-read policies in private.definer_policy_
+-- allowlist (0016) -- same narrow, self-revoked CURRENT_USER pattern used
+-- throughout this migration set.
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0017b ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
+  ('app', 'offer_code', 'pd_offer_code_guard_read', 'SELECT', true, 'M3 (post-P3a re-gate); narrowed to a GUC-scoped id match (follow-up, round 2): private.offer_code_play_guard sets app.guard.offer_code_id to the exact row it is reading immediately before, and clears it immediately after -- private_definer has no visibility outside that window'),
+  ('app', 'entitlement', 'pd_entitlement_guard_read', 'SELECT', true, 'M3 (post-P3a re-gate); narrowed to a GUC-scoped id match (follow-up, round 2), same as private.offer_code_play_guard above'),
+  ('app', 'play', 'pd_play_guard_read', 'SELECT', true, 'M3 (post-P3a re-gate); narrowed to a GUC-scoped id match (follow-up, round 2): both guards'' held_review lookup on the backing play row, same pattern -- app.guard.play_id');
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+  AND al.policy_name IN ('pd_offer_code_guard_read', 'pd_entitlement_guard_read', 'pd_play_guard_read');
+DROP POLICY current_user_seed_definer_policy_allowlist_0017b ON private.definer_policy_allowlist;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
+
+-- M2(a): bypass (a), "the play is placed on hold AFTER the code was
+-- issued" — when app.play.held_review flips false->true, move every
+-- backing offer_code/entitlement INTO the held_review state, so the
+-- guard above (which only checks state AT THE TIME offer_code/
+-- entitlement itself changes) can never be stale. Choice made here,
+-- documented: move to 'held_review', not void — held_review is a REVIEW
+-- state (money-path-security-requirements.md's own §3 vocabulary), not a
+-- final denial, so the backing code/entitlement should freeze pending
+-- review, not be destroyed; a human/process resolving the review can
+-- still redeem or void it afterward. Terminal states (redeemed/void, and
+-- offer_code's expired) are left alone — they are already resolved, and
+-- moving a REDEEMED code backward into held_review would be wrong (the
+-- money already moved).
+CREATE OR REPLACE FUNCTION app.play_held_review_cascade() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.held_review AND NOT OLD.held_review THEN
+    UPDATE app.offer_code SET state = 'held_review'
+      WHERE play_id = NEW.id AND state NOT IN ('held_review', 'redeemed', 'void', 'expired');
+    UPDATE app.entitlement SET state = 'held_review'
+      WHERE play_id = NEW.id AND state NOT IN ('held_review', 'redeemed', 'void');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER play_held_review_cascade_trg
+AFTER UPDATE OF held_review ON app.play
+FOR EACH ROW EXECUTE FUNCTION app.play_held_review_cascade();
+
+-- ============================================================================
+-- 4. Offer budgets: CHECK, max_redemptions enforcement, locked reserve fn.
+-- ============================================================================
+ALTER TABLE app.offer ADD CONSTRAINT offer_budget_within_cap
+  CHECK (budget_used + budget_reserved <= budget_cap);
+-- should-fix, post-P3a gate: a negative budget_used/budget_reserved
+-- (e.g. a release_offer_budget bug, or a hand-run UPDATE) would otherwise
+-- silently satisfy offer_budget_within_cap above while being nonsense —
+-- the CAP check alone doesn't rule out negative numbers "canceling out".
+ALTER TABLE app.offer ADD CONSTRAINT offer_budget_nonnegative
+  CHECK (budget_used >= 0 AND budget_reserved >= 0);
+
+-- max_redemptions: a row-count check on offer_code, enforced at INSERT
+-- time via trigger (a plain CHECK cannot reference another table's row
+-- count). NULL max_redemptions means unlimited (matches the column's own
+-- nullability, 0006).
+-- ⛔ FIX (H3, post-P3a gate): the original version read app.offer and
+-- app.offer_code with plain SELECTs, no lock — reproduced empirically:
+-- two concurrent sessions inserting against the SAME offer_id with
+-- max_redemptions=1 could both read count=0 before either committed, and
+-- both pass the check (classic TOCTOU race, the same class H3 names).
+-- `SELECT ... FOR UPDATE` on the offer row serializes concurrent
+-- redeemers of the SAME offer: the second session's FOR UPDATE blocks
+-- until the first commits, then re-reads a count that already reflects
+-- the first session's insert. Also now fires on `UPDATE OF offer_id`
+-- (re-pointing an existing offer_code at a different, maybe-exhausted
+-- offer was previously unchecked entirely).
+CREATE OR REPLACE FUNCTION app.offer_code_enforce_max_redemptions() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_max int;
+  v_count int;
+BEGIN
+  SELECT max_redemptions INTO v_max FROM app.offer WHERE id = NEW.offer_id FOR UPDATE;
+  IF v_max IS NOT NULL THEN
+    SELECT count(*) INTO v_count FROM app.offer_code WHERE offer_id = NEW.offer_id;
+    IF v_count >= v_max THEN
+      RAISE EXCEPTION 'offer_code: offer % has reached its max_redemptions (%)', NEW.offer_id, v_max
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER offer_code_enforce_max_redemptions_trg
+BEFORE INSERT OR UPDATE OF offer_id ON app.offer_code
+FOR EACH ROW EXECUTE FUNCTION app.offer_code_enforce_max_redemptions();
+
+-- Reserve/release/consume-budget functions: each locks the offer row
+-- (SELECT ... FOR UPDATE) before touching it, so two concurrent callers
+-- against the same near-exhausted budget can't both read a stale
+-- budget_used/budget_reserved and both succeed (the classic lost-update
+-- race a bare UPDATE ... WHERE budget_used + budget_reserved + p_amount
+-- <= budget_cap would still be exposed to under READ COMMITTED without
+-- the explicit row lock first). Plain SQL/plpgsql, not SECURITY DEFINER:
+-- their caller (service_role, an Edge Function) already has full DML +
+-- BYPASSRLS on app.offer, so no elevation is needed the way private.*
+-- helpers need it for anon/authenticated callers.
+--
+-- ⛔ FIX (should-fix, post-P3a gate): reserve_offer_budget now also
+-- checks the offer's own status ('live') and validity window
+-- (valid_from/valid_to straddling current_date) — the original version
+-- would happily reserve budget against a draft, paused, or expired
+-- offer, since only the numeric cap was ever checked.
+CREATE OR REPLACE FUNCTION app.reserve_offer_budget(p_offer_id uuid, p_amount numeric)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_cap numeric;
+  v_used numeric;
+  v_reserved numeric;
+  v_status app.offer_status;
+  v_valid_from date;
+  v_valid_to date;
+BEGIN
+  IF p_amount < 0 THEN
+    RAISE EXCEPTION 'reserve_offer_budget: p_amount must be >= 0 (got %)', p_amount;
+  END IF;
+  SELECT budget_cap, budget_used, budget_reserved, status, valid_from, valid_to
+    INTO v_cap, v_used, v_reserved, v_status, v_valid_from, v_valid_to
+    FROM app.offer
+    WHERE id = p_offer_id
+    FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'reserve_offer_budget: no such offer %', p_offer_id;
+  END IF;
+  IF v_status <> 'live' OR current_date < v_valid_from OR current_date > v_valid_to THEN
+    RETURN false;
+  END IF;
+  IF v_used + v_reserved + p_amount > v_cap THEN
+    RETURN false;
+  END IF;
+  UPDATE app.offer SET budget_reserved = budget_reserved + p_amount WHERE id = p_offer_id;
+  RETURN true;
+END;
+$$;
+
+-- release_offer_budget: undoes an UNCONSUMED reservation (e.g. the
+-- redemption it was held for was abandoned/declined) — moves the amount
+-- OUT of budget_reserved without ever touching budget_used. Same lock
+-- discipline; clamps at 0 rather than raising on a caller passing more
+-- than is actually reserved, since "release everything that's left" is
+-- the safe behaviour for a cleanup path.
+CREATE OR REPLACE FUNCTION app.release_offer_budget(p_offer_id uuid, p_amount numeric)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF p_amount < 0 THEN
+    RAISE EXCEPTION 'release_offer_budget: p_amount must be >= 0 (got %)', p_amount;
+  END IF;
+  PERFORM 1 FROM app.offer WHERE id = p_offer_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'release_offer_budget: no such offer %', p_offer_id;
+  END IF;
+  UPDATE app.offer SET budget_reserved = GREATEST(budget_reserved - p_amount, 0) WHERE id = p_offer_id;
+END;
+$$;
+
+-- consume_offer_budget: converts a reservation into an actual spend —
+-- moves the amount from budget_reserved into budget_used (the redemption
+-- actually happened). Same lock discipline; clamps budget_reserved at 0
+-- the same way release does, so a caller consuming slightly more than
+-- was reserved (rounding) can't push it negative and trip
+-- offer_budget_nonnegative.
+CREATE OR REPLACE FUNCTION app.consume_offer_budget(p_offer_id uuid, p_amount numeric)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF p_amount < 0 THEN
+    RAISE EXCEPTION 'consume_offer_budget: p_amount must be >= 0 (got %)', p_amount;
+  END IF;
+  PERFORM 1 FROM app.offer WHERE id = p_offer_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'consume_offer_budget: no such offer %', p_offer_id;
+  END IF;
+  UPDATE app.offer
+  SET budget_reserved = GREATEST(budget_reserved - p_amount, 0),
+      budget_used = budget_used + p_amount
+  WHERE id = p_offer_id;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.reserve_offer_budget(uuid, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.reserve_offer_budget(uuid, numeric) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.release_offer_budget(uuid, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.release_offer_budget(uuid, numeric) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.consume_offer_budget(uuid, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.consume_offer_budget(uuid, numeric) TO service_role;
+
+-- ============================================================================
+-- 5. Receipt dedupe: partial unique index + serialized dedupe function.
+-- ============================================================================
+-- Partial unique index: two DIFFERENT receipts legitimately share a NULL
+-- OCR number (OCR failed/not run), so the index only applies where the
+-- OCR number is actually present.
+CREATE UNIQUE INDEX receipt_fingerprint_ocr_facility_uniq
+  ON app.receipt_fingerprint (receipt_number_ocr, facility_id)
+  WHERE receipt_number_ocr IS NOT NULL;
+
+-- ⛔ FIX (M4, post-P3a gate) 2: UNIQUE(purchase_evidence_id) so a retry
+-- (the same ingestion call replayed) is idempotent instead of minting a
+-- second fingerprint row for the same purchase. Partial (WHERE NOT NULL)
+-- for the same reason as the OCR index: the column is nullable (ON
+-- DELETE SET NULL, 0003) once the purchase_evidence row it pointed at is
+-- gone, and multiple already-detached rows legitimately share NULL.
+CREATE UNIQUE INDEX receipt_fingerprint_purchase_evidence_uniq
+  ON app.receipt_fingerprint (purchase_evidence_id)
+  WHERE purchase_evidence_id IS NOT NULL;
+
+-- ⛔ FIX (post-P3a re-gate, cross-user receipt griefing): dedupe_receipt_
+-- fingerprint used to void the NEWER purchase on ANY phash match,
+-- regardless of whose purchase the EXISTING fingerprint belonged to.
+-- Across users that is a griefing vector: whoever uploads a photo of a
+-- SHARED receipt (a real scenario — e.g. two people on the same trip
+-- photographing the same paper receipt) first voids the rightful owner's
+-- later, legitimate upload. Only a SAME-USER match (a genuine retry/
+-- duplicate submission) is still auto-voided; a CROSS-USER match instead
+-- opens a review_item + fraud_signal (kind=receipt_cross_user_match) and
+-- leaves BOTH purchases pending, for a human to resolve.
+--
+-- void_reason distinguishes WHY a purchase_evidence row is void:
+--   - 'duplicate' — this function's own same-user auto-void. Does not by
+--     itself indicate fraud (an honest retry looks identical), so it
+--     never itself becomes the reason a LATER unrelated submission gets
+--     treated as suspicious.
+--   - 'reviewer' — a human voided it directly (out of this stage's scope
+--     — an ops/admin action). NULL on a void row means this: a void
+--     written before this column existed, or by any path that doesn't
+--     set it explicitly, is read as 'reviewer' (documented, not enforced
+--     by a DEFAULT, so an intentionally-NULL 'reviewer' void and an
+--     old/foreign void are indistinguishable on purpose — both mean
+--     "not this function's own automatic duplicate logic").
+--   - 'fraud' — voided as a confirmed fraud finding (out of this stage's
+--     scope — a fraud-review action).
+-- The (out-of-scope-this-stage) rules package tracks a matching
+-- `voidReason` field and treats only 'reviewer'/'fraud' as "poisoning" a
+-- fingerprint group (i.e. still treated as a live fraud signal for
+-- future matching) — 'duplicate' does not, since it is just this
+-- function's own bookkeeping, not an independent finding. This function
+-- does not need special-case logic for that distinction itself: a
+-- 'duplicate'-voided purchase never gets its OWN receipt_fingerprint row
+-- (see below — the newer, voided submission's INSERT never runs), so
+-- there is nothing on receipt_fingerprint for a 'duplicate' void to
+-- "poison" in the first place; a 'reviewer'/'fraud' void's existing
+-- fingerprint row is untouched by this function and so keeps matching
+-- normally, which already is the desired "still poisons" behaviour.
+CREATE TYPE app.purchase_void_reason AS ENUM ('duplicate', 'reviewer', 'fraud');
+ALTER TABLE app.purchase_evidence ADD COLUMN void_reason app.purchase_void_reason;
+COMMENT ON COLUMN app.purchase_evidence.void_reason IS
+  'Only meaningful when status = void. NULL on a void row is read as ''reviewer'' (see this migration''s own note above). Set by dedupe_receipt_fingerprint (''duplicate'') or by an out-of-scope-this-stage reviewer/fraud action.';
+
+-- app.purchase_evidence has NO relationship to app.play_evidence in this
+-- schema — play_evidence links (play_id, evidence_id) -> app.evidence
+-- (the self-report/device/staff-attestation evidence pathway), a
+-- COMPLETELY SEPARATE table from app.purchase_evidence (the receipt-
+-- purchase pathway); nothing ever links a purchase_evidence row to
+-- play_evidence, directly or otherwise (confirmed by grep over every
+-- migration this session). The one REAL "something was earned from this
+-- purchase" link in the schema is app.marker_credit.purchase_evidence_id
+-- (0005) — handled defensively below, same spirit as the instruction:
+-- a same-user duplicate void must not leave a live, non-terminal credit
+-- still pointing at a purchase now known to be a duplicate.
+
+-- phash is deliberately NOT made a bare UNIQUE constraint (a perceptual
+-- hash is approximate by design — two independently legitimate receipts
+-- CAN collide on phash without being the same receipt, so a hard UNIQUE
+-- would produce false-positive rejections of honest submissions). Instead:
+-- a serialized dedupe function, the directive's second option. It voids
+-- the NEW purchase and writes a fraud_signal when an EXACT phash match
+-- already exists for a DIFFERENT purchase; otherwise it records the new
+-- fingerprint. pg_advisory_xact_lock serializes concurrent callers on the
+-- SAME phash (released automatically at transaction end) so two
+-- simultaneous submissions of the same receipt image can't both read "no
+-- existing match" and both succeed.
+--
+-- ⛔ FIX (M4, post-P3a gate):
+--   1. Asserts transaction_isolation = 'read committed'. Under
+--      REPEATABLE READ, the lock alone is not enough: the calling
+--      transaction's snapshot is taken at its FIRST statement, before
+--      this function's own pg_advisory_xact_lock even runs, so a phash
+--      row committed by another session BETWEEN snapshot-start and lock-
+--      acquisition is invisible to the SELECT below regardless of the
+--      lock — the lock only serializes WRITERS against each other, it
+--      does not make an already-fixed snapshot see a later commit. READ
+--      COMMITTED re-takes its snapshot per-statement, so once the lock is
+--      held, this function's own SELECT genuinely sees every row
+--      committed before the lock was granted. Raising here, rather than
+--      silently under-protecting, matches this codebase's fail-closed
+--      convention (0015's own "classify it before this function can run"
+--      posture).
+--   3. An OCR-index collision (receipt_fingerprint_ocr_facility_uniq,
+--      unique_violation) is now caught and treated exactly like a phash
+--      duplicate — void + fraud_signal — instead of surfacing a raw
+--      23505 to the caller (an Edge Function 500, not a handled fraud
+--      case; every OTHER duplicate path here already resolves to a
+--      handled outcome, not an exception).
+--   4. p_user_id is checked against the purchase_evidence row's OWN
+--      user_id before anything else — a caller passing a p_user_id that
+--      does not match p_purchase_evidence_id's real owner would
+--      otherwise silently attribute a fraud_signal (or a void) to the
+--      wrong account.
+CREATE OR REPLACE FUNCTION app.dedupe_receipt_fingerprint(
+  p_purchase_evidence_id uuid,
+  p_user_id uuid,
+  p_phash text,
+  p_facility_id text,
+  p_local_date date,
+  p_receipt_number_ocr text DEFAULT NULL
+) RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_dupe_id uuid;
+  v_dupe_user_id uuid;
+  v_dupe_purchase_evidence_id uuid;
+  v_real_user_id uuid;
+BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'dedupe_receipt_fingerprint: requires transaction_isolation = read committed (got %) -- the advisory lock does not protect a REPEATABLE READ snapshot taken before it', current_setting('transaction_isolation');
+  END IF;
+
+  SELECT user_id INTO v_real_user_id FROM app.purchase_evidence WHERE id = p_purchase_evidence_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'dedupe_receipt_fingerprint: no such purchase_evidence %', p_purchase_evidence_id;
+  END IF;
+  IF v_real_user_id IS DISTINCT FROM p_user_id THEN
+    RAISE EXCEPTION 'dedupe_receipt_fingerprint: p_user_id (%) does not match purchase_evidence.user_id (%) for purchase_evidence_id=%',
+      p_user_id, v_real_user_id, p_purchase_evidence_id;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext(p_phash));
+
+  SELECT id, user_id, purchase_evidence_id INTO v_dupe_id, v_dupe_user_id, v_dupe_purchase_evidence_id
+  FROM app.receipt_fingerprint
+  WHERE phash = p_phash
+    AND (purchase_evidence_id IS DISTINCT FROM p_purchase_evidence_id)
+  LIMIT 1;
+
+  IF v_dupe_id IS NOT NULL AND v_dupe_user_id IS NOT DISTINCT FROM p_user_id THEN
+    -- SAME USER: a genuine retry/duplicate submission — auto-void the
+    -- NEWER (this) one, same as before, now tagged void_reason='duplicate'.
+    UPDATE app.purchase_evidence SET status = 'void', void_reason = 'duplicate' WHERE id = p_purchase_evidence_id;
+    -- Detach (never delete) any non-terminal marker_credit this purchase
+    -- backed — see this section's own note above (no play_evidence link
+    -- exists to detach; marker_credit is the real analog).
+    UPDATE app.marker_credit SET purchase_evidence_id = NULL
+      WHERE purchase_evidence_id = p_purchase_evidence_id AND status <> 'credited';
+    INSERT INTO app.fraud_signal (user_id, kind, detail)
+    VALUES (
+      p_user_id,
+      'receipt_phash_duplicate',
+      jsonb_build_object(
+        'purchase_evidence_id', p_purchase_evidence_id,
+        'duplicate_of_receipt_fingerprint_id', v_dupe_id,
+        'phash', p_phash,
+        'facility_id', p_facility_id,
+        'local_date', p_local_date
+      )
+    );
+    RETURN false;
+  ELSIF v_dupe_id IS NOT NULL THEN
+    -- ⛔ FIX (post-P3a re-gate, cross-user griefing): a DIFFERENT user's
+    -- fingerprint matches. Do NOT void either purchase -- neither
+    -- submission is known-fraudulent from a phash match alone (a shared
+    -- paper receipt legitimately produces this). Open a review_item +
+    -- fraud_signal instead, and leave BOTH purchases pending (never
+    -- reopen a purchase that is already terminally void, e.g. a prior
+    -- reviewer/fraud void -- that verdict stands).
+    UPDATE app.purchase_evidence SET status = 'pending' WHERE id = p_purchase_evidence_id AND status <> 'void';
+    IF v_dupe_purchase_evidence_id IS NOT NULL THEN
+      -- should-fix (post-P3a re-gate): don't demote the EARLIER
+      -- purchase's own status once it's already resolved to 'valid'
+      -- (the cross-user review is about the NEW submission colliding
+      -- with something already-accepted, not a reason to un-accept the
+      -- earlier one -- it's still referenced by matched_purchase_evidence_id
+      -- in the review_item/fraud_signal above either way).
+      UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status NOT IN ('void', 'valid');
+    END IF;
+    INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
+    VALUES (
+      'receipt_cross_user_match',
+      'purchase_evidence',
+      p_purchase_evidence_id,
+      jsonb_build_object(
+        'purchase_evidence_id', p_purchase_evidence_id,
+        'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+        'matched_receipt_fingerprint_id', v_dupe_id,
+        'phash', p_phash,
+        'facility_id', p_facility_id,
+        'local_date', p_local_date
+      )
+    );
+    INSERT INTO app.fraud_signal (user_id, kind, detail)
+    VALUES (
+      p_user_id,
+      'receipt_cross_user_match',
+      jsonb_build_object(
+        'purchase_evidence_id', p_purchase_evidence_id,
+        'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+        'phash', p_phash,
+        'facility_id', p_facility_id,
+        'local_date', p_local_date
+      )
+    );
+    RETURN false;
+  END IF;
+
+  BEGIN
+    INSERT INTO app.receipt_fingerprint
+      (purchase_evidence_id, user_id, phash, receipt_number_ocr, facility_id, local_date)
+    VALUES
+      (p_purchase_evidence_id, p_user_id, p_phash, p_receipt_number_ocr, p_facility_id, p_local_date)
+    ON CONFLICT (purchase_evidence_id) WHERE purchase_evidence_id IS NOT NULL DO NOTHING;
+  EXCEPTION WHEN unique_violation THEN
+    -- ⛔ FIX (post-P3a re-gate, correction): receipt_fingerprint_ocr_
+    -- facility_uniq — a DIFFERENT receipt already claimed this
+    -- (receipt_number_ocr, facility_id) pair. This round's FIRST version
+    -- of this fix reasoned an OCR collision is never a "shared photo"
+    -- scenario and so stayed same-user-shaped regardless of owner — WRONG:
+    -- if two users photograph the SAME physical receipt, the OCR'd number
+    -- collides too, not just the phash — that is exactly the same
+    -- griefing vector the phash path above closes, on the same paper
+    -- receipt. So: same owner check, same branching, mirroring the phash
+    -- path exactly (look up who actually holds the conflicting
+    -- (receipt_number_ocr, facility_id) row, since the failed INSERT
+    -- itself never got far enough to tell us).
+    SELECT id, user_id, purchase_evidence_id INTO v_dupe_id, v_dupe_user_id, v_dupe_purchase_evidence_id
+    FROM app.receipt_fingerprint
+    WHERE receipt_number_ocr = p_receipt_number_ocr AND facility_id = p_facility_id
+    LIMIT 1;
+
+    IF v_dupe_user_id IS NOT DISTINCT FROM p_user_id THEN
+      -- SAME USER: a genuine retry/duplicate submission.
+      UPDATE app.purchase_evidence SET status = 'void', void_reason = 'duplicate' WHERE id = p_purchase_evidence_id;
+      UPDATE app.marker_credit SET purchase_evidence_id = NULL
+        WHERE purchase_evidence_id = p_purchase_evidence_id AND status <> 'credited';
+      INSERT INTO app.fraud_signal (user_id, kind, detail)
+      VALUES (
+        p_user_id,
+        'receipt_ocr_duplicate',
+        jsonb_build_object(
+          'purchase_evidence_id', p_purchase_evidence_id,
+          'duplicate_of_receipt_fingerprint_id', v_dupe_id,
+          'receipt_number_ocr', p_receipt_number_ocr,
+          'facility_id', p_facility_id,
+          'local_date', p_local_date
+        )
+      );
+    ELSE
+      -- CROSS USER: same treatment as a cross-user phash match — no
+      -- auto-void either side, review_item + fraud_signal, both pending.
+      UPDATE app.purchase_evidence SET status = 'pending' WHERE id = p_purchase_evidence_id AND status <> 'void';
+      IF v_dupe_purchase_evidence_id IS NOT NULL THEN
+        -- should-fix (post-P3a re-gate): same reasoning as the phash
+        -- branch above -- don't demote an already-valid earlier purchase.
+        UPDATE app.purchase_evidence SET status = 'pending' WHERE id = v_dupe_purchase_evidence_id AND status NOT IN ('void', 'valid');
+      END IF;
+      INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
+      VALUES (
+        'receipt_cross_user_match',
+        'purchase_evidence',
+        p_purchase_evidence_id,
+        jsonb_build_object(
+          'purchase_evidence_id', p_purchase_evidence_id,
+          'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+          'matched_receipt_fingerprint_id', v_dupe_id,
+          'match_basis', 'receipt_number_ocr',
+          'receipt_number_ocr', p_receipt_number_ocr,
+          'facility_id', p_facility_id,
+          'local_date', p_local_date
+        )
+      );
+      INSERT INTO app.fraud_signal (user_id, kind, detail)
+      VALUES (
+        p_user_id,
+        'receipt_cross_user_match',
+        jsonb_build_object(
+          'purchase_evidence_id', p_purchase_evidence_id,
+          'matched_purchase_evidence_id', v_dupe_purchase_evidence_id,
+          'match_basis', 'receipt_number_ocr',
+          'receipt_number_ocr', p_receipt_number_ocr,
+          'facility_id', p_facility_id,
+          'local_date', p_local_date
+        )
+      );
+    END IF;
+    RETURN false;
+  END;
+  RETURN true;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.dedupe_receipt_fingerprint(uuid, uuid, text, text, date, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.dedupe_receipt_fingerprint(uuid, uuid, text, text, date, text) TO service_role;
+
+-- ============================================================================
+-- 6. Nonce uniqueness: attestation.token_jti (already unique, 0004) —
+--    checkin_challenge's nonce and used_at hardened here.
+-- ============================================================================
+-- checkin_challenge.nonce_hash is ALREADY a table-wide UNIQUE constraint
+-- (0005) — plain UNIQUE, not UNIQUE(user_id, nonce_hash), so it was
+-- already globally unique across users, not merely per-user; likewise
+-- course_qr_token.nonce_hash is already its PRIMARY KEY (globally
+-- unique). Both get pgTAP coverage proving this below (11_money_path.sql)
+-- rather than a schema change, since nothing here needs one.
+--
+-- The real gap: nothing stopped `used_at` being set, then RESET or
+-- overwritten — a challenge "unconsumed" and replayed, or consumed twice
+-- with a different used_at. A BEFORE UPDATE trigger makes that transition
+-- one-way: once used_at is non-NULL, it can never change again.
+CREATE OR REPLACE FUNCTION app.checkin_challenge_used_at_once() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- Reject ANY further UPDATE once used_at is set, even one that would
+  -- (re-)write the identical value: `now()` is stable for the whole
+  -- transaction in Postgres, not per-statement, so "set it to now() a
+  -- second time" can otherwise look like a no-op change and slip past an
+  -- `IS DISTINCT FROM` check entirely (confirmed empirically this
+  -- session). A consumed challenge must never be touched again, full
+  -- stop -- that is the actual replay-protection contract, not merely
+  -- "can't change to a different value".
+  IF OLD.used_at IS NOT NULL THEN
+    RAISE EXCEPTION 'checkin_challenge: used_at is already set (%) and cannot be changed (id=%)', OLD.used_at, OLD.id
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER checkin_challenge_used_at_once_trg
+BEFORE UPDATE ON app.checkin_challenge
+FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_used_at_once();
+
+-- ============================================================================
+-- should-fix (post-P3a gate): "Add a consumed-nonce tombstone ledger for
+-- checkin_challenge.nonce_hash and attestation.token_jti, so DELETE then
+-- re-INSERT can't replay." A plain table-level UNIQUE constraint (both
+-- already have one) only stops a DUPLICATE while the original row still
+-- exists — delete the row, then re-insert the identical nonce/jti, and
+-- the UNIQUE constraint has nothing left to object to. A separate,
+-- append-only ledger that nothing ever deletes from closes that: every
+-- nonce/jti that was EVER inserted stays blocked forever, row or no row.
+-- ============================================================================
+-- ⛔ FIX (should-fix, post-P3a re-gate): "add CHECK (expires_at <=
+-- issued_at + interval '24 hours') on the challenge ... right now a
+-- 30-day challenge is accepted." checkin_challenge (0005) has both
+-- issued_at (DEFAULT now()) and expires_at (NOT NULL) but nothing ever
+-- bounded the gap between them — a caller could issue one with an
+-- arbitrarily distant expires_at, and the consumed-nonce purge above (7
+-- days past THAT expiry) would then have to keep the tombstone around
+-- for just as long. 24 hours is generous for a proof-of-presence
+-- checkin challenge (every seeded fixture in this repo uses 5 minutes);
+-- re-tighten if a real, documented validity window is ever specified.
+ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_expires_at_bounded
+  CHECK (expires_at <= issued_at + interval '24 hours');
+
+-- ⛔ FIX (should-fix 3, post-P3a re-gate): "a future issued_at sidesteps
+-- the 24h cap." The CHECK above only bounds the GAP between issued_at and
+-- expires_at -- it says nothing about issued_at itself, so a caller free
+-- to choose issued_at can set it far in the future (e.g. now() + 30 days)
+-- and still satisfy the 24h-gap CHECK while the challenge's real validity
+-- window sits 30 days out, defeating the purpose of bounding it at all
+-- (and, by extension, private.consumed_nonce's purge floor above, which
+-- is anchored to expires_at). issued_at is pinned to "now, plus a small
+-- clock-skew margin" instead -- a CHECK (not a forcing BEFORE INSERT
+-- trigger) is sufficient and simpler, per this should-fix's own stated
+-- options ("force issued_at = now() ... or CHECK issued_at <= now() +
+-- interval '1 minute'"); a volatile now() in a CHECK is validated only at
+-- write time, which is exactly the point in time this needs to be true.
+ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_issued_at_not_future
+  CHECK (issued_at <= now() + interval '1 minute');
+
+CREATE TABLE private.consumed_nonce (
+  nonce_hash text PRIMARY KEY,
+  source text NOT NULL,
+  consumed_at timestamptz NOT NULL DEFAULT now(),
+  -- should-fix (post-P3a re-gate, correction): the SOURCE row's own
+  -- expiry, captured at tombstone-insert time — checkin_challenge has a
+  -- real, bounded expires_at (see the new CHECK constraint on that table,
+  -- below); attestation has no stored expiry at all (its token_jti is a
+  -- JWT id whose validity window lives in the JWT itself, out of this
+  -- stage's scope), so attestation-sourced rows leave this NULL and
+  -- purge_consumed_nonce falls back to consumed_at for those specifically
+  -- — documented there, not a silent gap.
+  expires_at timestamptz
+);
+ALTER TABLE private.consumed_nonce ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.consumed_nonce FORCE ROW LEVEL SECURITY;
+-- ⛔ FIX (should-fix, post-P3a re-gate: "consumed_nonce DELETE
+-- regression"): service_role must NOT have DELETE here — the whole point
+-- of this table is an append-only ledger nothing can shrink except a
+-- bounded, source-expiry-aware purge; a caller with DELETE could remove a
+-- consumed nonce and replay it (delete-then-replay), exactly defeating
+-- the ledger. service_role keeps INSERT (the two tombstone triggers
+-- below fire as whatever role is inserting into checkin_challenge/
+-- attestation, normally service_role) and SELECT (harness/observability
+-- needs); DELETE now belongs ONLY to private_definer, reached through
+-- private.purge_consumed_nonce (SECURITY DEFINER, below) and gated by
+-- that role's own narrow RLS policy — never a direct grant to any
+-- externally-callable role.
+GRANT INSERT, SELECT ON private.consumed_nonce TO service_role;
+
+CREATE OR REPLACE FUNCTION app.checkin_challenge_tombstone_nonce() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM private.consumed_nonce WHERE nonce_hash = NEW.nonce_hash) THEN
+    RAISE EXCEPTION 'checkin_challenge: nonce_hash % was already consumed (tombstoned) and cannot be reused', NEW.nonce_hash
+      USING ERRCODE = '23514';
+  END IF;
+  INSERT INTO private.consumed_nonce (nonce_hash, source, expires_at) VALUES (NEW.nonce_hash, 'checkin_challenge', NEW.expires_at);
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER checkin_challenge_tombstone_nonce_trg
+BEFORE INSERT ON app.checkin_challenge
+FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_tombstone_nonce();
+
+CREATE OR REPLACE FUNCTION app.attestation_tombstone_nonce() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM private.consumed_nonce WHERE nonce_hash = NEW.token_jti) THEN
+    RAISE EXCEPTION 'attestation: token_jti % was already consumed (tombstoned) and cannot be reused', NEW.token_jti
+      USING ERRCODE = '23514';
+  END IF;
+  -- No stored expiry to capture here (see the table's own column
+  -- comment) -- expires_at stays NULL; purge_consumed_nonce falls back
+  -- to consumed_at for attestation-sourced rows.
+  INSERT INTO private.consumed_nonce (nonce_hash, source) VALUES (NEW.token_jti, 'attestation');
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER attestation_tombstone_nonce_trg
+BEFORE INSERT ON app.attestation
+FOR EACH ROW EXECUTE FUNCTION app.attestation_tombstone_nonce();
+
+-- ⛔ FIX (should-fix, post-P3a re-gate): "make checkin_challenge.nonce_hash
+-- and attestation.token_jti immutable after insert, with a BEFORE UPDATE
+-- trigger that raises if they change. This closes the UPDATE revive."
+-- The tombstone-on-insert triggers above only run at INSERT time — an
+-- UPDATE that changes an EXISTING row's nonce_hash/token_jti to some
+-- other value (including a previously-tombstoned one) was never checked
+-- against private.consumed_nonce at all, since no UPDATE trigger ever
+-- looked. Rather than duplicate the tombstone-check logic for UPDATE too
+-- (two places to keep in sync), these columns are simply made immutable
+-- once set: if the value can never change after INSERT, there is no
+-- UPDATE path left that could revive or relocate a consumed nonce/jti
+-- onto a different row.
+CREATE OR REPLACE FUNCTION app.checkin_challenge_nonce_hash_immutable() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.nonce_hash IS DISTINCT FROM OLD.nonce_hash THEN
+    RAISE EXCEPTION 'checkin_challenge: nonce_hash is immutable after insert (id=%, old=%, attempted new=%)', OLD.id, OLD.nonce_hash, NEW.nonce_hash
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER checkin_challenge_nonce_hash_immutable_trg
+BEFORE UPDATE ON app.checkin_challenge
+FOR EACH ROW EXECUTE FUNCTION app.checkin_challenge_nonce_hash_immutable();
+
+CREATE OR REPLACE FUNCTION app.attestation_token_jti_immutable() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.token_jti IS DISTINCT FROM OLD.token_jti THEN
+    RAISE EXCEPTION 'attestation: token_jti is immutable after insert (id=%, old=%, attempted new=%)', OLD.id, OLD.token_jti, NEW.token_jti
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER attestation_token_jti_immutable_trg
+BEFORE UPDATE ON app.attestation
+FOR EACH ROW EXECUTE FUNCTION app.attestation_token_jti_immutable();
+
+-- ⛔ FIX (should-fix, post-P3a re-gate: "add a TTL purge function; keep
+-- tombstones at least as long as the maximum challenge validity plus a
+-- margin" — CORRECTED after the re-gate: the margin is now measured from
+-- each row's own SOURCE EXPIRY (expires_at, above), not from consumed_at.
+-- Retention is now hardcoded at 7 days past that expiry (no longer a
+-- caller-supplied parameter — the whole point of the should-fix is that
+-- this floor must not be something a caller can shrink) and enforced
+-- TWICE, independently: once in the function body below, and once,
+-- structurally, by the RLS policy on private.consumed_nonce itself
+-- (pd_purge_consumed_nonce_expired, further below) — even if this
+-- function's own WHERE clause had a bug, DELETE FROM private.
+-- consumed_nonce as private_definer literally cannot touch a row that
+-- policy's USING clause doesn't independently agree is expired.
+--
+-- SECURITY DEFINER, owned by private_definer (should-fix, post-P3a
+-- re-gate): purge must NOT run as service_role's own broad grants —
+-- reaching consumed_nonce ONLY through this one, narrowly-policed path
+-- is what makes "revoke service_role's DELETE grant" (above) hold in
+-- practice, not just on paper.
+CREATE OR REPLACE FUNCTION private.purge_consumed_nonce()
+RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_deleted bigint;
+BEGIN
+  DELETE FROM private.consumed_nonce WHERE COALESCE(expires_at, consumed_at) < now() - interval '7 days';
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN v_deleted;
+END;
+$$;
+
+-- REVOKE/GRANT EXECUTE must run BEFORE the OWNER TO transfer below, not
+-- after — confirmed (again) empirically this session: once ownership
+-- moves to private_definer, the connecting migration role no longer owns
+-- this function and holds no GRANT OPTION on it either, so a REVOKE/
+-- GRANT issued afterward 42501s (see 0018_pseudonym_vault.sql's own note
+-- on this exact ordering bug, hit and fixed there earlier this round).
+REVOKE EXECUTE ON FUNCTION private.purge_consumed_nonce() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce() TO service_role;
+
+-- Ownership transfer needs CREATE on schema private briefly, same
+-- discipline as every other private_definer-owned function in this file
+-- (see 0016's own note on why).
+GRANT CREATE ON SCHEMA private TO private_definer;
+ALTER FUNCTION private.purge_consumed_nonce() OWNER TO private_definer;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- The narrow policy itself: private_definer may DELETE a
+-- private.consumed_nonce row ONLY if it is more than 7 days past its own
+-- source expiry (or consumed_at, for the attestation rows that have no
+-- stored expiry) — a hardcoded floor, not a parameter, so nothing calling
+-- through purge_consumed_nonce (or anything else running as
+-- private_definer, ever) can delete a tombstone sooner than that,
+-- regardless of what the calling code asks for.
+GRANT SELECT, DELETE ON private.consumed_nonce TO private_definer;
+CREATE POLICY pd_purge_consumed_nonce_expired ON private.consumed_nonce
+  FOR DELETE TO private_definer
+  USING (COALESCE(expires_at, consumed_at) < now() - interval '7 days');
+CREATE POLICY pd_purge_consumed_nonce_expired_r ON private.consumed_nonce
+  FOR SELECT TO private_definer
+  USING (COALESCE(expires_at, consumed_at) < now() - interval '7 days');
+
+-- ⛔ SUPERSEDED (should-fix 2, post-P3a re-gate): the broad, row-unscoped
+-- pd_shift_log_discover_hmac_id policy this comment block used to explain
+-- (`FOR SELECT TO private_definer USING (true)` on the whole table) is
+-- REMOVED as of this round. It did its job (closing should-fix 4's own
+-- chicken-and-egg discovery problem) but was broader than it needed to
+-- be: a policy scoped only by "which role" (private_definer), not by
+-- "which rows", grants visibility into every row of a real player-data
+-- table for a query shape that only ever needed the DISTINCT set of key
+-- ids in use. private.pseudonym_key_registry (0018) replaces it: the M1
+-- write-time trigger registers every key id AS it is validated, and
+-- private.delete_my_data (0015) now iterates that small, purpose-built
+-- registry instead of scanning app.attestation_shift_log directly -- the
+-- discovery step no longer needs to read the wide table at all, so this
+-- policy no longer needs to exist. Its private.definer_policy_allowlist
+-- row is removed in the same edit (0018 registers the registry's own
+-- narrow policy instead).
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
+  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired', 'DELETE', true, 'purge_consumed_nonce (should-fix, post-P3a re-gate correction) -- hardcoded 7-days-past-source-expiry floor, independent of the function body'),
+  ('private', 'consumed_nonce', 'pd_purge_consumed_nonce_expired_r', 'SELECT', true, 'row-visibility companion to pd_purge_consumed_nonce_expired');
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+  AND al.policy_name IN ('pd_purge_consumed_nonce_expired', 'pd_purge_consumed_nonce_expired_r');
+DROP POLICY current_user_seed_definer_policy_allowlist_0017 ON private.definer_policy_allowlist;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
+
+-- ============================================================================
+-- should-fix (post-P3a re-gate): "The H1 catalog test must require
+-- CASCADE or SET NULL. Deferrable NO ACTION alone is not enough unless an
+-- explicit null-out is registered." offer_code_play_user_fk/
+-- entitlement_play_user_fk (above, M2) are exactly this shape: DEFERRABLE
+-- NO ACTION, not ON DELETE SET NULL on the FK itself (a bare SET NULL on
+-- a two-column composite FK would null BOTH columns, including user_id —
+-- see the play_deleted_detach_play_id comment above for why). Their
+-- explicit null-out is the app.play_deleted_detach_play_id BEFORE DELETE
+-- trigger, registered here by name so 09_delete_my_data.sql's H1 catalog
+-- test can verify a REAL, present trigger stands behind the "deferrable
+-- alone is not enough" exception, not just a comment's say-so — a
+-- migration that drops the trigger without also removing this row still
+-- fails the catalog test (see that test's own EXISTS-a-real-trigger
+-- clause).
+-- ============================================================================
+CREATE TABLE private.fk_explicit_detach_allowlist (
+  schema_name text NOT NULL,
+  table_name text NOT NULL,
+  constraint_name text NOT NULL,
+  detach_trigger_schema text NOT NULL,
+  detach_trigger_name text NOT NULL,
+  reason text NOT NULL,
+  PRIMARY KEY (schema_name, table_name, constraint_name)
+);
+ALTER TABLE private.fk_explicit_detach_allowlist ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.fk_explicit_detach_allowlist FORCE ROW LEVEL SECURITY;
+GRANT SELECT ON private.fk_explicit_detach_allowlist TO service_role;
+GRANT INSERT ON private.fk_explicit_detach_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_fk_explicit_detach_allowlist ON private.fk_explicit_detach_allowlist
+  FOR INSERT TO CURRENT_USER WITH CHECK (true);
+
+INSERT INTO private.fk_explicit_detach_allowlist
+  (schema_name, table_name, constraint_name, detach_trigger_schema, detach_trigger_name, reason)
+VALUES
+  ('app', 'offer_code', 'offer_code_play_user_fk', 'app', 'play_deleted_detach_play_id_trg',
+   'composite FK to app.play(id,user_id) is DEFERRABLE NO ACTION, not ON DELETE SET NULL, because a bare SET NULL on a 2-column composite FK would also null user_id -- app.play_deleted_detach_play_id (BEFORE DELETE ON app.play) nulls ONLY play_id explicitly instead'),
+  ('app', 'entitlement', 'entitlement_play_user_fk', 'app', 'play_deleted_detach_play_id_trg',
+   'same as offer_code_play_user_fk above -- the same trigger detaches both tables in one pass');
+
+-- ⛔ FIX (should-fix, post-P3a re-gate, close-out): tightening the H1
+-- catalog test (removing its old "OR condeferrable" escape) surfaced 8
+-- MORE FKs referencing a delete_row table that were NEVER part of this
+-- round's own changes, but were only ever passing the OLD, looser test
+-- because they were merely deferrable -- exactly the gap the tightened
+-- test now exists to catch. Rather than allow-list all 8 as "has an
+-- explicit detach elsewhere" (most did not -- e.g. app.evidence.device_id
+-- had NO detach logic anywhere, deferred-NO-ACTION alone, silently
+-- relying on iteration order never hitting the bad case in practice),
+-- each is given the correct ON DELETE action directly on the FK itself --
+-- CASCADE for a NOT NULL column (the referencing row is meaningless
+-- without its parent and should go with it), SET NULL for a nullable one
+-- (the referencing row should survive, decoupled). This is the SAME
+-- design already used for offer_code_play_user_fk/entitlement_play_user_fk
+-- above, just without the "one FK can't do it because it's composite and
+-- would null the wrong column" complication these single-column FKs don't
+-- have -- so no allow-list registration is needed for any of the 8.
+--
+-- play_evidence_play_user_fk/play_evidence_evidence_user_fk (M1, this
+-- round's own composite FKs) get CASCADE, matching play_evidence's
+-- ORIGINAL single-column FKs (0003: `play_id ... REFERENCES app.play(id)
+-- ON DELETE CASCADE`, `evidence_id ... REFERENCES app.evidence(id) ON
+-- DELETE CASCADE`, both still present and unchanged) -- play_id/
+-- evidence_id are NOT NULL PRIMARY KEY columns, so SET NULL is not even
+-- syntactically an option; the junction row itself should simply go away
+-- when either side of the pair it links does.
+ALTER TABLE app.play_evidence DROP CONSTRAINT play_evidence_play_user_fk;
+ALTER TABLE app.play_evidence ADD CONSTRAINT play_evidence_play_user_fk
+  FOREIGN KEY (play_id, user_id) REFERENCES app.play (id, user_id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.play_evidence DROP CONSTRAINT play_evidence_evidence_user_fk;
+ALTER TABLE app.play_evidence ADD CONSTRAINT play_evidence_evidence_user_fk
+  FOREIGN KEY (evidence_id, user_id) REFERENCES app.evidence (id, user_id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+
+-- evidence.device_id, marker_credit.purchase_evidence_id,
+-- entitlement.activated_device_id, offer_code.activated_device_id: all
+-- nullable -- SET NULL decouples the row, which survives (matches
+-- 0015's OWN pre-existing, now belt-and-suspenders, explicit
+-- `UPDATE app.entitlement SET activated_device_id = NULL ...` -- that
+-- inline code stays; this closes the same gap structurally, at the FK
+-- itself, for the case that code's own comment already named as
+-- deliberately NOT handled: "offer_code.activated_device_id has the same
+-- RESTRICT shape ... no action needed" reasoned from a "devices are
+-- never shared" invariant that this FK now enforces itself rather than
+-- assumes).
+ALTER TABLE app.evidence DROP CONSTRAINT evidence_device_id_fkey;
+ALTER TABLE app.evidence ADD CONSTRAINT evidence_device_id_fkey
+  FOREIGN KEY (device_id) REFERENCES app.device (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.marker_credit DROP CONSTRAINT marker_credit_purchase_evidence_id_fkey;
+ALTER TABLE app.marker_credit ADD CONSTRAINT marker_credit_purchase_evidence_id_fkey
+  FOREIGN KEY (purchase_evidence_id) REFERENCES app.purchase_evidence (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.entitlement DROP CONSTRAINT entitlement_activated_device_id_fkey;
+ALTER TABLE app.entitlement ADD CONSTRAINT entitlement_activated_device_id_fkey
+  FOREIGN KEY (activated_device_id) REFERENCES app.device (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.offer_code DROP CONSTRAINT offer_code_activated_device_id_fkey;
+ALTER TABLE app.offer_code ADD CONSTRAINT offer_code_activated_device_id_fkey
+  FOREIGN KEY (activated_device_id) REFERENCES app.device (id)
+  ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
+
+-- device_reward_ledger.device_id, checkin_challenge.device_id: both
+-- NOT NULL -- SET NULL is not an option; CASCADE is correct (both
+-- tables' own user_id is ALSO delete_row, so their rows are deleted
+-- either via this CASCADE or via the generic pass's own direct DELETE,
+-- whichever runs first -- the other then simply deletes zero rows, not
+-- an error).
+ALTER TABLE app.device_reward_ledger DROP CONSTRAINT device_reward_ledger_device_id_fkey;
+ALTER TABLE app.device_reward_ledger ADD CONSTRAINT device_reward_ledger_device_id_fkey
+  FOREIGN KEY (device_id) REFERENCES app.device (id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE app.checkin_challenge DROP CONSTRAINT checkin_challenge_device_id_fkey;
+ALTER TABLE app.checkin_challenge ADD CONSTRAINT checkin_challenge_device_id_fkey
+  FOREIGN KEY (device_id) REFERENCES app.device (id)
+  ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+
+-- ============================================================================
+-- S1 close-out follow-through: register the two new triggers' owning
+-- functions + app.reserve_offer_budget/app.dedupe_receipt_fingerprint in
+-- private.function_inventory (10_function_inventory.sql's own inventory
+-- check derives from it and fails on anything missing) — none of these
+-- are SECURITY DEFINER, so private_definer/0016's own inventory (owned-by
+-- + allow-list checks) does not apply to them.
+-- ============================================================================
+-- private.function_inventory already has ENABLE+FORCE ROW LEVEL SECURITY
+-- (0014) and only a SELECT grant (to service_role) -- no INSERT policy
+-- for anyone, including its own owner. Whoever is RUNNING this migration
+-- OWNS this table (created it, via 0014) but if NOBYPASSRLS, owner +
+-- FORCE + NOBYPASSRLS means RLS genuinely applies to it too (confirmed
+-- empirically this session: the INSERT below failed with "new row
+-- violates row-level security policy" without this).
+--
+-- ⛔ FIX (H2, post-P3a gate): this used to name the harness-only role
+-- `migration_owner` explicitly, the same defect as 0016:64 -- a real
+-- deploy, run as its own migration role, has no role literally named
+-- `migration_owner` and this GRANT/POLICY failed outright. `CURRENT_USER`
+-- is self-referential and correct regardless of what the connecting role
+-- is actually called (harness or real deploy) -- the table's OWNER can
+-- grant/police itself directly, no bootstrap-as-superuser step needed
+-- (unlike storage.buckets in supabase/tests/shim.sql, which is
+-- bootstrap-owned, not owned by the migration role). Governance/manifest
+-- data, not user data -- the same reasoning as storage.buckets' own
+-- WITH CHECK (true).
+GRANT INSERT ON private.function_inventory TO CURRENT_USER;
+CREATE POLICY current_user_seed_function_inventory ON private.function_inventory
+  FOR INSERT TO CURRENT_USER WITH CHECK (true);
+
+INSERT INTO private.function_inventory
+  (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
+VALUES
+  ('app', 'offer_code_enforce_max_redemptions', '', false, false, false, 'trigger function (app.offer_code_enforce_max_redemptions_trg) -- never EXECUTEd directly by any role'),
+  ('private', 'offer_code_play_guard', '', false, false, false, 'trigger function (app.offer_code_play_guard_trg) -- SECURITY DEFINER, owned by private_definer (M3, post-P3a re-gate: the re-read must run under private_definer''s own RLS, not the committing role''s); moved to schema private for that reason -- still never EXECUTEd directly by any role (a trigger function cannot be called as an ordinary SQL function at all)'),
+  ('private', 'entitlement_play_guard', '', false, false, false, 'trigger function (app.entitlement_play_guard_trg) -- SECURITY DEFINER, owned by private_definer, same reasoning as private.offer_code_play_guard'),
+  ('app', 'play_deleted_detach_play_id', '', false, false, false, 'trigger function (app.play_deleted_detach_play_id_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'play_held_review_cascade', '', false, false, false, 'trigger function (app.play_held_review_cascade_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'checkin_challenge_used_at_once', '', false, false, false, 'trigger function (app.checkin_challenge_used_at_once_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'checkin_challenge_tombstone_nonce', '', false, false, false, 'trigger function (app.checkin_challenge_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'attestation_tombstone_nonce', '', false, false, false, 'trigger function (app.attestation_tombstone_nonce_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'checkin_challenge_nonce_hash_immutable', '', false, false, false, 'trigger function (app.checkin_challenge_nonce_hash_immutable_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'attestation_token_jti_immutable', '', false, false, false, 'trigger function (app.attestation_token_jti_immutable_trg) -- never EXECUTEd directly by any role'),
+  ('app', 'reserve_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + reserves offer budget (checks status/validity window too); called by the (out-of-scope-this-stage) scorer/redemption Edge Function as service_role'),
+  ('app', 'release_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + releases an unconsumed reservation; service_role-only'),
+  ('app', 'consume_offer_budget', 'p_offer_id uuid, p_amount numeric', false, false, true, 'locks + moves a reservation into budget_used; service_role-only'),
+  ('app', 'dedupe_receipt_fingerprint', 'p_purchase_evidence_id uuid, p_user_id uuid, p_phash text, p_facility_id text, p_local_date date, p_receipt_number_ocr text', false, false, true, 'serialized receipt-phash dedupe; called by the (out-of-scope-this-stage) receipt-ingestion Edge Function as service_role'),
+  ('private', 'purge_consumed_nonce', '', false, false, true, 'TTL purge for private.consumed_nonce, SECURITY DEFINER owned by private_definer, hardcoded 7-days-past-source-expiry floor (should-fix, post-P3a re-gate correction); called by an (out-of-scope-this-stage) scheduled job as service_role');

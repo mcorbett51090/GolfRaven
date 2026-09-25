@@ -18,7 +18,12 @@
  * two plays name the pre-merge id and the survivor id separately for the
  * "same" real course.
  */
-import type { Field, IdLedger, RosterVersion, TrailId } from "@golfraven/catalog";
+import type {
+  Field,
+  IdLedger,
+  RosterVersion,
+  TrailId,
+} from "@golfraven/catalog";
 import { resolveMergedId } from "@golfraven/catalog";
 import {
   isFacilityCreditedByPlay,
@@ -41,7 +46,11 @@ function resolveId(ledger: IdLedger | undefined, id: string): string {
 /** S3: every qualifying play's course id, resolved through `mergedInto`
  * FIRST, then deduped — a `Set` of already-resolved ids, so a tombstoned
  * id's play and its survivor's own play collapse into one entry. */
-function qualifyingCourseIds(plays: Play[], ctx: AggregateContext, opts: EvalOptions): Set<string> {
+function qualifyingCourseIds(
+  plays: Play[],
+  ctx: AggregateContext,
+  opts: EvalOptions,
+): Set<string> {
   const set = new Set<string>();
   for (const p of plays) {
     if (!playQualifies(p, ctx, opts, undefined)) continue;
@@ -50,7 +59,11 @@ function qualifyingCourseIds(plays: Play[], ctx: AggregateContext, opts: EvalOpt
   return set;
 }
 
-function fieldValuesOfCourse(resolvedCourseId: string, field: Field, ctx: AggregateContext): string[] {
+function fieldValuesOfCourse(
+  resolvedCourseId: string,
+  field: Field,
+  ctx: AggregateContext,
+): string[] {
   const meta = ctx.courses[resolvedCourseId];
   switch (field) {
     case "region":
@@ -71,11 +84,16 @@ function fieldValuesOfCourse(resolvedCourseId: string, field: Field, ctx: Aggreg
  * resolving each member's own course reference(s) through the ledger too
  * (S3), so a roster that still lists a since-tombstoned id correctly
  * covers the survivor. */
-function trailsContainingCourse(resolvedCourseId: string, ctx: AggregateContext): TrailId[] {
+function trailsContainingCourse(
+  resolvedCourseId: string,
+  ctx: AggregateContext,
+): TrailId[] {
   const out: TrailId[] = [];
   for (const [trailId, versions] of Object.entries(ctx.trails)) {
     const contains = versions.some((v) =>
-      v.members.some((m) => memberCoversCourseId(resolvedCourseId, m, v.completionUnit, ctx)),
+      v.members.some((m) =>
+        memberCoversCourseId(resolvedCourseId, m, v.completionUnit, ctx),
+      ),
     );
     if (contains) out.push(trailId as TrailId);
   }
@@ -154,7 +172,9 @@ export function markerCredits(
   let best = 0;
   for (const v of allVersions) {
     const roster = markerRosterOf(v, ctx);
-    const credited = roster.filter((f) => isFacilityCreditedByPlay(f, v, allVersions, plays, ctx, opts)).length;
+    const credited = roster.filter((f) =>
+      isFacilityCreditedByPlay(f, v, allVersions, plays, ctx, opts),
+    ).length;
     if (credited > best) best = credited;
   }
   return best;

@@ -15,3 +15,28 @@ useDefault = true
 # ("Failed to load config ... [[allowlists]] must contain at least one
 # check"). Add an [allowlist] table back only when there is a real entry
 # to put in it, with a comment naming the exact false positive it covers.
+
+# 2026-09-24 — money-path pgTAP test. Lines that name the Vault test secrets
+# ('pseudonym_key_1' / '_2' / '_3', later renamed to 'pseudonym_hmac_v1' /
+# '_v2' / '_v3') next to fixed fake UUIDs trip the default generic-api-key
+# rule on the word "key"/"hmac". No secret value is on most of those lines
+# (the only test secret VALUES are the obviously fake 'shim-test-only-…'
+# literals in supabase/tests/shim.sql).
+#
+# ⛔ FIX (post-P3a re-gate): the PRIOR regex here, `pseudonym_(key|hmac)_
+# v?[0-9]`, suppressed a finding on ANY line containing that substring,
+# with no requirement that the line also be one of THESE specific test
+# rows — a real secret hidden in a variable literally named
+# `pseudonym_hmac_v1_api_key` would have been silently allowlisted too.
+# Anchored instead to the FIXED fake UUID prefix these exact fixture rows
+# use (`a0000000-1111-`, `supabase/tests/shim.sql`'s own seeded vault key
+# ids) appearing on the SAME line as the pseudonym_hmac name — a real
+# secret has no reason to carry this exact fake UUID, so this only
+# suppresses the specific rows it was written for.
+# Line-scoped only, no `paths` entry — gitleaks 8.30 skips a
+# path-allowlisted file entirely (verified: "scanned ~0 bytes"), which
+# would hide a real secret anywhere in that file.
+[[allowlists]]
+description = "money-path test: the fixed fake Vault-key UUID (a0000000-1111-...) beside a pseudonym_hmac_vN name — not a real secret line"
+regexTarget = "line"
+regexes = ['''a0000000-1111-.*pseudonym_hmac_v[0-9]''']

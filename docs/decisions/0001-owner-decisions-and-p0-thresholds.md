@@ -305,3 +305,232 @@ None of the pass bars change. Each rule below closes a reading that was still op
 
 Drafted by an agent, working on unblocked items at the owner's instruction (2026-09-24), before any K1 or K3 data exists. Matt may
 amend any of these **before** the first K1 log entry or K3 read. After that point they are fixed.
+
+## Addendum J (2026-09-24, AFTER the first X2 and X4 results were read) — X2 evidence sources and X4 "live" definition
+
+**This addendum was written after the first X2 and X4 results were read.** Both were read on 2026-09-24 (see
+`docs/p0/X2.md` and `docs/p0/X4.md` STATUS/MEASURED VALUE for that first run): X2 came back **0 of 3 confirmed
+(mechanical KILL)** — TN blocked by the site's WAF (403 to the tool's own polite, non-browser User-Agent), VI a
+JavaScript single-page app whose static HTML holds only the `<title>`, RTJ's roster confirmed but
+`completionUnit` and `season` found nowhere on the site — and X4 came back **RTJ 0/11**, because every
+`https://www.golfnow.com/tee-times/facility/<id>-<slug>/search` URL now 301-redirects to
+`https://www.golfnow.com/courses/<id>-<slug>-details`, GolfNow's correct live course page under a URL shape
+Addendum G/H did not anticipate. Both are unchanged on the record above and in `docs/p0/X2.md` / `docs/p0/X4.md`
+— this addendum does not edit either memo's first-run entry, it only fixes the reading rules for the re-checks
+that follow. Both changes below were decided by Matt, the owner, only after seeing those two results — that
+order matters and is disclosed here plainly rather than folded into the earlier "before any data is read"
+addenda above. **No pass bar changes anywhere in this addendum.**
+
+### (a) X2 evidence sources
+
+Addendum G's "X2 'confirmed from a direct fetch'" required every page used as evidence to be fetched directly,
+because a direct fetch was, at the time, the only way to guard against a fabricated or search-snippet-sourced
+quote. The first X2 run showed that rule cannot even be **applied** to two of the three slate trails: a direct
+fetch of TN is blocked by the site's own WAF, and VI's static HTML is a JavaScript shell with no body text for
+any fetch method to read. A page may therefore also be stored as evidence when it is either:
+
+  (i) **rendered in headless Chromium by the tool**, for a page whose static HTML carries no body text
+      (VI's case exactly), or
+  (ii) **saved by the owner from their own browser** ("Save Page As", HTML) and ingested by the tool.
+
+Either way, the stored record keeps **everything Addendum G already requires**: the raw bytes, the final URL,
+the HTTP status (for an owner-saved page: `"owner-saved"`, plus the URL the owner states and the date saved),
+the retrieval time in UTC, and a SHA-256. It additionally records its `method`: `direct`, `rendered` or
+`owner-saved`. **The verbatim-quote rule is unchanged**: every quote must still appear, after whitespace
+collapsing, in the stored evidence text — a rendered or owner-saved page is checked exactly as strictly as a
+directly-fetched one, it is only the route the bytes took to become "stored evidence" that widens.
+
+**Why this is not moving the goalposts.** The change fixes a measuring instrument that could not read two of
+the three trails at all — a WAF block and a client-rendered SPA are properties of the sites, not of what the
+plan asked X2 to measure. It does not change the bar: X2 still passes at ≥ 2 of 3 slate trails confirmed, and a
+confirmation still needs all three facts (roster, `completionUnit`, season) backed by a verbatim quote in
+stored evidence. The same bar is applied to all three slate trails alike, and an RTJ fact that is genuinely
+missing from `rtjgolf.com` — `completionUnit` and `season`, per the first run — stays missing: rendering or an
+owner-saved page cannot manufacture a fact that was never on the page to begin with, they only let the tool
+read pages a direct fetch structurally could not.
+
+### (b) X4 "live"
+
+A facility page is **also** live when the GET of `https://www.golfnow.com/tee-times/facility/<id>-<slug>/search`
+returns HTTP 200 after redirects, the final URL's path starts with `/courses/<id>-`, the `<id>` is the **SAME**
+one that was requested, the host is exactly `www.golfnow.com`, and the course name is present under Addendum
+F's name normalisation. **The old pattern still counts** — a final URL path containing
+`/tee-times/facility/<id>-` for the same id, as Addendum G/H already defined, is still live. Everything else
+Addendum H already said about "not covered (definitive)" and "indeterminate" is unchanged: a different id, a
+generic search page, a foreign host, or a page missing the course name remains "not covered", exactly as
+before — this addendum only widens which final URL *shape* counts as reaching a live page, not what counts as
+the course actually being findable on it.
+
+### (c) Decision attribution
+
+Both (a) and (b) above are Matt's decisions, as owner, given via the question prompt that opened this task,
+2026-09-24.
+
+## Addendum J — correction (2026-09-24, written after X2/X4 Run 2 and the gate review)
+
+**This correction was written after X2/X4 Run 2 (`docs/p0/X2.md` / `docs/p0/X4.md`, "Run 2 (under Addendum
+J)") and after an Opus gate review of that work found false or unsupported statements in the Addendum J text
+above.** Addendum J above is **not** edited in place — everything above stays on the record exactly as
+written, false statements included, so the record shows what was believed and when. This entry corrects it
+and adds rules the gate found missing, without pretending the original text said something different than it
+did.
+
+### Corrections to false or unsupported statements
+
+**1. The X4 "same id" rule (Addendum J(b)) was written without heeding data already on the record showing it
+could never pass.** `docs/p0/X4.md`'s own Run 1 STATUS section — read before Addendum J(b) was drafted —
+already stated, in its own words: *"Every one of the 10 `https://www.golfnow.com/tee-times/facility/<id>-…
+/search` URLs returns HTTP 200 but an unconditional 301 redirect to `https://www.golfnow.com/courses/<other-
+id>-…-details`"* (emphasis on "other-id" as written in that memo). That sentence already said, in writing,
+that the redirect target's id is a **different** id from the one requested — the qualitative fact needed to
+know a same-id test could never pass was already committed to the record. Addendum J(b) was drafted without
+cross-checking that sentence. Run 2 then made the concrete pairing explicit (e.g. Cambrian Ridge, configured
+facility id `2361`, redirects to `/courses/1046010-the-robert-trent-jones-golf-trail-at-cambrian-ridge-
+details` — id `1046010`, not `2361`; the same pattern holds for all 10 non-null RTJ courses, table in X4.md's
+Run 2), but that specific numeric pairing was new information from Run 2, not something already known when
+Addendum J(b) was written — only the qualitative "different id" fact was already known and was overlooked.
+
+**2. "VI's static HTML holds only the `<title>`" / "is a JavaScript shell with no body text for any fetch
+method to read" (Addendum J's own lines) is false.** `docs/p0/X2.md`'s own Run 1 STATUS section — also read
+before Addendum J was drafted — already described VI's actual markup: *"a client-side-rendered SPA (Inertia/
+Vue "Elemental" framework — `<div id="app" data-page="…JSON…">`, no server-rendered body text)"*. That
+`data-page` attribute **is** static HTML, sent on the very first response, and per that same description it
+holds a JSON blob — which, per Run 2, does contain the roster/completionUnit/season facts (Inertia.js ships
+its full initial page data this way precisely so client-side Vue can hydrate without a second network round
+trip). **The failure in Run 1 was that `stripHtmlToText` (`text-extract.ts`) only ever emits element TEXT
+NODES — it drops attribute values entirely, including `data-page="…"` — not that the site withheld the
+content.** This is a limitation of this tool's extractor, misdescribed in Addendum J as a property of the
+site. It is a real, separate question — not answered here — whether a JSON-aware extractor reading the
+`data-page` attribute directly from the DIRECT-FETCH bytes (no rendering at all) would have found these facts
+without ever needing Chromium; that question is not resolved by this correction and is not assumed answered.
+
+**3. Whether a `/courses/<id>-…-details` page is actually BOOKABLE was never tested, and Addendum J(b) did
+not say so.** X4's own Check text is "GolfNow facility-page coverage" read against the plan's §6.1 deep-link
+booking tier — the point of the check is whether a course can be BOOKED through that page, not merely whether
+a page resolves with the right name on it. Addendum J(b) widened the "live" test to a same-id `/courses/`
+redirect without ever loading that page far enough to check for a live booking widget, available tee times,
+or any other sign the page actually functions as a booking channel, and its text did not flag this as
+untested. Separately, `docs/p0/X2.md`'s own METHOD table already recorded, before any of this: *"Booking
+engine is separately at `https://rtjmembers.cps.golf/` (Club Prophet) — not needed for X2, relevant to
+X4/§6.1"* — RTJ's actual booking system is a **different vendor entirely** (Club Prophet, not GolfNow), which
+X4's whole design already anticipated as relevant and which this correction now surfaces plainly: a live,
+correctly-named GolfNow `/courses/` page proves GolfNow lists the course, not that GolfNow is (or could be) a
+working booking channel for it, and that gap is unresolved, not closed by Addendum J(b) or by Run 2.
+
+### Pre-registered rule: first capture wins
+
+Not present in Addendum J above — added here, before any new live capture is taken under it (that is the
+point of writing this correction as Step A, before Step C's re-runs):
+
+**The first capture of a given URL by a given method (`direct`, `rendered`, or `owner-saved`) is the recorded
+one for that URL+method pair.** Its SHA-256 and UTC retrieval time are logged in `docs/p0/X2.md` **before**
+any confirmation file cites it. Every later capture of the same URL by the same method is still stored and
+listed, never discarded, but is **not** the recorded one; a confirmation file may only cite the recorded
+capture's SHA-256. If a later capture's content conflicts with the recorded one (a different SHA-256, or a
+quote present in one but not the other), that conflict is flagged explicitly in the record — it is never
+silently resolved by preferring whichever capture is more convenient, and it never causes the recorded capture
+to be replaced. A conflict is itself a fact worth recording (the site changed, or the method is not
+deterministic), not noise to average away.
+
+Applied now, retroactively, to what already exists rather than left ambiguous:
+
+- **VI:** the existing `run-j` render captures are the recorded ones — `https://golfvancouverisland.ca/`,
+  sha256 `731ca853fcab032374de0ca367869dff005905d60fb597fdc46d8966d71b3fbc`, fetched
+  `2026-09-24T18:57:14.555Z` UTC; `https://golfvancouverisland.ca/about-us/golf-trail-pass/`, sha256
+  `5869018ffb2edb3a4f0c80e5fbb6cb2b6be2d053e41e35f3db4bff2a073f5ae4`, fetched `2026-09-24T18:57:26.575Z` UTC
+  (both `method: "rendered"`, from `/tmp/golfraven-p0/run-j/x2-render-evidence/manifest.json`). These values
+  are logged here now and are to be logged in `docs/p0/X2.md` itself as part of Step C, before any
+  confirmation file cites either SHA.
+- **TN:** no capture exists yet by any method — the rule binds from the start; whichever owner-saved capture
+  is ingested first for a given TN URL is the recorded one for it.
+
+### Owner-saved pages rest on the owner's word, and need corroboration
+
+Addendum J(a)(ii) above presented an owner-saved page as equivalent, evidentially, to a direct fetch or a
+render — it is not, and this correction says so plainly. **An owner-saved page's bytes are not independently
+verified by this tool at all: nothing about the ingestion process confirms the file the owner hands it ever
+came from the stated URL.** It rests entirely on the owner's word that the file is what it's claimed to be.
+
+That alone is not disqualifying — this is exactly the route Matt chose for a page a direct fetch cannot reach
+at all (see Attribution below) — but it needs a check beyond the tool trusting the label on the tin:
+**corroboration**. An owner-saved fact is corroborated when a `web.archive.org` snapshot of the SAME stated
+URL, from ANY date within **±90 days** of the stated saved-date, contains the SAME quote (after the same
+whitespace-collapsing rule the verbatim-quote check already uses). If no such snapshot exists, or none
+contains the quote, the fact is marked **"owner-attested, uncorroborated"** rather than confirmed outright.
+
+**An owner-attested, uncorroborated fact counts toward X2's confirmation bar only if Matt accepts that in
+writing**, and his acceptance — which fact, which trail, dated — is logged in `docs/p0/X2.md`'s Log. Absent
+that acceptance, an uncorroborated owner-saved fact is recorded as evidence, honestly labelled, but does not
+by itself confirm a trail.
+
+### Rendered evidence is post-JavaScript HTML, not network bytes
+
+Addendum J(a) above says a rendered page's stored record keeps "the raw bytes" using the same phrase Addendum
+G uses for a direct fetch's literal HTTP response body — that phrasing is corrected here: **for a `rendered`
+entry, the stored bytes are `page.content()` — the DOM's HTML serialization AFTER Chromium has run the page's
+JavaScript — not the bytes any server actually sent over the wire.** This is a meaningfully different kind of
+evidence from a direct fetch's raw response body: it can include content JavaScript inserted, reordered, or
+removed after the initial response, and (per the gate's own finding, addressed in Step B) can include content
+injected by a THIRD PARTY the page loaded a script from, not just the first-party site. A `rendered` entry's
+`method` field already names this plainly; this correction makes sure the surrounding prose does not imply
+"raw bytes" means the same thing for `rendered` that it means for `direct`.
+
+### Correction: an owner-saved page CAN manufacture a fact
+
+Addendum J above states: *"rendering or an owner-saved page cannot manufacture a fact that was never on the
+page to begin with, they only let the tool read pages a direct fetch structurally could not."* That claim is
+**false as written for the owner-saved route**, and is corrected, not merely qualified:
+
+- **Rendering** genuinely navigates to the real, live, stated URL and executes whatever the real host serves
+  — it cannot manufacture a fact out of nothing the way a fabricated file could, though (per the gate's
+  finding, fixed in Step B) it CAN surface a fact injected by a third-party subresource the page loaded,
+  which is a related but distinct risk from outright fabrication, and is why Step B adds off-host
+  request/subresource controls rather than resting on this weaker claim.
+- **An owner-saved page cannot make the same claim at all.** Nothing in `ingestOwnerSavedPage` verifies the
+  file's bytes ever touched the stated URL — a file typed up from scratch and an actual saved page are
+  indistinguishable to the tool. The original sentence's blanket claim was wrong for this route, which is
+  exactly why the corroboration requirement above exists: corroboration (or Matt's written acceptance of its
+  absence) is the actual safeguard against a manufactured owner-saved fact, not any property of the ingestion
+  mechanism itself.
+
+### Attribution — Matt's decisions, quoted verbatim
+
+Addendum J (c) above says only that "(a) and (b) ... are Matt's decisions ... given via the question prompt."
+His actual choices, quoted verbatim, in the question prompt of 2026-09-24, were:
+
+> "Re-check, you save pages (Recommended)"
+
+> "Count the new addresses (Recommended)"
+
+The first was Matt's answer to the X2 question, and is the basis for (a). The second was his answer to the
+X4 (GolfNow) question, and is the basis for (b). That option's description, written by the agent, read: "Count
+a course as live when GolfNow forwards to its own current page (same course number, course name on the page),
+then re-run." The "same course number" wording came from the agent's misreading of Run 1 (correction 1 above),
+not from Matt. Matt chose to count the new address shape. He was not choosing a same-id condition that the
+agent should have known could never be met.
+
+Drafted by an agent, after Run 2 and a gate review, at the owner's instruction. This correction is complete
+once committed; Step C's re-runs and memo fixes follow it, not the other way around.
+
+### Erratum to the Addendum J correction (2026-09-24, after the second gate review)
+
+This note corrects two parts of the correction above. The text above is not edited.
+
+1. **Correction 1 understated what was already known.** It says the numeric id pairing (for example `2361` →
+   `1046010`) "was new information from Run 2". That is false. Run 1's saved result
+   (`/tmp/golfraven-p0/x4-verify-result/result.json`, generated 18:29:29Z, before Run 2 at 18:54Z) already
+   recorded every pairing. Both the qualitative fact and the concrete numbers were on record before Addendum
+   J(b) was drafted.
+2. **The X2 attribution is incomplete.** The agent wrote the description of the X2 option Matt chose. Quoted
+   verbatim, it read: "You open the Tennessee and Vancouver Island trail pages in your own browser and save each
+   one (File → Save Page As). I load Vancouver Island's page in a real web browser here too. The same pass mark
+   is re-checked against those saved copies, and the record says this rule was added after the first result."
+   Browser rendering, route J(a)(i), was therefore part of the option Matt chose, but only for Vancouver
+   Island. Using it for any other trail (the RTJ renders) is the agent's own addition. Those renders are
+   recorded only to test whether RTJ's facts are really absent. They cannot confirm RTJ without Matt's
+   sign-off.
+
+   The full X4 option description read: "Count a course as live when GolfNow forwards to its own current page
+   (same course number, course name on the page), then re-run. The record says this was written after the
+   first result. Either way, links go to courses' own booking pages first until a lawyer clears GolfNow's
+   terms."

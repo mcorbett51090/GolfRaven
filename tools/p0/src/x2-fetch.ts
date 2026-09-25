@@ -26,17 +26,52 @@
  * evidence, never by this tool's own DRAFT candidate-name list (printed
  * below, clearly labelled — it is a hint for a human writing the
  * confirmation file, never itself a confirmation).
+ *
+ * **`--render` (decision 0001 Addendum J(a)(i), 2026-09-24, written AFTER
+ * the first X2 run).** For a page whose static HTML carries no body text
+ * (VI's JS-only SPA, found by the first run), `--render` fetches every
+ * configured URL by booting headless Chromium instead of a direct `fetch()`
+ * — see `x2-render.ts`. The evidence stored is identical in shape (raw
+ * bytes, final URL, HTTP status, `fetchedAt` UTC, SHA-256, extracted text),
+ * with `method: "rendered"` instead of `"direct"`. It keeps the tool's own
+ * bot-identifying User-Agent and the same https-only rule (gate N6); it
+ * never renders a URL outside that trail's own configured list. See
+ * `x2-ingest.ts` for the THIRD method, `"owner-saved"` (Addendum J(a)(ii)).
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractDraftCandidateNames } from "./text-extract.js";
-import { classifyEvidenceBytes, extractEvidenceText } from "./evidence-extract.js";
-import { buildAsciiUserAgent, DEFAULT_MAX_RESPONSE_BYTES, fetchWithBlockDetection, readBodyCapped } from "./net.js";
-import { assertOutsideRepoUnlessExplicit, defaultOutsideRepoDir } from "./run-dir.js";
+import {
+  classifyEvidenceBytes,
+  extractEvidenceText,
+} from "./evidence-extract.js";
+import {
+  buildAsciiUserAgent,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  fetchWithBlockDetection,
+  readBodyCapped,
+} from "./net.js";
+import {
+  assertOutsideRepoUnlessExplicit,
+  defaultOutsideRepoDir,
+} from "./run-dir.js";
+import {
+  renderUrl,
+  validateRenderExtraArgs,
+  type ChromiumLauncher,
+} from "./x2-render.js";
+import { registerCapture } from "./x2-recorded-ledger.js";
 
 export const X2_DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Decision 0001 Addendum J(a): which route these bytes reached the tool
+ * by — `"direct"` (the original `fetch()` path), `"rendered"` (headless
+ * Chromium, `--render`), or `"owner-saved"` (`x2-ingest`, a file the owner
+ * saved from their own browser). Every evidence entry states its own
+ * method; `x2-verdict` carries it through to its output unchanged. */
+export type X2Method = "direct" | "rendered" | "owner-saved";
 
 export function buildX2UserAgent(): string {
   return buildAsciiUserAgent({
@@ -53,10 +88,15 @@ export interface X2FetchEntry {
   trail: string;
   url: string;
   status: "fetched" | "failed";
-  httpStatus: number | null;
+  /** `"owner-saved"` (decision 0001 Addendum J(a)(ii)) records that this
+   * entry's evidence has no real HTTP status at all — it was saved by the
+   * owner from their own browser, not fetched by this tool. */
+  httpStatus: number | "owner-saved" | null;
   finalUrl: string | null;
   contentType: string | null;
-  /** UTC ISO-8601 retrieval time (Addendum G: "the retrieval time (UTC)"). */
+  /** UTC ISO-8601 retrieval time (Addendum G: "the retrieval time (UTC)")
+   * — for an owner-saved entry, this is the ingestion time, distinct from
+   * `ownerSavedDate` below. */
   fetchedAt: string;
   sha256: string | null;
   /** Path to the raw bytes, relative to the evidence output dir. */
@@ -75,6 +115,35 @@ export interface X2FetchEntry {
   /** Headings/link texts pulled from this one URL's HTML — DRAFT only, see
    * module doc. Empty for PDFs and failed fetches. */
   draftCandidateNames: string[];
+  /** Decision 0001 Addendum J(a): which route these bytes reached the tool
+   * by. Carried through unchanged by `x2-verdict` into its own output. */
+  method: X2Method;
+  /** Decision 0001 Addendum J(a)(ii), `"owner-saved"` entries only: the
+   * date the OWNER states they saved the page — `null` for `"direct"`/
+   * `"rendered"` entries, where `fetchedAt` already is that date. */
+  ownerSavedDate: string | null;
+  /** `"rendered"` entries only: the Chromium args actually used for this
+   * render (`validateRenderExtraArgs`-checked — see `x2-render.ts`), so a
+   * manifest reader can see exactly what ran, including any SPKI pin, for
+   * every render — `null` for `"direct"`/`"owner-saved"` entries, and `[]`
+   * (not `null`) for a render that used no extra args at all. */
+  renderArgs: string[] | null;
+  /** Should-fix (Addendum J re-gate): `"rendered"` entries only — the HOST
+   * (never credentials, and never the scheme or path) of `HTTPS_PROXY` /
+   * `https_proxy` that was in effect for this render, so a manifest reader
+   * can see which network path a render actually went out over, alongside
+   * `renderArgs`. `null` for `"direct"`/`"owner-saved"` entries, and also
+   * `null` for a `"rendered"` entry captured with no proxy env var set at
+   * all — never a guess, never the raw env var value (which could carry
+   * embedded credentials). */
+  renderProxyHost: string | null;
+  /** Addendum J correction (first-capture-wins): true when this is the
+   * recorded capture of this URL+method pair — the only one a confirmation
+   * file may cite (`x2-verdict` refuses otherwise). `x2-fetch`'s own
+   * `direct`/`rendered` entries are always the sole capture within one
+   * manifest and so are always `true`; `x2-ingest` is what can produce a
+   * `false` one (a second owner-saved capture, `--additional`). */
+  recorded: boolean;
 }
 
 export interface X2FetchManifest {
@@ -91,7 +160,18 @@ function failedEntry(
   url: string,
   fetchedAt: string,
   error: string,
-  opts: { blocked?: boolean; httpStatus?: number | null; finalUrl?: string | null } = {},
+  opts: {
+    method: X2Method;
+    blocked?: boolean;
+    httpStatus?: number | "owner-saved" | null;
+    finalUrl?: string | null;
+    /** `method: "rendered"` failures only — the args that were IN USE
+     * (validated or not) when the render failed, so even a failed capture
+     * shows what Chromium args were attempted. */
+    renderArgs?: string[];
+    /** `method: "rendered"` failures only — see `X2FetchEntry.renderProxyHost`. */
+    renderProxyHost?: string | null;
+  },
 ): X2FetchEntry {
   return {
     trail,
@@ -109,6 +189,84 @@ function failedEntry(
     blocked: opts.blocked ?? false,
     error,
     draftCandidateNames: [],
+    method: opts.method,
+    ownerSavedDate: null,
+    renderArgs: opts.method === "rendered" ? (opts.renderArgs ?? []) : null,
+    renderProxyHost:
+      opts.method === "rendered" ? (opts.renderProxyHost ?? null) : null,
+    recorded: true,
+  };
+}
+
+/** Should-fix (Addendum J re-gate): the HOST of `HTTPS_PROXY` / `https_proxy`
+ * currently in effect, with credentials/scheme/path stripped — for
+ * recording alongside `renderArgs` in a `"rendered"` manifest entry.
+ * Returns `null` when neither env var is set, or is set but not a parseable
+ * URL (never guesses, never throws — a proxy-host record is informational,
+ * not load-bearing for the render itself, which already ran through
+ * whatever the environment's real network stack does). Deliberately never
+ * returns the raw env var value: an env-configured proxy URL can carry
+ * embedded `user:pass@` credentials, which must never land in a manifest
+ * file that is committed/shared as evidence. */
+function currentHttpsProxyHost(): string | null {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.port ? `${u.hostname}:${u.port}` : u.hostname;
+  } catch {
+    return null;
+  }
+}
+
+/** Stores raw bytes as evidence (sha256, raw/text files, DRAFT candidate
+ * names) exactly as Addendum G requires — shared by the direct-fetch path
+ * (`fetchOne`) and the render path (`fetchOneRendered`) so there is exactly
+ * one definition of "how evidence bytes get stored", per gate S1/S3's
+ * "one extractor, used everywhere" principle. */
+async function storeEvidenceBytes(
+  outDir: string,
+  buf: Buffer,
+  contentType: string | null,
+  url: string,
+): Promise<{
+  sha256: string;
+  rawFile: string;
+  textFile: string | null;
+  textExtraction: "auto" | "auto-pdf" | "n/a";
+  extractor: string | null;
+  draftCandidateNames: string[];
+}> {
+  const sha256 = createHash("sha256").update(buf).digest("hex");
+  const kind = classifyEvidenceBytes(buf, contentType, url);
+  const ext = kind === "pdf" ? "pdf" : kind === "html" ? "html" : "bin";
+  const rawRelPath = path.join("raw", `${sha256}.${ext}`);
+  await mkdir(path.join(outDir, "raw"), { recursive: true });
+  await writeFile(path.join(outDir, rawRelPath), buf);
+
+  const { text, textExtraction, extractor } = await extractEvidenceText(
+    buf,
+    contentType,
+    url,
+  );
+  let textFile: string | null = null;
+  let draftCandidateNames: string[] = [];
+  if (text !== null) {
+    const textRelPath = path.join("text", `${sha256}.txt`);
+    await mkdir(path.join(outDir, "text"), { recursive: true });
+    await writeFile(path.join(outDir, textRelPath), text, "utf8");
+    textFile = textRelPath;
+  }
+  if (kind === "html") {
+    draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
+  }
+  return {
+    sha256,
+    rawFile: rawRelPath,
+    textFile,
+    textExtraction,
+    extractor,
+    draftCandidateNames,
   };
 }
 
@@ -117,6 +275,7 @@ async function fetchOne(
   url: string,
   outDir: string,
   timeoutMs: number,
+  ledgerPath: string,
 ): Promise<X2FetchEntry> {
   const fetchedAt = new Date().toISOString();
 
@@ -127,7 +286,13 @@ async function fetchOne(
   try {
     parsedUrl = new URL(url);
   } catch {
-    return failedEntry(trail, url, fetchedAt, `not a valid URL: "${url}" (gate N6)`);
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `not a valid URL: "${url}" (gate N6)`,
+      { method: "direct" },
+    );
   }
   if (parsedUrl.protocol !== "https:") {
     return failedEntry(
@@ -135,6 +300,7 @@ async function fetchOne(
       url,
       fetchedAt,
       `refusing to fetch non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
+      { method: "direct" },
     );
   }
 
@@ -155,6 +321,7 @@ async function fetchOne(
         url,
         fetchedAt,
         `fetch threw unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+        { method: "direct" },
       );
     }
 
@@ -166,7 +333,7 @@ async function fetchOne(
         outcome.kind === "blocked"
           ? `BLOCKED — network policy (${outcome.host}): ${outcome.detail}`
           : `fetch error (${outcome.host}): ${outcome.detail}`,
-        { blocked: outcome.kind === "blocked" },
+        { blocked: outcome.kind === "blocked", method: "direct" },
       );
     }
 
@@ -180,7 +347,7 @@ async function fetchOne(
           url,
           fetchedAt,
           `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
-          { httpStatus: response.status, finalUrl },
+          { httpStatus: response.status, finalUrl, method: "direct" },
         );
       }
     } catch {
@@ -199,7 +366,7 @@ async function fetchOne(
         url,
         fetchedAt,
         `HTTP ${response.status} ${response.statusText} — ${bodySample.slice(0, 300)}`,
-        { httpStatus: response.status, finalUrl },
+        { httpStatus: response.status, finalUrl, method: "direct" },
       );
     }
 
@@ -216,29 +383,31 @@ async function fetchOne(
         url,
         fetchedAt,
         `body read failed (timeout or size cap, gate S6): ${err instanceof Error ? err.message : String(err)}`,
-        { httpStatus: response.status, finalUrl },
+        { httpStatus: response.status, finalUrl, method: "direct" },
       );
     }
 
-    const sha256 = createHash("sha256").update(buf).digest("hex");
-    const kind = classifyEvidenceBytes(buf, contentType, url);
-    const ext = kind === "pdf" ? "pdf" : kind === "html" ? "html" : "bin";
-    const rawRelPath = path.join("raw", `${sha256}.${ext}`);
-    await mkdir(path.join(outDir, "raw"), { recursive: true });
-    await writeFile(path.join(outDir, rawRelPath), buf);
+    const {
+      sha256,
+      rawFile,
+      textFile,
+      textExtraction,
+      extractor,
+      draftCandidateNames,
+    } = await storeEvidenceBytes(outDir, buf, contentType, url);
 
-    const { text, textExtraction, extractor } = await extractEvidenceText(buf, contentType, url);
-    let textFile: string | null = null;
-    let draftCandidateNames: string[] = [];
-    if (text !== null) {
-      const textRelPath = path.join("text", `${sha256}.txt`);
-      await mkdir(path.join(outDir, "text"), { recursive: true });
-      await writeFile(path.join(outDir, textRelPath), text, "utf8");
-      textFile = textRelPath;
-    }
-    if (kind === "html") {
-      draftCandidateNames = extractDraftCandidateNames(buf.toString("utf8"));
-    }
+    // Gate finding 2: first-capture-wins is decided by the LEDGER, not
+    // hard-coded — a later capture of an already-recorded (normalised)
+    // URL is stored as real evidence but comes back `recorded: false`.
+    // `allowAdditional: true` because `x2-fetch` (direct/render) has no
+    // `--additional` concept of its own — re-running it to refresh
+    // evidence must never be a hard refusal, only `x2-ingest`'s owner-
+    // saved route refuses without an explicit flag.
+    const { recorded } = await registerCapture(
+      ledgerPath,
+      { method: "direct", url, sha256 },
+      { allowAdditional: true },
+    );
 
     return {
       trail,
@@ -249,13 +418,18 @@ async function fetchOne(
       contentType,
       fetchedAt,
       sha256,
-      rawFile: rawRelPath,
+      rawFile,
       textFile,
       textExtraction,
       extractor,
       blocked: false,
       error: null,
       draftCandidateNames,
+      method: "direct",
+      ownerSavedDate: null,
+      renderArgs: null,
+      renderProxyHost: null,
+      recorded,
     };
   } finally {
     // Gate S6: the timer stays live through the ENTIRE fetch — including
@@ -264,11 +438,203 @@ async function fetchOne(
   }
 }
 
+/** The `--render` path (decision 0001 Addendum J(a)(i)): renders `url` in
+ * headless Chromium (`x2-render.ts`) instead of a direct `fetch()`, then
+ * stores the rendered `page.content()` bytes through the SAME
+ * `storeEvidenceBytes` helper `fetchOne` uses — same sha256/text/DRAFT-name
+ * handling, only the route the bytes arrived by differs. Keeps the same
+ * https-only rule (gate N6) and the tool's own bot-identifying User-Agent
+ * (never a browser UA). */
+async function fetchOneRendered(
+  trail: string,
+  url: string,
+  outDir: string,
+  timeoutMs: number,
+  ledgerPath: string,
+  renderOpts: {
+    executablePath?: string;
+    launch?: ChromiumLauncher;
+    extraArgs?: string[];
+  } = {},
+): Promise<X2FetchEntry> {
+  const fetchedAt = new Date().toISOString();
+  const attemptedArgs = renderOpts.extraArgs ?? [];
+  // Should-fix (Addendum J re-gate): recorded once per render attempt so
+  // every entry this call can produce — failed or fetched — carries the
+  // SAME proxy-host snapshot, alongside `renderArgs`.
+  const attemptedProxyHost = currentHttpsProxyHost();
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `not a valid URL: "${url}" (gate N6)`,
+      { method: "rendered", renderArgs: attemptedArgs, renderProxyHost: attemptedProxyHost },
+    );
+  }
+  if (parsedUrl.protocol !== "https:") {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `refusing to render non-https URL "${url}" (scheme "${parsedUrl.protocol}") — gate N6`,
+      { method: "rendered", renderArgs: attemptedArgs, renderProxyHost: attemptedProxyHost },
+    );
+  }
+
+  let status: number;
+  let finalUrl: string;
+  let html: string;
+  try {
+    const rendered = await renderUrl(url, {
+      userAgent: buildX2UserAgent(),
+      timeoutMs,
+      ...renderOpts,
+    });
+    status = rendered.status;
+    finalUrl = rendered.finalUrl;
+    html = rendered.html;
+  } catch (err) {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `render failed: ${err instanceof Error ? err.message : String(err)}`,
+      { method: "rendered", renderArgs: attemptedArgs, renderProxyHost: attemptedProxyHost },
+    );
+  }
+
+  try {
+    const finalParsed = new URL(finalUrl);
+    if (finalParsed.protocol !== "https:") {
+      return failedEntry(
+        trail,
+        url,
+        fetchedAt,
+        `refusing evidence whose final URL downgraded to "${finalParsed.protocol}" (gate N6)`,
+        {
+          httpStatus: status,
+          finalUrl,
+          method: "rendered",
+          renderArgs: attemptedArgs,
+          renderProxyHost: attemptedProxyHost,
+        },
+      );
+    }
+  } catch {
+    // finalUrl not parseable — fall through, handled generically below.
+  }
+
+  if (status < 200 || status >= 300) {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `render navigation returned HTTP ${status}`,
+      {
+        httpStatus: status,
+        finalUrl,
+        method: "rendered",
+        renderArgs: attemptedArgs,
+        renderProxyHost: attemptedProxyHost,
+      },
+    );
+  }
+
+  const buf = Buffer.from(html, "utf8");
+  if (buf.byteLength > DEFAULT_MAX_RESPONSE_BYTES) {
+    return failedEntry(
+      trail,
+      url,
+      fetchedAt,
+      `rendered content exceeds ${DEFAULT_MAX_RESPONSE_BYTES} bytes (gate S6)`,
+      {
+        httpStatus: status,
+        finalUrl,
+        method: "rendered",
+        renderArgs: attemptedArgs,
+        renderProxyHost: attemptedProxyHost,
+      },
+    );
+  }
+
+  const contentType = "text/html; charset=utf-8";
+  const {
+    sha256,
+    rawFile,
+    textFile,
+    textExtraction,
+    extractor,
+    draftCandidateNames,
+  } = await storeEvidenceBytes(outDir, buf, contentType, url);
+
+  const { recorded } = await registerCapture(
+    ledgerPath,
+    { method: "rendered", url, sha256 },
+    { allowAdditional: true },
+  );
+
+  return {
+    trail,
+    url,
+    status: "fetched",
+    httpStatus: status,
+    finalUrl,
+    contentType,
+    fetchedAt,
+    sha256,
+    rawFile,
+    textFile,
+    textExtraction,
+    extractor,
+    blocked: false,
+    error: null,
+    draftCandidateNames,
+    method: "rendered",
+    ownerSavedDate: null,
+    renderArgs: attemptedArgs,
+    renderProxyHost: attemptedProxyHost,
+    recorded,
+  };
+}
+
 export async function runX2Fetch(
   config: X2SourceConfig,
   outDir: string,
-  opts: { timeoutMs?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    /** Decision 0001 Addendum J(a)(i): render every configured URL in
+     * headless Chromium instead of fetching it directly. */
+    render?: boolean;
+    /** `--render` only: passed straight through to `x2-render.ts`'s
+     * `renderUrl` — an injectable launcher is how tests avoid starting a
+     * real browser. */
+    renderExecutablePath?: string;
+    renderLaunch?: ChromiumLauncher;
+    /** `--render` only: extra Chromium command-line args — see
+     * `renderUrl`'s own doc for why this exists (an environment-specific
+     * TLS-trust escape hatch, never proxy-specific code in this file). */
+    renderExtraArgs?: string[];
+    /** Gate finding 2c (re-gate): REQUIRED — the recorded-captures ledger
+     * path. There is no more automatic `<outDir>/recorded-ledger.json`
+     * default (`x2-recorded-ledger.ts`'s own doc explains why the default
+     * was itself a bypass); pass the SAME explicit path across every run
+     * that captures evidence for the same logical URL set, whatever
+     * `--out-dir` each individual run happens to use. */
+    ledgerPath: string;
+  },
 ): Promise<X2FetchManifest> {
+  if (!opts.ledgerPath) {
+    throw new Error(
+      "runX2Fetch: `ledgerPath` is required (gate finding 2c, re-gate) — the per-directory default ledger " +
+        "was removed; pass an explicit `--ledger <path>` (or `ledgerPath` option) shared across every run " +
+        "that captures evidence for the same URL set.",
+    );
+  }
   const timeoutMs = opts.timeoutMs ?? X2_DEFAULT_TIMEOUT_MS;
   if (Object.keys(config).length === 0) {
     throw new Error(
@@ -276,16 +642,45 @@ export async function runX2Fetch(
     );
   }
   await mkdir(outDir, { recursive: true });
-  const trails: Record<string, X2FetchEntry[]> = {};
-  const draftCandidateNames: Record<string, string[]> = {};
+  const ledgerPath = opts.ledgerPath;
+
+  // Gate finding 2b: MERGE into an existing manifest.json rather than
+  // overwriting it wholesale — a prior run's OTHER trails' entries (e.g.
+  // from `x2-ingest`, or an earlier `x2-fetch` call for a different trail)
+  // must never be silently dropped just because this run's `config` only
+  // covers a subset of trails.
+  const manifestPath = path.join(outDir, "manifest.json");
+  let existingManifest: X2FetchManifest | null = null;
+  try {
+    existingManifest = JSON.parse(await readFile(manifestPath, "utf8")) as X2FetchManifest;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  const trails: Record<string, X2FetchEntry[]> = { ...(existingManifest?.trails ?? {}) };
+  const draftCandidateNames: Record<string, string[]> = {
+    ...(existingManifest?.draftCandidateNames ?? {}),
+  };
   for (const [trail, urls] of Object.entries(config)) {
     const entries: X2FetchEntry[] = [];
-    const names: string[] = [];
-    const seenNames = new Set<string>();
+    const names: string[] = [...(draftCandidateNames[trail] ?? [])];
+    const seenNames = new Set<string>(names);
     for (const url of urls) {
       // Sequential, not parallel: polite to the destination hosts, and
       // keeps fetchedAt strictly ordered for a human reading the log.
-      const entry = await fetchOne(trail, url, outDir, timeoutMs);
+      const entry = opts.render
+        ? await fetchOneRendered(trail, url, outDir, timeoutMs, ledgerPath, {
+            ...(opts.renderExecutablePath !== undefined
+              ? { executablePath: opts.renderExecutablePath }
+              : {}),
+            ...(opts.renderLaunch !== undefined
+              ? { launch: opts.renderLaunch }
+              : {}),
+            ...(opts.renderExtraArgs !== undefined
+              ? { extraArgs: opts.renderExtraArgs }
+              : {}),
+          })
+        : await fetchOne(trail, url, outDir, timeoutMs, ledgerPath);
       entries.push(entry);
       for (const n of entry.draftCandidateNames) {
         if (!seenNames.has(n)) {
@@ -294,20 +689,19 @@ export async function runX2Fetch(
         }
       }
     }
-    trails[trail] = entries;
+    // MERGE (append), never replace — a re-run for a trail this manifest
+    // already had entries for keeps the old ones too (each carrying its
+    // own `recorded` status from the ledger, above).
+    trails[trail] = [...(trails[trail] ?? []), ...entries];
     draftCandidateNames[trail] = names;
   }
   const manifest: X2FetchManifest = {
-    generatedAt: new Date().toISOString(),
+    generatedAt: existingManifest?.generatedAt ?? new Date().toISOString(),
     outDir,
     trails,
     draftCandidateNames,
   };
-  await writeFile(
-    path.join(outDir, "manifest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    "utf8",
-  );
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return manifest;
 }
 
@@ -360,15 +754,47 @@ export function resolveDefaultX2ConfigPath(): string {
 }
 
 async function main(argv: string[]): Promise<void> {
-  const flags = parseFlags(argv);
+  // Decision 0001 Addendum J(a)(i): `--render` boots headless Chromium
+  // (`x2-render.ts`) instead of a direct fetch for every configured URL.
+  // It is a bare boolean toggle (no value), so it is stripped from argv
+  // BEFORE `parseFlags` runs — otherwise `parseFlags`'s generic
+  // "next token is this flag's value" rule would swallow whatever flag
+  // happened to follow `--render` on the command line.
+  const render = argv.includes("--render");
+  const flags = parseFlags(argv.filter((a) => a !== "--render"));
+  if (!flags.ledger) {
+    throw new Error(
+      "Usage: node dist/x2-fetch.js --ledger <path> [--render] [--config <x2-sources.json>] " +
+        "[--out-dir <dir>] — `--ledger` is REQUIRED (gate finding 2c, re-gate): the per-directory default " +
+        "ledger was removed, so a run must always name the ledger it counts its captures against.",
+    );
+  }
   const configPath = flags.config || resolveDefaultX2ConfigPath();
   const outDirExplicit = Boolean(flags["out-dir"]);
-  const outDir = flags["out-dir"] || defaultOutsideRepoDir("x2-evidence");
+  const outDir =
+    flags["out-dir"] ||
+    defaultOutsideRepoDir(render ? "x2-render-evidence" : "x2-evidence");
   assertOutsideRepoUnlessExplicit(outDir, outDirExplicit);
   const config = JSON.parse(
     await readFile(configPath, "utf8"),
   ) as X2SourceConfig;
-  const manifest = await runX2Fetch(config, outDir);
+  // Decision 0001 Addendum J(a)(i): an environment-specific Chromium
+  // TLS-trust escape hatch (see `renderUrl`'s own doc) — never wired to
+  // anything proxy-specific in this file, just read from an env var the
+  // operator sets for the environment they're actually running in.
+  const renderExtraArgs =
+    process.env.X2_RENDER_CHROMIUM_ARGS?.split(/\s+/).filter(Boolean);
+  // Gate finding: refuse a bad X2_RENDER_CHROMIUM_ARGS value IMMEDIATELY —
+  // before touching config or launching a browser — not as a per-URL
+  // render failure buried in the manifest.
+  validateRenderExtraArgs(renderExtraArgs ?? []);
+  const manifest = await runX2Fetch(config, outDir, {
+    render,
+    ledgerPath: flags.ledger,
+    ...(renderExtraArgs && renderExtraArgs.length > 0
+      ? { renderExtraArgs }
+      : {}),
+  });
   process.stdout.write(`${renderManifestSummary(manifest)}\n`);
   process.stdout.write(
     `Manifest written to ${path.join(outDir, "manifest.json")}\n`,

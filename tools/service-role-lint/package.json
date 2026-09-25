@@ -1,0 +1,32 @@
+{
+  "name": "@golfraven/service-role-lint",
+  "private": true,
+  "version": "0.0.0",
+  "description": "AST-based lint enforcing build plan §4.7.1a (docs/golf-trails/02-build-plan.md:1183-1205): service-role client construction and privileged calls (.from()/.upsert()/.rpc()/Storage) are confined to supabase/functions/_shared/privileged.ts's withOwnership() callback. Part of P3 stage a's AT(2).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "service-role-lint": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc -b tsconfig.json",
+    "test": "vitest run",
+    "lint": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@typescript-eslint/typescript-estree": "8.46.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "5.7.3",
+    "vitest": "5.0.1"
+  }
+}
