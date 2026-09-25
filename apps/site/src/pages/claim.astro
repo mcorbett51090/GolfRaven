@@ -17,6 +17,13 @@
  *   - CORRECTION (trail): `?trail=<slug>` — a specific trail's roster/info.
  *   - NEW SUGGESTION: no query — "I know a course that isn't listed".
  *
+ * `?facility=`/`?trail=` are validated against `SLUG_PATTERN` below
+ * (gate review nit) before ever being used to prefill a hidden field or
+ * humanized display text — every real slug this site mints is
+ * `^[a-z0-9-]{1,100}$` (see `packages/catalog`'s slug schema); anything
+ * else is dropped outright rather than echoed back into the page or the
+ * owner email unfiltered.
+ *
  * This is a STATIC build (no SSR adapter — `astro.config.mjs` sets no
  * `output`/`adapter`), so `?facility`/`?trail` are NOT present in
  * `Astro.url` at runtime in production (only in `astro dev`). The values
@@ -30,26 +37,43 @@
  * The form itself is `SecureFormScript`: it POSTs only to the owned
  * secure-upload Worker (`FORMS_CONFIG.workerUrl`). Fields-only, v1 — no
  * file upload. Until the owner provisions real Worker/Turnstile values
- * (`src/config/forms-config.mjs`'s two `TODO(owner)` placeholders), its
+ * (`src/config/forms-config.mjs`'s `TODO(owner)` placeholders), its
  * unprovisioned-guard shows a "forms aren't live yet" message and makes no
  * network call — the build still passes either way.
+ *
+ * **B1 (gate review, blocking): the form is INERT with no JS, or before
+ * JS binds, or while unprovisioned.** All of it sits inside a
+ * `<fieldset disabled data-form-fieldset>` — see `SecureFormScript.astro`'s
+ * own module doc for why a disabled fieldset (not just a disabled submit
+ * button) is what makes a native submission structurally impossible, and
+ * why `method="post"` is dropped from the `<form>` tag entirely.
  */
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SecureFormScript from "../components/SecureFormScript.astro";
 import { FORMS_CONFIG } from "../config/forms-config.mjs";
 import { loadSiteCatalog } from "../lib/derive";
 
+/** Every real slug this site mints matches this — see this page's own
+ * module doc. A `?facility=`/`?trail=` value that doesn't is dropped
+ * outright: never prefilled, never echoed into the page or the hidden
+ * fields the owner email is built from. */
+const SLUG_PATTERN = /^[a-z0-9-]{1,100}$/;
+
 const { usedDemoData } = await loadSiteCatalog();
 
 // Best-effort server read (populated in dev / any SSR context; empty in
 // the static production build, where the inline script below takes over).
-const facilitySlug = Astro.url.searchParams.get("facility")?.trim() ?? "";
-const trailSlug = Astro.url.searchParams.get("trail")?.trim() ?? "";
+const rawFacilitySlug = Astro.url.searchParams.get("facility")?.trim() ?? "";
+const rawTrailSlug = Astro.url.searchParams.get("trail")?.trim() ?? "";
+const facilitySlug = SLUG_PATTERN.test(rawFacilitySlug) ? rawFacilitySlug : "";
+const trailSlug = SLUG_PATTERN.test(rawTrailSlug) ? rawTrailSlug : "";
 
 const title = "Suggest a correction | GolfRaven";
 const description = "Suggest a correction to a course or trail listing, claim it as its operator, or tell us about a course we haven't added yet.";
 const SUCCESS_MESSAGE =
   "Thank you — your note is on its way. We review every submission and will update the listing.";
+const VERIFYING_MESSAGE = "Verifying…";
+const SENDING_MESSAGE = "Sending…";
 // No hard-coded email anywhere: FORMS_CONFIG.contactEmail is empty until
 // the owner opts in (forms-config.mjs's TODO(owner)). Every message below
 // reads correctly either way — no mailto link, no email text anywhere
@@ -60,6 +84,11 @@ const UNPROVISIONED_MESSAGE = FORMS_CONFIG.contactEmail
 const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
   ? `Something went wrong. Please email ${FORMS_CONFIG.contactEmail} instead.`
   : "Something went wrong. Please try again later.";
+const TURNSTILE_TIMEOUT_MESSAGE =
+  "This form's spam check didn't complete — its Turnstile key likely isn't configured for this domain yet. " +
+  (FORMS_CONFIG.contactEmail
+    ? `Meanwhile, please email ${FORMS_CONFIG.contactEmail} and we'll take care of it.`
+    : "Please check back soon.");
 ---
 
 <BaseLayout
@@ -105,35 +134,46 @@ const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
     </header>
 
     <!--
-      method="post" is load-bearing. A form with no action submits to the
-      CURRENT URL, and with no method it submits GET — so if the submit
-      handler ever fails to BIND (a JS parse error, a CSP that blocks the
-      inline script), a native submit would put the sender's name, email
-      and free-text message into the query string, which then reaches
-      browser history and the Referer header sent to every third-party
-      origin this page loads. The <noscript> block does NOT cover this: it
-      shows when JavaScript is DISABLED, not when JavaScript is enabled
-      but the handler never attached. With method="post" that submit
-      fails visibly instead of leaking silently.
+      B1 (gate review, blocking): NO method="post" here, deliberately —
+      see the <fieldset disabled> below, which is the REAL defense. With
+      no `action` and no `method`, a form defaults to a same-origin GET on
+      itself; that native fallback path is what SecureFormScript.astro's
+      own module doc explains at length. The short version: every
+      descendant of a disabled <fieldset> is excluded from ANY native
+      submission's data set, on any method, per the HTML spec — so even
+      in some hypothetical browser-quirk bypass of the disabled state,
+      dropping method="post" means the fallback (if one could even fire)
+      is the less consequential of the two verbs, not the CSP-allowed
+      form-action='self' POST this repo's own gate review flagged.
     -->
     <form
       class="claim__form"
       data-secure-form
       novalidate
-      method="post"
       data-worker-url={FORMS_CONFIG.workerUrl}
       data-site-id={FORMS_CONFIG.siteId}
       data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+      data-contact-email={FORMS_CONFIG.contactEmail}
+      data-locale="en"
       data-success-message={SUCCESS_MESSAGE}
       data-unprovisioned-message={UNPROVISIONED_MESSAGE}
       data-generic-error-message={GENERIC_ERROR_MESSAGE}
-      data-contact-email={FORMS_CONFIG.contactEmail}
+      data-verifying-message={VERIFYING_MESSAGE}
+      data-sending-message={SENDING_MESSAGE}
+      data-turnstile-timeout-message={TURNSTILE_TIMEOUT_MESSAGE}
     >
+      {/* B1: disabled by default — SecureFormScript.astro's module script
+          removes `disabled` ONCE, ONLY when the form is genuinely
+          configured. No JS, JS that never binds, or an unprovisioned
+          build all leave this exactly as rendered: disabled, forever, for
+          this page view. */}
+      <fieldset disabled data-form-fieldset>
       {/* request_type distinguishes a correction from a new suggestion in
           the owner email (and the generate_lead analytics event,
           analytics-schema.json's REQUEST_TYPES: correction | new-listing).
-          `facility`/`trail` carry the exact page slug — the authoritative
-          id. All three are hidden, filled/confirmed client-side. */}
+          `facility`/`trail` carry the exact (validated) page slug — the
+          authoritative id. All three are hidden, filled/confirmed
+          client-side. */}
       <input
         type="hidden"
         name="request_type"
@@ -211,6 +251,7 @@ const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
       />
 
       <button class="btn btn--primary" type="submit">Send it in</button>
+      </fieldset>
 
       <p class="claim__fineprint">
         Your message goes directly to our own secure form service (not a third-party form provider) and reaches us
@@ -239,16 +280,29 @@ const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
     `?facility=`/`?trail=` arrival; that tradeoff is inherent to this
     site's CSP (`script-src 'self'`, no `'unsafe-inline'`) and is the same
     one every other script on this site already accepts. Purely
-    progressive either way: with JS off, the no-JS fallback in
-    SecureFormScript directs the visitor to email instead. */}
+    progressive either way: with JS off, SecureFormScript's <noscript>
+    fallback covers the whole form, copy-swap included — this page just
+    shows its NEW-SUGGESTION default copy regardless of a ?facility/?trail
+    param in that case, which is honest (a visitor with no JS can still
+    read and understand the page) rather than broken. */}
 <script>
   (function () {
+    // Gate review nit: only a slug matching this exact shape is ever
+    // used — mirrors this page's own server-side SLUG_PATTERN
+    // (`^[a-z0-9-]{1,100}$`), so a malformed/oversized/injected
+    // `?facility=`/`?trail=` value is dropped here too, not just at
+    // build time (this script is what runs in the actual static
+    // production build, where the server-side read above is empty).
+    var SLUG_RE = /^[a-z0-9-]{1,100}$/;
+
     var facility = "";
     var trail = "";
     try {
       var params = new URLSearchParams(window.location.search);
-      facility = (params.get("facility") || "").trim();
-      trail = (params.get("trail") || "").trim();
+      var rawFacility = (params.get("facility") || "").trim();
+      var rawTrail = (params.get("trail") || "").trim();
+      facility = SLUG_RE.test(rawFacility) ? rawFacility : "";
+      trail = SLUG_RE.test(rawTrail) ? rawTrail : "";
     } catch (e) {
       facility = "";
       trail = "";
@@ -339,6 +393,17 @@ const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
     flex-direction: column;
     gap: 1rem;
   }
+  /* Neutralise the browser default <fieldset> box (border/padding/margin)
+     and let its children participate directly in .claim__form's own flex
+     layout, exactly as if this element weren't there at all — B1's
+     disabled-by-default fieldset is a behavioural wrapper, not a visual
+     one. */
+  fieldset[data-form-fieldset] {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    display: contents;
+  }
   .field {
     display: flex;
     flex-direction: column;
@@ -392,6 +457,10 @@ const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
   .btn--primary[aria-disabled="true"] {
     opacity: 0.6;
     cursor: progress;
+  }
+  .btn--primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .claim__fineprint {
     font-size: 0.8rem;

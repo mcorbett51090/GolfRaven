@@ -6,8 +6,8 @@
  * globalSetup/test-file process boundary) — never a fixed, shared `/tmp`
  * path.
  *
- * Three separate builds, because B2/B3 need genuinely different catalog
- * inputs that can't share one `dist/`:
+ * Four separate builds, because B2/B3/gate-review-S2 need genuinely
+ * different catalog/config inputs that can't share one `dist/`:
  *   - `real`      — a temporary, POPULATED `data/`-shaped directory (the
  *                    demo fixture's own content, written as real `data/`
  *                    files) with NO `GOLFRAVEN_DEMO` set, so the site
@@ -18,6 +18,21 @@
  *                    (B3): every page noindex, empty sitemap, banner shown.
  *   - `paginated` — the SAME real fixture data, with `REGION_PAGE_SIZE=1`
  *                    (B2: "Run [AT1] with REGION_PAGE_SIZE=1 too").
+ *   - `configured` — the SAME real fixture data, PLUS
+ *                    `GOLFRAVEN_FORMS_WORKER_URL`/
+ *                    `GOLFRAVEN_FORMS_TURNSTILE_SITE_KEY` env overrides
+ *                    (`src/config/forms-config.mjs`'s `buildFormsConfig()`)
+ *                    set to fake-but-VALID values — gate review S2: "Add a
+ *                    test build with valid fake values ... and prove the
+ *                    full site test suite passes in the configured state
+ *                    too." The Turnstile site key used
+ *                    (`1x00000000000000000000AA`) is one of Cloudflare's
+ *                    own published always-passes DUMMY test keys — see
+ *                    https://developers.cloudflare.com/turnstile/troubleshooting/testing/
+ *                    `[unverified — training knowledge; this build never
+ *                    actually calls Turnstile's live siteverify, it only
+ *                    exercises the STATIC markup/CSP shape a real key
+ *                    would produce]`.
  */
 import { join } from "node:path";
 import { readTmpBase } from "./tmp-base.mjs";
@@ -44,5 +59,14 @@ export const BUILDS = {
     dist: join(TMP_BASE, "dist-paginated"),
     indexability: join(TMP_BASE, "indexability-paginated.json"),
     env: { GOLFRAVEN_DATA_DIR: FIXTURE_DATA_DIR, REGION_PAGE_SIZE: "1" },
+  },
+  configured: {
+    dist: join(TMP_BASE, "dist-configured"),
+    indexability: join(TMP_BASE, "indexability-configured.json"),
+    env: {
+      GOLFRAVEN_DATA_DIR: FIXTURE_DATA_DIR,
+      GOLFRAVEN_FORMS_WORKER_URL: "https://secure-upload.example.workers.dev",
+      GOLFRAVEN_FORMS_TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
+    },
   },
 };

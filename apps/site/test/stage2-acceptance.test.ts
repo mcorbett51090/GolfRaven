@@ -24,6 +24,7 @@ import {
   renderRedirectsFile,
 } from "../scripts/gen-redirects.mjs";
 import { buildHeaders } from "../scripts/gen-headers.mjs";
+import { parseHeadersFile, resolveHeaders } from "./e2e/serve-with-headers.mjs";
 import { allowedBookingEntries, bookingEntryAllowed, bookingPlatformLabel } from "../src/lib/booking-hosts";
 import { loadCatalogFromBundle } from "@golfraven/catalog";
 import { demoBundleForSite } from "../fixtures/demo-catalog/build-bundle.mjs";
@@ -421,6 +422,48 @@ describe("AT(11): the generated CSP passes csp_evaluator with no HIGH-severity f
     const findings = new CspEvaluator(parsed).evaluate();
     const high = findings.filter((f) => f.severity === Severity.HIGH);
     expect(high, JSON.stringify(high, null, 2)).toEqual([]);
+  });
+
+  // Gate review S5: "AT(11) runs the CSP evaluator on the configured CSP
+  // as well as the unconfigured one." `cspOf()` above only ever grabs the
+  // FIRST `Content-Security-Policy:` line in a `_headers` file — the
+  // site-wide `/*` block — so it can never see the FORM-PAGE-scoped CSP
+  // (gate review nit: Turnstile/Worker hosts are scoped to only the four
+  // form pages, see gen-headers.mjs's own doc). These two tests resolve
+  // the ACTUAL per-path CSP a form page gets, the same way a real
+  // Cloudflare Pages deployment (and this repo's own e2e tests) would.
+  it("gate review S5: a SYNTHETIC configured forms config's FORM-PAGE CSP has no HIGH findings", () => {
+    const headersText = buildHeaders(
+      {},
+      {
+        workerUrl: "https://secure-upload.example.workers.dev",
+        siteId: "golfraven",
+        turnstileSiteKey: "1x00000000000000000000AA",
+        contactEmail: "",
+      },
+    );
+    const blocks = parseHeadersFile(headersText);
+    const formPageCsp = resolveHeaders(blocks, "/claim/index.html")["Content-Security-Policy"];
+    expect(formPageCsp).toBeTruthy();
+    expect(formPageCsp).toContain("challenges.cloudflare.com");
+    const parsed = new CspParser(formPageCsp!).csp;
+    const findings = new CspEvaluator(parsed).evaluate();
+    const high = findings.filter((f) => f.severity === Severity.HIGH);
+    expect(high, JSON.stringify(high, null, 2)).toEqual([]);
+  });
+
+  it("gate review S5: the REAL built dist's (configured build) form-page CSP also has no HIGH findings", async () => {
+    const headers = await readIn(BUILDS.configured.dist, "_headers");
+    const blocks = parseHeadersFile(headers);
+    for (const formPath of ["/claim/index.html", "/feedback/index.html", "/fr/claim/index.html", "/fr/feedback/index.html"]) {
+      const formPageCsp = resolveHeaders(blocks, formPath)["Content-Security-Policy"];
+      expect(formPageCsp, formPath).toBeTruthy();
+      expect(formPageCsp, formPath).toContain("challenges.cloudflare.com");
+      const parsed = new CspParser(formPageCsp!).csp;
+      const findings = new CspEvaluator(parsed).evaluate();
+      const high = findings.filter((f) => f.severity === Severity.HIGH);
+      expect(high, `${formPath}: ${JSON.stringify(high, null, 2)}`).toEqual([]);
+    }
   });
 });
 

@@ -159,10 +159,20 @@ const xDefaultHref =
     </header>
     <slot />
     <footer class="site-footer" data-pagefind-ignore>
-      <p>
-        GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a> ·
-        <a href={withBase("/feedback/")}>Feedback</a>.
-      </p>
+      {/* Gate review nit: localized on FR pages — was hard-coded English
+          everywhere, even in the footer of an otherwise-French page. */}
+      {locale === "fr" ? (
+        <p>
+          GolfRaven — répertoire de golf, circuit par circuit.{" "}
+          <a href={withBase("/fr/claim/")}>Réclamer ou corriger une fiche</a> ·
+          <a href={withBase("/fr/feedback/")}>Commentaires</a>.
+        </p>
+      ) : (
+        <p>
+          GolfRaven — trail-first golf directory. <a href={withBase("/claim/")}>Claim or correct a listing</a> ·
+          <a href={withBase("/feedback/")}>Feedback</a>.
+        </p>
+      )}
     </footer>
     <Analytics />
     {

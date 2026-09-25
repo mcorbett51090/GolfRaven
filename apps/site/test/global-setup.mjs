@@ -81,6 +81,7 @@ export default async function setup() {
   runBuild("real", BUILDS.real);
   runBuild("demo", BUILDS.demo);
   runBuild("paginated", BUILDS.paginated);
+  runBuild("configured", BUILDS.configured);
 
   // Teardown: vitest calls the function a globalSetup default-exports.
   return async () => {

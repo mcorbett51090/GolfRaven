@@ -6,7 +6,7 @@
  */
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { verifySitemap } from "../scripts/verify-sitemap.mjs";
@@ -187,17 +187,39 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
     expect(findSetHtmlOccurrences(prose)).toEqual([]);
   });
 
-  it(
+  // Gate review S2: "AT(7) at acceptance.test.ts:207 rejects the
+  // Turnstile loader. Add an exact-URL exemption for
+  // https://challenges.cloudflare.com/turnstile/v0/api.js, only on the
+  // form pages. Parameterize forms-pages.test.ts on isFormsConfigured()."
+  // The exact, literal URL SecureFormScript.astro's Turnstile loader uses
+  // (`is:inline src="..."`, an untouched pass-through, never bundled) —
+  // ONLY this one third-party script, ONLY on the four form pages, is
+  // exempt from the "external module bundled under /_astro/" rule. Every
+  // other page, and any OTHER third-party src on a form page, still fails
+  // this test exactly as before.
+  const TURNSTILE_LOADER_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+  const FORM_PAGE_RELPATHS = new Set([
+    "claim/index.html",
+    "feedback/index.html",
+    "fr/claim/index.html",
+    "fr/feedback/index.html",
+  ]);
+
+  it.each([
+    ["real (unconfigured)", "real"],
+    ["configured (gate review S2 — proves AT(7) is exercised in the configured state too)", "configured"],
+  ] as const)(
     "every built page has at most one JSON-LD <script>, and every OTHER <script> tag is an " +
-      "Astro-bundled external module with an EMPTY body — never inline JS content " +
-      "(stage-2 generalisation: CourseMap/SiteSearch/the sw.js registrar are real client " +
-      "islands now, so 'no other script tag at all' becomes 'no INLINE script content ever " +
-      "reaches the page' — the same property AT(7) exists to guarantee)",
-    async () => {
-      const htmlFiles = (await walk(BUILDS.real.dist)).filter((f) => f.endsWith(".html"));
+      "Astro-bundled external module with an EMPTY body — never inline JS content — EXCEPT the " +
+      "exact Turnstile loader, and ONLY on a form page (%s build)",
+    async (_label, buildKey) => {
+      const dist = BUILDS[buildKey].dist;
+      const htmlFiles = (await walk(dist)).filter((f) => f.endsWith(".html"));
       let sawExternalModule = false;
       for (const file of htmlFiles) {
         const html = await readFile(file, "utf8");
+        const relPath = relative(dist, file).split(sep).join("/");
+        const isFormPage = FORM_PAGE_RELPATHS.has(relPath);
         const scriptTags = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
         const ldJsonCount = scriptTags.filter(([, attrs]) => /type="application\/ld\+json"/.test(attrs)).length;
         expect(ldJsonCount).toBeLessThanOrEqual(1);
@@ -205,7 +227,22 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
           const isLdJson = /type="application\/ld\+json"/.test(attrs);
           if (isLdJson) continue;
           const isExternalModule = /type="module"/.test(attrs) && /\ssrc="\/_astro\/[^"]+"/.test(attrs);
-          expect(isExternalModule, `unexpected <script> shape: ${full.slice(0, 120)}`).toBe(true);
+          // The ONE exemption: the exact Turnstile loader URL, and ONLY
+          // when this file is one of the four form pages — a page that
+          // ISN'T a form page never renders SecureFormScript at all, so
+          // this exemption should never even be reachable there; asserted
+          // explicitly (not just left to fall through to the generic
+          // failure below) so a future bug that leaked the widget onto a
+          // non-form page fails LOUDLY with a specific message.
+          const isExactTurnstileLoader = new RegExp(`\\ssrc="${TURNSTILE_LOADER_SRC.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`).test(
+            attrs,
+          );
+          if (isExactTurnstileLoader) {
+            expect(isFormPage, `Turnstile loader found OUTSIDE a form page: ${relPath}`).toBe(true);
+            expect(body.trim(), `Turnstile loader tag had inline body: ${full.slice(0, 120)}`).toBe("");
+            continue;
+          }
+          expect(isExternalModule, `unexpected <script> shape in ${relPath}: ${full.slice(0, 120)}`).toBe(true);
           // The defining property: NOTHING between the tags. Astro hoists
           // every non-`is:inline` <script> block's actual code into the
           // external file the `src=` attribute points at — the tag Astro
@@ -221,6 +258,13 @@ describe("AT(7): no set:html outside jsonLdScript()", () => {
       expect(sawExternalModule).toBe(true);
     },
   );
+
+  it("the configured build actually DOES render the Turnstile loader on all four form pages (else the exemption test above would be vacuous)", async () => {
+    for (const relPath of FORM_PAGE_RELPATHS) {
+      const html = await readFile(join(BUILDS.configured.dist, relPath), "utf8");
+      expect(html, relPath).toContain(`src="${TURNSTILE_LOADER_SRC}"`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------

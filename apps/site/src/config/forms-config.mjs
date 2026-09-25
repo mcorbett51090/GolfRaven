@@ -86,6 +86,20 @@ function readEnvOr(env, key, fallback) {
 }
 
 /**
+ * `typeof process !== "undefined"` — NOT a bare `process.env` reference —
+ * because this module is also bundled into the BROWSER (the client
+ * script below imports `isPlaceholderValue`/`isValidWorkerUrl` from it,
+ * pulling in the whole module including this top-level default). `typeof`
+ * on an undeclared identifier never throws; a direct `process.env` access
+ * would throw `ReferenceError: process is not defined` in that bundle and
+ * break every page's client-side JS. In the browser this resolves to
+ * `{}`, which is harmless: the client script never reads `FORMS_CONFIG`
+ * itself, only the pure functions below, applied to values already read
+ * from the DOM (`form.dataset.*`) — see SecureFormScript.astro.
+ */
+const DEFAULT_ENV = typeof process !== "undefined" && process.env ? process.env : {};
+
+/**
  * Builds `FORMS_CONFIG` from `env` (defaults to `process.env`). A named
  * function (not just the top-level `FORMS_CONFIG` object) so tests can
  * construct an independent config from arbitrary env vars without any
@@ -100,14 +114,14 @@ function readEnvOr(env, key, fallback) {
  * in this file, or in any form page, needs to change once those two
  * values are real.
  */
-export function buildFormsConfig(env = process.env) {
+export function buildFormsConfig(env = DEFAULT_ENV) {
   return {
     workerUrl: readEnvOr(
       env,
       "GOLFRAVEN_FORMS_WORKER_URL",
       // TODO(owner): the shared secure-upload Worker's deployed URL, no
       // trailing slash — e.g. "https://raven-secure-upload.example.workers.dev"
-      // (the SAME Worker southern-wine-country and corbett-claims already
+      // (the SAME Worker southern-wine-country and example-site already
       // use; see raven-site-kit/secure-upload/README.md — do not copy
       // their real URLs here, ask the owner for golfraven's own). Add
       // golfraven's entry to that Worker's SITES_CONFIG_JSON first

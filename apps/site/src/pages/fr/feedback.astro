@@ -20,6 +20,14 @@ const UNPROVISIONED_MESSAGE = FORMS_CONFIG.contactEmail
 const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
   ? `Une erreur est survenue. Veuillez écrire à ${FORMS_CONFIG.contactEmail}.`
   : "Une erreur est survenue. Veuillez réessayer plus tard.";
+const VERIFYING_MESSAGE = "Vérification…";
+const SENDING_MESSAGE = "Envoi…";
+const TURNSTILE_TIMEOUT_MESSAGE =
+  "La vérification anti-pourriel de ce formulaire ne s'est pas terminée — sa clé Turnstile n'est " +
+  "probablement pas encore configurée pour ce domaine. " +
+  (FORMS_CONFIG.contactEmail
+    ? `En attendant, écrivez-nous à ${FORMS_CONFIG.contactEmail} et nous nous en occuperons.`
+    : "Revenez bientôt.");
 
 const { usedDemoData } = await loadSiteCatalog();
 ---
@@ -44,20 +52,30 @@ const { usedDemoData } = await loadSiteCatalog();
       </p>
     </header>
 
-    <!-- method="post" : voir la note dans claim.astro. -->
+    <!--
+      B1 (gate review, blocking) : pas de method="post" ici,
+      volontairement — voir claim.astro (version EN) et le module doc de
+      SecureFormScript.astro. Le <fieldset disabled> ci-dessous est la
+      VRAIE protection.
+    -->
     <form
       class="claim__form"
       data-secure-form
       novalidate
-      method="post"
       data-worker-url={FORMS_CONFIG.workerUrl}
       data-site-id={FORMS_CONFIG.siteId}
       data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+      data-contact-email={FORMS_CONFIG.contactEmail}
+      data-locale="fr"
       data-success-message={SUCCESS_MESSAGE}
       data-unprovisioned-message={UNPROVISIONED_MESSAGE}
       data-generic-error-message={GENERIC_ERROR_MESSAGE}
-      data-contact-email={FORMS_CONFIG.contactEmail}
+      data-verifying-message={VERIFYING_MESSAGE}
+      data-sending-message={SENDING_MESSAGE}
+      data-turnstile-timeout-message={TURNSTILE_TIMEOUT_MESSAGE}
     >
+      {/* B1 : désactivé par défaut — voir claim.astro (version EN). */}
+      <fieldset disabled data-form-fieldset>
       <input type="hidden" name="request_type" value="feedback" />
 
       <div class="field">
@@ -117,6 +135,7 @@ const { usedDemoData } = await loadSiteCatalog();
       />
 
       <button class="btn btn--primary" type="submit">Envoyer</button>
+      </fieldset>
 
       <p class="claim__fineprint">
         Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un
@@ -174,6 +193,12 @@ const { usedDemoData } = await loadSiteCatalog();
     display: flex;
     flex-direction: column;
     gap: 1rem;
+  }
+  fieldset[data-form-fieldset] {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    display: contents;
   }
   .field {
     display: flex;
@@ -239,6 +264,10 @@ const { usedDemoData } = await loadSiteCatalog();
   .btn--primary[aria-disabled="true"] {
     opacity: 0.6;
     cursor: progress;
+  }
+  .btn--primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .claim__fineprint {
     font-size: 0.8rem;
