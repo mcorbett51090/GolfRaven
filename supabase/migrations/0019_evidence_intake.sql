@@ -53,7 +53,9 @@ CREATE TABLE app.checkin_token (
   -- delete_row table is ON DELETE CASCADE/SET NULL... " check).
   challenge_id uuid NOT NULL REFERENCES app.checkin_challenge (id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
   user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
-  device_id uuid NOT NULL REFERENCES app.device (id),
+  -- Same H1 reasoning as challenge_id above — app.device.user_id is also
+  -- delete_row classified.
+  device_id uuid NOT NULL REFERENCES app.device (id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
   facility_id text REFERENCES app.catalog_facility (id),
   attestation_grade app.attestation_grade NOT NULL,
   challenge_kind text NOT NULL CHECK (challenge_kind IN ('live', 'prefetched')),
