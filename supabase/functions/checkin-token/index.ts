@@ -13,7 +13,18 @@ import { serve } from "std/http/server";
 function isTokenRequest(v: unknown): v is TokenRequest {
   if (typeof v !== "object" || v === null) return false;
   const o = v as Record<string, unknown>;
-  return typeof o.challengeId === "string" && o.challengeId.length > 0 && typeof o.hardwareSupportsAttestation === "boolean";
+  return (
+    typeof o.challengeId === "string" &&
+    o.challengeId.length > 0 &&
+    typeof o.nonce === "string" &&
+    o.nonce.length > 0 &&
+    typeof o.hardwareSupportsAttestation === "boolean"
+  );
+}
+
+async function digestHex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 serve((req) => handleRequest(async () => {
@@ -23,8 +34,8 @@ serve((req) => handleRequest(async () => {
   if (!actor) return Errors.unauthorized().toResponse();
 
   const body = await readJsonBody(req);
-  if (!isTokenRequest(body)) throw Errors.badRequest('body must be {"challengeId": string, "hardwareSupportsAttestation": boolean}');
+  if (!isTokenRequest(body)) throw Errors.badRequest('body must be {"challengeId": string, "nonce": string, "hardwareSupportsAttestation": boolean}');
 
-  const token = await withOwnership(actor, (repo) => handleTokenRequest(actor.uid, body, repo));
+  const token = await withOwnership(actor, (repo) => handleTokenRequest(body, repo, digestHex));
   return okResponse(201, token);
 }));

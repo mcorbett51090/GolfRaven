@@ -29,7 +29,6 @@ serve((req) => handleRequest(async () => {
 
   const challenges = await withOwnership(actor, (repo) =>
     handleChallengeRequest(
-      actor.uid,
       body,
       repo,
       (n) => crypto.getRandomValues(new Uint8Array(n)),

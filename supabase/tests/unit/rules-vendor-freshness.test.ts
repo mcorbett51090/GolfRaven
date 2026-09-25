@@ -28,26 +28,25 @@ describe("rules vendor freshness", () => {
   });
 
   it("the committed vendor/ tree matches a fresh regeneration byte-for-byte", () => {
+    // ⛔ FIX (P3c gate round 2, should-fix nit): "the freshness test must
+    // not overwrite the committed tree; regenerate into a temp dir and
+    // diff." generate-bundle.sh now takes an optional output-dir argument
+    // (default: its own committed vendor/) specifically so this test can
+    // regenerate into an isolated scratch directory and compare — the
+    // committed tree is only ever READ here, never written, so a failing
+    // assertion (or a crash mid-test) can never leave the working tree
+    // modified.
     const scratchOut = mkdtempSync(join(tmpdir(), "gr-vendor-check-"));
     try {
-      // Point a throwaway copy of the script's SCRIPT_DIR-derived output
-      // at a scratch location by symlinking is fragile across platforms —
-      // simplest robust check: run the real script (it always writes to
-      // its own fixed VENDOR_DIR), diff its output against a saved copy
-      // taken BEFORE running it, then restore. Since the script is
-      // idempotent and deterministic, running it again must reproduce
-      // byte-identical content to what's already committed.
-      const before: Record<string, Buffer | null> = {};
+      execFileSync("bash", [GENERATE_SCRIPT, scratchOut], { stdio: "pipe" });
       for (const f of VENDORED_FILES) {
-        const p = join(VENDOR_DIR, f);
-        before[f] = existsSync(p) ? readFileSync(p) : null;
-      }
-      execFileSync("bash", [GENERATE_SCRIPT], { stdio: "pipe" });
-      for (const f of VENDORED_FILES) {
-        const p = join(VENDOR_DIR, f);
-        const after = readFileSync(p);
-        expect(before[f], `${f} did not exist before regeneration — was it committed?`).not.toBeNull();
-        expect(after.equals(before[f] as Buffer), `${f} drifted from the committed vendor/ tree — re-run generate-bundle.sh and commit the result`).toBe(true);
+        const committedPath = join(VENDOR_DIR, f);
+        const freshPath = join(scratchOut, f);
+        expect(existsSync(committedPath), `${f} is not in the committed vendor/ tree`).toBe(true);
+        expect(existsSync(freshPath), `${f} was not produced by a fresh regeneration`).toBe(true);
+        const committed = readFileSync(committedPath);
+        const fresh = readFileSync(freshPath);
+        expect(fresh.equals(committed), `${f} drifted from the committed vendor/ tree — re-run generate-bundle.sh and commit the result`).toBe(true);
       }
     } finally {
       rmSync(scratchOut, { recursive: true, force: true });

@@ -8,8 +8,18 @@
 // file in this directory imports the real module under test via a
 // relative path into supabase/functions/_shared, so it exercises the
 // EXACT file the Edge Functions ship, never a copy.
+//
+// ⛔ FIX (P3c gate round 2, item 7): `deviceId` bodies below now use a real
+// UUID — request-shape.ts's own fix ("validate deviceId as a UUID; a
+// non-UUID currently returns 500") means a non-UUID literal like "dev_1"
+// is no longer a valid fixture value for a WELL-FORMED submission.
+// ⛔ FIX (item 6): `holes` is no longer a client-submitted
+// `foreground_dwell` field at all — see this file's own new test for the
+// positive assertion that submitting it is now a rejected extra key.
 import { describe, expect, it } from "vitest";
 import { parseEvidenceSubmission, REJECTED_SOURCES } from "../../functions/_shared/evidence/request-shape.js";
+
+const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 
 function goodFix(overrides: Record<string, unknown> = {}) {
   return {
@@ -28,7 +38,7 @@ function goodFix(overrides: Record<string, unknown> = {}) {
 function baseBody(overrides: Record<string, unknown> = {}) {
   return {
     source: "foreground_checkin",
-    deviceId: "dev_1",
+    deviceId: DEVICE_ID,
     facilityId: "fac_x",
     courseId: "crs_x1",
     localDate: "2026-06-01",
@@ -52,6 +62,16 @@ describe("parseEvidenceSubmission", () => {
         expect(result.issues.some((i) => i.path === "source" && i.message.includes("its own server path"))).toBe(true);
       }
     }
+  });
+
+  // ⛔ FIX (P3c gate round 2, item 6): "reject connect_iq, health_route and
+  // file_import the way REJECTED_SOURCES does" — asserted by name, not
+  // merely by membership in the set this test iterates above, so a future
+  // accidental removal from REJECTED_SOURCES fails this test directly.
+  it("connect_iq, health_route and file_import are specifically among REJECTED_SOURCES", () => {
+    expect(REJECTED_SOURCES.has("connect_iq")).toBe(true);
+    expect(REJECTED_SOURCES.has("health_route")).toBe(true);
+    expect(REJECTED_SOURCES.has("file_import")).toBe(true);
   });
 
   it("rejects an unrecognized source", () => {
@@ -94,10 +114,42 @@ describe("parseEvidenceSubmission", () => {
     expect(result.ok).toBe(false);
   });
 
+  // ⛔ FIX (P3c gate round 2, item 7): "validate deviceId as a UUID; a
+  // non-UUID currently returns 500." — the positive assertion that a
+  // non-UUID deviceId is now a clean 400-shaped parse failure, never
+  // reaching a driver call at all.
+  it("rejects a non-UUID deviceId", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), deviceId: "dev_1" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some((i) => i.path === "deviceId")).toBe(true);
+    }
+  });
+
   it("accepts a well-formed foreground_dwell submission", () => {
     const body = {
       source: "foreground_dwell",
-      deviceId: "dev_1",
+      deviceId: DEVICE_ID,
+      facilityId: "fac_x",
+      courseId: "crs_x1",
+      localDate: "2026-06-01",
+      catalogVersion: 1,
+      checkinFix: goodFix({ fixId: "fix_in" }),
+      checkoutFix: goodFix({ fixId: "fix_out" }),
+      apartMinutes: 95,
+    };
+    const result = parseEvidenceSubmission(body);
+    expect(result.ok).toBe(true);
+  });
+
+  // ⛔ FIX (P3c gate round 2, item 6): `holes` is no longer client
+  // -submittable at all — a client that still sends it now hits the
+  // strict-object "unrecognized key" rejection, the same as any other
+  // removed/forged field.
+  it("rejects a foreground_dwell submission that still sends a client `holes` claim", () => {
+    const body = {
+      source: "foreground_dwell",
+      deviceId: DEVICE_ID,
       facilityId: "fac_x",
       courseId: "crs_x1",
       localDate: "2026-06-01",
@@ -108,12 +160,33 @@ describe("parseEvidenceSubmission", () => {
       holes: 18,
     };
     const result = parseEvidenceSubmission(body);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some((i) => i.path === "holes")).toBe(true);
+    }
   });
 
   it("rejects manifestSig with a non-base64url signature", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "not+valid/" } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "not+valid/", manifestSha256: "0".repeat(64) } });
     expect(result.ok).toBe(false);
+  });
+
+  // should-fix (P3c gate round 2): "sign a domain-tagged payload that
+  // binds the version and the manifest sha256" — manifestSha256 is now a
+  // required field of manifestSig itself.
+  it("rejects manifestSig missing manifestSha256", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "AAAA" } });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects manifestSig with a non-hex/wrong-length manifestSha256", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "AAAA", manifestSha256: "not-hex" } });
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts a well-formed manifestSig", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "AAAA", manifestSha256: "0".repeat(64) } });
+    expect(result.ok).toBe(true);
   });
 
   it("accepts a self_report submission with no fix at all", () => {

@@ -65,7 +65,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-VENDOR_DIR="${SCRIPT_DIR}/vendor"
+# P3c gate round 2 nit: "the freshness test must not overwrite the
+# committed tree; regenerate into a temp dir and diff." An optional first
+# positional argument redirects the output somewhere other than the
+# script's own committed vendor/ — supabase/tests/unit/rules-vendor
+# -freshness.test.ts passes a scratch tmpdir so running this script during
+# a test (or a stray local run) can never mutate the working tree. Default
+# (no argument — every existing caller, including a real re-vendor commit)
+# is unchanged: the committed ${SCRIPT_DIR}/vendor.
+VENDOR_DIR="${1:-${SCRIPT_DIR}/vendor}"
 
 if [ ! -f "${REPO_ROOT}/pnpm-workspace.yaml" ]; then
   echo "generate-bundle.sh: could not locate repo root (expected pnpm-workspace.yaml at ${REPO_ROOT})" >&2
@@ -102,6 +110,17 @@ if [ "$(grep -c 'from "@golfraven/catalog"' "${VENDOR_DIR}/parse-evidence.js")" 
 fi
 sed -i.bak 's#from "@golfraven/catalog"#from "./catalog/index.js"#' "${VENDOR_DIR}/parse-evidence.js"
 rm -f "${VENDOR_DIR}/parse-evidence.js.bak"
+
+# P3c gate round 2 nit: strip the `//# sourceMappingURL=...` comment each
+# copied file carries — the referenced .map file is deliberately NOT
+# copied into vendor/ (it's build tooling, not runtime code this tree
+# ships), so left in place the comment is a dangling reference to a file
+# that will never exist alongside it. Always the LAST line of a tsup/esbuild
+# output file; harmless either way but not worth shipping.
+for f in "${VENDOR_DIR}/score-play.js" "${VENDOR_DIR}/parse-evidence.js" "${VENDOR_DIR}/internal/classify.js" "${VENDOR_DIR}/catalog/geo.js" "${VENDOR_DIR}/catalog/common.js"; do
+  sed -i.bak '/^\/\/# sourceMappingURL=/d' "${f}"
+  rm -f "${f}.bak"
+done
 
 cat > "${VENDOR_DIR}/catalog/index.js" <<'EOF'
 // GENERATED FILE — DO NOT EDIT BY HAND. See generate-bundle.sh.

@@ -14,7 +14,7 @@ describe("classifyCatalogVersion", () => {
     const r = classifyCatalogVersion({
       declaredVersion: 3,
       currentVersion: 5,
-      declaredVersionRow: { publishedAt: "2026-05-20T00:00:00.000Z" },
+      declaredVersionRow: { publishedAt: "2026-05-20T00:00:00.000Z", kidRevoked: false },
       now: NOW,
     });
     expect(r.kind).toBe("current_or_within_window");
@@ -24,7 +24,7 @@ describe("classifyCatalogVersion", () => {
     const r = classifyCatalogVersion({
       declaredVersion: 4,
       currentVersion: 5,
-      declaredVersionRow: { publishedAt: "2026-01-01T00:00:00.000Z" },
+      declaredVersionRow: { publishedAt: "2026-01-01T00:00:00.000Z", kidRevoked: false },
       now: NOW,
     });
     expect(r.kind).toBe("stale");
@@ -34,7 +34,7 @@ describe("classifyCatalogVersion", () => {
     const r = classifyCatalogVersion({
       declaredVersion: 1,
       currentVersion: 10,
-      declaredVersionRow: { publishedAt: "2026-05-31T00:00:00.000Z" },
+      declaredVersionRow: { publishedAt: "2026-05-31T00:00:00.000Z", kidRevoked: false },
       now: NOW,
     });
     expect(r.kind).toBe("stale");
@@ -57,6 +57,23 @@ describe("classifyCatalogVersion", () => {
 
   it("fails closed when no catalog has ever been imported", () => {
     const r = classifyCatalogVersion({ declaredVersion: 1, currentVersion: null, declaredVersionRow: null, now: NOW });
+    expect(r.kind).toBe("stale");
+  });
+
+  // should-fix (P3c gate round 2, AT 15): "a revoked kid returns 422
+  // catalog_stale."
+  it("AT 15: a revoked-kid version is stale even when it IS the current version", () => {
+    const r = classifyCatalogVersion({ declaredVersion: 5, currentVersion: 5, declaredVersionRow: { publishedAt: "2026-05-20T00:00:00.000Z", kidRevoked: true }, now: NOW });
+    expect(r.kind).toBe("stale");
+  });
+
+  it("AT 15: a revoked-kid version is stale even when it's otherwise within the skew window", () => {
+    const r = classifyCatalogVersion({
+      declaredVersion: 3,
+      currentVersion: 5,
+      declaredVersionRow: { publishedAt: "2026-05-20T00:00:00.000Z", kidRevoked: true },
+      now: NOW,
+    });
     expect(r.kind).toBe("stale");
   });
 });
@@ -96,7 +113,7 @@ describe("classifyCatalogSubmission (the AT 8 / G3-10 outer decision, folding in
 
   it("a stale version stays stale regardless of any manifestSig", async () => {
     const r = await classifyCatalogSubmission(
-      { declaredVersion: 1, currentVersion: 10, declaredVersionRow: { publishedAt: "2026-05-31T00:00:00.000Z" }, now: NOW },
+      { declaredVersion: 1, currentVersion: 10, declaredVersionRow: { publishedAt: "2026-05-31T00:00:00.000Z", kidRevoked: false }, now: NOW },
       async () => true,
     );
     expect(r.kind).toBe("stale");

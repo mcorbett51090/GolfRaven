@@ -116,4 +116,3 @@ export function tzLikelyContainsCoordinates(tz, coord) {
     ];
     return points.some((p) => canonicalizeTimeZone(tzlookup(p.lat, p.lng)) === declaredCanonical);
 }
-//# sourceMappingURL=geo.js.map
