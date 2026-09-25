@@ -156,7 +156,40 @@ export interface EvidenceIntakeQueued {
   evidenceId: string;
 }
 
-export type EvidenceIntakeResult = EvidenceIntakeSuccess | EvidenceIntakeQueued;
+/** P3d should-fix 1 ("score each play once per batch, after all items
+ * for that play, instead of once per item"): what `handleEvidenceIntake`
+ * returns when called with `{ deferScoring: true, batchMode: true }` for
+ * a course-anchored submission — the evidence row is inserted (token
+ * consumption, catalog validation, replay/conflict detection, clock-skew
+ * fraud signals: all UNCHANGED, all already happened) but the expensive
+ * `listForPlay` + `scorePlay` + `play.upsertFromScore` tail is skipped.
+ * Produced by TWO distinct paths — `replay` tells them apart:
+ *   - a genuinely NEW submission (`replay: false`) — the main
+ *     `deferScoring` check, below.
+ *   - a REPLAY, in the SAME batch, of an earlier group member that
+ *     hasn't been scored yet (`replay: true`) — `buildReplayResult`'s
+ *     own `batchMode` branch.
+ * `evidence-batch/index.ts` groups every deferred result by
+ * `(facilityId, courseId, localDate)` and calls
+ * `finalizeScoringForKey` — a SEPARATE function, not tied to any one
+ * item — exactly ONCE per DISTINCT group, after every member's own
+ * insert has committed; every member is then backfilled with that
+ * group's single, shared `play`, keeping its OWN `replay` flag (a
+ * replayed member still reports `replay: true` to its caller, even
+ * though the actual SCORING happened via the dedicated finalize step,
+ * not via re-deriving anything from this row a second time). Never
+ * produced by the single-item `POST /v1/evidence` endpoint (which never
+ * passes `deferScoring`/`batchMode`). */
+export interface EvidenceIntakeDeferred {
+  status: "deferred";
+  evidenceId: string;
+  facilityId: string;
+  courseId: string;
+  localDate: string;
+  replay: boolean;
+}
+
+export type EvidenceIntakeResult = EvidenceIntakeSuccess | EvidenceIntakeQueued | EvidenceIntakeDeferred;
 
 function fixesOf(submission: EvidenceSubmission): FixSubmission[] {
   switch (submission.source) {
@@ -221,6 +254,45 @@ function canonicalize(value: unknown): unknown {
 
 function toHex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** P3d gate round 4, F1 (blocking): "the dedup drops later quarantine
+ * signals on the same play." The prior fraud_signal dedupe (P3d gate
+ * round 3, S2) was keyed on `(kind, playId)` alone — a SECOND finalize
+ * that quarantined a DIFFERENT row (q2) on the SAME play as an earlier
+ * quarantine (q1) was silently swallowed as "already signaled",
+ * violating security doc §3's own requirement that EVERY on-play
+ * quarantine raise a signal naming the play, the row's original index
+ * and its reasons — q2 never got its own signal at all.
+ *
+ * This computes a canonical digest over the FULL SET of currently
+ * quarantined rows (id + reasons) a single scoring pass found, which
+ * `Repo#fraudSignal.insert` (privileged.ts) now dedupes ON, together
+ * with playId, against a real partial unique index (0022) — so a
+ * REPEAT finalize over the EXACT SAME quarantined set is still a no-op
+ * (idempotent, P3d gate round 3's own original ask), but a DIFFERENT
+ * set (q2 newly present, or q1 no longer present) is a DIFFERENT digest
+ * and raises its own signal.
+ *
+ * Double-sorted so the SAME logical quarantine set always canonicalizes
+ * to the SAME bytes regardless of scan order: each row's own `reasons`
+ * array (the scorer/parser gives no ordering guarantee there) AND the
+ * row list itself (by id). `evidenceForScoring[r.index].id` — never the
+ * caller's own `rows`/`priorRows` array directly — because `r.index` is
+ * defined (parse-evidence.ts's own `ExcludedRow.index` doc) as the
+ * position in the array actually HANDED TO the parser, which is exactly
+ * `evidenceForScoring` at both call sites below (each entry already
+ * carries the real stored row's own `id`, via `reconstructOneStoredRow`/
+ * the fresh-row literal). */
+async function computeQuarantineDigest(excludedRows: readonly { index: number; reasons: string[]; kind: string }[], evidenceForScoring: readonly Record<string, unknown>[]): Promise<string> {
+  const entries = excludedRows
+    .filter((r) => r.kind === "quarantined")
+    .map((r) => ({ id: String(evidenceForScoring[r.index]?.id ?? ""), reasons: [...r.reasons].sort() }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const canonical = JSON.stringify(entries);
+  const bytes = new TextEncoder().encode(canonical);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice());
+  return toHex(digest);
 }
 
 export type DigestFn = (algorithm: "SHA-256", data: BufferSource) => Promise<ArrayBuffer>;
@@ -387,7 +459,7 @@ export function planEvidenceRateLimitChecks(rawBody: unknown, options: { skipLiv
  * SAME already-persisted inputs. `Repo#play.getForDate` is a plain
  * SELECT of that already-computed row — no scoring, no advisory lock, no
  * write of any kind. */
-async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow): Promise<EvidenceIntakeResult> {
+async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow, batchMode: boolean): Promise<EvidenceIntakeResult> {
   if (existing.status === "queued_catalog") {
     return { status: "queued_catalog", evidenceId: existing.id };
   }
@@ -401,14 +473,59 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow): Pro
   }
   const play = await repo.play.getForDate(existing.courseId, existing.localDate);
   if (!play) {
-    // Should be unreachable: the original submission that created this
-    // evidence row always upserts its play row in the SAME atomic
-    // transaction (P3c gate round 2, item 2), so a course-anchored
-    // evidence row and its play row either both exist or neither does.
-    // Reaching here means a genuine data inconsistency, not a normal
-    // race — fail closed rather than fabricate a play outcome.
-    console.error(`buildReplayResult: no app.play row found for an existing, course-anchored evidence row (evidenceId=${existing.id}, courseId=${existing.courseId}, localDate=${existing.localDate})`);
-    throw Errors.internal();
+    // ⛔ FIX (P3d should-fix 1: found by this round's OWN new batch
+    // grouping test — "an identical item submitted TWICE in one batch").
+    // Outside a batch, this stays what it always was: unreachable except
+    // as a genuine data inconsistency (the original submission that
+    // created this evidence row always upserts its play row in the SAME
+    // atomic transaction, P3c gate round 2 item 2) — fail closed.
+    //
+    // INSIDE a batch, it is now a real, EXPECTED shape: `deferScoring`
+    // means a course-anchored item's evidence row can exist for a
+    // while with NO play row yet, waiting for its group's single,
+    // LAST member to score everyone at once. If ANOTHER item in the
+    // SAME batch happens to be a byte-for-byte replay of that
+    // not-yet-scored item (this function is reached ONLY on an exact
+    // `input_hash` match — never a client attack, never new content),
+    // it must NOT throw — there is nothing wrong, the group's
+    // eventual scoring pass (triggered by whichever item in the group
+    // is NOT itself a replay) will fold this evidence row in too, via
+    // its own `listForPlay` call, regardless of which item's call
+    // triggers it. Deferred, exactly like a genuinely-new item would
+    // be — the batch handler's own backfill step fills in the real
+    // `play` once the group's scoring pass completes.
+    if (batchMode) {
+      return { status: "deferred", evidenceId: existing.id, facilityId: existing.facilityId, courseId: existing.courseId, localDate: existing.localDate, replay: true };
+    }
+    // ⛔ FIX (P3d gate round 3, S2, MEDIUM): "batch phase A commits, then
+    // phase B (finalizeScoringForKey) fails or never runs → evidence is
+    // accepted with no app.play. A later retry through the LIVE endpoint
+    // returns 500 because the non-batch buildReplayResult finds no play
+    // row." Confirmed: this exact branch (`!play`, `batchMode` false) is
+    // reached for real whenever a batch's own phase 2a (per-item insert,
+    // `deferScoring: true`) has committed but its phase 2b
+    // (`finalizeScoringForKey`, batch-handler.ts's own SEPARATE
+    // `withOwnershipBatch` call) failed or never ran — the evidence rows
+    // are durably in `app.evidence` with no `app.play` yet, and the PRIOR
+    // version of this branch treated that as "unreachable... genuine data
+    // inconsistency" and threw a 500, even though it is exactly the state
+    // an interrupted batch legitimately leaves behind and a live retry of
+    // the SAME evidence is the normal, expected way a client recovers
+    // from it.
+    //
+    // FIX: call the SAME idempotent `finalizeScoringForKey` a batch's own
+    // phase 2b would have called — it reads every already-persisted
+    // evidence row for this (facilityId, courseId, localDate) key via
+    // `listForPlay` (this replay's own row INCLUDED, since it is already
+    // committed) and scores/upserts the play NOW, synchronously, so this
+    // single live call finishes what the batch left undone. Reported as
+    // `accepted`/`replay: true` (not `deferred` — batchMode is false
+    // here, so the caller is a real HTTP response, never
+    // evidence-batch's own backfill step, and expects a real
+    // `EvidenceIntakeSuccess`).
+    console.warn(`buildReplayResult: no app.play row found for an existing, course-anchored evidence row outside batch mode (evidenceId=${existing.id}, courseId=${existing.courseId}, localDate=${existing.localDate}) — finalizing now via finalizeScoringForKey rather than failing closed (P3d gate round 3, S2: this is the expected shape of a live retry after an interrupted batch, not a data inconsistency)`);
+    const finalized = await finalizeScoringForKey(repo, existing.facilityId, existing.courseId, existing.localDate);
+    return { status: "accepted", evidenceId: existing.id, replay: true, play: finalized.play };
   }
   return {
     status: "accepted",
@@ -418,7 +535,28 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow): Pro
   };
 }
 
-export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promise<EvidenceIntakeResult> {
+export interface HandleEvidenceIntakeOptions {
+  /** P3d should-fix 1: skip the scoring/upsert tail for a genuinely new,
+   * course-anchored submission, returning an `EvidenceIntakeDeferred`
+   * instead — see that interface's own doc. Has no effect on the
+   * replay, conflict, `queued_catalog` or facility-level-evidence paths
+   * (none of them reach the expensive tail this option skips). Default
+   * `false` — the single-item `POST /v1/evidence` endpoint never sets
+   * this; only `evidence-batch/index.ts` does. */
+  deferScoring?: boolean;
+  /** P3d should-fix 1: set by `evidence-batch/index.ts`'s own handler
+   * for EVERY item (regardless of that item's own `deferScoring` value)
+   * — tells `buildReplayResult` that "no play row exists yet for this
+   * course-anchored evidence row" is an EXPECTED, benign condition (a
+   * sibling item in the SAME batch, for the SAME group, hasn't had its
+   * dedicated finalize-scoring step run yet), not the genuine data
+   * -inconsistency `buildReplayResult` otherwise fails closed on. See
+   * that function's own doc for the full reasoning. Default `false`. */
+  batchMode?: boolean;
+}
+
+export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options: HandleEvidenceIntakeOptions = {}): Promise<EvidenceIntakeResult> {
+  const batchMode = options.batchMode ?? false;
   const parsed = parseEvidenceSubmission(rawBody);
   if (!parsed.ok) {
     throw Errors.badRequest("invalid evidence submission", { issues: parsed.issues });
@@ -452,7 +590,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promis
   const existing = await repo.evidence.findExisting(submission.source, sourceRef);
   if (existing) {
     if (existing.inputHash === inputHash) {
-      return buildReplayResult(repo, existing);
+      return buildReplayResult(repo, existing, batchMode);
     }
     throw Errors.conflict("evidence_conflict", "a replay of this evidence id was submitted with different content than what is already on file");
   }
@@ -561,7 +699,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promis
       if (inserted.inputHash !== inputHash) {
         throw Errors.conflict("evidence_conflict", "a concurrent replay of this evidence id was submitted with different content than what is already on file");
       }
-      return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: submission.facilityId, courseId: submission.courseId ?? null, localDate: submission.localDate });
+      return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: submission.facilityId, courseId: submission.courseId ?? null, localDate: submission.localDate }, batchMode);
     }
     return { status: "queued_catalog", evidenceId: inserted.id };
   }
@@ -718,7 +856,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promis
     if (inserted.inputHash !== inputHash) {
       throw Errors.conflict("evidence_conflict", "a concurrent replay of this evidence id was submitted with different content than what is already on file");
     }
-    return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: resolvedFacilityId, courseId: resolvedCourseId, localDate: submission.localDate });
+    return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: resolvedFacilityId, courseId: resolvedCourseId, localDate: submission.localDate }, batchMode);
   }
 
   // ---- Score the play: gather every OTHER accepted row for this
@@ -735,6 +873,21 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promis
       evidenceId: inserted.id,
       replay: false,
       play: { id: "", scoreBadge: 0, scoreMonetary: 0, presenceSignal: false, money: false, heldReview: false },
+    };
+  }
+
+  // P3d should-fix 1: the caller (evidence-batch/index.ts) asked to skip
+  // scoring for this item — it will be folded into a LATER, single
+  // scoring call for the same (courseId, localDate) group instead. See
+  // `EvidenceIntakeDeferred`'s own doc for the full reasoning.
+  if (options.deferScoring) {
+    return {
+      status: "deferred",
+      evidenceId: inserted.id,
+      facilityId: resolvedFacilityId,
+      courseId: resolvedCourseId,
+      localDate: submission.localDate,
+      replay: false,
     };
   }
 
@@ -783,13 +936,17 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promis
   if (outcome.excludedRows.some((r) => r.kind === "quarantined")) {
     // security doc §3: "Every ON-PLAY quarantine... must raise a
     // fraud_signal or create a review_item." should-fix (P3c gate round
-    // 2): include play_id.
+    // 2): include play_id. P3d gate round 4, F1: quarantineDigest is the
+    // dedupe key (together with playId) `Repo#fraudSignal.insert` uses
+    // against the new partial unique index (0022) — see
+    // `computeQuarantineDigest`'s own doc for why.
     await repo.fraudSignal.insert("quarantined_evidence_row", {
       playId: play.id,
       facilityId: resolvedFacilityId,
       courseId: resolvedCourseId,
       localDate: submission.localDate,
       excludedRows: outcome.excludedRows.filter((r) => r.kind === "quarantined"),
+      quarantineDigest: await computeQuarantineDigest(outcome.excludedRows, evidenceForScoring),
     });
   }
 
@@ -797,6 +954,94 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo): Promis
     status: "accepted",
     evidenceId: inserted.id,
     replay: false,
+    play: { id: play.id, scoreBadge: outcome.score_badge, scoreMonetary: outcome.score_monetary, presenceSignal: outcome.presence_signal, money: outcome.money, heldReview: outcome.heldReview },
+  };
+}
+
+export interface FinalizeScoringResult {
+  play: EvidenceIntakeSuccess["play"];
+}
+
+/** P3d should-fix 1: the GROUP-finalization counterpart to a single
+ * item's own scoring tail above — not tied to any one item's submission.
+ * `evidence-batch/index.ts` calls this ONCE per distinct (facilityId,
+ * courseId, localDate) group, in its OWN savepoint, AFTER every item in
+ * that group has already inserted its own evidence row with
+ * `deferScoring: true` (each in its own, already-closed savepoint of the
+ * same outer transaction) — so this function's own `listForPlay` call
+ * sees every one of them, via the SAME `reconstructEvidenceFromStoredRows`
+ * the replay path already uses (never a "fresh, not-yet-persisted"
+ * reconstruction — there is no single "fresh" item here to reconstruct;
+ * every contributing row is already durably in `app.evidence` by the
+ * time this runs).
+ *
+ * `facilityId`/`courseId` are expected ALREADY RESOLVED (survivor) ids —
+ * every caller of this function only ever has these values from an
+ * `EvidenceIntakeDeferred` result (either path that produces one: a
+ * genuinely new item's own deferral, or `buildReplayResult`'s new
+ * `batchMode` branch), and both already carry the resolved ids the
+ * underlying `app.evidence` row was actually stored under (P3c gate
+ * round 2, item 11's own reasoning: a tombstoned id is rewritten to its
+ * survivor BEFORE the row is ever persisted) — never re-resolved here. */
+export async function finalizeScoringForKey(repo: Repo, facilityId: string, courseId: string, localDate: string): Promise<FinalizeScoringResult> {
+  const facilityTz = await repo.catalog.facilityTz(facilityId);
+  if (!facilityTz) {
+    // Should be unreachable: every evidence row this function's own
+    // `listForPlay` call could possibly find was itself only ever
+    // insertable because ITS OWN insert already resolved a real
+    // facility with a real tz, moments ago, in the SAME transaction.
+    console.error(`finalizeScoringForKey: facility "${facilityId}" has no tz on record`);
+    throw Errors.internal();
+  }
+
+  const rows = await repo.evidence.listForPlay(facilityId, courseId, localDate);
+  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows);
+
+  const outcome = scorePlay(evidenceForScoring, {
+    playFacilityId: facilityId,
+    playLocalDate: localDate,
+    playCourseId: courseId,
+    facilityTz,
+  });
+
+  if (!outcome.ok) {
+    // Same reasoning as the single-item tail above: our own row
+    // assembly, not a client attack.
+    console.error(`finalizeScoringForKey: scorePlay rejected server-assembled input: ${outcome.reasons.join("; ")}`);
+    throw Errors.internal();
+  }
+
+  const contributedIds = new Set(outcome.contributions.map((c) => c.evidenceId));
+  const evidenceIdsToLink = rows.map((r) => r.id).filter((id) => contributedIds.has(id));
+
+  const play = await repo.play.upsertFromScore({
+    courseId,
+    facilityId,
+    playDate: localDate,
+    courseDisambiguatedBy: null,
+    scoreBadge: outcome.score_badge,
+    scoreMonetary: outcome.score_monetary,
+    hardSignal: outcome.contributions.some((c) => c.hard),
+    presenceSignal: outcome.presence_signal,
+    money: outcome.money,
+    heldReview: outcome.heldReview,
+    policyVersion: String(outcome.policyVersion),
+    inputDigest: outcome.inputDigest,
+    evidenceIds: evidenceIdsToLink,
+  });
+
+  if (outcome.excludedRows.some((r) => r.kind === "quarantined")) {
+    await repo.fraudSignal.insert("quarantined_evidence_row", {
+      playId: play.id,
+      facilityId,
+      courseId,
+      localDate,
+      excludedRows: outcome.excludedRows.filter((r) => r.kind === "quarantined"),
+      quarantineDigest: await computeQuarantineDigest(outcome.excludedRows, evidenceForScoring),
+    });
+  }
+
+  return {
     play: { id: play.id, scoreBadge: outcome.score_badge, scoreMonetary: outcome.score_monetary, presenceSignal: outcome.presence_signal, money: outcome.money, heldReview: outcome.heldReview },
   };
 }

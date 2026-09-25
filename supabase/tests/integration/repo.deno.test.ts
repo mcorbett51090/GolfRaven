@@ -426,3 +426,94 @@ Deno.test("catalog.matchFix: real ST_DWithin containment against a POLYGON cours
   assertEquals(inside?.verificationTier, "play-verified");
   assertEquals(inside?.insideBuffer, true, "a fix at the polygon's own center must be inside the buffer");
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3d gate round 3, S2 (MEDIUM) / P3d gate round 4, F1 (BLOCKING, this
+// round's fix): "make repeated finalize idempotent for fraud signals: no
+// duplicate quarantined_evidence_row signal on each retry" — AND (F1,
+// found by the round-3 re-review): the dedupe must NOT drop a genuinely
+// DIFFERENT quarantine signal on the SAME play. Tests the actual
+// mechanism directly (privileged.ts#fraudSignal.insert's own
+// `INSERT ... ON CONFLICT (playId, quarantineDigest) ... DO NOTHING`
+// against the new partial unique index, 0022), rather than trying to
+// force a genuine scorer-level quarantine end to end for this
+// mechanism-level proof — a separate, higher-level test
+// (evidence-batch.deno.test.ts) proves the real q1-then-q2 repro through
+// the actual scorer/handler path.
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3d gate round 4, F1: repo.fraudSignal.insert is idempotent per (kind, playId, quarantineDigest) — SAME digest on a retry is a no-op, a DIFFERENT digest on the SAME play raises its OWN signal", DT, async () => {
+  const a = await withFreshUser("fraud-signal-dedupe");
+  const fakePlayId = freshUuid();
+  const digestQ1 = "digest-q1-only";
+  const digestQ1AndQ2 = "digest-q1-and-q2";
+
+  await withOwnership(a.actor, (repo) =>
+    repo.fraudSignal.insert("quarantined_evidence_row", { playId: fakePlayId, quarantineDigest: digestQ1, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [{ index: 0, kind: "quarantined", reasons: ["test fixture q1"] }] }),
+  );
+  // Second call: SAME kind, SAME playId, SAME digest — simulates
+  // finalizeScoringForKey running twice for the SAME quarantine set (an
+  // interrupted batch's own phase-2b retry, or a live retry through
+  // buildReplayResult's finalize path). Must be a no-op.
+  await withOwnership(a.actor, (repo) =>
+    repo.fraudSignal.insert("quarantined_evidence_row", { playId: fakePlayId, quarantineDigest: digestQ1, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [{ index: 0, kind: "quarantined", reasons: ["test fixture q1 (retry)"] }] }),
+  );
+  const nAfterRetry = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'playId' = '${fakePlayId}'`);
+  assertEquals(nAfterRetry, 1, "exactly ONE fraud_signal row after a same-digest retry, even though insert was called twice");
+
+  // P3d gate round 4, F1's own repro: the SAME play, but a DIFFERENT
+  // quarantine digest (q2 now also quarantined alongside q1) — this MUST
+  // raise its OWN, second signal, never be swallowed by the (playId)-only
+  // dedupe round 3 shipped.
+  await withOwnership(a.actor, (repo) =>
+    repo.fraudSignal.insert("quarantined_evidence_row", { playId: fakePlayId, quarantineDigest: digestQ1AndQ2, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [{ index: 0, kind: "quarantined", reasons: ["test fixture q1"] }, { index: 1, kind: "quarantined", reasons: ["test fixture q2"] }] }),
+  );
+  const nAfterQ2 = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'playId' = '${fakePlayId}'`);
+  assertEquals(nAfterQ2, 2, "a DIFFERENT quarantine digest on the SAME play raises its own, second signal — F1's own repro");
+
+  // A DIFFERENT play must still get its own, independent signal.
+  const otherPlayId = freshUuid();
+  await withOwnership(a.actor, (repo) => repo.fraudSignal.insert("quarantined_evidence_row", { playId: otherPlayId, quarantineDigest: digestQ1, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [] }));
+  const nOther = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'playId' = '${otherPlayId}'`);
+  assertEquals(nOther, 1, "a signal for a DIFFERENT play is never suppressed by the dedupe");
+
+  // A kind with no playId in its detail (e.g. clock_skew, keyed on
+  // fixIds instead) has no dedupe key and always inserts — unchanged.
+  await withOwnership(a.actor, (repo) => repo.fraudSignal.insert("clock_skew", { fixIds: ["fix_a"], evidenceSource: "foreground_checkin" }));
+  await withOwnership(a.actor, (repo) => repo.fraudSignal.insert("clock_skew", { fixIds: ["fix_a"], evidenceSource: "foreground_checkin" }));
+  const nClockSkew = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'clock_skew' and user_id = '${a.uid}'`);
+  assertEquals(nClockSkew, 2, "a kind with no playId in its detail is never deduped — both calls insert their own row");
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3d gate round 4, F1 requirement: "4 concurrent finalizes give 1." Proves
+// the fix is genuinely concurrency-safe, not merely idempotent when called
+// sequentially — the round-3 `WHERE NOT EXISTS` version this replaces was
+// NOT safe here (two simultaneous transactions could both pass that check
+// before either committed); the new `INSERT ... ON CONFLICT ... DO
+// NOTHING` is a single atomic statement against a REAL unique index, so
+// only one of N concurrent inserts for the SAME (playId, quarantineDigest)
+// can ever actually land.
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3d gate round 4, F1: 4 CONCURRENT inserts for the SAME (playId, quarantineDigest) produce exactly 1 fraud_signal row", DT, async () => {
+  const a = await withFreshUser("fraud-signal-concurrent");
+  const playId = freshUuid();
+  const digest = "digest-concurrent-fixture";
+
+  await Promise.all(
+    Array.from({ length: 4 }, (_unused, i) =>
+      withOwnership(a.actor, (repo) =>
+        repo.fraudSignal.insert("quarantined_evidence_row", {
+          playId,
+          quarantineDigest: digest,
+          facilityId: FAC_X,
+          courseId: "crs_concurrent",
+          localDate: "2026-06-01",
+          excludedRows: [{ index: 0, kind: "quarantined", reasons: [`concurrent attempt ${i}`] }],
+        }),
+      ),
+    ),
+  );
+
+  const n = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'playId' = '${playId}'`);
+  assertEquals(n, 1, "4 concurrent inserts for the identical (playId, quarantineDigest) must collapse to exactly 1 row, not race into duplicates");
+});

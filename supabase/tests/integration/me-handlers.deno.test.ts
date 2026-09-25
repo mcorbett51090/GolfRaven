@@ -364,3 +364,64 @@ Deno.test("follow-up 13: the SAME held lock, through the full evidence-intake pi
   const consumedRows = await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${token.jti}' and consumed_at is not null`);
   assertEquals(consumedRows, 0, "the checkin token must NOT show as consumed — the whole transaction, including its own consumeForFix UPDATE, rolled back");
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3d should-fix 1: "Add SET LOCAL transaction_timeout = '12s', verified
+// on the PG17 harness. statement_timeout is per statement, so a
+// transaction of many short statements still commits after a 503."
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3d should-fix 1: transaction_timeout (12s) is the backstop for MANY SHORT statements whose CUMULATIVE wall-clock time exceeds it, even though none individually nears statement_timeout (10s) or lock_timeout (5s)", DT, async () => {
+  // `transaction_timeout` is PG17+ only (confirmed this round via
+  // `--describe-config` against both this repo's pinned PG16 and PG17
+  // binaries: present on 17, absent on 16) — `privileged.ts#
+  // supportsTransactionTimeout` already skips issuing it on an older
+  // server, so this test skips itself the same way rather than failing
+  // on a harness invoked against PG16 (`tools/db/test.sh`'s own
+  // default): the FEATURE genuinely isn't there to test, which is a
+  // different thing from this repo's wiring of it being broken.
+  const versionRows = await adminSql()`select current_setting('server_version_num') as v`;
+  if (Number(versionRows[0]?.v ?? 0) < 170000) {
+    console.log(`SKIPPING (server_version_num=${versionRows[0]?.v}, < 170000): transaction_timeout is not available on this Postgres version`);
+    return;
+  }
+
+  const a = await withFreshUser("txtimeout");
+
+  // 13 short, real repo calls (each completing in single-digit
+  // milliseconds — confirmed this round against a real PG17 cluster:
+  // `postgres.js` reported ~10ms per `select 1`-shaped statement), each
+  // followed by a REAL ~1s JS-side idle gap. Confirmed empirically THIS
+  // round (a standalone scratch-cluster probe, same driver + version,
+  // before wiring this into privileged.ts) that Postgres's own
+  // transaction_timeout counts WALL-CLOCK time from BEGIN, including
+  // idle-between-statements time on an otherwise-open transaction — not
+  // merely cumulative active-query time — so ~13s of real elapsed time
+  // here, entirely below EITHER of the two per-statement timeouts,
+  // still crosses the 12s transaction-level backstop.
+  const start = Date.now();
+  let caught: unknown;
+  try {
+    await withOwnership(a.actor, async (repo: Repo) => {
+      for (let i = 0; i < 13; i++) {
+        await repo.device.ensureOwn(freshUuid(), "ios");
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    });
+  } catch (err) {
+    caught = err;
+  }
+  const elapsedMs = Date.now() - start;
+
+  assert(caught instanceof HttpError && caught.status === 503, `expected an HttpError with status 503 (transaction_timeout mapped), got ${caught}`);
+  // Generous bounds: the real cutoff is ~12s; this asserts it fires
+  // meaningfully before http.ts's own 15s request race (proving it IS
+  // the backstop, not a no-op) and meaningfully after the two
+  // per-statement timeouts (5s/10s) would have fired for a genuinely
+  // slow SINGLE statement (proving this is really transaction_timeout
+  // firing, not a mislabelled lock/statement timeout).
+  assert(elapsedMs < 15_000, `expected the transaction_timeout backstop to fire before http.ts's own 15s request timeout — took ${elapsedMs}ms`);
+  assert(elapsedMs > 10_000, `expected roughly the configured 12s, not an earlier (5s/10s) timeout firing instead — took ${elapsedMs}ms`);
+
+  const n = await rawCount(`select count(*)::int as n from app.device where user_id = '${a.uid}'`);
+  assertEquals(n, 0, "0 device rows after the transaction-timeout disconnect — the transaction never committed, so every one of the 13 inserts rolled back");
+});
