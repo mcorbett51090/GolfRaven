@@ -310,12 +310,20 @@ Deno.test("item 8 (handler-level): concurrent prefetch challenge requests never 
 
   // 3 concurrent requests for 5 each (15 total demand) against a cap of
   // 10 — real overlapping HTTP-shaped requests, each its own
-  // withOwnership transaction.
+  // withOwnership transaction. Once the cap is fully spent, a LATER
+  // (still-queued-behind-the-advisory-lock) request legitimately 429s
+  // (challenge-handler.ts's own `room <= 0` check) rather than returning
+  // an empty array — a real HttpError, not a bug — so this uses
+  // allSettled and counts only what actually got ISSUED, exactly the way
+  // a real caller handling 3 genuinely concurrent HTTP requests would.
   const attempts = Array.from({ length: 3 }, () =>
     withOwnership(actor, (repo) => handleChallengeRequest({ deviceId, prefetchCount: 5 }, repo, randomBytes, digestHex)),
   );
-  const results = await Promise.all(attempts);
-  const totalIssued = results.reduce((sum, r) => sum + r.length, 0);
+  const settled = await Promise.allSettled(attempts);
+  for (const s of settled) {
+    if (s.status === "rejected") assert(s.reason instanceof HttpError && s.reason.code === "rate_limited", `unexpected rejection shape: ${s.reason}`);
+  }
+  const totalIssued = settled.reduce((sum, s) => sum + (s.status === "fulfilled" ? s.value.length : 0), 0);
   assertEquals(totalIssued, 10, `expected exactly 10 prefetched challenges issued across 3 concurrent requests demanding 15 — got ${totalIssued}`);
 
   const n = await rawCount(`select count(*)::int as n from app.checkin_challenge where device_id = '${deviceId}' and kind = 'prefetched' and used_at is null`);

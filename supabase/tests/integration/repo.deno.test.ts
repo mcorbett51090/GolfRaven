@@ -14,7 +14,7 @@
 // expected, not a leak; the process exit at the end of `deno test` closes
 // every socket.
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { adminSql, createTestUser, createCourseWithRadiusAtFacX, freshUuid, makeActor, rawCount, FAC_X, NASHVILLE } from "./_helpers.ts";
+import { adminSql, createTestUser, createCourseWithRadiusAtFacX, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, NASHVILLE } from "./_helpers.ts";
 import { withOwnership } from "../../functions/_shared/privileged.ts";
 import type { Repo } from "../../functions/_shared/types.ts";
 
@@ -365,4 +365,16 @@ Deno.test("catalog.matchFix: real ST_DWithin containment via the Repo method its
 
   const outside = await withOwnership(a.actor, (repo) => repo.catalog.matchFix(courseId, NASHVILLE.lat + 0.2, NASHVILLE.lng));
   assertEquals(outside?.insideBuffer, false, "a fix ~22km away must NOT be inside the buffer");
+});
+
+Deno.test("catalog.matchFix: real ST_DWithin containment against a POLYGON course (geometryKind must read back as 'polygon')", DT, async () => {
+  const courseId = `crs_poly_${freshUuid().slice(0, 8)}`;
+  await createCourseWithPolygonAtFacX(courseId);
+  const a = await withFreshUser("matchfix-polygon");
+
+  const inside = await withOwnership(a.actor, (repo) => repo.catalog.matchFix(courseId, NASHVILLE.lat, NASHVILLE.lng));
+  assert(inside !== null);
+  assertEquals(inside?.geometryKind, "polygon");
+  assertEquals(inside?.verificationTier, "play-verified");
+  assertEquals(inside?.insideBuffer, true, "a fix at the polygon's own center must be inside the buffer");
 });
