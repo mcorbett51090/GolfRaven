@@ -426,3 +426,46 @@ Deno.test("catalog.matchFix: real ST_DWithin containment against a POLYGON cours
   assertEquals(inside?.verificationTier, "play-verified");
   assertEquals(inside?.insideBuffer, true, "a fix at the polygon's own center must be inside the buffer");
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3d gate round 3, S2 (MEDIUM): "make repeated finalize idempotent for
+// fraud signals: no duplicate quarantined_evidence_row signal on each
+// retry." Tests the actual mechanism directly (privileged.ts#fraudSignal.
+// insert's own INSERT ... WHERE NOT EXISTS dedupe on (kind,
+// detail->>'playId')), rather than trying to force a genuine scorer-level
+// quarantine end to end — that mechanism is what BOTH a batch's own
+// phase-2b retry AND buildReplayResult's new live-retry path (this same
+// round's S2 fix) share, so proving it here covers both call sites.
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3d gate round 3, S2: repo.fraudSignal.insert is idempotent per (kind, detail.playId) — a second insert for the SAME play is a no-op, not a duplicate row", DT, async () => {
+  const a = await withFreshUser("fraud-signal-dedupe");
+  const fakePlayId = freshUuid();
+
+  await withOwnership(a.actor, (repo) =>
+    repo.fraudSignal.insert("quarantined_evidence_row", { playId: fakePlayId, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [{ kind: "quarantined", reason: "test fixture" }] }),
+  );
+  // Second call: SAME kind, SAME playId — simulates finalizeScoringForKey
+  // running twice for the same group (an interrupted batch's own phase-2b
+  // retry, or a live retry through buildReplayResult's new finalize path).
+  await withOwnership(a.actor, (repo) =>
+    repo.fraudSignal.insert("quarantined_evidence_row", { playId: fakePlayId, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [{ kind: "quarantined", reason: "test fixture (retry)" }] }),
+  );
+
+  const n = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'playId' = '${fakePlayId}'`);
+  assertEquals(n, 1, "exactly ONE fraud_signal row for this play, even though insert was called twice");
+
+  // A DIFFERENT play must still get its own, independent signal — the
+  // dedupe is keyed on (kind, playId), never a blanket "one signal per
+  // kind ever" no-op.
+  const otherPlayId = freshUuid();
+  await withOwnership(a.actor, (repo) => repo.fraudSignal.insert("quarantined_evidence_row", { playId: otherPlayId, facilityId: FAC_X, courseId: "crs_dedupe", localDate: "2026-06-01", excludedRows: [] }));
+  const nOther = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row' and detail ->> 'playId' = '${otherPlayId}'`);
+  assertEquals(nOther, 1, "a signal for a DIFFERENT play is never suppressed by the dedupe");
+
+  // A kind with no playId in its detail (e.g. clock_skew, keyed on
+  // fixIds instead) has no dedupe key and always inserts — unchanged.
+  await withOwnership(a.actor, (repo) => repo.fraudSignal.insert("clock_skew", { fixIds: ["fix_a"], evidenceSource: "foreground_checkin" }));
+  await withOwnership(a.actor, (repo) => repo.fraudSignal.insert("clock_skew", { fixIds: ["fix_a"], evidenceSource: "foreground_checkin" }));
+  const nClockSkew = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'clock_skew' and user_id = '${a.uid}'`);
+  assertEquals(nClockSkew, 2, "a kind with no playId in its detail is never deduped — both calls insert their own row");
+});

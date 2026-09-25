@@ -709,8 +709,36 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     },
 
     fraudSignal: {
+      // ⛔ FIX (P3d gate round 3, S2, MEDIUM): "make repeated finalize
+      // idempotent for fraud signals: no duplicate quarantined_evidence_row
+      // signal on each retry." `finalizeScoringForKey` (evidence/
+      // handler.ts) can now genuinely run twice for the SAME play — once
+      // from a batch's own phase 2b, once more from `buildReplayResult`'s
+      // new live-retry path (this same round's S2 fix) if a client
+      // retries after an interrupted batch — and both passes independently
+      // decide whether a quarantine signal is warranted from the SAME
+      // underlying evidence rows, so a naive unconditional INSERT would
+      // raise it twice. Deduped on (kind, detail->>'playId') via a single
+      // atomic `INSERT ... SELECT ... WHERE NOT EXISTS` (not a separate
+      // SELECT-then-INSERT, which would leave a race window) whenever the
+      // caller's own `detail` carries a `playId` — every current
+      // `quarantined_evidence_row` call site does. A `detail` with no
+      // `playId` (the `clock_skew` kind, keyed on `fixIds` instead) has no
+      // dedupe key to work from and is left exactly as before — always
+      // inserts, never silently dropped.
       async insert(kind: string, detail: Record<string, unknown>): Promise<void> {
-        await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
+        const playId = typeof detail.playId === "string" ? detail.playId : null;
+        if (playId === null) {
+          await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
+          return;
+        }
+        await trx`
+          insert into app.fraud_signal (user_id, kind, detail)
+          select ${uid}, ${kind}, ${trx.json(detail as never)}
+          where not exists (
+            select 1 from app.fraud_signal where kind = ${kind} and detail ->> 'playId' = ${playId}
+          )
+        `;
       },
     },
 
@@ -1041,11 +1069,30 @@ function mapPgTimeoutError(err: unknown): unknown {
   // present in `PG_TIMEOUT_SQLSTATES` above, which only ever inspects
   // `.code` as a SQLSTATE string. Also confirmed: the connection POOL
   // recovers on its own (a later query opens a fresh connection; proven
-  // by running one immediately afterward in the same test) — this is
-  // safe to treat as "the database gave up in time," the same as the
-  // other two timeouts, not a pool-damaging event.
+  // by running one immediately afterward in the same test) — not a
+  // pool-damaging event.
+  //
+  // ⛔ FIX (P3d gate round 3, S3): this message USED to say "(transaction
+  // timeout) — safe to retry" — a specific CAUSAL claim this handler
+  // cannot actually verify. `CONNECTION_CLOSED` is a driver-level signal
+  // that the TCP connection dropped; `transaction_timeout` is ONE thing
+  // that produces it (confirmed empirically this round), but so does a
+  // network blip, a pooler recycling the connection, or the database
+  // process itself restarting — this code path has no way to tell them
+  // apart, and asserting "timeout" here is exactly the confident-but-
+  // unverified causal claim this project's own accuracy discipline warns
+  // against. What IS true, and what this response says instead: the
+  // outcome of whatever was in flight is unknown to the caller (the
+  // connection dropped before a result came back, which — because
+  // `withOwnership`/`withOwnershipBatch` always run inside a single
+  // transaction — means either everything committed or nothing did,
+  // never a partial write), and every write path this maps onto is
+  // idempotent by construction (evidence intake replay by input_hash,
+  // delete_my_data's own generic pass, redemption's advisory locking),
+  // so retrying is always safe regardless of which of those causes it
+  // actually was.
   if ((err as { code?: unknown } | null)?.code === "CONNECTION_CLOSED") {
-    return Errors.serviceUnavailable("the database could not complete this request in time (transaction timeout) — safe to retry");
+    return Errors.serviceUnavailable("outcome unknown; retrying is idempotent");
   }
   return err;
 }

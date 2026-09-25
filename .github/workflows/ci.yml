@@ -116,6 +116,23 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+          # P3d gate round 3, blocking B1: fetch-depth 0 (not this job's
+          # prior default of 1) so `origin/main` actually resolves for the
+          # migration-immutability check below — a `pull_request` event's
+          # default shallow checkout has no ref for it at all otherwise.
+          fetch-depth: 0
+
+      - name: Migrations are immutable once merged (P3d gate round 3, blocking B1)
+        # Runs FIRST, before the expensive Postgres/PostGIS/pgTAP install
+        # below — cheap, and the exact bug class this catches (a merged
+        # migration edited in place) is a fast, unambiguous fail with
+        # nothing DB-related to set up first. Self-test runs every time
+        # too (not a separate manual step) — a check that could silently
+        # stop checking anything is worse than no check.
+        run: |
+          set -euo pipefail
+          tools/db/check-migrations-immutable.sh --self-test
+          tools/db/check-migrations-immutable.sh --base origin/main
 
       - name: Install PostgreSQL 17 + PostGIS 3 + pgTAP (PGDG apt, key-checked)
         # Postgres 17, PostGIS 3, pgTAP (build plan §10 P3,

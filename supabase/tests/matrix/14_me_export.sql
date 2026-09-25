@@ -6,7 +6,7 @@
 -- account of what was wrong and why.
 
 BEGIN;
-SELECT plan(24);
+SELECT plan(27);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -26,6 +26,14 @@ INSERT INTO app.review_item (id, kind, subject_table, subject_id, detail, resolv
 VALUES ('d0000000-0000-0000-0000-000000000001', 'receipt_review', 'app.purchase_evidence', '90000000-0000-0000-0000-000000000001',
         jsonb_build_object('player_a_uuid_in_detail', '00000000-0000-0000-0000-00000000000a', 'note', 'internal reviewer notes'),
         now(), '00000000-0000-0000-0000-4000000000d0');
+-- P3d gate round 3, S1 nit: helpers.sql's own purchase_evidence row for
+-- player A leaves ref_id NULL (never exercising the exclusion), so it is
+-- populated here with a real value -- the shape a course-QR-variant row
+-- actually carries (the consumed course_qr_token's own nonce hash) --
+-- so the "ref_id is excluded" assertion below is proving something real,
+-- not vacuously true against an already-empty column.
+UPDATE app.purchase_evidence SET ref_id = 'zz-fixture-course-qr-nonce-hash'
+  WHERE id = '90000000-0000-0000-0000-000000000001';
 
 -- ============================================================================
 -- Registry sync: every table private.pii_retention_policy classifies at
@@ -162,6 +170,38 @@ SELECT ok(
 SELECT ok(
   private.export_my_data('00000000-0000-0000-0000-4000000000d0'::uuid)::text NOT ILIKE '%"detail"%',
   'admin''s WHOLE export contains no "detail" key anywhere (fraud_signal, review_item and audit_log all omit it by construction)'
+);
+
+-- ============================================================================
+-- P3d gate round 3, S1: "Add a pgTAP check that the export's top-level
+-- keys exactly equal the set of export-classified pii_export_policy
+-- tables, so an export row with no SELECT fails." A table registered
+-- `action = 'export'` but never actually given its own SELECT block in
+-- export_my_data's body (or a typo'd jsonb_build_object key) would
+-- otherwise pass every OTHER assertion in this file silently -- none of
+-- them enumerate the FULL key set, only individual keys' contents.
+-- ============================================================================
+SELECT is(
+  (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid)) k),
+  (SELECT array_agg(table_name ORDER BY table_name) FROM private.pii_export_policy WHERE schema_name = 'app' AND action = 'export'),
+  'export''s top-level keys exactly equal the set of export-classified private.pii_export_policy tables -- an export-classified table with no real SELECT block in export_my_data would fail this'
+);
+
+-- ============================================================================
+-- P3d gate round 3, S1 (should-fixes, do now): audit_log.subject_id and
+-- purchase_evidence.ref_id are no longer exported at all (0022's own
+-- header: subject_id is a polymorphic reference that can itself BE
+-- another account's own id; ref_id, for a course-QR row, is the
+-- consumed token's own nonce hash -- an internal matching key, not the
+-- caller's own data).
+-- ============================================================================
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'audit_log' -> 0 ? 'subject_id'),
+  'audit_log export never includes subject_id (a polymorphic reference that can itself name another account)'
+);
+SELECT ok(
+  NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'purchase_evidence' -> 0 ? 'ref_id'),
+  'purchase_evidence export never includes ref_id (a course-QR token''s own nonce hash, not the caller''s own data)'
 );
 
 -- ============================================================================

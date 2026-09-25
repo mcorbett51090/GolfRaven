@@ -19,7 +19,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import { createTestUser, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, CRS_X1 } from "./_helpers.ts";
 import { hitRateLimitForActor, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleEvidenceBatchIntake, RATE_LIMIT_PER_USER_DAY } from "../../functions/_shared/evidence/batch-handler.ts";
-import type { EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
+import { handleEvidenceIntake, type EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
 import { handleChallengeRequest } from "../../functions/_shared/checkin/challenge-handler.ts";
 import { handleTokenRequest } from "../../functions/_shared/checkin/token-handler.ts";
 
@@ -227,4 +227,46 @@ Deno.test("P3d should-fix 1: two DIFFERENT plays in one batch are scored indepen
   if (a.status === "accepted" && b.status === "accepted") {
     assert(a.play.id !== b.play.id, "two different courses on the same date must produce two DIFFERENT plays, not be folded into one group");
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// P3d gate round 3, S2 (MEDIUM): "Batch phase A commits, then phase B
+// (finalizeScoringForKey) fails or never runs → evidence is accepted with
+// no app.play. A later retry through the live endpoint returns 500
+// because the non-batch buildReplayResult finds no play row. Fix: when
+// the play row is missing, the replay path calls the idempotent
+// finalizeScoringForKey instead of throwing."
+// ─────────────────────────────────────────────────────────────────────────
+Deno.test("P3d gate round 3, S2: a live (non-batch) retry after a phase-A-only commit (evidence stored, no play yet) finalizes instead of 500ing", DT, async () => {
+  const actor = await withFreshUser("phase-a-only-retry");
+  const courseId = `crs_phaseaonly_${freshUuid().slice(0, 8)}`;
+  await createCourseWithPolygonAtFacX(courseId);
+  const body = checkinBody({ courseId, localDate: "2026-06-01" });
+
+  // Simulate exactly the state an INTERRUPTED batch leaves behind: phase
+  // A (per-item insert, deferScoring true) committed; phase B
+  // (finalizeScoringForKey) never ran at all. Calling handleEvidenceIntake
+  // directly with the SAME options evidence-batch/index.ts's own phase 2a
+  // uses, and stopping there, reproduces this without needing to actually
+  // kill a batch mid-flight.
+  const deferred = await withOwnership(actor, (repo) => handleEvidenceIntake(body, repo, { deferScoring: true, batchMode: true }));
+  assertEquals(deferred.status, "deferred");
+
+  const beforePlays = await rawCount(`select count(*)::int as n from app.play where course_id = '${courseId}'`);
+  assertEquals(beforePlays, 0, "precondition: no app.play row yet — phase A committed, phase B never ran");
+
+  // The live retry: the client resubmits the SAME item through the
+  // ordinary, non-batch POST /v1/evidence path (no deferScoring/batchMode
+  // options) — findExisting matches the already-stored row by input_hash,
+  // buildReplayResult finds no play row, and (this fix) finalizes now via
+  // finalizeScoringForKey instead of throwing Errors.internal().
+  const retried = await withOwnership(actor, (repo) => handleEvidenceIntake(body, repo));
+  assertEquals(retried.status, "accepted", `expected the live retry to succeed (200), got ${JSON.stringify(retried)}`);
+  if (retried.status === "accepted") {
+    assert(retried.replay, "the retry is reported as a replay of the already-stored evidence row, not a fresh insert");
+    assert(retried.play.id.length > 0, "a real play id is returned, not the empty-string facility-level placeholder");
+  }
+
+  const afterPlays = await rawCount(`select count(*)::int as n from app.play where course_id = '${courseId}'`);
+  assertEquals(afterPlays, 1, "the live retry created exactly one app.play row for the group that was left unscored");
 });

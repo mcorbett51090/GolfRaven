@@ -458,8 +458,35 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow, batc
     if (batchMode) {
       return { status: "deferred", evidenceId: existing.id, facilityId: existing.facilityId, courseId: existing.courseId, localDate: existing.localDate, replay: true };
     }
-    console.error(`buildReplayResult: no app.play row found for an existing, course-anchored evidence row (evidenceId=${existing.id}, courseId=${existing.courseId}, localDate=${existing.localDate})`);
-    throw Errors.internal();
+    // ⛔ FIX (P3d gate round 3, S2, MEDIUM): "batch phase A commits, then
+    // phase B (finalizeScoringForKey) fails or never runs → evidence is
+    // accepted with no app.play. A later retry through the LIVE endpoint
+    // returns 500 because the non-batch buildReplayResult finds no play
+    // row." Confirmed: this exact branch (`!play`, `batchMode` false) is
+    // reached for real whenever a batch's own phase 2a (per-item insert,
+    // `deferScoring: true`) has committed but its phase 2b
+    // (`finalizeScoringForKey`, batch-handler.ts's own SEPARATE
+    // `withOwnershipBatch` call) failed or never ran — the evidence rows
+    // are durably in `app.evidence` with no `app.play` yet, and the PRIOR
+    // version of this branch treated that as "unreachable... genuine data
+    // inconsistency" and threw a 500, even though it is exactly the state
+    // an interrupted batch legitimately leaves behind and a live retry of
+    // the SAME evidence is the normal, expected way a client recovers
+    // from it.
+    //
+    // FIX: call the SAME idempotent `finalizeScoringForKey` a batch's own
+    // phase 2b would have called — it reads every already-persisted
+    // evidence row for this (facilityId, courseId, localDate) key via
+    // `listForPlay` (this replay's own row INCLUDED, since it is already
+    // committed) and scores/upserts the play NOW, synchronously, so this
+    // single live call finishes what the batch left undone. Reported as
+    // `accepted`/`replay: true` (not `deferred` — batchMode is false
+    // here, so the caller is a real HTTP response, never
+    // evidence-batch's own backfill step, and expects a real
+    // `EvidenceIntakeSuccess`).
+    console.warn(`buildReplayResult: no app.play row found for an existing, course-anchored evidence row outside batch mode (evidenceId=${existing.id}, courseId=${existing.courseId}, localDate=${existing.localDate}) — finalizing now via finalizeScoringForKey rather than failing closed (P3d gate round 3, S2: this is the expected shape of a live retry after an interrupted batch, not a data inconsistency)`);
+    const finalized = await finalizeScoringForKey(repo, existing.facilityId, existing.courseId, existing.localDate);
+    return { status: "accepted", evidenceId: existing.id, replay: true, play: finalized.play };
   }
   return {
     status: "accepted",
