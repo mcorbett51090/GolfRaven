@@ -24,20 +24,35 @@
 // connector) are explicitly rejected here with a clear error — none of
 // those server paths are built this round (out of scope; see the P3c
 // handback report). Accepted this round: `foreground_checkin`,
-// `foreground_dwell`, `self_report`, `health_workout`, `health_route`,
-// `connect_iq`, `file_import` — every source a player's own device can
-// legitimately originate without another not-yet-built server path.
+// `foreground_dwell`, `self_report`, `health_workout`.
+//
+// ⛔ FIX (P3c gate round 2, item 6: "client claims mint badge credit").
+// `connect_iq`, `health_route` and `file_import` moved from accepted to
+// REJECTED — each one's own client-reported "quality" field
+// (`insidePolygon`/`k4bPassed`, `insideRatio`/`sourceAllowListed`,
+// `matchedRoute`) was taken at FACE VALUE with no server-side matcher or
+// connector verifying it, meaning a client could simply claim
+// `insidePolygon: true`/`matchedRoute: true` and mint real `score_badge`
+// credit for nothing. Until a real server-side matcher
+// (`@golfraven/matching`, wired against the raw route/points the same way
+// `Repo#catalog.matchFix` already does for a single fix) or the P8
+// connector exists, these three sources have no honest server-derivable
+// signal at all and are rejected the same way staff_presence/booking/
+// receipt_green_fee/arccos/garmin are — recorded as a deferral in
+// docs/security/p3-money-path-requirements.md.
 
 const ID_LIKE_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const BASE64URL_UNPADDED_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 // Same plausibility floor/ceiling as packages/rules' own PlausibleEpochMsSchema
 // (parse-evidence.ts) — 2020-01-01 to 2100-01-01 (exclusive).
 const MIN_EPOCH_MS = Date.UTC(2020, 0, 1);
 const MAX_EPOCH_MS = Date.UTC(2100, 0, 1);
 
-export const REJECTED_SOURCES = new Set(["staff_presence", "booking", "receipt_green_fee", "arccos", "garmin", "ghin"]);
-export const ACCEPTED_SOURCES = new Set(["foreground_checkin", "foreground_dwell", "self_report", "health_workout", "health_route", "connect_iq", "file_import"]);
+export const REJECTED_SOURCES = new Set(["staff_presence", "booking", "receipt_green_fee", "arccos", "garmin", "ghin", "connect_iq", "health_route", "file_import"]);
+export const ACCEPTED_SOURCES = new Set(["foreground_checkin", "foreground_dwell", "self_report", "health_workout"]);
 
 export interface ParseIssue {
   path: string;
@@ -53,6 +68,9 @@ function isRealCalendarDate(y: number, m: number, d: number): boolean {
 
 function isIdLike(v: unknown): v is string {
   return typeof v === "string" && ID_LIKE_RE.test(v);
+}
+function isUuid(v: unknown): v is string {
+  return typeof v === "string" && UUID_RE.test(v);
 }
 function isBase64UrlId(v: unknown): v is string {
   return typeof v === "string" && BASE64URL_UNPADDED_RE.test(v);
@@ -138,21 +156,31 @@ interface CommonFields {
   courseId?: string;
   localDate: string;
   catalogVersion: number;
-  manifestSig?: { kid: string; signatureB64Url: string };
+  // should-fix (P3c gate round 2): "sign a domain-tagged payload that
+  // binds the version and the manifest sha256" — manifestSha256 is the
+  // claimed content hash the signature is verified to also cover
+  // (handler.ts builds the exact domain-tagged string), not merely the
+  // bare version integer.
+  manifestSig?: { kid: string; signatureB64Url: string; manifestSha256: string };
 }
 
 export type EvidenceSubmission =
   | (CommonFields & { source: "foreground_checkin"; fix: FixSubmission })
-  | (CommonFields & { source: "foreground_dwell"; checkinFix: FixSubmission; checkoutFix: FixSubmission; apartMinutes: number; holes: 9 | 18 })
+  // ⛔ FIX (P3c gate round 2, item 6): `holes` is no longer client
+  // -submitted at all — evidence/handler.ts derives it from
+  // `Repo#catalog.courseHoleCount`, never the client's own claim.
+  | (CommonFields & { source: "foreground_dwell"; checkinFix: FixSubmission; checkoutFix: FixSubmission; apartMinutes: number })
   | (CommonFields & { source: "self_report" })
-  | (CommonFields & { source: "health_workout" })
-  | (CommonFields & { source: "health_route"; sourceAllowListed: boolean; insideRatio: number; simulated: boolean; startedAt?: number })
-  | (CommonFields & { source: "connect_iq"; variant: "route" | "checkin"; k4bPassed: boolean; insidePolygon: boolean; durationMinutes: number; simulated: boolean })
-  | (CommonFields & { source: "file_import"; matchedRoute: boolean; startedAt?: number });
+  | (CommonFields & { source: "health_workout" });
 
 function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): CommonFields | null {
   const ok0 = issues.length;
-  if (!isIdLike(raw.deviceId)) issues.push({ path: "deviceId", message: "must be an id-like string" });
+  // ⛔ FIX (P3c gate round 2, item 7): "validate deviceId as a UUID; a
+  // non-UUID currently returns 500." app.device.id is a real Postgres
+  // `uuid` column — a non-UUID string passed as a query parameter used
+  // to reach the driver before failing, surfacing as an unhandled 500
+  // instead of a clean 400 at the validation layer.
+  if (!isUuid(raw.deviceId)) issues.push({ path: "deviceId", message: "must be a UUID" });
   if (!isIdLike(raw.facilityId)) issues.push({ path: "facilityId", message: "must be an id-like string" });
   if (raw.courseId !== undefined && !isIdLike(raw.courseId)) issues.push({ path: "courseId", message: "must be an id-like string when present" });
   if (raw.courseId === null) issues.push({ path: "courseId", message: 'must be OMITTED, not null, when absent (security doc §2: "a SQL NULL maps to an OMITTED JSON field, never a literal null")' });
@@ -161,8 +189,15 @@ function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): Common
     issues.push({ path: "catalogVersion", message: "must be a non-negative integer" });
   }
   if (raw.manifestSig !== undefined) {
-    if (!isPlainObject(raw.manifestSig) || !isIdLike(raw.manifestSig.kid) || !isBase64UrlId(raw.manifestSig.signatureB64Url)) {
-      issues.push({ path: "manifestSig", message: "must be {kid: id-like string, signatureB64Url: base64url string} when present" });
+    const sig = raw.manifestSig as Record<string, unknown>;
+    if (
+      !isPlainObject(raw.manifestSig) ||
+      !isIdLike(sig.kid) ||
+      !isBase64UrlId(sig.signatureB64Url) ||
+      typeof sig.manifestSha256 !== "string" ||
+      !SHA256_HEX_RE.test(sig.manifestSha256)
+    ) {
+      issues.push({ path: "manifestSig", message: "must be {kid: id-like string, signatureB64Url: base64url string, manifestSha256: 64-char lowercase hex} when present" });
     }
   }
   if (issues.length !== ok0) return null;
@@ -172,7 +207,7 @@ function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): Common
     courseId: raw.courseId as string | undefined,
     localDate: raw.localDate as string,
     catalogVersion: raw.catalogVersion as number,
-    manifestSig: raw.manifestSig as { kid: string; signatureB64Url: string } | undefined,
+    manifestSig: raw.manifestSig as { kid: string; signatureB64Url: string; manifestSha256: string } | undefined,
   };
 }
 
@@ -206,18 +241,20 @@ export function parseEvidenceSubmission(raw: unknown): ParseResult<EvidenceSubmi
       return { ok: true, value: { ...common, source: "foreground_checkin", fix: fix.value } };
     }
     case "foreground_dwell": {
-      const extraKeys = Object.keys(raw).filter((k) => !COMMON_KEYS.has(k) && !["checkinFix", "checkoutFix", "apartMinutes", "holes"].includes(k));
+      // ⛔ FIX (P3c gate round 2, item 6): `holes` is no longer a
+      // client-submitted field at all — see this file's own note above
+      // EvidenceSubmission's foreground_dwell variant.
+      const extraKeys = Object.keys(raw).filter((k) => !COMMON_KEYS.has(k) && !["checkinFix", "checkoutFix", "apartMinutes"].includes(k));
       for (const k of extraKeys) issues.push({ path: k, message: "unrecognized key" });
       const checkinFix = parseFix(raw.checkinFix, "checkinFix");
       const checkoutFix = parseFix(raw.checkoutFix, "checkoutFix");
       if (!checkinFix.ok) issues.push(...checkinFix.issues);
       if (!checkoutFix.ok) issues.push(...checkoutFix.issues);
       if (!isFiniteNumber(raw.apartMinutes) || raw.apartMinutes < 0) issues.push({ path: "apartMinutes", message: "must be a finite number >= 0" });
-      if (raw.holes !== 9 && raw.holes !== 18) issues.push({ path: "holes", message: "must be 9 or 18" });
       if (issues.length > 0 || !common || !checkinFix.ok || !checkoutFix.ok) return { ok: false, issues };
       return {
         ok: true,
-        value: { ...common, source: "foreground_dwell", checkinFix: checkinFix.value, checkoutFix: checkoutFix.value, apartMinutes: raw.apartMinutes as number, holes: raw.holes as 9 | 18 },
+        value: { ...common, source: "foreground_dwell", checkinFix: checkinFix.value, checkoutFix: checkoutFix.value, apartMinutes: raw.apartMinutes as number },
       };
     }
     case "self_report":
@@ -226,41 +263,6 @@ export function parseEvidenceSubmission(raw: unknown): ParseResult<EvidenceSubmi
       for (const k of extraKeys) issues.push({ path: k, message: "unrecognized key" });
       if (issues.length > 0 || !common) return { ok: false, issues };
       return { ok: true, value: { ...common, source } as EvidenceSubmission };
-    }
-    case "health_route": {
-      const extraKeys = Object.keys(raw).filter((k) => !COMMON_KEYS.has(k) && !["sourceAllowListed", "insideRatio", "simulated", "startedAt"].includes(k));
-      for (const k of extraKeys) issues.push({ path: k, message: "unrecognized key" });
-      if (!isBoolean(raw.sourceAllowListed)) issues.push({ path: "sourceAllowListed", message: "must be a boolean" });
-      if (!isFiniteNumber(raw.insideRatio) || raw.insideRatio < 0 || raw.insideRatio > 1) issues.push({ path: "insideRatio", message: "must be a finite number in [0, 1]" });
-      if (!isBoolean(raw.simulated)) issues.push({ path: "simulated", message: "must be a boolean" });
-      if (raw.startedAt !== undefined && !isPlausibleEpochMs(raw.startedAt)) issues.push({ path: "startedAt", message: "must be a plausible epoch-ms timestamp when present" });
-      if (issues.length > 0 || !common) return { ok: false, issues };
-      return {
-        ok: true,
-        value: { ...common, source: "health_route", sourceAllowListed: raw.sourceAllowListed as boolean, insideRatio: raw.insideRatio as number, simulated: raw.simulated as boolean, startedAt: raw.startedAt as number | undefined },
-      };
-    }
-    case "connect_iq": {
-      const extraKeys = Object.keys(raw).filter((k) => !COMMON_KEYS.has(k) && !["variant", "k4bPassed", "insidePolygon", "durationMinutes", "simulated"].includes(k));
-      for (const k of extraKeys) issues.push({ path: k, message: "unrecognized key" });
-      if (raw.variant !== "route" && raw.variant !== "checkin") issues.push({ path: "variant", message: 'must be "route" or "checkin"' });
-      if (!isBoolean(raw.k4bPassed)) issues.push({ path: "k4bPassed", message: "must be a boolean" });
-      if (!isBoolean(raw.insidePolygon)) issues.push({ path: "insidePolygon", message: "must be a boolean" });
-      if (!isFiniteNumber(raw.durationMinutes) || raw.durationMinutes < 0) issues.push({ path: "durationMinutes", message: "must be a finite number >= 0" });
-      if (!isBoolean(raw.simulated)) issues.push({ path: "simulated", message: "must be a boolean" });
-      if (issues.length > 0 || !common) return { ok: false, issues };
-      return {
-        ok: true,
-        value: { ...common, source: "connect_iq", variant: raw.variant as "route" | "checkin", k4bPassed: raw.k4bPassed as boolean, insidePolygon: raw.insidePolygon as boolean, durationMinutes: raw.durationMinutes as number, simulated: raw.simulated as boolean },
-      };
-    }
-    case "file_import": {
-      const extraKeys = Object.keys(raw).filter((k) => !COMMON_KEYS.has(k) && !["matchedRoute", "startedAt"].includes(k));
-      for (const k of extraKeys) issues.push({ path: k, message: "unrecognized key" });
-      if (!isBoolean(raw.matchedRoute)) issues.push({ path: "matchedRoute", message: "must be a boolean" });
-      if (raw.startedAt !== undefined && !isPlausibleEpochMs(raw.startedAt)) issues.push({ path: "startedAt", message: "must be a plausible epoch-ms timestamp when present" });
-      if (issues.length > 0 || !common) return { ok: false, issues };
-      return { ok: true, value: { ...common, source: "file_import", matchedRoute: raw.matchedRoute as boolean, startedAt: raw.startedAt as number | undefined } };
     }
     default:
       return { ok: false, issues: [{ path: "source", message: `unrecognized source "${source}"` }] };

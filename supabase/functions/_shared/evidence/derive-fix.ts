@@ -6,30 +6,25 @@
 // expects (score-play.ts's own TRUST TABLE doc), by looking up:
 //
 //   - `verificationTier` / `geometryKind` / `insideBuffer` — REAL PostGIS
-//     containment (Repo#matchFix; not a stub — see types.ts's own doc),
-//     when the evidence row carries a `courseId`. Facility-level evidence
-//     (no `courseId` — the H3 residual rule, always allowed) has no
-//     course geometry to check against, so these default conservatively
-//     (unverified/radius/false — never a co-signal, never inflates a
-//     score).
+//     containment (Repo#catalog.matchFix; not a stub — see types.ts's
+//     own doc), when the evidence row carries a `courseId`. Facility
+//     -level evidence (no `courseId` — the H3 residual rule, always
+//     allowed) has no course geometry to check against, so these default
+//     conservatively (unverified/radius/false — never a co-signal, never
+//     inflates a score).
 //   - `challenge` / `token` — from the checkin-token session the fix ties
-//     itself to via `checkinTokenJti` (Repo#getCheckinToken), never from
-//     anything the client claims directly. No token reference at all ->
-//     `challenge: "none"`, `token: {present: false, ...}` (G3-08's own
-//     "no token" grading rule, applied the same way checkin-token itself
-//     applies it — see checkin/token-handler.ts).
+//     itself to via `checkinTokenJti`
+//     (`Repo#checkinToken.consumeForFix` — evidence/handler.ts calls this
+//     BEFORE calling `deriveFix`, since consuming is a write with its own
+//     ownership/window/device checks; this module just formats whatever
+//     that call already decided). No token reference at all, or the
+//     consume call itself returning null (already consumed, expired,
+//     wrong device, or outside the challenge window — P3c gate round 2,
+//     item 4) -> `challenge: "none"`, `token: {present: false, ...}`
+//     (G3-08's own "no token" grading rule, applied the same way
+//     checkin-token itself applies it — see checkin/token-handler.ts).
 //
 // Pure: takes everything through parameters, no I/O of its own.
-
-import type { FixSubmission } from "./request-shape.ts";
-
-export interface CheckinTokenLookup {
-  userId: string;
-  facilityId: string | null;
-  attestationGrade: "attested" | "unattestable" | "failed";
-  challengeKind: "live" | "prefetched";
-  expiresAt: string; // ISO
-}
 
 export interface MatchResult {
   verificationTier: "unverified" | "listed-verified" | "play-verified";
@@ -38,6 +33,11 @@ export interface MatchResult {
 }
 
 const DEFAULT_MATCH: MatchResult = { verificationTier: "unverified", geometryKind: "radius", insideBuffer: false };
+
+export interface ConsumedToken {
+  attestationGrade: "attested" | "unattestable" | "failed";
+  challengeKind: "live" | "prefetched";
+}
 
 export interface DerivedFix {
   fixId: string;
@@ -55,8 +55,17 @@ export interface DerivedFix {
   localDate: string;
 }
 
+export interface FixQuality {
+  fixId: string;
+  accuracyMeters: number;
+  capturedAt: number;
+  simulated: boolean;
+  foreground: boolean;
+  fromApp: boolean;
+}
+
 export interface DeriveFixInput {
-  fix: FixSubmission;
+  fix: FixQuality;
   /** The evidence row's own (already-resolved) facility id — every fix in
    * a submission is anchored to the evidence row's facility, never a
    * per-fix client claim. */
@@ -69,20 +78,16 @@ export interface DeriveFixInput {
    * facility-level evidence, always allowed) OR the course id doesn't
    * resolve. */
   match: MatchResult | null;
-  /** null when `fix.checkinTokenJti` was absent, not found, expired, or
-   * belongs to a DIFFERENT actor/facility than this submission (every one
-   * of those fails closed to `challenge: "none"`, never a co-signal —
-   * this module never rejects the submission outright over a stale
-   * token, since a fix that simply isn't a co-signal is a normal, scoreable
-   * (lower-weight) shape, not a structural error). */
-  tokenLookup: CheckinTokenLookup | null;
+  /** null when the fix carried no `checkinTokenJti`, or the atomic
+   * consume call already rejected it (see this module's own header). */
+  consumedToken: ConsumedToken | null;
 }
 
 export function deriveFix(input: DeriveFixInput): DerivedFix {
   const match = input.match ?? DEFAULT_MATCH;
-  const challenge: "live" | "prefetched" | "none" = input.tokenLookup ? input.tokenLookup.challengeKind : "none";
-  const token: DerivedFix["token"] = input.tokenLookup
-    ? { present: true, grade: input.tokenLookup.attestationGrade }
+  const challenge: "live" | "prefetched" | "none" = input.consumedToken ? input.consumedToken.challengeKind : "none";
+  const token: DerivedFix["token"] = input.consumedToken
+    ? { present: true, grade: input.consumedToken.attestationGrade }
     : { present: false, hardwareSupportsAttestation: false };
 
   return {

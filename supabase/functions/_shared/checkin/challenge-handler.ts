@@ -10,10 +10,17 @@
 // unused ones at once.
 //
 // The nonce itself: a fresh cryptographically random value, hashed
-// (SHA-256) before it is ever handed to `Repo#insertChallenge` — only the
-// hash is ever persisted (§4.4: "the table only its hash"), matching
+// (SHA-256) before it is ever handed to `Repo#challenge.insert` — only
+// the hash is ever persisted (§4.4: "the table only its hash"), matching
 // `course_qr_token`'s own pattern. The RAW nonce is returned to the
 // caller once, in the response, and never stored server-side at all.
+//
+// P3c gate round 2 fixes: device cap (item 7) checked before any device
+// row is created; the prefetch-cap count-then-insert race (item 8) is
+// closed inside `Repo#challenge.countOpenPrefetched` itself (an advisory
+// lock, privileged.ts); `kind` ("live"/"prefetched") is now a real
+// column (should-fix), passed straight through rather than inferred
+// downstream from TTL width.
 
 import type { Repo } from "../types.ts";
 import { Errors } from "../http.ts";
@@ -23,6 +30,7 @@ const MAX_OPEN_PREFETCHED_PER_DEVICE = 10;
 const LIVE_TTL_SECONDS = 120; // matches the rotating-course-QR ≤120s window's order of magnitude for a live in-session challenge
 const PREFETCH_TTL_SECONDS = 24 * 60 * 60;
 const MAX_PREFETCH_COUNT = 10;
+const MAX_DEVICES_PER_USER = 20; // same cap as evidence/handler.ts — one accepted-follow-up constant, not yet centralized
 
 export interface ChallengeRequest {
   deviceId: string;
@@ -52,25 +60,34 @@ function toBase64Url(bytes: Uint8Array): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export async function handleChallengeRequest(actorUid: string, body: ChallengeRequest, repo: Repo, randomBytes: RandomBytesFn, digestHex: DigestHexFn): Promise<IssuedChallenge[]> {
-  const rateLimit = await repo.hitRateLimit(`checkin-challenge:user:${actorUid}`, 3600, RATE_LIMIT_PER_USER_HOUR);
+export async function handleChallengeRequest(body: ChallengeRequest, repo: Repo, randomBytes: RandomBytesFn, digestHex: DigestHexFn): Promise<IssuedChallenge[]> {
+  // Rate-limit BEFORE any write (P3c gate round 2, item 7's own
+  // reasoning, applied here too).
+  const rateLimit = await repo.rateLimit.hit(`checkin-challenge:user`, 3600, RATE_LIMIT_PER_USER_HOUR);
   if (!rateLimit.ok) throw Errors.tooManyRequests("checkin-challenge rate limit exceeded", rateLimit.retryAfterSeconds);
 
-  const device = await repo.ensureOwnDevice(actorUid, body.deviceId, null);
+  const knownDevice = await repo.device.findOwn(body.deviceId);
+  if (!knownDevice) {
+    const existingDeviceCount = await repo.device.countForUser();
+    if (existingDeviceCount >= MAX_DEVICES_PER_USER) {
+      throw Errors.unprocessable("device_limit_exceeded", `this account already has ${MAX_DEVICES_PER_USER} devices on record`);
+    }
+  }
+  const device = knownDevice ?? (await repo.device.ensureOwn(body.deviceId, null));
   const prefetchCount = body.prefetchCount ?? 0;
 
   if (prefetchCount === 0) {
     const nonce = randomBytes(32);
     const nonceHash = await digestHex(nonce);
     const expiresAt = new Date(repo.now().getTime() + LIVE_TTL_SECONDS * 1000).toISOString();
-    const inserted = await repo.insertChallenge({ userId: actorUid, staffUserId: null, deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, expiresAt });
-    return [{ id: inserted.id, nonce: toBase64Url(nonce), expiresAt, kind: "live" }];
+    const inserted = await repo.challenge.insert({ staffUserId: null, deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, kind: "live", expiresAt });
+    return [{ id: inserted.id, nonce: toBase64Url(nonce), expiresAt: inserted.expiresAt, kind: "live" }];
   }
 
   if (prefetchCount < 0 || prefetchCount > MAX_PREFETCH_COUNT) {
     throw Errors.badRequest(`prefetchCount must be between 1 and ${MAX_PREFETCH_COUNT}`);
   }
-  const openCount = await repo.countOpenPrefetchedChallenges(device.id);
+  const openCount = await repo.challenge.countOpenPrefetched(device.id);
   const room = MAX_OPEN_PREFETCHED_PER_DEVICE - openCount;
   if (room <= 0) {
     throw Errors.tooManyRequests(`device already holds ${MAX_OPEN_PREFETCHED_PER_DEVICE} unused prefetched challenges`);
@@ -81,8 +98,8 @@ export async function handleChallengeRequest(actorUid: string, body: ChallengeRe
   for (let i = 0; i < toIssue; i++) {
     const nonce = randomBytes(32);
     const nonceHash = await digestHex(nonce);
-    const inserted = await repo.insertChallenge({ userId: actorUid, staffUserId: null, deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, expiresAt });
-    issued.push({ id: inserted.id, nonce: toBase64Url(nonce), expiresAt, kind: "prefetched" });
+    const inserted = await repo.challenge.insert({ staffUserId: null, deviceId: device.id, facilityId: body.facilityId ?? null, nonceHash, kind: "prefetched", expiresAt });
+    issued.push({ id: inserted.id, nonce: toBase64Url(nonce), expiresAt: inserted.expiresAt, kind: "prefetched" });
   }
   return issued;
 }

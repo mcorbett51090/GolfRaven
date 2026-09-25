@@ -69,13 +69,22 @@ export const Errors = {
   internal: (message = "internal error") => new HttpError(500, "internal_error", message),
 };
 
-/** Reads a `Request` body, enforcing MAX_BODY_BYTES on both the declared
- * `Content-Length` (fast path — never reads a body known up front to be
- * too large) and the actual decoded byte length (the real enforcement;
- * `Content-Length` is client-supplied and not trustworthy alone). Throws
- * `HttpError` (413/415/400) rather than returning a discriminated result —
- * every caller in this codebase wants exactly one of "parsed JSON value"
- * or "the request is rejected", never a third state to forget to check. */
+/** Reads a `Request` body, enforcing MAX_BODY_BYTES with a RUNNING byte
+ * count over the stream itself (P3c gate round 2, item 10) — the prior
+ * version called `req.arrayBuffer()` unconditionally, which buffers the
+ * ENTIRE body in memory before the size check ever runs whenever
+ * `Content-Length` is absent or understated (a client can omit or lie
+ * about it; the size check must not depend on it). This version reads
+ * `req.body` chunk by chunk, cancels the stream and throws the instant
+ * the running total exceeds the cap — a body ten times the cap is never
+ * more than ~`MAX_BODY_BYTES` resident at once. `Content-Length` is still
+ * checked first as a cheap fast-reject when present (never even opens
+ * the stream for an up-front-oversized body), but is never trusted
+ * alone. Throws `HttpError` (413/415/400) rather than returning a
+ * discriminated result — every caller in this codebase wants exactly one
+ * of "parsed JSON value" or "the request is rejected", never a third
+ * state to forget to check. Invalid UTF-8 -> 400 (P3c gate round 2, item
+ * 10), not an uncaught exception surfacing as a generic 500. */
 export async function readJsonBody(req: Request): Promise<unknown> {
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) {
@@ -88,11 +97,36 @@ export async function readJsonBody(req: Request): Promise<unknown> {
       throw Errors.payloadTooLarge();
     }
   }
-  const buf = await req.arrayBuffer();
-  if (buf.byteLength > MAX_BODY_BYTES) {
-    throw Errors.payloadTooLarge();
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (req.body) {
+    const reader = req.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw Errors.payloadTooLarge();
+      }
+      chunks.push(value);
+    }
   }
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+
+  const buf = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buf.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    throw Errors.badRequest("request body is not valid UTF-8");
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

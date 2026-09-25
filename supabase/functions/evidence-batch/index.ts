@@ -11,20 +11,32 @@
 // per-item failure (security doc §3: "Catch scorer exceptions per play,
 // so one bad row cannot block a re-score batch") — one bad item in a
 // batch never fails the other 1,999.
+//
+// P3c gate round 2, should-fix "batch limits":
+//   - the 2,000/user/day cap is now counted PER ITEM (one
+//     `repo.rateLimit.hit` call per item, not once per whole request) —
+//     a batch that would cross the daily cap partway through stops
+//     there, with every remaining item reported as rate_limited in the
+//     results array, rather than either silently under-counting (one
+//     hit for the whole request) or aborting the entire batch.
+//   - each item explicitly skips the LIVE 60/h bucket
+//     (`skipLiveRateLimit`) — historic/batch import must not compete
+//     with real-time submissions for the same budget.
+//   - MAX_BATCH_ITEMS_PER_REQUEST is lowered from 2000 to 100: chosen to
+//     fit a reasonable wall-clock budget given each item runs roughly a
+//     dozen sequential round trips inside ONE transaction (P3c gate
+//     round 2, item 2) — 2,000 items in one request/transaction would
+//     both hold that transaction open for an unreasonable time and make
+//     one bad item's rollback undo far more work than necessary. A
+//     client importing a full 2,000-item/day history sends it across
+//     multiple requests.
 
 import { getActorFromRequest, withOwnership } from "../_shared/privileged.ts";
 import { errorResponse, handleRequest, okResponse, readJsonBody, Errors, HttpError, MAX_BODY_BYTES } from "../_shared/http.ts";
 import { handleEvidenceIntake } from "../_shared/evidence/handler.ts";
 import { serve } from "std/http/server";
 
-// build plan §4.7 item 8's "2,000 items/user/day" is a PER-DAY rate limit
-// across every /v1/evidence/batch call that day (enforced below via
-// Repo#hitRateLimit), not a per-request cap — a single request's item
-// count is bounded far more tightly by the 64KB body cap already (P3 AT
-// 8), so MAX_BATCH_ITEMS_PER_REQUEST here is a generous, purely
-// structural sanity bound (never expected to bind before the body cap
-// does).
-const MAX_BATCH_ITEMS_PER_REQUEST = 2000;
+const MAX_BATCH_ITEMS_PER_REQUEST = 100;
 const RATE_LIMIT_PER_USER_DAY = 2000;
 
 serve((req) => handleRequest(async () => {
@@ -44,13 +56,15 @@ serve((req) => handleRequest(async () => {
   }
 
   const results = await withOwnership(actor, async (repo) => {
-    const rateLimit = await repo.hitRateLimit(`evidence-batch:user:${actor.uid}`, 86400, RATE_LIMIT_PER_USER_DAY);
-    if (!rateLimit.ok) throw Errors.tooManyRequests("evidence-batch daily rate limit exceeded", rateLimit.retryAfterSeconds);
-
     const out: Array<{ index: number; ok: boolean; result?: unknown; error?: { code: string; message: string } }> = [];
     for (let i = 0; i < items.length; i++) {
+      const rateLimit = await repo.rateLimit.hit(`evidence-batch:user`, 86400, RATE_LIMIT_PER_USER_DAY);
+      if (!rateLimit.ok) {
+        out.push({ index: i, ok: false, error: { code: "rate_limited", message: "evidence-batch daily rate limit exceeded" } });
+        continue;
+      }
       try {
-        const result = await handleEvidenceIntake(actor.uid, items[i], repo);
+        const result = await handleEvidenceIntake(items[i], repo, { skipLiveRateLimit: true });
         out.push({ index: i, ok: true, result });
       } catch (err) {
         if (err instanceof HttpError) {

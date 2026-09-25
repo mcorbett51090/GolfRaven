@@ -6,6 +6,24 @@
 -- matching the "nobody" client-read convention every other system/session
 -- table in this schema already follows (checkin_challenge, device_reward_
 -- ledger, etc. — build plan §4.4).
+--
+-- P3c gate round 2 (dbe1aaa): four schema fixes folded into this same
+-- file, since 0019 is still unmerged (each cross-referenced to the gate
+-- item it closes):
+--   - app.evidence gets a REAL `local_date date` column (item 1: "a real
+--     column is better than the summary->> form"). Backfill-free: no real
+--     data exists yet (never deployed), and the table is empty at the
+--     point in migration order this ALTER runs.
+--   - app.checkin_challenge gets a REAL `kind` column (should-fix
+--     "Challenge kind... don't infer it from TTL").
+--   - app.checkin_token gets `consumed_at` (item 4: single-use per fix,
+--     not "unlimited use for 15 minutes") and its `challenge_kind` column
+--     is now populated from the challenge's own stored `kind`, not
+--     inferred.
+--   - grants narrowed per the gate's "Conditions on the BYPASSRLS design":
+--     `catalog_signing_key` is SELECT-only for service_role;
+--     `checkin_token` drops the DELETE grant for service_role (the
+--     private_definer path already covers deletion via delete_my_data).
 
 -- ============================================================================
 -- 1. app.catalog_signing_key — build plan §4.8: "Catalog signing key
@@ -32,7 +50,13 @@ ALTER TABLE app.catalog_signing_key ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.catalog_signing_key FORCE ROW LEVEL SECURITY;
 -- No policy for any client role — read only by service_role (bypasses
 -- RLS), matching every other "nobody" table's convention (§4.4).
-GRANT SELECT, INSERT, UPDATE, DELETE ON app.catalog_signing_key TO service_role;
+-- ⛔ FIX (P3c gate round 2, "Conditions on the BYPASSRLS design"):
+-- SELECT-only. No Edge Function code this round ever writes a row here
+-- (the §4.8 key-rotation/registration workflow that would is still out of
+-- scope, per this table's own comment above) — a broader INSERT/UPDATE/
+-- DELETE grant was unused privilege, narrowed to what the runtime path
+-- actually needs.
+GRANT SELECT ON app.catalog_signing_key TO service_role;
 
 -- ============================================================================
 -- 2. app.checkin_token — the `checkin-token` Edge Function's own session
@@ -61,6 +85,13 @@ CREATE TABLE app.checkin_token (
   challenge_kind text NOT NULL CHECK (challenge_kind IN ('live', 'prefetched')),
   issued_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
+  -- ⛔ ADDED (P3c gate round 2, item 4): "consume a token for one evidence
+  -- row or fix, not unlimited use for 15 minutes." NULL = unconsumed;
+  -- Repo#checkinToken.consumeForFix's single atomic UPDATE sets this AND
+  -- checks the challenge-window clamp AND the submitting device, all in
+  -- one WHERE clause (see privileged.ts) — a token is single-use exactly
+  -- like app.checkin_challenge.used_at already is.
+  consumed_at timestamptz,
   UNIQUE (challenge_id)
 );
 CREATE INDEX checkin_token_user_idx ON app.checkin_token (user_id);
@@ -69,7 +100,18 @@ COMMENT ON COLUMN app.checkin_token.attestation_grade IS
 
 ALTER TABLE app.checkin_token ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.checkin_token FORCE ROW LEVEL SECURITY;
-GRANT SELECT, INSERT, UPDATE, DELETE ON app.checkin_token TO service_role;
+-- ⛔ FIX (P3c gate round 2, "Conditions on the BYPASSRLS design"): no
+-- DELETE grant for service_role — deletion of a checkin_token row is
+-- exclusively the private_definer delete_my_data path (granted below) or
+-- the ON DELETE CASCADE from its parent checkin_challenge; the runtime
+-- Edge Function write path never deletes a row here directly. UPDATE is
+-- kept: consumeForFix genuinely needs it (marking consumed_at) as part
+-- of normal, non-deferrable request handling — narrowing this further to
+-- a dedicated SECURITY DEFINER function is recorded in "Accepted
+-- follow-ups" alongside the rest of the BYPASSRLS-narrowing plan, since
+-- it does not change today's actual privilege boundary (service_role
+-- already bypasses RLS and already holds broad grants across `app`).
+GRANT SELECT, INSERT, UPDATE ON app.checkin_token TO service_role;
 
 -- ============================================================================
 -- 3. private_definer wiring for app.checkin_token's generic delete_my_data
@@ -123,3 +165,41 @@ INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, 
   ('app', 'checkin_token', 'user_id', 'delete_row', 'own, short-TTL checkin-session row (0019; same reasoning as checkin_challenge, line 829)');
 DROP POLICY current_user_seed_pii_retention_policy_0019 ON private.pii_retention_policy;
 REVOKE INSERT ON private.pii_retention_policy FROM CURRENT_USER;
+
+-- ============================================================================
+-- 4. app.checkin_challenge gets a REAL `kind` column (should-fix, P3c gate
+--    round 2: "store it as a column; don't infer it from TTL"). Existing
+--    table from 0005_marker_entitlement.sql (gate-passed) — altered here,
+--    not re-created, since 0019 is the current unmerged migration and
+--    this column is part of the SAME checkin-session feature slice.
+-- ============================================================================
+ALTER TABLE app.checkin_challenge ADD COLUMN kind text NOT NULL DEFAULT 'live' CHECK (kind IN ('live', 'prefetched'));
+ALTER TABLE app.checkin_challenge ALTER COLUMN kind DROP DEFAULT;
+COMMENT ON COLUMN app.checkin_challenge.kind IS
+  'Set at issuance by checkin/challenge-handler.ts (live vs. prefetched/offline) — a real column, not inferred from expires_at - issued_at width (P3c gate round 2 should-fix).';
+
+-- ============================================================================
+-- 5. app.evidence gets a REAL `local_date date` column (P3c gate round 2,
+--    item 1: "a real column is better than the summary->> form, and the
+--    coalesce(..., localDate) fail-open must go"). Existing table from
+--    0003_player_core.sql (gate-passed) — altered here for the same
+--    "0019 is the live unmerged migration for this feature" reason as
+--    checkin_challenge.kind above. NOT NULL with no default: the table is
+--    empty at this point in migration order (never deployed, no real
+--    data), so every future INSERT (Repo#evidence.insertIdempotent) must
+--    supply it — there is no silent fallback left to write.
+-- ============================================================================
+ALTER TABLE app.evidence ADD COLUMN local_date date NOT NULL;
+COMMENT ON COLUMN app.evidence.local_date IS
+  'The evidence row''s own facility-local date (server-derived at intake — evidence/handler.ts). A REAL column, not read out of summary jsonb: Repo#evidence.listForPlay (privileged.ts) filters on it directly, closing the P3c gate round 2 "day-2 evidence" bug (a fail-open coalesce(summary->>''localDate'', $queriedDate) made every prior row match every date queried, unboundedly, across every day).';
+CREATE INDEX evidence_user_facility_localdate_idx ON app.evidence (user_id, facility_id, local_date);
+
+-- ============================================================================
+-- 6. app.checkin_challenge / app.checkin_token: `is_uuid_or_null`-shaped
+--    guard N/A — deviceId validation moves to the request-shape layer
+--    (P3c gate round 2, item 7: "validate deviceId as a UUID"); no schema
+--    change needed since app.device.id is already `uuid` (a non-UUID
+--    string was never persisted — it failed at the driver/parameter-typing
+--    layer instead, surfacing as an unhandled 500 the request-shape fix
+--    now catches before any query runs at all).
+-- ============================================================================

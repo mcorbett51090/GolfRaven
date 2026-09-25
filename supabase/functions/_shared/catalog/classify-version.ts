@@ -38,8 +38,11 @@ export interface CatalogVersionClassifyInput {
    * catalog_version.version), or null if none exist yet. */
   currentVersion: number | null;
   /** The app.catalog_version row for `declaredVersion`, if the server has
-   * ever imported that exact version (null otherwise). */
-  declaredVersionRow: { publishedAt: string } | null;
+   * ever imported that exact version (null otherwise). `kidRevoked`:
+   * should-fix (P3c gate round 2, AT 15): "a revoked kid returns 422
+   * catalog_stale" — set by the caller from `Repo#catalog.signingKey`'s
+   * own `revokedAt`. */
+  declaredVersionRow: { publishedAt: string; kidRevoked: boolean } | null;
   now: Date;
   /** §3.3 / §4.4: "published_at drives the 30-day acceptance window." */
   maxAgeDays?: number;
@@ -89,6 +92,14 @@ export function classifyCatalogVersion(input: CatalogVersionClassifyInput): Cata
     // reports "forged" as the default; the caller upgrades it to
     // "current_or_within_window" only after a real verified signature.
     return { kind: "forged" };
+  }
+
+  // AT 15: "a revoked-kid version gets 422 catalog_stale" — checked for
+  // ANY version the server has a row for (current OR within-window),
+  // independent of the normal skew arithmetic: a revoked signing key
+  // means the release is no longer trusted, full stop.
+  if (input.declaredVersionRow?.kidRevoked) {
+    return { kind: "stale" };
   }
 
   if (input.declaredVersion === current) {

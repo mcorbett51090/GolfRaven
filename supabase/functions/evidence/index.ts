@@ -18,6 +18,6 @@ serve((req) => handleRequest(async () => {
   if (!actor) return Errors.unauthorized().toResponse();
 
   const body = await readJsonBody(req);
-  const result = await withOwnership(actor, (repo) => handleEvidenceIntake(actor.uid, body, repo));
+  const result = await withOwnership(actor, (repo) => handleEvidenceIntake(body, repo));
   return okResponse(result.status === "queued_catalog" ? 202 : 200, result);
 }));
