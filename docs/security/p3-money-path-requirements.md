@@ -375,3 +375,26 @@ fail-closed system-wide until the key is restored). There is currently no suppor
 "deregister a key" operation — the registry has no legitimate delete path at all, by
 design (see M1's own migration comment). A real key-retirement workflow, if one is ever
 needed, is a live follow-up, not something to route around this constraint for.
+
+## Accepted follow-ups at the P3a gate PASS (2026-09-25, round 12, `fb0ac15`)
+
+The P3a combined correctness and security gate passed with no blocking findings. The gate accepted
+these open items as follow-ups. None of them is exploitable against the current schema.
+
+1. **Check 7b coverage.** 7b checks only functions a policy directly depends on. It does not
+   follow chains two or more levels deep, it does not look at views referenced from policy
+   subqueries (`pg_get_viewdef`), and it does not look at settings read through dynamic SQL,
+   through `pg_settings`, or through `coalesce(nullif(...,''), '')`. The gate confirmed none of
+   these shapes exists today. To close it: walk `pg_depend` recursively and include view
+   definitions. As a backstop, every new GUC-scoped policy gets a session-reuse pgTAP test in the
+   style of `supabase/tests/matrix/12_guc_session_reuse.sql`.
+2. **Service-role lint residual.** Deliberately obfuscated code inside a single file is out of
+   scope for the lint. The database-side controls are the backstop (see "service-role lint: what
+   it is and isn't").
+3. **Vault key ops rule.** Never delete a Vault key that `private.pseudonym_key_registry` still
+   references. If one is deleted, every `delete_my_data` call fails closed.
+4. **Unverified deploy requirement.** The "pin `--config` at deploy time" requirement is still
+   `[unverified]`. Check it against the real Supabase CLI and edge runtime before the P3 Edge
+   Functions ship.
+5. **`attestation_grade`.** It still defaults to `'unattestable'`. Adding a "never graded" enum
+   value is deferred until the scoring Edge Function exists.
