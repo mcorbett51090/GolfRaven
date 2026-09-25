@@ -4,6 +4,5 @@
   "https://esm.sh/@noble/hashes@2.4.0/sha2.js",
   "https://esm.sh/tz-lookup@6.1.25",
   "https://deno.land/std@0.224.0/http/server.ts",
-  "https://deno.land/x/postgresjs@v3.4.5/mod.js",
-  "https://esm.sh/@supabase/supabase-js@2.45.4"
+  "https://deno.land/x/postgresjs@v3.4.5/mod.js"
 ]

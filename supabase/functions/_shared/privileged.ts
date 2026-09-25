@@ -43,38 +43,48 @@
 // explicitly, not left implicit.
 //
 // [unverified — this session confirmed `deno eval`/`deno check`/`deno
-// test` can import and resolve `postgres` and `@supabase/supabase-js`
-// from these exact pinned URLs (now resolved through
+// test` can import and resolve `postgres` (now via
 // supabase/functions/deno.json's import map — see the should-fix note
-// below) over this session's network proxy, and separately confirmed
-// Deno 2.5.2's `crypto.subtle` supports Ed25519 (catalog/signature.ts) —
-// neither confirms this exact driver version behaves identically inside
-// the REAL hosted Supabase Edge Runtime, which this session has no
-// access to. Flagged per this repo's own accuracy discipline, alongside
-// the pre-existing "pin --config at deploy time" unverified flag in
+// below) and `@supabase/supabase-js` (still a direct pinned URL — see
+// that same note for why) over this session's network proxy, and
+// separately confirmed Deno 2.5.2's `crypto.subtle` supports Ed25519
+// (catalog/signature.ts) — neither confirms this exact driver version
+// behaves identically inside the REAL hosted Supabase Edge Runtime,
+// which this session has no access to. Flagged per this repo's own
+// accuracy discipline, alongside the pre-existing "pin --config at
+// deploy time" unverified flag in
 // docs/security/p3-money-path-requirements.md.]
 //
-// ⛔ FIX (P3c gate round 2, should-fix "supply chain"): these two used to
-// be raw `https://` string-literal imports, invisible to
+// ⛔ FIX, PARTIAL (P3c gate round 2, should-fix "supply chain"): both of
+// these used to be raw `https://` string-literal imports, invisible to
 // tools/service-role-lint's own pinned-target discipline in a way no
 // OTHER third-party dependency in this codebase is (zod/@noble/hashes/
 // tz-lookup all resolve through the reviewed
 // supabase/functions/deno.json import map + pinned-import-targets.json
-// allow-list — see generate-bundle.sh's own header for why). Moved to
-// bare specifiers resolved through that SAME reviewed map: privileged.ts
+// allow-list — see generate-bundle.sh's own header for why). `postgres`
+// is now a bare specifier through that SAME reviewed map — privileged.ts
 // itself stays exempt from the lint's AST content scan (rule (a)/(b)/(c)
 // — it legitimately needs the raw env access / client construction every
-// other file is banned from), but its import GRAPH is no longer a
-// special case — config.ts's own model validates every deno.json's
+// other file is banned from), but this ONE import's GRAPH is no longer a
+// special case: config.ts's own model validates every deno.json's
 // import-map target against pinned-import-targets.json regardless of
-// which file resolves through it (see that module's own header, point
-// 1: "regardless of whether any source file currently imports through
-// it"), so bumping either pin now means touching the SAME two reviewed,
-// diffable files (deno.json + pinned-import-targets.json) every other
-// dependency bump already requires — not an inline URL edit invisible to
-// that discipline.
+// which file resolves through it, so bumping this pin now means touching
+// the SAME two reviewed, diffable files every other dependency bump
+// already requires.
+// `@supabase/supabase-js` could NOT be moved the same way — confirmed
+// this round: tools/service-role-lint/src/config.ts unconditionally bans
+// ANY import-map entry whose value contains "@supabase/" or
+// "supabase-js", regardless of pinning (`upper.includes("@SUPABASE/") ||
+// upper.includes("SUPABASE-JS")`, checked before the pinned-allow-list
+// lookup even runs) — a deliberate, pre-existing hardened rule closing
+// exactly the evasion this move would otherwise open: routing a
+// service-role-shaped client through the import map from a file OTHER
+// than privileged.ts, invisible to the AST's own specifier-text ban.
+// `@supabase/supabase-js` therefore stays a direct pinned URL, same as
+// before this round — the exemption for THIS ONE import is inherent to
+// the lint's own design, not an oversight to "remove".
 import postgres from "postgres";
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 import type {
   Actor,

@@ -5,7 +5,6 @@
     "@noble/hashes/sha2.js": "https://esm.sh/@noble/hashes@2.4.0/sha2.js",
     "tz-lookup": "https://esm.sh/tz-lookup@6.1.25",
     "std/http/server": "https://deno.land/std@0.224.0/http/server.ts",
-    "postgres": "https://deno.land/x/postgresjs@v3.4.5/mod.js",
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4"
+    "postgres": "https://deno.land/x/postgresjs@v3.4.5/mod.js"
   }
 }
