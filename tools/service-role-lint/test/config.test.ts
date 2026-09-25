@@ -71,7 +71,13 @@ describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless
 
 describe("config.ts — allowed top-level keys", () => {
   it("does not flag compilerOptions/lint/fmt/tasks alongside imports", () => {
-    const index = buildConfigIndex(join(FIXTURES_ROOT, "good-control", "somefn"), PINNED, join(FIXTURES_ROOT, "good-control", "somefn"));
+    // P3c: this fixture's own deno.json pins zod@4.6.5 (bumped alongside
+    // the real supabase/functions/deno.json — see index.test.ts's note),
+    // so it needs its OWN pinned set here rather than the module-level
+    // PINNED (still zod@3.23.8, used by unrelated scopes/workspace/jsonc
+    // fixtures elsewhere in this file that were never updated).
+    const pinnedForThisFixture = new Set(["https://esm.sh/zod@4.6.5"]);
+    const index = buildConfigIndex(join(FIXTURES_ROOT, "good-control", "somefn"), pinnedForThisFixture, join(FIXTURES_ROOT, "good-control", "somefn"));
     expect(index.results).toEqual([]);
   });
 });
@@ -217,8 +223,12 @@ describe("config.ts — round 2 (post-P3a re-gate): config-level remaps and lock
 
   it("good control: a deno.lock with ONLY pinned remotes, alongside a valid pinned import, produces zero findings", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-lock-good-"));
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@3.23.8" } }));
-    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "4", remote: { "https://esm.sh/zod@3.23.8": "sha256-aaaa" } }));
+    // P3c: bumped from zod@3.23.8 to zod@4.6.5 — see index.test.ts's own
+    // note on this same bump; this test reads the REAL committed
+    // pinned-import-targets.json (no explicit pinned set passed to
+    // lintDirectory), so it must match whatever's actually pinned there.
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@4.6.5" } }));
+    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "4", remote: { "https://esm.sh/zod@4.6.5": "sha256-aaaa" } }));
     writeFileSync(join(tmpRoot, "index.ts"), `import { z } from "zod"; export const s = z.object({});`);
 
     const results = lintDirectory(tmpRoot, tmpRoot);

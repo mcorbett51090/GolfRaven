@@ -1,0 +1,427 @@
+---
+/**
+ * /fr/claim/ — FR-CA chrome for the claim/correction form (build plan
+ * §5.5: "FR chrome strings ship in P2 ... Entity content is FR only when
+ * real FR editorial exists. Otherwise the EN page carries hreflang='en'
+ * only, and there is no machine-translated filler."). Like `fr/index.astro`,
+ * this is CHROME translation (hand-written labels/copy), never a machine
+ * translation of editorial content — the form has none. Field `name`
+ * attributes stay in English (the Worker/owner-email backend and the
+ * analytics schema are keyed in English on every locale), only the
+ * visible copy is FR.
+ *
+ * Same `?facility=`/`?trail=` prefill contract as `../claim.astro` — see
+ * that file's doc for the static-build hydration note. Also same
+ * `method="post"` (re-gate S-b) and static unconfigured-notice (re-gate
+ * S-a) treatment as `../claim.astro` — see that file's module doc for the
+ * full reasoning.
+ */
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import SecureFormScript from "../../components/SecureFormScript.astro";
+import { FORMS_CONFIG, isFormsConfigured } from "../../config/forms-config.mjs";
+import { loadSiteCatalog } from "../../lib/derive";
+
+/** Every real slug this site mints matches this — see ../claim.astro's
+ * own module doc (gate review nit). Anything else is dropped outright. */
+const SLUG_PATTERN = /^[a-z0-9-]{1,100}$/;
+
+const { usedDemoData } = await loadSiteCatalog();
+
+const rawFacilitySlug = Astro.url.searchParams.get("facility")?.trim() ?? "";
+const rawTrailSlug = Astro.url.searchParams.get("trail")?.trim() ?? "";
+const facilitySlug = SLUG_PATTERN.test(rawFacilitySlug) ? rawFacilitySlug : "";
+const trailSlug = SLUG_PATTERN.test(rawTrailSlug) ? rawTrailSlug : "";
+
+const formsConfigured = isFormsConfigured(FORMS_CONFIG);
+
+const title = "Suggérer une correction | GolfRaven";
+const description =
+  "Suggérez une correction pour un parcours ou un circuit, réclamez-en la gestion, ou proposez un parcours que nous n'avons pas encore répertorié.";
+const SUCCESS_MESSAGE =
+  "Merci — votre message est en route. Nous examinons chaque soumission et mettrons la fiche à jour.";
+// Aucun courriel codé en dur : FORMS_CONFIG.contactEmail est vide tant que
+// le propriétaire n'en fournit pas un (forms-config.mjs, TODO(owner)).
+const UNPROVISIONED_MESSAGE = FORMS_CONFIG.contactEmail
+  ? `Ce formulaire n'est pas encore actif. Pour nous joindre, écrivez à ${FORMS_CONFIG.contactEmail} et nous nous en occuperons.`
+  : "Ce formulaire n'est pas encore actif. Revenez bientôt.";
+const GENERIC_ERROR_MESSAGE = FORMS_CONFIG.contactEmail
+  ? `Une erreur est survenue. Veuillez écrire à ${FORMS_CONFIG.contactEmail}.`
+  : "Une erreur est survenue. Veuillez réessayer plus tard.";
+const VERIFYING_MESSAGE = "Vérification…";
+const SENDING_MESSAGE = "Envoi…";
+const TURNSTILE_TIMEOUT_MESSAGE =
+  "La vérification anti-pourriel de ce formulaire ne s'est pas terminée — sa clé Turnstile n'est " +
+  "probablement pas encore configurée pour ce domaine. " +
+  (FORMS_CONFIG.contactEmail
+    ? `En attendant, écrivez-nous à ${FORMS_CONFIG.contactEmail} et nous nous en occuperons.`
+    : "Revenez bientôt.");
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  path="/fr/claim/"
+  noindex={true}
+  demo={usedDemoData}
+  locale="fr"
+  alternates={[{ locale: "en", path: "/claim/" }]}
+>
+  <main class="wrap page" id="main-content" tabindex="-1">
+    <header class="page__head">
+      <p class="eyebrow">Aidez-nous à garder GolfRaven à jour</p>
+      <h1
+        id="claim-title"
+        data-title-new="Proposer un parcours à GolfRaven"
+        data-title-facility="Réclamer ou corriger cette fiche"
+        data-title-trail="Nous parler de ce circuit"
+      >
+        {
+          facilitySlug
+            ? "Réclamer ou corriger cette fiche"
+            : trailSlug
+              ? "Nous parler de ce circuit"
+              : "Proposer un parcours à GolfRaven"
+        }
+      </h1>
+      <p
+        class="page__lead"
+        id="claim-intro"
+        data-intro-new="Vous connaissez un parcours que nous n'avons pas encore répertorié? Dites-le-nous et nous l'ajouterons — chaque fiche renvoie vers le site du parcours ou une plateforme de réservation."
+        data-intro-facility="Une information périmée, ou vous gérez ce parcours? Envoyez-nous la correction et nous mettrons la fiche à jour."
+        data-intro-trail="Une information périmée sur ce circuit — une étape, un lien, la liste des parcours? Faites-le-nous savoir."
+      >
+        {
+          facilitySlug
+            ? "Une information périmée, ou vous gérez ce parcours? Envoyez-nous la correction et nous mettrons la fiche à jour."
+            : trailSlug
+              ? "Une information périmée sur ce circuit — une étape, un lien, la liste des parcours? Faites-le-nous savoir."
+              : "Vous connaissez un parcours que nous n'avons pas encore répertorié? Dites-le-nous et nous l'ajouterons — chaque fiche renvoie vers le site du parcours ou une plateforme de réservation."
+        }
+      </p>
+      <p class="claim__for" id="claim-for" hidden>
+        Au sujet de : <strong id="claim-for-name"></strong>
+      </p>
+    </header>
+
+    {/* S-a (re-gate, should-fix) : voir claim.astro (version EN) — avis
+        statique, rendu côté serveur, visible avec ou sans JS. */}
+    {!formsConfigured && (
+      <p class="claim__notice" data-unconfigured-notice role="note">
+        {UNPROVISIONED_MESSAGE}
+      </p>
+    )}
+
+    {/*
+      B1 (gate review, blocking) / S-b (re-gate, should-fix) : method="post"
+      EST présent ci-dessous (restauré) — voir claim.astro (version EN)
+      pour l'explication complète. Le <fieldset disabled> ci-dessous reste
+      la VRAIE protection.
+    */}
+    <form
+      class="claim__form"
+      method="post"
+      data-secure-form
+      novalidate
+      data-worker-url={FORMS_CONFIG.workerUrl}
+      data-site-id={FORMS_CONFIG.siteId}
+      data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+      data-contact-email={FORMS_CONFIG.contactEmail}
+      data-locale="fr"
+      data-success-message={SUCCESS_MESSAGE}
+      data-unprovisioned-message={UNPROVISIONED_MESSAGE}
+      data-generic-error-message={GENERIC_ERROR_MESSAGE}
+      data-verifying-message={VERIFYING_MESSAGE}
+      data-sending-message={SENDING_MESSAGE}
+      data-turnstile-timeout-message={TURNSTILE_TIMEOUT_MESSAGE}
+    >
+      {/* B1 : désactivé par défaut — voir claim.astro (version EN). */}
+      <fieldset disabled data-form-fieldset>
+      <input
+        type="hidden"
+        name="request_type"
+        id="request_type"
+        value={facilitySlug || trailSlug ? "correction" : "new-listing"}
+      />
+      <input type="hidden" name="facility" id="facility" value={facilitySlug} />
+      <input type="hidden" name="trail" id="trail" value={trailSlug} />
+
+      <div class="field">
+        <label for="name">Votre nom</label>
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="120" required />
+      </div>
+
+      <div class="field">
+        <label for="email">Votre courriel</label>
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autocomplete="email"
+          maxlength="254"
+          required
+          aria-describedby="email-hint"
+        />
+        <p class="field__hint" id="email-hint">Pour vous répondre si nous avons une question.</p>
+      </div>
+
+      <div class="field">
+        <label for="relationship">Votre lien avec ce parcours</label>
+        <select id="relationship" name="relationship" required>
+          <option value="" disabled selected>Choisissez…</option>
+          <option value="owner">Propriétaire</option>
+          <option value="staff">Employé(e) ou représentant(e)</option>
+          <option value="visitor">Golfeur / visiteur</option>
+          <option value="other">Autre</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label
+          for="message"
+          id="message-label"
+          data-label-new="Parlez-nous du parcours"
+          data-label-fix="Que faut-il corriger ou ajouter?"
+        >
+          {facilitySlug || trailSlug ? "Que faut-il corriger ou ajouter?" : "Parlez-nous du parcours"}
+        </label>
+        <textarea
+          id="message"
+          name="message"
+          rows="6"
+          maxlength="4000"
+          required
+          aria-describedby="message-hint"></textarea>
+        <p
+          class="field__hint"
+          id="message-hint"
+          data-hint-new="Nom, ville et province/État, heures de départ / site web, et tout autre détail utile."
+          data-hint-fix="Dites-nous ce qui est erroné ou manquant — heures, lien de réservation, fiche technique — et nous corrigerons."
+        >
+          {
+            facilitySlug || trailSlug
+              ? "Dites-nous ce qui est erroné ou manquant — heures, lien de réservation, fiche technique — et nous corrigerons."
+              : "Nom, ville et province/État, heures de départ / site web, et tout autre détail utile."
+          }
+        </p>
+      </div>
+
+      <SecureFormScript
+        workerUrl={FORMS_CONFIG.workerUrl}
+        siteId={FORMS_CONFIG.siteId}
+        turnstileSiteKey={FORMS_CONFIG.turnstileSiteKey}
+        contactEmail={FORMS_CONFIG.contactEmail}
+      />
+
+      <button class="btn btn--primary" type="submit">Envoyer</button>
+      </fieldset>
+
+      {/* S-a (re-gate, should-fix) : voir claim.astro (version EN). */}
+      {(formsConfigured || FORMS_CONFIG.contactEmail) && (
+        <p class="claim__fineprint">
+          {formsConfigured && (
+            <>Votre message est transmis directement à notre propre service de formulaire sécurisé (jamais à un fournisseur tiers) et nous parvient par courriel.{" "}</>
+          )}
+          {FORMS_CONFIG.contactEmail && (
+            <>
+              Vous préférez nous écrire directement? Courriel :{" "}
+              <a href={`mailto:${FORMS_CONFIG.contactEmail}`}>{FORMS_CONFIG.contactEmail}</a>.
+            </>
+          )}
+        </p>
+      )}
+    </form>
+  </main>
+</BaseLayout>
+
+{/* A plain (non-`is:inline`) module script — see ../claim.astro's own
+    doc comment on the same script for why: this repo's AT(7) invariant
+    forbids any inline script content but a single JSON-LD block. */}
+<script>
+  (function () {
+    // Gate review nit: mirrors this page's own server-side SLUG_PATTERN.
+    var SLUG_RE = /^[a-z0-9-]{1,100}$/;
+
+    var facility = "";
+    var trail = "";
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var rawFacility = (params.get("facility") || "").trim();
+      var rawTrail = (params.get("trail") || "").trim();
+      facility = SLUG_RE.test(rawFacility) ? rawFacility : "";
+      trail = SLUG_RE.test(rawTrail) ? rawTrail : "";
+    } catch (e) {
+      facility = "";
+      trail = "";
+    }
+
+    var titleEl = document.getElementById("claim-title");
+    var introEl = document.getElementById("claim-intro");
+    var labelEl = document.getElementById("message-label");
+    var hintEl = document.getElementById("message-hint");
+    var forEl = document.getElementById("claim-for");
+    var forNameEl = document.getElementById("claim-for-name");
+    var facilityEl = document.getElementById("facility") as HTMLInputElement | null;
+    var trailEl = document.getElementById("trail") as HTMLInputElement | null;
+    var typeEl = document.getElementById("request_type") as HTMLInputElement | null;
+
+    function apply(el: HTMLElement | null, attr: string) {
+      if (el && el.getAttribute(attr)) el.textContent = el.getAttribute(attr);
+    }
+
+    function humanize(slug: string): string {
+      return slug
+        .replace(/-/g, " ")
+        .replace(/\b\w/g, function (c) {
+          return c.toUpperCase();
+        });
+    }
+
+    if (facility) {
+      if (facilityEl) facilityEl.value = facility;
+      if (typeEl) typeEl.value = "correction";
+      apply(titleEl, "data-title-facility");
+      apply(introEl, "data-intro-facility");
+      apply(labelEl, "data-label-fix");
+      apply(hintEl, "data-hint-fix");
+      if (forNameEl) forNameEl.textContent = humanize(facility);
+      if (forEl) forEl.hidden = false;
+    } else if (trail) {
+      if (trailEl) trailEl.value = trail;
+      if (typeEl) typeEl.value = "correction";
+      apply(titleEl, "data-title-trail");
+      apply(introEl, "data-intro-trail");
+      apply(labelEl, "data-label-fix");
+      apply(hintEl, "data-hint-fix");
+      if (forNameEl) forNameEl.textContent = humanize(trail);
+      if (forEl) forEl.hidden = false;
+    } else {
+      if (typeEl) typeEl.value = "new-listing";
+      apply(titleEl, "data-title-new");
+      apply(introEl, "data-intro-new");
+      apply(labelEl, "data-label-new");
+      apply(hintEl, "data-hint-new");
+    }
+  })();
+</script>
+
+<style>
+  .page {
+    max-width: 46rem;
+  }
+  .page__head {
+    margin-bottom: 1.5rem;
+  }
+  .page__lead {
+    color: var(--ink-soft);
+  }
+  .claim__for {
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-left: 3px solid var(--accent);
+    border-radius: 0.3rem;
+    padding: 0.55em 0.85em;
+    width: fit-content;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .claim__for strong {
+    color: var(--ink);
+  }
+
+  /* S-a (re-gate, should-fix) : voir claim.astro (version EN). */
+  .claim__notice {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    padding: 0.65em 0.85em;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
+  }
+
+  .claim__form {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 0.6rem;
+    padding: clamp(1.25rem, 4vw, 2rem);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  fieldset[data-form-fieldset] {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    display: contents;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .field label {
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  input,
+  select,
+  textarea {
+    font: inherit;
+    font-size: 1rem;
+    color: var(--ink);
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 0.35rem;
+    padding: 0.65em 0.8em;
+    width: 100%;
+  }
+  textarea {
+    resize: vertical;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .field__hint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+  .btn {
+    align-self: flex-start;
+    border: none;
+    border-radius: 0.4rem;
+    padding: 0.65em 1.4em;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn--primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn--primary[aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .btn--primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .claim__fineprint {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+  }
+  .claim__fineprint a {
+    color: var(--accent);
+    font-weight: 600;
+  }
+</style>

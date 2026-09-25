@@ -5,60 +5,956 @@
 // scope check... Writes and privileged reads go only through
 // supabase/functions/_shared/privileged.ts -> withOwnership(actor, op)."
 //
-// TODO(build plan §4.7.1a, lines 1189-1196; out of this stage's scope —
-// task instruction excludes "Edge Functions (Deno)"): the real
-// implementation loads the target row by id, asserts
-// `row.user_id = actor.uid` (or the partner has_facility_scope /
-// has_trail_scope check for partner routes), and only then returns a
-// narrow repository object with named methods over fixed tables (e.g.
-// `evidenceRepo.insertForActor`) — never the raw supabase-js client
-// (A2-10: "It never returns the supabase-js client, because a client
-// cannot be scoped to one operation").
+// THIS FILE is the SOLE allow-listed construction site for a service-role
+// client (tools/service-role-lint rule (a)) and the sole allow-listed
+// place a raw `.from()`/`.rpc()`/Storage call, a Postgres driver import,
+// or `SUPABASE_DB_URL`/`SUPABASE_SERVICE_ROLE_KEY` may appear (rules (b),
+// (c)) — `tools/service-role-lint/src/lint.ts`'s `isAllowedFile` exempts
+// this EXACT path (`supabase/functions/_shared/privileged.ts`) from every
+// one of its checks; see that file's own header comment.
 //
-// ⛔ FAIL-CLOSED (B6, gate round 2): until that real implementation lands,
-// `withOwnership` THROWS — unconditionally, before constructing any
-// client and before calling `op` at all. The previous version constructed
-// a real service-role `createClient(...)` at MODULE LOAD TIME (so simply
-// importing this file, even for its types, created a live privileged
-// client sitting in memory) and then handed that same raw client straight
-// to the caller's callback with no ownership check — i.e. exactly the
-// unscoped, un-narrowed access A2-10 forbids, and worse than doing
-// nothing: a caller could plausibly believe `withOwnership` was already
-// enforcing something. A stub that throws cannot be mistaken for a
-// working authorization boundary, and cannot leak a privileged client
-// before real ownership-checking code replaces this function outright.
+// WHY A DIRECT POSTGRES CONNECTION, NOT supabase-js `.from()`/`.rpc()`:
+// `supabase/config.toml` sets `db.schemas = ["api"]` — PostgREST (which
+// `supabase-js` talks to) exposes ONLY the `api` schema. Every table this
+// round's endpoints read or write (`app.evidence`, `app.play`,
+// `app.checkin_challenge`, `app.catalog_id_ledger`, ...) lives in `app`,
+// and the rate-limit helper this round calls (`private.hit_rate_limit`)
+// lives in `private` — NEITHER is PostgREST-exposed, at any role, so
+// there is no `supabase-js` call shape that could ever reach them. A
+// direct Postgres connection is the only way to reach them at all, which
+// is exactly what the lint's rule (c) anticipates by naming
+// `SUPABASE_DB_URL`/a Postgres driver import as a legitimate,
+// privileged.ts-only shape.
 //
-// This file is the SOLE allow-listed construction site for a service-role
-// client (§4.7.1a rule (a)) and the sole allow-listed place raw
-// `.from()`/`.rpc()`/Storage calls or a Postgres driver / SUPABASE_DB_URL
-// reference may appear (rules (b), (c)) — once the real implementation
-// exists here. It exists in this throwing shape only so
-// `supabase/functions/**/*.ts` fixtures have a real `withOwnership` symbol
-// to import and so `@golfraven/service-role-lint` has a real allow-listed
-// file to exempt.
+// ⛔ P3c gate round 2 ("Conditions on the BYPASSRLS design", required):
+// the connection string's own role is `[unverified]` to be `service_role`
+// itself on the REAL hosted project — it may well be `postgres` (or
+// another admin-ish role), per the gate's own note. This file no longer
+// assumes it: `withOwnership` runs `SET LOCAL ROLE service_role` as the
+// FIRST statement of every transaction and asserts `current_user` came
+// back as `service_role` before building a `Repo` at all — see
+// `withOwnership`'s own body. If the connecting role can't assume
+// `service_role` (no membership, wrong grant), every request fails
+// closed with a clear error instead of silently running as whatever role
+// actually connected. No per-request GUC is used anywhere in this file —
+// every query parameterizes `actor.uid`/ids directly as bound values, so
+// there is nothing here for `SET LOCAL` + `nullif(current_setting(...))`
+// to apply to; noted because the gate asked for this to be stated
+// explicitly, not left implicit.
+//
+// [unverified — this session confirmed `deno eval`/`deno check`/`deno
+// test` can import and resolve `postgres` (now via
+// supabase/functions/deno.json's import map — see the should-fix note
+// below) and `@supabase/supabase-js` (still a direct pinned URL — see
+// that same note for why) over this session's network proxy, and
+// separately confirmed Deno 2.5.2's `crypto.subtle` supports Ed25519
+// (catalog/signature.ts) — neither confirms this exact driver version
+// behaves identically inside the REAL hosted Supabase Edge Runtime,
+// which this session has no access to. Flagged per this repo's own
+// accuracy discipline, alongside the pre-existing "pin --config at
+// deploy time" unverified flag in
+// docs/security/p3-money-path-requirements.md.]
+//
+// ⛔ FIX, PARTIAL (P3c gate round 2, should-fix "supply chain"): both of
+// these used to be raw `https://` string-literal imports, invisible to
+// tools/service-role-lint's own pinned-target discipline in a way no
+// OTHER third-party dependency in this codebase is (zod/@noble/hashes/
+// tz-lookup all resolve through the reviewed
+// supabase/functions/deno.json import map + pinned-import-targets.json
+// allow-list — see generate-bundle.sh's own header for why). `postgres`
+// is now a bare specifier through that SAME reviewed map — privileged.ts
+// itself stays exempt from the lint's AST content scan (rule (a)/(b)/(c)
+// — it legitimately needs the raw env access / client construction every
+// other file is banned from), but this ONE import's GRAPH is no longer a
+// special case: config.ts's own model validates every deno.json's
+// import-map target against pinned-import-targets.json regardless of
+// which file resolves through it, so bumping this pin now means touching
+// the SAME two reviewed, diffable files every other dependency bump
+// already requires.
+// `@supabase/supabase-js` could NOT be moved the same way — confirmed
+// this round: tools/service-role-lint/src/config.ts unconditionally bans
+// ANY import-map entry whose value contains "@supabase/" or
+// "supabase-js", regardless of pinning (`upper.includes("@SUPABASE/") ||
+// upper.includes("SUPABASE-JS")`, checked before the pinned-allow-list
+// lookup even runs) — a deliberate, pre-existing hardened rule closing
+// exactly the evasion this move would otherwise open: routing a
+// service-role-shaped client through the import map from a file OTHER
+// than privileged.ts, invisible to the AST's own specifier-text ban.
+// `@supabase/supabase-js` therefore stays a direct pinned URL, same as
+// before this round — the exemption for THIS ONE import is inherent to
+// the lint's own design, not an oversight to "remove".
+import postgres from "postgres";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import { Errors } from "./http.ts";
 
-export interface Actor {
-  uid: string;
-  role: "authenticated" | "staff" | "manager" | "operator" | "admin";
-}
+import type {
+  Actor,
+  CatalogVersionRow,
+  ChallengeRow,
+  ConsumedCheckinToken,
+  ExistingEvidenceRow,
+  InsertEvidenceResult,
+  LedgerRow,
+  MatchResult,
+  NewEvidenceRow,
+  RateLimitResult,
+  Repo,
+  SigningKeyRow,
+  StoredEvidenceRow,
+  StoredPlayRow,
+  UpsertPlayInput,
+  UpsertPlayResult,
+} from "./types.ts";
+// Type-only: erased at runtime, so this does NOT make ABSOLUTE_ROW_CAP a
+// second source of truth — it re-reads the SAME constant score-play.ts
+// exports, from the SAME vendored file evidence/handler.ts imports (see
+// generate-bundle.sh's own doc on why this vendor tree exists at all).
+// @deno-types="./scoring/scoring-types.d.ts"
+import { ABSOLUTE_ROW_CAP as ABSOLUTE_ROW_CAP_RUNTIME } from "./scoring/vendor/parse-evidence.js";
+
+const ABSOLUTE_ROW_CAP: number = ABSOLUTE_ROW_CAP_RUNTIME as unknown as number;
+
+export type { Actor, Repo } from "./types.ts";
 
 export interface Op<T> {
-  (repo: unknown): Promise<T>;
+  (repo: Repo): Promise<T>;
+}
+
+/** A single Postgres connection (the pool `postgres()` itself manages) —
+ * `TxSql` is what every Repo method actually queries with: the
+ * transaction-scoped tagged-template `sql.begin()` hands its callback,
+ * NEVER the top-level pool (see `withOwnership`'s own doc, P3c gate
+ * round 2 item 2: "every statement autocommits... run each withOwnership
+ * callback in ONE sql.begin()"). Typed as `postgres.TransactionSql`
+ * (the namespace member `postgres`'s own `.d.ts` merges onto the default
+ * export, per `deno.land/x/postgresjs`'s own types) rather than the
+ * looser `ReturnType<typeof postgres>` (P3c gate round 3, blocking
+ * MEDIUM 4) — `TransactionSql` is the one that actually declares
+ * `.savepoint(...)`, which `withOwnershipBatch` below needs typed, not
+ * cast through `any`. */
+type TxSql = postgres.TransactionSql;
+
+let _sql: ReturnType<typeof postgres> | null = null;
+
+function sql(): ReturnType<typeof postgres> {
+  if (_sql) return _sql;
+  const dbUrl = Deno.env.get("SUPABASE_DB_URL");
+  if (!dbUrl) {
+    throw new Error("privileged.ts: SUPABASE_DB_URL is not set in this environment");
+  }
+  _sql = postgres(dbUrl, {
+    max: 5,
+    prepare: true,
+    // ⛔ FIX (P3c gate round 4, blocking HIGH's own fix list, items 3-4):
+    // "Set a connect/acquire timeout... Set idle_in_transaction_session_
+    // timeout." Neither of these is the ROOT fix (see `hitRateLimitForActor`'s
+    // own doc for that) — postgres.js has no acquire-timeout at all (a
+    // request queued waiting for a free pooled connection waits forever;
+    // `connect_timeout` below bounds only the TCP+auth handshake for a
+    // NEW physical connection, not a wait for a pool SLOT), so neither
+    // setting can, by itself, prevent the deadlock this round's own
+    // reviewer reproduced. They are defense in depth: `connect_timeout`
+    // fails fast if the DATABASE itself is unreachable/slow, rather than
+    // hanging silently forever the same way an exhausted pool did;
+    // `idle_in_transaction_session_timeout` bounds how long ANY
+    // connection (this pool's or a future one) can sit idle inside an
+    // open transaction before Postgres itself kills it, a backstop
+    // against a DIFFERENT future bug of the same shape (something else
+    // holding a transaction open indefinitely), not a fix for THIS one.
+    connect_timeout: 10, // seconds
+    connection: {
+      idle_in_transaction_session_timeout: 30_000, // ms
+    },
+  });
+  return _sql;
 }
 
 /**
- * The ONLY sanctioned way an Edge Function would touch a privileged
- * (service-role) operation, once implemented. Until the real
- * ownership/scope check and narrow repository object exist, this THROWS —
- * it never constructs a service-role client, and never calls `op`.
+ * P3c gate round 4, blocking HIGH ("5 concurrent requests deadlock the
+ * pool"): the reviewer's own repro and diagnosis — `Repo#rateLimit.hit`
+ * (round 3's own fix) opened its own `db.begin()` (a SECOND pooled
+ * connection) from INSIDE a `buildRepo` callback that only ever exists
+ * while `withOwnership`/`withOwnershipBatch` ALREADY holds one pooled
+ * connection open for the request's own transaction. With `max: 5`, once
+ * 5 concurrent requests each hold their own outer-transaction connection
+ * and then EACH ALSO calls `repo.rateLimit.hit`, every one of them blocks
+ * forever waiting for a 6th connection that will never free up (nothing
+ * releases a connection until ITS OWN rate-limit hit completes, which
+ * never happens) — a real deadlock, reproduced by the reviewer at 12
+ * concurrent requests (5 sessions stuck `idle in transaction` forever;
+ * postgres.js queues a blocked `db.begin()` with no acquire timeout at
+ * all).
+ *
+ * The fix is ORDERING, not a bigger pool: this function is the ONE
+ * place a rate-limit hit opens its own connection, and it is designed to
+ * be called BEFORE any `withOwnership`/`withOwnershipBatch` call for the
+ * SAME request even STARTS — never from inside a `Repo` method, so no
+ * request can ever hold two connections from this pool at once. `Repo`
+ * itself no longer has a `rateLimit` member at all (removed, not merely
+ * deprecated) — the removal is deliberate and structural: keeping a
+ * `Repo`-level rate-limit method around, even unused, is exactly the
+ * footgun that let a future change re-introduce a call to it from inside
+ * an open transaction. Every current caller (evidence/handler.ts's
+ * `planEvidenceRateLimitChecks`, checkin/challenge-handler.ts, checkin/
+ * token-handler.ts) computes its bucket key(s) from data available
+ * BEFORE any DB access at all (`actor.uid`, plus a client-supplied
+ * `deviceId` — always present, request-shape.ts's `CommonFields` — never
+ * a value that requires resolving something inside the transaction
+ * first), so none of them have a genuine need to rate-limit from inside
+ * a transaction in the first place.
  */
-export function withOwnership<T>(_actor: Actor, _op: Op<T>): Promise<T> {
-  throw new Error(
-    "withOwnership() is not implemented yet (build plan §4.7.1a; out of P3 stage a's scope — " +
-      "Edge Function business logic). It fails closed: no service-role client is constructed " +
-      "and the callback is never invoked. Do not work around this by constructing a client " +
-      "directly — see tools/service-role-lint/test/with-ownership.test.ts (asserts this fails " +
-      "closed) and tools/service-role-lint generally (blocks a direct service-role client " +
-      "outside this file).",
-  );
+export async function hitRateLimitForActor(actor: Actor, bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
+  const db = sql();
+  const scopedBucketKey = `${actor.uid}:${bucketKey}`;
+  // Same reasoning as the round-3 fix this replaces (blocking MEDIUM 3,
+  // "rate-limit hits roll back on 4xx"): its own short transaction, on
+  // the top-level pool, so it commits independently of whatever the
+  // request's own (not-yet-open, with this fix) transaction later does.
+  // `private.hit_rate_limit` itself never raises (0020_rate_limit_no_
+  // raise.sql) — the increment always commits; this code decides
+  // ok/not-ok from the returned count.
+  return db.begin(async (rateTrx: TxSql) => {
+    await rateTrx`set local role service_role`;
+    const check = await rateTrx`select current_user as u`;
+    if (check[0]?.u !== "service_role") {
+      throw new Error(`hitRateLimitForActor: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+    }
+    const rows = await rateTrx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
+    const count = Number(rows[0]?.count ?? 0);
+    if (count > max) {
+      return { ok: false, count, retryAfterSeconds: windowSeconds };
+    }
+    return { ok: true, count };
+  }) as Promise<RateLimitResult>;
+}
+
+/**
+ * Verifies the caller's own JWT against Supabase Auth (`auth.getUser`) —
+ * NEVER a client-sent user id (build plan §4.7: "Roles and facilities
+ * never come from user_metadata"). Uses the ANON key + the caller's own
+ * forwarded `Authorization` header, exactly the "JWT-forwarded client"
+ * §4.7.1a describes for reads — routed through this file only because
+ * `supabase-js` itself may only ever be imported here (rule (a)/(b)).
+ * Returns `null` on any failure (missing header, invalid/expired token,
+ * GoTrue error) — the caller (every Edge Function entrypoint) maps that
+ * to 401, never assumes a role beyond "authenticated".
+ */
+export async function getActorFromRequest(req: Request): Promise<Actor | null> {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) return null;
+  const token = authHeader.slice(authHeader.indexOf(" ") + 1).trim();
+  if (!token) return null;
+
+  const url = Deno.env.get("SUPABASE_URL");
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!url || !anonKey) return null;
+
+  const client = createClient(url, anonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const { data, error } = await client.auth.getUser(token);
+  if (error || !data?.user) return null;
+  return { uid: data.user.id, role: "authenticated" };
+}
+
+/** Deterministic 64-bit advisory-lock key from a namespace + a string id
+ * (P3c gate round 2, item 8: "count-then-insert races... use
+ * pg_advisory_xact_lock inside the transaction"). Namespacing (a small
+ * integer prefix) keeps the prefetch-cap lock, the queued-catalog-cap
+ * lock and the play-rescore lock from ever colliding with each other on
+ * the SAME underlying id even though `hashtext` alone could. */
+function advisoryLockKeys(namespace: number, id: string): [number, number] {
+  // `hashtext` (used by 0017's own dedupe_receipt_fingerprint) needs a
+  // real SQL call; this file computes the SAME kind of 32-bit hash in JS
+  // (FNV-1a) so the lock key can be passed as a literal two-int pair to
+  // `pg_advisory_xact_lock(int, int)` without a round trip just to hash
+  // the string first. Collision-safety requirement here is "extremely
+  // unlikely to serialize two UNRELATED requests together", not
+  // cryptographic — a false-positive collision only costs a little
+  // throughput, never correctness (the lock is advisory, not a
+  // uniqueness constraint).
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  // ⛔ FIX (found via the P3c gate round 2 Deno integration suite):
+  // `pg_advisory_xact_lock(int, int)` takes two SIGNED 32-bit integers
+  // (Postgres `int4`, range -2147483648..2147483647). `h >>> 0` (unsigned
+  // right shift) always produces a NON-NEGATIVE value up to 4294967295 —
+  // roughly HALF of all possible hash outputs exceed int4's max positive
+  // value and fail with "value ... is out of range for type integer" the
+  // instant a real query actually binds it. `h | 0` (bitwise OR with 0)
+  // reinterprets the SAME 32 bits as SIGNED instead — every bit pattern
+  // is preserved (the lock key's own uniqueness/collision behaviour is
+  // identical either way), it just now fits the column type it's
+  // actually bound against. Caught only by running this against a real
+  // Postgres — every unit/fake-repo test exercises the TS-level function
+  // alone and never binds its output to an `int4` SQL parameter.
+  return [namespace, h | 0];
+}
+
+function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): Repo {
+  const uid = actor.uid;
+  return {
+    now(): Date {
+      return new Date();
+    },
+
+    // ⛔ REMOVED (P3c gate round 4, blocking HIGH: "5 concurrent requests
+    // deadlock the pool"). `Repo` no longer has a `rateLimit` member at
+    // all — see `hitRateLimitForActor`'s own doc, above `sql()`, for the
+    // full reasoning and its replacement. A rate-limit hit is now always
+    // made via `hitRateLimitForActor(actor, ...)`, called BEFORE
+    // `withOwnership`/`withOwnershipBatch` even opens, never through a
+    // `Repo` method reachable only from inside an already-open
+    // transaction.
+
+    catalog: {
+      async currentVersion(): Promise<CatalogVersionRow | null> {
+        const rows = await trx`
+          select version, contract_version, sha256, kid, published_at
+          from app.catalog_version order by version desc limit 1`;
+        const r = rows[0];
+        if (!r) return null;
+        return { version: r.version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
+      },
+
+      async versionRow(version: number): Promise<CatalogVersionRow | null> {
+        const rows = await trx`
+          select version, contract_version, sha256, kid, published_at
+          from app.catalog_version where version = ${version}`;
+        const r = rows[0];
+        if (!r) return null;
+        return { version: r.version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
+      },
+
+      async resolveLedgerId(id: string): Promise<LedgerRow | null> {
+        let currentId = id;
+        // Ninth-gate-style bounded closure walk (mirrors packages/catalog's
+        // own resolveMergedId — reimplemented here in SQL since this file
+        // cannot import that package; see the P3c report's bundling note):
+        // at most 10 hops, matching the tombstoned-id-chain being a single
+        // hop in every seeded fixture, with headroom against a cycle.
+        for (let hop = 0; hop < 10; hop++) {
+          const rows = await trx`
+            select id, kind, status, verified_in_version, split_from, tombstoned_at, merged_into, first_catalog_version
+            from app.catalog_id_ledger where id = ${currentId}`;
+          const r = rows[0];
+          if (!r) return null;
+          if (r.merged_into && r.merged_into !== currentId) {
+            currentId = r.merged_into;
+            continue;
+          }
+          return {
+            id: r.id,
+            kind: r.kind,
+            status: r.status,
+            verifiedInVersion: r.verified_in_version,
+            splitFrom: r.split_from,
+            tombstonedAt: r.tombstoned_at ? r.tombstoned_at.toISOString() : null,
+            mergedInto: r.merged_into,
+            firstCatalogVersion: r.first_catalog_version,
+          };
+        }
+        return null;
+      },
+
+      async facilityTz(facilityId: string): Promise<string | null> {
+        const rows = await trx`select tz from app.catalog_facility where id = ${facilityId}`;
+        return rows[0]?.tz ?? null;
+      },
+
+      async courseFacilityId(courseId: string): Promise<string | null> {
+        const rows = await trx`select facility_id from app.catalog_course where id = ${courseId}`;
+        return rows[0]?.facility_id ?? null;
+      },
+
+      async courseHoleCount(courseId: string): Promise<number> {
+        const rows = await trx`select count(*)::int as n from app.catalog_hole where course_id = ${courseId}`;
+        return rows[0]?.n ?? 0;
+      },
+
+      async matchFix(courseId: string, lat: number, lng: number): Promise<MatchResult | null> {
+        const rows = await trx`
+          select
+            verification_status,
+            geometry_kind,
+            case
+              when geometry_kind = 'polygon' and boundary is not null then
+                ST_DWithin(boundary::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, 50)
+              when geometry_kind = 'radius' and radius_center is not null then
+                ST_DWithin(radius_center::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, coalesce(radius_m, 0) + 50)
+              else false
+            end as inside_buffer
+          from app.catalog_course where id = ${courseId}`;
+        const r = rows[0];
+        if (!r) return null;
+        return {
+          verificationTier: r.verification_status as "unverified" | "listed-verified" | "play-verified",
+          geometryKind: (r.geometry_kind ?? "radius") as "polygon" | "radius",
+          insideBuffer: Boolean(r.inside_buffer),
+        };
+      },
+
+      async signingKey(kid: string): Promise<SigningKeyRow | null> {
+        const rows = await trx`select kid, public_key_b64url, revoked_at from app.catalog_signing_key where kid = ${kid}`;
+        const r = rows[0];
+        if (!r) return null;
+        return { kid: r.kid, publicKeyB64Url: r.public_key_b64url, revokedAt: r.revoked_at ? r.revoked_at.toISOString() : null };
+      },
+    },
+
+    evidence: {
+      async countOpenQueued(): Promise<number> {
+        // ⛔ FIX (P3c gate round 2, item 8): "count-then-insert races...
+        // use pg_advisory_xact_lock inside the transaction." Locked by
+        // user (namespace 2) — held until COMMIT, so the INSERT that
+        // follows this count (in the SAME transaction, per
+        // withOwnership's own wrapping) is serialized against any other
+        // concurrent request for the SAME user.
+        const [k1, k2] = advisoryLockKeys(2, uid);
+        await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+        const rows = await trx`select count(*)::int as n from app.evidence where user_id = ${uid} and status = 'queued_catalog'`;
+        return rows[0]?.n ?? 0;
+      },
+
+      async insertIdempotent(row: NewEvidenceRow): Promise<InsertEvidenceResult> {
+        const inserted = await trx`
+          insert into app.evidence (
+            user_id, device_id, source, source_ref, input_hash, course_id, facility_id,
+            started_at, ended_at, local_date, summary, integrity, cosignal,
+            attestation_grade, matcher_version, catalog_version, status
+          ) values (
+            ${uid}, ${row.deviceId}, ${row.source}::app.evidence_source, ${row.sourceRef}, ${row.inputHash}, ${row.courseId}, ${row.facilityId},
+            ${row.startedAt}, ${row.endedAt}, ${row.localDate}, ${trx.json(row.summary as never)}, ${trx.json(row.integrity as never)}, ${trx.json(row.cosignal as never)},
+            ${row.attestationGrade}::app.attestation_grade, ${row.matcherVersion}, ${row.catalogVersion}, ${row.status}::app.evidence_status
+          )
+          on conflict (user_id, source, source_ref) do nothing
+          returning id, status, input_hash`;
+        if (inserted[0]) {
+          return { id: inserted[0].id, wasNew: true, status: inserted[0].status, inputHash: inserted[0].input_hash };
+        }
+        // ⛔ P3c gate round 3, blocking HIGH 1+2's own post-insert
+        // race-safety note: `handler.ts` already calls
+        // `evidence.findExisting` BEFORE this insert is ever attempted, so
+        // reaching the ON CONFLICT branch here means a concurrent request
+        // for the SAME (user, source, source_ref) won the race between
+        // that lookup and this insert — the SAME kind of narrow window
+        // `device.ensureOwn`'s own ON CONFLICT fallback already closes.
+        // handler.ts re-checks `input_hash` against what IT computed
+        // before treating this as its own row.
+        const existing = await trx`select id, status, input_hash from app.evidence where user_id = ${uid} and source = ${row.source}::app.evidence_source and source_ref = ${row.sourceRef}`;
+        if (!existing[0]) throw new Error("insertIdempotent: conflict reported but no existing row found");
+        return { id: existing[0].id, wasNew: false, status: existing[0].status, inputHash: existing[0].input_hash };
+      },
+
+      async findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null> {
+        // ⛔ P3c gate round 3, blocking HIGH 1+2 ("replay handling"):
+        // called by handler.ts BEFORE any side effect (token consumption,
+        // a fraud signal, a rate-limit hit, a device row) — the whole
+        // point of this method existing at all. A `null` result is the
+        // ONLY signal that lets handler.ts proceed into the side-effecting
+        // pipeline; any row here means either an idempotent replay (exact
+        // `input_hash` match) or a rejected conflict (mismatch), decided
+        // entirely by handler.ts from the row this returns.
+        const rows = await trx`
+          select id, status, input_hash, facility_id, course_id, local_date
+          from app.evidence
+          where user_id = ${uid} and source = ${source}::app.evidence_source and source_ref = ${sourceRef}`;
+        const r = rows[0];
+        if (!r) return null;
+        // ⛔ FIX (found via the P3c gate round 3 Deno integration suite):
+        // `local_date` is a Postgres `date` column — postgres.js parses
+        // it back as a JS `Date` object, NOT a string, unlike every OTHER
+        // column this repo already returns as a bare string. `buildReplayResult`
+        // (handler.ts) feeds this straight into `scorePlay`'s own strict
+        // `ctx.playLocalDate` (a zod-validated STRING field, unlike a
+        // per-row Evidence's own `localDate`, which scorePlay accepts
+        // more leniently) — a raw `Date` object fails that validation
+        // outright ("expected string, received Date"), reachable only by
+        // actually running this against a real Postgres column of this
+        // type; no fake/unit test's plain-string fixture data could ever
+        // produce a real `Date` instance to catch it. Normalized to
+        // `YYYY-MM-DD` here, at the repo boundary, same as every other
+        // method's own local_date already IS everywhere else it's read.
+        const localDate = r.local_date instanceof Date ? r.local_date.toISOString().slice(0, 10) : r.local_date;
+        return { id: r.id, status: r.status, inputHash: r.input_hash, facilityId: r.facility_id, courseId: r.course_id, localDate };
+      },
+
+      async listForPlay(facilityId: string, courseId: string, localDate: string): Promise<StoredEvidenceRow[]> {
+        // ⛔ FIX (P3c gate round 2, item 1): filters on the REAL
+        // `local_date` column (0019's own ALTER — see that migration's
+        // own note) instead of a jsonb `summary->>'localDate'` read, and
+        // the old `coalesce(..., $localDate)` fail-open is gone
+        // entirely — a row with no local_date can no longer exist (the
+        // column is NOT NULL), and a row from a DIFFERENT date no longer
+        // silently matches every query. Capped at ABSOLUTE_ROW_CAP
+        // (packages/rules' own raw-query DoS bound, re-read from the
+        // SAME vendored constant evidence/handler.ts uses).
+        const rows = await trx`
+          select id, source, facility_id, course_id, local_date, summary, integrity, cosignal, attestation_grade
+          from app.evidence
+          where user_id = ${uid} and facility_id = ${facilityId}
+            and (course_id = ${courseId} or course_id is null)
+            and local_date = ${localDate}
+            and status = 'accepted'
+          order by created_at asc
+          limit ${ABSOLUTE_ROW_CAP}`;
+        return rows.map((r) => ({
+          id: r.id,
+          source: r.source,
+          facilityId: r.facility_id,
+          courseId: r.course_id,
+          localDate: r.local_date,
+          attestationGrade: r.attestation_grade,
+          summary: r.summary ?? {},
+          integrity: r.integrity ?? {},
+          cosignal: r.cosignal ?? {},
+        }));
+      },
+    },
+
+    play: {
+      async upsertFromScore(input: UpsertPlayInput): Promise<UpsertPlayResult> {
+        // ⛔ should-fix (P3c gate round 2): "concurrent re-score — hold an
+        // advisory lock on (user, course, date) inside the transaction."
+        // Serializes two concurrent scorers of the SAME play (e.g. two
+        // evidence submissions racing) so the ON CONFLICT DO UPDATE below
+        // can never lose an update to a concurrent one under READ
+        // COMMITTED.
+        const [k1, k2] = advisoryLockKeys(1, `${uid}:${input.courseId}:${input.playDate}`);
+        await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+
+        const rows = await trx`
+          insert into app.play (
+            user_id, course_id, facility_id, play_date, course_disambiguated_by,
+            score_badge, score_monetary, hard_signal, presence_signal,
+            money, held_review, policy_version, input_digest, status
+          ) values (
+            ${uid}, ${input.courseId}, ${input.facilityId}, ${input.playDate}, ${input.courseDisambiguatedBy},
+            ${input.scoreBadge}, ${input.scoreMonetary}, ${input.hardSignal}, ${input.presenceSignal},
+            ${input.money}, ${input.heldReview}, ${input.policyVersion}, ${input.inputDigest},
+            -- should-fix (P3c gate round 2): "provisional below the
+            -- threshold instead of always confirmed."
+            -- FIX (found via the Deno integration suite, NOT the
+            -- coordinator's list): a bare CASE expression's own result
+            -- type resolves to plain text, not app.play_status -- unlike
+            -- a plain string literal in a VALUES list (which Postgres
+            -- up-casts to the target column's type automatically via its
+            -- "unknown"-literal coercion), a CASE expression's branches
+            -- resolve to a concrete text type once evaluated, and
+            -- assigning text into an enum column with no explicit cast
+            -- is a hard error ("column is of type app.play_status but
+            -- expression is of type text") -- this INSERT would have
+            -- failed on every real Postgres, always, the very first time
+            -- a fresh play row was ever created; no unit/fake-repo test
+            -- could ever catch it, since the fake Repo never runs real
+            -- SQL at all. (No backticks in this comment block on
+            -- purpose: this whole statement is one JS template literal --
+            -- see this function's own opening line -- and a literal
+            -- backtick character here would terminate it early.)
+            (case when ${input.scoreBadge} >= 0.50 then 'confirmed' else 'provisional' end)::app.play_status
+          )
+          on conflict (user_id, course_id, play_date) do update set
+            score_badge = excluded.score_badge,
+            score_monetary = excluded.score_monetary,
+            hard_signal = excluded.hard_signal,
+            presence_signal = excluded.presence_signal,
+            money = excluded.money,
+            held_review = excluded.held_review,
+            policy_version = excluded.policy_version,
+            input_digest = excluded.input_digest,
+            status = (case when app.play.status = 'disputed' then app.play.status::text
+                          when excluded.score_badge >= 0.50 then 'confirmed' else 'provisional' end)::app.play_status
+          returning id, (xmax = 0) as inserted`;
+        const r = rows[0];
+        const playId = r.id as string;
+        for (const evidenceId of input.evidenceIds) {
+          // FIX (found via the Deno integration suite, item 1's own
+          // "cover the facility-level row with a second course on the
+          // same day" scenario): app.play_evidence carries TWO unique
+          // constraints — its own composite PK (play_id, evidence_id)
+          // AND a NARROWER play_evidence_evidence_id_key UNIQUE
+          // (evidence_id) (0017_money_path_hardening.sql's own M1: "one
+          // evidence row backs at most one play"). The ON CONFLICT target
+          // below used to name only the composite PK — a conflict on the
+          // NARROWER evidence_id-only constraint (a facility-level
+          // residual row that ALREADY backs a DIFFERENT play, from an
+          // earlier evidence intake the same day) is a DIFFERENT arbiter
+          // Postgres will not match against that clause at all, and
+          // raised as a raw, uncaught exception (500) instead of the
+          // graceful no-op this case actually calls for: a row that
+          // already backs one play correctly CANNOT also back a second
+          // one, and this play's own scoring/insert should still
+          // succeed regardless — it just doesn't gain this particular
+          // link. Targeting the narrower, subsuming constraint
+          // (evidence_id alone) covers BOTH cases: an exact replay of an
+          // already-linked (SAME play_id, SAME evidence_id) row, and a
+          // row that now belongs to a DIFFERENT play — both a real
+          // Postgres cluster, never the in-memory fake Repo.
+          await trx`
+            insert into app.play_evidence (play_id, evidence_id, user_id)
+            values (${playId}, ${evidenceId}, ${uid})
+            on conflict (evidence_id) do nothing`;
+        }
+        return { id: playId, created: Boolean(r.inserted) };
+      },
+
+      async getForDate(courseId: string, playDate: string): Promise<StoredPlayRow | null> {
+        // ⛔ ADDED (P3c gate round 4, blocking MEDIUM: "replays skip
+        // every rate limit" — fix item "make the replay path read-only:
+        // return the stored evidence and play outcome without
+        // re-scoring or upserting"). A plain SELECT of the ALREADY
+        // -PERSISTED play row — no scoring, no advisory lock, no write
+        // of any kind. `evidence/handler.ts#buildReplayResult` uses this
+        // instead of re-running `scorePlay` + `upsertFromScore` against
+        // the SAME already-stored rows: the original, genuinely-new
+        // submission that created this evidence row already scored and
+        // upserted its play row, atomically, in the SAME transaction
+        // (P3c gate round 2, item 2) — a later replay of that SAME
+        // content has nothing new to contribute, so reading the
+        // existing row back is not merely cheaper, it's the CORRECT
+        // "no re-score beyond what's idempotent" behaviour, made
+        // literal (no re-score AT ALL) rather than "re-score and get
+        // the same answer."
+        const rows = await trx`
+          select id, score_badge, score_monetary, presence_signal, money, held_review
+          from app.play
+          where user_id = ${uid} and course_id = ${courseId} and play_date = ${playDate}`;
+        const r = rows[0];
+        if (!r) return null;
+        return {
+          id: r.id,
+          scoreBadge: Number(r.score_badge),
+          scoreMonetary: Number(r.score_monetary),
+          presenceSignal: Boolean(r.presence_signal),
+          money: Boolean(r.money),
+          heldReview: Boolean(r.held_review),
+        };
+      },
+    },
+
+    fraudSignal: {
+      async insert(kind: string, detail: Record<string, unknown>): Promise<void> {
+        await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
+      },
+    },
+
+    device: {
+      async findOwn(deviceId: string) {
+        const rows = await trx`select id from app.device where id = ${deviceId} and user_id = ${uid}`;
+        return rows[0] ? { id: rows[0].id } : null;
+      },
+      async ensureOwn(deviceId: string | null, platform: "ios" | "android" | null) {
+        if (deviceId) {
+          const rows = await trx`select id from app.device where id = ${deviceId} and user_id = ${uid}`;
+          if (rows[0]) return { id: rows[0].id };
+        }
+        // FIX (found via the Deno integration suite — a whole-device-
+        // identity bug, not merely a concurrency one). The prior version
+        // NEVER wrote the caller's own `deviceId` into the new row at
+        // all — it inserted with no `id` column, letting
+        // `DEFAULT gen_random_uuid()` mint an UNRELATED random id, and
+        // returned THAT. Since no response anywhere in this round's
+        // endpoints (evidence, evidence-batch, checkin-challenge,
+        // checkin-token) ever echoes the resolved device id back to the
+        // caller, the client's own `deviceId` — the whole reason
+        // `findOwn`/`ensureOwn` exist as a pair, per this file's own
+        // types.ts doc ("looks up a device WITHOUT creating one") — was
+        // simply discarded: every subsequent request with that SAME
+        // `deviceId` would find nothing (it was never actually stored
+        // under that id), mint ANOTHER stray row, forever, defeating
+        // both device-identity continuity and the P3c gate round 2 item
+        // 7 device cap it exists to bound (each retry looks like a brand
+        // NEW device, not the same one). This also silently broke the
+        // per-device cap under real concurrency: two concurrent
+        // first-ever requests for what the CLIENT considers the SAME
+        // device id each got a DIFFERENT real row, so
+        // `countOpenPrefetched`'s own advisory lock (keyed by the real
+        // device id) never even saw them as related — caught by this
+        // suite's own concurrent-prefetch-request test, which expected
+        // ONE shared device and got three unrelated ones instead. The id
+        // is now the caller's own `deviceId` when given (falling back to
+        // a fresh id only when none was supplied at all, never expected
+        // from either real call site — both evidence/handler.ts and
+        // checkin/challenge-handler.ts always pass a real, already
+        // UUID-validated deviceId). `ON CONFLICT (id) DO NOTHING` +
+        // fallback SELECT (the SAME idempotent-insert idiom
+        // `evidence.insertIdempotent` above already uses) closes the
+        // matching race: two concurrent FIRST-ever requests for the
+        // SAME real device id now converge on ONE row, not two.
+        const id = deviceId ?? crypto.randomUUID();
+        const inserted = await trx`
+          insert into app.device (id, user_id, platform) values (${id}, ${uid}, ${platform ?? "ios"})
+          on conflict (id) do nothing
+          returning id`;
+        if (inserted[0]) return { id: inserted[0].id };
+        const existing = await trx`select id from app.device where id = ${id} and user_id = ${uid}`;
+        // ⛔ FIX (P3c gate round 3, should-fix: "ensureOwn on another
+        // user's device id: return 409, not 500"). `id` is either the
+        // caller's OWN deviceId or a freshly minted one, so reaching an ON
+        // CONFLICT with no row found FOR THIS USER means the SAME id
+        // already belongs to a DIFFERENT user's app.device row (a plain
+        // client id collision, or a stale id replayed against the wrong
+        // account — not a server bug). The bare `throw new Error(...)`
+        // this used to be surfaced as an uncaught exception -> a generic
+        // 500 (http.ts#handleRequest's own catch-all), leaking nothing
+        // useful and mis-classifying a client-caused, expected-shape
+        // conflict as a server fault. `Errors.conflict` (409) matches
+        // every other identity-conflict shape this round already uses.
+        if (!existing[0]) {
+          throw Errors.conflict("device_owned_by_other_user", "this deviceId is already registered to a different account");
+        }
+        return { id: existing[0].id };
+      },
+      async countForUser(): Promise<number> {
+        const rows = await trx`select count(*)::int as n from app.device where user_id = ${uid}`;
+        return rows[0]?.n ?? 0;
+      },
+    },
+
+    challenge: {
+      async insert(input) {
+        // FIX (found via the Deno integration suite, item 8's own
+        // concurrent-prefetch-request scenario): the column's own
+        // `issued_at timestamptz NOT NULL DEFAULT now()` (0005) uses
+        // Postgres's `now()`, which is fixed to the ENCLOSING
+        // TRANSACTION's start time — NOT the moment THIS statement
+        // actually runs. Under real concurrency, `countOpenPrefetched`'s
+        // own `pg_advisory_xact_lock` (above) can make a queued
+        // transaction wait a meaningful stretch AFTER it began before
+        // this INSERT ever executes, while `expires_at` (computed by the
+        // CALLER, challenge-handler.ts, from `repo.now()` — real wall-
+        // clock time, read AFTER that same wait) reflects whatever time
+        // it actually is BY THEN. The result: `expires_at` can end up
+        // LATER than `issued_at (txn-start) + 24h`, tripping
+        // checkin_challenge_expires_at_bounded's own CHECK
+        // (0017_money_path_hardening.sql) with a raw, unhandled
+        // constraint-violation exception — never reachable from a fake
+        // Repo, which has no transaction-vs-statement clock distinction
+        // at all. `clock_timestamp()` (Postgres's own actual-wall-clock
+        // function, re-evaluated on every call, unlike `now()`) pins
+        // `issued_at` to the SAME kind of "real time when this statement
+        // ran" `expires_at` was already computed from, keeping the two
+        // internally consistent regardless of how long this specific
+        // transaction waited on the advisory lock beforehand.
+        // ⛔ FIX (P3c gate round 4: "remove the leftover staffUserId
+        // parameter from challenge.insert"). staff_presence/partner
+        // -attest routes are out of this round's scope and were never
+        // built (request-shape.ts's own REJECTED_SOURCES) — every real
+        // call site (checkin/challenge-handler.ts) always passed
+        // `staffUserId: null`, so the parameter was dead weight (and a
+        // structural temptation for a future caller to pass something
+        // else without a real staff-issuance path behind it). Every
+        // challenge this round is issued to the authenticated actor
+        // themselves — `user_id = uid, staff_user_id = NULL` always.
+        // `app.checkin_challenge`'s own CHECK (0005) still requires
+        // exactly one of the two to be set; that invariant is trivially
+        // satisfied by never inserting a staff-issued row at all, not by
+        // this function branching on a parameter nothing supplies.
+        const rows = await trx`
+          insert into app.checkin_challenge (user_id, staff_user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at)
+          values (${uid}, null, ${input.deviceId}, ${input.facilityId}, ${input.nonceHash}, ${input.kind}, clock_timestamp(), ${input.expiresAt})
+          returning id, expires_at`;
+        return { id: rows[0].id, expiresAt: rows[0].expires_at.toISOString() };
+      },
+
+      async countOpenPrefetched(deviceId: string): Promise<number> {
+        // ⛔ FIX (P3c gate round 2, item 8): same advisory-lock fix as
+        // evidence.countOpenQueued above, namespaced separately (3) and
+        // keyed by device so two concurrent prefetch requests for the
+        // SAME device serialize against each other.
+        const [k1, k2] = advisoryLockKeys(3, deviceId);
+        await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+        const rows = await trx`
+          select count(*)::int as n from app.checkin_challenge
+          where device_id = ${deviceId} and user_id = ${uid} and used_at is null and expires_at > now()`;
+        return rows[0]?.n ?? 0;
+      },
+
+      async getOwn(challengeId: string): Promise<ChallengeRow | null> {
+        const rows = await trx`
+          select id, device_id, facility_id, nonce_hash, kind, expires_at, used_at
+          from app.checkin_challenge where id = ${challengeId} and user_id = ${uid}`;
+        const r = rows[0];
+        if (!r) return null;
+        return { id: r.id, deviceId: r.device_id, facilityId: r.facility_id, nonceHash: r.nonce_hash, kind: r.kind, expiresAt: r.expires_at.toISOString(), usedAt: r.used_at ? r.used_at.toISOString() : null };
+      },
+
+      async consume(challengeId: string, nonceHash: string): Promise<boolean> {
+        const rows = await trx`
+          update app.checkin_challenge set used_at = now()
+          where id = ${challengeId} and user_id = ${uid} and nonce_hash = ${nonceHash} and used_at is null
+          returning id`;
+        return rows.length > 0;
+      },
+    },
+
+    checkinToken: {
+      async insert(input) {
+        // Same fix, same reasoning as challenge.insert above: pin
+        // issued_at to clock_timestamp() rather than the column's own
+        // transaction-frozen `now()` default, so it always stays
+        // internally consistent with whatever expires_at the caller
+        // computed from real wall-clock time.
+        const rows = await trx`
+          insert into app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at)
+          values (${input.challengeId}, ${uid}, ${input.deviceId}, ${input.facilityId}, ${input.attestationGrade}::app.attestation_grade, ${input.challengeKind}, clock_timestamp(), ${input.expiresAt})
+          returning jti, expires_at`;
+        return { jti: rows[0].jti, expiresAt: rows[0].expires_at.toISOString() };
+      },
+
+      async consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
+        // ⛔ FIX (P3c gate round 2, item 4): ONE atomic statement enforces
+        // ownership (user_id), single use (consumed_at IS NULL), the
+        // submitting device matching the token's own device_id, AND a
+        // window clamp — no separate read-then-decide-then-write race
+        // window.
+        //
+        // ⛔ FIX (P3c gate round 3, should-fix "clamp live fixes to the
+        // CHALLENGE window, not the token's"). The prior version clamped
+        // capturedAt against the TOKEN's own issued_at/expires_at — but
+        // the token's own TTL is the 15-minute grace window a device has
+        // to actually SUBMIT the fix after redeeming a challenge for a
+        // token (checkin/token-handler.ts's TOKEN_TTL_SECONDS), not the
+        // window during which the ATTESTATION the token represents is
+        // meaningful. That window is the CHALLENGE's own, narrower one:
+        // 120s for a live challenge, 24h for a prefetched one
+        // (checkin/challenge-handler.ts's LIVE_TTL_SECONDS /
+        // PREFETCH_TTL_SECONDS) — clamping to the token's own 15-minute
+        // TTL let a capturedAt up to ~13 minutes stale (long past a live
+        // challenge's real 120s attestation window, though still inside
+        // the token's own separate 15-minute redemption TTL) pass as a
+        // valid co-signal. This now joins app.checkin_challenge (via the
+        // token's own challenge_id FK, 0019) and clamps against ITS
+        // issued_at/expires_at instead — automatically correct for
+        // whichever kind (live or prefetched) the challenge actually was,
+        // since it reads that row's own real values rather than assuming
+        // one TTL. Every column below is explicitly table-qualified: both
+        // tables share user_id/device_id/facility_id/expires_at column
+        // names, so an unqualified reference would be ambiguous (or worse,
+        // silently resolve to the wrong table's column).
+        const capturedAt = new Date(capturedAtMs);
+        const rows = await trx`
+          update app.checkin_token
+          set consumed_at = now()
+          from app.checkin_challenge cc
+          where checkin_token.challenge_id = cc.id
+            and checkin_token.jti = ${jti}
+            and checkin_token.user_id = ${uid}
+            and checkin_token.device_id = ${submittingDeviceId}
+            and checkin_token.consumed_at is null
+            and checkin_token.expires_at > now()
+            and cc.issued_at <= ${capturedAt}
+            and ${capturedAt} <= cc.expires_at
+          returning checkin_token.facility_id, checkin_token.attestation_grade, checkin_token.challenge_kind`;
+        const r = rows[0];
+        if (!r) return null;
+        return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
+      },
+    },
+  };
+}
+
+/**
+ * The ONLY sanctioned way an Edge Function touches a privileged
+ * (service-role) operation (build plan §4.7.1a).
+ *
+ * ⛔ FIX (P3c gate round 2, item 2: "writes silently lost"). Every
+ * statement used to autocommit on its own connection — a DEFERRABLE FK
+ * violation (or any later statement's failure) would leave EARLIER
+ * statements in this same logical operation already durably committed,
+ * while postgres.js itself still resolved the whole call successfully
+ * (each query is its own implicit transaction; nothing here ever rolled
+ * one back). The whole `op(repo)` callback now runs inside ONE
+ * `sql.begin()` — every write it makes commits together or not at all,
+ * and a DEFERRABLE constraint violation at the (now real) COMMIT point
+ * correctly fails the entire request instead of silently succeeding with
+ * some rows written and some not.
+ */
+export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
+  const db = sql();
+  // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
+  // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
+  // — a SEPARATE generic (T2) from this function's own `T`, and
+  // `UnwrapPromiseArray<T2>` is not provably assignable back to an
+  // UNCONSTRAINED `T` for every possible instantiation (`deno check`
+  // TS2322, caught this round by the P3c gate round 2 integration suite
+  // work — never actually run before). Every caller here always passes a
+  // plain (non-array, non-nested-Promise) value through `op`, so the cast
+  // is sound in practice; the type system alone can't prove it generically.
+  return db.begin(async (trx: TxSql) => {
+    // "Conditions on the BYPASSRLS design" (required): the connecting
+    // role is NOT assumed to already be service_role (it may be
+    // `postgres` on a real hosted project — [unverified], see this
+    // file's own header). Activate it explicitly and verify.
+    await trx`set local role service_role`;
+    const check = await trx`select current_user as u`;
+    if (check[0]?.u !== "service_role") {
+      throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+    }
+    const repo = buildRepo(db, trx, actor);
+    return op(repo);
+  }) as Promise<T>;
+}
+
+/**
+ * The batch counterpart to `withOwnership` (P3c gate round 3, blocking
+ * MEDIUM 4: "Batch: one failing item aborts the whole transaction").
+ * `evidence-batch/index.ts` is the one caller — every item runs inside
+ * its OWN `trx.savepoint(...)` of the SAME outer transaction: a failing
+ * item's writes roll back to just before its own savepoint (postgres.js's
+ * own `savepoint()` semantics — see this repo's own confirmation of that
+ * behaviour in the round-3 report), while every EARLIER item's already
+ * -committed-to-the-outer-transaction work is untouched, and later items
+ * still run. This is deliberately a SEPARATE export from `withOwnership`
+ * rather than a `Repo`-level escape hatch (a raw "give me a savepoint"
+ * method would break the "named methods over fixed tables... never the
+ * supabase-js client" narrow-repo discipline this file's own header
+ * documents) — the ONE place that needs per-item transactional isolation
+ * gets a purpose-built entry point instead.
+ *
+ * ⛔ P3c gate round 4, blocking HIGH: `perItem` must NEVER call
+ * `hitRateLimitForActor` (or anything that opens a second pooled
+ * connection) — by the time `perItem` runs, this function's own
+ * `db.begin()` is already holding one of the pool's `max: 5`
+ * connections, so a second `db.begin()` from inside it deadlocks the
+ * SAME way `Repo#rateLimit.hit` used to (see `hitRateLimitForActor`'s
+ * own doc). `evidence-batch/index.ts` hits every rate limit for every
+ * item BEFORE calling this function at all, precisely so `perItem` here
+ * only ever needs the ONE connection this transaction already holds.
+ */
+export async function withOwnershipBatch<T>(
+  actor: Actor,
+  itemCount: number,
+  perItem: (repo: Repo, index: number) => Promise<T>,
+): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
+  const db = sql();
+  return db.begin(async (trx: TxSql) => {
+    await trx`set local role service_role`;
+    const check = await trx`select current_user as u`;
+    if (check[0]?.u !== "service_role") {
+      throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+    }
+    const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
+    for (let i = 0; i < itemCount; i++) {
+      try {
+        // Same `UnwrapPromiseArray<T>` quirk as `withOwnership`'s own
+        // `db.begin()` cast above — `.savepoint`'s generic is a SEPARATE
+        // one from this function's own `T`, and TS can't prove the
+        // unwrap is `T` for every possible instantiation. Every caller
+        // here always passes a plain (non-array, non-nested-Promise)
+        // value through `perItem`, so the cast is sound in practice.
+        const value = (await trx.savepoint(async (sp: TxSql) => {
+          const repo = buildRepo(db, sp, actor);
+          return perItem(repo, i);
+        })) as T;
+        out.push({ ok: true, value });
+      } catch (err) {
+        out.push({ ok: false, error: err });
+      }
+    }
+    return out;
+  }) as Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>>;
 }

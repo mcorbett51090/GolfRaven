@@ -45,6 +45,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 import { serveDistWithHeaders } from "../test/e2e/serve-with-headers.mjs";
 import { runMapCspTest, checkSearch, FAKE_STYLE_URL } from "../test/e2e/map-csp-check.mjs";
+import { runFormJsOffTest } from "../test/e2e/form-js-off-check.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const siteRoot = join(here, "..");
@@ -123,17 +124,30 @@ async function main() {
 
     try {
       // The demo fixture's own known routes (apps/site/fixtures/demo-catalog) —
-      // a real page of each kind AT(2)/B2 both name.
+      // a real page of each kind AT(2)/B2 both name, PLUS all four form
+      // pages (gate review S5: "e2e loads all 4 form pages with 0 CSP
+      // violations") — this build's FORMS_CONFIG is the real, committed
+      // unconfigured state (no env overrides here), so no third-party
+      // Turnstile script is ever requested; these four just need to load
+      // clean under this site's live, generated CSP like every other page.
       await runMapCspTest(browser, baseUrl, {
         hub: "/",
         trail: "/trails/fictional-ridge-golf-trail/",
         course: "/courses/ridge-overlook-golf-club/",
+        claim: "/claim/",
+        feedback: "/feedback/",
+        frClaim: "/fr/claim/",
+        frFeedback: "/fr/feedback/",
       });
       // Re-gate: "Add an e2e search assertion: type a query, and expect
       // results under the CSP with zero violations." "Ridge" matches the
       // demo fixture's own facility ("Ridge Overlook Golf Club") and
       // trail ("Fictional Ridge Golf Trail") names.
       await checkSearch(browser, baseUrl, "/", "Ridge");
+
+      // Gate review B1 (blocking): "Add a Playwright JS-off test that
+      // clicks submit on all 4 pages and asserts zero non-GET requests."
+      await runFormJsOffTest(browser, baseUrl, ["/claim/", "/feedback/", "/fr/claim/", "/fr/feedback/"]);
     } finally {
       server.close();
     }

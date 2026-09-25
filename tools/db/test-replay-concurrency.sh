@@ -47,13 +47,13 @@ SOURCE_REF="concurrency-test-$(date +%s%N)"
 #    other, must yield exactly one row.
 # ---------------------------------------------------------------------------
 "${PSQL[@]}" -c "
-  INSERT INTO app.evidence (user_id, device_id, source, source_ref, status, catalog_version)
-  VALUES ('$USER_ID', '$DEVICE_ID', 'foreground_checkin', '${SOURCE_REF}-seq', 'accepted', 1)
+  INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
+  VALUES ('$USER_ID', '$DEVICE_ID', 'foreground_checkin', '${SOURCE_REF}-seq', encode(digest('${SOURCE_REF}-seq', 'sha256'), 'hex'), 'accepted', 1, current_date)
   ON CONFLICT (user_id, source, source_ref) DO NOTHING;
 " >/dev/null
 "${PSQL[@]}" -c "
-  INSERT INTO app.evidence (user_id, device_id, source, source_ref, status, catalog_version)
-  VALUES ('$USER_ID', '$DEVICE_ID', 'foreground_checkin', '${SOURCE_REF}-seq', 'accepted', 1)
+  INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
+  VALUES ('$USER_ID', '$DEVICE_ID', 'foreground_checkin', '${SOURCE_REF}-seq', encode(digest('${SOURCE_REF}-seq', 'sha256'), 'hex'), 'accepted', 1, current_date)
   ON CONFLICT (user_id, source, source_ref) DO NOTHING;
 " >/dev/null
 N=$(count "SELECT count(*) FROM app.evidence WHERE user_id = '$USER_ID' AND source_ref = '${SOURCE_REF}-seq'")
@@ -70,8 +70,8 @@ fi
 #    they genuinely overlap rather than serializing at the client.
 # ---------------------------------------------------------------------------
 CONC_REF="${SOURCE_REF}-conc"
-INSERT_SQL="INSERT INTO app.evidence (user_id, device_id, source, source_ref, status, catalog_version)
-  VALUES ('$USER_ID', '$DEVICE_ID', 'foreground_checkin', '$CONC_REF', 'accepted', 1)
+INSERT_SQL="INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, status, catalog_version, local_date)
+  VALUES ('$USER_ID', '$DEVICE_ID', 'foreground_checkin', '$CONC_REF', encode(digest('$CONC_REF', 'sha256'), 'hex'), 'accepted', 1, current_date)
   ON CONFLICT (user_id, source, source_ref) DO NOTHING;"
 
 "${PSQL[@]}" -c "$INSERT_SQL" >/dev/null &

@@ -233,9 +233,14 @@ describe("import-map alias resolution (MEDIUM 3)", () => {
 // tools/service-role-lint/pinned-import-targets.json, not a value passed
 // in by the caller).
 describe("pinned import-target allow-list (M2)", () => {
-  it("passes a bare specifier resolved through a real deno.json to a target that IS on the committed pinned-import-targets.json (zod, the one real entry)", () => {
+  it("passes a bare specifier resolved through a real deno.json to a target that IS on the committed pinned-import-targets.json (zod, one real entry)", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-pinned-ok-"));
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@3.23.8" } }));
+    // P3c: bumped from zod@3.23.8 to zod@4.6.5 — matches packages/rules'
+    // own zod dependency, now that supabase/functions/_shared/scoring/
+    // vendor/ actually imports it for real (see that directory's own
+    // generate-bundle.sh doc). Nothing else in supabase/functions/**
+    // depended on the old pin.
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@4.6.5" } }));
     const fnDir = join(tmpRoot, "some-fn");
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);

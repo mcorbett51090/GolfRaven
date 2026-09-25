@@ -50,7 +50,7 @@ export function buildSwSource(env = process.env) {
  */
 const CACHE = "gr-${buildId}";
 const HOME = new URL("./", self.registration.scope).href;
-const SHELL = ["./", "./claim/", "./fr/"];
+const SHELL = ["./", "./claim/", "./feedback/", "./fr/", "./fr/claim/", "./fr/feedback/"];
 const NAV_TIMEOUT_MS = 3000;
 
 // Same-origin paths that are network-first even though they aren't page

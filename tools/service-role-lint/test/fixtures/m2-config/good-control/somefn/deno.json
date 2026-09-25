@@ -1,6 +1,6 @@
 {
   "imports": {
-    "zod": "https://esm.sh/zod@3.23.8"
+    "zod": "https://esm.sh/zod@4.6.5"
   },
   "compilerOptions": {
     "strict": true
