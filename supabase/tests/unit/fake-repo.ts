@@ -20,7 +20,9 @@ import type {
   CatalogVersionRow,
   ChallengeRow,
   ConsumedCheckinToken,
+  DeleteMyDataResult,
   ExistingEvidenceRow,
+  ExportMyDataResult,
   InsertEvidenceResult,
   LedgerRow,
   MatchResult,
@@ -84,6 +86,13 @@ interface FakeCheckinTokenRow {
   consumedAt: string | null;
 }
 
+interface FakePushTokenRow {
+  userId: string;
+  deviceId: string;
+  expoToken: string;
+  updatedAt: string;
+}
+
 export interface FakeState {
   now: Date;
   rateLimits: Map<string, number>;
@@ -101,6 +110,11 @@ export interface FakeState {
   devices: Map<string, FakeDeviceRow>;
   challenges: Map<string, FakeChallengeRow>;
   checkinTokens: Map<string, FakeCheckinTokenRow>;
+  // P3d: DELETE /v1/me, GET /v1/me/export, POST /v1/me/push-token.
+  signinProviders: Map<string, string[]>; // userId -> providers
+  connectorProviders: Map<string, string[]>; // userId -> providers
+  deletedUsers: Set<string>;
+  pushTokens: Map<string, FakePushTokenRow>; // `${userId}:${deviceId}` -> row
   nextId: number;
 }
 
@@ -125,6 +139,10 @@ export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
     devices: new Map([["11111111-1111-4111-8111-111111111111", { id: "11111111-1111-4111-8111-111111111111", userId: "user-a" }]]),
     challenges: new Map(),
     checkinTokens: new Map(),
+    signinProviders: new Map(),
+    connectorProviders: new Map(),
+    deletedUsers: new Set(),
+    pushTokens: new Map(),
     nextId: 1,
     ...overrides,
   };
@@ -389,6 +407,55 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         if (!(issuedAtMs <= capturedAtMs && capturedAtMs <= expiresAtMs)) return null;
         row.consumedAt = state.now.toISOString();
         return { facilityId: row.facilityId, attestationGrade: row.attestationGrade, challengeKind: row.challengeKind };
+      },
+    },
+
+    // P3d: DELETE /v1/me, GET /v1/me/export.
+    me: {
+      async listSigninProviders(): Promise<string[]> {
+        return [...(state.signinProviders.get(uid) ?? [])];
+      },
+      async listConnectorProviders(): Promise<string[]> {
+        return [...(state.connectorProviders.get(uid) ?? [])];
+      },
+      async deleteMyData(): Promise<DeleteMyDataResult> {
+        // Idempotent, same as the real private.delete_my_data (0015): a
+        // second call for an already-deleted user removes nothing more
+        // (every map delete below is a no-op if the row is already gone)
+        // and still returns success, never throwing.
+        for (const [id, row] of state.evidence) if (row.userId === uid) state.evidence.delete(id);
+        for (const key of [...state.plays.keys()]) if (key.startsWith(`${uid}:`)) state.plays.delete(key);
+        for (const [id, row] of state.devices) if (row.userId === uid) state.devices.delete(id);
+        for (const [id, row] of state.challenges) if (row.userId === uid) state.challenges.delete(id);
+        for (const [jti, row] of state.checkinTokens) if (row.userId === uid) state.checkinTokens.delete(jti);
+        for (const key of [...state.pushTokens.keys()]) if (key.startsWith(`${uid}:`)) state.pushTokens.delete(key);
+        state.signinProviders.delete(uid);
+        state.connectorProviders.delete(uid);
+        state.deletedUsers.add(uid);
+        return { userId: uid, deletedAt: state.now.toISOString() };
+      },
+      async exportMyData(): Promise<ExportMyDataResult> {
+        return {
+          evidence: [...state.evidence.values()].filter((r) => r.userId === uid),
+          play: [...state.plays.values()].filter((r) => r.userId === uid),
+          device: [...state.devices.values()].filter((r) => r.userId === uid),
+          push_token: [...state.pushTokens.values()].filter((r) => r.userId === uid),
+        };
+      },
+    },
+
+    // P3d: POST /v1/me/push-token.
+    pushToken: {
+      async upsert(deviceId: string, expoToken: string) {
+        const key = `${uid}:${deviceId}`;
+        const updatedAt = state.now.toISOString();
+        state.pushTokens.set(key, { userId: uid, deviceId, expoToken, updatedAt });
+        return { deviceId, updatedAt };
+      },
+      async countForUser(): Promise<number> {
+        let n = 0;
+        for (const row of state.pushTokens.values()) if (row.userId === uid) n++;
+        return n;
       },
     },
   };

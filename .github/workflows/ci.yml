@@ -396,19 +396,36 @@ jobs:
           out = open(os.path.join(os.environ["TAMPER_DIR"], "tampered.lock"), "w"); json.dump(data, out); out.close()
           PY
           set +e
-          deno cache --config supabase/functions/deno.json --lock="$TAMPER_DIR/tampered.lock" --frozen \
+          TAMPER_OUTPUT=$(deno cache --config supabase/functions/deno.json --lock="$TAMPER_DIR/tampered.lock" --frozen \
             supabase/functions/evidence/index.ts \
             supabase/functions/evidence-batch/index.ts \
             supabase/functions/checkin-challenge/index.ts \
             supabase/functions/checkin-token/index.ts \
-            supabase/functions/_shared/privileged.ts
+            supabase/functions/_shared/privileged.ts 2>&1)
           TAMPER_EXIT=$?
           set -e
+          echo "$TAMPER_OUTPUT"
           if [ "$TAMPER_EXIT" -eq 0 ]; then
             echo "FAILED: 'deno cache --frozen' exited 0 against a lockfile with a deliberately tampered esm.sh .mjs hash -- the pin-proof step is not actually verifying integrity for this class of dependency." >&2
             exit 1
           fi
-          echo "deno cache --frozen tamper test: PASS (tampered hash correctly rejected, deno exit code $TAMPER_EXIT)"
+          # ⛔ FIX (P3c gate PASS follow-up 14, nit): the prior version of
+          # this step treated ANY non-zero exit as a pass -- which would
+          # also "pass" on an unrelated failure (a network error fetching
+          # a NON-tampered dependency, a config typo, deno itself being
+          # unavailable) that has nothing to do with the tamper actually
+          # being caught. Require the SPECIFIC signal this step exists to
+          # prove: either deno's own documented exit code for a lockfile
+          # integrity failure (10) or the "Integrity check failed" message
+          # in its output -- confirmed empirically in the P3c gate round 3
+          # report (`docs/security/p3-money-path-requirements.md`,
+          # "CI pin-proof step") against Deno 2.5.2, both for `deno check
+          # --frozen` and `deno cache --frozen`.
+          if [ "$TAMPER_EXIT" -ne 10 ] && ! echo "$TAMPER_OUTPUT" | grep -q "Integrity check failed"; then
+            echo "FAILED: 'deno cache --frozen' exited $TAMPER_EXIT against the tampered lockfile, but with neither exit code 10 nor an 'Integrity check failed' message -- this does not look like the specific tamper-detection failure this step exists to prove (it could be an unrelated failure, e.g. a network error on a non-tampered dependency). Output above." >&2
+            exit 1
+          fi
+          echo "deno cache --frozen tamper test: PASS (tampered hash correctly rejected: exit code $TAMPER_EXIT, 'Integrity check failed' message present: $(echo "$TAMPER_OUTPUT" | grep -q "Integrity check failed" && echo yes || echo no))"
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)

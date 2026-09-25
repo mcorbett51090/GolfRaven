@@ -179,6 +179,26 @@ export interface RateLimitResult {
   retryAfterSeconds?: number;
 }
 
+/** What `private.delete_my_data` itself returns (0015, unchanged by
+ * P3d) — the two fields `me-delete`'s response surfaces to the caller.
+ * `Repo#me.deleteMyData` parses this out of the function's own `jsonb`
+ * result (`{"user_id": ..., "deleted_at": ...}`, 0015's own
+ * `jsonb_build_object` call). */
+export interface DeleteMyDataResult {
+  userId: string;
+  deletedAt: string;
+}
+
+/** P3d, `GET /v1/me/export`: the raw `jsonb` `private.export_my_data`
+ * returns — one key per personal table (as `private.pii_retention_policy`
+ * classifies it), each value the caller's own rows as a JSON array. Kept
+ * as `Record<string, unknown>` rather than a fully-typed shape on
+ * purpose: the export function's OWN job (see its migration's header) is
+ * to stay in lockstep with `private.pii_retention_policy` as tables are
+ * added, and a hand-maintained TS type for its output would be exactly
+ * the kind of second source of truth that guarantee exists to avoid. */
+export type ExportMyDataResult = Record<string, unknown>;
+
 export interface ChallengeRow {
   id: string;
   deviceId: string;
@@ -328,5 +348,56 @@ export interface Repo {
      * `ConsumedCheckinToken`'s own doc for exactly what one call enforces
      * in a single statement. */
     consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null>;
+  };
+
+  /** P3d: `DELETE /v1/me` and `GET /v1/me/export` (build plan §4.7.1a
+   * inventory: "me-export, me-delete... ). Both call the SAME
+   * `private.pii_retention_policy`-driven registry (0014/0021) — see
+   * `_shared/me/delete-handler.ts`/`export-handler.ts`'s own header for
+   * how that keeps the two from drifting apart. */
+  me: {
+    /** Every provider row the caller has an OAuth-style grant under,
+     * read BEFORE `deleteMyData()` removes the rows (the P4/P8
+     * revocation seam — `_shared/me/provider-revocation.ts` — needs the
+     * provider names to call a real revocation endpoint against, once
+     * one exists; this round it only logs the seam). Distinct plain
+     * reads, not routed through `private.export_my_data` — the delete
+     * path must not depend on the export function's own shape. */
+    listSigninProviders(): Promise<string[]>;
+    listConnectorProviders(): Promise<string[]>;
+    /** Calls `private.delete_my_data(actor.uid)` (0015) through the
+     * established privileged path — never reimplemented here (task
+     * instruction). Idempotent: calling it again after the caller's
+     * personal rows are already gone is a documented no-op (0015's own
+     * generic pass affects 0 rows; nothing raises) — see
+     * `delete-handler.ts`'s own doc for the full idempotency argument. */
+    deleteMyData(): Promise<DeleteMyDataResult>;
+    /** Calls `private.export_my_data(actor.uid)` (0021) — the read-only
+     * twin of `deleteMyData()` above, driven by the exact same registry
+     * row set so the two "which tables count as personal" answers can
+     * never drift apart (see 0021's own header). */
+    exportMyData(): Promise<ExportMyDataResult>;
+  };
+
+  /** P3d: `POST /v1/me/push-token` (build plan line 832: "replaced on
+   * reinstall, deleted by DELETE /v1/me"). `app.push_token`'s own PK is
+   * `(user_id, device_id)` (0003) — a device is capped at one token, and
+   * the device itself is capped at `MAX_DEVICES_PER_USER` (the SAME
+   * accepted-follow-up constant `evidence/handler.ts`/`challenge-
+   * handler.ts` already use, per push-token-handler.ts's own doc), so
+   * "cap the number of tokens per user" is enforced by construction
+   * through the device cap this repo method's caller already checks —
+   * `countForUser` exists so the handler can still surface a clear count
+   * without a second raw query. */
+  pushToken: {
+    /** Registers or replaces the token for OWN `deviceId` — `ON CONFLICT
+     * (user_id, device_id) DO UPDATE`, so a reinstall (same device id,
+     * new Expo token) naturally overwrites the prior row rather than
+     * leaving a stale duplicate (build plan line 832: "replaced on
+     * reinstall"). Does NOT create the device row — the caller resolves/
+     * caps `deviceId` through `device.findOwn`/`ensureOwn` first, the
+     * same ordering `evidence/handler.ts` already uses. */
+    upsert(deviceId: string, expoToken: string): Promise<{ deviceId: string; updatedAt: string }>;
+    countForUser(): Promise<number>;
   };
 }
