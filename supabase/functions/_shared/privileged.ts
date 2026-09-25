@@ -419,19 +419,23 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
             ${input.money}, ${input.heldReview}, ${input.policyVersion}, ${input.inputDigest},
             -- should-fix (P3c gate round 2): "provisional below the
             -- threshold instead of always confirmed."
-            -- ⛔ FIX (found via the Deno integration suite): the bare
-            -- CASE expression's own result type resolves to `text`, not
-            -- `app.play_status` — unlike a plain string literal in a
-            -- VALUES list (which Postgres up-casts to the target
-            -- column's type automatically via its "unknown"-literal
-            -- coercion), a CASE expression's branches resolve to a
-            -- concrete `text` type once evaluated, and assigning `text`
-            -- into an enum column with no explicit cast is a hard error
-            -- ("column is of type app.play_status but expression is of
-            -- type text") — this INSERT would have failed on every real
-            -- Postgres, always, the very first time a fresh play row was
-            -- ever created; no unit/fake-repo test could ever catch it,
-            -- since the fake Repo never runs real SQL at all.
+            -- FIX (found via the Deno integration suite, NOT the
+            -- coordinator's list): a bare CASE expression's own result
+            -- type resolves to plain text, not app.play_status -- unlike
+            -- a plain string literal in a VALUES list (which Postgres
+            -- up-casts to the target column's type automatically via its
+            -- "unknown"-literal coercion), a CASE expression's branches
+            -- resolve to a concrete text type once evaluated, and
+            -- assigning text into an enum column with no explicit cast
+            -- is a hard error ("column is of type app.play_status but
+            -- expression is of type text") -- this INSERT would have
+            -- failed on every real Postgres, always, the very first time
+            -- a fresh play row was ever created; no unit/fake-repo test
+            -- could ever catch it, since the fake Repo never runs real
+            -- SQL at all. (No backticks in this comment block on
+            -- purpose: this whole statement is one JS template literal --
+            -- see this function's own opening line -- and a literal
+            -- backtick character here would terminate it early.)
             (case when ${input.scoreBadge} >= 0.50 then 'confirmed' else 'provisional' end)::app.play_status
           )
           on conflict (user_id, course_id, play_date) do update set
@@ -449,10 +453,32 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         const r = rows[0];
         const playId = r.id as string;
         for (const evidenceId of input.evidenceIds) {
+          // FIX (found via the Deno integration suite, item 1's own
+          // "cover the facility-level row with a second course on the
+          // same day" scenario): app.play_evidence carries TWO unique
+          // constraints — its own composite PK (play_id, evidence_id)
+          // AND a NARROWER play_evidence_evidence_id_key UNIQUE
+          // (evidence_id) (0017_money_path_hardening.sql's own M1: "one
+          // evidence row backs at most one play"). The ON CONFLICT target
+          // below used to name only the composite PK — a conflict on the
+          // NARROWER evidence_id-only constraint (a facility-level
+          // residual row that ALREADY backs a DIFFERENT play, from an
+          // earlier evidence intake the same day) is a DIFFERENT arbiter
+          // Postgres will not match against that clause at all, and
+          // raised as a raw, uncaught exception (500) instead of the
+          // graceful no-op this case actually calls for: a row that
+          // already backs one play correctly CANNOT also back a second
+          // one, and this play's own scoring/insert should still
+          // succeed regardless — it just doesn't gain this particular
+          // link. Targeting the narrower, subsuming constraint
+          // (evidence_id alone) covers BOTH cases: an exact replay of an
+          // already-linked (SAME play_id, SAME evidence_id) row, and a
+          // row that now belongs to a DIFFERENT play — both a real
+          // Postgres cluster, never the in-memory fake Repo.
           await trx`
             insert into app.play_evidence (play_id, evidence_id, user_id)
             values (${playId}, ${evidenceId}, ${uid})
-            on conflict (play_id, evidence_id) do nothing`;
+            on conflict (evidence_id) do nothing`;
         }
         return { id: playId, created: Boolean(r.inserted) };
       },
@@ -474,10 +500,48 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
           const rows = await trx`select id from app.device where id = ${deviceId} and user_id = ${uid}`;
           if (rows[0]) return { id: rows[0].id };
         }
-        const rows = await trx`
-          insert into app.device (user_id, platform) values (${uid}, ${platform ?? "ios"})
+        // FIX (found via the Deno integration suite — a whole-device-
+        // identity bug, not merely a concurrency one). The prior version
+        // NEVER wrote the caller's own `deviceId` into the new row at
+        // all — it inserted with no `id` column, letting
+        // `DEFAULT gen_random_uuid()` mint an UNRELATED random id, and
+        // returned THAT. Since no response anywhere in this round's
+        // endpoints (evidence, evidence-batch, checkin-challenge,
+        // checkin-token) ever echoes the resolved device id back to the
+        // caller, the client's own `deviceId` — the whole reason
+        // `findOwn`/`ensureOwn` exist as a pair, per this file's own
+        // types.ts doc ("looks up a device WITHOUT creating one") — was
+        // simply discarded: every subsequent request with that SAME
+        // `deviceId` would find nothing (it was never actually stored
+        // under that id), mint ANOTHER stray row, forever, defeating
+        // both device-identity continuity and the P3c gate round 2 item
+        // 7 device cap it exists to bound (each retry looks like a brand
+        // NEW device, not the same one). This also silently broke the
+        // per-device cap under real concurrency: two concurrent
+        // first-ever requests for what the CLIENT considers the SAME
+        // device id each got a DIFFERENT real row, so
+        // `countOpenPrefetched`'s own advisory lock (keyed by the real
+        // device id) never even saw them as related — caught by this
+        // suite's own concurrent-prefetch-request test, which expected
+        // ONE shared device and got three unrelated ones instead. The id
+        // is now the caller's own `deviceId` when given (falling back to
+        // a fresh id only when none was supplied at all, never expected
+        // from either real call site — both evidence/handler.ts and
+        // checkin/challenge-handler.ts always pass a real, already
+        // UUID-validated deviceId). `ON CONFLICT (id) DO NOTHING` +
+        // fallback SELECT (the SAME idempotent-insert idiom
+        // `evidence.insertIdempotent` above already uses) closes the
+        // matching race: two concurrent FIRST-ever requests for the
+        // SAME real device id now converge on ONE row, not two.
+        const id = deviceId ?? crypto.randomUUID();
+        const inserted = await trx`
+          insert into app.device (id, user_id, platform) values (${id}, ${uid}, ${platform ?? "ios"})
+          on conflict (id) do nothing
           returning id`;
-        return { id: rows[0].id };
+        if (inserted[0]) return { id: inserted[0].id };
+        const existing = await trx`select id from app.device where id = ${id} and user_id = ${uid}`;
+        if (!existing[0]) throw new Error("ensureOwn: conflict reported but no existing row found for this user");
+        return { id: existing[0].id };
       },
       async countForUser(): Promise<number> {
         const rows = await trx`select count(*)::int as n from app.device where user_id = ${uid}`;
@@ -487,9 +551,32 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
 
     challenge: {
       async insert(input) {
+        // FIX (found via the Deno integration suite, item 8's own
+        // concurrent-prefetch-request scenario): the column's own
+        // `issued_at timestamptz NOT NULL DEFAULT now()` (0005) uses
+        // Postgres's `now()`, which is fixed to the ENCLOSING
+        // TRANSACTION's start time — NOT the moment THIS statement
+        // actually runs. Under real concurrency, `countOpenPrefetched`'s
+        // own `pg_advisory_xact_lock` (above) can make a queued
+        // transaction wait a meaningful stretch AFTER it began before
+        // this INSERT ever executes, while `expires_at` (computed by the
+        // CALLER, challenge-handler.ts, from `repo.now()` — real wall-
+        // clock time, read AFTER that same wait) reflects whatever time
+        // it actually is BY THEN. The result: `expires_at` can end up
+        // LATER than `issued_at (txn-start) + 24h`, tripping
+        // checkin_challenge_expires_at_bounded's own CHECK
+        // (0017_money_path_hardening.sql) with a raw, unhandled
+        // constraint-violation exception — never reachable from a fake
+        // Repo, which has no transaction-vs-statement clock distinction
+        // at all. `clock_timestamp()` (Postgres's own actual-wall-clock
+        // function, re-evaluated on every call, unlike `now()`) pins
+        // `issued_at` to the SAME kind of "real time when this statement
+        // ran" `expires_at` was already computed from, keeping the two
+        // internally consistent regardless of how long this specific
+        // transaction waited on the advisory lock beforehand.
         const rows = await trx`
-          insert into app.checkin_challenge (user_id, staff_user_id, device_id, facility_id, nonce_hash, kind, expires_at)
-          values (${input.staffUserId ? null : uid}, ${input.staffUserId}, ${input.deviceId}, ${input.facilityId}, ${input.nonceHash}, ${input.kind}, ${input.expiresAt})
+          insert into app.checkin_challenge (user_id, staff_user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at)
+          values (${input.staffUserId ? null : uid}, ${input.staffUserId}, ${input.deviceId}, ${input.facilityId}, ${input.nonceHash}, ${input.kind}, clock_timestamp(), ${input.expiresAt})
           returning id, expires_at`;
         return { id: rows[0].id, expiresAt: rows[0].expires_at.toISOString() };
       },
@@ -527,9 +614,14 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
 
     checkinToken: {
       async insert(input) {
+        // Same fix, same reasoning as challenge.insert above: pin
+        // issued_at to clock_timestamp() rather than the column's own
+        // transaction-frozen `now()` default, so it always stays
+        // internally consistent with whatever expires_at the caller
+        // computed from real wall-clock time.
         const rows = await trx`
-          insert into app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, expires_at)
-          values (${input.challengeId}, ${uid}, ${input.deviceId}, ${input.facilityId}, ${input.attestationGrade}::app.attestation_grade, ${input.challengeKind}, ${input.expiresAt})
+          insert into app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at)
+          values (${input.challengeId}, ${uid}, ${input.deviceId}, ${input.facilityId}, ${input.attestationGrade}::app.attestation_grade, ${input.challengeKind}, clock_timestamp(), ${input.expiresAt})
           returning jti, expires_at`;
         return { jti: rows[0].jti, expiresAt: rows[0].expires_at.toISOString() };
       },

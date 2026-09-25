@@ -17,7 +17,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import {
   createTestUser,
   createCourseAtFacX,
-  createCourseWithRadiusAtFacX,
+  createCourseWithPolygonAtFacX,
   freshUuid,
   makeActor,
   insertCatalogVersion,
@@ -153,7 +153,15 @@ Deno.test("item 9: a replay of the SAME fixId with DIFFERENT fix content is reje
   const first = await evidence(actor, body);
   assertEquals(first.status, "accepted");
 
-  const changed = { ...body, fix: { ...(body.fix as object), lat: (body.fix as { lat: number }).lat + 0.5 } };
+  // The change must land in what actually gets PERSISTED (derive-fix.ts's
+  // DerivedFix) to be detectable at all — a fix's raw lat/lng are used
+  // only transiently to look up matchFix and never stored directly, so
+  // varying lat/lng alone (against crs_x1, which has no real geometry
+  // configured in this fixture set) produces an IDENTICAL derived summary
+  // both times, which is correctly treated as an ordinary idempotent
+  // replay, not a conflict. accuracyMeters, by contrast, IS carried
+  // straight through into the stored summary.
+  const changed = { ...body, fix: { ...(body.fix as object), accuracyMeters: (body.fix as { accuracyMeters: number }).accuracyMeters + 500 } };
   let threw: unknown = null;
   try {
     await evidence(actor, changed);
@@ -171,7 +179,7 @@ Deno.test("item 9: a replay of the SAME fixId with DIFFERENT fix content is reje
 Deno.test("item 4 end to end: a live checkin-token session makes a fix a REAL co-signal (presence_signal true)", DT, async () => {
   const actor = await withFreshUser("e2e-presence");
   const courseId = `crs_e2e_${freshUuid().slice(0, 8)}`;
-  await createCourseWithRadiusAtFacX(courseId, 200);
+  await createCourseWithPolygonAtFacX(courseId);
   const deviceId = freshUuid();
 
   const challenges = await withOwnership(actor, (repo) => handleChallengeRequest({ deviceId, facilityId: FAC_X }, repo, randomBytes, digestHex));
@@ -200,7 +208,7 @@ Deno.test("item 4 end to end: a live checkin-token session makes a fix a REAL co
 Deno.test("item 4 end to end: a token issued to DEVICE A cannot be consumed by a fix submitted from DEVICE B", DT, async () => {
   const actor = await withFreshUser("e2e-device-mismatch");
   const courseId = `crs_e2edm_${freshUuid().slice(0, 8)}`;
-  await createCourseWithRadiusAtFacX(courseId, 200);
+  await createCourseWithPolygonAtFacX(courseId);
   const deviceA = freshUuid();
   const deviceB = freshUuid();
 

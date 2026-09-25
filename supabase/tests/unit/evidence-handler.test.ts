@@ -55,7 +55,12 @@ describe("handleEvidenceIntake", () => {
     const state = makeFakeState();
     const repo = makeFakeRepo(state, "user-a");
     await handleEvidenceIntake(checkinBody(), repo);
-    const changed = checkinBody({ fix: { ...(checkinBody().fix as object), lat: 40.0 } });
+    // accuracyMeters (unlike lat/lng, which are used only transiently to
+    // look up matchFix and never persisted directly) IS carried straight
+    // through into the stored summary via derive-fix.ts's DerivedFix, so
+    // it is guaranteed to be a DETECTABLE change regardless of whether
+    // crs_x1 has a registered PostGIS match fixture.
+    const changed = checkinBody({ fix: { ...(checkinBody().fix as object), accuracyMeters: 500 } });
     await expect(handleEvidenceIntake(changed, repo)).rejects.toMatchObject({ code: "evidence_conflict" });
   });
 

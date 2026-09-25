@@ -182,6 +182,31 @@ export async function createCourseWithRadiusAtFacX(courseId: string, radiusM = 2
       ST_SetSRID(ST_MakePoint(${NASHVILLE.lng}, ${NASHVILLE.lat}), 4326), ${radiusM}, 1)`;
 }
 
+/** A course with a REAL polygon boundary (a small square centered on
+ * `NASHVILLE`) — packages/rules' own `isQualityCoSignalFix`
+ * (internal/classify.ts) requires `geometryKind === "polygon"`
+ * specifically for a fix to ever count as a presence co-signal; a
+ * radius-fallback course (`createCourseWithRadiusAtFacX` above) can
+ * never produce `presence_signal: true`, by design, REGARDLESS of
+ * `insideBuffer` — this suite's own end-to-end "real co-signal" tests
+ * need this shape, not the radius one. */
+export async function createCourseWithPolygonAtFacX(courseId: string): Promise<void> {
+  await ensureServiceRole();
+  const sql = adminSql();
+  await sql`insert into app.catalog_id_ledger (id, kind, status, first_catalog_version) values (${courseId}, 'course', 'verified', 1)`;
+  const d = 0.001; // ~100m at this latitude — plenty of margin around NASHVILLE for the ST_DWithin(+50m) buffer
+  await sql`
+    insert into app.catalog_course (id, facility_id, name, verification_status, geometry_kind, boundary, catalog_version)
+    values (${courseId}, 'fac_x', ${"Integration Test " + courseId}, 'play-verified', 'polygon',
+      ST_SetSRID(ST_MakePolygon(ST_MakeLine(ARRAY[
+        ST_MakePoint(${NASHVILLE.lng - d}, ${NASHVILLE.lat - d}),
+        ST_MakePoint(${NASHVILLE.lng + d}, ${NASHVILLE.lat - d}),
+        ST_MakePoint(${NASHVILLE.lng + d}, ${NASHVILLE.lat + d}),
+        ST_MakePoint(${NASHVILLE.lng - d}, ${NASHVILLE.lat + d}),
+        ST_MakePoint(${NASHVILLE.lng - d}, ${NASHVILLE.lat - d})
+      ])), 4326), 1)`;
+}
+
 /** A fresh `app.catalog_version` row (+ optional signing key), so a
  * single test file can exercise the AT 8/AT 15 skew-window and
  * revoked-kid paths without perturbing `fac_x`'s own catalog_version=1
