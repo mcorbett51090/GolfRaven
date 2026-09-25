@@ -40,7 +40,7 @@ const PRIVILEGED_TS = readFileSync(join(import.meta.dirname, "..", "..", "..", "
 
 describe("privileged.ts — withOwnership is genuinely implemented (P3c), not the old fail-closed stub", () => {
   it("exports withOwnership and getActorFromRequest", () => {
-    expect(PRIVILEGED_TS).toMatch(/export function withOwnership/);
+    expect(PRIVILEGED_TS).toMatch(/export (?:async )?function withOwnership/);
     expect(PRIVILEGED_TS).toMatch(/export async function getActorFromRequest/);
   });
 
