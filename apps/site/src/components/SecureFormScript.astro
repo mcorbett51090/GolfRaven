@@ -9,12 +9,28 @@
  *     token set — no `--gold`/`--wine`/`--space-*`/`--font-ui`, unlike
  *     SWC's richer stylesheet);
  *   - to detect "unprovisioned" via `src/config/forms-config.mjs`'s
- *     `isPlaceholderValue()` (a grep-able `TODO(owner)` marker) instead of
- *     SWC's `/^your-/i` convention — both mean the same thing ("this site
- *     hasn't been provisioned into the shared Worker yet"), the golfraven
- *     config module's own placeholders just spell it differently (see
- *     `forms-config.mjs`'s doc for why `workerUrl`/`turnstileSiteKey` are
- *     the two values that stay owner-only).
+ *     `isPlaceholderValue()`/`isValidWorkerUrl()` (a grep-able
+ *     `TODO(owner)` marker, plus real URL shape validation) instead of
+ *     SWC's `/^your-/i` convention;
+ *   - **B1 (gate review, blocking): the form is INERT by default, even
+ *     with JavaScript disabled or never binding.** All of its interactive
+ *     content sits inside a `<fieldset disabled data-form-fieldset>` that
+ *     the PAGE renders (see the USAGE snippet below) — a disabled
+ *     fieldset excludes every descendant control from the browser's
+ *     native form submission entirely (per the HTML spec: a disabled
+ *     control is never part of a form's "constructed data set", on ANY
+ *     submission, GET or POST). The module script below removes
+ *     `disabled` ONLY once, ONLY when `formConfigured` is true (real,
+ *     valid Worker/Turnstile config) — while unprovisioned, or with no JS
+ *     at all, the fieldset stays disabled exactly as the server rendered
+ *     it, and no native submission — carrying name/email/message to the
+ *     page's own origin, which CSP's `form-action 'self'` would otherwise
+ *     allow — can ever fire. The page's `<form>` tag also carries no
+ *     `method="post"` (belt-and-suspenders: even a hypothetical bypass of
+ *     the disabled fieldset would then default to a same-origin GET, not
+ *     a POST — though since disabled controls are excluded from the
+ *     submission regardless, no field VALUES would be attached either
+ *     way).
  *
  * WHAT THIS DOES: one submit sends the WHOLE form to `workerUrl`, in-
  * website — no mailto, no third-party form service. FIELDS-ONLY (v1, no
@@ -34,55 +50,70 @@
  *
  * DEMO/UNPROVISIONED-GUARD (this task's scope: "While the config is
  * unset, a form must not pretend to submit. It shows a clear 'forms
- * aren't live yet' state, and the build still passes"). While any of
- * `workerUrl` / `siteId` / `turnstileSiteKey` is still a placeholder, this
- * component (a) does NOT render the Turnstile widget or inject its
- * loader/challenge-iframe hosts, and (b) the submit handler shows a
- * friendly "forms aren't live yet" message and makes NO network call. The
- * build stays green and the page stays usable before the owner
+ * aren't live yet' state, and the build still passes"). While `workerUrl`
+ * / `siteId` / `turnstileSiteKey` isn't a complete, VALID (S1: real
+ * `https:` URL, no userinfo, no non-default port, a plain
+ * `[a-z0-9.-]+` hostname) set of real values, this component (a) does NOT
+ * render the Turnstile widget or inject its loader/challenge-iframe
+ * hosts, (b) the fieldset stays disabled (B1, above), and (c) the submit
+ * handler — reachable only if some other path re-enabled the fieldset —
+ * shows a friendly "forms aren't live yet" message and makes NO network
+ * call. The build stays green and the page stays usable before the owner
  * provisions the real Worker/Turnstile values.
  *
- * USAGE — wrap it in the page's own `<form>` (see `src/pages/claim.astro`).
- * **The page's `<form>` tag itself must carry the `data-worker-url`
- * / `data-site-id` / `data-turnstile-site-key` / `data-success-message`
- * / `data-contact-email` attributes** — set as plain, static HTML
- * attributes in the page's own markup, NOT stamped on by a script here.
- * (This repo's own whole-site invariant, `test/acceptance.test.ts`'s
- * AT(7): no page may ever carry an inline `<script>` with executable
- * content, JSON-LD aside — SWC's equivalent component used an
- * `is:inline define:vars` script to stamp its form's config onto the
- * `<form>` at runtime, which is exactly the shape AT(7) forbids here.
- * Reading config from static attributes the page already rendered avoids
- * needing that script at all — the module `<script>` below still reads
- * `form.dataset.*` at runtime, only the WRITE side moved from a script to
- * plain markup.)
+ * USAGE — the page's own `<form>` wraps its fields in a
+ * `<fieldset disabled data-form-fieldset>` (see `src/pages/claim.astro`),
+ * and carries every `data-*` attribute below as plain, static HTML
+ * attributes — NOT stamped on by a script here. (This repo's own
+ * whole-site invariant, `test/acceptance.test.ts`'s AT(7): no page may
+ * ever carry an inline `<script>` with executable content, JSON-LD
+ * aside — SWC's equivalent component used an `is:inline define:vars`
+ * script to stamp its form's config onto the `<form>` at runtime, which
+ * is exactly the shape AT(7) forbids here. Reading config from static
+ * attributes the page already rendered avoids needing that script at
+ * all — the module `<script>` below still reads `form.dataset.*` /
+ * `fieldset.dataset.*` at runtime, only the WRITE side moved from a
+ * script to plain markup.)
  *   <form
- *     data-secure-form novalidate method="post"
+ *     data-secure-form novalidate
  *     data-worker-url={FORMS_CONFIG.workerUrl}
  *     data-site-id={FORMS_CONFIG.siteId}
  *     data-turnstile-site-key={FORMS_CONFIG.turnstileSiteKey}
+ *     data-contact-email={FORMS_CONFIG.contactEmail}
+ *     data-locale="en"
  *     data-success-message="..."
  *     data-unprovisioned-message="..."
  *     data-generic-error-message="..."
- *     data-contact-email={FORMS_CONFIG.contactEmail}
+ *     data-verifying-message="Verifying…"
+ *     data-sending-message="Sending…"
+ *     data-turnstile-timeout-message="..."
  *   >
- *     ...your text fields...
- *     <SecureFormScript
- *       workerUrl={FORMS_CONFIG.workerUrl}
- *       siteId={FORMS_CONFIG.siteId}
- *       turnstileSiteKey={FORMS_CONFIG.turnstileSiteKey}
- *       contactEmail={FORMS_CONFIG.contactEmail}
- *     />
- *     <button type="submit">Send</button>
+ *     <fieldset disabled data-form-fieldset>
+ *       ...your text fields...
+ *       <SecureFormScript
+ *         workerUrl={FORMS_CONFIG.workerUrl}
+ *         siteId={FORMS_CONFIG.siteId}
+ *         turnstileSiteKey={FORMS_CONFIG.turnstileSiteKey}
+ *         contactEmail={FORMS_CONFIG.contactEmail}
+ *       />
+ *       <button type="submit">Send</button>
+ *     </fieldset>
  *   </form>
+ *
+ * `data-locale` (S3, gate review): which of `data-generic-error-message`
+ * vs. the Worker's own (English, unlocalized) `data.message` the FR pages
+ * show on a failed submission — see the catch block below. Every other
+ * `data-*-message` attribute carries the page's own LOCALIZED text
+ * directly (English on the EN pages, French on the FR pages) — this
+ * component never hard-codes an English string that a French page would
+ * otherwise show verbatim.
  *
  * `FORMS_CONFIG.contactEmail` is EMPTY in this repo today (deliberately —
  * see `forms-config.mjs`'s own `TODO(owner)` on that field: publishing a
  * personal address on a public site is the owner's call, not a default
- * this build makes for them). Every message below is written to degrade
+ * this build makes for them). Every message is written to degrade
  * honestly with no address at all: no mailto link, no email text
- * anywhere, ever — see `data-unprovisioned-message`/
- * `data-generic-error-message` above, which each page computes from
+ * anywhere, ever — each page computes its own `*_MESSAGE` consts from
  * `FORMS_CONFIG.contactEmail` itself (empty today → the no-email variant;
  * a real address later → the "email us" variant, automatically).
  */
@@ -175,18 +206,26 @@ const unprovisioned =
    * control (Turnstile siteverify, per-site CORS, rate-limit, field
    * escaping) stays in the Worker; nothing here reimplements it.
    */
-  import { isPlaceholderValue } from "../config/forms-config.mjs";
+  import { isPlaceholderValue, isValidWorkerUrl } from "../config/forms-config.mjs";
 
   const forms = document.querySelectorAll<HTMLFormElement>("form[data-secure-form]");
   forms.forEach((form) => {
     const status = form.querySelector<HTMLElement>("[data-form-status]");
     const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    // B1: the fieldset the PAGE rendered `disabled` by default — see this
+    // component's module doc. Every interactive control (text fields,
+    // selects, the submit button, the honeypot, the Turnstile widget) is
+    // a descendant of it.
+    const fieldset = form.querySelector<HTMLFieldSetElement>("[data-form-fieldset]");
     let busy = false;
 
     const workerUrl = (form.dataset.workerUrl || "").replace(/\/+$/, "");
     const siteId = form.dataset.siteId || "";
     const turnstileSiteKey = form.dataset.turnstileSiteKey || "";
+    const locale = form.dataset.locale || "en";
     const successMessage = form.dataset.successMessage || "Thank you — your message has been sent.";
+    const verifyingMessage = form.dataset.verifyingMessage || "Verifying…";
+    const sendingMessage = form.dataset.sendingMessage || "Sending…";
     // Empty, not a hard-coded address, until the owner sets one (see
     // forms-config.mjs's TODO(owner) on contactEmail) — every message
     // below is written to read correctly either way.
@@ -203,11 +242,33 @@ const unprovisioned =
     // value. `isPlaceholderValue` is the SAME function
     // `forms-config.mjs`'s own `isFormsConfigured()` uses server-side, and
     // is imported here (not reimplemented) so the server's and the
-    // client's "is this form live?" checks can never drift apart. Without
-    // it, an un-provisioned form would fetch() a dead placeholder "URL"
-    // and fail deep in the network layer with a confusing generic error
-    // instead of telling the visitor plainly that forms aren't live yet.
-    const isUnprovisioned = isPlaceholderValue;
+    // client's "is this form live?" checks can never drift apart.
+    //
+    // S1 (gate review): `workerUrl` is ALSO re-validated here with
+    // `isValidWorkerUrl` — the SAME shape check `forms-config.mjs`'s
+    // `assertValidFormsConfig()` enforces at build time (https: only, no
+    // userinfo, no non-default port, a plain `[a-z0-9.-]+` hostname, no
+    // wildcard). A build-time-valid value read back from a DOM attribute
+    // is re-checked here rather than trusted blind, before it is ever
+    // used to build a `fetch()` target — the exact defense that stops a
+    // scheme-less value like "raven-secure-upload.workers.dev" from
+    // silently resolving as a RELATIVE path against this page's own
+    // origin instead of failing loudly.
+    const formConfigured =
+      !isPlaceholderValue(workerUrl) &&
+      isValidWorkerUrl(workerUrl) &&
+      !isPlaceholderValue(siteId) &&
+      !isPlaceholderValue(turnstileSiteKey);
+
+    // B1: enable the fieldset EXACTLY ONCE, on load, and ONLY when the
+    // form is genuinely configured. While unprovisioned (or misconfigured
+    // — an invalid workerUrl counts as unprovisioned here), it stays
+    // disabled exactly as the server rendered it, forever, for this page
+    // view — no native submission of any kind can ever carry field
+    // values off this page.
+    if (fieldset && formConfigured) {
+      fieldset.disabled = false;
+    }
 
     // The page's own `data-unprovisioned-message`/`data-generic-error-message`
     // (see this component's module doc) carry the LOCALIZED text — a French
@@ -224,6 +285,10 @@ const unprovisioned =
       (contactEmail
         ? `Something went wrong. Please email ${contactEmail} instead.`
         : "Something went wrong. Please try again later.");
+    const turnstileTimeoutMessage =
+      form.dataset.turnstileTimeoutMessage ||
+      "This form's spam check didn't complete — its Turnstile key likely isn't configured for this domain yet. " +
+        (contactEmail ? `Meanwhile, please email ${contactEmail} and we'll take care of it.` : "Please check back soon.");
 
     function say(msg: string, kind: "ok" | "err" | "info") {
       if (!status) return;
@@ -251,7 +316,7 @@ const unprovisioned =
     }
 
     // How long to give Turnstile to produce a token before treating this
-    // as an un-provisioned/misconfigured deployment. isUnprovisioned()'s
+    // as an un-provisioned/misconfigured deployment. isPlaceholderValue()'s
     // TODO(owner) check only catches the literal placeholder string; a
     // real-shaped key that is simply misconfigured for this domain sails
     // past it and never solves — waiting for a token (not inspecting the
@@ -315,14 +380,19 @@ const unprovisioned =
         return;
       }
 
-      // Fast path: forms aren't live yet → friendly message, NO network call.
-      if (isUnprovisioned(workerUrl) || isUnprovisioned(siteId) || isUnprovisioned(turnstileSiteKey)) {
+      // Fast path: forms aren't live yet (unprovisioned OR an invalid
+      // workerUrl — S1) → friendly message, NO network call. This is
+      // reachable only if the fieldset was somehow re-enabled without
+      // `formConfigured` being true (it never is, from this script), so
+      // it's a second, independent layer under B1's fieldset-disabled
+      // defense, not the only one.
+      if (!formConfigured) {
         say(unprovisionedMessage, "info");
         return;
       }
 
       setBusy(true);
-      say("Verifying…", "info");
+      say(verifyingMessage, "info");
 
       // Slow path: a real-shaped key misconfigured for this domain sails
       // past the check above, then never solves — wait for an actual
@@ -330,17 +400,11 @@ const unprovisioned =
       const turnstileToken = await waitForTurnstileToken(TURNSTILE_READY_TIMEOUT_MS);
       if (!turnstileToken) {
         setBusy(false);
-        say(
-          "This form's spam check didn't complete — its Turnstile key likely isn't configured for this domain yet. " +
-            (contactEmail
-              ? `Meanwhile, please email ${contactEmail} and we'll take care of it.`
-              : "Please check back soon."),
-          "info",
-        );
+        say(turnstileTimeoutMessage, "info");
         return;
       }
 
-      say("Sending…", "info");
+      say(sendingMessage, "info");
 
       try {
         // FIELDS-ONLY: post straight to the Worker's /submit — the only
@@ -396,7 +460,15 @@ const unprovisioned =
 
         form.reset();
       } catch (err) {
-        const message = err instanceof Error ? err.message : "";
+        // S3 (gate review): the Worker's `data.message` (thrown above) is
+        // plain, unlocalized English — this shared backend has no notion
+        // of the visitor's page language. On an FR page, showing it
+        // verbatim would mix English into an otherwise-French status
+        // message; `genericErrorMessage` (locale-appropriate, computed by
+        // the page) is shown instead. EN pages keep the Worker's own,
+        // more specific message.
+        const rawMessage = err instanceof Error ? err.message : "";
+        const message = locale === "fr" ? "" : rawMessage;
         say(message || genericErrorMessage, "err");
       } finally {
         setBusy(false);

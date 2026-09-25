@@ -201,6 +201,12 @@ export function isPrivateIpv6(addr) {
   if (g0 === 0x2002) {
     return isPrivateV4(`${g1 >> 8}.${g1 & 0xff}.${g2 >> 8}.${g2 & 0xff}`); // 2002::/16 (6to4)
   }
+  // Nit (gate review): Teredo 2001::/32 (RFC 4380) is a tunneling
+  // mechanism carrying an obfuscated (XOR'd) embedded client address —
+  // decoding it accurately is unnecessary complexity for an SSRF gate.
+  // Treated as non-public outright, same conservative "unsafe by default"
+  // stance as an unparseable address.
+  if (g0 === 0x2001 && g1 === 0x0000) return true; // Teredo 2001::/32
   if ((g0 & 0xff00) === 0xff00) return true; // ff00::/8 (multicast)
   if ((g0 & 0xffc0) === 0xfe80) return true; // fe80::/10 (link-local)
   if ((g0 & 0xffc0) === 0xfec0) return true; // fec0::/10 (site-local, deprecated)
@@ -219,7 +225,13 @@ async function assertPublicHost(hostname) {
   try {
     addrs = await dns.promises.lookup(hostname, { all: true });
   } catch (e) {
-    throw new Error(`dns-fail:${e.code || e.message}`);
+    // Should-fix (gate review S4a): keep `e.code` (ENOTFOUND/EAI_AGAIN/…)
+    // ON the rethrown error, not just folded into its message text —
+    // `looksLikeNoNetwork()`/`classifyError()` read `err.code` directly,
+    // and `main()`'s first-request early-stop path depends on that
+    // classification landing on "no-network" for a real DNS failure, not
+    // the generic "error" bucket.
+    throw Object.assign(new Error(`dns-fail:${e.code || e.message}`), { code: e.code });
   }
   if (!addrs.length) throw new Error("dns-empty");
   for (const a of addrs) {
@@ -358,6 +370,16 @@ export async function hardenedCheck(startUrl, allowList, timeoutMs, opts = {}) {
       current = new URL(loc, u).href;
       continue;
     }
+    // Nit (gate review): drain/cancel the response body before returning.
+    // A HEAD response never carries one, but the HEAD->GET fallback above
+    // (405/501) DOES fetch a real body we never read — leaving it open
+    // holds the underlying connection instead of releasing it back to the
+    // agent's pool. We only ever need status/headers here, never content.
+    try {
+      await res.body?.cancel();
+    } catch {
+      /* ignore */
+    }
     return { ok: res.ok, status: res.status };
   }
   return { ok: false, status: null, reason: "too-many-redirects" };
@@ -456,10 +478,21 @@ function looksLikeNoNetwork(err) {
 // `hardenedCheck()` results/errors, and `checkLink()` below is what wires
 // them to the real (or, in a test, an injected) `hardenedCheck()`.
 //
-// The four report categories, and what produces each:
+// The five report categories, and what produces each:
 //   - "ok"                a 2xx (after allowed redirects)
-//   - "dead"               hardenedCheck resolved but !ok (non-2xx,
-//                          too-many-redirects, redirect-no-location)
+//   - "blocked"            the host answered with 401, 403 or 429 —
+//                          INCONCLUSIVE, not proof the link is dead. A
+//                          booking host commonly 403s/429s an
+//                          unauthenticated HEAD/GET from an unfamiliar
+//                          user-agent/IP (bot defense, rate limiting) even
+//                          though the SAME link works fine in a browser —
+//                          folding this into "dead" would false-positive
+//                          on a healthy link every time that host has a
+//                          bad day with this checker specifically.
+//   - "dead"               hardenedCheck resolved but !ok, and the status
+//                          is NOT one of the "blocked" codes above
+//                          (other 4xx/5xx, too-many-redirects,
+//                          redirect-no-location).
 //   - "not-allow-listed"   the link's OWN host was never on the allow-list
 //                          (NOT_ALLOW_LISTED at hop 0)
 //   - "redirect-off-host"  an ALLOWED starting host redirected somewhere
@@ -473,6 +506,10 @@ function looksLikeNoNetwork(err) {
 //                          failure on a single host, …).
 // ---------------------------------------------------------------------
 
+/** Status codes that mean "this specific request was refused", not "this
+ * link is dead" — see the "blocked" category note above. */
+const BLOCKED_STATUSES = new Set([401, 403, 429]);
+
 /** Classifies a THROWN error from `hardenedCheck()` — never a resolved result. */
 export function classifyError(err) {
   if (err?.code === "NOT_ALLOW_LISTED") {
@@ -484,7 +521,9 @@ export function classifyError(err) {
 
 /** Classifies a RESOLVED `hardenedCheck()` result (`{ ok, status, reason? }`) — never a thrown error. */
 export function classifyResult(result) {
-  return result.ok ? "ok" : "dead";
+  if (result.ok) return "ok";
+  if (result.status !== null && BLOCKED_STATUSES.has(result.status)) return "blocked";
+  return "dead";
 }
 
 /**

@@ -17,12 +17,14 @@ name: golfraven weekly link checker
 
 on:
   schedule:
-    # Mondays at 13:00 UTC (a jittered, non-top-of-hour-adjacent time by
-    # convention elsewhere in this org's scheduling — see this repo's
-    # `create_trigger`/`update_trigger` guidance for scheduled jobs
-    # generally; a GitHub Actions `schedule:` cron is evaluated in UTC
-    # regardless).
-    - cron: "0 13 * * 1"
+    # Mondays at 13:07 UTC. GitHub's own scheduled-workflows docs warn that
+    # runs are DELAYED "during periods of high loads", worst around the
+    # top of the hour, when the largest number of workflows across all of
+    # GitHub are scheduled to fire at once — so this is deliberately NOT
+    # "0 13 * * 1" (an exact top-of-the-hour minute), to avoid queuing
+    # behind that spike. A GitHub Actions `schedule:` cron is always
+    # evaluated in UTC, regardless of any contributor's own time zone.
+    - cron: "7 13 * * 1"
   workflow_dispatch: {}
 
 permissions:
@@ -61,6 +63,19 @@ jobs:
 
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
+
+      - name: Build @golfraven/catalog (check-links.mjs's runtime import — not built by install alone)
+        # Gate review B1: `pnpm install` alone does NOT build workspace
+        # TypeScript packages. @golfraven/catalog's package.json points
+        # `main`/`types` at ./dist/, which does not exist until this runs —
+        # without it, the run step below throws `ERR_MODULE_NOT_FOUND` on
+        # every single invocation of this workflow.
+        #
+        # Scoped to just this one package (not the whole-repo `pnpm -r
+        # build`): check-links.mjs imports nothing else from the workspace
+        # — its only internal import is `@golfraven/catalog` (verified
+        # this session via `grep -n "^import" scripts/check-links.mjs`).
+        run: pnpm --filter @golfraven/catalog build
 
       - name: Run the weekly link checker (--live, report-only — never blocks a PR, uses no secret)
         # Exits non-zero when there are findings (dead links, redirects

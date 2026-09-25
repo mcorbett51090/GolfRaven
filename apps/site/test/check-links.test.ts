@@ -75,6 +75,9 @@ describe("check-links.mjs SSRF hardening: isPrivateIpv6 — every range the re-g
     ["::ffff:127.0.0.1", true, "v4-mapped ::ffff:0:0/96 wrapping loopback"],
     ["::ffff:8.8.8.8", false, "v4-mapped ::ffff:0:0/96 wrapping a PUBLIC v4"],
     ["2001:4860:4860::8888", false, "public v6 (Google DNS) — not in any reserved range"],
+    ["2001:0:4136:e378::1", true, "Teredo 2001::/32 (RFC 4380 tunneling)"],
+    ["2001::1", true, "Teredo 2001::/32, minimal form"],
+    ["2001:db8::1", false, "documentation-only 2001:db8::/32 is NOT Teredo (distinct prefix, g1=0xdb8 != 0)"],
   ])("isPrivateIpv6(%s) => %s (%s)", (ip, expected) => {
     expect(isPrivateIpv6(ip)).toBe(expected);
   });
@@ -128,11 +131,21 @@ describe("classifyResult (pure — no network)", () => {
   it("ok:true => 'ok'", () => {
     expect(classifyResult({ ok: true, status: 200 })).toBe("ok");
   });
-  it("ok:false (any status/reason) => 'dead'", () => {
+  it("ok:false (any OTHER status/reason) => 'dead'", () => {
     expect(classifyResult({ ok: false, status: 404 })).toBe("dead");
     expect(classifyResult({ ok: false, status: 500 })).toBe("dead");
     expect(classifyResult({ ok: false, status: null, reason: "too-many-redirects" })).toBe("dead");
     expect(classifyResult({ ok: false, status: 301, reason: "redirect-no-location" })).toBe("dead");
+  });
+  it("gate review S4b: 401, 403 and 429 => 'blocked' (inconclusive), never 'dead'", () => {
+    expect(classifyResult({ ok: false, status: 401 })).toBe("blocked");
+    expect(classifyResult({ ok: false, status: 403 })).toBe("blocked");
+    expect(classifyResult({ ok: false, status: 429 })).toBe("blocked");
+  });
+  it("a NEIGHBOURING status (400, 404, 451) is NOT folded into 'blocked'", () => {
+    expect(classifyResult({ ok: false, status: 400 })).toBe("dead");
+    expect(classifyResult({ ok: false, status: 404 })).toBe("dead");
+    expect(classifyResult({ ok: false, status: 451 })).toBe("dead");
   });
 });
 
@@ -152,6 +165,18 @@ describe("classifyError (pure — no network)", () => {
       "no-network",
     );
     expect(classifyError(new Error("EGRESS_BLOCKED by sandbox proxy"))).toBe("no-network");
+  });
+  it("gate review S4a: a real assertPublicHost-shaped DNS failure (Object.assign with .code, as assertPublicHost now throws) => 'no-network'", () => {
+    // The EXACT shape `assertPublicHost()` throws after the S4a fix:
+    // `Object.assign(new Error(\`dns-fail:${e.code}\`), { code: e.code })` —
+    // `.code` lives on the error object itself, not folded only into the
+    // message text.
+    expect(classifyError(Object.assign(new Error("dns-fail:ENOTFOUND"), { code: "ENOTFOUND" }))).toBe(
+      "no-network",
+    );
+    expect(classifyError(Object.assign(new Error("dns-fail:EAI_AGAIN"), { code: "EAI_AGAIN" }))).toBe(
+      "no-network",
+    );
   });
   it("anything else => 'error'", () => {
     expect(classifyError(new Error("timeout"))).toBe("error");
@@ -183,6 +208,15 @@ describe("hardenedCheck + checkLink end-to-end, with an injected fetchImpl (no r
     const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
     expect(record.classification).toBe("dead");
     expect(record.status).toBe(404);
+  });
+
+  it("gate review S4b: a 403/429 from an allowed host classifies as 'blocked', not 'dead' — end-to-end through checkLink()", async () => {
+    for (const status of [401, 403, 429]) {
+      const fetchImpl = async () => fakeResponse(status);
+      const record = await checkLink(link, ALLOWED, 1000, { fetchImpl, assertPublicHost: noopAssertPublicHost });
+      expect(record.classification).toBe("blocked");
+      expect(record.status).toBe(status);
+    }
   });
 
   it("a redirect chain that STAYS on allowed hosts follows through and classifies the final response", async () => {
