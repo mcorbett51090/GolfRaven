@@ -62,8 +62,11 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
   // explicitly, closing over `actor.uid` for every Repo method built
   // from it. The old shape (`buildRepo()`, zero args) is asserted ABSENT
   // below, not merely "not required".
-  it("withOwnership passes the REAL actor into buildRepo(trx, actor) — never a zero-arg buildRepo(), never an unused _actor", () => {
-    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(trx, actor\);/);
+  it("withOwnership (and withOwnershipBatch) pass the REAL actor into buildRepo(db, trx, actor) — never a zero-arg buildRepo(), never an unused _actor", () => {
+    // `db` is passed so rate-limit hits can commit in their own short
+    // transaction (P3c round 2, MEDIUM 3); the actor binding is unchanged.
+    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(db, trx, actor\);/);
+    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(db, sp, actor\);/);
     expect(PRIVILEGED_TS).not.toMatch(/function withOwnership[^)]*\(_actor: Actor/);
     expect(PRIVILEGED_TS).not.toMatch(/function buildRepo\(\): Repo \{/);
   });
@@ -76,11 +79,11 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
     expect(PRIVILEGED_TS).toMatch(/if \(check\[0\]\?\.u !== "service_role"\)/);
   });
 
-  it("buildRepo takes the REAL transaction handle and the actor, and returns a Repo", () => {
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{/);
+  it("buildRepo takes the connection (for out-of-transaction rate limits), the REAL transaction handle and the actor, and returns a Repo", () => {
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor\): Repo \{/);
     // Closes over `actor.uid` once — every Repo method built from this
     // function reads `uid` from closure, not a per-call parameter.
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{\s*const uid = actor\.uid;/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor\): Repo \{\s*const uid = actor\.uid;/);
   });
 
   it("still never returns the raw supabase-js/postgres client to a caller — only a narrow Repo object", () => {
@@ -88,6 +91,6 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
     // file constructs one; `deno check` (this session) confirms it
     // type-checks against that interface, which has no method returning
     // a client.
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor\): Repo \{/);
   });
 });
