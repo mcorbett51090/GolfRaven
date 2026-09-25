@@ -120,6 +120,11 @@ describe("TURNSTILE_HOSTS", () => {
 // ---------------------------------------------------------------------
 
 describe("isValidWorkerUrl", () => {
+  it("rejects an empty trailing ? or # (which parse to an empty search/hash)", () => {
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev#")).toBe(false);
+    expect(isValidWorkerUrl("https://secure-upload.example.workers.dev?")).toBe(false);
+  });
+
   it("a real, well-formed https: Worker URL is valid", () => {
     expect(isValidWorkerUrl("https://secure-upload.example.workers.dev")).toBe(true);
     expect(isValidWorkerUrl("https://secure-upload.example.workers.dev/")).toBe(true);
@@ -211,6 +216,11 @@ describe("isValidWorkerUrl", () => {
 // ---------------------------------------------------------------------
 
 describe("isValidContactEmail", () => {
+  it("rejects mailto header injection such as ?bcc=", () => {
+    expect(isValidContactEmail("x@example.test?bcc=y@example.test")).toBe(false);
+    expect(isValidContactEmail("x@example.test&cc=y@example.test")).toBe(false);
+  });
+
   it("a real, simple address is valid", () => {
     expect(isValidContactEmail("hello@example.test")).toBe(true);
     expect(isValidContactEmail("owner+golfraven@example.test")).toBe(true);

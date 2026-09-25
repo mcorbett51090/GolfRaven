@@ -182,6 +182,9 @@ export function isPlaceholderValue(value) {
  */
 export function isValidWorkerUrl(url) {
   if (typeof url !== "string" || !url) return false;
+  // An empty `?` or `#` parses to search === "" / hash === "", so the
+  // parsed checks below can't see them; reject the raw characters instead.
+  if (/[?#]/.test(url)) return false;
   let parsed;
   try {
     parsed = new URL(url);
@@ -223,6 +226,8 @@ export function isValidWorkerUrl(url) {
 const CONTACT_EMAIL_PATTERN = /^[^\s'"<>]+@[^\s'"<>]+\.[^\s'"<>]+$/;
 export function isValidContactEmail(value) {
   if (typeof value !== "string" || !value) return false;
+  // `?`/`&`/`=` would let a mailto: carry extra headers (e.g. ?bcc=).
+  if (/[?&=]/.test(value)) return false;
   return CONTACT_EMAIL_PATTERN.test(value);
 }
 
