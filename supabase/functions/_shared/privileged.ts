@@ -257,6 +257,69 @@ export async function getActorFromRequest(req: Request): Promise<Actor | null> {
   return { uid: data.user.id, role: "authenticated" };
 }
 
+let _adminClient: ReturnType<typeof createClient> | null = null;
+function adminClient(): ReturnType<typeof createClient> {
+  if (_adminClient) return _adminClient;
+  const url = Deno.env.get("SUPABASE_URL");
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !serviceRoleKey) {
+    throw new Error("privileged.ts: SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY are not set in this environment");
+  }
+  _adminClient = createClient(url, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } });
+  return _adminClient;
+}
+
+/**
+ * P3d, `DELETE /v1/me`: deletes the caller's own Supabase Auth user (task
+ * instruction: "Delete the Supabase Auth user: use the Auth admin API
+ * from the allow-listed privileged module only"). Uses the SAME
+ * privileged-module exemption `getActorFromRequest`/`sql()` already rely
+ * on (`tools/service-role-lint/src/lint.ts`'s `isAllowedFile` — this
+ * whole file is the one construction site for a service-role-privileged
+ * client of ANY kind, Postgres or Supabase Auth Admin) — routed through
+ * `@supabase/supabase-js`'s Admin API (`auth.admin.deleteUser`), never a
+ * direct `auth.users` DELETE from SQL: `private.delete_my_data` (0015)
+ * deliberately never touches `auth.users` itself (only reads `email`
+ * from it) — Supabase Auth owns that table's own lifecycle (identities,
+ * sessions, refresh tokens) in ways a raw DELETE would not correctly
+ * unwind `[unverified — training knowledge that a direct DELETE FROM
+ * auth.users bypasses GoTrue's own cleanup; this environment has no live
+ * Supabase Auth to confirm the admin API's exact behaviour against
+ * either]`.
+ *
+ * Deliberately called by `me-delete/index.ts` AFTER `withOwnership`'s own
+ * transaction (running `private.delete_my_data`) has COMMITTED, never
+ * from inside it — the Admin API is an HTTP call to GoTrue, not a
+ * Postgres statement, so it cannot participate in that transaction, and
+ * ordering the DB deletion first means a failure here still leaves the
+ * caller's personal ROWS gone (the privacy-bearing half of AT 6) even if
+ * the Auth identity itself has to be retried.
+ *
+ * Idempotent by construction: a SECOND call (the caller retries after a
+ * first call's Auth deletion failed, or the account was already deleted)
+ * is treated as success — Supabase Auth Admin's own error for an
+ * already-deleted/nonexistent user id is read as "already gone", not a
+ * failure, so a retry never surfaces a spurious error for work that is
+ * already done `[unverified — training knowledge on the admin API's
+ * exact error shape for a missing user (a 404 body, a specific error
+ * code) — this environment cannot exercise a real GoTrue instance; the
+ * check below is written broadly (status 404, or a message mentioning
+ * "not found"/"not_found") rather than pinned to one exact shape, on
+ * purpose, so it fails closed to "report the error" rather than silently
+ * swallowing something else if the exact shape differs]`.
+ */
+export async function deleteAuthUser(uid: string): Promise<{ deleted: boolean; alreadyGone: boolean }> {
+  const client = adminClient();
+  const { error } = await client.auth.admin.deleteUser(uid);
+  if (!error) return { deleted: true, alreadyGone: false };
+  const status = (error as { status?: number } | null)?.status;
+  const message = String((error as { message?: unknown } | null)?.message ?? "").toLowerCase();
+  if (status === 404 || message.includes("not found") || message.includes("not_found") || message.includes("user not found")) {
+    return { deleted: true, alreadyGone: true };
+  }
+  throw new Error(`deleteAuthUser: Supabase Auth admin.deleteUser failed for this account: ${message || String(error)}`);
+}
+
 /** Deterministic 64-bit advisory-lock key from a namespace + a string id
  * (P3c gate round 2, item 8: "count-then-insert races... use
  * pg_advisory_xact_lock inside the transaction"). Namespacing (a small
@@ -294,7 +357,17 @@ function advisoryLockKeys(namespace: number, id: string): [number, number] {
   return [namespace, h | 0];
 }
 
-function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): Repo {
+// ⛔ FIX (P3c gate PASS follow-up 14, nit): `db` used to be an unused
+// second parameter here (three args: connection, transaction, actor) —
+// every Repo method
+// queries through `trx` only; nothing in this function ever read `db`.
+// Removed rather than left as dead weight (the same discipline
+// `challenge.insert`'s dead `staffUserId` parameter already got in P3c
+// gate round 4). `withOwnership`/`withOwnershipBatch` below updated to
+// match (`buildRepo(trx, actor)`/`buildRepo(sp, actor)`); their OWN `db`
+// locals stay (that one IS used, to open `sql.begin()`/`sql.savepoint()`
+// in the first place).
+function buildRepo(trx: TxSql, actor: Actor): Repo {
   const uid = actor.uid;
   return {
     now(): Date {
@@ -854,7 +927,110 @@ function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): R
         return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
       },
     },
+
+    // P3d: DELETE /v1/me, GET /v1/me/export. Both DB functions this
+    // namespace calls are the ones the docstrings on Repo#me point at
+    // (0015's private.delete_my_data, 0021's private.export_my_data) —
+    // this Repo layer never reimplements their logic, only invokes them
+    // through the same service_role connection every other write in this
+    // file already uses.
+    me: {
+      async listSigninProviders(): Promise<string[]> {
+        const rows = await trx`select distinct provider from app.signin_provider_token where user_id = ${uid}`;
+        return rows.map((r) => r.provider as string);
+      },
+      async listConnectorProviders(): Promise<string[]> {
+        const rows = await trx`select distinct provider from app.connector_account where user_id = ${uid}`;
+        return rows.map((r) => r.provider as string);
+      },
+      async deleteMyData() {
+        const rows = await trx`select private.delete_my_data(${uid}) as result`;
+        const result = rows[0]?.result as { user_id?: string; deleted_at?: string } | undefined;
+        if (!result || typeof result.user_id !== "string" || typeof result.deleted_at !== "string") {
+          throw new Error("me.deleteMyData: private.delete_my_data returned an unexpected shape");
+        }
+        return { userId: result.user_id, deletedAt: result.deleted_at };
+      },
+      async exportMyData() {
+        const rows = await trx`select private.export_my_data(${uid}) as result`;
+        const result = rows[0]?.result as Record<string, unknown> | undefined;
+        if (!result || typeof result !== "object") {
+          throw new Error("me.exportMyData: private.export_my_data returned an unexpected shape");
+        }
+        return result;
+      },
+    },
+
+    // P3d: POST /v1/me/push-token (build plan line 832).
+    pushToken: {
+      async upsert(deviceId: string, expoToken: string) {
+        const rows = await trx`
+          insert into app.push_token (user_id, device_id, expo_token, updated_at)
+          values (${uid}, ${deviceId}, ${expoToken}, now())
+          on conflict (user_id, device_id) do update set expo_token = excluded.expo_token, updated_at = excluded.updated_at
+          returning device_id, updated_at`;
+        const r = rows[0];
+        return { deviceId: r.device_id, updatedAt: r.updated_at.toISOString() };
+      },
+      async countForUser(): Promise<number> {
+        const rows = await trx`select count(*)::int as n from app.push_token where user_id = ${uid}`;
+        return rows[0]?.n ?? 0;
+      },
+    },
   };
+}
+
+// ⛔ FIX (P3c gate PASS follow-up 13, "503 after a successful commit"):
+// "make the database give up before the HTTP timeout (SET LOCAL
+// statement_timeout and lock_timeout below the 15s HTTP race inside
+// withOwnership)." Both are well under http.ts's own DEFAULT_REQUEST_
+// TIMEOUT_MS (15s): lock_timeout (5s) bounds how long a statement may
+// wait to ACQUIRE a lock before giving up (the shape a concurrent writer
+// holding e.g. an app.play row/table lock produces); statement_timeout
+// (10s) is the backstop for any other slow-running statement once it IS
+// executing. lock_timeout firing first (5s < 10s) is deliberate: a lock
+// wait is the specific, named failure mode this follow-up exists for,
+// and it should be reported as exactly that (lock_not_available) rather
+// than however statement_timeout's later, broader cutoff would present
+// the same wait.
+const STATEMENT_TIMEOUT = "10s";
+const LOCK_TIMEOUT = "5s";
+
+// ⛔ NOTE: both are embedded as LITERAL SQL text below (`set local
+// statement_timeout = '10s'`), never through a `${...}` tagged-template
+// substitution — postgres.js turns every `${...}` into a bound `$n`
+// parameter, and `SET`/`SET LOCAL` is a utility statement whose grammar
+// does not accept a bind parameter in place of its value (only a
+// literal/identifier) `[unverified — training knowledge; not exercised
+// against a live driver in this session beyond confirming the OTHER SET
+// LOCAL calls in this file, e.g. "set local role service_role", are all
+// literal text with no interpolation]`. Both constants are internal,
+// compile-time strings (never derived from request input), so literal
+// embedding carries no injection risk.
+//
+// Postgres SQLSTATEs this file maps to a 503 (Errors.serviceUnavailable)
+// rather than letting them surface as an opaque 500: 57014 =
+// query_canceled (statement_timeout), 55P03 = lock_not_available
+// (lock_timeout). `[unverified — training knowledge that postgres.js's
+// thrown PostgresError exposes `.code` as the raw SQLSTATE, the same
+// convention node-postgres uses; this session had no live Postgres+Deno
+// harness run to confirm the exact shape against THIS driver version —
+// see tools/db/test.sh's own db-tests run, which DOES exercise this
+// against a real cluster, for the empirical confirmation once it runs].
+const PG_TIMEOUT_SQLSTATES = new Set(["57014", "55P03"]);
+
+/** Maps a thrown error to `Errors.serviceUnavailable()` when it is one of
+ * the two Postgres timeout SQLSTATEs `STATEMENT_TIMEOUT`/`LOCK_TIMEOUT`
+ * above produce; returns every other error unchanged (never masks a real
+ * application error, e.g. an `HttpError` a handler threw on purpose, as
+ * a 503). Shared by `withOwnership` and `withOwnershipBatch` so the two
+ * timeouts mean the same thing in both. */
+function mapPgTimeoutError(err: unknown): unknown {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && PG_TIMEOUT_SQLSTATES.has(code)) {
+    return Errors.serviceUnavailable("the database could not complete this request in time (statement/lock timeout) — safe to retry");
+  }
+  return err;
 }
 
 /**
@@ -875,28 +1051,43 @@ function buildRepo(db: ReturnType<typeof postgres>, trx: TxSql, actor: Actor): R
  */
 export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
   const db = sql();
-  // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
-  // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
-  // — a SEPARATE generic (T2) from this function's own `T`, and
-  // `UnwrapPromiseArray<T2>` is not provably assignable back to an
-  // UNCONSTRAINED `T` for every possible instantiation (`deno check`
-  // TS2322, caught this round by the P3c gate round 2 integration suite
-  // work — never actually run before). Every caller here always passes a
-  // plain (non-array, non-nested-Promise) value through `op`, so the cast
-  // is sound in practice; the type system alone can't prove it generically.
-  return db.begin(async (trx: TxSql) => {
-    // "Conditions on the BYPASSRLS design" (required): the connecting
-    // role is NOT assumed to already be service_role (it may be
-    // `postgres` on a real hosted project — [unverified], see this
-    // file's own header). Activate it explicitly and verify.
-    await trx`set local role service_role`;
-    const check = await trx`select current_user as u`;
-    if (check[0]?.u !== "service_role") {
-      throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-    }
-    const repo = buildRepo(db, trx, actor);
-    return op(repo);
-  }) as Promise<T>;
+  try {
+    // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
+    // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
+    // — a SEPARATE generic (T2) from this function's own `T`, and
+    // `UnwrapPromiseArray<T2>` is not provably assignable back to an
+    // UNCONSTRAINED `T` for every possible instantiation (`deno check`
+    // TS2322, caught this round by the P3c gate round 2 integration suite
+    // work — never actually run before). Every caller here always passes a
+    // plain (non-array, non-nested-Promise) value through `op`, so the cast
+    // is sound in practice; the type system alone can't prove it generically.
+    return await (db.begin(async (trx: TxSql) => {
+      // "Conditions on the BYPASSRLS design" (required): the connecting
+      // role is NOT assumed to already be service_role (it may be
+      // `postgres` on a real hosted project — [unverified], see this
+      // file's own header). Activate it explicitly and verify.
+      await trx`set local role service_role`;
+      // Follow-up 13: below both http.ts's request timeout AND the
+      // caller's own patience — a request that would otherwise hang past
+      // 15s and 503 with the transaction STILL committing behind it
+      // instead fails fast, inside the same transaction, so nothing is
+      // left half-applied for the client to be wrong about.
+      // Literal SQL text (no `${...}` substitution — see this file's own
+      // note above `STATEMENT_TIMEOUT`/`LOCK_TIMEOUT` for why); the two
+      // named constants exist for the doc comment to point at, not for
+      // runtime interpolation here.
+      await trx`set local statement_timeout = '10s'`;
+      await trx`set local lock_timeout = '5s'`;
+      const check = await trx`select current_user as u`;
+      if (check[0]?.u !== "service_role") {
+        throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+      }
+      const repo = buildRepo(trx, actor);
+      return op(repo);
+    }) as Promise<T>);
+  } catch (err) {
+    throw mapPgTimeoutError(err);
+  }
 }
 
 /**
@@ -931,30 +1122,47 @@ export async function withOwnershipBatch<T>(
   perItem: (repo: Repo, index: number) => Promise<T>,
 ): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
   const db = sql();
-  return db.begin(async (trx: TxSql) => {
-    await trx`set local role service_role`;
-    const check = await trx`select current_user as u`;
-    if (check[0]?.u !== "service_role") {
-      throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-    }
-    const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
-    for (let i = 0; i < itemCount; i++) {
-      try {
-        // Same `UnwrapPromiseArray<T>` quirk as `withOwnership`'s own
-        // `db.begin()` cast above — `.savepoint`'s generic is a SEPARATE
-        // one from this function's own `T`, and TS can't prove the
-        // unwrap is `T` for every possible instantiation. Every caller
-        // here always passes a plain (non-array, non-nested-Promise)
-        // value through `perItem`, so the cast is sound in practice.
-        const value = (await trx.savepoint(async (sp: TxSql) => {
-          const repo = buildRepo(db, sp, actor);
-          return perItem(repo, i);
-        })) as T;
-        out.push({ ok: true, value });
-      } catch (err) {
-        out.push({ ok: false, error: err });
+  try {
+    return await (db.begin(async (trx: TxSql) => {
+      await trx`set local role service_role`;
+      // Follow-up 13 — same reasoning as withOwnership's own note above.
+      await trx`set local statement_timeout = '10s'`;
+      await trx`set local lock_timeout = '5s'`;
+      const check = await trx`select current_user as u`;
+      if (check[0]?.u !== "service_role") {
+        throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
       }
-    }
-    return out;
-  }) as Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>>;
+      const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
+      for (let i = 0; i < itemCount; i++) {
+        try {
+          // Same `UnwrapPromiseArray<T>` quirk as `withOwnership`'s own
+          // `db.begin()` cast above — `.savepoint`'s generic is a SEPARATE
+          // one from this function's own `T`, and TS can't prove the
+          // unwrap is `T` for every possible instantiation. Every caller
+          // here always passes a plain (non-array, non-nested-Promise)
+          // value through `perItem`, so the cast is sound in practice.
+          const value = (await trx.savepoint(async (sp: TxSql) => {
+            const repo = buildRepo(sp, actor);
+            return perItem(repo, i);
+          })) as T;
+          out.push({ ok: true, value });
+        } catch (err) {
+          // Follow-up 13: a per-item statement/lock timeout is mapped to
+          // the SAME 503 shape withOwnership's own outer catch produces,
+          // so evidence-batch/index.ts's per-item error surfacing (which
+          // reads `HttpError#code`/`#message` off whatever lands in
+          // `error` here) reports it as `service_unavailable`, not a raw,
+          // unmapped Postgres error.
+          out.push({ ok: false, error: mapPgTimeoutError(err) });
+        }
+      }
+      return out;
+    }) as Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>>);
+  } catch (err) {
+    // A timeout OUTSIDE any per-item savepoint (e.g. during the initial
+    // `SET LOCAL`/role-check statements themselves) fails the whole batch
+    // the same way any other such failure already does — mapped here too
+    // for consistency.
+    throw mapPgTimeoutError(err);
+  }
 }
