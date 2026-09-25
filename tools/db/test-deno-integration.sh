@@ -19,21 +19,21 @@
 #     bash tools/db/test-deno-integration.sh
 #
 # `deno` must already be resolvable — via DENO_BIN (an explicit path), or
-# on PATH. DENO_DIR (optional) is forwarded through as-is if set — Deno's
-# own module-cache-location env var, useful when the caller (tools/db/
-# test.sh) runs this as a DIFFERENT OS user (e.g. `postgres`, under
-# `su`) than the one that already has outbound-network/cert access: a
-# `deno cache` warmed up front, into a DENO_DIR that user can also read,
-# lets this step run entirely from that cache with no network call of its
-# own. Unlike the "gitleaks/pg_prove not found" style soft-skips
-# elsewhere in this tree, a MISSING deno here is a HARD FAILURE, not a
-# skip: this script exists specifically because the reviewer found real
-# bugs that only running this suite could catch (see the header above) —
-# a silently-skipped run is indistinguishable, from this script's own
-# exit code, from a clean pass, which is exactly the blind spot item 0 is
-# closing. (Contrast with tools/db/test.sh's own "FAILED — node/dist
-# missing" hard-fail discipline for service-role-lint, added the same
-# round for the identical reason.)
+# on PATH. DENO_DIR (optional) is forwarded through as-is if the CALLER
+# already set one (e.g. a real pre-warmed cache, deliberately reused
+# across runs); if not, this script creates and owns its own scoped,
+# throwaway one (see the should-fix fix below for why "own" specifically
+# matters when tools/db/test.sh's `run_as_pg` runs this as a DIFFERENT
+# OS user, e.g. `postgres` under `su`, than the one that invoked
+# tools/db/test.sh itself). Unlike the "gitleaks/pg_prove not found"
+# style soft-skips elsewhere in this tree, a MISSING deno here is a HARD
+# FAILURE, not a skip: this script exists specifically because the
+# reviewer found real bugs that only running this suite could catch (see
+# the header above) — a silently-skipped run is indistinguishable, from
+# this script's own exit code, from a clean pass, which is exactly the
+# blind spot item 0 is closing. (Contrast with tools/db/test.sh's own
+# "FAILED — node/dist missing" hard-fail discipline for service-role
+# -lint, added the same round for the identical reason.)
 
 set -euo pipefail
 
@@ -63,6 +63,65 @@ DENO_BIN="${DENO_BIN:-deno}"
 if ! command -v "$DENO_BIN" >/dev/null 2>&1; then
   echo "tools/db/test-deno-integration.sh: FAILED — '$DENO_BIN' is not on PATH and DENO_BIN was not set to an explicit path. This is a hard failure, not a skip (see this script's own header)." >&2
   exit 1
+fi
+
+# ⛔ FIX (P3c gate round 3, should-fix): "make it work when run as the
+# postgres OS user without a pre-warmed DENO_DIR... don't hardcode this
+# sandbox's paths." The prior version only ever FORWARDED a
+# caller-supplied `DENO_DIR` — with none given, `deno`'s own default
+# module-cache location is under the invoking OS user's home directory,
+# which the CALLER (tools/db/test.sh's `run_as_pg`, `su postgres -s
+# /bin/bash -c ...`) may not have one of, or may not be able to write to.
+# When the caller hasn't already provided one, this script now creates
+# its OWN scoped, throwaway cache directory — via `mktemp`, so it is
+# ALWAYS created (and therefore owned/writable) by whichever OS user
+# actually executes this exact script, never assumed to already exist or
+# be pre-warmed by a DIFFERENT user first. Cleaned up on exit, but only
+# when THIS script is the one that created it — a caller-supplied
+# DENO_DIR (e.g. a real pre-warmed cache, deliberately reused across
+# runs) is left alone.
+CREATED_DENO_DIR=0
+if [ -z "${DENO_DIR:-}" ]; then
+  DENO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/golfraven-deno-integration-cache.XXXXXX")"
+  CREATED_DENO_DIR=1
+fi
+export DENO_DIR
+cleanup_deno_dir() {
+  if [ "$CREATED_DENO_DIR" -eq 1 ]; then
+    rm -rf "$DENO_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup_deno_dir EXIT
+
+# ⛔ FIX (P3c gate round 3, should-fix, same item): "pass the CA via
+# DENO_CERT from the environment's standard CA path when it's set and
+# readable." `DENO_CERT` is Deno's OWN native env var for this — if the
+# invoking user's environment already has a USABLE one (set AND actually
+# readable BY THIS USER; a proxy CA bundle can be readable-in-principle
+# but unreachable if it lives under a directory the invoking user can't
+# traverse — this is the exact shape this repo's own sandbox hit:
+# `/root/.ccr/ca-bundle.crt` itself was world-readable, but `/root` was
+# not, blocking the `postgres` OS user from ever reaching it, regardless
+# of DENO_CERT being set at all) — nothing further to do; Deno already
+# consumes `DENO_CERT` from its own process environment automatically.
+# Otherwise, check the SAME small set of conventional CA-bundle env vars
+# a proxied sandbox commonly sets (never a hardcoded path of any ONE
+# sandbox) and adopt whichever ONE is BOTH set and readable by this
+# user. If none qualify, DENO_CERT is explicitly UNSET (never left
+# pointing at the already-known-unreadable path it may have inherited) —
+# Deno then falls back to its own default trust store, which may or may
+# not suffice for this particular network; an honest gap rather than a
+# silently-assumed path, and a cleaner failure mode than handing Deno a
+# path its own `access()` check will just reject anyway.
+if [ -z "${DENO_CERT:-}" ] || [ ! -r "${DENO_CERT:-/nonexistent}" ]; then
+  unset DENO_CERT
+  for candidate_var in NODE_EXTRA_CA_CERTS SSL_CERT_FILE CURL_CA_BUNDLE; do
+    candidate_path="${!candidate_var:-}"
+    if [ -n "$candidate_path" ] && [ -r "$candidate_path" ]; then
+      export DENO_CERT="$candidate_path"
+      break
+    fi
+  done
 fi
 
 # should-fix (P3c gate round 2, "supply chain"): run against the committed

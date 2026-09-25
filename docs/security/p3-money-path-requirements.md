@@ -631,3 +631,130 @@ records the DECISIONS, not the diff.
 `tools/db/test-deno-integration.sh` (called by `tools/db/test.sh`, against the SAME live cluster the
 pgTAP matrix and the two concurrency scripts already ran against, before teardown), both HARNESS_MODE=
 superuser and HARNESS_MODE=restricted: **25 passed, 0 failed, in both modes.**
+
+## P3c gate round 3 fixes (`b7c41cc` re-gate: 2 blocking HIGH + 3 blocking MEDIUM)
+
+Everything from round 2 was confirmed fixed by the coordinator's own round-3 message. This round closed
+the 5 blocking findings plus the should-fix list, file:line pointers below.
+
+**Blocking HIGH 1 (changed-replay bypass) + HIGH 2 (AT 3 regression) — one fix.** The OLD replay check
+only ran when the stored row showed up in that call's own `listForPlay` window (a changed `localDate`
+skipped it entirely), and `consumeTokenForFix` ran BEFORE any replay check at all (so an identical retry
+saw its own token already consumed). Fixed by moving the whole replay/conflict decision to the FRONT of
+the pipeline, before any side effect:
+
+- `app.evidence` gets a real `input_hash text NOT NULL` column — a canonical SHA-256 of the ENTIRE parsed
+  submission (`evidence/handler.ts:207` `computeInputHash`), covering content a fix-bearing source's own
+  natural `source_ref` (keyed on fixId alone) cannot distinguish. `supabase/migrations/0019_evidence_intake.sql`
+  §7 (nullable → backfill-from-`source_ref`-digest → `NOT NULL`, since 0019 is still unmerged).
+- `Repo#evidence.findExisting(source, sourceRef)` (`privileged.ts:428`, `types.ts`'s `Repo.evidence`
+  interface) — the FIRST repo call `handleEvidenceIntake` makes (`evidence/handler.ts:393`), before rate
+  -limiting, device resolution, token consumption or any fraud signal.
+- A match with an identical `input_hash` is an idempotent replay: `buildReplayResult` (`evidence/handler.ts:311`)
+  re-derives the response purely from already-persisted rows (a fresh `listForPlay` + re-score, itself
+  idempotent) — zero new side effects. A mismatch is `Errors.conflict` (`http.ts:75`, new 409 helper) —
+  `evidence/handler.ts:398`.
+- The SAME post-insert race window (a concurrent request winning between `findExisting` and the actual
+  insert) is closed by comparing `insertIdempotent`'s own returned `inputHash` on the `!wasNew` branch —
+  `evidence/handler.ts:514` (queued-catalog branch) and `:671` (accepted branch).
+- Integration tests (both single and batch mode; both harness modes): `supabase/tests/integration/handlers.deno.test.ts`
+  ("blocking HIGH 1", "blocking HIGH 2"), `supabase/tests/integration/evidence-batch.deno.test.ts` ("blocking
+  HIGH 1+2 (batch mode)"), plus the unit-level fake-repo equivalents in `supabase/tests/unit/evidence-handler.test.ts`.
+
+**Blocking MEDIUM 3 (rate-limit hits roll back on 4xx).** `private.hit_rate_limit` raised on over-limit in
+the SAME statement that did the increment — an uncaught `RAISE EXCEPTION` aborts the transaction that
+statement ran in, discarding that SAME statement's own increment; wrapping the call in its own transaction
+did not change this, since the abort was already scoped to one statement. Fixed in TWO parts:
+`private.hit_rate_limit` no longer raises at all — it always returns the post-increment count
+(`supabase/migrations/0020_rate_limit_no_raise.sql`, a NEW migration since 0007/0016 are merged; the
+`SET ROLE private_definer` / `GRANT CREATE ON SCHEMA private` bracketing at `:75-76` is required because
+0016 already narrowed `private_definer` to schema-USAGE-only, and `CREATE OR REPLACE FUNCTION` needs BOTH
+ownership and schema CREATE, not ownership alone — found by actually running this against
+`HARNESS_MODE=restricted`/the H2 check, never reachable from a superuser bootstrap connection alone).
+`privileged.ts#rateLimit.hit` (`privileged.ts:224-286`) now opens its own separate `db.begin()` (not the
+request's shared `trx`) and compares the returned count to its own max. Integration test: `supabase/tests/integration/repo.deno.test.ts`
+proves N calls against a real Postgres cluster each increment by exactly 1, the (max+1)th correctly flips
+`ok:false` without losing the count; `supabase/tests/matrix/07_rate_limit.sql` updated for the no-raise
+contract (5 assertions, was 4).
+
+**Blocking MEDIUM 4 (batch: one failing item aborts the whole transaction).** Fixed via a new
+`privileged.ts#withOwnershipBatch` (`privileged.ts:854`) — one outer `db.begin()`, each item in its OWN
+`trx.savepoint(...)`, so a failing item's writes roll back to just its own savepoint while every earlier
+item's committed work is untouched. `evidence-batch/index.ts:75` calls it; rate-limiting (MEDIUM 3's own
+fix) runs first per item, so a cap-crossing item is rejected as `rate_limited` without even attempting its
+now-pointless savepoint-scoped work. Integration tests: `supabase/tests/integration/evidence-batch.deno.test.ts`
+("one bad item among good ones", "items after the per-user daily cap... earlier items still commit").
+
+**Blocking MEDIUM 5 (local_date comes from the client label, not the server).** For a fix-bearing source
+(`foreground_checkin`/`foreground_dwell`), `localDate` is now derived server-side from the anchor fix's own
+`capturedAt` resolved into the facility's real IANA tz (`evidence/handler.ts:221` `localDateInTz`, `:235`
+`anchorCapturedAtMs`, `:276` `assertServerDerivableLocalDate`) — a mismatching client label is rejected
+with 422 `local_date_mismatch` before any side effect, never silently overridden. For a date-only source
+(`self_report`/`health_workout`, no client-controlled capturedAt to derive a date from at all), the
+client's own label is accepted only inside a bounded window of facility-local "today"
+(`evidence/handler.ts:252` `assertSelfReportDateWindow`; `SELF_REPORT_WINDOW_DAYS_BACK`/`_FORWARD` = 30/1
+— no plan-stated number found in this checkout, same documented-default footnote as `MAX_DEVICES_PER_USER`).
+`app.evidence.local_date`'s own column comment (0019 §5) rewritten to match. Integration tests: the
+UTC-date-traveller case (`supabase/tests/integration/handlers.deno.test.ts`, anchored to the most recent
+real occurrence of 02:00 UTC so it is correct on whatever real date the suite runs, never a hardcoded one)
+gets the facility-local date accepted and the naive UTC date rejected; out-of-window `self_report` gets
+422 `local_date_out_of_window`.
+
+**Should-fix items, all done:**
+
+- **Clamp live fixes to the challenge window, not the token's.** `Repo#checkinToken.consumeForFix`
+  (`privileged.ts:753`) now joins `app.checkin_challenge` and clamps `capturedAt` against ITS
+  `issued_at`/`expires_at` (120s live / 24h prefetched, whichever the challenge actually was) instead of
+  the token's own separate 15-minute redemption TTL, which could let a capturedAt up to ~13 minutes stale
+  pass as valid for a live challenge.
+- **`ensureOwn` on another user's device id: 409, not 500.** `privileged.ts:650` — `Errors.conflict("device_owned_by_other_user", ...)`
+  replaces the old bare `throw new Error(...)`.
+- **CI pin-proof step.** `.github/workflows/ci.yml`'s new "deno cache --frozen (proves the pinned hashes,
+  tamper-evident)" step. This session independently RE-TESTED the premise ("`deno check --frozen` doesn't
+  verify JS module hashes") directly — a copy of `supabase/tests/deno.lock` with one remote entry's hash
+  byte-flipped, run via both `deno check --frozen` and `deno cache --frozen`, against both a fresh empty
+  `DENO_DIR` and an already-warm one — and in Deno 2.5.2, `deno check --frozen` ALSO failed with `error:
+  Integrity check failed for remote specifier` (exit 10) in every combination tested, not merely `deno
+  cache --frozen`. `[unverified — training-knowledge premise as originally stated, and NOT reproduced this
+  session on Deno 2.5.2]`. The dedicated step is added regardless — see its own inline comment for the
+  three reasons a `check`-only step doesn't fully cover on its own even so.
+- **0019 `local_date`/`input_hash` nullable → backfill → NOT NULL.** Both already fixed as of round 2's
+  own close-out edit to 0019 (see that migration's own comments); round 3 additionally needed the SAME
+  `helpers.sql`/pgTAP-fixture/concurrency-script `input_hash` backfill across every raw
+  `INSERT INTO app.evidence` this repo's own test fixtures make directly (`supabase/tests/helpers.sql`,
+  `supabase/tests/matrix/11_money_path.sql`, `supabase/tests/matrix/13_evidence_intake.sql`,
+  `tools/db/test-replay-concurrency.sh`) — none of these go through `Repo#evidence.insertIdempotent`, so
+  the new NOT NULL column needed a value at every one of these call sites too.
+- **`test-deno-integration.sh` portability.** No longer depends on a manually pre-warmed `DENO_DIR` tied to
+  one sandbox's own paths: it now creates and owns a scoped, throwaway `DENO_DIR` via `mktemp` when the
+  caller hasn't already supplied one (cleaned up on exit), and discovers a usable `DENO_CERT` from whichever
+  of `DENO_CERT`/`NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE`/`CURL_CA_BUNDLE` is BOTH set and actually readable by
+  the invoking OS user (never a hardcoded path) — verified end to end in this session as the `postgres` OS
+  user, with no manual pre-warming, against a genuinely fresh, throwaway `DENO_DIR` the script created
+  itself, using a copy of this sandbox's own CA bundle made world-readable under `/tmp` (never touching
+  `/root`'s own permissions) so the fallback-discovery loop had something real to find.
+
+**Updated Deno integration suite counts:** `supabase/tests/integration/{repo,handlers,evidence-batch}.deno.test.ts`
+— 14 + 16 + 4 = 34 tests (up from 25 at round 2 — new: HIGH 1/HIGH 2/MEDIUM 5's own integration tests, plus
+the new `evidence-batch.deno.test.ts` file), both HARNESS_MODE=superuser and HARNESS_MODE=restricted:
+**34 passed, 0 failed, in both modes.** pgTAP matrix: 387 assertions (up from 386 — `07_rate_limit.sql`'s
+own no-raise rewrite added one).
+
+**Updated Accepted follow-ups (tightening #7 from the P3c gate round 2 append above — append-only, that
+entry is left as originally written; this is the CURRENT, more precise statement of the same gap):**
+
+9. **Follow-up 7, tightened (P3c gate round 3).** `hardwareSupportsAttestation` is fully CLIENT
+   -CONTROLLED (a platform-capability self-report, never a signed assertion), and a tokenless fix
+   hard-codes it to `false` regardless of what the device could actually support (`derive-fix.ts:91`) — so
+   a MISSING token never grades `failed` under G3-08's own rule, only `unattestable`. Restated precisely:
+   **no offer issuance or reward activation may rest on a P3c-graded fix until real App Attest/Play
+   Integrity attestation verification ships.** This is not a hypothetical future tightening — it is the
+   condition under which P3c's own scoring output is safe to build on top of at all.
+10. **`supabase/tests/deno.lock` does not govern `supabase functions deploy` (P3c gate round 3).** This
+    lockfile is a TEST-time artifact only — `tools/db/test-deno-integration.sh` and the CI `deno check`/
+    `deno cache` steps are the only things that read it. The real Supabase CLI's own deploy-time dependency
+    resolution for the Edge Runtime is a SEPARATE mechanism this repo has not yet verified pins the same
+    way (the pre-existing "pin `--config` at deploy time" `[unverified]` flag, follow-up 4 at the P3a gate
+    and restated in `privileged.ts`'s own header, already covers the `--config` half of this; this note
+    covers the LOCKFILE half specifically). Deploy-time pinning verification is a pre-deploy item, not
+    something this round's test-time lockfile discipline substitutes for.
