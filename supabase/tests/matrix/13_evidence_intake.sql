@@ -8,7 +8,7 @@
 -- harness).
 
 BEGIN;
-SELECT plan(18);
+SELECT plan(24);
 
 -- ============================================================================
 -- 1. app.catalog_signing_key / app.checkin_token: no client role can read
@@ -51,8 +51,8 @@ SELECT is((SELECT count(*)::int FROM app.catalog_signing_key), 0, 'catalog_signi
 -- 3. app.checkin_challenge -> app.checkin_token: single-use consumption
 --    (Repo#consumeChallenge's own SQL shape).
 -- ============================================================================
-INSERT INTO app.checkin_challenge (id, user_id, device_id, facility_id, nonce_hash, expires_at)
-VALUES ('60000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'fac_x', 'nonce-hash-1', now() + interval '2 minutes');
+INSERT INTO app.checkin_challenge (id, user_id, device_id, facility_id, nonce_hash, expires_at, kind)
+VALUES ('60000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'fac_x', 'nonce-hash-1', now() + interval '2 minutes', 'live');
 
 -- A data-modifying WITH must be the top-level statement (Postgres does
 -- not allow one nested inside a scalar-subquery argument to is()) — so
@@ -100,12 +100,101 @@ SELECT is(
 );
 
 -- ============================================================================
+-- 3b. P3c gate round 2, item 4: Repo#checkinToken.consumeForFix's own
+--     single atomic UPDATE — ownership + single-use + device match +
+--     challenge-window clamp (issued_at <= capturedAt <= expires_at), all
+--     in ONE WHERE clause (see privileged.ts's own doc).
+-- ============================================================================
+INSERT INTO app.checkin_challenge (id, user_id, device_id, facility_id, nonce_hash, expires_at, kind)
+VALUES ('61000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'fac_x', 'nonce-hash-consume-1', now() + interval '2 minutes', 'live');
+UPDATE app.checkin_challenge SET used_at = now() WHERE id = '61000000-0000-0000-0000-000000000001';
+INSERT INTO app.checkin_token (jti, challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at)
+VALUES ('61100000-0000-0000-0000-000000000001', '61000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'fac_x', 'unattestable', 'live', now() - interval '1 minute', now() + interval '14 minutes');
+
+-- A DIFFERENT device than the token's own device_id: consumeForFix's
+-- WHERE clause must reject it (0 rows updated), never fall back to
+-- matching on user_id/jti alone.
+UPDATE app.checkin_token SET consumed_at = now()
+WHERE jti = '61100000-0000-0000-0000-000000000001'
+  AND user_id = '00000000-0000-0000-0000-00000000000a'
+  AND device_id = '20000000-0000-0000-0000-000000000099' -- wrong device
+  AND consumed_at IS NULL AND expires_at > now();
+SELECT is(
+  (SELECT consumed_at FROM app.checkin_token WHERE jti = '61100000-0000-0000-0000-000000000001'),
+  NULL,
+  'consumeForFix-shape UPDATE: a device mismatch matches 0 rows (consumed_at stays NULL)'
+);
+
+-- A capturedAt OUTSIDE [issued_at, expires_at] (e.g. before issued_at):
+-- also 0 rows, even with the RIGHT device.
+UPDATE app.checkin_token SET consumed_at = now()
+WHERE jti = '61100000-0000-0000-0000-000000000001'
+  AND user_id = '00000000-0000-0000-0000-00000000000a'
+  AND device_id = '20000000-0000-0000-0000-000000000001'
+  AND consumed_at IS NULL AND expires_at > now()
+  AND issued_at <= (now() - interval '10 minutes') AND (now() - interval '10 minutes') <= expires_at;
+SELECT is(
+  (SELECT consumed_at FROM app.checkin_token WHERE jti = '61100000-0000-0000-0000-000000000001'),
+  NULL,
+  'consumeForFix-shape UPDATE: a capturedAt before issued_at matches 0 rows (window clamp)'
+);
+
+-- The RIGHT device, WITHIN the window: succeeds, exactly once.
+UPDATE app.checkin_token SET consumed_at = now()
+WHERE jti = '61100000-0000-0000-0000-000000000001'
+  AND user_id = '00000000-0000-0000-0000-00000000000a'
+  AND device_id = '20000000-0000-0000-0000-000000000001'
+  AND consumed_at IS NULL AND expires_at > now()
+  AND issued_at <= now() AND now() <= expires_at;
+SELECT is(
+  (SELECT consumed_at IS NOT NULL FROM app.checkin_token WHERE jti = '61100000-0000-0000-0000-000000000001'),
+  true,
+  'consumeForFix-shape UPDATE: right device + within window succeeds'
+);
+-- A SECOND attempt (single-use): 0 rows, even though device/window are
+-- both still fine.
+UPDATE app.checkin_token SET consumed_at = now()
+WHERE jti = '61100000-0000-0000-0000-000000000001'
+  AND user_id = '00000000-0000-0000-0000-00000000000a'
+  AND device_id = '20000000-0000-0000-0000-000000000001'
+  AND consumed_at IS NULL AND expires_at > now()
+  AND issued_at <= now() AND now() <= expires_at;
+SELECT is(
+  (SELECT count(*)::int FROM app.checkin_token WHERE jti = '61100000-0000-0000-0000-000000000001' AND consumed_at IS NULL),
+  0,
+  'consumeForFix-shape UPDATE: a second consumption attempt matches 0 rows (single-use)'
+);
+
+-- ============================================================================
+-- 3c. P3c gate round 2, item 1: app.evidence.local_date is a REAL column
+--     that Repo#evidence.listForPlay filters on directly — proven here as
+--     the exact query shape, not the fail-open coalesce it replaced.
+-- ============================================================================
+INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
+VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-localdate-day1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, '2026-06-01'),
+       ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-localdate-day2', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, '2026-06-02');
+SELECT is(
+  (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND facility_id = 'fac_x'
+     AND (course_id = 'crs_x1' OR course_id IS NULL) AND local_date = '2026-06-01' AND status = 'accepted'
+     AND source_ref = 'p3c-localdate-day1'),
+  1,
+  'listForPlay-shape query: day-1 row matches a day-1 query'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND facility_id = 'fac_x'
+     AND (course_id = 'crs_x1' OR course_id IS NULL) AND local_date = '2026-06-01' AND status = 'accepted'
+     AND source_ref = 'p3c-localdate-day2'),
+  0,
+  'listForPlay-shape query: day-2 row does NOT match a day-1 query (no fail-open coalesce)'
+);
+
+-- ============================================================================
 -- 4. app.evidence idempotent insert (Repo#insertEvidenceIdempotent's own
 --    ON CONFLICT (user_id, source, source_ref) DO NOTHING shape) — AT(3):
 --    "a replayed evidence payload yields one row and one play."
 -- ============================================================================
-INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary)
-VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb)
+INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
+VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, current_date)
 ON CONFLICT (user_id, source, source_ref) DO NOTHING;
 SELECT is(
   (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND source = 'self_report' AND source_ref = 'p3c-test-ref-1'),
@@ -113,8 +202,8 @@ SELECT is(
   'first insert of a (user, source, source_ref) triple succeeds'
 );
 -- REPLAY: the exact same insert again.
-INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary)
-VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb)
+INSERT INTO app.evidence (user_id, device_id, source, source_ref, facility_id, course_id, status, attestation_grade, catalog_version, summary, local_date)
+VALUES ('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'self_report', 'p3c-test-ref-1', 'fac_x', 'crs_x1', 'accepted', 'unattestable', 1, '{}'::jsonb, current_date)
 ON CONFLICT (user_id, source, source_ref) DO NOTHING;
 SELECT is(
   (SELECT count(*)::int FROM app.evidence WHERE user_id = '00000000-0000-0000-0000-00000000000a' AND source = 'self_report' AND source_ref = 'p3c-test-ref-1'),

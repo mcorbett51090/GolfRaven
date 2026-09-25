@@ -27,6 +27,12 @@
 #      how these rows would really be written by an Edge Function).
 #   6. Run every supabase/tests/matrix/*.sql file with pg_prove (falls back
 #      to psql + runtests() if pg_prove is unavailable).
+#   6b. Replay/idempotency + money-path concurrency checks (real, two
+#      -session races) and the Deno integration suite (P3c gate round 2,
+#      item 0: the REAL privileged.ts + handlers, under Deno, against
+#      THIS live cluster — supabase/tests/integration/, run via
+#      tools/db/test-deno-integration.sh), all against this same
+#      database, before teardown.
 #   7. Tear the cluster down (trap on EXIT, so a failed run still cleans
 #      up).
 #
@@ -248,6 +254,23 @@ run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAM
 
 echo "tools/db/test.sh: money-path concurrency checks (H3 + should-fix, as $DBUSER)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-money-path-concurrency.sh'"
+
+# ⛔ FIX (P3c gate round 2, item 0 — required first): the CI blind spot.
+# Every HIGH/MEDIUM item in that gate round was found ONLY by running the
+# REAL privileged.ts (and the handlers built on it) under Deno against a
+# real Postgres cluster — nothing above this line ever does that (pgTAP
+# exercises raw SQL shapes directly; the vitest unit suite runs against an
+# in-memory FAKE Repo). This step runs supabase/tests/integration/
+# against THIS SAME live cluster/database, connecting as $DBUSER — in
+# BOTH harness modes, so "Conditions on the BYPASSRLS design"'s own
+# `SET LOCAL ROLE service_role` activation is proven to work from a
+# connecting role that is NOT already service_role in EITHER shape
+# (`postgres`, a true superuser, under HARNESS_MODE=superuser; and
+# `migration_owner`, NOSUPERUSER NOBYPASSRLS, under HARNESS_MODE=restricted).
+# A missing `deno` is a HARD failure here (see that script's own header),
+# never a soft skip.
+echo "tools/db/test.sh: Deno integration suite — REAL privileged.ts + handlers against this live cluster (P3c gate round 2, item 0, as $DBUSER)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
 
 echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
 PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \

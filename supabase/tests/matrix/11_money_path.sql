@@ -29,9 +29,9 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 -- for player A, so a NEW evidence row is used here to isolate each
 -- assertion cleanly rather than colliding with that existing pair.
 SELECT lives_ok(
-  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
     VALUES ('32000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a2', 'accepted', 1)$$,
+            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a2', 'accepted', 1, current_date)$$,
   'setup: a second evidence row owned by player A'
 );
 SELECT lives_ok(
@@ -67,9 +67,9 @@ SELECT lives_ok(
 
 -- A play for player B, evidence for player A: ownership mismatch.
 SELECT lives_ok(
-  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
     VALUES ('31000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000b',
-            NULL, 'self_report', 'money-path-seed-b', 'accepted', 1)$$,
+            NULL, 'self_report', 'money-path-seed-b', 'accepted', 1, current_date)$$,
   'setup: an evidence row owned by player B'
 );
 -- A THIRD evidence row for player A, not yet linked to anything (30000000-
@@ -77,9 +77,9 @@ SELECT lives_ok(
 -- would trip the UNIQUE(evidence_id) constraint first and mask the FK
 -- violation these two tests are isolating).
 SELECT lives_ok(
-  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
+  $$INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
     VALUES ('33000000-0000-0000-0000-000000000099', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a3', 'accepted', 1)$$,
+            '20000000-0000-0000-0000-000000000001', 'self_report', 'money-path-seed-a3', 'accepted', 1, current_date)$$,
   'setup: a THIRD evidence row owned by player A, not yet linked'
 );
 
@@ -517,9 +517,9 @@ SELECT is(
 --    used_at one-way transition.
 -- ---------------------------------------------------------------------------
 SELECT lives_ok(
-  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at, kind)
     VALUES ('a1000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes')$$,
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes', 'live')$$,
   'setup: seed one checkin_challenge row'
 );
 -- The consumed-nonce tombstone trigger (should-fix, added below) fires
@@ -528,9 +528,9 @@ SELECT lives_ok(
 -- 23505 -- this still proves the same thing (global uniqueness, not
 -- per-user), just via the stricter of the two mechanisms.
 SELECT throws_ok(
-  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at, kind)
     VALUES ('a1000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000b',
-            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes')$$,
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes', 'live')$$,
   '23514',
   NULL,
   'checkin_challenge.nonce_hash is globally unique across users (tombstone ledger + the table''s own UNIQUE both agree, not per-user)'
@@ -556,9 +556,9 @@ SELECT lives_ok(
   'setup: delete the checkin_challenge row seeded above (freeing its nonce_hash from the table''s own UNIQUE constraint)'
 );
 SELECT throws_ok(
-  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at, kind)
     VALUES ('a1000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes')$$,
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-1', now() + interval '5 minutes', 'live')$$,
   '23514',
   NULL,
   'checkin_challenge: a DELETEd-then-re-INSERTed nonce_hash is still rejected by the consumed-nonce tombstone ledger, not just the table''s own UNIQUE constraint'
@@ -573,9 +573,9 @@ SELECT throws_ok(
 -- ledger, so an UPDATE targeting it would silently match zero rows and
 -- prove nothing).
 SELECT lives_ok(
-  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at, kind)
     VALUES ('a1000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-immutable', now() + interval '5 minutes')$$,
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-immutable', now() + interval '5 minutes', 'live')$$,
   'setup: a fresh checkin_challenge row for the immutability test'
 );
 SELECT throws_ok(
@@ -649,9 +649,9 @@ SELECT is(
 -- should-fix: "an over-long TTL is refused" — app.checkin_challenge's new
 -- CHECK constraint bounds expires_at to at most 24 hours past issued_at.
 SELECT throws_ok(
-  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at)
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, expires_at, kind)
     VALUES ('a1000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000a',
-            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-overlong-ttl', now() + interval '30 days')$$,
+            '20000000-0000-0000-0000-000000000001', 'nonce-money-path-overlong-ttl', now() + interval '30 days', 'live')$$,
   '23514',
   NULL,
   'checkin_challenge rejects an over-long TTL (expires_at more than 24 hours past issued_at) -- a 30-day challenge is no longer accepted'
@@ -666,10 +666,10 @@ SELECT throws_ok(
 -- checkin_challenge_issued_at_not_future CHECK closes this independently
 -- of the gap CHECK.
 SELECT throws_ok(
-  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, issued_at, expires_at)
+  $$INSERT INTO app.checkin_challenge (id, user_id, device_id, nonce_hash, issued_at, expires_at, kind)
     VALUES ('a1000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a',
             '20000000-0000-0000-0000-000000000001', 'nonce-money-path-future-issued-at',
-            now() + interval '10 days', now() + interval '10 days' + interval '5 minutes')$$,
+            now() + interval '10 days', now() + interval '10 days' + interval '5 minutes', 'live')$$,
   '23514',
   NULL,
   'checkin_challenge rejects a FUTURE issued_at, even though expires_at stays well within the 24h gap CHECK -- closes the "push the whole window out" sidestep (should-fix 3, post-P3a re-gate)'

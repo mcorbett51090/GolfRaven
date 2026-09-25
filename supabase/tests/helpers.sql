@@ -94,9 +94,13 @@ VALUES ('trl_t', 'fac_x', 'in_stock');
 -- "player B reads A's X" has something real to fail to read.
 INSERT INTO app.device (id, user_id, platform) VALUES
   ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'ios');
-INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version)
+-- local_date: NOT NULL since 0019's own P3c gate round 2 fix (item 1) —
+-- see that migration's own comment. This seed row predates that column;
+-- pinned to the SAME play_date the seeded app.play row below uses so the
+-- two stay consistent with each other.
+INSERT INTO app.evidence (id, user_id, device_id, source, source_ref, status, catalog_version, local_date)
 VALUES ('30000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
-        '20000000-0000-0000-0000-000000000001', 'foreground_checkin', 'checkin-seed-1', 'accepted', 1);
+        '20000000-0000-0000-0000-000000000001', 'foreground_checkin', 'checkin-seed-1', 'accepted', 1, current_date);
 INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status)
 VALUES ('40000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
         'crs_x1', 'fac_x', current_date, 'v1', 'confirmed');

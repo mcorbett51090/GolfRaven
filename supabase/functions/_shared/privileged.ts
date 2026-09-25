@@ -42,17 +42,39 @@
 // to apply to; noted because the gate asked for this to be stated
 // explicitly, not left implicit.
 //
-// [unverified — this session confirmed `deno eval`/`deno check` can
-// import and resolve `postgres` and `@supabase/supabase-js` from these
-// exact URLs over this session's network proxy, and separately confirmed
+// [unverified — this session confirmed `deno eval`/`deno check`/`deno
+// test` can import and resolve `postgres` and `@supabase/supabase-js`
+// from these exact pinned URLs (now resolved through
+// supabase/functions/deno.json's import map — see the should-fix note
+// below) over this session's network proxy, and separately confirmed
 // Deno 2.5.2's `crypto.subtle` supports Ed25519 (catalog/signature.ts) —
 // neither confirms this exact driver version behaves identically inside
 // the REAL hosted Supabase Edge Runtime, which this session has no
 // access to. Flagged per this repo's own accuracy discipline, alongside
 // the pre-existing "pin --config at deploy time" unverified flag in
 // docs/security/p3-money-path-requirements.md.]
-import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+//
+// ⛔ FIX (P3c gate round 2, should-fix "supply chain"): these two used to
+// be raw `https://` string-literal imports, invisible to
+// tools/service-role-lint's own pinned-target discipline in a way no
+// OTHER third-party dependency in this codebase is (zod/@noble/hashes/
+// tz-lookup all resolve through the reviewed
+// supabase/functions/deno.json import map + pinned-import-targets.json
+// allow-list — see generate-bundle.sh's own header for why). Moved to
+// bare specifiers resolved through that SAME reviewed map: privileged.ts
+// itself stays exempt from the lint's AST content scan (rule (a)/(b)/(c)
+// — it legitimately needs the raw env access / client construction every
+// other file is banned from), but its import GRAPH is no longer a
+// special case — config.ts's own model validates every deno.json's
+// import-map target against pinned-import-targets.json regardless of
+// which file resolves through it (see that module's own header, point
+// 1: "regardless of whether any source file currently imports through
+// it"), so bumping either pin now means touching the SAME two reviewed,
+// diffable files (deno.json + pinned-import-targets.json) every other
+// dependency bump already requires — not an inline URL edit invisible to
+// that discipline.
+import postgres from "postgres";
+import { createClient } from "@supabase/supabase-js";
 
 import type {
   Actor,
@@ -158,7 +180,20 @@ function advisoryLockKeys(namespace: number, id: string): [number, number] {
     h ^= id.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }
-  return [namespace, h >>> 0];
+  // ⛔ FIX (found via the P3c gate round 2 Deno integration suite):
+  // `pg_advisory_xact_lock(int, int)` takes two SIGNED 32-bit integers
+  // (Postgres `int4`, range -2147483648..2147483647). `h >>> 0` (unsigned
+  // right shift) always produces a NON-NEGATIVE value up to 4294967295 —
+  // roughly HALF of all possible hash outputs exceed int4's max positive
+  // value and fail with "value ... is out of range for type integer" the
+  // instant a real query actually binds it. `h | 0` (bitwise OR with 0)
+  // reinterprets the SAME 32 bits as SIGNED instead — every bit pattern
+  // is preserved (the lock key's own uniqueness/collision behaviour is
+  // identical either way), it just now fits the column type it's
+  // actually bound against. Caught only by running this against a real
+  // Postgres — every unit/fake-repo test exercises the TS-level function
+  // alone and never binds its output to an `int4` SQL parameter.
+  return [namespace, h | 0];
 }
 
 function buildRepo(trx: TxSql, actor: Actor): Repo {
@@ -170,8 +205,24 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
 
     rateLimit: {
       async hit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
+        // ⛔ FIX (found via the P3c gate round 2 Deno integration suite,
+        // item 5's own class of bug: "withOwnership ignores the actor").
+        // Every caller (evidence/handler.ts, checkin/challenge-handler.ts,
+        // checkin/token-handler.ts, evidence-batch/index.ts) passes a
+        // BARE bucket key like "evidence:user" or "checkin-token:user" —
+        // it relies on THIS method to scope it per actor, exactly like
+        // every other Repo method closes over `uid` itself. Without the
+        // prefix below, every user on the platform shared the SAME
+        // "evidence:user" bucket in private.rate_limit_bucket — a global
+        // rate limit, not a per-user one (the device-keyed bucket,
+        // `evidence:device:${device.id}`, already happened to be
+        // per-device by construction, but the per-USER buckets were not
+        // per-user at all). Caught only by running this against a real
+        // Postgres cluster with two distinct actors — no fake/unit test
+        // exercised two actors racing the SAME literal bucket key.
+        const scopedBucketKey = `${uid}:${bucketKey}`;
         try {
-          const rows = await trx`select private.hit_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
+          const rows = await trx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
           return { ok: true, count: Number(rows[0]?.count ?? 0) };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -368,7 +419,20 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
             ${input.money}, ${input.heldReview}, ${input.policyVersion}, ${input.inputDigest},
             -- should-fix (P3c gate round 2): "provisional below the
             -- threshold instead of always confirmed."
-            case when ${input.scoreBadge} >= 0.50 then 'confirmed' else 'provisional' end
+            -- ⛔ FIX (found via the Deno integration suite): the bare
+            -- CASE expression's own result type resolves to `text`, not
+            -- `app.play_status` — unlike a plain string literal in a
+            -- VALUES list (which Postgres up-casts to the target
+            -- column's type automatically via its "unknown"-literal
+            -- coercion), a CASE expression's branches resolve to a
+            -- concrete `text` type once evaluated, and assigning `text`
+            -- into an enum column with no explicit cast is a hard error
+            -- ("column is of type app.play_status but expression is of
+            -- type text") — this INSERT would have failed on every real
+            -- Postgres, always, the very first time a fresh play row was
+            -- ever created; no unit/fake-repo test could ever catch it,
+            -- since the fake Repo never runs real SQL at all.
+            (case when ${input.scoreBadge} >= 0.50 then 'confirmed' else 'provisional' end)::app.play_status
           )
           on conflict (user_id, course_id, play_date) do update set
             score_badge = excluded.score_badge,
@@ -379,8 +443,8 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
             held_review = excluded.held_review,
             policy_version = excluded.policy_version,
             input_digest = excluded.input_digest,
-            status = case when app.play.status = 'disputed' then app.play.status
-                          when excluded.score_badge >= 0.50 then 'confirmed' else 'provisional' end
+            status = (case when app.play.status = 'disputed' then app.play.status::text
+                          when excluded.score_badge >= 0.50 then 'confirmed' else 'provisional' end)::app.play_status
           returning id, (xmax = 0) as inserted`;
         const r = rows[0];
         const playId = r.id as string;
@@ -514,6 +578,15 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
  */
 export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
   const db = sql();
+  // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
+  // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
+  // — a SEPARATE generic (T2) from this function's own `T`, and
+  // `UnwrapPromiseArray<T2>` is not provably assignable back to an
+  // UNCONSTRAINED `T` for every possible instantiation (`deno check`
+  // TS2322, caught this round by the P3c gate round 2 integration suite
+  // work — never actually run before). Every caller here always passes a
+  // plain (non-array, non-nested-Promise) value through `op`, so the cast
+  // is sound in practice; the type system alone can't prove it generically.
   return db.begin(async (trx: TxSql) => {
     // "Conditions on the BYPASSRLS design" (required): the connecting
     // role is NOT assumed to already be service_role (it may be
@@ -526,5 +599,5 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
     }
     const repo = buildRepo(trx, actor);
     return op(repo);
-  });
+  }) as Promise<T>;
 }
