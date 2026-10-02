@@ -116,6 +116,56 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+          # P3d gate round 3, blocking B1: fetch-depth 0 (not this job's
+          # prior default of 1) so `origin/main` actually resolves for the
+          # migration-immutability check below — a `pull_request` event's
+          # default shallow checkout has no ref for it at all otherwise.
+          fetch-depth: 0
+
+      - name: Migrations are immutable once merged (P3d gate round 3, blocking B1)
+        # Runs FIRST, before the expensive Postgres/PostGIS/pgTAP install
+        # below — cheap, and the exact bug class this catches (a merged
+        # migration edited in place) is a fast, unambiguous fail with
+        # nothing DB-related to set up first. Self-test runs every time
+        # too (not a separate manual step) — a check that could silently
+        # stop checking anything is worse than no check.
+        #
+        # ⛔ FIX (P3d gate round 4, S-a2): "on push: main the job compares
+        # main against itself." A plain `--base origin/main` on a `push`
+        # event to `main` (this workflow's own `on.push.branches: [main]`,
+        # above) is vacuous: by the time this job checks out, the just-
+        # pushed commit has ALREADY landed, so `origin/main` already
+        # equals HEAD — the check compares the new commit's migrations
+        # against themselves and can never fail, regardless of what that
+        # push actually changed. On `push`, the correct base is
+        # `github.event.before` — the tip main pointed at immediately
+        # BEFORE this push — passed via `env:` (never interpolated
+        # directly into the shell body) per GitHub's own hardening
+        # guidance for event-context values. Skipped ONLY when `before`
+        # is the all-zero SHA (a brand-new branch reaching `main` for the
+        # first time, or a history rewrite with no real prior tip) — there
+        # is genuinely nothing to compare against in that one shape, not a
+        # loophole for anything else. `pull_request` keeps `origin/main`
+        # (a PR's base is main's CURRENT tip, unaffected by this bug —
+        # the PR's own commits have not landed there yet). The `fetch-depth:
+        # 0` above already unshallows the WHOLE history (not just main's
+        # tip), so `event.before`'s own commit is always resolvable here,
+        # not only `origin/main`.
+        env:
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          tools/db/check-migrations-immutable.sh --self-test
+          if [ "$GH_EVENT_NAME" = "push" ]; then
+            if [ "$GH_EVENT_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "tools/db/check-migrations-immutable.sh: push event's 'before' is the all-zero SHA (new branch reaching main for the first time, or a history rewrite with no real prior tip) -- nothing to compare against, skipping this run."
+            else
+              tools/db/check-migrations-immutable.sh --base "$GH_EVENT_BEFORE"
+            fi
+          else
+            tools/db/check-migrations-immutable.sh --base origin/main
+          fi
 
       - name: Install PostgreSQL 17 + PostGIS 3 + pgTAP (PGDG apt, key-checked)
         # Postgres 17, PostGIS 3, pgTAP (build plan §10 P3,

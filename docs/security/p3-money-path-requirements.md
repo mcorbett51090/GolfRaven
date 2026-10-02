@@ -915,20 +915,26 @@ pattern every other endpoint this round uses) plus one new migration
   `MAX_DEVICES_PER_USER` (20) cap `evidence/handler.ts`/`checkin/challenge-handler.ts` already use,
   checked BEFORE creating a new device row — since `push_token`'s own PK is `(user_id, device_id)`, a
   token is capped at one per device by construction, so the device cap IS the token cap.
-- **Follow-up 13 ("503 after a successful commit"), CLOSED.** `withOwnership`/`withOwnershipBatch`
-  (`privileged.ts`) now run `SET LOCAL statement_timeout = '10s'` and `SET LOCAL lock_timeout = '5s'`
-  as their first two statements after activating `service_role` — both comfortably under
-  `http.ts`'s 15 s request race, `lock_timeout` firing first on purpose (a lock wait is the specific
-  failure shape this follow-up names). A new `mapPgTimeoutError` maps Postgres SQLSTATEs `57014`
-  (`query_canceled`, statement_timeout) and `55P03` (`lock_not_available`, lock_timeout) to
-  `Errors.serviceUnavailable()` (503), in both functions (including per-item, inside
-  `withOwnershipBatch`'s savepoint loop). Proven end to end against a REAL held lock from a SECOND
-  session, exactly as specified: `supabase/tests/integration/me-handlers.deno.test.ts` holds an
-  `ACCESS EXCLUSIVE` lock on `app.play` for 20 s from a second connection while a concurrent
-  `withOwnership` call is made — the call fails with a real 503 in ~5 s (not the full 20 s), 0 rows
-  are written afterward, and (the full evidence-intake-pipeline variant of the same test) the
-  checkin token's `consumed_at` is still `NULL` — its own `consumeForFix` UPDATE rolled back with
-  everything else in the same transaction. Passed in BOTH harness modes.
+- **Follow-up 13 ("503 after a successful commit"), CLOSED — corrected/extended, P3d gate round 2.**
+  The ORIGINAL wording below described only the `statement_timeout`/`lock_timeout` half; the gate
+  round 2 pass found a SECOND, distinct hole the per-statement timeouts alone cannot close (a
+  transaction of MANY SHORT statements, none individually near either timeout, whose CUMULATIVE
+  wall-clock time still exceeds the HTTP race) and a live O(n²) batch-scoring bug — both fixed and
+  documented in the new "P3d gate round 2" section below. Kept here verbatim for what it still
+  correctly describes: `withOwnership`/`withOwnershipBatch` (`privileged.ts`) run
+  `SET LOCAL statement_timeout = '10s'` and `SET LOCAL lock_timeout = '5s'` as their first two
+  statements after activating `service_role` — both comfortably under `http.ts`'s 15 s request race,
+  `lock_timeout` firing first on purpose (a lock wait is the specific failure shape this follow-up
+  names). A new `mapPgTimeoutError` maps Postgres SQLSTATEs `57014` (`query_canceled`,
+  statement_timeout) and `55P03` (`lock_not_available`, lock_timeout) to `Errors.serviceUnavailable()`
+  (503), in both functions (including per-item, inside `withOwnershipBatch`'s savepoint loop). Proven
+  end to end against a REAL held lock from a SECOND session, exactly as specified:
+  `supabase/tests/integration/me-handlers.deno.test.ts` holds an `ACCESS EXCLUSIVE` lock on `app.play`
+  for 20 s from a second connection while a concurrent `withOwnership` call is made — the call fails
+  with a real 503 in ~5 s (not the full 20 s), 0 rows are written afterward, and (the full
+  evidence-intake-pipeline variant of the same test) the checkin token's `consumed_at` is still `NULL`
+  — its own `consumeForFix` UPDATE rolled back with everything else in the same transaction. Passed in
+  BOTH harness modes.
 - **Follow-up 14 ("nits"), CLOSED.** `buildRepo`'s unused `db` parameter removed
   (`buildRepo(trx, actor)`/`buildRepo(sp, actor)`, not `buildRepo(db, trx, actor)`); confirmed with
   `deno check` and the service-role lint that nothing else referenced it. The CI lockfile tamper step
@@ -936,12 +942,10 @@ pattern every other endpoint this round uses) plus one new migration
   check failed" — re-verified empirically THIS round (Deno 2.5.2, the same tamper fixture the round-3
   pin-proof step already builds): exit 10, "Integrity check failed" present. A non-zero exit from an
   unrelated cause (a network error, a config typo) no longer masquerades as a pass.
-- **Test counts.** pgTAP matrix: 398 assertions (up from 387 — `14_me_export.sql`, new, 11
-  assertions). Deno integration suite: `supabase/tests/integration/{repo,handlers,evidence-batch,
-  me-handlers}.deno.test.ts` — 15 + 16 + 4 + 7 = 42 tests (up from 34), **42 passed, 0 failed, in
-  BOTH harness modes** (superuser and restricted). Unit (vitest): 114 tests, 12 files, all passed
-  (up from the pre-P3d count — four new files: `me-delete-handler`, `me-export-handler`,
-  `me-push-token-handler`, `provider-revocation`).
+- **Test counts (superseded — see "P3d gate round 2" below for the FINAL counts).** This bullet
+  originally reported 398 pgTAP assertions and 42 Deno tests, from before the gate round 2 fixes
+  (the export blocking-HIGH rewrite, should-fixes 1–3) added more of both. Left here only so the delta
+  in the new section below is legible; do not cite this bullet's numbers as current.
 - **Deferrals, restated plainly.** Real Apple/Google sign-in-provider revocation (O12/AT 19) and real
   golf-app connector revocation (P8) are NOT built this round — see `provider-revocation.ts`'s own
   header. `deleteAuthUser`'s exact behaviour against a REAL Supabase Auth instance (not merely its
@@ -950,3 +954,503 @@ pattern every other endpoint this round uses) plus one new migration
   Follow-ups 6–12 (the P3c gate round 2/3 "Accepted follow-ups" list, above) are UNCHANGED by this
   round — P3d did not touch the BYPASSRLS role-scope design, the attestation-still-client-hinted gap,
   or the batch-history-import/duplicate-clock-skew items; only 13 and 14 were in this round's scope.
+  Gate round 2 adds its OWN, separately documented deferrals — see below.
+
+## P3d gate round 2 (2026-09-25): export blocking HIGH, should-fixes 1–3
+
+The gate on commit `269b1bf` failed on one blocking HIGH (export leak) and asked for three
+should-fixes "now." All four are closed this round; nothing here was deferred without saying so.
+
+- **BLOCKING HIGH: `GET /v1/me/export` leaked other users' data and secret token material — CLOSED.**
+  `0021_export_my_data.sql` rewritten from scratch. Root cause: the original version exported every
+  row the registry matched through EITHER a `delete_row` OR a `set_null` column via `to_jsonb(t)` —
+  for a `set_null` column the matched column names the ACTOR (e.g. `redeemed_by_staff`,
+  `invited_by`, `cleared_by`), not the subject, so a staff member's own export pulled in whole rows
+  belonging to whichever PLAYERS that staff member had redeemed offer codes for or reviewed; two
+  connector/token tables (`connector_account`, `signin_provider_token`) were exported via bare
+  `to_jsonb(t)` with no column allow-list, including `refresh_token_ciphertext`/`dek_wrapped`/
+  `kek_id`; and `fraud_signal`/`review_item` exported their full `detail` jsonb, including another
+  user's uuid and fraud-review internals.
+
+  Fix: a new `private.pii_export_policy` registry (`export` / `exclude` per table, mirroring
+  `private.pii_retention_policy`'s own shape) with a fail-closed coverage check — `export_my_data`
+  raises if any `pii_retention_policy` table has no matching row — and `export_my_data` itself
+  rewritten to 20 EXPLICIT, hand-written `SELECT <named columns> ... WHERE <subject column> =
+  p_user_id` statements, never `SELECT *`/`to_jsonb(t)` blind. Every subject-column choice is a
+  genuine subject specific column (`attestation.player_user_id`, `entitlement.user_id`,
+  `receipt_fingerprint.user_id`, `audit_log.actor_user_id`), never a `set_null` actor column — no
+  table is EVER reached through `redeemed_by_staff`/`invited_by`/`cleared_by`/`resolved_by`.
+  `connector_account` is exported with only `api.my_connector_account`'s own column set (no token
+  columns at all, §4.4). `signin_provider_token` is excluded entirely (reason recorded in the
+  registry). `fraud_signal`/`review_item` are restricted to `id, kind, created_at` — no `detail`, no
+  `cleared_by`/`resolved_by` — the "actions you took" shape the fix instructions allowed. Every
+  other table's SELECT lists every real column BY NAME, excluding every secret/hash/pepper/key
+  column that exists on it (`devicecheck_token_hash`, `code_hmac`, `pepper_kid`, `nonce_hash`, etc).
+
+  New tests (`supabase/tests/matrix/14_me_export.sql`, rewritten, 24 assertions, up from 11):
+  registry-sync (every `pii_retention_policy` table has a `pii_export_policy` row, no empty reasons);
+  a whole-export regex scan (both a staff export and an admin export) for
+  `ciphertext|dek_wrapped|kek_id|token_hash|code_hmac|pepper_kid|nonce_hash` — absent; a whole-export
+  scan of the serialized JSON text for the OTHER seeded player's uuid — absent, for both the staff
+  export and the admin export; `signin_provider_token` key entirely absent from the JSON;
+  `connector_account`'s exported object never includes `refresh_token_ciphertext`; no `"detail"` key
+  appears anywhere under `fraud_signal`/`review_item` in any export; staff's own export has ZERO
+  `offer_code`/`entitlement` rows belonging to the player they redeemed for (proving the `set_null`
+  leak is closed); the player still gets their own full export. File:line:
+  `supabase/migrations/0021_export_my_data.sql:1` (header explaining the fix),
+  `supabase/tests/matrix/14_me_export.sql:1`.
+
+- **Should-fix 1: timeouts — CLOSED.**
+  - `SET LOCAL transaction_timeout = '12s'` added to `withOwnership`/`withOwnershipBatch`
+    (`supabase/functions/_shared/privileged.ts`, gated behind a cached `server_version_num >= 170000`
+    check — PG16 has no such GUC). Verified empirically (scratch PG17 cluster, this round) that
+    `transaction_timeout` is WALL-CLOCK across the whole transaction, including idle-between-statement
+    gaps, and that exceeding it is a FATAL, connection-TERMINATING event (not a catchable SQLSTATE) —
+    `mapPgTimeoutError` extended to also map a postgres.js `CONNECTION_CLOSED` driver code to 503.
+    New test: `supabase/tests/integration/me-handlers.deno.test.ts` — 13 real repo calls separated by
+    real 1 s waits (no single statement or gap near `statement_timeout`/`lock_timeout`) still 503s at
+    ~12 s, 0 rows committed; self-skips with a printed reason on PG16 (confirmed: skip message
+    printed, 46/46 still pass).
+  - Batch rescoring changed from once-per-item to once-per-DISTINCT-play
+    (`supabase/functions/_shared/evidence/batch-handler.ts`, `_shared/evidence/handler.ts`'s new
+    `finalizeScoringForKey`): every batch item now always defers its own scoring
+    (`deferScoring: true`), grouped by `(facilityId, courseId, localDate)`, with ONE dedicated
+    finalize savepoint per group. A same-batch replay of an unscored sibling also defers
+    (`handler.ts`'s `buildReplayResult`, new `batchMode` parameter) instead of hitting the
+    now-unreachable-in-batch-context "no play yet" raise. New tests confirm: 3 items for the same
+    play share one play id and one scoring pass; a group of size 1 behaves exactly like an un-batched
+    submission; 2 different plays in one batch score independently.
+  - File:line: `supabase/functions/_shared/privileged.ts` (`mapPgTimeoutError`,
+    `supportsTransactionTimeout`, the three `set local` statements inside `withOwnership`/
+    `withOwnershipBatch`); `supabase/functions/_shared/evidence/handler.ts` (`EvidenceIntakeDeferred`,
+    `HandleEvidenceIntakeOptions`, `finalizeScoringForKey`); `supabase/functions/_shared/evidence/
+    batch-handler.ts:1` (full header explains the two-phase design and why the FIRST attempt — "the
+    group's last item scores for real" — was wrong).
+
+- **Should-fix 2: `delete_my_data` post-condition + the "`_r` companion" gate — CLOSED.**
+  New migration `supabase/migrations/0022_delete_my_data_post_condition.sql` redefines
+  `private.delete_my_data` (0015 is merged; same signature, so `CREATE OR REPLACE FUNCTION`
+  preserves its OID/grants — nothing to re-grant) using 0020's own ownership-bracketing convention
+  (`GRANT CREATE ON SCHEMA private TO private_definer; SET ROLE private_definer; ... RESET ROLE;
+  REVOKE CREATE ...`). Adds a fail-closed POST-CONDITION at the end of the function body: iterates
+  `private.pii_retention_policy` (the SAME registry the deletion itself is driven from) and RAISES if
+  any subject row still remains for any table/column, with ONE documented exclusion
+  (`entitlement.user_id` — redeemed/terminal rows are INTENTIONALLY retained, per O9/O10, not a bug).
+
+  New static check (`tools/db/verify-function-inventory.mjs` check 8, `supabase/tests/matrix/
+  10_function_inventory.sql` check 11, pgTAP `plan()` bumped 9→10): every table with a DELETE/
+  UPDATE(/ALL) RLS policy applying to `private_definer` also has a SELECT(/ALL) "`_r` companion"
+  policy applying to `private_definer` on the SAME table (table-level existence, not exact
+  expression matching — a legitimate companion is not always byte-identical to its sibling). A
+  from-scratch parse of every `private_definer`-scoped policy across every migration (this round)
+  found ZERO current violations among 98 such policies — this check is protective/regression-
+  preventing, not a fix for a live bug; it is what makes the runtime post-condition TRUSTWORTHY in
+  the first place (without a guaranteed SELECT companion, a missing/misscoped DELETE/UPDATE policy
+  could let a delete silently no-op while the SAME missing companion also blinds the post-condition's
+  own read-back — reporting success while the row survives, exactly the gap named).
+
+  "Export must fail when a registry table has no SELECT visibility" is addressed the SAME way, not by
+  a separate runtime check inside `export_my_data`: from inside plpgsql a SELECT narrowed to zero rows
+  by a missing policy is byte-for-byte indistinguishable from a SELECT that correctly found no data
+  (RLS filters silently, never raises) — there is no runtime signal to build a "blocked vs. empty"
+  check on. The `_r`-companion check above is what guarantees every table `export_my_data` reads from
+  has REAL SELECT visibility in the first place, which is the only place this class of bug is
+  actually observable — reasoning recorded in `0022_delete_my_data_post_condition.sql`'s own header.
+
+  File:line: `supabase/migrations/0022_delete_my_data_post_condition.sql:1` (full reasoning in the
+  header, the post-condition loop is the block right after the storage.objects/public_profile_
+  projection cleanup and before the final `v_result` build); `tools/db/verify-function-inventory.mjs`
+  (check 8, appended before the final `if (failures.length > 0)`); `supabase/tests/matrix/
+  10_function_inventory.sql` (check 11, appended before `SELECT * FROM finish();`).
+
+- **Should-fix 3: rate-limit keys — CLOSED. Chosen: purge inside `delete_my_data`, not `me-delete`'s
+  own handler.** Folded into the SAME 0022 redefinition (same transaction as the deletion itself, so
+  it is atomic with — and rolls back together with — everything else, and fires for every caller of
+  `delete_my_data`, not only the `me-delete` Edge Function specifically). `DELETE FROM
+  private.rate_limit_bucket WHERE bucket_key LIKE p_user_id::text || ':%' AND bucket_key <>
+  p_user_id::text || ':me-delete:user'` — every bucket `hitRateLimitForActor` ever writes for this
+  user is prefixed `<uid>:...` (`privileged.ts`'s own `scopedBucketKey`), so the LIKE-prefix match
+  covers every endpoint's bucket with no separate registry. The in-flight `me-delete:user` bucket
+  itself is DELIBERATELY KEPT (per the fix instructions' own allowance) so a RETRY of this same
+  deletion call — the one legitimate reason to call this endpoint again in a short window — stays
+  rate-limited exactly as a first attempt already is, rather than becoming unbounded the moment one
+  successful run has purged its own counter. No new RLS policy needed — `private_definer` already
+  holds an unscoped DELETE policy on this table (`pd_rate_limit_purge`, 0016), the same one the
+  nightly `purge_rate_limit_buckets` sweep already uses, with its own `_r` companion
+  (`pd_rate_limit_purge_r`) already present (confirmed by this round's own check 8/11).
+
+  New test (`supabase/tests/matrix/09_delete_my_data.sql`, `plan()` bumped 31→33): seeds one ordinary
+  rate-limit bucket and the `me-delete:user` bucket for player A before her deletion, then asserts the
+  ordinary bucket is gone and the `me-delete:user` bucket survives. File:line:
+  `supabase/migrations/0022_delete_my_data_post_condition.sql` (the DELETE block, right before the
+  post-condition loop, with its own header comment); `supabase/tests/matrix/09_delete_my_data.sql`
+  (the two new assertions, right after the first `private.delete_my_data(...)` call).
+
+- **Local-harness-only fix (not a code/security change): `tools/db/test-deno-integration.sh`.** The
+  Deno integration suite failed in THIS session's sandbox with "Failed to load platform certificates:
+  Permission denied" — root cause: `SSL_CERT_FILE` (and sibling vars) remained set to this sandbox's
+  proxy CA bundle (`/root/.ccr/ca-bundle.crt`, root-only-readable) even after the script's existing
+  DENO_CERT-selection logic correctly left `DENO_CERT` itself unset; Deno's underlying
+  rustls-native-certs loader reads `SSL_CERT_FILE` directly, independent of `DENO_CERT`. Fixed by
+  unsetting any of `SSL_CERT_FILE`/`NIX_SSL_CERT_FILE`/`CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`/
+  `HTTPLIB2_CA_CERTS`/`NODE_EXTRA_CA_CERTS`/`CURL_CA_BUNDLE` that is set but NOT readable by the
+  invoking user, leaving any genuinely-usable one alone. Confirmed empirically before landing (a raw
+  `deno eval` fetch, su'd to `postgres`, failed before this fix and succeeded after, with no other
+  change). File:line: `tools/db/test-deno-integration.sh` (the new loop right after the existing
+  DENO_CERT-candidate block).
+
+- **Final test counts, BOTH harness modes (superuser and restricted), plus PG16:**
+  - pgTAP matrix: **414 assertions, 14 files, all passed** (up from 398 — `09_delete_my_data.sql`
+    31→33, `10_function_inventory.sql` 9→10, `14_me_export.sql` 11→24).
+  - Deno integration suite (`supabase/tests/integration/{repo,handlers,evidence-batch,
+    me-handlers}.deno.test.ts`): 15 + 16 + 7 + 8 = **46 tests, 46 passed, 0 failed**, in BOTH
+    `HARNESS_MODE=superuser` and `HARNESS_MODE=restricted` (up from 42 — evidence-batch 4→7 for the
+    batch-rescoring should-fix-1 tests, me-handlers 7→8 for the transaction_timeout test).
+  - Re-confirmed on PG16 (`PG_BIN_DIR=/usr/lib/postgresql/16/bin`, `HARNESS_MODE=superuser`): same
+    414/414 pgTAP and 46/46 Deno, with the transaction_timeout test self-skipping (printed
+    `SKIPPING (server_version_num=160013, < 170000)`) rather than failing.
+  - `tools/db/test.sh` exit code 0 in both `HARNESS_MODE=restricted` and `HARNESS_MODE=superuser`
+    (and again under PG16), including `verify-function-inventory` OK and `service-role-lint: clean`
+    as the harness's own final steps.
+  - Unit (vitest, `pnpm --filter @golfraven/rules exec vitest run --config
+    ../../supabase/tests/vitest.config.ts`): 114 tests, 12 files, all passed — unchanged by this
+    round (no unit-level surface touched).
+  - `pnpm -r typecheck`: exit 0 across all 13 TypeScript-bearing workspace projects, 0 errors.
+  - `node tools/service-role-lint/dist/cli.js supabase/functions`: clean, no lint changes (checked
+    after every edit this round, not only at the end) — no stray `deno.lock` under
+    `supabase/functions/` at any point.
+  - `gitleaks git . --config .gitleaks.toml --redact --exit-code 1` (checksum-pinned 8.30.1): no
+    leaks found (26 commits scanned).
+  - `gitleaks dir . --config .gitleaks.toml --redact --exit-code 1`: no leaks found (~11.5 MB
+    scanned).
+
+- **Accepted as follow-ups (gate round 2's own list — recorded here, NOT built this round):**
+  1. Provider rows (`connector_account`/`signin_provider_token`) are deleted BEFORE P4/P8's real
+     Apple/Google/golf-app revocation exists — AT 6's "revokes connectors" stays open (see
+     `provider-revocation.ts`'s own seam, P3d status section above). Before shipping P4/P8, either
+     refuse deletion while provider rows exist, or queue the revocation material first, so a
+     revocation token isn't lost the moment the local row is gone.
+  2. A durable pending-deletion marker, plus a background retry of the Supabase Auth user delete, for
+     a user who abandons the client after a 500 from `deleteAuthUser` (the DB-side deletion has
+     already committed by that point — see the AT 6 bullet above — but the Auth-side user record
+     could be left behind indefinitely with no automatic retry).
+  3. `storage.objects` receipt deletion on a REAL hosted Supabase project is `[unverified]`, and the
+     `LIKE 'receipts/<uid>/%'` fallback pattern possibly never matching a real object's stored name —
+     both carried over from P3a, unresolved without a real Supabase Storage instance to test against
+     (this environment has none). Verify on a real Supabase branch before relying on it.
+  4. Asynchronous or paginated export for an account whose personal data exceeds
+     `EXPORT_SIZE_BOUND_BYTES` (8 MiB) — the current behaviour logs the breach and returns the full
+     payload anyway, never truncating or refusing.
+  5. Push-token hardening not built this round: Expo push-token FORMAT validation (currently any
+     non-empty string is accepted), and the fact that the SAME token string can currently be
+     registered to several different accounts (no uniqueness constraint on the token value itself,
+     only on `(user_id, device_id)`).
+
+## P3d gate round 3 (2026-09-25): B1 (blocking, merged-migration immutability), S1–S4
+
+The re-gate on `5d3f4bc` failed on one blocking item (B1) plus four should-fixes. All five are
+closed this round.
+
+- **B1 (blocking): a merged migration (0021) was edited in place — CLOSED.**
+  `supabase/migrations/0021_export_my_data.sql` is restored byte-for-byte to its `34d00dc` (origin/main)
+  content — confirmed via `tools/db/check-migrations-immutable.sh --base origin/main`, which now also
+  runs in CI (`.github/workflows/ci.yml`, `db-tests` job, as its own first step, before the expensive
+  Postgres install). Everything gate round 2 changed inside 0021 (the `private.pii_export_policy`
+  registry and the leak-fixed `export_my_data` body) moved into the renamed, still-unmerged
+  `supabase/migrations/0022_export_and_delete_hardening.sql` — `pii_export_policy` is a brand-new
+  table (plain `CREATE TABLE`), and `export_my_data` is redefined via `CREATE OR REPLACE FUNCTION`
+  under 0020's own ownership bracket, the SAME one `delete_my_data`'s own redefinition (round 2, also
+  relocated into this renamed file) already uses — both functions share ONE `GRANT CREATE ON SCHEMA
+  private TO private_definer; SET ROLE private_definer; ... RESET ROLE; REVOKE CREATE ...` bracket.
+  The effective, final database state is unchanged from round 2 — only which migration file states it
+  changed.
+
+  New CI gate: `tools/db/check-migrations-immutable.sh` — any file under `supabase/migrations/` that
+  already exists on the base ref (default `origin/main`) must be byte-identical on the branch being
+  checked; a file present on base but missing here (renamed/deleted) is also a failure. Must-fail
+  self-test (`--self-test`, run unconditionally as its own CI step before the real check, not a manual
+  side step): plants one line into a **`/tmp`-only scratch copy** of a real base-ref migration file
+  (the real working tree is never touched) and proves the comparator flags it, then proves the SAME
+  file's byte-identical content passes clean. File:line: `tools/db/check-migrations-immutable.sh:1`
+  (full header); `.github/workflows/ci.yml` `db-tests` job, the `fetch-depth: 0` addition to its
+  Checkout step (needed so `origin/main` actually resolves — a `pull_request` event's default shallow
+  checkout has no ref for it) plus the new "Migrations are immutable once merged" step immediately
+  after.
+
+- **S1 (do now): export narrowing + a key-set coverage test — CLOSED.**
+  - `audit_log.subject_id` is no longer exported at all (was: `id, action, subject_table, subject_id,
+    created_at`) — the SAFER of the two offered options, chosen over a per-row conditional: `subject_id`
+    is a polymorphic reference that can itself BE another account's own id (e.g. a staff member's audit
+    row for an action taken on another user's data), and omitting the column outright cannot leak
+    regardless of which row it is, where a conditional is one more place a future edit could get wrong.
+  - `purchase_evidence.ref_id` is no longer exported — for a `qr_variant = 'course'` row it is the
+    consumed `course_qr_token`'s own nonce hash (an internal matching key, the same reasoning
+    `course_qr_token` itself is excluded from export entirely for), not the caller's own data.
+  - New pgTAP assertion (`supabase/tests/matrix/14_me_export.sql`, `plan()` 24→27): the export's
+    top-level `jsonb_object_keys` exactly equal the set of `action = 'export'` rows in
+    `private.pii_export_policy` — an export-classified table with no real `SELECT` block in
+    `export_my_data`'s body (or a typo'd `jsonb_build_object` key) would previously pass every OTHER
+    assertion in the file silently, since none of them enumerated the FULL key set. Plus two direct
+    exclusion assertions for the two narrowed columns above (`purchase_evidence`'s fixture row is given
+    a real, non-null `ref_id` value first, so the exclusion assertion proves something, not vacuously
+    true against an already-empty column). File:line: `supabase/migrations/0022_export_and_delete_hardening.sql`
+    (the `export_my_data` body's two narrowed `SELECT` lists, each with an inline comment), `supabase/tests/matrix/14_me_export.sql`
+    (the new key-set + two exclusion assertions, placed right before the "Access control" section).
+
+- **S2 (MEDIUM): batch phase-A-only state leaves evidence with no play, and a live retry 500'd — CLOSED.**
+  `evidence/handler.ts`'s `buildReplayResult`: when a course-anchored replay finds no `app.play` row
+  and `batchMode` is `false` (the live, non-batch `POST /v1/evidence` path), it now calls the SAME
+  idempotent `finalizeScoringForKey` a batch's own phase 2b would have called — reading every
+  already-persisted evidence row for that `(facilityId, courseId, localDate)` key and scoring/upserting
+  the play NOW, synchronously — instead of throwing `Errors.internal()` (a 500). This is exactly the
+  state an interrupted batch (phase A/`withOwnershipBatch` #1 committed, phase B/`withOwnershipBatch`
+  #2 failed or never ran) legitimately leaves behind, and a live retry of the same evidence is the
+  normal way a client recovers from it.
+
+  Made safe against a SECOND idempotency gap this fix would otherwise reopen:
+  `Repo#fraudSignal.insert` (`privileged.ts`) is now deduped on `(kind, detail.playId)` via a single
+  atomic `INSERT ... SELECT ... WHERE NOT EXISTS` (not a separate SELECT-then-INSERT, which would leave
+  a race window) whenever the caller's `detail` carries a `playId` string — both current
+  `quarantined_evidence_row` call sites do. A `detail` with no `playId` (the `clock_skew` kind, keyed
+  on `fixIds` instead) has no dedupe key and is left exactly as before, always inserting. This means a
+  `finalizeScoringForKey` retry — either a batch's own phase-2b retry, or this fix's new live-retry
+  path — never raises a second `quarantined_evidence_row` signal for a play that already has one.
+
+  New tests: `supabase/tests/integration/evidence-batch.deno.test.ts` — inserts an item with
+  `{deferScoring: true, batchMode: true}` and stops (simulating phase-A-only), asserts 0 `app.play`
+  rows, then replays the SAME item through the plain (non-batch) `handleEvidenceIntake` path and
+  asserts `status: "accepted"`, `replay: true`, a real play id, and exactly 1 `app.play` row created.
+  `supabase/tests/integration/repo.deno.test.ts` — calls `repo.fraudSignal.insert("quarantined_evidence_row",
+  ...)` twice with the SAME `playId` and asserts exactly 1 row; a DIFFERENT `playId` still gets its own
+  row; a `clock_skew` call with no `playId` is never deduped. File:line:
+  `supabase/functions/_shared/evidence/handler.ts` (`buildReplayResult`'s `!play`/`!batchMode` branch);
+  `supabase/functions/_shared/privileged.ts` (`fraudSignal.insert`); `supabase/functions/_shared/types.ts`
+  (both methods' doc comments, corrected to describe the new, real shapes instead of "should be
+  unreachable in practice").
+
+- **S3: the `CONNECTION_CLOSED` → 503 message no longer claims "timeout" — CLOSED.** `mapPgTimeoutError`
+  (`privileged.ts`) used to say `"the database could not complete this request in time (transaction
+  timeout) — safe to retry"` for a `CONNECTION_CLOSED` driver error — a specific CAUSAL claim this
+  handler cannot actually verify (the connection dropping is also consistent with a network blip, a
+  pooler recycling the connection, or the database process restarting; `transaction_timeout` is ONE
+  cause among several, not the only one). The message is now `"outcome unknown; retrying is
+  idempotent"` — what IS actually true and verifiable: because `withOwnership`/`withOwnershipBatch`
+  always run inside a single transaction, the connection dropping means either everything committed or
+  nothing did, never a partial write, and every write path this maps onto is idempotent by
+  construction. No test pinned the old message text (both existing tests assert only `caught.status
+  === 503`), so nothing else needed updating. File:line: `supabase/functions/_shared/privileged.ts`
+  (`mapPgTimeoutError`'s `CONNECTION_CLOSED` branch).
+
+- **S4 (MEDIUM): the "`_r` companion" check was table-level, and the post-condition's own comment
+  overclaimed what that guaranteed — CLOSED.** Round 2's check (table 8/matrix check 11) asked only
+  "does SOME `private_definer` SELECT(/ALL) policy exist on this table at all" — a table with TWO
+  classified columns, one with a real companion and one with none, PASSED it, while
+  `delete_my_data`'s own post-condition and `export_my_data` both re-read PER COLUMN, under RLS gated
+  on that SAME column. Both check 8 (`tools/db/verify-function-inventory.mjs`) and matrix check 11
+  (`supabase/tests/matrix/10_function_inventory.sql`) are now COLUMN-level: for every
+  `private.pii_retention_policy` (table, column) pair classified `delete_row`/`set_null`, a
+  `private_definer` SELECT(/ALL) policy on that SAME table must guard THAT SPECIFIC column with the
+  EXACT `nullif(current_setting(...))` form — reusing check 7's own "exact form, not a loose substring"
+  parsing discipline (a shared regex built from `pg_get_expr`'s canonical deparsed shape, confirmed
+  against this project's own real policies).
+
+  New must-fail fixture (matrix check 12, `plan()` 10→21 across checks 11+12 combined, see the
+  file's own per-check comments for the exact breakdown): plants a real, temporary table
+  `app.zz_two` with two `delete_row`-classified columns (`user_a`, `user_b`), a `private_definer`
+  DELETE policy on BOTH, but a SELECT "`_r` companion" on ONLY `user_a` — the reviewer's own repro
+  shape — and asserts the column-level query flags EXACTLY `zz_two.user_b` and not `zz_two.user_a`,
+  proving the check is genuinely column-level (a table-level check would have reported BOTH columns
+  fine, since the table has *a* SELECT policy). Fixture setup/teardown needed two things not obvious
+  up front, both now documented inline where they occur: (a) the file authenticates as `service_role`
+  at its own top and never resets, so the fixture first calls `tests.clear_actor()` (a plain `RESET
+  ROLE`) to get back to the connecting/owning role, which actually owns schema `app`; (b) inserting
+  into `private.pii_retention_policy` at TEST time (not migration time) needs the SAME
+  `GRANT INSERT/DELETE ... TO CURRENT_USER` + self-granting temporary policy dance
+  `0019_evidence_intake.sql` already needed for this exact table — table ownership alone does not carry
+  an implicit DML grant here (FORCE ROW LEVEL SECURITY applies to the owner too, and the owner's
+  default DML privileges were explicitly revoked as part of this project's own hardening).
+
+  `delete_my_data`'s post-condition comment (0022) is corrected to describe what the OLD table-level
+  check actually guaranteed (less than the prior wording implied) and what the NEW column-level check
+  guarantees instead — see that migration's own inline comment, right above the post-condition loop,
+  for the full corrected account. File:line: `tools/db/verify-function-inventory.mjs` (check 8, the
+  `NULLIF_COLUMN_RE` regex and the per-column existence check that replaced the table-level version);
+  `supabase/tests/matrix/10_function_inventory.sql` (check 11, rewritten as a `DO` block; check 12, the
+  new `zz_two` must-fail fixture); `supabase/migrations/0022_export_and_delete_hardening.sql` (the
+  corrected post-condition comment, and the post-condition loop itself, unchanged in logic).
+
+- **Verify, exact commands and results (all re-run after every fix above, not just once at the end):**
+  - `HARNESS_MODE=restricted tools/db/test.sh` → exit 0. pgTAP: **428/428 assertions, 14 files, all
+    pass** (up from 414 — matrix checks 10/11/12 and 14's own new assertions). Deno integration:
+    **48/48 tests, 0 failed** (up from 46 — the two new S2 tests). `verify-function-inventory: OK`.
+    `service-role-lint: clean`.
+  - `HARNESS_MODE=superuser tools/db/test.sh` → exit 0, same 428/428 pgTAP, 48/48 Deno.
+  - `PG_BIN_DIR=/usr/lib/postgresql/16/bin HARNESS_MODE=superuser tools/db/test.sh` → exit 0, same
+    428/428 pgTAP, 48/48 Deno; the transaction_timeout test still self-skips on PG16
+    (`SKIPPING (server_version_num=160013, < 170000)`).
+  - `tools/db/check-migrations-immutable.sh --self-test` → OK (must-fail and must-pass fixtures both
+    behave as expected). `tools/db/check-migrations-immutable.sh --base origin/main` → OK, 0021 is
+    byte-identical to `origin/main`.
+  - `pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts` →
+    **114/114 tests, 12 files, all pass** (unchanged — no unit-level surface touched this round).
+  - `pnpm -r typecheck` → exit 0, 0 errors, all 13 TypeScript-bearing workspace projects.
+  - `deno check --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen
+    supabase/tests/integration/` → clean, no lockfile drift.
+  - `node tools/service-role-lint/dist/cli.js supabase/functions` → `clean`. Its own test suite,
+    `pnpm --filter @golfraven/service-role-lint test` (after `pnpm --filter @golfraven/service-role-lint
+    run build`) → **112/112 tests, 4 files, all pass**, unchanged (`tools/service-role-lint/test/
+    with-ownership.test.ts` was not touched this round — no nits from round 1 recurred).
+  - `gitleaks git . --config .gitleaks.toml --redact --exit-code 1` (checksum-pinned 8.30.1): no leaks
+    found (27 commits scanned).
+  - `gitleaks dir . --config .gitleaks.toml --redact --exit-code 1`: no leaks found (~11.55 MB
+    scanned).
+
+- **Touch-scope compliance.** Only files under `supabase/migrations/` (0021 restored, 0022 renamed —
+  0023/0024 left untouched, reserved for another builder), `supabase/functions/_shared/`,
+  `supabase/tests/`, `tools/db/` (including the new `check-migrations-immutable.sh`), and
+  `.github/workflows/ci.yml` were touched this round, plus this append-only doc section. No FORCE RLS
+  was removed anywhere; no RLS policy was broadened — the fixtures added this round (`app.zz_two`, the
+  temporary `private.pii_retention_policy` self-granting policy) are both created and dropped within
+  their own test file's transaction (`BEGIN; ... ROLLBACK;`), never a permanent schema change, and both
+  mirror an EXISTING, already-reviewed pattern in this same file/migration set rather than inventing a
+  new one. No mutation proof was left in the tree — `check-migrations-immutable.sh --self-test`'s own
+  planted-edit fixture is built and compared entirely inside a `mktemp`-created `/tmp` scratch
+  directory, cleaned up via its own `trap ... EXIT`, and the negative-path proof used to validate the
+  script during THIS session (copying the repo to a separate `/tmp` directory and tampering with the
+  copy) was likewise deleted immediately afterward — `git status --short` was re-checked clean of any
+  such artifact before this report was written.
+
+## P3d gate round 4 (2026-09-25): F1 (blocking), S-a1, S-a2
+
+The re-review on round 3's own commit (`d7c7127`) confirmed B1 and S1–S4 all fixed, and found one new
+blocking MEDIUM (F1) plus two advisory items (S-a1, S-a2) in the round-3 work itself. All three closed
+this round; 0021 and earlier remain untouched (verified again below), and 0022 (still unmerged) is
+where every schema change in this round went.
+
+- **F1 (BLOCKING): the fraud-signal dedupe dropped a genuinely DIFFERENT quarantine signal on the
+  SAME play — CLOSED.** Round 3's `Repo#fraudSignal.insert` (`privileged.ts`) deduped on `(kind,
+  detail->>'playId')` alone. Reviewer's repro: a malformed row q1 on play P, finalized, raises 1
+  signal; a DIFFERENT malformed row q2 on the SAME play P, finalized again, raised **nothing** — q1's
+  earlier signal was read as "already signaled for this play" and q2 was silently dropped, violating
+  security doc §3's own "every on-play quarantine... naming the row and its reasons" requirement.
+  Independently, the round-3 mechanism (`INSERT ... SELECT ... WHERE NOT EXISTS`) was never safe under
+  real concurrency without a backing unique constraint.
+
+  Fix: `evidence/handler.ts`'s new `computeQuarantineDigest` computes a canonical digest over the FULL
+  SET of rows a single scoring pass actually quarantined — each row's own `id` (resolved via
+  `evidenceForScoring[excludedRow.index].id`, never a separate lookup) plus its `reasons`, doubly
+  sorted (each row's own `reasons` array, then the row list itself by id) so the SAME logical
+  quarantine set always canonicalizes to the SAME SHA-256 hex digest, stored as `detail.quarantineDigest`
+  and computed at BOTH call sites (the single-item scoring tail and `finalizeScoringForKey`).
+  `supabase/migrations/0022_export_and_delete_hardening.sql` (still unmerged, appended to — never
+  0021 or earlier) adds a partial unique index,
+  `fraud_signal_quarantine_dedupe_idx ON app.fraud_signal ((detail->>'playId'), (detail->>'quarantineDigest'))
+  WHERE kind = 'quarantined_evidence_row'` — scoped to that ONE kind only, every other fraud_signal
+  kind (e.g. `clock_skew`) is completely unaffected. `Repo#fraudSignal.insert` now does
+  `INSERT ... ON CONFLICT ((detail->>'playId'), (detail->>'quarantineDigest')) WHERE kind =
+  'quarantined_evidence_row' DO NOTHING` against that exact index — atomic, so a REPLAY of the exact
+  same quarantine set is still idempotent (round 3's own original ask), a DIFFERENT set on the same
+  play raises its own signal, and the whole thing is now genuinely concurrency-safe. A
+  `quarantined_evidence_row` call with no `playId`/`quarantineDigest` (should never happen — every
+  real call site always computes both) throws loudly rather than silently falling back to an undeduped
+  insert.
+
+  Existing-data check before adding the unique index (a live duplicate would make `CREATE UNIQUE
+  INDEX` itself fail): grepped every frozen migration (0001–0021) and `supabase/tests/helpers.sql` for
+  `quarantined_evidence_row` — the only fraud_signal fixture row anywhere (helpers.sql's own M5 seed)
+  has a different kind (`manual_review_seed`), entirely outside this index's partial predicate.
+
+  Tests: `supabase/tests/integration/evidence-batch.deno.test.ts` — the real q1-then-q2 repro through
+  the actual scorer/handler path (two already-stored evidence rows, each corrupted in place via a
+  direct SQL `summary` override — an unpadded `localDate` and a trailing-space `facilityId`, both
+  proven-quarantined shapes from `packages/rules/test/parse-evidence.test.ts`): finalize after q1 →
+  1 signal; finalize after q2 joins → 2 signals, the second one's `excludedRows` naming q2 (its
+  `facilityId` reason text present only in the second, not the first); a third finalize with no new
+  corruption (replaying q1+q2) stays at 2. `supabase/tests/integration/repo.deno.test.ts` — the
+  mechanism-level proof directly against `Repo#fraudSignal.insert`: same digest twice → 1 row;
+  different digest, same play → 2 rows; different play → its own row; a no-playId kind never deduped;
+  and a NEW test, **4 concurrent inserts for the identical `(playId, quarantineDigest)` → exactly 1
+  row** (proving the atomic `ON CONFLICT` closes the concurrency gap the old `WHERE NOT EXISTS` had).
+  pgTAP (`supabase/tests/matrix/13_evidence_intake.sql`, `plan()` 24→28): the partial unique index
+  exists with the right shape (`pg_indexes` introspection), and a live duplicate
+  `INSERT ... ON CONFLICT ... DO NOTHING` against it is a genuine no-op (row count stays 1, not
+  asserted in prose). File:line: `supabase/functions/_shared/evidence/handler.ts`
+  (`computeQuarantineDigest`, right after `toHex`; both call sites' `fraudSignal.insert(...)` calls);
+  `supabase/functions/_shared/privileged.ts` (`fraudSignal.insert`, rewritten);
+  `supabase/migrations/0022_export_and_delete_hardening.sql` (the new index, appended after
+  `delete_my_data`'s `REVOKE CREATE ON SCHEMA private`).
+
+- **S-a1: the immutability gate could pass vacuously on a bad base — CLOSED.**
+  `tools/db/check-migrations-immutable.sh`: `--base` is now validated with
+  `git rev-parse --verify --quiet "$BASE_REF^{commit}"` (not a bare `rev-parse --verify`, so a ref
+  that resolves to something OTHER than a commit is also rejected) and exits 2 if it fails — closes
+  the "a typo'd/unfetched ref silently compares against nothing and reports OK" gap. The `|| true` on
+  the `git ls-tree` call (was line ~146) is gone — a real `ls-tree` failure now propagates (the script
+  already runs under `set -euo pipefail`). The script also now counts how many migration files the
+  base actually lists and fails loudly (exit 2) if that count is zero — a base that resolves cleanly
+  but genuinely has no `supabase/migrations/` files is the same "vacuous pass" shape reached a
+  different way. `--self-test` gained two new must-fail cases, both invoking the real script as a real
+  subprocess (not just asserting the failure mode in prose): a nonexistent `--base`
+  (`refs/heads/this-ref-does-not-exist-...`) and a `--base` built from git's own well-known empty-tree
+  object via `git commit-tree` (a real, valid, but deliberately empty commit — never referenced by any
+  branch/tag/ref, so it neither touches the working tree nor becomes reachable history). File:line:
+  `tools/db/check-migrations-immutable.sh` (the `^{commit}` validation right after `resolve_base_ref`
+  is applied; the `MIGRATION_COUNT` check right after the comparison loop; the two new must-fail cases
+  inside `self_test()`).
+
+- **S-a2: on `push: main` the job compared main against itself — CLOSED.** `.github/workflows/ci.yml`'s
+  `db-tests` job: on a `push` event (this workflow's `on.push.branches: [main]`), `origin/main` at
+  checkout time already equals the just-pushed HEAD — the round-3 step's `--base origin/main` compared
+  the new commit's migrations against themselves and could never fail regardless of what the push
+  actually changed. Fixed: on `push`, the base is now `github.event.before` (main's tip immediately
+  BEFORE this push), passed via `env:` (never interpolated directly into the shell body, per GitHub's
+  own event-context hardening guidance) — skipped ONLY when `before` is the all-zero SHA (a brand-new
+  branch reaching `main` for the first time, or a history rewrite with no real prior tip; nothing to
+  compare against in that one shape). `pull_request` keeps `--base origin/main` unchanged (a PR's base
+  is main's current tip, which the PR's own commits have not landed on yet — the round-3 bug never
+  applied there). Checkout depth: `fetch-depth: 0` (already set round 3) unshallows the WHOLE history,
+  not merely `origin/main`'s tip, so `event.before`'s own commit is always resolvable. Verified locally
+  by simulating both branches of the new shell logic with `GH_EVENT_NAME`/`GH_EVENT_BEFORE` env vars
+  set by hand — the real-base case ran the real check against `origin/main`'s own prior tip
+  successfully, and the all-zero-SHA case printed the skip message without invoking the script at all.
+  File:line: `.github/workflows/ci.yml`, `db-tests` job, the "Migrations are immutable once merged"
+  step (now carries an `env:` block and the `push`/`pull_request` branch).
+
+- **Verify, exact commands and results (re-run after every fix above):**
+  - `HARNESS_MODE=restricted tools/db/test.sh` → exit 0. pgTAP: **432/432 assertions, 14 files, all
+    pass** (up from 428 — `13_evidence_intake.sql`'s 4 new F1 assertions). Deno integration: **50/50
+    tests, 0 failed** (up from 48 — the new q1-then-q2 repro test and the 4-concurrent-finalizes
+    test).
+  - `HARNESS_MODE=superuser tools/db/test.sh` → exit 0, same 432/432 pgTAP, 50/50 Deno.
+    `verify-function-inventory: OK`. `service-role-lint: clean`.
+  - `PG_BIN_DIR=/usr/lib/postgresql/16/bin HARNESS_MODE=superuser tools/db/test.sh` → exit 0, same
+    432/432 pgTAP, 50/50 Deno; transaction_timeout test still self-skips on PG16.
+  - `pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts` →
+    **114/114 tests, 12 files** (unchanged — no unit-level surface touched this round).
+  - `pnpm -r typecheck` → exit 0, 0 errors.
+  - `deno check --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen
+    supabase/tests/integration/` → clean, no lockfile drift.
+  - `node tools/service-role-lint/dist/cli.js supabase/functions` → `clean`. Its own suite
+    (`pnpm --filter @golfraven/service-role-lint test`, after `run build`) → **112/112 tests, 4 files**
+    (unchanged).
+  - `tools/db/check-migrations-immutable.sh --self-test` → OK, including the two NEW must-fail cases
+    (nonexistent base; zero-migration base).
+  - `tools/db/check-migrations-immutable.sh --base origin/main` → OK — 21/21 migration files
+    (0001–0021) byte-identical; confirms 0021 and earlier are STILL untouched this round too.
+  - `gitleaks git . --config .gitleaks.toml --redact --exit-code 1` (checksum-pinned 8.30.1): no leaks
+    found (28 commits scanned).
+  - `gitleaks dir . --config .gitleaks.toml --redact --exit-code 1`: no leaks found (~11.59 MB
+    scanned).
+
+- **Touch-scope / constraint compliance.** Only `supabase/functions/_shared/evidence/handler.ts`,
+  `supabase/functions/_shared/privileged.ts`, `supabase/migrations/0022_export_and_delete_hardening.sql`
+  (still unmerged — schema changes went here, never 0021 or earlier), `supabase/tests/integration/
+  {evidence-batch,repo}.deno.test.ts`, `supabase/tests/matrix/13_evidence_intake.sql`,
+  `tools/db/check-migrations-immutable.sh`, `.github/workflows/ci.yml`, and this append-only doc
+  section were touched. 0023 and later were never referenced or created. `/home/user/golfraven-p3e`
+  and `/tmp/gr-gate*` were never touched (all work stayed under `/home/user/golfraven`, using
+  `/tmp/gitleaks-bin` and `/tmp/check-migrations-immutable-selftest.*` only — the latter cleaned up by
+  the self-test's own `trap ... EXIT`). No FORCE RLS removed, no RLS policy broadened. No mutation-proof marker
+  string or other planted marker left anywhere in the tree — confirmed via
+  a whole-tree grep for the mutation marker (no matches) and a final `git status --short` re-check before writing this
+  report. Nothing committed — HEAD stays at `d7c7127` in the working tree for review.

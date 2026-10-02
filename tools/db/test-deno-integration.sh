@@ -124,6 +124,33 @@ if [ -z "${DENO_CERT:-}" ] || [ ! -r "${DENO_CERT:-/nonexistent}" ]; then
   done
 fi
 
+# ⛔ FIX (P3d gate round 2, found this round): the block above only ever
+# used SSL_CERT_FILE/NODE_EXTRA_CA_CERTS/CURL_CA_BUNDLE as CANDIDATES to
+# populate DENO_CERT — it never UNSET the ones that turned out unreadable
+# by this user. That was enough as long as Deno's TLS stack only ever
+# consulted DENO_CERT itself, but Deno's underlying platform-certificate
+# loader (rustls-native-certs) ALSO reads a subset of these — confirmed
+# empirically this round (su'd to the `postgres` OS user, exactly this
+# script's own real invocation shape): with DENO_CERT correctly left
+# unset (the file above), a plain `deno eval` fetching an HTTPS URL still
+# failed with "Failed to load platform certificates: Permission denied
+# (os error 13)" as long as SSL_CERT_FILE remained set to the SAME
+# unreadable `/root/.ccr/ca-bundle.crt` — unsetting SSL_CERT_FILE (and,
+# defensively, the sibling vars other tooling in this same proxied
+# sandbox sets to the identical path, per this repo's own README at
+# /root/.ccr/README.md — NIX_SSL_CERT_FILE,
+# CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE, HTTPLIB2_CA_CERTS) made the SAME
+# fetch succeed immediately, no other change. Every one of these is left
+# ALONE if it's already usable (set AND readable by this user) — only an
+# unreadable one is cleared, so a sandbox where these genuinely work
+# (the common case outside this one repo's own proxy) is unaffected.
+for stale_cert_var in SSL_CERT_FILE NIX_SSL_CERT_FILE CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE HTTPLIB2_CA_CERTS NODE_EXTRA_CA_CERTS CURL_CA_BUNDLE; do
+  stale_cert_path="${!stale_cert_var:-}"
+  if [ -n "$stale_cert_path" ] && [ ! -r "$stale_cert_path" ]; then
+    unset "$stale_cert_var"
+  fi
+done
+
 # should-fix (P3c gate round 2, "supply chain"): run against the committed
 # lockfile with --frozen once one exists, so transitive drift (e.g. a
 # dependency's own dependency quietly moving) fails loudly instead of

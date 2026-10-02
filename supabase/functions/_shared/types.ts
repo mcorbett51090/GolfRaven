@@ -299,13 +299,24 @@ export interface Repo {
      * already-persisted play row for (courseId, playDate) — no advisory
      * lock, no write. Used by a replay's own response reconstruction,
      * which must never re-score or re-upsert. `null` if no play row
-     * exists yet for this (user, courseId, playDate) — see
-     * `buildReplayResult`'s own doc for why that should be unreachable
-     * in practice. */
+     * exists yet for this (user, courseId, playDate) — either a batch's
+     * own deferred-scoring window, or (P3d gate round 3, S2) a live
+     * retry of a course-anchored replay whose group was left unscored by
+     * an interrupted batch; see `buildReplayResult`'s own doc for both
+     * shapes. */
     getForDate(courseId: string, playDate: string): Promise<StoredPlayRow | null>;
   };
 
   fraudSignal: {
+    /** P3d gate round 3, S2: idempotent when `detail.playId` is a string
+     * — a second `insert` call with the SAME `kind` and the SAME
+     * `detail.playId` is a silent no-op (no duplicate row), so a
+     * `finalizeScoringForKey` retry (either an interrupted batch's own
+     * follow-up finalize, or `buildReplayResult`'s new live-retry path)
+     * never raises a second `quarantined_evidence_row` signal for a play
+     * that already has one. `detail` with no `playId` (e.g. the
+     * `clock_skew` kind, keyed on `fixIds` instead) is never deduped —
+     * always inserts, unchanged from before. */
     insert(kind: string, detail: Record<string, unknown>): Promise<void>;
   };
 

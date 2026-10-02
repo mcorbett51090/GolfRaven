@@ -429,6 +429,69 @@ for (const { policy, function_name: functionName, prosrc } of policyFunctionRows
   }
 }
 
+// 8. P3d gate round 3, S4: COLUMN-level "_r companion" check (was
+// table-level in round 2). Table-level was insufficient — found this
+// round: it passes as long as SOME SELECT(/ALL) policy exists ANYWHERE
+// on a table, even if the SPECIFIC column a DELETE/UPDATE policy is
+// scoped to has no SELECT visibility of its own. That matters because
+// both `private.delete_my_data`'s own post-condition and
+// `private.export_my_data` (0022) re-read through PER-COLUMN, RLS-gated
+// SELECTs — a table-level "some policy exists" check can pass while one
+// specific column is silently invisible to private_definer, which is
+// EXACTLY the "reports success while the row survives" shape this check
+// exists to prevent (see 0022's own post-condition comment for the full
+// account, including the correction from round 2's table-level version).
+//
+// For every `private.pii_retention_policy` (table, column) pair
+// classified `delete_row`/`set_null` — the exact set `delete_my_data`'s
+// own generic pass touches via dynamic SQL — this requires a
+// private_definer SELECT(/ALL) policy on the SAME table whose USING
+// clause guards THAT column with the EXACT `nullif(current_setting(...))`
+// form, reusing check 7's own "exact form, not a loose substring match"
+// discipline (pg_get_expr's canonical deparsed shape, confirmed against
+// this project's own real policies — see `NULLIF_COLUMN_RE` below).
+const NULLIF_COLUMN_RE = /(\w+)\s*=\s*\(?NULLIF\(current_setting\('[^']*'::text,\s*true\),\s*''::text\)\)?(?:::\w+)?/g;
+function columnsGuardedByNullifCurrentSetting(usingExpr) {
+  const cols = new Set();
+  if (!usingExpr) return cols;
+  const re = new RegExp(NULLIF_COLUMN_RE.source, "g");
+  let m;
+  while ((m = re.exec(usingExpr)) !== null) cols.add(m[1]);
+  return cols;
+}
+const selectPolicyRowsForRCompanion = psql(`
+  SELECT n.nspname, cl.relname, pg_get_expr(pol.polqual, pol.polrelid)
+  FROM pg_policy pol
+  JOIN pg_class cl ON cl.oid = pol.polrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+  CROSS JOIN pg_roles pr
+  WHERE pr.rolname = 'private_definer'
+    AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+    AND pol.polcmd IN ('r', '*')
+`);
+const rCompanionGuardedColumnsByTable = new Map(); // "schema.table" -> Set<column>
+for (const [schema, table, usingExpr] of selectPolicyRowsForRCompanion) {
+  const key = `${schema}.${table}`;
+  let set = rCompanionGuardedColumnsByTable.get(key);
+  if (!set) {
+    set = new Set();
+    rCompanionGuardedColumnsByTable.set(key, set);
+  }
+  for (const col of columnsGuardedByNullifCurrentSetting(usingExpr)) set.add(col);
+}
+const registryColumnRowsForRCompanion = psql(`
+  SELECT schema_name, table_name, column_name
+  FROM private.pii_retention_policy
+  WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null')
+`);
+const missingRCompanion = registryColumnRowsForRCompanion.filter(([schema, table, column]) => {
+  const guarded = rCompanionGuardedColumnsByTable.get(`${schema}.${table}`);
+  return !guarded || !guarded.has(column);
+});
+for (const [schema, table, column] of missingRCompanion) {
+  failures.push(`private.pii_retention_policy column ${schema}.${table}.${column} (delete_row/set_null) has no private_definer SELECT(/ALL) policy whose USING clause guards THAT column with the exact nullif(current_setting(...)) form — column-level "_r companion" check, P3d gate round 3 S4: ${schema}.${table}.${column}`);
+}
+
 if (failures.length > 0) {
   console.error(`verify-function-inventory: ${failures.length} failure(s):`);
   for (const f of failures) console.error(`  - ${f}`);

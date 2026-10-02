@@ -8,7 +8,7 @@
 -- harness).
 
 BEGIN;
-SELECT plan(24);
+SELECT plan(28);
 
 -- ============================================================================
 -- 1. app.catalog_signing_key / app.checkin_token: no client role can read
@@ -275,6 +275,44 @@ SELECT is(
   (SELECT ST_DWithin(radius_center::geography, ST_SetSRID(ST_MakePoint(-86.6000, 36.1467), 4326)::geography, coalesce(radius_m, 0) + 50) FROM app.catalog_course WHERE id = 'crs_radius1'),
   false,
   'matchFix: a point ~16km from the radius center is NOT inside radius + 50m'
+);
+
+-- ============================================================================
+-- P3d gate round 4, F1 (BLOCKING): the quarantine-dedupe partial unique
+-- index (0022) exists, correctly scoped, and a duplicate
+-- INSERT ... ON CONFLICT ... DO NOTHING against it is a genuine no-op —
+-- proven with a real INSERT attempted twice and the resulting row count
+-- checked, not merely asserted in prose.
+-- ============================================================================
+SELECT is(
+  (
+    SELECT count(*)::int FROM pg_indexes
+    WHERE schemaname = 'app' AND tablename = 'fraud_signal'
+      AND indexname = 'fraud_signal_quarantine_dedupe_idx'
+      AND indexdef ILIKE '%UNIQUE%'
+      AND indexdef ILIKE '%playId%'
+      AND indexdef ILIKE '%quarantineDigest%'
+      AND indexdef ILIKE '%quarantined_evidence_row%'
+  ),
+  1,
+  'app.fraud_signal has the P3d gate round 4 F1 partial unique index on (playId, quarantineDigest), scoped to kind = quarantined_evidence_row'
+);
+
+SELECT lives_ok(
+  $$INSERT INTO app.fraud_signal (user_id, kind, detail)
+    VALUES (NULL, 'quarantined_evidence_row', jsonb_build_object('playId', 'zz-idx-test-play', 'quarantineDigest', 'zz-idx-test-digest'))$$,
+  'seed: one quarantined_evidence_row fraud_signal row'
+);
+SELECT lives_ok(
+  $$INSERT INTO app.fraud_signal (user_id, kind, detail)
+    VALUES (NULL, 'quarantined_evidence_row', jsonb_build_object('playId', 'zz-idx-test-play', 'quarantineDigest', 'zz-idx-test-digest'))
+    ON CONFLICT ((detail ->> 'playId'), (detail ->> 'quarantineDigest')) WHERE kind = 'quarantined_evidence_row' DO NOTHING$$,
+  'a duplicate INSERT ... ON CONFLICT (...) WHERE kind = quarantined_evidence_row DO NOTHING against the SAME (playId, quarantineDigest) does not raise'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.fraud_signal WHERE kind = 'quarantined_evidence_row' AND detail ->> 'playId' = 'zz-idx-test-play'),
+  1,
+  'the duplicate insert was a genuine no-op -- exactly 1 row, not 2'
 );
 
 SELECT * FROM finish();

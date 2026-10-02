@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(9);
+SELECT plan(21);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -318,6 +318,164 @@ SELECT is(
   0,
   'every private.definer_policy_allowlist row still names a real policy applying to private_definer with a matching expression'
 );
+
+-- (11) P3d gate round 3, S4: COLUMN-level "_r companion" check --
+-- REPLACES round 2's table-level version (kept the same check number;
+-- this is a fix to the check, not an addition). Round 2's table-level
+-- check ("does SOME SELECT(/ALL) policy exist for private_definer on
+-- this table at all") was found insufficient THIS round: a table with
+-- TWO classified columns, one with a real SELECT companion and one with
+-- none, PASSED it, even though `delete_my_data`'s own post-condition
+-- (0022) and `export_my_data` (0022) both re-read PER COLUMN, under RLS
+-- gated on that SAME column -- a column with no companion is invisible
+-- to both, "reporting success while the row survives" for exactly that
+-- column, table-level check notwithstanding. See 0022's own
+-- post-condition comment for the full corrected account (P3d gate round
+-- 3, S4 also asked for that correction).
+--
+-- This version requires, for every `private.pii_retention_policy`
+-- (table, column) pair classified delete_row/set_null, a private_definer
+-- SELECT(/ALL) policy on the SAME table whose USING clause guards THAT
+-- SPECIFIC column with the EXACT `nullif(current_setting(...))` form --
+-- reusing check 7's own "exact form, not a loose substring" discipline
+-- (pg_get_expr's canonical deparsed shape). Built as a DO block (not a
+-- single `is()` SELECT) so the regex pattern can be assembled with
+-- `chr(39)` for each literal single quote it needs to match, rather than
+-- fighting SQL string-literal quote-doubling inside a doubly-nested
+-- string -- same "build the awkward literal with chr(39)" technique this
+-- file's own earlier checks are free to reach for.
+DO $$
+DECLARE
+  v_q text := chr(39);
+  v_rp record;
+  v_pattern text;
+  v_guarded boolean;
+BEGIN
+  FOR v_rp IN
+    SELECT schema_name, table_name, column_name
+    FROM private.pii_retention_policy
+    WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null')
+  LOOP
+    v_pattern := '\m' || v_rp.column_name || '\M\s*=\s*\(?NULLIF\(current_setting\(' || v_q
+      || '[^' || v_q || ']*' || v_q || '::text,\s*true\),\s*' || v_q || v_q || '::text\)\)?(::\w+)?';
+    SELECT bool_or(pg_get_expr(pol.polqual, pol.polrelid) ~ v_pattern) INTO v_guarded
+    FROM pg_policy pol
+    JOIN pg_class cl ON cl.oid = pol.polrelid
+    JOIN pg_namespace n ON n.oid = cl.relnamespace
+    CROSS JOIN pg_roles pr
+    WHERE pr.rolname = 'private_definer'
+      AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+      AND pol.polcmd IN ('r', '*')
+      AND n.nspname = v_rp.schema_name
+      AND cl.relname = v_rp.table_name;
+    IF NOT COALESCE(v_guarded, false) THEN
+      RAISE EXCEPTION 'column-level "_r companion" check: %.%.% (delete_row/set_null) has no private_definer SELECT(/ALL) policy whose USING clause guards that column with the exact nullif(current_setting(...)) form', v_rp.schema_name, v_rp.table_name, v_rp.column_name;
+    END IF;
+  END LOOP;
+END
+$$;
+SELECT pass('every private.pii_retention_policy (table, column) pair classified delete_row/set_null has a private_definer SELECT(/ALL) "_r companion" policy guarding THAT SPECIFIC column (column-level, P3d gate round 3 S4)');
+
+-- (12) P3d gate round 3, S4: must-fail fixture, proving check 11's own
+-- logic is genuinely column-level and not vacuously true (this project's
+-- real schema has zero live violations, so check 11 alone never proves
+-- it would actually CATCH one). Reviewer's own repro shape: a table with
+-- TWO delete_row-classified columns, a private_definer SELECT "_r
+-- companion" policy on only ONE of them.
+--
+-- Reverts to the CONNECTING role first (tests.clear_actor(), a plain
+-- RESET ROLE): this file authenticated as service_role at its very top
+-- (line 25) and never switched back — service_role owns neither schema
+-- app nor its own CREATE grant on it, so a CREATE TABLE app.zz_two
+-- while still impersonating it fails "permission denied for schema app".
+-- The connecting role itself (migration_owner under HARNESS_MODE=
+-- restricted; postgres under HARNESS_MODE=superuser) is what actually
+-- OWNS schema app (0001_schemas.sql's own CREATE SCHEMA, applied by
+-- whichever role runs migrations) and needs no extra grant.
+SELECT lives_ok($$SELECT tests.clear_actor()$$, 'setup (S4 fixture): revert to the connecting role, which owns schema app');
+SELECT lives_ok(
+  $$CREATE TABLE app.zz_two (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_a uuid, user_b uuid)$$,
+  'setup (S4 fixture): create app.zz_two'
+);
+ALTER TABLE app.zz_two ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.zz_two FORCE ROW LEVEL SECURITY;
+SELECT lives_ok(
+  $$CREATE POLICY zz_two_delete_a ON app.zz_two FOR DELETE TO private_definer USING (user_a = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid)$$,
+  'setup (S4 fixture): DELETE policy on user_a'
+);
+SELECT lives_ok(
+  $$CREATE POLICY zz_two_delete_b ON app.zz_two FOR DELETE TO private_definer USING (user_b = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid)$$,
+  'setup (S4 fixture): DELETE policy on user_b'
+);
+SELECT lives_ok(
+  $$CREATE POLICY zz_two_select_a_r ON app.zz_two FOR SELECT TO private_definer USING (user_a = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid)$$,
+  'setup (S4 fixture): SELECT "_r companion" policy on user_a ONLY -- user_b deliberately has none'
+);
+-- private.pii_retention_policy has FORCE ROW LEVEL SECURITY (0014) —
+-- and (found by this exact fixture, empirically): unlike
+-- pseudonym_key_registry, table OWNERSHIP alone does not carry an
+-- implicit INSERT/DELETE grant here either — 0019_evidence_intake.sql
+-- hit the SAME "permission denied for table pii_retention_policy" when
+-- it needed to insert a fixture row into this exact table, and its own
+-- fix is reused verbatim here: an explicit `GRANT INSERT/DELETE ...
+-- TO CURRENT_USER` alongside the usual self-granting temporary policy
+-- (row-visibility) — a GRANT and a POLICY answer two DIFFERENT
+-- questions (table-level privilege vs. row-level visibility) and FORCE
+-- RLS means BOTH are needed even for the connecting/owning role.
+GRANT INSERT, DELETE ON private.pii_retention_policy TO CURRENT_USER;
+SELECT lives_ok(
+  $$CREATE POLICY current_user_seed_pii_retention_policy_s4_test ON private.pii_retention_policy FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)$$,
+  'setup (S4 fixture): temporary self-granting policy on private.pii_retention_policy'
+);
+SELECT lives_ok(
+  $$INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, action, reason)
+    VALUES ('app', 'zz_two', 'user_a', 'delete_row', 'fixture (S4 must-fail proof, removed before this file ends)'),
+           ('app', 'zz_two', 'user_b', 'delete_row', 'fixture (S4 must-fail proof, removed before this file ends)')$$,
+  'setup (S4 fixture): register both zz_two columns in private.pii_retention_policy'
+);
+
+-- Re-runs check 11's OWN logic, scoped to zz_two only, as a real query
+-- (not prose) -- this assertion FAILS THE BUILD if the column-level fix
+-- ever regresses back to table-level (a table-level check would report
+-- BOTH columns as fine, since zz_two has *a* SELECT policy).
+SELECT is(
+  (
+    SELECT array_agg(v.column_name ORDER BY v.column_name)
+    FROM (
+      SELECT rp.column_name
+      FROM private.pii_retention_policy rp
+      WHERE rp.schema_name = 'app' AND rp.table_name = 'zz_two' AND rp.action = 'delete_row'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pg_policy pol
+          JOIN pg_class cl ON cl.oid = pol.polrelid
+          JOIN pg_namespace n ON n.oid = cl.relnamespace
+          CROSS JOIN pg_roles pr
+          WHERE pr.rolname = 'private_definer'
+            AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
+            AND pol.polcmd IN ('r', '*')
+            AND n.nspname = 'app' AND cl.relname = 'zz_two'
+            AND pg_get_expr(pol.polqual, pol.polrelid) ~ (
+              '\m' || rp.column_name || '\M\s*=\s*\(?NULLIF\(current_setting\(' || chr(39)
+              || '[^' || chr(39) || ']*' || chr(39) || '::text,\s*true\),\s*' || chr(39) || chr(39) || '::text\)\)?(::\w+)?'
+            )
+        )
+    ) v
+  ),
+  ARRAY['user_b'],
+  'S4 must-fail fixture: the column-level check flags EXACTLY zz_two.user_b (DELETE policy, no SELECT companion) and NOT zz_two.user_a (DELETE policy, WITH a SELECT companion) -- proves the check is column-level, not merely table-level'
+);
+
+SELECT lives_ok(
+  $$DELETE FROM private.pii_retention_policy WHERE schema_name = 'app' AND table_name = 'zz_two'$$,
+  'cleanup (S4 fixture): remove fixture pii_retention_policy rows'
+);
+SELECT lives_ok(
+  $$DROP POLICY current_user_seed_pii_retention_policy_s4_test ON private.pii_retention_policy$$,
+  'cleanup (S4 fixture): drop the temporary self-granting policy on private.pii_retention_policy'
+);
+REVOKE INSERT, DELETE ON private.pii_retention_policy FROM CURRENT_USER;
+SELECT lives_ok($$DROP TABLE app.zz_two$$, 'cleanup (S4 fixture): drop app.zz_two (cascades its own policies)');
 
 SELECT * FROM finish();
 ROLLBACK;

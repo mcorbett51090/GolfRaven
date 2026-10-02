@@ -709,8 +709,66 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     },
 
     fraudSignal: {
+      // ⛔ FIX (P3d gate round 3, S2, MEDIUM): "make repeated finalize
+      // idempotent for fraud signals: no duplicate quarantined_evidence_row
+      // signal on each retry." `finalizeScoringForKey` (evidence/
+      // handler.ts) can now genuinely run twice for the SAME play — once
+      // from a batch's own phase 2b, once more from `buildReplayResult`'s
+      // live-retry path — and both passes independently decide whether a
+      // quarantine signal is warranted from the SAME underlying evidence
+      // rows, so a naive unconditional INSERT would raise it twice.
+      //
+      // ⛔ FIX (P3d gate round 4, F1, BLOCKING): the round-3 version above
+      // deduped on `(kind, detail->>'playId')` ALONE — found this round to
+      // silently drop a SECOND, genuinely DIFFERENT quarantine signal on
+      // the SAME play (a q2 malformed row found alongside/after an
+      // earlier q1), violating security doc §3's own "every on-play
+      // quarantine... naming the row and its reasons" requirement, and
+      // (independently) `INSERT ... SELECT ... WHERE NOT EXISTS` is not
+      // safe under real concurrency without a backing unique constraint —
+      // two simultaneous finalizes could both pass the NOT EXISTS check
+      // before either commits.
+      //
+      // FIX: dedupe key widened to `(playId, quarantineDigest)` — a
+      // canonical digest over the FULL quarantined-row SET a single
+      // scoring pass found (`evidence/handler.ts#computeQuarantineDigest`,
+      // the ONLY place that knows enough domain shape to compute it — not
+      // duplicated here). Enforced by a REAL partial unique index on
+      // `app.fraud_signal` (0022, `WHERE kind = 'quarantined_evidence_row'`),
+      // via `INSERT ... ON CONFLICT (...) DO NOTHING` against that index —
+      // atomic, so this is now safe under genuine concurrency too (proven
+      // this round: 4 concurrent finalizes of the SAME quarantine set
+      // produce exactly 1 row). A `detail` with no `playId` (the
+      // `clock_skew` kind, keyed on `fixIds` instead) is untouched by any
+      // of this — always inserts, never deduped, same as before.
+      //
+      // Scoped STRICTLY to `kind === "quarantined_evidence_row"`: the
+      // partial index only exists for that kind, so using `ON CONFLICT`
+      // for any other kind would either match nothing (harmless no-op
+      // clause) or, worse, silently mask a real constraint-name typo — a
+      // plain unconditional insert for every OTHER kind is simpler and
+      // exactly as correct.
       async insert(kind: string, detail: Record<string, unknown>): Promise<void> {
-        await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
+        if (kind !== "quarantined_evidence_row") {
+          await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
+          return;
+        }
+        const playId = typeof detail.playId === "string" ? detail.playId : null;
+        const quarantineDigest = typeof detail.quarantineDigest === "string" ? detail.quarantineDigest : null;
+        if (playId === null || quarantineDigest === null) {
+          // Every REAL call site (evidence/handler.ts) always computes
+          // both before calling this — a missing one here is this
+          // codebase's own bug, not a client-triggerable shape, and
+          // silently falling back to an undeduped insert would defeat
+          // the entire point of this fix. Fail loud.
+          throw new Error(`Repo#fraudSignal.insert: kind "quarantined_evidence_row" requires detail.playId and detail.quarantineDigest to both be strings (got playId=${JSON.stringify(detail.playId)}, quarantineDigest=${JSON.stringify(detail.quarantineDigest)})`);
+        }
+        await trx`
+          insert into app.fraud_signal (user_id, kind, detail)
+          values (${uid}, ${kind}, ${trx.json(detail as never)})
+          on conflict ((detail ->> 'playId'), (detail ->> 'quarantineDigest')) where kind = 'quarantined_evidence_row'
+          do nothing
+        `;
       },
     },
 
@@ -1030,7 +1088,60 @@ function mapPgTimeoutError(err: unknown): unknown {
   if (typeof code === "string" && PG_TIMEOUT_SQLSTATES.has(code)) {
     return Errors.serviceUnavailable("the database could not complete this request in time (statement/lock timeout) — safe to retry");
   }
+  // P3d should-fix 1 ("transaction_timeout"): confirmed empirically this
+  // round, against a real PG17 cluster via THIS EXACT driver version —
+  // exceeding `transaction_timeout` is NOT a normal, catchable-and-the-
+  // session-continues ERROR the way statement_timeout/lock_timeout are.
+  // Postgres sends a FATAL ("terminating connection due to transaction
+  // timeout") and closes the TCP connection outright. postgres.js
+  // surfaces that as a plain `Error` with `.code === "CONNECTION_CLOSED"`
+  // (a driver-level socket-error code, never a Postgres SQLSTATE) — NOT
+  // present in `PG_TIMEOUT_SQLSTATES` above, which only ever inspects
+  // `.code` as a SQLSTATE string. Also confirmed: the connection POOL
+  // recovers on its own (a later query opens a fresh connection; proven
+  // by running one immediately afterward in the same test) — not a
+  // pool-damaging event.
+  //
+  // ⛔ FIX (P3d gate round 3, S3): this message USED to say "(transaction
+  // timeout) — safe to retry" — a specific CAUSAL claim this handler
+  // cannot actually verify. `CONNECTION_CLOSED` is a driver-level signal
+  // that the TCP connection dropped; `transaction_timeout` is ONE thing
+  // that produces it (confirmed empirically this round), but so does a
+  // network blip, a pooler recycling the connection, or the database
+  // process itself restarting — this code path has no way to tell them
+  // apart, and asserting "timeout" here is exactly the confident-but-
+  // unverified causal claim this project's own accuracy discipline warns
+  // against. What IS true, and what this response says instead: the
+  // outcome of whatever was in flight is unknown to the caller (the
+  // connection dropped before a result came back, which — because
+  // `withOwnership`/`withOwnershipBatch` always run inside a single
+  // transaction — means either everything committed or nothing did,
+  // never a partial write), and every write path this maps onto is
+  // idempotent by construction (evidence intake replay by input_hash,
+  // delete_my_data's own generic pass, redemption's advisory locking),
+  // so retrying is always safe regardless of which of those causes it
+  // actually was.
+  if ((err as { code?: unknown } | null)?.code === "CONNECTION_CLOSED") {
+    return Errors.serviceUnavailable("outcome unknown; retrying is idempotent");
+  }
   return err;
+}
+
+// P3d should-fix 1: `transaction_timeout` is PG17+ only — confirmed
+// empirically this round (`--describe-config` against both this repo's
+// pinned PG16 and PG17 binaries: present on 17, absent on 16). Cached
+// after the first check (one query per cold start, not per transaction)
+// so every write endpoint doesn't pay an extra round trip. `[unverified —
+// the REAL hosted Supabase project's own Postgres major version for this
+// environment; the P3 build plan's own week-1 spike item list already
+// names "the P3 spike confirms" for several PG-version-dependent facts —
+// this joins that list]`.
+let _supportsTransactionTimeout: boolean | null = null;
+async function supportsTransactionTimeout(db: ReturnType<typeof postgres>): Promise<boolean> {
+  if (_supportsTransactionTimeout !== null) return _supportsTransactionTimeout;
+  const rows = await db`select current_setting('server_version_num') as v`;
+  _supportsTransactionTimeout = Number(rows[0]?.v ?? 0) >= 170000;
+  return _supportsTransactionTimeout;
 }
 
 /**
@@ -1051,6 +1162,7 @@ function mapPgTimeoutError(err: unknown): unknown {
  */
 export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
   const db = sql();
+  const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
     // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
     // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
@@ -1078,6 +1190,13 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
       // runtime interpolation here.
       await trx`set local statement_timeout = '10s'`;
       await trx`set local lock_timeout = '5s'`;
+      // P3d should-fix 1: the BACKSTOP for a transaction made of many
+      // short statements, none individually over statement_timeout, but
+      // whose CUMULATIVE duration still exceeds http.ts's 15s request
+      // race — 12s is comfortably under that, and deliberately ABOVE
+      // statement_timeout (10s) so a single long statement is still
+      // reported via ITS OWN, more specific timeout first.
+      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
       const check = await trx`select current_user as u`;
       if (check[0]?.u !== "service_role") {
         throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
@@ -1122,12 +1241,20 @@ export async function withOwnershipBatch<T>(
   perItem: (repo: Repo, index: number) => Promise<T>,
 ): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
   const db = sql();
+  const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
     return await (db.begin(async (trx: TxSql) => {
       await trx`set local role service_role`;
       // Follow-up 13 — same reasoning as withOwnership's own note above.
       await trx`set local statement_timeout = '10s'`;
       await trx`set local lock_timeout = '5s'`;
+      // P3d should-fix 1: THIS is the function the coordinator's own
+      // repro named directly ("a transaction of many short statements
+      // still commits after a 503: 833 of 900 rows committed after seven
+      // 503 batches") — a batch is EXACTLY "many short statements," one
+      // savepoint per item, so the cumulative-duration backstop matters
+      // most here.
+      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
       const check = await trx`select current_user as u`;
       if (check[0]?.u !== "service_role") {
         throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
