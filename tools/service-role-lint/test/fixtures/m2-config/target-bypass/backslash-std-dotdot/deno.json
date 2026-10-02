@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "dep": "https://deno.land/std@0.224.0/..\\x/attacker_admin/mod.ts"
+  }
+}

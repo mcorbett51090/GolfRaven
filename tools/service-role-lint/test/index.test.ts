@@ -1,8 +1,10 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { committedLockProblems } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
+import { importMapTargetProblem } from "../src/lint.js";
 
 // M3 (post-P3a gate): "Stop excluding dist and __fixtures__ under
 // supabase/functions except the lint's own fixtures dir, matched
@@ -240,7 +242,7 @@ describe("pinned import-target allow-list (M2)", () => {
     // vendor/ actually imports it for real (see that directory's own
     // generate-bundle.sh doc). Nothing else in supabase/functions/**
     // depended on the old pin.
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@4.6.5" } }));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
     const fnDir = join(tmpRoot, "some-fn");
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);
@@ -249,9 +251,160 @@ describe("pinned import-target allow-list (M2)", () => {
     expect(results).toHaveLength(0);
   });
 
+  it.each(["npm:zod", "npm:zod@^4"])(
+    "end to end through the committed allow-list: an unpinned `%s` target in a real deno.json is flagged (config level AND at the importing file)",
+    (target) => {
+      tmpRoot = mkdtempSync(join(tmpdir(), "srl-npm-unpinned-"));
+      writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: target } }));
+      const fnDir = join(tmpRoot, "some-fn");
+      mkdirSync(fnDir, { recursive: true });
+      writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);
+
+      const results = lintDirectory(tmpRoot, tmpRoot);
+      const configResult = results.find((r) => r.filePath.endsWith("deno.json"));
+      expect(configResult?.findings.some((f) => f.message.includes("not an exact version pin"))).toBe(true);
+      const srcResult = results.find((r) => r.filePath.endsWith("index.ts"));
+      expect(srcResult?.findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not an exact version pin"))).toBe(true);
+    },
+  );
+
+  it("the committed pinned-import-targets.json passes the lint's own target rules: no CDN routing host (any case), every npm:/jsr: entry an exact pin, no whitespace/odd-case scheme", () => {
+    const list = JSON.parse(readFileSync(join(import.meta.dirname, "..", "pinned-import-targets.json"), "utf8")) as string[];
+    expect(list.some((t) => /esm\.sh|jsdelivr|unpkg|skypack/i.test(t))).toBe(false);
+    expect(list.filter((t) => /^\s*(npm|jsr):/i.test(t)).length).toBeGreaterThan(0);
+    for (const t of list) expect(importMapTargetProblem(t), t).toBeUndefined();
+  });
+
+  // The REAL lock is supabase/tests/deno.lock, which sits outside the
+  // linted supabase/functions tree, so validateLockFile never sees it
+  // (supply-chain gate HIGH). This committed-file test is what makes the
+  // npm-table rules apply to it; it runs in CI via `pnpm -r test` (the
+  // `verify` job), not just locally. Deno --frozen accepts a removed
+  // integrity and a tarball+integrity swap, so nothing else catches them.
+  describe("committed supabase/tests/deno.lock (npm table)", () => {
+    const repoRoot = join(import.meta.dirname, "..", "..", "..");
+    const lock = JSON.parse(readFileSync(join(repoRoot, "supabase", "tests", "deno.lock"), "utf8")) as Record<string, Record<string, unknown>>;
+    // Redirect keys may not equal a pinned target or an import-map value.
+    const ctx = {
+      pinnedImportTargets: JSON.parse(readFileSync(join(repoRoot, "tools", "service-role-lint", "pinned-import-targets.json"), "utf8")) as string[],
+      importMapValues: Object.values((JSON.parse(readFileSync(join(repoRoot, "supabase", "functions", "deno.json"), "utf8")) as { imports: Record<string, string> }).imports),
+    };
+
+    it("passes the layout and npm-table rules (version 5, allow-listed tables, sha512 integrity on every entry, no tarball override, no dangling/downgraded specifier, no orphan entry)", () => {
+      expect(Object.keys(lock.npm ?? {}).length).toBeGreaterThan(0);
+      expect(committedLockProblems(lock, ctx)).toEqual([]);
+      expect(lock.version).toBe("5");
+    });
+
+    it("every npm: import-map target in supabase/functions/deno.json is pinned by a lock specifier, and the lock has no esm.sh stub entry for it", () => {
+      const imports = (JSON.parse(readFileSync(join(repoRoot, "supabase", "functions", "deno.json"), "utf8")) as { imports: Record<string, string> }).imports;
+      const npmTargets = Object.values(imports).filter((t) => t.startsWith("npm:"));
+      expect(npmTargets.length).toBeGreaterThan(0);
+      for (const t of npmTargets) {
+        const base = t.replace(/^(npm:(?:@[^/]+\/)?[^/@]+@[^/]+).*$/, "$1");
+        expect(Object.keys(lock.specifiers ?? {}), t).toContain(base);
+      }
+      for (const key of Object.keys(lock.remote ?? {})) expect(key).not.toMatch(/esm\.sh\/(zod|@noble|tz-lookup)@/);
+    });
+
+    const mutations: Array<[string, (l: Record<string, Record<string, Record<string, unknown>>>) => void]> = [
+      ["integrity removed", (l) => delete l.npm!["zod@4.6.5"]!.integrity],
+      ["sha1- integrity", (l) => (l.npm!["zod@4.6.5"]!.integrity = "sha1-" + "A".repeat(27) + "=")],
+      ["tarball override", (l) => (l.npm!["zod@4.6.5"]!.tarball = "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz")],
+      [
+        "tarball + integrity swap to 4.6.4",
+        (l) => Object.assign(l.npm!["zod@4.6.5"]!, { tarball: "https://registry.npmjs.org/zod/-/zod-4.6.4.tgz", integrity: "sha512-" + "C".repeat(86) + "==" }),
+      ],
+      ["dangling specifier", (l) => ((l.specifiers as unknown as Record<string, string>)["npm:left-pad@1.3.0"] = "1.3.0")],
+      [
+        "specifier downgrade: npm:zod@4.6.5 -> 4.6.4 with a (real-shaped) 4.6.4 entry, 4.6.5 entry removed",
+        (l) => {
+          (l.specifiers as unknown as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
+          delete l.npm!["zod@4.6.5"];
+          l.npm!["zod@4.6.4"] = { integrity: "sha512-" + "D".repeat(86) + "==" };
+        },
+      ],
+      [
+        "specifier downgrade variant: the 4.6.5 entry is KEPT beside the 4.6.4 one (orphan)",
+        (l) => {
+          (l.specifiers as unknown as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
+          l.npm!["zod@4.6.4"] = { integrity: "sha512-" + "D".repeat(86) + "==" };
+        },
+      ],
+      ["orphan npm entry (nothing refers to it)", (l) => (l.npm!["left-pad@1.3.0"] = { integrity: "sha512-" + "E".repeat(86) + "==" })],
+      [
+        'older layout: "version": "3" with specifiers/npm under "packages", integrity removed',
+        (l) => {
+          const npm = l.npm!;
+          const specifiers = l.specifiers!;
+          delete npm["zod@4.6.5"]!.integrity;
+          delete l.npm;
+          delete l.specifiers;
+          (l as Record<string, unknown>).version = "3";
+          (l as Record<string, unknown>).packages = { specifiers, npm };
+        },
+      ],
+      [
+        'older layout: "version": "3" with specifiers/npm under "packages", tarball + integrity swap',
+        (l) => {
+          const npm = l.npm!;
+          const specifiers = l.specifiers!;
+          Object.assign(npm["zod@4.6.5"]!, { tarball: "https://registry.npmjs.org/zod/-/zod-4.6.4.tgz", integrity: "sha512-" + "C".repeat(86) + "==" });
+          delete l.npm;
+          delete l.specifiers;
+          (l as Record<string, unknown>).version = "3";
+          (l as Record<string, unknown>).packages = { specifiers, npm };
+        },
+      ],
+      ['an unknown top-level table ("packages") alongside the v5 tables', (l) => ((l as Record<string, unknown>).packages = { npm: {} })],
+      [
+        "redirect: same-host, deno.land postgresjs v3.4.5 -> v3.4.4 (plus a matching remote hash)",
+        (l) => {
+          (l.redirects as Record<string, unknown>)["https://deno.land/x/postgresjs@v3.4.5/mod.js"] = "https://deno.land/x/postgresjs@v3.4.4/mod.js";
+          (l.remote as Record<string, unknown>)["https://deno.land/x/postgresjs@v3.4.4/mod.js"] = "f".repeat(64);
+        },
+      ],
+      [
+        "redirect: cross-host, deno.land postgresjs -> esm.sh/postgres@3.4.4 (plus a matching remote hash)",
+        (l) => {
+          (l.redirects as Record<string, unknown>)["https://deno.land/x/postgresjs@v3.4.5/mod.js"] = "https://esm.sh/postgres@3.4.4";
+          (l.remote as Record<string, unknown>)["https://esm.sh/postgres@3.4.4"] = "f".repeat(64);
+        },
+      ],
+      [
+        "redirect FROM a pinned target / import-map value (std/http/server)",
+        (l) => ((l.redirects as Record<string, unknown>)["https://deno.land/std@0.224.0/http/server.ts"] = "https://deno.land/std@0.224.1/http/server.ts"),
+      ],
+      [
+        "redirect from a floating esm.sh key to a DIFFERENT package",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/ws@^8.14.2?target=denonext"] = "https://esm.sh/evil-ws@8.22.0?target=denonext"),
+      ],
+      [
+        "redirect from a floating esm.sh key to a different ORIGIN",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/ws@^8.14.2?target=denonext"] = "https://evil.example.com/ws@8.22.0?target=denonext"),
+      ],
+      [
+        "redirect from a floating esm.sh key to a non-exact version",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/ws@^8.14.2?target=denonext"] = "https://esm.sh/ws@^8?target=denonext"),
+      ],
+      [
+        "redirect from an esm.sh key WITHOUT a range operator (an exact stub)",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/@supabase/supabase-js@2.45.4"] = "https://esm.sh/@supabase/supabase-js@2.45.3"),
+      ],
+      ["remote key on a foreign host", (l) => ((l.remote as Record<string, unknown>)["https://evil.example.com/x.js"] = "f".repeat(64))],
+      ["remote deno.land key that is not a versioned path", (l) => ((l.remote as Record<string, unknown>)["https://deno.land/x/postgresjs/mod.js"] = "f".repeat(64))],
+      ['version "4" with otherwise-valid v5 tables', (l) => ((l as Record<string, unknown>).version = "4")],
+    ];
+    it.each(mutations)("must-fail mutation of the REAL lock: %s", (_name, mutate) => {
+      const copy = JSON.parse(JSON.stringify(lock)) as Record<string, Record<string, Record<string, unknown>>>;
+      mutate(copy);
+      expect(committedLockProblems(copy, ctx).length).toBeGreaterThan(0);
+    });
+  });
+
   it("flags a bare specifier resolved to a target that looks legitimate but is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-pinned-missing-"));
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { "left-pad": "https://esm.sh/left-pad@1.3.0" } }));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { "left-pad": "npm:left-pad@1.3.0" } }));
     const fnDir = join(tmpRoot, "some-fn");
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import leftPad from "left-pad"; export const p = leftPad;`);

@@ -164,6 +164,80 @@ const KNOWN_REGISTRY_HOST_PREFIXES = [
   "jsr.io/",
 ];
 
+// Supply-chain follow-up (esm.sh stub -> `npm:` migration, P3d round 4 /
+// P3e follow-ups; hardened over two supply-chain gate rounds): an
+// import-map TARGET is only acceptable if Deno will resolve it to ONE
+// immutable thing, and the way to guarantee that is a POSITIVE allow-list
+// of target shapes -- a deny-list of CDN hosts was bypassable (trailing-dot
+// `esm.sh.`, `esm.run`, `ga.jspm.io`, `data:`/`blob:`/`file:`/`node:`
+// schemes, IDN lookalike hosts, `esm.sh@evil.com` userinfo, ...).
+// `importMapTargetProblem` returns the reason a target is NOT acceptable,
+// or undefined. It runs before (and independent of) the pinned-allow-list
+// membership check, so listing a bad target in pinned-import-targets.json
+// does not make it pass. The ONLY accepted shapes:
+//   - `npm:<name>@<x.y.z>[-pre][/subpath]` and
+//     `jsr:@<scope>/<name>@<x.y.z>[-pre][/subpath]` (exact pins; no `+build`,
+//     no `%`, no `.`/`..` segment);
+//   - `https://deno.land/std@<x.y.z>/<path>` and
+//     `https://deno.land/x/<name>@v<x.y.z>/<path>` (immutable versioned
+//     URLs), matched against the RAW string so the host is necessarily
+//     ASCII, lowercase, with no trailing dot, userinfo or port.
+// Everything else -- any other scheme or host, `http:`, `data:`, `blob:`,
+// `file:`, `node:`, bare names -- is rejected. Before that, any
+// whitespace/control character and any non-lowercase scheme is rejected
+// outright: Deno normalises `" npm:zod@^4"`, `"n\tpm:zod@^4"` and
+// `"NPM:zod@^4"` to the range `npm:zod@^4` (confirmed by the gate), so a
+// literal `startsWith("npm:")` test is bypassed by exactly those spellings.
+// There is deliberately NO exemption for the legacy supabase-js esm.sh URL:
+// it is a direct import in _shared/privileged.ts, which this lint exempts
+// by PATH (isAllowedFile), never an import-map target; any `@supabase/` or
+// `supabase-js` target is banned earlier, at both call sites. Its own
+// follow-up replaces it with an exact npm: pin.
+const SEMVER_EXACT = "(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?";
+const EXACT_NPM_TARGET = new RegExp(`^npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*@${SEMVER_EXACT}(/[^\\s?#]*)?$`);
+const EXACT_JSR_TARGET = new RegExp(`^jsr:@[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*@${SEMVER_EXACT}(/[^\\s?#]*)?$`);
+const DENO_LAND_STD_TARGET = new RegExp(`^https://deno\\.land/std@${SEMVER_EXACT}(/[^\\s?#%]+)$`);
+const DENO_LAND_X_TARGET = new RegExp(`^https://deno\\.land/x/[A-Za-z0-9_-]+@v${SEMVER_EXACT}(/[^\\s?#%]+)$`);
+
+export function importMapTargetProblem(target: string): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  if (/[\s\u0000-\u001f\u007f-\u009f]/u.test(target)) {
+    return "target contains whitespace or a control character -- Deno normalises these away, so the lint and Deno would read different specifiers";
+  }
+  // WHATWG URL treats `\` as `/` in https: URLs, so `..\x/evil/mod.ts`
+  // is a traversal the `/`-segment checks below never see. Reject it
+  // outright, in any target.
+  if (target.includes("\\")) {
+    return "target contains a backslash -- WHATWG URL parsing treats it as '/', so the path would resolve somewhere the lint did not check";
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(target)?.[1];
+  if (scheme !== undefined && scheme !== scheme.toLowerCase()) {
+    return `target has a non-lowercase scheme "${scheme}:" -- Deno treats it as the lowercase scheme, so the lint and Deno would read different specifiers`;
+  }
+  if (scheme === "npm" || scheme === "jsr") {
+    const m = (scheme === "npm" ? EXACT_NPM_TARGET : EXACT_JSR_TARGET).exec(target);
+    const subpath = m?.[1] ?? "";
+    if (m === null || subpath.includes("%") || subpath.split("/").some((seg) => seg === ".." || seg === ".")) {
+      return `target is a ${scheme}: specifier that is not an exact version pin (${scheme}:${scheme === "jsr" ? "@scope/" : ""}<name>@<major.minor.patch>[/subpath], no %, no ./.. segments) -- a bare name, range, dist-tag or build-metadata suffix lets the resolved version drift`;
+    }
+    return undefined;
+  }
+  if (scheme === "https") {
+    // Any normalisation (dot-segments, percent/case/host rewriting, IDN) means the
+    // raw string is not what Deno will fetch; require it to be its own canonical form.
+    let href: string | undefined;
+    try {
+      href = new URL(target).href;
+    } catch {
+      href = undefined;
+    }
+    if (href !== target) return "target is not in canonical URL form (new URL(target).href differs: dot-segments, host or percent normalisation) -- Deno would fetch something other than the string the lint checked";
+  }
+  const denoLand = DENO_LAND_STD_TARGET.exec(target) ?? DENO_LAND_X_TARGET.exec(target);
+  if (denoLand !== null && !(denoLand[1] ?? "").split("/").some((seg) => seg === ".." || seg === ".")) return undefined;
+  return "target is not on the positive allow-list of import-map target shapes (an exact npm:/jsr: pin, or https://deno.land/std@x.y.z/<path>, or https://deno.land/x/<name>@vX.Y.Z/<path> with an ASCII lowercase host, no port/userinfo/trailing dot) -- every other scheme and host (CDN routers such as esm.sh/esm.run/jsdelivr/unpkg/skypack/jspm, data:, blob:, file:, node:, http:) is rejected";
+}
+
 function normalizePackageSpecifier(spec: string): string {
   let s = spec.replace(/^https?:\/\//, "");
   for (const prefix of KNOWN_REGISTRY_HOST_PREFIXES) {
@@ -386,6 +460,10 @@ function isBannedSpecifierOrAlias(
     // pinned, versioned" string by construction, independent of whether
     // it happens to collide with a pinned entry.
     return { banned: true, reason: "alias target is a prefix mapping (trailing '/'), not a single exact pinned target", resolvedVia: resolved };
+  }
+  const targetProblem = importMapTargetProblem(resolved);
+  if (targetProblem !== undefined) {
+    return { banned: true, reason: `alias target ${JSON.stringify(resolved)}: ${targetProblem}`, resolvedVia: resolved };
   }
   if (!pinnedImportTargets.has(resolved)) {
     return {

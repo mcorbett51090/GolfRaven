@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "zod": "npm:zod@4.6.5",
+    "@noble/hashes/utils.js": "npm:@noble/hashes@2.4.0/utils.js"
+  }
+}

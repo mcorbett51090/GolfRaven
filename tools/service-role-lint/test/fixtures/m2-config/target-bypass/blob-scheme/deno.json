@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "dep": "blob:https://evil.example.com/uuid"
+  }
+}

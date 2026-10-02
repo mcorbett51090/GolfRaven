@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "zod": "https://cdn.jsdelivr.net/npm/zod@4/+esm"
+  }
+}

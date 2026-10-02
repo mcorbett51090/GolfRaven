@@ -440,7 +440,7 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
   });
 
   it("flags an exact-key alias whose target is a clean-looking URL that is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {
-    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "https://esm.sh/left-pad@1.3.0" }, []);
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "npm:left-pad@1.3.0" }, []);
     expect(
       findings.some(
         (f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list"),
@@ -479,9 +479,73 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
     expect(findings.some((f) => f.rule === "dynamic-code-execution")).toBe(false);
   });
 
+  it("passes (must-pass control) a bare specifier whose import-map target is an exact-pinned npm: specifier on the allow-list", () => {
+    expect(lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "npm:zod@4.6.5" }, ["npm:zod@4.6.5"])).toEqual([]);
+  });
+
+  it.each(["npm:zod", "npm:zod@^4", "npm:zod@4", "npm:zod@4.6", "npm:zod@latest", "npm:zod@*", "npm:zod@~4.6.5", "npm:zod@>=4.6.5", "npm:zod@4.6.5/../evil.js"])(
+    "must-fail: an import-map target `%s` is not an exact npm: pin -- rejected even when listed on the pinned allow-list",
+    (target) => {
+      const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: target }, [target]);
+      expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not an exact version pin"))).toBe(true);
+    },
+  );
+
+  it.each([
+    "NPM:zod@^4",
+    " npm:zod@^4",
+    "n\tpm:zod@^4",
+    "jsr:@std/assert@^1",
+    "https://cdn.jsdelivr.net/npm/zod@4/+esm",
+    "https://esm.sh/zod@^4",
+    "https://unpkg.com/zod@4.6.5/index.js",
+    "https://cdn.skypack.dev/zod@4.6.5",
+    "npm:zod@4.6.5+build.1",
+    "npm:zod@4.6.5/%2e%2e/evil.js",
+    "https://esm.sh./zod@^4",
+    "https://esm.run/zod@4",
+    "https://ga.jspm.io/npm:zod@4.6.5/index.js",
+    "data:text/javascript;base64,ZXhwb3J0IGRlZmF1bHQgMQ==",
+    "blob:https://evil.example.com/uuid",
+    "file:///tmp/evil.js",
+    "node:fs",
+    "https://\u0435sm.sh/zod@4.6.5",
+    "https://xn--sm-8cd.sh/zod@4.6.5",
+    "https://esm.sh@evil.com/zod@4.6.5",
+    "http://deno.land/std@0.224.0/http/server.ts",
+    "https://deno.land:8443/std@0.224.0/http/server.ts",
+    "https://deno.land/std@0.224.0/..\\x/attacker_admin/mod.ts",
+    "https://deno.land/x/postgresjs@v3.4.5/..\\..\\x/evil/mod.ts",
+    "https://deno.land/std@0.224.0/http\\..\\..\\x/postgresjs@v3.4.4/mod.js",
+    "https://deno.land/std@0.224.0/http/../../x/postgresjs@v3.4.4/mod.js",
+  ])("must-fail (supply-chain gate bypass): an import-map target %j is rejected at the importing file even when listed on the allow-list", (target) => {
+    const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: target }, [target]);
+    // Some targets name a banned driver package (postgresjs) and are rejected by that earlier rule instead; either way they must be banned.
+    expect(
+      findings.some((f) => f.rule === "banned-import-specifier" && (f.message.includes(`alias target ${JSON.stringify(target)}`) || f.message.includes("banned Supabase/Postgres-driver package"))),
+    ).toBe(true);
+  });
+
+  it("must-pass control: an exact jsr: pin that is on the allow-list resolves clean", () => {
+    expect(lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "jsr:@std/assert@1.0.0" }, ["jsr:@std/assert@1.0.0"])).toEqual([]);
+  });
+
+  it("must-fail: an exact npm: pin that is NOT on the allow-list is rejected by the allow-list, not by the exactness check", () => {
+    const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "npm:zod@4.6.5" }, []);
+    expect(findings.some((f) => f.message.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
+    expect(findings.some((f) => f.message.includes("not an exact version pin"))).toBe(false);
+  });
+
+  it("must-fail: a DIRECT npm: specifier in source stays banned even when it is an exact pin that is on the allow-list (only import-map keys are allowed)", () => {
+    const findings = lintSource(`import { z } from "npm:zod@4.6.5"; export const s = z;`, "supabase/functions/some-fn/index.ts", {
+      pinnedImportTargets: ["npm:zod@4.6.5"],
+    });
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("direct URL/npm:"))).toBe(true);
+  });
+
   it("clean negative control: a legitimate dependency imported ONLY through an exact-key, pinned-target import map, an in-bounds relative import, an allow-listed Deno.env.get read, and ordinary arr[i]/obj[key] access produce ZERO findings", () => {
     expect(
-      lintFixtureWithMap("good/legit-remote-import.ts", { zod: "https://esm.sh/zod@3.23.8" }, ["https://esm.sh/zod@3.23.8"]),
+      lintFixtureWithMap("good/legit-remote-import.ts", { zod: "npm:zod@3.23.8" }, ["npm:zod@3.23.8"]),
     ).toEqual([]);
   });
 });

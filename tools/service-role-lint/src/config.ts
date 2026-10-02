@@ -90,6 +90,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { importMapTargetProblem } from "./lint.js";
 import type { Finding, LintResult } from "./lint.js";
 
 /** The three config file shapes Deno recognises, in the order this module checks for them. */
@@ -108,7 +109,7 @@ const ANCESTOR_CHECK_FILENAMES = [...CONFIG_FILENAMES, LOCK_FILENAME] as const;
 const ALLOWED_TOP_LEVEL_KEYS = new Set(["imports", "compilerOptions", "lint", "fmt", "tasks"]);
 
 /** deno.lock's own allowed top-level keys (round 2, "Lockfile" requirement). */
-const LOCK_ALLOWED_TOP_LEVEL_KEYS = new Set(["version", "remote", "specifiers", "redirects", "workspace"]);
+const LOCK_ALLOWED_TOP_LEVEL_KEYS = new Set(["version", "remote", "specifiers", "npm", "redirects", "workspace"]);
 
 // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): the `node_modules`
 // exclusion that used to live here (mirroring index.ts's own, now also
@@ -286,6 +287,8 @@ function validateSingleConfigFile(filePath: string, pinnedImportTargets: Set<str
         const upper = v.toUpperCase();
         if (upper.includes("@SUPABASE/") || upper.includes("SUPABASE-JS")) {
           problems.push(configProblem(filePath, `imports["${k}"] = "${v}" contains '@supabase/' or 'supabase-js'`));
+        } else if (importMapTargetProblem(v) !== undefined) {
+          problems.push(configProblem(filePath, `imports["${k}"] = ${JSON.stringify(v)}: ${importMapTargetProblem(v)}; rejected even if listed on the pinned-import-targets allow-list`));
         } else if (!pinnedImportTargets.has(v)) {
           problems.push(configProblem(filePath, `imports["${k}"] = "${v}" is not on the committed pinned-import-targets allow-list -- add it there as its own reviewed diff`));
         }
@@ -315,6 +318,203 @@ function containsKeyDeep(value: unknown, keyName: string): boolean {
   const obj = value as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(obj, keyName)) return true;
   return Object.values(obj).some((v) => containsKeyDeep(v, keyName));
+}
+
+// Deno lock v5 `npm` table (present since the esm.sh stub -> `npm:`
+// migration). `deno cache --frozen` (2.5.2, confirmed by the supply-chain
+// gate) ACCEPTS a lock in which (a) an npm entry's `integrity` is removed
+// (the package is silently unpinned) and (b) an entry's `tarball` points
+// at a different version's tarball together with THAT version's integrity
+// (different code served under the pinned name), so Deno itself is not a
+// backstop for either. This check is the backstop. It is exported and run
+// against the COMMITTED supabase/tests/deno.lock by a test
+// (test/index.test.ts) -- validateLockFile below only ever sees a lock
+// that sits under the linted functions root, and the real lock does not.
+// Requirements: every `npm` entry has `integrity` =
+// ^sha512-<86 base64 chars>==$ (a sha1- value is rejected); no entry has
+// a `tarball` field; every `specifiers` value for an `npm:` key maps to an
+// existing `npm` entry ("<name>@<value>").
+const NPM_INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const SEMVER_EXACT_LOCK = "(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?";
+
+/**
+ * Lock LAYOUT for the committed supabase/tests/deno.lock: version "5" only,
+ * and only the allow-listed top-level tables. Deno 2.5.2 --frozen also
+ * reads the older layout (`"version": "3"` with `specifiers`/`npm` nested
+ * under `"packages"`) and honours `tarball` there, which the npm-table
+ * check above (written for the v5 shape) never sees.
+ */
+export function lockLayoutProblems(lock: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  if (lock.version !== "5") problems.push(`deno.lock "version" is ${JSON.stringify(lock.version)}, not "5" -- only the v5 layout is checked by this lint; an older layout (e.g. v3 "packages") is rejected`);
+  for (const key of Object.keys(lock)) {
+    if (!LOCK_ALLOWED_TOP_LEVEL_KEYS.has(key)) problems.push(`deno.lock has a disallowed top-level key "${key}" -- only ${[...LOCK_ALLOWED_TOP_LEVEL_KEYS].join(", ")} are allowed`);
+  }
+  return problems;
+}
+
+export function npmLockTableProblems(lock: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  const npmTable = lock.npm;
+  let npmKeys = new Set<string>();
+  if (npmTable !== undefined) {
+    if (typeof npmTable !== "object" || npmTable === null || Array.isArray(npmTable)) {
+      problems.push(`deno.lock "npm" is not a JSON object`);
+    } else {
+      npmKeys = new Set(Object.keys(npmTable as Record<string, unknown>));
+      for (const [pkg, entry] of Object.entries(npmTable as Record<string, unknown>)) {
+        const e = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? (entry as Record<string, unknown>) : undefined;
+        if (e === undefined) {
+          problems.push(`deno.lock "npm" entry "${pkg}" is not a JSON object`);
+          continue;
+        }
+        if (typeof e.integrity !== "string" || !NPM_INTEGRITY.test(e.integrity)) {
+          problems.push(
+            `deno.lock "npm" entry "${pkg}" has a missing or malformed "integrity" (must match ${NPM_INTEGRITY.source}) -- every npm package must be pinned by a sha512 registry tarball integrity hash`,
+          );
+        }
+        if (Object.prototype.hasOwnProperty.call(e, "tarball")) {
+          problems.push(`deno.lock "npm" entry "${pkg}" carries a "tarball" URL override -- banned: it can serve different code under a pinned name (frozen Deno accepts it)`);
+        }
+      }
+    }
+  }
+  // `specifiers`: for an `npm:` key that names an exact version, the value
+  // must BE that version (ignoring a `_peer...` suffix) -- a downgrade
+  // (`"npm:zod@4.6.5": "4.6.4"` plus a real 4.6.4 entry) is otherwise
+  // internally consistent and served by frozen Deno (supply-chain gate,
+  // round 2). Every value must also map to an existing `npm` entry.
+  const reachable = new Set<string>();
+  const specifiers = lock.specifiers;
+  if (specifiers !== undefined && typeof specifiers === "object" && specifiers !== null && !Array.isArray(specifiers)) {
+    for (const [spec, value] of Object.entries(specifiers as Record<string, unknown>)) {
+      if (!spec.startsWith("npm:")) continue;
+      const at = spec.indexOf("@", 5); // skip a leading "@scope"
+      const name = at === -1 ? spec.slice(4) : spec.slice(4, at);
+      const requested = at === -1 ? "" : spec.slice(at + 1);
+      if (typeof value !== "string" || !npmKeys.has(`${name}@${value}`)) {
+        problems.push(`deno.lock "specifiers" entry "${spec}" -> ${JSON.stringify(value)} has no matching "npm" entry "${name}@${String(value)}" (dangling: nothing pins it)`);
+        continue;
+      }
+      reachable.add(`${name}@${value}`);
+      if (new RegExp(`^${SEMVER_EXACT_LOCK}$`).test(requested) && value.split("_")[0] !== requested) {
+        problems.push(`deno.lock "specifiers" entry "${spec}" resolves to "${value}", not the exact version it names -- a specifier downgrade/upgrade serves different code than the import map pins`);
+      }
+    }
+  }
+  // Orphans: every `npm` key must be reachable from a specifier or from
+  // some reachable entry's dependencies (a second, unreferenced version
+  // entry is how the downgrade variant keeps the original in place).
+  const npmObj = (typeof npmTable === "object" && npmTable !== null && !Array.isArray(npmTable) ? npmTable : {}) as Record<string, unknown>;
+  const queue = [...reachable];
+  while (queue.length > 0) {
+    const key = queue.pop()!;
+    const entry = npmObj[key];
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    for (const field of ["dependencies", "optionalDependencies"]) {
+      const deps = e[field];
+      const list = Array.isArray(deps) ? deps : typeof deps === "object" && deps !== null ? Object.keys(deps) : [];
+      for (const d of list) {
+        if (typeof d !== "string") continue;
+        // Each dependency edge must resolve to EXACTLY ONE npm key (an exact
+        // key, or a bare name with exactly one "<name>@<version>" entry);
+        // otherwise an extra package could ride along through a prefix match.
+        const matches = npmKeys.has(d) ? [d] : [...npmKeys].filter((k) => k.startsWith(`${d}@`));
+        if (matches.length > 1) {
+          problems.push(`deno.lock "npm" entry "${key}" ${field} edge "${d}" is ambiguous: it matches ${matches.length} npm entries (${matches.join(", ")})`);
+        } else if (matches.length === 0 && field === "dependencies") {
+          problems.push(`deno.lock "npm" entry "${key}" dependencies edge "${d}" resolves to no npm entry`);
+        }
+        for (const k of matches.length === 1 ? matches : []) {
+          if (!reachable.has(k)) {
+            reachable.add(k);
+            queue.push(k);
+          }
+        }
+      }
+    }
+  }
+  for (const key of npmKeys) {
+    if (!reachable.has(key)) {
+      problems.push(`deno.lock "npm" entry "${key}" is an orphan: no "specifiers" value and no reachable entry's dependencies refers to it`);
+    }
+  }
+  return problems;
+}
+
+// `redirects` / `remote` tables of the committed lock. Deno --frozen
+// accepts a `redirects` entry that points ANY remote module at any other
+// URL when matching `remote` hashes are present (supply-chain gate,
+// round 3: `deno.land/x/postgresjs@v3.4.5/mod.js` -> an esm.sh or a
+// same-host v3.4.4 module). So `redirects` is limited to the one thing it
+// legitimately holds here: esm.sh range -> exact-version resolutions under
+// the remaining esm.sh supabase-js import (`ws@^8.14.2?target=denonext`
+// -> `ws@8.22.0?target=denonext`).
+const ESM_SH_URL = /^https:\/\/esm\.sh\/((?:@[a-z0-9._~-]+\/)?[a-z0-9._~-]+)@([^/?]+)([/?].*)?$/;
+const RANGE_OPERATOR = /^(?:[\^~*<>]|%3[CE])/i;
+const EXACT_VERSION_ONLY = new RegExp(`^${SEMVER_EXACT_LOCK}$`);
+
+export interface CommittedLockContext {
+  /** pinned-import-targets.json entries: no redirect key may equal one. */
+  pinnedImportTargets?: string[];
+  /** supabase/functions/deno.json import-map values: no redirect key may equal one. */
+  importMapValues?: string[];
+}
+
+export function lockRedirectAndRemoteProblems(lock: Record<string, unknown>, ctx: CommittedLockContext = {}): string[] {
+  const problems: string[] = [];
+  const protectedKeys = new Set([...(ctx.pinnedImportTargets ?? []), ...(ctx.importMapValues ?? [])]);
+  const redirects = lock.redirects;
+  if (redirects !== undefined) {
+    if (typeof redirects !== "object" || redirects === null || Array.isArray(redirects)) {
+      problems.push(`deno.lock "redirects" is not a JSON object`);
+    } else {
+      for (const [from, to] of Object.entries(redirects as Record<string, unknown>)) {
+        const where = `deno.lock redirect ${JSON.stringify(from)} -> ${JSON.stringify(to)}`;
+        if (protectedKeys.has(from)) problems.push(`${where}: the key is a pinned target / import-map value -- a redirect would swap a reviewed module for another`);
+        if (from.startsWith("https://deno.land/")) problems.push(`${where}: no redirect may start from a deno.land URL`);
+        const f = ESM_SH_URL.exec(from);
+        if (f === null || !RANGE_OPERATOR.test(f[2]!)) {
+          problems.push(`${where}: the key must be an https://esm.sh/ URL whose version carries a range operator (^ ~ > < * %3E %3C) -- only floating esm.sh resolutions may be redirected`);
+          continue;
+        }
+        const t = typeof to === "string" ? ESM_SH_URL.exec(to) : null;
+        if (t === null) {
+          problems.push(`${where}: the target must be an https://esm.sh/ URL (same origin as the key)`);
+          continue;
+        }
+        if (t[1] !== f[1]) problems.push(`${where}: the target is a different package ("${t[1]}" vs "${f[1]}")`);
+        if (!EXACT_VERSION_ONLY.test(t[2]!)) problems.push(`${where}: the target version "${t[2]}" is not an exact version`);
+        if ((t[3] ?? "") !== (f[3] ?? "")) problems.push(`${where}: the target's sub-path/query differs from the key's`);
+      }
+    }
+  }
+  // `remote`: limit = no full import-graph reachability walk. Minimum
+  // enforced: only deno.land / esm.sh hosts; deno.land keys must be the
+  // versioned shapes of the positive import-map allow-list; no backslash /
+  // whitespace; no esm.sh key carrying a version range operator.
+  const remote = lock.remote;
+  if (remote !== undefined && typeof remote === "object" && remote !== null && !Array.isArray(remote)) {
+    for (const key of Object.keys(remote as Record<string, unknown>)) {
+      const host = /^https:\/\/(deno\.land|esm\.sh)\//.exec(key)?.[1];
+      if (host === undefined) {
+        problems.push(`deno.lock "remote" key ${JSON.stringify(key)} is not on host deno.land or esm.sh`);
+      } else if (host === "deno.land" && importMapTargetProblem(key) !== undefined) {
+        problems.push(`deno.lock "remote" key ${JSON.stringify(key)} is a deno.land URL that is not a canonical versioned /std@x.y.z/ or /x/<name>@vX.Y.Z/ path`);
+      } else if (host === "esm.sh") {
+        const m = ESM_SH_URL.exec(key);
+        if (m !== null && RANGE_OPERATOR.test(m[2]!)) problems.push(`deno.lock "remote" key ${JSON.stringify(key)} is an esm.sh URL with a version range, not a resolved module`);
+        if (/[\\\s]/.test(key)) problems.push(`deno.lock "remote" key ${JSON.stringify(key)} contains a backslash or whitespace`);
+      }
+    }
+  }
+  return problems;
+}
+
+/** Every lock rule that applies to the committed supabase/tests/deno.lock: layout (version "5", allow-listed tables), the npm table, and the redirects/remote tables. */
+export function committedLockProblems(lock: Record<string, unknown>, ctx: CommittedLockContext = {}): string[] {
+  return [...lockLayoutProblems(lock), ...npmLockTableProblems(lock), ...lockRedirectAndRemoteProblems(lock, ctx)];
 }
 
 function validateLockFile(filePath: string, pinnedImportTargets: Set<string>): ConfigProblem[] {
@@ -369,6 +569,8 @@ function validateLockFile(filePath: string, pinnedImportTargets: Set<string>): C
       }
     }
   }
+
+  for (const message of npmLockTableProblems(obj)) problems.push(configProblem(filePath, message));
 
   // "workspace (with no imports overrides)" -- a shallow recursive scan
   // for either key name anywhere inside the value, since this project's

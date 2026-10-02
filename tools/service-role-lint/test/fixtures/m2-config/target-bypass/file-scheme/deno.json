@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "dep": "file:///tmp/evil.js"
+  }
+}
