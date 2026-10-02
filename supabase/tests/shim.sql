@@ -297,6 +297,10 @@ CREATE TABLE IF NOT EXISTS auth.users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text UNIQUE,
   email_confirmed_at timestamptz,
+  -- 0039: GoTrue stamps this when it issues a session (a password sign-in, an OTP verification); the proof-bound link reads it as a
+  -- corroboration that a verifyOtp for the account really happened. `[unverified — training knowledge: real GoTrue stamps it from
+  -- issueRefreshToken, so verifyOtp does too]`; the harness reproduces the column only, tests stamp it by hand (service_role UPDATE below).
+  last_sign_in_at timestamptz,
   raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -358,6 +362,8 @@ $$;
 
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT SELECT, INSERT ON auth.users TO service_role;
+-- Test seeding only (0039 suites): stamp last_sign_in_at the way GoTrue would after a verifyOtp. No migration grants this to service_role.
+GRANT UPDATE (last_sign_in_at) ON auth.users TO service_role;
 -- Test seeding only (supabase/tests/matrix/17_signin_providers.sql and the Deno suite create and read identity
 -- rows the way GoTrue would); no migration grants this to service_role.
 GRANT SELECT, INSERT, DELETE ON auth.identities TO service_role;

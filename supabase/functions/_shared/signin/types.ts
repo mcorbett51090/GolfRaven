@@ -35,9 +35,14 @@ export interface RevocationJob {
  * (`Repo#signin`); every method is one of the private.signin_* definers of 0035. Errors are already mapped to HttpErrors:
  * 409 identity_conflict / provider_already_linked, 404 not_linked, 422 last_sign_in_method, 503 on a timeout. */
 export interface SigninRepo {
-  /** false when this transaction has no way to link an identity to ANOTHER account (the OTP-proven link): `edge` mode, by design (no
-   * edge definer attaches an identity to an arbitrary account). The handler answers 501 before it spends an OTP or a code. */
+  /** false when this transaction has no way at all to link an identity to ANOTHER account (the OTP-proven link). Both database modes
+   * can since 0039 (`legacy` directly, `edge` through a proof); a repo that cannot makes the handler answer 501 before it spends an OTP or
+   * a code. */
   readonly crossAccountLink: boolean;
+  /** true when the OTP-proven link goes through a database-checked PROOF (`edge`, 0039): the handler mints one after the OTP verifies
+   * (`SigninDeps.emailProofs`) and redeems it with `linkIdentityWithProof`; `linkIdentity` / `storeToken` then refuse any account but the
+   * caller's. false (`legacy`, deleted in PR4b): the handler links to the proven account directly, as before. */
+  readonly proofBoundLink: boolean;
   /** The caller's own sign-in methods. */
   listMethods(): Promise<SigninMethodRow[]>;
   /** The account holding an email, or null (§3.4 rule 1). Cross-user by design; returns only an id. */
@@ -46,6 +51,10 @@ export interface SigninRepo {
    * true = created, false = this account already held that identity. */
   linkIdentity(targetUserId: string, input: LinkIdentityInput): Promise<boolean>;
   storeToken(targetUserId: string, provider: "apple" | "google", envelope: Envelope): Promise<void>;
+  /** `proofBoundLink` only. Redeems the proof ATOMICALLY and links the identity AND stores its token for the PROOF's target account (never the
+   * caller's): one definer call, so the proof is consumed exactly once. true = created, false = that account already held that identity. A
+   * proof that is expired, already used, issued to another caller, or for another identity / address is 409 `email_proof_refused`. */
+  linkIdentityWithProof(proofId: string, input: LinkIdentityInput, envelope: Envelope): Promise<boolean>;
   /** Unlinks one method (only while another remains) and queues its provider-grant revocation. Returns the queue ids. */
   unlinkIdentity(provider: string): Promise<string[]>;
   /** DELETE /v1/me: queue every grant of the caller for revocation, before the rows are deleted. Idempotent. */
@@ -70,6 +79,8 @@ export interface SigninSystemOps {
   reserveOtpAttempt(emailHash: string): Promise<OtpReservation>;
   /** Gives one reserved attempt back, in EXACTLY the window it was reserved in (never the current one by itself; never below zero). */
   releaseOtpAttempt(emailHash: string, windowStart: string): Promise<void>;
+  /** Deletes email-OTP link proofs an hour past their expiry (0039); system work. */
+  purgeEmailProofs(): Promise<number>;
 }
 
 export interface ClaimedRevocation {
@@ -115,6 +126,25 @@ export interface AppleSigninPort {
 
 export interface GoogleRevokePort {
   revokeToken(token: string): Promise<void>;
+}
+
+/** What the handler hands the minter after an OTP verified (0039). The minter hashes the address and the subject; the database re-derives both. */
+export interface EmailProofInput {
+  /** The signed-in caller: the only account that may redeem the proof. */
+  callerUserId: string;
+  /** The account whose mailbox was proven: the only account the proof can link to. */
+  targetUserId: string;
+  email: string;
+  provider: "apple" | "google";
+  /** The provider's stable subject (the Apple `sub`) of the identity that triggered the proof. */
+  subject: string;
+}
+
+/** Mints the single-use, short-lived proof of a verified email OTP (`private.signin_record_email_proof`, 0039). Runs in its OWN transaction as
+ * `edge_system`, never as the per-user actor, and the database refuses unless the target's own address and GoTrue's sign-in stamp agree. Returns
+ * the proof id (a random uuid that never leaves the server). Used only when `SigninRepo.proofBoundLink`. */
+export interface EmailProofMinter {
+  record(input: EmailProofInput): Promise<string>;
 }
 
 export type EmailOtpResult = { ok: true; userId: string } | { ok: false };

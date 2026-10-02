@@ -7,11 +7,11 @@
 // SQL, which is what keeps this fake honest. State hangs off the shared `FakeState` through a WeakMap, so fake-repo.ts needs
 // nothing beyond mounting `signin` and calling `deleteSigninRows` from its own deleteMyData.
 
-import { Errors } from "../../functions/_shared/http.ts";
+import { Errors, HttpError } from "../../functions/_shared/http.ts";
 import type { Envelope, Kek } from "../../functions/_shared/signin/envelope.ts";
-import { toHex } from "../../functions/_shared/signin/bytes.ts";
+import { sha256Hex, toHex } from "../../functions/_shared/signin/bytes.ts";
 import { NotConfiguredError } from "../../functions/_shared/signin/errors.ts";
-import type { ClaimedRevocation, LinkIdentityInput, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo } from "../../functions/_shared/signin/types.ts";
+import type { ClaimedRevocation, EmailProofInput, EmailProofMinter, LinkIdentityInput, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo } from "../../functions/_shared/signin/types.ts";
 import type { FakeState } from "./fake-repo.ts";
 
 export interface FakeIdentity {
@@ -39,8 +39,23 @@ export interface FakeQueueRow {
   nextAttemptAtMs: number;
   expiresAtMs: number;
 }
+/** A row of private.signin_email_proof (0039): the hashes, never the address or the subject. */
+export interface FakeProof {
+  id: string;
+  callerUserId: string;
+  targetUserId: string;
+  provider: string;
+  emailHash: string;
+  subHash: string;
+  expiresAtMs: number;
+  consumed: boolean;
+}
 export interface SigninFake {
   identities: FakeIdentity[];
+  /** private.signin_email_proof (0039). */
+  proofs: FakeProof[];
+  /** auth.users.last_sign_in_at (GoTrue's stamp), per user id, in ms. The minter refuses unless it is within 60 s of the fake clock. */
+  lastSignInMs: Map<string, number>;
   /** lower-cased email -> user id (auth.users.email). */
   accounts: Map<string, string>;
   tokens: FakeToken[];
@@ -60,7 +75,7 @@ const fakes = new WeakMap<FakeState, SigninFake>();
 export function signinFake(state: FakeState): SigninFake {
   let f = fakes.get(state);
   if (!f) {
-    f = { identities: [], accounts: new Map(), tokens: [], queue: [], keks: new Map(), calls: [], nextId: 1, failNext: new Map(), otpFailures: new Map() };
+    f = { identities: [], proofs: [], lastSignInMs: new Map(), accounts: new Map(), tokens: [], queue: [], keks: new Map(), calls: [], nextId: 1, failNext: new Map(), otpFailures: new Map() };
     fakes.set(state, f);
   }
   return f;
@@ -79,11 +94,18 @@ export function addKek(state: FakeState, kekId: string): Kek {
   return { kekId, key };
 }
 
-/** What private.delete_my_data does to the user's grant rows (and ONLY to them: the queue is untouched, by design). */
+/** What private.delete_my_data does to the user's grant rows (and ONLY to them: the queue is untouched, by design) and, since 0039, to the proofs
+ * the account is a party to. */
 export function deleteSigninRows(state: FakeState, userId: string): void {
   const f = signinFake(state);
   f.calls.push(`delete_my_data:${userId}`);
   f.tokens = f.tokens.filter((t) => t.userId !== userId);
+  f.proofs = f.proofs.filter((p) => p.callerUserId !== userId && p.targetUserId !== userId);
+}
+
+/** GoTrue stamps auth.users.last_sign_in_at when verifyOtp issues its session; a test calls this the way the real verifier's side effect would. */
+export function stampSignIn(state: FakeState, userId: string, atMs: number = state.now.getTime()): void {
+  signinFake(state).lastSignInMs.set(userId, atMs);
 }
 
 const fingerprint = (e: Envelope) => toHex(e.ciphertext);
@@ -111,7 +133,40 @@ function enqueueInternal(state: FakeState, userId: string, provider: string | nu
   return jobs;
 }
 
-export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossAccountLink?: boolean } = {}): SigninRepo {
+const normEmail = (e: string) => e.trim().toLowerCase();
+
+/** Mirrors private.signin_record_email_proof (0039): the address must hash to the TARGET's own, the target must have signed in within 60 s, caller
+ * and target differ. It runs in its own transaction as edge_system, so it is not a SigninRepo method. */
+export function makeFakeEmailProofs(state: FakeState): EmailProofMinter {
+  const f = signinFake(state);
+  const refused = () => Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
+  return {
+    async record(input: EmailProofInput): Promise<string> {
+      f.calls.push(`proof.record:${input.callerUserId}->${input.targetUserId}`);
+      maybeFail(f, "proof.record");
+      if (input.callerUserId === input.targetUserId) throw Errors.internal();
+      const targetEmail = [...f.accounts.entries()].find(([, id]) => id === input.targetUserId)?.[0] ?? null;
+      const emailHash = await sha256Hex(normEmail(input.email));
+      if (targetEmail === null || (await sha256Hex(normEmail(targetEmail))) !== emailHash) throw refused();
+      const last = f.lastSignInMs.get(input.targetUserId);
+      if (last === undefined || Math.abs(state.now.getTime() - last) > 60_000) throw refused();
+      const id = `00000000-0000-4000-9000-${String(f.nextId++).padStart(12, "0")}`;
+      f.proofs.push({
+        id,
+        callerUserId: input.callerUserId,
+        targetUserId: input.targetUserId,
+        provider: input.provider,
+        emailHash,
+        subHash: await sha256Hex(`${input.provider}:${input.subject}`),
+        expiresAtMs: state.now.getTime() + 5 * 60_000,
+        consumed: false,
+      });
+      return id;
+    },
+  };
+}
+
+export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossAccountLink?: boolean; proofBoundLink?: boolean } = {}): SigninRepo {
   const f = signinFake(state);
   const methodsOf = (u: string): SigninMethodRow[] =>
     f.identities
@@ -123,8 +178,34 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
     if (!last) throw new NotConfiguredError("kek_missing");
     return { kekId: last[0], key: last[1] };
   };
+  const proofBound = opts.proofBoundLink ?? false;
+  /** The direct core path (private.signin_link_identity) on `target`, shared by linkIdentity and the proof-bound link. */
+  const linkCore = (target: string, input: LinkIdentityInput): boolean => {
+    const owner = f.identities.find((i) => i.provider === input.provider && i.subject === input.subject);
+    if (owner) {
+      if (owner.userId === target) return false;
+      throw Errors.conflict("identity_conflict", "that sign-in identity is already linked to another account");
+    }
+    if (f.identities.some((i) => i.userId === target && i.provider === input.provider)) {
+      throw Errors.conflict("provider_already_linked", "this account already has a different identity linked for that provider");
+    }
+    f.identities.push({ userId: target, provider: input.provider, subject: input.subject, email: input.email, isPrivateRelay: input.isPrivateRelay, linkedAt: state.now.toISOString() });
+    return true;
+  };
+  const storeCore = (target: string, provider: string, envelope: Envelope): void => {
+    if (!f.identities.some((i) => i.userId === target && i.provider === provider)) throw Errors.notFound("that sign-in method is not linked");
+    const existing = f.tokens.find((t) => t.userId === target && t.provider === provider);
+    if (existing && fingerprint(existing.envelope) !== fingerprint(envelope)) enqueueInternal(state, target, provider, "replaced");
+    f.tokens = f.tokens.filter((t) => !(t.userId === target && t.provider === provider));
+    f.tokens.push({ userId: target, provider, envelope });
+  };
+  /** Direct (uid-taking) writes: in the proof-bound (edge) shape only the caller's own account, as privileged.ts#mustBeSelf. */
+  const mustBeSelf = (target: string) => {
+    if (proofBound && target !== uid) throw new HttpError(403, "cross_account_link_requires_proof", "an identity is linked to another account only through a verified email proof");
+  };
   return {
     crossAccountLink: opts.crossAccountLink ?? true,
+    proofBoundLink: proofBound,
     async listMethods() {
       f.calls.push("listMethods");
       maybeFail(f, "listMethods");
@@ -137,25 +218,44 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
     async linkIdentity(target: string, input: LinkIdentityInput) {
       f.calls.push(`linkIdentity:${target}`);
       maybeFail(f, "linkIdentity");
-      const owner = f.identities.find((i) => i.provider === input.provider && i.subject === input.subject);
-      if (owner) {
-        if (owner.userId === target) return false;
-        throw Errors.conflict("identity_conflict", "that sign-in identity is already linked to another account");
-      }
-      if (f.identities.some((i) => i.userId === target && i.provider === input.provider)) {
-        throw Errors.conflict("provider_already_linked", "this account already has a different identity linked for that provider");
-      }
-      f.identities.push({ userId: target, provider: input.provider, subject: input.subject, email: input.email, isPrivateRelay: input.isPrivateRelay, linkedAt: state.now.toISOString() });
-      return true;
+      mustBeSelf(target);
+      return linkCore(target, input);
     },
     async storeToken(target, provider, envelope) {
       f.calls.push(`storeToken:${target}`);
       maybeFail(f, "storeToken");
-      if (!f.identities.some((i) => i.userId === target && i.provider === provider)) throw Errors.notFound("that sign-in method is not linked");
-      const existing = f.tokens.find((t) => t.userId === target && t.provider === provider);
-      if (existing && fingerprint(existing.envelope) !== fingerprint(envelope)) enqueueInternal(state, target, provider, "replaced");
-      f.tokens = f.tokens.filter((t) => !(t.userId === target && t.provider === provider));
-      f.tokens.push({ userId: target, provider, envelope });
+      mustBeSelf(target);
+      storeCore(target, provider, envelope);
+    },
+    /** Mirrors private.signin_link_identity_with_proof_for_actor (0039): redeems the proof (unconsumed, unexpired, issued to THIS caller, for this
+     * provider / subject hash / address hash, the target's address still the proven one) and links + stores for the PROOF's target, never `uid`. */
+    async linkIdentityWithProof(proofId, input, envelope) {
+      f.calls.push(`linkIdentityWithProof:${proofId}`);
+      maybeFail(f, "linkIdentityWithProof");
+      if (!proofBound) throw Errors.internal();
+      const refused = () => Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
+      const proof = f.proofs.find((p) => p.id === proofId);
+      if (!proof || proof.consumed || proof.expiresAtMs <= state.now.getTime() || proof.callerUserId !== uid) throw refused();
+      if (!input.emailVerified || input.isPrivateRelay || input.email === null) throw Errors.internal();
+      if (proof.provider !== input.provider || proof.subHash !== (await sha256Hex(`${input.provider}:${input.subject}`))) throw refused();
+      const emailHash = await sha256Hex(normEmail(input.email));
+      if (proof.emailHash !== emailHash) throw refused();
+      const targetEmail = [...f.accounts.entries()].find(([, id]) => id === proof.targetUserId)?.[0] ?? null;
+      if (targetEmail === null || (await sha256Hex(normEmail(targetEmail))) !== emailHash) throw refused();
+      // one transaction: a refusal below leaves the proof unconsumed (the definer's exception rolls the UPDATE back)
+      const snapshot = { identities: [...f.identities], tokens: [...f.tokens], queue: f.queue.map((q) => ({ ...q })) };
+      try {
+        proof.consumed = true;
+        const created = linkCore(proof.targetUserId, input);
+        storeCore(proof.targetUserId, input.provider, envelope);
+        return created;
+      } catch (e) {
+        proof.consumed = false;
+        f.identities = snapshot.identities;
+        f.tokens = snapshot.tokens;
+        f.queue = snapshot.queue;
+        throw e;
+      }
     },
     async unlinkIdentity(provider) {
       f.calls.push(`unlinkIdentity:${provider}`);
@@ -196,6 +296,11 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
       },
       async releaseOtpAttempt(h, _windowStart) {
         f.otpFailures.set(h, Math.max(0, (f.otpFailures.get(h) ?? 0) - 1));
+      },
+      async purgeEmailProofs() {
+        const before = f.proofs.length;
+        f.proofs = f.proofs.filter((p) => p.expiresAtMs >= state.now.getTime() - 3600_000);
+        return before - f.proofs.length;
       },
     },
   };

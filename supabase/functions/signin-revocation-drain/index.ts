@@ -9,7 +9,7 @@
 // Deploy step, not code: schedule it, e.g. every 5 minutes. See docs/security/p3-money-path-requirements.md ("Sign in with Apple,
 // server side").
 
-import { isServiceRoleBearer, loadAppleSiwaConfig, signinRevocationDb } from "../_shared/privileged.ts";
+import { isServiceRoleBearer, loadAppleSiwaConfig, purgeSigninEmailProofs, signinRevocationDb } from "../_shared/privileged.ts";
 import { errorResponse, handleRequest, okResponse, Errors } from "../_shared/http.ts";
 import { buildSigninPorts, platformFetch } from "../_shared/signin/production.ts";
 import { runRevocations } from "../_shared/signin/revocation.ts";
@@ -25,11 +25,13 @@ serve((req) =>
 
     const outcomes = await runRevocations({ db: signinRevocationDb, apple: ports.apple, google: ports.google, log }, { limit: 25 });
     const purged = await signinRevocationDb.purge(30);
+    const purgedEmailProofs = await purgeSigninEmailProofs();
     return okResponse(200, {
       attempted: outcomes.length,
       revoked: outcomes.filter((o) => o.status === "revoked").length,
       queuedForRetry: outcomes.filter((o) => o.status === "queued_for_retry").length,
       purgedFinishedRows: purged,
+      purgedEmailProofs,
     });
   }),
 );
