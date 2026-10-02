@@ -335,6 +335,23 @@ function containsKeyDeep(value: unknown, keyName: string): boolean {
 // a `tarball` field; every `specifiers` value for an `npm:` key maps to an
 // existing `npm` entry ("<name>@<value>").
 const NPM_INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const SEMVER_EXACT_LOCK = "(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?";
+
+/**
+ * Lock LAYOUT for the committed supabase/tests/deno.lock: version "5" only,
+ * and only the allow-listed top-level tables. Deno 2.5.2 --frozen also
+ * reads the older layout (`"version": "3"` with `specifiers`/`npm` nested
+ * under `"packages"`) and honours `tarball` there, which the npm-table
+ * check above (written for the v5 shape) never sees.
+ */
+export function lockLayoutProblems(lock: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  if (lock.version !== "5") problems.push(`deno.lock "version" is ${JSON.stringify(lock.version)}, not "5" -- only the v5 layout is checked by this lint; an older layout (e.g. v3 "packages") is rejected`);
+  for (const key of Object.keys(lock)) {
+    if (!LOCK_ALLOWED_TOP_LEVEL_KEYS.has(key)) problems.push(`deno.lock has a disallowed top-level key "${key}" -- only ${[...LOCK_ALLOWED_TOP_LEVEL_KEYS].join(", ")} are allowed`);
+  }
+  return problems;
+}
 
 export function npmLockTableProblems(lock: Record<string, unknown>): string[] {
   const problems: string[] = [];
@@ -362,18 +379,65 @@ export function npmLockTableProblems(lock: Record<string, unknown>): string[] {
       }
     }
   }
+  // `specifiers`: for an `npm:` key that names an exact version, the value
+  // must BE that version (ignoring a `_peer...` suffix) -- a downgrade
+  // (`"npm:zod@4.6.5": "4.6.4"` plus a real 4.6.4 entry) is otherwise
+  // internally consistent and served by frozen Deno (supply-chain gate,
+  // round 2). Every value must also map to an existing `npm` entry.
+  const reachable = new Set<string>();
   const specifiers = lock.specifiers;
   if (specifiers !== undefined && typeof specifiers === "object" && specifiers !== null && !Array.isArray(specifiers)) {
     for (const [spec, value] of Object.entries(specifiers as Record<string, unknown>)) {
       if (!spec.startsWith("npm:")) continue;
       const at = spec.indexOf("@", 5); // skip a leading "@scope"
       const name = at === -1 ? spec.slice(4) : spec.slice(4, at);
+      const requested = at === -1 ? "" : spec.slice(at + 1);
       if (typeof value !== "string" || !npmKeys.has(`${name}@${value}`)) {
         problems.push(`deno.lock "specifiers" entry "${spec}" -> ${JSON.stringify(value)} has no matching "npm" entry "${name}@${String(value)}" (dangling: nothing pins it)`);
+        continue;
+      }
+      reachable.add(`${name}@${value}`);
+      if (new RegExp(`^${SEMVER_EXACT_LOCK}$`).test(requested) && value.split("_")[0] !== requested) {
+        problems.push(`deno.lock "specifiers" entry "${spec}" resolves to "${value}", not the exact version it names -- a specifier downgrade/upgrade serves different code than the import map pins`);
       }
     }
   }
+  // Orphans: every `npm` key must be reachable from a specifier or from
+  // some reachable entry's dependencies (a second, unreferenced version
+  // entry is how the downgrade variant keeps the original in place).
+  const npmObj = (typeof npmTable === "object" && npmTable !== null && !Array.isArray(npmTable) ? npmTable : {}) as Record<string, unknown>;
+  const queue = [...reachable];
+  while (queue.length > 0) {
+    const key = queue.pop()!;
+    const entry = npmObj[key];
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    for (const field of ["dependencies", "optionalDependencies"]) {
+      const deps = e[field];
+      const list = Array.isArray(deps) ? deps : typeof deps === "object" && deps !== null ? Object.keys(deps) : [];
+      for (const d of list) {
+        if (typeof d !== "string") continue;
+        const matches = npmKeys.has(d) ? [d] : [...npmKeys].filter((k) => k.startsWith(`${d}@`));
+        for (const k of matches) {
+          if (!reachable.has(k)) {
+            reachable.add(k);
+            queue.push(k);
+          }
+        }
+      }
+    }
+  }
+  for (const key of npmKeys) {
+    if (!reachable.has(key)) {
+      problems.push(`deno.lock "npm" entry "${key}" is an orphan: no "specifiers" value and no reachable entry's dependencies refers to it`);
+    }
+  }
   return problems;
+}
+
+/** Every lock rule that applies to the committed supabase/tests/deno.lock: layout (version "5", allow-listed tables) plus the npm table. */
+export function committedLockProblems(lock: Record<string, unknown>): string[] {
+  return [...lockLayoutProblems(lock), ...npmLockTableProblems(lock)];
 }
 
 function validateLockFile(filePath: string, pinnedImportTargets: Set<string>): ConfigProblem[] {

@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "dep": "https://ga.jspm.io/npm:zod@4.6.5/index.js"
+  }
+}

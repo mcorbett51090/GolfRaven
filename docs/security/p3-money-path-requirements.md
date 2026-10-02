@@ -1724,24 +1724,32 @@ Carried from the P3d round-4 gate (recommended, not blocking):
    what they resolve to. At deploy time `supabase functions deploy` ignores this lock (item 10 above), so there
    the guarantee rests on npm's version immutability, not on the lock `[unverified — training knowledge: the
    deploy-time resolver was not exercised]`.
-   **Lint backstop.** Deno `--frozen` 2.5.2 accepts an `npm` lock entry with its `integrity` removed and a
-   `tarball` override that serves another version's tarball under the pinned name, so the lock is also checked
-   by `npmLockTableProblems` (sha512 integrity on every entry, no `tarball`, every `npm:` specifier backed by an
-   `npm` entry). It is run against the COMMITTED `supabase/tests/deno.lock` by a test in
-   `tools/service-role-lint/test/index.test.ts` (CI runs it through `pnpm -r test`) because that lock lives
-   outside the linted `supabase/functions` tree. The import-map target rules (`importMapTargetProblem`) reject
-   whitespace/control characters and non-lowercase schemes (Deno normalises `NPM:zod@^4`, ` npm:zod@^4` and
-   `n\tpm:zod@^4` to a range), require exact `major.minor.patch` pins for `npm:` and `jsr:` (no `+build`, no `%`
-   or `..` in the sub-path), and ban the CDN routing hosts `esm.sh`, `cdn.jsdelivr.net`, `unpkg.com` and
-   `cdn.skypack.dev` as targets (the one exact legacy `supabase-js` esm.sh URL is exempt by string; it is a
-   direct import in `privileged.ts`, not a map target). CI also gained an npm tamper test (flip a tarball
-   integrity, fresh `DENO_DIR`, require "Tarball checksum did not match") beside the esm.sh one.
+   **Lint backstop.** Deno `--frozen` 2.5.2 accepts an `npm` lock entry with its `integrity` removed, a
+   `tarball` override serving another version's tarball under the pinned name, a specifier downgrade
+   (`"npm:zod@4.6.5": "4.6.4"` plus a 4.6.4 entry), and the older `"version": "3"` layout with the tables under
+   `"packages"` (where it honours `tarball`). So the COMMITTED `supabase/tests/deno.lock` is checked by
+   `committedLockProblems` (`tools/service-role-lint/src/config.ts`): `version` must be `"5"` and the top-level
+   keys limited to `version`/`specifiers`/`npm`/`redirects`/`remote`/`workspace`; every `npm` entry has a sha512
+   integrity and no `tarball`; every `npm:` specifier maps to an existing entry and, when it names an exact
+   version, resolves to exactly that version; no `npm` entry is an orphan (unreachable from a specifier or a
+   reachable entry's dependencies). The check runs as a test in `tools/service-role-lint/test/index.test.ts`
+   against the real lock (CI runs it through `pnpm -r test`), because that lock lives outside the linted
+   `supabase/functions` tree; each probe above is also a must-fail mutation of the real lock.
+   Import-map targets (`importMapTargetProblem`) are a POSITIVE allow-list, not a CDN deny-list: only an exact
+   `npm:`/`jsr:` pin, or `https://deno.land/std@x.y.z/...` / `https://deno.land/x/<name>@vX.Y.Z/...` matched
+   against the raw string (so ASCII lowercase host, no port, userinfo or trailing dot). Whitespace/control
+   characters and non-lowercase schemes are rejected first (Deno normalises `NPM:zod@^4`, ` npm:zod@^4` and
+   `n\tpm:zod@^4` to a range). Everything else is rejected: `esm.sh` (including `esm.sh.`), `esm.run`, jsdelivr,
+   unpkg, skypack, `ga.jspm.io`, IDN lookalikes, `data:`, `blob:`, `file:`, `node:`, `http:`. There is no
+   exemption for the legacy `supabase-js` esm.sh URL: it is a direct import in `privileged.ts`, which the lint
+   exempts by path, and `@supabase/` targets are banned separately. CI also gained an npm tamper test (flip a
+   tarball integrity, fresh `DENO_DIR`, require "Tarball checksum did not match") beside the esm.sh one.
    **Still esm.sh:** the direct `@supabase/supabase-js@2.45.4` URL in `_shared/privileged.ts` and its floating
    transitives; its own follow-up. `deno.land/std` and `deno.land/x/postgresjs` are immutable versioned URLs and
    stay. `[unverified — training knowledge]`: that the hosted Supabase Edge Runtime resolves `npm:` specifiers
    in a function's `deno.json` import map (local Deno 2.5.2 does; no deploy was run). Revert path: restore the
-   four `https://esm.sh/...` values in `deno.json` and `pinned-import-targets.json` (the CDN-host rule will then
-   need those entries exempted) and regenerate the lock.
+   four `https://esm.sh/...` values in `deno.json` and `pinned-import-targets.json` (the positive allow-list will then
+   reject them, so it needs a reviewed change too) and regenerate the lock.
 6. `check-migrations-immutable.sh` on `push`: try `git fetch --no-tags origin "$GH_EVENT_BEFORE"` before
    failing closed after a force-push, and print `commit-tree` stderr in the self-test failure branch.
 

@@ -506,8 +506,9 @@ jobs:
         # What this step does NOT cover: Deno 2.5.2 --frozen also accepts a
         # lock whose npm entry has its `integrity` REMOVED, or carries a
         # `tarball` override pointing at another version's tarball with
-        # that version's integrity. Those are caught by the service-role
-        # lint package's committed-lock test (npmLockTableProblems over
+        # that version's integrity, a specifier downgrade, an orphan entry
+        # or the older v3 `packages` layout. Those are caught by the service-role
+        # lint package's committed-lock test (committedLockProblems over
         # supabase/tests/deno.lock), which the `verify` job runs through
         # `pnpm -r test`.
         run: |

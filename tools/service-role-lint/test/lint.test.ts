@@ -502,6 +502,18 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
     "https://cdn.skypack.dev/zod@4.6.5",
     "npm:zod@4.6.5+build.1",
     "npm:zod@4.6.5/%2e%2e/evil.js",
+    "https://esm.sh./zod@^4",
+    "https://esm.run/zod@4",
+    "https://ga.jspm.io/npm:zod@4.6.5/index.js",
+    "data:text/javascript;base64,ZXhwb3J0IGRlZmF1bHQgMQ==",
+    "blob:https://evil.example.com/uuid",
+    "file:///tmp/evil.js",
+    "node:fs",
+    "https://\u0435sm.sh/zod@4.6.5",
+    "https://xn--sm-8cd.sh/zod@4.6.5",
+    "https://esm.sh@evil.com/zod@4.6.5",
+    "http://deno.land/std@0.224.0/http/server.ts",
+    "https://deno.land:8443/std@0.224.0/http/server.ts",
   ])("must-fail (supply-chain gate bypass): an import-map target %j is rejected at the importing file even when listed on the allow-list", (target) => {
     const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: target }, [target]);
     expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes(`alias target ${JSON.stringify(target)}`))).toBe(true);

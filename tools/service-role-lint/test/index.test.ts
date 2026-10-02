@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { npmLockTableProblems } from "../src/config.js";
+import { committedLockProblems } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
 import { importMapTargetProblem } from "../src/lint.js";
 
@@ -285,9 +285,10 @@ describe("pinned import-target allow-list (M2)", () => {
     const repoRoot = join(import.meta.dirname, "..", "..", "..");
     const lock = JSON.parse(readFileSync(join(repoRoot, "supabase", "tests", "deno.lock"), "utf8")) as Record<string, Record<string, unknown>>;
 
-    it("passes the npm-table rules (sha512 integrity on every entry, no tarball override, no dangling npm: specifier)", () => {
+    it("passes the layout and npm-table rules (version 5, allow-listed tables, sha512 integrity on every entry, no tarball override, no dangling/downgraded specifier, no orphan entry)", () => {
       expect(Object.keys(lock.npm ?? {}).length).toBeGreaterThan(0);
-      expect(npmLockTableProblems(lock)).toEqual([]);
+      expect(committedLockProblems(lock)).toEqual([]);
+      expect(lock.version).toBe("5");
     });
 
     it("every npm: import-map target in supabase/functions/deno.json is pinned by a lock specifier, and the lock has no esm.sh stub entry for it", () => {
@@ -310,11 +311,53 @@ describe("pinned import-target allow-list (M2)", () => {
         (l) => Object.assign(l.npm!["zod@4.6.5"]!, { tarball: "https://registry.npmjs.org/zod/-/zod-4.6.4.tgz", integrity: "sha512-" + "C".repeat(86) + "==" }),
       ],
       ["dangling specifier", (l) => ((l.specifiers as unknown as Record<string, string>)["npm:left-pad@1.3.0"] = "1.3.0")],
+      [
+        "specifier downgrade: npm:zod@4.6.5 -> 4.6.4 with a (real-shaped) 4.6.4 entry, 4.6.5 entry removed",
+        (l) => {
+          (l.specifiers as unknown as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
+          delete l.npm!["zod@4.6.5"];
+          l.npm!["zod@4.6.4"] = { integrity: "sha512-" + "D".repeat(86) + "==" };
+        },
+      ],
+      [
+        "specifier downgrade variant: the 4.6.5 entry is KEPT beside the 4.6.4 one (orphan)",
+        (l) => {
+          (l.specifiers as unknown as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
+          l.npm!["zod@4.6.4"] = { integrity: "sha512-" + "D".repeat(86) + "==" };
+        },
+      ],
+      ["orphan npm entry (nothing refers to it)", (l) => (l.npm!["left-pad@1.3.0"] = { integrity: "sha512-" + "E".repeat(86) + "==" })],
+      [
+        'older layout: "version": "3" with specifiers/npm under "packages", integrity removed',
+        (l) => {
+          const npm = l.npm!;
+          const specifiers = l.specifiers!;
+          delete npm["zod@4.6.5"]!.integrity;
+          delete l.npm;
+          delete l.specifiers;
+          (l as Record<string, unknown>).version = "3";
+          (l as Record<string, unknown>).packages = { specifiers, npm };
+        },
+      ],
+      [
+        'older layout: "version": "3" with specifiers/npm under "packages", tarball + integrity swap',
+        (l) => {
+          const npm = l.npm!;
+          const specifiers = l.specifiers!;
+          Object.assign(npm["zod@4.6.5"]!, { tarball: "https://registry.npmjs.org/zod/-/zod-4.6.4.tgz", integrity: "sha512-" + "C".repeat(86) + "==" });
+          delete l.npm;
+          delete l.specifiers;
+          (l as Record<string, unknown>).version = "3";
+          (l as Record<string, unknown>).packages = { specifiers, npm };
+        },
+      ],
+      ['an unknown top-level table ("packages") alongside the v5 tables', (l) => ((l as Record<string, unknown>).packages = { npm: {} })],
+      ['version "4" with otherwise-valid v5 tables', (l) => ((l as Record<string, unknown>).version = "4")],
     ];
     it.each(mutations)("must-fail mutation of the REAL lock: %s", (_name, mutate) => {
       const copy = JSON.parse(JSON.stringify(lock)) as Record<string, Record<string, Record<string, unknown>>>;
       mutate(copy);
-      expect(npmLockTableProblems(copy).length).toBeGreaterThan(0);
+      expect(committedLockProblems(copy).length).toBeGreaterThan(0);
     });
   });
 

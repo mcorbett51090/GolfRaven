@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildConfigIndex, deriveRepoRoot, npmLockTableProblems, stripJsonComments } from "../src/config.js";
+import { buildConfigIndex, deriveRepoRoot, lockLayoutProblems, npmLockTableProblems, stripJsonComments } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
+import { importMapTargetProblem } from "../src/lint.js";
 
 // ⛔ M2 BLOCKING (post-P3a re-gate): "the lint's import-map model
 // diverges from what Deno actually loads." Each fixture directory below
@@ -48,14 +49,14 @@ describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless
     const results = lintDirectory(join(FIXTURES_ROOT, "n3-nested-function"), join(FIXTURES_ROOT, "n3-nested-function"));
     const flat = results.flatMap((r) => r.findings);
     expect(
-      flat.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list")),
+      flat.some((f) => f.rule === "banned-import-specifier" && /not on the committed pinned-import-targets allow-list|positive allow-list/.test(f.message)),
     ).toBe(true);
   });
 
   it("n4: deno.jsonc is read (was never read at all by the old model)", () => {
     const index = buildConfigIndex(join(FIXTURES_ROOT, "n4-jsonc"), PINNED, join(FIXTURES_ROOT, "n4-jsonc"));
     const messages = index.results.flatMap((r) => r.findings.map((f) => f.message));
-    expect(messages.some((m) => m.includes('imports["admin"]') && m.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
+    expect(messages.some((m) => m.includes('imports["admin"]') && /not on the committed pinned-import-targets allow-list|positive allow-list/.test(m))).toBe(true);
   });
 
   it("disallowed-key: an `importMap` key is rejected outright, even alongside an otherwise-clean, pinned `imports` entry", () => {
@@ -125,15 +126,29 @@ describe("config.ts — import-map target bypasses (supply-chain gate: Deno norm
 
   it("has a fixture per bypass shape (guards against the fixture dir silently emptying)", () => {
     expect(cases).toEqual([
+      "blob-scheme",
+      "cdn-esm-run",
+      "cdn-esm-sh-trailing-dot",
       "cdn-jsdelivr-range",
+      "cdn-jspm",
+      "data-base64-no-spaces",
+      "deno-land-port",
+      "deno-land-unversioned",
+      "deno-land-x-no-v",
       "esm-sh-range",
+      "file-scheme",
+      "http-deno-land",
+      "idn-cyrillic-host",
+      "idn-punycode-host",
       "jsonc-uppercase-scheme",
       "jsr-range",
+      "node-scheme",
       "npm-build-metadata",
       "npm-embedded-tab",
       "npm-leading-space",
       "npm-percent-subpath",
       "npm-uppercase-scheme",
+      "userinfo-host",
     ]);
   });
 
@@ -146,6 +161,12 @@ describe("config.ts — import-map target bypasses (supply-chain gate: Deno norm
     const messages = buildConfigIndex(dir, listed, dir).results.flatMap((r) => r.findings.map((f) => f.message));
     expect(messages.length).toBeGreaterThan(0);
     expect(messages.some((m) => m.includes("rejected even if listed on the pinned-import-targets allow-list"))).toBe(true);
+  });
+
+  it("must-pass control: the REAL committed import map (npm: pins + the two deno.land URLs) has zero target problems", () => {
+    const imports = (JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "..", "supabase", "functions", "deno.json"), "utf8")) as { imports: Record<string, string> }).imports;
+    expect(Object.keys(imports).length).toBeGreaterThanOrEqual(6);
+    for (const target of Object.values(imports)) expect(importMapTargetProblem(target), target).toBeUndefined();
   });
 
   it("must-pass control: an exact jsr: pin that is on the allow-list produces zero findings", () => {
@@ -171,6 +192,10 @@ describe("config.ts — import-map target bypasses (supply-chain gate: Deno norm
       }
     },
   );
+
+  it("the legacy supabase-js esm.sh URL is NOT exempted as an import-map target (the @supabase/ ban and the positive allow-list both reject it; privileged.ts is exempt by path, not by target string)", () => {
+    expect(importMapTargetProblem("https://esm.sh/@supabase/supabase-js@2.45.4")).toBeDefined();
+  });
 });
 
 describe("config.ts — npmLockTableProblems (the deno.lock npm table; Deno --frozen accepts all of these mutations)", () => {
@@ -227,6 +252,36 @@ describe("config.ts — npmLockTableProblems (the deno.lock npm table; Deno --fr
     const l = lock();
     (l.specifiers as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
     expect(npmLockTableProblems(l).some((m) => m.includes("dangling"))).toBe(true);
+  });
+
+  it("must-fail: a specifier DOWNGRADE (npm:zod@4.6.5 -> 4.6.4 with a 4.6.4 entry present)", () => {
+    const l = lock();
+    (l.specifiers as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
+    (l.npm as Record<string, unknown>)["zod@4.6.4"] = { integrity: VALID_INTEGRITY };
+    delete (l.npm as Record<string, unknown>)["zod@4.6.5"];
+    expect(npmLockTableProblems(l).some((m) => m.includes("not the exact version it names"))).toBe(true);
+  });
+
+  it("must-fail: an ORPHAN npm entry; but an entry reachable only through another entry's dependencies is fine", () => {
+    const l = lock();
+    (l.npm as Record<string, unknown>)["left-pad@1.3.0"] = { integrity: VALID_INTEGRITY };
+    expect(npmLockTableProblems(l).some((m) => m.includes("orphan") && m.includes("left-pad@1.3.0"))).toBe(true);
+    const ok = lock();
+    (ok.npm as Record<string, unknown>)["undici-types@7.10.0"] = { integrity: VALID_INTEGRITY };
+    expect(npmLockTableProblems(ok)).toEqual([]);
+  });
+
+  it("a `_peer` suffix on a specifier value is ignored when comparing to the named exact version", () => {
+    const l = lock();
+    (l.specifiers as Record<string, string>)["npm:zod@4.6.5"] = "4.6.5_peer@1.0.0";
+    (l.npm as Record<string, unknown>)["zod@4.6.5_peer@1.0.0"] = { integrity: VALID_INTEGRITY };
+    delete (l.npm as Record<string, unknown>)["zod@4.6.5"];
+    expect(npmLockTableProblems(l)).toEqual([]);
+  });
+
+  it("lockLayoutProblems: only version 5 and the allow-listed tables", () => {
+    expect(lockLayoutProblems({ version: "5", specifiers: {}, npm: {}, redirects: {}, remote: {}, workspace: {} })).toEqual([]);
+    expect(lockLayoutProblems({ version: "3", packages: { specifiers: {}, npm: {} } }).length).toBe(2);
   });
 
   it("must-fail: `npm` is not an object", () => {
