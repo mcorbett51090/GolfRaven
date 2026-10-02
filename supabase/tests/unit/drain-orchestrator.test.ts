@@ -339,19 +339,25 @@ describe("NEW-2: a transient error never makes a row terminal", () => {
     expect(state.evidence.get(id)!.status).toBe("needs_attention");
   });
 
-  it("failing to WRITE a terminal state is also just 'left queued'", async () => {
+  it("the terminal write shares the redrain's ONE transaction: if it throws, the whole unit rolls back and the row is simply left queued", async () => {
     const state = makeFakeState();
-    // structural failure -> terminal_unknown_id from the redrain itself, but the marking write throws
+    // structural failure -> terminal_unknown_id from the redrain itself
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_ghost", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
-    let n = 0;
+    let calls = 0;
     const flaky: WithOwnershipFn = async (actor, op) => {
-      n += 1;
-      if (n === 2) throw new Error("CONNECTION_CLOSED");
+      calls += 1;
+      if (calls === 1) throw new Error("CONNECTION_CLOSED");
       return buildFakeWithOwnership(state)(actor, op);
     };
     const result = await drainQueuedCatalog(buildImporterShim(state), flaky, 10);
+    expect(calls).toBe(1); // ONE transaction per unit — no second terminal-write transaction
     expect(result).toMatchObject({ unknownId: 0, errored: 1, stillQueued: 1 });
     expect(state.evidence.get(id)!.status).toBe("queued_catalog");
+    // and a healthy pass makes it terminal, in a single transaction
+    calls = 100;
+    const retry = await drainQueuedCatalog(buildImporterShim(state), flaky, 10);
+    expect(retry.unknownId).toBe(1);
+    expect(calls).toBe(101);
   });
 });
 

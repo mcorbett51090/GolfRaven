@@ -78,15 +78,40 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
     const actor: Actor = { uid: row.userId, role: "authenticated" };
     const createdAt = new Date(row.createdAt);
     const aged = now.getTime() - createdAt.getTime() >= MAX_AGE_MS;
-    let redrainKind: "resolved" | "still_unresolved" | "terminal_unknown_id";
-    let claimedVersionImported = true;
+    // ⛔ ONE transaction per unit (round 3 gate, LOW): the redrain AND the
+    // terminal write (needs_attention / unknown_id) happen in the SAME
+    // per-user transaction, so a unit is bounded by one 12 s transaction —
+    // never redrain (12 s) + a second terminal-write transaction (12 s)
+    // overrunning the unit reserve.
+    let outcomeKind: "resolved" | "unknown_id" | "needs_attention" | "still_queued";
     try {
-      const outcomeKind = await withOwnership(actor, async (repo) => {
+      outcomeKind = await withOwnership(actor, async (repo): Promise<"resolved" | "unknown_id" | "needs_attention" | "still_queued"> => {
         const outcome = await redrainQueuedEvidenceRow(repo, row.id, row.queuedInput, createdAt);
-        if (outcome.kind === "still_unresolved" && outcome.claimedVersionImported === false) claimedVersionImported = false;
-        return outcome.kind === "resolved" || outcome.kind === "terminal_unknown_id" ? outcome.kind : "still_unresolved";
+        if (outcome.kind === "resolved") return "resolved";
+        if (outcome.kind === "terminal_unknown_id") {
+          // redrainQueuedEvidenceRow found a STRUCTURAL failure (forged
+          // pairing, a bad local date, ...) — terminal regardless of age or
+          // import coverage.
+          await repo.evidence.markQueuedTerminal(row.id, "unknown_id");
+          return "unknown_id";
+        }
+        // still_unresolved: the M1 age/version-coverage judgment
+        // (drain-queued.ts, pure). A claimed version that has not been
+        // imported at all (NEW-1) is never "covered", whatever the current
+        // import is.
+        const claimedVersionImported = outcome.claimedVersionImported !== false;
+        const coveringImportAlreadyRan = claimedVersionImported && currentSiteVersion !== null && compareCatalogVersions(currentSiteVersion, row.claimedCatalogVersion) >= 0;
+        const decision = decideQueuedDrainOutcome({ redrainKind: "still_unresolved", createdAt, now, coveringImportAlreadyRan });
+        if (decision.kind === "terminal_unknown_id") {
+          await repo.evidence.markQueuedTerminal(row.id, "unknown_id");
+          return "unknown_id";
+        }
+        if (decision.kind === "needs_attention") {
+          await repo.evidence.markQueuedTerminal(row.id, "needs_attention");
+          return "needs_attention";
+        }
+        return "still_queued";
       });
-      redrainKind = outcomeKind;
     } catch (err) {
       // ⛔ FIX (P3e round 2 gate, NEW-2): a THROW (lock/statement timeout,
       // `CONNECTION_CLOSED`/503, deadlock, ...) is a statement about the
@@ -112,45 +137,15 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
       continue;
     }
 
-    if (redrainKind === "resolved") {
-      result.resolved += 1;
-      continue;
-    }
-    if (redrainKind === "terminal_unknown_id") {
-      // redrainQueuedEvidenceRow found a STRUCTURAL failure (forged
-      // pairing, a bad local date, ...) — terminal regardless of age or
-      // import coverage. Applied via the SAME per-row actor-scoped
-      // transaction shape as a resolution (markQueuedTerminal), not the
-      // system-scoped repo (B2's own "no more system-scoped promotion"
-      // reasoning applies here identically).
-      if (await tryMarkTerminal(withOwnership, actor, row.id, "unknown_id")) result.unknownId += 1;
-      else {
-        result.errored += 1;
-        result.stillQueued += 1;
-      }
-      continue;
-    }
-
-    // redrainKind === "still_unresolved": the M1 age/version-coverage
-    // judgment (drain-queued.ts, pure). A claimed version that has not
-    // been imported at all (NEW-1) is never "covered", whatever the
-    // current import is.
-    const coveringImportAlreadyRan = claimedVersionImported && currentSiteVersion !== null && compareCatalogVersions(currentSiteVersion, row.claimedCatalogVersion) >= 0;
-    const decision = decideQueuedDrainOutcome({ redrainKind: "still_unresolved", createdAt, now, coveringImportAlreadyRan });
-    switch (decision.kind) {
-      case "terminal_unknown_id":
-        if (await tryMarkTerminal(withOwnership, actor, row.id, "unknown_id")) result.unknownId += 1;
-        else {
-          result.errored += 1;
-          result.stillQueued += 1;
-        }
+    switch (outcomeKind) {
+      case "resolved":
+        result.resolved += 1;
+        break;
+      case "unknown_id":
+        result.unknownId += 1;
         break;
       case "needs_attention":
-        if (await tryMarkTerminal(withOwnership, actor, row.id, "needs_attention")) result.needsAttention += 1;
-        else {
-          result.errored += 1;
-          result.stillQueued += 1;
-        }
+        result.needsAttention += 1;
         break;
       default:
         result.stillQueued += 1;
@@ -161,16 +156,3 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
 }
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** A failure to WRITE the terminal state is, like any other throw, a
- * statement about the infrastructure: the row stays queued and is retried
- * next pass. */
-async function tryMarkTerminal(withOwnership: WithOwnershipFn, actor: Actor, id: string, status: "needs_attention" | "unknown_id"): Promise<boolean> {
-  try {
-    await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(id, status));
-    return true;
-  } catch (err) {
-    console.error(`drainQueuedCatalog: row ${id} could not be marked ${status} (left queued)`, err);
-    return false;
-  }
-}

@@ -567,3 +567,42 @@ describe("handleEvidenceIntake — replay of a terminal drained row (NEW-3)", ()
   });
 });
 
+
+// ============================================================================
+// Round 3 gate (HIGH, §8.6 minimisation): raw fix coordinates are stored only
+// when a re-pick can actually happen.
+// ============================================================================
+describe("handleEvidenceIntake — fixCoords minimisation (§8.6)", () => {
+  const evidenceOf = (state: ReturnType<typeof makeFakeState>) => [...state.evidence.values()][0]! as unknown as { integrity: Record<string, unknown> };
+
+  it("a VERIFIED, never-split course stores NO coordinates", async () => {
+    const state = makeFakeState();
+    expect(state.ledger.get("crs_x1")!.status).toBe("verified");
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toEqual({});
+  });
+
+  it("a STUB course stores them (only stubs split, G3-01)", async () => {
+    const state = makeFakeState();
+    state.ledger.set("crs_x1", { ...state.ledger.get("crs_x1")!, status: "stub" });
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toEqual({ fixCoords: { fix_1: { lat: 36.1467, lng: -86.7816 } } });
+  });
+
+  it("a course already in a split family stores them (a sibling, and the kept course)", async () => {
+    const state = makeFakeState();
+    state.ledger.set("crs_x1", { ...state.ledger.get("crs_x1")!, splitFrom: "crs_kept" }); // crs_x1 is a split sibling
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toHaveProperty("fixCoords");
+    const state2 = makeFakeState();
+    state2.ledger.set("crs_sib", { id: "crs_sib", kind: "course", status: "verified", verifiedInVersion: 1, splitFrom: "crs_x1", tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 });
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state2, "user-a")); // crs_x1 is the KEPT course
+    expect(evidenceOf(state2).integrity).toHaveProperty("fixCoords");
+  });
+
+  it("a row with no course (facility-level) never stores coordinates, even at a stub facility", async () => {
+    const state = makeFakeState();
+    await handleEvidenceIntake(checkinBody({ courseId: undefined }), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toEqual({});
+  });
+});

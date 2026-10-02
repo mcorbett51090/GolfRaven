@@ -17,6 +17,7 @@ import { drainQueuedCatalog } from "../../functions/_shared/catalog/drain-orches
 import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-repo.ts";
 import { handleEvidenceIntake } from "../../functions/_shared/evidence/handler.ts";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawCount } from "./_helpers.ts";
+import { facilityShard, ids, mint, newPublisher } from "./_publisher.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 const drainRepo = makeDrainReadRepo(withSystemCatalogImport);
@@ -38,16 +39,70 @@ const statusOf = async (id: string) => {
   return rows[0]!;
 };
 
-// NOTE on NEW-1: its BLOCKER path needs a VALIDLY SIGNED claim of a version that
-// is newer than the cluster's current import yet not "far future" (> now + 1
-// day). The harness seeds its baseline `catalog_version` at 2030-01-02
-// (`siteVersionFor(1)`), so nothing within the 1-day bound can be newer than
-// "current" in this shared cluster. That exact path is therefore proven at
-// unit level with a real Ed25519 signature (drain-orchestrator.test.ts, "NEW-1")
-// and by a mutation proof; this test covers what the real database adds: a
-// drain before the covering import never makes a not-yet-judged row terminal
-// (only the 7-day timer does, as needs_attention), a terminal row is cleared,
-// and replaying a terminal row never 5xx.
+// NOTE on the BLOCKER test below: it needs a VALIDLY SIGNED claim of a version
+// that is newer than the cluster's current import yet not "far future" (> now +
+// 1 day). The harness seeds its baseline `catalog_version` at 2030-01-02
+// (`siteVersionFor(1)`) — and the other integration files insert 2030-dated
+// fixtures — so in this shared cluster nothing within the 1-day bound is newer
+// than "current". Re-dating the seed itself would push every other test's
+// `SEED_SITE_VERSION` claim more than 5 RELEASES behind (each file imports its
+// own versions, which would then sort ABOVE the seed). So the test shifts the
+// 2027+ fixture versions into the past for its own duration and restores them
+// in `finally` (nothing else runs concurrently: Deno runs the files in order).
+
+/** Moves every `site_version` dated 2027 or later back 1000 years (order preserved) and returns the undo. */
+async function shiftFutureVersionsIntoPast(): Promise<() => Promise<void>> {
+  await ensureServiceRole();
+  const rows = await adminSql()`select version, site_version from app.catalog_version where site_version >= '2027'`;
+  for (const r of rows) await adminSql()`update app.catalog_version set site_version = ${String(Number((r.site_version as string).slice(0, 4)) - 1000) + (r.site_version as string).slice(4)} where version = ${r.version}`;
+  return async () => {
+    await ensureServiceRole();
+    for (const r of rows) await adminSql()`update app.catalog_version set site_version = ${r.site_version} where version = ${r.version}`;
+  };
+}
+
+Deno.test("NEW-1 (BLOCKER, real Postgres): a validly SIGNED claim of a newer, not-yet-imported version is queued; drains WITHOUT the import leave the rows queued (never unknown_id); once V is imported they resolve", DT, async () => {
+  const restore = await shiftFutureVersionsIntoPast();
+  try {
+    const i = ids();
+    const pub = await newPublisher();
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, "");
+    const V = `${tomorrow}-${freshUuid().replace(/-/g, "").slice(0, 7)}`;
+    const cur = await adminSql()`select site_version from app.catalog_version where site_version is not null order by site_version desc, version desc limit 1`;
+    assert(!cur[0] || (cur[0].site_version as string) < V, `precondition: V (${V}) must be newer than the cluster's current import (${cur[0]?.site_version})`);
+
+    // V's release, built and signed but NOT imported. The claim is the REAL manifestSig a client would lift from its manifest.sig.json.
+    const release = await pub.build(V, {
+      "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(V) }, [i.k]: { id: i.k, status: "verified", transitions: mint(V) } } },
+      "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Newer K", holes: 18 }]),
+    });
+    const users = [await newUser("v1"), await newUser("v2")];
+    const ids2: string[] = [];
+    for (const u of users) {
+      const r = await withOwnership(u, (repo) => handleEvidenceIntake({ source: "self_report", deviceId: freshUuid(), facilityId: i.fac, courseId: i.k, localDate: todayChicago(), catalogVersion: V, manifestSig: release.manifestSig }, repo));
+      assertEquals(r.status, "queued_catalog", "a validly signed newer claim is queued (202)");
+      ids2.push((r as { evidenceId: string }).evidenceId);
+    }
+
+    // The drain runs after EVERY import (failed ones included) — here with V never imported. The OLD code
+    // classified this claim `ok`, looked the ids up against the OLDER import, missed, and ended both rows unknown_id.
+    for (let pass = 0; pass < 2; pass++) {
+      const res = await drain();
+      assertEquals(res.unknownId, 0, `pass ${pass}: ${JSON.stringify(res)}`);
+      for (const id of ids2) assertEquals((await statusOf(id)).status, "queued_catalog", `pass ${pass}: stays queued`);
+    }
+
+    // Now V is imported (it carries the ids): the same rows resolve.
+    await pub.apply(release);
+    const after = await drain();
+    assert(after.resolved >= 2, `after the covering import both rows resolve: ${JSON.stringify(after)}`);
+    for (const id of ids2) assertEquals((await statusOf(id)).status, "accepted");
+    for (const u of users) assertEquals(await rawCount(`select count(*)::int as n from app.play where user_id = '${u.uid}' and course_id = '${i.k}'`), 1);
+  } finally {
+    await restore();
+  }
+});
+
 Deno.test("NEW-1/NEW-3/LOW: drains before the covering import leave a not-yet-imported claim queued; it ages out to needs_attention (never unknown_id) with its queued submission cleared; replaying terminal rows never 500s", DT, async () => {
   const claimedVersion = "20991231-" + freshUuid().replace(/-/g, "").slice(0, 7); // newer than anything imported
   const user = await newUser("ageout");

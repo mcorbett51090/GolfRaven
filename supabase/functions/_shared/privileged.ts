@@ -445,6 +445,19 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         return { version: r.version, siteVersion: r.site_version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
       },
 
+      async repickEligible(courseId: string): Promise<boolean> {
+        const rows = await trx`
+          select exists (
+            select 1 from app.catalog_id_ledger l
+            where l.id = ${courseId}
+              and (l.status = 'stub'
+                   or l.split_from is not null
+                   or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id)
+                   or exists (select 1 from app.catalog_rescore_backlog b where b.course_id = l.id and b.done_at is null))
+          ) as e`;
+        return Boolean(rows[0]?.e);
+      },
+
       async releaseRank(siteVersion: string): Promise<number | null> {
         const rows = await trx`select count(*)::int as n from app.catalog_version where site_version is not null and site_version <= ${siteVersion}`;
         const n = Number(rows[0]?.n ?? 0);
@@ -845,14 +858,30 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
 
       // AT 18 — server-side `uniqueCourses` (see types.ts's own doc).
       async uniqueCourseCount(): Promise<number> {
+        // A2-01 / §4.2: plays that are USER PICKS (labelled `user`, or unlabelled
+        // at a split-family course) count at most ONCE per (facility, date) —
+        // the labelled one wins, then the lowest course id — however many
+        // split-ambiguous plays that facility-date holds. Geometry/staff
+        // resolved plays are unaffected.
         const rows = await trx`
-          with recursive q as (
-            select p.course_id as start_id
+          with recursive cand as (
+            select p.id, p.course_id, p.facility_id, p.play_date,
+                   (coalesce(p.course_disambiguated_by = 'user', false)
+                    or (p.course_disambiguated_by is null and exists (
+                         select 1 from app.catalog_id_ledger l
+                         where l.id = p.course_id
+                           and (l.split_from is not null or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id))))) as user_pick,
+                   coalesce(p.course_disambiguated_by = 'user', false) as labelled
             from app.play p
             join app.catalog_id_ledger l on l.id = p.course_id and l.status = 'verified'
             where p.user_id = ${uid}
               and p.status not in ('void', 'disputed')
               and (p.score_badge >= 0.50 or p.money)
+          ), q as (
+            select course_id as start_id from (
+              select c.*, row_number() over (partition by c.facility_id, c.play_date, c.user_pick order by c.labelled desc, c.course_id) as rn from cand c
+            ) r
+            where not r.user_pick or r.rn = 1
           ), walk(start_id, cur_id, depth) as (
             select start_id, start_id, 0 from q
             union all
@@ -878,10 +907,26 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         return rows.length > 0;
       },
 
-      async disambiguatedBy(courseId: string, playDate: string): Promise<"geometry" | "staff" | "user" | null> {
-        const rows = await trx`select course_disambiguated_by as d from app.play where user_id = ${uid} and course_id = ${courseId} and play_date = ${playDate}`;
-        const d = rows[0]?.d;
-        return d === "geometry" || d === "staff" || d === "user" ? d : null;
+      async lockForScoring(courseId: string, playDate: string): Promise<void> {
+        const [k1, k2] = advisoryLockKeys(1, `${uid}:${courseId}:${playDate}`);
+        await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+      },
+
+      async disambiguation(courseId: string, playDate: string): Promise<{ stored: "geometry" | "staff" | "user" | null; effective: "geometry" | "staff" | "user" | null }> {
+        const rows = await trx`
+          select
+            (select course_disambiguated_by::text from app.play where user_id = ${uid} and course_id = ${courseId} and play_date = ${playDate}) as stored,
+            exists (
+              select 1 from app.catalog_id_ledger l
+              where l.id = ${courseId}
+                and (l.split_from is not null or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id))
+            ) as split_family`;
+        const d = rows[0]?.stored;
+        const stored = d === "geometry" || d === "staff" || d === "user" ? d : null;
+        // §4.2: a play at a split-family course with no geometry/staff
+        // resolution IS a user pick, whether or not the one-per-facility-date
+        // label could be written.
+        return { stored, effective: stored ?? (rows[0]?.split_family ? "user" : null) };
       },
 
       async repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true; playId: string } | { ok: false; reason: RepickRefusal }> {
@@ -932,6 +977,9 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         }
         await trx`update app.evidence set course_id = ${args.toCourseId} where user_id = ${uid} and course_id = ${args.fromCourseId} and local_date = ${args.playDate} and facility_id = ${args.facilityId}`;
         await trx`update app.play set course_id = ${args.toCourseId}, course_disambiguated_by = 'user' where id = ${args.playId} and user_id = ${uid}`;
+        // §8.6: the single re-pick is now used — the raw coordinates have
+        // nothing left to do, so they go with it.
+        await trx`update app.evidence set integrity = integrity - 'fixCoords' where user_id = ${uid} and course_id = ${args.toCourseId} and local_date = ${args.playDate} and facility_id = ${args.facilityId} and integrity ? 'fixCoords'`;
         await trx`
           insert into app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
           values (${uid}, 'play.repick', 'play', ${args.playId},
@@ -1971,14 +2019,71 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
     },
 
     rescoreBacklog: {
-      async listOpen(limit: number): Promise<RescoreBacklogRow[]> {
-        const rows = await trx`select id, course_id, reason, cursor_play_id, cursor_created_at::text as cursor_created_at from app.catalog_rescore_backlog where done_at is null order by id limit ${limit}`;
+      async listOpen(limit: number, sweepDelaySeconds: number): Promise<RescoreBacklogRow[]> {
+        const rows = await trx`
+          select id, course_id, reason, cursor_play_id, cursor_created_at::text as cursor_created_at, finished_at::text as finished_at, swept,
+                 (finished_at is not null and clock_timestamp() >= finished_at + make_interval(secs => ${sweepDelaySeconds}::double precision)) as sweep_ready
+          from app.catalog_rescore_backlog where done_at is null order by id limit ${limit}`;
         return rows.map((r) => ({
           id: Number(r.id),
           courseId: r.course_id as string,
           reason: r.reason as "promotion" | "split",
           cursor: r.cursor_play_id ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null,
+          finishedAt: (r.finished_at as string | null) ?? null,
+          swept: Boolean(r.swept),
+          sweepReady: Boolean(r.sweep_ready),
         }));
+      },
+      async markFinished(id: number, cursor: RescoreCursor | null): Promise<void> {
+        await trx`
+          update app.catalog_rescore_backlog set
+            cursor_play_id = ${cursor?.playId ?? null}, cursor_created_at = ${cursor?.createdAt ?? null}::text::timestamptz,
+            finished_at = coalesce(finished_at, clock_timestamp())
+          where id = ${id}`;
+      },
+      async beginSweep(id: number, cursor: RescoreCursor | null, overlapSeconds: number): Promise<RescoreCursor | null> {
+        // Rewind by the overlap, in SQL on the stored (microsecond-exact)
+        // timestamp; the nil uuid sorts before every real id, so every play at
+        // or after the rewound instant is revisited. With no cursor at all
+        // (a course with no plays) there is nothing to rewind.
+        if (cursor === null) {
+          await trx`update app.catalog_rescore_backlog set swept = true where id = ${id}`;
+          return null;
+        }
+        const rows = await trx`
+          update app.catalog_rescore_backlog set
+            swept = true,
+            cursor_play_id = '00000000-0000-0000-0000-000000000000'::uuid,
+            cursor_created_at = ${cursor.createdAt}::text::timestamptz - make_interval(secs => ${overlapSeconds}::double precision)
+          where id = ${id}
+          returning cursor_play_id, cursor_created_at::text as cursor_created_at`;
+        const r = rows[0];
+        return r ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null;
+      },
+      async purgeFixCoords(retentionDays: number, limit: number): Promise<number> {
+        const rows = await trx`
+          with doomed as (
+            select e.id from app.evidence e
+            where e.integrity ? 'fixCoords'
+              and (
+                e.created_at < now() - make_interval(days => ${retentionDays}::int)
+                or e.course_id is null
+                or not exists (
+                  select 1 from app.catalog_id_ledger l
+                  where l.id = e.course_id
+                    and (l.status = 'stub'
+                         or l.split_from is not null
+                         or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id)
+                         or exists (select 1 from app.catalog_rescore_backlog b where b.course_id = l.id and b.done_at is null))
+                )
+              )
+            order by e.created_at
+            limit ${limit}
+          )
+          update app.evidence e set integrity = e.integrity - 'fixCoords'
+          from doomed d where e.id = d.id
+          returning e.id`;
+        return rows.length;
       },
       async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
         // Stable keyset over (created_at, id): a play inserted while the

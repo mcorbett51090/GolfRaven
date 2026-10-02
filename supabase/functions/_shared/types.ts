@@ -310,6 +310,15 @@ export interface Repo {
      * id (or, after following merges, its survivor) is not in the ledger
      * at all. */
     resolveLedgerId(id: string): Promise<LedgerRow | null>;
+    /**
+     * §8.6: may a play at this course still be RE-PICKED (so its raw fix
+     * coordinates are worth keeping)? True only when the course is a ledger
+     * `stub` (G3-01: only stubs split), or already in a split family (it has a
+     * `split_from`, or is the kept course of one), or has an open rescore
+     * backlog row. A verified, never-split course: false — nothing can move
+     * its play, so coordinates are never stored.
+     */
+    repickEligible(courseId: string): Promise<boolean>;
     facilityTz(facilityId: string): Promise<string | null>;
     courseFacilityId(courseId: string): Promise<string | null>;
     /** The course's own catalog hole count (P3c gate round 2, item 6:
@@ -405,12 +414,31 @@ export interface Repo {
      * same (facility, date) (the partial unique index). Returns whether
      * it was marked. */
     markUserPick(playId: string): Promise<boolean>;
-    /** A2-01: the play's recorded `course_disambiguated_by` at (course,
-     * date), or null when there is no play yet / no label. The scorer caps
-     * a `user` pick (contributes 0 to `score_monetary`) ONLY when every
-     * scored evidence row carries this label, so every scoring path reads
-     * it here first (plain SELECT, no lock). */
-    disambiguatedBy(courseId: string, playDate: string): Promise<"geometry" | "staff" | "user" | null>;
+    /** A2-01 / §4.2: how the play at (course, date) is disambiguated.
+     *  - `stored` is the recorded `course_disambiguated_by` (null when there is
+     *    no play yet or no label) — the ONLY value ever written back.
+     *  - `effective` is what the SCORER must be told. It equals `stored`, except
+     *    that a play with no label at a course in a split family (the kept
+     *    course or any sibling) is a `user` pick — "a split play is always a
+     *    user pick and never money" — even when the DB label could not be set
+     *    (the one-user-pick-per-facility-date index blocked it). Without this a
+     *    second split play at the same facility and date was left uncapped.
+     * The scorer caps a `user` pick (0 to `score_monetary`) ONLY when every
+     * scored evidence row carries the label, so every scoring path reads this
+     * first (plain SELECT, no lock). */
+    disambiguation(courseId: string, playDate: string): Promise<{ stored: "geometry" | "staff" | "user" | null; effective: "geometry" | "staff" | "user" | null }>;
+    /**
+     * Takes the per-(user, course, date) scoring advisory lock (the SAME key
+     * `upsertFromScore` takes, held to commit) BEFORE the caller reads the
+     * play's evidence. Without it two scorers (a live submission and the
+     * promotion re-score) each read the evidence set, score, and only then
+     * serialize at `upsertFromScore` — the later writer can overwrite with a
+     * score computed from a stale evidence set (found by the promotion-vs-live
+     * race test, restricted harness run). Taking the lock first means the
+     * later scorer's reads run AFTER the earlier one committed (READ
+     * COMMITTED sees its rows).
+     */
+    lockForScoring(courseId: string, playDate: string): Promise<void>;
     /** AT 18 (re-pick) step 1 — takes the advisory locks of BOTH plays (the
      * same key family as `upsertFromScore`, stable order) and checks every
      * precondition: same split family, a play exists at `fromCourseId`, it
@@ -605,6 +633,12 @@ export interface RescoreBacklogRow {
   reason: "promotion" | "split";
   /** Stable keyset position: (play created_at as Postgres text, play id). */
   cursor: RescoreCursor | null;
+  /** Set once a page first came back short — the start of the straggler grace. */
+  finishedAt: string | null;
+  /** True once the closing straggler sweep (cursor rewound by the overlap) has begun. */
+  swept: boolean;
+  /** `finishedAt` is at least `sweepDelaySeconds` old (computed by the database clock). */
+  sweepReady: boolean;
 }
 
 export interface RescoreCursor {
@@ -723,7 +757,18 @@ export interface ImporterRepo {
 
   /** AT 18: the re-score backlog (migration 0026) — bounded work per run. */
   rescoreBacklog: {
-    listOpen(limit: number): Promise<RescoreBacklogRow[]>;
+    listOpen(limit: number, sweepDelaySeconds: number): Promise<RescoreBacklogRow[]>;
+    /** A page came back short: records `finished_at` (once) and the cursor; the row stays open. */
+    markFinished(id: number, cursor: RescoreCursor | null): Promise<void>;
+    /** After the straggler grace: rewinds the cursor by `overlapSeconds` (database clock arithmetic on the stored timestamp, microsecond-exact) and starts the closing sweep. Returns the new cursor. */
+    beginSweep(id: number, cursor: RescoreCursor | null, overlapSeconds: number): Promise<RescoreCursor | null>;
+    /**
+     * §8.6 minimisation: set-based purge of `integrity.fixCoords` from evidence
+     * rows that can no longer be re-picked — course not a ledger stub / not in a
+     * split family / no open backlog row for it, OR older than `retentionDays`.
+     * At most `limit` rows per call. Returns the number of rows cleared.
+     */
+    purgeFixCoords(retentionDays: number, limit: number): Promise<number>;
     /** Set-based keyset page of plays at `courseId` strictly after `after`, ordered by (created_at, id). */
     nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]>;
     advance(id: number, cursor: RescoreCursor | null, done: boolean): Promise<void>;

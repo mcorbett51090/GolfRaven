@@ -36,6 +36,16 @@ CREATE TABLE app.catalog_rescore_backlog (
   CONSTRAINT catalog_rescore_backlog_cursor_pair CHECK ((cursor_play_id IS NULL) = (cursor_created_at IS NULL)),
   created_at timestamptz NOT NULL DEFAULT now(),
   done_at timestamptz,
+  -- Straggler sweep (round 3 gate, LOW). `app.play.created_at` is now() = the
+  -- START of the inserting transaction, so a long live-intake transaction can
+  -- commit AFTER the keyset cursor has passed its timestamp and be skipped.
+  -- The drain therefore does not finish a course the first time a page comes
+  -- back short: it records `finished_at`, waits out the longest possible
+  -- straggler (transaction_timeout 12 s + margin), rewinds the cursor by that
+  -- overlap and scans to the end once more (`swept`) before closing the row.
+  -- Re-scoring is idempotent, so the overlap is harmless.
+  finished_at timestamptz,
+  swept boolean NOT NULL DEFAULT false,
   UNIQUE (course_id, reason, catalog_version)
 );
 COMMENT ON TABLE app.catalog_rescore_backlog IS
@@ -48,3 +58,12 @@ ALTER TABLE app.catalog_rescore_backlog FORCE ROW LEVEL SECURITY;
 -- UPDATE (cursor/done_at) + SELECT; never DELETE — a finished row is the
 -- idempotency record that stops a replayed import re-queuing the work.
 GRANT SELECT, INSERT, UPDATE ON app.catalog_rescore_backlog TO service_role;
+
+-- 3. Raw fix coordinates are retained ONLY while a re-pick can still happen
+--    (build plan §8.6: no raw routes on the server by default). The importer
+--    run purges them set-based (ImporterRepo#rescoreBacklog.purgeFixCoords):
+--    when the course is no longer a ledger stub / in a split family with no
+--    open backlog row, and after a fixed retention window. This partial index
+--    keeps that purge (and the "is there anything to purge" probe) cheap — it
+--    holds only the rows that still carry coordinates.
+CREATE INDEX evidence_fixcoords_idx ON app.evidence (created_at) WHERE integrity ? 'fixCoords';

@@ -894,7 +894,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     endedAt: null,
     localDate: submission.localDate,
     summary,
-    integrity: fixCoordsIntegrity(fixesOf(submission)),
+    integrity: await fixCoordsIntegrity(repo, resolvedCourseId, fixesOf(submission)),
     cosignal: {},
     attestationGrade: worstGrade,
     matcherVersion: null,
@@ -960,9 +960,12 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     };
   }
 
+  // Serialize with any concurrent scorer of this play BEFORE reading the
+  // evidence set (see `Repo#play.lockForScoring`).
+  await repo.play.lockForScoring(resolvedCourseId, submission.localDate);
   const priorRows = await repo.evidence.listForPlay(resolvedFacilityId, resolvedCourseId, submission.localDate);
-  const disambiguatedBy = await repo.play.disambiguatedBy(resolvedCourseId, submission.localDate);
-  const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes, disambiguatedBy);
+  const disambiguation = await repo.play.disambiguation(resolvedCourseId, submission.localDate);
+  const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes, disambiguation.effective);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: resolvedFacilityId,
@@ -991,7 +994,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     courseId: resolvedCourseId,
     facilityId: resolvedFacilityId,
     playDate: submission.localDate,
-    courseDisambiguatedBy: disambiguatedBy,
+    courseDisambiguatedBy: disambiguation.stored,
     scoreBadge: outcome.score_badge,
     scoreMonetary: outcome.score_monetary,
     hardSignal: outcome.contributions.some((c) => c.hard),
@@ -1083,9 +1086,10 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
     throw Errors.internal();
   }
 
+  await repo.play.lockForScoring(courseId, localDate);
   const rows = await repo.evidence.listForPlay(facilityId, courseId, localDate);
-  const disambiguatedBy = await repo.play.disambiguatedBy(courseId, localDate);
-  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows, disambiguatedBy);
+  const disambiguation = await repo.play.disambiguation(courseId, localDate);
+  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows, disambiguation.effective);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: facilityId,
@@ -1108,7 +1112,7 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
     courseId,
     facilityId,
     playDate: localDate,
-    courseDisambiguatedBy: disambiguatedBy,
+    courseDisambiguatedBy: disambiguation.stored,
     scoreBadge: outcome.score_badge,
     scoreMonetary: outcome.score_monetary,
     hardSignal: outcome.contributions.some((c) => c.hard),
@@ -1352,7 +1356,7 @@ export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, q
       facilityId: resolvedFacilityId,
       courseId: resolvedCourseId,
       summary,
-      integrity: fixCoordsIntegrity(fixes),
+      integrity: await fixCoordsIntegrity(repo, resolvedCourseId, fixes),
       attestationGrade: worstGrade,
       catalogVersion: declaredVersionRow?.version ?? currentVersion?.version ?? null,
     });
@@ -1392,6 +1396,7 @@ export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, q
  * CURRENT `verification_status` first — without that, re-running the
  * scorer over the stored rows would reproduce the old (stub) score. */
 export async function rescorePlayAfterPromotion(repo: Repo, play: { facilityId: string; courseId: string; playDate: string }): Promise<FinalizeScoringResult> {
+  await repo.play.lockForScoring(play.courseId, play.playDate);
   await repo.evidence.refreshFixTiers(play.courseId, play.playDate);
   return finalizeScoringForKey(repo, play.facilityId, play.courseId, play.playDate);
 }
@@ -1473,10 +1478,25 @@ export async function repickUserPlay(repo: Repo, args: { facilityId: string; pla
 /** The raw fix coordinates, kept in `app.evidence.integrity.fixCoords`
  * (NOT in `summary`: the scorer's fix schema is strict, and these must
  * never reach it). Needed ONLY so a re-pick can re-run the matcher against
- * a different course; they belong to the owner's own row, ride along in
- * `export_my_data`, and go with the row on `delete_my_data`. */
-function fixCoordsIntegrity(fixes: FixSubmission[]): Record<string, unknown> {
-  if (fixes.length === 0) return {};
+ * a different course.
+ *
+ * ⛔ MINIMISATION (round 3 gate, HIGH; build plan §8.6 "No raw routes on the
+ * server by default. The play location is the course id" and §3.3 "Raw routes
+ * stay on the device"). They are stored ONLY when a re-pick can actually
+ * happen — the course is a ledger STUB at intake (G3-01: only stubs split) or
+ * is already in a split family (`Repo#catalog.repickEligible`) — and never for
+ * a row with no course. A verified, never-split course stores NO coordinates.
+ * They are cleared again (a) when the single re-pick is used
+ * (`Repo#play.repickApply`), (b) once the course can no longer be re-picked
+ * (promoted with its backlog row done), and (c) after
+ * `FIX_COORDS_RETENTION_DAYS` — all by `rescoreBacklog.purgeFixCoords`, run
+ * set-based every import/drain pass. A row without coordinates simply fails
+ * closed at re-pick (`cannot_rederive`). */
+export const FIX_COORDS_RETENTION_DAYS = 30;
+
+async function fixCoordsIntegrity(repo: Repo, courseId: string | null, fixes: FixSubmission[]): Promise<Record<string, unknown>> {
+  if (fixes.length === 0 || courseId === null) return {};
+  if (!(await repo.catalog.repickEligible(courseId))) return {};
   return { fixCoords: Object.fromEntries(fixes.map((f) => [f.fixId, { lat: f.lat, lng: f.lng }])) };
 }
 
@@ -1501,7 +1521,7 @@ function reconstructOneStoredRow(row: StoredEvidenceRow, disambiguatedBy: Disamb
   };
 }
 
-/** The play's own `course_disambiguated_by` (see `Repo#play.disambiguatedBy`). */
+/** The play's own `course_disambiguated_by` (see `Repo#play.disambiguation`). */
 type Disambiguation = "geometry" | "staff" | "user" | null;
 
 /** P3c gate round 3: the replay path's own scoring input — EVERY row

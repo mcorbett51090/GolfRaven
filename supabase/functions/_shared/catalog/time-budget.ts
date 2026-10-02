@@ -9,7 +9,7 @@
 // DESIGN (each phase has its OWN bound; the total is a backstop, not the
 // mechanism):
 //
-//   fetch phase      <= FETCH_PHASE_MS total across ALL artifact fetches
+//   fetch phase      <= FETCH_PHASE_MS (30 s) total across ALL artifact fetches
 //                    (each fetch additionally capped at PER_FETCH_MS and
 //                    never allowed past the phase deadline);
 //   import write     one transaction, bounded by privileged.ts's own
@@ -35,10 +35,17 @@
 // number here is one constant to change.
 
 export const TOTAL_BUDGET_MS = 100_000;
-export const FETCH_PHASE_MS = 40_000;
+// 30 s (was 40): with the 26 s unit reserve, a fetch phase + a 12 s import write
+// must still leave the drain half of the budget at least one full unit (42 s used
+// at worst -> 58 s left -> a 29 s drain slice >= 26 s).
+export const FETCH_PHASE_MS = 30_000;
 export const PER_FETCH_MS = 15_000;
-/** One drain/rescore unit = one short per-user transaction (<= 12 s) plus margin. */
-export const UNIT_RESERVE_MS = 14_000;
+/** One drain/rescore unit is normally ONE per-user transaction (<= 12 s) — the
+ * queued drain writes a terminal state inside the same transaction as the
+ * redrain. The one exception is a row whose redrain transaction THREW and
+ * which is past its 7-day age: ageing it out is a second transaction, so a
+ * unit can take two (12 s + 12 s). The reserve covers both plus margin. */
+export const UNIT_RESERVE_MS = 26_000;
 
 export interface Deadline {
   /** Epoch ms. */

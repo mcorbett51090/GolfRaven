@@ -21,180 +21,19 @@
 // `finalizeScoringForKey` the live tail uses.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
-import { fetchAndVerifyArtifact, applyImportPlanAtomically, type FetchBytes } from "../../functions/_shared/catalog/import-handler.ts";
 import { drainRescoreBacklog } from "../../functions/_shared/catalog/rescore-orchestrator.ts";
 import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-repo.ts";
-import { canonicalStringify, MANIFEST_DOMAIN, VERSIONS_DOMAIN } from "../../functions/_shared/catalog/manifest-artifact.ts";
-import { bytesToBase64Url } from "../../functions/_shared/catalog/signature.ts";
 import { finalizeScoringForKey, handleEvidenceIntake, repickUserPlay } from "../../functions/_shared/evidence/handler.ts";
-import { deriveFix } from "../../functions/_shared/evidence/derive-fix.ts";
-import { adminSql, createTestUser, ensureServiceRole, freshUuid, insertSigningKeyWithKey, rawCount } from "./_helpers.ts";
+import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawCount } from "./_helpers.ts";
+import { closeStaleBacklog, facilityShard, giveCoursePolygon, ids, mint, newPublisher, newUser, playScore, seedDwellAndScore, todayChicago, uniqueCourses } from "./_publisher.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
-const BASE_URL = "https://golfraven.example/catalog/v1";
-const ALLOWED_HOSTS = ["golfraven.example"];
-const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const drainRepo = makeDrainReadRepo(withSystemCatalogImport);
-
-function todayChicago(): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-}
-
-/** Unique ids per test run (the cluster is shared with every other test file). */
-function ids() {
-  const salt = [...crypto.getRandomValues(new Uint8Array(20))].map((b) => CROCKFORD[b % 32]).join("");
-  const mk = (prefix: string, n: string) => `${prefix}_${salt}${n}`; // 20 + 6 = 26
-  return {
-    fac: mk("fac", "000001"),
-    k: mk("crs", "00000K"),
-    s: mk("crs", "00000S"),
-    trl: mk("trl", "000001"),
-    hol1: mk("hol", "000001"),
-    hol2: mk("hol", "000002"),
-    mk,
-    salt,
-  };
-}
-
-async function generateKeypair() {
-  const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
-  const raw = await crypto.subtle.exportKey("raw", kp.publicKey);
-  return { privateKey: kp.privateKey, publicKeyB64Url: bytesToBase64Url(new Uint8Array(raw)) };
-}
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-async function signStd(privateKey: CryptoKey, text: string): Promise<string> {
-  const sig = await crypto.subtle.sign("Ed25519", privateKey, new TextEncoder().encode(text));
-  let bin = "";
-  for (const b of new Uint8Array(sig)) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
-const jsonBytes = (v: unknown) => new TextEncoder().encode(canonicalStringify(v));
-
-class Publisher {
-  private history: { version: string; publishedAt: string; kid: string; sha256: string }[] = [];
-  constructor(private privateKey: CryptoKey, private kid: string) {}
-
-  /** Signs + imports one release (real two-phase pipeline). */
-  async publish(version: string, shardFiles: Record<string, unknown>) {
-    if (!this.history.some((h) => h.version === version)) this.history.push({ version, publishedAt: new Date().toISOString(), kid: this.kid, sha256: "a".repeat(63) + String(this.history.length) });
-    const bytesByPath = new Map<string, Uint8Array>();
-    for (const [path, value] of Object.entries(shardFiles)) bytesByPath.set(path, jsonBytes(value));
-    const shards = [];
-    for (const [path, bytes] of bytesByPath) shards.push({ path, sha256: await sha256Hex(bytes), bytes: bytes.length });
-    const manifestBytes = jsonBytes({ contractVersion: 1, catalogVersion: version, minAppVersion: "1.0.0", kid: this.kid, revokedKids: [], generatedAt: new Date().toISOString(), shards });
-    const mStmt = { catalogVersion: version, contractVersion: 1, kid: this.kid, manifestSha: await sha256Hex(manifestBytes) };
-    const manifestSigBytes = jsonBytes({ ...mStmt, sig: await signStd(this.privateKey, MANIFEST_DOMAIN + canonicalStringify(mStmt)) });
-    const versionsBytes = jsonBytes(this.history);
-    const vStmt = { kid: this.kid, versionsSha: await sha256Hex(versionsBytes) };
-    const versionsSigBytes = jsonBytes({ ...vStmt, sig: await signStd(this.privateKey, VERSIONS_DOMAIN + canonicalStringify(vStmt)) });
-    const fetchBytes: FetchBytes = async (url: string) => {
-      if (url.endsWith("/manifest.json")) return manifestBytes;
-      if (url.endsWith("/manifest.sig.json")) return manifestSigBytes;
-      if (url.endsWith("/versions.json")) return versionsBytes;
-      if (url.endsWith("/versions.sig.json")) return versionsSigBytes;
-      for (const [p, b] of bytesByPath) if (url.endsWith(`/${p}`)) return b;
-      throw new Error(`unexpected url ${url}`);
-    };
-    const getKey = async (kid: string) => {
-      await ensureServiceRole();
-      const rows = await adminSql()`select kid, public_key_b64url, revoked_at from app.catalog_signing_key where kid = ${kid}`;
-      const r = rows[0];
-      return r ? { kid: r.kid as string, publicKeyB64Url: r.public_key_b64url as string, revokedAt: r.revoked_at ? (r.revoked_at as Date).toISOString() : null } : null;
-    };
-    const plan = await fetchAndVerifyArtifact({ artifactBaseUrl: BASE_URL, allowedHosts: ALLOWED_HOSTS }, fetchBytes, getKey);
-    assert(plan.ok, `plan rejected: ${JSON.stringify(plan)}`);
-    const outcome = await applyImportPlanAtomically(plan, withSystemCatalogImport);
-    assert(outcome.ok, `import rejected: ${outcome.reason}`);
-    return outcome;
-  }
-}
-
-async function newPublisher() {
-  const { privateKey, publicKeyB64Url } = await generateKeypair();
-  const kid = `kid-promo-${freshUuid()}`;
-  await insertSigningKeyWithKey(kid, publicKeyB64Url, null);
-  return new Publisher(privateKey, kid);
-}
-
-const mint = (v: string) => [{ type: "minted", catalogVersion: v }];
-const facilityShard = (i: ReturnType<typeof ids>, status: string, courses: unknown[]) => [
-  { id: i.fac, slug: `promo-${i.salt.toLowerCase()}`, region: "US-TN", tz: "America/Chicago", name: "Promo Facility", verification: { status }, courses },
-];
-
-/** Gives an imported course a real polygon (the artifact carries none) so
- * the (derived-fix) tier is the ONLY thing standing between the stub-era
- * score and the promoted one. */
-async function giveCoursePolygon(courseId: string) {
-  await ensureServiceRole();
-  const d = 0.001;
-  await adminSql()`
-    update app.catalog_course set geometry_kind = 'polygon',
-      boundary = ST_SetSRID(ST_MakePolygon(ST_MakeLine(ARRAY[
-        ST_MakePoint(${-86.7816 - d}, ${36.1467 - d}), ST_MakePoint(${-86.7816 + d}, ${36.1467 - d}),
-        ST_MakePoint(${-86.7816 + d}, ${36.1467 + d}), ST_MakePoint(${-86.7816 - d}, ${36.1467 + d}),
-        ST_MakePoint(${-86.7816 - d}, ${36.1467 - d})])), 4326)
-    where id = ${courseId}`;
-}
-
-type Actor = { uid: string; role: "authenticated" };
-async function newUser(label: string): Promise<Actor> {
-  const uid = freshUuid();
-  await createTestUser(uid, `promo-${label}-${uid.slice(0, 8)}`);
-  return { uid, role: "authenticated" };
-}
-
-/** A dwell round (2 h apart, both fixes live+attested, inside a polygon) the
- * way live intake would have stored it, with the course's tier AS OF NOW —
- * including `integrity.fixCoords` (the raw coordinates intake now keeps so a
- * re-pick can re-run the matcher). `vendor: true` adds a mapped sensor-
- * provenance vendor round beside it: the combination that makes the play
- * money-TRUE as long as it is NOT a user pick. */
-async function seedDwellAndScore(actor: Actor, facilityId: string, courseId: string, tier: "unverified" | "play-verified", opts: { vendor?: boolean; holes?: 9 | 18 } = {}) {
-  const localDate = todayChicago();
-  const noonUtcMs = Date.parse(`${localDate}T17:00:00Z`); // 12:00 Chicago (CDT/CST both keep this on the same local day)
-  const mk = (fixId: string, capturedAt: number) =>
-    deriveFix({
-      fix: { fixId, accuracyMeters: 10, capturedAt, simulated: false, foreground: true, fromApp: true },
-      resolvedFacilityId: facilityId,
-      localDate,
-      match: { verificationTier: tier, geometryKind: "polygon", insideBuffer: true },
-      consumedToken: { attestationGrade: "attested", challengeKind: "live" },
-    });
-  const inId = `in${freshUuid().slice(0, 8)}`;
-  const outId = `out${freshUuid().slice(0, 8)}`;
-  return withOwnership(actor, async (repo) => {
-    const device = await repo.device.ensureOwn(null, "ios");
-    const sourceRef = `dwell-${freshUuid()}`;
-    await repo.evidence.insertIdempotent({
-      kind: "resolved", sourceRef, inputHash: `hash-${sourceRef}`, source: "foreground_dwell", facilityId, courseId,
-      startedAt: null, endedAt: null, localDate,
-      summary: { localDate, checkinFix: mk(inId, noonUtcMs), checkoutFix: mk(outId, noonUtcMs + 120 * 60_000), apartMinutes: 120, holes: opts.holes ?? 18 },
-      integrity: { fixCoords: { [inId]: { lat: 36.1467, lng: -86.7816 }, [outId]: { lat: 36.1468, lng: -86.7817 } } },
-      cosignal: {}, attestationGrade: "attested", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: device.id,
-    });
-    if (opts.vendor) {
-      const ref = `vendor-${freshUuid()}`;
-      await repo.evidence.insertIdempotent({
-        kind: "resolved", sourceRef: ref, inputHash: `hash-${ref}`, source: "arccos", facilityId, courseId,
-        startedAt: null, endedAt: null, localDate, summary: { localDate, vendorCourseMapped: true, sensorProvenance: true },
-        integrity: {}, cosignal: {}, attestationGrade: "unattestable", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: device.id,
-      });
-    }
-    return finalizeScoringForKey(repo, facilityId, courseId, localDate);
-  });
-}
-
-const playScore = async (uid: string, courseId: string) => {
-  await ensureServiceRole();
-  const rows = await adminSql()`select score_badge, score_monetary, money, status, course_disambiguated_by, id from app.play where user_id = ${uid} and course_id = ${courseId}`;
-  return rows[0] ? { badge: Number(rows[0].score_badge), monetary: Number(rows[0].score_monetary), money: Boolean(rows[0].money), status: rows[0].status as string, pick: rows[0].course_disambiguated_by as string | null, id: rows[0].id as string } : null;
-};
-const uniqueCourses = (actor: Actor) => withOwnership(actor, (repo) => repo.play.uniqueCourseCount());
+/** No straggler grace (tests only): the finish mark, the sweep start and the sweep itself happen within one run. */
+const NO_GRACE = { sweepDelaySeconds: 0 };
 
 Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after promotion the bounded drain re-scores it and uniqueCourses rises by exactly 1 (replays never double)", DT, async () => {
+  await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
   const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "0")}`;
@@ -232,9 +71,11 @@ Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after 
   assertEquals(pass1.playsProcessed, 2);
   assertEquals(pass1.coursesCompleted, 0);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_rescore_backlog where course_id = '${i.k}' and done_at is null`), 1, "the backlog row stays open with a cursor");
-  const pass2 = await drainRescoreBacklog(drainRepo, withOwnership, 2);
-  assertEquals(pass2.playsProcessed, 1);
-  assertEquals(pass2.coursesCompleted, 1);
+  // Later passes (no straggler grace in the test): the last play, then the
+  // closing sweep (cursor rewound by the overlap), then the row closes.
+  let completed = 0;
+  for (let pass = 0; pass < 8 && completed === 0; pass++) completed += (await drainRescoreBacklog(drainRepo, withOwnership, 2, undefined, NO_GRACE)).coursesCompleted;
+  assertEquals(completed, 1, "the backlog row closes after its sweep");
 
   for (const u of users) {
     assertEquals(await uniqueCourses(u), 1, "uniqueCourses rose by EXACTLY 1");
@@ -257,6 +98,7 @@ Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after 
 });
 
 Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_monetary 0, money false); a re-pick MOVES the play, re-derived, exactly once, audited (never double counts)", DT, async () => {
+  await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
   const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "2")}`;
@@ -293,10 +135,11 @@ Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_mone
   assertEquals(afterSplit.money, false, "...so a fixture that was money-true is money-false once it is a user pick");
   assertEquals(await uniqueCourses(actor), 1, "the kept course counts once");
 
-  // A player who is NOT a user pick must be untouched by the cap (control).
+  // §4.2: ANY unlabelled play at a split-family course is a user pick and capped — not just the labelled one.
   const other = await newUser("split-control");
   const ctrl = await seedDwellAndScore(other, i.fac, i.s, "play-verified", { vendor: true });
-  assertEquals(ctrl.play.money, true, "a geometry play at the sibling is still money-true — the cap is for user picks only");
+  assertEquals(ctrl.play.money, false, "a play at a split sibling is a user pick: capped even though no label was ever written for this player");
+  assertEquals(ctrl.play.scoreMonetary, 0);
 
   // Re-pick K -> S: the SAME play row moves, evidence follows (RE-DERIVED against S), still exactly 1.
   // S has no polygon: the stored fixes must be re-matched, not carried over from K.
@@ -310,6 +153,8 @@ Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_mone
   assertEquals(await rawCount(`select count(*)::int as n from app.play where user_id = '${actor.uid}'`), 1);
   assertEquals(await rawCount(`select count(*)::int as n from app.evidence where user_id = '${actor.uid}' and course_id = '${i.s}'`), 2, "the evidence (dwell + vendor round) moved with it");
   await ensureServiceRole();
+  // §8.6 trigger (a): the single re-pick is used, so the raw coordinates are cleared with it.
+  assertEquals(await rawCount(`select count(*)::int as n from app.evidence where user_id = '${actor.uid}' and integrity ? 'fixCoords'`), 0, "re-pick used -> coordinates cleared");
   const ev = await adminSql()`select summary from app.evidence where user_id = ${actor.uid} and source = 'foreground_dwell'`;
   const sum = ev[0]!.summary as { checkinFix: { geometryKind: string; insideBuffer: boolean }; holes: number };
   assertEquals(sum.checkinFix.geometryKind, "radius", "re-matched against S (no polygon), not K's");
@@ -329,6 +174,7 @@ Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_mone
 });
 
 Deno.test("AT 18 (concurrency): the promotion re-score racing a LIVE submission for the same play ends consistent — one play, no deadlock, same score as a final re-run", DT, async () => {
+  await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
   const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "4")}`;
@@ -431,6 +277,7 @@ Deno.test("R3: an imported course with an UNKNOWN hole count never gets the 9-ho
 });
 
 Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sorts BEFORE the cursor is still reached (a stable (created_at, id) keyset, not bare uuid order)", DT, async () => {
+  await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
   const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "6")}`;
@@ -459,9 +306,15 @@ Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sort
   await ensureServiceRole();
   await adminSql()`update app.play set id = '00000000-0000-4000-8000-0000000000aa' where user_id = ${late.uid} and course_id = ${i.k}`;
 
-  const pass2 = await drainRescoreBacklog(drainRepo, withOwnership, 50);
+  // Count which players the drain actually re-scored.
+  const seen = new Set<string>();
+  const spy: typeof withOwnership = (actor, op) => {
+    seen.add(actor.uid);
+    return withOwnership(actor, op);
+  };
+  const pass2 = await drainRescoreBacklog(drainRepo, spy, 50, undefined, NO_GRACE);
   assertEquals(pass2.failures, 0);
-  assertEquals(pass2.playsProcessed, 2, "the last original play AND the late one (id behind the cursor)");
+  assert(seen.has(late.uid), "the late play (id behind the cursor) was reached");
   assertEquals(pass2.coursesCompleted, 1);
 });
 

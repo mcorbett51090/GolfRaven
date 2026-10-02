@@ -236,6 +236,11 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         }
         return null;
       },
+      async repickEligible(courseId: string): Promise<boolean> {
+        const l = state.ledger.get(courseId);
+        if (!l) return false;
+        return l.status === "stub" || l.splitFrom !== null || [...state.ledger.values()].some((o) => o.splitFrom === courseId);
+      },
       async releaseRank(siteVersion: string): Promise<number | null> {
         let n = 0;
         for (const row of state.catalogVersions.values()) if (row.siteVersion !== null && row.siteVersion !== undefined && row.siteVersion <= siteVersion) n += 1;
@@ -462,8 +467,12 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         play.courseDisambiguatedBy = "user";
         return true;
       },
-      async disambiguatedBy(courseId: string, playDate: string) {
-        return state.plays.get(`${uid}:${courseId}:${playDate}`)?.courseDisambiguatedBy ?? null;
+      async lockForScoring(_courseId: string, _playDate: string): Promise<void> {},
+      async disambiguation(courseId: string, playDate: string) {
+        const stored = state.plays.get(`${uid}:${courseId}:${playDate}`)?.courseDisambiguatedBy ?? null;
+        const l = state.ledger.get(courseId);
+        const family = Boolean(l && (l.splitFrom !== null || [...state.ledger.values()].some((o) => o.splitFrom === courseId)));
+        return { stored, effective: stored ?? (family ? ("user" as const) : null) };
       },
       async repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }) {
         const fromKey = `${uid}:${args.fromCourseId}:${args.playDate}`;

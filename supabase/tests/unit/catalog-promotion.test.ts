@@ -165,6 +165,9 @@ describe("AT 18 — import queues the work (never does it inline)", () => {
   });
 });
 
+/** Straggler grace 0: a short page, the finish mark, the sweep begin and the sweep's own (short) page all happen within one run. */
+const NO_GRACE = { sweepDelaySeconds: 0 };
+
 describe("AT 18 — the bounded re-score drain", () => {
   function setup(nPlays: number) {
     const state = makeFakeState();
@@ -190,15 +193,15 @@ describe("AT 18 — the bounded re-score drain", () => {
     importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
     const repo = makeFakeImporterRepo(importer);
 
-    const p1 = await drainRescoreBacklog(repo, withOwnership, 2);
+    const p1 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
     expect(p1).toMatchObject({ playsProcessed: 2, coursesCompleted: 0, failures: 0 });
     expect(importer.backlog[0]!.cursor?.playId).toBe(importer.plays[1]!.playId);
-    const p2 = await drainRescoreBacklog(repo, withOwnership, 2);
+    const p2 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
     expect(p2.playsProcessed).toBe(2);
-    const p3 = await drainRescoreBacklog(repo, withOwnership, 2);
+    const p3 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
     expect(p3).toMatchObject({ playsProcessed: 1, coursesCompleted: 1 });
     expect(importer.backlog[0]!.done).toBe(true);
-    const p4 = await drainRescoreBacklog(repo, withOwnership, 2);
+    const p4 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
     expect(p4).toMatchObject({ backlogRows: 0, playsProcessed: 0 });
   });
 
@@ -364,5 +367,77 @@ describe("AT 18 — re-pick: fully re-derived, user plays only, exactly once, au
     expect(await repickUserPlay(repo, args)).toEqual({ ok: false, reason: "cannot_rederive" });
     expect([...state.plays.values()][0]!.courseId).toBe("crs_x1");
     expect([...state.evidence.values()][0]!.courseId).toBe("crs_x1");
+  });
+});
+
+describe("backlog straggler sweep (round 3 gate, LOW): a course closes only after a grace + a rewound closing sweep", () => {
+  async function world(nPlays: number) {
+    const state = makeFakeState();
+    const importer = makeFakeImporterState(NOW);
+    const withOwnership: WithOwnershipFn = async (actor: Actor, op: (repo: Repo) => Promise<unknown>) => op(makeFakeRepo(state, actor.uid)) as never;
+    for (let i = 0; i < nPlays; i++) {
+      const d = `2026-05-${String(31 - i).padStart(2, "0")}`;
+      const r = await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", courseId: "crs_x1", localDate: d, catalogVersion: "20260520-a000001" }, makeFakeRepo(state, "user-a"));
+      if (r.status !== "accepted") throw new Error("unreachable");
+      importer.plays.push({ playId: r.play.id, userId: "user-a", facilityId: "fac_x", courseId: "crs_x1", playDate: d });
+    }
+    importer.plays.sort((a, b) => (a.playId < b.playId ? -1 : 1));
+    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
+    return { state, importer, withOwnership, repo: makeFakeImporterRepo(importer) };
+  }
+
+  it("a short page does NOT close the course: it records finished_at and waits out the grace; only a later run begins the sweep and closes it", async () => {
+    const { importer, withOwnership, repo } = await world(2);
+    importer.backlog[0]!.graceElapsed = false;
+    const r1 = await drainRescoreBacklog(repo, withOwnership, 10);
+    expect(r1).toMatchObject({ playsProcessed: 2, coursesCompleted: 0 });
+    expect(importer.backlog[0]).toMatchObject({ done: false, finishedAt: "now" });
+    expect(importer.backlog[0]!.swept ?? false).toBe(false);
+    // still inside the grace: nothing closes
+    const r2 = await drainRescoreBacklog(repo, withOwnership, 10);
+    expect(r2.coursesCompleted).toBe(0);
+    expect(importer.backlog[0]!.swept ?? false).toBe(false);
+    // grace elapsed: the sweep begins and, finding nothing further, closes the row in the same run
+    importer.backlog[0]!.graceElapsed = true;
+    const r3 = await drainRescoreBacklog(repo, withOwnership, 10);
+    expect(r3.coursesCompleted).toBe(1);
+    expect(importer.backlog[0]).toMatchObject({ done: true, swept: true });
+  });
+
+  it("a play that lands during the grace (a straggler) is picked up by the later run's pass", async () => {
+    const { state, importer, withOwnership, repo } = await world(1);
+    importer.backlog[0]!.graceElapsed = false;
+    await drainRescoreBacklog(repo, withOwnership, 10);
+    // a late committer
+    const r = await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", courseId: "crs_x1", localDate: "2026-05-20", catalogVersion: "20260520-a000001" }, makeFakeRepo(state, "user-a"));
+    if (r.status !== "accepted") throw new Error("unreachable");
+    importer.plays.push({ playId: "zzz_straggler", userId: "user-a", facilityId: "fac_x", courseId: "crs_x1", playDate: "2026-05-20" });
+    importer.backlog[0]!.graceElapsed = true;
+    const r2 = await drainRescoreBacklog(repo, withOwnership, 10);
+    expect(r2.playsProcessed).toBeGreaterThanOrEqual(1);
+    expect(r2.coursesCompleted).toBe(1);
+  });
+});
+
+describe("A2-01 / §4.2 (round 3 gate, MEDIUM): a BLOCKED split label never leaves a split-ambiguous play uncapped", () => {
+  it("two courses at one facility both split: K gets the user label; K2's label is blocked (one per facility-date) — yet K2 is scored capped too", async () => {
+    const state = makeFakeState();
+    // K = crs_x1 (existing) and K2 = crs_k2, both at fac_x. Seeded BEFORE any split exists: money-true.
+    const ledger = (id: string, splitFrom: string | null) => ({ id, kind: "course" as const, status: "verified" as const, verifiedInVersion: 1, splitFrom, tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 });
+    state.ledger.set("crs_k2", ledger("crs_k2", null));
+    state.courseFacility.set("crs_k2", "fac_x");
+    const a = await seedDwell(state, "user-a", "crs_x1", { vendor: true });
+    const b = await seedDwell(state, "user-a", "crs_k2", { vendor: true });
+    expect(a.play.money && b.play.money).toBe(true);
+    // ...then BOTH courses split (the import that adds the siblings).
+    state.ledger.set("crs_s1", ledger("crs_s1", "crs_x1"));
+    state.ledger.set("crs_s2", ledger("crs_s2", "crs_k2"));
+
+    const repo = makeFakeRepo(state, "user-a");
+    expect(await labelSplitPlayAsUserPick(repo, { playId: a.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE })).toBe(true);
+    expect(await labelSplitPlayAsUserPick(repo, { playId: b.play.id, facilityId: "fac_x", courseId: "crs_k2", playDate: LOCAL_DATE })).toBe(false); // label blocked...
+    const plays = [...state.plays.values()];
+    expect(plays.find((p) => p.courseId === "crs_k2")!.courseDisambiguatedBy).toBeNull();
+    for (const p of plays) expect(p).toMatchObject({ scoreMonetary: 0, money: false }); // ...but BOTH are capped
   });
 });

@@ -1545,7 +1545,13 @@ courses per pass, further bounded by the time budget below; a failing play stops
 retried, never skipped), one short `withOwnership` transaction per play. The cursor is a STABLE
 keyset over `(play created_at, play id)` stored on the backlog row (a deleted play cannot move it):
 the original bare-uuid ordering missed a play inserted mid-drain whose random id sorted before the
-cursor (round 2 gate, LOW). Promotion: the stored derived fixes carry a
+cursor (round 2 gate, LOW). `app.play.created_at` is `now()` — the START of the inserting transaction —
+so a long live-intake transaction (<= `transaction_timeout`, 12 s) can still COMMIT after the cursor
+has passed its timestamp (round 3 gate, LOW). A course is therefore NOT closed the first time a page
+comes back short: the row records `finished_at`, waits `RESCORE_SWEEP_DELAY_SECONDS` (15 s, > 12 s, so
+every such transaction has committed or died), rewinds the cursor by `RESCORE_SWEEP_OVERLAP_SECONDS`
+(15 s) and scans to the end once more (`swept`) before closing; re-scoring is idempotent. Promotion:
+the stored derived fixes carry a
 `verificationTier` frozen at ingest from the then-stub course, so it is rewritten to the course's
 current `verification_status` and the play is re-scored through the live `finalizeScoringForKey`
 (advisory-locked per user/course/date, idempotent). Split: the existing play at the kept course becomes
@@ -1554,9 +1560,19 @@ RE-SCORED straight away. **NEW-4 (HIGH) — the A2-01 cap applies on every path.
 pick (contributes 0 to `score_monetary`, never `money`) only when each scored evidence row carries
 `courseDisambiguatedBy === "user"`; every scoring path (live intake, `finalizeScoringForKey`, promotion
 re-score, split re-score, re-pick) now reads the play's `course_disambiguated_by`
-(`Repo#play.disambiguatedBy`) and stamps it on every course-anchored scored row — a play labelled
+(`Repo#play.disambiguation`) and stamps it on every course-anchored scored row — a play labelled
 `user` but scored without the stamp kept `score_monetary` 0.50 (and a money-true fixture stayed
-money-true). A re-pick (`repickUserPlay`) is limited to a `user` pick, to exactly ONE re-pick per
+money-true). **A blocked label never leaves a split play uncapped (round 3 gate, MEDIUM; A2-01 /
+§4.2).** The one-user-pick-per-facility-date index can refuse the label for a SECOND split play at the
+same facility and date (two courses K and K2 of one facility both split); that play used to stay
+unlabelled, so it scored uncapped (`score_monetary` 0.93, money true) and counted as a second course.
+`Repo#play.disambiguation` now returns `{stored, effective}`: `stored` is the recorded label (the only
+thing ever written), `effective` is what the scorer is told — a play with no geometry/staff label at a
+course in a split family (the kept course or any sibling) is a `user` pick — "a split play is always a
+user pick and never money" — whether or not the label could be written. `uniqueCourseCount` counts the
+user picks of a (facility, date) at most ONCE (the labelled play wins, then the lowest course id);
+geometry/staff-resolved plays are unaffected. (A play whose label was blocked cannot itself be
+re-picked: only a labelled `user` pick can.) A re-pick (`repickUserPlay`) is limited to a `user` pick, to exactly ONE re-pick per
 play (the audit row is the record), and to the split family; it MOVES the same play row and its
 evidence (never a second play) and FULLY RE-DERIVES the stored evidence against the target course:
 each embedded fix is re-matched (`matchFix`: `geometryKind`, `insideBuffer`, `verificationTier`) from
@@ -1564,11 +1580,39 @@ the raw coordinates stored at intake (`app.evidence.integrity.fixCoords`, kept O
 the scorer's fix schema is strict) and a dwell's `holes` is recomputed from the target's hole count
 (a 9-hole dwell moved to an 18-hole sibling gets the 18-hole bar). Evidence without stored
 coordinates fails closed (`cannot_rederive`, nothing moves). The move writes an `app.audit_log` row
-(`play.repick`). Privacy: raw fix coordinates are now retained on accepted evidence rows (they were
-previously dropped after matching); they belong to the owner's own row, ride along in
-`export_my_data` (the `integrity` column) and go with the row on `delete_my_data`. Known limit: if the
+(`play.repick`).
+
+**Raw fix coordinates — retention (round 3 gate, HIGH; build plan §8.6 "No raw routes on the server by
+default. The play location is the course id", §3.3 "Raw routes stay on the device").** A re-pick needs
+the coordinates, so they are kept in `app.evidence.integrity.fixCoords` — but ONLY while a re-pick can
+actually happen:
+- STORED only when the course is a ledger `stub` at intake (G3-01: only stubs split), or is already in a
+  split family (it has a `split_from`, is the kept course of one), or has an open rescore backlog row
+  (`Repo#catalog.repickEligible`). A verified, never-split course stores NO coordinates; a row with no
+  course (facility-level) never does.
+- CLEARED (set-based, every import/drain pass, `rescoreBacklog.purgeFixCoords`, ≤ 5,000 rows per pass,
+  backed by the partial index `evidence_fixcoords_idx` on the rows that still carry them): (a) when the
+  single re-pick is used (`repickApply`, same transaction); (b) once the course can no longer be
+  re-picked — promoted with its backlog row DONE, not in a split family; (c) after
+  `FIX_COORDS_RETENTION_DAYS` = 30 days from the evidence's `created_at`. Why 30: a client can only
+  submit against a catalog inside the 30-day skew window (build plan §3.3), so a split that matters to
+  a play is announced by a catalog release within about that long; keeping them longer buys nothing, and
+  a re-pick after that fails closed (`cannot_rederive`). It is one named constant
+  (`evidence/handler.ts`).
+- A row without coordinates keeps failing closed at re-pick (`cannot_rederive`, nothing moves).
+- They belong to the owner's own row: they ride along in `export_my_data` (the `integrity` column — so
+  the export shows exactly what is retained: coordinates for a stub/split-family row inside its window,
+  none otherwise) and go with the row on `delete_my_data`.
+
+*Note for the §8.6 / privacy-label owner:* the server now holds raw coordinates of a play for up to 30
+days in ONE narrow case (a play at a course that is still a catalog stub or in a split family), where it
+previously held none; everywhere else the §8.6 position (course id only) is unchanged. If the privacy
+label must read "no raw location on the server", that sentence needs this exception or the re-pick
+feature must be dropped.
+
+Known limit: if the
 user ALREADY has a `user`-picked play at another course of the same facility + date, the split label
-cannot be applied (A2-01's one-per-facility-date index) and that play keeps its geometry label. `Repo#play.uniqueCourseCount()` is the server-side
+cannot be applied (A2-01's one-per-facility-date index); it is still scored as a user pick (above), only the stored label is missing. `Repo#play.uniqueCourseCount()` is the server-side
 `uniqueCourses` (mirrors `playQualifies`: `score_badge >= 0.50 OR money`, ledger status `verified`,
 not void/disputed, merge closure resolved, distinct). Proven against real Postgres: a play at a stub is
 accepted and counts for nothing; after promotion + drain `uniqueCourses` is exactly 1 for each of
@@ -1597,11 +1641,16 @@ credit (the old `>= 18 ? 18 : 9` put a 12-hole count in the 9-hole bucket).
 **Time budget (round 2 gate, MEDIUM).** `import-catalog` used to inherit http.ts's single 15 s race
 over sequential 15 s fetches, a 12 s transaction, the drain and the re-score, so a full-directory run
 answered 503 while work continued unobserved. Each PHASE now has its own explicit deadline
-(`catalog/time-budget.ts`): the fetch phase has 40 s TOTAL across all artifact fetches (each fetch also
+(`catalog/time-budget.ts`): the fetch phase has 30 s TOTAL across all artifact fetches (each fetch also
 capped at 15 s and never allowed past the phase deadline); the import write is one transaction bounded
 by `transaction_timeout` (12 s); what remains of the 100 s whole-request budget is split between the
-queued drain (first half) and the re-score, and each only STARTS a per-user unit (<= 12 s + margin =
-14 s reserve) while the deadline leaves room — whatever is left stays queued / stays in the backlog
+queued drain (first half) and the re-score, and each only STARTS a per-user unit while 26 s remain.
+A unit is normally ONE per-user transaction (<= 12 s): the queued drain writes a terminal state
+(`needs_attention` / `unknown_id`) in the SAME transaction as the redrain (round 3 gate, LOW — it used to
+be a second transaction, so a unit could overrun a 14 s reserve). The one remaining two-transaction unit
+is a row whose redrain THREW and which is past its 7-day age (the age-out is a second transaction), so
+the reserve is 2 × 12 s + margin = 26 s; the fetch phase is 30 s (was 40) so that a worst-case fetch + a
+12 s import write still leave the drain half of the budget one full unit — whatever is left stays queued / stays in the backlog
 (cursor persisted) for the next run. The response is therefore truthful: it reports each phase's result
 and `truncated: true` when the budget, not an error, cut a drain short; the 100 s http.ts race is only
 the backstop for a phase that blows through its own bound. `[unverified — training knowledge]`: the
@@ -1613,6 +1662,10 @@ confirm against the deployed project before relying on the margin (each number i
 1. Geometry import (see above — nothing to import).
 2. The metadata fields listed above as having no target table.
 3. A HTTP endpoint for `repickUserPlay`.
+3a. Live intake never DERIVES a `user` pick: two plays at one facility on one date via different
+   `courseId`s outside any split family are both full-weight (A2-01's cap and one-per-facility-date
+   rule only bite for split-ambiguous plays today). The radius cap (0.50) masks it while no geometry is
+   imported; revisit with the geometry pipeline.
 4. Queued rows never earn a co-signal (a co-signal is a live-session guarantee; the drain consumes the
    token for its own side effects but never fabricates one days later) — this fails closed.
 5. The AT 8 retired-MAJOR rule ("a retired major version -> 422") is enforced nowhere (pre-existing, not

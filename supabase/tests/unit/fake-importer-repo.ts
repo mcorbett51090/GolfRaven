@@ -87,9 +87,13 @@ export interface FakeHoleRow {
   catalogVersionInt: number;
 }
 
-export interface FakeBacklogRow extends RescoreBacklogRow {
+export interface FakeBacklogRow extends Omit<RescoreBacklogRow, "finishedAt" | "swept" | "sweepReady"> {
   catalogVersionInt: number;
   done: boolean;
+  finishedAt?: string | null;
+  swept?: boolean;
+  /** Tests: force the straggler grace to have (not) elapsed; undefined = elapsed. */
+  graceElapsed?: boolean;
 }
 
 /** Test fixture for the re-score backlog's play listing (AT 18). */
@@ -319,8 +323,26 @@ export function makeFakeImporterRepo(state: FakeImporterState): ImporterRepo {
       },
     },
     rescoreBacklog: {
-      async listOpen(limit: number): Promise<RescoreBacklogRow[]> {
-        return state.backlog.filter((b) => !b.done).slice(0, limit).map(({ id, courseId, reason, cursor }) => ({ id, courseId, reason, cursor }));
+      async listOpen(limit: number, _sweepDelaySeconds: number): Promise<RescoreBacklogRow[]> {
+        return state.backlog
+          .filter((b) => !b.done)
+          .slice(0, limit)
+          .map((b) => ({ id: b.id, courseId: b.courseId, reason: b.reason, cursor: b.cursor, finishedAt: b.finishedAt ?? null, swept: b.swept ?? false, sweepReady: b.finishedAt != null && (b.graceElapsed ?? true) }));
+      },
+      async markFinished(id: number, cursor: RescoreCursor | null): Promise<void> {
+        const b = state.backlog.find((x) => x.id === id);
+        if (b) {
+          b.cursor = cursor;
+          b.finishedAt = b.finishedAt ?? "now";
+        }
+      },
+      async beginSweep(id: number, cursor: RescoreCursor | null, _overlapSeconds: number): Promise<RescoreCursor | null> {
+        const b = state.backlog.find((x) => x.id === id);
+        if (b) b.swept = true;
+        return cursor; // the fake has no timestamps to rewind; it keeps the cursor
+      },
+      async purgeFixCoords(_retentionDays: number, _limit: number): Promise<number> {
+        return 0; // the real set-based SQL is proven against Postgres
       },
       async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
         return state.plays

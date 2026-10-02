@@ -369,6 +369,10 @@ export async function applyImportPlan(plan: VerifiedArtifactPlan, repo: Importer
     for (const row of await repo.catalog.listSiteVersions()) siteVersionMap.set(row.siteVersion, row.version);
     for (const [siteVersion, r] of results) siteVersionMap.set(siteVersion, r.version);
 
+    // M6 fallbacks are aggregated into ONE summary line per import (a ledger
+    // of tens of thousands of entries must not log tens of thousands of lines).
+    let unknownVersionFallbacks = 0;
+    const unknownVersionSamples: string[] = [];
     const baseRows: LedgerBaseRow[] = [];
     const stateRows: LedgerStateRow[] = [];
     for (const entry of ledgerResult.value.entries) {
@@ -382,7 +386,8 @@ export async function applyImportPlan(plan: VerifiedArtifactPlan, repo: Importer
       const resolveVersionInt = (versionStr: string): number => {
         const mapped = siteVersionMap.get(versionStr);
         if (mapped !== undefined) return mapped;
-        console.warn(`applyImportPlan: id-ledger.json entry "${entry.id}" names catalogVersion "${versionStr}", which is not a known site version — using the importing version ${manifest.catalogVersion} (int ${currentImport.version})`);
+        unknownVersionFallbacks += 1;
+        if (unknownVersionSamples.length < 3 && !unknownVersionSamples.includes(versionStr)) unknownVersionSamples.push(versionStr);
         return currentImport.version;
       };
       const firstVersionStr = firstMintedVersion(entry, compareCatalogVersions);
@@ -392,6 +397,10 @@ export async function applyImportPlan(plan: VerifiedArtifactPlan, repo: Importer
       const verifiedStr = latestVerifiedVersion(entry, compareCatalogVersions);
       if (verifiedStr) verifiedInVersionInt = resolveVersionInt(verifiedStr);
       stateRows.push({ id: entry.id, status: entry.status ?? "stub", tombstoned: entry.tombstoned, mergedInto: entry.mergedInto, verifiedInVersionInt, splitSiblings: entry.splitSiblings });
+    }
+
+    if (unknownVersionFallbacks > 0) {
+      console.warn(`applyImportPlan: ${unknownVersionFallbacks} id-ledger.json version reference(s) named a catalogVersion that is not a known site version (e.g. ${unknownVersionSamples.map((v) => JSON.stringify(v)).join(", ")}) — used the importing version ${manifest.catalogVersion} (int ${currentImport.version}) for each`);
     }
 
     // ⛔ FIX (P3e round 2 gate, M3): "fail closed when a signed ledger

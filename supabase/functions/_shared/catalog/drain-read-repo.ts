@@ -20,7 +20,10 @@ export function makeDrainReadRepo(withSystem: <T>(op: (repo: ImporterRepo) => Pr
       currentSiteVersion: () => withSystem((repo) => repo.queuedCatalog.currentSiteVersion()),
     },
     rescoreBacklog: {
-      listOpen: (limit) => withSystem((repo) => repo.rescoreBacklog.listOpen(limit)),
+      listOpen: (limit, sweepDelaySeconds) => withSystem((repo) => repo.rescoreBacklog.listOpen(limit, sweepDelaySeconds)),
+      markFinished: (id, cursor) => withSystem((repo) => repo.rescoreBacklog.markFinished(id, cursor)),
+      beginSweep: (id, cursor, overlap) => withSystem((repo) => repo.rescoreBacklog.beginSweep(id, cursor, overlap)),
+      purgeFixCoords: (days, limit) => withSystem((repo) => repo.rescoreBacklog.purgeFixCoords(days, limit)),
       nextPlays: (courseId, after, limit) => withSystem((repo) => repo.rescoreBacklog.nextPlays(courseId, after, limit)),
       advance: (id, cursor, done) => withSystem((repo) => repo.rescoreBacklog.advance(id, cursor, done)),
     },
