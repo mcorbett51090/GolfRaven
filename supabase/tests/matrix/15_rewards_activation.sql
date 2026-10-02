@@ -18,7 +18,7 @@
 -- 20000000-...-000000000001, trails trl_t / trl_u / trl_v, facility fac_x.
 
 BEGIN;
-SELECT plan(218);
+SELECT plan(224);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -1056,6 +1056,55 @@ SELECT isnt(
   '...and differs per account'
 );
 SELECT throws_ok($$SELECT * FROM private.account_pseudonyms(NULL)$$, '22023', NULL, 'account_pseudonyms refuses NULL');
+-- P1 (0029): domain separation. (account_pseudonyms is EXECUTE-able by service_role only and the vault
+-- by nobody but its owner, so each check snapshots the function's output into a temp table as service_role
+-- and compares it, as the owner, against the vault.)
+CREATE TEMP TABLE p1_snap_1 AS SELECT * FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a');
+GRANT SELECT ON p1_snap_1 TO PUBLIC;
+RESET ROLE;
+SELECT is(
+  (SELECT count(*)::int FROM p1_snap_1 a
+   WHERE a.pseudonym IN (
+     SELECT encode(public.hmac('00000000-0000-0000-0000-00000000000a', v.decrypted_secret, 'sha256'), 'hex')
+     FROM vault.decrypted_secrets v WHERE v.name LIKE 'pseudonym_hmac%')),
+  0, 'P1: account_pseudonyms(A) never equals hmac(A, key) — the value app.attestation.player_pseudonym stores — under ANY active key'
+);
+SELECT is(
+  (SELECT count(*)::int FROM p1_snap_1 a JOIN app.attestation t ON t.player_pseudonym = a.pseudonym),
+  0, 'P1: no tombstone pseudonym joins to a retained attestation row'
+);
+SELECT is(
+  (SELECT pseudonym FROM p1_snap_1 WHERE preferred),
+  (SELECT encode(public.hmac('install_link_account:00000000-0000-0000-0000-00000000000a', v.decrypted_secret, 'sha256'), 'hex')
+   FROM vault.decrypted_secrets v WHERE v.name = 'pseudonym_hmac_v2'),
+  'P1: the pseudonym is hmac(''install_link_account:'' || user_id, key) with the newest key preferred'
+);
+-- "preferred" follows the vault's creation order, NOT lexicographic name order.
+INSERT INTO vault.secrets (name, secret) VALUES
+  ('pseudonym_hmac_v9',  'shim-test-only-pseudonym-hmac-nine-32bytes-minimum-zzzzzzzzzzzzzzzzzzzzz'),
+  ('pseudonym_hmac_v10', 'shim-test-only-pseudonym-hmac-ten-32bytes-minimum-wwwwwwwwwwwwwwwwwwwwwwww');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+CREATE TEMP TABLE p1_snap_2 AS SELECT * FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a');
+GRANT SELECT ON p1_snap_2 TO PUBLIC;
+RESET ROLE;
+SELECT is((SELECT count(*)::int FROM p1_snap_2 WHERE preferred), 1, 'P1: still exactly one preferred key with four keys in the vault');
+SELECT is(
+  (SELECT v.name FROM p1_snap_2 a JOIN vault.decrypted_secrets v ON v.id = a.key_id WHERE a.preferred),
+  'pseudonym_hmac_v10',
+  'P1: of two keys created together, the higher NUMERIC version wins (_v10, not the lexicographic max _v9)'
+);
+INSERT INTO vault.secrets (name, secret, created_at) VALUES
+  ('pseudonym_hmac_v11', 'shim-test-only-pseudonym-hmac-eleven-32bytes-minimum-vvvvvvvvvvvvvvvvvvv', now() - interval '30 days');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+CREATE TEMP TABLE p1_snap_3 AS SELECT * FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a');
+GRANT SELECT ON p1_snap_3 TO PUBLIC;
+RESET ROLE;
+SELECT is(
+  (SELECT v.name FROM p1_snap_3 a JOIN vault.decrypted_secrets v ON v.id = a.key_id WHERE a.preferred),
+  'pseudonym_hmac_v10',
+  'P1: a key with a higher name but an OLDER vault creation time is not preferred: creation order decides'
+);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 -- Four accounts use one install; two of them delete themselves.
 INSERT INTO app.device (id, user_id, platform) VALUES
@@ -1109,7 +1158,7 @@ SELECT is((SELECT count(*)::int FROM app.device WHERE user_id = '00000000-0000-0
 SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('c', 64)), 4, '...and left the install-link tombstone rows (documented retention exception)');
 -- a row written under an OLDER key is still recognised after the preferred key moved on (rotation).
 INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id)
-SELECT repeat('d', 64), a.pseudonym, a.key_id FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') a WHERE NOT a.preferred;
+SELECT repeat('d', 64), a.pseudonym, a.key_id FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') a WHERE NOT a.preferred ORDER BY a.key_id LIMIT 1;
 UPDATE app.device SET install_link_hash = NULL WHERE id = '20000000-0000-0000-0000-000000000001';
 SELECT app.record_install_link('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', repeat('d', 64));
 SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('d', 64)), 1,

@@ -2119,20 +2119,31 @@ guard disabled (the LOW test then dies with the uncaught `TypeError`, failing th
 
 The P3f security gate passed with no BLOCKER or HIGH; N1–N5 re-probed fixed on real Postgres.
 
-1. **MEDIUM — domain-separate the install-link tombstone pseudonym (P1).** `private.account_pseudonyms`
-   (0027) computes `hmac(user_id::text, key)` with the same vault key and input as
-   `app.attestation.player_pseudonym` (0022), so a deleted player's tombstone joins to their retained
-   staff-attestation rows by equality, and service_role gains an oracle for attestation pseudonyms.
-   Fix in the next migration (before any production write): `hmac('install_link_account:' || user_id,
-   key)`. Also order the "preferred" key by the registry, not `max(name)` (lexicographic `_v10` < `_v9`).
-   **Scheduled as the immediate follow-up PR after P3f.**
+1. **MEDIUM — domain-separate the install-link tombstone pseudonym (P1). DONE in 0029
+   (`0029_install_link_pseudonym_domain.sql`).** `private.account_pseudonyms` (0027) computed `hmac(user_id::text, key)`
+   with the same vault key and input as `app.attestation.player_pseudonym` (0022), so a deleted player's tombstone joined
+   to their retained staff-attestation rows by equality, and service_role held an oracle for attestation pseudonyms.
+   0029 redefines it (same signature, grants, inventory row, owner; the 0020/0022 ownership bracket) as
+   `hmac('install_link_account:' || user_id, key)`. The "preferred" key is now the **newest by the vault's creation order**
+   (`created_at DESC`, then the numeric version suffix, then name) instead of `max(name)` (lexicographic, `_v9` > `_v10`);
+   this needed one more narrow column grant to `private_definer` (`SELECT (created_at)` on `vault.decrypted_secrets` — a
+   timestamp, not a secret). The key *registry* was not used as the order because it lists only keys already used to write a
+   row; a freshly added key is not in it yet. **Existing tombstone rows are deleted** by the migration: they cannot be
+   recomputed (the table holds no user id, by design) and would stay equality-joinable — exactly the defect; nothing is
+   deployed, so no count or fraud mark is lost, live `device` rows keep both signals meanwhile, and each account is
+   re-recorded under the new derivation on its next activation. Rotation semantics are unchanged (an account already
+   recorded under any active key is not counted twice). Tests: `15_rewards_activation.sql` (no pseudonym equals
+   `hmac(A, key)` under any active key; the new derivation; `_v10` beats `_v9`; creation order beats name order; the N4
+   count and fraud-mark tests unchanged) and `rewards-isolation.test.ts` (0029 redefines exactly that one function).
 2. **MEDIUM, launch-blocking — F19 tombstone retention.** Pseudonymised (not anonymous) personal
    information under Law 25 / GDPR: needs a retention bound and purge job (suggested 24 months from
    `first_seen_at`, mirroring `receipt_fingerprint`), privacy-officer / PIA sign-off, and privacy-policy
    disclosure before launch.
-3. **LOW — F20:** pin the suppressed-error stack match to the pinned module URL
-   (`deno.land/x/postgresjs@v3.4.5/src/connection.js`), add a counter, and confirm at deploy that the
-   Supabase edge runtime honours `preventDefault` on the global `error` event `[unverified]`.
+3. **LOW — F20: partly done.** The suppressed-error stack match is pinned to the pinned module URL
+   (`deno.land/x/postgresjs@v3.4.5/src/connection.js`) and the guard counts what it contains
+   (`getContainedClosedSocketWrites()`, also in the log line); a Deno test pins the match (another version, another file
+   of the same name, another function, another message and a non-`TypeError` are all NOT matched). **Still open:** confirm
+   at deploy that the Supabase edge runtime honours `preventDefault` on the global `error` event `[unverified]`.
 4. **LOW — F14 surface** is wider after the N2 reorder (bit0 can be set when the transition then fails
    or ends held); worst case remains a row-4 review, never an issued or refused reward.
 5. **LOW —** `mark_account_devices_fraud_voided` writes the raw user id into `audit_log.subject_id`,

@@ -125,4 +125,12 @@ describe("the migration", () => {
     expect(definers).toEqual(["private.account_pseudonyms"]);
     expect(text).not.toMatch(/DISABLE ROW LEVEL SECURITY|NO FORCE ROW LEVEL SECURITY/i);
   });
+
+  it("0029 redefines exactly one function — the install-link pseudonym — with a domain-separated HMAC input", () => {
+    const text = readFileSync(join(FUNCTIONS, "..", "migrations", "0029_install_link_pseudonym_domain.sql"), "utf8").replace(/^\s*--.*$/gm, "");
+    expect([...text.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)/gi)].map((m) => m[1])).toEqual(["private.account_pseudonyms"]);
+    expect(text).toMatch(/hmac\('install_link_account:' \|\| p_user_id::text/);
+    expect(text).not.toMatch(/hmac\(p_user_id::text/);
+    expect(text).not.toMatch(/max\(v\.name\)/);
+  });
 });

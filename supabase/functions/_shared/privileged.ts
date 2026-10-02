@@ -2493,23 +2493,29 @@ export function loadRewardsAttestationConfig(): RewardsAttestationConfig {
 // one exact signature (a TypeError reading 'write' of null, from postgres.js's
 // connection.js `nextWrite`) is marked handled. Anything else — including any
 // other TypeError — is left to surface exactly as before.
-function isPostgresJsClosedSocketWrite(err: unknown): boolean {
+// The stack must name the PINNED module URL (the import is hash-locked to exactly
+// this version): a different postgres.js version, or any other file's identical
+// message, is NOT matched and surfaces as before. Bumping the pin means revisiting
+// this guard — which is the point.
+const POSTGRESJS_PINNED_CONNECTION = /deno\.land\/x\/postgresjs@v3\.4\.5\/src\/connection\.js/;
+let containedClosedSocketWrites = 0;
+/** How many closed-socket writes this isolate has contained (for tests and logs). */
+export function getContainedClosedSocketWrites(): number {
+  return containedClosedSocketWrites;
+}
+export function isPostgresJsClosedSocketWrite(err: unknown): boolean {
   if (!(err instanceof TypeError)) return false;
   const stack = String(err.stack ?? "");
-  return /reading 'write'/.test(err.message) && /connection\.js/.test(stack) && /nextWrite/.test(stack);
+  return /reading 'write'/.test(err.message) && POSTGRESJS_PINNED_CONNECTION.test(stack) && /nextWrite/.test(stack);
+}
+function containClosedSocketWrite(ev: Event, err: unknown): void {
+  if (!isPostgresJsClosedSocketWrite(err)) return;
+  ev.preventDefault();
+  containedClosedSocketWrites++;
+  console.error(`privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction); total this isolate: ${containedClosedSocketWrites}`);
 }
 if (typeof globalThis.addEventListener === "function") {
-  globalThis.addEventListener("error", (ev: Event) => {
-    if (isPostgresJsClosedSocketWrite((ev as ErrorEvent).error)) {
-      ev.preventDefault();
-      console.error("privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction)");
-    }
-  });
-  globalThis.addEventListener("unhandledrejection", (ev: Event) => {
-    if (isPostgresJsClosedSocketWrite((ev as PromiseRejectionEvent).reason)) {
-      ev.preventDefault();
-      console.error("privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction)");
-    }
-  });
+  globalThis.addEventListener("error", (ev: Event) => containClosedSocketWrite(ev, (ev as ErrorEvent).error));
+  globalThis.addEventListener("unhandledrejection", (ev: Event) => containClosedSocketWrite(ev, (ev as PromiseRejectionEvent).reason));
 }
 // ==== END P3f additions ======================================================
