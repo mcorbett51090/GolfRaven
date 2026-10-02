@@ -17,7 +17,7 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, makeActor, rawCount } from "./_helpers.ts";
-import { hitRateLimitForActor, isServiceRoleBearer, getDbMode, loadAppleSiwaConfig, makeEmailOtpVerifier, type OtpAuthClient, purgeSigninEmailProofs, type Repo, signinEmailProofs, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
+import { hitRateLimitForActor, isServiceRoleBearer, loadAppleSiwaConfig, makeEmailOtpVerifier, type OtpAuthClient, purgeSigninEmailProofs, type Repo, signinEmailProofs, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleLinkProvider, handleListMethods, handleUnlinkProvider, type SigninDeps } from "../../functions/_shared/signin/methods-handler.ts";
 import { orchestrateMeDelete } from "../../functions/_shared/me/delete-orchestrator.ts";
 import { runRevocations, type RevocationDeps } from "../../functions/_shared/signin/revocation.ts";
@@ -257,7 +257,7 @@ Deno.test("link: an Apple email that matches ANOTHER account is never auto-linke
   const world = appleWorld(script);
   const token = await mintIdentityToken(appleKey, `apple-sub-collide-${RUN}`, { rawNonce: RAW_NONCE, claims: { email: bob.email.toUpperCase() } });
   const e = await httpError(handleLinkProvider(await linkReq({ identityToken: token }), alice.uid, depsFor(alice.uid, world)));
-  // both modes ask for a proof (the 501 an edge-mode runtime used to answer here is gone, 0039)
+  // the answer is a proof request (the 501 an edge-mode runtime used to answer here is gone, 0039)
   assertEquals([e.status, e.code], [409, "email_proof_required"]);
   assertEquals(await identityCount(alice.uid), 1);
   assertEquals(await identityCount(bob.uid), 1);
@@ -622,25 +622,19 @@ Deno.test("L2: a release names the window the attempt was reserved in; releasing
   assertEquals(code, "22023", "a window that is not hour-aligned is refused");
 });
 
-Deno.test("F4: edge mode REFUSES to link or store a grant for ANOTHER account, called directly on the repo (mustBeSelf: only a proof links another account)", DT, async () => {
+Deno.test("F4: the repo REFUSES to link or store a grant for ANOTHER account, called directly on the repo (mustBeSelf: only a proof links another account)", DT, async () => {
   await setupOnce();
   const alice = await newUser("f4a");
   const bob = await newUser("f4b");
   const input = { provider: "apple" as const, subject: `apple-sub-f4-${freshUuid().slice(0, 8)}`, email: null, emailVerified: false, isPrivateRelay: false };
   const env = { ciphertext: new Uint8Array(40).fill(7), dekWrapped: new Uint8Array(70).fill(9), kekId: KEK_ID };
-  if (getDbMode() !== "edge") {
-    // legacy: the core lane takes the uid by design (the OTP-proven link); nothing to refuse here. The edge run is the cell.
-    return;
-  }
   const link = await httpError(withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(bob.uid, input)));
   assertEquals([link.status, link.code], [403, "cross_account_link_requires_proof"]);
   const store = await httpError(withOwnership(makeActor(alice.uid), (repo) => repo.signin.storeToken(bob.uid, "apple", env)));
   assertEquals([store.status, store.code], [403, "cross_account_link_requires_proof"]);
   assertEquals(await identityCount(bob.uid), 1, "nothing was linked to Bob");
   assertEquals(await tokenCount(bob.uid), 0, "no grant was stored for Bob");
-  // the repo has a route to another account since 0039, and it is the PROOF-bound one (the direct path above is refused)
-  assertEquals(await withOwnership(makeActor(alice.uid), (repo) => Promise.resolve([repo.signin.crossAccountLink, repo.signin.proofBoundLink])), [true, true]);
-  // linking to SELF still works in edge mode
+  // linking to SELF still works
   assertEquals(await withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(alice.uid, input)), true);
 });
 
@@ -786,11 +780,7 @@ Deno.test("PR4a: the OTP-proven link works in BOTH modes end to end: it lands on
   const row = (await adminSql()`select refresh_token_ciphertext, dek_wrapped, kek_id from app.signin_provider_token where user_id = ${bob.uid} and provider = 'apple'`)[0]!;
   const raw = Uint8Array.from(atob((await adminSql()`select o_kek_b64 from private.get_signin_token_kek(${KEK_ID}::text)`)[0]!.o_kek_b64), (c) => c.charCodeAt(0));
   assertEquals(await decryptToken({ ciphertext: new Uint8Array(row.refresh_token_ciphertext), dekWrapped: new Uint8Array(row.dek_wrapped), kekId: row.kek_id }, "apple", { kekId: KEK_ID, key: raw }), "r.pr4a1");
-  if (getDbMode() !== "edge") {
-    assertEquals((await proofRows(bob.uid)).length, 0, "legacy links the proven account directly: no proof row exists");
-    return;
-  }
-  // edge: exactly one proof, between these two accounts, hashed, capped at 10 minutes, and consumed by the link
+  // exactly one proof, between these two accounts, hashed, capped at 10 minutes, and consumed by the link
   const p = await oneProof(bob.uid);
   assertEquals([p.caller_user_id, p.target_user_id, p.provider, p.consumed, p.capped], [alice.uid, bob.uid, "apple", true, true]);
   assertEquals(p.email_hash, await sha256Hex(bob.email));
@@ -798,9 +788,8 @@ Deno.test("PR4a: the OTP-proven link works in BOTH modes end to end: it lands on
   assertEquals((await proofRows(alice.uid)).length, 1, "the same single row, seen from the caller's side");
 });
 
-Deno.test("PR4a (edge): a REPLAYED proof is refused (single use), by the caller it was issued to, through the real repo", DT, async () => {
+Deno.test("PR4a: a REPLAYED proof is refused (single use), by the caller it was issued to, through the real repo", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   const { alice, bob } = await proofPair("pr4a2");
   const sub = `apple-sub-pr4a2-${RUN}`;
   const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
@@ -812,9 +801,8 @@ Deno.test("PR4a (edge): a REPLAYED proof is refused (single use), by the caller 
   assertEquals((await oneProof(bob.uid)).consumed, true);
 });
 
-Deno.test("PR4a (edge): a proof minted for Apple sub A can NOT link sub B (nor another provider, nor another address); sub A still links afterwards", DT, async () => {
+Deno.test("PR4a: a proof minted for Apple sub A can NOT link sub B (nor another provider, nor another address); sub A still links afterwards", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   const { alice, bob } = await proofPair("pr4a3");
   const subA = `apple-sub-pr4a3a-${RUN}`;
   const subB = `apple-sub-pr4a3b-${RUN}`;
@@ -833,9 +821,8 @@ Deno.test("PR4a (edge): a proof minted for Apple sub A can NOT link sub B (nor a
   assertEquals(await asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(subA, bob.email), ENVELOPE())), true, "the proof's own identity links");
 });
 
-Deno.test("PR4a (edge): a proof is redeemable only by the caller it was issued to; the target cannot redeem it for itself and a stranger cannot", DT, async () => {
+Deno.test("PR4a: a proof is redeemable only by the caller it was issued to; the target cannot redeem it for itself and a stranger cannot", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   const { alice, bob } = await proofPair("pr4a4");
   const mallory = await newUser("pr4a4m");
   const sub = `apple-sub-pr4a4-${RUN}`;
@@ -848,9 +835,8 @@ Deno.test("PR4a (edge): a proof is redeemable only by the caller it was issued t
   assertEquals(await asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())), true);
 });
 
-Deno.test("PR4a (edge): an EXPIRED proof is refused (the row is fabricated through the only writer's own INSERT window: the minter never writes one)", DT, async () => {
+Deno.test("PR4a: an EXPIRED proof is refused (the row is fabricated through the only writer's own INSERT window: the minter never writes one)", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   const { alice, bob } = await proofPair("pr4a5");
   const sub = `apple-sub-pr4a5-${RUN}`;
   // a proof that expired 10 minutes ago, written as private_definer with the INSERT window open on its id (the minter would never write it)
@@ -865,9 +851,8 @@ Deno.test("PR4a (edge): an EXPIRED proof is refused (the row is fabricated throu
   assertEquals(await rawCount(`select count(*) as n from auth.identities where provider_id = '${sub}'`), 0);
 });
 
-Deno.test("PR4a (edge): the minter refuses when GoTrue shows no sign-in for the target (a verifier that 'verified' without a session), and the handler answers 409 before any code is exchanged", DT, async () => {
+Deno.test("PR4a: the minter refuses when GoTrue shows no sign-in for the target (a verifier that 'verified' without a session), and the handler answers 409 before any code is exchanged", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   const alice = await newUser("pr4a6a");
   const bob = await newUser("pr4a6b"); // never signed in: last_sign_in_at is NULL
   const sub = `apple-sub-pr4a6-${RUN}`;
@@ -896,9 +881,8 @@ Deno.test("PR4a (edge): the minter refuses when GoTrue shows no sign-in for the 
   assertEquals((await proofRows(bob.uid)).length, 0);
 });
 
-Deno.test("PR4a (edge): CONCURRENT redemption of one proof yields exactly one link and one refusal (per-account advisory lock + FOR UPDATE), repeated", DT, async () => {
+Deno.test("PR4a: CONCURRENT redemption of one proof yields exactly one link and one refusal (per-account advisory lock + FOR UPDATE), repeated", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   for (let round = 0; round < 3; round++) {
     const { alice, bob } = await proofPair(`pr4a7r${round}`);
     const sub = `apple-sub-pr4a7-${round}-${RUN}`;
@@ -913,7 +897,7 @@ Deno.test("PR4a (edge): CONCURRENT redemption of one proof yields exactly one li
   }
 });
 
-Deno.test("PR4a: the F5 sign-out still happens in the full proven flow (both modes): verifyOtp then signOut(local), and the link lands on the proven account", DT, async () => {
+Deno.test("PR4a: the F5 sign-out still happens in the full proven flow : verifyOtp then signOut(local), and the link lands on the proven account", DT, async () => {
   await setupOnce();
   const { alice, bob } = await proofPair("pr4a8");
   const sub = `apple-sub-pr4a8-${RUN}`;
@@ -940,9 +924,8 @@ Deno.test("PR4a: the F5 sign-out still happens in the full proven flow (both mod
   assertEquals(await rawCount(`select count(*) as n from auth.identities where user_id = '${bob.uid}' and provider_id = '${sub}'`), 1);
 });
 
-Deno.test("PR4a (edge): the proof rows are deleted with the account (delete_my_data) as caller or as target, and purged an hour past expiry; a live proof of others survives both", DT, async () => {
+Deno.test("PR4a: the proof rows are deleted with the account (delete_my_data) as caller or as target, and purged an hour past expiry; a live proof of others survives both", DT, async () => {
   await setupOnce();
-  if (getDbMode() !== "edge") return;
   const { alice, bob } = await proofPair("pr4a9");
   const carol = await newUser("pr4a9c");
   await stampSignIn(carol.uid);

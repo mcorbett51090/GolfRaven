@@ -44,9 +44,9 @@ export interface DrainQueuedCatalogResult {
 const DEFAULT_BATCH_LIMIT = 500;
 
 /** Edge role PR3: the per-row transaction wrapper is `privileged.ts#withDelegatedActor`, injected (not imported) so this module
- * stays privileged.ts-free, the same DI discipline `evidence/handler.ts` uses. In `edge` mode it binds the row's owner through
- * `private.bind_delegate_for_queued_evidence(evidenceId)` (valid only while the row is `queued_catalog`) and runs as `edge_actor`;
- * in `legacy` mode it is `withOwnership(actor, op)`. Either way the drain acts as the row's own user and nobody else. */
+ * stays privileged.ts-free, the same DI discipline `evidence/handler.ts` uses. It binds the row's owner through
+ * `private.bind_delegate_for_queued_evidence(evidenceId)` (valid only while the row is `queued_catalog`) and runs as `edge_actor`, so the
+ * drain acts as the row's own user and nobody else. */
 export type { WithDelegatedActorFn };
 
 /** Drains up to `limit` open `queued_catalog` rows, oldest first, each in

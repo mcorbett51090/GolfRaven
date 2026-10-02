@@ -716,8 +716,22 @@ export interface QueuedEvidenceRow {
  */
 export type DelegateRef = { kind: "queued_evidence"; evidenceId: string } | { kind: "rescore"; backlogId: number; playId: string };
 
-/** The shape `privileged.ts#withDelegatedActor` has. `edge`: a transaction that binds the owner through the delegate binder and then
- * acts as `edge_actor`. `legacy`: exactly `withOwnership(actor, op)` (the delegate is ignored; there is no binder in service_role mode). */
+/**
+ * Edge role PR4b (E5): one retention class the independent retention purge (`retention-purge`) runs. Each class is a bounded definer
+ * that `edge_system` may EXECUTE; `privileged.ts#retentionPurgeSteps` builds one step per class and the pure handler
+ * (`_shared/retention/purge-handler.ts`) runs them, so the handler never sees a connection.
+ */
+export interface RetentionStep {
+  name: "fix_coords" | "install_link_tombstones" | "signin_email_proofs" | "signin_revocation_queue";
+  /** The most rows one batch removes (the definer's own `limit`); `null` = one unbatched pass (the definer has no row bound). The runner
+   * repeats a batched step while a batch comes back FULL, up to its own per-run cap, so a backlog drains faster than one batch per run. */
+  batchLimit: number | null;
+  /** ONE batch in its own short `edge_system` transaction. Returns the rows removed, or `null` when another run holds this step's lock right
+   * now (the batch was skipped, not failed: that run is doing the same work). */
+  runBatch(): Promise<number | null>;
+}
+
+/** The shape `privileged.ts#withDelegatedActor` has: a transaction that binds the owner through the delegate binder and then acts as `edge_actor`. */
 export type WithDelegatedActorFn = <T>(delegate: DelegateRef, actor: Actor, op: (repo: Repo) => Promise<T>) => Promise<T>;
 
 /** The narrow repository object `privileged.ts#withSystemCatalogImport()`

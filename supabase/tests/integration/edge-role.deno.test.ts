@@ -8,11 +8,9 @@
 //   - `openScopedTx` really scopes: a deliberately UNSCOPED raw query inside it returns 0 foreign rows, a forgotten
 //     bind fails closed, and a bind that bound somebody else fails closed BEFORE the operation runs;
 //   - the `edge_system` kind is `edge_system` and can read no personal data;
-//   - `EDGE_DB_MODE` accepts only `legacy` / `edge`.
+//   - `EDGE_DB_MODE` is gone (edge role PR4b): there is one mode, and nothing reads that variable any more.
 //
-// This file forces `EDGE_DB_MODE=edge` itself (privileged.ts reads it on every call), so it exercises the edge path
-// in BOTH passes of tools/db/test-deno-integration.sh. Every other file in this directory runs the suite as the pass's
-// own mode. The edge connection string is built by _helpers.ts from PGHOST / PGPORT / PGDATABASE and the provisioned
+// The edge connection string is built by _helpers.ts from PGHOST / PGPORT / PGDATABASE and the provisioned
 // `edge_gateway` login (the harness cluster's auth is `trust`; no password literal exists anywhere in the repo).
 
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -20,7 +18,6 @@ import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, makeActor } from "./_helpers.ts";
 import {
   assertEdgeConnectionSafe,
-  getDbMode,
   hitRateLimitForActor,
   openScopedTx,
   resetPrivilegedConnectionsForTests,
@@ -38,20 +35,13 @@ const PGUSER = Deno.env.get("PGUSER")!;
 const PGDATABASE = Deno.env.get("PGDATABASE")!;
 const GOOD_EDGE_URL = Deno.env.get("GOLFRAVEN_EDGE_DB_URL")!;
 
-/**
- * Run one test with EDGE_DB_MODE=edge and put the previous value back afterwards. `Deno.env` is process-wide, so a file
- * that left the mode at `edge` would silently turn every LATER test file of a `legacy` pass into an edge-mode run (and
- * make the two passes of tools/db/test-deno-integration.sh the same pass) -- the restore is the point of this wrapper.
- */
+/** One test, with the connections (and the self-check schedule) reset afterwards: a test here points `GOLFRAVEN_EDGE_DB_URL` at other
+ * logins and shrinks the self-check interval, and none of that may leak into a later test or file. */
 function edgeTest(name: string, fn: () => void | Promise<void>): void {
   Deno.test(name, DT, async () => {
-    const before = Deno.env.get("EDGE_DB_MODE");
-    Deno.env.set("EDGE_DB_MODE", "edge");
     try {
       await fn();
     } finally {
-      if (before === undefined) Deno.env.delete("EDGE_DB_MODE");
-      else Deno.env.set("EDGE_DB_MODE", before);
       await resetPrivilegedConnectionsForTests();
     }
   });
@@ -81,32 +71,6 @@ async function withFreshUserWithDevice(label: string): Promise<{ uid: string; de
   await adminSql()`insert into app.device (id, user_id, platform) values (${deviceId}, ${uid}, 'ios')`;
   return { uid, deviceId };
 }
-
-Deno.test("EDGE_DB_MODE: only legacy / edge are accepted (unset = legacy); anything else is a configuration error, never a silent default", DT, () => {
-  const before = Deno.env.get("EDGE_DB_MODE");
-  try {
-    Deno.env.delete("EDGE_DB_MODE");
-    assertEquals(getDbMode(), "legacy");
-    Deno.env.set("EDGE_DB_MODE", "legacy");
-    assertEquals(getDbMode(), "legacy");
-    Deno.env.set("EDGE_DB_MODE", "edge");
-    assertEquals(getDbMode(), "edge");
-    for (const bad of ["EDGE", "service_role", "true", "1", " edge"]) {
-      Deno.env.set("EDGE_DB_MODE", bad);
-      let threw = false;
-      try {
-        getDbMode();
-      } catch (e) {
-        threw = true;
-        assert(String((e as Error).message).includes("EDGE_DB_MODE must be 'legacy' or 'edge'"));
-      }
-      assert(threw, `'${bad}' must be refused`);
-    }
-  } finally {
-    if (before === undefined) Deno.env.delete("EDGE_DB_MODE");
-    else Deno.env.set("EDGE_DB_MODE", before);
-  }
-});
 
 edgeTest("self-check: a connection that is not edge_gateway (the harness role: a superuser, or at least not the edge login) is REFUSED, as a plain Error, and the refusal is not cached", async () => {
   const harnessUrl = `postgres:///${PGDATABASE}`; // host-less: PGHOST/PGPORT/PGUSER from the environment = the harness role
@@ -381,5 +345,28 @@ edgeTest("edge mode: a rate-limit hit uses the bare key (the database adds the <
   assertEquals((await hitRateLimitForActor(makeActor(b.uid), key, 3600, 2)).count, 1, "B has its own bucket for the same key");
   await ensureServiceRole();
   const stored = await adminSql()`select bucket_key from private.rate_limit_bucket where bucket_key = ${a.uid + ":" + key}`;
-  assertEquals(stored.length, 1, "the bucket is stored under <uid>:<key>, the exact key legacy mode builds");
+  assertEquals(stored.length, 1, "the bucket is stored under <uid>:<key>");
+});
+
+// R2 ruling (edge role PR4b): `play.held_review` is NOT one-way for edge_actor, because the scorer legitimately lifts a hold. This cell pins the
+// legitimate path (the real Repo, as edge_actor): a play scored held, then re-scored with the attested contribution it lacked, is un-held through
+// `play.upsertFromScore`. If a later change makes the column one-way for edge_actor, this cell fails first and the re-score has to be given a definer.
+edgeTest("R2 ruling: the scorer lifts a hold through the real Repo as edge_actor (play.upsertFromScore: held true, then re-scored un-held)", async () => {
+  const { uid } = await withFreshUserWithDevice("r2");
+  const actor = makeActor(uid);
+  const score = (heldReview: boolean) =>
+    withOwnership(actor, (repo) =>
+      repo.play.upsertFromScore({
+        courseId: "crs_x1", facilityId: "fac_x", playDate: "2026-09-20", courseDisambiguatedBy: null,
+        scoreBadge: 0.6, scoreMonetary: 0.9, hardSignal: true, presenceSignal: true, money: true, heldReview,
+        policyVersion: "v1", inputDigest: "r".repeat(64), evidenceIds: [],
+      }),
+    );
+  const held = await score(true);
+  await ensureServiceRole();
+  const heldOf = async () => (await adminSql()`select held_review from app.play where id = ${held.id}`)[0]!.held_review as boolean;
+  assertEquals(await heldOf(), true);
+  const lifted = await score(false);
+  assertEquals(lifted.id, held.id, "the same play row was re-scored");
+  assertEquals(await heldOf(), false, "the scorer lifted the hold: held_review true -> false as edge_actor (the ruling: this stays inside R6)");
 });

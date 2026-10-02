@@ -56,6 +56,7 @@
 // requirement.
 
 import { AST_NODE_TYPES, parse, type TSESTree } from "@typescript-eslint/typescript-estree";
+import { lintPrivilegedSource } from "./privileged-lint.js";
 
 export type RuleId =
   | "service-role-construction"
@@ -71,6 +72,15 @@ export type RuleId =
   | "raw-fetch-with-secret"
   | "dynamic-code-execution"
   | "parse-error"
+  // Edge role PR4b: the privileged-file pass (privileged-lint.ts), the ONE set of rules that applies to privileged.ts itself.
+  | "privileged-forbidden-role"
+  | "privileged-db-url"
+  | "privileged-service-key"
+  | "privileged-env-access"
+  | "privileged-stray-transaction"
+  | "privileged-stray-pool"
+  | "privileged-guc-in-ts"
+  | "privileged-edge-db-mode"
   // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): "the mere presence of any
   // node_modules directory under the functions root [is] a finding."
   // Emitted by index.ts's own directory walker (listFiles), not by this
@@ -571,7 +581,10 @@ function isExactDenoEnvGetCall(node: TSESTree.Node): node is TSESTree.CallExpres
 export function lintSource(source: string, filePath: string, options: LintOptions = {}): Finding[] {
   const findings: Finding[] = [];
   if (isAllowedFile(filePath)) {
-    return findings; // privileged.ts is the sanctioned construction site.
+    // privileged.ts is the sanctioned construction site: exempt from every GENERAL rule below (it legitimately imports the driver and
+    // supabase-js and reads raw env), but NOT from the privileged-file pass (edge role PR4b), which keeps the service_role path, the
+    // old database URL, the mode switch, stray transactions and session-variable identity out of it.
+    return lintPrivilegedSource(source);
   }
 
   let ast: TSESTree.Program;

@@ -917,7 +917,15 @@ SELECT is((SELECT expiry_paused_at IS NOT NULL FROM app.offer_code WHERE id = 'e
 SELECT is((SELECT issued_before_hold FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), true, 'cascade: issued_before_hold recorded (the trigger''s own NEW assignments are not privilege-checked)');
 SELECT lives_ok($$SET CONSTRAINTS ALL IMMEDIATE$$, 'cascade: the deferred play-guard constraint triggers (private_definer) accept the result');
 SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 'earned', 'cascade: a code NOT backed by the held play is untouched');
-SELECT is(pg_temp.rows($$UPDATE app.play SET held_review = false WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = '{A}'$$), 1, 'cascade: lifting the hold is also a counted write');
+-- R2 ruling (edge role PR4b, docs/security/edge-role-design.md section 8): `held_review` is deliberately NOT one-way for edge_actor. The scorer lifts a hold when a
+-- re-score has an attested contribution the first score lacked (score-play.ts computeHeldReview: held = no attested + some non-attested), through
+-- `Repo#play.upsertFromScore` (ON CONFLICT DO UPDATE SET held_review = excluded.held_review) as edge_actor; a one-way column would forbid that re-score (the Deno cell
+-- in edge-role.deno.test.ts pins the legitimate path). What keeps the lift from being a lever is that the cascade is one-way: the lift RELEASES NOTHING, and only a
+-- reviewer's app.resolve_held_* moves a held code. Both facts are one cell here (it is one cell on purpose: the tail of this file is numbered by hand).
+SELECT is(pg_temp.rows($$UPDATE app.play SET held_review = false WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = '{A}'$$)::text
+          || '/' || (SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901')
+          || '/' || (SELECT state::text FROM app.entitlement WHERE id = 'eeee0000-0000-0000-0000-0000000a0801'),
+  '1/held_review/held_review', 'cascade: lifting the hold is a counted write (1 row) and releases NOTHING: the backing code and entitlement stay held_review (R2 ruling: held_review is not one-way for edge_actor)');
 ROLLBACK;
 -- The same hold by B changes nothing of A's.
 BEGIN;

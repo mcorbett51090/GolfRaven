@@ -159,7 +159,7 @@ Deno.test("NEW-1/NEW-3/LOW: drains before the covering import leave a not-yet-im
   assertEquals((thrown as { code: string }).code, "unknown_id");
 });
 
-Deno.test("NEW-2: a transient error (a REAL lock timeout — another session holds the row's lock for 7 s) leaves the row queued, even though the covering import already ran; the next healthy pass resolves it", DT, async () => {
+Deno.test("NEW-2: a transient error (a REAL lock timeout — another session holds the play row the re-score needs for 7 s) leaves the row queued, even though the covering import already ran; the next healthy pass resolves it", DT, async () => {
   const user = await newUser("lock");
   await ensureServiceRole();
   const deviceId = freshUuid();
@@ -173,9 +173,14 @@ Deno.test("NEW-2: a transient error (a REAL lock timeout — another session hol
     returning id`;
   const id = ins[0]!.id as string;
 
-  // A second session holds the row for 7 s (> the 5 s lock_timeout).
+  // A second session holds a lock the drain's transaction needs, for 7 s (> the 5 s lock_timeout). It used to hold the EVIDENCE row itself; since
+  // edge role PR4b the drain's first statement locks that row `for update skip locked`, so a held evidence row is SKIPPED (the P1 cells in
+  // edge-system-path.deno.test.ts prove that) and no longer produces a timeout here. The play row the re-score upserts is the next lock the
+  // transaction takes: a play for this user/course/day already exists, and the holder has it, so the upsert (ON CONFLICT DO UPDATE) waits and times out.
+  const playDate = todayChicago();
+  await adminSql()`insert into app.play (user_id, course_id, facility_id, play_date, policy_version, status) values (${user.uid}, 'crs_y1', 'fac_y', ${playDate}, 'v0', 'provisional')`;
   const holder = adminSql().begin(async (trx) => {
-    await trx`select id from app.evidence where id = ${id} for update`;
+    await trx`select id from app.play where user_id = ${user.uid} and course_id = 'crs_y1' and play_date = ${playDate} for update`;
     await sleep(7000);
   });
   await sleep(800);

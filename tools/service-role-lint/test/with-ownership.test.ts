@@ -37,8 +37,14 @@ import { describe, expect, it } from "vitest";
 // cli.js supabase/functions` is clean — see tools/db/test.sh's own
 // "service-role lint" step).
 const PRIVILEGED_TS = readFileSync(join(import.meta.dirname, "..", "..", "..", "supabase", "functions", "_shared", "privileged.ts"), "utf8");
+// The same text without comments, for the "this word appears nowhere in the code" pins (the file's own comments name the deleted things).
+const PRIVILEGED_CODE = PRIVILEGED_TS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-describe("privileged.ts — withOwnership is genuinely implemented (P3c), not the old fail-closed stub", () => {
+// ⛔ UPDATED (edge role PR4b): the `service_role` / `legacy` shape these pins used to describe is gone. There is ONE transaction opener
+// (`openScopedTx`, as edge_actor / edge_system), and `withOwnership`, `withOwnershipBatch`, `withDelegatedActor` and `withSystemCatalogImport`
+// are thin callers of it. The pins below say that; the structural bans (no service_role, no stray `.begin(`, ...) are the privileged-file lint
+// pass's (privileged-lint.ts, test/privileged-lint.test.ts).
+describe("privileged.ts — withOwnership is genuinely implemented (P3c), as one transaction opened by openScopedTx (PR4b)", () => {
   it("exports withOwnership and getActorFromRequest", () => {
     expect(PRIVILEGED_TS).toMatch(/export (?:async )?function withOwnership/);
     expect(PRIVILEGED_TS).toMatch(/export async function getActorFromRequest/);
@@ -48,92 +54,66 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
     expect(PRIVILEGED_TS).not.toMatch(/withOwnership\(\) is not implemented yet/);
   });
 
-  // ⛔ FIX (item 2): the whole callback runs inside ONE real transaction
-  // (`db.begin(...)`), not a bare `op(buildRepo())` call against
-  // autocommitting statements.
-  it("withOwnership runs its callback inside a real db.begin() transaction, not bare autocommitting statements", () => {
+  // ⛔ FIX (item 2): the whole callback runs inside ONE real transaction, not a bare `op(buildRepo())` call against autocommitting statements.
+  it("withOwnership runs its callback inside ONE real transaction (openScopedTx -> db.begin), not bare autocommitting statements", () => {
     expect(PRIVILEGED_TS).toMatch(/export async function withOwnership<T>\(actor: Actor, op: Op<T>\): Promise<T> \{/);
-    expect(PRIVILEGED_TS).toMatch(/const db = sql\(\);/);
-    // ⛔ FIX (follow-up 13): wrapped in try/await so a timeout SQLSTATE
-    // can be mapped to a 503 before it escapes this function — the call
-    // itself is unchanged (still one real db.begin() transaction).
+    expect(PRIVILEGED_TS).toMatch(/return await openScopedTx\("actor", userBind\(actor\.uid\), \(trx\) => op\(buildRepo\(trx, actor\)\)\);/);
     expect(PRIVILEGED_TS).toMatch(/return await \(db\.begin\(async \(trx: TxSql\) => \{/);
+    // and there is exactly ONE db.begin( in the file
+    expect((PRIVILEGED_CODE.match(/\.begin\(/g) ?? []).length).toBe(1);
   });
 
-  // ⛔ NEW (P3c gate PASS follow-up 13, "503 after a successful commit"):
-  // both withOwnership and withOwnershipBatch must give the database a
-  // deadline well under http.ts's own 15s request timeout, so a slow
-  // statement/lock wait fails INSIDE the transaction (rolling it back)
-  // rather than the HTTP layer timing out while the write keeps running
-  // and later commits behind the client's back.
-  it("withOwnership, withOwnershipBatch and withSystemCatalogImport all set statement_timeout and lock_timeout below the 15s HTTP request race", () => {
-    const statementTimeoutCount = (PRIVILEGED_TS.match(/set local statement_timeout = '10s'/g) ?? []).length;
-    const lockTimeoutCount = (PRIVILEGED_TS.match(/set local lock_timeout = '5s'/g) ?? []).length;
-    // ⛔ UPDATED (P3e, import-catalog): withSystemCatalogImport (privileged.ts's
-    // additive end-of-file section) is a THIRD legitimate transaction
-    // wrapper with the same deadline discipline — see that function's own
-    // doc for why it also needs statement_timeout/lock_timeout (it runs
-    // the SAME "SET LOCAL ROLE service_role" + role-assertion pattern as
-    // withOwnership/withOwnershipBatch, for the same reason).
-    // ⛔ UPDATED (edge role PR2): openScopedTx (the edge-mode transaction opener behind withOwnership /
-    // withOwnershipBatch) is a FOURTH site with the same deadlines — it is the one place the edge role sets them.
-    expect(statementTimeoutCount).toBe(4); // withOwnership + withOwnershipBatch + withSystemCatalogImport (legacy) + openScopedTx (edge)
-    expect(lockTimeoutCount).toBe(4);
+  // ⛔ NEW (P3c gate PASS follow-up 13, "503 after a successful commit"): every transaction must give the database a deadline well under http.ts's
+  // own 15s request timeout, so a slow statement/lock wait fails INSIDE the transaction (rolling it back) rather than the HTTP layer timing out while
+  // the write keeps running and later commits behind the client's back. ⛔ UPDATED (PR4b): openScopedTx is now the ONLY site that sets them, which is
+  // what makes "every transaction has the deadlines" true by construction.
+  it("openScopedTx is the one place statement_timeout and lock_timeout are set (so every transaction has them)", () => {
+    expect((PRIVILEGED_TS.match(/set local statement_timeout = '10s'/g) ?? []).length).toBe(1);
+    expect((PRIVILEGED_TS.match(/set local lock_timeout = '5s'/g) ?? []).length).toBe(1);
+    expect((PRIVILEGED_TS.match(/set local transaction_timeout = '12s'/g) ?? []).length).toBe(1);
   });
 
-  it("withOwnership and withOwnershipBatch map a statement/lock-timeout SQLSTATE to Errors.serviceUnavailable(), not an opaque 500", () => {
+  it("withOwnership, withOwnershipBatch and withSystemCatalogImport map a statement/lock-timeout SQLSTATE to Errors.serviceUnavailable(), not an opaque 500", () => {
     expect(PRIVILEGED_TS).toMatch(/function mapPgTimeoutError\(err: unknown\): unknown \{/);
     expect(PRIVILEGED_TS).toMatch(/PG_TIMEOUT_SQLSTATES = new Set\(\["57014", "55P03"\]\)/);
     expect(PRIVILEGED_TS).toMatch(/throw mapPgTimeoutError\(err\);/);
   });
 
-  // ⛔ FIX (item 5, the bug this file used to PIN): `actor` is a real,
-  // USED parameter — never `_actor` — and `buildRepo` takes it
-  // explicitly, closing over `actor.uid` for every Repo method built
-  // from it. The old shape (`buildRepo()`, zero args) is asserted ABSENT
-  // below, not merely "not required".
-  //
-  // ⛔ FIX (P3c gate PASS follow-up 14, nit): `buildRepo`'s own `db`
-  // parameter was unused (every Repo method queries through `trx`, never
-  // `db`) and has been removed — `buildRepo(trx, actor)`/
-  // `buildRepo(sp, actor)`, not `buildRepo(db, trx, actor)`/
-  // `buildRepo(db, sp, actor)`. This assertion is updated to match, not
-  // merely relaxed: the two-arg call sites are asserted PRESENT and the
-  // old three-arg shape is asserted ABSENT, so this test would fail
-  // again if the dead parameter were reintroduced.
-  it("withOwnership (and withOwnershipBatch) pass the REAL actor into buildRepo(trx, actor) — never a zero-arg buildRepo(), never an unused _actor, never a reintroduced unused db param", () => {
-    // ⛔ UPDATED (edge role PR2): buildRepo also takes the EDGE_DB_MODE it is building for ("legacy" here; the edge
-    // branches call buildRepo(trx|sp, actor, "edge") through openScopedTx). The real actor is still passed.
-    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(trx, actor, "legacy"\);/);
-    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(sp, actor, "legacy"\);/);
-    expect(PRIVILEGED_TS).toMatch(/buildRepo\(trx, actor, "edge"\)/);
-    expect(PRIVILEGED_TS).toMatch(/buildRepo\(sp, actor, "edge"\)/);
+  // ⛔ FIX (item 5, the bug this file used to PIN): `actor` is a real, USED parameter — never `_actor` — and `buildRepo` takes it explicitly, closing
+  // over `actor.uid` for every Repo method built from it. ⛔ UPDATED (PR4b): buildRepo no longer takes a mode.
+  it("withOwnership (and withOwnershipBatch) pass the REAL actor into buildRepo(trx, actor) — never a zero-arg buildRepo(), never an unused _actor, never a mode", () => {
+    expect(PRIVILEGED_TS).toMatch(/buildRepo\(trx, actor\)/);
+    expect(PRIVILEGED_TS).toMatch(/buildRepo\(sp, actor\)/);
+    expect(PRIVILEGED_TS).not.toMatch(/buildRepo\([a-z]+, actor, "/);
     expect(PRIVILEGED_TS).not.toMatch(/function withOwnership[^)]*\(_actor: Actor/);
     expect(PRIVILEGED_TS).not.toMatch(/function buildRepo\(\): Repo \{/);
     expect(PRIVILEGED_TS).not.toMatch(/buildRepo\(db, (trx|sp), actor\)/);
   });
 
-  // ⛔ FIX ("Conditions on the BYPASSRLS design", required): the
-  // connecting role is not assumed to already BE service_role — activated
-  // explicitly, every transaction, with a hard assertion that it worked.
-  it("withOwnership activates service_role explicitly (SET LOCAL ROLE) and asserts current_user before building a Repo", () => {
-    expect(PRIVILEGED_TS).toMatch(/await trx`set local role service_role`;/);
-    expect(PRIVILEGED_TS).toMatch(/if \(check\[0\]\?\.u !== "service_role"\)/);
+  // ⛔ FIX ("Conditions on the BYPASSRLS design", required, kept in its edge form): the role is activated explicitly, every transaction, with a hard
+  // assertion that it worked, and it is an edge role (never service_role: the privileged-file lint pass fails on that literal).
+  it("openScopedTx activates an edge role explicitly (SET LOCAL ROLE) and asserts current_user before running anything", () => {
+    expect(PRIVILEGED_TS).toMatch(/await trx`set local role edge_actor`;/);
+    expect(PRIVILEGED_TS).toMatch(/await trx`set local role edge_system`;/);
+    expect(PRIVILEGED_TS).toMatch(/if \(c\?\.u !== role\) throw new Error\(`openScopedTx: expected current_user/);
+    expect(PRIVILEGED_TS).not.toMatch(/set local role service_role/);
   });
 
   it("buildRepo takes the REAL transaction handle and the actor (no unused db param), and returns a Repo", () => {
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor, mode: DbMode\): Repo \{/);
-    // Closes over `actor.uid` once — every Repo method built from this
-    // function reads `uid` from closure, not a per-call parameter.
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor, mode: DbMode\): Repo \{\s*const uid = actor\.uid;/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{/);
+    // Closes over `actor.uid` once — every Repo method built from this function reads `uid` from closure, not a per-call parameter.
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{\s*const uid = actor\.uid;/);
     expect(PRIVILEGED_TS).not.toMatch(/function buildRepo\(db: ReturnType<typeof postgres>/);
   });
 
   it("still never returns the raw supabase-js/postgres client to a caller — only a narrow Repo object", () => {
-    // buildRepo(...)'s return type is `Repo` (types.ts) everywhere this
-    // file constructs one; `deno check` (this session) confirms it
-    // type-checks against that interface, which has no method returning
-    // a client.
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor, mode: DbMode\): Repo \{/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{/);
+  });
+
+  it("the legacy path is gone: no mode switch, no service_role pool, no SUPABASE_DB_URL read, no nil-uid system actor", () => {
+    expect(PRIVILEGED_CODE).not.toMatch(/getDbMode|DbMode|EDGE_DB_MODE/);
+    expect(PRIVILEGED_CODE).not.toMatch(/SUPABASE_DB_URL/);
+    expect(PRIVILEGED_CODE).not.toMatch(/SIGNIN_SYSTEM_ACTOR/);
+    expect(PRIVILEGED_CODE).not.toMatch(/function sql\(\)/);
   });
 });

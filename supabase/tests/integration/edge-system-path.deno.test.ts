@@ -1,13 +1,12 @@
 // supabase/tests/integration/edge-system-path.deno.test.ts
 //
 // Edge role PR3 (follow-up 6, step 3 of 4): the SYSTEM path of `import-catalog` runs as `edge_system` and acts for a user only through the
-// DELEGATE binders. Proved against the REAL cluster tools/db/test.sh builds, in the real `edge` mode this file forces itself (so both passes of
-// tools/db/test-deno-integration.sh run it as edge; the rest of the suite runs the pass's own mode, and the catalog suites that drain through
-// `withDelegatedActor` therefore exercise the delegate flow in the `edge` pass and the unchanged `withOwnership` path in the `legacy` one).
+// DELEGATE binders. Proved against the REAL cluster tools/db/test.sh builds. (PR4b: edge is the only mode; the `legacy` pool and its control
+// cell are gone, the rest of the cells are unchanged.)
 //
 //   A. `import-catalog` needs ONE connection string: the whole pipeline (signing-key read, import, both drains, both purges, the rate limit)
-//      runs with the legacy URL UNSET, and again with it pointing at an unusable host (so a quiet fallback to the legacy pool would fail,
-//      with a control that the same URL really does break `legacy` mode).
+//      runs with SUPABASE_DB_URL UNSET, and again with it pointing at an unusable host (nothing reads it any more; the lint also fails the
+//      build on any read of it in privileged.ts).
 //   B. A delegated transaction binds exactly the owner of the row it names, only while the row's precondition holds, and an unscoped query
 //      inside it sees 0 foreign rows. The drain and the rescore are proved to open their per-row transactions with that delegate and that
 //      owner (a probe re-opens the identical delegated transaction and reads what the database says).
@@ -42,22 +41,18 @@ const FAC_Y = "fac_y";
 const CRS_Y1 = "crs_y1";
 const TODAY_CHICAGO = todayChicago();
 
-/** One test with EDGE_DB_MODE=edge; the previous value (and the connections) are put back afterwards, exactly as edge-role.deno.test.ts does. */
+/** One test; the connections are reset afterwards, exactly as edge-role.deno.test.ts does. */
 function edgeTest(name: string, fn: () => void | Promise<void>): void {
   Deno.test(name, DT, async () => {
-    const before = Deno.env.get("EDGE_DB_MODE");
-    Deno.env.set("EDGE_DB_MODE", "edge");
     try {
       await fn();
     } finally {
-      if (before === undefined) Deno.env.delete("EDGE_DB_MODE");
-      else Deno.env.set("EDGE_DB_MODE", before);
       await resetPrivilegedConnectionsForTests();
     }
   });
 }
 
-/** Runs `fn` with SUPABASE_DB_URL (the LEGACY pool's only input) unset (`null`) or set to `url`, then restores it. */
+/** Runs `fn` with SUPABASE_DB_URL (which no code reads any more) unset (`null`) or set to `url`, then restores it. */
 async function withLegacyUrl<T>(url: string | null, fn: () => Promise<T>): Promise<T> {
   const before = Deno.env.get("SUPABASE_DB_URL");
   await resetPrivilegedConnectionsForTests();
@@ -192,24 +187,15 @@ async function wholeSystemPath(label: string) {
   assertEquals(rl.ok, true);
 }
 
-edgeTest("PR3: import-catalog's WHOLE system path (key read, import, queued drain, rescore drain, both purges, rate limit) runs with the legacy URL UNSET", async () => {
+edgeTest("PR3: import-catalog's WHOLE system path (key read, import, queued drain, rescore drain, both purges, rate limit) runs with SUPABASE_DB_URL UNSET", async () => {
   await withLegacyUrl(null, () => wholeSystemPath("unset"));
 });
 
-edgeTest("PR3: ...and with SUPABASE_DB_URL pointing at an unusable host (a quiet fallback to the legacy pool would fail); the control shows legacy mode really is broken by that URL", async () => {
+edgeTest("PR3: ...and with SUPABASE_DB_URL pointing at an unusable host (nothing may read it: a read would fail here)", async () => {
   await withLegacyUrl(UNUSABLE_LEGACY_URL, () => wholeSystemPath("invalid"));
-  // control: the same URL does break the legacy path, so the passes above prove the legacy pool was never opened.
-  await withLegacyUrl(UNUSABLE_LEGACY_URL, async () => {
-    Deno.env.set("EDGE_DB_MODE", "legacy");
-    try {
-      await assertRejects(() => withSystemCatalogImport((repo) => repo.catalog.currentVersion()));
-    } finally {
-      Deno.env.set("EDGE_DB_MODE", "edge");
-    }
-  });
 });
 
-edgeTest("PR3: edge mode with the EDGE URL missing fails closed (one connection string is required, not zero)", async () => {
+edgeTest("PR3: with the EDGE URL missing every database call fails closed (one connection string is required, not zero)", async () => {
   const before = Deno.env.get("GOLFRAVEN_EDGE_DB_URL");
   await resetPrivilegedConnectionsForTests();
   Deno.env.delete("GOLFRAVEN_EDGE_DB_URL");
@@ -499,4 +485,104 @@ edgeTest("PR3: the retention bounds are the database's: a fix-coordinate purge a
     const err = (await assertRejects(() => withSystemCatalogImport((repo) => repo.rescoreBacklog.purgeFixCoords(days, 100)))) as { code?: string };
     assertEquals(err.code, "22023", `retention ${days}`);
   }
+});
+
+// ============================================================================
+// D. PR3 gate P1 (edge role PR4b): concurrent drains do not double-process a queued row
+// ============================================================================
+// `Repo#evidence.readQueuedInput` is the first statement of the drain's per-row transaction and takes `for update skip locked` on the evidence
+// row. These cells are TWO real sessions (two pooled connections of the real privileged.ts): session A holds the row's transaction open; session B,
+// a second drain, must skip the row instead of re-deriving it.
+
+/** Opens session A: a delegated transaction that reads (and so locks) the queued row, then waits for `release()` before it commits. */
+async function holdQueuedRow(ref: DelegateRef & { kind: "queued_evidence" }, actor: Actor) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let locked!: () => void;
+  const lockedSignal = new Promise<void>((r) => (locked = r));
+  const done = withDelegatedActor(ref, actor, async (repo) => {
+    const first = await repo.evidence.readQueuedInput(ref.evidenceId);
+    locked();
+    await gate;
+    return first;
+  });
+  // a failure of A must surface, not hang the test
+  const settled = done.then((v) => v, (e) => { locked(); throw e; });
+  await lockedSignal;
+  return { release, done: settled };
+}
+
+edgeTest("PR4b P1: while one drain holds a queued row, a second drain's re-read gets NO row (skip locked), immediately; once the first commits the row is readable again", async () => {
+  const a = await newPlainUser("lock-a");
+  const ea = await seedQueued(a.uid);
+  const ref = { kind: "queued_evidence", evidenceId: ea.evidenceId } as const;
+  const held = await holdQueuedRow(ref, a);
+  try {
+    // control: the row IS still queued while A holds it, so the empty answer below is the lock's doing, not a state change
+    const status = (await adminSql()`select status from app.evidence where id = ${ea.evidenceId}`)[0]!.status;
+    assertEquals(status, "queued_catalog", "control: the row is still queued while A holds it");
+    const t0 = Date.now();
+    const b = await withDelegatedActor(ref, a, (repo) => repo.evidence.readQueuedInput(ea.evidenceId));
+    const ms = Date.now() - t0;
+    assertEquals(b, null, "B skipped the row A holds");
+    assert(ms < 3000, `B did not wait for A (took ${ms} ms; the lock timeout is 5 s)`);
+  } finally {
+    held.release();
+  }
+  const first = await held.done;
+  assertEquals((first?.queuedInput as { deviceId?: string }).deviceId, ea.deviceId, "A read the row");
+  const after = await withDelegatedActor(ref, a, (repo) => repo.evidence.readQueuedInput(ea.evidenceId));
+  assertEquals((after?.queuedInput as { deviceId?: string }).deviceId, ea.deviceId, "the lock ended with A's transaction: the row is readable again");
+});
+
+edgeTest("PR4b P1: a second REAL drain over a row another drain holds does not re-derive it (no resolve attempt, no error), and picks it up once the first is done", async () => {
+  await closeStaleBacklog();
+  const queuedUser = await newPlainUser("lock-drain");
+  const currentVersion = (await adminSql()`select site_version from app.catalog_version order by site_version desc nulls last, version desc limit 1`)[0]!.site_version as string;
+  const q = await seedQueued(queuedUser.uid, { facilityId: FAC_Y, courseId: CRS_Y1, claimedVersion: currentVersion });
+  const ref = { kind: "queued_evidence", evidenceId: q.evidenceId } as const;
+  const drainRepo = makeDrainReadRepo(withSystemCatalogImport);
+
+  // a spy over withDelegatedActor that records what the drain does with THIS row
+  const reads: unknown[] = [];
+  let resolveAttempts = 0;
+  const spy: WithDelegatedActorFn = (delegate, actor, op) =>
+    withDelegatedActor(delegate, actor, (repo) => {
+      if (delegate.kind === "queued_evidence" && delegate.evidenceId === q.evidenceId) {
+        const realRead = repo.evidence.readQueuedInput.bind(repo.evidence);
+        repo.evidence.readQueuedInput = async (id) => {
+          const r = await realRead(id);
+          reads.push(r);
+          return r;
+        };
+        const realResolve = repo.evidence.resolveQueuedRow.bind(repo.evidence);
+        repo.evidence.resolveQueuedRow = (...args) => {
+          resolveAttempts += 1;
+          return realResolve(...args);
+        };
+      }
+      return op(repo);
+    });
+
+  const held = await holdQueuedRow(ref, queuedUser);
+  let during;
+  try {
+    during = await drainQueuedCatalog(drainRepo, spy, 200);
+  } finally {
+    held.release();
+  }
+  await held.done;
+  assertEquals(reads, [null], "the second drain's re-read of the held row returned no row");
+  assertEquals(resolveAttempts, 0, "the second drain did not re-derive (resolve) the row A holds");
+  assertEquals(during.errored, 0, `no row errored (a blocked second drain would have hit the 5 s lock timeout): ${JSON.stringify(during)}`);
+  assertEquals((await adminSql()`select status from app.evidence where id = ${q.evidenceId}`)[0]!.status, "queued_catalog", "nothing was resolved while A held the row");
+
+  // A is done: the next drain pass resolves the row, exactly once
+  reads.length = 0;
+  resolveAttempts = 0;
+  const later = await drainQueuedCatalog(drainRepo, spy, 200);
+  assert(later.resolved >= 1, `the row is drained once the first session is done: ${JSON.stringify(later)}`);
+  assertEquals(reads.length, 1);
+  assertEquals(resolveAttempts, 1);
+  assertEquals((await adminSql()`select status from app.evidence where id = ${q.evidenceId}`)[0]!.status, "accepted");
 });

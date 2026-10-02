@@ -1,46 +1,27 @@
 // supabase/functions/_shared/privileged.ts
-// build plan §4.7.1a (docs/golf-trails/02-build-plan.md:1183-1205): "Every
-// write runs as service_role, which bypasses RLS. The authorization
-// boundary on writes is therefore each Edge Function's own ownership and
-// scope check... Writes and privileged reads go only through
+// build plan §4.7.1a (docs/golf-trails/02-build-plan.md:1183-1205): "Writes and privileged reads go only through
 // supabase/functions/_shared/privileged.ts -> withOwnership(actor, op)."
 //
-// THIS FILE is the SOLE allow-listed construction site for a service-role
-// client (tools/service-role-lint rule (a)) and the sole allow-listed
-// place a raw `.from()`/`.rpc()`/Storage call, a Postgres driver import,
-// or `SUPABASE_DB_URL`/`SUPABASE_SERVICE_ROLE_KEY` may appear (rules (b),
-// (c)) — `tools/service-role-lint/src/lint.ts`'s `isAllowedFile` exempts
-// this EXACT path (`supabase/functions/_shared/privileged.ts`) from every
-// one of its checks; see that file's own header comment.
+// THIS FILE is the SOLE allow-listed construction site for a Postgres connection and for the one remaining service-role-keyed
+// client (`adminClient`, GoTrue admin calls only), and the sole allow-listed place a raw `.from()`/`.rpc()`/Storage call, a
+// Postgres driver import, or an env read of anything outside the public allow-list may appear (tools/service-role-lint rules
+// (a)-(c)): `tools/service-role-lint/src/lint.ts`'s `isAllowedFile` exempts this EXACT path (`supabase/functions/_shared/
+// privileged.ts`) from the general rules, and since edge role PR4b a SEPARATE privileged-file pass (`lintPrivilegedSource`) runs
+// over it and fails on any `service_role` / `set role` literal other than the two edge roles, any `SUPABASE_DB_URL`, the
+// service-role key anywhere but `adminClient` and `isServiceRoleBearer`, a `.begin(` / `.savepoint(` outside `openScopedTx` /
+// `withOwnershipBatch`, a `set_config(` / `current_setting(` in TypeScript, and any `EDGE_DB_MODE`.
+//
+// THE DATABASE ROLE MODEL (docs/security/edge-role-design.md): every transaction this file opens is `SET LOCAL ROLE edge_actor`
+// (per-user work, identity = the database-side binding `private.bind_actor(uid)`) or `edge_system` (the catalog importer and the
+// system drains), over ONE pool connecting as the NOBYPASSRLS login `edge_gateway` (GOLFRAVEN_EDGE_DB_URL). FORCE RLS therefore
+// backs every Repo method. There is no `service_role` / BYPASSRLS path left (edge role PR4b deleted it, together with the
+// `EDGE_DB_MODE` switch and every use of `SUPABASE_DB_URL` for database access).
 //
 // WHY A DIRECT POSTGRES CONNECTION, NOT supabase-js `.from()`/`.rpc()`:
-// `supabase/config.toml` sets `db.schemas = ["api"]` — PostgREST (which
-// `supabase-js` talks to) exposes ONLY the `api` schema. Every table this
-// round's endpoints read or write (`app.evidence`, `app.play`,
-// `app.checkin_challenge`, `app.catalog_id_ledger`, ...) lives in `app`,
-// and the rate-limit helper this round calls (`private.hit_rate_limit`)
-// lives in `private` — NEITHER is PostgREST-exposed, at any role, so
-// there is no `supabase-js` call shape that could ever reach them. A
-// direct Postgres connection is the only way to reach them at all, which
-// is exactly what the lint's rule (c) anticipates by naming
-// `SUPABASE_DB_URL`/a Postgres driver import as a legitimate,
-// privileged.ts-only shape.
-//
-// ⛔ P3c gate round 2 ("Conditions on the BYPASSRLS design", required):
-// the connection string's own role is `[unverified]` to be `service_role`
-// itself on the REAL hosted project — it may well be `postgres` (or
-// another admin-ish role), per the gate's own note. This file no longer
-// assumes it: `withOwnership` runs `SET LOCAL ROLE service_role` as the
-// FIRST statement of every transaction and asserts `current_user` came
-// back as `service_role` before building a `Repo` at all — see
-// `withOwnership`'s own body. If the connecting role can't assume
-// `service_role` (no membership, wrong grant), every request fails
-// closed with a clear error instead of silently running as whatever role
-// actually connected. No per-request GUC is used anywhere in this file —
-// every query parameterizes `actor.uid`/ids directly as bound values, so
-// there is nothing here for `SET LOCAL` + `nullif(current_setting(...))`
-// to apply to; noted because the gate asked for this to be stated
-// explicitly, not left implicit.
+// `supabase/config.toml` sets `db.schemas = ["api"]` — PostgREST (which `supabase-js` talks to) exposes ONLY the `api` schema.
+// Every table this code reads or writes (`app.evidence`, `app.play`, ...) lives in `app`, and the rate-limit helper
+// (`private.hit_actor_rate_limit`) lives in `private`: neither is PostgREST-exposed, at any role, so there is no `supabase-js`
+// call shape that could ever reach them.
 //
 // [unverified — this session confirmed `deno eval`/`deno check`/`deno
 // test` can import and resolve `postgres` (now via
@@ -122,6 +103,7 @@ import type {
   RescoreBacklogRow,
   RescoreCursor,
   RescorePlayRef,
+  RetentionStep,
   RosterVersionInput,
 } from "./types.ts";
 // Type-only: erased at runtime, so this does NOT make ABSOLUTE_ROW_CAP a
@@ -153,42 +135,17 @@ export interface Op<T> {
  * cast through `any`. */
 type TxSql = postgres.TransactionSql;
 
-let _sql: ReturnType<typeof postgres> | null = null;
-
 // ============================================================================
-// EDGE ROLE (follow-up 6, PR2): the TEMPORARY `EDGE_DB_MODE` switch.
+// EDGE ROLE (follow-up 6): the one database path.
 // ============================================================================
-// docs/security/edge-role-design.md. `legacy` (the default) is today's path: one
-// pool from SUPABASE_DB_URL, `SET LOCAL ROLE service_role` (BYPASSRLS) per
-// transaction, ownership enforced only by each Repo method's own `user_id = ${uid}`
-// filter. `edge` runs the user-facing paths as `edge_actor` through a pool opened
-// from GOLFRAVEN_EDGE_DB_URL (connecting as the NOBYPASSRLS login `edge_gateway`):
-// FORCE RLS then backs every Repo method, and the identity is the database-side
-// binding `private.bind_actor(uid)` (a forgotten bind fails closed).
+// docs/security/edge-role-design.md. Every transaction runs as `edge_actor` (per-user work: FORCE RLS backs every Repo method, the
+// identity is the database-side binding `private.bind_actor(uid)`, and a forgotten bind fails closed) or `edge_system` (the catalog
+// importer, the drains, the purges), through ONE pool opened from GOLFRAVEN_EDGE_DB_URL (connecting as the NOBYPASSRLS login
+// `edge_gateway`). The system path acts on a user's rows only through the delegate binders (`withDelegatedActor`).
 //
-// Both variables are read ONLY in this file (the lint's allow-listed site). The
-// switch is temporary: PR4 flips the default, deletes the legacy path and adds the
-// lint pass. Until then every behaviour below is written to be observably the same
-// in both modes; the few differences are listed in docs/security/edge-role-design.md
-// §9 ("Behaviour differences between the two modes").
-//
-// PR3 (edge role): the system path is edge_system too. `withSystemCatalogImport` (the importer repo, the drains' list reads, the
-// fix-coordinate purge, the install-link tombstone purge) runs as `edge_system` through GOLFRAVEN_EDGE_DB_URL, so `import-catalog` in
-// `edge` mode needs ONLY that URL and never opens the legacy pool. The drains' per-row USER transactions are `withDelegatedActor`:
-// edge_system binds the row's owner through `private.bind_delegate_for_queued_evidence` / `bind_delegate_for_rescore` (each valid only
-// while its row's precondition holds), then the same transaction acts as `edge_actor`. Nothing in `edge` mode calls `bind_actor` for the
-// system path any more. What stays legacy-only in `edge` mode: nothing in this file; the one `edge`-mode refusal is the OTP-proven
-// cross-account sign-in link (501, docs/security/edge-role-design.md section 12).
-export type DbMode = "legacy" | "edge";
-
-/** Reads `EDGE_DB_MODE` on every call (cheap; lets a test flip it). Anything but
- * `legacy`/`edge` (or unset = `legacy`) is a configuration error, never a silent default. */
-export function getDbMode(): DbMode {
-  const raw = Deno.env.get("EDGE_DB_MODE");
-  if (raw === undefined || raw === "" || raw === "legacy") return "legacy";
-  if (raw === "edge") return "edge";
-  throw new Error(`privileged.ts: EDGE_DB_MODE must be 'legacy' or 'edge' (got '${raw}')`);
-}
+// Edge role PR4b made this the ONLY mode: the `EDGE_DB_MODE` switch, the `service_role` (BYPASSRLS) pool, `SUPABASE_DB_URL` as a database
+// input, `SIGNIN_SYSTEM_ACTOR` and the legacy rate-limit buckets are gone. The lint's privileged-file pass keeps them gone
+// (tools/service-role-lint `lintPrivilegedSource`).
 
 function openPool(dbUrl: string): ReturnType<typeof postgres> {
   return postgres(dbUrl, {
@@ -217,23 +174,13 @@ function openPool(dbUrl: string): ReturnType<typeof postgres> {
   });
 }
 
-function sql(): ReturnType<typeof postgres> {
-  if (_sql) return _sql;
-  const dbUrl = Deno.env.get("SUPABASE_DB_URL");
-  if (!dbUrl) {
-    throw new Error("privileged.ts: SUPABASE_DB_URL is not set in this environment");
-  }
-  _sql = openPool(dbUrl);
-  return _sql;
-}
-
 let _edgeSql: ReturnType<typeof postgres> | null = null;
 
 function edgeSql(): ReturnType<typeof postgres> {
   if (_edgeSql) return _edgeSql;
   const dbUrl = Deno.env.get("GOLFRAVEN_EDGE_DB_URL");
   if (!dbUrl) {
-    throw new Error("privileged.ts: EDGE_DB_MODE=edge needs GOLFRAVEN_EDGE_DB_URL (the edge_gateway connection string)");
+    throw new Error("privileged.ts: GOLFRAVEN_EDGE_DB_URL is not set (the edge_gateway connection string): every database path needs it");
   }
   _edgeSql = openPool(dbUrl);
   return _edgeSql;
@@ -312,17 +259,14 @@ export function setEdgeSelfCheckScheduleForTests(over: { intervalMs?: number; ev
   return () => gate.checksStarted;
 }
 
-/** Tests only: closes both pools and forgets the self-check, so a test can point
- * `GOLFRAVEN_EDGE_DB_URL` / `SUPABASE_DB_URL` somewhere else and start clean. */
+/** Tests only: closes the pool and forgets the self-check, so a test can point `GOLFRAVEN_EDGE_DB_URL` somewhere else and start clean. */
 export async function resetPrivilegedConnectionsForTests(): Promise<void> {
-  const a = _sql;
   const b = _edgeSql;
-  _sql = null;
   _edgeSql = null;
   _edgeGate.reset();
   _edgeGate = newEdgeSelfCheckGate();
   _supportsTransactionTimeout = null;
-  await Promise.allSettled([a?.end({ timeout: 1 }), b?.end({ timeout: 1 })]);
+  await Promise.allSettled([b?.end({ timeout: 1 })]);
 }
 
 /** What `openScopedTx` binds. `expectedUid` is the identity the transaction must END UP
@@ -438,41 +382,16 @@ export async function openScopedTx<T>(kind: "actor" | "system" | "delegate", bin
  * a transaction in the first place.
  */
 export async function hitRateLimitForActor(actor: Actor, bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
-  if (getDbMode() === "edge") {
-    // Edge mode: its own short transaction, as edge_actor, through `private.hit_actor_rate_limit`,
-    // which builds the `<uid>:<key>` bucket IN THE DATABASE from the bound actor (so the Edge code
-    // cannot reach another user's bucket, nor the global one) — the exact key format legacy builds
-    // here, so a bucket counts the same in both modes. The database bounds the key (<= 128 chars),
-    // the window (1 s .. 1 day) and the max (1 .. 1,000,000); a violation raises 22023.
-    const count = await openScopedTx("actor", userBind(actor.uid), async (rateTrx) => {
-      const rows = await rateTrx`select private.hit_actor_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
-      return Number(rows[0]?.count ?? 0);
-    });
-    if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
-    return { ok: true, count };
-  }
-  const db = sql();
-  const scopedBucketKey = `${actor.uid}:${bucketKey}`;
-  // Same reasoning as the round-3 fix this replaces (blocking MEDIUM 3,
-  // "rate-limit hits roll back on 4xx"): its own short transaction, on
-  // the top-level pool, so it commits independently of whatever the
-  // request's own (not-yet-open, with this fix) transaction later does.
-  // `private.hit_rate_limit` itself never raises (0020_rate_limit_no_
-  // raise.sql) — the increment always commits; this code decides
-  // ok/not-ok from the returned count.
-  return db.begin(async (rateTrx: TxSql) => {
-    await rateTrx`set local role service_role`;
-    const check = await rateTrx`select current_user as u`;
-    if (check[0]?.u !== "service_role") {
-      throw new Error(`hitRateLimitForActor: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-    }
-    const rows = await rateTrx`select private.hit_rate_limit(${scopedBucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
-    const count = Number(rows[0]?.count ?? 0);
-    if (count > max) {
-      return { ok: false, count, retryAfterSeconds: windowSeconds };
-    }
-    return { ok: true, count };
-  }) as Promise<RateLimitResult>;
+  // Its own short transaction, as edge_actor, through `private.hit_actor_rate_limit`, which builds the `<uid>:<key>` bucket IN THE DATABASE
+  // from the bound actor (so the Edge code cannot reach another user's bucket, nor the global one). The increment commits on its own,
+  // before any request transaction opens; `private.hit_actor_rate_limit` never raises over the cap (0020), so the decision is made here
+  // from the returned count. The database bounds the key (<= 128 chars), the window (1 s .. 1 day) and the max (1 .. 1,000,000), raising 22023.
+  const count = await openScopedTx("actor", userBind(actor.uid), async (rateTrx) => {
+    const rows = await rateTrx`select private.hit_actor_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
+    return Number(rows[0]?.count ?? 0);
+  });
+  if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
+  return { ok: true, count };
 }
 
 /**
@@ -504,6 +423,15 @@ export async function getActorFromRequest(req: Request): Promise<Actor | null> {
   return { uid: data.user.id, role: "authenticated" };
 }
 
+// THE SERVICE-ROLE KEY: the two places it is still read (the lint's privileged-file pass allows exactly these two functions, and nothing else).
+//   1. `adminClient` (below): a supabase-js client keyed with it, used ONLY for GoTrue admin calls that have no database form: today,
+//      `auth.admin.deleteUser` (`deleteAuthUser`). It is never handed to a caller and never reaches Postgres: every database statement in this file
+//      runs as edge_actor / edge_system through the edge pool. Supabase injects the key into every function's environment whether or not the code reads
+//      it, so reading it here adds no exposure; removing it needs a GoTrue-side admin path that does not exist (PR5 follow-up, design doc section 10).
+//   2. `isServiceRoleBearer` (below): a constant-time COMPARISON of an inbound bearer token with it, so a scheduler that holds the key (Supabase's
+//      documented cron pattern) can call the system functions (`signin-revocation-drain`, `retention-purge`). It authenticates the CALLER; it opens
+//      nothing, and a leaked scheduler token grants only "run an idempotent, bounded, rate-limited maintenance pass".
+// `verifyOtp` is NOT a use of the key: it runs with the anon key (`supabaseEmailOtpVerifier`).
 let _adminClient: ReturnType<typeof createClient> | null = null;
 function adminClient(): ReturnType<typeof createClient> {
   if (_adminClient) return _adminClient;
@@ -520,10 +448,10 @@ function adminClient(): ReturnType<typeof createClient> {
  * P3d, `DELETE /v1/me`: deletes the caller's own Supabase Auth user (task
  * instruction: "Delete the Supabase Auth user: use the Auth admin API
  * from the allow-listed privileged module only"). Uses the SAME
- * privileged-module exemption `getActorFromRequest`/`sql()` already rely
+ * privileged-module exemption `getActorFromRequest` already relies
  * on (`tools/service-role-lint/src/lint.ts`'s `isAllowedFile` — this
- * whole file is the one construction site for a service-role-privileged
- * client of ANY kind, Postgres or Supabase Auth Admin) — routed through
+ * whole file is the one construction site for a Postgres connection and
+ * for the one service-role-keyed client, `adminClient`) — routed through
  * `@supabase/supabase-js`'s Admin API (`auth.admin.deleteUser`), never a
  * direct `auth.users` DELETE from SQL: `private.delete_my_data` (0015)
  * deliberately never touches `auth.users` itself (only reads `email`
@@ -614,7 +542,7 @@ function advisoryLockKeys(namespace: number, id: string): [number, number] {
 // match (`buildRepo(trx, actor)`/`buildRepo(sp, actor)`); their OWN `db`
 // locals stay (that one IS used, to open `sql.begin()`/`sql.savepoint()`
 // in the first place).
-function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
+function buildRepo(trx: TxSql, actor: Actor): Repo {
   const uid = actor.uid;
   return {
     now(): Date {
@@ -623,7 +551,7 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
 
     // ⛔ REMOVED (P3c gate round 4, blocking HIGH: "5 concurrent requests
     // deadlock the pool"). `Repo` no longer has a `rateLimit` member at
-    // all — see `hitRateLimitForActor`'s own doc, above `sql()`, for the
+    // all — see `hitRateLimitForActor`'s own doc, above, for the
     // full reasoning and its replacement. A rate-limit hit is now always
     // made via `hitRateLimitForActor(actor, ...)`, called BEFORE
     // `withOwnership`/`withOwnershipBatch` even opens, never through a
@@ -939,7 +867,18 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
       // Edge role PR3: the drain's re-read of the raw submission AS THE ROW'S OWNER (see types.ts). Guarded by status so a row a
       // concurrent drain already resolved reads as "gone", never as a stale submission to re-run.
       async readQueuedInput(id: string): Promise<{ queuedInput: unknown } | null> {
-        const rows = await trx`select queued_input from app.evidence where id = ${id} and user_id = ${uid} and status = 'queued_catalog'`;
+        // PR3 gate P1 (edge role PR4b): this is the FIRST statement of the drain's per-row transaction, and it LOCKS the evidence row
+        // (`for update skip locked`) until that transaction ends. Without the lock, two concurrent drains that both listed the row each read
+        // `queued_input` (the row is still `queued_catalog` in both snapshots) and BOTH re-derive it: the facility/course resolution, the
+        // matcher and the play re-score run twice, and only the final status UPDATE (guarded by `status = 'queued_catalog'`) serialises them.
+        // With it, the second drain finds the row locked and gets NO row back, which the drain reads as "gone" (handled by someone else:
+        // counted in `scanned` only), so it skips the row instead of re-deriving it.
+        // SKIP LOCKED, not NOWAIT: NOWAIT raises 55P03 (a 503 through mapPgTimeoutError) and the drain would count the row as errored and,
+        // for an aged row, try to age it out; SKIP LOCKED is the answer this call already has for "not yours to work on any more". It
+        // does not wait either, so a drain never sits behind another for the 5 s lock_timeout. A row the first drain COMMITTED while the
+        // second was waiting its turn fails the `status = 'queued_catalog'` re-check (READ COMMITTED re-evaluates a locked row's new version),
+        // so it is also "gone". The lock needs UPDATE on the table, which edge_actor holds on this table's columns (0031); no grant was added.
+        const rows = await trx`select queued_input from app.evidence where id = ${id} and user_id = ${uid} and status = 'queued_catalog' for update skip locked`;
         const r = rows[0];
         return r ? { queuedInput: r.queued_input } : null;
       },
@@ -1294,15 +1233,15 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
     // P3f: the reward-activation repository — implemented in the delimited
     // "P3f" section at the END of this file (one seam here, everything else
     // appended below).
-    rewards: buildRewardsRepo(trx, uid, mode),
+    rewards: buildRewardsRepo(trx, uid),
 
     // App Attest key registration (follow-up F2) — implemented in the delimited "App Attest key
     // registration" section at the END of this file (one seam here).
-    attestKey: buildAttestKeyRepo(trx, uid, mode),
+    attestKey: buildAttestKeyRepo(trx, uid),
 
     // O12: the sign-in-methods repository — implemented in the delimited "O12 sign-in" section at the END of this file (one
     // seam here, everything else appended below).
-    signin: buildSigninRepo(trx, uid, mode),
+    signin: buildSigninRepo(trx, uid),
 
     device: {
       async findOwn(deviceId: string) {
@@ -1522,8 +1461,7 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
     // namespace calls are the ones the docstrings on Repo#me point at
     // (0015's private.delete_my_data, 0021's private.export_my_data) —
     // this Repo layer never reimplements their logic, only invokes them
-    // through the same service_role connection every other write in this
-    // file already uses.
+    // through the `_for_actor` definers (the bound actor, no uid argument).
     me: {
       async listSigninProviders(): Promise<string[]> {
         const rows = await trx`select distinct provider from app.signin_provider_token where user_id = ${uid}`;
@@ -1534,19 +1472,11 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
         return rows.map((r) => r.provider as string);
       },
       async deleteMyData() {
-        // P3f: a held (or approved-unredeemed) offer code is RESERVING offer
-        // budget; deleting the account deletes the code, so the reservation is
-        // handed back FIRST, in this same transaction (0027's own header). Runs
-        // before delete_my_data because that removes the offer_code rows this
-        // reads. Idempotent: a retried deletion finds nothing left to release.
-        //
-        // EDGE MODE (PR1b): edge_actor can call neither function, and does not need to —
-        // `private.delete_my_data_for_actor()` deletes the BOUND actor (no uid argument) and releases
-        // the account's reservations itself, first, in the same call.
-        if (mode === "legacy") await trx`select app.release_account_reservations(${uid})`;
-        const rows = mode === "edge"
-          ? await trx`select private.delete_my_data_for_actor() as result`
-          : await trx`select private.delete_my_data(${uid}) as result`;
+        // P3f: a held (or approved-unredeemed) offer code is RESERVING offer budget; deleting the account deletes the code, so the
+        // reservation is handed back FIRST, in this same transaction (0027's own header). edge_actor can call neither
+        // `app.release_account_reservations` nor `private.delete_my_data`, and does not need to: `private.delete_my_data_for_actor()`
+        // deletes the BOUND actor (no uid argument) and releases the account's reservations itself, first, in the same call.
+        const rows = await trx`select private.delete_my_data_for_actor() as result`;
         const result = rows[0]?.result as { user_id?: string; deleted_at?: string } | undefined;
         if (!result || typeof result.user_id !== "string" || typeof result.deleted_at !== "string") {
           throw new Error("me.deleteMyData: private.delete_my_data returned an unexpected shape");
@@ -1554,9 +1484,7 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
         return { userId: result.user_id, deletedAt: result.deleted_at };
       },
       async exportMyData() {
-        const rows = mode === "edge"
-          ? await trx`select private.export_my_data_for_actor() as result`
-          : await trx`select private.export_my_data(${uid}) as result`;
+        const rows = await trx`select private.export_my_data_for_actor() as result`;
         const result = rows[0]?.result as Record<string, unknown> | undefined;
         if (!result || typeof result !== "object") {
           throw new Error("me.exportMyData: private.export_my_data returned an unexpected shape");
@@ -1607,7 +1535,7 @@ const LOCK_TIMEOUT = "5s";
 // does not accept a bind parameter in place of its value (only a
 // literal/identifier) `[unverified — training knowledge; not exercised
 // against a live driver in this session beyond confirming the OTHER SET
-// LOCAL calls in this file, e.g. "set local role service_role", are all
+// LOCAL calls in this file, e.g. "set local role edge_actor", are all
 // literal text with no interpolation]`. Both constants are internal,
 // compile-time strings (never derived from request input), so literal
 // embedding carries no injection risk.
@@ -1696,14 +1624,16 @@ function mapPgTimeoutError(err: unknown): unknown {
 let _supportsTransactionTimeout: boolean | null = null;
 async function supportsTransactionTimeout(db: ReturnType<typeof postgres>): Promise<boolean> {
   if (_supportsTransactionTimeout !== null) return _supportsTransactionTimeout;
-  const rows = await db`select current_setting('server_version_num') as v`;
+  // `pg_settings`, not `current_setting(...)`: the lint's privileged-file pass bans that call in TypeScript (identity never rides a GUC).
+  const rows = await db`select setting as v from pg_catalog.pg_settings where name = 'server_version_num'`;
   _supportsTransactionTimeout = Number(rows[0]?.v ?? 0) >= 170000;
   return _supportsTransactionTimeout;
 }
 
 /**
- * The ONLY sanctioned way an Edge Function touches a privileged
- * (service-role) operation (build plan §4.7.1a).
+ * The ONLY sanctioned way an Edge Function opens a per-user database
+ * transaction (build plan §4.7.1a): one transaction as `edge_actor`, bound
+ * to `actor.uid` (edge role design, docs/security/edge-role-design.md).
  *
  * ⛔ FIX (P3c gate round 2, item 2: "writes silently lost"). Every
  * statement used to autocommit on its own connection — a DEFERRABLE FK
@@ -1718,58 +1648,10 @@ async function supportsTransactionTimeout(db: ReturnType<typeof postgres>): Prom
  * some rows written and some not.
  */
 export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
-  if (getDbMode() === "edge") {
-    // Edge mode (see the EDGE ROLE banner): the whole `op(repo)` is ONE transaction as edge_actor,
-    // bound to `actor.uid`; every error maps exactly as in legacy.
-    try {
-      return await openScopedTx("actor", userBind(actor.uid), (trx) => op(buildRepo(trx, actor, "edge")));
-    } catch (err) {
-      throw mapPgTimeoutError(err);
-    }
-  }
-  const db = sql();
-  const txTimeoutSupported = await supportsTransactionTimeout(db);
+  // The whole `op(repo)` is ONE transaction as edge_actor, bound to `actor.uid` (`openScopedTx`: the role, the three timeouts, the bind and
+  // the post-bind assertions run before `op` does). Every error maps through `mapPgTimeoutError`.
   try {
-    // The explicit `as Promise<T>`: postgres.js's own `.d.ts` types
-    // `begin<T2>(cb: (sql) => T2 | Promise<T2>): Promise<UnwrapPromiseArray<T2>>`
-    // — a SEPARATE generic (T2) from this function's own `T`, and
-    // `UnwrapPromiseArray<T2>` is not provably assignable back to an
-    // UNCONSTRAINED `T` for every possible instantiation (`deno check`
-    // TS2322, caught this round by the P3c gate round 2 integration suite
-    // work — never actually run before). Every caller here always passes a
-    // plain (non-array, non-nested-Promise) value through `op`, so the cast
-    // is sound in practice; the type system alone can't prove it generically.
-    return await (db.begin(async (trx: TxSql) => {
-      // "Conditions on the BYPASSRLS design" (required): the connecting
-      // role is NOT assumed to already be service_role (it may be
-      // `postgres` on a real hosted project — [unverified], see this
-      // file's own header). Activate it explicitly and verify.
-      await trx`set local role service_role`;
-      // Follow-up 13: below both http.ts's request timeout AND the
-      // caller's own patience — a request that would otherwise hang past
-      // 15s and 503 with the transaction STILL committing behind it
-      // instead fails fast, inside the same transaction, so nothing is
-      // left half-applied for the client to be wrong about.
-      // Literal SQL text (no `${...}` substitution — see this file's own
-      // note above `STATEMENT_TIMEOUT`/`LOCK_TIMEOUT` for why); the two
-      // named constants exist for the doc comment to point at, not for
-      // runtime interpolation here.
-      await trx`set local statement_timeout = '10s'`;
-      await trx`set local lock_timeout = '5s'`;
-      // P3d should-fix 1: the BACKSTOP for a transaction made of many
-      // short statements, none individually over statement_timeout, but
-      // whose CUMULATIVE duration still exceeds http.ts's 15s request
-      // race — 12s is comfortably under that, and deliberately ABOVE
-      // statement_timeout (10s) so a single long statement is still
-      // reported via ITS OWN, more specific timeout first.
-      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
-      const check = await trx`select current_user as u`;
-      if (check[0]?.u !== "service_role") {
-        throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-      }
-      const repo = buildRepo(trx, actor, "legacy");
-      return op(repo);
-    }) as Promise<T>);
+    return await openScopedTx("actor", userBind(actor.uid), (trx) => op(buildRepo(trx, actor)));
   } catch (err) {
     throw mapPgTimeoutError(err);
   }
@@ -1784,18 +1666,13 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
  * `actor.uid` is the owner the caller EXPECTS (the system list's `user_id`); the database's answer is compared with it before `op` runs.
  * A delegate-bound transaction cannot be re-bound, and cannot delete or export the account, activate a reward, or touch sign-in state
  * (those definers require a `kind = 'user'` binding): it can do the ordinary per-user Repo work the drain needs and nothing wider.
- *
- * In `legacy` mode there is no binder (service_role), and this is exactly `withOwnership(actor, op)`; the delegate is not consulted.
  */
 export async function withDelegatedActor<T>(delegate: DelegateRef, actor: Actor, op: Op<T>): Promise<T> {
-  if (getDbMode() === "edge") {
-    try {
-      return await openScopedTx("delegate", delegateBind(delegate, actor.uid), (trx) => op(buildRepo(trx, actor, "edge")));
-    } catch (err) {
-      throw mapPgTimeoutError(err);
-    }
+  try {
+    return await openScopedTx("delegate", delegateBind(delegate, actor.uid), (trx) => op(buildRepo(trx, actor)));
+  } catch (err) {
+    throw mapPgTimeoutError(err);
   }
-  return withOwnership(actor, op);
 }
 
 /**
@@ -1829,75 +1706,27 @@ export async function withOwnershipBatch<T>(
   itemCount: number,
   perItem: (repo: Repo, index: number) => Promise<T>,
 ): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
-  if (getDbMode() === "edge") {
-    // Edge mode: the same per-item savepoint isolation, inside one edge_actor transaction.
-    try {
-      return await openScopedTx("actor", userBind(actor.uid), async (trx) => {
-        const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
-        for (let i = 0; i < itemCount; i++) {
-          try {
-            const value = (await trx.savepoint(async (sp: TxSql) => perItem(buildRepo(sp, actor, "edge"), i))) as T;
-            out.push({ ok: true, value });
-          } catch (err) {
-            out.push({ ok: false, error: mapPgTimeoutError(err) });
-          }
-        }
-        return out;
-      });
-    } catch (err) {
-      throw mapPgTimeoutError(err);
-    }
-  }
-  const db = sql();
-  const txTimeoutSupported = await supportsTransactionTimeout(db);
+  // The per-item savepoint isolation, inside one edge_actor transaction. A per-item statement/lock timeout is mapped to the same 503 shape
+  // `withOwnership`'s own outer catch produces, so evidence-batch/index.ts's per-item error surfacing (which reads `HttpError#code` /
+  // `#message` off whatever lands in `error`) reports it as `service_unavailable`, not a raw, unmapped Postgres error.
   try {
-    return await (db.begin(async (trx: TxSql) => {
-      await trx`set local role service_role`;
-      // Follow-up 13 — same reasoning as withOwnership's own note above.
-      await trx`set local statement_timeout = '10s'`;
-      await trx`set local lock_timeout = '5s'`;
-      // P3d should-fix 1: THIS is the function the coordinator's own
-      // repro named directly ("a transaction of many short statements
-      // still commits after a 503: 833 of 900 rows committed after seven
-      // 503 batches") — a batch is EXACTLY "many short statements," one
-      // savepoint per item, so the cumulative-duration backstop matters
-      // most here.
-      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
-      const check = await trx`select current_user as u`;
-      if (check[0]?.u !== "service_role") {
-        throw new Error(`withOwnershipBatch: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-      }
+    return await openScopedTx("actor", userBind(actor.uid), async (trx) => {
       const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
       for (let i = 0; i < itemCount; i++) {
         try {
-          // Same `UnwrapPromiseArray<T>` quirk as `withOwnership`'s own
-          // `db.begin()` cast above — `.savepoint`'s generic is a SEPARATE
-          // one from this function's own `T`, and TS can't prove the
-          // unwrap is `T` for every possible instantiation. Every caller
-          // here always passes a plain (non-array, non-nested-Promise)
-          // value through `perItem`, so the cast is sound in practice.
-          const value = (await trx.savepoint(async (sp: TxSql) => {
-            const repo = buildRepo(sp, actor, "legacy");
-            return perItem(repo, i);
-          })) as T;
+          // `.savepoint`'s generic is a SEPARATE one from this function's own `T`, and TS cannot prove the unwrap is `T` for every possible
+          // instantiation; every caller passes a plain (non-array, non-nested-Promise) value through `perItem`, so the cast is sound.
+          const value = (await trx.savepoint(async (sp: TxSql) => perItem(buildRepo(sp, actor), i))) as T;
           out.push({ ok: true, value });
         } catch (err) {
-          // Follow-up 13: a per-item statement/lock timeout is mapped to
-          // the SAME 503 shape withOwnership's own outer catch produces,
-          // so evidence-batch/index.ts's per-item error surfacing (which
-          // reads `HttpError#code`/`#message` off whatever lands in
-          // `error` here) reports it as `service_unavailable`, not a raw,
-          // unmapped Postgres error.
           out.push({ ok: false, error: mapPgTimeoutError(err) });
         }
       }
       return out;
-    }) as Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>>);
+    });
   } catch (err) {
-    // A timeout OUTSIDE any per-item savepoint (e.g. during the initial
-    // `SET LOCAL`/role-check statements themselves) fails the whole batch
-    // the same way any other such failure already does — mapped here too
-    // for consistency.
+    // A timeout OUTSIDE any per-item savepoint (e.g. during the initial SET LOCAL / bind statements themselves) fails the whole batch the
+    // same way any other such failure already does, mapped here too for consistency.
     throw mapPgTimeoutError(err);
   }
 }
@@ -1951,9 +1780,8 @@ export async function withOwnershipBatch<T>(
 // never a real one).
 // ============================================================================
 
-/** Same `SET LOCAL ROLE service_role` + role-assertion + timeout
- * discipline as `withOwnership`'s own doc — see that function for the
- * full "Conditions on the BYPASSRLS design" reasoning, unchanged here.
+/** The importer repo's transaction: `openScopedTx("system")` (`SET LOCAL ROLE edge_system`, the same three timeouts and role assertion as
+ * every other transaction in this file).
  *
  * ⛔ FIX (P3e round 2 gate: "align `withSystemCatalogImport` with P3d's
  * own `supportsTransactionTimeout()`/`mapPgTimeoutError()` CONNECTION_CLOSED
@@ -1966,37 +1794,16 @@ export async function withOwnershipBatch<T>(
  * postgres.js as `.code === "CONNECTION_CLOSED"` — a case this function's
  * own try/catch never handled (it only ever guarded the SET statement,
  * never a later query inside the same transaction actually timing out).
- * Reuses `withOwnership`'s own two pieces instead of re-deriving them:
+ * Reuses `openScopedTx`'s own two pieces instead of re-deriving them:
  * `supportsTransactionTimeout()` (cached PG-version feature probe, so
  * this function no longer needs its own "is this GUC recognized" guess)
  * and `mapPgTimeoutError()` (now maps CONNECTION_CLOSED -> 503 for this
  * function's own callers too, not just `withOwnership`'s). */
 export async function withSystemCatalogImport<T>(op: (repo: ImporterRepo) => Promise<T>): Promise<T> {
-  if (getDbMode() === "edge") {
-    // Edge role PR3: the importer repo runs as `edge_system` through the edge pool, so `import-catalog` in `edge` mode needs ONLY
-    // GOLFRAVEN_EDGE_DB_URL: this branch never calls `sql()`, the legacy pool. Every statement stays inside edge_system's column grants and
-    // policies (0031); what edge_system cannot read (evidence, plays) goes through the list / purge definers (see buildImporterRepo).
-    try {
-      return await openScopedTx("system", { expectedUid: null }, (trx) => op(buildImporterRepo(trx, "edge")));
-    } catch (err) {
-      throw mapPgTimeoutError(err);
-    }
-  }
-  const db = sql();
-  const txTimeoutSupported = await supportsTransactionTimeout(db);
+  // The importer repo runs as `edge_system` through the edge pool. Every statement stays inside edge_system's column grants and policies
+  // (0031); what edge_system cannot read (evidence, plays) goes through the list / purge definers (see buildImporterRepo).
   try {
-    return await (db.begin(async (trx: TxSql) => {
-      await trx`set local role service_role`;
-      await trx`set local statement_timeout = '10s'`;
-      await trx`set local lock_timeout = '5s'`;
-      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
-      const check = await trx`select current_user as u`;
-      if (check[0]?.u !== "service_role") {
-        throw new Error(`withSystemCatalogImport: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-      }
-      const repo = buildImporterRepo(trx, "legacy");
-      return op(repo);
-    }) as Promise<T>);
+    return await openScopedTx("system", { expectedUid: null }, (trx) => op(buildImporterRepo(trx)));
   } catch (err) {
     throw mapPgTimeoutError(err);
   }
@@ -2010,7 +1817,7 @@ export async function withSystemCatalogImport<T>(op: (repo: ImporterRepo) => Pro
  * "assign the next catalog_version" serialization point, system-wide,
  * not one per anything), so it reuses `advisoryLockKeys` directly rather
  * than duplicating the hash. */
-function buildImporterRepo(trx: TxSql, mode: DbMode): ImporterRepo {
+function buildImporterRepo(trx: TxSql): ImporterRepo {
   return {
     now(): Date {
       return new Date();
@@ -2400,40 +2207,15 @@ function buildImporterRepo(trx: TxSql, mode: DbMode): ImporterRepo {
         return r ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null;
       },
       async purgeFixCoords(retentionDays: number, limit: number): Promise<number> {
-        if (mode === "edge") {
-          // edge_system has no privilege on app.evidence: the SAME statement runs inside `private.purge_fix_coords` (0030/0032) as
-          // `private_definer`, which can only remove the `fixCoords` key from rows that still carry it, with the retention pinned to 7..30 days
-          // and the limit to 1..10000 (a violation raises 22023). The importer passes 30 days and 5000.
-          const purged = await trx`select private.purge_fix_coords(${retentionDays}::int, ${limit}::int) as n`;
-          return Number(purged[0]?.n ?? 0);
-        }
-        const rows = await trx`
-          with doomed as (
-            select e.id from app.evidence e
-            where e.integrity ? 'fixCoords'
-              and (
-                e.created_at < now() - make_interval(days => ${retentionDays}::int)
-                or e.course_id is null
-                or not exists (
-                  select 1 from app.catalog_id_ledger l
-                  where l.id = e.course_id
-                    and (l.status = 'stub'
-                         or l.split_from is not null
-                         or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id)
-                         or exists (select 1 from app.catalog_rescore_backlog b where b.course_id = l.id and b.done_at is null))
-                )
-              )
-            order by e.created_at
-            limit ${limit}
-          )
-          update app.evidence e set integrity = e.integrity - 'fixCoords'
-          from doomed d where e.id = d.id
-          returning e.id`;
-        return rows.length;
+        // edge_system has no privilege on app.evidence: the work runs inside `private.purge_fix_coords` (0030/0032) as `private_definer`,
+        // which can only remove the `fixCoords` key from rows that still carry it, with the retention pinned to 7..30 days and the limit to
+        // 1..10000 (a violation raises 22023). The importer and the retention purge pass 30 days and 5000.
+        const purged = await trx`select private.purge_fix_coords(${retentionDays}::int, ${limit}::int) as n`;
+        return Number(purged[0]?.n ?? 0);
       },
       async purgeInstallLinkTombstones(maxRows: number): Promise<number> {
         // F19 retention (owner decision 2026-10-02): the 24 months are `private.purge_install_link_tombstones`'s own.
-        // service_role holds EXECUTE (legacy); edge_system does too (the PR3 importer path).
+        // edge_system holds EXECUTE (service_role does too, which nothing in this runtime uses any more).
         const rows = await trx`select private.purge_install_link_tombstones(${maxRows}::int) as n`;
         return Number(rows[0]?.n ?? 0);
       },
@@ -2447,25 +2229,14 @@ function buildImporterRepo(trx: TxSql, mode: DbMode): ImporterRepo {
         // truncate the cursor — so it is cast text -> timestamptz in SQL.
         const afterAt = after?.createdAt ?? null;
         const afterId = after?.playId ?? null;
-        if (mode === "edge") {
-          // edge_system has no privilege on app.play: `private.list_rescore_plays` (0030) is the same keyset page, readable only for a course
-          // that has an OPEN backlog row, capped at 500 rows (the orchestrator never asks for more: MAX_RESCORE_PAGE). The cursor stays text end
-          // to end and is cast to timestamptz in SQL, exactly as below, so the keyset keeps its microseconds.
-          const listed = await trx`
-            select play_id, user_id, facility_id, course_id, play_date, created_at_text
-            from private.list_rescore_plays(${courseId}, ${afterAt}::text::timestamptz, ${afterId}::uuid, ${limit}::int)`;
-          return listed.map((r) => ({
-            playId: r.play_id as string, userId: r.user_id as string, facilityId: r.facility_id as string, courseId: r.course_id as string,
-            playDate: r.play_date instanceof Date ? r.play_date.toISOString().slice(0, 10) : String(r.play_date),
-            createdAt: r.created_at_text as string,
-          }));
-        }
-        const rows = await trx`
-          select id, user_id, facility_id, course_id, play_date, created_at::text as created_at_text from app.play
-          where course_id = ${courseId} and (${afterId}::uuid is null or (created_at, id) > (${afterAt}::text::timestamptz, ${afterId}::uuid))
-          order by created_at, id limit ${limit}`;
-        return rows.map((r) => ({
-          playId: r.id as string, userId: r.user_id as string, facilityId: r.facility_id as string, courseId: r.course_id as string,
+        // edge_system has no privilege on app.play: `private.list_rescore_plays` (0030) is the same keyset page, readable only for a course
+        // that has an OPEN backlog row, capped at 500 rows (the orchestrator never asks for more: MAX_RESCORE_PAGE). The cursor stays text end
+        // to end and is cast to timestamptz in SQL, so the keyset keeps its microseconds.
+        const listed = await trx`
+          select play_id, user_id, facility_id, course_id, play_date, created_at_text
+          from private.list_rescore_plays(${courseId}, ${afterAt}::text::timestamptz, ${afterId}::uuid, ${limit}::int)`;
+        return listed.map((r) => ({
+          playId: r.play_id as string, userId: r.user_id as string, facilityId: r.facility_id as string, courseId: r.course_id as string,
           playDate: r.play_date instanceof Date ? r.play_date.toISOString().slice(0, 10) : String(r.play_date),
           createdAt: r.created_at_text as string,
         }));
@@ -2487,19 +2258,10 @@ function buildImporterRepo(trx: TxSql, mode: DbMode): ImporterRepo {
       // evidence/handler.ts#redrainQueuedEvidenceRow's header, for the
       // full "why".
       async listOpen(limit: number): Promise<QueuedEvidenceRow[]> {
-        // Edge role PR3, both modes: the raw submission (`queued_input`) is NOT listed. The drain reads it as the row's owner, inside the
-        // per-row transaction (`Repo#evidence.readQueuedInput`), so raw coordinates leave the owner's transaction only to the owner.
-        // `edge`: `private.list_queued_catalog` (edge_system has no privilege on app.evidence; the definer returns exactly these columns,
-        // capped at 500 rows). `legacy`: the same columns straight from the table.
-        const rows =
-          mode === "edge"
-            ? await trx`select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, created_at from private.list_queued_catalog(${limit}::int)`
-            : await trx`
-                select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, created_at
-                from app.evidence
-                where status = 'queued_catalog'
-                order by created_at asc
-                limit ${limit}`;
+        // The raw submission (`queued_input`) is NOT listed. The drain reads it as the row's owner, inside the per-row transaction
+        // (`Repo#evidence.readQueuedInput`), so raw coordinates leave the owner's transaction only to the owner. edge_system has no privilege on
+        // app.evidence; `private.list_queued_catalog` returns exactly these columns, capped at 500 rows.
+        const rows = await trx`select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, created_at from private.list_queued_catalog(${limit}::int)`;
         return rows.map((r) => ({
           id: r.id,
           userId: r.user_id,
@@ -2529,31 +2291,63 @@ function buildImporterRepo(trx: TxSql, mode: DbMode): ImporterRepo {
  * webhook secret, distinct from — and in addition to — the HMAC check
  * that gates the endpoint at all). */
 export async function hitSystemRateLimit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
-  if (getDbMode() === "edge") {
-    // Edge mode: as edge_system through `private.hit_system_rate_limit`, which stores the bucket as
-    // `system:<key>`. (Behaviour difference from legacy, which stored the bare key: the two modes keep
-    // SEPARATE counters for the same import-catalog key; irrelevant once PR4 deletes legacy.)
-    const count = await openScopedTx("system", { expectedUid: null }, async (rateTrx) => {
-      const rows = await rateTrx`select private.hit_system_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
-      return Number(rows[0]?.count ?? 0);
-    });
-    if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
-    return { ok: true, count };
-  }
-  const db = sql();
-  return db.begin(async (rateTrx: TxSql) => {
-    await rateTrx`set local role service_role`;
-    const check = await rateTrx`select current_user as u`;
-    if (check[0]?.u !== "service_role") {
-      throw new Error(`hitSystemRateLimit: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
-    }
-    const rows = await rateTrx`select private.hit_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
-    const count = Number(rows[0]?.count ?? 0);
-    if (count > max) {
-      return { ok: false, count, retryAfterSeconds: windowSeconds };
-    }
-    return { ok: true, count };
-  }) as Promise<RateLimitResult>;
+  // As edge_system through `private.hit_system_rate_limit`, which stores the bucket as `system:<key>`.
+  const count = await openScopedTx("system", { expectedUid: null }, async (rateTrx) => {
+    const rows = await rateTrx`select private.hit_system_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
+    return Number(rows[0]?.count ?? 0);
+  });
+  if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
+  return { ok: true, count };
+}
+
+/**
+ * Edge role PR4b (E5, launch-blocking): the INDEPENDENT retention schedule. Before this, the fix-coordinate purge and the install-link tombstone
+ * purge ran only inside a catalog import's drain pass, and the sign-in proof / revocation-queue purges only inside `signin-revocation-drain`, so a
+ * quiet catalog (or an unscheduled drain) stopped retention. `retention-purge` runs all four classes, as `edge_system`, on its own schedule.
+ *
+ * Each step is a bounded, row-narrow definer that edge_system already holds EXECUTE on (no migration, no grant added):
+ *   fix_coords               `private.purge_fix_coords(30, 5000)`           removes only the `fixCoords` key from evidence rows, retention pinned to 7..30 days
+ *   install_link_tombstones  `private.purge_install_link_tombstones(5000)`  24 months, the function's own constant; the policies repeat the cutoff
+ *   signin_email_proofs      `private.purge_signin_email_proofs()`          proofs an hour past expiry
+ *   signin_revocation_queue  `private.purge_signin_revocation_queue(30 d)`  finished (revoked / expired) rows older than 30 days; never a pending one
+ * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
+ * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
+ *
+ * Every batch is its own short edge_system transaction that first takes a `pg_try_advisory_xact_lock` on its step: a concurrent run skips
+ * (returns null) instead of waiting or deadlocking on the same rows, and two runs never double-count a batch. Safe to run concurrently, idempotent, bounded.
+ */
+const RETENTION_FIX_COORDS_DAYS = 30;
+const RETENTION_SIGNIN_QUEUE_DAYS = 30;
+const RETENTION_BATCH_ROWS = 5000;
+
+/** The advisory-lock key a step's batch try-locks (namespace 6). Exported so a test can hold a step's lock from another session and prove a concurrent run skips it. */
+export function retentionStepLockKeys(name: RetentionStep["name"]): [number, number] {
+  return advisoryLockKeys(6, `retention:${name}`);
+}
+
+/** `batchRows` is the rows per batch for the two batched classes (default 5000, the definers' own bound is 10000 / 100000). Only a test passes it, to
+ * make "bounded per run" provable with a handful of rows instead of 50 000. */
+export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): RetentionStep[] {
+  const step = (name: RetentionStep["name"], batchLimit: number | null, run: (trx: TxSql) => Promise<number>): RetentionStep => ({
+    name,
+    batchLimit,
+    runBatch: () =>
+      openScopedTx("system", { expectedUid: null }, async (trx): Promise<number | null> => {
+        const [k1, k2] = retentionStepLockKeys(name);
+        const got = await trx`select pg_try_advisory_xact_lock(${k1}, ${k2}) as got`;
+        if (got[0]?.got !== true) return null;
+        return run(trx);
+      }).catch((err) => {
+        throw mapPgTimeoutError(err);
+      }),
+  });
+  const n = (rows: ReadonlyArray<Record<string, unknown>>) => Number(rows[0]?.n ?? 0);
+  return [
+    step("fix_coords", batchRows, async (trx) => n(await trx`select private.purge_fix_coords(${RETENTION_FIX_COORDS_DAYS}::int, ${batchRows}::int) as n`)),
+    step("install_link_tombstones", batchRows, async (trx) => n(await trx`select private.purge_install_link_tombstones(${batchRows}::int) as n`)),
+    step("signin_email_proofs", null, async (trx) => n(await trx`select private.purge_signin_email_proofs() as n`)),
+    step("signin_revocation_queue", null, async (trx) => n(await trx`select private.purge_signin_revocation_queue(make_interval(days => ${RETENTION_SIGNIN_QUEUE_DAYS}::int)) as n`)),
+  ];
 }
 
 export type { CatalogImportEnvConfig } from "./types.ts";
@@ -2607,7 +2401,7 @@ function rewardsStateConflict(err: unknown): unknown {
   return err;
 }
 
-function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
+function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
   return {
     async isAppReviewDemoAccount(): Promise<boolean> {
       const rows = await trx`select exists (select 1 from app.app_review_demo_account where user_id = ${uid}) as demo`;
@@ -2620,24 +2414,20 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
       if (!REWARDS_UUID_RE.test(id)) return null;
       // Ownership is part of the WHERE clause, never a post-hoc check: another
       // user's id and a nonexistent id are the same empty result.
-      // EDGE MODE (0033): edge_actor holds no UPDATE on offer_code / entitlement, and `SELECT ... FOR UPDATE`
-      // needs one. The lock is taken by `private.lock_own_reward_for_actor(id)` instead — a definer that does
-      // the same `FOR UPDATE` on the BOUND actor's row, and a row lock lasts until the TRANSACTION ends whoever
-      // took it — so concurrent activations of one reward are serialised exactly as in legacy. (Dropping the
-      // lock altogether, on the argument that `private.activate_*_for_actor` lock the row themselves, was tried
-      // and refuted by the integration suite: the handler DECIDES from the state it reads here, BEFORE those
-      // functions lock, so a racing second request could turn an already-issued code into held_review.)
-      // Legacy keeps its `for update` verbatim.
-      if (mode === "edge") await trx`select private.lock_own_reward_for_actor(${id}::uuid)`;
-      const lockOc = mode === "legacy" ? trx`for update of oc` : trx``;
+      // edge_actor holds no UPDATE on offer_code / entitlement, and `SELECT ... FOR UPDATE` needs one. The lock is taken by
+      // `private.lock_own_reward_for_actor(id)` instead (0033): a definer that does the same `FOR UPDATE` on the BOUND actor's row, and a row
+      // lock lasts until the TRANSACTION ends whoever took it, so concurrent activations of one reward are serialised. (Dropping the lock
+      // altogether, on the argument that `private.activate_*_for_actor` lock the row themselves, was tried and refuted by the integration
+      // suite: the handler DECIDES from the state it reads here, BEFORE those functions lock, so a racing second request could turn an
+      // already-issued code into held_review.)
+      await trx`select private.lock_own_reward_for_actor(${id}::uuid)`;
       const codes = await trx`
         select oc.id, oc.state, oc.activated_device_id, oc.expires_at, oc.expiry_paused_at,
                (oc.rests_on_unattestable and oc.review_cleared_at is null) as rests_on_unattestable,
                coalesce(p.held_review, false) as play_held
         from app.offer_code oc
         left join app.play p on p.id = oc.play_id and p.user_id = oc.user_id
-        where oc.id = ${id} and oc.user_id = ${uid}
-        ${lockOc}`;
+        where oc.id = ${id} and oc.user_id = ${uid}`;
       const c = codes[0];
       if (c) {
         return {
@@ -2653,15 +2443,13 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
           restsOnUnattestable: Boolean(c.rests_on_unattestable) || Boolean(c.play_held),
         };
       }
-      const lockEnt = mode === "legacy" ? trx`for update of e` : trx``;
       const ents = await trx`
         select e.id, e.state, e.activated_device_id,
                (e.rests_on_unattestable and e.review_cleared_at is null) as rests_on_unattestable,
                coalesce(p.held_review, false) as play_held
         from app.entitlement e
         left join app.play p on p.id = e.play_id and p.user_id = e.user_id
-        where e.id = ${id} and e.user_id = ${uid}
-        ${lockEnt}`;
+        where e.id = ${id} and e.user_id = ${uid}`;
       const e = ents[0];
       if (!e) return null;
       return {
@@ -2705,8 +2493,8 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
       // can commit between that read and this UPDATE; under READ COMMITTED the UPDATE then re-evaluates against the
       // NEW row. Without this predicate the retired key's counter (41) would be written onto the new key (its next
       // 41 assertions would then fail as replays) and the activation would be graded `attested` on a retired key.
-      // With it, the replaced row no longer matches: 0 rows, and the handler fails closed. Same statement in both
-      // EDGE_DB_MODEs (edge_actor already holds SELECT on app.device, which a WHERE on attest_key_id needs).
+      // With it, the replaced row no longer matches: 0 rows, and the handler fails closed. (edge_actor already holds SELECT on
+      // app.device, which a WHERE on attest_key_id needs.)
       const rows = await trx`
         update app.device set attest_counter = ${counter}, last_seen = now()
         where id = ${deviceId} and user_id = ${uid} and attest_key_id = ${keyId} and attest_counter < ${counter}
@@ -2794,18 +2582,14 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
     async applyActivation(input) {
       const detail = input.holdDetail === null ? null : trx.json(input.holdDetail as never);
       try {
-        // EDGE MODE (PR1b): `private.activate_*_for_actor` run the SAME P3f functions as private_definer
-        // for the BOUND actor — there is no user argument (the uid is the binding's), edge_actor cannot
-        // call `app.activate_*`, and the SQLSTATEs (P0002 / 42501 / 55000 / 23514) are the P3f ones.
+        // `private.activate_*_for_actor` (PR1b) run the SAME P3f functions as private_definer for the BOUND actor: there is no user
+        // argument (the uid is the binding's), edge_actor cannot call `app.activate_*`, and the SQLSTATEs (P0002 / 42501 / 55000 / 23514)
+        // are the P3f ones.
         if (input.kind === "offer_code") {
-          const rows = mode === "edge"
-            ? await trx`select private.activate_offer_code_for_actor(${input.rewardId}::uuid, ${input.deviceId}::uuid, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`
-            : await trx`select app.activate_offer_code(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
+          const rows = await trx`select private.activate_offer_code_for_actor(${input.rewardId}::uuid, ${input.deviceId}::uuid, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
           return { state: rows[0]!.state as string };
         }
-        const rows = mode === "edge"
-          ? await trx`select private.activate_entitlement_for_actor(${input.rewardId}::uuid, ${input.deviceId}::uuid, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`
-          : await trx`select app.activate_entitlement(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
+        const rows = await trx`select private.activate_entitlement_for_actor(${input.rewardId}::uuid, ${input.deviceId}::uuid, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
         return { state: rows[0]!.state as string };
       } catch (err) {
         throw rewardsStateConflict(err);
@@ -2815,28 +2599,20 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
     async recordInstallLink(deviceId: string, installLinkHash: string): Promise<void> {
       // One SQL function (0027 5g): stamps the link on the device row (first
       // writer wins) and writes the account's pseudonymous tombstone row, which
-      // survives account deletion (N4). service_role holds EXECUTE; the vault key
-      // is read inside a SECURITY DEFINER function, never here.
+      // survives account deletion (N4). An invoker-rights function run as edge_actor (its INSERT is held to the actor's own device and key
+      // by the L5 policy); the vault key is read inside a SECURITY DEFINER function, never here.
       await trx`select app.record_install_link(${uid}, ${deviceId}, ${installLinkHash})`;
     },
 
     async androidInstallSignals(deviceId: string) {
-      // EDGE MODE (PR1b): `app.device_link_signals` counts accounts ACROSS users, which edge_actor's own-row
-      // policies would silently turn into an undercount (a fail-OPEN); `private.device_link_signals_for_actor`
-      // is the definer that does the cross-account read for the actor's OWN device (same result shape).
-      const rows = mode === "edge"
-        ? await trx`
-          select s.accounts_on_install, s.voided_account_used_install,
-                 (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
-          from app.device d
-          cross join lateral private.device_link_signals_for_actor(d.id) s
-          where d.id = ${deviceId} and d.user_id = ${uid}`
-        : await trx`
-          select s.accounts_on_install, s.voided_account_used_install,
-                 (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
-          from app.device d
-          cross join lateral app.device_link_signals(d.id) s
-          where d.id = ${deviceId} and d.user_id = ${uid}`;
+      // `app.device_link_signals` counts accounts ACROSS users, which edge_actor's own-row policies would silently turn into an undercount
+      // (a fail-OPEN); `private.device_link_signals_for_actor` (PR1b) is the definer that does the cross-account read for the actor's OWN device.
+      const rows = await trx`
+        select s.accounts_on_install, s.voided_account_used_install,
+               (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
+        from app.device d
+        cross join lateral private.device_link_signals_for_actor(d.id) s
+        where d.id = ${deviceId} and d.user_id = ${uid}`;
       const r = rows[0];
       if (!r || !r.linkable) return null;
       return { accountsOnInstall: Number(r.accounts_on_install), voidedAccountUsedInstall: Boolean(r.voided_account_used_install) };
@@ -2947,7 +2723,7 @@ function attestKeyError(err: unknown): unknown {
   return err;
 }
 
-function buildAttestKeyRepo(trx: TxSql, uid: string, mode: DbMode): AttestKeyRepo {
+function buildAttestKeyRepo(trx: TxSql, uid: string): AttestKeyRepo {
   return {
     async deviceKey(deviceId: string) {
       // Ownership is part of the WHERE clause: another user's id and a nonexistent id are the same empty result.
@@ -2961,12 +2737,9 @@ function buildAttestKeyRepo(trx: TxSql, uid: string, mode: DbMode): AttestKeyRep
       try {
         // One SQL function (0034): validates the key against its id, locks the caller's own device row, writes the key
         // (a reinstall's replacement restarts the counter, retires the old key) and audits it.
-        // EDGE MODE (0034): edge_actor cannot call `app.register_attest_key` (it names any user); `private.register_attest_key_for_actor`
-        // runs it as private_definer for the BOUND actor (no user argument). Same SQLSTATEs either way.
-        const rows =
-          mode === "edge"
-            ? await trx`select private.register_attest_key_for_actor(${input.deviceId}::uuid, ${input.keyId}, ${input.publicKey}) as result`
-            : await trx`select app.register_attest_key(${uid}, ${input.deviceId}, ${input.keyId}, ${input.publicKey}) as result`;
+        // edge_actor cannot call `app.register_attest_key` (it names any user); `private.register_attest_key_for_actor` (0034) runs it as
+        // private_definer for the BOUND actor (no user argument).
+        const rows = await trx`select private.register_attest_key_for_actor(${input.deviceId}::uuid, ${input.keyId}, ${input.publicKey}) as result`;
         return rows[0]!.result as "registered" | "replaced";
       } catch (err) {
         throw attestKeyError(err);
@@ -3031,8 +2804,9 @@ export function loadAppleSiwaConfig(): AppleSecretConfig | null {
   return { teamId, clientId, keyId, privateKeyPem };
 }
 
-/** True only when the request carries the project's service-role key as its bearer token (constant-time). The revocation drain is
- * system work, called by a scheduler holding that key; Supabase's gateway check alone would also admit an anon key. */
+/** True only when the request carries the project's service-role key as its bearer token (constant-time). The system functions (the revocation
+ * drain, the retention purge) are maintenance work, called by a scheduler holding that key; Supabase's gateway check alone would also admit an anon
+ * key. A comparison only: the key is never used to open a connection or a client here (see "THE SERVICE-ROLE KEY" above `adminClient`). */
 export function isServiceRoleBearer(req: Request): boolean {
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const header = req.headers.get("Authorization") ?? "";
@@ -3076,13 +2850,11 @@ async function readKek(run: () => Promise<{ o_kek_id: string; o_kek_b64: string 
   return kekFromBase64(row.o_kek_id, row.o_kek_b64); // EnvelopeError('kek_length') if the decoded key is not 32 bytes
 }
 
-/** The system operations (queue claim / complete / purge, the KEK by id, the OTP-failure counter). Same SQL in both modes for the queue and the KEK: the queue
- * functions are granted to service_role AND edge_system, `get_signin_token_kek` to service_role, edge_actor and edge_system, and the
- * OTP-failure CORES to service_role only (0037: edge_actor reaches the counter through the `_for_actor` wrappers, which require a bound
- * kind = 'user' actor, so `mode` picks the cores in legacy and the wrappers in edge). WHICH transaction runs them is decided by `withSigninSystem` (queue) and
- * `signinOtpFailuresFor` (OTP counter) below. */
-function buildSigninSystemOps(trx: TxSql, mode: DbMode): SigninSystemOps {
-  const edge = mode === "edge";
+/** The system operations (queue claim / complete / purge, the KEK by id, the OTP-failure counter). The queue functions are granted to edge_system
+ * (and service_role, which nothing here uses), `get_signin_token_kek` to edge_actor and edge_system, and the OTP-failure CORES to service_role only
+ * (0037): edge_actor reaches the counter through the `_for_actor` wrappers, which require a bound kind = 'user' actor. WHICH transaction runs them is
+ * decided by `withSigninSystem` (queue; edge_system) and `signinOtpFailuresFor` (OTP counter; the calling actor) below. */
+function buildSigninSystemOps(trx: TxSql): SigninSystemOps {
   const kekRows = async (kekId: string | null) =>
     (await trx`select o_kek_id, o_kek_b64 from private.get_signin_token_kek(${kekId}::text)`) as unknown as { o_kek_id: string; o_kek_b64: string }[];
   return {
@@ -3112,24 +2884,21 @@ function buildSigninSystemOps(trx: TxSql, mode: DbMode): SigninSystemOps {
       return Number(rows[0]?.n ?? 0);
     },
     kekById: (kekId: string) => readKek(() => kekRows(kekId)),
-    // The OTP counter. `legacy`: the service_role CORES. `edge`: the `_for_actor` wrappers, which refuse unless a kind = 'user' actor is bound
-    // in this transaction (0037, L1): the cores are not granted to edge_actor at all, so an unbound edge_actor connection cannot call them.
+    // The OTP counter, through the `_for_actor` wrappers, which refuse unless a kind = 'user' actor is bound in this transaction (0037, L1): the
+    // cores are not granted to edge_actor at all, so an unbound edge_actor connection cannot call them.
     async peekOtpFailures(emailHash): Promise<number> {
-      const rows = edge ? await trx`select private.peek_signin_otp_failures_for_actor(${emailHash}) as n` : await trx`select private.peek_signin_otp_failures(${emailHash}) as n`;
+      const rows = await trx`select private.peek_signin_otp_failures_for_actor(${emailHash}) as n`;
       return Number(rows[0]?.n ?? 0);
     },
     async reserveOtpAttempt(emailHash): Promise<OtpReservation> {
-      const rows = edge
-        ? await trx`select o_attempts, o_window_start from private.reserve_signin_otp_attempt_for_actor(${emailHash})`
-        : await trx`select o_attempts, o_window_start from private.reserve_signin_otp_attempt(${emailHash})`;
+      const rows = await trx`select o_attempts, o_window_start from private.reserve_signin_otp_attempt_for_actor(${emailHash})`;
       const w = rows[0]?.o_window_start;
       return { attempts: Number(rows[0]?.o_attempts ?? -1), windowStart: w instanceof Date ? w.toISOString() : String(w) };
     },
     async releaseOtpAttempt(emailHash, windowStart): Promise<void> {
-      if (edge) await trx`select private.release_signin_otp_attempt_for_actor(${emailHash}, ${windowStart}::timestamptz) as n`;
-      else await trx`select private.release_signin_otp_attempt(${emailHash}, ${windowStart}::timestamptz) as n`;
+      await trx`select private.release_signin_otp_attempt_for_actor(${emailHash}, ${windowStart}::timestamptz) as n`;
     },
-    // 0039: the same SQL in both modes (granted to service_role and edge_system; it acts on no account).
+    // 0039: granted to edge_system (and service_role); it acts on no account.
     async purgeEmailProofs(): Promise<number> {
       const rows = await trx`select private.purge_signin_email_proofs() as n`;
       return Number(rows[0]?.n ?? 0);
@@ -3137,14 +2906,12 @@ function buildSigninSystemOps(trx: TxSql, mode: DbMode): SigninSystemOps {
   };
 }
 
-/** Per-user operations. `legacy`: the 0035 CORE definers with an explicit uid (service_role). `edge`: the `_for_actor` wrappers (edge_actor,
- * no uid argument: the bound actor of this transaction; a wrong uid cannot even be expressed). The result shapes are identical. The one
- * operation with no direct edge form is linking an identity to ANOTHER account (the OTP-proven link). A definer that took the target as an
- * argument would be an "attach an identity to any account" primitive, so in edge mode (0039) the target is the PROOF's: the handler mints a
- * single-use proof after the OTP verifies (`signinEmailProofs`, edge_system, in its own transaction) and `linkIdentityWithProof` redeems it as
- * the bound caller; `linkIdentity` / `storeToken` still refuse any account but the caller's (`mustBeSelf`). `crossAccountLink` is true in both
- * modes; `proofBoundLink` is the edge one (docs/security/edge-role-design.md §12). */
-function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
+/** Per-user operations: the `_for_actor` wrappers (edge_actor, no uid argument: the bound actor of this transaction; a wrong uid cannot even be
+ * expressed). The one operation with no direct form is linking an identity to ANOTHER account (the OTP-proven link). A definer that took the target as
+ * an argument would be an "attach an identity to any account" primitive, so the target is the PROOF's (0039): the handler mints a single-use proof
+ * after the OTP verifies (`signinEmailProofs`, edge_system, in its own transaction) and `linkIdentityWithProof` redeems it as the bound caller;
+ * `linkIdentity` / `storeToken` refuse any account but the caller's (`mustBeSelf`). docs/security/edge-role-design.md §12. */
+function buildSigninRepo(trx: TxSql, uid: string): SigninRepo {
   const guard = async <T>(op: () => Promise<T>): Promise<T> => {
     try {
       return await op();
@@ -3154,21 +2921,15 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
   };
   const kekRows = async (kekId: string | null) =>
     (await trx`select o_kek_id, o_kek_b64 from private.get_signin_token_kek(${kekId}::text)`) as unknown as { o_kek_id: string; o_kek_b64: string }[];
-  const edge = mode === "edge";
-  // The DIRECT path (a uid argument) never names another account in edge mode: that is the proof-bound path's job. A handler that reaches this with
-  // a foreign uid is a bug, and the answer is a refusal, not a link.
+  // The DIRECT path (a uid argument) never names another account: that is the proof-bound path's job. A handler that reaches this with a foreign
+  // uid is a bug, and the answer is a refusal, not a link.
   const mustBeSelf = (target: string) => {
-    if (edge && target.toLowerCase() !== uid.toLowerCase()) throw new HttpError(403, "cross_account_link_requires_proof", "an identity is linked to another account only through a verified email proof");
+    if (target.toLowerCase() !== uid.toLowerCase()) throw new HttpError(403, "cross_account_link_requires_proof", "an identity is linked to another account only through a verified email proof");
   };
   return {
-    crossAccountLink: true,
-    proofBoundLink: edge,
-
     listMethods: () =>
       guard(async () => {
-        const rows = edge
-          ? await trx`select o_provider, o_subject, o_email, o_is_private_relay, o_linked_at, o_has_token from private.signin_methods_for_actor()`
-          : await trx`select o_provider, o_subject, o_email, o_is_private_relay, o_linked_at, o_has_token from private.signin_methods(${uid}::uuid)`;
+        const rows = await trx`select o_provider, o_subject, o_email, o_is_private_relay, o_linked_at, o_has_token from private.signin_methods_for_actor()`;
         return rows.map(
           (r): SigninMethodRow => ({
             provider: r.o_provider,
@@ -3183,7 +2944,7 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
 
     findAccountByEmail: (email: string) =>
       guard(async () => {
-        const rows = edge ? await trx`select private.signin_find_account_by_email_for_actor(${email}) as id` : await trx`select private.signin_find_account_by_email(${email}) as id`;
+        const rows = await trx`select private.signin_find_account_by_email_for_actor(${email}) as id`;
         return (rows[0]?.id as string | null | undefined) ?? null;
       }),
 
@@ -3191,15 +2952,12 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
       guard(async () => {
         if (!SIGNIN_UUID_RE.test(targetUserId)) throw Errors.internal();
         mustBeSelf(targetUserId);
-        const rows = edge
-          ? await trx`select private.signin_link_identity_for_actor(${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`
-          : await trx`select private.signin_link_identity(${targetUserId}::uuid, ${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`;
+        const rows = await trx`select private.signin_link_identity_for_actor(${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`;
         return Boolean(rows[0]?.created);
       }),
 
     linkIdentityWithProof: (proofId: string, input: LinkIdentityInput, envelope) =>
       guard(async () => {
-        if (!edge) throw Errors.internal(); // legacy links the proven account directly (linkIdentity); it has no proof lane
         if (!SIGNIN_UUID_RE.test(proofId)) throw Errors.internal();
         // ONE definer call: it redeems the proof under the target's advisory lock, links the identity and stores the token for the PROOF's account.
         const rows = await trx`
@@ -3214,50 +2972,34 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
         if (!SIGNIN_UUID_RE.test(targetUserId)) throw Errors.internal();
         mustBeSelf(targetUserId);
         // Uint8Array parameters, cast to bytea: postgres.js serialises them as bytea (never as text).
-        if (edge) {
-          await trx`select private.signin_store_token_for_actor(${provider}, ${envelope.ciphertext}::bytea, ${envelope.dekWrapped}::bytea, ${envelope.kekId})`;
-        } else {
-          await trx`select private.signin_store_token(${targetUserId}::uuid, ${provider}, ${envelope.ciphertext}::bytea, ${envelope.dekWrapped}::bytea, ${envelope.kekId})`;
-        }
+        await trx`select private.signin_store_token_for_actor(${provider}, ${envelope.ciphertext}::bytea, ${envelope.dekWrapped}::bytea, ${envelope.kekId})`;
       }),
 
     unlinkIdentity: (provider: string) =>
       guard(async () => {
-        const rows = edge
-          ? await trx`select o_queue_id from private.signin_unlink_identity_for_actor(${provider})`
-          : await trx`select o_queue_id from private.signin_unlink_identity(${uid}::uuid, ${provider})`;
+        const rows = await trx`select o_queue_id from private.signin_unlink_identity_for_actor(${provider})`;
         return rows.map((r) => r.o_queue_id as string);
       }),
 
     enqueueRevocations: () =>
       guard(async () => {
-        const rows = edge
-          ? await trx`select o_queue_id, o_provider from private.signin_enqueue_revocations_for_actor()`
-          : await trx`select o_queue_id, o_provider from private.signin_enqueue_revocations(${uid}::uuid)`;
+        const rows = await trx`select o_queue_id, o_provider from private.signin_enqueue_revocations_for_actor()`;
         return rows.map((r): RevocationJob => ({ queueId: r.o_queue_id as string, provider: r.o_provider as string }));
       }),
 
     currentKek: () => readKek(() => kekRows(null)),
     kekById: (kekId: string) => readKek(() => kekRows(kekId)),
-    system: buildSigninSystemOps(trx, mode),
+    system: buildSigninSystemOps(trx),
   };
 }
 
-/** The identity the LEGACY-mode sign-in system operations run under: `withOwnership` needs an actor to build its Repo, and these operations
- * (the revocation queue) act on no account, so they never read it. */
-const SIGNIN_SYSTEM_ACTOR: Actor = { uid: "00000000-0000-0000-0000-000000000000", role: "authenticated" };
-
-/** The revocation-queue operations, each call its own short transaction. `legacy`: through `withOwnership` as service_role (the nil-uid
- * actor above is never read). `edge`: through `openScopedTx("system", ...)` as **edge_system**, the role 0035 granted claim / complete /
- * purge / the KEK reader to (no actor is bound; edge_system has no privilege on any PII table, check 12). The OTP-failure counter is NOT
- * here: edge_system has no grant on it, so it runs as the caller's actor (`signinOtpFailuresFor`). */
+/** The revocation-queue operations, each call its own short transaction, as **edge_system** through `openScopedTx("system", ...)`: the role 0035
+ * granted claim / complete / purge / the KEK reader to (no actor is bound; edge_system has no privilege on any PII table, check 12). The OTP-failure
+ * counter is NOT here: edge_system has no grant on it, so it runs as the caller's actor (`signinOtpFailuresFor`). */
 function withSigninSystem<T>(op: (sys: SigninSystemOps) => Promise<T>): Promise<T> {
-  if (getDbMode() === "edge") {
-    return openScopedTx("system", { expectedUid: null }, (trx) => op(buildSigninSystemOps(trx, "edge"))).catch((err) => {
-      throw mapPgTimeoutError(err);
-    });
-  }
-  return withOwnership(SIGNIN_SYSTEM_ACTOR, (repo) => op(repo.signin.system));
+  return openScopedTx("system", { expectedUid: null }, (trx) => op(buildSigninSystemOps(trx))).catch((err) => {
+    throw mapPgTimeoutError(err);
+  });
 }
 
 /** The revocation queue, as the runner (_shared/signin/revocation.ts) needs it. Every call is its OWN short transaction: a vendor call is
@@ -3269,8 +3011,7 @@ export const signinRevocationDb: RevocationDb = {
   purge: (olderThanDays) => withSigninSystem((s) => s.purge(olderThanDays)),
 };
 
-/** The OTP-proof failure counter (§4.7 item 8), run AS THE CALLER (service_role in legacy mode, the bound edge_actor in edge mode: both
- * hold the OTP functions and nothing wider is needed). `reserve` takes the attempt atomically and commits on its own, BEFORE the proof is
+/** The OTP-proof failure counter (§4.7 item 8), run AS THE CALLER (the bound edge_actor, through the `_for_actor` wrappers: nothing wider is needed). `reserve` takes the attempt atomically and commits on its own, BEFORE the proof is
  * verified, so a failed proof (or a request that dies) always counts and N parallel proofs cannot all pass a read of the count; `release`
  * gives it back only for a proof that succeeded or never produced a verdict (security gate F3). */
 export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
@@ -3285,16 +3026,14 @@ export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
   };
 }
 
-/** The minter of the single-use email-OTP link proof (0039), `edge` mode only: `private.signin_record_email_proof`, run as **edge_system** in its
+/** The minter of the single-use email-OTP link proof (0039): `private.signin_record_email_proof`, run as **edge_system** in its
  * OWN transaction (`openScopedTx("system")`, no actor bound: the definer refuses inside an actor-bound transaction), committed before the link
  * transaction that redeems the proof. The address and the subject are hashed here; the database re-derives both and checks the address against the
  * target's own `auth.users.email` and the target's GoTrue sign-in stamp. Not a per-user operation: it is `edge_system` because the edge runtime has no
- * `service_role` pool to mint with (PR4b deletes the legacy one) and the per-user lane (`edge_actor`) must never write the proof table. In `legacy`
- * mode nothing calls it (`proofBoundLink` is false). */
+ * `service_role` pool to mint with and the per-user lane (`edge_actor`) must never write the proof table. */
 export function signinEmailProofs(): EmailProofMinter {
   return {
     async record(input: EmailProofInput): Promise<string> {
-      if (getDbMode() !== "edge") throw Errors.internal();
       const emailHash = await sha256Hex(input.email.trim().toLowerCase());
       const subHash = await sha256Hex(`${input.provider}:${input.subject}`);
       try {

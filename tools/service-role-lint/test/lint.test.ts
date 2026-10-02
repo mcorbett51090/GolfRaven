@@ -580,7 +580,7 @@ describe("the exemption is an EXACT path match, not endsWith (B5)", () => {
   });
 
   it("exempts only the exact supabase/functions/_shared/privileged.ts path", () => {
-    expect(lintSource(source, "/repo/supabase/functions/_shared/privileged.ts")).toEqual([]);
+    expect(lintSource(source, "/repo/supabase/functions/_shared/privileged.ts").every((f) => f.rule.startsWith("privileged-"))).toBe(true);
   });
 });
 

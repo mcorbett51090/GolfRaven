@@ -16,19 +16,14 @@
 // etc. — are already seeded by the time this suite runs, and are reused
 // directly rather than re-created).
 //
-// `privileged.ts` (supabase/functions/_shared/privileged.ts) reads its
-// OWN connection string from `Deno.env.get("SUPABASE_DB_URL")` — never
-// PGHOST/PGPORT directly — so this module derives one from the PG* env
-// vars and sets it before any test imports privileged.ts. The derived
-// URL is deliberately host-less (`postgres:///$PGDATABASE`): postgres.js
-// (the driver privileged.ts imports) falls back to `PGHOST`/`PGPORT`/
-// `PGUSER` from the environment when the URL string itself carries no
-// host — confirmed this session against a real throwaway cluster (a URL
-// WITH a host, even a percent-encoded unix-socket path, either fails
-// `new URL(...)` outright or survives un-decoded and is then dialed as a
-// literal TCP hostname; the host-less form is the only shape that
-// reaches postgres.js's own env-var fallback, which is what correctly
-// resolves the unix-socket directory `PGHOST` holds here).
+// `privileged.ts` (supabase/functions/_shared/privileged.ts) reads its ONLY connection string from `Deno.env.get("GOLFRAVEN_EDGE_DB_URL")`
+// (the NOBYPASSRLS `edge_gateway` login; edge role PR4b deleted the service_role pool and `SUPABASE_DB_URL`), never PGHOST/PGPORT
+// directly — so this module derives one from the PG* env vars and sets it before any test imports privileged.ts (below). The
+// derived URL is deliberately host-less (`postgres:///$PGDATABASE?user=edge_gateway`): postgres.js (the driver privileged.ts imports)
+// falls back to `PGHOST`/`PGPORT` from the environment when the URL string itself carries no host — confirmed against a real
+// throwaway cluster (a URL WITH a host, even a percent-encoded unix-socket path, either fails `new URL(...)` outright or survives
+// un-decoded and is then dialed as a literal TCP hostname; the host-less form is the only shape that reaches postgres.js's own
+// env-var fallback, which is what correctly resolves the unix-socket directory `PGHOST` holds here).
 const PGHOST = Deno.env.get("PGHOST");
 const PGPORT = Deno.env.get("PGPORT");
 const PGUSER = Deno.env.get("PGUSER");
@@ -38,12 +33,7 @@ if (!PGHOST || !PGPORT || !PGUSER || !PGDATABASE) {
     "supabase/tests/integration/_helpers.ts: PGHOST, PGPORT, PGUSER and PGDATABASE must all be set — run via tools/db/test-deno-integration.sh (or tools/db/test.sh), never `deno test` directly against this directory.",
   );
 }
-if (!Deno.env.get("SUPABASE_DB_URL")) {
-  Deno.env.set("SUPABASE_DB_URL", `postgres:///${PGDATABASE}`);
-}
-// Edge role (PR2). `EDGE_DB_MODE` itself is set by tools/db/test-deno-integration.sh (it runs this whole suite
-// once per mode); privileged.ts is the only reader of it. The edge pool connects as the provisioned `edge_gateway`
-// login: same host-less shape as above (the host and port come from PGHOST/PGPORT), the user named in the URL's query. The
+// The edge pool connects as the provisioned `edge_gateway` login: the host and port come from PGHOST/PGPORT, the user is named in the URL's query. The
 // harness cluster authenticates with `trust`; when tools/db/test.sh passes the throwaway password it generated at
 // runtime (EDGE_GATEWAY_TEST_PASSWORD, never a literal anywhere in the repo) it is handed to the client the way a
 // libpq client would receive it (PGPASSWORD), and ignored by `trust`.
@@ -66,13 +56,14 @@ type AdminSql = ReturnType<typeof postgres>;
 let _admin: AdminSql | null = null;
 
 /** A single persistent (max: 1) raw admin connection — `SET ROLE
- * service_role` once, so every fixture write below runs with the SAME
- * BYPASSRLS privilege `privileged.ts` itself uses, exactly mirroring how
- * `tools/db/test.sh` seeds `supabase/tests/helpers.sql` (`SET ROLE
- * service_role;` then the fixture file, in ONE psql session) in EITHER
- * harness mode. This is test-fixture plumbing ONLY — real assertions
- * always go through `withOwnership`/the real handlers, never this
- * connection. */
+ * service_role` once, so every FIXTURE write below runs with BYPASSRLS,
+ * exactly mirroring how `tools/db/test.sh` seeds
+ * `supabase/tests/helpers.sql` (`SET ROLE service_role;` then the fixture
+ * file, in ONE psql session) in EITHER harness mode. This is test-fixture
+ * plumbing ONLY (the production code under test no longer has any
+ * service_role path: it runs as edge_actor / edge_system) — real
+ * assertions always go through `withOwnership`/the real handlers, never
+ * this connection. */
 export function adminSql(): AdminSql {
   if (_admin) return _admin;
   _admin = postgres({
