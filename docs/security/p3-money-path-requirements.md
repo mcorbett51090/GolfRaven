@@ -2667,11 +2667,43 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   decrease branch, the NEW list must equal EXACTLY what `app.register_attest_key` writes: the OLD list with the replaced key's hash
   appended, newest 16 kept (FIFO). That is stricter than "OLD is a subset of NEW" and has no special case at the cap: at 16 the oldest drops
   and the rest keep their order, anything else (a dropped or reordered entry, a smuggled extra one, the wrong entry dropped at the cap) is
-  `23514`; pgTAP `17_attest_key_registration.sql` section 7b. **Still not enforced, by design of the 0032 trigger:** it is
-  `BEFORE UPDATE OF attest_counter`, so a statement that does not assign `attest_counter` does not fire it and a bare
-  `UPDATE ... SET attest_retired_key_hashes` is not covered by any trigger; only `service_role` and `private_definer` hold UPDATE on that
-  column and the only code that writes it is `app.register_attest_key`. A second trigger on that column is a follow-up, not a claim. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
+  `23514`; pgTAP `17_attest_key_registration.sql` section 7b. **Not enforced at 0036 (closed by 0038, next paragraph):** the trigger was
+  `BEFORE UPDATE OF attest_counter`, so a statement that did not assign `attest_counter` did not fire it and a bare
+  `UPDATE ... SET attest_retired_key_hashes` was not covered by any trigger; only `service_role` and `private_definer` hold UPDATE on that
+  column and the only code that writes it is `app.register_attest_key`. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
   believed to allow `attestKey` once per key `[unverified]`; follow-up K6).
+  **Correction (security-gate LOW-A; migration `0038_attest_trigger_key_change.sql`).** Everything above that says "a retired key coming back
+  is `23514`" and "the counter may fall only for a replacement" described what the trigger was MEANT to enforce; at 0036 it decided on "the
+  counter went down", not on "the key changed", and returned at once when the counter had not fallen. As `service_role` (or `private_definer`) three
+  hand-written statements were accepted: **P15** `SET attest_key_id = <retired key>, attest_public_key = <its public key>, attest_counter =
+  <the old value>` (a retired key returns with its old counter window reopened; the retired list still names it); **P16** the same swap
+  without assigning the counter (the trigger did not fire); **P17** wipe the retired list (no counter change, no trigger), then replace
+  onto the retired key. Only `service_role` and `private_definer` can write those columns and `app.register_attest_key` refuses a retired key, so this was
+  defence in depth, but the sentence was not true of the database. 0038 drops and recreates the same trigger
+  (`device_attest_counter_monotonic_trg`) as `BEFORE UPDATE OF attest_counter, attest_key_id, attest_public_key,
+  attest_retired_key_hashes` and redefines the same function (`CREATE OR REPLACE`; owner, empty `search_path`, ACL and the
+  `private.function_inventory` row unchanged; no grant, policy or RLS setting touched) so it decides on whether the KEY changed, by
+  content, never by role: **key unchanged** (id and public key both equal) means the counter may not decrease and the retired list may not
+  change (a key that is not changing is not re-judged: rows written before 0038 are left alone); **whenever the key changes, whatever the shape,
+  the NEW key must be WHOLE and BOUND** (security-gate LOW A/B on the first 0038): both columns non-null, and `attest_key_id =
+  encode(sha256(attest_public_key), 'base64')`, the exact expression `register_attest_key` checks (0034). Without it the "never used before" test compared
+  the key-id LABEL, so a retired public key came back under a fresh label, a key id with no public key was accepted on a keyless device (and
+  then blocked `register_attest_key` there for good), and a key id paired with another key's public key was accepted; each is now `23514`, as is a cleared key.
+  The retired-list membership checks therefore run on a bound identity. **First registration** (no key id and no public key before; the bound key is required as above) means the counter and the list stay as they are (the counter
+  is left alone because `register_attest_key` leaves it alone; it is 0 on every reachable keyless row, and the existing suite registers
+  a keyless device that sits at 5); **replacement** (both before, both after, both different) means exactly what
+  `register_attest_key` writes: counter 0, the new (bound) key's id hash in neither the OLD nor the NEW list (the OLD-list test is a wall of its own: at the 16-entry cap the FIFO drops the oldest retired entry from the NEW list, so a replacement ONTO that key is caught only by it; security-gate LOW C), the NEW list equal to (OLD list ||
+  hash of the replaced key) trimmed to the newest 16, and `attest_registered_at` set; **anything else is `23514`**.
+  **Clearing a key is refused** (NEW key NULL while OLD is not, or a half-key): no legitimate path clears a key, because a device is
+  deleted, never updated, when its account goes (`private.delete_my_data` and the `auth.users` cascade use the DELETE policy
+  `pd_delete_device_user_id`), and a cleared-then-reinstalled key is the rollback this closes. What is still NOT enforced, stated: the public key's own shape beyond the 65-byte CHECK (`register_attest_key` also requires the leading `0x04`; a hand-written key with another leading byte is still accepted); the trigger
+  cannot tell a VERIFIED registration from an unverified one (Apple's chain is checked in TypeScript), so `attest_registered_at` is only required
+  to be set on a replacement, not proven (and not required to move forward: it is the writing transaction's `now()`, and two registrations racing for the row lock take it in the opposite order to their start times, which `attest-key.deno.test.ts` "two concurrent registrations" caught in a first draft); a statement touching none of the four columns is not covered; `TRUNCATE`, `ALTER TABLE ... DISABLE
+  TRIGGER` and a superuser are outside any row trigger. Proved by pgTAP `17_attest_key_registration.sql` (sections 5b, 6, 7, 7b: P15, P16, P17,
+  a key change at a counter that is not 0, a key change onto a retired key, a list change with the key unchanged, clearing a key, the
+  at-cap FIFO accept and refuse, a retired public key under a fresh label, half keys and mismatched pairs at first registration and at replacement, the at-cap replacement onto the oldest retired key, and must-pass cells for every legitimate shape, including a correctly bound first registration and replacement). Test fixtures that wrote keys by hand in a shape the new trigger refuses were
+  changed to a legitimate shape, not the trigger to fit them (`rewards-activate.deno.test.ts#registerKey` now replaces the placeholder key the
+  way `register_attest_key` would, then advances the counter, and every fixture key id is now DERIVED from its key (`registerKey`, `newDevice`'s per-device placeholder, the shared key in `15_rewards_activation.sql`); the pgTAP A5 cell that set a retired list by hand now builds that state through the function).
   Alternatives rejected: leave the counter alone on replacement (the new key's first 40 assertions would fail as replays and raise an
   account-wide `attestation_failed`); a per-key counter in a side table (a new table with all its registry rows, for what two columns and a
   trigger do); a role-based exemption in the trigger (then every role that may hold it holds a rollback).
@@ -2691,11 +2723,15 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   issued on a retired key, while the new key's next 41 assertions failed as replays and held the account. `advanceAttestCounter` now takes the
   key id the assertion was verified against and adds `AND attest_key_id = $key` (privileged.ts; the same statement in both
   `EDGE_DB_MODE`s: `edge_actor` already holds SELECT on `app.device`, and its UPDATE grant is still `attest_counter` / `last_seen` etc. only;
-  no migration, no grant or policy change). Zero rows is treated exactly like a lost replay race: `failed` with reason `counter_replay`, the
-  reward held, never `attested`. A registration that has not yet committed cannot interleave either: the advance takes the device row lock
+  no migration, no grant or policy change). Zero rows fails closed exactly like a lost replay race: `failed`, the
+  reward held, never `attested`. **Reason, since NIT-A:** the handler re-reads the device (only on this failure path, same transaction) and records `key_replaced` when the key it
+  verified against is no longer the device's key, and `counter_replay` otherwise (the counter was not higher, or the device is gone); no schema change
+  (`fraud_signal.detail` is jsonb), same grade, same held outcome, and the same account-wide `attestation_failed` signal as before. The signal is deliberately kept: a
+  retired key's assertion reaching the server is a reinstall racing an activation or a captured assertion, and a reviewer has to see which; the reason
+  tells them, and clearing the signal is still a human act. A registration that has not yet committed cannot interleave either: the advance takes the device row lock
   first and the registration (which locks the same row) waits. Proved by `attest-key.deno.test.ts` ("race: ...", an `IosPort` whose
   `verifyAssertion` runs the REAL verifier on K1 counter 41 and then commits a K2 registration through the real repo before returning; run
-  in both modes: the reward is held, the signal says `counter_replay`, K2's counter stays 0 and K2's counter-1 assertion then issues),
+  in both modes: the reward is held, the signal says `key_replaced` (it said `counter_replay` before NIT-A), K2's counter stays 0 and K2's counter-1 assertion then issues),
   `activate-handler.test.ts` (the same interleaving over the fake repo) and pgTAP `17_attest_key_registration_edge.sql` section 5b (the
   statement as `edge_actor`: 1 row for the current key, 0 for another key, 0 for a replay).
 
@@ -2715,7 +2751,7 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **Unit (vitest)**: `app-attest-registration.test.ts` (verifier, parsers, pinned root, binding; every must-fail below),
   `attest-key-handler.test.ts` (order of checks, challenge discipline, ownership, rate limits, request shape),
   `attest-key-isolation.test.ts` (source-level guarantees), the file list in `rewards-isolation.test.ts` extended.
-- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 97 assertions: schema, privileges, first registration, the counter,
+- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 136 assertions: schema, privileges, first registration, the counter,
   replacement, the trigger decided by content including hand-written writes, the FIFO cap, validation and ownership, who can read or write
   the new columns, export and deletion) and `17_attest_key_registration_edge.sql` (the edge_actor lane as a real `edge_gateway` login, 54
   assertions: every registration proved by reading the row back, direct writes closed, the counter cannot be lowered by edge_actor, foreign
@@ -2802,7 +2838,7 @@ revokes it at the provider, and only then deletes; a failed revocation is retrie
 | (2) never auto-link a social sign-in whose email matches an existing account; email OTP proof first | A link whose Apple email belongs to *another* account is refused, 409 `email_proof_required`, with **no exchange, no write**. With `emailProof.code` the OTP is verified (`EmailOtpVerifier`, Supabase Auth `verifyOtp`) for *that address*; only a verified proof links the identity, and it links to **the account the proof was for**, not to the caller. The attempt is **reserved before the code is checked**, in one statement that checks the cap and increments (`private.reserve_signin_otp_attempt`; F3: the earlier peek-then-record let 20 parallel wrong proofs all reach the verifier), and given back only for a proof that succeeded or never reached a verdict. So at most **5 wrong proofs per target email per hour reach the verifier, then 429 even for a correct code**; a transport failure is not counted. The session `verifyOtp` creates for the proven account is signed out (`signOut({scope:"local"})`) immediately (F5); in `edge` mode this path answers 501 (O5); a proof for a different account than was looked up is 409 `email_proof_mismatch`. |
 | (3) a private-relay address is its own email | Stored and flagged as given. A relay address never takes the proof path (409 `email_belongs_to_another_account` if it matches another account); a relay account links only from this endpoint, signed in, to the **caller**. |
 | (4) unlink only while another method remains | `private.signin_unlink_identity`: one transaction, per-account advisory lock, 55000 → **422 `last_sign_in_method`**. Two concurrent unlinks of a two-method account leave exactly one (integration test, 3 rounds). |
-| rate limits | 10/user/h on link and unlink (`hitRateLimitForActor`, before the transaction opens); 5 failed OTP proofs per target email per hour (`private.reserve_signin_otp_attempt` / `release_signin_otp_attempt`, bucket key built in the database from a sha256 of the email — no address is ever in a bucket key). `GET` (list) is not limited. |
+| rate limits | 10/user/h on link and unlink (`hitRateLimitForActor`, before the transaction opens); 5 failed OTP proofs per target email per hour (`private.reserve_signin_otp_attempt` / `release_signin_otp_attempt`, bucket key built in the database from a sha256 of the email — no address is ever in a bucket key; since 0037 `reserve` returns the hour window it charged and `release` takes that window, and the edge lane calls the `_for_actor` wrappers, see Round 3). `GET` (list) is not limited. |
 | "another user's id" | The request has **no field that names an account**; `userId` / `user_id` / `uid` / `email` in a body are *rejected* (400), not ignored. Everything is the authenticated caller's own account; another account's method is 404, another account's Apple identity is 409. |
 
 ### Design decisions
@@ -2958,9 +2994,30 @@ no refresh token is captured**; the client must call `link` with the token and t
   item:** with a real project, unlink `email` on an account that holds another method and check whether `signInWithOtp` for that address still issues a session.
 - **O10. F6 residual.** The delete transaction now re-enqueues under the per-account lock (the lock is held to commit), so no grant is stored between "queued" and
   "deleted" and none is deleted unqueued. A `link` that waits on that lock runs after the commit and can store a grant for a user whose rows are gone but whose
-  `auth.users` row still exists for the few milliseconds before `deleteAuthUser`; that grant is cascade-deleted unqueued. It needs the account's owner to link Apple
-  while deleting the same account; closing it needs a deletion tombstone (a table), which is not built. Late grants caught by the second enqueue are revoked right after
-  the commit, from the durable queue, not before the rows are deleted.
+  `auth.users` row still exists until `deleteAuthUser`; that grant is cascade-deleted unqueued. Late grants caught by the second enqueue are revoked right after
+  the commit, from the durable queue, not before the rows are deleted. **Corrected in round 3 (2026-10-02, N2); the wording above ("a few milliseconds", "needs the account's
+  owner to link Apple while deleting the same account") understated it, and the "tombstone" it said was needed has been checked, not assumed:**
+  - **How long the window is.** It opens when the delete transaction commits and closes when `deleteAuthUser` returns. In between, `orchestrateMeDelete` runs step 4
+    (`runRevocationsBestEffort` over the late grants: the revocations run in parallel, each bounded by `SIGNIN_VENDOR_TIMEOUT_MS` = 3 s, plus the claim and complete
+    round trips), and only then does the entrypoint call `deleteAuthUser` (an HTTP call to the Auth admin API; this file gives it no timeout of its own, only the 15 s request race around the whole handler, which abandons the response but does not cancel the call). So the window is
+    **up to about 3 s plus two database round trips plus the Auth call, not milliseconds**, and a `deleteAuthUser` that throws (the response is then an error and
+    the caller retries) leaves it **open until the retry succeeds**. It is also not only for a link that was *waiting* on the lock: any `me-signin-methods` request that
+    carries the still-valid session and starts after the commit gets through, because `signin_link_identity` only checks that `auth.users` has the row and
+    `signin_store_token` only that the account holds the identity.
+  - **What it costs.** If `deleteAuthUser` then succeeds, `auth.identities` and `app.signin_provider_token` both cascade away from `auth.users`, with no queue row for the new grant:
+    the refresh token minted at Apple during that request is **never revoked at Apple** (the 5.1.1(v) gap this feature exists to close, for one grant, in a narrow race). If
+    `deleteAuthUser` fails, the account survives with that identity and grant until the user deletes again (the retry's enqueue does queue it).
+  - **The gate's cheap closure was investigated and cannot be built on what exists.** The suggestion was that the link / store definers refuse when the app-side row
+    `delete_my_data` removes is gone. That needs a row every account is guaranteed to hold. None is: `app.profile` has no `INSERT` path in this repository (no migration,
+    no Edge function; `INSERT` is revoked from `anon` and `authenticated` in 0009; `supabase/tests/helpers.sql` is the only writer), no trigger on `auth.users`
+    exists in 0001-0036, and every other table `private.pii_retention_policy` lists (`device`, `push_token`, `play`, ...) is created by use, so an account that
+    signed in by email OTP and linked Apple holds none of them. A refusal keyed on "the row is gone" cannot tell "deleted" from "never created", so it would either refuse
+    every such user or refuse nobody. **No row was invented** (a deletion tombstone is a new table with its own retention and registry classification), so 0037 does not
+    touch the link / store definers and there is no race cell for it.
+  - **Closing it properly (not built; for a later round, each needs its own gate):** (a) a deletion tombstone written by `delete_my_data` in the same transaction and checked by
+    link / store under the per-account lock (the install-link tombstone is the precedent: keyed so it names no person); or (b) make the session unusable *before* the
+    delete commits, by banning the Auth user first through the admin API `[unverified: GoTrue's ban semantics for an already-issued access token (it is a JWT, valid until it expires) were not checked]`.
+    Until then this is a documented, bounded residual, not a closed finding.
 - **O11. Accepted NIT residuals:** the queue's idempotency key is `(provider, md5(ciphertext))`, so a grant re-queued more than 72 hours after the first row expired
   is a new row; expiry is lazy (applied when a claim runs); the envelope's AAD binds provider and kek id but not the user or the row, which is deliberate (the
   queue row has no user id) and means a ciphertext moved between rows of the same provider decrypts. The `verifyOtp` session sign-out is best effort (a failure is
@@ -3016,3 +3073,18 @@ Numbers: `tools/db/test.sh` exit 0 in `HARNESS_MODE=superuser` and `restricted`;
 Deno suite **195 tests in each of `EDGE_DB_MODE=legacy` and `edge`**; vitest **40 files / 762 tests**; the lint's own **316** tests; `pnpm -r typecheck` clean; `deno check --frozen` and `deno cache --frozen`
 (fresh `DENO_DIR`) exit 0; `gitleaks dir` no leaks; `check-migrations-immutable.sh --base 67f0b2c` and `--self-test` OK. The F3 concurrency cell is vacuous in `edge` mode (the proof path
 answers 501 there, O5) and is proved in `legacy`.
+
+### Round 3: non-blocking follow-ups L1, L2, N1, N2 (on `127970f` = `main` b8fed5b + the App Attest hardening commit; migration **0037**, 0001-0036 untouched)
+
+| Finding | Fix | Proof |
+|---|---|---|
+| **L1** any `edge_actor` connection could call the OTP counter functions with no bound user (`release` is a decrement: it resets any address's brute-force counter; `reserve` burns an address's five attempts) | `peek_` / `reserve_` / `release_signin_otp_attempt_for_actor`, each calling `signin_bound_user` first (the F7 shape: unbound and system-delegate are 42501); EXECUTE on the three cores **revoked from `edge_actor`** (service_role keeps them); `privileged.ts` `buildSigninSystemOps(trx, mode)` calls the wrappers in `edge`, the cores in `legacy`; 4 inventory rows added/changed | 18 new pgTAP cells in `18_signin_providers_edge.sql` (unbound x3, system delegate x3, cores not callable unbound x3 and bound x3, privilege counts x3, a bound flow); mutations: binding check removed from the three wrappers fails 6 cells; cores re-granted to `edge_actor` fails 7 cells plus `10_function_inventory.sql` |
+| **L2** `release` decremented the CURRENT hour window, not the one the reservation was taken in (a proof straddling the top of the hour refunded a window that never paid) | `reserve_signin_otp_attempt` returns `(o_attempts, o_window_start)`; `release_signin_otp_attempt(p_email_hash, p_window_start)` decrements exactly that window and refuses a non-hour-aligned or NULL one (22023); the one-argument release is dropped; `OtpFailureCounter.reserve` returns `{used, windowStart}`, `release` takes the window; the handler passes the reservation's window | 11 pgTAP cells in `17_signin_providers.sql` (a release naming the previous window moves that window and not the current one; none-row no-op; misaligned / NULL refused; the old signature gone), a Deno cell (real database, both modes), a unit cell that moves the clock mid-proof; mutations: SQL release on the current window fails 3 + 1 pgTAP cells and the Deno cell; handler releasing a window computed at release time fails 3 unit cells |
+| **N1** the unit F3 cell's verifier was instant, so the round-1 peek, verify, record shape still passed it | the unit verifier now yields for 25 ms (a real round trip), the same as the Deno cell | mutation: the handler restored to peek, verify, record FAILS the unit F3 cell (`expected 20 to be 5`); the same mutation against the instant verifier PASSES that cell (only the L2 cell, which needs the release, fails), so the delay is what closes it |
+| **N2 / O10** a link that waited on the per-account lock can store a grant between the delete's commit and `deleteAuthUser` | **not closed, deliberately.** The gate's closure needs an app-side row every account holds; there is none (see O10), and a tombstone table was not to be invented. O10 is corrected instead: the window is not "a few milliseconds" | n/a (nothing built, so no race cell); the evidence for "no such row" is the O10 text |
+
+0037 touches no table, column, table grant, policy or RLS setting (FORCE RLS untouched); `private.edge_policy_allowlist` and `private.definer_policy_allowlist` are unchanged. The only grants it changes are EXECUTE (three revoked from `edge_actor`, three wrappers granted to it, the two recreated cores granted to `service_role` only). Every new definer is `SECURITY DEFINER`, owned by `private_definer`, `search_path = ''`, created inside the `GRANT CREATE ON SCHEMA private` bracket, with `private.function_inventory` rows. The migration needs `UPDATE, DELETE` on `private.function_inventory` for the old release row, so it uses 0032's temporary current-user policy and revokes it again.
+
+**Honest limits.** (1) A BOUND user actor can still `release` / `reserve` for any address (the counter is keyed by the target address's hash); L1 closes "any connection", not "a signed-in caller going around the Edge code" (edge-role-design.md §12). (2) The Deno L2 cell is proved in `legacy` and `edge` against correct code, but its mutation (SQL release on the current window) was run in `legacy` only. (3) A rollover cannot be produced inside one pgTAP transaction (`now()` is fixed), so the L2 pgTAP cells stage it as "the reservation sits in the previous window's bucket row", which is what the database sees; the unit cell moves a fake clock mid-proof. (4) The in-database `now()` window arithmetic and the Edge code's `windowStart` round trip as an ISO string with millisecond precision (hour-aligned, so exact).
+
+Numbers: `tools/db/test.sh` exit 0 in `HARNESS_MODE=superuser` and `restricted` (each a fresh cluster; both H2 no-`migration_owner` checks apply 0037); pgTAP **21 files, 1835 assertions** (`17_signin_providers.sql` 162, was 150; `18_signin_providers_edge.sql` 83, was 65); the Deno suite **198 tests in each of `EDGE_DB_MODE=legacy` and `edge`** (one new); `verify-function-inventory.mjs` OK; vitest **40 files / 767 tests** (one new; the F3 and L2 cells run with the 25 ms verifier); the lint **316** tests and clean over `supabase/functions`; `pnpm -r typecheck` exit 0; `deno check --frozen` and `deno cache --frozen` (fresh `DENO_DIR`) over the 11 CI entrypoints exit 0; `check-migrations-immutable.sh --base 127970f` (36 files byte-identical) and `--self-test` OK; `gitleaks dir` no leaks. Not run: prettier (out of scope), any deploy, a real Supabase project.

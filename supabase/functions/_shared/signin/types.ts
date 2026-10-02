@@ -65,10 +65,11 @@ export interface SigninSystemOps {
   purge(olderThanDays: number): Promise<number>;
   kekById(kekId: string): Promise<Kek>;
   peekOtpFailures(emailHash: string): Promise<number>;
-  /** Atomic: takes one attempt (cap check + increment in one statement). Returns attempts used including this one, or -1 at the cap. */
-  reserveOtpAttempt(emailHash: string): Promise<number>;
-  /** Gives one reserved attempt back (never below zero). */
-  releaseOtpAttempt(emailHash: string): Promise<void>;
+  /** Atomic: takes one attempt (cap check + increment in one statement). `attempts` is the number used including this one, or -1 at the cap;
+   * `windowStart` is the hour window the attempt was charged to (ISO 8601), to be handed to `releaseOtpAttempt` (L2). */
+  reserveOtpAttempt(emailHash: string): Promise<OtpReservation>;
+  /** Gives one reserved attempt back, in EXACTLY the window it was reserved in (never the current one by itself; never below zero). */
+  releaseOtpAttempt(emailHash: string, windowStart: string): Promise<void>;
 }
 
 export interface ClaimedRevocation {
@@ -88,15 +89,22 @@ export interface RevocationDb {
   purge(olderThanDays: number): Promise<number>;
 }
 
+/** What a reservation hands back: the attempts used (-1 at the cap) and the hour window the attempt was charged to. */
+export interface OtpReservation {
+  attempts: number;
+  windowStart: string;
+}
+
 export interface OtpFailureCounter {
   /** Failed-or-in-flight OTP proofs recorded for this target-email hash in the current hour (read only; the handler does not decide on it). */
   peek(emailHash: string): Promise<number>;
   /** Takes one attempt BEFORE the proof is verified, atomically (the cap check and the increment are one statement, so parallel proofs cannot all
-   * pass a read of the count). Returns the attempts used including this one, or null when the cap is already reached (nothing was taken).
-   * Commits on its own: a proof that fails, or a request that dies, still counts. */
-  reserve(emailHash: string): Promise<number | null>;
-  /** Gives one reserved attempt back: the proof SUCCEEDED, or never reached a verdict (a transport failure says nothing about the code). */
-  release(emailHash: string): Promise<void>;
+   * pass a read of the count). Returns the attempts used including this one and the window it was charged to, or null when the cap is already
+   * reached (nothing was taken). Commits on its own: a proof that fails, or a request that dies, still counts. */
+  reserve(emailHash: string): Promise<{ used: number; windowStart: string } | null>;
+  /** Gives one reserved attempt back: the proof SUCCEEDED, or never reached a verdict (a transport failure says nothing about the code).
+   * `windowStart` is the window `reserve` returned: a release after the hour rolled over must not refund the new window (L2). */
+  release(emailHash: string, windowStart: string): Promise<void>;
 }
 
 export interface AppleSigninPort {

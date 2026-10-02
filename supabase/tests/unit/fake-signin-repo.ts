@@ -189,11 +189,12 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
       },
       async reserveOtpAttempt(h) {
         const n = f.otpFailures.get(h) ?? 0;
-        if (n >= 5) return -1;
+        const windowStart = "2030-01-01T00:00:00.000Z";
+        if (n >= 5) return { attempts: -1, windowStart };
         f.otpFailures.set(h, n + 1);
-        return n + 1;
+        return { attempts: n + 1, windowStart };
       },
-      async releaseOtpAttempt(h) {
+      async releaseOtpAttempt(h, _windowStart) {
         f.otpFailures.set(h, Math.max(0, (f.otpFailures.get(h) ?? 0) - 1));
       },
     },

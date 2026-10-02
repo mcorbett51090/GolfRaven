@@ -32,7 +32,17 @@ interface Harness {
     grant: { refreshToken: string; subject: string };
     revokeError: unknown;
   };
-  otp: { failures: Map<string, number>; verifierCalls: Array<{ email: string; code: string }>; result: EmailOtpResult; throws: boolean };
+  otp: {
+    failures: Map<string, number>;
+    verifierCalls: Array<{ email: string; code: string }>;
+    result: EmailOtpResult;
+    throws: boolean;
+    /** The hour window the fake counter is currently in (what `reserve` returns), and every `release` it was asked to do. */
+    windowStart: string;
+    releases: Array<{ hash: string; windowStart: string }>;
+    /** Runs inside the verifier, after its delay: lets a cell move the clock past the top of the hour mid-proof. */
+    onVerify: (() => void) | null;
+  };
 }
 
 function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountLink?: boolean } = {}): Harness {
@@ -67,8 +77,9 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountL
       if (apple.revokeError) throw apple.revokeError;
     },
   };
-  const otp: Harness["otp"] = { failures: new Map(), verifierCalls: [], result: { ok: false }, throws: false };
-  // Mirrors private.reserve_signin_otp_attempt / release_signin_otp_attempt: take-with-cap is ONE step, release never goes below zero.
+  const otp: Harness["otp"] = { failures: new Map(), verifierCalls: [], result: { ok: false }, throws: false, windowStart: "2030-01-01T10:00:00.000Z", releases: [], onVerify: null };
+  // Mirrors private.reserve_signin_otp_attempt / release_signin_otp_attempt: take-with-cap is ONE step, release never goes below zero, and
+  // a release decrements only the window it names (`failures` holds the CURRENT window's counts; a release naming an older window is a no-op on it, L2).
   const counter: OtpFailureCounter = {
     async peek(h) {
       return otp.failures.get(h) ?? 0;
@@ -77,15 +88,22 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountL
       const n = otp.failures.get(h) ?? 0;
       if (n >= 5) return null;
       otp.failures.set(h, n + 1);
-      return n + 1;
+      return { used: n + 1, windowStart: otp.windowStart };
     },
-    async release(h) {
+    async release(h, windowStart) {
+      otp.releases.push({ hash: h, windowStart });
+      if (windowStart !== otp.windowStart) return;
       otp.failures.set(h, Math.max(0, (otp.failures.get(h) ?? 0) - 1));
     },
   };
+  // A verifier that is NOT instantaneous: like the real GoTrue round trip it yields for ~25 ms, which is the window in which a
+  // check-then-act counter (peek, verify, record) lets every parallel proof pass its read. With an instant verifier the round-1 shape
+  // still passed the F3 cell (N1).
   const verifier: EmailOtpVerifier = {
     async verify(email, code) {
       otp.verifierCalls.push({ email, code });
+      await new Promise((r) => setTimeout(r, 25));
+      otp.onVerify?.();
       if (otp.throws) throw new Error("gotrue unreachable");
       return otp.result;
     },
@@ -421,6 +439,22 @@ describe("link: never auto-link a social identity whose email matches an existin
     expect(slowVerify.length).toBe(5);
     expect(results.filter((e) => e.status === 422)).toHaveLength(5);
     expect(results.filter((e) => e.status === 429)).toHaveLength(15);
+  });
+
+  it("L2: a proof that straddles the top of the hour releases the window it reserved in and does NOT refund the new window", async () => {
+    const h = harness(ALICE);
+    h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
+    const hash = await sha256Hex("bob@example.test");
+    const w1 = h.otp.windowStart;
+    h.otp.throws = true; // a transport failure: the attempt is given back
+    h.otp.onVerify = () => {
+      // the clock passes the top of the hour while the proof is in flight; the new window already holds 3 attempts
+      h.otp.windowStart = "2030-01-01T11:00:00.000Z";
+      h.otp.failures.set(hash, 3);
+    };
+    expect((await failure(handleLinkProvider(linkReq({ emailProof: { code: "123456" } }), ALICE, h.deps))).status).toBe(502);
+    expect(h.otp.releases).toEqual([{ hash, windowStart: w1 }]); // it named the window the attempt was TAKEN in
+    expect(h.otp.failures.get(hash)).toBe(3); // the new window was not refunded
   });
 
   it("a transport failure of the OTP check is a 502 and is NOT counted against the address", async () => {

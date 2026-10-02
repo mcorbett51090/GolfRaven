@@ -10,7 +10,7 @@
 -- Every group is its own BEGIN ... ROLLBACK except the session-reuse group (needs a real COMMIT, the P3a follow-up 1
 -- style, see 12_guc_session_reuse.sql), which cleans up after itself.
 
-SELECT plan(150);
+SELECT plan(162);
 
 -- ----------------------------------------------------------------------------
 -- 0. Structure
@@ -325,28 +325,58 @@ ROLLBACK;
 
 -- ----------------------------------------------------------------------------
 -- 5. The OTP-proof failure counter (§4.7 item 8: 5 failed proofs per target email per hour)
+--    0037 (L2): reserve returns (o_attempts, o_window_start) and release takes that window. The edge lane (the _for_actor wrappers and
+--    the revoked cores) is 18_signin_providers_edge.sql.
 -- ----------------------------------------------------------------------------
 BEGIN;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 0, 'otp: no attempts yet for a fresh email hash');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 1, 'otp: the first reservation is attempt 1');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: ... then 2');
-SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: peek reads the count without moving it');
-SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: ... twice');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('b@x.test', 'sha256'), 'hex')), 1, 'otp: a different target email has its own bucket');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 3, 'otp: the first email continues at 3');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 4, 'otp: 4');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: 5 (the cap)');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), -1, 'otp: at the cap a reservation is REFUSED (-1): the cap check and the increment are one statement (F3)');
-SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: ... and the refused reservation did not move the count');
-SELECT is(private.release_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 4, 'otp: a release gives one attempt back (a proof that succeeded is not a failure)');
-SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: ... and the freed attempt can be taken again');
-SELECT lives_ok($$SELECT private.release_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')) FROM generate_series(1, 7)$$, 'otp: releasing more than was reserved does not raise');
-SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 0, 'otp: ... and the count never goes below zero');
+SELECT encode(digest('a@x.test', 'sha256'), 'hex') AS ha, encode(digest('b@x.test', 'sha256'), 'hex') AS hb,
+       to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600) AS w_now,
+       to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600) - interval '1 hour' AS w_prev \gset
+SELECT is(private.peek_signin_otp_failures(:'ha'), 0, 'otp: no attempts yet for a fresh email hash');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), 1, 'otp: the first reservation is attempt 1');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), 2, 'otp: ... then 2');
+SELECT is(private.peek_signin_otp_failures(:'ha'), 2, 'otp: peek reads the count without moving it');
+SELECT is(private.peek_signin_otp_failures(:'ha'), 2, 'otp: ... twice');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'hb')), 1, 'otp: a different target email has its own bucket');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), 3, 'otp: the first email continues at 3');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), 4, 'otp: 4');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), 5, 'otp: 5 (the cap)');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), -1, 'otp: at the cap a reservation is REFUSED (-1): the cap check and the increment are one statement (F3)');
+SELECT is(private.peek_signin_otp_failures(:'ha'), 5, 'otp: ... and the refused reservation did not move the count');
+SELECT is((SELECT o_window_start FROM private.reserve_signin_otp_attempt(:'ha')), :'w_now'::timestamptz, 'otp (L2): a reservation, refused or not, reports the hour window it was charged to');
+SELECT is(private.release_signin_otp_attempt(:'ha', :'w_now'::timestamptz), 4, 'otp: a release gives one attempt back (a proof that succeeded is not a failure)');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt(:'ha')), 5, 'otp: ... and the freed attempt can be taken again');
+SELECT lives_ok($$SELECT private.release_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex'), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600)) FROM generate_series(1, 7)$$, 'otp: releasing more than was reserved does not raise');
+SELECT is(private.peek_signin_otp_failures(:'ha'), 0, 'otp: ... and the count never goes below zero');
 SELECT throws_ok($$SELECT private.peek_signin_otp_failures('not-a-hash')$$, '22023', NULL, 'otp: only a sha256 hex may name a bucket (no email address ever lands in a bucket key)');
-SELECT throws_ok($$SELECT private.reserve_signin_otp_attempt('A@X.TEST')$$, '22023', NULL, 'otp: ... for the reservation as well');
-SELECT throws_ok($$SELECT private.release_signin_otp_attempt('A@X.TEST')$$, '22023', NULL, 'otp: ... and the release');
+SELECT throws_ok($$SELECT * FROM private.reserve_signin_otp_attempt('A@X.TEST')$$, '22023', NULL, 'otp: ... for the reservation as well');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt('A@X.TEST', to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600))$$, '22023', NULL, 'otp: ... and the release');
 SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'signin-otp-fail:%' AND bucket_key LIKE '%@%'), 0, 'otp: no bucket key contains an address');
+ROLLBACK;
+
+-- 5b. L2 (0037): the release decrements the window the reservation was taken in, not the current one. A rollover cannot be produced inside
+-- a transaction (now() is fixed), so it is staged the way it looks to the database: the attempt was reserved in the PREVIOUS hour window (a
+-- bucket row with count 3 there) and the release arrives in the CURRENT one (count 1).
+BEGIN;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT encode(digest('l2@x.test', 'sha256'), 'hex') AS hl2,
+       to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600) AS w_now,
+       to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600) - interval '1 hour' AS w_prev \gset
+CREATE TEMP TABLE l2_res ON COMMIT DROP AS SELECT * FROM private.reserve_signin_otp_attempt(:'hl2');
+SELECT is((SELECT o_attempts FROM l2_res), 1, 'L2: the fresh current window starts at attempt 1');
+SELECT is((SELECT o_window_start FROM l2_res), :'w_now'::timestamptz, 'L2: ... and the reservation carries the window it was charged to (the current hour)');
+INSERT INTO private.rate_limit_bucket (bucket_key, window_start, count) VALUES ('signin-otp-fail:' || :'hl2', :'w_prev'::timestamptz, 3);
+SELECT is(private.release_signin_otp_attempt(:'hl2', :'w_prev'::timestamptz), 2, 'L2: a release naming the PREVIOUS window decrements that window (3 -> 2)');
+SELECT is(private.peek_signin_otp_failures(:'hl2'), 1, 'L2: ... and does NOT refund the current window (still 1: a release after the rollover gives the new window nothing)');
+SELECT is((SELECT count FROM private.rate_limit_bucket WHERE bucket_key = 'signin-otp-fail:' || :'hl2' AND window_start = :'w_prev'::timestamptz), 2, 'L2: ... the previous window row is the one that moved');
+SELECT is(private.release_signin_otp_attempt(:'hl2', :'w_now'::timestamptz), 0, 'L2: a release naming the current window decrements the current window');
+SELECT is(private.release_signin_otp_attempt(:'hl2', :'w_prev'::timestamptz - interval '1 hour'), 0, 'L2: a release naming a window with no bucket row is a no-op that returns 0');
+SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key = 'signin-otp-fail:' || :'hl2'), 2, 'L2: ... and creates no row');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt(repeat('0', 64), now())$$, '22023', NULL, 'L2: a window that is not hour-aligned is refused (reserve never returns one)');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt(repeat('0', 64), NULL)$$, '22023', NULL, 'L2: ... and so is a NULL window');
+SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'private' AND p.proname = 'release_signin_otp_attempt' AND pg_get_function_identity_arguments(p.oid) = 'p_email_hash text'), 0,
+  'L2: the one-argument release (which refunded whatever window was current) no longer exists');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------

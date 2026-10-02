@@ -55,11 +55,11 @@ SELECT is(
   'rests_on_unattestable defaults to false for every existing reward (nothing is retroactively held)'
 );
 SELECT throws_ok(
-  $$UPDATE app.device SET attest_public_key = '\x0102030405'::bytea WHERE id = '20000000-0000-0000-0000-0000000000a2'$$,
+  $$UPDATE app.device SET attest_public_key = '\x0102030405'::bytea, attest_key_id = encode(sha256('\x0102030405'::bytea), 'base64') WHERE id = '20000000-0000-0000-0000-0000000000a2'$$,
   '23514', NULL, 'device.attest_public_key must be exactly 65 bytes (an uncompressed P-256 point) or NULL'
 );
 SELECT lives_ok(
-  $$UPDATE app.device SET attest_public_key = decode('04' || repeat('ab', 64), 'hex') WHERE id = '20000000-0000-0000-0000-0000000000a2'$$,
+  $$UPDATE app.device SET attest_public_key = decode('04' || repeat('ab', 64), 'hex'), attest_key_id = encode(sha256(decode('04' || repeat('ab', 64), 'hex')), 'base64') WHERE id = '20000000-0000-0000-0000-0000000000a2'$$,
   'a 65-byte key is accepted'
 );
 SELECT throws_ok(
@@ -932,7 +932,9 @@ SELECT results_eq(
   $$SELECT accounts_on_install FROM app.device_link_signals('20000000-0000-0000-0000-000000000001')$$,
   $$VALUES (1)$$, 'device_link_signals: a device with no link keys counts only itself'
 );
-UPDATE app.device SET attest_key_id = 'KEYIDSHARED' WHERE id IN ('20000000-0000-0000-0000-0000000000b1', '20000000-0000-0000-0000-0000000000c3');
+-- (0038: a key is written whole and bound -- the key id is the base64 SHA-256 of the public key -- so two devices sharing a key share both.)
+UPDATE app.device SET attest_public_key = decode('04' || repeat('5a', 64), 'hex'),
+  attest_key_id = encode(sha256(decode('04' || repeat('5a', 64), 'hex')), 'base64') WHERE id IN ('20000000-0000-0000-0000-0000000000b1', '20000000-0000-0000-0000-0000000000c3');
 SELECT results_eq(
   $$SELECT accounts_on_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000c3')$$,
   $$VALUES (2)$$, 'device_link_signals: rows also link by an equal attest key id'

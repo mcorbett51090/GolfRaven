@@ -11,11 +11,17 @@
 -- independently of its caller: a key id must be the hash of its key; only the caller's own iOS device; the same or
 -- a retired key is refused; a counter can fall only for a new key, by content and not by role.
 --
+-- Since 0038 the trigger fires on the key columns and the retired list as well as the counter and decides on whether the KEY
+-- changed (sections 5b, 6, 7b). Whenever the key changes it must be written WHOLE and BOUND (both columns, the key id the base64
+-- SHA-256 of the public key, as app.register_attest_key requires), so "never used before" is a statement about the KEY and not about
+-- its label: a retired key cannot come back by a hand-written statement, whatever the counter assignment and whatever label it
+-- carries. NOT checked by the trigger: the public key's leading 0x04 byte (only the 65-byte CHECK applies to a hand-written key).
+--
 -- Public keys here are 65 arbitrary bytes starting 0x04: the database checks the SHAPE (and key id = hash of key),
 -- not that the point is on the curve (the verifier proved that).
 
 BEGIN;
-SELECT plan(97);
+SELECT plan(136);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -28,13 +34,15 @@ CREATE FUNCTION pg_temp.kid(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SEL
 CREATE FUNCTION pg_temp.kh(n int) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT encode(sha256(convert_to(pg_temp.kid(n), 'UTF8')), 'hex') $$;
 
 -- Player A and B come from helpers.sql. Devices: A1 ios (the main subject), A2 ios (a counter with no key), A3 android,
--- B1 ios (someone else's), A4 ios (the FIFO cap), A5 ios (the hand-written-replacement cells).
+-- B1 ios (someone else's), A4 ios (the FIFO cap), A5 ios (the hand-written-replacement cells), A6 ios (hand-written first registration, 0038), A7 ios (the at-cap OLD-list cell, 0038).
 INSERT INTO app.device (id, user_id, platform) VALUES
   ('17000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000000a', 'ios'),
   ('17000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-00000000000a', 'ios'),
   ('17000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-00000000000a', 'android'),
   ('17000000-0000-0000-0000-0000000000a4', '00000000-0000-0000-0000-00000000000a', 'ios'),
   ('17000000-0000-0000-0000-0000000000a5', '00000000-0000-0000-0000-00000000000a', 'ios'),
+  ('17000000-0000-0000-0000-0000000000a6', '00000000-0000-0000-0000-00000000000a', 'ios'),
+  ('17000000-0000-0000-0000-0000000000a7', '00000000-0000-0000-0000-00000000000a', 'ios'),
   ('17000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-00000000000b', 'ios');
 UPDATE app.device SET attest_counter = 5 WHERE id = '17000000-0000-0000-0000-0000000000a2';
 
@@ -49,7 +57,7 @@ SELECT throws_ok($$UPDATE app.device SET attest_registered_at = now() WHERE id =
   'a "registered" device must carry a key id and a public key (device_attest_registered_needs_key)');
 SELECT throws_ok(
   format($$UPDATE app.device SET attest_retired_key_hashes = %L::text[] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, (SELECT array_agg(pg_temp.kh(n))::text FROM generate_series(1, 17) n)),
-  '23514', NULL, 'the retired list is capped at 16 (device_attest_retired_cap)');
+  '23514', NULL, 'a 17-entry retired list is refused (0038: the list is not writable on its own, and device_attest_retired_cap is the second wall)');
 
 -- ============================================================================
 -- 2. Privileges: who may call it
@@ -130,9 +138,113 @@ SELECT throws_ok($$SELECT app.register_attest_key('00000000-0000-0000-0000-00000
 SELECT is((SELECT attest_counter FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a1'), 4::bigint, 'the counter is where it was');
 
 -- ============================================================================
+-- 5b. 0038: the trigger decides on the KEY, not on "the counter went down" (security-gate LOW-A)
+-- ============================================================================
+-- Before 0038 the trigger was `BEFORE UPDATE OF attest_counter` and returned as soon as the counter had not fallen, so a service_role
+-- writer could bring a RETIRED key back with its old counter window reopened (P15: key swap + the OLD counter assigned), do the same swap
+-- without assigning the counter at all (P16: no trigger), or wipe the retired list and then "replace" onto the retired key (P17).
+-- A1 now holds key 3 at counter 4 with [key 1] retired (section 4): every statement below is a hand-written write, as service_role.
+SELECT is((SELECT attest_key_id = pg_temp.kid(3) AND attest_counter = 4 AND attest_retired_key_hashes = ARRAY[pg_temp.kh(1)] AND attest_registered_at IS NOT NULL
+           FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a1'), true, 'precondition: A1 holds key 3 at counter 4 with key 1 retired');
+-- P15: the retired key comes back, the counter is "assigned" the value it already had.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 4 WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(1), pg_temp.pk(1)),
+  '23514', NULL, 'P15: swapping to a retired key while assigning the unchanged counter is refused (the trigger no longer returns early on "the counter did not fall")');
+-- P16: the same swap, attest_counter not assigned at all (the trigger used to not fire).
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(1), pg_temp.pk(1)),
+  '23514', NULL, 'P16: swapping to a retired key without assigning the counter is refused (the trigger now fires on the key columns)');
+-- P17: wipe the retired list (no counter change), then replace onto the key that was retired.
+SELECT throws_ok($$UPDATE app.device SET attest_retired_key_hashes = '{}' WHERE id = '17000000-0000-0000-0000-0000000000a1'$$,
+  '23514', NULL, 'P17a: wiping the retired list with the key unchanged is refused (the list changes only with the key)');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(1), pg_temp.pk(1), pg_temp.kh(3)),
+  '23514', NULL, 'P17b: replacing onto a key that is on the OLD list, with the list rewritten to forget it, is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(1), pg_temp.pk(1), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'a retired key coming back in otherwise EXACTLY the shape register_attest_key writes (counter 0, list appended) is refused: the new key is on the old list');
+-- A key change must start from counter 0 whatever the direction: unchanged, lower, and higher are all refused.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 4, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(50), pg_temp.pk(50), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'a key change with the counter left at 4 (not 0) is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 2, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(50), pg_temp.pk(50), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'a key change with a LOWER non-zero counter is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 9, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(50), pg_temp.pk(50), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'a key change with a HIGHER counter is refused too (the new key has no history; the counter starts at 0)');
+-- The list moves only with the key, and only by the one append.
+SELECT throws_ok(format($$UPDATE app.device SET attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kh(1), pg_temp.kh(60)),
+  '23514', NULL, 'a list change with the key unchanged (an entry smuggled in) is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_counter = 5, attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'a list change with the key unchanged is refused even next to a legitimate counter increase');
+-- Half-swaps: a key id without its key, a key without its id.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(50), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'changing only the key id (the public key left) is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.pk(50), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'changing only the public key (the key id left) is refused');
+-- Clearing a key. registered_at is cleared with it so the CHECK constraint (device_attest_registered_needs_key) cannot be what refuses it.
+SELECT throws_ok($$UPDATE app.device SET attest_key_id = NULL, attest_public_key = NULL, attest_registered_at = NULL WHERE id = '17000000-0000-0000-0000-0000000000a1'$$,
+  '23514', NULL, 'a key cannot be CLEARED (no path does it: a device is deleted, never updated)');
+SELECT throws_ok($$UPDATE app.device SET attest_key_id = NULL, attest_public_key = NULL, attest_registered_at = NULL, attest_counter = 0 WHERE id = '17000000-0000-0000-0000-0000000000a1'$$,
+  '23514', NULL, 'clearing the key and resetting the counter in one statement is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = NULL, attest_public_key = NULL, attest_registered_at = NULL, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'clearing the key while appending it to the retired list is refused');
+SELECT throws_ok($$UPDATE app.device SET attest_key_id = NULL, attest_registered_at = NULL WHERE id = '17000000-0000-0000-0000-0000000000a1'$$,
+  '23514', NULL, 'clearing only the key id is refused');
+-- A replacement that is right in every way except its provenance flag.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = NULL, attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(50), pg_temp.pk(50), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'a replacement that leaves attest_registered_at NULL is refused (register_attest_key always sets it)');
+SELECT is((SELECT attest_key_id = pg_temp.kid(3) AND attest_public_key = pg_temp.pk(3) AND attest_counter = 4 AND attest_retired_key_hashes = ARRAY[pg_temp.kh(1)] FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a1'), true,
+  'none of the refused statements changed the key, the counter or the list');
+-- The legitimate paths still pass. (Must-pass cells: a trigger that refuses everything would also "pass" every must-fail cell above.)
+SELECT lives_ok($$UPDATE app.device SET attest_counter = 5 WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, 'a counter increase with the key unchanged is accepted');
+SELECT lives_ok($$UPDATE app.device SET attest_key_id = attest_key_id, attest_public_key = attest_public_key, attest_counter = attest_counter, attest_retired_key_hashes = attest_retired_key_hashes WHERE id = '17000000-0000-0000-0000-0000000000a1'$$,
+  'a write that re-assigns every watched column to the value it already has is accepted (nothing changed)');
+-- LOW A (security gate on the first 0038): the "never used before" test compared the key-id LABEL, so a RETIRED public key came back under a
+-- fresh label. The key id must be the base64 SHA-256 of the public key (as register_attest_key requires), so the label cannot be chosen.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(70), pg_temp.pk(1), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'LOW A: a RETIRED public key (key 1) under a fresh key-id label (70), in the exact replacement shape otherwise, is refused (the id is not its SHA-256)');
+-- LOW B: a mismatched pair at replacement (id of key 90, public key 91), otherwise the exact shape.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(90), pg_temp.pk(91), pg_temp.kh(1), pg_temp.kh(3)),
+  '23514', NULL, 'LOW B: a mismatched pair (id of one key, public key of another) at replacement is refused');
+SELECT lives_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(51), pg_temp.pk(51), pg_temp.kh(1), pg_temp.kh(3)),
+  'the exact replacement (a bound key, counter 0, old key appended, registered_at set) is accepted when hand-written');
+SELECT is((SELECT attest_key_id = pg_temp.kid(51) AND attest_counter = 0 AND attest_retired_key_hashes = ARRAY[pg_temp.kh(1), pg_temp.kh(3)] FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a1'), true, 'and it is exactly that');
+-- P15 again, now against the NEW current key: the key that was just retired (3) cannot come back with the counter left alone either.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0 WHERE id = '17000000-0000-0000-0000-0000000000a1'$$, pg_temp.kid(3), pg_temp.pk(3)),
+  '23514', NULL, 'P15 on the new row: the key replaced a moment ago cannot be swapped back in at counter 0');
+-- First registration, by hand, on a keyless device (A6): the counter and the list stay as they are.
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 3 WHERE id = '17000000-0000-0000-0000-0000000000a6'$$, pg_temp.kid(61), pg_temp.pk(61)),
+  '23514', NULL, 'a first registration that also moves the counter is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_retired_key_hashes = ARRAY[%L] WHERE id = '17000000-0000-0000-0000-0000000000a6'$$, pg_temp.kid(61), pg_temp.pk(61), pg_temp.kh(60)),
+  '23514', NULL, 'a first registration that also writes a retired list is refused');
+-- LOW B: half keys and mismatched pairs on a keyless device. (A key id alone also used to leave a row register_attest_key could never register on.)
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L WHERE id = '17000000-0000-0000-0000-0000000000a6'$$, pg_temp.kid(80)),
+  '23514', NULL, 'LOW B: a key id with no public key on a keyless device is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_public_key = %L WHERE id = '17000000-0000-0000-0000-0000000000a6'$$, pg_temp.pk(80)),
+  '23514', NULL, 'LOW B: a public key with no key id on a keyless device is refused');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L WHERE id = '17000000-0000-0000-0000-0000000000a6'$$, pg_temp.kid(90), pg_temp.pk(91)),
+  '23514', NULL, 'LOW B: a mismatched pair (id of key 90, public key 91) at first registration is refused');
+SELECT is((SELECT attest_key_id IS NULL AND attest_public_key IS NULL FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a6'), true, 'and the keyless device is still keyless');
+SELECT lives_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L WHERE id = '17000000-0000-0000-0000-0000000000a6'$$, pg_temp.kid(61), pg_temp.pk(61)),
+  'a correctly bound first registration (no key before; whole key, id = SHA-256 of it; counter and list untouched) is accepted when hand-written');
+SELECT throws_ok($$UPDATE app.device SET attest_key_id = NULL, attest_public_key = NULL WHERE id = '17000000-0000-0000-0000-0000000000a6'$$,
+  '23514', NULL, 'and once a key is on the row it cannot be cleared again to "start over"');
+
+-- LOW C (security gate on the first 0038): nothing pinned the OLD-list check. At the 16-entry cap the FIFO drops the OLDEST retired entry from
+-- the NEW list, so a replacement ONTO that oldest retired key is a bound key, counter 0, with exactly the FIFO list -- and NOT on the NEW list.
+-- Only `NOT (new hash = ANY (OLD list))` refuses it. A7: keys 101..117 registered through the function -> retired 101..116 (16), current 117.
+SELECT count(app.register_attest_key('00000000-0000-0000-0000-00000000000a', '17000000-0000-0000-0000-0000000000a7', pg_temp.kid(n), pg_temp.pk(n))) FROM generate_series(101, 117) AS n;
+SELECT is((SELECT cardinality(attest_retired_key_hashes) = 16 AND attest_retired_key_hashes[1] = pg_temp.kh(101) AND attest_retired_key_hashes[16] = pg_temp.kh(116) AND attest_key_id = pg_temp.kid(117)
+           FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a7'), true, 'precondition: A7 is at the cap, retired 101..116, current 117');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(),
+    attest_retired_key_hashes = (SELECT (attest_retired_key_hashes || %L::text)[2:17] FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a7') WHERE id = '17000000-0000-0000-0000-0000000000a7'$$, pg_temp.kid(101), pg_temp.pk(101), pg_temp.kh(117)),
+  '23514', NULL, 'LOW C: at the cap, a replacement onto the OLDEST retired key (101) whose FIFO list has just dropped it is refused (the OLD-list check)');
+SELECT is((SELECT attest_key_id = pg_temp.kid(117) AND attest_retired_key_hashes[1] = pg_temp.kh(101) FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a7'), true, 'and A7 still holds key 117 with key 101 still retired');
+SELECT lives_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(),
+    attest_retired_key_hashes = (SELECT (attest_retired_key_hashes || %L::text)[2:17] FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a7') WHERE id = '17000000-0000-0000-0000-0000000000a7'$$, pg_temp.kid(118), pg_temp.pk(118), pg_temp.kh(117)),
+  'at the cap, the identical statement onto a NEVER-used key (118) is accepted: the refusal above was the OLD-list check and nothing else');
+
+-- ============================================================================
 -- 6. The trigger decides by CONTENT: direct writes, any role
 -- ============================================================================
--- (A5 gets key 20 through the function, counter 9.)
+-- (A5 gets key 22 and then key 20 through the function, so its retired list is [22] and its key is 20 -- the state cell (e) below
+-- needs. Since 0038 a bare write to the retired list is itself refused, so the list can no longer be set up by hand.) Counter 9.
+SELECT app.register_attest_key('00000000-0000-0000-0000-00000000000a', '17000000-0000-0000-0000-0000000000a5', pg_temp.kid(22), pg_temp.pk(22));
 SELECT app.register_attest_key('00000000-0000-0000-0000-00000000000a', '17000000-0000-0000-0000-0000000000a5', pg_temp.kid(20), pg_temp.pk(20));
 UPDATE app.device SET attest_counter = 9 WHERE id = '17000000-0000-0000-0000-0000000000a5';
 -- (a) a new key, counter 0, but the old key NOT retired: refused.
@@ -147,8 +259,7 @@ SELECT throws_ok(format($$UPDATE app.device SET attest_counter = 0, attest_retir
 -- (d) a NEW key whose public key did not change: refused.
 SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(21), pg_temp.kh(20)),
   '23514', NULL, 'direct: a changed key id over the same public key is refused');
--- (e) the new key was ALREADY retired in the old row: refused.
-UPDATE app.device SET attest_retired_key_hashes = ARRAY[pg_temp.kh(22)] WHERE id = '17000000-0000-0000-0000-0000000000a5';
+-- (e) the new key was ALREADY retired in the old row (A5's list is [22]): refused.
 SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(22), pg_temp.pk(22), pg_temp.kh(22), pg_temp.kh(20)),
   '23514', NULL, 'direct: replacing with a key that is already on the retired list is refused');
 -- (e2) the same, but the writer DROPS the new key's entry from the retired list in the same statement ("forgetting" it): refused,
@@ -161,7 +272,7 @@ SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_publi
 -- (g) no key before: a counter cannot fall to 0 by "installing" a first key.
 SELECT is((SELECT attest_counter FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a5'), 9::bigint, 'none of the refused statements moved the counter');
 -- (h) the legitimate shape, hand-written: allowed, because it is decided by content and not by who wrote it.
-SELECT lives_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(21), pg_temp.pk(21), pg_temp.kh(22), pg_temp.kh(20)),
+SELECT lives_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_registered_at = now(), attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(21), pg_temp.pk(21), pg_temp.kh(22), pg_temp.kh(20)),
   'direct: a replacement that retires the old key and installs a never-used one may restart at 0 (content, not role)');
 SELECT is((SELECT attest_counter FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a5'), 0::bigint, 'and it did');
 
@@ -228,6 +339,8 @@ SELECT is(pg_temp.replace_at_cap('swap') || pg_temp.replace_at_cap('no_old_hash'
 SELECT is(pg_temp.replace_at_cap('fifo'), 'ok', 'at the cap: the exact FIFO result (oldest dropped, replaced key appended) is accepted');
 SELECT is((SELECT cardinality(attest_retired_key_hashes) FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a4'), 16, 'and the list is still 16 long');
 SELECT is((SELECT attest_retired_key_hashes[16] FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a4'), pg_temp.kh(100), 'with the replaced key (100) last');
+SELECT throws_ok($$UPDATE app.device SET attest_retired_key_hashes = attest_retired_key_hashes[2:16] WHERE id = '17000000-0000-0000-0000-0000000000a4'$$, '23514', NULL,
+  'at the cap: trimming the list by hand with the key unchanged (the FIFO drop without the replacement it belongs to) is refused (0038)');
 
 -- ============================================================================
 -- 8. Argument validation and ownership

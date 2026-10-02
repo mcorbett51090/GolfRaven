@@ -2895,7 +2895,7 @@ import { kekFromBase64, type Kek } from "./signin/envelope.ts";
 import type { AppleSecretConfig } from "./signin/apple-client-secret.ts";
 import { NotConfiguredError } from "./signin/errors.ts";
 import { constantTimeEqual } from "./signin/bytes.ts";
-import type { ClaimedRevocation, EmailOtpResult, EmailOtpVerifier, LinkIdentityInput, OtpFailureCounter, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo, SigninSystemOps } from "./signin/types.ts";
+import type { ClaimedRevocation, EmailOtpResult, EmailOtpVerifier, LinkIdentityInput, OtpFailureCounter, OtpReservation, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo, SigninSystemOps } from "./signin/types.ts";
 
 /** The Sign in with Apple server configuration, or `null` when ANY of the four values is absent or blank (a half-set configuration is
  * "not configured", never a default). These are the only environment reads for this feature, and this is the only place they happen.
@@ -2956,11 +2956,13 @@ async function readKek(run: () => Promise<{ o_kek_id: string; o_kek_b64: string 
   return kekFromBase64(row.o_kek_id, row.o_kek_b64); // EnvelopeError('kek_length') if the decoded key is not 32 bytes
 }
 
-/** The system operations (queue claim / complete / purge, the KEK by id, the OTP-failure counter). Same SQL in both modes: the queue
+/** The system operations (queue claim / complete / purge, the KEK by id, the OTP-failure counter). Same SQL in both modes for the queue and the KEK: the queue
  * functions are granted to service_role AND edge_system, `get_signin_token_kek` to service_role, edge_actor and edge_system, and the
- * OTP-failure functions to service_role and edge_actor. WHICH transaction runs them is decided by `withSigninSystem` (queue) and
+ * OTP-failure CORES to service_role only (0037: edge_actor reaches the counter through the `_for_actor` wrappers, which require a bound
+ * kind = 'user' actor, so `mode` picks the cores in legacy and the wrappers in edge). WHICH transaction runs them is decided by `withSigninSystem` (queue) and
  * `signinOtpFailuresFor` (OTP counter) below. */
-function buildSigninSystemOps(trx: TxSql): SigninSystemOps {
+function buildSigninSystemOps(trx: TxSql, mode: DbMode): SigninSystemOps {
+  const edge = mode === "edge";
   const kekRows = async (kekId: string | null) =>
     (await trx`select o_kek_id, o_kek_b64 from private.get_signin_token_kek(${kekId}::text)`) as unknown as { o_kek_id: string; o_kek_b64: string }[];
   return {
@@ -2990,16 +2992,22 @@ function buildSigninSystemOps(trx: TxSql): SigninSystemOps {
       return Number(rows[0]?.n ?? 0);
     },
     kekById: (kekId: string) => readKek(() => kekRows(kekId)),
+    // The OTP counter. `legacy`: the service_role CORES. `edge`: the `_for_actor` wrappers, which refuse unless a kind = 'user' actor is bound
+    // in this transaction (0037, L1): the cores are not granted to edge_actor at all, so an unbound edge_actor connection cannot call them.
     async peekOtpFailures(emailHash): Promise<number> {
-      const rows = await trx`select private.peek_signin_otp_failures(${emailHash}) as n`;
+      const rows = edge ? await trx`select private.peek_signin_otp_failures_for_actor(${emailHash}) as n` : await trx`select private.peek_signin_otp_failures(${emailHash}) as n`;
       return Number(rows[0]?.n ?? 0);
     },
-    async reserveOtpAttempt(emailHash): Promise<number> {
-      const rows = await trx`select private.reserve_signin_otp_attempt(${emailHash}) as n`;
-      return Number(rows[0]?.n ?? -1);
+    async reserveOtpAttempt(emailHash): Promise<OtpReservation> {
+      const rows = edge
+        ? await trx`select o_attempts, o_window_start from private.reserve_signin_otp_attempt_for_actor(${emailHash})`
+        : await trx`select o_attempts, o_window_start from private.reserve_signin_otp_attempt(${emailHash})`;
+      const w = rows[0]?.o_window_start;
+      return { attempts: Number(rows[0]?.o_attempts ?? -1), windowStart: w instanceof Date ? w.toISOString() : String(w) };
     },
-    async releaseOtpAttempt(emailHash): Promise<void> {
-      await trx`select private.release_signin_otp_attempt(${emailHash}) as n`;
+    async releaseOtpAttempt(emailHash, windowStart): Promise<void> {
+      if (edge) await trx`select private.release_signin_otp_attempt_for_actor(${emailHash}, ${windowStart}::timestamptz) as n`;
+      else await trx`select private.release_signin_otp_attempt(${emailHash}, ${windowStart}::timestamptz) as n`;
     },
   };
 }
@@ -3089,7 +3097,7 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
 
     currentKek: () => readKek(() => kekRows(null)),
     kekById: (kekId: string) => readKek(() => kekRows(kekId)),
-    system: buildSigninSystemOps(trx),
+    system: buildSigninSystemOps(trx, mode),
   };
 }
 
@@ -3103,7 +3111,7 @@ const SIGNIN_SYSTEM_ACTOR: Actor = { uid: "00000000-0000-0000-0000-000000000000"
  * here: edge_system has no grant on it, so it runs as the caller's actor (`signinOtpFailuresFor`). */
 function withSigninSystem<T>(op: (sys: SigninSystemOps) => Promise<T>): Promise<T> {
   if (getDbMode() === "edge") {
-    return openScopedTx("system", { expectedUid: null }, (trx) => op(buildSigninSystemOps(trx))).catch((err) => {
+    return openScopedTx("system", { expectedUid: null }, (trx) => op(buildSigninSystemOps(trx, "edge"))).catch((err) => {
       throw mapPgTimeoutError(err);
     });
   }
@@ -3127,10 +3135,11 @@ export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
   return {
     peek: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.peekOtpFailures(emailHash)),
     reserve: async (emailHash) => {
-      const n = await withOwnership(actor, (repo) => repo.signin.system.reserveOtpAttempt(emailHash));
-      return n < 0 ? null : n;
+      const r = await withOwnership(actor, (repo) => repo.signin.system.reserveOtpAttempt(emailHash));
+      return r.attempts < 0 ? null : { used: r.attempts, windowStart: r.windowStart };
     },
-    release: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.releaseOtpAttempt(emailHash)),
+    // The window the attempt was reserved in, not "the current one" (0037, L2).
+    release: (emailHash, windowStart) => withOwnership(actor, (repo) => repo.signin.system.releaseOtpAttempt(emailHash, windowStart)),
   };
 }
 

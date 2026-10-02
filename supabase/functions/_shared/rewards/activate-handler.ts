@@ -211,7 +211,13 @@ async function assessActivatingDevice(rewardId: string, deviceId: string, req: A
         reasons = [];
       } else {
         grade = "failed";
-        reasons = ["counter_replay"];
+        // Two different reasons for the same zero rows (NIT-A): the counter was not higher (a replay, or a lost race with another
+        // advance) vs the key this assertion was verified against is no longer the device's key (a registration replaced it between
+        // the read and the write). The grade and the held outcome are identical; only the diagnostic differs, so an operator reading
+        // the signal can tell a reinstall racing an activation from a replay. The re-read runs only on this failure path, on the
+        // same transaction (READ COMMITTED sees the committed replacement), and decides nothing: it can only relabel a `failed`.
+        const current = device.attestKeyId === null ? null : await repo.rewards.deviceAttestState(deviceId);
+        reasons = current !== null && current.attestKeyId !== device.attestKeyId ? ["key_replaced"] : ["counter_replay"];
       }
     } else {
       grade = verdict.grade;

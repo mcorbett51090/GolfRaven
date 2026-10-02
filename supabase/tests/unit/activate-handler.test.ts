@@ -445,7 +445,7 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
       },
     };
     expect((await activate(state, R1, req, deps({ ios: wrapped }))).state).toBe("held_review");
-    expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_replay"]);
+    expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["key_replaced"]);
     expect(rewardsState(state).deviceAttest.get(D1)!.attestCounter).toBe(0);
   });
 
