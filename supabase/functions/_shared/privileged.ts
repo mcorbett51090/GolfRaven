@@ -87,6 +87,8 @@ import postgres from "postgres";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { Errors } from "./http.ts";
 
+import type { OwnReward, RewardsRepo } from "./rewards/types.ts";
+import type { RewardsAttestationConfig } from "./rewards/production-ports.ts";
 import type {
   Actor,
   CatalogVersionRow,
@@ -1051,6 +1053,11 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       },
     },
 
+    // P3f: the reward-activation repository — implemented in the delimited
+    // "P3f" section at the END of this file (one seam here, everything else
+    // appended below).
+    rewards: buildRewardsRepo(trx, uid),
+
     device: {
       async findOwn(deviceId: string) {
         const rows = await trx`select id from app.device where id = ${deviceId} and user_id = ${uid}`;
@@ -1281,6 +1288,12 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         return rows.map((r) => r.provider as string);
       },
       async deleteMyData() {
+        // P3f: a held (or approved-unredeemed) offer code is RESERVING offer
+        // budget; deleting the account deletes the code, so the reservation is
+        // handed back FIRST, in this same transaction (0027's own header). Runs
+        // before delete_my_data because that removes the offer_code rows this
+        // reads. Idempotent: a retried deletion finds nothing left to release.
+        await trx`select app.release_account_reservations(${uid})`;
         const rows = await trx`select private.delete_my_data(${uid}) as result`;
         const result = rows[0]?.result as { user_id?: string; deleted_at?: string } | undefined;
         if (!result || typeof result.user_id !== "string" || typeof result.deleted_at !== "string") {
@@ -1355,6 +1368,14 @@ const LOCK_TIMEOUT = "5s";
 // see tools/db/test.sh's own db-tests run, which DOES exercise this
 // against a real cluster, for the empirical confirmation once it runs].
 const PG_TIMEOUT_SQLSTATES = new Set(["57014", "55P03"]);
+// P3f (gate M1): 40P01 = deadlock_detected, 40001 = serialization_failure. Both
+// ABORT the transaction (nothing committed) and are the database telling the
+// caller to run it again; the account-deletion / activation / play-hold paths
+// take row locks in different orders on purpose-built-but-not-provably-disjoint
+// sets (a scoring cascade locks a play's codes in arbitrary order), so a
+// deadlock is a possible, correct, retryable outcome — never an opaque 500. A
+// SEPARATE set so `PG_TIMEOUT_SQLSTATES` above keeps meaning exactly "timeout".
+const PG_RETRYABLE_SQLSTATES = new Set(["40P01", "40001"]);
 
 /** Maps a thrown error to `Errors.serviceUnavailable()` when it is one of
  * the two Postgres timeout SQLSTATEs `STATEMENT_TIMEOUT`/`LOCK_TIMEOUT`
@@ -1402,6 +1423,9 @@ function mapPgTimeoutError(err: unknown): unknown {
   // actually was.
   if ((err as { code?: unknown } | null)?.code === "CONNECTION_CLOSED") {
     return Errors.serviceUnavailable("outcome unknown; retrying is idempotent");
+  }
+  if (typeof code === "string" && PG_RETRYABLE_SQLSTATES.has(code)) {
+    return Errors.serviceUnavailable("the database rolled this request back because it conflicted with a concurrent one (deadlock/serialization) — nothing was changed; safe to retry");
   }
   return err;
 }
@@ -2200,3 +2224,292 @@ export function getCatalogImportEnvConfig(): CatalogImportEnvConfig | null {
   if (allowedHosts.length === 0) return null;
   return { artifactBaseUrl, allowedHosts, webhookHmacSecret };
 }
+
+// ============================================================================
+// ==== P3f additions — `rewards-activate` (build plan §7.5, A2-08) ============
+// ============================================================================
+// Everything between this banner and the matching END banner is P3f's. It is
+// appended (not interleaved) on purpose: other P3 builders append their own
+// delimited sections to this file too, and one block per builder keeps the
+// merge to "keep both". The only P3f line elsewhere in this file is the single
+// `rewards: buildRewardsRepo(trx, uid)` seam inside `buildRepo`.
+
+const REWARDS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function rewardsStateConflict(err: unknown): unknown {
+  const code = (err as { code?: unknown } | null)?.code;
+  // SQLSTATEs app.activate_* / app.resolve_held_* raise (0027): P0002 = no such
+  // reward for this user; 55000 = the reward's state does not allow the
+  // transition; 23514 = the DB refused an `activate` the table's rows 2/3 forbid
+  // (a fraud signal raised, or the reward's basis changed, since the handler
+  // read them — a retry re-runs the table on fresh facts).
+  if (code === "P0002") return Errors.notFound("no such reward");
+  if (code === "55000") return Errors.conflict("reward_not_activatable", "this reward cannot be activated in its current state");
+  if (code === "23514") return Errors.conflict("reward_state_changed", "the reward or the account changed while this was being activated — retry");
+  return err;
+}
+
+function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
+  return {
+    async isAppReviewDemoAccount(): Promise<boolean> {
+      const rows = await trx`select exists (select 1 from app.app_review_demo_account where user_id = ${uid}) as demo`;
+      return Boolean(rows[0]?.demo);
+    },
+
+    async lockOwnReward(id: string): Promise<OwnReward | null> {
+      // A non-UUID would make the driver raise 22P02 and surface as a 500 — it
+      // is simply "no such reward" (404), the same as any id that is not theirs.
+      if (!REWARDS_UUID_RE.test(id)) return null;
+      // Ownership is part of the WHERE clause, never a post-hoc check: another
+      // user's id and a nonexistent id are the same empty result.
+      const codes = await trx`
+        select oc.id, oc.state, oc.activated_device_id, oc.expires_at, oc.expiry_paused_at,
+               (oc.rests_on_unattestable and oc.review_cleared_at is null) as rests_on_unattestable,
+               coalesce(p.held_review, false) as play_held
+        from app.offer_code oc
+        left join app.play p on p.id = oc.play_id and p.user_id = oc.user_id
+        where oc.id = ${id} and oc.user_id = ${uid}
+        for update of oc`;
+      const c = codes[0];
+      if (c) {
+        return {
+          kind: "offer_code",
+          id: c.id,
+          state: c.state,
+          activatedDeviceId: c.activated_device_id ?? null,
+          expiresAt: c.expires_at ? c.expires_at.toISOString() : null,
+          expiryPaused: c.expiry_paused_at !== null && c.expiry_paused_at !== undefined,
+          // The reward's own flag stops counting once a reviewer cleared it (H2,
+          // folded into the SELECT above); a held PLAY is not cleared by a review
+          // of the code. Row 3 only: a review never waives an account-level signal.
+          restsOnUnattestable: Boolean(c.rests_on_unattestable) || Boolean(c.play_held),
+        };
+      }
+      const ents = await trx`
+        select e.id, e.state, e.activated_device_id,
+               (e.rests_on_unattestable and e.review_cleared_at is null) as rests_on_unattestable,
+               coalesce(p.held_review, false) as play_held
+        from app.entitlement e
+        left join app.play p on p.id = e.play_id and p.user_id = e.user_id
+        where e.id = ${id} and e.user_id = ${uid}
+        for update of e`;
+      const e = ents[0];
+      if (!e) return null;
+      return {
+        kind: "entitlement",
+        id: e.id,
+        state: e.state,
+        activatedDeviceId: e.activated_device_id ?? null,
+        expiresAt: null,
+        expiryPaused: false,
+        restsOnUnattestable: Boolean(e.rests_on_unattestable) || Boolean(e.play_held),
+      };
+    },
+
+    async deviceAttestState(deviceId: string) {
+      const rows = await trx`
+        select id, platform, attest_key_id, attest_counter, attest_public_key
+        from app.device where id = ${deviceId} and user_id = ${uid}`;
+      const r = rows[0];
+      if (!r) return null;
+      return {
+        id: r.id,
+        platform: r.platform as "ios" | "android",
+        attestKeyId: r.attest_key_id ?? null,
+        // bigint arrives as a string from postgres.js.
+        attestCounter: Number(r.attest_counter),
+        attestPublicKey: r.attest_public_key ? new Uint8Array(r.attest_public_key) : null,
+      };
+    },
+
+    async advanceAttestCounter(deviceId: string, counter: number): Promise<boolean> {
+      // One atomic, monotonic statement: a replayed or racing counter updates 0
+      // rows, whichever of two concurrent requests lost.
+      const rows = await trx`
+        update app.device set attest_counter = ${counter}, last_seen = now()
+        where id = ${deviceId} and user_id = ${uid} and attest_counter < ${counter}
+        returning id`;
+      return rows.length > 0;
+    },
+
+    async recordDeviceVerdict(deviceId: string, verdict: { grade: string; tokenHash: string | null }): Promise<void> {
+      // `integrity_last` is part of GET /v1/me/export (0022): grade + time only,
+      // never the diagnostic reasons.
+      await trx`
+        update app.device set
+          devicecheck_token_hash = coalesce(${verdict.tokenHash}::text, devicecheck_token_hash),
+          integrity_last = ${trx.json({ grade: verdict.grade, at: new Date().toISOString() } as never)},
+          last_seen = now()
+        where id = ${deviceId} and user_id = ${uid}`;
+    },
+
+    async hasOpenAttestationFailedSignal(): Promise<boolean> {
+      // Only the signal's own cleared_at releases it (N3): a review of one reward
+      // never waives an account-level signal.
+      const rows = await trx`
+        select exists (
+          select 1 from app.fraud_signal where user_id = ${uid} and kind = 'attestation_failed' and cleared_at is null
+        ) as open`;
+      return Boolean(rows[0]?.open);
+    },
+
+    async canReserveBudget(rewardId: string): Promise<boolean> {
+      // Advisory and lock-free: see RewardsRepo#canReserveBudget. No row of the
+      // result is the caller's to lock; the database re-decides under the offer lock.
+      const rows = await trx`
+        select (o.face_value <= 0 or oc.reserved_amount > 0 or oc.state <> 'earned'
+                or o.budget_used + o.budget_reserved + o.face_value <= o.budget_cap) as ok
+        from app.offer_code oc join app.offer o on o.id = oc.offer_id
+        where oc.id = ${rewardId} and oc.user_id = ${uid}`;
+      // Not a code (an entitlement reserves nothing) or not found: nothing to refuse.
+      return rows.length === 0 ? true : Boolean(rows[0]!.ok);
+    },
+
+    async raiseAttestationFailedIfNone(detail: Record<string, unknown>): Promise<boolean> {
+      // Serialised per account so two concurrent activations cannot both see
+      // "none open" and insert two.
+      const [k1, k2] = advisoryLockKeys(4, uid);
+      await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+      const rows = await trx`
+        insert into app.fraud_signal (user_id, kind, detail)
+        select ${uid}::uuid, 'attestation_failed', ${trx.json(detail as never)}::jsonb
+        where not exists (
+          select 1 from app.fraud_signal where user_id = ${uid} and kind = 'attestation_failed' and cleared_at is null
+        )
+        returning id`;
+      return rows.length > 0;
+    },
+
+    async raiseFraudSignalOnce(kind: string, detail: Record<string, unknown>, onceKey: string): Promise<boolean> {
+      const [k1, k2] = advisoryLockKeys(5, `${uid}:${kind}:${onceKey}`);
+      await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+      const stored = { ...detail, onceKey };
+      const rows = await trx`
+        insert into app.fraud_signal (user_id, kind, detail)
+        select ${uid}::uuid, ${kind}::text, ${trx.json(stored as never)}::jsonb
+        where not exists (
+          select 1 from app.fraud_signal
+          where user_id = ${uid} and kind = ${kind} and cleared_at is null and detail ->> 'onceKey' = ${onceKey}
+        )
+        returning id`;
+      return rows.length > 0;
+    },
+
+    async hasPriorReward(): Promise<boolean> {
+      // A reward the account actually RECEIVED, ON A DEVICE: a ledger row, or its
+      // own record in a post-activation state with an activated_device_id.
+      // Earned, held and void rewards do not count, and neither does a reward no
+      // device ever ran the table on (H2).
+      const rows = await trx`
+        select (
+          exists (select 1 from app.device_reward_ledger where user_id = ${uid})
+          or exists (select 1 from app.offer_code where user_id = ${uid} and state in ('issued', 'redeemed') and activated_device_id is not null)
+          or exists (select 1 from app.entitlement where user_id = ${uid} and state in ('redeemable', 'vouchered', 'redeemed') and activated_device_id is not null)
+        ) as prior`;
+      return Boolean(rows[0]?.prior);
+    },
+
+    async applyActivation(input) {
+      const detail = input.holdDetail === null ? null : trx.json(input.holdDetail as never);
+      try {
+        if (input.kind === "offer_code") {
+          const rows = await trx`select app.activate_offer_code(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
+          return { state: rows[0]!.state as string };
+        }
+        const rows = await trx`select app.activate_entitlement(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
+        return { state: rows[0]!.state as string };
+      } catch (err) {
+        throw rewardsStateConflict(err);
+      }
+    },
+
+    async recordInstallLink(deviceId: string, installLinkHash: string): Promise<void> {
+      // One SQL function (0027 5g): stamps the link on the device row (first
+      // writer wins) and writes the account's pseudonymous tombstone row, which
+      // survives account deletion (N4). service_role holds EXECUTE; the vault key
+      // is read inside a SECURITY DEFINER function, never here.
+      await trx`select app.record_install_link(${uid}, ${deviceId}, ${installLinkHash})`;
+    },
+
+    async androidInstallSignals(deviceId: string) {
+      const rows = await trx`
+        select s.accounts_on_install, s.voided_account_used_install,
+               (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
+        from app.device d
+        cross join lateral app.device_link_signals(d.id) s
+        where d.id = ${deviceId} and d.user_id = ${uid}`;
+      const r = rows[0];
+      if (!r || !r.linkable) return null;
+      return { accountsOnInstall: Number(r.accounts_on_install), voidedAccountUsedInstall: Boolean(r.voided_account_used_install) };
+    },
+  };
+}
+
+/** Reads the vendor configuration for `rewards-activate` from the environment.
+ * `null` for a platform means UNCONFIGURED, and production-ports.ts turns that
+ * into a port that does not exist (every request carrying that platform's
+ * attestation material then fails closed). A platform is configured only when
+ * EVERY one of its variables is present and non-empty — a half-set
+ * configuration is "not configured", never a default.
+ *
+ * Secrets (the DeviceCheck .p8 key, the Google service-account key) live ONLY
+ * in the environment; nothing in this repository carries one.
+ *   Apple:  GR_APPLE_TEAM_ID, GR_APPLE_BUNDLE_ID, GR_APPLE_DEVICECHECK_KEY_ID,
+ *           GR_APPLE_DEVICECHECK_PRIVATE_KEY (PKCS#8 PEM),
+ *           GR_APPLE_DEVICECHECK_ENV ("production" | "development")
+ *   Google: GR_PLAY_PACKAGE_NAME, GR_PLAY_CERT_SHA256 (comma-separated base64url),
+ *           GR_PLAY_SERVICE_ACCOUNT_EMAIL, GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY (PEM) */
+export function loadRewardsAttestationConfig(): RewardsAttestationConfig {
+  const teamId = Deno.env.get("GR_APPLE_TEAM_ID") ?? "";
+  const bundleId = Deno.env.get("GR_APPLE_BUNDLE_ID") ?? "";
+  const keyId = Deno.env.get("GR_APPLE_DEVICECHECK_KEY_ID") ?? "";
+  const privateKeyPem = Deno.env.get("GR_APPLE_DEVICECHECK_PRIVATE_KEY") ?? "";
+  const environment = Deno.env.get("GR_APPLE_DEVICECHECK_ENV") ?? "";
+  const appleComplete = teamId !== "" && bundleId !== "" && keyId !== "" && privateKeyPem !== "" && (environment === "production" || environment === "development");
+
+  const packageName = Deno.env.get("GR_PLAY_PACKAGE_NAME") ?? "";
+  const digests = (Deno.env.get("GR_PLAY_CERT_SHA256") ?? "").split(",").map((d) => d.trim()).filter((d) => d !== "");
+  const serviceAccountEmail = Deno.env.get("GR_PLAY_SERVICE_ACCOUNT_EMAIL") ?? "";
+  const serviceAccountPrivateKeyPem = Deno.env.get("GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY") ?? "";
+  const googleComplete = packageName !== "" && digests.length > 0 && serviceAccountEmail !== "" && serviceAccountPrivateKeyPem !== "";
+
+  return {
+    apple: appleComplete ? { teamId, bundleId, keyId, privateKeyPem, environment: environment as "production" | "development" } : null,
+    google: googleComplete ? { packageName, certificateSha256Digests: digests, serviceAccountEmail, serviceAccountPrivateKeyPem } : null,
+  };
+}
+// ---- postgres.js closed-socket guard (P3f gate round 2, LOW) ----------------
+// When Postgres kills a connection mid-transaction (`transaction_timeout` is a
+// FATAL that drops the socket — see `mapPgTimeoutError`), postgres.js v3.4.5 can
+// still have a write queued for that connection: its deferred `nextWrite`
+// (connection.js, scheduled through the setImmediate polyfill) then runs with
+// `socket === null` and throws `TypeError: Cannot read properties of null
+// (reading 'write')` FROM A TIMER CALLBACK — an uncaught exception no caller can
+// `catch`. Reproduced here under `deno test` (it fails the whole runner, after
+// the request itself had already been answered with the correct 503); in an Edge
+// isolate an uncaught error event is the kind of thing that can take the worker
+// down, and every other in-flight request on it with it. This is a LIBRARY bug we
+// cannot patch (the import is pinned and hash-locked), so it is CONTAINED: this
+// one exact signature (a TypeError reading 'write' of null, from postgres.js's
+// connection.js `nextWrite`) is marked handled. Anything else — including any
+// other TypeError — is left to surface exactly as before.
+function isPostgresJsClosedSocketWrite(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false;
+  const stack = String(err.stack ?? "");
+  return /reading 'write'/.test(err.message) && /connection\.js/.test(stack) && /nextWrite/.test(stack);
+}
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("error", (ev: Event) => {
+    if (isPostgresJsClosedSocketWrite((ev as ErrorEvent).error)) {
+      ev.preventDefault();
+      console.error("privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction)");
+    }
+  });
+  globalThis.addEventListener("unhandledrejection", (ev: Event) => {
+    if (isPostgresJsClosedSocketWrite((ev as PromiseRejectionEvent).reason)) {
+      ev.preventDefault();
+      console.error("privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction)");
+    }
+  });
+}
+// ==== END P3f additions ======================================================

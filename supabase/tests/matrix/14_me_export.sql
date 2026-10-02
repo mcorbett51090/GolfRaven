@@ -6,7 +6,7 @@
 -- account of what was wrong and why.
 
 BEGIN;
-SELECT plan(27);
+SELECT plan(32);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -202,6 +202,37 @@ SELECT ok(
 SELECT ok(
   NOT (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'purchase_evidence' -> 0 ? 'ref_id'),
   'purchase_evidence export never includes ref_id (a course-QR token''s own nonce hash, not the caller''s own data)'
+);
+
+-- ============================================================================
+-- P3f gate (0028): device_reward_ledger is exported as a REDUCED projection of
+-- the caller's own rows — never devicecheck_token_hash, never another account's.
+-- ============================================================================
+INSERT INTO app.device_reward_ledger (id, device_id, devicecheck_token_hash, user_id, reward_kind, reward_id) VALUES
+  ('e1000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'zz-fixture-devicecheck-token-digest', '00000000-0000-0000-0000-00000000000a', 'offer', '71000000-0000-0000-0000-0000000000f1');
+INSERT INTO app.device (id, user_id, platform) VALUES ('20000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-00000000000b', 'ios');
+INSERT INTO app.device_reward_ledger (id, device_id, user_id, reward_kind, reward_id) VALUES
+  ('e1000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-00000000000b', 'offer', '71000000-0000-0000-0000-0000000000f2');
+SELECT is(
+  jsonb_array_length(private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'device_reward_ledger'),
+  1, 'the export carries the caller''s own ledger rows (and only theirs: player B''s row is not in A''s export)'
+);
+SELECT is(
+  (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'device_reward_ledger' -> 0) k),
+  ARRAY['at', 'device_id', 'id', 'reward_id', 'reward_kind', 'user_id'],
+  'the ledger projection is exactly {id, user_id, device_id, reward_kind, reward_id, at}'
+);
+SELECT ok(
+  private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid)::text NOT LIKE '%zz-fixture-devicecheck-token-digest%',
+  'the ledger''s devicecheck_token_hash never reaches the export'
+);
+SELECT ok(
+  private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid)::text NOT LIKE '%71000000-0000-0000-0000-0000000000f2%',
+  'another account''s ledger row never reaches the export'
+);
+SELECT is(
+  (SELECT action::text FROM private.pii_export_policy WHERE schema_name = 'app' AND table_name = 'device_reward_ledger'),
+  'export', 'the registry classifies device_reward_ledger as export (0028)'
 );
 
 -- ============================================================================
