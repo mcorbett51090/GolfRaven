@@ -1368,6 +1368,14 @@ const LOCK_TIMEOUT = "5s";
 // see tools/db/test.sh's own db-tests run, which DOES exercise this
 // against a real cluster, for the empirical confirmation once it runs].
 const PG_TIMEOUT_SQLSTATES = new Set(["57014", "55P03"]);
+// P3f (gate M1): 40P01 = deadlock_detected, 40001 = serialization_failure. Both
+// ABORT the transaction (nothing committed) and are the database telling the
+// caller to run it again; the account-deletion / activation / play-hold paths
+// take row locks in different orders on purpose-built-but-not-provably-disjoint
+// sets (a scoring cascade locks a play's codes in arbitrary order), so a
+// deadlock is a possible, correct, retryable outcome — never an opaque 500. A
+// SEPARATE set so `PG_TIMEOUT_SQLSTATES` above keeps meaning exactly "timeout".
+const PG_RETRYABLE_SQLSTATES = new Set(["40P01", "40001"]);
 
 /** Maps a thrown error to `Errors.serviceUnavailable()` when it is one of
  * the two Postgres timeout SQLSTATEs `STATEMENT_TIMEOUT`/`LOCK_TIMEOUT`
@@ -1415,6 +1423,9 @@ function mapPgTimeoutError(err: unknown): unknown {
   // actually was.
   if ((err as { code?: unknown } | null)?.code === "CONNECTION_CLOSED") {
     return Errors.serviceUnavailable("outcome unknown; retrying is idempotent");
+  }
+  if (typeof code === "string" && PG_RETRYABLE_SQLSTATES.has(code)) {
+    return Errors.serviceUnavailable("the database rolled this request back because it conflicted with a concurrent one (deadlock/serialization) — nothing was changed; safe to retry");
   }
   return err;
 }
@@ -2253,13 +2264,15 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
       // user's id and a nonexistent id are the same empty result.
       const codes = await trx`
         select oc.id, oc.state, oc.activated_device_id, oc.expires_at, oc.expiry_paused_at,
-               oc.rests_on_unattestable, coalesce(p.held_review, false) as play_held
+               oc.rests_on_unattestable, oc.review_cleared_at::text as review_cleared_at,
+               coalesce(p.held_review, false) as play_held
         from app.offer_code oc
         left join app.play p on p.id = oc.play_id and p.user_id = oc.user_id
         where oc.id = ${id} and oc.user_id = ${uid}
         for update of oc`;
       const c = codes[0];
       if (c) {
+        const cleared = c.review_cleared_at ?? null;
         return {
           kind: "offer_code",
           id: c.id,
@@ -2267,17 +2280,22 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
           activatedDeviceId: c.activated_device_id ?? null,
           expiresAt: c.expires_at ? c.expires_at.toISOString() : null,
           expiryPaused: c.expiry_paused_at !== null && c.expiry_paused_at !== undefined,
-          restsOnUnattestable: Boolean(c.rests_on_unattestable) || Boolean(c.play_held),
+          // The reward's own flag stops counting once a reviewer cleared it (H2);
+          // a held PLAY is not cleared by a review of the code.
+          restsOnUnattestable: (Boolean(c.rests_on_unattestable) && cleared === null) || Boolean(c.play_held),
+          reviewClearedAt: cleared,
         };
       }
       const ents = await trx`
-        select e.id, e.state, e.activated_device_id, e.rests_on_unattestable, coalesce(p.held_review, false) as play_held
+        select e.id, e.state, e.activated_device_id, e.rests_on_unattestable, e.review_cleared_at::text as review_cleared_at,
+               coalesce(p.held_review, false) as play_held
         from app.entitlement e
         left join app.play p on p.id = e.play_id and p.user_id = e.user_id
         where e.id = ${id} and e.user_id = ${uid}
         for update of e`;
       const e = ents[0];
       if (!e) return null;
+      const eCleared = e.review_cleared_at ?? null;
       return {
         kind: "entitlement",
         id: e.id,
@@ -2285,7 +2303,8 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         activatedDeviceId: e.activated_device_id ?? null,
         expiresAt: null,
         expiryPaused: false,
-        restsOnUnattestable: Boolean(e.rests_on_unattestable) || Boolean(e.play_held),
+        restsOnUnattestable: (Boolean(e.rests_on_unattestable) && eCleared === null) || Boolean(e.play_held),
+        reviewClearedAt: eCleared,
       };
     },
 
@@ -2326,10 +2345,16 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         where id = ${deviceId} and user_id = ${uid}`;
     },
 
-    async hasOpenAttestationFailedSignal(): Promise<boolean> {
+    async hasOpenAttestationFailedSignal(since: string | null): Promise<boolean> {
+      // `since` is a reward's review_cleared_at, passed back as the database's
+      // own text (microseconds intact): a signal the reviewer already saw does
+      // not hold the reward again; one raised after the review — including the
+      // one this very request just raised — does.
       const rows = await trx`
         select exists (
-          select 1 from app.fraud_signal where user_id = ${uid} and kind = 'attestation_failed' and cleared_at is null
+          select 1 from app.fraud_signal
+          where user_id = ${uid} and kind = 'attestation_failed' and cleared_at is null
+            and created_at > coalesce(${since}::timestamptz, '-infinity'::timestamptz)
         ) as open`;
       return Boolean(rows[0]?.open);
     },
@@ -2365,28 +2390,51 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
     },
 
     async hasPriorReward(): Promise<boolean> {
-      // A reward the account actually RECEIVED: a ledger row, or its own record
-      // in a post-activation state. Earned, held and void rewards do not count.
+      // A reward the account actually RECEIVED, ON A DEVICE: a ledger row, or its
+      // own record in a post-activation state with an activated_device_id.
+      // Earned, held and void rewards do not count, and neither does a reward no
+      // device ever ran the table on (H2).
       const rows = await trx`
         select (
           exists (select 1 from app.device_reward_ledger where user_id = ${uid})
-          or exists (select 1 from app.offer_code where user_id = ${uid} and state in ('issued', 'redeemed'))
-          or exists (select 1 from app.entitlement where user_id = ${uid} and state in ('redeemable', 'vouchered', 'redeemed'))
+          or exists (select 1 from app.offer_code where user_id = ${uid} and state in ('issued', 'redeemed') and activated_device_id is not null)
+          or exists (select 1 from app.entitlement where user_id = ${uid} and state in ('redeemable', 'vouchered', 'redeemed') and activated_device_id is not null)
         ) as prior`;
       return Boolean(rows[0]?.prior);
     },
 
     async applyActivation(input) {
+      const detail = input.holdDetail === null ? null : trx.json(input.holdDetail as never);
       try {
         if (input.kind === "offer_code") {
-          const rows = await trx`select app.activate_offer_code(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}) as state`;
+          const rows = await trx`select app.activate_offer_code(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
           return { state: rows[0]!.state as string };
         }
-        const rows = await trx`select app.activate_entitlement(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}) as state`;
+        const rows = await trx`select app.activate_entitlement(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
         return { state: rows[0]!.state as string };
       } catch (err) {
         throw rewardsStateConflict(err);
       }
+    },
+
+    async recordInstallLink(deviceId: string, installLinkHash: string): Promise<void> {
+      // First writer wins: the link is a stable property of the device row. (A
+      // rotated id lands on a NEW device row anyway.)
+      await trx`
+        update app.device set install_link_hash = coalesce(install_link_hash, ${installLinkHash}::text)
+        where id = ${deviceId} and user_id = ${uid}`;
+    },
+
+    async androidInstallSignals(deviceId: string) {
+      const rows = await trx`
+        select s.accounts_on_install, s.voided_account_used_install,
+               (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
+        from app.device d
+        cross join lateral app.device_link_signals(d.id) s
+        where d.id = ${deviceId} and d.user_id = ${uid}`;
+      const r = rows[0];
+      if (!r || !r.linkable) return null;
+      return { accountsOnInstall: Number(r.accounts_on_install), voidedAccountUsedInstall: Boolean(r.voided_account_used_install) };
     },
   };
 }

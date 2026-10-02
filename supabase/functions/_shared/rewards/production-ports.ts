@@ -12,17 +12,19 @@
 // `VendorNotConfiguredError` on anything they cannot use.
 //
 // ⚠ LIVE VENDOR VERIFICATION IS NOT EXERCISED (see devicecheck-client.ts /
-// play-integrity-client.ts). The Android port additionally reports NO device
-// recall bits and refuses to write any: whether Play Integrity device recall
-// exists, and under what field/endpoint, is spike A20 `[unverified]`. With no
-// bits an attested Android activation routes to `held_review` (decision-table.ts
-// "no_persistent_signal"), which is the §7.5 Android contract.
+// play-integrity-client.ts). The Android port has NO persistent-bit methods at
+// all: whether Play Integrity device recall exists, and under what field/
+// endpoint, is spike A20 `[unverified]`, and a port that could read bits it
+// cannot write would be half a mechanism. Android's two bits are the §7.5
+// server-side substitute instead, computed by the handler from the `device`
+// rows (`RewardsRepo#androidInstallSignals`) — read and written (the install
+// link is recorded on every Android activation) by the server itself.
 
 import { type AppAttestCrypto, verifyAppAttestAssertion } from "./app-attest.ts";
 import { type DeviceCheckClient, type DeviceCheckConfig, createDeviceCheckClient, isCompleteDeviceCheckConfig } from "./devicecheck-client.ts";
 import { type PlayIntegrityConfig, createIntegrityDecoder, isCompletePlayIntegrityConfig } from "./play-integrity-client.ts";
-import { evaluateIntegrityPayload, extractRecallBits } from "./play-integrity.ts";
-import { type AttestationPorts, type AndroidPort, type IosPort, VendorNotConfiguredError, VendorRejectedError } from "./types.ts";
+import { evaluateIntegrityPayload } from "./play-integrity.ts";
+import { type AttestationPorts, type AndroidPort, type IosPort, VendorRejectedError } from "./types.ts";
 import type { VendorHttp } from "./vendor-http.ts";
 
 export interface AppleConfig extends DeviceCheckConfig {
@@ -67,7 +69,7 @@ export function buildAndroidPort(google: PlayIntegrityConfig, http: VendorHttp):
       } catch (e) {
         // Google understood the request and could not decode the token: that is
         // a failed attestation. Unavailable / not-configured propagate.
-        if (e instanceof VendorRejectedError) return { grade: "failed", reasons: ["token_rejected_by_google"], bits: null };
+        if (e instanceof VendorRejectedError) return { grade: "failed", reasons: ["token_rejected_by_google"] };
         throw e;
       }
       const evaluation = evaluateIntegrityPayload(payload, {
@@ -78,12 +80,7 @@ export function buildAndroidPort(google: PlayIntegrityConfig, http: VendorHttp):
         maxAgeMs: INTEGRITY_MAX_AGE_MS,
         maxFutureSkewMs: INTEGRITY_MAX_FUTURE_SKEW_MS,
       });
-      const bits = extractRecallBits(payload);
-      return evaluation.grade === "attested" ? { grade: "attested", bits } : { grade: "failed", reasons: evaluation.reasons, bits };
-    },
-    // deno-lint-ignore require-await
-    async setBit0() {
-      throw new VendorNotConfiguredError("Play Integrity device recall write is not implemented (spike A20 is unsettled)");
+      return evaluation;
     },
   };
 }

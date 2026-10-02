@@ -82,12 +82,47 @@ describe("§7.5 table — precedence (rows are checked in order, first match win
     expect(decideActivation(f({ accountHasOpenAttestationFailed: true, rewardRestsOnUnattestable: true })).row).toBe(2);
   });
 
-  it("row 3 beats rows 4 and 5 (an unattestable reward on a bit0 device is row 3, with no multi_account_device signal)", () => {
+  it("row 3 beats rows 4 and 5 for the OUTCOME (an unattestable reward on a bit0 device is held by row 3)", () => {
     for (const prior of [false, true]) {
       const d = decideActivation(f({ bits: bits(true, false), accountHasPriorReward: prior, rewardRestsOnUnattestable: true }));
       expect(d.row).toBe(3);
-      expect(d.signals).toEqual([]);
+      expect(d.outcome).toBe("held_review");
     }
+  });
+});
+
+describe("M2 — first match decides the outcome, EVERY matching row raises its signals", () => {
+  it("probe C: first account, bit0 device, unattestable reward -> held by row 3 WITH multi_account_device (row 4 also matches)", () => {
+    const d = decideActivation(f({ bits: bits(true, false), accountHasPriorReward: false, rewardRestsOnUnattestable: true }));
+    expect(d.row).toBe(3);
+    expect(d.outcome).toBe("held_review");
+    expect(d.matchedRows).toEqual([3, 4]);
+    expect(d.signals).toEqual(["multi_account_device"]);
+  });
+  it("with a prior reward, rows 3 and 5 match and there is no signal to raise", () => {
+    const d = decideActivation(f({ bits: bits(true, false), accountHasPriorReward: true, rewardRestsOnUnattestable: true }));
+    expect(d.matchedRows).toEqual([3, 5]);
+    expect(d.signals).toEqual([]);
+  });
+  it("an open attestation_failed signal on a bit0 device with no prior reward still raises multi_account_device", () => {
+    const d = decideActivation(f({ bits: bits(true, false), accountHasOpenAttestationFailed: true }));
+    expect(d.row).toBe(2);
+    expect(d.signals).toEqual(["multi_account_device"]);
+  });
+  it("a failed or unattestable activating device on a bit0 device raises it too", () => {
+    for (const g of ["failed", "unattestable"] as const) {
+      expect(decideActivation(f({ bits: bits(true, false), activatingGrade: g })).signals).toEqual(["multi_account_device"]);
+    }
+  });
+  it("bit1 (row 1) excludes rows 4-6, so the two signals never co-occur", () => {
+    const d = decideActivation(f({ bits: bits(true, true), accountHasOpenAttestationFailed: true, rewardRestsOnUnattestable: true }));
+    expect(d.matchedRows).toEqual([1, 2, 3]);
+    expect(d.signals).toEqual(["flagged_device_activation"]);
+  });
+  it("matchedRows lists every row in evaluation order and starts with the deciding row", () => {
+    const d = decideActivation(f({ bits: { kind: "none" }, accountHasOpenAttestationFailed: true, rewardRestsOnUnattestable: true }));
+    expect(d.matchedRows).toEqual([2, 3, "no_persistent_signal"]);
+    expect(d.matchedRows[0]).toBe(d.row);
   });
 });
 
@@ -118,7 +153,7 @@ describe("no persistent signal on this platform (Android without device recall, 
 // ---------------------------------------------------------------------------
 // Exhaustive check against an independent oracle.
 // ---------------------------------------------------------------------------
-type Oracle = { outcome: "activate" | "held_review"; row: Decision["row"] };
+type Oracle = { outcome: "activate" | "held_review"; row: Decision["row"]; matched: Array<Decision["row"]>; signals: string[] };
 
 /** The plan's table as a flat, ordered list of (predicate, outcome). The first
  * predicate that matches wins. Rows 7 ("no persistent signal") is the plan's
@@ -132,9 +167,13 @@ const ORDERED_RULES: Array<[Decision["row"], (x: ActivationFacts) => boolean, "a
   [5, (x) => x.bits.kind === "known" && x.bits.bit0 && !x.bits.bit1 && x.accountHasPriorReward, "activate"],
   [6, (x) => x.bits.kind === "known" && !x.bits.bit0 && !x.bits.bit1, "activate"],
 ];
+const SIGNAL_OF_ROW: Partial<Record<string, string>> = { "1": "flagged_device_activation", "4": "multi_account_device" };
 function oracle(x: ActivationFacts): Oracle {
-  for (const [row, pred, outcome] of ORDERED_RULES) if (pred(x)) return { row, outcome };
-  throw new Error("oracle: the table is not total over this input");
+  const hits = ORDERED_RULES.filter(([, pred]) => pred(x));
+  const first = hits[0];
+  if (!first) throw new Error("oracle: the table is not total over this input");
+  const signals = [...new Set(hits.map(([row]) => SIGNAL_OF_ROW[String(row)]).filter((v): v is string => v !== undefined))];
+  return { row: first[0], outcome: first[2], matched: hits.map(([row]) => row), signals };
 }
 
 describe("exhaustive: decideActivation equals the independent oracle over the whole input space", () => {
@@ -151,7 +190,13 @@ describe("exhaustive: decideActivation equals the independent oracle over the wh
               const facts: ActivationFacts = { bits: b, activatingGrade: grade, accountHasOpenAttestationFailed: openFailed, rewardRestsOnUnattestable: unatt, accountHasPriorReward: prior };
               const got = decideActivation(facts);
               const want = oracle(facts);
-              expect({ facts, row: got.row, outcome: got.outcome }).toEqual({ facts, row: want.row, outcome: want.outcome });
+              expect({ facts, row: got.row, outcome: got.outcome, matched: got.matchedRows, signals: got.signals }).toEqual({
+                facts,
+                row: want.row,
+                outcome: want.outcome,
+                matched: want.matched,
+                signals: want.signals,
+              });
               n++;
             }
           }

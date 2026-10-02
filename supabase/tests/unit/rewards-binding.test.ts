@@ -41,7 +41,24 @@ describe("canonicalJson", () => {
 });
 
 describe("the bound body and its hash", () => {
-  it("binds exactly {challengeId, deviceId, platform, rewardId}, canonically", () => {
+  it("H1: iOS binds the hash of the DeviceCheck token; Android binds the install link; an absent field is ABSENT from the bytes (never null)", () => {
+    const tokenSha = "ab".repeat(32);
+    expect(new TextDecoder().decode(boundBodyBytes({ ...BODY, deviceCheckTokenSha256: tokenSha }))).toBe(
+      `{"challengeId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","deviceCheckTokenSha256":"${tokenSha}","deviceId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","platform":"ios","rewardId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`,
+    );
+    expect(new TextDecoder().decode(boundBodyBytes({ ...BODY, platform: "android", installLinkId: "install-link-AAAAAAAAAA" }))).toContain('"installLinkId":"install-link-AAAAAAAAAA"');
+    expect(new TextDecoder().decode(boundBodyBytes(BODY))).not.toMatch(/deviceCheckTokenSha256|installLinkId|null/);
+  });
+
+  it("H1: swapping the DeviceCheck token (a different hash) or the install link changes the binding", async () => {
+    const withTok = (h: string): BoundBody => ({ ...BODY, deviceCheckTokenSha256: h });
+    const a = toHex(await computeRequestBinding(sha256, withTok("aa".repeat(32)), CHALLENGE));
+    const b = toHex(await computeRequestBinding(sha256, withTok("bb".repeat(32)), CHALLENGE));
+    const none = toHex(await computeRequestBinding(sha256, BODY, CHALLENGE));
+    expect(new Set([a, b, none]).size).toBe(3);
+  });
+
+  it("binds exactly {challengeId, deviceId, platform, rewardId}, canonically, when no optional field is present", () => {
     expect(new TextDecoder().decode(boundBodyBytes(BODY))).toBe(
       '{"challengeId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","deviceId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","platform":"ios","rewardId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}',
     );

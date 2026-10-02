@@ -77,20 +77,17 @@ function iosPort(opts: { bits?: DeviceBits | Error; assertion?: AssertionResult 
   };
 }
 interface SpyAndroid extends AndroidPort {
-  calls: { verify: number; setBit0: number };
+  calls: { verify: number };
   lastRequestHash: string | null;
 }
 function androidPort(result: IntegrityResult): SpyAndroid {
   const port: SpyAndroid = {
-    calls: { verify: 0, setBit0: 0 },
+    calls: { verify: 0 },
     lastRequestHash: null,
     async verifyIntegrity(input) {
       port.calls.verify++;
       port.lastRequestHash = input.expectedRequestHash;
       return result;
-    },
-    async setBit0() {
-      port.calls.setBit0++;
     },
   };
   return port;
@@ -259,7 +256,7 @@ Deno.test("AT 9: same account, second offer on the same device -> issued (bit0 s
   assertEquals(row.state, "issued");
   assertEquals(row.activated_device_id, dev);
   assert(row.devicecheck_token_hash, "the DeviceCheck token hash is recorded");
-  assertEquals(row.reserved_amount, "0.00");
+  assertEquals(row.reserved_amount, "10.00", "issuing an earned code that holds no reservation takes one (0027 budget model, step 2)");
   assertEquals((await ledgerFor(code.id)).length, 1);
   assertEquals((await signals(u)).length, 0);
   assertEquals(ios.calls.setBit0, 0);
@@ -627,11 +624,22 @@ async function registerKey(deviceId: string, counter = 5) {
   };
   return { key, port, fake };
 }
-async function signedReq(u: User, deviceId: string, key: Awaited<ReturnType<typeof generateP256>>, o: { rewardId: string; counter: number; bindRewardId?: string; bindChallenge?: Uint8Array }): Promise<ActivationRequest> {
+const SIGNED_TOKEN = "REVWSUNF";
+async function signedReq(
+  u: User,
+  deviceId: string,
+  key: Awaited<ReturnType<typeof generateP256>>,
+  o: { rewardId: string; counter: number; bindRewardId?: string; bindChallenge?: Uint8Array; sendToken?: string },
+): Promise<ActivationRequest> {
   const ch = await issueLive(u, deviceId);
-  const hash = await computeRequestBinding(sha256, { rewardId: o.bindRewardId ?? o.rewardId, deviceId, platform: "ios", challengeId: ch.challengeId }, o.bindChallenge ?? ch.nonceBytes);
+  // H1: the assertion covers the SHA-256 of the DeviceCheck token the request carries.
+  const hash = await computeRequestBinding(
+    sha256,
+    { rewardId: o.bindRewardId ?? o.rewardId, deviceId, platform: "ios", challengeId: ch.challengeId, deviceCheckTokenSha256: await digestHex(new TextEncoder().encode(SIGNED_TOKEN)) },
+    o.bindChallenge ?? ch.nonceBytes,
+  );
   const built = await buildAssertion({ key, appId: APP_ID, counter: o.counter, clientDataHash: hash });
-  return { deviceId, platform: "ios", challengeId: ch.challengeId, nonce: ch.nonce, attestation: { kind: "ios", keyId: KEY_ID, assertion: built.assertionB64, deviceCheckToken: "REVWSUNF" } };
+  return { deviceId, platform: "ios", challengeId: ch.challengeId, nonce: ch.nonce, attestation: { kind: "ios", keyId: KEY_ID, assertion: built.assertionB64, deviceCheckToken: o.sendToken ?? SIGNED_TOKEN } };
 }
 async function counterOf(deviceId: string): Promise<number> {
   return Number((await adminSql()`select attest_counter from app.device where id = ${deviceId}`)[0]!.attest_counter);
@@ -685,6 +693,19 @@ Deno.test("AT 5: a counter that passes verification but loses the ATOMIC advance
   assertEquals(((await signals(u, "attestation_failed"))[0]!.detail as Record<string, unknown>).reasons, ["counter_replay"]);
 });
 
+Deno.test("H1: a VALID assertion next to a SWAPPED DeviceCheck token is failed -> signal + held; the token's bits are never trusted and nothing is issued", DT, async () => {
+  const u = await freshUser("h1-swap");
+  const dev = await newDevice(u);
+  const { key, port, fake } = await registerKey(dev, 5);
+  const code = await newCode(u);
+  const out = await activate(u, code.id, await signedReq(u, dev, key, { rewardId: code.id, counter: 6, sendToken: "T1RIRVJERVZJQ0U=" }), deps({ ios: port }));
+  assertEquals(out.state, "held_review");
+  assertEquals(await counterOf(dev), 5, "a failed assertion never advances the counter");
+  assertEquals(((await signals(u, "attestation_failed"))[0]!.detail as Record<string, unknown>).reasons, ["bad_signature_or_request_hash"]);
+  assertEquals((await ledgerFor(code.id)).length, 0);
+  assertEquals(fake.calls.setBit0, 0, "no vendor write on a failed verdict");
+});
+
 Deno.test("AT 5: a MISMATCHED body hash (assertion bound to another reward / another challenge) is rejected", DT, async () => {
   const u = await freshUser("at5-bodyhash");
   const dev = await newDevice(u);
@@ -719,35 +740,119 @@ Deno.test("AT 5: a device with no registered App Attest key is unattestable -> h
   assertEquals((await signals(u)).length, 0);
 });
 
-Deno.test("AT 5 (Android): the verifier is handed base64url(SHA-256(canonical_body ‖ challenge)); a wrong requestHash verdict is failed -> held + signal", DT, async () => {
+// One install link per test: the substitute counts accounts across the WHOLE database, and this suite shares one.
+const newLink = () => `install-link-${crypto.randomUUID()}`;
+const linkHashOf = (id: string) => digestHex(new TextEncoder().encode(id));
+async function androidReq(u: User, deviceId: string, installLinkId: string | null): Promise<ActivationRequest & { _nonceBytes: Uint8Array }> {
+  const ch = await issueLive(u, deviceId);
+  return {
+    deviceId,
+    platform: "android",
+    challengeId: ch.challengeId,
+    nonce: ch.nonce,
+    ...(installLinkId !== null ? { installLinkId } : {}),
+    attestation: { kind: "android", integrityToken: "tok.en.val" },
+    _nonceBytes: ch.nonceBytes,
+  };
+}
+/** Other accounts whose Android device rows carry the SAME install link. */
+async function otherAccountsOnInstall(link: string, n: number, opts: { voided?: boolean } = {}): Promise<User[]> {
+  const out: User[] = [];
+  for (let i = 0; i < n; i++) {
+    const o = await freshUser(`install-mate-${i}`);
+    const d = await newDevice(o, "android");
+    await adminSql()`update app.device set install_link_hash = ${await linkHashOf(link)}, fraud_voided_at = ${opts.voided && i === 0 ? adminSql()`now()` : null} where id = ${d}`;
+    out.push(o);
+  }
+  return out;
+}
+
+Deno.test("AT 5 (Android): the verifier is handed base64url(SHA-256(canonical_body ‖ challenge)) with the install link bound in; a wrong requestHash verdict is failed -> held + signal", DT, async () => {
   const u = await freshUser("android-hash");
   const dev = await newDevice(u, "android");
   const code = await newCode(u);
-  const ch = await issueLive(u, dev);
-  const android = androidPort({ grade: "failed", reasons: ["request_hash_mismatch"], bits: null });
-  const out = await activate(u, code.id, { deviceId: dev, platform: "android", challengeId: ch.challengeId, nonce: ch.nonce, attestation: { kind: "android", integrityToken: "tok.en.val" } }, deps({ android }));
+  const LINK = newLink();
+  const { _nonceBytes, ...req } = await androidReq(u, dev, LINK);
+  const android = androidPort({ grade: "failed", reasons: ["request_hash_mismatch"] });
+  const out = await activate(u, code.id, req, deps({ android }));
   assertEquals(out.state, "held_review");
-  const expected = toBase64Url(await computeRequestBinding(sha256, { rewardId: code.id, deviceId: dev, platform: "android", challengeId: ch.challengeId }, ch.nonceBytes));
+  const expected = toBase64Url(await computeRequestBinding(sha256, { rewardId: code.id, deviceId: dev, platform: "android", challengeId: req.challengeId!, installLinkId: LINK }, _nonceBytes));
   assertEquals(android.lastRequestHash, expected);
   assertEquals(((await signals(u, "attestation_failed"))[0]!.detail as Record<string, unknown>).reasons, ["request_hash_mismatch"]);
 });
 
-Deno.test("Android: attested with device-recall bits runs the same table; attested with NO bits (A20) is held, never activated", DT, async () => {
-  const u = await freshUser("android-bits");
+Deno.test("AT 9 on ANDROID via the server-side substitute (A20): clean install -> issued and the install link is recorded; same account again / after reinstall -> issued", DT, async () => {
+  const u = await freshUser("android-clean");
   const dev = await newDevice(u, "android");
-  const clean = await newCode(u);
-  const ios = androidPort({ grade: "attested", bits: CLEAR });
-  const ch1 = await issueLive(u, dev);
-  const out = await activate(u, clean.id, { deviceId: dev, platform: "android", challengeId: ch1.challengeId, nonce: ch1.nonce, attestation: { kind: "android", integrityToken: "a.b.c" } }, deps({ android: ios }));
-  assertEquals(out.state, "issued");
-  assertEquals(ios.calls.setBit0, 1);
+  const code = await newCode(u);
+  const LINK = newLink();
+  const { _nonceBytes: _a, ...req } = await androidReq(u, dev, LINK);
+  assertEquals((await activate(u, code.id, req, deps({ android: androidPort({ grade: "attested" }) }))).state, "issued");
+  const d = await adminSql()`select install_link_hash from app.device where id = ${dev}`;
+  assertEquals(d[0]!.install_link_hash, await linkHashOf(LINK), "the substitute's write: the hashed install link is on the device row");
+  assertEquals(JSON.stringify(d[0]).includes(LINK), false, "never the raw id");
+  // same account, second offer on the same install
+  const second = await newCode(u);
+  const { _nonceBytes: _b, ...req2 } = await androidReq(u, dev, LINK);
+  assertEquals((await activate(u, second.id, req2, deps({ android: androidPort({ grade: "attested" }) }))).state, "issued");
+  // reinstall: a NEW device row and a NEW install link, same account (a repeat user with one account everywhere)
+  const dev2 = await newDevice(u, "android");
+  const third = await newCode(u);
+  const { _nonceBytes: _c, ...req3 } = await androidReq(u, dev2, "install-link-NEWINSTALL");
+  assertEquals((await activate(u, third.id, req3, deps({ android: androidPort({ grade: "attested" }) }))).state, "issued");
+  assertEquals((await signals(u)).length, 0);
+});
 
-  const u2 = await freshUser("android-nobits");
-  const dev2 = await newDevice(u2, "android");
-  const code2 = await newCode(u2);
-  const ch2 = await issueLive(u2, dev2);
-  const out2 = await activate(u2, code2.id, { deviceId: dev2, platform: "android", challengeId: ch2.challengeId, nonce: ch2.nonce, attestation: { kind: "android", integrityToken: "a.b.c" } }, deps({ android: androidPort({ grade: "attested", bits: null }) }));
-  assertEquals(out2.state, "held_review");
+Deno.test("AT 9 on ANDROID: a new account on an install seen on > 2 accounts -> held_review + multi_account_device; a repeat user there -> issued (row 5)", DT, async () => {
+  const LINK = newLink();
+  const mates = await otherAccountsOnInstall(LINK, 2); // this account will be the 3rd
+  assertEquals(mates.length, 2);
+  const u = await freshUser("android-bit0");
+  const dev = await newDevice(u, "android");
+  const code = await newCode(u);
+  const { _nonceBytes: _n, ...req } = await androidReq(u, dev, LINK);
+  const out = await activate(u, code.id, req, deps({ android: androidPort({ grade: "attested" }) }));
+  assertEquals(out.state, "held_review");
+  assertEquals((await signals(u)).map((x) => x.kind), ["multi_account_device"]);
+  const hd = (await adminSql()`select hold_detail from app.offer_code where id = ${code.id}`)[0]!.hold_detail as Record<string, unknown>;
+  assertEquals(hd.bitsSource, "server_substitute");
+  assertEquals(hd.primaryRow, 4);
+  assertEquals((hd.androidInstallSignals as Record<string, unknown>).accountsOnInstall, 3);
+
+  // a repeat user on the same install is a repeat user: row 5
+  const r = await freshUser("android-bit0-repeat");
+  const rdev = await newDevice(r, "android");
+  await priorReward(r, rdev);
+  const rcode = await newCode(r);
+  const { _nonceBytes: _m, ...rreq } = await androidReq(r, rdev, LINK);
+  assertEquals((await activate(r, rcode.id, rreq, deps({ android: androidPort({ grade: "attested" }) }))).state, "issued");
+});
+
+Deno.test("AT 9 on ANDROID: ANY account on an install a fraud-voided account used -> held_review + a high-priority signal (the bit1 substitute); mark_account_devices_fraud_voided produces it", DT, async () => {
+  const LINK = newLink();
+  const [voided] = await otherAccountsOnInstall(LINK, 1);
+  const u = await freshUser("android-bit1-before");
+  const dev = await newDevice(u, "android");
+  const before = await newCode(u);
+  const { _nonceBytes: _a, ...req0 } = await androidReq(u, dev, LINK);
+  assertEquals((await activate(u, before.id, req0, deps({ android: androidPort({ grade: "attested" }) }))).state, "issued", "before the fraud decision the install is merely shared by two accounts");
+  // The admin fraud decision on the OTHER account (the real function, not a fixture UPDATE).
+  assertEquals((await adminSql()`select app.mark_account_devices_fraud_voided(${voided!.uid}, ${ADMIN}) as n`)[0]!.n, 1);
+  const after = await newCode(u);
+  const { _nonceBytes: _b, ...req1 } = await androidReq(u, dev, LINK);
+  assertEquals((await activate(u, after.id, req1, deps({ android: androidPort({ grade: "attested" }) }))).state, "held_review");
+  const sig = (await signals(u, "flagged_device_activation"))[0]!;
+  assertEquals((sig.detail as Record<string, unknown>).priority, "high");
+});
+
+Deno.test("Android with NO install link on record (none sent, no attest key): no substitute signal -> held, never activated, never refused", DT, async () => {
+  const u = await freshUser("android-nolink");
+  const dev = await newDevice(u, "android");
+  const code = await newCode(u);
+  const { _nonceBytes: _n, ...req } = await androidReq(u, dev, null);
+  const out = await activate(u, code.id, req, deps({ android: androidPort({ grade: "attested" }) }));
+  assertEquals(out.state, "held_review");
+  assertEquals((await signals(u)).length, 0);
 });
 
 // ===========================================================================
@@ -782,18 +887,18 @@ Deno.test("the database refuses an `activate` that table rows 2/3 forbid, whatev
   const u = await freshUser("backstop");
   const dev = await newDevice(u);
   const code = await newCode(u, { restsOnUnattestable: true });
-  const out = await codeOf(withOwnership(u.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: code.id, deviceId: dev, tokenHash: null, decision: "activate" })));
+  const out = await codeOf(withOwnership(u.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: code.id, deviceId: dev, tokenHash: null, decision: "activate", holdDetail: null })));
   assertEquals(out, { status: 409, code: "reward_state_changed" });
   assertEquals((await codeRow(code.id)).state, "earned");
   // A state the transition does not allow (a terminal reward) is a 409, mapped from SQLSTATE 55000.
   const redeemed = await newCode(u, { state: "redeemed" });
   assertEquals(
-    await codeOf(withOwnership(u.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: redeemed.id, deviceId: dev, tokenHash: null, decision: "activate" }))),
+    await codeOf(withOwnership(u.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: redeemed.id, deviceId: dev, tokenHash: null, decision: "activate", holdDetail: null }))),
     { status: 409, code: "reward_not_activatable" },
   );
   // ... and the ownership check inside the function: another user's id is a 404 through the Repo too.
   const other = await freshUser("backstop-other");
-  const out2 = await codeOf(withOwnership(other.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: code.id, deviceId: dev, tokenHash: null, decision: "held_review" })));
+  const out2 = await codeOf(withOwnership(other.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: code.id, deviceId: dev, tokenHash: null, decision: "held_review", holdDetail: null })));
   assertEquals(out2, { status: 404, code: "not_found" });
 });
 
@@ -960,4 +1065,263 @@ Deno.test("the verdict recorded on the device row is grade + time only, and the 
   const d = await adminSql()`select integrity_last, devicecheck_token_hash from app.device where id = ${dev}`;
   assertEquals(Object.keys(d[0]!.integrity_last as Record<string, unknown>).sort(), ["at", "grade"]);
   assert(d[0]!.devicecheck_token_hash, "the token hash is stored on the device too");
+});
+
+// ===========================================================================
+// P3f gate round 1 (FAIL: H1-H3, M1-M4, LOWs) — the fixes, against real SQL
+// ===========================================================================
+async function resolveHeld(id: string, approve: boolean): Promise<string> {
+  return (await adminSql()`select app.resolve_held_offer_code(${id}, ${approve}, ${ADMIN}) as state`)[0]!.state as string;
+}
+async function fullCode(id: string) {
+  return (await adminSql()`select state, reserved_amount, review_cleared_at, hold_detail, issued_before_hold, expiry_paused_at, activated_device_id, expires_at from app.offer_code where id = ${id}`)[0]!;
+}
+
+Deno.test("H2 probe B: a reviewer-approved play-hold code (no device) returns to EARNED, not issued; activating it on a bit0 device with no prior reward still holds (row 4) + multi_account_device; the approval is not a 'prior reward'", DT, async () => {
+  const u = await freshUser("h2-probe-b");
+  const dev = await newDevice(u);
+  const code = await newCode(u, { state: "held_review", faceValue: 10 }); // no device ever ran the table on it
+  assertEquals(await resolveHeld(code.id, true), "earned");
+  const row = await fullCode(code.id);
+  assertEquals([row.state, row.activated_device_id], ["earned", null]);
+  assert(row.review_cleared_at, "the review-cleared marker is set");
+  assertEquals((await ledgerFor(code.id)).length, 0, "nothing was issued, so nothing on the ledger");
+  assertEquals(await withOwnership(u.actor, (repo: Repo) => repo.rewards.hasPriorReward()), false, "an approved-but-never-activated reward is not a prior reward");
+  // ...nor is a reward no device ever ran the table on, even in a post-activation state (the real SQL's device filter).
+  await newCode(u, { state: "issued" });
+  await newEntitlement(u, "trl_u", { state: "redeemable" });
+  assertEquals(await withOwnership(u.actor, (repo: Repo) => repo.rewards.hasPriorReward()), false, "issued/redeemable rewards with no activated_device_id do not make a repeat user");
+
+  const out = await activate(u, code.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: BIT0 }) }));
+  assertEquals(out.state, "held_review");
+  assertEquals((await signals(u)).map((x) => x.kind), ["multi_account_device"]);
+});
+
+Deno.test("H2: approve-then-activate on a clean attested device -> issued: rows 2/3 were cleared for the reward, rows 1 and 4-6 ran", DT, async () => {
+  const u = await freshUser("h2-approve-activate");
+  const dev = await newDevice(u);
+  const code = await newCode(u, { state: "held_review", restsOnUnattestable: true });
+  assertEquals(await resolveHeld(code.id, true), "earned");
+  // a signal the reviewer already saw does not hold it again...
+  await adminSql()`insert into app.fraud_signal (user_id, kind, detail, created_at) values (${u.uid}, 'attestation_failed', '{}'::jsonb, now() - interval '1 hour')`;
+  const ios = iosPort({ bits: CLEAR });
+  const out = await activate(u, code.id, await iosReq(u, dev), deps({ ios }));
+  assertEquals(out.state, "issued");
+  assertEquals((await ledgerFor(code.id)).length, 1);
+  assertEquals(ios.calls.setBit0, 1);
+});
+
+Deno.test("H2: a cleared reward is still held on a flagged device (row 1), when the device is unattestable, and by a signal raised AFTER the review", DT, async () => {
+  const u = await freshUser("h2-still-held");
+  const dev = await newDevice(u);
+  const a = await newCode(u, { state: "held_review", restsOnUnattestable: true });
+  await resolveHeld(a.id, true);
+  assertEquals((await activate(u, a.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: BIT1 }) }))).state, "held_review");
+  assert((await signals(u, "flagged_device_activation")).length === 1);
+
+  const u2 = await freshUser("h2-still-held-2");
+  const dev2 = await newDevice(u2);
+  const b = await newCode(u2, { state: "held_review", restsOnUnattestable: true });
+  await resolveHeld(b.id, true);
+  const none = await activate(u2, b.id, { deviceId: dev2, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } }, deps({}));
+  assertEquals(none.state, "held_review", "an unattestable DEVICE is not cleared by a review of the reward");
+
+  const u3 = await freshUser("h2-still-held-3");
+  const dev3 = await newDevice(u3);
+  const c = await newCode(u3, { state: "held_review" });
+  await resolveHeld(c.id, true);
+  await adminSql()`insert into app.fraud_signal (user_id, kind, detail, created_at) values (${u3.uid}, 'attestation_failed', '{}'::jsonb, now() + interval '1 hour')`;
+  assertEquals((await activate(u3, c.id, await iosReq(u3, dev3), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "held_review");
+});
+
+Deno.test("H3: a play-hold CASCADE (a re-score holding the play) reserves the backing code's budget and pauses its expiry; approval keeps the reservation; reject releases it", DT, async () => {
+  const u = await freshUser("h3-cascade");
+  const dev = await newDevice(u);
+  const offerId = await newOffer({ faceValue: 12 });
+  const code = await newCode(u, { offerId });
+  const p = await (async () => {
+    const playDate = new Date(Date.now() - 70 * 86400_000).toISOString().slice(0, 10);
+    const playId = await withOwnership(u.actor, async (repo: Repo) =>
+      (await repo.play.upsertFromScore({
+        courseId: CRS_X1, facilityId: FAC_X, playDate, courseDisambiguatedBy: null,
+        scoreBadge: 0.6, scoreMonetary: 0.9, hardSignal: true, presenceSignal: true, money: true, heldReview: false,
+        policyVersion: "v1", inputDigest: "d".repeat(64), evidenceIds: [],
+      })).id);
+    await adminSql()`update app.offer_code set play_id = ${playId} where id = ${code.id}`;
+    return { playId, courseId: CRS_X1, playDate };
+  })();
+  assertEquals(await offerReserved(offerId), 0, "nothing reserved before the hold");
+  await rescoreHeld(u, p);
+  const held = await fullCode(code.id);
+  assertEquals(held.state, "held_review");
+  assertEquals(held.reserved_amount, "12.00", "the cascade reserved the code's face value (it used to write only state)");
+  assert(held.expiry_paused_at, "...and paused the expiry clock");
+  assertEquals(await offerReserved(offerId), 12);
+  // approval keeps the reservation (the reviewer clears the play first: the 0017 guard).
+  await adminSql()`update app.play set held_review = false where id = ${p.playId}`;
+  assertEquals(await resolveHeld(code.id, true), "earned");
+  assertEquals((await fullCode(code.id)).reserved_amount, "12.00");
+  assertEquals(await offerReserved(offerId), 12, "approval does not touch the reservation");
+  // ...and activation on a device finds the reservation and does not take a second.
+  const out = await activate(u, code.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: CLEAR }) }));
+  assertEquals(out.state, "issued");
+  assertEquals(await offerReserved(offerId), 12, "idempotent against the existing reservation");
+
+  // reject releases, once
+  const offerB = await newOffer({ faceValue: 12 });
+  const code2 = await newCode(u, { offerId: offerB });
+  const p2date = new Date(Date.now() - 71 * 86400_000).toISOString().slice(0, 10);
+  const play2 = await withOwnership(u.actor, async (repo: Repo) =>
+    (await repo.play.upsertFromScore({
+      courseId: CRS_X1, facilityId: FAC_X, playDate: p2date, courseDisambiguatedBy: null,
+      scoreBadge: 0.6, scoreMonetary: 0.9, hardSignal: true, presenceSignal: true, money: true, heldReview: false,
+      policyVersion: "v1", inputDigest: "f".repeat(64), evidenceIds: [],
+    })).id);
+  await adminSql()`update app.offer_code set play_id = ${play2} where id = ${code2.id}`;
+  await rescoreHeld(u, { courseId: CRS_X1, playDate: p2date });
+  assertEquals(await offerReserved(offerB), 12);
+  await adminSql()`update app.play set held_review = false where id = ${play2}`;
+  assertEquals(await resolveHeld(code2.id, false), "void");
+  assertEquals(await offerReserved(offerB), 0, "reject released the rejected code's 12");
+  assertEquals(await offerReserved(offerId), 12, "...and nothing of the other offer's");
+  await adminSql()`update app.offer_code set state = 'void' where id = ${code2.id}`;
+  assertEquals(await offerReserved(offerB), 0, "a second void releases nothing more");
+});
+
+Deno.test("H3: DELETE of a code that holds a reservation releases it (a role that can update the offer)", DT, async () => {
+  const u = await freshUser("h3-delete");
+  const dev = await newDevice(u);
+  const code = await newCode(u, { faceValue: 7 });
+  await activate(u, code.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: BIT1 }) }));
+  const offerId = (await codeRow(code.id)).offer_id as string;
+  assertEquals(await offerReserved(offerId), 7);
+  await adminSql()`delete from app.offer_code where id = ${code.id}`;
+  assertEquals(await offerReserved(offerId), 0);
+});
+
+Deno.test("M1 probe: account deletion racing an activation that is mid-flight (reservation taken, uncommitted) ends with budget_reserved = 0 — no leaked reservation", DT, async () => {
+  const u = await freshUser("m1-delete-race");
+  const dev = await newDevice(u);
+  const code = await newCode(u, { faceValue: 10 });
+  const offerId = (await codeRow(code.id)).offer_id as string;
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.5/mod.js");
+  const sess = postgres({ host: Deno.env.get("PGHOST"), port: Number(Deno.env.get("PGPORT")), username: Deno.env.get("PGUSER"), database: Deno.env.get("PGDATABASE"), max: 1, prepare: false });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let started!: () => void;
+  const hasLocks = new Promise<void>((r) => (started = r));
+  // Session A: the activation's SQL, held OPEN (row locked, reservation taken, not committed).
+  const sessionA = sess.begin(async (tx) => {
+    await tx`set local role service_role`;
+    await tx`select app.activate_offer_code(${code.id}, ${u.uid}, ${dev}, null, 'activate')`;
+    started();
+    await gate;
+  });
+  await hasLocks;
+  // Session B: the account deletion, started while A is mid-flight. It must WAIT for A's lock (not skip the row).
+  const deletion = withOwnership(u.actor, (repo: Repo) => handleMeDelete(repo));
+  await new Promise((r) => setTimeout(r, 400));
+  release();
+  await sessionA;
+  await deletion;
+  await sess.end();
+  assertEquals((await adminSql()`select count(*)::int as n from app.offer_code where id = ${code.id}`)[0]!.n, 0, "the code is gone");
+  assertEquals(await offerReserved(offerId), 0, "...and the reservation the in-flight activation took was handed back, not leaked");
+});
+
+Deno.test("M1: a deadlock (SQLSTATE 40P01) surfaces as a retryable 503, never an opaque 500", DT, async () => {
+  const u = await freshUser("m1-deadlock");
+  const x = await newCode(u);
+  const y = await newCode(u);
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.5/mod.js");
+  const sess = postgres({ host: Deno.env.get("PGHOST"), port: Number(Deno.env.get("PGPORT")), username: Deno.env.get("PGUSER"), database: Deno.env.get("PGDATABASE"), max: 1, prepare: false });
+  let rawHoldsX!: () => void;
+  const xLocked = new Promise<void>((r) => (rawHoldsX = r));
+  let wHoldsY!: () => void;
+  const yLocked = new Promise<void>((r) => (wHoldsY = r));
+  // Raw session: locks X, then (after W holds Y) asks for Y. W: locks Y, then asks for X. The FIRST waiter
+  // (W, asking for X) is the one whose deadlock check fires first, so W is the victim.
+  const raw = sess.begin(async (tx) => {
+    await tx`set local role service_role`;
+    await tx`select 1 from app.offer_code where id = ${x.id} for update`;
+    rawHoldsX();
+    await yLocked;
+    await new Promise((r) => setTimeout(r, 150)); // W must be waiting on X first
+    await tx`select 1 from app.offer_code where id = ${y.id} for update`;
+  }).catch((e) => e);
+  await xLocked;
+  const w = await codeOf(
+    withOwnership(u.actor, async (repo: Repo) => {
+      await repo.rewards.lockOwnReward(y.id);
+      wHoldsY();
+      await repo.rewards.lockOwnReward(x.id); // blocks on the raw session; deadlock detected
+    }),
+  );
+  const rawResult = await raw;
+  await sess.end();
+  assertEquals(w, { status: 503, code: "service_unavailable" }, `the victim must be W (raw result: ${String(rawResult)})`);
+});
+
+Deno.test("M3: an ENDED offer does not block a clean activation; the issue path is idempotent against an earn-time reservation", DT, async () => {
+  const u = await freshUser("m3-ended");
+  const dev = await newDevice(u);
+  const offerId = await newOffer({ faceValue: 10 });
+  await adminSql()`update app.offer set status = 'ended', valid_to = current_date - 1 where id = ${offerId}`;
+  const code = await newCode(u, { offerId });
+  assertEquals((await activate(u, code.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "issued");
+  assertEquals(await offerReserved(offerId), 10);
+  // earn-time reservation present: activating neither takes a second one nor releases it
+  const offer2 = await newOffer({ faceValue: 10 });
+  const code2 = await newCode(u, { offerId: offer2 });
+  await adminSql()`update app.offer_code set reserved_amount = 10 where id = ${code2.id}`;
+  await adminSql()`update app.offer set budget_reserved = 10 where id = ${offer2}`;
+  assertEquals((await activate(u, code2.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: BIT0 }) }))).state, "issued"); // row 5: prior reward exists
+  assertEquals(await offerReserved(offer2), 10);
+});
+
+Deno.test("M2 probe C: first account, bit0 device, unattestable reward -> held WITH multi_account_device; the hold stores the bits, every matched row and the DeviceCheck month", DT, async () => {
+  const u = await freshUser("m2-probe-c");
+  const dev = await newDevice(u);
+  const code = await newCode(u, { restsOnUnattestable: true });
+  const out = await activate(u, code.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: BIT0 }) }));
+  assertEquals(out.state, "held_review");
+  assertEquals((await signals(u)).map((x) => x.kind), ["multi_account_device"]);
+  const hd = (await fullCode(code.id)).hold_detail as Record<string, unknown>;
+  assertEquals(hd.matchedRows, [3, 4]);
+  assertEquals(hd.primaryRow, 3);
+  assertEquals(hd.bits, { bit0: true, bit1: false });
+  assertEquals(hd.deviceCheckLastUpdateMonth, "2026-02");
+  assertEquals(hd.platform, "ios");
+});
+
+Deno.test("LOW re-hold: a code ISSUED before a second device was flagged gets its REMAINING validity back on approval, not a fresh full term", DT, async () => {
+  const u = await freshUser("rehold");
+  const dev1 = await newDevice(u);
+  const dev2 = await newDevice(u);
+  const code = await newCode(u, { expiresInDays: 20, earnedDaysAgo: 10 }); // a 30-day term, 20 days left
+  assertEquals((await activate(u, code.id, await iosReq(u, dev1), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "issued");
+  assertEquals((await activate(u, code.id, await iosReq(u, dev2), deps({ ios: iosPort({ bits: BIT1 }) }))).state, "held_review");
+  const held = await fullCode(code.id);
+  assertEquals(held.issued_before_hold, true);
+  assertEquals(await resolveHeld(code.id, true), "issued");
+  const secs = Number((await adminSql()`select extract(epoch from (expires_at - now())) as s from app.offer_code where id = ${code.id}`)[0]!.s);
+  assert(Math.abs(secs - 20 * 86400) < 5, `expected ~20 days remaining, got ${secs}s (a full restart would be ~30)`);
+});
+
+Deno.test("M4: Repo#rewards.androidInstallSignals / recordInstallLink against real SQL: unlinked device -> null; first writer wins; linked -> counts accounts", DT, async () => {
+  const h1 = await linkHashOf(newLink());
+  const h2 = await linkHashOf(newLink());
+  const a = await freshUser("m4-a");
+  const da = await newDevice(a, "android");
+  assertEquals(await withOwnership(a.actor, (repo: Repo) => repo.rewards.androidInstallSignals(da)), null, "no link key on the row: nothing can be said");
+  await withOwnership(a.actor, (repo: Repo) => repo.rewards.recordInstallLink(da, h1));
+  await withOwnership(a.actor, (repo: Repo) => repo.rewards.recordInstallLink(da, h2)); // first writer wins
+  assertEquals((await adminSql()`select install_link_hash from app.device where id = ${da}`)[0]!.install_link_hash, h1);
+  assertEquals(await withOwnership(a.actor, (repo: Repo) => repo.rewards.androidInstallSignals(da)), { accountsOnInstall: 1, voidedAccountUsedInstall: false });
+  const b = await freshUser("m4-b");
+  const db = await newDevice(b, "android");
+  await withOwnership(b.actor, (repo: Repo) => repo.rewards.recordInstallLink(db, h1));
+  assertEquals(await withOwnership(a.actor, (repo: Repo) => repo.rewards.androidInstallSignals(da)), { accountsOnInstall: 2, voidedAccountUsedInstall: false });
+  // another user cannot read or write a device that is not theirs
+  assertEquals(await withOwnership(b.actor, (repo: Repo) => repo.rewards.androidInstallSignals(da)), null);
 });

@@ -17,14 +17,31 @@ export interface VendorHttp {
   fetch(url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }): Promise<Response>;
   nowMs(): number;
   randomUuid(): string;
-  /** Per-vendor-call wall-clock bound. The handler makes at most two calls per
-   * request (query + update), so 2 x this stays well under privileged.ts's
-   * 12 s `transaction_timeout`. */
+  /** Per-vendor-call wall-clock bound; see `VENDOR_CALL_TIMEOUT_MS`. */
   timeoutMs: number;
 }
 
+/** THE TIMING BUDGET (F6). `withOwnership` runs the whole activation in ONE
+ * transaction with `lock_timeout = 5 s` and `transaction_timeout = 12 s`
+ * (privileged.ts). The first thing the handler does is lock the reward row, which
+ * may wait up to the full 5 s behind another request on the SAME reward. After
+ * that, the only slow steps are the vendor calls, and there are at most
+ * `MAX_VENDOR_CALLS_PER_REQUEST` of them per request:
+ *   iOS     DeviceCheck query_two_bits, then (row 6 only) update_two_bits
+ *   Android Google OAuth token exchange, then decodeIntegrityToken
+ * Worst case: 5 s + 2 x 2.5 s = 10 s, leaving 2 s for every other statement and
+ * for signing. (The later advisory-lock waits cannot add to this: no vendor call
+ * happens after one is taken — a held outcome ends the request, and row 6 raises
+ * no signal.) With the earlier 4 s default the worst case was 13 s: a
+ * transaction_timeout kill (FATAL, connection dropped, outcome unknown) that a
+ * slow-but-working vendor could have triggered on a contended reward.
+ * `activate-handler`'s unit test pins this inequality against the real
+ * constants in privileged.ts. */
+export const VENDOR_CALL_TIMEOUT_MS = 2_500;
+export const MAX_VENDOR_CALLS_PER_REQUEST = 2;
+
 /** The default `VendorHttp` over the platform's `fetch` / `crypto`. */
-export function platformVendorHttp(timeoutMs = 4_000): VendorHttp {
+export function platformVendorHttp(timeoutMs = VENDOR_CALL_TIMEOUT_MS): VendorHttp {
   return {
     fetch: (url, init) => fetch(url, init),
     nowMs: () => Date.now(),

@@ -17,8 +17,25 @@
 //     for update);
 //   - query response: 200 JSON {bit0, bit1, last_update_time:"YYYY-MM"}, or 200
 //     with the text "Failed to find bit state" when the bits were never set;
-//   - 400 = bad/missing device token; 401/403 = our JWT/credentials rejected;
-//     429/5xx = try later.
+//   - 400 = a malformed request; the BODY says what was malformed (see below);
+//     401/403 = our JWT/credentials rejected; 429/5xx = try later.
+//
+// THE 400 SPLIT. A 400 is classified by its body, and the default is the SAFE one:
+//   - a body that names the DEVICE TOKEN (/device.?token/) -> `VendorRejectedError`:
+//     this player's token is bad; the activation is graded `failed` (account-wide
+//     `attestation_failed` signal, holds that account's activations);
+//   - ANYTHING ELSE — a payload / transaction / timestamp complaint, an empty or
+//     unrecognised body -> `VendorNotConfiguredError`: 503, nothing written, no
+//     signal. A 400 that does not blame the token is more likely OUR fault (a
+//     request we built wrongly, a development-environment token sent to the
+//     production host or the reverse) than the player's, and `failed` is an
+//     account-wide penalty that must not hang on a response this adapter cannot
+//     read. The cost of the cautious default is a retryable 503, never a
+//     wrongly-held account. `[unverified]`: Apple's exact 400 bodies, and whether
+//     an environment mismatch is distinguishable from a bad token at all — if it
+//     is not, an environment mismatch still reads as a token complaint; the
+//     follow-up is a deploy-time canary against the configured environment
+//     (docs/security/p3-money-path-requirements.md, P3f follow-ups).
 //
 // FAIL CLOSED. With no config, an incomplete config, or an unusable private
 // key, every call throws `VendorNotConfiguredError` — the handler turns that
@@ -48,6 +65,7 @@ const HOSTS: Record<DeviceCheckConfig["environment"], string> = {
   development: "https://api.development.devicecheck.apple.com",
 };
 
+const BAD_TOKEN_BODY_RE = /device[\s_-]*token/i;
 const NEVER_SET_RE = /^\s*failed to find bit state\.?\s*$/i;
 const LAST_UPDATE_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -88,7 +106,10 @@ export function createDeviceCheckClient(config: DeviceCheckConfig | null, http: 
     }
     const text = await res.text().catch(() => "");
     if (res.status === 200) return text;
-    if (res.status === 400) throw new VendorRejectedError(`DeviceCheck ${path} rejected the device token`);
+    if (res.status === 400) {
+      if (BAD_TOKEN_BODY_RE.test(text)) throw new VendorRejectedError(`DeviceCheck ${path} rejected the device token`);
+      throw notConfigured("Apple answered 400 without blaming the device token — treated as a request/environment fault, not a bad token");
+    }
     if (res.status === 401 || res.status === 403) throw notConfigured(`Apple rejected our credentials (${res.status})`);
     throw new VendorUnavailableError(`DeviceCheck ${path} answered ${res.status}`);
   }

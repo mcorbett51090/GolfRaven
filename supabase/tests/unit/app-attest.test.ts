@@ -159,6 +159,29 @@ describe("DER -> raw signature conversion", () => {
     raw.set([9], 63);
     expect(derSignatureToRaw(rawSignatureToDer(raw))).toEqual(raw);
   });
+  it("rejects NON-MINIMAL DER integers (a redundant leading zero, a negative value) — one signature, one accepted encoding", () => {
+    const ok = "3006020101020102"; // r = 1, s = 2
+    expect(derSignatureToRaw(toBytes(ok))).not.toBeNull();
+    const cases: Record<string, string> = {
+      "redundant leading zero on r": "300702020001020102",
+      "redundant leading zero on s": "300702010102020002",
+      "negative r (high bit, no leading zero)": "3006020181020102",
+      "negative s": "3006020101020181",
+      "two leading zeros before a high-bit byte": "30080203000080020102",
+    };
+    for (const [label, hex] of Object.entries(cases)) expect(derSignatureToRaw(toBytes(hex)), label).toBeNull();
+    // ...while the ONE legal form of a high-bit value (a single leading zero) is accepted.
+    expect(derSignatureToRaw(toBytes("300702020081020102"))).not.toBeNull();
+  });
+  it("a 33-byte integer is accepted only as 0x00 + a high-bit 32-byte value", () => {
+    const body = (r: string) => {
+      const rb = r.length / 2;
+      return toBytes(`30${(2 + rb + 3).toString(16).padStart(2, "0")}02${rb.toString(16).padStart(2, "0")}${r}020102`);
+    };
+    expect(derSignatureToRaw(body("00" + "80".padEnd(64, "0")))).not.toBeNull();
+    expect(derSignatureToRaw(body("00" + "7f".padEnd(64, "0")))).toBeNull(); // the zero is not needed
+    expect(derSignatureToRaw(body("01" + "ff".padEnd(64, "0")))).toBeNull(); // 33 significant bytes
+  });
   it("returns null for malformed DER", () => {
     for (const bad of [new Uint8Array([]), new Uint8Array([0x31, 0]), new Uint8Array([0x30, 5, 2, 1, 1]), new Uint8Array([0x30, 0x81, 0]), toBytes("30060201010201")]) {
       expect(derSignatureToRaw(bad)).toBeNull();

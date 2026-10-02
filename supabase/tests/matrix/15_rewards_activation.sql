@@ -18,7 +18,7 @@
 -- 20000000-...-000000000001, trails trl_t / trl_u / trl_v, facility fac_x.
 
 BEGIN;
-SELECT plan(121);
+SELECT plan(176);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -35,6 +35,11 @@ INSERT INTO app.device (id, user_id, platform) VALUES
 INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, face_value, valid_from, valid_to, status)
 SELECT ('61000000-0000-0000-0000-0000000000' || lpad(n::text, 2, '0'))::uuid, 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 25, 10, current_date, current_date + 30, 'live'
 FROM generate_series(1, 14) AS n;
+
+-- Offers for the gate-round sections below (budget_cap 100: room for several reservations each).
+INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, face_value, valid_from, valid_to, status)
+SELECT ('62000000-0000-0000-0000-0000000000' || lpad(n::text, 2, '0'))::uuid, 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 100, 10, current_date, current_date + 30, 'live'
+FROM generate_series(1, 20) AS n;
 
 -- ============================================================================
 -- 1. Schema additions
@@ -185,9 +190,10 @@ SELECT results_eq(
   $$VALUES ('20000000-0000-0000-0000-000000000001'::uuid, '00000000-0000-0000-0000-00000000000a'::uuid, 'offer'::text, 'tokhash-1'::text)$$,
   'activate: writes exactly one device_reward_ledger row (device, account, reward kind, token hash)'
 );
-SELECT is(
-  (SELECT reserved_amount FROM app.offer_code WHERE id = '71000000-0000-0000-0000-000000000001'),
-  0::numeric, 'activate: an issued code reserves no budget (only a held code does)'
+SELECT results_eq(
+  $$SELECT c.reserved_amount, o.budget_reserved FROM app.offer_code c JOIN app.offer o ON o.id = c.offer_id WHERE c.id = '71000000-0000-0000-0000-000000000001'$$,
+  $$VALUES (10::numeric, 10::numeric)$$,
+  'activate: an earned code that holds no reservation takes one (its face value) as it is issued (the earn path reserves nothing today — 0027 header)'
 );
 
 -- 3b. A SECOND device re-runs the table: state stays issued, the ledger gains the device, provenance is kept.
@@ -463,7 +469,7 @@ INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at
   ('71000000-0000-0000-0000-000000000005', '61000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now(), NULL, NULL);
 SELECT is(
   app.resolve_held_offer_code('71000000-0000-0000-0000-000000000005', true, '00000000-0000-0000-0000-4000000000d0'),
-  'issued'::app.offer_code_state, 'approve: a code with no expiry stays without one, and a detached device writes no ledger row'
+  'earned'::app.offer_code_state, 'approve (H2): a held code NO DEVICE ever ran the table on returns to earned, not issued — it keeps no expiry and writes no ledger row'
 );
 SELECT results_eq(
   $$SELECT expires_at IS NULL, (SELECT count(*)::int FROM app.device_reward_ledger WHERE reward_id = '71000000-0000-0000-0000-000000000005') FROM app.offer_code WHERE id = '71000000-0000-0000-0000-000000000005'$$,
@@ -642,6 +648,335 @@ SELECT throws_ok(
     VALUES ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'offer', '71000000-0000-0000-0000-000000000001')$$,
   '23505', NULL, 'the ledger cannot hold the same (device, kind, reward) twice'
 );
+
+-- ============================================================================
+-- 8. THE RESERVATION TRIGGER (gate H3 / F13): held_review by ANY path reserves
+--    and pauses; void / expired / DELETE release; explicit + trigger paths are
+--    idempotent against each other.
+-- ============================================================================
+-- (player A's open attestation_failed signal from section 5 would hold every activation below)
+UPDATE app.fraud_signal SET cleared_at = now() WHERE id = 'f2000000-0000-0000-0000-000000000003';
+SELECT has_trigger('app', 'offer_code', 'offer_code_reservation_sync_trg', 'the reservation trigger exists on offer_code');
+
+INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status, held_review) VALUES
+  ('42000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-00000000000a', 'crs_x1', 'fac_x', current_date - 50, 'v1', 'confirmed', false);
+-- 72..01: earned, no reservation.  72..02: issued WITH an earn-time reservation (10) and 20 days of validity left.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, play_id, state, earned_at, expires_at, activated_device_id, reserved_amount) VALUES
+  ('72000000-0000-0000-0000-000000000001', '62000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'fac_x', '42000000-0000-0000-0000-0000000000f2', 'earned', now() - interval '10 days', now() + interval '20 days', NULL, 0),
+  ('72000000-0000-0000-0000-000000000002', '62000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', 'fac_x', '42000000-0000-0000-0000-0000000000f2', 'issued', now() - interval '10 days', now() + interval '20 days', '20000000-0000-0000-0000-000000000001', 10);
+UPDATE app.offer SET budget_reserved = 10 WHERE id = '62000000-0000-0000-0000-000000000002';
+
+-- The 0017 play-hold cascade writes ONLY `state`. It used to reserve nothing and pause nothing.
+UPDATE app.play SET held_review = true WHERE id = '42000000-0000-0000-0000-0000000000f2';
+SELECT results_eq(
+  $$SELECT state::text, reserved_amount, expiry_paused_at IS NOT NULL, issued_before_hold FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000001'$$,
+  $$VALUES ('held_review'::text, 10::numeric, true, false)$$,
+  'H3: a play-hold cascade moves an earned code to held_review AND reserves its face value AND pauses its expiry clock'
+);
+SELECT is(
+  (SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000001'), 10::numeric,
+  'H3: ...and offer.budget_reserved counts it'
+);
+SELECT results_eq(
+  $$SELECT state::text, reserved_amount, issued_before_hold, expiry_paused_at IS NOT NULL, expiry_remaining = interval '20 days' FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000002'$$,
+  $$VALUES ('held_review'::text, 10::numeric, true, true, true)$$,
+  'H3: an ISSUED code the cascade holds keeps its earn-time reservation (no double reservation), remembers it was issued, and records the validity it had left'
+);
+SELECT is(
+  (SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000002'), 10::numeric,
+  'H3: ...idempotent against the earn-time reservation: offer.budget_reserved is still 10, not 20'
+);
+SELECT lives_ok($$SET CONSTRAINTS ALL IMMEDIATE$$, 'the play-guard constraint triggers (0017) accept the cascade-held codes');
+SET CONSTRAINTS ALL DEFERRED;
+
+-- Approval keeps the reservation. The reviewer clears the play first (the 0017 guard refuses a non-held code over a held play).
+UPDATE app.play SET held_review = false WHERE id = '42000000-0000-0000-0000-0000000000f2';
+SELECT is(
+  app.resolve_held_offer_code('72000000-0000-0000-0000-000000000001', true, '00000000-0000-0000-0000-4000000000d0'),
+  'earned'::app.offer_code_state, 'H2/H3: approving the cascade-held code (no device ever ran the table) returns it to earned'
+);
+SELECT results_eq(
+  $$SELECT reserved_amount, review_cleared_at IS NOT NULL, expiry_paused_at IS NULL, activated_device_id IS NULL FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000001'$$,
+  $$VALUES (10::numeric, true, true, true)$$,
+  'H3: approval KEEPS the reservation, sets review_cleared_at, resumes the clock, and does not invent a device'
+);
+SELECT is(
+  (SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000001'), 10::numeric,
+  'H3: ...offer.budget_reserved unchanged by an approval'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.device_reward_ledger WHERE reward_id = '72000000-0000-0000-0000-000000000001'), 0,
+  'H2: no ledger row — nothing was issued'
+);
+
+-- Re-hold: an ISSUED code that was held and approved gets its REMAINING validity back, not a fresh 30 days.
+SELECT is(
+  app.resolve_held_offer_code('72000000-0000-0000-0000-000000000002', true, '00000000-0000-0000-0000-4000000000d0'),
+  'issued'::app.offer_code_state, 'approving a held code that DID run on a device -> issued'
+);
+SELECT results_eq(
+  $$SELECT expires_at = now() + interval '20 days', issued_before_hold, expiry_remaining IS NULL, reserved_amount FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000002'$$,
+  $$VALUES (true, false, true, 10::numeric)$$,
+  'LOW re-hold: a code issued before it was held gets its REMAINING 20 days (a self-induced re-hold is not a free renewal to a fresh 30), the reservation kept'
+);
+
+-- Reject (via the resolver) and every other route to void / expired release EXACTLY once.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, expires_at) VALUES
+  ('72000000-0000-0000-0000-000000000003', '62000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now(), now() + interval '30 days');
+SELECT app.activate_offer_code('72000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'held_review');
+SELECT is((SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000003'), 10::numeric, 'a held activation reserved 10 (via the trigger)');
+SELECT is(
+  app.resolve_held_offer_code('72000000-0000-0000-0000-000000000003', false, '00000000-0000-0000-0000-4000000000d0'),
+  'void'::app.offer_code_state, 'reject -> void'
+);
+SELECT results_eq(
+  $$SELECT c.reserved_amount, o.budget_reserved FROM app.offer_code c JOIN app.offer o ON o.id = c.offer_id WHERE c.id = '72000000-0000-0000-0000-000000000003'$$,
+  $$VALUES (0::numeric, 0::numeric)$$,
+  'H3: reject releases the reservation (code and offer back to 0), once'
+);
+
+-- a code INSERTED as held_review (any writer) reserves and pauses; then a plain void releases.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at) VALUES
+  ('72000000-0000-0000-0000-000000000004', '62000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now());
+SELECT results_eq(
+  $$SELECT reserved_amount, expiry_paused_at IS NOT NULL FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000004'$$,
+  $$VALUES (10::numeric, true)$$,
+  'H3: a code INSERTED as held_review reserves and pauses (the earn path holding a code outright)'
+);
+UPDATE app.offer_code SET state = 'void' WHERE id = '72000000-0000-0000-0000-000000000004';
+SELECT results_eq(
+  $$SELECT c.reserved_amount, o.budget_reserved FROM app.offer_code c JOIN app.offer o ON o.id = c.offer_id WHERE c.id = '72000000-0000-0000-0000-000000000004'$$,
+  $$VALUES (0::numeric, 0::numeric)$$,
+  'H3: a bare UPDATE ... SET state = void releases (the 0017 "resolved by review" terminal) — whoever writes it'
+);
+UPDATE app.offer_code SET state = 'void' WHERE id = '72000000-0000-0000-0000-000000000004';
+SELECT is((SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000004'), 0::numeric, 'idempotent: voiding again releases nothing more');
+
+-- expired releases too.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, expires_at, reserved_amount) VALUES
+  ('72000000-0000-0000-0000-000000000005', '62000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'issued', now(), now() + interval '1 day', 10);
+UPDATE app.offer SET budget_reserved = 10 WHERE id = '62000000-0000-0000-0000-000000000005';
+UPDATE app.offer_code SET state = 'expired' WHERE id = '72000000-0000-0000-0000-000000000005';
+SELECT results_eq(
+  $$SELECT c.reserved_amount, o.budget_reserved FROM app.offer_code c JOIN app.offer o ON o.id = c.offer_id WHERE c.id = '72000000-0000-0000-0000-000000000005'$$,
+  $$VALUES (0::numeric, 0::numeric)$$,
+  'H3: expiry releases the reservation'
+);
+
+-- DELETE releases (when the deleting role can update the offer) — and a void code's stale amount is NOT released.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at) VALUES
+  ('72000000-0000-0000-0000-000000000006', '62000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now());
+SELECT is((SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000006'), 10::numeric, 'a held code holds 10');
+DELETE FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000006';
+SELECT is((SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000006'), 0::numeric, 'H3/M1: DELETE of a code that holds a reservation releases it');
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, reserved_amount) VALUES
+  ('72000000-0000-0000-0000-000000000007', '62000000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'void', now(), 7);
+UPDATE app.offer SET budget_reserved = 7 WHERE id = '62000000-0000-0000-0000-000000000007';
+DELETE FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000007';
+SELECT is((SELECT budget_reserved FROM app.offer WHERE id = '62000000-0000-0000-0000-000000000007'), 7::numeric, 'DELETE of a void code does not release its stale reserved_amount (not outstanding)');
+
+-- the cap cannot cover it: held anyway, unreserved, a review_item says so.
+UPDATE app.offer SET budget_cap = 5 WHERE id = '62000000-0000-0000-0000-000000000008';
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at) VALUES
+  ('72000000-0000-0000-0000-000000000008', '62000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now());
+SELECT results_eq(
+  $$SELECT reserved_amount, (SELECT count(*)::int FROM app.review_item WHERE kind = 'held_offer_budget_unreserved' AND subject_id = '72000000-0000-0000-0000-000000000008') FROM app.offer_code WHERE id = '72000000-0000-0000-0000-000000000008'$$,
+  $$VALUES (0::numeric, 1)$$,
+  'H3: a hold the cap cannot cover is never refused: held, unreserved, and a review_item says so'
+);
+
+-- ============================================================================
+-- 9. REVIEW-CLEARED (gate H2) and the budget model (gate M3)
+-- ============================================================================
+-- 73..01: a held code NO device ever ran the table on, resting on an unattestable co-signal.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, rests_on_unattestable) VALUES
+  ('73000000-0000-0000-0000-000000000001', '62000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now(), true),
+  ('73000000-0000-0000-0000-000000000002', '62000000-0000-0000-0000-000000000010', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now(), true),
+  ('73000000-0000-0000-0000-000000000003', '62000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'held_review', now(), true);
+SELECT is(
+  app.resolve_held_offer_code('73000000-0000-0000-0000-000000000001', true, '00000000-0000-0000-0000-4000000000d0'),
+  'earned'::app.offer_code_state, 'H2 probe: approving a held code with activated_device_id NULL returns it to earned (NOT issued)'
+);
+SELECT results_eq(
+  $$SELECT state::text, review_cleared_at IS NOT NULL, rests_on_unattestable FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000001'$$,
+  $$VALUES ('earned'::text, true, true)$$,
+  'H2: review_cleared_at is the marker; the flag itself is left as the earning path wrote it'
+);
+SELECT is(
+  app.activate_offer_code('73000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'H2: the cleared code can now be activated on a real device (the row 3 backstop treats the unattestable basis as cleared)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.device_reward_ledger WHERE reward_id = '73000000-0000-0000-0000-000000000001'), 1,
+  'H2: ...and only THEN does the ledger record it'
+);
+
+-- an attestation_failed signal raised BEFORE the review does not hold the cleared code; one raised AFTER does.
+SELECT app.resolve_held_offer_code('73000000-0000-0000-0000-000000000002', true, '00000000-0000-0000-0000-4000000000d0');
+INSERT INTO app.fraud_signal (id, user_id, kind, detail, created_at) VALUES
+  ('f2000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-00000000000a', 'attestation_failed', '{}'::jsonb, now() - interval '1 hour');
+SELECT is(
+  app.activate_offer_code('73000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'H2: a signal raised BEFORE the review no longer holds the cleared code (the reviewer saw it)'
+);
+SELECT app.resolve_held_offer_code('73000000-0000-0000-0000-000000000003', true, '00000000-0000-0000-0000-4000000000d0');
+INSERT INTO app.fraud_signal (id, user_id, kind, detail, created_at) VALUES
+  ('f2000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-00000000000a', 'attestation_failed', '{}'::jsonb, now() + interval '1 hour');
+SELECT throws_ok(
+  $$SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate')$$,
+  '23514', NULL, 'H2: a signal raised AFTER the review still holds the account''s activations (row 2 backstop)'
+);
+DELETE FROM app.fraud_signal WHERE id IN ('f2000000-0000-0000-0000-000000000011', 'f2000000-0000-0000-0000-000000000012');
+
+-- a held PLAY is not cleared by a review of the code.
+INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_version, status, held_review) VALUES
+  ('42000000-0000-0000-0000-0000000000f3', '00000000-0000-0000-0000-00000000000a', 'crs_x1', 'fac_x', current_date - 60, 'v1', 'confirmed', true);
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, play_id, state, earned_at, review_cleared_at) VALUES
+  ('73000000-0000-0000-0000-000000000004', '62000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-00000000000a', 'fac_x', '42000000-0000-0000-0000-0000000000f3', 'earned', now(), now());
+SELECT throws_ok(
+  $$SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate')$$,
+  '23514', NULL, 'H2: a review-cleared code whose backing play is STILL held_review cannot be activated'
+);
+UPDATE app.offer_code SET play_id = NULL WHERE id = '73000000-0000-0000-0000-000000000004';
+DELETE FROM app.play WHERE id = '42000000-0000-0000-0000-0000000000f3';
+
+-- M3: an earn-time reservation makes both activation paths idempotent; an ended offer does not block activation.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, expires_at, reserved_amount) VALUES
+  ('73000000-0000-0000-0000-000000000005', '62000000-0000-0000-0000-000000000013', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now(), now() + interval '30 days', 10),
+  ('73000000-0000-0000-0000-000000000006', '62000000-0000-0000-0000-000000000014', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now(), now() + interval '30 days', 10);
+UPDATE app.offer SET budget_reserved = 10 WHERE id IN ('62000000-0000-0000-0000-000000000013', '62000000-0000-0000-0000-000000000014');
+SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate');
+SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'held_review');
+SELECT results_eq(
+  $$SELECT budget_reserved FROM app.offer WHERE id IN ('62000000-0000-0000-0000-000000000013', '62000000-0000-0000-0000-000000000014') ORDER BY id$$,
+  $$VALUES (10::numeric), (10::numeric)$$,
+  'M3: activating (issue OR hold) a code that already holds an earn-time reservation does not reserve again'
+);
+UPDATE app.offer SET status = 'ended', valid_to = current_date - 1 WHERE id = '62000000-0000-0000-0000-000000000015';
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, expires_at) VALUES
+  ('73000000-0000-0000-0000-000000000007', '62000000-0000-0000-0000-000000000015', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now() - interval '5 days', now() + interval '25 days');
+SELECT is(
+  app.activate_offer_code('73000000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'M3 decision: an ENDED offer does not block a clean activation of a code earned while it was live (the code''s own expiry bounds it)'
+);
+SELECT is((SELECT reserved_amount FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000007'), 10::numeric, '...and the reservation is taken, since the offer''s cap still bounds the spend');
+UPDATE app.offer SET budget_cap = 5 WHERE id = '62000000-0000-0000-0000-000000000016';
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at) VALUES
+  ('73000000-0000-0000-0000-000000000008', '62000000-0000-0000-0000-000000000016', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now());
+SELECT is(
+  app.activate_offer_code('73000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'M3: an activation the cap cannot reserve for is still issued, never refused'
+);
+SELECT results_eq(
+  $$SELECT reserved_amount, (SELECT count(*)::int FROM app.review_item WHERE kind = 'issued_offer_budget_unreserved' AND subject_id = '73000000-0000-0000-0000-000000000008') FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000008'$$,
+  $$VALUES (0::numeric, 1)$$, '...unreserved, with a review_item'
+);
+
+-- hold_detail: written on a hold, only what the reviewer needs.
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at) VALUES
+  ('73000000-0000-0000-0000-000000000009', '62000000-0000-0000-0000-000000000017', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now());
+SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000009', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'held_review',
+  '{"matchedRows":[3,4],"primaryRow":3,"bits":{"bit0":true,"bit1":false},"deviceCheckLastUpdateMonth":"2026-02"}'::jsonb);
+SELECT is(
+  (SELECT hold_detail -> 'matchedRows' FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000009'),
+  '[3, 4]'::jsonb, 'M2: the hold records every matched row (and the bits, and the DeviceCheck month) for the reviewer'
+);
+
+-- entitlements follow the same H2 rule.
+-- (reuse B's 51..03: put it back into a held state no device ran the table on)
+UPDATE app.entitlement SET state = 'held_review', rests_on_unattestable = true, activated_device_id = NULL, review_cleared_at = NULL
+WHERE id = '51000000-0000-0000-0000-000000000003';
+SELECT is(
+  app.resolve_held_entitlement('51000000-0000-0000-0000-000000000003', true, '00000000-0000-0000-0000-4000000000d0'),
+  'earned'::app.entitlement_state, 'H2: an entitlement no device ran the table on is approved back to earned too'
+);
+SELECT is(
+  app.activate_entitlement('51000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000b', '20000000-0000-0000-0000-0000000000b1', NULL, 'activate'),
+  'redeemable'::app.entitlement_state, 'H2: ...and is activatable on a device once the unattestable basis was cleared'
+);
+
+-- ============================================================================
+-- 10. The Android A20 substitute (gate M4)
+-- ============================================================================
+SELECT has_column('app', 'device', 'install_link_hash', 'device.install_link_hash exists');
+SELECT has_column('app', 'device', 'fraud_voided_at', 'device.fraud_voided_at exists');
+SELECT throws_ok(
+  $$UPDATE app.device SET install_link_hash = 'not-a-hash' WHERE id = '20000000-0000-0000-0000-0000000000a2'$$,
+  '23514', NULL, 'install_link_hash must be 64 lowercase hex characters'
+);
+INSERT INTO app.device (id, user_id, platform, install_link_hash) VALUES
+  ('20000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-1000000000a1', 'android', repeat('a', 64)),
+  ('20000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-2000000000b1', 'android', repeat('a', 64)),
+  ('20000000-0000-0000-0000-0000000000c3', '00000000-0000-0000-0000-3000000000c1', 'android', repeat('b', 64));
+UPDATE app.device SET install_link_hash = repeat('a', 64) WHERE id = '20000000-0000-0000-0000-0000000000a2';
+SELECT results_eq(
+  $$SELECT accounts_on_install, voided_account_used_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000a2')$$,
+  $$VALUES (3, false)$$, 'device_link_signals: three accounts share an install link -> "> 2 accounts" is derivable'
+);
+SELECT results_eq(
+  $$SELECT accounts_on_install, voided_account_used_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000c3')$$,
+  $$VALUES (1, false)$$, 'device_link_signals: a lone install is one account'
+);
+SELECT results_eq(
+  $$SELECT accounts_on_install FROM app.device_link_signals('20000000-0000-0000-0000-000000000001')$$,
+  $$VALUES (1)$$, 'device_link_signals: a device with no link keys counts only itself'
+);
+UPDATE app.device SET attest_key_id = 'KEYIDSHARED' WHERE id IN ('20000000-0000-0000-0000-0000000000b1', '20000000-0000-0000-0000-0000000000c3');
+SELECT results_eq(
+  $$SELECT accounts_on_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000c3')$$,
+  $$VALUES (2)$$, 'device_link_signals: rows also link by an equal attest key id'
+);
+SELECT throws_ok(
+  $$SELECT app.mark_account_devices_fraud_voided('00000000-0000-0000-0000-1000000000a1', '00000000-0000-0000-0000-00000000000b')$$,
+  '42501', NULL, 'must-fail: a non-admin cannot mark an account''s devices fraud-voided'
+);
+SELECT throws_ok(
+  $$SELECT app.mark_account_devices_fraud_voided('00000000-0000-0000-0000-1000000000a1', NULL)$$,
+  '42501', NULL, 'must-fail: no resolver, no marking'
+);
+SELECT is(
+  app.mark_account_devices_fraud_voided('00000000-0000-0000-0000-1000000000a1', '00000000-0000-0000-0000-4000000000d0'),
+  1, 'an admin marks every device of the voided account (1)'
+);
+SELECT results_eq(
+  $$SELECT accounts_on_install, voided_account_used_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000a2')$$,
+  $$VALUES (3, true)$$, 'device_link_signals: "an account voided for fraud used this install" (the bit1 substitute) — seen from ANOTHER account''s device on the same install'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.audit_log WHERE action = 'account_devices_fraud_voided' AND subject_id = '00000000-0000-0000-0000-1000000000a1'),
+  1, 'the marking is audited'
+);
+
+-- ============================================================================
+-- 11. Privileges on the gate-round functions
+-- ============================================================================
+SELECT is(
+  (SELECT bool_and(has_function_privilege('service_role', p.oid, 'EXECUTE') AND NOT has_function_privilege('anon', p.oid, 'EXECUTE') AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE'))
+   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'app' AND p.proname IN ('reserve_offer_for_code', 'device_link_signals', 'mark_account_devices_fraud_voided')),
+  true, 'reserve_offer_for_code / device_link_signals / mark_account_devices_fraud_voided: service_role only'
+);
+SELECT is(
+  (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'app' AND p.proname IN ('reserve_offer_for_code', 'device_link_signals', 'mark_account_devices_fraud_voided', 'offer_code_reservation_sync')
+     AND (p.prosecdef OR NOT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%'))),
+  0, 'none of them is SECURITY DEFINER and every one pins search_path'
+);
+SELECT tests.authenticate_as('authenticated', jsonb_build_object('sub', '00000000-0000-0000-0000-00000000000a'));
+SELECT throws_ok(
+  $$SELECT app.reserve_offer_for_code('62000000-0000-0000-0000-000000000001', gen_random_uuid(), 'x')$$,
+  '42501', NULL, 'must-fail: a player cannot reserve offer budget themselves'
+);
+SELECT throws_ok(
+  $$SELECT * FROM app.device_link_signals('20000000-0000-0000-0000-000000000001')$$,
+  '42501', NULL, 'must-fail: a player cannot read the install-link signals (they describe other accounts)'
+);
+SELECT throws_ok(
+  $$SELECT app.mark_account_devices_fraud_voided('00000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-00000000000a')$$,
+  '42501', NULL, 'must-fail: a player cannot mark another account''s devices'
+);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
 
 -- ============================================================================
 -- 7. Unchanged invariants this migration must not weaken

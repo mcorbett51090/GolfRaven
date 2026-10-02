@@ -17,14 +17,29 @@ export interface Sha256Fn {
   (bytes: Uint8Array): Promise<Uint8Array>;
 }
 
-/** What the client binds. Deliberately the REQUEST'S identity fields only — the
- * attestation material itself (assertion, tokens) cannot be part of what it
- * signs, and `hardwareSupportsAttestation` is a self-report, not a bound fact. */
+/** What the client binds. The request's identity fields, plus the two request
+ * fields that feed the persistent-bit lookup:
+ *   - iOS: `deviceCheckTokenSha256` (lowercase hex SHA-256 of the DeviceCheck
+ *     token the request carries). The assertion cannot cover the token itself
+ *     (the token is not part of what an App Attest key signs), but it CAN cover
+ *     the token's hash — and must, otherwise the DeviceCheck token is the one
+ *     request field a man-in-the-middle or a second device can swap freely:
+ *     present a valid assertion from a device whose bits are bad, next to a
+ *     token from a device whose bits are clean (H1).
+ *   - Android: `installLinkId` (the opaque install identifier the A20 substitute
+ *     links on), when the request carries one.
+ * The attestation material itself (assertion, integrity token) cannot be part
+ * of what it signs, and `hardwareSupportsAttestation` is a self-report, not a
+ * bound fact. A field that is absent is absent from the canonical bytes — it is
+ * never serialised as null — so an Android body and an iOS body can never be
+ * confused for one another. */
 export interface BoundBody {
   rewardId: string;
   deviceId: string;
   platform: "ios" | "android";
   challengeId: string;
+  deviceCheckTokenSha256?: string;
+  installLinkId?: string;
 }
 
 /** Canonical JSON: object keys sorted (recursively), no whitespace, strings
@@ -56,7 +71,14 @@ function canonicalize(value: unknown): unknown {
 
 export function boundBodyBytes(body: BoundBody): Uint8Array {
   return new TextEncoder().encode(
-    canonicalJson({ rewardId: body.rewardId, deviceId: body.deviceId, platform: body.platform, challengeId: body.challengeId }),
+    canonicalJson({
+      rewardId: body.rewardId,
+      deviceId: body.deviceId,
+      platform: body.platform,
+      challengeId: body.challengeId,
+      ...(body.deviceCheckTokenSha256 !== undefined ? { deviceCheckTokenSha256: body.deviceCheckTokenSha256 } : {}),
+      ...(body.installLinkId !== undefined ? { installLinkId: body.installLinkId } : {}),
+    }),
   );
 }
 

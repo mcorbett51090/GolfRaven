@@ -102,3 +102,21 @@ describe("parseActivationBody", () => {
     expect(r.ok && r.value.challengeId).toBe(CH);
   });
 });
+
+describe("installLinkId (Android substitute, A20)", () => {
+  const base = { deviceId: DEV, platform: "android", challengeId: CH, nonce: "AAAA", attestation: { kind: "android", integrityToken: "tok.en" } };
+  it("is accepted on Android and carried through", () => {
+    const r = parseActivationBody({ ...base, installLinkId: "install-link-AAAAAAAAAA" });
+    expect(r.ok && r.value.installLinkId).toBe("install-link-AAAAAAAAAA");
+  });
+  it("is optional", () => {
+    const r = parseActivationBody(base);
+    expect(r.ok && r.value.installLinkId).toBeUndefined();
+  });
+  it("is rejected on iOS, and when too short, too long, or not opaque-id characters", () => {
+    expect(parseActivationBody({ ...base, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false }, installLinkId: "install-link-AAAAAAAAAA" }).ok).toBe(false);
+    for (const bad of ["short", "x".repeat(129), "has space in it 123456", 7, null]) {
+      expect(parseActivationBody({ ...base, installLinkId: bad }).ok, String(bad)).toBe(false);
+    }
+  });
+});

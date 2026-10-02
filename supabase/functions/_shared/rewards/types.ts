@@ -22,10 +22,16 @@ export interface OwnReward {
   expiresAt: string | null;
   /** offer_code only: the expiry clock is paused (the code is held). */
   expiryPaused: boolean;
-  /** §7.5 table row 3 input: the reward's own `rests_on_unattestable` flag OR
-   * its backing play's `held_review` (the scorer's pre-computed superset —
-   * unattestable co-signal or a quarantined on-play row). */
+  /** §7.5 table row 3 input, EFFECTIVE: the reward's own `rests_on_unattestable`
+   * flag — unless a reviewer cleared it (`reviewClearedAt` set) — OR its backing
+   * play's `held_review` (a review of the CODE does not clear a held PLAY; the
+   * database refuses to activate over one either way). */
   restsOnUnattestable: boolean;
+  /** Set when a reviewer approved this reward while no device had ever run the
+   * table on it (H2): rows 2 and 3 are cleared for it, rows 1 and 4-6 still run.
+   * Opaque database text (microsecond precision preserved) — only ever handed
+   * back to `hasOpenAttestationFailedSignal(since)`. */
+  reviewClearedAt: string | null;
 }
 
 export interface DeviceAttestState {
@@ -44,6 +50,20 @@ export interface ApplyActivationInput {
   /** SHA-256 hex of the DeviceCheck token / Play Integrity token, or null. */
   tokenHash: string | null;
   decision: ActivationDecision;
+  /** What the reviewer sees (§7.5): the bits read, every matched table row, the
+   * primary row, DeviceCheck's last-update month. Stored on a held reward;
+   * `null` when the reward is activated. Never exported, never returned. */
+  holdDetail: Record<string, unknown> | null;
+}
+
+/** The Android A20 substitute's inputs (§7.5): what the server itself knows about
+ * the install the activating device row is linked to. */
+export interface AndroidInstallSignals {
+  /** Distinct accounts whose device rows carry the same install link (or the
+   * same attest key id), this account included. */
+  accountsOnInstall: number;
+  /** An account voided for fraud used this install. */
+  voidedAccountUsedInstall: boolean;
 }
 
 /** Everything `rewards-activate` needs from the database, already scoped to
@@ -66,18 +86,22 @@ export interface RewardsRepo {
   /** Records the last verdict on the device row (grade + time only — the
    * column is exported to the player, so no reasons) and the token hash. */
   recordDeviceVerdict(deviceId: string, verdict: { grade: Grade; tokenHash: string | null }): Promise<void>;
-  /** Table row 2's input. */
-  hasOpenAttestationFailedSignal(): Promise<boolean>;
+  /** Table row 2's input. `since` (a reward's `reviewClearedAt`): only a signal
+   * raised AFTER that instant counts — a reviewer already looked at the earlier
+   * ones (H2). `null` = every open signal counts. */
+  hasOpenAttestationFailedSignal(since: string | null): Promise<boolean>;
   /** Inserts `fraud_signal(attestation_failed)` unless the account already has
    * an open one. Returns whether a row was inserted. */
   raiseAttestationFailedIfNone(detail: Record<string, unknown>): Promise<boolean>;
   /** Inserts a fraud_signal of `kind` unless an OPEN one with the same
    * `onceKey` exists for the account. Returns whether a row was inserted. */
   raiseFraudSignalOnce(kind: string, detail: Record<string, unknown>, onceKey: string): Promise<boolean>;
-  /** Table row 5's input: the account has RECEIVED a reward — a
+  /** Table row 5's input: the account has RECEIVED a reward ON A DEVICE — a
    * `device_reward_ledger` row, or an offer_code in issued/redeemed, or an
-   * entitlement in redeemable/vouchered/redeemed, on its own record. Earned,
-   * held and void rewards do not count. Deliberately NOT "another reward":
+   * entitlement in redeemable/vouchered/redeemed, on its own record, with an
+   * `activated_device_id`. Earned, held and void rewards do not count, and
+   * neither does a reward no device ever ran the table on (H2: a reviewer-cleared
+   * play-hold code is not evidence the account is a repeat user). Deliberately NOT "another reward":
    * re-activating the account's own already-issued reward on a reinstalled or
    * second device is a repeat user (the reward being re-run is itself the
    * prior one), while a FIRST activation of an `earned` reward finds nothing to
@@ -85,6 +109,13 @@ export interface RewardsRepo {
   hasPriorReward(): Promise<boolean>;
   /** Calls `app.activate_offer_code` / `app.activate_entitlement`. */
   applyActivation(input: ApplyActivationInput): Promise<{ state: string }>;
+  /** Android only: remember the (hashed) install link on the activating device
+   * row, first writer wins. The substitute's "write". */
+  recordInstallLink(deviceId: string, installLinkHash: string): Promise<void>;
+  /** Android only: the A20 substitute's two signals for the install this device
+   * row is linked to, or `null` when the row has no link key at all (no install
+   * link, no attest key) — then nothing can be said and the table holds. */
+  androidInstallSignals(deviceId: string): Promise<AndroidInstallSignals | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,16 +156,6 @@ export class VendorRejectedError extends Error {
     this.name = "VendorRejectedError";
   }
 }
-/** This platform has no persistent-bit source at all (Play Integrity device
- * recall unavailable, spike A20). Routes to review; never refused, never
- * clean. */
-export class NoPersistentSignalError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NoPersistentSignalError";
-  }
-}
-
 export type AssertionResult =
   | { ok: true; counter: number }
   | { ok: false; grade: "failed" | "unattestable"; reason: string };
@@ -167,14 +188,14 @@ export interface IntegrityInput {
   nowMs: number;
 }
 
-export type IntegrityResult =
-  | { grade: "attested"; bits: DeviceBits | null }
-  | { grade: "failed"; reasons: string[]; bits: DeviceBits | null };
+export type IntegrityResult = { grade: "attested" } | { grade: "failed"; reasons: string[] };
 
+/** Android has NO vendor persistent-bit port: whether Play Integrity device
+ * recall exists is spike A20 `[unverified]`, and a port that reported bits it
+ * cannot also WRITE would be a read with no matching write. The two bits are
+ * the server-side substitute instead (`RewardsRepo#androidInstallSignals`). */
 export interface AndroidPort {
   verifyIntegrity(input: IntegrityInput): Promise<IntegrityResult>;
-  /** Writes bit0 for the device the token belongs to (device recall). */
-  setBit0(integrityToken: string, known: DeviceBits): Promise<void>;
 }
 
 /** `null` = that platform is not configured: any request carrying that

@@ -37,6 +37,16 @@
 //     without one.
 // Anything that is not a clear, verified "activate" is a hold. There is no
 // outcome called "refused": §7.5 "never silently refused".
+//
+// FIRST MATCH DECIDES THE OUTCOME; EVERY MATCH RAISES ITS SIGNALS (M2). The
+// plan's "first match wins" is about which outcome applies — it never said a
+// lower row's fraud signal should be dropped because a higher row also held.
+// Row 4's `multi_account_device` is the reviewer's evidence that a second
+// account is on this hardware; losing it because the reward ALSO rests on an
+// unattestable co-signal (rows 3 and 4 both match) would hand the reviewer a
+// hold with the evidence stripped. So `decideActivation` evaluates every row
+// independently, reports them all in `matchedRows`, takes `outcome`/`row` from
+// the first, and returns the UNION of the matched rows' signals.
 
 import type { Grade } from "./types.ts";
 
@@ -58,9 +68,13 @@ export type DecisionRow = 1 | 2 | 3 | 4 | 5 | 6 | "no_persistent_signal";
 export type FraudSignalKind = "flagged_device_activation" | "multi_account_device";
 
 export interface Decision {
+  /** The first matching row: the one whose outcome applies. */
   row: DecisionRow;
+  /** EVERY row whose conditions hold, in evaluation order (row, then the
+   * `no_persistent_signal` row, then 4-6); `matchedRows[0] === row`. */
+  matchedRows: DecisionRow[];
   outcome: "activate" | "held_review";
-  /** Fraud signals the matched row requires (the handler de-duplicates). */
+  /** Fraud signals required by ANY matched row (the handler de-duplicates). */
   signals: FraudSignalKind[];
   /** Row 6: bit0 is set on the activating device once the reward is issued. */
   setBit0: boolean;
@@ -68,40 +82,62 @@ export interface Decision {
   reason: string;
 }
 
+interface RowSpec {
+  row: DecisionRow;
+  matches: boolean;
+  outcome: "activate" | "held_review";
+  signals: FraudSignalKind[];
+  setBit0: boolean;
+  reason: string;
+}
+
 export function decideActivation(f: ActivationFacts): Decision {
   const bits = f.bits.kind === "known" ? f.bits : null;
+  const bit1 = bits !== null && bits.bit1;
+  const bit0 = bits !== null && bits.bit0;
 
-  // Row 1 — bit1 set, any bit0, any account.
-  if (bits !== null && bits.bit1) {
-    return { row: 1, outcome: "held_review", signals: ["flagged_device_activation"], setBit0: false, reason: "bit1 set: an account voided for fraud has used this device" };
-  }
-  // Row 2 — an open attestation_failed signal holds the account's activations.
-  if (f.accountHasOpenAttestationFailed || f.activatingGrade === "failed") {
-    return { row: 2, outcome: "held_review", signals: [], setBit0: false, reason: "open attestation_failed fraud_signal on the account" };
-  }
-  // Row 3 — the reward (or the activating device) is unattestable.
-  if (f.rewardRestsOnUnattestable || f.activatingGrade === "unattestable") {
-    return {
+  const specs: RowSpec[] = [
+    // Row 1 — bit1 set, any bit0, any account.
+    { row: 1, matches: bit1, outcome: "held_review", signals: ["flagged_device_activation"], setBit0: false, reason: "bit1 set: an account voided for fraud has used this device" },
+    // Row 2 — an open attestation_failed signal holds the account's activations.
+    { row: 2, matches: f.accountHasOpenAttestationFailed || f.activatingGrade === "failed", outcome: "held_review", signals: [], setBit0: false, reason: "open attestation_failed fraud_signal on the account" },
+    // Row 3 — the reward (or the activating device) is unattestable.
+    {
       row: 3,
+      matches: f.rewardRestsOnUnattestable || f.activatingGrade === "unattestable",
       outcome: "held_review",
       signals: [],
       setBit0: false,
       reason: f.rewardRestsOnUnattestable ? "reward rests on an unattestable co-signal" : "activating device is unattestable",
-    };
-  }
-  // No persistent-bit source: rows 4-6 cannot be evaluated.
-  if (bits === null) {
-    return { row: "no_persistent_signal", outcome: "held_review", signals: [], setBit0: false, reason: "no persistent device signal available on this platform" };
-  }
-  // bit1 is clear from here on.
-  if (bits.bit0) {
-    // Row 4 — bit0 set, no prior reward: held, never refused.
-    if (!f.accountHasPriorReward) {
-      return { row: 4, outcome: "held_review", signals: ["multi_account_device"], setBit0: false, reason: "bit0 set and the account has no prior reward: possible second account on this device" };
-    }
-    // Row 5 — bit0 set, prior reward: a repeat user.
-    return { row: 5, outcome: "activate", signals: [], setBit0: false, reason: "bit0 set, account has a prior reward: repeat user" };
-  }
-  // Row 6 — clear / clear.
-  return { row: 6, outcome: "activate", signals: [], setBit0: true, reason: "clean device" };
+    },
+    // No persistent-bit source: rows 4-6 cannot be evaluated.
+    { row: "no_persistent_signal", matches: bits === null, outcome: "held_review", signals: [], setBit0: false, reason: "no persistent device signal available for this activation" },
+    // Rows 4-6 need a reading, and bit1 clear.
+    {
+      row: 4,
+      matches: bits !== null && !bit1 && bit0 && !f.accountHasPriorReward,
+      outcome: "held_review",
+      signals: ["multi_account_device"],
+      setBit0: false,
+      reason: "bit0 set and the account has no prior reward: possible second account on this device",
+    },
+    { row: 5, matches: bits !== null && !bit1 && bit0 && f.accountHasPriorReward, outcome: "activate", signals: [], setBit0: false, reason: "bit0 set, account has a prior reward: repeat user" },
+    { row: 6, matches: bits !== null && !bit1 && !bit0, outcome: "activate", signals: [], setBit0: true, reason: "clean device" },
+  ];
+
+  const matched = specs.filter((s) => s.matches);
+  // Rows 5 and 6 are only reachable with a reading, rows 1-3 and the
+  // no-signal row cover every other case: something always matches.
+  const first = matched[0];
+  if (!first) throw new Error("decideActivation: no row matched (unreachable)");
+  const signals: FraudSignalKind[] = [];
+  for (const m of matched) for (const sig of m.signals) if (!signals.includes(sig)) signals.push(sig);
+  return {
+    row: first.row,
+    matchedRows: matched.map((m) => m.row),
+    outcome: first.outcome,
+    signals,
+    setBit0: first.setBit0,
+    reason: first.reason,
+  };
 }

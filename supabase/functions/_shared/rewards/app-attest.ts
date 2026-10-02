@@ -145,6 +145,13 @@ export function parseAuthenticatorData(data: Uint8Array): ParsedAuthenticatorDat
 export function derSignatureToRaw(der: Uint8Array): Uint8Array | null {
   // A P-256 ECDSA signature is at most 72 bytes of DER, so every length below
   // uses the one-byte short form; the long form is rejected.
+  //
+  // STRICT DER: each INTEGER must be the MINIMAL encoding of a non-negative
+  // value. A leading 0x00 is legal only in front of a byte with the high bit set
+  // (it is what keeps that value positive); a leading 0x00 in front of anything
+  // else is a non-minimal encoding, and a high-bit first byte with no leading
+  // 0x00 is a negative number. Both are rejected, not "repaired": accepting a
+  // malleable encoding means one signature has several accepted byte strings.
   let p = 0;
   if (der[p++] !== 0x30) return null;
   const seqLen = der[p++];
@@ -156,8 +163,10 @@ export function derSignatureToRaw(der: Uint8Array): Uint8Array | null {
     if (len === undefined || len === 0 || len >= 0x80 || p + len > der.length) return null;
     let start = p;
     p += len;
-    // Strip the single leading zero DER adds in front of a high-bit integer.
-    while (len > 32 && der[start] === 0) {
+    const first = der[start]!;
+    if (first & 0x80) return null; // negative
+    if (len > 1 && first === 0x00) {
+      if (((der.at(start + 1) ?? 0) & 0x80) === 0) return null; // non-minimal: the zero is not needed
       start++;
       len--;
     }

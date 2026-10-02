@@ -5,7 +5,8 @@
 // wrong Play Integrity requestHash is rejected".
 
 import { describe, expect, it } from "vitest";
-import { evaluateIntegrityPayload, extractRecallBits, type IntegrityExpectations } from "../../functions/_shared/rewards/play-integrity.js";
+import * as playIntegrity from "../../functions/_shared/rewards/play-integrity.js";
+import { evaluateIntegrityPayload, type IntegrityExpectations } from "../../functions/_shared/rewards/play-integrity.js";
 
 const NOW = Date.parse("2026-06-01T12:00:00.000Z");
 const EXP: IntegrityExpectations = {
@@ -102,13 +103,13 @@ describe("fails CLOSED on missing or oddly typed fields", () => {
   });
 });
 
-describe("extractRecallBits — absent or malformed is null, never 'clear'", () => {
-  it("reads the two bits when present", () => {
-    expect(extractRecallBits({ deviceIntegrity: { deviceRecall: { values: { bitFirst: true, bitSecond: false } } } })).toEqual({ bit0: true, bit1: false, lastUpdateMonth: null });
+describe("device recall is NOT read from the verdict (A20)", () => {
+  it("the module exports no recall extractor: Android's two bits are the server-side substitute", () => {
+    expect(Object.keys(playIntegrity).sort()).toEqual(["evaluateIntegrityPayload"]);
   });
-  it("returns null for every other shape", () => {
-    for (const p of [null, {}, { deviceIntegrity: {} }, { deviceIntegrity: { deviceRecall: {} } }, { deviceIntegrity: { deviceRecall: { values: { bitFirst: "yes", bitSecond: false } } } }, { deviceIntegrity: { deviceRecall: { values: { bitFirst: true } } } }]) {
-      expect(extractRecallBits(p), JSON.stringify(p)).toBeNull();
-    }
+  it("a payload that carries a deviceRecall block grades exactly like one without it", () => {
+    const p = payload();
+    const withRecall = { ...p, deviceIntegrity: { ...(p.deviceIntegrity as object), deviceRecall: { values: { bitFirst: true, bitSecond: true } } } };
+    expect(evaluateIntegrityPayload(withRecall, EXP)).toEqual(evaluateIntegrityPayload(p, EXP));
   });
 });

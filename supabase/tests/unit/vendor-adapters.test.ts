@@ -16,7 +16,7 @@ import { createIntegrityDecoder, isCompletePlayIntegrityConfig, type PlayIntegri
 import { buildAndroidPort, buildAttestationPorts, buildIosPort } from "../../functions/_shared/rewards/production-ports.js";
 import { fromBase64UrlStrict } from "../../functions/_shared/rewards/binding.js";
 import { verifyP256WebCrypto } from "../../functions/_shared/rewards/app-attest.js";
-import { NoPersistentSignalError, VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "../../functions/_shared/rewards/types.js";
+import { VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "../../functions/_shared/rewards/types.js";
 import { pemToDer, type VendorHttp } from "../../functions/_shared/rewards/vendor-http.js";
 import { sha256, toB64 } from "./rewards-test-crypto.js";
 
@@ -123,14 +123,26 @@ describe("DeviceCheck adapter", () => {
     expect(JSON.parse(http.calls[0]!.body)).toMatchObject({ device_token: "TOK", bit0: true, bit1: true });
   });
 
-  it("status mapping: 400 -> rejected token; 401/403 -> not configured; 429/5xx/network -> unavailable", async () => {
+  it("status mapping: 400 blaming the token -> rejected token; 401/403 -> not configured; 429/5xx/network -> unavailable", async () => {
     const run = (r: Response | Error) => createDeviceCheckClient(appleConfig(), scriptedHttp([r])).queryTwoBits("T");
-    await expect(run(text(400, "bad token"))).rejects.toBeInstanceOf(VendorRejectedError);
+    await expect(run(text(400, "Missing or incorrectly formatted device token"))).rejects.toBeInstanceOf(VendorRejectedError);
+    await expect(run(text(400, "Bad Device Token"))).rejects.toBeInstanceOf(VendorRejectedError);
     await expect(run(text(401, ""))).rejects.toBeInstanceOf(VendorNotConfiguredError);
     await expect(run(text(403, ""))).rejects.toBeInstanceOf(VendorNotConfiguredError);
     await expect(run(text(429, ""))).rejects.toBeInstanceOf(VendorUnavailableError);
     await expect(run(text(503, ""))).rejects.toBeInstanceOf(VendorUnavailableError);
     await expect(run(new Error("ECONNRESET"))).rejects.toBeInstanceOf(VendorUnavailableError);
+  });
+
+  it("400 SPLIT: a 400 that does NOT blame the device token is a request/environment fault (503, no account-wide signal), not a bad token", async () => {
+    const run = (r: Response | Error) => createDeviceCheckClient(appleConfig(), scriptedHttp([r])).queryTwoBits("T");
+    for (const body of ["Missing or incorrectly formatted payload", "Missing or incorrectly formatted transaction id", "Missing or incorrectly formatted timestamp", "", "Bad Request", "<html>"]) {
+      await expect(run(text(400, body)), body).rejects.toBeInstanceOf(VendorNotConfiguredError);
+    }
+    // ... and the same split holds for the write.
+    const w = (r: Response) => createDeviceCheckClient(appleConfig(), scriptedHttp([r])).updateTwoBits("T", { bit0: true, bit1: false });
+    await expect(w(text(400, "Missing or incorrectly formatted payload"))).rejects.toBeInstanceOf(VendorNotConfiguredError);
+    await expect(w(text(400, "Missing or incorrectly formatted device token"))).rejects.toBeInstanceOf(VendorRejectedError);
   });
 
   it("FAILS CLOSED when unconfigured, half-configured, or the key is unusable — and never calls out", async () => {
@@ -277,7 +289,7 @@ describe("production port assembly", () => {
   it("Android: a Google decode rejection grades the verdict failed (not an exception)", async () => {
     const port = buildAndroidPort(googleConfig(), scriptedHttp([json(200, { access_token: "t", expires_in: 3600 }), text(400, "")]));
     const r = await port.verifyIntegrity({ integrityToken: "T", expectedRequestHash: "h", nowMs: 1 });
-    expect(r).toEqual({ grade: "failed", reasons: ["token_rejected_by_google"], bits: null });
+    expect(r).toEqual({ grade: "failed", reasons: ["token_rejected_by_google"] });
   });
 
   it("Android: unavailable and not-configured propagate (the handler turns them into 503)", async () => {
@@ -285,7 +297,7 @@ describe("production port assembly", () => {
     await expect(port.verifyIntegrity({ integrityToken: "T", expectedRequestHash: "h", nowMs: 1 })).rejects.toBeInstanceOf(VendorUnavailableError);
   });
 
-  it("Android: a good verdict is attested but carries NO bits (device recall is spike A20); setBit0 refuses", async () => {
+  it("Android: a good verdict is attested; the port has NO persistent-bit methods at all (device recall is spike A20)", async () => {
     const now = 1_780_000_000_000;
     const good = {
       requestDetails: { requestPackageName: "com.example.golfraven", requestHash: "REQHASH", timestampMillis: String(now) },
@@ -293,8 +305,9 @@ describe("production port assembly", () => {
       deviceIntegrity: { deviceRecognitionVerdict: ["MEETS_DEVICE_INTEGRITY"] },
     };
     const port = buildAndroidPort(googleConfig(), scriptedHttp([json(200, { access_token: "t", expires_in: 3600 }), json(200, { tokenPayloadExternal: good })]));
-    expect(await port.verifyIntegrity({ integrityToken: "T", expectedRequestHash: "REQHASH", nowMs: now })).toEqual({ grade: "attested", bits: null });
-    await expect(port.setBit0("T", { bit0: false, bit1: false, lastUpdateMonth: null })).rejects.toBeInstanceOf(VendorNotConfiguredError);
+    expect(await port.verifyIntegrity({ integrityToken: "T", expectedRequestHash: "REQHASH", nowMs: now })).toEqual({ grade: "attested" });
+    // A port that could read bits it cannot write would be half a mechanism.
+    expect(Object.keys(port)).toEqual(["verifyIntegrity"]);
   });
 
   it("Android: a wrong requestHash from Google's payload is graded failed", async () => {
@@ -316,9 +329,5 @@ describe("pemToDer", () => {
     for (const bad of ["", "nope", "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----", "-----BEGIN PRIVATE KEY-----\n!!!\n-----END PRIVATE KEY-----"]) {
       expect(pemToDer(bad), bad).toBeNull();
     }
-  });
-  it("NoPersistentSignalError is a distinct class", () => {
-    expect(new NoPersistentSignalError("x")).toBeInstanceOf(Error);
-    expect(new NoPersistentSignalError("x")).not.toBeInstanceOf(VendorUnavailableError);
   });
 });

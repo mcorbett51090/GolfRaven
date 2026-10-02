@@ -10,6 +10,8 @@
 //     "platform":    "ios" | "android",
 //     "challengeId": "<uuid>",            // from POST /v1/checkin/challenge — required
 //     "nonce":       "<base64url>",       //   whenever attestation material is sent
+//     "installLinkId": "<opaque id>",     // OPTIONAL, android only: the install identifier the
+//                                         //   §7.5 Android substitute (A20) links device rows on
 //     "attestation": one of
 //        { "kind": "ios",     "keyId": "<base64>", "assertion": "<base64 CBOR>", "deviceCheckToken": "<base64>" }
 //        { "kind": "android", "integrityToken": "<token>" }
@@ -51,6 +53,10 @@ export interface ActivationRequest {
   platform: "ios" | "android";
   challengeId?: string;
   nonce?: string;
+  /** Android only. Opaque, client-chosen: an UNAUTHENTICATED hint (a factory
+   * reset or a fresh id evades it — §7.5 accepts that). Bound into the Android
+   * request hash when present, so it cannot be altered in transit. */
+  installLinkId?: string;
   attestation: AttestationMaterial;
 }
 
@@ -83,7 +89,8 @@ export function extractRewardId(pathname: string): string | null {
   return ok ? id.toLowerCase() : null;
 }
 
-const TOP_KEYS = new Set(["deviceId", "platform", "challengeId", "nonce", "attestation"]);
+const TOP_KEYS = new Set(["deviceId", "platform", "challengeId", "nonce", "installLinkId", "attestation"]);
+const INSTALL_LINK_RE = /^[A-Za-z0-9._~-]{16,128}$/;
 
 export function parseActivationBody(raw: unknown): ParseResult<ActivationRequest> {
   const issues: ParseIssue[] = [];
@@ -94,6 +101,14 @@ export function parseActivationBody(raw: unknown): ParseResult<ActivationRequest
   if (raw.platform !== "ios" && raw.platform !== "android") issues.push({ path: "platform", message: 'must be "ios" or "android"' });
   if (raw.challengeId !== undefined && !isUuid(raw.challengeId)) issues.push({ path: "challengeId", message: "must be a UUID" });
   if (raw.nonce !== undefined && !(typeof raw.nonce === "string" && B64URL_RE.test(raw.nonce))) issues.push({ path: "nonce", message: "must be unpadded base64url" });
+
+  if (raw.installLinkId !== undefined) {
+    if (!(typeof raw.installLinkId === "string" && INSTALL_LINK_RE.test(raw.installLinkId))) {
+      issues.push({ path: "installLinkId", message: "must be an opaque id of 16-128 characters [A-Za-z0-9._~-]" });
+    } else if (raw.platform !== "android") {
+      issues.push({ path: "installLinkId", message: "Android only" });
+    }
+  }
 
   const att = raw.attestation;
   let attestation: AttestationMaterial | null = null;
@@ -151,6 +166,7 @@ export function parseActivationBody(raw: unknown): ParseResult<ActivationRequest
       platform: raw.platform as "ios" | "android",
       ...(raw.challengeId !== undefined ? { challengeId: (raw.challengeId as string).toLowerCase() } : {}),
       ...(raw.nonce !== undefined ? { nonce: raw.nonce as string } : {}),
+      ...(typeof raw.installLinkId === "string" && issues.length === 0 ? { installLinkId: raw.installLinkId } : {}),
       attestation,
     },
   };

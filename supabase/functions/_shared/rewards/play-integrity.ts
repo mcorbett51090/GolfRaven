@@ -15,13 +15,13 @@
 // requestPackageName`, `requestDetails.timestampMillis`, `appIntegrity.
 // appRecognitionVerdict`, `appIntegrity.certificateSha256Digest`,
 // `deviceIntegrity.deviceRecognitionVerdict`) are what this code expects; they
-// are exercised only against payloads this repo's tests construct, and the
-// field that carries device-recall bits (`extractRecallBits`) is the least
-// certain of all (spike A20). Every check fails CLOSED: a missing or oddly
+// are exercised only against payloads this repo's tests construct. Device
+// recall (spike A20) is deliberately NOT read here: Android's two persistent
+// bits are a server-side substitute (rewards activation, `androidInstallSignals`).
+// Every check fails CLOSED: a missing or oddly
 // typed field is a `failed` verdict with a reason, never a pass.
 
 import { stringsEqualConstantTime } from "./binding.ts";
-import type { DeviceBits } from "./types.ts";
 
 export interface IntegrityExpectations {
   packageName: string;
@@ -87,17 +87,4 @@ export function evaluateIntegrityPayload(payload: unknown, exp: IntegrityExpecta
   }
 
   return reasons.length === 0 ? { grade: "attested" } : { grade: "failed", reasons };
-}
-
-/** Device-recall bits from the decoded verdict, or `null` when the payload does
- * not carry them (recall not enabled — spike A20). `[unverified]`: the shape
- * `deviceIntegrity.deviceRecall.values.{bitFirst,bitSecond}` is the least
- * certain part of this file. Absent or malformed is `null`, never "clear". */
-export function extractRecallBits(payload: unknown): DeviceBits | null {
-  const device = obj(obj(payload)?.deviceIntegrity);
-  const recall = obj(device?.deviceRecall);
-  const values = obj(recall?.values);
-  if (!values) return null;
-  if (typeof values.bitFirst !== "boolean" || typeof values.bitSecond !== "boolean") return null;
-  return { bit0: values.bitFirst, bit1: values.bitSecond, lastUpdateMonth: null };
 }

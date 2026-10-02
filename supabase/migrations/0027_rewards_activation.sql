@@ -4,64 +4,92 @@
 -- `offer_code` and `entitlement` (build plan §7.5, A2-08; P3 acceptance
 -- test (9)).
 --
--- What already existed (0003/0005/0006/0014/0016/0017) and is therefore NOT
--- recreated here:
+-- What already existed (0003/0005/0006/0014/0016/0017/0022) and is NOT recreated:
 --   - `held_review` as a value of BOTH `app.offer_code_state` and
 --     `app.entitlement_state`;
---   - `offer_code`/`entitlement`.`activated_device_id`, `devicecheck_token_hash`,
---     `activated_at`; `offer_code.expiry_paused_at`; `offer.budget_reserved`
---     (+ `offer_budget_within_cap`);
---   - `app.device_reward_ledger` (FORCE RLS, no client policy, `user_id` already
---     classified `delete_row` in `private.pii_retention_policy` and `exclude`
---     in `private.pii_export_policy` — so this migration adds NO registry rows
---     and does NOT redefine `export_my_data` / `delete_my_data`);
---   - the play-guard constraint triggers (0017): a `held_review` play can only
---     back a `held_review` (or terminal) code/entitlement.
+--   - `activated_device_id`, `devicecheck_token_hash`, `activated_at` on both;
+--     `offer_code.expiry_paused_at`; `offer.budget_reserved` (+ the cap CHECK);
+--   - `app.device_reward_ledger` (FORCE RLS, no client policy);
+--   - the play-guard constraint triggers and the play-hold cascade (0017).
 --
--- What this migration adds (ALL of it is "P3f additions"):
---   1. `app.device.attest_public_key` — the raw (uncompressed, 65-byte) P-256 key
---      an App Attest assertion is verified against. NULL until key registration
---      (attestation-object verification, NOT built in P3f) writes it; the
---      verifier treats a NULL key as `unattestable`, never as "verified".
---   2. `app.offer.face_value` and `app.offer_code.reserved_amount` — a held offer
---      code RESERVES its budget (`offer.budget_reserved`, §7.5): the amount is
---      the offer's per-code face value, snapshotted on the code so a later
---      release/consume uses exactly what was reserved.
---   3. `app.offer_code.rests_on_unattestable` / `app.entitlement.rests_on_unattestable`
---      — table row 3's input ("the reward rests on an `unattestable`
---      co-signal"). Written ONLY by the earning path (server side); activation
---      only reads it.
---   4. `UNIQUE (device_id, reward_kind, reward_id)` + a `user_id` index on the
---      ledger, so recording an activation is idempotent.
---   5. Five `app` functions that own the state transitions, so the money
---      semantics (state machine, budget reservation, expiry pause, ledger row,
---      row-2/row-3 backstops) live in ONE place in the database, not only in
---      the Edge Function:
+-- ============================================================================
+-- THE BUDGET MODEL (pinned here; M3)
+-- ============================================================================
+-- Reservation = the offer's claim on `budget_cap` for ONE code, recorded twice
+-- and kept equal: `offer_code.reserved_amount` (this code's share) and
+-- `offer.budget_reserved` (the sum). One idempotent primitive takes it
+-- (`app.reserve_offer_for_code`): a no-op for a code that already holds one.
+--
+--   Who takes it, in order of precedence:
+--     1. THE EARNING PATH, at earn time, via `app.reserve_offer_budget` (0017)
+--        — NOT BUILT. Today nothing in the repository inserts an offer_code, so
+--        in this codebase the earn path reserves nothing; every reservation is
+--        taken by 2 or 3 below. If the earning path later reserves, setting
+--        `reserved_amount` is all it needs to do: 2 and 3 then find it and skip.
+--     2. ACTIVATION of an `earned` code that holds none (decision `activate`):
+--        `app.activate_offer_code` reserves its face value as it issues it.
+--     3. ENTRY INTO `held_review` BY ANY PATH — the row trigger
+--        `app.offer_code_reservation_sync` — including the 0017 play-hold
+--        cascade, which only writes `state` and used to reserve nothing (F13).
+--        It reserves and pauses the expiry clock.
+--   Who gives it back: transition to `void` / `expired` (same trigger, from the
+--   code's OWN reserved_amount, so a reviewer reject releases exactly once);
+--   DELETE of the row (same trigger, when the deleting role may update
+--   app.offer — `private.delete_my_data` runs as `private_definer`, which holds
+--   no grant on app.offer and must not be given one, so account deletion calls
+--   `app.release_account_reservations` first, in the same transaction, locking
+--   EVERY row of the account); redemption (`app.consume_offer_budget`, the
+--   redeem path's job). Approval keeps it: the reservation pays for the
+--   redemption even if the offer has ended.
+--
+--   What it never does: refuse. If `budget_cap` cannot cover a reservation the
+--   code is still issued / held, UNRESERVED, and a `review_item` says so
+--   (`issued_offer_budget_unreserved` / `held_offer_budget_unreserved`).
+--
+--   Does an ended offer block activation? NO. `offer.status` / `valid_from` /
+--   `valid_to` gate EARNING (the earn path) and REDEMPTION; a code earned while
+--   the offer was live is honoured, exactly as §7.5 honours an approved held
+--   code. The code's own `expires_at` is what bounds its life, and the
+--   handler refuses an expired one (409). Tested both ways.
+--
+--   Outstanding reservations are those of codes in earned / held_review /
+--   issued. A redeemed code's reservation was consumed into budget_used.
+--   `expired` needs an expiry sweeper (not built, F11): moving a code to
+--   `expired` through the trigger releases it.
+--
+-- ============================================================================
+-- What this migration adds
+-- ============================================================================
+--   1. device: `attest_public_key`; `install_link_hash` + `fraud_voided_at`
+--      (the Android A20 substitute's inputs, §7.5 "Android").
+--   2. offer.face_value; offer_code.reserved_amount.
+--   3. rests_on_unattestable (row 3's input), review_cleared_at (H2),
+--      hold_detail (what the reviewer sees), issued_before_hold /
+--      expiry_remaining (restore remaining validity after a self-induced
+--      re-hold).
+--   4. ledger idempotency.
+--   5. functions (plain invoker-rights, EXECUTE service_role only, none
+--      SECURITY DEFINER, so no private_definer bracket):
 --        app.activate_offer_code / app.activate_entitlement
 --        app.resolve_held_offer_code / app.resolve_held_entitlement
---        app.release_account_reservations — account deletion must give back the
---          budget a deleted account's held codes were reserving (called by
---          `Repo#me.deleteMyData()` in the same transaction, BEFORE
---          private.delete_my_data removes the offer_code rows; `delete_my_data`
---          itself is deliberately NOT redefined here)
---      All five are plain (invoker-rights) functions, EXECUTE service_role only
---      — the same shape as 0017's `app.reserve_offer_budget`. They are NOT
---      SECURITY DEFINER, so no `private_definer` ownership bracket is needed.
+--        app.release_account_reservations
+--        app.reserve_offer_for_code            (the idempotent primitive)
+--        app.device_link_signals               (Android A20 substitute)
+--        app.mark_account_devices_fraud_voided (admin; sets the substitute's bit1)
+--      and the trigger app.offer_code_reservation_sync.
 --
--- The decision itself (which §7.5 row matched, and the DeviceCheck/Play
--- Integrity bits it rests on) is made in TypeScript
--- (`supabase/functions/_shared/rewards/decision-table.ts`) because the bits
--- come from a vendor, not the database. What the database enforces
--- INDEPENDENTLY of the caller is the part it can see: an `activate` decision is
--- refused (SQLSTATE 23514) when the reward rests on an unattestable co-signal
--- (row 3), when its backing play is held, or when the account has an open
--- `fraud_signal(attestation_failed)` (row 2). A bug (or a later builder's
--- code) that tries to activate through these functions cannot skip those rows.
+-- The decision itself (which §7.5 rows matched, and the vendor bits) is made in
+-- TypeScript; what the database enforces independently of its caller is what it
+-- can see: an `activate` is refused (23514) when the reward rests on an
+-- unattestable co-signal (unless a reviewer cleared it), its backing play is
+-- held, or the account has an open `attestation_failed` signal raised after the
+-- review (row 2).
 --
--- Immutability: this file is NEW. No existing migration is edited.
+-- `export_my_data` / `delete_my_data` are NOT redefined here (see 0028 for the
+-- ledger export projection). This file is NEW: no existing migration is edited.
 
 -- ============================================================================
--- P3f additions — 1. device.attest_public_key
+-- 1. device
 -- ============================================================================
 ALTER TABLE app.device ADD COLUMN attest_public_key bytea;
 ALTER TABLE app.device ADD CONSTRAINT device_attest_public_key_len
@@ -69,57 +97,168 @@ ALTER TABLE app.device ADD CONSTRAINT device_attest_public_key_len
 COMMENT ON COLUMN app.device.attest_public_key IS
   'Raw uncompressed P-256 point (0x04 || X || Y, 65 bytes) of this install''s App Attest key. Written ONLY by App Attest key registration (attestation-object verification against Apple''s root — not built in P3f). NULL means "no key registered": the assertion verifier returns unattestable, never verified. A public key, not a secret.';
 
+ALTER TABLE app.device ADD COLUMN install_link_hash text;
+ALTER TABLE app.device ADD CONSTRAINT device_install_link_hash_shape
+  CHECK (install_link_hash IS NULL OR install_link_hash ~ '^[0-9a-f]{64}$');
+ALTER TABLE app.device ADD COLUMN fraud_voided_at timestamptz;
+CREATE INDEX device_install_link_idx ON app.device (install_link_hash) WHERE install_link_hash IS NOT NULL;
+CREATE INDEX device_attest_key_idx ON app.device (attest_key_id) WHERE attest_key_id IS NOT NULL;
+COMMENT ON COLUMN app.device.install_link_hash IS
+  'SHA-256 hex of an opaque, client-supplied install identifier (Android). Links device rows of different accounts for the §7.5 Android substitute (A20): "this install has been seen on > 2 accounts". An UNAUTHENTICATED hint — a factory reset or a rotated id evades it, which §7.5 accepts because the table routes to review rather than refusing. Never exported.';
+COMMENT ON COLUMN app.device.fraud_voided_at IS
+  'Set by app.mark_account_devices_fraud_voided (an admin fraud decision) on every device of a voided account: the Android substitute for DeviceCheck bit1, "an account voided for fraud used this install".';
+
 -- ============================================================================
--- P3f additions — 2. budget reservation inputs
+-- 2. budget reservation inputs
 -- ============================================================================
--- IF NOT EXISTS on offer.face_value: another P3 builder may introduce the same
--- per-code face value (the settlement multiplier, §9.5); this must not make
--- the migration set fail to apply in either order.
+-- IF NOT EXISTS on face_value: another P3 builder may introduce the same
+-- per-code face value; this must not make the migration set fail in either order.
 ALTER TABLE app.offer ADD COLUMN IF NOT EXISTS face_value numeric(10, 2) NOT NULL DEFAULT 0 CHECK (face_value >= 0);
 COMMENT ON COLUMN app.offer.face_value IS
-  'Per-code face value in the offer''s currency (build plan §9.5 settlement: redemptions x face value). A held code reserves this much of budget_cap (offer.budget_reserved, §7.5). 0 = nothing reserved (legacy rows).';
+  'Per-code face value in the offer''s currency (build plan §9.5 settlement: redemptions x face value). A code reserves this much of budget_cap. 0 = nothing reserved (legacy rows).';
 
 ALTER TABLE app.offer_code ADD COLUMN reserved_amount numeric(10, 2) NOT NULL DEFAULT 0 CHECK (reserved_amount >= 0);
 COMMENT ON COLUMN app.offer_code.reserved_amount IS
-  'Amount of offer.budget_reserved this code holds (snapshot of offer.face_value taken when the code was first held). Set by app.activate_offer_code; released by app.resolve_held_offer_code on reject; kept on approve so the reservation pays for the redemption even if the offer has since ended (§7.5).';
+  'Amount of offer.budget_reserved this code holds (offer.face_value at the time it was taken). Taken by the earn path, by activation, or by entry into held_review (app.offer_code_reservation_sync); released on void / expired / delete / account deletion; kept on approval so the reservation pays for the redemption even if the offer has ended (§7.5). See this migration''s header for the model.';
 
 -- ============================================================================
--- P3f additions — 3. table row 3's input
+-- 3. per-reward review state
 -- ============================================================================
 ALTER TABLE app.offer_code ADD COLUMN rests_on_unattestable boolean NOT NULL DEFAULT false;
 ALTER TABLE app.entitlement ADD COLUMN rests_on_unattestable boolean NOT NULL DEFAULT false;
+ALTER TABLE app.offer_code ADD COLUMN review_cleared_at timestamptz;
+ALTER TABLE app.entitlement ADD COLUMN review_cleared_at timestamptz;
+ALTER TABLE app.offer_code ADD COLUMN hold_detail jsonb;
+ALTER TABLE app.entitlement ADD COLUMN hold_detail jsonb;
+ALTER TABLE app.offer_code ADD COLUMN issued_before_hold boolean NOT NULL DEFAULT false;
+ALTER TABLE app.offer_code ADD COLUMN expiry_remaining interval;
 COMMENT ON COLUMN app.offer_code.rests_on_unattestable IS
-  '§7.5 table row 3 input: true when the reward rests on an unattestable co-signal (§4.5). Written ONLY by the server-side earning path; rewards-activate reads it (OR-ed with the backing play''s held_review) and the DB refuses to activate a code with this set.';
+  '§7.5 table row 3 input: true when the reward rests on an unattestable co-signal (§4.5). Written ONLY by the server-side earning path; rewards-activate reads it (OR-ed with the backing play''s held_review).';
 COMMENT ON COLUMN app.entitlement.rests_on_unattestable IS
   '§7.5 table row 3 input — see app.offer_code.rests_on_unattestable.';
+COMMENT ON COLUMN app.offer_code.review_cleared_at IS
+  'Set when a reviewer APPROVES a held code that never ran the §7.5 table on a device (activated_device_id IS NULL): the code returns to `earned` with rows 2 and 3 cleared for it (the unattestable basis, and any attestation_failed signal raised BEFORE this time), but rows 1 and 4-6 still run on a real device at activation. A held code that did run on a device is issued directly.';
+COMMENT ON COLUMN app.entitlement.review_cleared_at IS 'See app.offer_code.review_cleared_at.';
+COMMENT ON COLUMN app.offer_code.hold_detail IS
+  'What the reviewer sees (§7.5): {bits, matchedRows, primaryRow, deviceCheckLastUpdateMonth, platform, grade, at}, written by activation when it holds the code. NULL for a code held by the play-hold cascade (no device was involved). Never exported, never in a player-facing view.';
+COMMENT ON COLUMN app.entitlement.hold_detail IS 'See app.offer_code.hold_detail.';
+COMMENT ON COLUMN app.offer_code.issued_before_hold IS
+  'True when the code was `issued` at the moment it entered held_review (a second device was flagged, or a play was held after issuance). On approval such a code gets its REMAINING validity back, not a fresh full one.';
+COMMENT ON COLUMN app.offer_code.expiry_remaining IS
+  'Validity left when an issued code entered held_review; restored on approval (see issued_before_hold).';
 
 -- ============================================================================
--- P3f additions — 4. ledger idempotency
+-- 4. ledger idempotency
 -- ============================================================================
 ALTER TABLE app.device_reward_ledger
   ADD CONSTRAINT device_reward_ledger_device_reward_key UNIQUE (device_id, reward_kind, reward_id);
 CREATE INDEX device_reward_ledger_user_idx ON app.device_reward_ledger (user_id);
 
 -- ============================================================================
--- P3f additions — 5. state-transition functions
+-- 5. functions
 -- ============================================================================
 -- Error contract (SQLSTATEs the Edge layer maps; messages are diagnostics only):
---   22023  invalid parameter (bad p_decision / NULL p_approve)
+--   22023  invalid parameter
 --   P0002  no such reward for this user (the Edge layer has already answered 404)
 --   42501  the device is not the caller's, or p_resolved_by is not an admin
 --   55000  the reward's state does not allow this transition (terminal/expired)
 --   23514  an `activate` decision was refused by a table-row backstop (rows 2/3)
 
+-- 5a. The idempotent reservation primitive. Touches only app.offer and
+-- app.review_item; the CALLER records the returned amount on the code.
+CREATE FUNCTION app.reserve_offer_for_code(p_offer_id uuid, p_code_id uuid, p_review_kind text)
+RETURNS numeric
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  v_offer app.offer%ROWTYPE;
+BEGIN
+  SELECT * INTO v_offer FROM app.offer WHERE id = p_offer_id FOR UPDATE;
+  IF NOT FOUND OR v_offer.face_value <= 0 THEN
+    RETURN 0;
+  END IF;
+  -- Deliberately NOT gated on offer.status / valid_to (see the header: earned
+  -- while live = honoured).
+  IF v_offer.budget_used + v_offer.budget_reserved + v_offer.face_value <= v_offer.budget_cap THEN
+    UPDATE app.offer SET budget_reserved = budget_reserved + v_offer.face_value WHERE id = p_offer_id;
+    RETURN v_offer.face_value;
+  END IF;
+  -- Never refused, never silently unreserved: a human is told.
+  INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
+  VALUES (p_review_kind, 'offer_code', p_code_id,
+          jsonb_build_object('offer_id', v_offer.id, 'face_value', v_offer.face_value));
+  RETURN 0;
+END;
+$$;
+
+-- 5b. The row trigger: held_review (by ANY path) reserves + pauses; void /
+-- expired / DELETE release.
+CREATE FUNCTION app.offer_code_reservation_sync() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    -- private.delete_my_data runs as private_definer, which has no UPDATE on
+    -- app.offer (and must not get one): that path releases through
+    -- app.release_account_reservations first. Every role that CAN update the
+    -- offer releases here.
+    IF OLD.reserved_amount > 0 AND OLD.state IN ('earned', 'held_review', 'issued')
+       AND has_table_privilege('app.offer', 'UPDATE') THEN
+      PERFORM app.release_offer_budget(OLD.offer_id, OLD.reserved_amount);
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.state = 'held_review' THEN
+      NEW.expiry_paused_at := coalesce(NEW.expiry_paused_at, now());
+      IF NEW.reserved_amount = 0 THEN
+        NEW.reserved_amount := app.reserve_offer_for_code(NEW.offer_id, NEW.id, 'held_offer_budget_unreserved');
+      END IF;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- UPDATE OF state
+  IF NEW.state IS NOT DISTINCT FROM OLD.state THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.state = 'held_review' THEN
+    NEW.issued_before_hold := (OLD.state = 'issued');
+    NEW.expiry_remaining := CASE
+      WHEN OLD.state = 'issued' AND OLD.expires_at IS NOT NULL THEN greatest(OLD.expires_at - now(), interval '0')
+      ELSE NULL END;
+    NEW.expiry_paused_at := coalesce(NEW.expiry_paused_at, now());
+    IF NEW.reserved_amount = 0 THEN
+      NEW.reserved_amount := app.reserve_offer_for_code(NEW.offer_id, NEW.id, 'held_offer_budget_unreserved');
+    END IF;
+  ELSIF NEW.state IN ('void', 'expired') THEN
+    IF OLD.reserved_amount > 0 AND OLD.state IN ('earned', 'held_review', 'issued') THEN
+      PERFORM app.release_offer_budget(OLD.offer_id, OLD.reserved_amount);
+      NEW.reserved_amount := 0;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER offer_code_reservation_sync_trg
+BEFORE INSERT OR UPDATE OF state OR DELETE ON app.offer_code
+FOR EACH ROW EXECUTE FUNCTION app.offer_code_reservation_sync();
+
+-- 5c. activation
 CREATE FUNCTION app.activate_offer_code(
-  p_code_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text
+  p_code_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text,
+  p_hold_detail jsonb DEFAULT NULL
 ) RETURNS app.offer_code_state
 LANGUAGE plpgsql
 SET search_path = ''
 AS $$
 DECLARE
   v_code app.offer_code%ROWTYPE;
-  v_offer app.offer%ROWTYPE;
-  v_reserve numeric(10, 2) := 0;
+  v_reserve numeric := 0;
 BEGIN
   IF p_decision IS NULL OR p_decision NOT IN ('activate', 'held_review') THEN
     RAISE EXCEPTION 'activate_offer_code: p_decision must be ''activate'' or ''held_review'' (got %)', p_decision
@@ -150,9 +289,8 @@ BEGIN
   END IF;
 
   IF p_decision = 'activate' THEN
-    -- Table rows 2 and 3, enforced by the database independently of the
-    -- caller (the decision is made in TypeScript; this is the backstop).
-    IF v_code.rests_on_unattestable THEN
+    -- Table rows 2 and 3, enforced by the database independently of the caller.
+    IF v_code.rests_on_unattestable AND v_code.review_cleared_at IS NULL THEN
       RAISE EXCEPTION 'activate_offer_code: offer_code % rests on an unattestable co-signal (§7.5 row 3) and cannot be activated', p_code_id
         USING ERRCODE = '23514';
     END IF;
@@ -163,14 +301,22 @@ BEGIN
         USING ERRCODE = '23514';
     END IF;
     IF EXISTS (
-      SELECT 1 FROM app.fraud_signal WHERE user_id = p_user_id AND kind = 'attestation_failed' AND cleared_at IS NULL
+      SELECT 1 FROM app.fraud_signal
+      WHERE user_id = p_user_id AND kind = 'attestation_failed' AND cleared_at IS NULL
+        AND created_at > coalesce(v_code.review_cleared_at, '-infinity'::timestamptz)
     ) THEN
       RAISE EXCEPTION 'activate_offer_code: the account has an open attestation_failed fraud_signal (§7.5 row 2); activations are held'
         USING ERRCODE = '23514';
     END IF;
 
+    -- Issuing a code that holds no reservation takes one (header: model, step 2).
+    IF v_code.state = 'earned' AND v_code.reserved_amount = 0 THEN
+      v_reserve := app.reserve_offer_for_code(v_code.offer_id, v_code.id, 'issued_offer_budget_unreserved');
+    END IF;
+
     UPDATE app.offer_code SET
       state = 'issued',
+      reserved_amount = reserved_amount + v_reserve,
       activated_device_id = coalesce(activated_device_id, p_device_id),
       devicecheck_token_hash = coalesce(devicecheck_token_hash, p_token_hash),
       activated_at = coalesce(activated_at, now())
@@ -182,29 +328,12 @@ BEGIN
     RETURN 'issued';
   END IF;
 
-  -- p_decision = 'held_review'. A held code RESERVES its budget and its expiry
-  -- clock PAUSES (§7.5). The offer is deliberately NOT required to still be
-  -- live: the code was earned while it was, and "if the offer ends ... during
-  -- review, an approved code is still honoured".
-  IF v_code.reserved_amount = 0 THEN
-    SELECT * INTO v_offer FROM app.offer WHERE id = v_code.offer_id FOR UPDATE;
-    IF v_offer.face_value > 0 THEN
-      IF v_offer.budget_used + v_offer.budget_reserved + v_offer.face_value <= v_offer.budget_cap THEN
-        UPDATE app.offer SET budget_reserved = budget_reserved + v_offer.face_value WHERE id = v_offer.id;
-        v_reserve := v_offer.face_value;
-      ELSE
-        -- Never silently refused, never silently unreserved: a human sees it.
-        INSERT INTO app.review_item (kind, subject_table, subject_id, detail)
-        VALUES ('held_offer_budget_unreserved', 'offer_code', v_code.id,
-                jsonb_build_object('offer_id', v_offer.id, 'face_value', v_offer.face_value));
-      END IF;
-    END IF;
-  END IF;
-
+  -- held_review. app.offer_code_reservation_sync reserves the budget and pauses
+  -- the expiry clock on the state change — the same path the play-hold cascade
+  -- takes, so there is exactly one implementation.
   UPDATE app.offer_code SET
     state = 'held_review',
-    reserved_amount = reserved_amount + v_reserve,
-    expiry_paused_at = coalesce(expiry_paused_at, now()),
+    hold_detail = coalesce(p_hold_detail, hold_detail),
     activated_device_id = coalesce(activated_device_id, p_device_id),
     devicecheck_token_hash = coalesce(devicecheck_token_hash, p_token_hash),
     activated_at = coalesce(activated_at, now())
@@ -214,7 +343,8 @@ END;
 $$;
 
 CREATE FUNCTION app.activate_entitlement(
-  p_entitlement_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text
+  p_entitlement_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text,
+  p_hold_detail jsonb DEFAULT NULL
 ) RETURNS app.entitlement_state
 LANGUAGE plpgsql
 SET search_path = ''
@@ -248,7 +378,7 @@ BEGIN
   END IF;
 
   IF p_decision = 'activate' THEN
-    IF v_ent.rests_on_unattestable THEN
+    IF v_ent.rests_on_unattestable AND v_ent.review_cleared_at IS NULL THEN
       RAISE EXCEPTION 'activate_entitlement: entitlement % rests on an unattestable co-signal (§7.5 row 3) and cannot be activated', p_entitlement_id
         USING ERRCODE = '23514';
     END IF;
@@ -259,7 +389,9 @@ BEGIN
         USING ERRCODE = '23514';
     END IF;
     IF EXISTS (
-      SELECT 1 FROM app.fraud_signal WHERE user_id = p_user_id AND kind = 'attestation_failed' AND cleared_at IS NULL
+      SELECT 1 FROM app.fraud_signal
+      WHERE user_id = p_user_id AND kind = 'attestation_failed' AND cleared_at IS NULL
+        AND created_at > coalesce(v_ent.review_cleared_at, '-infinity'::timestamptz)
     ) THEN
       RAISE EXCEPTION 'activate_entitlement: the account has an open attestation_failed fraud_signal (§7.5 row 2); activations are held'
         USING ERRCODE = '23514';
@@ -282,6 +414,7 @@ BEGIN
   -- trail's outstanding-redemption figure, which reads state = 'held_review'.
   UPDATE app.entitlement SET
     state = 'held_review',
+    hold_detail = coalesce(p_hold_detail, hold_detail),
     activated_device_id = coalesce(activated_device_id, p_device_id),
     devicecheck_token_hash = coalesce(devicecheck_token_hash, p_token_hash),
     activated_at = coalesce(activated_at, now())
@@ -290,13 +423,19 @@ BEGIN
 END;
 $$;
 
--- The §9.2 review decision on a held offer code. Approve: the code becomes
--- `issued` with its FULL validity counted from the approval date, honoured even
--- if the offer has since ended or its budget is otherwise used up — the
--- reservation taken when it was held pays for it, so reserved_amount and
--- offer.budget_reserved are deliberately left untouched. Reject: `void`, and
--- the reservation is released. `p_resolved_by` must be an admin; the Edge layer
--- that eventually exposes this passes its own verified actor.
+-- 5d. The §9.2 review decision on a held offer code.
+--   APPROVE, and the code RAN the table on a device (activated_device_id is
+--     set): `issued`, validity restored — FULL validity counted from the
+--     approval date for a code that was never issued (§7.5), the REMAINING
+--     validity for one that was issued before it was held (a self-induced
+--     re-hold must not be a free renewal). Honoured even if the offer ended;
+--     the reservation is untouched.
+--   APPROVE, and no device ever ran the table on it (a play-hold cascade, an
+--     earn-time hold): the code returns to `earned` with review_cleared_at set.
+--     It is NOT issued — it has no device and §7.5 has not run — and it does
+--     not make the account a "repeat user": rows 1 and 4-6 still run, on a
+--     real device, at activation.
+--   REJECT: `void`; app.offer_code_reservation_sync releases the reservation.
 CREATE FUNCTION app.resolve_held_offer_code(p_code_id uuid, p_approve boolean, p_resolved_by uuid)
 RETURNS app.offer_code_state
 LANGUAGE plpgsql
@@ -304,7 +443,8 @@ SET search_path = ''
 AS $$
 DECLARE
   v_code app.offer_code%ROWTYPE;
-  v_validity interval;
+  v_expires timestamptz;
+  v_new app.offer_code_state;
 BEGIN
   IF p_approve IS NULL THEN
     RAISE EXCEPTION 'resolve_held_offer_code: p_approve must not be NULL' USING ERRCODE = '22023';
@@ -323,31 +463,31 @@ BEGIN
   END IF;
 
   IF p_approve THEN
-    IF v_code.expires_at IS NOT NULL AND v_code.expires_at > v_code.earned_at THEN
-      v_validity := v_code.expires_at - v_code.earned_at;
-    END IF;
+    v_expires := CASE
+      WHEN v_code.issued_before_hold AND v_code.expiry_remaining IS NOT NULL THEN now() + v_code.expiry_remaining
+      WHEN v_code.expires_at IS NOT NULL AND v_code.expires_at > v_code.earned_at THEN now() + (v_code.expires_at - v_code.earned_at)
+      ELSE v_code.expires_at END;
+    v_new := CASE WHEN v_code.activated_device_id IS NULL THEN 'earned'::app.offer_code_state ELSE 'issued'::app.offer_code_state END;
     UPDATE app.offer_code SET
-      state = 'issued',
-      expires_at = CASE WHEN v_validity IS NULL THEN expires_at ELSE now() + v_validity END,
-      expiry_paused_at = NULL
+      state = v_new,
+      expires_at = v_expires,
+      expiry_paused_at = NULL,
+      issued_before_hold = false,
+      expiry_remaining = NULL,
+      review_cleared_at = CASE WHEN v_new = 'earned' THEN now() ELSE review_cleared_at END
     WHERE id = p_code_id;
-    IF v_code.activated_device_id IS NOT NULL THEN
+    IF v_new = 'issued' THEN
       INSERT INTO app.device_reward_ledger (device_id, devicecheck_token_hash, user_id, reward_kind, reward_id)
       VALUES (v_code.activated_device_id, v_code.devicecheck_token_hash, v_code.user_id, 'offer', p_code_id)
       ON CONFLICT (device_id, reward_kind, reward_id) DO NOTHING;
     END IF;
     INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
     VALUES (p_resolved_by, 'held_reward_approved', 'offer_code', p_code_id::text,
-            jsonb_build_object('reserved_amount', v_code.reserved_amount));
-    RETURN 'issued';
+            jsonb_build_object('reserved_amount', v_code.reserved_amount, 'resulting_state', v_new));
+    RETURN v_new;
   END IF;
 
-  IF v_code.reserved_amount > 0 THEN
-    PERFORM 1 FROM app.offer WHERE id = v_code.offer_id FOR UPDATE;
-    UPDATE app.offer SET budget_reserved = greatest(budget_reserved - v_code.reserved_amount, 0)
-    WHERE id = v_code.offer_id;
-  END IF;
-  UPDATE app.offer_code SET state = 'void', reserved_amount = 0 WHERE id = p_code_id;
+  UPDATE app.offer_code SET state = 'void' WHERE id = p_code_id; -- the trigger releases the reservation
   INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
   VALUES (p_resolved_by, 'held_reward_rejected', 'offer_code', p_code_id::text,
           jsonb_build_object('released_amount', v_code.reserved_amount));
@@ -362,6 +502,7 @@ SET search_path = ''
 AS $$
 DECLARE
   v_ent app.entitlement%ROWTYPE;
+  v_new app.entitlement_state;
 BEGIN
   IF p_approve IS NULL THEN
     RAISE EXCEPTION 'resolve_held_entitlement: p_approve must not be NULL' USING ERRCODE = '22023';
@@ -380,15 +521,20 @@ BEGIN
   END IF;
 
   IF p_approve THEN
-    UPDATE app.entitlement SET state = 'redeemable' WHERE id = p_entitlement_id;
-    IF v_ent.activated_device_id IS NOT NULL THEN
+    -- Same rule as offer codes: no device ever ran §7.5 on it -> back to earned, review-cleared.
+    v_new := CASE WHEN v_ent.activated_device_id IS NULL THEN 'earned'::app.entitlement_state ELSE 'redeemable'::app.entitlement_state END;
+    UPDATE app.entitlement SET
+      state = v_new,
+      review_cleared_at = CASE WHEN v_new = 'earned' THEN now() ELSE review_cleared_at END
+    WHERE id = p_entitlement_id;
+    IF v_new = 'redeemable' THEN
       INSERT INTO app.device_reward_ledger (device_id, devicecheck_token_hash, user_id, reward_kind, reward_id)
       VALUES (v_ent.activated_device_id, v_ent.devicecheck_token_hash, v_ent.user_id, 'special_marker', p_entitlement_id)
       ON CONFLICT (device_id, reward_kind, reward_id) DO NOTHING;
     END IF;
     INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
-    VALUES (p_resolved_by, 'held_reward_approved', 'entitlement', p_entitlement_id::text, '{}'::jsonb);
-    RETURN 'redeemable';
+    VALUES (p_resolved_by, 'held_reward_approved', 'entitlement', p_entitlement_id::text, jsonb_build_object('resulting_state', v_new));
+    RETURN v_new;
   END IF;
 
   UPDATE app.entitlement SET state = 'void' WHERE id = p_entitlement_id;
@@ -398,15 +544,17 @@ BEGIN
 END;
 $$;
 
--- Account deletion (AT 6) removes a player's offer_code rows. A held code is
--- RESERVING budget (offer.budget_reserved) and so is an approved-but-unredeemed
--- one (its reservation pays for the redemption); once the row is gone nothing
--- would ever release that, and the offer's budget would stay inflated forever.
--- This returns it. It touches only reservations still outstanding
--- (held_review / issued with reserved_amount > 0): a redeemed code's reservation
--- was consumed into budget_used, a rejected one's was released by
--- app.resolve_held_offer_code. Idempotent: a second call finds nothing to
--- release.
+-- 5e. Account deletion hands back what the account's codes reserve. TWO phases:
+--   phase 1 locks EVERY offer_code row of the account (no predicate, `ORDER BY
+--     id`) and waits for each. A `FOR UPDATE ... WHERE reserved_amount > 0` would
+--     SKIP (not wait for) a row a concurrent activation has locked but not yet
+--     committed, and the deletion that follows would then remove a row that
+--     committed WITH a reservation (M1);
+--   phase 2 is a NEW statement, so it reads the rows as they were committed once
+--     phase 1 got every lock, and releases from those. Because every code lock is
+--     taken BEFORE the first offer lock, a concurrent activation (code lock ->
+--     offer lock) cannot form a cycle with this function (offer lock held here
+--     while waiting for a code lock there).
 CREATE FUNCTION app.release_account_reservations(p_user_id uuid) RETURNS numeric
 LANGUAGE plpgsql
 SET search_path = ''
@@ -418,15 +566,13 @@ BEGIN
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'release_account_reservations: p_user_id must not be NULL' USING ERRCODE = '22023';
   END IF;
-  -- Ordered by offer id so two concurrent deletions lock offers in one order.
+  PERFORM 1 FROM app.offer_code WHERE user_id = p_user_id ORDER BY id FOR UPDATE;
   FOR r IN
-    SELECT id, offer_id, reserved_amount FROM app.offer_code
-    WHERE user_id = p_user_id AND reserved_amount > 0 AND state IN ('held_review', 'issued')
-    ORDER BY offer_id, id
-    FOR UPDATE
+    SELECT id, offer_id, reserved_amount, state FROM app.offer_code
+    WHERE user_id = p_user_id AND reserved_amount > 0 AND state IN ('earned', 'held_review', 'issued')
+    ORDER BY id
   LOOP
-    PERFORM 1 FROM app.offer WHERE id = r.offer_id FOR UPDATE;
-    UPDATE app.offer SET budget_reserved = greatest(budget_reserved - r.reserved_amount, 0) WHERE id = r.offer_id;
+    PERFORM app.release_offer_budget(r.offer_id, r.reserved_amount);
     UPDATE app.offer_code SET reserved_amount = 0 WHERE id = r.id;
     v_total := v_total + r.reserved_amount;
   END LOOP;
@@ -434,28 +580,80 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION app.activate_offer_code(uuid, uuid, uuid, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.activate_offer_code(uuid, uuid, uuid, text, text) TO service_role;
-REVOKE EXECUTE ON FUNCTION app.activate_entitlement(uuid, uuid, uuid, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.activate_entitlement(uuid, uuid, uuid, text, text) TO service_role;
+-- 5f. The Android A20 substitute (§7.5): "device rows linked by install id,
+-- attest key id and account give two signals". bit0-ish: the install has been
+-- seen on MORE THAN 2 accounts; bit1-ish: an account voided for fraud used it.
+-- A device row is linked to this one by an equal install_link_hash or an equal
+-- attest_key_id (either, when non-NULL), or is this row itself.
+CREATE FUNCTION app.device_link_signals(p_device_id uuid)
+RETURNS TABLE (accounts_on_install int, voided_account_used_install boolean)
+LANGUAGE sql
+STABLE
+SET search_path = ''
+AS $$
+  WITH me AS (
+    SELECT id, install_link_hash, attest_key_id FROM app.device WHERE id = p_device_id
+  ), linked AS (
+    SELECT d.user_id, d.fraud_voided_at
+    FROM app.device d JOIN me ON d.id = me.id
+       OR (me.install_link_hash IS NOT NULL AND d.install_link_hash = me.install_link_hash)
+       OR (me.attest_key_id IS NOT NULL AND d.attest_key_id = me.attest_key_id)
+  )
+  SELECT count(DISTINCT user_id)::int, coalesce(bool_or(fraud_voided_at IS NOT NULL), false) FROM linked;
+$$;
+
+-- 5g. The admin fraud decision's device side: marks every device of a voided
+-- account, which is the Android substitute's bit1 for every install linked to
+-- them. (The iOS DeviceCheck bit1 write is the same admin tool's job, not built.)
+CREATE FUNCTION app.mark_account_devices_fraud_voided(p_user_id uuid, p_resolved_by uuid) RETURNS int
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  v_n int;
+BEGIN
+  IF p_user_id IS NULL OR p_resolved_by IS NULL OR NOT private.is_admin(p_resolved_by) THEN
+    RAISE EXCEPTION 'mark_account_devices_fraud_voided: p_resolved_by is not an admin' USING ERRCODE = '42501';
+  END IF;
+  UPDATE app.device SET fraud_voided_at = coalesce(fraud_voided_at, now()) WHERE user_id = p_user_id;
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
+  VALUES (p_resolved_by, 'account_devices_fraud_voided', 'device', p_user_id::text, jsonb_build_object('devices', v_n));
+  RETURN v_n;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.reserve_offer_for_code(uuid, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.reserve_offer_for_code(uuid, uuid, text) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.offer_code_reservation_sync() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.activate_offer_code(uuid, uuid, uuid, text, text, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.activate_offer_code(uuid, uuid, uuid, text, text, jsonb) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.activate_entitlement(uuid, uuid, uuid, text, text, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.activate_entitlement(uuid, uuid, uuid, text, text, jsonb) TO service_role;
 REVOKE EXECUTE ON FUNCTION app.resolve_held_offer_code(uuid, boolean, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.resolve_held_offer_code(uuid, boolean, uuid) TO service_role;
 REVOKE EXECUTE ON FUNCTION app.resolve_held_entitlement(uuid, boolean, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.resolve_held_entitlement(uuid, boolean, uuid) TO service_role;
 REVOKE EXECUTE ON FUNCTION app.release_account_reservations(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.release_account_reservations(uuid) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.device_link_signals(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.device_link_signals(uuid) TO service_role;
+REVOKE EXECUTE ON FUNCTION app.mark_account_devices_fraud_voided(uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.mark_account_devices_fraud_voided(uuid, uuid) TO service_role;
 
 -- ============================================================================
--- P3f additions — 6. function inventory (derived check 10_function_inventory.sql
--- / verify-function-inventory.mjs fail CI on a missing row). The
--- `current_user_seed_function_inventory` INSERT policy was created by 0017 and
--- is still in place (0018 and 0021 insert the same way).
+-- 6. function inventory (the `current_user_seed_function_inventory` INSERT
+-- policy was created by 0017 and is still in place).
 -- ============================================================================
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, note)
 VALUES
-  ('app', 'activate_offer_code', 'p_code_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text', false, false, true, 'P3f: the offer_code activation state machine (§7.5): earned/issued -> issued | held_review, held code reserves budget + pauses expiry, ledger row; rows 2/3 backstop. Called by rewards-activate through withOwnership as service_role; plain invoker function, not SECURITY DEFINER'),
-  ('app', 'activate_entitlement', 'p_entitlement_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text', false, false, true, 'P3f: the entitlement activation state machine (§7.5): earned/redeemable -> redeemable | held_review, ledger row; rows 2/3 backstop. service_role only'),
-  ('app', 'resolve_held_offer_code', 'p_code_id uuid, p_approve boolean, p_resolved_by uuid', false, false, true, 'P3f: the §9.2 review decision on a held offer code (approve -> issued with full validity from approval, reservation kept; reject -> void, reservation released); p_resolved_by must be an admin. No Edge Function exposes it yet (P5.1a review queue). service_role only'),
-  ('app', 'resolve_held_entitlement', 'p_entitlement_id uuid, p_approve boolean, p_resolved_by uuid', false, false, true, 'P3f: the §9.2 review decision on a held entitlement (approve -> redeemable, reject -> void); p_resolved_by must be an admin. No Edge Function exposes it yet (P5.1a review queue). service_role only'),
-  ('app', 'release_account_reservations', 'p_user_id uuid', false, false, true, 'P3f: returns the offer budget a deleted account''s held/approved-unredeemed codes were reserving; called by Repo#me.deleteMyData() in the delete transaction, before private.delete_my_data. Idempotent. service_role only');
+  ('app', 'reserve_offer_for_code', 'p_offer_id uuid, p_code_id uuid, p_review_kind text', false, false, true, 'P3f: the idempotent budget-reservation primitive (locks the offer, cap-checked, review_item when it cannot reserve, never refuses); called from the activation functions and the reservation trigger as service_role'),
+  ('app', 'offer_code_reservation_sync', '', false, false, false, 'trigger function (app.offer_code_reservation_sync_trg) -- held_review by ANY path reserves + pauses; void/expired/DELETE release; never EXECUTEd directly by any role'),
+  ('app', 'activate_offer_code', 'p_code_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb', false, false, true, 'P3f: the offer_code activation state machine (§7.5); earned/issued -> issued | held_review, reservation, ledger row, rows 2/3 backstop. Called by rewards-activate through withOwnership as service_role; plain invoker function, not SECURITY DEFINER'),
+  ('app', 'activate_entitlement', 'p_entitlement_id uuid, p_user_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb', false, false, true, 'P3f: the entitlement activation state machine (§7.5); earned/redeemable -> redeemable | held_review, ledger row, rows 2/3 backstop. service_role only'),
+  ('app', 'resolve_held_offer_code', 'p_code_id uuid, p_approve boolean, p_resolved_by uuid', false, false, true, 'P3f: the §9.2 review decision on a held offer code (approve -> issued, or back to earned review-cleared if no device ever ran the table; reject -> void); p_resolved_by must be an admin. No Edge Function exposes it yet (P5.1a review queue). service_role only'),
+  ('app', 'resolve_held_entitlement', 'p_entitlement_id uuid, p_approve boolean, p_resolved_by uuid', false, false, true, 'P3f: the §9.2 review decision on a held entitlement; p_resolved_by must be an admin. No Edge Function exposes it yet (P5.1a review queue). service_role only'),
+  ('app', 'release_account_reservations', 'p_user_id uuid', false, false, true, 'P3f: returns the offer budget a deleted account''s codes were reserving, locking EVERY offer_code row of the account first; called by Repo#me.deleteMyData() in the delete transaction, before private.delete_my_data. Idempotent. service_role only'),
+  ('app', 'device_link_signals', 'p_device_id uuid', false, false, true, 'P3f: the §7.5 Android A20 substitute: accounts seen on the install (linked by install_link_hash / attest_key_id) and whether a fraud-voided account used it. service_role only'),
+  ('app', 'mark_account_devices_fraud_voided', 'p_user_id uuid, p_resolved_by uuid', false, false, true, 'P3f: the admin fraud decision''s device side (sets fraud_voided_at on every device of the account); p_resolved_by must be an admin. No Edge Function exposes it yet. service_role only');
