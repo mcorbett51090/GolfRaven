@@ -165,26 +165,66 @@ const KNOWN_REGISTRY_HOST_PREFIXES = [
 ];
 
 // Supply-chain follow-up (esm.sh stub -> `npm:` migration, P3d round 4 /
-// P3e follow-ups): an `npm:` import-map TARGET is only "exact, pinned,
-// versioned" if it names ONE registry version -- `npm:<name>@<x.y.z>[-pre]
-// [/subpath]`. Deno's lockfile pins an npm package by registry tarball
-// integrity, but only for whatever version the specifier resolves to: a
-// range/tag/bare name (`npm:zod`, `npm:zod@^4`, `npm:zod@4`,
-// `npm:zod@latest`, `npm:zod@*`) lets a lock regeneration pick a
-// different version silently, which is exactly what the esm.sh stubs'
-// re-route risk was. So an unpinned `npm:` target is rejected HERE,
-// independent of (and before) the allow-list membership check -- adding a
-// range to pinned-import-targets.json would still not make it pass.
-const EXACT_NPM_TARGET =
-  /^npm:(?:@[a-z0-9~][a-z0-9._~-]*\/)?[a-z0-9~][a-z0-9._~-]*@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(\/[^\s?#]*)?$/;
+// P3e follow-ups; hardened after the supply-chain gate): an import-map
+// TARGET is only "exact, pinned, versioned" if Deno will resolve it to ONE
+// immutable thing. `importMapTargetProblem` returns the reason a target
+// is NOT acceptable, or undefined. It runs before (and independent of) the
+// allow-list membership check -- listing a bad target in
+// pinned-import-targets.json does not make it pass. It rejects:
+//   1. any whitespace/control character anywhere in the target. Deno
+//      normalises `" npm:zod@^4"` and `"n\tpm:zod@^4"` to the range
+//      `npm:zod@^4` (confirmed by the gate), so a `startsWith("npm:")`
+//      test is bypassed by exactly these spellings.
+//   2. a scheme that is not lowercase (`NPM:zod@^4`) -- same reason.
+//   3. an `npm:` / `jsr:` target that is not `<scheme>:<name>@<x.y.z>[-pre]
+//      [/subpath]` (a bare name, range, tag, `+build` metadata, a `..`/`.`
+//      sub-path segment, or a `%` anywhere in the sub-path).
+//   4. a CDN routing host (esm.sh, cdn.jsdelivr.net, unpkg.com,
+//      cdn.skypack.dev): their URLs are re-routable stubs or floating
+//      ranges (`https://esm.sh/zod@^4`, `.../npm/zod@4/+esm`) -- the exact
+//      failure this migration exists to remove.
+// Exempt, by exact string: the one legacy supabase-js esm.sh URL, which
+// today lives ONLY as a direct import in _shared/privileged.ts (never an
+// import-map target; that file is path-exempt from this lint, and
+// `@supabase/` targets are banned separately anyway). Listed so a future
+// move of that URL into the map is an explicit, reviewed decision -- its
+// own follow-up replaces it with an exact npm: pin.
+const LEGACY_ESM_SH_EXEMPT_TARGETS = new Set(["https://esm.sh/@supabase/supabase-js@2.45.4"]);
+const CDN_ROUTING_HOSTS = new Set(["esm.sh", "cdn.jsdelivr.net", "unpkg.com", "cdn.skypack.dev"]);
+const SEMVER_EXACT = "(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?";
+const EXACT_NPM_TARGET = new RegExp(`^npm:(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*@${SEMVER_EXACT}(/[^\\s?#]*)?$`);
+const EXACT_JSR_TARGET = new RegExp(`^jsr:@[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*@${SEMVER_EXACT}(/[^\\s?#]*)?$`);
 
-/** true for a non-`npm:` string (not this check's concern); for an `npm:` string, true only if it is an exact-version pin with no `..` sub-path segment. */
-export function isExactPinnedNpmTargetOrNotNpm(target: string): boolean {
-  if (!target.startsWith("npm:")) return true;
-  const m = EXACT_NPM_TARGET.exec(target);
-  if (m === null) return false;
-  const subpath = m[1] ?? "";
-  return !subpath.split("/").some((seg) => seg === ".." || seg === ".");
+export function importMapTargetProblem(target: string): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  if (/[\s\u0000-\u001f\u007f-\u009f]/u.test(target)) {
+    return "target contains whitespace or a control character -- Deno normalises these away, so the lint and Deno would read different specifiers";
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(target)?.[1];
+  if (scheme !== undefined && scheme !== scheme.toLowerCase()) {
+    return `target has a non-lowercase scheme "${scheme}:" -- Deno treats it as the lowercase scheme, so the lint and Deno would read different specifiers`;
+  }
+  const lower = scheme?.toLowerCase();
+  if (lower === "npm" || lower === "jsr") {
+    const m = (lower === "npm" ? EXACT_NPM_TARGET : EXACT_JSR_TARGET).exec(target);
+    const subpath = m?.[1] ?? "";
+    if (m === null || subpath.includes("%") || subpath.split("/").some((seg) => seg === ".." || seg === ".")) {
+      return `target is a ${lower}: specifier that is not an exact version pin (${lower}:${lower === "jsr" ? "@scope/" : ""}<name>@<major.minor.patch>[/subpath], no %, no ./.. segments) -- a bare name, range, dist-tag or build-metadata suffix lets the resolved version drift`;
+    }
+    return undefined;
+  }
+  if ((lower === "http" || lower === "https") && !LEGACY_ESM_SH_EXEMPT_TARGETS.has(target)) {
+    let host: string | undefined;
+    try {
+      host = new URL(target).hostname.toLowerCase();
+    } catch {
+      host = undefined;
+    }
+    if (host !== undefined && [...CDN_ROUTING_HOSTS].some((h) => host === h || host!.endsWith(`.${h}`))) {
+      return `target is on a CDN routing host (${host}) -- its URLs are re-routable stubs or floating ranges; use an exact npm: pin instead`;
+    }
+  }
+  return undefined;
 }
 
 function normalizePackageSpecifier(spec: string): string {
@@ -410,12 +450,9 @@ function isBannedSpecifierOrAlias(
     // it happens to collide with a pinned entry.
     return { banned: true, reason: "alias target is a prefix mapping (trailing '/'), not a single exact pinned target", resolvedVia: resolved };
   }
-  if (!isExactPinnedNpmTargetOrNotNpm(resolved)) {
-    return {
-      banned: true,
-      reason: `alias target "${resolved}" is an npm: specifier that is not an exact version pin (npm:<name>@<major.minor.patch>[/subpath]) -- a bare name, range, or dist-tag lets the resolved version drift`,
-      resolvedVia: resolved,
-    };
+  const targetProblem = importMapTargetProblem(resolved);
+  if (targetProblem !== undefined) {
+    return { banned: true, reason: `alias target ${JSON.stringify(resolved)}: ${targetProblem}`, resolvedVia: resolved };
   }
   if (!pinnedImportTargets.has(resolved)) {
     return {

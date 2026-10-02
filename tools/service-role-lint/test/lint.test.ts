@@ -440,7 +440,7 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
   });
 
   it("flags an exact-key alias whose target is a clean-looking URL that is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {
-    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "https://esm.sh/left-pad@1.3.0" }, []);
+    const findings = lintFixtureWithMap("bad/m2-importmap-prefix-escape.ts", { "lib/admin.ts": "npm:left-pad@1.3.0" }, []);
     expect(
       findings.some(
         (f) => f.rule === "banned-import-specifier" && f.message.includes("not on the committed pinned-import-targets allow-list"),
@@ -491,6 +491,26 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
     },
   );
 
+  it.each([
+    "NPM:zod@^4",
+    " npm:zod@^4",
+    "n\tpm:zod@^4",
+    "jsr:@std/assert@^1",
+    "https://cdn.jsdelivr.net/npm/zod@4/+esm",
+    "https://esm.sh/zod@^4",
+    "https://unpkg.com/zod@4.6.5/index.js",
+    "https://cdn.skypack.dev/zod@4.6.5",
+    "npm:zod@4.6.5+build.1",
+    "npm:zod@4.6.5/%2e%2e/evil.js",
+  ])("must-fail (supply-chain gate bypass): an import-map target %j is rejected at the importing file even when listed on the allow-list", (target) => {
+    const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: target }, [target]);
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes(`alias target ${JSON.stringify(target)}`))).toBe(true);
+  });
+
+  it("must-pass control: an exact jsr: pin that is on the allow-list resolves clean", () => {
+    expect(lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "jsr:@std/assert@1.0.0" }, ["jsr:@std/assert@1.0.0"])).toEqual([]);
+  });
+
   it("must-fail: an exact npm: pin that is NOT on the allow-list is rejected by the allow-list, not by the exactness check", () => {
     const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "npm:zod@4.6.5" }, []);
     expect(findings.some((f) => f.message.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
@@ -506,7 +526,7 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
 
   it("clean negative control: a legitimate dependency imported ONLY through an exact-key, pinned-target import map, an in-bounds relative import, an allow-listed Deno.env.get read, and ordinary arr[i]/obj[key] access produce ZERO findings", () => {
     expect(
-      lintFixtureWithMap("good/legit-remote-import.ts", { zod: "https://esm.sh/zod@3.23.8" }, ["https://esm.sh/zod@3.23.8"]),
+      lintFixtureWithMap("good/legit-remote-import.ts", { zod: "npm:zod@3.23.8" }, ["npm:zod@3.23.8"]),
     ).toEqual([]);
   });
 });

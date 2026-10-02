@@ -2,7 +2,9 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { npmLockTableProblems } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
+import { importMapTargetProblem } from "../src/lint.js";
 
 // M3 (post-P3a gate): "Stop excluding dist and __fixtures__ under
 // supabase/functions except the lint's own fixtures dir, matched
@@ -266,17 +268,59 @@ describe("pinned import-target allow-list (M2)", () => {
     },
   );
 
-  it("the committed pinned-import-targets.json holds no esm.sh stub URL and every npm: entry is an exact pin (regression guard for the esm.sh -> npm: migration)", () => {
+  it("the committed pinned-import-targets.json passes the lint's own target rules: no CDN routing host (any case), every npm:/jsr: entry an exact pin, no whitespace/odd-case scheme", () => {
     const list = JSON.parse(readFileSync(join(import.meta.dirname, "..", "pinned-import-targets.json"), "utf8")) as string[];
-    expect(list.some((t) => t.includes("esm.sh"))).toBe(false);
-    const npmTargets = list.filter((t) => t.startsWith("npm:"));
-    expect(npmTargets.length).toBeGreaterThan(0);
-    for (const t of npmTargets) expect(t).toMatch(/^npm:(@[^/@]+\/)?[^/@]+@\d+\.\d+\.\d+(\/\S*)?$/);
+    expect(list.some((t) => /esm\.sh|jsdelivr|unpkg|skypack/i.test(t))).toBe(false);
+    expect(list.filter((t) => /^\s*(npm|jsr):/i.test(t)).length).toBeGreaterThan(0);
+    for (const t of list) expect(importMapTargetProblem(t), t).toBeUndefined();
+  });
+
+  // The REAL lock is supabase/tests/deno.lock, which sits outside the
+  // linted supabase/functions tree, so validateLockFile never sees it
+  // (supply-chain gate HIGH). This committed-file test is what makes the
+  // npm-table rules apply to it; it runs in CI via `pnpm -r test` (the
+  // `verify` job), not just locally. Deno --frozen accepts a removed
+  // integrity and a tarball+integrity swap, so nothing else catches them.
+  describe("committed supabase/tests/deno.lock (npm table)", () => {
+    const repoRoot = join(import.meta.dirname, "..", "..", "..");
+    const lock = JSON.parse(readFileSync(join(repoRoot, "supabase", "tests", "deno.lock"), "utf8")) as Record<string, Record<string, unknown>>;
+
+    it("passes the npm-table rules (sha512 integrity on every entry, no tarball override, no dangling npm: specifier)", () => {
+      expect(Object.keys(lock.npm ?? {}).length).toBeGreaterThan(0);
+      expect(npmLockTableProblems(lock)).toEqual([]);
+    });
+
+    it("every npm: import-map target in supabase/functions/deno.json is pinned by a lock specifier, and the lock has no esm.sh stub entry for it", () => {
+      const imports = (JSON.parse(readFileSync(join(repoRoot, "supabase", "functions", "deno.json"), "utf8")) as { imports: Record<string, string> }).imports;
+      const npmTargets = Object.values(imports).filter((t) => t.startsWith("npm:"));
+      expect(npmTargets.length).toBeGreaterThan(0);
+      for (const t of npmTargets) {
+        const base = t.replace(/^(npm:(?:@[^/]+\/)?[^/@]+@[^/]+).*$/, "$1");
+        expect(Object.keys(lock.specifiers ?? {}), t).toContain(base);
+      }
+      for (const key of Object.keys(lock.remote ?? {})) expect(key).not.toMatch(/esm\.sh\/(zod|@noble|tz-lookup)@/);
+    });
+
+    const mutations: Array<[string, (l: Record<string, Record<string, Record<string, unknown>>>) => void]> = [
+      ["integrity removed", (l) => delete l.npm!["zod@4.6.5"]!.integrity],
+      ["sha1- integrity", (l) => (l.npm!["zod@4.6.5"]!.integrity = "sha1-" + "A".repeat(27) + "=")],
+      ["tarball override", (l) => (l.npm!["zod@4.6.5"]!.tarball = "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz")],
+      [
+        "tarball + integrity swap to 4.6.4",
+        (l) => Object.assign(l.npm!["zod@4.6.5"]!, { tarball: "https://registry.npmjs.org/zod/-/zod-4.6.4.tgz", integrity: "sha512-" + "C".repeat(86) + "==" }),
+      ],
+      ["dangling specifier", (l) => ((l.specifiers as unknown as Record<string, string>)["npm:left-pad@1.3.0"] = "1.3.0")],
+    ];
+    it.each(mutations)("must-fail mutation of the REAL lock: %s", (_name, mutate) => {
+      const copy = JSON.parse(JSON.stringify(lock)) as Record<string, Record<string, Record<string, unknown>>>;
+      mutate(copy);
+      expect(npmLockTableProblems(copy).length).toBeGreaterThan(0);
+    });
   });
 
   it("flags a bare specifier resolved to a target that looks legitimate but is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-pinned-missing-"));
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { "left-pad": "https://esm.sh/left-pad@1.3.0" } }));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { "left-pad": "npm:left-pad@1.3.0" } }));
     const fnDir = join(tmpRoot, "some-fn");
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import leftPad from "left-pad"; export const p = leftPad;`);

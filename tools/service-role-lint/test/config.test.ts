@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildConfigIndex, deriveRepoRoot, stripJsonComments } from "../src/config.js";
+import { buildConfigIndex, deriveRepoRoot, npmLockTableProblems, stripJsonComments } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
 
 // ⛔ M2 BLOCKING (post-P3a re-gate): "the lint's import-map model
@@ -23,6 +23,8 @@ import { lintDirectory } from "../src/index.js";
 
 const FIXTURES_ROOT = join(import.meta.dirname, "fixtures", "m2-config");
 const PINNED = new Set(["https://esm.sh/zod@3.23.8"]);
+// A well-formed sha512 integrity string (86 base64 chars + "=="); the value is arbitrary.
+const VALID_INTEGRITY = "sha512-" + "A".repeat(86) + "==";
 
 describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless of importers", () => {
   it("n1: flags a `scopes` key in deno.json (never inspected by the old host-trust model)", () => {
@@ -111,6 +113,135 @@ describe("config.ts — exact-pinned npm: targets (esm.sh stub -> npm: migration
       const messages = buildConfigIndex(dir, PINNED_NPM, dir).results.flatMap((r) => r.findings.map((f) => f.message));
       expect(messages.some((m) => m.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
       expect(messages.some((m) => m.includes("not an exact version pin"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("config.ts — import-map target bypasses (supply-chain gate: Deno normalises what the lint compared literally)", () => {
+  const BYPASS_ROOT = join(FIXTURES_ROOT, "target-bypass");
+  const cases = readdirSync(BYPASS_ROOT).sort();
+
+  it("has a fixture per bypass shape (guards against the fixture dir silently emptying)", () => {
+    expect(cases).toEqual([
+      "cdn-jsdelivr-range",
+      "esm-sh-range",
+      "jsonc-uppercase-scheme",
+      "jsr-range",
+      "npm-build-metadata",
+      "npm-embedded-tab",
+      "npm-leading-space",
+      "npm-percent-subpath",
+      "npm-uppercase-scheme",
+    ]);
+  });
+
+  it.each(cases)("must-fail fixture %s: rejected at the config level even though the target is LISTED on the allow-list", (name) => {
+    const dir = join(BYPASS_ROOT, name);
+    const file = existsSync(join(dir, "deno.jsonc")) ? "deno.jsonc" : "deno.json";
+    const raw = readFileSync(join(dir, file), "utf8");
+    const parsed = JSON.parse(file.endsWith("c") ? stripJsonComments(raw) : raw) as { imports: Record<string, string> };
+    const listed = new Set(Object.values(parsed.imports));
+    const messages = buildConfigIndex(dir, listed, dir).results.flatMap((r) => r.findings.map((f) => f.message));
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages.some((m) => m.includes("rejected even if listed on the pinned-import-targets allow-list"))).toBe(true);
+  });
+
+  it("must-pass control: an exact jsr: pin that is on the allow-list produces zero findings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "srl-jsr-ok-"));
+    try {
+      writeFileSync(join(dir, "deno.json"), JSON.stringify({ imports: { assert: "jsr:@std/assert@1.0.0" } }));
+      expect(buildConfigIndex(dir, new Set(["jsr:@std/assert@1.0.0"]), dir).results).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["https://unpkg.com/zod@4.6.5/index.js", "https://cdn.skypack.dev/zod@4.6.5", "https://sub.esm.sh/zod@4.6.5", "HTTPS://ESM.SH/zod@4.6.5"])(
+    "CDN routing host target %s is rejected even when listed",
+    (target) => {
+      const dir = mkdtempSync(join(tmpdir(), "srl-cdn-"));
+      try {
+        writeFileSync(join(dir, "deno.json"), JSON.stringify({ imports: { zod: target } }));
+        const messages = buildConfigIndex(dir, new Set([target]), dir).results.flatMap((r) => r.findings.map((f) => f.message));
+        expect(messages.some((m) => m.includes("rejected even if listed"))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("config.ts — npmLockTableProblems (the deno.lock npm table; Deno --frozen accepts all of these mutations)", () => {
+  const lock = (): Record<string, unknown> => ({
+    version: "5",
+    specifiers: { "npm:zod@4.6.5": "4.6.5", "npm:@types/node@*": "24.2.0" },
+    npm: { "zod@4.6.5": { integrity: VALID_INTEGRITY }, "@types/node@24.2.0": { integrity: VALID_INTEGRITY, dependencies: ["undici-types"] } },
+  });
+
+  it("good control: a well-formed npm table (scoped package, dependencies field) has no problems", () => {
+    expect(npmLockTableProblems(lock())).toEqual([]);
+  });
+
+  it("must-fail: an entry with its integrity REMOVED (silently unpinned)", () => {
+    const l = lock();
+    delete (l.npm as Record<string, Record<string, unknown>>)["zod@4.6.5"]!.integrity;
+    expect(npmLockTableProblems(l).some((m) => m.includes('"zod@4.6.5"') && m.includes("integrity"))).toBe(true);
+  });
+
+  it("must-fail: a sha1- integrity (weak, wrong algorithm)", () => {
+    const l = lock();
+    (l.npm as Record<string, Record<string, unknown>>)["zod@4.6.5"]!.integrity = "sha1-" + "A".repeat(27) + "=";
+    expect(npmLockTableProblems(l).some((m) => m.includes("integrity"))).toBe(true);
+  });
+
+  it("must-fail: a sha512 integrity of the wrong length", () => {
+    const l = lock();
+    (l.npm as Record<string, Record<string, unknown>>)["zod@4.6.5"]!.integrity = "sha512-" + "A".repeat(10) + "==";
+    expect(npmLockTableProblems(l).some((m) => m.includes("integrity"))).toBe(true);
+  });
+
+  it("must-fail: a tarball override", () => {
+    const l = lock();
+    (l.npm as Record<string, Record<string, unknown>>)["zod@4.6.5"]!.tarball = "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz";
+    expect(npmLockTableProblems(l).some((m) => m.includes('"tarball"'))).toBe(true);
+  });
+
+  it("must-fail: tarball+integrity SWAP (a different version's tarball with that version's own valid integrity under the 4.6.5 name)", () => {
+    const l = lock();
+    Object.assign((l.npm as Record<string, Record<string, unknown>>)["zod@4.6.5"]!, {
+      tarball: "https://registry.npmjs.org/zod/-/zod-4.6.4.tgz",
+      integrity: "sha512-" + "B".repeat(86) + "==",
+    });
+    expect(npmLockTableProblems(l).some((m) => m.includes('"tarball"'))).toBe(true);
+  });
+
+  it("must-fail: a dangling specifier (an npm: specifier whose npm entry does not exist)", () => {
+    const l = lock();
+    (l.specifiers as Record<string, string>)["npm:tz-lookup@6.1.25"] = "6.1.25";
+    expect(npmLockTableProblems(l).some((m) => m.includes("npm:tz-lookup@6.1.25") && m.includes("dangling"))).toBe(true);
+  });
+
+  it("must-fail: a specifier that maps to a version with no npm entry", () => {
+    const l = lock();
+    (l.specifiers as Record<string, string>)["npm:zod@4.6.5"] = "4.6.4";
+    expect(npmLockTableProblems(l).some((m) => m.includes("dangling"))).toBe(true);
+  });
+
+  it("must-fail: `npm` is not an object", () => {
+    expect(npmLockTableProblems({ npm: [] }).some((m) => m.includes("not a JSON object"))).toBe(true);
+  });
+
+  it("through lintDirectory: a deno.lock UNDER the linted root with an integrity-less npm entry is flagged", () => {
+    const dir = mkdtempSync(join(tmpdir(), "srl-lock-npm-int-"));
+    try {
+      writeFileSync(join(dir, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
+      const l = lock();
+      delete (l.npm as Record<string, Record<string, unknown>>)["zod@4.6.5"]!.integrity;
+      writeFileSync(join(dir, "deno.lock"), JSON.stringify(l));
+      const results = lintDirectory(dir, dir);
+      expect(results.some((r) => r.findings.some((f) => f.message.includes("integrity")))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -274,7 +405,7 @@ describe("config.ts — round 2 (post-P3a re-gate): config-level remaps and lock
     writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
     writeFileSync(
       join(tmpRoot, "deno.lock"),
-      JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": { integrity: "sha512-aaaa", tarball: "https://evil.example.com/zod.tgz" } } }),
+      JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": { integrity: VALID_INTEGRITY, tarball: "https://evil.example.com/zod.tgz" } } }),
     );
     const index = buildConfigIndex(tmpRoot, new Set(["npm:zod@4.6.5"]), tmpRoot);
     expect(index.results.some((r) => r.findings.some((f) => f.message.includes('"tarball" URL override')))).toBe(true);
@@ -285,7 +416,7 @@ describe("config.ts — round 2 (post-P3a re-gate): config-level remaps and lock
     writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
     writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": {} } }));
     const index = buildConfigIndex(tmpRoot, new Set(["npm:zod@4.6.5"]), tmpRoot);
-    expect(index.results.some((r) => r.findings.some((f) => f.message.includes('no "integrity" hash')))).toBe(true);
+    expect(index.results.some((r) => r.findings.some((f) => f.message.includes('missing or malformed "integrity"')))).toBe(true);
   });
 
   it("good control: a deno.lock with ONLY pinned remotes, alongside a valid pinned import, produces zero findings", () => {
@@ -295,7 +426,7 @@ describe("config.ts — round 2 (post-P3a re-gate): config-level remaps and lock
     // pinned-import-targets.json (no explicit pinned set passed to
     // lintDirectory), so it must match whatever's actually pinned there.
     writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
-    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": { integrity: "sha512-aaaa" } }, remote: {} }));
+    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": { integrity: VALID_INTEGRITY } }, remote: {} }));
     writeFileSync(join(tmpRoot, "index.ts"), `import { z } from "zod"; export const s = z.object({});`);
 
     const results = lintDirectory(tmpRoot, tmpRoot);

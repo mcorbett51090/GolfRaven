@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "assert": "jsr:@std/assert@^1"
+  }
+}

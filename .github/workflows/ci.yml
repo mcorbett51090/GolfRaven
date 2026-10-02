@@ -502,6 +502,14 @@ jobs:
         # fail its own "must reject" assertion for the wrong reason.
         # Remote (esm.sh/deno.land) entries do not have this property:
         # the esm.sh test above is valid on a warm cache.
+        #
+        # What this step does NOT cover: Deno 2.5.2 --frozen also accepts a
+        # lock whose npm entry has its `integrity` REMOVED, or carries a
+        # `tarball` override pointing at another version's tarball with
+        # that version's integrity. Those are caught by the service-role
+        # lint package's committed-lock test (npmLockTableProblems over
+        # supabase/tests/deno.lock), which the `verify` job runs through
+        # `pnpm -r test`.
         run: |
           set -euo pipefail
           export TAMPER_DIR="$(mktemp -d)"

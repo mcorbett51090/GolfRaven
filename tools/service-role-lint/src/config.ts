@@ -90,7 +90,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { isExactPinnedNpmTargetOrNotNpm } from "./lint.js";
+import { importMapTargetProblem } from "./lint.js";
 import type { Finding, LintResult } from "./lint.js";
 
 /** The three config file shapes Deno recognises, in the order this module checks for them. */
@@ -287,13 +287,8 @@ function validateSingleConfigFile(filePath: string, pinnedImportTargets: Set<str
         const upper = v.toUpperCase();
         if (upper.includes("@SUPABASE/") || upper.includes("SUPABASE-JS")) {
           problems.push(configProblem(filePath, `imports["${k}"] = "${v}" contains '@supabase/' or 'supabase-js'`));
-        } else if (!isExactPinnedNpmTargetOrNotNpm(v)) {
-          problems.push(
-            configProblem(
-              filePath,
-              `imports["${k}"] = "${v}" is an npm: specifier that is not an exact version pin (npm:<name>@<major.minor.patch>[/subpath]) -- a bare name, range, or dist-tag lets the resolved version drift; it is rejected even if listed on the pinned-import-targets allow-list`,
-            ),
-          );
+        } else if (importMapTargetProblem(v) !== undefined) {
+          problems.push(configProblem(filePath, `imports["${k}"] = ${JSON.stringify(v)}: ${importMapTargetProblem(v)}; rejected even if listed on the pinned-import-targets allow-list`));
         } else if (!pinnedImportTargets.has(v)) {
           problems.push(configProblem(filePath, `imports["${k}"] = "${v}" is not on the committed pinned-import-targets allow-list -- add it there as its own reviewed diff`));
         }
@@ -323,6 +318,62 @@ function containsKeyDeep(value: unknown, keyName: string): boolean {
   const obj = value as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(obj, keyName)) return true;
   return Object.values(obj).some((v) => containsKeyDeep(v, keyName));
+}
+
+// Deno lock v5 `npm` table (present since the esm.sh stub -> `npm:`
+// migration). `deno cache --frozen` (2.5.2, confirmed by the supply-chain
+// gate) ACCEPTS a lock in which (a) an npm entry's `integrity` is removed
+// (the package is silently unpinned) and (b) an entry's `tarball` points
+// at a different version's tarball together with THAT version's integrity
+// (different code served under the pinned name), so Deno itself is not a
+// backstop for either. This check is the backstop. It is exported and run
+// against the COMMITTED supabase/tests/deno.lock by a test
+// (test/index.test.ts) -- validateLockFile below only ever sees a lock
+// that sits under the linted functions root, and the real lock does not.
+// Requirements: every `npm` entry has `integrity` =
+// ^sha512-<86 base64 chars>==$ (a sha1- value is rejected); no entry has
+// a `tarball` field; every `specifiers` value for an `npm:` key maps to an
+// existing `npm` entry ("<name>@<value>").
+const NPM_INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
+
+export function npmLockTableProblems(lock: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  const npmTable = lock.npm;
+  let npmKeys = new Set<string>();
+  if (npmTable !== undefined) {
+    if (typeof npmTable !== "object" || npmTable === null || Array.isArray(npmTable)) {
+      problems.push(`deno.lock "npm" is not a JSON object`);
+    } else {
+      npmKeys = new Set(Object.keys(npmTable as Record<string, unknown>));
+      for (const [pkg, entry] of Object.entries(npmTable as Record<string, unknown>)) {
+        const e = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? (entry as Record<string, unknown>) : undefined;
+        if (e === undefined) {
+          problems.push(`deno.lock "npm" entry "${pkg}" is not a JSON object`);
+          continue;
+        }
+        if (typeof e.integrity !== "string" || !NPM_INTEGRITY.test(e.integrity)) {
+          problems.push(
+            `deno.lock "npm" entry "${pkg}" has a missing or malformed "integrity" (must match ${NPM_INTEGRITY.source}) -- every npm package must be pinned by a sha512 registry tarball integrity hash`,
+          );
+        }
+        if (Object.prototype.hasOwnProperty.call(e, "tarball")) {
+          problems.push(`deno.lock "npm" entry "${pkg}" carries a "tarball" URL override -- banned: it can serve different code under a pinned name (frozen Deno accepts it)`);
+        }
+      }
+    }
+  }
+  const specifiers = lock.specifiers;
+  if (specifiers !== undefined && typeof specifiers === "object" && specifiers !== null && !Array.isArray(specifiers)) {
+    for (const [spec, value] of Object.entries(specifiers as Record<string, unknown>)) {
+      if (!spec.startsWith("npm:")) continue;
+      const at = spec.indexOf("@", 5); // skip a leading "@scope"
+      const name = at === -1 ? spec.slice(4) : spec.slice(4, at);
+      if (typeof value !== "string" || !npmKeys.has(`${name}@${value}`)) {
+        problems.push(`deno.lock "specifiers" entry "${spec}" -> ${JSON.stringify(value)} has no matching "npm" entry "${name}@${String(value)}" (dangling: nothing pins it)`);
+      }
+    }
+  }
+  return problems;
 }
 
 function validateLockFile(filePath: string, pinnedImportTargets: Set<string>): ConfigProblem[] {
@@ -378,34 +429,7 @@ function validateLockFile(filePath: string, pinnedImportTargets: Set<string>): C
     }
   }
 
-  // `npm` table (Deno lock v5; present since the esm.sh stub -> `npm:`
-  // migration): each entry pins a registry tarball by integrity hash.
-  // An entry may not carry a `tarball` field -- Deno uses it to fetch a
-  // package from an arbitrary URL instead of the configured registry,
-  // which would route a "pinned" npm: target to a non-registry host
-  // (integrity would still be checked, but it would be the integrity of
-  // whatever that URL served when the lock was written). Fail closed:
-  // `integrity` must also be present and a string for every entry.
-  const npmTable = obj.npm;
-  if (npmTable !== undefined) {
-    if (typeof npmTable !== "object" || npmTable === null || Array.isArray(npmTable)) {
-      problems.push(configProblem(filePath, `deno.lock "npm" is not a JSON object`));
-    } else {
-      for (const [pkg, entry] of Object.entries(npmTable as Record<string, unknown>)) {
-        const e = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? (entry as Record<string, unknown>) : undefined;
-        if (e === undefined) {
-          problems.push(configProblem(filePath, `deno.lock "npm" entry "${pkg}" is not a JSON object`));
-          continue;
-        }
-        if (typeof e.integrity !== "string" || e.integrity === "") {
-          problems.push(configProblem(filePath, `deno.lock "npm" entry "${pkg}" has no "integrity" hash -- every npm package must be pinned by registry tarball integrity`));
-        }
-        if (Object.prototype.hasOwnProperty.call(e, "tarball")) {
-          problems.push(configProblem(filePath, `deno.lock "npm" entry "${pkg}" carries a "tarball" URL override -- banned: it can route a pinned npm: package to a non-registry host`));
-        }
-      }
-    }
-  }
+  for (const message of npmLockTableProblems(obj)) problems.push(configProblem(filePath, message));
 
   // "workspace (with no imports overrides)" -- a shallow recursive scan
   // for either key name anywhere inside the value, since this project's

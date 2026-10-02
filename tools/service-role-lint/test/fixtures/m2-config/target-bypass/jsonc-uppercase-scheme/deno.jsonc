@@ -1,0 +1,6 @@
+{
+  // a deno.jsonc is read too
+  "imports": {
+    "zod": "NPM:zod@^4" /* range */
+  }
+}
