@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseSigninBody } from "../../functions/_shared/signin/request-shape.ts";
 
 const JWT = "aaaa.bbbb.cccc";
-const link = (over: Record<string, unknown> = {}) => ({ action: "link", provider: "apple", identityToken: JWT, authorizationCode: "code-1", nonce: "raw-nonce-0123", ...over });
+const link = (over: Record<string, unknown> = {}) => ({ action: "link", provider: "apple", identityToken: JWT, authorizationCode: "code-1", nonce: "raw-nonce-0123456789", ...over });
 
 describe("parseSigninBody", () => {
   it("accepts a link and an unlink", () => {
@@ -40,6 +40,7 @@ describe("parseSigninBody", () => {
     ["an oversized token", link({ identityToken: "a.b." + "c".repeat(9000) })],
     ["a missing nonce", link({ nonce: undefined })],
     ["a short nonce", link({ nonce: "short" })],
+    ["a 15-character nonce (too little entropy to be a secret)", link({ nonce: "abcdefghijklmno" })],
     ["a nonce with spaces", link({ nonce: "has a space in it" })],
     ["an empty authorization code", link({ authorizationCode: "" })],
     ["an authorization code with whitespace", link({ authorizationCode: "a b" })],

@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { AppleTokenError, VendorUnavailableError } from "../../functions/_shared/signin/errors.ts";
 import { APPLE_JWKS_URL, createJwksCache, verifyAppleIdentityToken, type VerifyOptions } from "../../functions/_shared/signin/apple-id-token.ts";
 import { createSafeFetcher } from "../../functions/_shared/signin/safe-fetch.ts";
-import { sha256Hex } from "../../functions/_shared/signin/bytes.ts";
+import { fromBase64Url, sha256Hex } from "../../functions/_shared/signin/bytes.ts";
 import { CLIENT_ID, NOW_MS, NOW_SEC, fakeFetch, json, jwksBody, makeRsaKey, mintIdentityToken, signRs256, type TestRsaKey } from "./signin-test-helpers.ts";
 
 let apple: TestRsaKey;
@@ -50,10 +50,35 @@ describe("verifyAppleIdentityToken: the pass case", () => {
     expect(byAddress.isPrivateRelay).toBe(true);
   });
 
-  it("accepts the nonce as its SHA-256 hex (Apple's native flow) or as the raw value", async () => {
+  it("F1: a claim equal to the RAW nonce is REFUSED (the nonce claim must be sha256(raw), never the raw value itself)", async () => {
     const { opts } = setup([apple]);
-    const raw = await mintIdentityToken(apple, "s", { rawNonce: RAW, claims: { nonce: RAW } });
-    await expect(verifyAppleIdentityToken(raw, { rawNonce: RAW }, opts)).resolves.toMatchObject({ subject: "s" });
+    const rawClaim = await mintIdentityToken(apple, "s", { rawNonce: RAW, claims: { nonce: RAW } });
+    expect(await reason(verifyAppleIdentityToken(rawClaim, { rawNonce: RAW }, opts))).toBe("nonce");
+  });
+
+  it("F1: a token holder cannot bind the nonce by submitting the token's own nonce claim as the raw nonce", async () => {
+    const { opts } = setup([apple]);
+    const victim = await mintIdentityToken(apple, "victim", { rawNonce: RAW });
+    const claim = JSON.parse(new TextDecoder().decode(fromBase64Url(victim.split(".")[1]!)!)).nonce as string;
+    expect(claim).toBe(await sha256Hex(RAW));
+    // The attacker never saw RAW, only the claim. Using the claim as the "raw nonce" must not verify.
+    expect(await reason(verifyAppleIdentityToken(victim, { rawNonce: claim }, opts))).toBe("nonce");
+    // The real raw nonce still verifies.
+    await expect(verifyAppleIdentityToken(victim, { rawNonce: RAW }, opts)).resolves.toMatchObject({ subject: "victim" });
+  });
+
+  it("accepts the nonce as its SHA-256 hex (Apple's native flow)", async () => {
+    const { opts } = setup([apple]);
+    const t = await mintIdentityToken(apple, "s", { rawNonce: RAW });
+    await expect(verifyAppleIdentityToken(t, { rawNonce: RAW }, opts)).resolves.toMatchObject({ subject: "s" });
+  });
+
+  it("NIT: a JWKS key with a modulus under 2048 bits is refused even when it signed the token", async () => {
+    const pair = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 1024, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+    const pub = (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey;
+    const weak: TestRsaKey = { kid: "weak-kid", privateKey: pair.privateKey, jwk: { kty: "RSA", kid: "weak-kid", n: pub.n!, e: pub.e! } };
+    const { opts } = setup([weak]);
+    expect(await reason(verifyAppleIdentityToken(await mintIdentityToken(weak, "s", { rawNonce: RAW }), { rawNonce: RAW }, opts))).toBe("signature");
   });
 
   it("a token with no email verifies, with email null", async () => {
@@ -124,7 +149,7 @@ describe("verifyAppleIdentityToken: must-fail", () => {
 
   it("alg downgrade: none, HS256 and RS512 are refused before any key is touched", async () => {
     const { opts, calls } = setup([apple]);
-    const payload = { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: NOW_SEC, exp: NOW_SEC + 60, sub: "s", nonce: RAW };
+    const payload = { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: NOW_SEC, exp: NOW_SEC + 60, sub: "s", nonce: await sha256Hex(RAW) };
     for (const alg of ["none", "HS256", "RS512", "ES256"]) {
       const t = await signRs256(apple.privateKey, { alg, kid: apple.kid }, payload);
       expect(await reason(verifyAppleIdentityToken(t, { rawNonce: RAW }, opts))).toBe("alg");
@@ -135,7 +160,7 @@ describe("verifyAppleIdentityToken: must-fail", () => {
   it("a missing / empty / non-string kid", async () => {
     const { opts } = setup([apple]);
     for (const header of [{ alg: "RS256" }, { alg: "RS256", kid: "" }, { alg: "RS256", kid: 5 }]) {
-      const t = await signRs256(apple.privateKey, header, { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: NOW_SEC, exp: NOW_SEC + 60, sub: "s", nonce: RAW });
+      const t = await signRs256(apple.privateKey, header, { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: NOW_SEC, exp: NOW_SEC + 60, sub: "s", nonce: await sha256Hex(RAW) });
       expect(await reason(verifyAppleIdentityToken(t, { rawNonce: RAW }, opts))).toBe("unknown_kid");
     }
   });
@@ -219,9 +244,9 @@ describe("the JWKS fetch and cache", () => {
     await verifyAppleIdentityToken(await mintIdentityToken(apple, "s", { rawNonce: RAW }), { rawNonce: RAW }, opts);
     down = true;
     t += 2 * 3600_000; // stale (ttl 1 h) but inside the 24 h bound
-    await expect(verifyAppleIdentityToken(await signRs256(apple.privateKey, { alg: "RS256", kid: apple.kid }, { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: Math.floor(t / 1000) - 5, exp: Math.floor(t / 1000) + 60, sub: "s", nonce: RAW }), { rawNonce: RAW }, opts)).resolves.toMatchObject({ subject: "s" });
+    await expect(verifyAppleIdentityToken(await signRs256(apple.privateKey, { alg: "RS256", kid: apple.kid }, { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: Math.floor(t / 1000) - 5, exp: Math.floor(t / 1000) + 60, sub: "s", nonce: await sha256Hex(RAW) }), { rawNonce: RAW }, opts)).resolves.toMatchObject({ subject: "s" });
     t += 25 * 3600_000; // past the bound
-    await expect(verifyAppleIdentityToken(await signRs256(apple.privateKey, { alg: "RS256", kid: apple.kid }, { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: Math.floor(t / 1000) - 5, exp: Math.floor(t / 1000) + 60, sub: "s", nonce: RAW }), { rawNonce: RAW }, opts)).rejects.toBeInstanceOf(VendorUnavailableError);
+    await expect(verifyAppleIdentityToken(await signRs256(apple.privateKey, { alg: "RS256", kid: apple.kid }, { iss: "https://appleid.apple.com", aud: CLIENT_ID, iat: Math.floor(t / 1000) - 5, exp: Math.floor(t / 1000) + 60, sub: "s", nonce: await sha256Hex(RAW) }), { rawNonce: RAW }, opts)).rejects.toBeInstanceOf(VendorUnavailableError);
   });
 
   it("a malformed JWKS (not JSON, no keys, no RSA key) is unavailable, not 'no such key'", async () => {

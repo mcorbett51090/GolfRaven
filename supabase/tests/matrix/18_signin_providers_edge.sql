@@ -55,7 +55,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(61);
+SELECT plan(65);
 
 -- ----------------------------------------------------------------------------
 -- 1. Privileges: who can call what (the inventory check proves the same against the manifest; these are the behaviours)
@@ -66,11 +66,11 @@ CREATE FUNCTION pg_temp.can_exec(p_role text, p_names text[]) RETURNS int LANGUA
   SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname = 'private' AND p.proname = ANY (p_names) AND has_function_privilege(p_role, p.oid, 'EXECUTE')
 $f$;
-SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_methods_for_actor', 'signin_link_identity_for_actor', 'signin_store_token_for_actor', 'signin_unlink_identity_for_actor', 'signin_enqueue_revocations_for_actor']), 5,
-  'privileges: edge_actor can EXECUTE the five _for_actor wrappers');
-SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_methods', 'signin_link_identity', 'signin_store_token', 'signin_unlink_identity', 'signin_enqueue_revocations', 'claim_signin_revocations', 'complete_signin_revocation', 'purge_signin_revocation_queue', 'signin_bound_user', 'signin_enqueue_internal']), 0,
-  'privileges: edge_actor can EXECUTE NONE of the user-id-taking core functions, the queue operations or the internals');
-SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_methods_for_actor', 'signin_link_identity_for_actor', 'signin_store_token_for_actor', 'signin_unlink_identity_for_actor', 'signin_enqueue_revocations_for_actor', 'signin_methods', 'signin_find_account_by_email', 'peek_signin_otp_failures', 'hit_signin_otp_failure']), 0,
+SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_methods_for_actor', 'signin_link_identity_for_actor', 'signin_store_token_for_actor', 'signin_unlink_identity_for_actor', 'signin_enqueue_revocations_for_actor', 'signin_find_account_by_email_for_actor']), 6,
+  'privileges: edge_actor can EXECUTE the six _for_actor wrappers');
+SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_methods', 'signin_link_identity', 'signin_store_token', 'signin_unlink_identity', 'signin_enqueue_revocations', 'claim_signin_revocations', 'complete_signin_revocation', 'purge_signin_revocation_queue', 'signin_bound_user', 'signin_enqueue_internal', 'signin_find_account_by_email']), 0,
+  'privileges: edge_actor can EXECUTE NONE of the user-id-taking core functions, the queue operations, the unbound email lookup or the internals (F7)');
+SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_methods_for_actor', 'signin_link_identity_for_actor', 'signin_store_token_for_actor', 'signin_unlink_identity_for_actor', 'signin_enqueue_revocations_for_actor', 'signin_methods', 'signin_find_account_by_email', 'signin_find_account_by_email_for_actor', 'peek_signin_otp_failures', 'reserve_signin_otp_attempt', 'release_signin_otp_attempt']), 0,
   'privileges: edge_system can EXECUTE none of the user-facing sign-in functions (it is not an actor)');
 SELECT is(pg_temp.can_exec('edge_system', ARRAY['claim_signin_revocations', 'complete_signin_revocation', 'purge_signin_revocation_queue', 'get_signin_token_kek']), 4,
   'privileges: edge_system CAN run the queue operations and read the KEK (the drain decrypts)');
@@ -85,6 +85,7 @@ SELECT throws_ok($$SELECT private.signin_link_identity_for_actor('apple', 'x', N
 SELECT throws_ok($$SELECT private.signin_store_token_for_actor('apple', decode(repeat('ab', 40), 'hex'), decode(repeat('cd', 70), 'hex'), 'e18')$$, '42501', 'signin_store_token_for_actor: no actor is bound in this transaction', 'unbound: store_token_for_actor refuses');
 SELECT throws_ok($$SELECT * FROM private.signin_unlink_identity_for_actor('google')$$, '42501', 'signin_unlink_identity_for_actor: no actor is bound in this transaction', 'unbound: unlink_for_actor refuses');
 SELECT throws_ok($$SELECT * FROM private.signin_enqueue_revocations_for_actor()$$, '42501', 'signin_enqueue_revocations_for_actor: no actor is bound in this transaction', 'unbound: enqueue_for_actor refuses');
+SELECT throws_ok($$SELECT private.signin_find_account_by_email_for_actor('edge18-eb@signin.test')$$, '42501', 'signin_find_account_by_email_for_actor: no actor is bound in this transaction', 'unbound (F7): the email lookup refuses: an unbound edge_actor learns nothing about which emails hold accounts');
 ROLLBACK;
 
 BEGIN;
@@ -94,6 +95,7 @@ SET LOCAL ROLE edge_actor;
 SELECT throws_ok($$SELECT * FROM private.signin_methods_for_actor()$$, '42501', 'signin_methods_for_actor: a system delegate may not manage sign-in methods', 'delegate: a system delegate binding cannot list sign-in methods');
 SELECT throws_ok($$SELECT * FROM private.signin_enqueue_revocations_for_actor()$$, '42501', 'signin_enqueue_revocations_for_actor: a system delegate may not manage sign-in methods', 'delegate: ... nor queue revocations (it is not an account deletion)');
 SELECT throws_ok($$SELECT private.signin_link_identity_for_actor('apple', 'x', NULL, false, false)$$, '42501', 'signin_link_identity_for_actor: a system delegate may not manage sign-in methods', 'delegate: ... nor link an identity');
+SELECT throws_ok($$SELECT private.signin_find_account_by_email_for_actor('edge18-eb@signin.test')$$, '42501', 'signin_find_account_by_email_for_actor: a system delegate may not manage sign-in methods', 'delegate (F7): ... nor look an email up (only a kind = user binding may)');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------
@@ -129,10 +131,12 @@ SELECT throws_ok($$SELECT private.signin_link_identity('5a5a1800-0000-0000-0000-
 SELECT throws_ok($$SELECT * FROM private.signin_unlink_identity('5a5a1800-0000-0000-0000-0000000000eb', 'google')$$, '42501', NULL, 'EA: ... nor unlink another account''s method');
 SELECT throws_ok($$SELECT * FROM private.claim_signin_revocations(NULL, 10, 60)$$, '42501', NULL, 'EA: the queue claim is not an actor operation');
 -- the no-uid helpers an actor may call
-SELECT is(private.signin_find_account_by_email('EDGE18-EB@signin.test'), '5a5a1800-0000-0000-0000-0000000000eb'::uuid, 'EA: can look up the account holding an email (the proof path needs it; returns only an id)');
+SELECT is(private.signin_find_account_by_email_for_actor('EDGE18-EB@signin.test'), '5a5a1800-0000-0000-0000-0000000000eb'::uuid, 'EA: a BOUND user can look up the account holding an email (the link path needs it; returns only an id)');
+SELECT throws_ok($$SELECT private.signin_find_account_by_email('edge18-eb@signin.test')$$, '42501', NULL, 'EA (F7): the unbound core lookup is not callable by an edge_actor at all');
 SELECT is((SELECT o_kek_id FROM private.get_signin_token_kek(NULL)), 'e18', 'EA: can read the KEK (R6: the runtime that runs as edge_actor encrypts the grant)');
 SELECT is(private.peek_signin_otp_failures(repeat('0', 64)), 0, 'EA: can peek the OTP failure counter for a hash');
-SELECT is(private.hit_signin_otp_failure(repeat('0', 64)), 1, 'EA: ... and add one failure');
+SELECT is(private.reserve_signin_otp_attempt(repeat('0', 64)), 1, 'EA: ... and reserve one attempt');
+SELECT is(private.release_signin_otp_attempt(repeat('0', 64)), 0, 'EA: ... and give it back');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------

@@ -61,6 +61,29 @@
 GRANT SELECT (user_id, provider, provider_id, identity_data, created_at) ON auth.identities TO private_definer;
 GRANT INSERT (provider_id, user_id, identity_data, provider, last_sign_in_at) ON auth.identities TO private_definer;
 GRANT DELETE ON auth.identities TO private_definer;
+-- A GRANT the grantor may not make (no GRANT OPTION on the table, a role that does not own it) does NOT fail: PostgreSQL
+-- raises a WARNING ("no privileges were granted") and carries on. So the grants above are PROVED here, privilege by privilege,
+-- and the migration stops if any did not take. Without this a project that refuses the grant would apply 0035 cleanly and fail
+-- later, at run time, on the first link. (security gate F8)
+DO $assert_identities_grants$
+DECLARE
+  v_col text;
+BEGIN
+  FOREACH v_col IN ARRAY ARRAY['user_id', 'provider', 'provider_id', 'identity_data', 'created_at'] LOOP
+    IF NOT has_column_privilege('private_definer', 'auth.identities', v_col, 'SELECT') THEN
+      RAISE EXCEPTION '0035: the GRANT SELECT (%) ON auth.identities TO private_definer did not take effect (a refused grant only warns); the sign-in definers cannot work without it', v_col;
+    END IF;
+  END LOOP;
+  FOREACH v_col IN ARRAY ARRAY['provider_id', 'user_id', 'identity_data', 'provider', 'last_sign_in_at'] LOOP
+    IF NOT has_column_privilege('private_definer', 'auth.identities', v_col, 'INSERT') THEN
+      RAISE EXCEPTION '0035: the GRANT INSERT (%) ON auth.identities TO private_definer did not take effect (a refused grant only warns); the sign-in definers cannot work without it', v_col;
+    END IF;
+  END LOOP;
+  IF NOT has_table_privilege('private_definer', 'auth.identities', 'DELETE') THEN
+    RAISE EXCEPTION '0035: the GRANT DELETE ON auth.identities TO private_definer did not take effect (a refused grant only warns); signin_unlink_identity cannot work without it';
+  END IF;
+END
+$assert_identities_grants$;
 
 -- app.signin_provider_token: 0016 gave private_definer SELECT and DELETE (delete_my_data's generic pass, GUC-scoped to
 -- app.delete_my_data.target_user_id). The sign-in definers also INSERT and UPDATE it, under their own GUC window.
@@ -197,6 +220,8 @@ END;
 $$;
 
 -- 3c. Email lookup for the "one account per verified email" rule (§3.4 rule 1). Returns only an id. Cross-user by design.
+-- Deterministic (ORDER BY) even though GoTrue keeps lower(email) unique. EXECUTE: service_role only. An edge_actor reaches it
+-- through signin_find_account_by_email_for_actor (3l), which requires a kind = 'user' binding (security gate F7).
 CREATE FUNCTION private.signin_find_account_by_email(p_email text)
 RETURNS uuid
 LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -208,7 +233,7 @@ BEGIN
   IF p_email IS NULL OR btrim(p_email) = '' OR length(p_email) > 320 THEN
     RETURN NULL;
   END IF;
-  SELECT u.id INTO v_uid FROM auth.users u WHERE lower(u.email) = lower(btrim(p_email)) LIMIT 1;
+  SELECT u.id INTO v_uid FROM auth.users u WHERE lower(u.email) = lower(btrim(p_email)) ORDER BY u.id LIMIT 1;
   RETURN v_uid;
 END;
 $$;
@@ -351,6 +376,9 @@ BEGIN
 END;
 $$;
 
+-- ⚠ Unlinking 'email' removes only the auth.identities row. It is NOT claimed to end email-OTP access: GoTrue's OTP sign-in probably
+-- looks the user up by auth.users.email, not by an identity row, so the address may still sign in after the unlink. [unverified: P4
+-- spike item, docs/security/p3-money-path-requirements.md O12 "F2"]. Nothing in the API or UI may say "unlinking email revokes email access".
 -- 3h. Unlink a method, only while another remains (§3.4 rule 4). One transaction, one advisory lock: the count of the
 -- account's distinct providers, the queueing of the provider grant, the grant row's deletion and the identity's deletion
 -- cannot interleave with a concurrent link or unlink of the same account. Raises P0002 (not linked) and 55000 (the last
@@ -395,6 +423,10 @@ BEGIN
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'signin_enqueue_revocations: the user id is required' USING ERRCODE = '22023';
   END IF;
+  -- The same per-account lock link / store_token / unlink take. Called inside the DELETE transaction (delete-orchestrator.ts step 3)
+  -- it is held until that transaction commits, so a link racing the deletion either lands before this call (and is queued by it) or
+  -- waits until the grant rows are gone: no grant can be stored between "queued" and "deleted" (security gate F6).
+  PERFORM pg_advisory_xact_lock(hashtextextended('signin:' || p_user_id::text, 0));
   PERFORM set_config('app.signin.target_user_id', p_user_id::text, true);
   RETURN QUERY SELECT e.o_queue_id, e.o_provider FROM private.signin_enqueue_internal(p_user_id, NULL, 'account_delete') e;
   PERFORM set_config('app.signin.target_user_id', '', true);
@@ -500,7 +532,7 @@ $$;
 
 -- 3k. The OTP-proof failure counter (§4.7 item 8: "5 failed OTP proofs per target email per hour"). The bucket key is built
 -- HERE from a sha256 hex of the lower-cased target email (the caller never names a bucket, and no email address is stored
--- in a bucket key). peek reads the current window without touching it; hit adds one failure. Fixed one-hour windows, the
+-- in a bucket key). peek reads the current window without touching it; reserve / release take and give back one attempt. Fixed one-hour windows, the
 -- same arithmetic as private.hit_rate_limit; purge_rate_limit_buckets removes old windows.
 CREATE FUNCTION private.peek_signin_otp_failures(p_email_hash text)
 RETURNS int
@@ -522,16 +554,51 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION private.hit_signin_otp_failure(p_email_hash text)
+-- reserve: the attempt is taken BEFORE the proof is verified, in ONE statement that both checks the cap and increments, so N parallel
+-- proofs cannot all pass a peek and reach the verifier (the cap is no longer check-then-act; security gate F3). Returns the number
+-- of attempts used in this window INCLUDING this one, or -1 when the cap (5) is already reached (nothing is incremented then).
+-- ON CONFLICT ... DO UPDATE ... WHERE takes the row lock, so concurrent reservations serialise on it.
+CREATE FUNCTION private.reserve_signin_otp_attempt(p_email_hash text)
 RETURNS int
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+  v_window_start timestamptz;
+  v_count int;
 BEGIN
   IF p_email_hash IS NULL OR p_email_hash !~ '^[0-9a-f]{64}$' THEN
-    RAISE EXCEPTION 'hit_signin_otp_failure: the email hash must be 64 lowercase hex characters' USING ERRCODE = '22023';
+    RAISE EXCEPTION 'reserve_signin_otp_attempt: the email hash must be 64 lowercase hex characters' USING ERRCODE = '22023';
   END IF;
-  RETURN private.hit_rate_limit('signin-otp-fail:' || p_email_hash, interval '1 hour', 5);
+  v_window_start := to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600);
+  INSERT INTO private.rate_limit_bucket AS b (bucket_key, window_start, count)
+  VALUES ('signin-otp-fail:' || p_email_hash, v_window_start, 1)
+  ON CONFLICT (bucket_key, window_start)
+  DO UPDATE SET count = b.count + 1 WHERE b.count < 5
+  RETURNING b.count INTO v_count;
+  RETURN coalesce(v_count, -1);
+END;
+$$;
+
+-- release: undoes ONE reservation (a proof that SUCCEEDED, or that never reached a verdict because the transport failed, is not a
+-- failure). Never below zero; a no-op when the window has rolled over.
+CREATE FUNCTION private.release_signin_otp_attempt(p_email_hash text)
+RETURNS int
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_window_start timestamptz;
+  v_count int;
+BEGIN
+  IF p_email_hash IS NULL OR p_email_hash !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'release_signin_otp_attempt: the email hash must be 64 lowercase hex characters' USING ERRCODE = '22023';
+  END IF;
+  v_window_start := to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600);
+  UPDATE private.rate_limit_bucket b SET count = greatest(b.count - 1, 0)
+  WHERE b.bucket_key = 'signin-otp-fail:' || p_email_hash AND b.window_start = v_window_start
+  RETURNING b.count INTO v_count;
+  RETURN coalesce(v_count, 0);
 END;
 $$;
 
@@ -591,6 +658,20 @@ BEGIN
 END;
 $$;
 
+-- The email lookup for an edge_actor: refuses unless a kind = 'user' actor is bound in this transaction (an unbound actor, or a
+-- system delegate, gets 42501 and no answer). Without this wrapper "does an account hold this email" would be answerable by any
+-- edge_actor connection, bound or not (security gate F7). Same answer as the core: an id, or NULL.
+CREATE FUNCTION private.signin_find_account_by_email_for_actor(p_email text)
+RETURNS uuid
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  PERFORM private.signin_bound_user('signin_find_account_by_email_for_actor');
+  RETURN private.signin_find_account_by_email(p_email);
+END;
+$$;
+
 -- 3m. EXECUTE grants. PUBLIC first (private_definer-created functions default to PUBLIC), then exactly the roles below.
 REVOKE EXECUTE ON FUNCTION private.signin_bound_user(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.get_signin_token_kek(text) FROM PUBLIC;
@@ -605,7 +686,9 @@ REVOKE EXECUTE ON FUNCTION private.claim_signin_revocations(uuid[], int, int) FR
 REVOKE EXECUTE ON FUNCTION private.complete_signin_revocation(uuid, text, text, int) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.purge_signin_revocation_queue(interval) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.peek_signin_otp_failures(text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION private.hit_signin_otp_failure(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.reserve_signin_otp_attempt(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.release_signin_otp_attempt(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.signin_find_account_by_email_for_actor(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.signin_methods_for_actor() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.signin_link_identity_for_actor(text, text, text, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.signin_store_token_for_actor(text, bytea, bytea, text) FROM PUBLIC;
@@ -614,14 +697,15 @@ REVOKE EXECUTE ON FUNCTION private.signin_enqueue_revocations_for_actor() FROM P
 
 -- service_role: the core lane the Edge code runs on today.
 GRANT EXECUTE ON FUNCTION private.get_signin_token_kek(text) TO service_role, edge_actor, edge_system;
-GRANT EXECUTE ON FUNCTION private.signin_find_account_by_email(text) TO service_role, edge_actor;
+GRANT EXECUTE ON FUNCTION private.signin_find_account_by_email(text) TO service_role;
 GRANT EXECUTE ON FUNCTION private.signin_methods(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION private.signin_link_identity(uuid, text, text, text, boolean, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION private.signin_store_token(uuid, text, bytea, bytea, text) TO service_role;
 GRANT EXECUTE ON FUNCTION private.signin_unlink_identity(uuid, text) TO service_role;
 GRANT EXECUTE ON FUNCTION private.signin_enqueue_revocations(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION private.peek_signin_otp_failures(text) TO service_role, edge_actor;
-GRANT EXECUTE ON FUNCTION private.hit_signin_otp_failure(text) TO service_role, edge_actor;
+GRANT EXECUTE ON FUNCTION private.reserve_signin_otp_attempt(text) TO service_role, edge_actor;
+GRANT EXECUTE ON FUNCTION private.release_signin_otp_attempt(text) TO service_role, edge_actor;
 -- the queue's system operations: service_role now, edge_system after the flip (they act on no particular user).
 GRANT EXECUTE ON FUNCTION private.claim_signin_revocations(uuid[], int, int) TO service_role, edge_system;
 GRANT EXECUTE ON FUNCTION private.complete_signin_revocation(uuid, text, text, int) TO service_role, edge_system;
@@ -632,6 +716,7 @@ GRANT EXECUTE ON FUNCTION private.signin_link_identity_for_actor(text, text, tex
 GRANT EXECUTE ON FUNCTION private.signin_store_token_for_actor(text, bytea, bytea, text) TO edge_actor;
 GRANT EXECUTE ON FUNCTION private.signin_unlink_identity_for_actor(text) TO edge_actor;
 GRANT EXECUTE ON FUNCTION private.signin_enqueue_revocations_for_actor() TO edge_actor;
+GRANT EXECUTE ON FUNCTION private.signin_find_account_by_email_for_actor(text) TO edge_actor;
 
 COMMENT ON FUNCTION private.get_signin_token_kek(text) IS
   '0035. The Vault-held KEK for the envelope encryption of app.signin_provider_token / private.signin_revocation_queue (build plan §4.8): NULL = the newest `siwa_token_kek_<id>`, a kek id = that one. Returns the key as a function result only.';
@@ -680,7 +765,7 @@ VALUES
   ('private', 'signin_bound_user', 'p_who text', false, false, false, false, false, '0035: the bound kind=user actor helper for the signin_*_for_actor wrappers; reachable only through them (no role is granted EXECUTE)'),
   ('private', 'signin_enqueue_internal', 'p_user_id uuid, p_provider text, p_source text', false, false, false, false, false, '0035: the queue-copy core; reachable only through signin_store_token / signin_unlink_identity / signin_enqueue_revocations (no role is granted EXECUTE)'),
   ('private', 'get_signin_token_kek', 'p_kek_id text', false, false, true, true, true, '0035: the Vault-held KEK (a function result only), for envelope encryption of the sign-in provider grants (build plan §4.8)'),
-  ('private', 'signin_find_account_by_email', 'p_email text', false, false, true, true, false, '0035: id of the account holding an email (the one-account-per-verified-email rule, §3.4 rule 1)'),
+  ('private', 'signin_find_account_by_email', 'p_email text', false, false, true, false, false, '0035: id of the account holding an email (the one-account-per-verified-email rule, §3.4 rule 1); service_role lane, deterministic'),
   ('private', 'signin_methods', 'p_user_id uuid', false, false, true, false, false, '0035: a user''s sign-in methods (Supabase Auth identities), service_role lane'),
   ('private', 'signin_link_identity', 'p_user_id uuid, p_provider text, p_subject text, p_email text, p_email_verified boolean, p_is_private_relay boolean', false, false, true, false, false, '0035: link an apple/google identity; 23505 when the identity is another account''s or the provider is already linked; service_role lane'),
   ('private', 'signin_store_token', 'p_user_id uuid, p_provider text, p_ciphertext bytea, p_dek_wrapped bytea, p_kek_id text', false, false, true, false, false, '0035: store/replace the envelope-encrypted refresh token for a linked identity; service_role lane'),
@@ -690,9 +775,11 @@ VALUES
   ('private', 'complete_signin_revocation', 'p_id uuid, p_outcome text, p_error text, p_backoff_seconds integer', false, false, true, false, true, '0035: record a revocation attempt (revoked / retry); system work'),
   ('private', 'purge_signin_revocation_queue', 'p_older_than interval', false, false, true, false, true, '0035: delete finished revocation rows older than 1..365 days; system work'),
   ('private', 'peek_signin_otp_failures', 'p_email_hash text', false, false, true, true, false, '0035: failed OTP proofs for one target email in the current hour (the bucket key is built in the database)'),
-  ('private', 'hit_signin_otp_failure', 'p_email_hash text', false, false, true, true, false, '0035: record one failed OTP proof for a target email; fixed one-hour window, never raises over the cap'),
+  ('private', 'reserve_signin_otp_attempt', 'p_email_hash text', false, false, true, true, false, '0035: take one OTP-proof attempt for a target email BEFORE verifying (atomic cap check + increment, -1 at the cap of 5 per hour)'),
+  ('private', 'release_signin_otp_attempt', 'p_email_hash text', false, false, true, true, false, '0035: give back one reserved OTP-proof attempt (the proof succeeded or never reached a verdict)'),
   ('private', 'signin_methods_for_actor', '', false, false, false, true, false, '0035: edge_actor only; signin_methods for the BOUND kind=user actor (no uid argument)'),
   ('private', 'signin_link_identity_for_actor', 'p_provider text, p_subject text, p_email text, p_email_verified boolean, p_is_private_relay boolean', false, false, false, true, false, '0035: edge_actor only; links to the bound actor''s OWN account only'),
   ('private', 'signin_store_token_for_actor', 'p_provider text, p_ciphertext bytea, p_dek_wrapped bytea, p_kek_id text', false, false, false, true, false, '0035: edge_actor only; signin_store_token for the bound actor'),
   ('private', 'signin_unlink_identity_for_actor', 'p_provider text', false, false, false, true, false, '0035: edge_actor only; signin_unlink_identity for the bound actor'),
-  ('private', 'signin_enqueue_revocations_for_actor', '', false, false, false, true, false, '0035: edge_actor only; signin_enqueue_revocations for the bound actor');
+  ('private', 'signin_enqueue_revocations_for_actor', '', false, false, false, true, false, '0035: edge_actor only; signin_enqueue_revocations for the bound actor'),
+  ('private', 'signin_find_account_by_email_for_actor', 'p_email text', false, false, false, true, false, '0035: edge_actor only; signin_find_account_by_email, refused unless a kind=user actor is bound (F7)');

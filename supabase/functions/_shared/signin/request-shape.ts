@@ -6,6 +6,7 @@
 //   { "action": "link",   "provider": "apple", "identityToken": "<jwt>", "authorizationCode": "<code>", "nonce": "<raw nonce>",
 //                         "emailProof"?: { "code": "<6-10 digit OTP>" } }
 //   { "action": "unlink", "provider": "email" | "apple" | "google" }
+//   (unlinking "email" removes the identity row only; it is NOT a claim that email sign-in stops working: see 0035 and O12 F2)
 //
 // There is NO field that names an account. Every operation is on the authenticated caller's own account, derived from the
 // verified JWT; a body carrying `userId` / `user_id` / `uid` / `email` of someone else is not "ignored", it is REJECTED (400),
@@ -34,7 +35,7 @@ export type SigninRequest = LinkRequest | UnlinkRequest;
 
 const MAX_TOKEN = 8 * 1024;
 const MAX_CODE = 2048;
-const NONCE_RE = /^[A-Za-z0-9._~+/=-]{8,256}$/;
+const NONCE_RE = /^[A-Za-z0-9._~+/=-]{16,256}$/;
 const OTP_RE = /^[0-9]{6,10}$/;
 const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
@@ -67,7 +68,7 @@ export function parseSigninBody(raw: unknown): ParseResult<SigninRequest> {
   const code = raw.authorizationCode;
   if (typeof code !== "string" || code.length === 0 || code.length > MAX_CODE || /\s/.test(code)) issues.push({ path: "authorizationCode", message: "must be a non-empty string" });
   const nonce = raw.nonce;
-  if (typeof nonce !== "string" || !NONCE_RE.test(nonce)) issues.push({ path: "nonce", message: "must be the 8-256 character raw nonce the client generated" });
+  if (typeof nonce !== "string" || !NONCE_RE.test(nonce)) issues.push({ path: "nonce", message: "must be the 16-256 character raw nonce the client generated" });
 
   let emailProof: { code: string } | undefined;
   if (raw.emailProof !== undefined) {

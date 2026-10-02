@@ -2983,9 +2983,12 @@ function buildSigninSystemOps(trx: TxSql): SigninSystemOps {
       const rows = await trx`select private.peek_signin_otp_failures(${emailHash}) as n`;
       return Number(rows[0]?.n ?? 0);
     },
-    async recordOtpFailure(emailHash): Promise<number> {
-      const rows = await trx`select private.hit_signin_otp_failure(${emailHash}) as n`;
-      return Number(rows[0]?.n ?? 0);
+    async reserveOtpAttempt(emailHash): Promise<number> {
+      const rows = await trx`select private.reserve_signin_otp_attempt(${emailHash}) as n`;
+      return Number(rows[0]?.n ?? -1);
+    },
+    async releaseOtpAttempt(emailHash): Promise<void> {
+      await trx`select private.release_signin_otp_attempt(${emailHash}) as n`;
     },
   };
 }
@@ -3031,7 +3034,7 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
 
     findAccountByEmail: (email: string) =>
       guard(async () => {
-        const rows = await trx`select private.signin_find_account_by_email(${email}) as id`;
+        const rows = edge ? await trx`select private.signin_find_account_by_email_for_actor(${email}) as id` : await trx`select private.signin_find_account_by_email(${email}) as id`;
         return (rows[0]?.id as string | null | undefined) ?? null;
       }),
 
@@ -3106,33 +3109,61 @@ export const signinRevocationDb: RevocationDb = {
 };
 
 /** The OTP-proof failure counter (§4.7 item 8), run AS THE CALLER (service_role in legacy mode, the bound edge_actor in edge mode: both
- * hold the two OTP-failure functions and nothing wider is needed). `record` commits on its own, BEFORE the request fails, so a failed
- * proof always counts (the same ordering rule as hitRateLimitForActor). */
+ * hold the OTP functions and nothing wider is needed). `reserve` takes the attempt atomically and commits on its own, BEFORE the proof is
+ * verified, so a failed proof (or a request that dies) always counts and N parallel proofs cannot all pass a read of the count; `release`
+ * gives it back only for a proof that succeeded or never produced a verdict (security gate F3). */
 export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
   return {
     peek: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.peekOtpFailures(emailHash)),
-    record: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.recordOtpFailure(emailHash)),
+    reserve: async (emailHash) => {
+      const n = await withOwnership(actor, (repo) => repo.signin.system.reserveOtpAttempt(emailHash));
+      return n < 0 ? null : n;
+    },
+    release: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.releaseOtpAttempt(emailHash)),
   };
 }
 
 /** Proof of mailbox control by an email OTP, through Supabase Auth's verifyOtp with the ANON key (the response's session is
  * discarded: this server never hands one to a client). A wrong or expired code is `{ ok: false }`; a transport or server failure
  * THROWS, so it is not counted against the address. `[unverified — training knowledge of GoTrue's verifyOtp error statuses]`. */
-export const supabaseEmailOtpVerifier: EmailOtpVerifier = {
-  async verify(email: string, code: string): Promise<EmailOtpResult> {
-    const url = Deno.env.get("SUPABASE_URL");
-    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-    if (!url || !anonKey) throw new Error("privileged.ts: SUPABASE_URL/SUPABASE_ANON_KEY are not set in this environment");
-    const client = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
-    const { data, error } = await client.auth.verifyOtp({ email, token: code, type: "email" });
-    if (error) {
-      const status = (error as { status?: number }).status;
-      if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) return { ok: false };
-      throw new Error("supabase auth verifyOtp failed");
-    }
-    const id = data?.user?.id;
-    if (!id) throw new Error("supabase auth verifyOtp returned no user");
-    return { ok: true, userId: id };
-  },
-};
+export interface OtpAuthClient {
+  auth: {
+    verifyOtp(args: { email: string; token: string; type: "email" }): Promise<{ data: { user?: { id?: string } | null } | null; error: { status?: number } | null }>;
+    signOut(opts: { scope: "local" }): Promise<{ error: unknown }>;
+  };
+}
+
+/** Builds the verifier over a client factory (the real one below; a recording fake in the integration suite). verifyOtp ESTABLISHES a live GoTrue
+ * session for the proven account on the client it is called on; this server never hands it to anyone, so it is signed out (scope local: that one
+ * session) the moment the proof is read, on success. A sign-out that fails is logged (no secret in the line) and does not fail the proof: the
+ * session is in memory only and never leaves this function (security gate F5). */
+export function makeEmailOtpVerifier(newClient: () => OtpAuthClient): EmailOtpVerifier {
+  return {
+    async verify(email: string, code: string): Promise<EmailOtpResult> {
+      const client = newClient();
+      const { data, error } = await client.auth.verifyOtp({ email, token: code, type: "email" });
+      if (error) {
+        const status = error.status;
+        if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) return { ok: false };
+        throw new Error("supabase auth verifyOtp failed");
+      }
+      const id = data?.user?.id;
+      try {
+        const out = await client.auth.signOut({ scope: "local" });
+        if (out.error) console.warn(JSON.stringify({ event: "signin_otp_session_signout_failed" }));
+      } catch {
+        console.warn(JSON.stringify({ event: "signin_otp_session_signout_failed" }));
+      }
+      if (!id) throw new Error("supabase auth verifyOtp returned no user");
+      return { ok: true, userId: id };
+    },
+  };
+}
+
+export const supabaseEmailOtpVerifier: EmailOtpVerifier = makeEmailOtpVerifier(() => {
+  const url = Deno.env.get("SUPABASE_URL");
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!url || !anonKey) throw new Error("privileged.ts: SUPABASE_URL/SUPABASE_ANON_KEY are not set in this environment");
+  return createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } }) as unknown as OtpAuthClient;
+});
 // ==== END O12 sign-in additions ==============================================

@@ -68,14 +68,19 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountL
     },
   };
   const otp: Harness["otp"] = { failures: new Map(), verifierCalls: [], result: { ok: false }, throws: false };
+  // Mirrors private.reserve_signin_otp_attempt / release_signin_otp_attempt: take-with-cap is ONE step, release never goes below zero.
   const counter: OtpFailureCounter = {
     async peek(h) {
       return otp.failures.get(h) ?? 0;
     },
-    async record(h) {
-      const n = (otp.failures.get(h) ?? 0) + 1;
-      otp.failures.set(h, n);
-      return n;
+    async reserve(h) {
+      const n = otp.failures.get(h) ?? 0;
+      if (n >= 5) return null;
+      otp.failures.set(h, n + 1);
+      return n + 1;
+    },
+    async release(h) {
+      otp.failures.set(h, Math.max(0, (otp.failures.get(h) ?? 0) - 1));
     },
   };
   const verifier: EmailOtpVerifier = {
@@ -361,7 +366,7 @@ describe("link: never auto-link a social identity whose email matches an existin
     expect(f.tokens.map((t) => t.userId)).toEqual([BOB]);
     expect(f.identities.filter((i) => i.userId === ALICE).map((i) => i.provider)).toEqual(["email"]);
     expect(h.otp.verifierCalls).toEqual([{ email: "bob@example.test", code: "123456" }]);
-    expect(h.otp.failures.size).toBe(0);
+    expect([...h.otp.failures.values()].every((v) => v === 0)).toBe(true); // the attempt was reserved, then given back
   });
 
   it("a WRONG proof code: 422 email_proof_invalid with the attempts remaining, the failure counted, nothing linked, no exchange", async () => {
@@ -407,12 +412,23 @@ describe("link: never auto-link a social identity whose email matches an existin
     expect(h.otp.failures.get(await sha256Hex("bob@example.test"))).toBe(1);
   });
 
+  it("F3: 20 PARALLEL wrong proofs reach the verifier at most 5 times (the attempt is reserved before verifying, not read-then-written)", async () => {
+    const h = harness(ALICE);
+    h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
+    h.otp.result = { ok: false };
+    const slowVerify = h.otp.verifierCalls;
+    const results = await Promise.all(Array.from({ length: 20 }, () => failure(handleLinkProvider(linkReq({ emailProof: { code: "000000" } }), ALICE, h.deps))));
+    expect(slowVerify.length).toBe(5);
+    expect(results.filter((e) => e.status === 422)).toHaveLength(5);
+    expect(results.filter((e) => e.status === 429)).toHaveLength(15);
+  });
+
   it("a transport failure of the OTP check is a 502 and is NOT counted against the address", async () => {
     const h = harness(ALICE);
     h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
     h.otp.throws = true;
     expect((await failure(handleLinkProvider(linkReq({ emailProof: { code: "123456" } }), ALICE, h.deps))).status).toBe(502);
-    expect(h.otp.failures.size).toBe(0);
+    expect([...h.otp.failures.values()].every((v) => v === 0)).toBe(true); // the attempt was reserved, then given back
   });
 
   it("a proof for a DIFFERENT account than the one looked up (the address changed hands) is refused: 409 email_proof_mismatch", async () => {

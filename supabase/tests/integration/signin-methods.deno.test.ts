@@ -14,14 +14,14 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, makeActor, rawCount } from "./_helpers.ts";
-import { hitRateLimitForActor, isServiceRoleBearer, getDbMode, loadAppleSiwaConfig, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
+import { hitRateLimitForActor, isServiceRoleBearer, getDbMode, loadAppleSiwaConfig, makeEmailOtpVerifier, type OtpAuthClient, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleLinkProvider, handleListMethods, handleUnlinkProvider, type SigninDeps } from "../../functions/_shared/signin/methods-handler.ts";
 import { orchestrateMeDelete } from "../../functions/_shared/me/delete-orchestrator.ts";
 import { runRevocations, type RevocationDeps } from "../../functions/_shared/signin/revocation.ts";
 import { buildSigninPorts } from "../../functions/_shared/signin/production.ts";
 import { APPLE_JWKS_URL } from "../../functions/_shared/signin/apple-id-token.ts";
 import { APPLE_REVOKE_URL, APPLE_TOKEN_URL } from "../../functions/_shared/signin/apple-client.ts";
-import { decryptToken } from "../../functions/_shared/signin/envelope.ts";
+import { decryptToken, encryptToken } from "../../functions/_shared/signin/envelope.ts";
 import { sha256Hex } from "../../functions/_shared/signin/bytes.ts";
 import { HttpError } from "../../functions/_shared/http.ts";
 import type { LinkRequest } from "../../functions/_shared/signin/request-shape.ts";
@@ -507,8 +507,9 @@ Deno.test("the OTP failure counter and the 10/user/h linking limit are real and 
   const u = await newUser("rl");
   const counter = signinOtpFailuresFor(makeActor(u.uid));
   const h = await sha256Hex(`otp-${freshUuid()}@x.test`);
-  for (let i = 1; i <= 6; i++) assertEquals(await counter.record(h), i);
-  assertEquals(await counter.peek(h), 6);
+  for (let i = 1; i <= 5; i++) assertEquals(await counter.reserve(h), i);
+  assertEquals(await counter.reserve(h), null, "the cap is 5 and the sixth is refused");
+  assertEquals(await counter.peek(h), 5);
   assertEquals(await counter.peek(await sha256Hex(`other-${freshUuid()}@x.test`)), 0);
 
   const actor = makeActor(u.uid);
@@ -534,6 +535,179 @@ Deno.test("the revocation drain authenticates by the service-role key only (cons
     if (saved === undefined) Deno.env.delete("SUPABASE_SERVICE_ROLE_KEY");
     else Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", saved);
   }
+});
+
+// ── round 2 (security gate F3-F7) ──────────────────────────────────────────────────────────────────────────────────────
+Deno.test("F3: 20 PARALLEL wrong email proofs reach the verifier exactly 5 times (the attempt is reserved atomically, not read then written)", DT, async () => {
+  await setupOnce();
+  const alice = await newUser("f3a");
+  const bob = await newUser("f3b");
+  // Edge mode refuses the cross-account link before any proof (F4), so the proof path is only reachable in legacy mode.
+  if (getDbMode() === "edge") return;
+  let verifierCalls = 0;
+  const slow: EmailOtpVerifier = {
+    async verify() {
+      verifierCalls++;
+      await new Promise((r) => setTimeout(r, 25)); // a real network round trip: the window a check-then-act counter loses
+      return { ok: false };
+    },
+  };
+  const sub = `apple-sub-f3-${freshUuid().slice(0, 8)}`;
+  const attempt = async () => {
+    const script: AppleScript = { nextRefreshToken: "r.f3", nextSubject: sub, revoked: [], revokeStatus: 200 };
+    const world = appleWorld(script);
+    const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
+    return httpError(handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "000000" } }, alice.uid, depsFor(alice.uid, world, slow)));
+  };
+  const results = await Promise.all(Array.from({ length: 20 }, attempt));
+  assertEquals(verifierCalls, 5, "no more than 5 wrong proofs ever reach the verifier");
+  assertEquals(results.filter((e) => e.status === 422).length, 5);
+  assertEquals(results.filter((e) => e.status === 429).length, 15);
+  assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await sha256Hex(bob.email)), 5);
+  assertEquals(await identityCount(bob.uid), 1, "nothing was linked");
+});
+
+Deno.test("F3: a SUCCESSFUL proof gives its attempt back; a transport failure is not a failure", DT, async () => {
+  await setupOnce();
+  const u = await newUser("f3c");
+  const counter = signinOtpFailuresFor(makeActor(u.uid));
+  const h = await sha256Hex(`f3-${freshUuid()}@x.test`);
+  assertEquals(await counter.reserve(h), 1);
+  await counter.release(h);
+  assertEquals(await counter.peek(h), 0);
+  for (let i = 1; i <= 5; i++) assertEquals(await counter.reserve(h), i);
+  assertEquals(await counter.reserve(h), null, "the sixth is refused and takes nothing");
+  assertEquals(await counter.peek(h), 5);
+  await counter.release(h);
+  assertEquals(await counter.reserve(h), 5, "a released attempt can be taken again");
+});
+
+Deno.test("F4: edge mode REFUSES to link or store a grant for ANOTHER account, called directly on the repo (mustBeSelf)", DT, async () => {
+  await setupOnce();
+  const alice = await newUser("f4a");
+  const bob = await newUser("f4b");
+  const input = { provider: "apple" as const, subject: `apple-sub-f4-${freshUuid().slice(0, 8)}`, email: null, emailVerified: false, isPrivateRelay: false };
+  const env = { ciphertext: new Uint8Array(40).fill(7), dekWrapped: new Uint8Array(70).fill(9), kekId: KEK_ID };
+  if (getDbMode() !== "edge") {
+    // legacy: the core lane takes the uid by design (the OTP-proven link); nothing to refuse here. The edge run is the cell.
+    return;
+  }
+  const link = await httpError(withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(bob.uid, input)));
+  assertEquals([link.status, link.code], [501, "email_proof_link_unavailable"]);
+  const store = await httpError(withOwnership(makeActor(alice.uid), (repo) => repo.signin.storeToken(bob.uid, "apple", env)));
+  assertEquals([store.status, store.code], [501, "email_proof_link_unavailable"]);
+  assertEquals(await identityCount(bob.uid), 1, "nothing was linked to Bob");
+  assertEquals(await tokenCount(bob.uid), 0, "no grant was stored for Bob");
+  // and the repo reports that it cannot do it, so the handler answers before spending a proof
+  assertEquals(await withOwnership(makeActor(alice.uid), (repo) => Promise.resolve(repo.signin.crossAccountLink)), false);
+  // linking to SELF still works in edge mode
+  assertEquals(await withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(alice.uid, input)), true);
+});
+
+Deno.test("F5: the GoTrue session verifyOtp establishes is signed out (scope local) on a successful proof; a failed sign-out does not fail the proof", DT, async () => {
+  const calls: string[] = [];
+  const mk = (over: { verifyError?: { status?: number }; user?: { id?: string } | null; signOutThrows?: boolean }): OtpAuthClient => ({
+    auth: {
+      async verifyOtp(args) {
+        calls.push(`verifyOtp:${args.email}:${args.type}`);
+        return { data: over.verifyError ? null : { user: over.user === undefined ? { id: "11111111-1111-4111-8111-111111111111" } : over.user }, error: over.verifyError ?? null };
+      },
+      async signOut(opts) {
+        calls.push(`signOut:${opts.scope}`);
+        if (over.signOutThrows) throw new Error("network");
+        return { error: null };
+      },
+    },
+  });
+  const ok = await makeEmailOtpVerifier(() => mk({})).verify("a@x.test", "123456");
+  assertEquals(ok, { ok: true, userId: "11111111-1111-4111-8111-111111111111" });
+  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"], "the session was signed out, locally, after the proof");
+  calls.length = 0;
+  const thrown = await makeEmailOtpVerifier(() => mk({ signOutThrows: true })).verify("a@x.test", "123456");
+  assertEquals(thrown.ok, true, "a sign-out that fails does not fail the proof");
+  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"]);
+  calls.length = 0;
+  assertEquals(await makeEmailOtpVerifier(() => mk({ verifyError: { status: 400 } })).verify("a@x.test", "000000"), { ok: false });
+  assertEquals(calls, ["verifyOtp:a@x.test:email"], "a refused code created no session: nothing to sign out");
+  let transport = false;
+  try {
+    await makeEmailOtpVerifier(() => mk({ verifyError: { status: 500 } })).verify("a@x.test", "000000");
+  } catch {
+    transport = true;
+  }
+  assert(transport, "a 5xx is a transport failure (thrown, so it is not counted against the address)");
+  // a successful verify that names no user still ends the session it created before it fails
+  calls.length = 0;
+  let noUser = false;
+  try {
+    await makeEmailOtpVerifier(() => mk({ user: null })).verify("a@x.test", "123456");
+  } catch {
+    noUser = true;
+  }
+  assert(noUser);
+  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"]);
+});
+
+Deno.test("F6: a grant stored while the deletion is revoking at Apple (a racing link) is queued inside the delete transaction and revoked, never deleted unqueued", DT, async () => {
+  await setupOnce();
+  const u = await newUser("f6");
+  await linkAs(u.uid, `apple-sub-f6-${RUN}`, { email: u.email, refresh: "r.f6-first" });
+  const actor = makeActor(u.uid);
+  const googleRevoked: string[] = [];
+  const appleRevoked: string[] = [];
+  let injected = false;
+  const out = await orchestrateMeDelete({
+    withRepo: (op) => withOwnership(actor, op),
+    revocation: {
+      db: signinRevocationDb,
+      apple: {
+        async revokeRefreshToken(t) {
+          appleRevoked.push(t);
+          if (injected) return;
+          injected = true; // the racing link: stored AFTER the first enqueue, BEFORE the delete transaction
+          await withOwnership(actor, async (repo) => {
+            await repo.signin.linkIdentity(u.uid, { provider: "google", subject: `g-sub-f6-${RUN}`, email: null, emailVerified: false, isPrivateRelay: false });
+            await repo.signin.storeToken(u.uid, "google", await encryptToken("g.f6-late-grant", "google", await repo.signin.currentKek()));
+          });
+        },
+      },
+      google: { revokeToken: async (t) => void googleRevoked.push(t) },
+      log: () => {},
+    },
+  });
+  assert(injected, "the race was actually injected");
+  assertEquals(appleRevoked, ["r.f6-first"]);
+  assertEquals(googleRevoked, ["g.f6-late-grant"], "the late grant reached Google");
+  assertEquals(await tokenCount(u.uid), 0);
+  assertEquals(out.signinProvidersRevoked.map((o) => [o.provider, o.status]).sort(), [["apple", "revoked"], ["google", "revoked"]]);
+});
+
+Deno.test("F6: the enqueue inside the delete transaction holds the per-account lock: a link started meanwhile waits for the commit", DT, async () => {
+  await setupOnce();
+  const u = await newUser("f6l");
+  const actor = makeActor(u.uid);
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let started!: () => void;
+  const inLock = new Promise<void>((r) => (started = r));
+  const deleting = withOwnership(actor, async (repo) => {
+    await repo.signin.enqueueRevocations(); // takes the account lock, held to the end of THIS transaction
+    started();
+    await gate;
+    order.push("delete-tx-commits");
+  });
+  await inLock;
+  const linking = withOwnership(actor, async (repo) => {
+    await repo.signin.linkIdentity(u.uid, { provider: "google", subject: `g-sub-f6l-${RUN}`, email: null, emailVerified: false, isPrivateRelay: false });
+    order.push("link-done");
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  assertEquals(order, [], "the link is still waiting on the lock");
+  release();
+  await deleting;
+  await linking;
+  assertEquals(order, ["delete-tx-commits", "link-done"]);
 });
 
 Deno.test("cleanup: the throw-away KEK is removed", DT, async () => {

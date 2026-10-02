@@ -215,6 +215,30 @@ describe("DELETE /v1/me orchestration (queue, revoke, then delete)", () => {
     expect(out.signinProvidersRevoked.map((o) => [o.provider, o.status]).sort()).toEqual([["apple", "revoked"], ["google", "revoked"]]);
   });
 
+  it("F6: a grant stored AFTER the first enqueue (a link racing the deletion) is queued inside the delete transaction and revoked, never deleted unqueued", async () => {
+    const h = await harness();
+    const f = signinFake(h.state);
+    f.tokens = f.tokens.filter((t) => !(t.userId === ALICE && t.provider === "google"));
+    const realApple = h.deps.apple!;
+    let injected = false;
+    h.deps.apple = {
+      async revokeRefreshToken(t) {
+        await realApple.revokeRefreshToken(t);
+        if (!injected) {
+          injected = true; // the racing link: a Google grant stored while Apple was being told
+          f.tokens.push({ userId: ALICE, provider: "google", envelope: await encryptToken("g.late-grant", "google", { kekId: "k1", key: f.keks.get("k1")! }) });
+        }
+      },
+    };
+    const out = await orchestrateMeDelete(deleteDeps(h));
+    expect(h.google.revoked).toEqual(["g.late-grant"]);
+    expect(f.tokens.filter((t) => t.userId === ALICE)).toHaveLength(0);
+    expect(out.signinProvidersRevoked.map((o) => [o.provider, o.status]).sort()).toEqual([["apple", "revoked"], ["google", "revoked"]]);
+    const calls = f.calls;
+    const deleteAt = calls.indexOf(`delete_my_data:${ALICE}`);
+    expect(calls.slice(0, deleteAt).filter((c) => c === "enqueueRevocations")).toHaveLength(2); // the second one is in the delete transaction
+  });
+
   it("a FAILED revocation never blocks the deletion: the account is deleted, the grant stays queued with its envelope, and the error is logged", async () => {
     const h = await harness();
     h.apple.error = new VendorUnavailableError("revoke_5xx");

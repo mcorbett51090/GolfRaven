@@ -10,7 +10,7 @@
 -- Every group is its own BEGIN ... ROLLBACK except the session-reuse group (needs a real COMMIT, the P3a follow-up 1
 -- style, see 12_guc_session_reuse.sql), which cleans up after itself.
 
-SELECT plan(143);
+SELECT plan(150);
 
 -- ----------------------------------------------------------------------------
 -- 0. Structure
@@ -41,6 +41,10 @@ SELECT is(has_column_privilege('edge_actor', 'app.signin_provider_token', 'refre
   'structure: edge_actor still cannot read the ciphertext or the wrapped DEK (0031 column grant: user_id, provider only)');
 SELECT is(has_column_privilege('private_definer', 'auth.identities', 'email', 'SELECT') OR has_table_privilege('private_definer', 'auth.identities', 'UPDATE'), false,
   'structure: private_definer holds only the narrow auth.identities slice 0035 grants (no UPDATE, no generated email column)');
+SELECT is((SELECT bool_and(has_column_privilege('private_definer', 'auth.identities', c, 'SELECT')) FROM unnest(ARRAY['user_id', 'provider', 'provider_id', 'identity_data', 'created_at']) c)
+          AND (SELECT bool_and(has_column_privilege('private_definer', 'auth.identities', c, 'INSERT')) FROM unnest(ARRAY['provider_id', 'user_id', 'identity_data', 'provider', 'last_sign_in_at']) c)
+          AND has_table_privilege('private_definer', 'auth.identities', 'DELETE'), true,
+  'structure (F8): every auth.identities privilege 0035 needs is held by private_definer (the migration RAISEs itself if a GRANT only warned)');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.signin_provider_token'::regclass AND (p.polroles @> ARRAY[0]::oid[])), 0,
   'structure: no PUBLIC policy on app.signin_provider_token (FORCE RLS still admits nobody but the named roles)');
 SELECT is((SELECT c.relrowsecurity AND c.relforcerowsecurity FROM pg_class c WHERE c.oid = 'app.signin_provider_token'::regclass), true, 'structure: app.signin_provider_token keeps FORCE ROW LEVEL SECURITY');
@@ -324,18 +328,24 @@ ROLLBACK;
 -- ----------------------------------------------------------------------------
 BEGIN;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 0, 'otp: no failures yet for a fresh email hash');
-SELECT is(private.hit_signin_otp_failure(encode(digest('a@x.test', 'sha256'), 'hex')), 1, 'otp: the first failure counts 1');
-SELECT is(private.hit_signin_otp_failure(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: ... then 2');
+SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 0, 'otp: no attempts yet for a fresh email hash');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 1, 'otp: the first reservation is attempt 1');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: ... then 2');
 SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: peek reads the count without moving it');
 SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 2, 'otp: ... twice');
-SELECT is(private.hit_signin_otp_failure(encode(digest('b@x.test', 'sha256'), 'hex')), 1, 'otp: a different target email has its own bucket');
-SELECT is(private.hit_signin_otp_failure(encode(digest('a@x.test', 'sha256'), 'hex')), 3, 'otp: the first email continues at 3');
-SELECT is(private.hit_signin_otp_failure(encode(digest('a@x.test', 'sha256'), 'hex')), 4, 'otp: 4');
-SELECT is(private.hit_signin_otp_failure(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: 5 (the cap: the Edge code refuses a further proof at >= 5)');
-SELECT is(private.hit_signin_otp_failure(encode(digest('a@x.test', 'sha256'), 'hex')), 6, 'otp: past the cap the count keeps counting (the function never raises, so every attempt counts, 0020)');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('b@x.test', 'sha256'), 'hex')), 1, 'otp: a different target email has its own bucket');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 3, 'otp: the first email continues at 3');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 4, 'otp: 4');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: 5 (the cap)');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), -1, 'otp: at the cap a reservation is REFUSED (-1): the cap check and the increment are one statement (F3)');
+SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: ... and the refused reservation did not move the count');
+SELECT is(private.release_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 4, 'otp: a release gives one attempt back (a proof that succeeded is not a failure)');
+SELECT is(private.reserve_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')), 5, 'otp: ... and the freed attempt can be taken again');
+SELECT lives_ok($$SELECT private.release_signin_otp_attempt(encode(digest('a@x.test', 'sha256'), 'hex')) FROM generate_series(1, 7)$$, 'otp: releasing more than was reserved does not raise');
+SELECT is(private.peek_signin_otp_failures(encode(digest('a@x.test', 'sha256'), 'hex')), 0, 'otp: ... and the count never goes below zero');
 SELECT throws_ok($$SELECT private.peek_signin_otp_failures('not-a-hash')$$, '22023', NULL, 'otp: only a sha256 hex may name a bucket (no email address ever lands in a bucket key)');
-SELECT throws_ok($$SELECT private.hit_signin_otp_failure('A@X.TEST')$$, '22023', NULL, 'otp: ... for the hit as well');
+SELECT throws_ok($$SELECT private.reserve_signin_otp_attempt('A@X.TEST')$$, '22023', NULL, 'otp: ... for the reservation as well');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt('A@X.TEST')$$, '22023', NULL, 'otp: ... and the release');
 SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'signin-otp-fail:%' AND bucket_key LIKE '%@%'), 0, 'otp: no bucket key contains an address');
 ROLLBACK;
 

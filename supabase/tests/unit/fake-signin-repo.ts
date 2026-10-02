@@ -187,10 +187,14 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
       async peekOtpFailures(h) {
         return f.otpFailures.get(h) ?? 0;
       },
-      async recordOtpFailure(h) {
-        const n = (f.otpFailures.get(h) ?? 0) + 1;
-        f.otpFailures.set(h, n);
-        return n;
+      async reserveOtpAttempt(h) {
+        const n = f.otpFailures.get(h) ?? 0;
+        if (n >= 5) return -1;
+        f.otpFailures.set(h, n + 1);
+        return n + 1;
+      },
+      async releaseOtpAttempt(h) {
+        f.otpFailures.set(h, Math.max(0, (f.otpFailures.get(h) ?? 0) - 1));
       },
     },
   };

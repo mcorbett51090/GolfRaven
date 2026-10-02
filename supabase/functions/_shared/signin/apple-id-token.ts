@@ -161,6 +161,9 @@ function decodeJsonSegment(seg: string): Record<string, unknown> {
   return obj;
 }
 
+/** A JWK `n` has no leading zero byte, so a 2048-bit modulus is exactly 256 bytes. */
+const MIN_RSA_MODULUS_BYTES = 256;
+
 const isTrue = (v: unknown): boolean => v === true || v === "true";
 
 export async function verifyAppleIdentityToken(token: string, expect: Expectation, opts: VerifyOptions): Promise<VerifiedAppleIdentity> {
@@ -181,6 +184,9 @@ export async function verifyAppleIdentityToken(token: string, expect: Expectatio
 
   let valid: boolean;
   try {
+    // A modulus under 2048 bits is not a key Apple publishes (security gate NIT): refuse it before it can verify anything.
+    const modulus = fromBase64Url(jwk.n);
+    if (modulus === null || modulus.length < MIN_RSA_MODULUS_BYTES) throw new AppleTokenError("signature");
     const key = await crypto.subtle.importKey("jwk", { kty: "RSA", n: jwk.n, e: jwk.e, alg: "RS256", ext: true }, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
     valid = await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, sig.slice().buffer, new TextEncoder().encode(`${h}.${p}`));
   } catch {
@@ -201,11 +207,11 @@ export async function verifyAppleIdentityToken(token: string, expect: Expectatio
   if (expect.rawNonce !== null) {
     const claimed = claims.nonce;
     if (typeof claimed !== "string" || claimed.length === 0) throw new AppleTokenError("nonce");
+    // ONLY the SHA-256 hex of the raw nonce is accepted (Apple's native flow: the app puts sha256(raw) in the request, Apple echoes it as the
+    // claim). The claim itself is NEVER an acceptable raw nonce: a token holder can read the claim, so accepting `claim === raw` would let
+    // anyone who holds an id_token "prove" the nonce by submitting the claim as the raw value, binding nothing (security gate F1).
     const hashed = await sha256Hex(expect.rawNonce);
-    // Constant-time, and both forms are compared before deciding, so timing does not say which one (if any) was close.
-    const okHashed = constantTimeEqual(claimed, hashed);
-    const okRaw = constantTimeEqual(claimed, expect.rawNonce);
-    if (!(okHashed || okRaw)) throw new AppleTokenError("nonce");
+    if (!constantTimeEqual(claimed, hashed)) throw new AppleTokenError("nonce");
   }
 
   const email = typeof claims.email === "string" && claims.email.length > 0 && claims.email.length <= 320 ? claims.email.trim().toLowerCase() : null;

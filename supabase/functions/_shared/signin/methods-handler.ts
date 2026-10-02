@@ -184,22 +184,33 @@ export async function handleLinkProvider(req: LinkRequest, actorUid: string, dep
  * account id the proof was for. */
 async function proveEmail(email: string, code: string, ownerUid: string, deps: SigninDeps): Promise<string> {
   const hash = await sha256Hex(email.trim().toLowerCase());
-  const failed = await deps.otpFailures.peek(hash);
-  if (failed >= OTP_FAILURES_PER_EMAIL_PER_HOUR) {
+  if (deps.emailOtp === null) throw notConfigured("Email proof");
+  // The attempt is TAKEN before the code is checked, atomically (cap check + increment in one statement), so N parallel wrong proofs
+  // cannot all pass a read of the count and reach the verifier (security gate F3: check-then-act let 20 through). It is given back only
+  // when the proof succeeded or never produced a verdict.
+  const used = await deps.otpFailures.reserve(hash);
+  if (used === null) {
     throw Errors.tooManyRequests("too many failed email proofs for this address; try again in an hour", 3600);
   }
-  if (deps.emailOtp === null) throw notConfigured("Email proof");
+  const giveBack = async () => {
+    try {
+      await deps.otpFailures.release(hash);
+    } catch {
+      // A release that fails leaves the attempt charged: the safe direction.
+    }
+  };
   let result;
   try {
     result = await deps.emailOtp.verify(email, code);
   } catch {
     // A transport failure says nothing about the code: not counted against the address.
+    await giveBack();
     throw upstream();
   }
   if (!result.ok) {
-    const n = await deps.otpFailures.record(hash);
-    throw Errors.unprocessable("email_proof_invalid", "that code is not valid", { attemptsRemaining: Math.max(0, OTP_FAILURES_PER_EMAIL_PER_HOUR - n) });
+    throw Errors.unprocessable("email_proof_invalid", "that code is not valid", { attemptsRemaining: Math.max(0, OTP_FAILURES_PER_EMAIL_PER_HOUR - used) });
   }
+  await giveBack();
   if (result.userId !== ownerUid) {
     // The address changed hands between the lookup and the proof. Refuse; never link to a different account than was looked up.
     throw Errors.conflict("email_proof_mismatch", "the proven account is not the account that was looked up; try again");

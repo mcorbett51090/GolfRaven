@@ -461,8 +461,8 @@ as the row's owner. The delegate binders and the list definers are still unused 
 - **Per-user operations** (`methods`, `linkIdentity`, `storeToken`, `unlinkIdentity`, `enqueueRevocations`) call the `signin_*_for_actor` definers
   inside the `edge_actor` transaction `withOwnership` opens (the uid is the bound actor, never an argument). In `legacy` they call the cores as
   `service_role` with the uid as an argument. No grant or policy was broadened for this.
-- **The OTP failure counter** (`peek_signin_otp_failures`, `hit_signin_otp_failure`; the bucket key is built in the database from a 64-hex
-  email hash) is granted to `edge_actor`, so in `edge` it runs as the calling actor (`signinOtpFailuresFor(actor)`), not as a system actor.
+- **The OTP attempt counter** (`peek_signin_otp_failures`, `reserve_signin_otp_attempt`, `release_signin_otp_attempt`; the bucket key is built in the database from a 64-hex
+  email hash; reserve is an atomic cap-check-and-increment taken BEFORE the proof is verified) is granted to `edge_actor`, so in `edge` it runs as the calling actor (`signinOtpFailuresFor(actor)`), not as a system actor.
 - **System operations** (`claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek`) run
   in `edge` as `edge_system` through `openScopedTx("system", { expectedUid: null }, ...)` (`withSigninSystem`), the roles those definers were
   granted to in 0035. They need no `import-catalog`-style legacy pool. In `legacy` they run through `withOwnership` with the nil-uid
@@ -474,7 +474,7 @@ as the row's owner. The delegate binders and the list definers are still unused 
    `legacy` it is unchanged (the proof's own account is the target). The rest of the §3.4 linking rules (a signed-in user linking their own
    identity, a provider-email match to the SAME account) work in both modes. PR3 designs a narrow, proof-bound definer (the OTP proof's
    verifier, not the client, names the target) or keeps this path legacy-only.
-2. `signin_find_account_by_email` answers "does an account hold this email" for any `edge_actor` (returns an id only; no worse than R3).
+2. `signin_find_account_by_email` is service_role only; an `edge_actor` reaches it through `signin_find_account_by_email_for_actor`, which refuses (42501) unless a kind = `user` actor is bound (an unbound actor or a system delegate learns nothing; must-fail cells in `18_signin_providers_edge.sql`). A bound user can still ask "does an account hold this email" (an id only; no worse than R3).
 3. The drain and the KEK reader are `edge_system` already; PR3 only has to move `signin-revocation-drain` onto `withDelegatedActor` if that
    becomes the system path's single entry, and to retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
 

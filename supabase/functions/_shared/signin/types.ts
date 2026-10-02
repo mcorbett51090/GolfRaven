@@ -65,7 +65,10 @@ export interface SigninSystemOps {
   purge(olderThanDays: number): Promise<number>;
   kekById(kekId: string): Promise<Kek>;
   peekOtpFailures(emailHash: string): Promise<number>;
-  recordOtpFailure(emailHash: string): Promise<number>;
+  /** Atomic: takes one attempt (cap check + increment in one statement). Returns attempts used including this one, or -1 at the cap. */
+  reserveOtpAttempt(emailHash: string): Promise<number>;
+  /** Gives one reserved attempt back (never below zero). */
+  releaseOtpAttempt(emailHash: string): Promise<void>;
 }
 
 export interface ClaimedRevocation {
@@ -86,10 +89,14 @@ export interface RevocationDb {
 }
 
 export interface OtpFailureCounter {
-  /** Failed OTP proofs recorded for this target-email hash in the current hour. */
+  /** Failed-or-in-flight OTP proofs recorded for this target-email hash in the current hour (read only; the handler does not decide on it). */
   peek(emailHash: string): Promise<number>;
-  /** Records one failed proof; returns the new count. Commits on its own (it must survive the request failing). */
-  record(emailHash: string): Promise<number>;
+  /** Takes one attempt BEFORE the proof is verified, atomically (the cap check and the increment are one statement, so parallel proofs cannot all
+   * pass a read of the count). Returns the attempts used including this one, or null when the cap is already reached (nothing was taken).
+   * Commits on its own: a proof that fails, or a request that dies, still counts. */
+  reserve(emailHash: string): Promise<number | null>;
+  /** Gives one reserved attempt back: the proof SUCCEEDED, or never reached a verdict (a transport failure says nothing about the code). */
+  release(emailHash: string): Promise<void>;
 }
 
 export interface AppleSigninPort {

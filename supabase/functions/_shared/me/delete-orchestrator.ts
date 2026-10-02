@@ -9,8 +9,13 @@
 //   2. REVOKE at the providers (no transaction open), BEFORE the provider rows are deleted: each queued grant is decrypted with
 //      the Vault KEK and revoked at Apple / Google. Any failure (provider down, our key unconfigured, KEK missing) is recorded on
 //      the queue row and the row stays pending: the drain retries it for 72 h and logs it (revocation.ts). This step NEVER throws.
-//   3. DELETE (own transaction): `handleMeDelete` -> private.delete_my_data, unchanged. It runs whatever step 2 returned: a failed
-//      revocation never blocks the deletion.
+//   3. DELETE (own transaction): first a SECOND enqueue, then `handleMeDelete` -> private.delete_my_data, unchanged. The second enqueue
+//      takes the per-account advisory lock (the one link / unlink take) and holds it until this transaction commits, and it copies any
+//      grant stored since step 1 (a `link` that ran while step 2 was talking to Apple) into the queue in the SAME transaction that deletes
+//      the rows. So no grant can be stored between "queued" and "deleted", and none is deleted unqueued (security gate F6). Those late
+//      grants are revoked right after the commit (step 4), best effort, from the same durable queue. It runs whatever step 2 returned: a
+//      failed revocation never blocks the deletion.
+//   4. REVOKE the late grants (no transaction open), merged into the reported outcomes.
 // The Supabase Auth user (and its identities) is deleted by the entrypoint after this returns, as before.
 //
 // Idempotent end to end: a retry after any partial failure re-enqueues nothing new (the queue is idempotent on the grant's
@@ -29,5 +34,13 @@ export interface DeleteDeps {
 export async function orchestrateMeDelete(deps: DeleteDeps): Promise<DeleteMyDataOutcome> {
   const jobs = await deps.withRepo((repo) => repo.signin.enqueueRevocations());
   const outcomes: RevocationOutcome[] = await runRevocationsBestEffort(deps.revocation, jobs);
-  return deps.withRepo((repo) => handleMeDelete(repo, outcomes));
+  const { result, late } = await deps.withRepo(async (repo) => {
+    // Under the account lock, in the transaction that deletes: whatever was stored since step 1 is queued before its rows go.
+    const again = await repo.signin.enqueueRevocations();
+    const seen = new Set(jobs.map((j) => j.queueId));
+    return { result: await handleMeDelete(repo, outcomes), late: again.filter((j) => !seen.has(j.queueId)) };
+  });
+  if (late.length === 0) return result;
+  const lateOutcomes = await runRevocationsBestEffort(deps.revocation, late);
+  return { ...result, signinProvidersRevoked: [...result.signinProvidersRevoked, ...lateOutcomes] };
 }

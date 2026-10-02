@@ -2760,11 +2760,11 @@ revokes it at the provider, and only then deletes; a failed revocation is retrie
 
 | Rule | Enforcement |
 |---|---|
-| (1) one account per verified email | `private.signin_find_account_by_email` on the (verified) email in the Apple token; a match with another account is never merged. The database refuses to move or duplicate an identity (`signin_link_identity`, 23505 → 409 `identity_conflict`; one Apple per account → 409 `provider_already_linked`). An **unverified** email claim is neither matched nor stored. |
-| (2) never auto-link a social sign-in whose email matches an existing account; email OTP proof first | A link whose Apple email belongs to *another* account is refused, 409 `email_proof_required`, with **no exchange, no write**. With `emailProof.code` the OTP is verified (`EmailOtpVerifier`, Supabase Auth `verifyOtp`) for *that address*; only a verified proof links the identity, and it links to **the account the proof was for**, not to the caller. Failures are counted per target email (**5 per hour, then 429 even for a correct code**); a transport failure is not counted; a proof for a different account than was looked up is 409 `email_proof_mismatch`. |
+| (1) one account per verified email | `private.signin_find_account_by_email` (service_role only, deterministic `ORDER BY`; an edge_actor reaches it through `signin_find_account_by_email_for_actor`, which refuses unless a kind = `user` actor is bound: F7) on the (verified) email in the Apple token; a match with another account is never merged. The database refuses to move or duplicate an identity (`signin_link_identity`, 23505 → 409 `identity_conflict`; one Apple per account → 409 `provider_already_linked`). An **unverified** email claim is neither matched nor stored. |
+| (2) never auto-link a social sign-in whose email matches an existing account; email OTP proof first | A link whose Apple email belongs to *another* account is refused, 409 `email_proof_required`, with **no exchange, no write**. With `emailProof.code` the OTP is verified (`EmailOtpVerifier`, Supabase Auth `verifyOtp`) for *that address*; only a verified proof links the identity, and it links to **the account the proof was for**, not to the caller. The attempt is **reserved before the code is checked**, in one statement that checks the cap and increments (`private.reserve_signin_otp_attempt`; F3: the earlier peek-then-record let 20 parallel wrong proofs all reach the verifier), and given back only for a proof that succeeded or never reached a verdict. So at most **5 wrong proofs per target email per hour reach the verifier, then 429 even for a correct code**; a transport failure is not counted. The session `verifyOtp` creates for the proven account is signed out (`signOut({scope:"local"})`) immediately (F5); in `edge` mode this path answers 501 (O5); a proof for a different account than was looked up is 409 `email_proof_mismatch`. |
 | (3) a private-relay address is its own email | Stored and flagged as given. A relay address never takes the proof path (409 `email_belongs_to_another_account` if it matches another account); a relay account links only from this endpoint, signed in, to the **caller**. |
 | (4) unlink only while another method remains | `private.signin_unlink_identity`: one transaction, per-account advisory lock, 55000 → **422 `last_sign_in_method`**. Two concurrent unlinks of a two-method account leave exactly one (integration test, 3 rounds). |
-| rate limits | 10/user/h on link and unlink (`hitRateLimitForActor`, before the transaction opens); 5 failed OTP proofs per target email per hour (`private.hit_signin_otp_failure`, bucket key built in the database from a sha256 of the email — no address is ever in a bucket key). `GET` (list) is not limited. |
+| rate limits | 10/user/h on link and unlink (`hitRateLimitForActor`, before the transaction opens); 5 failed OTP proofs per target email per hour (`private.reserve_signin_otp_attempt` / `release_signin_otp_attempt`, bucket key built in the database from a sha256 of the email — no address is ever in a bucket key). `GET` (list) is not limited. |
 | "another user's id" | The request has **no field that names an account**; `userId` / `user_id` / `uid` / `email` in a body are *rejected* (400), not ignored. Everything is the authenticated caller's own account; another account's method is 404, another account's Apple identity is 409. |
 
 ### Design decisions
@@ -2807,7 +2807,7 @@ compare in `privileged.ts`; the gateway's JWT check alone would also admit an an
 looked up in a JWKS fetched through the hardened fetcher and cached 1 h (an unknown `kid` refetches at most once a minute; stale-if-error for up
 to 24 h, then fail closed); `iss` exactly `https://appleid.apple.com`; `aud` the configured client id (a string, or an array of exactly that
 one); `exp` in the future; `iat` not in the future (60 s skew); `sub` non-empty; **`nonce` mandatory**: the claim must equal SHA-256-hex of the
-client's raw nonce (Apple's native flow) or the raw nonce itself, compared in constant time; a token without a nonce is refused. The code
+client's raw nonce (Apple's native flow), compared in constant time. **The raw value is never accepted as the claim** (F1: a token holder can read the claim, so accepting `claim === raw` let anyone holding an id_token verify it with `rawNonce = payload.nonce`, binding nothing; the request-shape floor for the raw nonce is now 16 characters); a token without a nonce is refused. The code
 returned by the exchange must belong to **the same Apple user as the identity token** (the id_token Apple returns is verified too, minus the
 nonce); otherwise 422 `authorization_code_mismatch` and the grant that was just minted is revoked. If the database write fails after the
 exchange, the unrecorded grant is revoked too (best effort, logged if it fails): no live token nobody can revoke.
@@ -2889,11 +2889,16 @@ no refresh token is captured**; the client must call `link` with the token and t
 
 ### Residual risks and accepted follow-ups (O-numbers are this work's own)
 
-- **O1. No single-use nonce.** The nonce binds a token to a client-held secret and the caller's session, not to "used once"; a replay needs the
-  caller's valid JWT *and* the single-use authorization code. Cheap to add (a nonce tombstone like `consumed_nonce`); not built.
+- **O1. The nonce is client-chosen and not single-use.** Fixed in round 2 (F1): the claim must be `sha256(raw)` and the raw fallback is gone, with must-fail
+  cells for a raw-valued claim and for the token's own claim submitted as the raw nonce. What remains, **not built on purpose** (a contained change, but not a small
+  one: a server-issued nonce needs a new table, a definer, registry rows and a new endpoint, plus a client-contract change, and it would balloon this PR): the nonce
+  is still chosen by the client, so it binds a token to a client-held secret and to the caller's session, not to "issued by us, used once". A replay still needs the
+  caller's valid JWT *and* the single-use authorization code. **Remaining O1 work:** `POST /v1/me/signin-nonce` returning a random value stored hashed with a short
+  expiry in a private table, consumed (deleted) by the same transaction that links; `link` then refuses an unknown or already-consumed nonce.
 - **O2. Google capture is a TODO(P4).** `link` for Google is 501 `provider_not_supported` (it needs Google's code exchange and a native-flow
   decision). The Google *revoker* is built and unit-tested, so nothing changes in the queue once capture exists.
-- **O3. One Apple client id.** Android/web (Services ID) needs a second `aud` and a secret with `sub` = that id.
+- **O3. One Apple client id.** Android/web (Services ID) needs a second `aud` and a secret with `sub` = that id. Note for that work: the `nonce` claim rule is
+  `sha256(raw)` only, so a web flow must send `sha256(raw)` as the `nonce` parameter to Apple as well (Apple echoes it unchanged); a web client that sends the raw value is refused.
 - **O4. KEK rotation has no re-wrap job.** A new KEK wraps new DEKs; old KEKs must stay while any row names them.
 - **O5. Edge-role lane (E-numbers continue the PR1 list).** Rebased onto PR2's `EDGE_DB_MODE`. 0035 ships the `_for_actor` wrappers (edge_actor) and
   grants the queue operations and the KEK reader to `edge_system`, with **no new edge policy and no new edge table grant** (every edge path is a
@@ -2901,12 +2906,27 @@ no refresh token is captured**; the client must call `link` with the token and t
   11/12). In `edge` mode `privileged.ts` runs per-user ops through the `_for_actor` definers, the OTP counter as the actor, and the queue ops and
   KEK reader as `edge_system` (`openScopedTx("system")`); the full Deno suite passes in both modes. Open PR3 items: (i) the **OTP-proven link to
   another account** has no edge definer on purpose (it would be an "attach an identity to any account" primitive), so it answers
-  `501 email_proof_link_unavailable` in `edge` mode only; (ii) `private.signin_find_account_by_email` is an account-existence oracle for any
-  edge_actor (returns only an id, no worse than R3); (iii) retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
+  `501 email_proof_link_unavailable` in `edge` mode only; (ii) `private.signin_find_account_by_email` is service_role only and an edge_actor reaches it through `signin_find_account_by_email_for_actor`, which requires a kind = `user` binding (F7: it was callable by any edge_actor with no binding check); a bound user still gets an id-only existence answer (no worse than R3); the edge-mode refusal to link another account's identity (`mustBeSelf`) has its own integration cell that calls `repo.signin.linkIdentity(otherUid, ...)` directly (F4); (iii) retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
 - **O6. The OTP verification is not bounded by the vendor timeout** (Supabase Auth, through supabase-js): only the 15 s request race bounds it.
 - **O7. `GET` (list) is not rate-limited** (the plan's 10/user/h is for linking); it is one cheap read.
-- **O8. `auth.identities` is written by a definer.** If the real project refuses the grant, the migration fails loudly rather than the endpoint
-  failing at run time (the grant is in 0035 itself).
+- **O8. `auth.identities` is written by a definer.** A GRANT the grantor may not make (no GRANT OPTION) does **not** fail: PostgreSQL only warns ("no privileges
+  were granted"). The earlier claim that a refused grant fails the migration loudly was wrong. 0035 now asserts every privilege it needs with
+  `has_column_privilege` / `has_table_privilege('private_definer', 'auth.identities', ...)` right after the GRANTs and RAISEs if one did not take (F8). Proved by a
+  mutation: the H2 approximation role stripped of DELETE on `auth.identities` gives the warning and then `0035: the GRANT DELETE ON auth.identities TO private_definer
+  did not take effect`. A pgTAP cell asserts the privileges are held.
+- **O9. F2 (MEDIUM, non-blocking, `[unverified]`): unlinking `email` may not end email access.** `signin_unlink_identity('email')` removes the `auth.identities`
+  row only. GoTrue's email-OTP sign-in most likely looks the user up by `auth.users.email`, so the address may still sign in after the unlink: unlink is **not** a
+  security control for the email method, and nothing here says it is (no API or UI text claims it; 0035 and `request-shape.ts` say so in a comment). **P4-spike
+  item:** with a real project, unlink `email` on an account that holds another method and check whether `signInWithOtp` for that address still issues a session.
+- **O10. F6 residual.** The delete transaction now re-enqueues under the per-account lock (the lock is held to commit), so no grant is stored between "queued" and
+  "deleted" and none is deleted unqueued. A `link` that waits on that lock runs after the commit and can store a grant for a user whose rows are gone but whose
+  `auth.users` row still exists for the few milliseconds before `deleteAuthUser`; that grant is cascade-deleted unqueued. It needs the account's owner to link Apple
+  while deleting the same account; closing it needs a deletion tombstone (a table), which is not built. Late grants caught by the second enqueue are revoked right after
+  the commit, from the durable queue, not before the rows are deleted.
+- **O11. Accepted NIT residuals:** the queue's idempotency key is `(provider, md5(ciphertext))`, so a grant re-queued more than 72 hours after the first row expired
+  is a new row; expiry is lazy (applied when a claim runs); the envelope's AAD binds provider and kek id but not the user or the row, which is deliberate (the
+  queue row has no user id) and means a ciphertext moved between rows of the same provider decrypts. The `verifyOtp` session sign-out is best effort (a failure is
+  logged and does not fail the proof); the session is in memory only and never leaves the function.
 
 ### Verification (rebased onto App Attest `0daf155`; 0035 follows 0034)
 
@@ -2939,3 +2959,22 @@ no refresh token is captured**; the client must call `link` with the token and t
   session), purge deleting pending rows, an arbitrary error string stored. `privileged.ts` (5, against the real cluster): `55000` no longer mapped to 422, a half-set
   Apple configuration counted as configured, the drain's bearer check always true, OTP failures not persisted, `23505` no longer mapped.
 - **Not run:** PG16 (the harness defaults to PG17, `supabase/config.toml`'s pin); any test against a real Supabase project, Apple or Google; prettier and any deploy (out of scope).
+
+### Round 2: security gate findings F1-F8 (on `main` 67f0b2c; 0035 edited in place, it is not merged)
+
+| Finding | Fix | Proof |
+|---|---|---|
+| **F1** (MEDIUM, blocking) raw-nonce fallback | `claim === sha256Hex(raw)` only; request-shape floor 16 chars; O1 records the remaining server-issued-nonce work | 2 must-fail cells (a raw-valued claim; the token's own claim submitted as the raw nonce); mutation: fallback restored, both fail |
+| **F3** OTP cap was check-then-act | `reserve_signin_otp_attempt` (one statement: cap check + increment) before verifying, `release_signin_otp_attempt` on success / transport failure | 20-parallel Deno cell (verifier called exactly 5 times), a unit twin, 7 pgTAP cells; mutation: a peek-then-record handler fails the Deno cell; mutation: the SQL cap removed fails 4 pgTAP cells |
+| **F4** `mustBeSelf` untested | integration cell calling `repo.signin.linkIdentity(otherUid, ...)` and `storeToken(otherUid, ...)` directly in `edge` mode | mutation: `mustBeSelf` made a no-op fails exactly that cell |
+| **F5** `verifyOtp` left a live GoTrue session | `makeEmailOtpVerifier` signs the session out (`scope: "local"`) | recording-fake cell (called on success, not on a refused code, a failed sign-out does not fail the proof); mutation: sign-out removed fails it |
+| **F6** link between enqueue and delete | `signin_enqueue_revocations` takes the per-account lock; the delete transaction re-enqueues first and the late grants are revoked after the commit | a race cell (a grant stored during the Apple call is revoked), a lock cell (a link waits for the commit), a unit twin; mutations: second enqueue removed and lock removed each fail their cell |
+| **F7** unbound email lookup | core is service_role only; `signin_find_account_by_email_for_actor` requires a kind = `user` binding; `ORDER BY u.id` | 4 pgTAP cells; mutation: binding check removed fails 2 |
+| **F8** refused GRANT only warns | `has_column_privilege` / `has_table_privilege` assertions after the GRANTs, RAISE if one did not take | a pgTAP cell; mutation: the H2 approximation role without DELETE gives the warning, then the RAISE |
+| NIT | RSA modulus >= 2048 bits on JWKS import (a 1024-bit key cell); `16_edge_role.sql` cell 708 echo no longer has an apostrophe inside `\echo` (the echo prints) | |
+| **F2** (non-blocking) | documented as O9, a P4-spike item; no behaviour change, no text claims unlink ends email access | |
+
+Numbers: `tools/db/test.sh` exit 0 in `HARNESS_MODE=superuser` and `restricted`; pgTAP **21 files, 1784 assertions** (`17_signin_providers.sql` 150, `18_signin_providers_edge.sql` 65); the
+Deno suite **195 tests in each of `EDGE_DB_MODE=legacy` and `edge`**; vitest **40 files / 762 tests**; the lint's own **316** tests; `pnpm -r typecheck` clean; `deno check --frozen` and `deno cache --frozen`
+(fresh `DENO_DIR`) exit 0; `gitleaks dir` no leaks; `check-migrations-immutable.sh --base 67f0b2c` and `--self-test` OK. The F3 concurrency cell is vacuous in `edge` mode (the proof path
+answers 501 there, O5) and is proved in `legacy`.
