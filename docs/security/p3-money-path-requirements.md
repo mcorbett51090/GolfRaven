@@ -1594,21 +1594,23 @@ actually happen:
   backed by the partial index `evidence_fixcoords_idx` on the rows that still carry them): (a) when the
   single re-pick is used (`repickApply`, same transaction); (b) once the course can no longer be
   re-picked — promoted with its backlog row DONE, not in a split family; (c) after
-  `FIX_COORDS_RETENTION_DAYS` = 30 days from the evidence's `created_at`. Why 30: a client can only
-  submit against a catalog inside the 30-day skew window (build plan §3.3), so a split that matters to
-  a play is announced by a catalog release within about that long; keeping them longer buys nothing, and
-  a re-pick after that fails closed (`cannot_rederive`). It is one named constant
+  `FIX_COORDS_RETENTION_DAYS` = 30 days from the evidence's `created_at`. Why 30: it is a minimisation choice, not a derived bound. Splits come from verification work that
+  can land months after a play, so 30 days does NOT cover every split; the accepted cost is that a split
+  announced later cannot be re-picked for that play and fails closed (`cannot_rederive`, nothing moves). It is one named constant
   (`evidence/handler.ts`).
 - A row without coordinates keeps failing closed at re-pick (`cannot_rederive`, nothing moves).
 - They belong to the owner's own row: they ride along in `export_my_data` (the `integrity` column — so
   the export shows exactly what is retained: coordinates for a stub/split-family row inside its window,
   none otherwise) and go with the row on `delete_my_data`.
 
-*Note for the §8.6 / privacy-label owner:* the server now holds raw coordinates of a play for up to 30
-days in ONE narrow case (a play at a course that is still a catalog stub or in a split family), where it
-previously held none; everywhere else the §8.6 position (course id only) is unchanged. If the privacy
-label must read "no raw location on the server", that sentence needs this exception or the re-pick
-feature must be dropped.
+*Note for the §8.6 / privacy-label owner (wording corrected at the P3e gate PASS):* the server now
+holds raw coordinates of a play for up to 30 days whenever the play's course is a catalog stub, is in a
+split family, or has an open rescore backlog row, where it previously held none. Stubs are the whole
+unverified base layer, so at launch this covers most plays away from the branded trails, not a narrow
+case. Plays at verified, never-split courses and facility-level rows are unchanged (course id only).
+The privacy label must state this exception, or the re-pick feature must be dropped. **Launch-blocking:**
+the purge runs only inside `import-catalog`; until the hourly backstop (or a dedicated purge job) is
+scheduled, the 30-day limit is not enforced. See the P3e gate PASS follow-ups below.
 
 Known limit: if the
 user ALREADY has a `user`-picked play at another course of the same facility + date, the split label
@@ -1687,3 +1689,29 @@ ledger outgrows it.
 2. Wiring the deploy webhook and the hourly backstop schedule (deploy-gated).
 3. The service-role lint CLI treats a nonexistent root as clean (exit 0) instead of failing.
 
+## P3e gate PASS (round 5, `c0d24e8`, 2026-10-02): accepted follow-ups
+
+The P3e security gate passed with no BLOCKER or HIGH. These remain, recorded rather than built:
+
+1. **MEDIUM (fail-closed, latent): split-family over-cap.** Every unlabelled play at a split sibling is
+   scored as a `user` pick, including a post-split play matched to that sibling's own polygon, so no play
+   at a facility that has ever split can earn money. The user-pick treatment belongs only to plays from
+   before the split (created before the split import, or dated on or before the split transition), or to
+   fixes matched to the site-covering geometry. Fix before the geometry import ships. Latent today:
+   imported courses carry no geometry (the radius cap zeroes money), and the money programme is
+   pilot-only on verified courses.
+2. **LOW, launch-blocking: schedule the fix-coordinate purge independently** (the hourly `import-catalog`
+   backstop, or its own job). Until then the 30-day retention is not enforced.
+3. **LOW: replace the backlog grace-sweep** with a page bound `created_at <= clock_timestamp() - interval
+   '15 s'` in `nextPlays`. The current sweep rewinds only from the final cursor, so a play straddling an
+   early page of a multi-page drain can be missed (needs a ≤ 12 s race on a course with > 50 plays).
+4. **NIT: guard the NEW-1 date-shift test against parallel runs** (a session advisory lock, or a
+   "must stay sequential" note in `tools/db/test-deno-integration.sh`). Today files run sequentially.
+
+Carried from the P3d round-4 gate (recommended, not blocking):
+
+5. Replace esm.sh routing stubs in `supabase/functions/deno.json` (and `pinned-import-targets.json`) with
+   final module URLs or exact `npm:` specifiers. esm.sh re-routed the `@noble/hashes` `utils.js` stub on
+   2026-10-02 despite immutable cache headers, which broke `deno cache --frozen` until re-pinned.
+6. `check-migrations-immutable.sh` on `push`: try `git fetch --no-tags origin "$GH_EVENT_BEFORE"` before
+   failing closed after a force-push, and print `commit-tree` stderr in the self-test failure branch.
