@@ -185,6 +185,14 @@ describe("devices-attest-key handler: MUST-FAIL", () => {
     expect(state.challenges.get(cMine.id)!.usedAt).toBeNull();
   });
 
+  it("the repo's own 'no such device' (the database's P0002) is that same 422, never a 404 — foreign and nonexistent alike", async () => {
+    const state = world();
+    seedAttestDevice(state, { id: FOREIGN, userId: OTHER });
+    const input = (deviceId: string) => ({ deviceId, keyId: "K".repeat(43) + "=", publicKey: new Uint8Array(65) });
+    await expectHttp(repoFor(state, USER).attestKey.register(input(FOREIGN)), 422, "challenge_not_consumable");
+    await expectHttp(repoFor(state, USER).attestKey.register(input("44444444-4444-4444-8444-444444444444")), 422, "challenge_not_consumable");
+  });
+
   it("another user's CHALLENGE is refused (it is not visible to the caller)", async () => {
     const state = world();
     seedAttestDevice(state, { id: DEV, userId: USER });

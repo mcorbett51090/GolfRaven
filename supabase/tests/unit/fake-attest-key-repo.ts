@@ -54,7 +54,7 @@ export function makeFakeAttestKeyRepo(state: FakeState, uid: string): AttestKeyR
     },
     async register(input) {
       const d = devices().get(input.deviceId);
-      if (!d || d.userId !== uid) throw Errors.notFound("no such device");
+      if (!d || d.userId !== uid) throw Errors.unprocessable("challenge_not_consumable", "this challenge could not be used (already used, expired, or not issued to this device)");
       if (d.platform !== "ios") throw Errors.unprocessable("attestation_rejected", "the attestation could not be verified");
       const keyHash = await sha256Hex(input.keyId);
       if (d.keyId === input.keyId) throw Errors.conflict("key_already_registered", "this key is already registered on this device");

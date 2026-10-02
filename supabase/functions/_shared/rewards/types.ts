@@ -76,9 +76,12 @@ export interface RewardsRepo {
    * the row for the rest of the transaction. */
   lockOwnReward(id: string): Promise<OwnReward | null>;
   deviceAttestState(deviceId: string): Promise<DeviceAttestState | null>;
-  /** Atomic, monotonic: `UPDATE ... WHERE attest_counter < $new`. `false` =
-   * the counter did not advance (a replay, or a lost race). */
-  advanceAttestCounter(deviceId: string, counter: number): Promise<boolean>;
+  /** Atomic, monotonic, and bound to the key the assertion was verified against:
+   * `UPDATE ... WHERE attest_key_id = $keyId AND attest_counter < $new`. `false` =
+   * the counter did not advance (a replay, a lost race, or the key was replaced
+   * on this device after the state was read — a retired key never advances, and
+   * the replacement key never inherits its counter). */
+  advanceAttestCounter(deviceId: string, keyId: string, counter: number): Promise<boolean>;
   /** Records the last verdict on the device row (grade + time only — the
    * column is exported to the player, so no reasons) and the token hash. */
   recordDeviceVerdict(deviceId: string, verdict: { grade: Grade; tokenHash: string | null }): Promise<void>;
