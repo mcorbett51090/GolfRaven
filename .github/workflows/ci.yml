@@ -86,6 +86,17 @@ jobs:
         # heuristic (`verify-a11y-budget.mjs`, part of `pnpm -r build`).
         run: pnpm --filter @golfraven/site exec playwright install --with-deps chromium
 
+      - name: Expo prebuild (generates the native projects the mobile policy test scans)
+        # P4 AT 5 / allowBackup: apps/mobile/test/policy.test.ts scans the GENERATED
+        # AndroidManifest.xml and Info.plist. Under CI those two tests FAIL if the files
+        # are missing (locally they skip), so this step must run before `pnpm -r test`.
+        # Verified offline in ~2s locally; the output (apps/mobile/{android,ios}) is
+        # gitignored. `[unverified on a GitHub runner until this job first runs]`
+        run: pnpm --filter @golfraven/mobile exec expo prebuild --no-install
+        env:
+          EXPO_OFFLINE: "1"
+          EXPO_NO_TELEMETRY: "1"
+
       - name: Test
         # Same scoping as the Build step above — apps/site's own test
         # suite forces GOLFRAVEN_DEMO=1 itself (test/global-setup.mjs), but

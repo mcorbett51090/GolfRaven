@@ -16,7 +16,7 @@ export interface AppConfig {
    * manifest's `minAppVersion`. */
   appVersion: string;
   /** The contract MAJOR this build reads (`CONTRACT_VERSION` in
-   * `@golfraven/catalog`; pinned equal by `test/config.test.ts`). The M-freeze
+   * `@golfraven/catalog`; pinned equal by `test/wallet-config.test.ts`). The M-freeze
    * moves it to 1. */
   supportedContractMajor: number;
   /** Where the force-update screen sends the player. */

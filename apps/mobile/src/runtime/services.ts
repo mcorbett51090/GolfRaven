@@ -6,7 +6,7 @@
 import { MemoryDeviceFlagStore, SqliteDeviceFlagStore, AgeGate, type DeviceFlagStore } from "../age";
 import { createMockApi, type MockApi } from "../api";
 import { nobleCatalogCrypto } from "../catalog/crypto";
-import { TRUSTED_KEYSET } from "../catalog/keys";
+import { resolveTrustAnchors, TRUSTED_KEYSET } from "../catalog/keys";
 import { CatalogManager } from "../catalog/manager";
 import { MemoryCatalogCacheStore, SqliteCatalogCacheStore } from "../catalog/store";
 import { readAppConfig, type AppConfig } from "../config";
@@ -26,6 +26,10 @@ export interface AppServices {
   providers: ReturnType<typeof stubProviders>;
   /** False when SQLite could not be opened and the app fell back to memory. */
   persistent: boolean;
+  /** Why the compiled-in keyset was refused (release builds only), or `null`.
+   * When set the catalog is untrusted and network refresh is off (fail closed;
+   * `resolveTrustAnchors`). */
+  keysetProblem: string | null;
 }
 
 export async function createServices(): Promise<AppServices> {
@@ -50,11 +54,15 @@ export async function createServices(): Promise<AppServices> {
     flags = new MemoryDeviceFlagStore();
   }
 
+  // LOW-12: `assertReleaseKeyset`, applied without throwing. A release build whose keyset
+  // is not releasable (today: empty, until the P3 gate) trusts NOTHING and does not fetch.
+  const anchors = resolveTrustAnchors(TRUSTED_KEYSET, __DEV__);
+
   const catalog = new CatalogManager({
-    baseUrl: config.catalogBaseUrl,
+    baseUrl: anchors.problem === null ? config.catalogBaseUrl : null,
     store: catalogStore,
     crypto: nobleCatalogCrypto,
-    trustedKeys: TRUSTED_KEYSET,
+    trustedKeys: anchors.trustedKeys,
     appVersion: config.appVersion,
     supportedContractMajor: config.supportedContractMajor,
   });
@@ -73,10 +81,19 @@ export async function createServices(): Promise<AppServices> {
     refreshCatalog: async () => {
       await catalog.refresh();
     },
-    // P4.1 STUB: the on-device matcher (`@golfraven/matching`) is wired in a
-    // later slice. Until then a re-match only checks that the stored course
-    // still exists in the current catalog; if not, the play becomes an
-    // "Unlisted course" item and waits (§7.6, G3-01). It never invents a match.
+    // P4.1 STUBS — what they do, and what that means on a device:
+    //  * `rematch`: the on-device matcher (`@golfraven/matching`) is wired in a later
+    //    slice. Until then a re-match only checks that the stored course still exists in
+    //    the current catalog, and it never invents a match. With NO verified snapshot —
+    //    which is every build until the production keyset exists, because an empty
+    //    keyset verifies nothing — it returns `{ ok: false }`, so a 422 `catalog_stale`
+    //    answer DEAD-LETTERS the item (`needs_attention` / `rematch_failed`) rather than
+    //    re-matching it.
+    //  * `findCourseForUnlisted` always answers `null`: an "Unlisted course" item never
+    //    becomes sendable on the device (§7.6, G3-01).
+    //  * `resolveQueued` (outbox/machine.ts) has no caller: nothing observes the server
+    //    resolving a `queued_catalog` item, so on the device a queued play stays `queued`
+    //    (it never becomes `accepted` or `queue_expired`).
     rematch: (item: OutboxItem): Promise<RematchResult> => {
       const snap = catalog.getState().snapshot;
       if (!snap) return Promise.resolve({ ok: false });
@@ -97,5 +114,6 @@ export async function createServices(): Promise<AppServices> {
     flags,
     providers: stubProviders(),
     persistent,
+    keysetProblem: anchors.problem,
   };
 }

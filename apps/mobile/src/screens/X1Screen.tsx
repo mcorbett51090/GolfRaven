@@ -6,9 +6,12 @@ import { runX1HealthConnectCheck } from "../health-connect";
 
 /**
  * The P0 check-X1 screen (build plan §10 P0, row X1), moved here unchanged in
- * behaviour from the old placeholder `App.tsx` and reachable only from
- * Me → Developer tools in development builds. See apps/mobile/README.md for
- * how Matt runs it on a real Android device (it cannot be run here).
+ * behaviour from the old placeholder `App.tsx`. It is linked from Me →
+ * Developer tools, which only exists in development builds. The route
+ * (`app/dev/x1.tsx`) is still deep-linkable (`golfraven://dev/x1`) in every
+ * build, so it redirects away when `!__DEV__` and loads this screen lazily
+ * so release bundles do not contain it. See apps/mobile/README.md for how Matt
+ * runs it on a real Android device (it cannot be run here).
  * Dev-only text: deliberately not localized.
  */
 export function X1Screen() {

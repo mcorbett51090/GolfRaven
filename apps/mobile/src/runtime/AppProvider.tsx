@@ -5,7 +5,6 @@ import type { Session } from "../api";
 import { buildIndex, type CatalogIndex } from "../browse";
 import type { CatalogState, RefreshOutcome } from "../catalog/manager";
 import type { CatalogSnapshot } from "../catalog/snapshot";
-import { DEMO_SNAPSHOT } from "../demo/demo-catalog";
 import { resolveLocale, translate, plural, LOCALES, type Locale, type MessageKey, type Params, type PluralBase } from "../i18n";
 import type { OutboxItem } from "../outbox";
 import type { ProgrammeStatus } from "../wallet";
@@ -13,6 +12,11 @@ import { walletTabVisible } from "../wallet";
 import { createServices, type AppServices } from "./services";
 
 const LOCALE_FLAG = "locale";
+
+/** The labelled demo catalog exists only in development builds: it is
+ * `require`d lazily under `__DEV__` so Metro drops it from release bundles
+ * (a static import would ship it, merely unused). */
+const DEMO_SNAPSHOT: CatalogSnapshot | null = __DEV__ ? (require("../demo/demo-catalog") as typeof import("../demo/demo-catalog")).DEMO_SNAPSHOT : null;
 
 export interface AppContextValue {
   services: AppServices;

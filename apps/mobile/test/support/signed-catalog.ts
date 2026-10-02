@@ -4,13 +4,14 @@
  * / `signVersions` + canonical JSON that publishes the real catalog), with a
  * throwaway Ed25519 key generated in-process — no key material is committed.
  */
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash, createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCatalogBundle } from "@golfraven/catalog-tools/bundle";
 import { emitCatalogArtifact } from "@golfraven/catalog-tools/emit-catalog";
-import type { CatalogManifest } from "@golfraven/catalog-tools/manifest-core";
+import { canonicalStringify, type CatalogManifest } from "@golfraven/catalog-tools/manifest-core";
+import { signManifest, signVersions } from "@golfraven/catalog-tools/sign";
 import { base64UrlToBytes } from "../../src/catalog/bytes";
 import type { FetchBytes, FetchOptions, FetchResult } from "../../src/catalog/manager";
 import type { TrustedKey } from "../../src/catalog/keys";
@@ -241,4 +242,32 @@ export function replaceText(bytes: Uint8Array, from: string, to: string): Uint8A
   const text = Buffer.from(bytes).toString("utf8");
   if (!text.includes(from)) throw new Error(`"${from}" not found in fixture`);
   return new Uint8Array(Buffer.from(text.replace(from, to), "utf8"));
+}
+
+/** A `versions.sig.json` over `versions.json`'s exact bytes, signed by `key`
+ * (which need not be the key that signed the manifest — the verifier checks
+ * each signature against its own `kid`). */
+export function versionsSigBy(versionsBytes: Uint8Array, key: TestKey): Uint8Array {
+  const sig = signVersions(Buffer.from(versionsBytes), key.kid, createPrivateKey(key.privateKeyPem));
+  return new Uint8Array(Buffer.from(canonicalStringify(sig), "utf8"));
+}
+
+/** A `manifest.sig.json` that is genuinely signed by `key`, but whose
+ * statement fields (`kid`, `catalogVersion`, `contractVersion`) are the ones
+ * given — i.e. exactly one thing is wrong with it: it disagrees with the
+ * manifest.json it sits next to. */
+export function manifestSidecar(
+  manifestBytes: Uint8Array,
+  fields: { kid: string; catalogVersion: string; contractVersion: number },
+  key: TestKey,
+): Uint8Array {
+  const sig = signManifest(fields, Buffer.from(manifestBytes), createPrivateKey(key.privateKeyPem));
+  return new Uint8Array(Buffer.from(canonicalStringify(sig), "utf8"));
+}
+
+/** The same catalog with `versions.sig.json` re-signed by another key. */
+export function withVersionsSignedBy(c: SignedCatalog, key: TestKey): SignedCatalog {
+  const files = new Map(c.files);
+  files.set("versions.sig.json", versionsSigBy(files.get("versions.json")!, key));
+  return { files, manifest: c.manifest };
 }

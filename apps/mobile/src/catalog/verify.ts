@@ -54,7 +54,10 @@ export type VerifyIssueCode =
   | "CONTRACT_MAJOR_MISMATCH"
   | "VERSIONS_TAMPERED"
   | "VERSIONS_EMPTY"
-  | "VERSIONS_MISMATCH";
+  | "VERSIONS_MISMATCH"
+  /** The install's own persisted trust state (revoked set / version floor)
+   * is present but unreadable: nothing can be trusted (`manager.ts`). */
+  | "TRUST_STATE_CORRUPT";
 
 export interface VerifyIssue {
   code: VerifyIssueCode;
@@ -76,8 +79,10 @@ export interface VerifyContext {
   revokedKids: ReadonlySet<string>;
   /** The contract MAJOR this build understands. */
   supportedContractMajor: number;
-  /** The currently cached `catalogVersion`: anything OLDER is refused
-   * (anti-rollback). Equal is allowed (idempotent re-fetch). */
+  /** The anti-rollback FLOOR: anything OLDER is refused. Equal is allowed
+   * (idempotent re-fetch). The manager passes the persisted high-water mark
+   * (`maxVerifiedCatalogVersion`), NOT the cached version, so it still binds
+   * after the cache has been dropped. */
   minCatalogVersion?: string | undefined;
 }
 

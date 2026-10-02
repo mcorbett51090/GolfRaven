@@ -1,23 +1,57 @@
 /**
  * Store-policy gates that can be checked without a device:
- *  - P4 AT 5: no `Always` / background-location permission (config, manifest, Info.plist);
+ *  - P4 AT 5: no `Always` / background-location permission (config, resolved config, manifest, Info.plist);
+ *  - the under-age flag cannot leave the device through a backup (`allowBackup`);
  *  - P4 AT 7: no ads or analytics SDK in the lockfile.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  ALLOWED_PLUGINS,
   DENIED_SDKS,
   findDeniedSdks,
+  findDynamicConfigs,
   lockfilePackageNames,
+  normalizeAndroidPermission,
   scanAndroidManifest,
   scanAppConfig,
   scanInfoPlist,
 } from "./support/policy-scan";
 
 const here = (rel: string): string => fileURLToPath(new URL(rel, import.meta.url));
+const appDir = here("..");
 const appJson = JSON.parse(readFileSync(here("../app.json"), "utf8")) as Parameters<typeof scanAppConfig>[0];
 const lock = readFileSync(here("../../../pnpm-lock.yaml"), "utf8");
+const rules = (c: Parameters<typeof scanAppConfig>[0]): string[] => scanAppConfig(c).map((v) => v.rule);
+
+describe("AT 5 — no dynamic Expo config can hide anything from the scan", () => {
+  it("there is no app.config.* next to app.json (it could add permissions the app.json scan never sees)", () => {
+    expect(findDynamicConfigs(readdirSync(appDir))).toEqual([]);
+  });
+
+  it("the detector recognises every dynamic-config spelling and ignores app.json", () => {
+    expect(findDynamicConfigs(["app.json", "app.config.ts", "app.config.js", "app.config.mjs", "app.config.cjs", "app.config.json", "package.json", "app.configs"])).toEqual([
+      "app.config.ts",
+      "app.config.js",
+      "app.config.mjs",
+      "app.config.cjs",
+      "app.config.json",
+    ]);
+  });
+
+  // `@expo/config` is Expo's own resolver (what `expo prebuild` reads); it is in the lockfile as a dependency
+  // of `expo`, so it is resolved THROUGH expo rather than added as a dependency of this app.
+  it("the config Expo actually resolves is clean too", () => {
+    const fromExpo = createRequire(createRequire(import.meta.url).resolve("expo/package.json"));
+    const { getConfig } = fromExpo("@expo/config") as { getConfig: (root: string, o: Record<string, unknown>) => { exp: NonNullable<Parameters<typeof scanAppConfig>[0]["expo"]> } };
+    const resolved = getConfig(dirname(appDir + "/app.json"), { skipSDKVersionRequirement: true, isPublicConfig: false });
+    expect(resolved.exp.plugins?.length, "the resolved config must not be empty (the scan would be vacuous)").toBeGreaterThan(0);
+    expect(scanAppConfig({ expo: resolved.exp })).toEqual([]);
+  });
+});
 
 describe("AT 5 — no Always / background location: app.json", () => {
   it("the real app.json is clean and blocks the background-location permissions", () => {
@@ -25,6 +59,11 @@ describe("AT 5 — no Always / background location: app.json", () => {
     const blocked = appJson.expo?.android?.blockedPermissions ?? [];
     expect(blocked).toContain("android.permission.ACCESS_BACKGROUND_LOCATION");
     expect(blocked).toContain("android.permission.FOREGROUND_SERVICE_LOCATION");
+    expect(blocked).toContain("android.permission.SYSTEM_ALERT_WINDOW");
+  });
+
+  it("the real app.json turns Android backup off (the device-local under-age flag must not be copied off the device)", () => {
+    expect(appJson.expo?.android?.allowBackup).toBe(false);
   });
 
   const base = (): NonNullable<typeof appJson.expo> => structuredClone(appJson.expo!);
@@ -32,41 +71,81 @@ describe("AT 5 — no Always / background location: app.json", () => {
   it("fails when an Android background permission is requested", () => {
     const e = base();
     e.android = { ...e.android, permissions: [...(e.android?.permissions ?? []), "android.permission.ACCESS_BACKGROUND_LOCATION"] };
-    expect(scanAppConfig({ expo: e }).map((v) => v.rule)).toContain("android-permission");
+    expect(rules({ expo: e })).toContain("android-permission");
   });
 
-  it("fails when a background permission is no longer explicitly blocked", () => {
+  it("recognises the SHORT permission name (Expo and Android both accept it)", () => {
+    expect(normalizeAndroidPermission("ACCESS_BACKGROUND_LOCATION")).toBe(normalizeAndroidPermission("android.permission.ACCESS_BACKGROUND_LOCATION"));
     const e = base();
-    e.android = { ...e.android, blockedPermissions: [] };
-    expect(scanAppConfig({ expo: e }).map((v) => v.rule)).toContain("android-blocked-permission-missing");
+    e.android = { ...e.android, permissions: ["ACCESS_BACKGROUND_LOCATION"] };
+    expect(rules({ expo: e })).toContain("android-permission");
+    // and a short name in blockedPermissions counts as blocking it
+    const ok = base();
+    ok.android = { ...ok.android, blockedPermissions: ["ACCESS_BACKGROUND_LOCATION", "FOREGROUND_SERVICE_LOCATION", "SYSTEM_ALERT_WINDOW"] };
+    expect(rules({ expo: ok })).toEqual([]);
+  });
+
+  it("fails when a background permission (or SYSTEM_ALERT_WINDOW) is no longer explicitly blocked", () => {
+    for (const keep of [[], ["android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.SYSTEM_ALERT_WINDOW"], ["android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION"]]) {
+      const e = base();
+      e.android = { ...e.android, blockedPermissions: keep };
+      expect(rules({ expo: e }), keep.join(",")).toContain("android-blocked-permission-missing");
+    }
+  });
+
+  it("fails when Android backup is on, or merely not stated", () => {
+    for (const v of [true, undefined]) {
+      const e = base();
+      e.android = { ...e.android };
+      if (v === undefined) delete e.android.allowBackup;
+      else e.android.allowBackup = v;
+      expect(rules({ expo: e }), String(v)).toContain("android-allow-backup");
+    }
   });
 
   it("fails on an iOS Always usage string or a location background mode", () => {
     const e = base();
     e.ios = { ...e.ios, infoPlist: { NSLocationAlwaysAndWhenInUseUsageDescription: "x", UIBackgroundModes: ["location"] } };
-    const rules = scanAppConfig({ expo: e }).map((v) => v.rule);
-    expect(rules).toContain("ios-infoplist");
-    expect(rules).toContain("ios-background-modes");
+    const r = rules({ expo: e });
+    expect(r).toContain("ios-infoplist");
+    expect(r).toContain("ios-background-modes");
   });
 
-  it("fails when expo-location is configured for background use", () => {
+  it("fails when expo-location is configured for background use (it is not even on the allow-list)", () => {
     for (const props of [{ isAndroidBackgroundLocationEnabled: true }, { isIosBackgroundLocationEnabled: true }, { locationAlwaysAndWhenInUsePermission: "x" }]) {
       const e = base();
       e.plugins = [...(e.plugins ?? []), ["expo-location", props]];
-      expect(scanAppConfig({ expo: e }).map((v) => v.rule)).toContain("plugin-prop");
+      expect(rules({ expo: e })).toContain("plugin-prop");
+      expect(rules({ expo: e })).toContain("plugin");
     }
   });
 
-  it("an expo-location plugin that turns background OFF is fine", () => {
-    const e = base();
-    e.plugins = [...(e.plugins ?? []), ["expo-location", { isAndroidBackgroundLocationEnabled: false, isIosBackgroundLocationEnabled: false }]];
-    expect(scanAppConfig({ expo: e })).toEqual([]);
+  it("fails on ANY plugin outside the allow-list — even expo-location with no props, a background-geolocation library, or a local plugin", () => {
+    for (const p of ["expo-location", ["expo-location"], "react-native-background-geolocation", "@transistorsoft/react-native-background-geolocation", "expo-task-manager", "./plugins/with-anything"]) {
+      const e = base();
+      e.plugins = [...(e.plugins ?? []), p];
+      expect(rules({ expo: e }), JSON.stringify(p)).toContain("plugin");
+    }
   });
 
-  it("fails on background-only plugins", () => {
+  it("fails on a plugin that is not a package name (a function in a dynamic config cannot be audited)", () => {
     const e = base();
-    e.plugins = [...(e.plugins ?? []), "expo-task-manager"];
-    expect(scanAppConfig({ expo: e }).map((v) => v.rule)).toContain("plugin");
+    e.plugins = [...(e.plugins ?? []), () => undefined, [() => undefined, {}]];
+    expect(rules({ expo: e }).filter((r) => r === "plugin")).toHaveLength(2);
+  });
+
+  it("an allow-listed plugin that turns a background prop on still fails, and every allow-listed plugin is in the real app.json", () => {
+    const e = base();
+    e.plugins = [...(e.plugins ?? []), ["expo-localization", { isAndroidBackgroundLocationEnabled: true }]];
+    expect(rules({ expo: e })).toContain("plugin-prop");
+    const used = (appJson.expo?.plugins ?? []).map((p) => (Array.isArray(p) ? p[0] : p));
+    expect([...ALLOWED_PLUGINS].sort()).toEqual([...used].sort());
+  });
+
+  it("an expo-location-style prop explicitly set to false is not itself a violation", () => {
+    const e = base();
+    e.plugins = [...(e.plugins ?? []).filter((p) => p !== "expo-router"), ["expo-router", { isAndroidBackgroundLocationEnabled: false }]];
+    expect(rules({ expo: e })).toEqual([]);
   });
 });
 
@@ -79,6 +158,27 @@ describe("AT 5 — generated manifest and Info.plist scanners", () => {
     expect(scanAndroidManifest(removed)).toEqual([]);
     expect(scanAndroidManifest(foreground)).toEqual([]);
     expect(scanAndroidManifest('<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>')).toHaveLength(1);
+    expect(scanAndroidManifest('<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>')).toHaveLength(1);
+  });
+
+  it("Android: the short permission name, single-quoted attributes and attribute order are all caught", () => {
+    expect(scanAndroidManifest('<manifest><uses-permission android:name="ACCESS_BACKGROUND_LOCATION"/></manifest>')).toHaveLength(1);
+    expect(scanAndroidManifest("<manifest><uses-permission android:name='android.permission.ACCESS_BACKGROUND_LOCATION'/></manifest>")).toHaveLength(1);
+    expect(scanAndroidManifest("<manifest><uses-permission android:name='ACCESS_BACKGROUND_LOCATION' /></manifest>")).toHaveLength(1);
+    expect(scanAndroidManifest('<manifest><uses-permission tools:node="replace" android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/></manifest>')).toHaveLength(1);
+    expect(scanAndroidManifest('<manifest><uses-permission-sdk-23 android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/></manifest>')).toHaveLength(1);
+    // removal is honoured in either quote style
+    expect(scanAndroidManifest("<manifest><uses-permission android:name='ACCESS_BACKGROUND_LOCATION' tools:node='remove'/></manifest>")).toEqual([]);
+    expect(scanAndroidManifest("<manifest><uses-permission tools:node='remove' android:name='android.permission.SYSTEM_ALERT_WINDOW'/></manifest>")).toEqual([]);
+  });
+
+  it("Android: <application> must say allowBackup=false (either quote style); no <application> is not a violation of its own", () => {
+    const app = (attrs: string): string => `<manifest><application android:name=".MainApplication" ${attrs} android:theme="@style/AppTheme"></application></manifest>`;
+    expect(scanAndroidManifest(app('android:allowBackup="false"'))).toEqual([]);
+    expect(scanAndroidManifest(app("android:allowBackup='false'"))).toEqual([]);
+    expect(scanAndroidManifest(app('android:allowBackup="true"')).map((v) => v.rule)).toEqual(["android-allow-backup"]);
+    expect(scanAndroidManifest(app("android:allowBackup='true'")).map((v) => v.rule)).toEqual(["android-allow-backup"]);
+    expect(scanAndroidManifest(app("")).map((v) => v.rule)).toEqual(["android-allow-backup"]);
   });
 
   it("iOS: an Always usage string or a location background mode fails", () => {
@@ -90,17 +190,20 @@ describe("AT 5 — generated manifest and Info.plist scanners", () => {
     expect(scanInfoPlist(whenInUse)).toEqual([]);
   });
 
-  // `expo prebuild --no-install` writes android/ and ios/ (gitignored). When a
-  // developer has run it, scan what it actually generated: this is the literal
-  // "manifest + Info.plist scan" of AT 5. Skipped (not passed) when absent.
-  const manifestPath = here("../android/app/src/main/AndroidManifest.xml");
-  const plistPath = here("../ios/GolfRaven/Info.plist");
-  it.skipIf(!existsSync(manifestPath))("the generated AndroidManifest.xml is clean", () => {
-    expect(scanAndroidManifest(readFileSync(manifestPath, "utf8"))).toEqual([]);
-  });
-  it.skipIf(!existsSync(plistPath))("the generated Info.plist is clean", () => {
-    expect(scanInfoPlist(readFileSync(plistPath, "utf8"))).toEqual([]);
-  });
+  // `expo prebuild --no-install` writes android/ and ios/ (gitignored). Scanning what it actually generated is
+  // the literal "manifest + Info.plist scan" of AT 5. Locally these skip when you have not run prebuild; in CI
+  // (`CI` is set, and the workflow runs prebuild before the tests) a missing file is a FAILURE, never a skip.
+  const inCi = Boolean(process.env["CI"]);
+  const generated = (name: string, path: string, scan: (text: string) => unknown[]): void => {
+    const run = (): void => {
+      expect(existsSync(path), `${path} is missing: run \`expo prebuild --no-install\` in apps/mobile first (CI does)`).toBe(true);
+      expect(scan(readFileSync(path, "utf8"))).toEqual([]);
+    };
+    if (existsSync(path) || inCi) it(name, run);
+    else it.skip(name, run);
+  };
+  generated("the generated AndroidManifest.xml is clean (and has allowBackup=false)", here("../android/app/src/main/AndroidManifest.xml"), scanAndroidManifest);
+  generated("the generated Info.plist is clean", here("../ios/GolfRaven/Info.plist"), scanInfoPlist);
 });
 
 describe("AT 7 — no ads or analytics SDK in the lockfile", () => {

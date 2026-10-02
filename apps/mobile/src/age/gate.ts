@@ -8,8 +8,19 @@
  * - Under the minimum: no account is created and ONLY a device-local "not
  *   eligible" flag is kept, so an immediate retry with another year is
  *   refused on that install `[inference: a common neutral-age-gate practice]`.
- *   The flag lives in the app's own SQLite file, which an uninstall removes
- *   (hence "on that install").
+ *   The flag lives in the app's own SQLite file (`golfraven.db`), which an
+ *   uninstall removes (hence "on that install"). It is meant to stay on the
+ *   device: Android backup is OFF (`android.allowBackup: false` in app.json,
+ *   asserted by `test/policy.test.ts`), so it is not copied to Google Drive.
+ *   iOS is NOT closed: `expo-sqlite` 57.0.3 keeps the file under the app's
+ *   Documents directory (`Documents/SQLite`), which iCloud / iTunes backups
+ *   include, and the package has no backup-exclusion option
+ *   `[checked 2026-10-02 in the installed expo-sqlite: its .d.ts and
+ *   SQLiteModule.swift — no such API; the iOS backup behaviour itself is
+ *   unverified, never run on a device]`. P4.2: exclude the file
+ *   (`NSURLIsExcludedFromBackupKey` via a small native module or
+ *   `expo-file-system`), or move the flag to a store that is not backed up.
+ *   Android device-to-device transfer on 12+ is also `[unverified]`.
  * - The birth year itself is never stored or sent.
  * - `minAge` is NOT a constant here: it comes from the server policy
  *   (`MIN_AGE`, "one server constant, so counsel can raise it without a

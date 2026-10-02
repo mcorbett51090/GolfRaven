@@ -2,9 +2,12 @@ import { useRouter } from "expo-router";
 import { useState } from "react";
 import { useApp } from "../../src/runtime/AppProvider";
 import { LOCALES, type MessageKey } from "../../src/i18n";
-import { DevPanel } from "../../src/screens/DevPanel";
 import { CatalogBanners } from "../../src/screens/CatalogBanners";
 import { Body, Button, Card, Chip, H2, Row, Screen } from "../../src/ui/components";
+
+/** Required lazily under `__DEV__` so Metro drops the panel (and what it imports)
+ * from release bundles; a static import would ship it, merely un-rendered. */
+const DevPanel = __DEV__ ? (require("../../src/screens/DevPanel") as typeof import("../../src/screens/DevPanel")).DevPanel : null;
 
 /** Me tab: language, account (sign-in goes through the age screen), sources,
  * privacy, and the catalog's status. Export/delete land in P4.2 (§7.8). */
@@ -61,10 +64,11 @@ export default function MeScreen() {
         <Body>{catalogState.snapshot ? t("me.catalog.version", { version: catalogState.snapshot.catalogVersion }) : t("me.catalog.none")}</Body>
         <Button variant="secondary" title={t("me.catalog.refresh")} onPress={() => void check()} />
         {outcome ? <Body muted>{t(outcome)}</Body> : null}
+        {services.keysetProblem ? <Body muted>{t("me.catalog.keysetProblem")}</Body> : null}
         <Body muted>{t("me.version", { version: services.config.appVersion })}</Body>
       </Card>
 
-      {__DEV__ ? <DevPanel /> : null}
+      {DevPanel ? <DevPanel /> : null}
     </Screen>
   );
 }

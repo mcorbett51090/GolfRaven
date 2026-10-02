@@ -12,10 +12,15 @@ import { createPrivateKey } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { nobleCatalogCrypto } from "../src/catalog/crypto";
 import { verifyCatalogEnvelope, type EnvelopeBytes, type VerifyContext, type VerifyResult } from "../src/catalog/verify";
-import { CatalogPublisher, flipByte, makeKey, replaceText, type SignedCatalog } from "./support/signed-catalog";
+import { CatalogPublisher, flipByte, makeKey, manifestSidecar, replaceText, withVersionsSignedBy, type SignedCatalog } from "./support/signed-catalog";
 
 const KEY_A = makeKey("k-prod-a");
 const KEY_B = makeKey("k-prod-b");
+/** Signs `versions.json` ONLY. The real emitter signs it with the manifest's key, which MASKS the
+ * manifest-level checks: a revoked / self-revoked manifest key is also caught at the versions step.
+ * Every fixture below therefore re-signs versions.json with this separate, never-revoked key, so each
+ * check in `verify.ts` has to hold on its own (mutation-proved, see the PR notes). */
+const KEY_V = makeKey("k-versions");
 const pub = new CatalogPublisher();
 let v1: SignedCatalog;
 let v2: SignedCatalog;
@@ -26,16 +31,19 @@ beforeAll(async () => {
 });
 afterAll(() => pub.dispose());
 
-const env = (c: SignedCatalog): EnvelopeBytes => ({
+/** The envelope exactly as the real emitter produced it (one key signs everything). */
+const rawEnv = (c: SignedCatalog): EnvelopeBytes => ({
   manifest: c.files.get("manifest.json")!,
   manifestSig: c.files.get("manifest.sig.json")!,
   versions: c.files.get("versions.json")!,
   versionsSig: c.files.get("versions.sig.json")!,
 });
+/** The default fixture: versions.json signed by KEY_V, not the manifest's key. */
+const env = (c: SignedCatalog): EnvelopeBytes => rawEnv(withVersionsSignedBy(c, KEY_V));
 
 const ctx = (over: Partial<VerifyContext> = {}): VerifyContext => ({
   crypto: nobleCatalogCrypto,
-  trustedKeys: [KEY_A.trusted, KEY_B.trusted],
+  trustedKeys: [KEY_A.trusted, KEY_B.trusted, KEY_V.trusted],
   revokedKids: new Set(),
   supportedContractMajor: 0,
   ...over,
@@ -54,6 +62,10 @@ describe("verifyCatalogEnvelope — genuine artifacts", () => {
       expect(r.value.manifest.catalogVersion).toBe("20260101-aaaaaaa");
       expect(r.value.versions.map((v) => v.version)).toEqual(["20260101-aaaaaaa"]);
     }
+  });
+
+  it("accepts the emitter's own single-key envelope too (interop with the real signer, unmodified)", () => {
+    expect(codes(verifyCatalogEnvelope(rawEnv(v1), ctx()))).toEqual([]);
   });
 
   it("accepts the newest version of a two-entry versions.json", () => {
@@ -81,17 +93,17 @@ describe("verifyCatalogEnvelope — fails closed", () => {
   it("a modified manifest.json (e.g. lowering minAppVersion) with the original sidecar is MANIFEST_TAMPERED", () => {
     const e = env(v1);
     const tampered = replaceText(e.manifest, '"minAppVersion": "0.0.0"', '"minAppVersion": "0.0.1"');
-    expect(codes(verifyCatalogEnvelope({ ...e, manifest: tampered }, ctx()))).toContain("MANIFEST_TAMPERED");
+    expect(codes(verifyCatalogEnvelope({ ...e, manifest: tampered }, ctx()))).toEqual(["MANIFEST_TAMPERED"]);
   });
 
   it("a kid not in the compiled-in keyset is UNKNOWN_KID", () => {
-    expect(codes(verifyCatalogEnvelope(env(v1), ctx({ trustedKeys: [KEY_B.trusted] })))).toContain("UNKNOWN_KID");
+    expect(codes(verifyCatalogEnvelope(env(v1), ctx({ trustedKeys: [KEY_B.trusted, KEY_V.trusted] })))).toEqual(["UNKNOWN_KID"]);
   });
 
   it("an empty keyset (what a build compiles in before the §3.5 production keyset exists) verifies nothing", () => {
     const r = verifyCatalogEnvelope(env(v1), ctx({ trustedKeys: [] }));
     expect(r.ok).toBe(false);
-    expect(codes(r)).toContain("UNKNOWN_KID");
+    expect(codes(r)).toEqual(["UNKNOWN_KID"]);
   });
 
   it("the right kid label with the wrong public key is BAD_SIGNATURE", () => {
@@ -99,14 +111,45 @@ describe("verifyCatalogEnvelope — fails closed", () => {
     expect(codes(verifyCatalogEnvelope(env(v1), ctx({ trustedKeys: [impostor] })))).toEqual(["BAD_SIGNATURE"]);
   });
 
-  it("a kid in the install's revoked set is REVOKED_KID even though the signature is valid", () => {
-    expect(codes(verifyCatalogEnvelope(env(v1), ctx({ revokedKids: new Set([KEY_A.kid]) })))).toContain("REVOKED_KID");
+  it("a manifest kid in the install's revoked set is exactly REVOKED_KID even though the signature is valid (the primary revocation check)", () => {
+    // versions.json is signed by KEY_V, so nothing downstream can catch this: only the manifest-kid check does.
+    expect(codes(verifyCatalogEnvelope(env(v1), ctx({ revokedKids: new Set([KEY_A.kid]) })))).toEqual(["REVOKED_KID"]);
+  });
+
+  it("a revoked kid that is NOT the manifest's does not refuse the manifest", () => {
+    expect(codes(verifyCatalogEnvelope(env(v1), ctx({ revokedKids: new Set(["k-some-other-kid"]) })))).toEqual([]);
+  });
+
+  it("a sidecar naming a different kid than the manifest is exactly SIG_KID_MISMATCH", () => {
+    const e = env(v1);
+    // Genuinely signed by KEY_A (so BAD_SIGNATURE cannot fire) but the statement names KEY_B's kid.
+    const sidecar = manifestSidecar(e.manifest, { kid: KEY_B.kid, catalogVersion: v1.manifest.catalogVersion, contractVersion: v1.manifest.contractVersion }, KEY_A);
+    expect(codes(verifyCatalogEnvelope({ ...e, manifestSig: sidecar }, ctx()))).toEqual(["SIG_KID_MISMATCH"]);
+  });
+
+  it("a sidecar with a different catalogVersion than the manifest is exactly SIG_FIELD_MISMATCH", () => {
+    const e = env(v1);
+    const sidecar = manifestSidecar(e.manifest, { kid: KEY_A.kid, catalogVersion: "20260102-1111111", contractVersion: v1.manifest.contractVersion }, KEY_A);
+    expect(codes(verifyCatalogEnvelope({ ...e, manifestSig: sidecar }, ctx()))).toEqual(["SIG_FIELD_MISMATCH"]);
+  });
+
+  it("a sidecar with a different contractVersion than the manifest is exactly SIG_FIELD_MISMATCH", () => {
+    const e = env(v1);
+    const sidecar = manifestSidecar(e.manifest, { kid: KEY_A.kid, catalogVersion: v1.manifest.catalogVersion, contractVersion: v1.manifest.contractVersion + 1 }, KEY_A);
+    expect(codes(verifyCatalogEnvelope({ ...e, manifestSig: sidecar }, ctx()))).toEqual(["SIG_FIELD_MISMATCH"]);
+  });
+
+  it("every sidecar disagreement is reported, not just the first", () => {
+    const e = env(v1);
+    const sidecar = manifestSidecar(e.manifest, { kid: KEY_B.kid, catalogVersion: "20260102-1111111", contractVersion: 7 }, KEY_A);
+    expect(codes(verifyCatalogEnvelope({ ...e, manifestSig: sidecar }, ctx()))).toEqual(["SIG_KID_MISMATCH", "SIG_FIELD_MISMATCH", "SIG_FIELD_MISMATCH"]);
   });
 
   it("a manifest that lists its own signing kid in revokedKids[] is refused (self-revoking)", async () => {
     const p = new CatalogPublisher();
     try {
       const c = await p.emit({ version: "20260301-ccccccc", generatedAt: "2026-03-01T00:00:00.000Z", key: KEY_A, revokedKids: [KEY_A.kid] });
+      // versions.json is signed by KEY_V (not revoked, not the manifest's key): only the self-revocation check can refuse this.
       expect(codes(verifyCatalogEnvelope(env(c), ctx()))).toEqual(["REVOKED_KID"]);
     } finally {
       await p.dispose();
@@ -124,7 +167,7 @@ describe("verifyCatalogEnvelope — fails closed", () => {
   it("a modified versions.json is VERSIONS_TAMPERED", () => {
     const e = env(v2);
     const tampered = replaceText(e.versions, "20260101-aaaaaaa", "20250101-aaaaaaa");
-    expect(codes(verifyCatalogEnvelope({ ...e, versions: tampered }, ctx()))).toContain("VERSIONS_TAMPERED");
+    expect(codes(verifyCatalogEnvelope({ ...e, versions: tampered }, ctx()))).toEqual(["VERSIONS_TAMPERED"]);
   });
 
   it("a validly signed versions.json whose last entry is not this manifest is VERSIONS_MISMATCH", () => {
@@ -158,7 +201,7 @@ describe("verifyCatalogEnvelope — fails closed", () => {
         const versionsRaw = Buffer.from(base.versions);
         const bySigA = signVersions(versionsRaw, KEY_A.kid, createPrivateKey(KEY_A.privateKeyPem));
         const r = verifyCatalogEnvelope({ ...base, versionsSig: new Uint8Array(Buffer.from(canonicalStringify(bySigA), "utf8")) }, ctx());
-        expect(codes(r)).toContain("REVOKED_KID");
+        expect(codes(r)).toEqual(["REVOKED_KID"]);
       })
       .finally(() => p.dispose());
   });

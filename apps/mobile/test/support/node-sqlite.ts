@@ -24,19 +24,26 @@ function queryable(db: DatabaseSync): SqlQueryable {
 export async function openNodeSqlite(): Promise<SqlDatabase & { raw: DatabaseSync }> {
   const raw = new DatabaseSync(":memory:");
   const q = queryable(raw);
+  // One connection: overlapping `transaction()` calls must queue (expo-sqlite's
+  // `withExclusiveTransactionAsync` does the same), not hit a nested BEGIN.
+  let queue: Promise<unknown> = Promise.resolve();
   const db = {
     ...q,
     raw,
-    async transaction<T>(fn: (tx: SqlQueryable) => Promise<T>): Promise<T> {
-      raw.exec("BEGIN IMMEDIATE");
-      try {
-        const out = await fn(q);
-        raw.exec("COMMIT");
-        return out;
-      } catch (err) {
-        raw.exec("ROLLBACK");
-        throw err;
-      }
+    transaction<T>(fn: (tx: SqlQueryable) => Promise<T>): Promise<T> {
+      const run = queue.then(async () => {
+        raw.exec("BEGIN IMMEDIATE");
+        try {
+          const out = await fn(q);
+          raw.exec("COMMIT");
+          return out;
+        } catch (err) {
+          raw.exec("ROLLBACK");
+          throw err;
+        }
+      });
+      queue = run.catch(() => undefined);
+      return run;
     },
   };
   await migrate(db);

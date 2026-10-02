@@ -17,7 +17,7 @@ export function parseCatalogBaseUrl(raw: string | undefined | null, opts: { allo
 }
 
 /** The contract MAJOR this build reads (`CONTRACT_VERSION` in
- * `@golfraven/catalog`; pinned equal by `test/config.test.ts`). The M-freeze
+ * `@golfraven/catalog`; pinned equal by `test/wallet-config.test.ts`). The M-freeze
  * (build plan §10 P1) moves it to 1 — and moving it is a deliberate edit
  * here, which is the point. */
 export const SUPPORTED_CONTRACT_MAJOR = 0;

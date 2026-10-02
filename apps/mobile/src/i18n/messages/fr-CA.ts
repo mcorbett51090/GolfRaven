@@ -135,6 +135,7 @@ export const frCA: Record<MessageKey, string> = {
   "me.catalog.outcome.rejected": "Le nouveau catalogue n'a pas passé la vérification et n'a pas été appliqué.",
   "me.catalog.outcome.network_error": "Impossible de joindre le serveur du catalogue.",
   "me.catalog.outcome.disabled": "Aucune source de catalogue n'est configurée dans cette version.",
+  "me.catalog.keysetProblem": "Cette version n'a pas de clés de signature de catalogue valides : aucun catalogue ne peut être vérifié ni téléchargé.",
   "me.version": "Version de l'application {version}",
 
   "ageGate.title": "Avant de continuer",

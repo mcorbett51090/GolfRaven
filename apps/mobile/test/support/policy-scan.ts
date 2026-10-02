@@ -12,12 +12,29 @@
 export const FORBIDDEN_ANDROID_PERMISSIONS = [
   "android.permission.ACCESS_BACKGROUND_LOCATION",
   "android.permission.FOREGROUND_SERVICE_LOCATION",
+  // Draw-over-other-apps: never needed, and Expo's template grants it by default.
+  "android.permission.SYSTEM_ALERT_WINDOW",
 ] as const;
 
 export const FORBIDDEN_IOS_INFOPLIST_KEYS = [
   "NSLocationAlwaysAndWhenInUseUsageDescription",
   "NSLocationAlwaysUsageDescription",
 ] as const;
+
+/** Android accepts a permission as the short name (`ACCESS_BACKGROUND_LOCATION`,
+ * which Expo's `permissions` / `blockedPermissions` and a hand-written manifest
+ * entry both allow) or the qualified one. Compare on the qualified form. */
+export function normalizeAndroidPermission(name: string): string {
+  const n = name.trim();
+  return (n.includes(".") ? n : `android.permission.${n}`).toUpperCase();
+}
+const FORBIDDEN_NORMALIZED = new Set(FORBIDDEN_ANDROID_PERMISSIONS.map(normalizeAndroidPermission));
+
+/** The ONLY config plugins this app may use. An allow-list, not a deny-list:
+ * a new plugin (a background-geolocation library, an `expo-location` with no
+ * props that still contributes permissions at prebuild, a local plugin that
+ * rewrites the manifest) must be added here on purpose, in review. */
+export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set(["expo-router", "expo-localization", "react-native-health-connect", "expo-build-properties"]);
 
 /** Config-plugin props that turn background location on. */
 const BACKGROUND_PLUGIN_PROPS = new Set([
@@ -28,9 +45,6 @@ const BACKGROUND_PLUGIN_PROPS = new Set([
   "locationAlwaysPermission",
 ]);
 
-/** Plugins whose purpose is background work/location; none is in the MVP. */
-const FORBIDDEN_PLUGINS = new Set(["expo-task-manager", "expo-background-fetch", "expo-background-task"]);
-
 export interface Violation {
   rule: string;
   detail: string;
@@ -38,49 +52,78 @@ export interface Violation {
 
 type ExpoConfig = {
   expo?: {
-    android?: { permissions?: string[]; blockedPermissions?: string[] };
+    android?: { permissions?: string[]; blockedPermissions?: string[]; allowBackup?: boolean };
     ios?: { infoPlist?: Record<string, unknown>; entitlements?: Record<string, unknown> };
-    plugins?: (string | [string, Record<string, unknown>?])[];
+    plugins?: unknown[];
   };
 };
 
-/** Static scan of `app.json`. */
+/** A dynamic Expo config (`app.config.js|ts|…`) runs code at build time and can
+ * add permissions, plugins and Info.plist keys that a static scan of `app.json`
+ * never sees — and can do so only for some environments. None may exist. */
+export function findDynamicConfigs(fileNames: readonly string[]): string[] {
+  return fileNames.filter((f) => /^app\.config\.[A-Za-z]+$/.test(f));
+}
+
+/** Static scan of an Expo config (`app.json`, or the config Expo RESOLVED). */
 export function scanAppConfig(config: ExpoConfig): Violation[] {
   const out: Violation[] = [];
   const expo = config.expo ?? {};
-  const permissions = expo.android?.permissions ?? [];
-  const blocked = new Set(expo.android?.blockedPermissions ?? []);
+  const permissions = new Set((expo.android?.permissions ?? []).map(normalizeAndroidPermission));
+  const blocked = new Set((expo.android?.blockedPermissions ?? []).map(normalizeAndroidPermission));
   for (const p of FORBIDDEN_ANDROID_PERMISSIONS) {
-    if (permissions.includes(p)) out.push({ rule: "android-permission", detail: `app.json requests ${p}` });
+    const n = normalizeAndroidPermission(p);
+    if (permissions.has(n)) out.push({ rule: "android-permission", detail: `app config requests ${p}` });
     // Defence against a library adding it through its own manifest: the app must
     // explicitly block it so the manifest merger removes it.
-    if (!blocked.has(p)) out.push({ rule: "android-blocked-permission-missing", detail: `app.json must list ${p} in android.blockedPermissions` });
+    if (!blocked.has(n)) out.push({ rule: "android-blocked-permission-missing", detail: `app config must list ${p} in android.blockedPermissions` });
   }
+  // The under-age flag lives in the app's SQLite file; a backup would copy it off the device.
+  if (expo.android?.allowBackup !== false) out.push({ rule: "android-allow-backup", detail: "app config must set android.allowBackup to false" });
   const infoPlist = expo.ios?.infoPlist ?? {};
   for (const k of FORBIDDEN_IOS_INFOPLIST_KEYS) {
-    if (k in infoPlist) out.push({ rule: "ios-infoplist", detail: `app.json sets ${k}` });
+    if (k in infoPlist) out.push({ rule: "ios-infoplist", detail: `app config sets ${k}` });
   }
   const modes = infoPlist["UIBackgroundModes"];
-  if (Array.isArray(modes) && modes.includes("location")) out.push({ rule: "ios-background-modes", detail: "app.json sets UIBackgroundModes: location" });
+  if (Array.isArray(modes) && modes.includes("location")) out.push({ rule: "ios-background-modes", detail: "app config sets UIBackgroundModes: location" });
   for (const entry of expo.plugins ?? []) {
-    const [name, props] = Array.isArray(entry) ? entry : [entry, undefined];
-    if (FORBIDDEN_PLUGINS.has(name)) out.push({ rule: "plugin", detail: `plugin ${name} is background-only and not allowed in the MVP` });
-    for (const [prop, value] of Object.entries(props ?? {})) {
-      if (BACKGROUND_PLUGIN_PROPS.has(prop) && value !== false) out.push({ rule: "plugin-prop", detail: `plugin ${name} sets ${prop}` });
+    const [name, props] = Array.isArray(entry) ? (entry as [unknown, unknown]) : [entry, undefined];
+    if (typeof name !== "string") {
+      out.push({ rule: "plugin", detail: "a config plugin that is not a package name (a function or object) cannot be audited" });
+      continue;
+    }
+    if (!ALLOWED_PLUGINS.has(name)) out.push({ rule: "plugin", detail: `plugin ${name} is not on the allow-list (test/support/policy-scan.ts ALLOWED_PLUGINS)` });
+    if (props && typeof props === "object") {
+      for (const [prop, value] of Object.entries(props as Record<string, unknown>)) {
+        if (BACKGROUND_PLUGIN_PROPS.has(prop) && value !== false) out.push({ rule: "plugin-prop", detail: `plugin ${name} sets ${prop}` });
+      }
     }
   }
   return out;
 }
 
+const ATTR = (name: string): RegExp => new RegExp(`${name.replace(/[:.]/g, "\\$&")}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`);
+const attr = (attrs: string, name: string): string | undefined => {
+  const m = ATTR(name).exec(attrs);
+  return m ? (m[1] ?? m[2]) : undefined;
+};
+/** A tag's attribute text, tolerant of `>` inside a quoted value. */
+const TAG_ATTRS = String.raw`((?:"[^"]*"|'[^']*'|[^>"'])*)`;
+
 /** Scan of a generated `AndroidManifest.xml` (after `expo prebuild`). A
- * permission removed with `tools:node="remove"` does not count as granted. */
+ * permission removed with `tools:node="remove"` does not count as granted.
+ * Short permission names and single-quoted attributes are understood. */
 export function scanAndroidManifest(xml: string): Violation[] {
   const out: Violation[] = [];
-  for (const m of xml.matchAll(/<uses-permission\b([^>]*)>/g)) {
+  for (const m of xml.matchAll(new RegExp(`<uses-permission(?:-sdk-23)?\\b${TAG_ATTRS}>`, "g"))) {
     const attrs = m[1] ?? "";
-    const name = /android:name="([^"]+)"/.exec(attrs)?.[1];
-    if (!name || /tools:node="remove"/.test(attrs)) continue;
-    if ((FORBIDDEN_ANDROID_PERMISSIONS as readonly string[]).includes(name)) out.push({ rule: "android-manifest", detail: `manifest grants ${name}` });
+    const name = attr(attrs, "android:name");
+    if (!name || attr(attrs, "tools:node")?.trim() === "remove") continue;
+    if (FORBIDDEN_NORMALIZED.has(normalizeAndroidPermission(name))) out.push({ rule: "android-manifest", detail: `manifest grants ${name}` });
+  }
+  const app = new RegExp(`<application\\b${TAG_ATTRS}>`).exec(xml);
+  if (app && attr(app[1] ?? "", "android:allowBackup")?.trim() !== "false") {
+    out.push({ rule: "android-allow-backup", detail: "manifest <application> must set android:allowBackup=\"false\"" });
   }
   return out;
 }

@@ -132,6 +132,7 @@ export const en = {
   "me.catalog.outcome.rejected": "The new catalog failed verification and was not applied.",
   "me.catalog.outcome.network_error": "Could not reach the catalog server.",
   "me.catalog.outcome.disabled": "This build has no catalog source configured.",
+  "me.catalog.keysetProblem": "This build has no valid catalog signing keys, so no catalog can be verified or downloaded.",
   "me.version": "App version {version}",
 
   "ageGate.title": "Before you continue",

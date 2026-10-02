@@ -2,8 +2,9 @@
  * A tiny SYNTHETIC catalog for `__DEV__` builds with no catalog source
  * configured, so the screens can be seen without a server. It is clearly
  * labelled in the UI ("Demo data") and is injected as a read-only snapshot
- * — it never goes through, and never bypasses, the signature verifier; a
- * release build has no path to it. Ids are fabricated (`…01DEMO…`, not real ledger
+ * — it never goes through, and never bypasses, the signature verifier. Only
+ * `AppProvider` reaches it, behind `__DEV__` and a lazy `require`, so Metro
+ * leaves it out of release bundles. Ids are fabricated (`…01DEMO…`, not real ledger
  * ids), the names are fictional, and every URL is `example.com`.
  */
 import type { Facility, Trail } from "@golfraven/catalog";
