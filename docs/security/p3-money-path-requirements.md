@@ -2114,3 +2114,26 @@ guard disabled (the LOW test then dies with the uncaught `TypeError`, failing th
   `GR_APPLE_DEVICECHECK_ENV` (`production` | `development`); `GR_PLAY_PACKAGE_NAME`, `GR_PLAY_CERT_SHA256` (comma-separated
   base64url), `GR_PLAY_SERVICE_ACCOUNT_EMAIL`, `GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY` (PEM). The existing "pin `--config` at
   deploy time" requirement applies to this function unchanged.
+
+## P3f gate PASS (round 3, `baa3596`, 2026-10-02): accepted follow-ups
+
+The P3f security gate passed with no BLOCKER or HIGH; N1–N5 re-probed fixed on real Postgres.
+
+1. **MEDIUM — domain-separate the install-link tombstone pseudonym (P1).** `private.account_pseudonyms`
+   (0027) computes `hmac(user_id::text, key)` with the same vault key and input as
+   `app.attestation.player_pseudonym` (0022), so a deleted player's tombstone joins to their retained
+   staff-attestation rows by equality, and service_role gains an oracle for attestation pseudonyms.
+   Fix in the next migration (before any production write): `hmac('install_link_account:' || user_id,
+   key)`. Also order the "preferred" key by the registry, not `max(name)` (lexicographic `_v10` < `_v9`).
+   **Scheduled as the immediate follow-up PR after P3f.**
+2. **MEDIUM, launch-blocking — F19 tombstone retention.** Pseudonymised (not anonymous) personal
+   information under Law 25 / GDPR: needs a retention bound and purge job (suggested 24 months from
+   `first_seen_at`, mirroring `receipt_fingerprint`), privacy-officer / PIA sign-off, and privacy-policy
+   disclosure before launch.
+3. **LOW — F20:** pin the suppressed-error stack match to the pinned module URL
+   (`deno.land/x/postgresjs@v3.4.5/src/connection.js`), add a counter, and confirm at deploy that the
+   Supabase edge runtime honours `preventDefault` on the global `error` event `[unverified]`.
+4. **LOW — F14 surface** is wider after the N2 reorder (bit0 can be set when the transition then fails
+   or ends held); worst case remains a row-4 review, never an issued or refused reward.
+5. **LOW —** `mark_account_devices_fraud_voided` writes the raw user id into `audit_log.subject_id`,
+   which can re-link the tombstone for fraud-voided accounts (intended for fraud audit; revisit with F19).
