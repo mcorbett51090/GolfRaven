@@ -353,6 +353,13 @@ What it did NOT do and PR3 / PR4 still must: the delegate flow, the importer rep
 - **A challenge and its token must be inserted in two statements.** A single-CTE `WITH c AS (INSERT challenge ... RETURNING id) INSERT
   checkin_token ... SELECT id FROM c` is REFUSED under edge_actor: the token's own-challenge `EXISTS` (0032 M3) runs against the
   statement's snapshot, which cannot see the challenge the same statement is inserting. The Repo already uses two statements.
+- **App Attest key registration (0034, `devices-attest-key`):** the key columns of `app.device` (`attest_key_id`, `attest_public_key`,
+  `attest_registered_at`, `attest_retired_key_hashes`) are written ONLY through `private.register_attest_key_for_actor(device, key_id,
+  public_key)` (no user id; `kind = user` bindings only), which runs `app.register_attest_key` as `private_definer` under the actor-keyed
+  policy `pd_edge_act_device_update`. `Repo#attestKey.register` calls it in `EDGE_DB_MODE=edge` (and `app.register_attest_key` as
+  service_role in legacy mode); both modes run `attest-key.deno.test.ts` in CI. `app.register_attest_key` is not callable by edge_actor. 0034 added no edge_actor policy and no edge_policy_allowlist row.
+  The counter trigger now allows exactly one decrease (a replacement by a never-used key, decided by content), so edge_actor's own
+  `attest_counter` column grant still cannot lower a counter. Proved in `17_attest_key_registration_edge.sql`.
 - **One-way columns (PR1b):** a consume of an already-consumed `checkin_token` and an `attest_counter` decrease are
   `23514`. The verifier's `WHERE attest_counter < $new` and the consume's `WHERE consumed_at IS NULL` already avoid
   both; a retry that re-sets the same value on a consumed token now fails loudly instead of being a no-op.

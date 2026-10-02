@@ -9,6 +9,11 @@
 // challenge therefore cannot verify against this request: a "mismatched body
 // hash" (AT 5) is a hash that does not match, nothing more subtle.
 //
+// UPDATE (iOS): the iOS clientDataHash no longer uses this raw-bytes form. A React Native client can only hash a
+// STRING, so iOS (activation assertions and key registration) uses string-binding.ts
+// (`SHA-256(UTF-8(canonical JSON string carrying the nonce as text))`). This module's raw-bytes construction remains
+// the Android Play Integrity `requestHash`, which the app computes itself, and its building blocks.
+//
 // Pure, Web-Crypto-only (the SHA-256 itself is injected as `Sha256Fn`, so unit
 // tests and the Deno runtime share one code path and nothing here imports a
 // platform global).

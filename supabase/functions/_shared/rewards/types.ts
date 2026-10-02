@@ -208,3 +208,21 @@ export interface AttestationPorts {
   ios: IosPort | null;
   android: AndroidPort | null;
 }
+
+// ---------------------------------------------------------------------------
+// App Attest key registration (`POST /v1/devices/attest-key`, follow-up F2)
+// ---------------------------------------------------------------------------
+
+/** The two database operations key registration needs, already scoped to the actor (no method takes a
+ * user id). Mounted on `Repo#attestKey` (../types.ts). */
+export interface AttestKeyRepo {
+  /** The caller's OWN device: its platform and the key id registered on it (`null` = none). `null` for a
+   * device that is not the caller's — nonexistent and someone else's are indistinguishable. */
+  deviceKey(deviceId: string): Promise<{ platform: Platform; keyId: string | null } | null>;
+  /** `app.register_attest_key` (0034): records the key a VERIFIED attestation attested on the caller's own
+   * iOS device. `"registered"` = the device had no key; `"replaced"` = a reinstall's new key replaced the old
+   * one (counter restarts at 0 for the new key; the old key is retired and the change is audited). Throws an
+   * `HttpError`: 409 `key_already_registered` (the same key), 409 `key_previously_retired`, 404 (not the
+   * caller's device), 422 (a malformed key — the verifier makes this unreachable). */
+  register(input: { deviceId: string; keyId: string; publicKey: Uint8Array }): Promise<"registered" | "replaced">;
+}

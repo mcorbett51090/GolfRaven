@@ -1238,6 +1238,10 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
     // appended below).
     rewards: buildRewardsRepo(trx, uid, mode),
 
+    // App Attest key registration (follow-up F2) — implemented in the delimited "App Attest key
+    // registration" section at the END of this file (one seam here).
+    attestKey: buildAttestKeyRepo(trx, uid, mode),
+
     device: {
       async findOwn(deviceId: string) {
         const rows = await trx`select id from app.device where id = ${deviceId} and user_id = ${uid}`;
@@ -2551,8 +2555,14 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
     },
 
     async deviceAttestState(deviceId: string) {
+      // An attested grade requires a REGISTERED key (0034, F2): the key (and its id) are handed to the
+      // verifier only when `attest_registered_at` is set, i.e. only for a key written by
+      // app.register_attest_key after a verified attestation. A key written any other way reads as "no key"
+      // here, and the verifier answers `unattestable` — never `attested`.
       const rows = await trx`
-        select id, platform, attest_key_id, attest_counter, attest_public_key
+        select id, platform, attest_counter,
+               case when attest_registered_at is not null then attest_key_id end as attest_key_id,
+               case when attest_registered_at is not null then attest_public_key end as attest_public_key
         from app.device where id = ${deviceId} and user_id = ${uid}`;
       const r = rows[0];
       if (!r) return null;
@@ -2780,3 +2790,75 @@ if (typeof globalThis.addEventListener === "function") {
   globalThis.addEventListener("unhandledrejection", (ev: Event) => containClosedSocketWrite(ev, (ev as PromiseRejectionEvent).reason));
 }
 // ==== END P3f additions ======================================================
+
+// ============================================================================
+// ==== App Attest key registration additions — `devices-attest-key` (F2) ======
+// ============================================================================
+// Everything between this banner and the matching END banner belongs to App Attest key registration
+// (`POST /v1/devices/attest-key`, 0034). Appended, not interleaved, like the P3f section above; the only line
+// elsewhere in this file is the single `attestKey: buildAttestKeyRepo(trx, uid)` seam inside `buildRepo` (and the
+// one-statement `deviceAttestState` change in the P3f section, which now returns only a REGISTERED key).
+import type { AttestKeyRepo } from "./rewards/types.ts";
+import type { RegistrationVerifierConfig } from "./rewards/app-attest-registration.ts";
+import { APPLE_APP_ATTEST_ROOT_DER } from "./rewards/apple-app-attest-root.ts";
+
+function attestKeyError(err: unknown): unknown {
+  const code = (err as { code?: unknown } | null)?.code;
+  // SQLSTATEs app.register_attest_key raises (0034): 55000 = the device already holds this very key; 23514 = this
+  // key was retired on this device and may not return (or the one-way counter trigger refused); P0002 = no such
+  // device for this user; 22023 = a malformed key / non-iOS device (the verifier makes both unreachable).
+  if (code === "55000") return Errors.conflict("key_already_registered", "this key is already registered on this device");
+  if (code === "23514") return Errors.conflict("key_previously_retired", "this key was retired on this device and cannot be registered again");
+  if (code === "P0002") return Errors.notFound("no such device");
+  if (code === "22023") return Errors.unprocessable("attestation_rejected", "the attestation could not be verified");
+  return err;
+}
+
+function buildAttestKeyRepo(trx: TxSql, uid: string, mode: DbMode): AttestKeyRepo {
+  return {
+    async deviceKey(deviceId: string) {
+      // Ownership is part of the WHERE clause: another user's id and a nonexistent id are the same empty result.
+      const rows = await trx`select platform, attest_key_id from app.device where id = ${deviceId} and user_id = ${uid}`;
+      const r = rows[0];
+      if (!r) return null;
+      return { platform: r.platform as "ios" | "android", keyId: (r.attest_key_id as string | null) ?? null };
+    },
+
+    async register(input: { deviceId: string; keyId: string; publicKey: Uint8Array }): Promise<"registered" | "replaced"> {
+      try {
+        // One SQL function (0034): validates the key against its id, locks the caller's own device row, writes the key
+        // (a reinstall's replacement restarts the counter, retires the old key) and audits it.
+        // EDGE MODE (0034): edge_actor cannot call `app.register_attest_key` (it names any user); `private.register_attest_key_for_actor`
+        // runs it as private_definer for the BOUND actor (no user argument). Same SQLSTATEs either way.
+        const rows =
+          mode === "edge"
+            ? await trx`select private.register_attest_key_for_actor(${input.deviceId}::uuid, ${input.keyId}, ${input.publicKey}) as result`
+            : await trx`select app.register_attest_key(${uid}, ${input.deviceId}, ${input.keyId}, ${input.publicKey}) as result`;
+        return rows[0]!.result as "registered" | "replaced";
+      } catch (err) {
+        throw attestKeyError(err);
+      }
+    },
+  };
+}
+
+/** Reads the configuration for `devices-attest-key` from the environment (this file is the only one allowed to).
+ * `null` = UNCONFIGURED, and the endpoint then answers 503 before reading or writing anything. Configured only
+ * when EVERY variable is present and sane — a half-set configuration is "not configured", never a default.
+ *   GR_APPLE_TEAM_ID, GR_APPLE_BUNDLE_ID   the App ID whose SHA-256 is the attestation's rpIdHash (the same two
+ *                                           variables the DeviceCheck / assertion path reads)
+ *   GR_APPLE_APPATTEST_ENV                  "production" | "development": which aaguid an attestation must carry.
+ *                                           Deliberately its own variable (not GR_APPLE_DEVICECHECK_ENV): it is a
+ *                                           property of the app BUILD's entitlement, DeviceCheck's is a property of
+ *                                           the API host, and registration needs no DeviceCheck credential. In a
+ *                                           normal deployment the two agree.
+ * THE TRUST ANCHOR is not configuration: it is Apple's root, pinned in code (rewards/apple-app-attest-root.ts) and
+ * set here, and only here, as `trustAnchorDer`. No variable, request field or row can supply another. */
+export function loadAttestKeyVerifierConfig(): RegistrationVerifierConfig | null {
+  const teamId = (Deno.env.get("GR_APPLE_TEAM_ID") ?? "").trim();
+  const bundleId = (Deno.env.get("GR_APPLE_BUNDLE_ID") ?? "").trim();
+  const environment = (Deno.env.get("GR_APPLE_APPATTEST_ENV") ?? "").trim();
+  if (teamId === "" || bundleId === "" || /\s/.test(teamId + bundleId) || (environment !== "production" && environment !== "development")) return null;
+  return { appId: `${teamId}.${bundleId}`, environment, trustAnchorDer: APPLE_APP_ATTEST_ROOT_DER };
+}
+// ==== END App Attest key registration additions ===============================

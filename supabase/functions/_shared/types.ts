@@ -24,7 +24,7 @@
 // to do. Grouped into narrow, per-resource objects (§4.7.1a: "named
 // methods over fixed tables") rather than one flat 20-method interface.
 
-import type { RewardsRepo } from "./rewards/types.ts";
+import type { AttestKeyRepo, RewardsRepo } from "./rewards/types.ts";
 
 export type ActorRole = "authenticated" | "staff" | "manager" | "operator" | "admin";
 
@@ -472,6 +472,10 @@ export interface Repo {
   /** P3f: `POST /v1/rewards/{id}/activate` (build plan §7.5, A2-08) — the
    * reward-activation reads and writes, defined in ./rewards/types.ts. */
   rewards: RewardsRepo;
+
+  /** App Attest key registration (`POST /v1/devices/attest-key`, P3f follow-up F2) — defined in
+   * ./rewards/types.ts. */
+  attestKey: AttestKeyRepo;
 
   device: {
     /** Looks up a device WITHOUT creating one — P3c gate round 2, item 7

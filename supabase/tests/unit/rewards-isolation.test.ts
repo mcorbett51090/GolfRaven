@@ -79,16 +79,24 @@ describe("the rewards modules", () => {
     expect(files.map(rel).sort()).toEqual(
       [
         "_shared/rewards/activate-handler.ts",
+        "_shared/rewards/app-attest-registration.ts",
         "_shared/rewards/app-attest.ts",
+        "_shared/rewards/apple-app-attest-root.ts",
+        "_shared/rewards/attest-key-handler.ts",
+        "_shared/rewards/attest-key-request.ts",
         "_shared/rewards/binding.ts",
+        "_shared/rewards/cbor-strict.ts",
         "_shared/rewards/decision-table.ts",
+        "_shared/rewards/der.ts",
         "_shared/rewards/devicecheck-client.ts",
         "_shared/rewards/play-integrity-client.ts",
         "_shared/rewards/play-integrity.ts",
         "_shared/rewards/production-ports.ts",
         "_shared/rewards/request-shape.ts",
+        "_shared/rewards/string-binding.ts",
         "_shared/rewards/types.ts",
         "_shared/rewards/vendor-http.ts",
+        "_shared/rewards/x509-lite.ts",
       ].sort(),
     );
   });
