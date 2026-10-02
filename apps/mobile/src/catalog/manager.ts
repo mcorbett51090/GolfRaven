@@ -41,8 +41,15 @@
  *
  * **Recovering from `TRUST_STATE_CORRUPT` (`resetCatalogData`, Me → "Reset
  * catalog data").** Refusing everything is right, but a user must not be stuck
- * with it until they reinstall. The reset is deliberately NOT a wipe:
- *   - it ALWAYS drops the cached catalog (it is re-downloaded and re-verified);
+ * with it until they reinstall. The reset is for that case ONLY: it is a no-op
+ * (`performed: false`, nothing written, state untouched) unless a STORED trust
+ * row is unreadable. On a healthy install it would only delete a perfectly good
+ * catalog, and the re-download that follows can fail (force-update state,
+ * network refresh off, no keyset, offline), leaving the user with none — so
+ * neither the Me-tab button nor a programmatic call may do that. (A malformed
+ * COMPILED-IN minimum is a build defect no stored-data reset can fix; that is
+ * also a no-op, reported as `stillCorrupt`.) The reset is deliberately NOT a wipe:
+ *   - once it runs it drops the cached catalog (it is re-downloaded and re-verified);
  *   - a trust-state row that is still VALID is KEPT — the persisted floor
  *     (`maxVerifiedCatalogVersion`) and the revoked set. Clearing a valid floor
  *     would hand an attacker (or a bad CDN node) a one-tap rollback, and a valid
@@ -253,6 +260,8 @@ export function isTrustStateCorrupt(state: Pick<CatalogState, "cacheDropped" | "
 
 /** What `resetCatalogData` did, for the UI to report. */
 export interface CatalogResetReport {
+  /** The reset ran. `false` = no stored row was unreadable, so NOTHING was changed (the cache included). */
+  performed: boolean;
   /** The revoked-key set was unreadable and was cleared (a readable one is never touched). */
   revokedCleared: boolean;
   /** The version floor was unreadable and was cleared (a readable one is never touched). */
@@ -428,6 +437,8 @@ export class CatalogManager {
    * cached catalog; clears ONLY an unreadable revoked set / floor row (a valid
    * one is kept); re-seeds a cleared floor from the compiled-in minimum; then
    * reloads state. Never touches the network and never throws for a bad row.
+   * A no-op (`performed: false`) when no stored row is unreadable: a healthy
+   * install keeps its catalog, whatever state it is in (force update included).
    */
   resetCatalogData(): Promise<CatalogResetReport> {
     return this.exclusive(() => this.resetNow());
@@ -435,6 +446,13 @@ export class CatalogManager {
 
   private async resetNow(): Promise<CatalogResetReport> {
     const { store } = this.opts;
+    // Nothing to repair => change nothing (see the header). Judged by the same parsers `readTrust` uses; the
+    // atomic per-row updates below re-judge each row at the moment they write, so this read is only the gate.
+    const storedCorrupt = parseRevoked(await store.readMeta(META_REVOKED)) === null || readFloor(await store.readMeta(META_MAX_VERIFIED_VERSION)).kind === "corrupt";
+    if (!storedCorrupt) {
+      const trust = await this.readTrust();
+      return { performed: false, revokedCleared: false, floorCleared: false, floorReseededTo: null, stillCorrupt: !trust.ok };
+    }
     await store.clearCatalog();
 
     // Each row is judged inside its own atomic update: a row that is readable at that instant is never cleared.
@@ -460,7 +478,7 @@ export class CatalogManager {
     this.state = { ...this.state, snapshot: null, cacheDropped: null, outOfDateBanner: false, lastOutcome: null };
     await this.loadCachedNow();
     const trust = await this.readTrust();
-    return { revokedCleared, floorCleared, floorReseededTo: floorCleared ? seed : null, stillCorrupt: !trust.ok };
+    return { performed: true, revokedCleared, floorCleared, floorReseededTo: floorCleared ? seed : null, stillCorrupt: !trust.ok };
   }
 
   private async loadCachedNow(): Promise<CatalogState> {

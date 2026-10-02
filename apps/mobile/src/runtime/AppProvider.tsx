@@ -112,7 +112,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
   const resetCatalog = useCallback(async () => {
     const report = await services.catalog.resetCatalogData();
     setCatalogState(services.catalog.getState());
-    if (!report.stillCorrupt) void refreshCatalog(); // fetch and verify the catalog again
+    if (report.performed && !report.stillCorrupt) void refreshCatalog(); // fetch and verify the catalog again (a no-op reset deleted nothing)
     return report;
   }, [services, refreshCatalog]);
 

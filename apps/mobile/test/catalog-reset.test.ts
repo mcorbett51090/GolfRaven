@@ -88,7 +88,7 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
       expect(m.getState().outOfDateBanner).toBe(true);
 
       const report = await m.resetCatalogData();
-      expect(report).toEqual({ revokedCleared: true, floorCleared: false, floorReseededTo: null, stillCorrupt: false });
+      expect(report).toEqual({ performed: true, revokedCleared: true, floorCleared: false, floorReseededTo: null, stillCorrupt: false });
       expect(await store.loadCatalog()).toBeNull(); // the cache is gone
       expect(await store.readMeta(REVOKED)).toBeNull(); // the unreadable row is gone
       expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBe(V1); // the VALID floor is untouched
@@ -122,7 +122,7 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
       expect(isTrustStateCorrupt(m.getState())).toBe(true);
 
       const report = await m.resetCatalogData();
-      expect(report).toEqual({ revokedCleared: false, floorCleared: true, floorReseededTo: V1, stillCorrupt: false });
+      expect(report).toEqual({ performed: true, revokedCleared: false, floorCleared: true, floorReseededTo: V1, stillCorrupt: false });
       expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBe(V1);
       expect(await store.loadCatalog()).toBeNull();
       expect(isTrustStateCorrupt(m.getState())).toBe(false);
@@ -135,7 +135,7 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
       await manager().refresh();
       await store.writeMeta(META_MAX_VERIFIED_VERSION, "");
       const m = manager({ compiledMinCatalogVersion: "" });
-      expect(await m.resetCatalogData()).toEqual({ revokedCleared: false, floorCleared: true, floorReseededTo: null, stillCorrupt: false });
+      expect(await m.resetCatalogData()).toEqual({ performed: true, revokedCleared: false, floorCleared: true, floorReseededTo: null, stillCorrupt: false });
       expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBeNull();
       expect((await m.refresh()).kind).toBe("updated");
     });
@@ -162,7 +162,7 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
   });
 
   describe("what a reset must NOT clear", () => {
-    it("on a healthy install it drops only the cache: a valid floor and a valid revoked set both survive", async () => {
+    it("on a healthy install it is a NO-OP: the catalog, the valid floor and the valid revoked set all survive, and it is still refused as before", async () => {
       cdn.serve(c1);
       await manager().refresh();
       cdn.serve(c4); // by B, revokes A
@@ -171,15 +171,66 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
       expect(JSON.parse((await store.readMeta(REVOKED))!)).toEqual([KEY_A.kid]);
 
       const m = manager();
-      expect(await m.resetCatalogData()).toEqual({ revokedCleared: false, floorCleared: false, floorReseededTo: null, stillCorrupt: false });
-      expect(await store.loadCatalog()).toBeNull();
-      expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBe(V4); // would be null / lower if the floor were cleared
-      expect(JSON.parse((await store.readMeta(REVOKED))!)).toEqual([KEY_A.kid]); // would be null if the revoked set were cleared
+      await m.loadCached();
+      const before = { state: m.getState(), cache: await store.loadCatalog() };
+      expect(before.cache).not.toBeNull();
+      expect(before.state.snapshot?.catalogVersion).toBe(V4);
+
+      expect(await m.resetCatalogData()).toEqual({ performed: false, revokedCleared: false, floorCleared: false, floorReseededTo: null, stillCorrupt: false });
+      expect(await store.loadCatalog()).toEqual(before.cache); // the readable catalog is NOT deleted
+      expect(m.getState()).toBe(before.state); // not even the in-memory state was rebuilt
+      expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBe(V4);
+      expect(JSON.parse((await store.readMeta(REVOKED))!)).toEqual([KEY_A.kid]);
 
       cdn.serve(oldByB); // older and genuine, by a trusted key: still a rollback
       expect(codes(await m.refresh())).toEqual(["CATALOG_VERSION_ROLLBACK"]);
       cdn.serve(lateByA); // newer, genuine, but by a revoked key: still refused
       expect(codes(await m.refresh())).toEqual(["REVOKED_KID"]);
+    });
+
+    it("on a healthy install in the FORCE-UPDATE state it changes nothing: the older catalog stays readable and the requirement stays", async () => {
+      cdn.serve(c1);
+      await manager().refresh(); // a readable V1 catalog
+      const newer = await late.emit({ version: "20260701-1111111", generatedAt: "2026-07-01T00:00:00.000Z", key: KEY_B, minAppVersion: "9.0.0" });
+      cdn.serve(newer);
+      const m = manager();
+      expect((await m.refresh()).kind).toBe("update_required");
+      expect(m.getState().snapshot?.catalogVersion).toBe(V1); // the older catalog is still readable
+      expect(m.getState().updateRequired).not.toBeNull();
+      expect(isTrustStateCorrupt(m.getState())).toBe(false);
+      const cache = await store.loadCatalog();
+      const metaBefore = [await store.readMeta(META_MAX_VERIFIED_VERSION), await store.readMeta(REVOKED), await store.readMeta(REQUIRED)];
+      const stateBefore = m.getState();
+
+      expect((await m.resetCatalogData()).performed).toBe(false);
+      expect(await store.loadCatalog()).toEqual(cache);
+      expect(cache).not.toBeNull();
+      expect([await store.readMeta(META_MAX_VERIFIED_VERSION), await store.readMeta(REVOKED), await store.readMeta(REQUIRED)]).toEqual(metaBefore);
+      expect(m.getState()).toBe(stateBefore);
+      expect(m.getState().snapshot?.catalogVersion).toBe(V1);
+    });
+
+    it("with network refresh off (baseUrl null) or no reachable CDN, a reset on a healthy install still deletes nothing", async () => {
+      cdn.serve(c1);
+      await manager().refresh();
+      for (const m of [manager({ baseUrl: null }), manager({ fetchBytes: async () => ({ status: 503, bytes: new Uint8Array(), etag: null }) })]) {
+        expect((await m.resetCatalogData()).performed).toBe(false);
+        expect(await store.loadCatalog()).not.toBeNull();
+        await m.loadCached();
+        expect(m.getState().snapshot?.catalogVersion).toBe(V1);
+      }
+    });
+
+    it("an empty install (nothing cached, nothing stored) is also a no-op, and a malformed compiled-in minimum is reported but changes nothing", async () => {
+      const m = manager();
+      expect(await m.resetCatalogData()).toEqual({ performed: false, revokedCleared: false, floorCleared: false, floorReseededTo: null, stillCorrupt: false });
+      expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBeNull();
+
+      cdn.serve(c1);
+      await manager().refresh();
+      const bad = manager({ compiledMinCatalogVersion: "not-a-version" });
+      expect(await bad.resetCatalogData()).toEqual({ performed: false, revokedCleared: false, floorCleared: false, floorReseededTo: null, stillCorrupt: true });
+      expect(await store.loadCatalog()).not.toBeNull(); // a build defect no reset can fix must not also cost the user the catalog
     });
 
     it("a corrupt FLOOR with a valid revoked set: only the floor goes; the revoked key stays revoked", async () => {
@@ -199,7 +250,7 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
       await store.writeMeta(REVOKED, "[1]");
       await store.writeMeta(META_MAX_VERIFIED_VERSION, "20260101");
       const m = manager();
-      expect(await m.resetCatalogData()).toEqual({ revokedCleared: true, floorCleared: true, floorReseededTo: null, stillCorrupt: false });
+      expect(await m.resetCatalogData()).toEqual({ performed: true, revokedCleared: true, floorCleared: true, floorReseededTo: null, stillCorrupt: false });
       expect((await m.refresh()).kind).toBe("updated");
     });
 
@@ -211,12 +262,13 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
     });
   });
 
-  it("reports stillCorrupt when the compiled-in minimum itself is malformed (a build defect no reset can fix)", async () => {
+  it("reports stillCorrupt when a stored row is cleared but the compiled-in minimum itself is malformed (a build defect no reset can fix)", async () => {
+    await store.writeMeta(REVOKED, "not json");
     const m = manager({ compiledMinCatalogVersion: "not-a-version" });
-    expect((await m.resetCatalogData()).stillCorrupt).toBe(true);
+    expect(await m.resetCatalogData()).toMatchObject({ performed: true, revokedCleared: true, stillCorrupt: true });
   });
 
-  it("never interleaves with a refresh in flight: it waits for it, then wipes what it saved", async () => {
+  it("never interleaves with a refresh in flight: it waits for it, then judges what it saved (healthy => keeps it)", async () => {
     cdn.serve(c1);
     const g = gate();
     const slow: FetchBytes = async (url, o) => {
@@ -232,7 +284,29 @@ describe.each(STORES)("resetCatalogData (%s)", (_n, makeStore) => {
     expect(done).toBe(false);
     g.release();
     expect((await refreshing).kind).toBe("updated");
-    await resetting;
+    expect((await resetting).performed).toBe(false);
+    expect(await store.loadCatalog()).not.toBeNull(); // the refresh's catalog survives: nothing was corrupt
+    expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBe(V1);
+  });
+
+  it("a corrupt row written while a refresh is in flight: the reset waits for the refresh, then repairs and wipes what it saved", async () => {
+    cdn.serve(c1);
+    const g = gate();
+    const slow: FetchBytes = async (url, o) => {
+      if (url.endsWith("/trails.json")) await g.hit();
+      return cdn.fetchBytes(url, o);
+    };
+    const m = manager({ fetchBytes: slow });
+    const refreshing = m.refresh();
+    await g.reached;
+    await store.writeMeta(REVOKED, "not json"); // damaged after the refresh already read its trust state
+    let done = false;
+    const resetting = m.resetCatalogData().then((r) => ((done = true), r));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toBe(false);
+    g.release();
+    expect((await refreshing).kind).toBe("updated");
+    expect(await resetting).toMatchObject({ performed: true, revokedCleared: true });
     expect(await store.loadCatalog()).toBeNull();
     expect(await store.readMeta(META_MAX_VERIFIED_VERSION)).toBe(V1); // the refresh's floor survives the reset
   });

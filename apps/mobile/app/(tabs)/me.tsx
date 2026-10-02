@@ -1,6 +1,7 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import { Alert } from "react-native";
+import { isTrustStateCorrupt } from "../../src/catalog/manager";
 import { useApp } from "../../src/runtime/AppProvider";
 import { LOCALES, type MessageKey } from "../../src/i18n";
 import { CatalogBanners } from "../../src/screens/CatalogBanners";
@@ -29,7 +30,7 @@ export default function MeScreen() {
   async function reset(): Promise<void> {
     const report = await app.resetCatalog();
     setOutcome(null);
-    setResetNote(report.stillCorrupt ? "me.catalog.reset.failed" : "me.catalog.reset.done");
+    setResetNote(!report.performed ? "me.catalog.reset.nothing" : report.stillCorrupt ? "me.catalog.reset.failed" : "me.catalog.reset.done");
   }
   function confirmReset(): void {
     Alert.alert(t("me.catalog.reset.confirmTitle"), t("me.catalog.reset.confirmBody"), [
@@ -80,7 +81,10 @@ export default function MeScreen() {
         <Body>{catalogState.snapshot ? t("me.catalog.version", { version: catalogState.snapshot.catalogVersion }) : t("me.catalog.none")}</Body>
         <Button variant="secondary" title={t("me.catalog.refresh")} onPress={() => void check()} />
         {outcome ? <Body muted>{t(outcome)}</Body> : null}
-        <Button variant="secondary" title={t("me.catalog.reset")} onPress={confirmReset} />
+        {/* Only offered when the install's own trust state is unreadable — the one case a reset can fix. On a healthy install
+            it would delete a readable catalog that the re-download may then be unable to replace (force-update state,
+            refresh off, no keyset, offline). `resetCatalogData()` refuses to run on a healthy install as well. */}
+        {isTrustStateCorrupt(catalogState) ? <Button variant="secondary" title={t("me.catalog.reset")} onPress={confirmReset} /> : null}
         {resetNote ? <Body muted>{t(resetNote)}</Body> : null}
         {services.keysetProblem ? <Body muted>{t("me.catalog.keysetProblem")}</Body> : null}
         <Body muted>{t("me.version", { version: services.config.appVersion })}</Body>
