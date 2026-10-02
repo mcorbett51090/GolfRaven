@@ -21,3 +21,22 @@ packages:
 # postinstall download.
 onlyBuiltDependencies:
   - sharp
+
+# P4.1 (apps/mobile): expo-router 57.0.22 depends on react-native-drawer-layout,
+# which declares react-native-reanimated and react-native-gesture-handler as
+# NON-optional peers. With `autoInstallPeers: true` (this repo's setting) pnpm
+# therefore installs reanimated 4.7.1, gesture-handler 3.3.0 and (via
+# reanimated) react-native-worklets 0.13.0 — three native modules that this
+# app never imports, at versions outside Expo SDK 57's certified set
+# (gesture-handler ~2.32.0, reanimated 4.5.1, worklets 0.10.1), and Expo's
+# autolinking then compiles all three into the binary (observed with
+# `expo-modules-autolinking react-native-config`, see apps/mobile/SPIKE.md).
+# The drawer layout is only used by expo-router's Drawer navigator, which the
+# app does not use, so the peers are marked optional here.
+packageExtensions:
+  react-native-drawer-layout:
+    peerDependenciesMeta:
+      react-native-reanimated:
+        optional: true
+      react-native-gesture-handler:
+        optional: true

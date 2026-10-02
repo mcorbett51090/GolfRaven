@@ -2,20 +2,33 @@
   "name": "@golfraven/mobile",
   "private": true,
   "version": "0.0.0",
-  "description": "GolfRaven mobile app (Expo/React Native, build plan §3.1 row G, §7). P0 scope: only the Android Health Connect reader for check X1 (build plan §10 P0).",
-  "main": "index.ts",
+  "description": "GolfRaven mobile app (Expo/React Native, build plan §3.1 row G, §7). P4.1 app shell (guest browse, signed catalog cache, outbox, EN/FR-CA) over a mock of api.*, plus the P0 Android Health Connect reader for check X1.",
+  "main": "expo-router/entry",
   "scripts": {
-    "build": "echo \"@golfraven/mobile: no EAS/expo export build in the P0 skeleton (real builds start P4, build plan §10). typecheck is the meaningful gate here.\"",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "echo \"@golfraven/mobile: no EAS build or expo export in CI yet (real store builds are P4.2). typecheck + test are the gates here.\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run"
   },
   "dependencies": {
+    "@expo/metro-runtime": "57.0.16",
+    "@golfraven/catalog": "workspace:*",
+    "@golfraven/catalog-tools": "workspace:*",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "expo": "57.0.24",
+    "expo-constants": "57.0.19",
+    "expo-linking": "57.0.10",
+    "expo-localization": "57.0.2",
+    "expo-router": "57.0.22",
+    "expo-sqlite": "57.0.3",
     "react": "19.2.3",
     "react-native": "0.86.3",
-    "react-native-health-connect": "4.1.3"
+    "react-native-health-connect": "4.1.3",
+    "react-native-safe-area-context": "5.7.0",
+    "react-native-screens": "4.26.0"
   },
   "devDependencies": {
+    "@types/node": "26.6.2",
     "@types/react": "19.2.18",
     "expo-build-properties": "57.0.21",
     "typescript": "7.0.2",

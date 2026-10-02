@@ -10,7 +10,7 @@ import type {
   RawExerciseRoutePoint,
   RawExerciseSessionRecord,
   RouteFollowUpResult,
-} from "./types.js";
+} from "./types";
 
 /** Health Connect `ExerciseType.GOLF` (from `react-native-health-connect`'s
  * `constants.ts`), duplicated here as a literal so `shape.ts` stays free

@@ -15,14 +15,25 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE"
-      ]
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
+      "allowBackup": false
     },
     "ios": {
       "bundleIdentifier": "com.golfraven.app"
     },
     "plugins": [
+      "expo-router",
+      [
+        "expo-localization",
+        {
+          "supportedLocales": ["en", "fr-CA"]
+        }
+      ],
       "react-native-health-connect",
       [
         "expo-build-properties",

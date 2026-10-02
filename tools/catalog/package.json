@@ -10,6 +10,22 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./manifest-core": {
+      "types": "./dist/manifest-core.d.ts",
+      "default": "./dist/manifest-core.js"
+    },
+    "./sign": {
+      "types": "./dist/sign.d.ts",
+      "default": "./dist/sign.js"
+    },
+    "./emit-catalog": {
+      "types": "./dist/emit-catalog.d.ts",
+      "default": "./dist/emit-catalog.js"
+    },
+    "./bundle": {
+      "types": "./dist/bundle.d.ts",
+      "default": "./dist/bundle.js"
     }
   },
   "scripts": {
