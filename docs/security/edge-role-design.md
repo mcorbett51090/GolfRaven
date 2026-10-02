@@ -453,7 +453,7 @@ as the row's owner. The delegate binders and the list definers are still unused 
 
 | Role | Gets | Notes |
 |---|---|---|
-| `edge_actor` | `signin_methods_for_actor`, `signin_link_identity_for_actor`, `signin_store_token_for_actor`, `signin_unlink_identity_for_actor`, `signin_enqueue_revocations_for_actor` (no uid argument; a `kind = 'user'` binding only, a system delegate is refused); plus `get_signin_token_kek`, `signin_find_account_by_email`, `peek_signin_otp_failures` / `hit_signin_otp_failure` | The cores that take a uid (`signin_methods(uuid)` ...) are `service_role` only: `18_signin_providers_edge.sql` proves `edge_actor` cannot call them. |
+| `edge_actor` | `signin_methods_for_actor`, `signin_link_identity_for_actor`, `signin_store_token_for_actor`, `signin_unlink_identity_for_actor`, `signin_enqueue_revocations_for_actor` (no uid argument; a `kind = 'user'` binding only, a system delegate is refused); plus `signin_find_account_by_email_for_actor` (F7) and, since 0037 (L1), `peek_signin_otp_failures_for_actor`, `reserve_signin_otp_attempt_for_actor`, `release_signin_otp_attempt_for_actor` (each refuses with 42501 unless a `kind = 'user'` actor is bound in the transaction); plus `get_signin_token_kek` | The cores that take a uid (`signin_methods(uuid)` ...), the unbound email lookup (`signin_find_account_by_email`) and the three OTP-counter cores (`peek_` / `reserve_` / `release_signin_otp_*`) are `service_role` only: `18_signin_providers_edge.sql` proves `edge_actor` cannot call them. (This row said, before 0037, that `edge_actor` held `peek_signin_otp_failures` and a `hit_signin_otp_failure`; the second name never existed, and the first was the unbound-callable defect L1 below.) |
 | `edge_system` | `claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek` | The drain is system work and acts on no account. `edge_system` has no privilege on the PII-registered grant table (check 12). |
 
 **How `privileged.ts` runs the sign-in lane in `edge` mode (PR2, as built).** The `signin:` seam is `buildSigninRepo(trx, uid, mode)`, switched on
@@ -461,8 +461,16 @@ as the row's owner. The delegate binders and the list definers are still unused 
 - **Per-user operations** (`methods`, `linkIdentity`, `storeToken`, `unlinkIdentity`, `enqueueRevocations`) call the `signin_*_for_actor` definers
   inside the `edge_actor` transaction `withOwnership` opens (the uid is the bound actor, never an argument). In `legacy` they call the cores as
   `service_role` with the uid as an argument. No grant or policy was broadened for this.
-- **The OTP attempt counter** (`peek_signin_otp_failures`, `reserve_signin_otp_attempt`, `release_signin_otp_attempt`; the bucket key is built in the database from a 64-hex
-  email hash; reserve is an atomic cap-check-and-increment taken BEFORE the proof is verified) is granted to `edge_actor`, so in `edge` it runs as the calling actor (`signinOtpFailuresFor(actor)`), not as a system actor.
+- **The OTP attempt counter** (the bucket key is built in the database from a 64-hex email hash; reserve is an atomic cap-check-and-increment taken BEFORE the proof is
+  verified) runs in `edge` as the calling actor (`signinOtpFailuresFor(actor)`), not as a system actor, **through the `_for_actor` wrappers since 0037**
+  (`buildSigninSystemOps(trx, mode)` picks the cores in `legacy` and the wrappers in `edge`). *Corrected 2026-10-02 (L1): 0035 granted the three cores straight to
+  `edge_actor`. They take no user and check no binding, so any `edge_actor` connection, with no Edge code and no actor bound, could call `release` in a loop and reset
+  any address's brute-force counter (release is a decrement) or `reserve` to burn another address's five attempts. The cores are now `service_role` only; the wrappers call
+  `private.signin_bound_user` first (the F7 shape), so an unbound `edge_actor` and a system delegate are both refused. Must-fail cells: `18_signin_providers_edge.sql`
+  (unbound, delegate, core not callable even when bound). **Honest limit:** a BOUND user actor can still `release` / `reserve` for an address of its choosing (the counter is keyed
+  by the target address, not the caller), the same standing it has for `signin_find_account_by_email_for_actor`; the binding is the authorization the Edge entrypoint
+  established, so this closes "any connection", not "a signed-in caller who goes around the Edge code".* Also 0037 (L2): `reserve` returns the hour window it charged and
+  `release` takes that window, so a proof that straddles the top of the hour cannot refund the new window.
 - **System operations** (`claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek`) run
   in `edge` as `edge_system` through `openScopedTx("system", { expectedUid: null }, ...)` (`withSigninSystem`), the roles those definers were
   granted to in 0035. They need no `import-catalog`-style legacy pool. In `legacy` they run through `withOwnership` with the nil-uid

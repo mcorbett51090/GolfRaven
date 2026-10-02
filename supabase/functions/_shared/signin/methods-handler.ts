@@ -188,13 +188,15 @@ async function proveEmail(email: string, code: string, ownerUid: string, deps: S
   // The attempt is TAKEN before the code is checked, atomically (cap check + increment in one statement), so N parallel wrong proofs
   // cannot all pass a read of the count and reach the verifier (security gate F3: check-then-act let 20 through). It is given back only
   // when the proof succeeded or never produced a verdict.
-  const used = await deps.otpFailures.reserve(hash);
-  if (used === null) {
+  const reservation = await deps.otpFailures.reserve(hash);
+  if (reservation === null) {
     throw Errors.tooManyRequests("too many failed email proofs for this address; try again in an hour", 3600);
   }
+  const used = reservation.used;
+  // The release names the window the attempt was reserved in, so a proof that straddles the top of the hour cannot refund the new window (L2).
   const giveBack = async () => {
     try {
-      await deps.otpFailures.release(hash);
+      await deps.otpFailures.release(hash, reservation.windowStart);
     } catch {
       // A release that fails leaves the attempt charged: the safe direction.
     }

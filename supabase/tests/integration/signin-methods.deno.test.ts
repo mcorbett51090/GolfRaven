@@ -507,7 +507,7 @@ Deno.test("the OTP failure counter and the 10/user/h linking limit are real and 
   const u = await newUser("rl");
   const counter = signinOtpFailuresFor(makeActor(u.uid));
   const h = await sha256Hex(`otp-${freshUuid()}@x.test`);
-  for (let i = 1; i <= 5; i++) assertEquals(await counter.reserve(h), i);
+  for (let i = 1; i <= 5; i++) assertEquals((await counter.reserve(h))?.used, i);
   assertEquals(await counter.reserve(h), null, "the cap is 5 and the sixth is refused");
   assertEquals(await counter.peek(h), 5);
   assertEquals(await counter.peek(await sha256Hex(`other-${freshUuid()}@x.test`)), 0);
@@ -572,14 +572,46 @@ Deno.test("F3: a SUCCESSFUL proof gives its attempt back; a transport failure is
   const u = await newUser("f3c");
   const counter = signinOtpFailuresFor(makeActor(u.uid));
   const h = await sha256Hex(`f3-${freshUuid()}@x.test`);
-  assertEquals(await counter.reserve(h), 1);
-  await counter.release(h);
+  const first = await counter.reserve(h);
+  assertEquals(first?.used, 1);
+  await counter.release(h, first!.windowStart);
   assertEquals(await counter.peek(h), 0);
-  for (let i = 1; i <= 5; i++) assertEquals(await counter.reserve(h), i);
+  let last = first;
+  for (let i = 1; i <= 5; i++) {
+    last = await counter.reserve(h);
+    assertEquals(last?.used, i);
+  }
   assertEquals(await counter.reserve(h), null, "the sixth is refused and takes nothing");
   assertEquals(await counter.peek(h), 5);
-  await counter.release(h);
-  assertEquals(await counter.reserve(h), 5, "a released attempt can be taken again");
+  await counter.release(h, last!.windowStart);
+  assertEquals((await counter.reserve(h))?.used, 5, "a released attempt can be taken again");
+});
+
+Deno.test("L2: a release names the window the attempt was reserved in; releasing an OLDER window (the hour rolled over) does not refund the current one", DT, async () => {
+  await setupOnce();
+  const u = await newUser("l2");
+  const counter = signinOtpFailuresFor(makeActor(u.uid));
+  const h = await sha256Hex(`l2-${freshUuid()}@x.test`);
+  const a = await counter.reserve(h);
+  const b = await counter.reserve(h);
+  assertEquals([a?.used, b?.used], [1, 2]);
+  assertEquals(a!.windowStart, b!.windowStart, "both attempts are charged to the same hour window");
+  const win = Date.parse(a!.windowStart);
+  assertEquals(win % 3_600_000, 0, "the window is hour-aligned");
+  // the reservation was taken in the PREVIOUS hour (as if the proof straddled the top of the hour): this window is not the current one
+  const prev = new Date(win - 3_600_000).toISOString();
+  await counter.release(h, prev);
+  assertEquals(await counter.peek(h), 2, "the current window was NOT refunded by a release that names an older one");
+  await counter.release(h, a!.windowStart);
+  assertEquals(await counter.peek(h), 1, "a release naming the window it was reserved in does refund it");
+  // the database refuses a window no reserve could have returned
+  let code: unknown = null;
+  try {
+    await counter.release(h, new Date(win + 1_000).toISOString());
+  } catch (e) {
+    code = (e as { code?: unknown } | null)?.code;
+  }
+  assertEquals(code, "22023", "a window that is not hour-aligned is refused");
 });
 
 Deno.test("F4: edge mode REFUSES to link or store a grant for ANOTHER account, called directly on the repo (mustBeSelf)", DT, async () => {

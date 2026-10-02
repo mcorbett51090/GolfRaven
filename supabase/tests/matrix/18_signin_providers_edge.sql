@@ -55,7 +55,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(65);
+SELECT plan(83);
 
 -- ----------------------------------------------------------------------------
 -- 1. Privileges: who can call what (the inventory check proves the same against the manifest; these are the behaviours)
@@ -70,7 +70,13 @@ SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_methods_for_actor', 'sign
   'privileges: edge_actor can EXECUTE the six _for_actor wrappers');
 SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_methods', 'signin_link_identity', 'signin_store_token', 'signin_unlink_identity', 'signin_enqueue_revocations', 'claim_signin_revocations', 'complete_signin_revocation', 'purge_signin_revocation_queue', 'signin_bound_user', 'signin_enqueue_internal', 'signin_find_account_by_email']), 0,
   'privileges: edge_actor can EXECUTE NONE of the user-id-taking core functions, the queue operations, the unbound email lookup or the internals (F7)');
-SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_methods_for_actor', 'signin_link_identity_for_actor', 'signin_store_token_for_actor', 'signin_unlink_identity_for_actor', 'signin_enqueue_revocations_for_actor', 'signin_methods', 'signin_find_account_by_email', 'signin_find_account_by_email_for_actor', 'peek_signin_otp_failures', 'reserve_signin_otp_attempt', 'release_signin_otp_attempt']), 0,
+SELECT is(pg_temp.can_exec('edge_actor', ARRAY['peek_signin_otp_failures_for_actor', 'reserve_signin_otp_attempt_for_actor', 'release_signin_otp_attempt_for_actor']), 3,
+  'privileges (L1): edge_actor can EXECUTE the three OTP-counter _for_actor wrappers');
+SELECT is(pg_temp.can_exec('edge_actor', ARRAY['peek_signin_otp_failures', 'reserve_signin_otp_attempt', 'release_signin_otp_attempt']), 0,
+  'privileges (L1): edge_actor can EXECUTE NONE of the three OTP-counter CORES (they take no user and check no binding: any connection could reset an address''s counter)');
+SELECT is(pg_temp.can_exec('service_role', ARRAY['peek_signin_otp_failures', 'reserve_signin_otp_attempt', 'release_signin_otp_attempt']), 3,
+  'privileges (L1): ... service_role, the legacy lane, keeps them');
+SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_methods_for_actor', 'signin_link_identity_for_actor', 'signin_store_token_for_actor', 'signin_unlink_identity_for_actor', 'signin_enqueue_revocations_for_actor', 'signin_methods', 'signin_find_account_by_email', 'signin_find_account_by_email_for_actor', 'peek_signin_otp_failures', 'reserve_signin_otp_attempt', 'release_signin_otp_attempt', 'peek_signin_otp_failures_for_actor', 'reserve_signin_otp_attempt_for_actor', 'release_signin_otp_attempt_for_actor']), 0,
   'privileges: edge_system can EXECUTE none of the user-facing sign-in functions (it is not an actor)');
 SELECT is(pg_temp.can_exec('edge_system', ARRAY['claim_signin_revocations', 'complete_signin_revocation', 'purge_signin_revocation_queue', 'get_signin_token_kek']), 4,
   'privileges: edge_system CAN run the queue operations and read the KEK (the drain decrypts)');
@@ -86,6 +92,12 @@ SELECT throws_ok($$SELECT private.signin_store_token_for_actor('apple', decode(r
 SELECT throws_ok($$SELECT * FROM private.signin_unlink_identity_for_actor('google')$$, '42501', 'signin_unlink_identity_for_actor: no actor is bound in this transaction', 'unbound: unlink_for_actor refuses');
 SELECT throws_ok($$SELECT * FROM private.signin_enqueue_revocations_for_actor()$$, '42501', 'signin_enqueue_revocations_for_actor: no actor is bound in this transaction', 'unbound: enqueue_for_actor refuses');
 SELECT throws_ok($$SELECT private.signin_find_account_by_email_for_actor('edge18-eb@signin.test')$$, '42501', 'signin_find_account_by_email_for_actor: no actor is bound in this transaction', 'unbound (F7): the email lookup refuses: an unbound edge_actor learns nothing about which emails hold accounts');
+SELECT throws_ok($$SELECT private.peek_signin_otp_failures_for_actor(repeat('0', 64))$$, '42501', 'peek_signin_otp_failures_for_actor: no actor is bound in this transaction', 'unbound (L1): the OTP peek wrapper refuses');
+SELECT throws_ok($$SELECT * FROM private.reserve_signin_otp_attempt_for_actor(repeat('0', 64))$$, '42501', 'reserve_signin_otp_attempt_for_actor: no actor is bound in this transaction', 'unbound (L1): ... the reserve wrapper (no address''s attempts can be burned)');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt_for_actor(repeat('0', 64), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600))$$, '42501', 'release_signin_otp_attempt_for_actor: no actor is bound in this transaction', 'unbound (L1): ... and the release wrapper (no address''s counter can be reset: release is a decrement)');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt(repeat('0', 64), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600))$$, '42501', NULL, 'unbound (L1): the release CORE is not callable by edge_actor at all (permission denied, not a binding check)');
+SELECT throws_ok($$SELECT * FROM private.reserve_signin_otp_attempt(repeat('0', 64))$$, '42501', NULL, 'unbound (L1): ... nor the reserve core');
+SELECT throws_ok($$SELECT private.peek_signin_otp_failures(repeat('0', 64))$$, '42501', NULL, 'unbound (L1): ... nor the peek core');
 ROLLBACK;
 
 BEGIN;
@@ -96,6 +108,9 @@ SELECT throws_ok($$SELECT * FROM private.signin_methods_for_actor()$$, '42501', 
 SELECT throws_ok($$SELECT * FROM private.signin_enqueue_revocations_for_actor()$$, '42501', 'signin_enqueue_revocations_for_actor: a system delegate may not manage sign-in methods', 'delegate: ... nor queue revocations (it is not an account deletion)');
 SELECT throws_ok($$SELECT private.signin_link_identity_for_actor('apple', 'x', NULL, false, false)$$, '42501', 'signin_link_identity_for_actor: a system delegate may not manage sign-in methods', 'delegate: ... nor link an identity');
 SELECT throws_ok($$SELECT private.signin_find_account_by_email_for_actor('edge18-eb@signin.test')$$, '42501', 'signin_find_account_by_email_for_actor: a system delegate may not manage sign-in methods', 'delegate (F7): ... nor look an email up (only a kind = user binding may)');
+SELECT throws_ok($$SELECT private.peek_signin_otp_failures_for_actor(repeat('0', 64))$$, '42501', 'peek_signin_otp_failures_for_actor: a system delegate may not manage sign-in methods', 'delegate (L1): ... nor peek the OTP counter');
+SELECT throws_ok($$SELECT * FROM private.reserve_signin_otp_attempt_for_actor(repeat('0', 64))$$, '42501', 'reserve_signin_otp_attempt_for_actor: a system delegate may not manage sign-in methods', 'delegate (L1): ... nor reserve an OTP attempt');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt_for_actor(repeat('0', 64), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600))$$, '42501', 'release_signin_otp_attempt_for_actor: a system delegate may not manage sign-in methods', 'delegate (L1): ... nor release one (only a kind = user binding may)');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------
@@ -134,9 +149,15 @@ SELECT throws_ok($$SELECT * FROM private.claim_signin_revocations(NULL, 10, 60)$
 SELECT is(private.signin_find_account_by_email_for_actor('EDGE18-EB@signin.test'), '5a5a1800-0000-0000-0000-0000000000eb'::uuid, 'EA: a BOUND user can look up the account holding an email (the link path needs it; returns only an id)');
 SELECT throws_ok($$SELECT private.signin_find_account_by_email('edge18-eb@signin.test')$$, '42501', NULL, 'EA (F7): the unbound core lookup is not callable by an edge_actor at all');
 SELECT is((SELECT o_kek_id FROM private.get_signin_token_kek(NULL)), 'e18', 'EA: can read the KEK (R6: the runtime that runs as edge_actor encrypts the grant)');
-SELECT is(private.peek_signin_otp_failures(repeat('0', 64)), 0, 'EA: can peek the OTP failure counter for a hash');
-SELECT is(private.reserve_signin_otp_attempt(repeat('0', 64)), 1, 'EA: ... and reserve one attempt');
-SELECT is(private.release_signin_otp_attempt(repeat('0', 64)), 0, 'EA: ... and give it back');
+SELECT is(private.peek_signin_otp_failures_for_actor(repeat('0', 64)), 0, 'EA: a BOUND user can peek the OTP failure counter for a hash (through the wrapper)');
+SELECT is((SELECT o_attempts FROM private.reserve_signin_otp_attempt_for_actor(repeat('0', 64))), 1, 'EA: ... and reserve one attempt');
+SELECT is((SELECT o_window_start FROM private.reserve_signin_otp_attempt_for_actor(repeat('0', 64))), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600), 'EA: ... the reservation reports the hour window it was charged to (L2)');
+SELECT is(private.release_signin_otp_attempt_for_actor(repeat('0', 64), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600)), 1, 'EA: ... and give one back in that window (2 -> 1)');
+SELECT is(private.release_signin_otp_attempt_for_actor(repeat('0', 64), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600) - interval '1 hour'), 0, 'EA (L2): a release naming another window moves nothing here');
+SELECT is(private.peek_signin_otp_failures_for_actor(repeat('0', 64)), 1, 'EA (L2): ... the current window still holds its 1');
+SELECT throws_ok($$SELECT private.peek_signin_otp_failures(repeat('0', 64))$$, '42501', NULL, 'EA (L1): even BOUND, the peek core is not callable by edge_actor (only the wrapper is)');
+SELECT throws_ok($$SELECT * FROM private.reserve_signin_otp_attempt(repeat('0', 64))$$, '42501', NULL, 'EA (L1): ... nor the reserve core');
+SELECT throws_ok($$SELECT private.release_signin_otp_attempt(repeat('0', 64), to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600))$$, '42501', NULL, 'EA (L1): ... nor the release core');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------
