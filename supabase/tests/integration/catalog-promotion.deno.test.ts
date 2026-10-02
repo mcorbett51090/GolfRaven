@@ -20,7 +20,7 @@
 // cannot issue through real challenge/token TTLs), then scored by the SAME
 // `finalizeScoringForKey` the live tail uses.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
+import { withDelegatedActor, withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
 import { drainRescoreBacklog } from "../../functions/_shared/catalog/rescore-orchestrator.ts";
 import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-repo.ts";
 import { finalizeScoringForKey, handleEvidenceIntake, repickUserPlay } from "../../functions/_shared/evidence/handler.ts";
@@ -67,14 +67,14 @@ Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after 
   for (const u of users) assertEquals(await uniqueCourses(u), 0);
 
   // Bounded pass: at most 2 plays, so the 3-play backlog is NOT finished.
-  const pass1 = await drainRescoreBacklog(drainRepo, withOwnership, 2);
+  const pass1 = await drainRescoreBacklog(drainRepo, withDelegatedActor, 2);
   assertEquals(pass1.playsProcessed, 2);
   assertEquals(pass1.coursesCompleted, 0);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_rescore_backlog where course_id = '${i.k}' and done_at is null`), 1, "the backlog row stays open with a cursor");
   // Later passes (no straggler grace in the test): the last play, then the
   // closing sweep (cursor rewound by the overlap), then the row closes.
   let completed = 0;
-  for (let pass = 0; pass < 8 && completed === 0; pass++) completed += (await drainRescoreBacklog(drainRepo, withOwnership, 2, undefined, NO_GRACE)).coursesCompleted;
+  for (let pass = 0; pass < 8 && completed === 0; pass++) completed += (await drainRescoreBacklog(drainRepo, withDelegatedActor, 2, undefined, NO_GRACE)).coursesCompleted;
   assertEquals(completed, 1, "the backlog row closes after its sweep");
 
   for (const u of users) {
@@ -92,7 +92,7 @@ Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after 
   });
   assertEquals(replay.alreadyImported, true);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_rescore_backlog where course_id = '${i.k}'`), 1);
-  const idle = await drainRescoreBacklog(drainRepo, withOwnership, 50);
+  const idle = await drainRescoreBacklog(drainRepo, withDelegatedActor, 50);
   assertEquals(idle.playsProcessed, 0);
   for (const u of users) assertEquals(await uniqueCourses(u), 1, "an idempotent replay must not double the count");
 });
@@ -127,7 +127,7 @@ Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_mone
   assertEquals(o2.splitCourses, 1);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_id_ledger where id = '${i.s}' and split_from = '${i.k}'`), 1);
 
-  await drainRescoreBacklog(drainRepo, withOwnership, 50);
+  await drainRescoreBacklog(drainRepo, withDelegatedActor, 50);
   const afterSplit = (await playScore(actor.uid, i.k))!;
   assertEquals(afterSplit.pick, "user", "the existing play becomes a user pick of the KEPT course");
   // NEW-4 (A2-01): the label is not enough — the play was RE-SCORED with the cap.
@@ -198,7 +198,7 @@ Deno.test("AT 18 (concurrency): the promotion re-score racing a LIVE submission 
   const live = withOwnership(actor, (repo) =>
     handleEvidenceIntake({ source: "self_report", deviceId: freshUuid(), facilityId: i.fac, courseId: i.k, localDate: todayChicago(), catalogVersion }, repo),
   );
-  const drain = drainRescoreBacklog(drainRepo, withOwnership, 50);
+  const drain = drainRescoreBacklog(drainRepo, withDelegatedActor, 50);
   const [liveResult, drained] = await Promise.all([live, drain]);
   assertEquals(liveResult.status, "accepted");
   assertEquals(drained.failures, 0);
@@ -299,7 +299,7 @@ Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sort
     "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 18 }]),
   });
 
-  const pass1 = await drainRescoreBacklog(drainRepo, withOwnership, 2);
+  const pass1 = await drainRescoreBacklog(drainRepo, withDelegatedActor, 2);
   assertEquals(pass1.playsProcessed, 2);
 
   // A new play lands while the drain is mid-course, and its id is the
@@ -313,9 +313,9 @@ Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sort
 
   // Count which players the drain actually re-scored.
   const seen = new Set<string>();
-  const spy: typeof withOwnership = (actor, op) => {
+  const spy: typeof withDelegatedActor = (delegate, actor, op) => {
     seen.add(actor.uid);
-    return withOwnership(actor, op);
+    return withDelegatedActor(delegate, actor, op);
   };
   const pass2 = await drainRescoreBacklog(drainRepo, spy, 50, undefined, NO_GRACE);
   assertEquals(pass2.failures, 0);

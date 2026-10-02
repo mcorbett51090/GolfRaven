@@ -1,8 +1,8 @@
 // supabase/functions/_shared/catalog/drain-orchestrator.ts
 //
 // The I/O half of `queued_catalog` draining — for each open row, opens a
-// PER-ROW, actor-scoped transaction (via an injected `withOwnership`
-// -shaped function — this module stays privileged.ts-free, matching
+// PER-ROW, actor-scoped transaction (via an injected `withDelegatedActor`
+// -shaped function, edge role PR3 — this module stays privileged.ts-free, matching
 // evidence/handler.ts's own dependency-injection discipline) and calls
 // `evidence/handler.ts#redrainQueuedEvidenceRow`, the REAL re-derivation
 // entry point (P3e round 2 gate, B2). `decideQueuedDrainOutcome`
@@ -27,7 +27,7 @@ import { decideQueuedDrainOutcome } from "./drain-queued.ts";
 import { redrainQueuedEvidenceRow } from "../evidence/handler.ts";
 import { compareCatalogVersions } from "./manifest-artifact.ts";
 import type { Deadline } from "./time-budget.ts";
-import type { Actor, ImporterRepo, Repo } from "../types.ts";
+import type { Actor, ImporterRepo, WithDelegatedActorFn } from "../types.ts";
 
 export interface DrainQueuedCatalogResult {
   scanned: number;
@@ -43,14 +43,11 @@ export interface DrainQueuedCatalogResult {
 
 const DEFAULT_BATCH_LIMIT = 500;
 
-/** `withOwnership` is injected (the exact shape
- * `privileged.ts#withOwnership` already has) rather than imported
- * directly — this module runs pure derivation/decision logic over
- * whatever transaction wrapper the caller (`import-catalog/index.ts`)
- * supplies, the same DI discipline `evidence/handler.ts`'s own
- * `planEvidenceRateLimitChecks`/`handleEvidenceIntake` already use for
- * their own injected dependencies. */
-export type WithOwnershipFn = <T>(actor: Actor, op: (repo: Repo) => Promise<T>) => Promise<T>;
+/** Edge role PR3: the per-row transaction wrapper is `privileged.ts#withDelegatedActor`, injected (not imported) so this module
+ * stays privileged.ts-free, the same DI discipline `evidence/handler.ts` uses. In `edge` mode it binds the row's owner through
+ * `private.bind_delegate_for_queued_evidence(evidenceId)` (valid only while the row is `queued_catalog`) and runs as `edge_actor`;
+ * in `legacy` mode it is `withOwnership(actor, op)`. Either way the drain acts as the row's own user and nobody else. */
+export type { WithDelegatedActorFn };
 
 /** Drains up to `limit` open `queued_catalog` rows, oldest first, each in
  * its OWN per-user transaction (so one row's failure — a thrown error
@@ -61,7 +58,7 @@ export type WithOwnershipFn = <T>(actor: Actor, op: (repo: Repo) => Promise<T>) 
  * SAME snapshot of "what has been imported," so draining 500 rows over
  * several seconds can't have row #1 and row #500 judged against subtly
  * different "current" states. */
-export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnership: WithOwnershipFn, limit: number = DEFAULT_BATCH_LIMIT, deadline?: Deadline): Promise<DrainQueuedCatalogResult> {
+export async function drainQueuedCatalog(importerRepo: ImporterRepo, withDelegatedActor: WithDelegatedActorFn, limit: number = DEFAULT_BATCH_LIMIT, deadline?: Deadline): Promise<DrainQueuedCatalogResult> {
   const rows = await importerRepo.queuedCatalog.listOpen(limit);
   const currentSiteVersion = await importerRepo.queuedCatalog.currentSiteVersion();
   const now = importerRepo.now();
@@ -83,10 +80,14 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
     // per-user transaction, so a unit is bounded by one 12 s transaction —
     // never redrain (12 s) + a second terminal-write transaction (12 s)
     // overrunning the unit reserve.
-    let outcomeKind: "resolved" | "unknown_id" | "needs_attention" | "still_queued";
+    const delegate = { kind: "queued_evidence", evidenceId: row.id } as const;
+    let outcomeKind: "resolved" | "unknown_id" | "needs_attention" | "still_queued" | "gone";
     try {
-      outcomeKind = await withOwnership(actor, async (repo): Promise<"resolved" | "unknown_id" | "needs_attention" | "still_queued"> => {
-        const outcome = await redrainQueuedEvidenceRow(repo, row.id, row.queuedInput, createdAt);
+      outcomeKind = await withDelegatedActor(delegate, actor, async (repo): Promise<"resolved" | "unknown_id" | "needs_attention" | "still_queued" | "gone"> => {
+        // Edge role PR3: the raw submission is read HERE, as the row's owner (the system list does not carry it).
+        const stored = await repo.evidence.readQueuedInput(row.id);
+        if (stored === null) return "gone"; // resolved or moved on by a concurrent drain since the list was read: nothing left to do
+        const outcome = await redrainQueuedEvidenceRow(repo, row.id, stored.queuedInput, createdAt);
         if (outcome.kind === "resolved") return "resolved";
         if (outcome.kind === "terminal_unknown_id") {
           // redrainQueuedEvidenceRow found a STRUCTURAL failure (forged
@@ -125,7 +126,7 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
       result.errored += 1;
       if (aged) {
         try {
-          await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(row.id, "needs_attention"));
+          await withDelegatedActor(delegate, actor, (repo) => repo.evidence.markQueuedTerminal(row.id, "needs_attention"));
           result.needsAttention += 1;
         } catch (err2) {
           console.error(`drainQueuedCatalog: row ${row.id} could not be aged out either (left queued)`, err2);
@@ -147,6 +148,8 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
       case "needs_attention":
         result.needsAttention += 1;
         break;
+      case "gone":
+        break; // handled by someone else since the list was read: counted in `scanned` only
       default:
         result.stillQueued += 1;
         break;

@@ -2476,7 +2476,55 @@ drain pass calls it where it calls the fix-coordinate purge (`drainRescoreBacklo
   retention promises in the privacy label depend on an import happening.
 - **E6.** Before launch: privacy-officer / PIA sign-off and a privacy-policy disclosure for the install-link tombstone; disclose the fix-coordinate re-pick
   exception in the privacy label (owner decisions above).
-- **E7 (PR3).** Run `import-catalog` entirely as edge_system with delegate binders; then `edge` mode needs one URL.
+- **E7 (PR3).** Run `import-catalog` entirely as edge_system with delegate binders; then `edge` mode needs one URL. **Closed by edge role PR3** (section "Edge role PR3" below).
+
+## Edge role PR3 (2026-10-02): the system path (follow-up 6, step 3 of 4)
+
+Follow-up 6 is still open until PR4. PR3 moves the system path of `import-catalog` onto `edge_system` and the delegate binders: design as built, the PR4 blockers and the
+`[unverified]` items are in [`docs/security/edge-role-design.md`](edge-role-design.md) section 13. **No migration (there is no 0039)** and no grant, policy, allowlist row, fixture or
+definer was added: every importer statement already fits the 0031 `edge_system` column grants and policies, and the cross-user reads and purges already had definers (0030, 0033).
+FORCE RLS is untouched; nothing was given to `edge_system` on a PII table (check 12 unchanged).
+
+- **`withDelegatedActor(delegate, actor, op)`.** `edge`: one transaction that starts as `edge_system`, binds through `private.bind_delegate_for_queued_evidence(evidence_id)` (valid only while
+  the evidence is `queued_catalog`) or `private.bind_delegate_for_rescore(backlog_id, play_id)` (valid only while the backlog row is open and the play is at its course), then acts as `edge_actor`;
+  `private.actor_uid()` must equal the owner the caller EXPECTS (the system list's `user_id`) before `op` runs. `legacy`: exactly `withOwnership`. The drain re-reads `queued_input` as the row's
+  owner (`Repo#evidence.readQueuedInput`); the list omits it in both modes. Orchestrator signatures: `drainQueuedCatalog(importerRepo, withDelegatedActor, ...)`,
+  `drainRescoreBacklog(importerRepo, withDelegatedActor, ...)`; the rescore page request is capped at 500 (`MAX_RESCORE_PAGE`, the definer's own clamp).
+- **The importer repo as `edge_system`.** `withSystemCatalogImport` in `edge` runs the existing statements as `edge_system`, with three of them through definers (`list_queued_catalog`,
+  `list_rescore_plays`, `purge_fix_coords`; the tombstone purge was already one). `import-catalog` in `edge` mode needs `GOLFRAVEN_EDGE_DB_URL` only.
+- **Sign in with Apple (section 12, item 3).** Left as is: `signin-revocation-drain` already runs as `edge_system` through `openScopedTx("system")` and acts on no account, so it has no
+  use for a delegate. The OTP-proven cross-account link stays `501` in `edge` mode; **the decision to build a proof-bound definer is deferred** (recorded as a PR4 blocker).
+- **Carried PR2 LOWs / NITs.** (1) The design doc now says the 24-month tombstone purge runs in BOTH modes (the "legacy byte-for-byte" claim was wrong since 0033). (2) The edge self-check is
+  periodic (5 minutes / 1000 transactions; a failure is never remembered; concurrent callers share one check). (3) `tools/db/test.sh` no longer puts the throwaway `edge_gateway` password
+  inside a `su -c` string (stdin instead). (4) Supavisor transaction mode with `prepare: true` on the edge pool is documented as a PR4 pre-deploy check `[unverified]`, behaviour unchanged.
+- **PR4 blockers** (detail in the design doc): delete `legacy` and add the lint pass; the cross-account link (build it or ship the 501); E5 (schedule both purges independently of an import);
+  the Supavisor / `prepare` check and the real provisioning of `edge_gateway` (both `[unverified]`); the R2 `held_review` ruling; the deploy config for `import-catalog` (edge URL only); the
+  self-check interval is an unmeasured default.
+- **Tests.** `supabase/tests/integration/edge-system-path.deno.test.ts` (12 tests, forced to `edge` mode): the whole system path with `SUPABASE_DB_URL` unset and again pointing at an unusable host (with
+  a control that the same URL breaks `legacy`); a delegate binds only the named row's owner, and an unscoped query inside it sees 0 foreign rows; a delegate for evidence that is not `queued_catalog`, a
+  closed backlog row or a play at another course is refused before any work runs; naming A's row while expecting B fails closed; a delegate-bound transaction is a system delegate (it cannot export; the
+  user-bound control can); the real queued and rescore drains open every per-row transaction with the delegate for that row and its owner; the purges run through the `edge_system` definers (with EXECUTE
+  revoked from `edge_system` they stop; superuser harness) and the retention bounds are the database's. `edge-role.deno.test.ts` gained the periodic self-check cell (superuser harness). Unit:
+  `edge-selfcheck-gate.test.ts` (9, fake clock), `edge-system-path-isolation.test.ts` (10 source pins), orchestrator signatures and delegate refs in `drain-orchestrator.test.ts` and
+  `catalog-promotion.test.ts`. pgTAP matrix 16 gained cells 712-713 (below).
+- **A layered-defence finding, closed with cells.** Mutation proof showed that deleting the `status = 'queued_catalog'` predicate from `bind_delegate_for_queued_evidence` left every pgTAP cell and the
+  whole Deno suite green: `pd_queued_catalog_read` hides a non-queued row from `private_definer`, so the same `P0002` and message come out of the policy's NOT FOUND. Likewise the binder's
+  `p.course_id = v_course` is masked by `pd_rescore_play_read` (plays at a course with SOME open backlog row; observed the same way). Cells 712 and 713 widen the policy to `true` in a rolled-back transaction, prove with a control that
+  the row IS then visible to `private_definer`, and expect the body's refusal; each fails when its predicate is removed. (The other layer, a mutant that widens `pd_queued_catalog_read` to `USING (true)`, passes pgTAP and the Deno suite and is caught by `tools/db/verify-function-inventory.mjs` against `supabase/tests/fixtures/definer_policy_exprs.txt`: `expected using_expr="(status = 'queued_catalog'::app.evidence_status)" ... got using_expr="true"`.)
+
+- **Verification (PR3 on `fb91e05`, 2026-10-02, PostgreSQL 17, a fresh cluster per run).** `tools/db/test.sh` green in HARNESS_MODE=superuser and =restricted: pgTAP `Files=21, Tests=1866,
+  Result: PASS` (1864 before; matrix 16 is plan 713); the Deno integration suite **211 passed / 0 failed in `EDGE_DB_MODE=legacy` AND 211 / 0 in `edge`**, in each harness mode (198 / 198 before: 12 new
+  tests in `edge-system-path.deno.test.ts` and 1 in `edge-role.deno.test.ts`); `verify-function-inventory: OK`; `service-role-lint: clean`. The superuser-only cells (the periodic self-check, the
+  self-check mutation cells, the purge EXECUTE-revoke cells) print `skipped` under HARNESS_MODE=restricted and run under `superuser`. Unit suite 42 files / 793 tests (40 / 767 before), `service-role-lint`
+  tests 4 files / 316, `pnpm -r typecheck` exit 0, `deno check --frozen` and `deno cache --frozen` exit 0 over every CI entry point on a fresh `DENO_DIR`,
+  `check-migrations-immutable.sh --base fb91e05` (38 files byte-identical) and `--self-test`, `gitleaks dir` no leaks.
+- **Mutation proofs (`/tmp` copies only, a fresh cluster each; nothing mutated was left in the tree).** (1) `withDelegatedActor` binds with `bind_actor` (`userBind`) instead of the delegate: **6 Deno tests
+  fail**, among them the two that drive the REAL queued and rescore drains (each calls the public `withDelegatedActor` with the drain's own arguments and expects the account-export definer to refuse
+  the transaction as a system delegate). (2) The `queued_catalog` predicate removed from `bind_delegate_for_queued_evidence`: **pgTAP cell 712 fails**; before 712 existed this mutant passed every pgTAP
+  cell and all 24 Deno tests of the two edge files (the layered defence above), so the Deno suite alone does NOT kill it. (2b) The binder's course predicate removed from `bind_delegate_for_rescore`:
+  **cell 713 fails**; with matrix 16 reverted to its pre-PR3 text this mutant also passes every pgTAP cell and the Deno suite. (3) `withSystemCatalogImport` routed back to the legacy pool in `edge` mode: **5 Deno tests fail** (the legacy-URL-unset and unusable-URL tests, the missing-edge-URL test, and
+  both purge tests, which need the `edge_system` definers). (4) The periodic self-check disabled (success remembered for the pool's life): **1 Deno test fails** (the periodic cell) **and 6 unit tests fail**.
+  (5) Widening `pd_queued_catalog_read` to `USING (true)`: caught only by `verify-function-inventory.mjs` (above).
 
 ## App Attest key registration (2026-10-02): follow-up F2 closed in code, not yet on a device
 

@@ -54,6 +54,16 @@ DENO_CONFIG="$SUPABASE_DIR/functions/deno.json"
 # place next to the other test-only assets.
 DENO_LOCK="$SUPABASE_DIR/tests/deno.lock"
 
+# Edge role PR3: the throwaway edge_gateway password arrives on STDIN when EDGE_GATEWAY_TEST_PASSWORD_STDIN=1 (tools/db/test.sh pipes it), never
+# as part of a command line, where `ps` would show it for the whole run. It is read once, into this process's environment (which `deno test`
+# inherits, and which only this OS user and root can read), and the flag is dropped so a child cannot re-read stdin. A caller that already
+# exports EDGE_GATEWAY_TEST_PASSWORD (a standalone run) is left alone.
+if [ "${EDGE_GATEWAY_TEST_PASSWORD_STDIN:-}" = "1" ]; then
+  IFS= read -r EDGE_GATEWAY_TEST_PASSWORD || true
+  export EDGE_GATEWAY_TEST_PASSWORD
+fi
+unset EDGE_GATEWAY_TEST_PASSWORD_STDIN
+
 : "${PGHOST:?tools/db/test-deno-integration.sh: PGHOST must be set (see the header comment in this file)}"
 : "${PGPORT:?tools/db/test-deno-integration.sh: PGPORT must be set}"
 : "${PGUSER:?tools/db/test-deno-integration.sh: PGUSER must be set}"
@@ -169,7 +179,7 @@ fi
 #           `edge_gateway` login (tools/db/provision-edge-login.sh, run by tools/db/test.sh before this script).
 # Override with EDGE_DB_MODES="legacy" (or "edge") to run one. Edge mode's connection string is built by
 # supabase/tests/integration/_helpers.ts from PGHOST/PGPORT/PGDATABASE (+ EDGE_GATEWAY_TEST_PASSWORD, which tools/db/test.sh
-# generates at runtime; this script never contains a credential).
+# generates at runtime and pipes in on stdin; this script never contains a credential).
 EDGE_DB_MODES="${EDGE_DB_MODES:-legacy edge}"
 # THE SUITE IS NOT RE-RUNNABLE ON ONE DATABASE (fixed catalog versions, a growing "current import", fixed handles): every
 # pass therefore needs its OWN copy of the database. tools/db/test.sh clones one per mode from the freshly-seeded database
@@ -197,7 +207,7 @@ for EDGE_DB_MODE in $EDGE_DB_MODES; do
     --config "$DENO_CONFIG" \
     "${LOCK_ARGS[@]}" \
     --allow-net --allow-env --allow-read --allow-write \
-    "$INTEGRATION_DIR"
+    "$INTEGRATION_DIR" < /dev/null
   echo "tools/db/test-deno-integration.sh: all Deno integration tests passed (EDGE_DB_MODE=$EDGE_DB_MODE)"
 done
 echo "tools/db/test-deno-integration.sh: all Deno integration tests passed in every mode ($EDGE_DB_MODES)"

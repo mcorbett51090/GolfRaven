@@ -11,13 +11,18 @@
 // AUTH: HMAC-only, no JWT path at all — see import-endpoint.ts /
 // webhook-auth.ts.
 //
+// EDGE ROLE (PR3): in `EDGE_DB_MODE=edge` every database call below runs through GOLFRAVEN_EDGE_DB_URL and never opens the legacy pool:
+// the importer repo, the drain's list reads and both purges are `edge_system` (`withSystemCatalogImport`); the drains' per-row USER
+// transactions are `withDelegatedActor` (edge_system binds the row's owner through a delegate binder, then acts as edge_actor); the rate
+// limit is `hitSystemRateLimit` (edge_system). So this function needs ONE connection string, not two.
+//
 // M4 (fetch safety): every artifact is fetched and verified BEFORE the
 // write transaction opens (`fetchAndVerifyArtifact`), with
 // `AbortSignal.timeout`, `redirect: "error"` and a streamed byte cap on
 // every fetch; the signing-key lookup it needs is its own short,
 // already-committed read.
 
-import { getCatalogImportEnvConfig, hitSystemRateLimit, withOwnership, withSystemCatalogImport } from "../_shared/privileged.ts";
+import { getCatalogImportEnvConfig, hitSystemRateLimit, withDelegatedActor, withSystemCatalogImport } from "../_shared/privileged.ts";
 import { handleRequest } from "../_shared/http.ts";
 import { applyImportPlanAtomically, fetchAndVerifyArtifact, type FetchBytes } from "../_shared/catalog/import-handler.ts";
 import { drainQueuedCatalog } from "../_shared/catalog/drain-orchestrator.ts";
@@ -98,8 +103,8 @@ serve((req) =>
           return applyImportPlanAtomically(plan, withSystemCatalogImport);
         },
         // H4: its own transaction(s) — independent of whatever the import did.
-        runDrain: (deadline) => drainQueuedCatalog(drainReadRepo, withOwnership, DRAIN_BATCH_LIMIT, deadline),
-        runRescore: (deadline) => drainRescoreBacklog(drainReadRepo, withOwnership, undefined, deadline),
+        runDrain: (deadline) => drainQueuedCatalog(drainReadRepo, withDelegatedActor, DRAIN_BATCH_LIMIT, deadline),
+        runRescore: (deadline) => drainRescoreBacklog(drainReadRepo, withDelegatedActor, undefined, deadline),
       }),
     // The per-PHASE deadlines above are the mechanism; this race (the
     // whole-request budget) is only the backstop for a phase that blows
