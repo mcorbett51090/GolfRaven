@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(21);
+SELECT plan(42);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -476,6 +476,282 @@ SELECT lives_ok(
 );
 REVOKE INSERT, DELETE ON private.pii_retention_policy FROM CURRENT_USER;
 SELECT lives_ok($$DROP TABLE app.zz_two$$, 'cleanup (S4 fixture): drop app.zz_two (cascades its own policies)');
+
+
+-- ==========================================================================
+-- The edge roles (0030 / 0031): docs/security/edge-role-design.md
+-- ==========================================================================
+-- tools/db/verify-function-inventory.mjs runs the SAME four queries (checks 9-12) against the live
+-- cluster; this file proves each one on the clean schema AND must-fails it on a planted defect.
+-- Each fixture defect is created and undone INSIDE this transaction (the file's ROLLBACK).
+--
+-- First: the EXECUTE columns of private.function_inventory for the two edge roles (check 2's twin of
+-- the three DO blocks above).
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+DO $$
+DECLARE
+  v_row record;
+  v_oid oid;
+  v_mismatches text[] := '{}';
+BEGIN
+  FOR v_row IN SELECT * FROM private.function_inventory LOOP
+    SELECT p.oid INTO v_oid
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = v_row.schema_name AND p.proname = v_row.function_name
+      AND pg_get_function_identity_arguments(p.oid) = v_row.identity_args;
+    IF has_function_privilege('edge_actor', v_oid, 'EXECUTE') <> v_row.expected_edge_actor THEN
+      v_mismatches := v_mismatches || format('%s.%s: edge_actor expected=%s actual=%s', v_row.schema_name, v_row.function_name, v_row.expected_edge_actor, has_function_privilege('edge_actor', v_oid, 'EXECUTE'));
+    END IF;
+  END LOOP;
+  IF array_length(v_mismatches, 1) > 0 THEN
+    RAISE EXCEPTION 'edge_actor EXECUTE mismatches: %', array_to_string(v_mismatches, '; ');
+  END IF;
+END
+$$;
+SELECT pass('every function''s actual edge_actor EXECUTE grant matches private.function_inventory.expected_edge_actor');
+DO $$
+DECLARE
+  v_row record;
+  v_oid oid;
+  v_mismatches text[] := '{}';
+BEGIN
+  FOR v_row IN SELECT * FROM private.function_inventory LOOP
+    SELECT p.oid INTO v_oid
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = v_row.schema_name AND p.proname = v_row.function_name
+      AND pg_get_function_identity_arguments(p.oid) = v_row.identity_args;
+    IF has_function_privilege('edge_system', v_oid, 'EXECUTE') <> v_row.expected_edge_system THEN
+      v_mismatches := v_mismatches || format('%s.%s: edge_system expected=%s actual=%s', v_row.schema_name, v_row.function_name, v_row.expected_edge_system, has_function_privilege('edge_system', v_oid, 'EXECUTE'));
+    END IF;
+  END LOOP;
+  IF array_length(v_mismatches, 1) > 0 THEN
+    RAISE EXCEPTION 'edge_system EXECUTE mismatches: %', array_to_string(v_mismatches, '; ');
+  END IF;
+END
+$$;
+SELECT pass('every function''s actual edge_system EXECUTE grant matches private.function_inventory.expected_edge_system');
+SELECT is(
+  (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'private' AND c.relname IN ('actor_binding', 'edge_policy_allowlist') AND c.relrowsecurity AND c.relforcerowsecurity),
+  2, 'the two tables 0030/0031 add to schema private keep ENABLE + FORCE ROW LEVEL SECURITY');
+
+-- The four checks, as session-local functions returning the violation list (NULL = clean).
+CREATE FUNCTION pg_temp.edge_check_9() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+WITH RECURSIVE edge AS (
+  SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')
+), closure(roleid, path) AS (
+  SELECT e.oid, ARRAY[e.oid] FROM edge e
+  UNION
+  SELECT m.roleid, c.path || m.roleid FROM closure c JOIN pg_auth_members m ON m.member = c.roleid WHERE NOT (m.roleid = ANY (c.path))
+)
+SELECT 'an edge role can reach a role outside the edge set: ' || r.rolname
+FROM closure c JOIN pg_roles r ON r.oid = c.roleid WHERE c.roleid NOT IN (SELECT oid FROM edge)
+UNION ALL
+SELECT 'edge role attribute: ' || r.rolname || ' has ' || a.attr
+FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('CREATEROLE', r.rolcreaterole),
+  ('CREATEDB', r.rolcreatedb), ('REPLICATION', r.rolreplication), ('INHERIT', r.rolinherit)) AS a(attr, is_on)
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND a.is_on
+UNION ALL
+SELECT 'edge role can log in but must not: ' || rolname FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system') AND rolcanlogin
+UNION ALL
+SELECT 'role ' || m.rolname || ' can SET ROLE to / inherit from edge role ' || r.rolname
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system') AND (am.set_option OR am.inherit_option)
+UNION ALL
+SELECT 'edge_gateway is not a SET TRUE, INHERIT FALSE member of ' || t.rolname
+FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system')
+  AND NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.member
+                  WHERE am.roleid = t.oid AND g.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option)
+  ) AS t(v)
+$f$;
+
+CREATE FUNCTION pg_temp.edge_check_10() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+WITH live AS (
+  SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
+         CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' END AS command,
+         CASE WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_actor')] THEN 'edge_actor'
+              WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_system')] THEN 'edge_system'
+              ELSE 'MULTI_OR_PUBLIC' END AS role_name,
+         pg_get_expr(pol.polqual, pol.polrelid) AS using_expr, pg_get_expr(pol.polwithcheck, pol.polrelid) AS with_check_expr
+  FROM pg_policy pol
+  JOIN pg_class cl ON cl.oid = pol.polrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+  WHERE pol.polroles @> ARRAY[0]::oid[]
+     OR pol.polroles && ARRAY(SELECT oid FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system'))
+)
+SELECT 'live edge policy missing from private.edge_policy_allowlist, or its role/command/text differs: ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l
+WHERE NOT EXISTS (
+  SELECT 1 FROM private.edge_policy_allowlist al
+  WHERE al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
+    AND al.command = l.command AND al.role_name = l.role_name
+    AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)
+UNION ALL
+SELECT 'private.edge_policy_allowlist row names no matching live policy: ' || al.schema_name || '.' || al.table_name || '.' || al.policy_name
+FROM private.edge_policy_allowlist al
+WHERE NOT EXISTS (
+  SELECT 1 FROM live l
+  WHERE al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
+    AND al.command = l.command AND al.role_name = l.role_name
+    AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)
+  ) AS t(v)
+$f$;
+
+CREATE FUNCTION pg_temp.edge_check_11() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+WITH live AS (
+  SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
+         CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' END AS command,
+         CASE WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_actor')] THEN 'edge_actor'
+              WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_system')] THEN 'edge_system'
+              ELSE 'MULTI_OR_PUBLIC' END AS role_name,
+         pg_get_expr(pol.polqual, pol.polrelid) AS using_expr, pg_get_expr(pol.polwithcheck, pol.polrelid) AS with_check_expr
+  FROM pg_policy pol
+  JOIN pg_class cl ON cl.oid = pol.polrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+  WHERE pol.polroles @> ARRAY[0]::oid[]
+     OR pol.polroles && ARRAY(SELECT oid FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system'))
+)
+SELECT 'edge policy reads an identity source other than private.actor_uid(): ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l
+WHERE (coalesce(l.using_expr, '') || ' ' || coalesce(l.with_check_expr, '')) ~* '(auth\.(uid|jwt|role|email)\s*\(|current_setting\s*\(|set_config\s*\(|request\.jwt|session_user|current_user)'
+UNION ALL
+SELECT 'edge policy depends on function ' || fp.oid::regprocedure::text || ': ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l
+JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = l.pol_oid AND d.refclassid = 'pg_proc'::regclass
+JOIN pg_proc fp ON fp.oid = d.refobjid
+WHERE fp.oid::regprocedure::text NOT IN ('private.actor_uid()', 'private.account_pseudonyms(uuid)')
+UNION ALL
+SELECT 'actor-scope edge policy does not contain private.actor_uid(): ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l JOIN private.edge_policy_allowlist al
+  ON al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
+WHERE al.scope = 'actor' AND (coalesce(l.using_expr, '') || ' ' || coalesce(l.with_check_expr, '')) NOT LIKE '%private.actor_uid()%'
+UNION ALL
+SELECT 'open_read edge policy is not SELECT USING (true): ' || al.schema_name || '.' || al.table_name || '.' || al.policy_name
+FROM private.edge_policy_allowlist al
+WHERE al.scope = 'open_read' AND (al.command <> 'SELECT' OR al.using_expr IS DISTINCT FROM 'true' OR al.role_name <> 'edge_actor')
+UNION ALL
+SELECT 'edge_system policy is not system_write scope: ' || al.schema_name || '.' || al.table_name || '.' || al.policy_name
+FROM private.edge_policy_allowlist al
+WHERE al.role_name = 'edge_system' AND al.scope <> 'system_write'
+  ) AS t(v)
+$f$;
+
+CREATE FUNCTION pg_temp.edge_check_12() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+WITH pii AS (
+  SELECT schema_name, table_name FROM private.pii_retention_policy
+  UNION
+  SELECT schema_name, table_name FROM private.pii_export_policy
+)
+SELECT 'edge_system has a policy on a PII-registered table: ' || n.nspname || '.' || cl.relname || '.' || pol.polname
+FROM pg_policy pol JOIN pg_class cl ON cl.oid = pol.polrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
+JOIN pii ON pii.schema_name = n.nspname AND pii.table_name = cl.relname
+WHERE pol.polroles @> ARRAY[0]::oid[] OR pol.polroles @> ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_system')]
+UNION ALL
+SELECT 'edge_system holds a privilege on a PII-registered table: ' || n.nspname || '.' || cl.relname
+FROM pii JOIN pg_namespace n ON n.nspname = pii.schema_name JOIN pg_class cl ON cl.relnamespace = n.oid AND cl.relname = pii.table_name
+WHERE has_any_column_privilege('edge_system', cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege('edge_system', cl.oid, 'DELETE,TRUNCATE,TRIGGER')
+UNION ALL
+SELECT 'an edge role holds a privilege on a table outside app, or on an app table without FORCE ROW LEVEL SECURITY: ' || n.nspname || '.' || cl.relname || ' (' || r.rolname || ')'
+FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname IN ('app', 'private', 'api', 'auth', 'storage', 'vault')
+  AND (has_any_column_privilege(r.rolname, cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, cl.oid, 'DELETE,TRUNCATE,TRIGGER'))
+  AND (n.nspname <> 'app' OR NOT (cl.relrowsecurity AND cl.relforcerowsecurity))
+  ) AS t(v)
+$f$;
+
+
+-- ---- check 9: the membership closure of the three edge roles is clean ----
+SELECT is(pg_temp.edge_check_9(), NULL::text[], 'check 9: no edge role reaches a role outside {edge_gateway, edge_actor, edge_system}; none holds SUPERUSER/BYPASSRLS/CREATEROLE/CREATEDB/REPLICATION/INHERIT; only edge_gateway can log in; nobody else can SET ROLE to one');
+SELECT tests.clear_actor();
+CREATE ROLE zz_edge_member NOLOGIN;
+GRANT zz_edge_member TO edge_system;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%zz_edge_member%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL: edge_system made a member of another role (the closure reaches zz_edge_member)');
+SELECT tests.clear_actor();
+REVOKE zz_edge_member FROM edge_system;
+ALTER ROLE edge_actor CREATEROLE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%edge_actor has CREATEROLE%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL: edge_actor given CREATEROLE');
+SELECT tests.clear_actor();
+ALTER ROLE edge_actor NOCREATEROLE;
+GRANT edge_actor TO zz_edge_member WITH SET TRUE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%zz_edge_member can SET ROLE to / inherit from edge role edge_actor%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL: another role can SET ROLE to edge_actor');
+SELECT tests.clear_actor();
+REVOKE edge_actor FROM zz_edge_member;
+DROP ROLE zz_edge_member;
+
+-- ---- check 10: the live edge policies equal private.edge_policy_allowlist, both directions ----
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_10(), NULL::text[], 'check 10: every policy that applies to edge_actor / edge_system (or PUBLIC) is in private.edge_policy_allowlist with the same role, command and text, and every row names a live policy');
+SELECT tests.clear_actor();
+CREATE POLICY zz_edge_probe ON app.play FOR SELECT TO edge_actor USING (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%app.play.zz_edge_probe%') FROM unnest(pg_temp.edge_check_10()) v), true, 'check 10 MUST FAIL: a policy added for edge_actor with no allowlist row');
+SELECT tests.clear_actor();
+DROP POLICY zz_edge_probe ON app.play;
+ALTER POLICY edge_actor_play_select ON app.play USING (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%app.play.edge_actor_play_select%') FROM unnest(pg_temp.edge_check_10()) v), true, 'check 10 MUST FAIL: a registered policy whose USING was broadened to true');
+SELECT tests.clear_actor();
+ALTER POLICY edge_actor_play_select ON app.play USING (user_id = (SELECT private.actor_uid()));
+DROP POLICY edge_actor_device_update ON app.device;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'private.edge_policy_allowlist row names no matching live policy: app.device.edge_actor_device_update') FROM unnest(pg_temp.edge_check_10()) v), true, 'check 10 MUST FAIL: an allowlist row whose policy was dropped (stale row)');
+
+-- ---- check 11: edge_actor policies reference private.actor_uid() only ----
+SELECT tests.clear_actor();
+CREATE POLICY edge_actor_device_update ON app.device FOR UPDATE TO edge_actor USING (user_id = (SELECT private.actor_uid())) WITH CHECK (user_id = (SELECT private.actor_uid()));
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_11(), NULL::text[], 'check 11: no edge policy reads auth.uid()/auth.jwt()/current_setting()/session_user/current_user, none depends on a function but private.actor_uid(), every actor-scope policy contains it, every open_read policy is SELECT USING (true)');
+SELECT tests.clear_actor();
+CREATE POLICY zz_edge_auth ON app.play FOR SELECT TO edge_actor USING (user_id = auth.uid());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%identity source%app.play.zz_edge_auth') FROM unnest(pg_temp.edge_check_11()) v), true, 'check 11 MUST FAIL: an edge_actor policy keyed on auth.uid()');
+SELECT tests.clear_actor();
+DROP POLICY zz_edge_auth ON app.play;
+CREATE POLICY zz_edge_guc ON app.play FOR SELECT TO edge_actor USING (user_id = nullif(current_setting('request.jwt.claim.sub', true), '')::uuid);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%identity source%app.play.zz_edge_guc') FROM unnest(pg_temp.edge_check_11()) v), true, 'check 11 MUST FAIL: an edge_actor policy keyed on a GUC');
+SELECT tests.clear_actor();
+DROP POLICY zz_edge_guc ON app.play;
+ALTER POLICY edge_actor_play_select ON app.play USING (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'actor-scope edge policy does not contain private.actor_uid(): app.play.edge_actor_play_select') FROM unnest(pg_temp.edge_check_11()) v), true, 'check 11 MUST FAIL: an actor-scope policy that does not use private.actor_uid() at all');
+SELECT tests.clear_actor();
+ALTER POLICY edge_actor_play_select ON app.play USING (user_id = (SELECT private.actor_uid()));
+
+-- ---- check 12: edge_system has nothing on personal data; edge roles hold privileges only on FORCE-RLS app tables ----
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12: no edge_system policy or privilege on any PII-registered table; no edge role holds a privilege outside app or on an app table without FORCE RLS');
+SELECT tests.clear_actor();
+CREATE POLICY zz_edge_system_pii ON app.evidence FOR SELECT TO edge_system USING (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_system has a policy on a PII-registered table: app.evidence.zz_edge_system_pii') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL: an edge_system policy on app.evidence');
+SELECT tests.clear_actor();
+DROP POLICY zz_edge_system_pii ON app.evidence;
+CREATE POLICY zz_public_pii ON app.play FOR SELECT TO PUBLIC USING (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_system has a policy on a PII-registered table: app.play.zz_public_pii') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL: a PUBLIC policy on app.play (it applies to edge_system too)');
+SELECT tests.clear_actor();
+DROP POLICY zz_public_pii ON app.play;
+GRANT SELECT ON app.play TO edge_system;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_system holds a privilege on a PII-registered table: app.play') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL: a table GRANT to edge_system on app.play (no policy needed to be wrong)');
+SELECT tests.clear_actor();
+REVOKE SELECT ON app.play FROM edge_system;
+GRANT SELECT ON private.consumed_nonce TO edge_actor;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%private.consumed_nonce (edge_actor)') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL: edge_actor granted a table in schema private');
+SELECT tests.clear_actor();
+REVOKE SELECT ON private.consumed_nonce FROM edge_actor;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12: clean again after every fixture is undone');
 
 SELECT * FROM finish();
 ROLLBACK;

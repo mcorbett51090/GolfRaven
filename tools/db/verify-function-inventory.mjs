@@ -84,25 +84,31 @@ for (const [fn] of uninventoried) {
   failures.push(`uninventoried function: ${fn} — add a row to private.function_inventory (supabase/migrations/0014_hardening.sql) before this can pass`);
 }
 
-// 2. Every inventory row's EXECUTE grants match, for each role.
+// 2. Every inventory row's EXECUTE grants match, for each role (anon, authenticated, service_role and, since
+// 0030, the two edge roles: private.function_inventory.expected_edge_actor / expected_edge_system).
 const grantRows = psql(`
   SELECT
     fi.schema_name, fi.function_name, fi.identity_args,
     fi.expected_anon, fi.expected_authenticated, fi.expected_service_role,
+    fi.expected_edge_actor, fi.expected_edge_system,
     has_function_privilege('anon', p.oid, 'EXECUTE'),
     has_function_privilege('authenticated', p.oid, 'EXECUTE'),
-    has_function_privilege('service_role', p.oid, 'EXECUTE')
+    has_function_privilege('service_role', p.oid, 'EXECUTE'),
+    has_function_privilege('edge_actor', p.oid, 'EXECUTE'),
+    has_function_privilege('edge_system', p.oid, 'EXECUTE')
   FROM private.function_inventory fi
   JOIN pg_proc p ON p.proname = fi.function_name
   JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = fi.schema_name
   WHERE pg_get_function_identity_arguments(p.oid) = fi.identity_args
 `);
 for (const row of grantRows) {
-  const [schema, name, args, expAnon, expAuth, expSvc, actAnon, actAuth, actSvc] = row;
+  const [schema, name, args, expAnon, expAuth, expSvc, expEdgeActor, expEdgeSystem, actAnon, actAuth, actSvc, actEdgeActor, actEdgeSystem] = row;
   const label = `${schema}.${name}(${args})`;
   if (expAnon !== actAnon) failures.push(`${label}: anon EXECUTE expected=${expAnon} actual=${actAnon}`);
   if (expAuth !== actAuth) failures.push(`${label}: authenticated EXECUTE expected=${expAuth} actual=${actAuth}`);
   if (expSvc !== actSvc) failures.push(`${label}: service_role EXECUTE expected=${expSvc} actual=${actSvc}`);
+  if (expEdgeActor !== actEdgeActor) failures.push(`${label}: edge_actor EXECUTE expected=${expEdgeActor} actual=${actEdgeActor}`);
+  if (expEdgeSystem !== actEdgeSystem) failures.push(`${label}: edge_system EXECUTE expected=${expEdgeSystem} actual=${actEdgeSystem}`);
 }
 
 // 3. Every SECURITY DEFINER function/procedure ANYWHERE (not just
@@ -224,21 +230,17 @@ try {
 const keyOf = (r) => `${r.schema_name}\u0000${r.table_name}\u0000${r.policy_name}\u0000${r.command}`;
 const fixtureByKey = new Map(fixtureRows.map((r) => [keyOf(r), r]));
 
-// psql -A -t prints an empty field for a SQL NULL; a SQL boolean/USING
-// expression is never itself an empty string, so treating "" as null
-// here is unambiguous for this specific column's domain.
-const liveRows = psql(`
-  SELECT schema_name, table_name, policy_name, command, using_expr, with_check_expr
-  FROM private.definer_policy_allowlist
-  ORDER BY schema_name, table_name, policy_name, command
-`).map(([schema_name, table_name, policy_name, command, using_expr, with_check_expr]) => ({
-  schema_name,
-  table_name,
-  policy_name,
-  command,
-  using_expr: using_expr === "" ? null : using_expr,
-  with_check_expr: with_check_expr === "" ? null : with_check_expr,
-}));
+// ⛔ Read through psqlJsonRows (one JSON object per row), NOT psql(): a deparsed policy expression with a
+// sub-select (pd_rescore_play_read, 0030; every edge policy that uses EXISTS) contains real newlines, which
+// the tab/newline-split psql() helper silently turns into several bogus rows (the problem psqlJsonRows's own
+// header describes). A SQL NULL arrives as JSON null, so no "" -> null mapping is needed.
+const liveRows = psqlJsonRows(`
+  SELECT row_to_json(t) FROM (
+    SELECT schema_name, table_name, policy_name, command, using_expr, with_check_expr
+    FROM private.definer_policy_allowlist
+    ORDER BY schema_name, table_name, policy_name, command
+  ) t
+`);
 const liveByKey = new Map(liveRows.map((r) => [keyOf(r), r]));
 
 if (fixtureRows.length > 0 || liveRows.length > 0) {
@@ -490,6 +492,186 @@ const missingRCompanion = registryColumnRowsForRCompanion.filter(([schema, table
 });
 for (const [schema, table, column] of missingRCompanion) {
   failures.push(`private.pii_retention_policy column ${schema}.${table}.${column} (delete_row/set_null) has no private_definer SELECT(/ALL) policy whose USING clause guards THAT column with the exact nullif(current_setting(...)) form — column-level "_r companion" check, P3d gate round 3 S4: ${schema}.${table}.${column}`);
+}
+
+
+// 9-12. The edge roles (supabase/migrations/0030_edge_role_core.sql, 0031_edge_role_policies.sql;
+// docs/security/edge-role-design.md). The four queries below are the SAME text as the session-local functions
+// in supabase/tests/matrix/10_function_inventory.sql, which proves each one on the clean schema and must-fails
+// it on a planted defect; here they run against the live cluster as a standalone CLI check. Each returns one
+// row per violation (none = clean).
+//
+//  9  the membership closure of edge_gateway / edge_actor / edge_system is clean: it reaches no role outside
+//     the three, none holds SUPERUSER / BYPASSRLS / CREATEROLE / CREATEDB / REPLICATION / INHERIT, only
+//     edge_gateway can log in, nobody else can SET ROLE to one of them, and edge_gateway holds
+//     SET TRUE / INHERIT FALSE membership of the other two.
+//  10 every RLS policy that applies to edge_actor or edge_system (directly or through PUBLIC) is in
+//     private.edge_policy_allowlist with the same role, command and deparsed text, and every allowlist row
+//     names a live policy (both directions) -- plus the checked-in fixture (below) so a self-consistent
+//     policy+row edit still shows as a diff in review.
+//  11 edge policies reference private.actor_uid() and no other identity source (no auth.uid() / jwt / GUC /
+//     session_user / current_user, no dependency on any function but actor_uid() and, for the pseudonym-keyed
+//     install-link tombstone, account_pseudonyms()); an actor-scope policy
+//     must contain it; an open_read policy must be SELECT USING (true).
+//  12 edge_system has no policy and no privilege on any PII-registered table; no edge role holds a privilege
+//     outside schema app, or on an app table without FORCE ROW LEVEL SECURITY.
+const edgeChecks = [
+  [9, "membership closure / attributes", `WITH RECURSIVE edge AS (
+  SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')
+), closure(roleid, path) AS (
+  SELECT e.oid, ARRAY[e.oid] FROM edge e
+  UNION
+  SELECT m.roleid, c.path || m.roleid FROM closure c JOIN pg_auth_members m ON m.member = c.roleid WHERE NOT (m.roleid = ANY (c.path))
+)
+SELECT 'an edge role can reach a role outside the edge set: ' || r.rolname
+FROM closure c JOIN pg_roles r ON r.oid = c.roleid WHERE c.roleid NOT IN (SELECT oid FROM edge)
+UNION ALL
+SELECT 'edge role attribute: ' || r.rolname || ' has ' || a.attr
+FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('CREATEROLE', r.rolcreaterole),
+  ('CREATEDB', r.rolcreatedb), ('REPLICATION', r.rolreplication), ('INHERIT', r.rolinherit)) AS a(attr, is_on)
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND a.is_on
+UNION ALL
+SELECT 'edge role can log in but must not: ' || rolname FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system') AND rolcanlogin
+UNION ALL
+SELECT 'role ' || m.rolname || ' can SET ROLE to / inherit from edge role ' || r.rolname
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system') AND (am.set_option OR am.inherit_option)
+UNION ALL
+SELECT 'edge_gateway is not a SET TRUE, INHERIT FALSE member of ' || t.rolname
+FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system')
+  AND NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.member
+                  WHERE am.roleid = t.oid AND g.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option)`],
+  [10, "policy allowlist, both directions", `WITH live AS (
+  SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
+         CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' END AS command,
+         CASE WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_actor')] THEN 'edge_actor'
+              WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_system')] THEN 'edge_system'
+              ELSE 'MULTI_OR_PUBLIC' END AS role_name,
+         pg_get_expr(pol.polqual, pol.polrelid) AS using_expr, pg_get_expr(pol.polwithcheck, pol.polrelid) AS with_check_expr
+  FROM pg_policy pol
+  JOIN pg_class cl ON cl.oid = pol.polrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+  WHERE pol.polroles @> ARRAY[0]::oid[]
+     OR pol.polroles && ARRAY(SELECT oid FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system'))
+)
+SELECT 'live edge policy missing from private.edge_policy_allowlist, or its role/command/text differs: ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l
+WHERE NOT EXISTS (
+  SELECT 1 FROM private.edge_policy_allowlist al
+  WHERE al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
+    AND al.command = l.command AND al.role_name = l.role_name
+    AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)
+UNION ALL
+SELECT 'private.edge_policy_allowlist row names no matching live policy: ' || al.schema_name || '.' || al.table_name || '.' || al.policy_name
+FROM private.edge_policy_allowlist al
+WHERE NOT EXISTS (
+  SELECT 1 FROM live l
+  WHERE al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
+    AND al.command = l.command AND al.role_name = l.role_name
+    AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)`],
+  [11, "identity source", `WITH live AS (
+  SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
+         CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' END AS command,
+         CASE WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_actor')] THEN 'edge_actor'
+              WHEN pol.polroles = ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_system')] THEN 'edge_system'
+              ELSE 'MULTI_OR_PUBLIC' END AS role_name,
+         pg_get_expr(pol.polqual, pol.polrelid) AS using_expr, pg_get_expr(pol.polwithcheck, pol.polrelid) AS with_check_expr
+  FROM pg_policy pol
+  JOIN pg_class cl ON cl.oid = pol.polrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+  WHERE pol.polroles @> ARRAY[0]::oid[]
+     OR pol.polroles && ARRAY(SELECT oid FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system'))
+)
+SELECT 'edge policy reads an identity source other than private.actor_uid(): ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l
+WHERE (coalesce(l.using_expr, '') || ' ' || coalesce(l.with_check_expr, '')) ~* '(auth\\.(uid|jwt|role|email)\\s*\\(|current_setting\\s*\\(|set_config\\s*\\(|request\\.jwt|session_user|current_user)'
+UNION ALL
+SELECT 'edge policy depends on function ' || fp.oid::regprocedure::text || ': ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l
+JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = l.pol_oid AND d.refclassid = 'pg_proc'::regclass
+JOIN pg_proc fp ON fp.oid = d.refobjid
+WHERE fp.oid::regprocedure::text NOT IN ('private.actor_uid()', 'private.account_pseudonyms(uuid)')
+UNION ALL
+SELECT 'actor-scope edge policy does not contain private.actor_uid(): ' || l.schema_name || '.' || l.table_name || '.' || l.policy_name
+FROM live l JOIN private.edge_policy_allowlist al
+  ON al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
+WHERE al.scope = 'actor' AND (coalesce(l.using_expr, '') || ' ' || coalesce(l.with_check_expr, '')) NOT LIKE '%private.actor_uid()%'
+UNION ALL
+SELECT 'open_read edge policy is not SELECT USING (true): ' || al.schema_name || '.' || al.table_name || '.' || al.policy_name
+FROM private.edge_policy_allowlist al
+WHERE al.scope = 'open_read' AND (al.command <> 'SELECT' OR al.using_expr IS DISTINCT FROM 'true' OR al.role_name <> 'edge_actor')
+UNION ALL
+SELECT 'edge_system policy is not system_write scope: ' || al.schema_name || '.' || al.table_name || '.' || al.policy_name
+FROM private.edge_policy_allowlist al
+WHERE al.role_name = 'edge_system' AND al.scope <> 'system_write'`],
+  [12, "PII tables / FORCE RLS", `WITH pii AS (
+  SELECT schema_name, table_name FROM private.pii_retention_policy
+  UNION
+  SELECT schema_name, table_name FROM private.pii_export_policy
+)
+SELECT 'edge_system has a policy on a PII-registered table: ' || n.nspname || '.' || cl.relname || '.' || pol.polname
+FROM pg_policy pol JOIN pg_class cl ON cl.oid = pol.polrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
+JOIN pii ON pii.schema_name = n.nspname AND pii.table_name = cl.relname
+WHERE pol.polroles @> ARRAY[0]::oid[] OR pol.polroles @> ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'edge_system')]
+UNION ALL
+SELECT 'edge_system holds a privilege on a PII-registered table: ' || n.nspname || '.' || cl.relname
+FROM pii JOIN pg_namespace n ON n.nspname = pii.schema_name JOIN pg_class cl ON cl.relnamespace = n.oid AND cl.relname = pii.table_name
+WHERE has_any_column_privilege('edge_system', cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege('edge_system', cl.oid, 'DELETE,TRUNCATE,TRIGGER')
+UNION ALL
+SELECT 'an edge role holds a privilege on a table outside app, or on an app table without FORCE ROW LEVEL SECURITY: ' || n.nspname || '.' || cl.relname || ' (' || r.rolname || ')'
+FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname IN ('app', 'private', 'api', 'auth', 'storage', 'vault')
+  AND (has_any_column_privilege(r.rolname, cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, cl.oid, 'DELETE,TRUNCATE,TRIGGER'))
+  AND (n.nspname <> 'app' OR NOT (cl.relrowsecurity AND cl.relforcerowsecurity))`],
+];
+for (const [num, label, sql] of edgeChecks) {
+  for (const [violation] of psql(sql)) {
+    failures.push(`edge-role check ${num} (${label}): ${violation}`);
+  }
+}
+
+// 10b. The checked-in fixture of every private.edge_policy_allowlist row's deparsed text
+// (supabase/tests/fixtures/edge_policy_exprs.txt) -- the edge twin of check 6 above, for the same reason.
+const edgeFixturePath = join(import.meta.dirname, "..", "..", "supabase", "tests", "fixtures", "edge_policy_exprs.txt");
+let edgeFixtureRows;
+try {
+  edgeFixtureRows = readFileSync(edgeFixturePath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((line) => JSON.parse(line));
+} catch (err) {
+  failures.push(`could not read/parse ${edgeFixturePath}: ${err.message}`);
+  edgeFixtureRows = [];
+}
+const edgeKeyOf = (r) => `${r.schema_name}\u0000${r.table_name}\u0000${r.policy_name}`;
+const edgeFixtureByKey = new Map(edgeFixtureRows.map((r) => [edgeKeyOf(r), r]));
+// psqlJsonRows for the same reason as check 6 above (edge policies deparse with embedded newlines).
+const edgeLiveRows = psqlJsonRows(`
+  SELECT row_to_json(t) FROM (
+    SELECT schema_name, table_name, policy_name, role_name, command, scope, using_expr, with_check_expr
+    FROM private.edge_policy_allowlist
+    ORDER BY schema_name, table_name, policy_name
+  ) t
+`);
+const edgeLiveByKey = new Map(edgeLiveRows.map((r) => [edgeKeyOf(r), r]));
+for (const live of edgeLiveRows) {
+  const fx = edgeFixtureByKey.get(edgeKeyOf(live));
+  const name = `${live.schema_name}.${live.table_name}.${live.policy_name}`;
+  if (!fx) {
+    failures.push(`private.edge_policy_allowlist row ${name} has no entry in supabase/tests/fixtures/edge_policy_exprs.txt -- regenerate the fixture (see its own header comment)`);
+  } else if (
+    fx.role_name !== live.role_name || fx.command !== live.command || fx.scope !== live.scope ||
+    fx.using_expr !== live.using_expr || fx.with_check_expr !== live.with_check_expr
+  ) {
+    failures.push(`private.edge_policy_allowlist row ${name} does not match supabase/tests/fixtures/edge_policy_exprs.txt -- expected ${JSON.stringify(fx)}, got ${JSON.stringify(live)}`);
+  }
+}
+for (const fx of edgeFixtureRows) {
+  if (!edgeLiveByKey.has(edgeKeyOf(fx))) {
+    failures.push(`supabase/tests/fixtures/edge_policy_exprs.txt names a row with no live match in private.edge_policy_allowlist: ${fx.schema_name}.${fx.table_name}.${fx.policy_name} -- stale fixture entry, regenerate`);
+  }
 }
 
 if (failures.length > 0) {
