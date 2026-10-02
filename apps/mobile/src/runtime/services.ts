@@ -3,11 +3,12 @@
  * config + the app database. Everything here is wiring; the logic lives in
  * the modules it composes (and is tested there).
  */
+import { fetch as expoFetch } from "expo/fetch";
 import { MemoryDeviceFlagStore, SqliteDeviceFlagStore, AgeGate, type DeviceFlagStore } from "../age";
 import { createMockApi, type MockApi } from "../api";
 import { nobleCatalogCrypto } from "../catalog/crypto";
 import { resolveTrustAnchors, TRUSTED_KEYSET } from "../catalog/keys";
-import { CatalogManager } from "../catalog/manager";
+import { CatalogManager, createFetchBytes } from "../catalog/manager";
 import { MemoryCatalogCacheStore, SqliteCatalogCacheStore } from "../catalog/store";
 import { readAppConfig, type AppConfig } from "../config";
 import { openAppDatabase } from "../db/expo-sqlite-adapter";
@@ -65,6 +66,10 @@ export async function createServices(): Promise<AppServices> {
     trustedKeys: anchors.trustedKeys,
     appVersion: config.appVersion,
     supportedContractMajor: config.supportedContractMajor,
+    // LOW-C: RN's default `fetch` is believed to expose no body stream, so a byte cap there could
+    // only apply AFTER the download. `expo/fetch` streams the body natively, so `createFetchBytes`
+    // cancels an over-cap download mid-flight. `[unverified — device: streaming + redirect:"error" on iOS/Android]`
+    fetchBytes: createFetchBytes(expoFetch),
   });
 
   const api = createMockApi({

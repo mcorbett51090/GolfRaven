@@ -17,9 +17,13 @@
  *   include, and the package has no backup-exclusion option
  *   `[checked 2026-10-02 in the installed expo-sqlite: its .d.ts and
  *   SQLiteModule.swift — no such API; the iOS backup behaviour itself is
- *   unverified, never run on a device]`. P4.2: exclude the file
- *   (`NSURLIsExcludedFromBackupKey` via a small native module or
- *   `expo-file-system`), or move the flag to a store that is not backed up.
+ *   unverified, never run on a device; `test/ios-backup.test.ts` pins the
+ *   source-level facts, and `expo-file-system` 57.0.7 has no such API either]`.
+ *   Moving the DB does not help (Caches is purgeable, Application Support is
+ *   backed up). P4.2, exact action: set `isExcludedFromBackup` on the
+ *   `Documents/SQLite` directory from a small native module, or keep the flag in
+ *   a `ThisDeviceOnly` Keychain item (`expo-secure-store`) — see README
+ *   "Backups (P4.2, iOS)".
  *   Android device-to-device transfer on 12+ is also `[unverified]`.
  * - The birth year itself is never stored or sent.
  * - `minAge` is NOT a constant here: it comes from the server policy

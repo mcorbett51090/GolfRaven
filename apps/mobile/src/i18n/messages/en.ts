@@ -18,10 +18,12 @@ export const en = {
   "common.close": "Close",
   "common.back": "Back",
   "common.notYet": "Coming in a later build.",
+  "common.cancel": "Cancel",
 
   "banner.demo": "Demo data. This is not the real catalog.",
   "banner.outOfDate": "Catalog out of date. Showing the last verified catalog.",
   "banner.outOfDate.action": "Check again",
+  "banner.trustCorrupt": "Catalog data on this device is damaged, so no catalog can be used or downloaded. Go to the Me tab and choose “Reset catalog data”.",
 
   "catalog.empty.title": "No catalog yet",
   "catalog.empty.body": "Connect to the internet to download the course catalog.",
@@ -133,6 +135,12 @@ export const en = {
   "me.catalog.outcome.network_error": "Could not reach the catalog server.",
   "me.catalog.outcome.disabled": "This build has no catalog source configured.",
   "me.catalog.keysetProblem": "This build has no valid catalog signing keys, so no catalog can be verified or downloaded.",
+  "me.catalog.reset": "Reset catalog data",
+  "me.catalog.reset.confirmTitle": "Reset catalog data?",
+  "me.catalog.reset.confirmBody": "This deletes the saved catalog and any damaged catalog settings, then downloads the catalog again. Your plays and account are not affected.",
+  "me.catalog.reset.confirm": "Reset",
+  "me.catalog.reset.done": "Catalog data was reset. Downloading the catalog again…",
+  "me.catalog.reset.failed": "Catalog data could not be reset. Update GolfRaven and try again.",
   "me.version": "App version {version}",
 
   "ageGate.title": "Before you continue",
