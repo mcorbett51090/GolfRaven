@@ -132,7 +132,12 @@ self_test() {
   # already creates incidentally).
   local empty_tree="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
   local empty_commit
-  empty_commit="$(git commit-tree "$empty_tree" -m "check-migrations-immutable.sh --self-test: empty scratch commit, never referenced by any ref" 2>/dev/null)"
+  # A fixed, non-personal identity: CI runners have no git user configured,
+  # and without one `commit-tree` exits 128, which `set -e` turned into an
+  # unexplained job failure. `|| true` lets the explicit check below report it.
+  empty_commit="$(GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.invalid \
+    GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@example.invalid \
+    git commit-tree "$empty_tree" -m "check-migrations-immutable.sh --self-test: empty scratch commit, never referenced by any ref" 2>/dev/null || true)"
   if [ -z "$empty_commit" ]; then
     echo "tools/db/check-migrations-immutable.sh --self-test: FAILED — could not construct the empty-base scratch commit (git commit-tree itself failed)" >&2
     exit 1
