@@ -153,3 +153,5 @@
 {"command": "UPDATE", "table_name": "actor_binding", "using_expr": "(backend_pid = pg_backend_pid())", "policy_name": "pd_actor_binding_update", "schema_name": "private", "with_check_expr": "(backend_pid = pg_backend_pid())"}
 {"command": "INSERT", "table_name": "consumed_nonce", "using_expr": null, "policy_name": "pd_record_consumed_nonce", "schema_name": "private", "with_check_expr": "(source = 'checkin_challenge'::text)"}
 {"command": "SELECT", "table_name": "install_link_account", "using_expr": "(install_link_hash = NULLIF(current_setting('app.edge.link_hash'::text, true), ''::text))", "policy_name": "pd_install_link_read", "schema_name": "app", "with_check_expr": null}
+{"command": "DELETE", "table_name": "install_link_account", "using_expr": "(first_seen_at < (now() - '2 years'::interval))", "policy_name": "pd_purge_install_link_delete", "schema_name": "app", "with_check_expr": null}
+{"command": "SELECT", "table_name": "install_link_account", "using_expr": "(first_seen_at < (now() - '2 years'::interval))", "policy_name": "pd_purge_install_link_read", "schema_name": "app", "with_check_expr": null}

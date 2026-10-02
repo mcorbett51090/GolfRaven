@@ -290,9 +290,17 @@ jobs:
         # unchanged; HARNESS_MODE defaults to `superuser` when unset. Deno
         # is already on PATH (installed above) for the harness's own
         # tools/db/test-deno-integration.sh step.
+        #
+        # Edge role PR2: that Deno step runs the WHOLE suite twice, once
+        # per EDGE_DB_MODE (legacy = service_role BYPASSRLS; edge = the
+        # NOBYPASSRLS edge_gateway/edge_actor role), each against its own
+        # clone of the migrated database. The edge login's password is
+        # generated at runtime by tools/db/test.sh — never a literal here.
+        # EDGE_DB_MODES is spelled out so dropping a mode is a visible diff.
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: superuser
+          EDGE_DB_MODES: "legacy edge"
 
       - name: Run tools/db/test.sh (HARNESS_MODE=restricted)
         # S1 close-out (gate round 3): "add a harness mode where tests run
@@ -308,10 +316,12 @@ jobs:
         # activation works from a connecting role that is NOT already
         # service_role, in BOTH harness shapes. Extension installation
         # stays on the step above (bootstrap-as-superuser in either mode,
-        # per the harness's own header comment).
+        # per the harness's own header comment). The Deno suite runs in
+        # both EDGE_DB_MODEs here as well (see the step above).
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: restricted
+          EDGE_DB_MODES: "legacy edge"
 
       - name: Run supabase/tests/unit (vitest — P3c pure/DI'd handler modules)
         # Task instruction: "put handler logic in pure, dependency-injected

@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(50);
+SELECT plan(53);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -680,7 +680,7 @@ CREATE FUNCTION pg_temp.edge_check_13() RETURNS text[] LANGUAGE sql AS $f$
   SELECT array_agg(v ORDER BY v) FROM (
 SELECT 'SECURITY DEFINER function reads an unqualified pg_ relation (a temp relation of that name would shadow the catalog): ' || n.nspname || '.' || p.proname || ' -> ' || m[1]
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\n]*', '', 'g'), '\m(?:from|join|update|into|table)\s+(pg_[a-z_]+)\M(?!\.|\s*\()', 'gi') AS m
+CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\n]*', '', 'g'), '(?:\m(?:from|join|update|into|table|using)\s+|,\s*)(pg_[a-z_]+)\M(?!\.|\s*\()', 'gi') AS m
 WHERE p.prosecdef AND n.nspname IN ('app', 'api', 'private')
   ) AS t(v)
 $f$;
@@ -808,6 +808,30 @@ CREATE FUNCTION private.zz_edge_shadow() RETURNS int LANGUAGE sql SECURITY DEFIN
   SELECT count(*)::int FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = pg_catalog.current_schema() $z$;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_13(), NULL::text[], 'check 13: a definer that qualifies pg_catalog (and mentions an unqualified name only in a comment) is clean');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_edge_shadow();
+-- 0033 (PR1b gate LOW-2): the comma-list and USING shapes the first version of the pattern missed.
+CREATE FUNCTION private.zz_edge_shadow() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$
+  SELECT count(*)::int FROM app.device d, pg_class c WHERE c.oid = 0 $z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%private.zz_edge_shadow -> pg_class') FROM unnest(pg_temp.edge_check_13()) v), true, 'check 13 MUST FAIL (LOW-2): a comma list `FROM app.device d, pg_class c`');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_edge_shadow();
+CREATE FUNCTION private.zz_edge_shadow() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  DELETE FROM app.device d USING pg_roles r WHERE r.rolname = 'zz_none' AND d.id = d.id AND false;
+  RETURN 0;
+END; $z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%private.zz_edge_shadow -> pg_roles') FROM unnest(pg_temp.edge_check_13()) v), true, 'check 13 MUST FAIL (LOW-2): DELETE ... USING pg_roles');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_edge_shadow();
+CREATE FUNCTION private.zz_edge_shadow() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  RETURN (SELECT count(*)::int FROM app.device d, pg_catalog.pg_class c, pg_temp.nothing n WHERE false);
+END; $z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_13(), NULL::text[], 'check 13: qualified comma-list members (pg_catalog.pg_class, pg_temp.x) are not flagged');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_edge_shadow();
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);

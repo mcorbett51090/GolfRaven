@@ -89,6 +89,16 @@ SELECT app.record_install_link('eeee0000-0000-0000-0000-0000000000b0', 'eeee0000
 INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id)
 SELECT repeat('e', 64), a.pseudonym, a.key_id FROM private.account_pseudonyms(gen_random_uuid()) a WHERE a.preferred;
 
+-- Install-link tombstone RETENTION (owner decision 2026-10-02): 24 months from first_seen_at. Three backdated rows, each under
+-- the real pseudonym of a seeded account, each on its own install hash: UA 25 months old (purged), UB 23 months old (kept),
+-- UD 40 months old (purged). Section 10k purges and reads them back.
+INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id, first_seen_at)
+SELECT v.h, a.pseudonym, a.key_id, now() - v.age
+FROM (VALUES (repeat('7', 64), 'eeee0000-0000-0000-0000-0000000000a0'::uuid, interval '25 months'),
+             (repeat('8', 64), 'eeee0000-0000-0000-0000-0000000000b0'::uuid, interval '23 months'),
+             (repeat('9', 64), 'eeee0000-0000-0000-0000-0000000000d0'::uuid, interval '40 months')) AS v(h, uid, age)
+CROSS JOIN LATERAL private.account_pseudonyms(v.uid) a WHERE a.preferred;
+
 -- Evidence: UA accepted (fixCoords, recent, at crs_y1 -- which the purge cell gives an open backlog row, so
 -- its coordinates are KEPT), UA accepted (fixCoords, 40 days old: purged by age), UA queued_catalog (the
 -- delegate target), UB accepted (fixCoords at crs_x1, a verified never-split course: purged).
@@ -166,7 +176,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(678);
+SELECT plan(711);
 
 -- ----------------------------------------------------------------------------
 -- Test-only helpers (session-local, in pg_temp; never part of a migration)
@@ -618,6 +628,25 @@ SELECT throws_ok($$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0
 SELECT throws_ok($$SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000a0801', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, '42501', 'activate_entitlement_for_actor: no actor is bound in this transaction', 'M4: activate_entitlement_for_actor, unbound, raises');
 ROLLBACK;
 
+-- 7b'. PR2 (0033): the reward row lock the activation path takes (edge_actor cannot FOR UPDATE it itself)
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT throws_ok($$SELECT private.lock_own_reward_for_actor('eeee0000-0000-0000-0000-0000000a0903')$$, '42501', 'lock_own_reward_for_actor: no actor is bound in this transaction', 'lock: unbound raises');
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'lock: bind A');
+SELECT is((SELECT xmax::text::bigint FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 0::bigint, 'lock control: before the call the code row carries no row lock (xmax = 0)');
+SELECT lives_ok($$SELECT private.lock_own_reward_for_actor('eeee0000-0000-0000-0000-0000000a0903')$$, 'lock: A locks its own code');
+SELECT isnt((SELECT xmax::text::bigint FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 0::bigint, 'lock: the code row now carries this transaction''s row lock (xmax <> 0): a concurrent activation of it would wait');
+SELECT lives_ok($$SELECT private.lock_own_reward_for_actor('eeee0000-0000-0000-0000-0000000a0801')$$, 'lock: A locks its own entitlement (a reward id is a code OR an entitlement)');
+SELECT isnt((SELECT xmax::text::bigint FROM app.entitlement WHERE id = 'eeee0000-0000-0000-0000-0000000a0801'), 0::bigint, 'lock: ... and the entitlement row carries it');
+SELECT lives_ok($$SELECT private.lock_own_reward_for_actor('eeee0000-0000-0000-0000-0000000b0901')$$, 'lock: B''s code id locks nothing and raises nothing (identical to a nonexistent id)');
+SELECT lives_ok($$SELECT private.lock_own_reward_for_actor(gen_random_uuid())$$, 'lock: a nonexistent id locks nothing and raises nothing');
+SELECT pg_temp.throws($$SELECT id FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0904' FOR UPDATE$$, '42501', 'permission denied for table offer_code', 'lock: edge_actor still cannot take the lock itself (no UPDATE grant)');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_system;
+SELECT throws_ok($$SELECT private.lock_own_reward_for_actor('eeee0000-0000-0000-0000-0000000a0903')$$, '42501', 'permission denied for function lock_own_reward_for_actor', 'lock: edge_system cannot call it');
+ROLLBACK;
+
 -- ============================================================================
 -- 7c. M2 (0032): one-way columns are one-way for edge_actor too
 -- ============================================================================
@@ -707,7 +736,8 @@ FROM (VALUES
   ('reserve_offer_for_code', $s$SELECT app.reserve_offer_for_code('eeee0000-0000-0000-0000-00000000e101', 'eeee0000-0000-0000-0000-0000000a0901', 'x')$s$),
   ('release_offer_budget', $s$SELECT app.release_offer_budget('eeee0000-0000-0000-0000-00000000e101', 1)$s$),
   ('release_account_reservations', $s$SELECT app.release_account_reservations('{A}')$s$),
-  ('hold_play_rewards', $s$SELECT app.hold_play_rewards('eeee0000-0000-0000-0000-0000000a0a01')$s$)
+  ('hold_play_rewards', $s$SELECT app.hold_play_rewards('eeee0000-0000-0000-0000-0000000a0a01')$s$),
+  ('purge_install_link_tombstones', $s$SELECT private.purge_install_link_tombstones(10)$s$)
 ) AS q(fn, sql);
 ROLLBACK;
 BEGIN;
@@ -1217,6 +1247,41 @@ SELECT is(nullif(current_setting('app.edge.purge_fix_coords', true), ''), NULL, 
 SELECT is(private.purge_fix_coords(30, 100), 0, 'reuse (purge): a second call on the reused connection is correct (nothing left to purge)');
 SELECT is(nullif(current_setting('app.edge.purge_fix_coords', true), ''), NULL, 'reuse (purge): ... and closes the window again');
 ROLLBACK;
+-- Install-link tombstone retention (owner decision 2026-10-02, F19): 24 months from first_seen_at. Rows seeded in phase 0:
+-- UA's is 25 months old (purged), UB's 23 months (kept), UD's 40 months (purged).
+BEGIN;
+SET LOCAL ROLE edge_system;
+SELECT throws_ok($$SELECT private.purge_install_link_tombstones(0)$$, '22023', NULL, 'tombstone retention: a bound of 0 is refused');
+SELECT throws_ok($$SELECT private.purge_install_link_tombstones(100001)$$, '22023', NULL, 'tombstone retention: a bound over 100000 is refused');
+SELECT throws_ok($$SELECT private.purge_install_link_tombstones(NULL)$$, '22023', NULL, 'tombstone retention: a NULL bound is refused');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_system;
+SELECT is(private.purge_install_link_tombstones(1), 1, 'tombstone retention: the bound is honoured (one row per call when asked for one), oldest first (UD''s 40-month row)');
+SELECT is(private.purge_install_link_tombstones(100), 1, 'tombstone retention: the next call purges the remaining expired row (UA''s 25-month row)');
+SELECT is(private.purge_install_link_tombstones(100), 0, 'tombstone retention: nothing else is past 24 months (UB''s 23-month row is not)');
+COMMIT;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'tombstone retention: bind A');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('7', 64)), 0, 'tombstone retention: the 25-month-old row (A''s) was PURGED');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000d0')$$, 'tombstone retention: bind D');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('9', 64)), 0, 'tombstone retention: the 40-month-old row (D''s) was PURGED');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000b0')$$, 'tombstone retention: bind B');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('8', 64)), 1, 'tombstone retention: the 23-month-old row (B''s) was KEPT');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('b', 64)), 1, 'tombstone retention: ... and B''s current tombstone is untouched');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'tombstone retention: bind A (live rows)');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('e', 64)), 1, 'tombstone retention: ... a young tombstone (A''s, shared install) is untouched');
+ROLLBACK;
 -- B deletes its account (committed): the definer hands B's reservation on offer E2 back BEFORE the delete. D holds an
 -- earned code on the same offer, so D can still see the offer afterwards and read the shared counter.
 BEGIN;
@@ -1239,6 +1304,136 @@ ROLLBACK;
 -- PHASE 2: cleanup (harness role, as service_role)
 -- ============================================================================
 \c :"harness_db" :"harness_user"
+-- ----------------------------------------------------------------------------
+-- 11. Layered defences, each proved ALONE (harness role; TAP lines printed by hand because the pgTAP session of phase 1
+-- is gone -- a new connection restarts pgTAP's numbering -- and the numbers continue the plan). Every cell is an
+-- ordinary transaction that ends in ROLLBACK, except the one re-seed, which phase 2's own cleanup removes.
+--   * 0033's retention is enforced TWICE: by the private_definer policies pd_purge_install_link_{read,delete} and by the
+--     function body's own cutoff. Either alone is enough, so a mutant of one is masked by the other unless a cell takes
+--     the other away. Cells 706-707 prove the POLICIES with no function in the way; cell 708 widens both policies
+--     inside a rolled-back transaction and proves the BODY keeps the 23-month row.
+--   * hold_play_rewards_for_actor's post-condition only fires if app.hold_play_rewards leaves a reward behind, which the
+--     real body never does. Cells 709-711 swap in a deliberately incomplete app.hold_play_rewards (rolled back) -- one
+--     that skips the entitlements, one that skips the codes -- and expect 55000 from the matching branch, plus the
+--     unswapped control. (A mutant of ONE branch is otherwise masked by the other, because a no-op swap trips both.)
+-- ----------------------------------------------------------------------------
+\set QUIET 1
+SET ROLE service_role;
+INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id, first_seen_at)
+SELECT repeat('7', 64), a.pseudonym, a.key_id, now() - interval '25 months'
+FROM private.account_pseudonyms('eeee0000-0000-0000-0000-0000000000a0'::uuid) a WHERE a.preferred;
+RESET ROLE;
+
+-- 706: as private_definer the READ policy shows only rows past 24 months (the 25-month re-seed yes; nothing younger, the
+-- 23-month row 8 included)
+BEGIN;
+SET LOCAL ROLE private_definer;
+SELECT (count(*) FILTER (WHERE first_seen_at < now() - interval '24 months') >= 1
+        AND count(*) FILTER (WHERE first_seen_at >= now() - interval '24 months') = 0) AS good
+FROM app.install_link_account \gset
+ROLLBACK;
+\if :good
+\echo ok 706 - purge policy (read): private_definer sees the expired tombstone and not one row younger than 24 months
+\else
+\echo not ok 706 - purge policy (read): private_definer sees the expired tombstone and not one row younger than 24 months
+\endif
+
+-- 707: ... and the DELETE policy lets it delete only expired rows, even when the WHERE clause names younger ones too.
+-- (A DELETE is also filtered by the SELECT policy, which would mask a broken DELETE policy, so the READ policy is
+-- widened to true -- in this rolled-back transaction only -- to make the DELETE policy the only thing standing.)
+BEGIN;
+ALTER POLICY pd_purge_install_link_read ON app.install_link_account USING (true);
+SET LOCAL ROLE private_definer;
+WITH d AS (DELETE FROM app.install_link_account WHERE first_seen_at > now() - interval '30 months' RETURNING first_seen_at)
+SELECT (count(*) >= 1 AND count(*) FILTER (WHERE first_seen_at >= now() - interval '24 months') = 0) AS good FROM d \gset
+ROLLBACK;
+\if :good
+\echo ok 707 - purge policy (delete): private_definer can delete an expired tombstone and never one younger than 24 months
+\else
+\echo not ok 707 - purge policy (delete): private_definer can delete an expired tombstone and never one younger than 24 months
+\endif
+
+-- 708: the function body's own cutoff, with BOTH policies widened to true: it still purges only the expired rows
+BEGIN;
+ALTER POLICY pd_purge_install_link_read ON app.install_link_account USING (true);
+ALTER POLICY pd_purge_install_link_delete ON app.install_link_account USING (true);
+SET LOCAL ROLE service_role;
+SELECT (private.purge_install_link_tombstones(100000) = 1) AS good \gset
+ROLLBACK;
+\if :good
+\echo ok 708 - purge body: with both policies widened, the function's own 24-month cutoff still keeps every younger row (exactly the 25-month row goes)
+\else
+\echo not ok 708 - purge body: with both policies widened, the function's own 24-month cutoff still keeps every younger row (exactly the 25-month row goes)
+\endif
+
+-- 709-711: the hold post-condition. A's play 0a02 backs the issued code 0901 AND the entitlement 0801 (see 10a).
+BEGIN;
+CREATE OR REPLACE FUNCTION app.hold_play_rewards(p_play_id uuid) RETURNS void LANGUAGE plpgsql SET search_path = '' AS $f$
+BEGIN
+  UPDATE app.offer_code SET state = 'held_review' WHERE play_id = p_play_id AND state NOT IN ('held_review', 'redeemed', 'void', 'expired');
+END;
+$f$;
+GRANT edge_actor TO CURRENT_USER WITH INHERIT FALSE, SET TRUE; -- rolled back; a restricted harness role may not SET ROLE edge_actor otherwise
+SET LOCAL ROLE edge_actor;
+DO $d$ DECLARE s text; BEGIN
+  PERFORM private.bind_actor('eeee0000-0000-0000-0000-0000000000a0');
+  BEGIN
+    UPDATE app.play SET held_review = true WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = 'eeee0000-0000-0000-0000-0000000000a0';
+    s := 'no error';
+  EXCEPTION WHEN OTHERS THEN s := SQLSTATE; END;
+  PERFORM set_config('edge16.pc', s, true);
+END $d$;
+SELECT (current_setting('edge16.pc') = '55000') AS good \gset
+ROLLBACK;
+\if :good
+\echo ok 709 - hold post-condition (entitlement branch): a hold that moved the codes but not the entitlement is refused with 55000
+\else
+\echo not ok 709 - hold post-condition (entitlement branch): a hold that moved the codes but not the entitlement is refused with 55000
+\endif
+
+BEGIN;
+CREATE OR REPLACE FUNCTION app.hold_play_rewards(p_play_id uuid) RETURNS void LANGUAGE plpgsql SET search_path = '' AS $f$
+BEGIN
+  UPDATE app.entitlement SET state = 'held_review' WHERE play_id = p_play_id AND state NOT IN ('held_review', 'redeemed', 'void');
+END;
+$f$;
+GRANT edge_actor TO CURRENT_USER WITH INHERIT FALSE, SET TRUE; -- rolled back; a restricted harness role may not SET ROLE edge_actor otherwise
+SET LOCAL ROLE edge_actor;
+DO $d$ DECLARE s text; BEGIN
+  PERFORM private.bind_actor('eeee0000-0000-0000-0000-0000000000a0');
+  BEGIN
+    UPDATE app.play SET held_review = true WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = 'eeee0000-0000-0000-0000-0000000000a0';
+    s := 'no error';
+  EXCEPTION WHEN OTHERS THEN s := SQLSTATE; END;
+  PERFORM set_config('edge16.pc', s, true);
+END $d$;
+SELECT (current_setting('edge16.pc') = '55000') AS good \gset
+ROLLBACK;
+\if :good
+\echo ok 710 - hold post-condition (code branch): a hold that moved the entitlement but left an issued code is refused with 55000
+\else
+\echo not ok 710 - hold post-condition (code branch): a hold that moved the entitlement but left an issued code is refused with 55000
+\endif
+
+BEGIN;
+GRANT edge_actor TO CURRENT_USER WITH INHERIT FALSE, SET TRUE; -- rolled back; a restricted harness role may not SET ROLE edge_actor otherwise
+SET LOCAL ROLE edge_actor;
+DO $d$ DECLARE s text; BEGIN
+  PERFORM private.bind_actor('eeee0000-0000-0000-0000-0000000000a0');
+  BEGIN
+    UPDATE app.play SET held_review = true WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = 'eeee0000-0000-0000-0000-0000000000a0';
+    s := 'no error';
+  EXCEPTION WHEN OTHERS THEN s := SQLSTATE; END;
+  PERFORM set_config('edge16.pc', s, true);
+END $d$;
+SELECT (current_setting('edge16.pc') = 'no error') AS good \gset
+ROLLBACK;
+\if :good
+\echo ok 711 - hold post-condition (control): with the real app.hold_play_rewards the same hold raises nothing
+\else
+\echo not ok 711 - hold post-condition (control): with the real app.hold_play_rewards the same hold raises nothing
+\endif
+
 SET ROLE service_role;
 BEGIN;
 SELECT app.release_account_reservations(u) FROM unnest(ARRAY['eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-0000000000d0']::uuid[]) AS u;
@@ -1258,7 +1453,7 @@ BEGIN;
 CREATE POLICY edge16_cleanup_entitlement ON app.entitlement FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY edge16_cleanup_install_link ON app.install_link_account FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 DELETE FROM app.entitlement WHERE id::text LIKE 'eeee0000-%';
-DELETE FROM app.install_link_account WHERE install_link_hash IN (repeat('e', 64), repeat('b', 64), repeat('c', 64));
+DELETE FROM app.install_link_account WHERE install_link_hash IN (repeat('e', 64), repeat('b', 64), repeat('c', 64), repeat('7', 64), repeat('8', 64), repeat('9', 64));
 DROP POLICY edge16_cleanup_entitlement ON app.entitlement;
 DROP POLICY edge16_cleanup_install_link ON app.install_link_account;
 COMMIT;

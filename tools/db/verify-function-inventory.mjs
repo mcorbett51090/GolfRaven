@@ -518,7 +518,8 @@ for (const [schema, table, column] of missingRCompanion) {
 //     outside schema app, or on an app table without FORCE ROW LEVEL SECURITY -- in EVERY non-system schema (0032, L2:
 //     not a fixed list; extension-owned relations such as postgis' spatial_ref_sys are exempt) -- and no edge role
 //     can CREATE in any schema.
-//  13 (0032, L1) no SECURITY DEFINER function in app/api/private reads an UNQUALIFIED pg_* relation: edge_actor holds
+//  13 (0032, L1; widened in 0033 for the PR1b gate's LOW-2: comma lists `FROM a, pg_class c` and `DELETE ... USING pg_roles`)
+//     no SECURITY DEFINER function in app/api/private reads an UNQUALIFIED pg_* relation: edge_actor holds
 //     TEMP, pg_temp is searched before pg_catalog for relations even with search_path = '', so a temp table named
 //     pg_constraint would shadow the catalog under the definer. (All definers, a superset of "reachable from edge_*".)
 const edgeChecks = [
@@ -643,7 +644,7 @@ WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_toast%' AND
   AND has_schema_privilege(r.rolname, n.oid, 'CREATE')`],
   [13, "definer bodies: unqualified catalog relations", `SELECT 'SECURITY DEFINER function reads an unqualified pg_ relation (a temp relation of that name would shadow the catalog): ' || n.nspname || '.' || p.proname || ' -> ' || m[1]
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\\n]*', '', 'g'), '\\m(?:from|join|update|into|table)\\s+(pg_[a-z_]+)\\M(?!\\.|\\s*\\()', 'gi') AS m
+CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\\n]*', '', 'g'), '(?:\\m(?:from|join|update|into|table|using)\\s+|,\\s*)(pg_[a-z_]+)\\M(?!\\.|\\s*\\()', 'gi') AS m
 WHERE p.prosecdef AND n.nspname IN ('app', 'api', 'private')`],
 ];
 for (const [num, label, sql] of edgeChecks) {

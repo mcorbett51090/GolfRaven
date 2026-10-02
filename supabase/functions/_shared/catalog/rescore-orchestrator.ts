@@ -24,6 +24,8 @@ export interface RescoreBacklogResult {
   truncated: boolean;
   /** §8.6: evidence rows whose raw fix coordinates this pass cleared. */
   coordsPurged: number;
+  /** F19 retention: install-link tombstones older than 24 months this pass deleted. */
+  tombstonesPurged: number;
 }
 
 export type WithOwnershipFn = <T>(actor: Actor, op: (repo: Repo) => Promise<T>) => Promise<T>;
@@ -51,6 +53,8 @@ export const RESCORE_SWEEP_OVERLAP_SECONDS = 15;
  * fails closed (`cannot_rederive`). Named here, enforced by `purgeFixCoords`. */
 export { FIX_COORDS_RETENTION_DAYS };
 const PURGE_BATCH = 5000;
+/** Bound per call of the install-link tombstone retention purge (the 24 months themselves live in the database function). */
+const TOMBSTONE_PURGE_BATCH = 5000;
 
 export interface RescoreOptions {
   /** Tests only: shorten the straggler grace (default RESCORE_SWEEP_DELAY_SECONDS). */
@@ -60,7 +64,7 @@ export interface RescoreOptions {
 export async function drainRescoreBacklog(importerRepo: ImporterRepo, withOwnership: WithOwnershipFn, maxPlays: number = DEFAULT_RESCORE_MAX_PLAYS, deadline?: Deadline, opts: RescoreOptions = {}): Promise<RescoreBacklogResult> {
   const sweepDelay = opts.sweepDelaySeconds ?? RESCORE_SWEEP_DELAY_SECONDS;
   const rows = await importerRepo.rescoreBacklog.listOpen(DEFAULT_RESCORE_MAX_COURSES, sweepDelay);
-  const result: RescoreBacklogResult = { backlogRows: rows.length, playsProcessed: 0, coursesCompleted: 0, failures: 0, truncated: false, coordsPurged: 0 };
+  const result: RescoreBacklogResult = { backlogRows: rows.length, playsProcessed: 0, coursesCompleted: 0, failures: 0, truncated: false, coordsPurged: 0, tombstonesPurged: 0 };
   let budget = maxPlays;
 
   outer: for (const initial of rows) {
@@ -134,6 +138,14 @@ export async function drainRescoreBacklog(importerRepo: ImporterRepo, withOwners
     result.coordsPurged = await importerRepo.rescoreBacklog.purgeFixCoords(FIX_COORDS_RETENTION_DAYS, PURGE_BATCH);
   } catch (err) {
     console.error("drainRescoreBacklog: fixCoords purge failed; will retry next pass", err);
+  }
+  // F19 (owner decision 2026-10-02): the install-link fraud tombstone is kept 24 months from first_seen_at. Run here, next to the
+  // fix-coordinate purge, because this is the one recurring system pass there is. SCHEDULING both purges independently of an
+  // import is a launch-blocking follow-up (docs/security/p3-money-path-requirements.md, "Owner decisions (2026-10-02)").
+  try {
+    result.tombstonesPurged = await importerRepo.rescoreBacklog.purgeInstallLinkTombstones(TOMBSTONE_PURGE_BATCH);
+  } catch (err) {
+    console.error("drainRescoreBacklog: install-link tombstone purge failed; will retry next pass", err);
   }
   return result;
 }

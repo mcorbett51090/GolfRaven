@@ -41,6 +41,22 @@ if (!PGHOST || !PGPORT || !PGUSER || !PGDATABASE) {
 if (!Deno.env.get("SUPABASE_DB_URL")) {
   Deno.env.set("SUPABASE_DB_URL", `postgres:///${PGDATABASE}`);
 }
+// Edge role (PR2). `EDGE_DB_MODE` itself is set by tools/db/test-deno-integration.sh (it runs this whole suite
+// once per mode); privileged.ts is the only reader of it. The edge pool connects as the provisioned `edge_gateway`
+// login: same host-less shape as above (the host and port come from PGHOST/PGPORT), the user named in the URL's query. The
+// harness cluster authenticates with `trust`; when tools/db/test.sh passes the throwaway password it generated at
+// runtime (EDGE_GATEWAY_TEST_PASSWORD, never a literal anywhere in the repo) it is handed to the client the way a
+// libpq client would receive it (PGPASSWORD), and ignored by `trust`.
+if (!Deno.env.get("GOLFRAVEN_EDGE_DB_URL")) {
+  const edgePassword = Deno.env.get("EDGE_GATEWAY_TEST_PASSWORD");
+  // `new URL("postgres://user:pw@/db")` is invalid (userinfo with an empty host), and postgres.js v3.4.5 reads a password
+  // ONLY from the URL's userinfo or PGPASSWORD (a `?password=` / `?pass=` query parameter is not an option -- it is sent to
+  // the server as a startup parameter and refused: `unrecognized configuration parameter`). The host-less URL therefore
+  // carries only the user and database; the socket directory comes from PGHOST, and the throwaway password (when
+  // tools/db/test.sh generated one) goes in PGPASSWORD, which a `trust` cluster simply never asks for.
+  if (edgePassword && !Deno.env.get("PGPASSWORD")) Deno.env.set("PGPASSWORD", edgePassword);
+  Deno.env.set("GOLFRAVEN_EDGE_DB_URL", `postgres:///${PGDATABASE}?user=edge_gateway`);
+}
 
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import type { Actor } from "../../functions/_shared/types.ts";
