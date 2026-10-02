@@ -23,15 +23,11 @@ export interface OwnReward {
   /** offer_code only: the expiry clock is paused (the code is held). */
   expiryPaused: boolean;
   /** §7.5 table row 3 input, EFFECTIVE: the reward's own `rests_on_unattestable`
-   * flag — unless a reviewer cleared it (`reviewClearedAt` set) — OR its backing
-   * play's `held_review` (a review of the CODE does not clear a held PLAY; the
-   * database refuses to activate over one either way). */
+   * flag — unless a reviewer cleared it (`review_cleared_at` set; H2) — OR its
+   * backing play's `held_review` (a review of the CODE does not clear a held
+   * PLAY; the database refuses to activate over one either way). Review clears
+   * ROW 3 and nothing else: row 2 is released only by the signal being cleared. */
   restsOnUnattestable: boolean;
-  /** Set when a reviewer approved this reward while no device had ever run the
-   * table on it (H2): rows 2 and 3 are cleared for it, rows 1 and 4-6 still run.
-   * Opaque database text (microsecond precision preserved) — only ever handed
-   * back to `hasOpenAttestationFailedSignal(since)`. */
-  reviewClearedAt: string | null;
 }
 
 export interface DeviceAttestState {
@@ -86,10 +82,18 @@ export interface RewardsRepo {
   /** Records the last verdict on the device row (grade + time only — the
    * column is exported to the player, so no reasons) and the token hash. */
   recordDeviceVerdict(deviceId: string, verdict: { grade: Grade; tokenHash: string | null }): Promise<void>;
-  /** Table row 2's input. `since` (a reward's `reviewClearedAt`): only a signal
-   * raised AFTER that instant counts — a reviewer already looked at the earlier
-   * ones (H2). `null` = every open signal counts. */
-  hasOpenAttestationFailedSignal(since: string | null): Promise<boolean>;
+  /** Table row 2's input: the account has an OPEN `attestation_failed` signal.
+   * Only the signal's own `cleared_at` releases it — never a review of a reward
+   * (N3). */
+  hasOpenAttestationFailedSignal(): Promise<boolean>;
+  /** Advisory pre-check, NO lock taken: could an `activate` of this reward still
+   * reserve its budget? (An entitlement, a code that already holds a reservation
+   * and a code whose offer has no face value: yes. Otherwise: does the cap have
+   * room.) The database stays authoritative — `app.activate_offer_code` HOLDS a
+   * code it cannot reserve for (N1) — this only lets the handler skip the vendor
+   * bit0 write for a reward that is about to be held, so bit0 is not claimed for a
+   * reward the account never received. */
+  canReserveBudget(rewardId: string): Promise<boolean>;
   /** Inserts `fraud_signal(attestation_failed)` unless the account already has
    * an open one. Returns whether a row was inserted. */
   raiseAttestationFailedIfNone(detail: Record<string, unknown>): Promise<boolean>;

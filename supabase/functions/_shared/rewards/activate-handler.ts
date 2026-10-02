@@ -32,12 +32,13 @@
 //      key / account, after recording this install link;
 //   7. raise fraud_signal(attestation_failed) AT INTAKE if the grade is `failed`;
 //   8. run the table; raise the signals of EVERY matching row; record the verdict;
+//  8b. on row 6 (iOS), set bit0 at the vendor BEFORE the transition, so no vendor
+//      I/O happens while the offer row (or any advisory lock) is held (N2). A
+//      failure here throws and rolls the whole transaction back — the reward
+//      stays `earned` and a retry is safe.
 //   9. apply the transition in the database (which re-checks rows 2 and 3
 //      itself, independently of this code, and — for a hold — records what the
 //      reviewer sees: the bits, the matched rows, DeviceCheck's last-update month);
-//  10. only then, on row 6, set bit0 at the vendor. A failure here throws and
-//      rolls the whole transaction back — the reward stays `earned`, a retry is
-//      safe, and bit0 is never claimed set when it was not.
 //
 // A failed verification never refuses: it opens the signal and the reward goes
 // to `held_review`. The only 5xx outcomes are vendor unavailability or an
@@ -324,16 +325,53 @@ export async function handleActivation(rewardId: string, req: ActivationRequest,
     await repo.rewards.raiseAttestationFailedIfNone({ rewardId: reward.id, deviceId: device.id, platform: req.platform, reasons, source: "rewards-activate" });
   }
 
-  // 8. The table. A reviewer-cleared reward (H2) has rows 2 and 3 cleared FOR IT
-  //    — `reward.restsOnUnattestable` is already the effective flag, and only a
-  //    signal raised after the review counts — while rows 1 and 4-6 run as ever.
+  // 8. The table. A reviewer-cleared reward (H2) has ROW 3 cleared FOR IT —
+  //    `reward.restsOnUnattestable` is already the effective flag — while rows 1,
+  //    2 and 4-6 run as ever: an open attestation_failed signal on the ACCOUNT is
+  //    released only by the signal itself being cleared (N3).
   const decision = decideActivation({
     bits,
     activatingGrade: grade,
-    accountHasOpenAttestationFailed: await repo.rewards.hasOpenAttestationFailedSignal(reward.reviewClearedAt),
+    accountHasOpenAttestationFailed: await repo.rewards.hasOpenAttestationFailedSignal(),
     rewardRestsOnUnattestable: reward.restsOnUnattestable,
     accountHasPriorReward: await repo.rewards.hasPriorReward(),
   });
+
+  // N1 pre-check (advisory, no lock). The database HOLDS a code it cannot reserve
+  // for instead of issuing it; asking first lets us skip the vendor bit0 write for
+  // a reward that is about to be held (bit0 means "an account that RECEIVED a
+  // reward used this device"). A race (room taken between this read and the
+  // transition) still ends held, and leaves bit0 set: follow-up F14.
+  let outcome = decision.outcome;
+  let wantSetBit0 = decision.setBit0;
+  let heldFor: "offer_budget" | null = null;
+  if (outcome === "activate" && !(await repo.rewards.canReserveBudget(reward.id))) {
+    outcome = "held_review";
+    wantSetBit0 = false;
+    heldFor = "offer_budget";
+  }
+
+  // 8b. Row 6 on iOS: set DeviceCheck bit0 — BEFORE the database transition (N2).
+  //     The transition locks the offer row (reservation) and every lock is held to
+  //     the end of the transaction; calling the vendor AFTER it meant the offer
+  //     lock was held across Apple's latency, so activations on one offer queued
+  //     behind each other and `lock_timeout` restarted per holder: 6 concurrent
+  //     activations with a 2.4 s `update_two_bits` produced two 503s. Here the only
+  //     lock held across the vendor call is the caller's own reward row. A failure
+  //     here still throws and rolls the whole transaction back, so bit0 is never
+  //     claimed set for a transition that did not run; the remaining failure
+  //     direction (bit0 set, then the transition fails or ends held) is the
+  //     accepted follow-up F14. Android has no vendor bit to set: the install link
+  //     recorded above is its "write".
+  if (outcome === "activate" && wantSetBit0 && req.platform === "ios") {
+    if (!assessment.setBit0 || bits.kind !== "known") throw Errors.internal();
+    try {
+      await assessment.setBit0({ bit0: bits.bit0, bit1: bits.bit1, lastUpdateMonth });
+    } catch (e) {
+      throw mapVendorError(e);
+    }
+  }
+
   // M2: first match decides the outcome, EVERY matching row raises its signals.
   for (const kind of decision.signals) {
     await repo.rewards.raiseFraudSignalOnce(
@@ -358,7 +396,7 @@ export async function handleActivation(rewardId: string, req: ActivationRequest,
   //    bits as read, every matched row, the primary one, DeviceCheck's
   //    last-update month — stored on the reward, never returned to the client.
   const holdDetail: Record<string, unknown> | null =
-    decision.outcome === "held_review"
+    outcome === "held_review"
       ? {
           bits: bits.kind === "known" ? { bit0: bits.bit0, bit1: bits.bit1 } : null,
           bitsSource: req.platform === "ios" ? "devicecheck" : "server_substitute",
@@ -366,6 +404,7 @@ export async function handleActivation(rewardId: string, req: ActivationRequest,
           primaryRow: decision.row,
           deviceCheckLastUpdateMonth: lastUpdateMonth,
           ...(androidSignals ? { androidInstallSignals: { accountsOnInstall: androidSignals.accountsOnInstall, voidedAccountUsedInstall: androidSignals.voidedAccountUsedInstall } } : {}),
+          ...(heldFor ? { heldFor } : {}),
           platform: req.platform,
           grade,
           at: repo.now().toISOString(),
@@ -376,20 +415,8 @@ export async function handleActivation(rewardId: string, req: ActivationRequest,
     rewardId: reward.id,
     deviceId: device.id,
     tokenHash: assessment.tokenHash,
-    decision: decision.outcome,
+    decision: outcome,
     holdDetail,
   });
-
-  // 10. Row 6 on iOS only: set DeviceCheck bit0. Last, so a failure rolls
-  //     everything back. (Android has no vendor bit to set; the install link
-  //     recorded above is its "write".)
-  if (decision.setBit0 && applied.state !== "held_review" && req.platform === "ios") {
-    if (!assessment.setBit0 || bits.kind !== "known") throw Errors.internal();
-    try {
-      await assessment.setBit0({ bit0: bits.bit0, bit1: bits.bit1, lastUpdateMonth });
-    } catch (e) {
-      throw mapVendorError(e);
-    }
-  }
   return resultOf(reward, applied.state, false);
 }

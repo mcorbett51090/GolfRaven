@@ -74,6 +74,10 @@ export interface FakeRewardsState {
   signals: Array<{ userId: string; kind: string; detail: Record<string, unknown>; cleared: boolean; onceKey: string | null; at: number }>;
   /** budget_reserved per offer id (a single synthetic offer is enough). */
   budgetReserved: number;
+  /** budget_cap of that synthetic offer (budget_used is 0). Large by default. */
+  budgetCap: number;
+  /** The install-link tombstone (0027 5g): survives deleting the accounts it names. */
+  installTombstones: Array<{ hash: string; account: string; fraudVoided: boolean }>;
   reviewItems: Array<{ kind: string; rewardId: string }>;
   applyCalls: ApplyActivationInput[];
   demoAccounts: Set<string>;
@@ -86,7 +90,7 @@ const states = new WeakMap<FakeState, FakeRewardsState>();
 export function rewardsState(state: FakeState): FakeRewardsState {
   let s = states.get(state);
   if (!s) {
-    s = { rewards: new Map(), deviceAttest: new Map(), ledger: [], signals: [], budgetReserved: 0, reviewItems: [], applyCalls: [], demoAccounts: new Set(), seq: 0 };
+    s = { rewards: new Map(), deviceAttest: new Map(), ledger: [], signals: [], budgetReserved: 0, budgetCap: 1_000_000, installTombstones: [], reviewItems: [], applyCalls: [], demoAccounts: new Set(), seq: 0 };
     states.set(state, s);
   }
   return s;
@@ -146,6 +150,27 @@ export function openSignal(state: FakeState, userId: string, kind: string): void
   rewardsState(state).signals.push({ userId, kind, detail: {}, cleared: false, onceKey: null, at: ++rewardsState(state).seq });
 }
 
+/** Account deletion as private.delete_my_data does it to the Android substitute's
+ * inputs: the account's device rows go; the install-link tombstone STAYS. */
+export function fakeDeleteAccountDevices(state: FakeState, userId: string): void {
+  const rs = rewardsState(state);
+  for (const [id, d] of [...state.devices]) {
+    if (d.userId !== userId) continue;
+    state.devices.delete(id);
+    rs.deviceAttest.delete(id);
+  }
+}
+
+/** app.mark_account_devices_fraud_voided: the account's device rows AND its tombstone rows. */
+export function fakeMarkFraudVoided(state: FakeState, userId: string): void {
+  const rs = rewardsState(state);
+  for (const [id, d] of state.devices) if (d.userId === userId) {
+    const a = rs.deviceAttest.get(id);
+    if (a) a.fraudVoided = true;
+  }
+  for (const t of rs.installTombstones) if (t.account === userId) t.fraudVoided = true;
+}
+
 /** Mirrors app.resolve_held_offer_code / app.resolve_held_entitlement (0027).
  * A reviewer's approval of a held reward: no device ever ran the table on it ->
  * back to `earned`, review-cleared (H2); otherwise the active state, with the
@@ -197,7 +222,6 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
         expiresAt: r.expiresAt,
         expiryPaused: r.expiryPausedAt !== null,
         restsOnUnattestable: (r.restsOnUnattestable && r.reviewClearedAt === null) || r.playHeld,
-        reviewClearedAt: r.reviewClearedAt,
       };
     },
     async deviceAttestState(deviceId: string): Promise<DeviceAttestState | null> {
@@ -219,9 +243,13 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
       a.integrityLast = { grade: verdict.grade };
       if (verdict.tokenHash) a.tokenHash = verdict.tokenHash;
     },
-    async hasOpenAttestationFailedSignal(since: string | null): Promise<boolean> {
-      const after = since === null ? -Infinity : Number(since);
-      return rs.signals.some((s) => s.userId === uid && s.kind === "attestation_failed" && !s.cleared && s.at > after);
+    async hasOpenAttestationFailedSignal(): Promise<boolean> {
+      return rs.signals.some((s) => s.userId === uid && s.kind === "attestation_failed" && !s.cleared);
+    },
+    async canReserveBudget(rewardId: string): Promise<boolean> {
+      const r = own(rewardId);
+      if (!r || r.kind !== "offer_code" || r.state !== "earned" || r.reservedAmount > 0 || r.faceValue <= 0) return true;
+      return rs.budgetReserved + r.faceValue <= rs.budgetCap;
     },
     async raiseAttestationFailedIfNone(detail) {
       if (rs.signals.some((s) => s.userId === uid && s.kind === "attestation_failed" && !s.cleared)) return false;
@@ -259,10 +287,20 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
 
       if (input.decision === "activate") {
         // The DB-side backstops for table rows 2 and 3 (0027).
-        const after = r.reviewClearedAt === null ? -Infinity : Number(r.reviewClearedAt);
-        const openFailed = rs.signals.some((s) => s.userId === uid && s.kind === "attestation_failed" && !s.cleared && s.at > after);
+        const openFailed = rs.signals.some((s) => s.userId === uid && s.kind === "attestation_failed" && !s.cleared);
         if ((r.restsOnUnattestable && r.reviewClearedAt === null) || r.playHeld || openFailed) throw Errors.conflict("reward_state_changed", "backstop");
         if (r.kind === "offer_code" && r.state === "earned" && r.reservedAmount === 0 && r.faceValue > 0) {
+          if (rs.budgetReserved + r.faceValue > rs.budgetCap) {
+            // N1: a clean activation the cap cannot reserve for is HELD, never issued unreserved.
+            r.issuedBeforeHold = false;
+            r.state = "held_review";
+            r.holdDetail = { ...(input.holdDetail ?? {}), heldFor: "offer_budget" };
+            r.expiryPausedAt ??= state.now.toISOString();
+            r.activatedDeviceId ??= input.deviceId;
+            r.tokenHash ??= input.tokenHash;
+            r.activatedAt ??= state.now.toISOString();
+            return { state: r.state };
+          }
           r.reservedAmount = r.faceValue;
           rs.budgetReserved += r.faceValue;
         }
@@ -276,7 +314,7 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
         return { state: r.state };
       }
       // held_review
-      if (r.kind === "offer_code" && r.reservedAmount === 0 && r.faceValue > 0) {
+      if (r.kind === "offer_code" && r.reservedAmount === 0 && r.faceValue > 0 && rs.budgetReserved + r.faceValue <= rs.budgetCap) {
         r.reservedAmount = r.faceValue;
         rs.budgetReserved += r.faceValue;
       }
@@ -294,6 +332,10 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
       const a = rs.deviceAttest.get(deviceId);
       if (!dev || dev.userId !== uid || !a) return;
       a.installLinkHash ??= installLinkHash;
+      // the tombstone: one row per (install, account), kept when the account is deleted
+      if (!rs.installTombstones.some((t) => t.hash === a.installLinkHash && t.account === uid)) {
+        rs.installTombstones.push({ hash: a.installLinkHash!, account: uid, fraudVoided: false });
+      }
     },
     async androidInstallSignals(deviceId: string): Promise<AndroidInstallSignals | null> {
       const dev = state.devices.get(deviceId);
@@ -310,7 +352,8 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
         users.add(d.userId);
         if (a.fraudVoided) voided = true;
       }
-      return { accountsOnInstall: users.size, voidedAccountUsedInstall: voided };
+      const tomb = me.installLinkHash === null ? [] : rs.installTombstones.filter((t) => t.hash === me.installLinkHash);
+      return { accountsOnInstall: Math.max(users.size, new Set(tomb.map((t) => t.account)).size), voidedAccountUsedInstall: voided || tomb.some((t) => t.fraudVoided) };
     },
   };
 }

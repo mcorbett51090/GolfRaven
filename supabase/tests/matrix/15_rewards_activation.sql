@@ -18,7 +18,7 @@
 -- 20000000-...-000000000001, trails trl_t / trl_u / trl_v, facility fac_x.
 
 BEGIN;
-SELECT plan(176);
+SELECT plan(218);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -811,20 +811,31 @@ SELECT is(
   'H2: ...and only THEN does the ledger record it'
 );
 
--- an attestation_failed signal raised BEFORE the review does not hold the cleared code; one raised AFTER does.
+-- N3: a review of ONE reward never waives an ACCOUNT-level signal. An open
+-- attestation_failed signal holds the cleared code whether it was raised before or
+-- after the review; only the signal being CLEARED (cleared_at) releases it.
 SELECT app.resolve_held_offer_code('73000000-0000-0000-0000-000000000002', true, '00000000-0000-0000-0000-4000000000d0');
 INSERT INTO app.fraud_signal (id, user_id, kind, detail, created_at) VALUES
   ('f2000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-00000000000a', 'attestation_failed', '{}'::jsonb, now() - interval '1 hour');
-SELECT is(
-  app.activate_offer_code('73000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
-  'issued'::app.offer_code_state, 'H2: a signal raised BEFORE the review no longer holds the cleared code (the reviewer saw it)'
+SELECT throws_ok(
+  $$SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate')$$,
+  '23514', NULL, 'N3 probe E: an approved (review-cleared) code is STILL refused while the account has an open attestation_failed signal raised BEFORE the review'
 );
 SELECT app.resolve_held_offer_code('73000000-0000-0000-0000-000000000003', true, '00000000-0000-0000-0000-4000000000d0');
 INSERT INTO app.fraud_signal (id, user_id, kind, detail, created_at) VALUES
   ('f2000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-00000000000a', 'attestation_failed', '{}'::jsonb, now() + interval '1 hour');
 SELECT throws_ok(
   $$SELECT app.activate_offer_code('73000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate')$$,
-  '23514', NULL, 'H2: a signal raised AFTER the review still holds the account''s activations (row 2 backstop)'
+  '23514', NULL, 'N3: ...and its sibling, with a signal raised AFTER the review, is refused too'
+);
+UPDATE app.fraud_signal SET cleared_at = now() WHERE id IN ('f2000000-0000-0000-0000-000000000011', 'f2000000-0000-0000-0000-000000000012');
+SELECT is(
+  app.activate_offer_code('73000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'N3: once the signal is CLEARED, the approved code activates'
+);
+SELECT is(
+  app.activate_offer_code('73000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'N3: ...and so does its sibling'
 );
 DELETE FROM app.fraud_signal WHERE id IN ('f2000000-0000-0000-0000-000000000011', 'f2000000-0000-0000-0000-000000000012');
 
@@ -865,11 +876,11 @@ INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at
   ('73000000-0000-0000-0000-000000000008', '62000000-0000-0000-0000-000000000016', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now());
 SELECT is(
   app.activate_offer_code('73000000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
-  'issued'::app.offer_code_state, 'M3: an activation the cap cannot reserve for is still issued, never refused'
+  'held_review'::app.offer_code_state, 'N1: a CLEAN activation the cap cannot reserve for is HELD, never issued unreserved (and never refused)'
 );
 SELECT results_eq(
-  $$SELECT reserved_amount, (SELECT count(*)::int FROM app.review_item WHERE kind = 'issued_offer_budget_unreserved' AND subject_id = '73000000-0000-0000-0000-000000000008') FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000008'$$,
-  $$VALUES (0::numeric, 1)$$, '...unreserved, with a review_item'
+  $$SELECT reserved_amount, hold_detail ->> 'heldFor', (SELECT count(*)::int FROM app.review_item WHERE kind = 'held_offer_budget_unreserved' AND subject_id = '73000000-0000-0000-0000-000000000008') FROM app.offer_code WHERE id = '73000000-0000-0000-0000-000000000008'$$,
+  $$VALUES (0::numeric, 'offer_budget'::text, 1)$$, '...unreserved, hold_detail says why, and exactly ONE review_item (the trigger''s second attempt does not duplicate it)'
 );
 
 -- hold_detail: written on a hold, only what the reviewer needs.
@@ -946,6 +957,181 @@ SELECT is(
   (SELECT count(*)::int FROM app.audit_log WHERE action = 'account_devices_fraud_voided' AND subject_id = '00000000-0000-0000-0000-1000000000a1'),
   1, 'the marking is audited'
 );
+
+-- ============================================================================
+-- 8b. N1 probe G — the cap covers ONE code; two accounts activate cleanly.
+-- ============================================================================
+INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, face_value, valid_from, valid_to, status) VALUES
+  ('63000000-0000-0000-0000-000000000001', 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 10, 10, current_date, current_date + 30, 'live');
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at, expires_at) VALUES
+  ('74000000-0000-0000-0000-00000000000a', '63000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a', 'fac_x', 'earned', now(), now() + interval '30 days'),
+  ('74000000-0000-0000-0000-00000000000b', '63000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000b', 'fac_x', 'earned', now(), now() + interval '30 days');
+SELECT is(
+  app.activate_offer_code('74000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', NULL, 'activate'),
+  'issued'::app.offer_code_state, 'N1 probe G: the first code on a cap that covers one is issued and reserved'
+);
+SELECT is(
+  app.activate_offer_code('74000000-0000-0000-0000-00000000000b', '00000000-0000-0000-0000-00000000000b', '20000000-0000-0000-0000-0000000000b1', NULL, 'activate'),
+  'held_review'::app.offer_code_state, 'N1 probe G: the second is HELD (it used to be issued with reserved_amount 0)'
+);
+SELECT results_eq(
+  $$SELECT (SELECT reserved_amount FROM app.offer_code WHERE id = '74000000-0000-0000-0000-00000000000a'),
+           (SELECT reserved_amount FROM app.offer_code WHERE id = '74000000-0000-0000-0000-00000000000b'),
+           (SELECT budget_reserved FROM app.offer WHERE id = '63000000-0000-0000-0000-000000000001')$$,
+  $$VALUES (10::numeric, 0::numeric, 10::numeric)$$, 'N1: the books reconcile: only the issued code holds the reservation'
+);
+SELECT lives_ok(
+  $$SELECT app.consume_offer_budget('63000000-0000-0000-0000-000000000001', 10)$$,
+  'N1: the till pays the issued code'
+);
+SELECT results_eq(
+  $$SELECT budget_used, budget_reserved FROM app.offer WHERE id = '63000000-0000-0000-0000-000000000001'$$,
+  $$VALUES (10::numeric, 0::numeric)$$, '...and the cap is exactly spent: nothing is owed to the held code'
+);
+SELECT throws_ok(
+  $$SELECT app.resolve_held_offer_code('74000000-0000-0000-0000-00000000000b', true, '00000000-0000-0000-0000-4000000000d0')$$,
+  '23514', NULL, 'N1: approving the held code is REFUSED while the cap still cannot cover it (raise the cap or reject)'
+);
+UPDATE app.offer SET budget_cap = 20 WHERE id = '63000000-0000-0000-0000-000000000001';
+SELECT is(
+  app.resolve_held_offer_code('74000000-0000-0000-0000-00000000000b', true, '00000000-0000-0000-0000-4000000000d0'),
+  'issued'::app.offer_code_state, 'N1: once the cap is raised, approval issues it...'
+);
+SELECT results_eq(
+  $$SELECT c.reserved_amount, o.budget_reserved FROM app.offer_code c JOIN app.offer o ON o.id = c.offer_id WHERE c.id = '74000000-0000-0000-0000-00000000000b'$$,
+  $$VALUES (10::numeric, 10::numeric)$$, '...WITH its reservation taken at approval, so it can be paid at the till'
+);
+
+-- ============================================================================
+-- 8c. N5 — the cascade's lock order is code(id) -> offer(id) -> entitlement(id).
+-- (The two-session race is in rewards-activate.deno.test.ts; here: the function is the
+-- redefined one, and pinned.)
+-- ============================================================================
+SELECT is(
+  (SELECT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'app' AND p.proname = 'play_held_review_cascade'),
+  true, 'N5: app.play_held_review_cascade now pins search_path'
+);
+SELECT ok(
+  (SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'app' AND p.proname = 'play_held_review_cascade') ~ 'ORDER BY id FOR UPDATE',
+  'N5: the cascade locks the play''s rows ORDER BY id before it updates them'
+);
+
+-- ============================================================================
+-- 10b. N4 — the install-link tombstone survives account deletion.
+-- ============================================================================
+SELECT has_table('app', 'install_link_account', 'app.install_link_account exists');
+SELECT is(
+  (SELECT c.relrowsecurity AND c.relforcerowsecurity FROM pg_class c WHERE c.oid = 'app.install_link_account'::regclass),
+  true, 'install_link_account has ENABLE + FORCE ROW LEVEL SECURITY'
+);
+SELECT is(
+  (SELECT count(*)::int FROM information_schema.role_table_grants WHERE table_schema = 'app' AND table_name = 'install_link_account' AND grantee IN ('anon', 'authenticated', 'PUBLIC')),
+  0, 'no client role holds any grant on install_link_account'
+);
+SELECT is(
+  (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'app.install_link_account'::regclass AND contype = 'f' AND confrelid = 'auth.users'::regclass)
+  + (SELECT count(*)::int FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'install_link_account' AND column_name IN ('user_id', 'device_id', 'email')),
+  0, 'the tombstone has NO column or FK that names a user: it is not a personal row, so private.pii_retention_policy (derived from FKs to auth.users) has nothing to classify — and a future user column fails this cell'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.pii_retention_policy WHERE table_name = 'install_link_account'),
+  0, 'install_link_account is deliberately absent from the retention policy (a documented retention exception)'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a')), 2,
+  'account_pseudonyms: one pseudonym per active vault key'
+);
+SELECT is(
+  (SELECT count(*)::int FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') WHERE preferred), 1,
+  '...exactly one of them preferred (the newest key)'
+);
+SELECT is(
+  (SELECT pseudonym FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') WHERE preferred),
+  (SELECT pseudonym FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') WHERE preferred),
+  'account_pseudonyms is deterministic'
+);
+SELECT isnt(
+  (SELECT pseudonym FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') WHERE preferred),
+  (SELECT pseudonym FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000b') WHERE preferred),
+  '...and differs per account'
+);
+SELECT throws_ok($$SELECT * FROM private.account_pseudonyms(NULL)$$, '22023', NULL, 'account_pseudonyms refuses NULL');
+
+-- Four accounts use one install; two of them delete themselves.
+INSERT INTO app.device (id, user_id, platform) VALUES
+  ('20000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-1000000000a2', 'android'),
+  ('20000000-0000-0000-0000-0000000000d2', '00000000-0000-0000-0000-2000000000b2', 'android'),
+  ('20000000-0000-0000-0000-0000000000d3', '00000000-0000-0000-0000-3000000000c2', 'android'),
+  ('20000000-0000-0000-0000-0000000000d4', '00000000-0000-0000-0000-1000000000a3', 'android');
+SELECT app.record_install_link('00000000-0000-0000-0000-1000000000a2', '20000000-0000-0000-0000-0000000000d1', repeat('c', 64));
+SELECT app.record_install_link('00000000-0000-0000-0000-1000000000a2', '20000000-0000-0000-0000-0000000000d1', repeat('c', 64));
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('c', 64)), 1,
+  'record_install_link is idempotent per (install, account)');
+SELECT is((SELECT install_link_hash FROM app.device WHERE id = '20000000-0000-0000-0000-0000000000d1'), repeat('c', 64),
+  '...and stamps the link on the device row');
+SELECT app.record_install_link('00000000-0000-0000-0000-2000000000b2', '20000000-0000-0000-0000-0000000000d2', repeat('c', 64));
+SELECT app.record_install_link('00000000-0000-0000-0000-3000000000c2', '20000000-0000-0000-0000-0000000000d3', repeat('c', 64));
+SELECT results_eq(
+  $$SELECT accounts_on_install, voided_account_used_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000d3')$$,
+  $$VALUES (3, false)$$, 'three accounts on the install'
+);
+-- two of the three delete themselves (devices go; the tombstone rows must stay)
+DELETE FROM app.device WHERE id IN ('20000000-0000-0000-0000-0000000000d1', '20000000-0000-0000-0000-0000000000d2');
+SELECT results_eq(
+  $$SELECT accounts_on_install, voided_account_used_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000d3')$$,
+  $$VALUES (3, false)$$, 'N4: the ">2 accounts" count HOLDS after two of the accounts deleted their device rows'
+);
+SELECT app.record_install_link('00000000-0000-0000-0000-1000000000a3', '20000000-0000-0000-0000-0000000000d4', repeat('c', 64));
+SELECT results_eq(
+  $$SELECT accounts_on_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000d4')$$,
+  $$VALUES (4)$$, 'N4: a 4th account on the install sees 4, not 2'
+);
+-- the fraud decision is recorded, then the voided account deletes its device
+SELECT app.mark_account_devices_fraud_voided('00000000-0000-0000-0000-3000000000c2', '00000000-0000-0000-0000-4000000000d0');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('c', 64) AND fraud_voided_at IS NOT NULL), 1,
+  'N4: the fraud mark is written on the voided account''s tombstone row');
+DELETE FROM app.device WHERE id = '20000000-0000-0000-0000-0000000000d3';
+SELECT results_eq(
+  $$SELECT accounts_on_install, voided_account_used_install FROM app.device_link_signals('20000000-0000-0000-0000-0000000000d4')$$,
+  $$VALUES (4, true)$$, 'N4: a fraud-voided account that DELETED itself still taints the install for the next account'
+);
+-- marking an account whose devices are already gone still works (it needs only the id)
+SELECT is(
+  app.mark_account_devices_fraud_voided('00000000-0000-0000-0000-2000000000b2', '00000000-0000-0000-0000-4000000000d0'), 0,
+  'marking an already-deleted account''s devices touches no device (0) ...'
+);
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('c', 64) AND fraud_voided_at IS NOT NULL), 2,
+  '...but still marks its tombstone');
+-- the REAL deletion path leaves the tombstone (a retention exception), and removes the device
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('c', 64)), 4, 'four tombstone rows before the deletion');
+SELECT lives_ok($$SELECT private.delete_my_data('00000000-0000-0000-0000-1000000000a3')$$, 'private.delete_my_data runs for an account that has a tombstone row');
+SELECT is((SELECT count(*)::int FROM app.device WHERE user_id = '00000000-0000-0000-0000-1000000000a3'), 0, 'N4: delete_my_data removed the account''s device rows...');
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('c', 64)), 4, '...and left the install-link tombstone rows (documented retention exception)');
+-- a row written under an OLDER key is still recognised after the preferred key moved on (rotation).
+INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id)
+SELECT repeat('d', 64), a.pseudonym, a.key_id FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a') a WHERE NOT a.preferred;
+UPDATE app.device SET install_link_hash = NULL WHERE id = '20000000-0000-0000-0000-000000000001';
+SELECT app.record_install_link('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', repeat('d', 64));
+SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('d', 64)), 1,
+  'N4: an account already recorded under a non-preferred (older) key is not counted twice');
+SELECT throws_ok(
+  $$INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id) VALUES (repeat('e', 64), repeat('f', 64), gen_random_uuid())$$,
+  '23514', NULL, 'the write-time trigger rejects a pseudonym key id that does not resolve in the vault'
+);
+SELECT throws_ok(
+  $$SELECT app.record_install_link('00000000-0000-0000-0000-00000000000b', '20000000-0000-0000-0000-000000000001', repeat('a', 64))$$,
+  '42501', NULL, 'record_install_link refuses a device that is not the account''s'
+);
+SELECT throws_ok(
+  $$SELECT app.record_install_link('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'nope')$$,
+  '22023', NULL, 'record_install_link refuses a malformed link hash'
+);
+SELECT tests.authenticate_as('authenticated', jsonb_build_object('sub', '00000000-0000-0000-0000-00000000000a'));
+SELECT throws_ok($$SELECT * FROM private.account_pseudonyms('00000000-0000-0000-0000-00000000000a')$$, '42501', NULL, 'must-fail: a player cannot compute pseudonyms');
+SELECT throws_ok($$SELECT count(*) FROM app.install_link_account$$, '42501', NULL, 'must-fail: a player cannot read the tombstone');
+SELECT throws_ok($$SELECT app.record_install_link('00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', repeat('a', 64))$$, '42501', NULL, 'must-fail: a player cannot call record_install_link');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
 
 -- ============================================================================
 -- 11. Privileges on the gate-round functions

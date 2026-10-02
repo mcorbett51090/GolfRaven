@@ -55,7 +55,19 @@ export interface ActivationRequest {
   nonce?: string;
   /** Android only. Opaque, client-chosen: an UNAUTHENTICATED hint (a factory
    * reset or a fresh id evades it — §7.5 accepts that). Bound into the Android
-   * request hash when present, so it cannot be altered in transit. */
+   * request hash when present, so it cannot be altered in transit.
+   *
+   * CLIENT CONTRACT: send an id that SURVIVES an app reinstall on the same device
+   * and is stable across accounts — the Android ID (`Settings.Secure.ANDROID_ID`,
+   * the SSAID: scoped to the app signing key, the user and the device, unchanged
+   * by an uninstall/reinstall of an app signed with the same key, reset by a
+   * factory reset) `[unverified — training knowledge]`. NOT a per-install random
+   * id, an advertising id, or anything the user resets from settings: the server
+   * links device rows (and a pseudonymous tombstone that outlives account
+   * deletion) by this id, and an id that changes on reinstall links nothing.
+   * 16-128 characters of [A-Za-z0-9._~-] (the SSAID is 16 hex characters). The
+   * server stores only its SHA-256. Omit it and the activation is held: with no
+   * link the server has no substitute signal to evaluate. */
   installLinkId?: string;
   attestation: AttestationMaterial;
 }

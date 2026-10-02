@@ -1102,8 +1102,6 @@ Deno.test("H2: approve-then-activate on a clean attested device -> issued: rows 
   const dev = await newDevice(u);
   const code = await newCode(u, { state: "held_review", restsOnUnattestable: true });
   assertEquals(await resolveHeld(code.id, true), "earned");
-  // a signal the reviewer already saw does not hold it again...
-  await adminSql()`insert into app.fraud_signal (user_id, kind, detail, created_at) values (${u.uid}, 'attestation_failed', '{}'::jsonb, now() - interval '1 hour')`;
   const ios = iosPort({ bits: CLEAR });
   const out = await activate(u, code.id, await iosReq(u, dev), deps({ ios }));
   assertEquals(out.state, "issued");
@@ -1111,7 +1109,7 @@ Deno.test("H2: approve-then-activate on a clean attested device -> issued: rows 
   assertEquals(ios.calls.setBit0, 1);
 });
 
-Deno.test("H2: a cleared reward is still held on a flagged device (row 1), when the device is unattestable, and by a signal raised AFTER the review", DT, async () => {
+Deno.test("H2: a cleared reward is still held on a flagged device (row 1), when the device is unattestable, and by a signal raised AFTER the review (N3: and by one raised BEFORE it)", DT, async () => {
   const u = await freshUser("h2-still-held");
   const dev = await newDevice(u);
   const a = await newCode(u, { state: "held_review", restsOnUnattestable: true });
@@ -1324,4 +1322,211 @@ Deno.test("M4: Repo#rewards.androidInstallSignals / recordInstallLink against re
   assertEquals(await withOwnership(a.actor, (repo: Repo) => repo.rewards.androidInstallSignals(da)), { accountsOnInstall: 2, voidedAccountUsedInstall: false });
   // another user cannot read or write a device that is not theirs
   assertEquals(await withOwnership(b.actor, (repo: Repo) => repo.rewards.androidInstallSignals(da)), null);
+});
+
+// ===========================================================================
+// P3f gate round 2 (FAIL: N1-N5 + LOW) — against real SQL
+// ===========================================================================
+Deno.test("N1 probe G: cap for ONE code, two accounts activate cleanly -> the second is HELD (not issued unreserved); both books reconcile at the till; approval needs the cap raised", DT, async () => {
+  const offerId = await newOffer({ faceValue: 10, cap: 10 });
+  const a = await freshUser("n1-a");
+  const b = await freshUser("n1-b");
+  const da = await newDevice(a);
+  const db = await newDevice(b);
+  const ca = await newCode(a, { offerId });
+  const cb = await newCode(b, { offerId });
+  assertEquals((await activate(a, ca.id, await iosReq(a, da), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "issued");
+  const ios = iosPort({ bits: CLEAR });
+  const out = await activate(b, cb.id, await iosReq(b, db), deps({ ios }));
+  assertEquals(out.state, "held_review");
+  assertEquals(ios.calls.setBit0, 0, "no vendor write for a reward that is held for budget (the advisory pre-check)");
+  const rowB = await fullCode(cb.id);
+  assertEquals([rowB.reserved_amount, (rowB.hold_detail as Record<string, unknown>).heldFor], ["0.00", "offer_budget"]);
+  assertEquals((await adminSql()`select count(*)::int as n from app.review_item where kind = 'held_offer_budget_unreserved' and subject_id = ${cb.id}`)[0]!.n, 1);
+  // The DATABASE is authoritative, not just the handler's pre-check: a caller that decides "activate" directly gets a hold.
+  const c = await freshUser("n1-c");
+  const dc = await newDevice(c);
+  const cc = await newCode(c, { offerId });
+  const direct = await withOwnership(c.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: cc.id, deviceId: dc, tokenHash: null, decision: "activate", holdDetail: null }));
+  assertEquals(direct.state, "held_review");
+  assertEquals((await fullCode(cc.id)).reserved_amount, "0.00");
+  // the till: the issued code is paid; nothing is owed to the held ones
+  await adminSql()`select app.consume_offer_budget(${offerId}, 10)`;
+  const o = await adminSql()`select budget_used, budget_reserved from app.offer where id = ${offerId}`;
+  assertEquals([o[0]!.budget_used, o[0]!.budget_reserved], ["10.00", "0.00"]);
+  // approval is refused while the cap cannot cover it...
+  let code = "";
+  try {
+    await resolveHeld(cb.id, true);
+  } catch (e) {
+    code = (e as { code?: string }).code ?? "";
+  }
+  assertEquals(code, "23514");
+  // ...and succeeds, WITH a reservation, once the cap is raised
+  await adminSql()`update app.offer set budget_cap = 20 where id = ${offerId}`;
+  assertEquals(await resolveHeld(cb.id, true), "issued");
+  assertEquals((await fullCode(cb.id)).reserved_amount, "10.00");
+  await adminSql()`select app.consume_offer_budget(${offerId}, 10)`;
+});
+
+Deno.test("N2 probe: 6 concurrent activations on ONE offer, each with a 2.4 s DeviceCheck write, all finish together with no 503 and exactly one vendor write each (no vendor I/O under the offer lock)", DT, async () => {
+  const offerId = await newOffer({ faceValue: 5, cap: 1000 });
+  const users = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => freshUser(`n2-${i}`)));
+  const prepared = await Promise.all(
+    users.map(async (u) => {
+      const dev = await newDevice(u);
+      const code = await newCode(u, { offerId });
+      const port = iosPort({ bits: CLEAR });
+      const orig = port.setBit0.bind(port);
+      port.setBit0 = async (t, k) => {
+        await new Promise((r) => setTimeout(r, 2400));
+        return orig(t, k);
+      };
+      return { u, dev, code, port, req: await iosReq(u, dev) };
+    }),
+  );
+  const t0 = Date.now();
+  const results = await Promise.allSettled(prepared.map((p) => activate(p.u, p.code.id, p.req, deps({ ios: p.port }))));
+  const took = Date.now() - t0;
+  for (const r of results) assertEquals(r.status, "fulfilled", JSON.stringify(r));
+  for (const r of results) assertEquals((r as PromiseFulfilledResult<{ state: string }>).value.state, "issued");
+  assert(took < 7000, `6 parallel activations took ${took}ms: the vendor calls serialised behind a lock (6 x 2.4 s would be ~14 s)`);
+  for (const p of prepared) assertEquals(p.port.calls.setBit0, 1, "one vendor write per activation — no retries after a 503");
+  assertEquals(await offerReserved(offerId), 30);
+});
+
+Deno.test("N3 probe E: an open attestation_failed signal holds the review-approved code AND its sibling; once the signal is cleared both activate", DT, async () => {
+  const u = await freshUser("n3-e");
+  const dev = await newDevice(u);
+  const approved = await newCode(u, { state: "held_review" });
+  const sibling = await newCode(u);
+  await resolveHeld(approved.id, true);
+  await adminSql()`insert into app.fraud_signal (id, user_id, kind, detail, created_at) values (${freshUuid()}, ${u.uid}, 'attestation_failed', '{}'::jsonb, now() - interval '1 hour')`;
+  assertEquals((await activate(u, approved.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "held_review");
+  assertEquals((await activate(u, sibling.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "held_review");
+  // the DB backstop agrees, whatever the caller decided
+  const approvedAgain = await newCode(u, { state: "held_review" });
+  await resolveHeld(approvedAgain.id, true);
+  assertEquals(
+    await codeOf(withOwnership(u.actor, (repo: Repo) => repo.rewards.applyActivation({ kind: "offer_code", rewardId: approvedAgain.id, deviceId: dev, tokenHash: null, decision: "activate", holdDetail: null }))),
+    { status: 409, code: "reward_state_changed" },
+  );
+  // signal cleared: fresh codes (the held ones now wait for a human) activate
+  await adminSql()`update app.fraud_signal set cleared_at = now() where user_id = ${u.uid}`;
+  assertEquals((await activate(u, approvedAgain.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "issued");
+  const fresh = await newCode(u);
+  assertEquals((await activate(u, fresh.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: BIT0 }) }))).state, "issued");
+});
+
+async function deleteAccount(u: User): Promise<void> {
+  await withOwnership(u.actor, (repo: Repo) => handleMeDelete(repo));
+}
+async function tombstonesFor(link: string): Promise<{ n: number; voided: number }> {
+  const h = await linkHashOf(link);
+  const r = await adminSql()`select count(*)::int as n, count(*) filter (where fraud_voided_at is not null)::int as v from app.install_link_account where install_link_hash = ${h}`;
+  return { n: r[0]!.n as number, voided: r[0]!.v as number };
+}
+async function androidActivate(u: User, dev: string, link: string, codeId: string) {
+  const { _nonceBytes: _n, ...req } = await androidReq(u, dev, link);
+  return activate(u, codeId, req, deps({ android: androidPort({ grade: "attested" }) }));
+}
+
+Deno.test("N4: a fraud-voided account that DELETES ITSELF still taints the install: the next account on it is held with a high-priority signal; the tombstone has no user id and outlives the delete", DT, async () => {
+  const link = newLink();
+  const v = await freshUser("n4-voided");
+  const dv = await newDevice(v, "android");
+  const cv = await newCode(v);
+  assertEquals((await androidActivate(v, dv, link, cv.id)).state, "issued");
+  assertEquals(await tombstonesFor(link), { n: 1, voided: 0 });
+  await adminSql()`select app.mark_account_devices_fraud_voided(${v.uid}, ${ADMIN})`;
+  await deleteAccount(v);
+  assertEquals((await adminSql()`select count(*)::int as n from app.device where id = ${dv}`)[0]!.n, 0, "the device row is gone");
+  assertEquals(await tombstonesFor(link), { n: 1, voided: 1 }, "...the tombstone and its fraud mark are not");
+  const cols = await adminSql()`select column_name from information_schema.columns where table_schema = 'app' and table_name = 'install_link_account' order by 1`;
+  assertEquals(cols.map((c) => c.column_name), ["account_pseudonym", "account_pseudonym_hmac_id", "first_seen_at", "fraud_voided_at", "install_link_hash"]);
+  const u = await freshUser("n4-next");
+  const du = await newDevice(u, "android");
+  const cu = await newCode(u);
+  assertEquals((await androidActivate(u, du, link, cu.id)).state, "held_review");
+  assertEquals(((await signals(u, "flagged_device_activation"))[0]!.detail as Record<string, unknown>).priority, "high");
+});
+
+Deno.test("N4: after 3 accounts with deletions in between, the '> 2 accounts' count still holds: the third account (no prior reward) is held with multi_account_device", DT, async () => {
+  const link = newLink();
+  for (const i of [1, 2]) {
+    const u = await freshUser(`n4-seq-${i}`);
+    const d = await newDevice(u, "android");
+    const c = await newCode(u);
+    assertEquals((await androidActivate(u, d, link, c.id)).state, "issued", `account ${i}`);
+    await deleteAccount(u);
+  }
+  assertEquals((await tombstonesFor(link)).n, 2);
+  const third = await freshUser("n4-seq-3");
+  const d3 = await newDevice(third, "android");
+  const c3 = await newCode(third);
+  assertEquals((await androidActivate(third, d3, link, c3.id)).state, "held_review");
+  assertEquals((await signals(third)).map((x) => x.kind), ["multi_account_device"]);
+  assertEquals((await tombstonesFor(link)).n, 3);
+  // the export carries no trace of it, and the account's own export still works
+  const exp = await adminSql()`select private.export_my_data(${third.uid}) as r`;
+  assertEquals(JSON.stringify(exp[0]!.r).includes("install_link_account"), false);
+});
+
+Deno.test("N5: two plays whose codes sit on the same offers in OPPOSITE order, held at the same moment, never deadlock (cascade locks code(id) -> offer(id))", DT, async () => {
+  const { default: postgres } = await import("https://deno.land/x/postgresjs@v3.4.5/mod.js");
+  const mk = () => postgres({ host: Deno.env.get("PGHOST"), port: Number(Deno.env.get("PGPORT")), username: Deno.env.get("PGUSER"), database: Deno.env.get("PGDATABASE"), max: 1, prepare: false });
+  const s1 = mk();
+  const s2 = mk();
+  const playFor = (u: User, round: number) =>
+    withOwnership(u.actor, async (repo: Repo) =>
+      (await repo.play.upsertFromScore({
+        courseId: CRS_X1, facilityId: FAC_X, playDate: new Date(Date.now() - (200 + round) * 86400_000).toISOString().slice(0, 10), courseDisambiguatedBy: null,
+        scoreBadge: 0.6, scoreMonetary: 0.9, hardSignal: true, presenceSignal: true, money: true, heldReview: false,
+        policyVersion: "v1", inputDigest: "a".repeat(64), evidenceIds: [],
+      })).id);
+  try {
+    for (let round = 0; round < 12; round++) {
+      const offers: string[] = [];
+      for (let i = 0; i < 8; i++) offers.push(await newOffer({ faceValue: 1 }));
+      // A user holds one code per offer, so the two plays belong to two users; their codes cover the same
+      // 8 offers, inserted (and therefore scanned) in OPPOSITE order.
+      const u1 = await freshUser(`n5a-${round}`);
+      const u2 = await freshUser(`n5b-${round}`);
+      const p1 = await playFor(u1, round);
+      const p2 = await playFor(u2, round);
+      for (const [u, playId, order] of [[u1, p1, offers], [u2, p2, [...offers].reverse()]] as const) {
+        for (const offerId of order) {
+          const c = await newCode(u, { offerId });
+          await adminSql()`update app.offer_code set play_id = ${playId} where id = ${c.id}`;
+        }
+      }
+      const hold = (sess: ReturnType<typeof mk>, playId: string) =>
+        sess.begin(async (tx) => {
+          await tx`set local role service_role`;
+          await tx`update app.play set held_review = true where id = ${playId}`;
+        });
+      const results = await Promise.allSettled([hold(s1, p1), hold(s2, p2)]);
+      for (const r of results) assertEquals(r.status, "fulfilled", `round ${round}: ${JSON.stringify(r)}`);
+      assertEquals((await adminSql()`select count(*)::int as n from app.offer_code where play_id in (${p1}, ${p2}) and state = 'held_review'`)[0]!.n, 16);
+    }
+  } finally {
+    await s1.end();
+    await s2.end();
+  }
+});
+
+Deno.test("LOW: a transaction_timeout FATAL (connection killed mid-transaction) answers 503 and does NOT escape as an uncaught postgres.js TypeError", DT, async () => {
+  const u = await freshUser("tx-timeout");
+  let status = 0;
+  try {
+    await withOwnership(u.actor, async (repo: Repo) => {
+      await repo.device.countForUser();
+      await new Promise((r) => setTimeout(r, 13_500)); // transaction_timeout is 12 s
+      await repo.device.countForUser(); // queued onto the dead connection: postgres.js's nextWrite then hits a null socket
+    });
+  } catch (e) {
+    if (e instanceof HttpError) status = e.status;
+  }
+  assertEquals(status, 503);
+  await new Promise((r) => setTimeout(r, 1500)); // an uncaught error would fail the runner here
 });

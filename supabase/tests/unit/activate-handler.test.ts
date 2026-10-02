@@ -18,7 +18,7 @@ import type { ActivationRequest } from "../../functions/_shared/rewards/request-
 import { VendorNotConfiguredError, VendorUnavailableError, VendorRejectedError, type IosPort } from "../../functions/_shared/rewards/types.js";
 import { HttpError } from "../../functions/_shared/http.js";
 import { fakeHitRateLimitForActor, makeFakeRepo, makeFakeState, type FakeState } from "./fake-repo.js";
-import { fakeResolveHeld, makeFakeAndroidPort, makeFakeIosPort, openSignal, ports, rewardsState, seedDevice, seedReward, type FakeAndroidPort, type FakeIosPort } from "./fake-rewards-repo.js";
+import { fakeDeleteAccountDevices, fakeMarkFraudVoided, fakeResolveHeld, makeFakeAndroidPort, makeFakeIosPort, openSignal, ports, rewardsState, seedDevice, seedReward, type FakeAndroidPort, type FakeIosPort } from "./fake-rewards-repo.js";
 import { buildAssertion, generateP256, sha256, toB64 } from "./rewards-test-crypto.js";
 
 const USER_A = "user-a";
@@ -858,7 +858,7 @@ describe("vendor failure modes fail closed — never 'clean'", () => {
     expect(signalKinds(state)).toEqual(["flagged_device_activation"]);
   });
 
-  it("row 6: bit0 is set only AFTER the database transition, and a failure to set it surfaces as 503 (the real transaction then rolls back)", async () => {
+  it("row 6 (N2): bit0 is set BEFORE the database transition — no vendor I/O while the offer row is locked — and a failure to set it surfaces as 503 with nothing applied", async () => {
     const state = newWorld();
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const order: string[] = [];
@@ -869,7 +869,8 @@ describe("vendor failure modes fail closed — never 'clean'", () => {
       return orig(t, k);
     };
     expect(await codeOf(run(state, ios))).toBe("attestation_unavailable");
-    expect(order).toEqual(["setBit0 (applyCalls so far: 1)"]);
+    expect(order).toEqual(["setBit0 (applyCalls so far: 0)"]);
+    expect(rewardsState(state).applyCalls).toHaveLength(0);
   });
 
   it("an unexpected error is not swallowed or relabelled", async () => {
@@ -926,18 +927,26 @@ describe("H2 — approving a held reward no device ever ran the table on returns
     expect((await activate(state, R1, req, deps({}))).state).toBe("held_review");
   });
 
-  it("an attestation_failed signal raised BEFORE the review does not hold the cleared reward; one raised AFTER does", async () => {
+  it("N3 probe E: review waives ROW 3 only — with an attestation_failed signal OPEN (raised before or after the review) the approved code AND its sibling stay held; once the signal is CLEARED both activate", async () => {
+    for (const when of ["before", "after"] as const) {
+      const state = newWorld();
+      if (when === "before") openSignal(state, USER_A, "attestation_failed");
+      seedReward(state, { id: R1, userId: USER_A, kind: "offer_code", state: "held_review" });
+      seedReward(state, { id: R2, userId: USER_A, kind: "offer_code" }); // the sibling, never held
+      fakeResolveHeld(state, R1, true);
+      if (when === "after") openSignal(state, USER_A, "attestation_failed");
+      expect((await activate(state, R1, await iosRequest(state), deps({ ios: makeFakeIosPort({ bits: CLEAR }) }))).state, `${when}: approved`).toBe("held_review");
+      expect((await activate(state, R2, await iosRequest(state), deps({ ios: makeFakeIosPort({ bits: CLEAR }) }))).state, `${when}: sibling`).toBe("held_review");
+    }
+    // the signal is cleared (by whoever owns that decision): fresh pair, both activate
     const state = newWorld();
-    openSignal(state, USER_A, "attestation_failed"); // the reviewer saw this one
+    openSignal(state, USER_A, "attestation_failed");
+    rewardsState(state).signals[0]!.cleared = true;
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code", state: "held_review" });
+    seedReward(state, { id: R2, userId: USER_A, kind: "offer_code" });
     fakeResolveHeld(state, R1, true);
     expect((await activate(state, R1, await iosRequest(state), deps({ ios: makeFakeIosPort({ bits: CLEAR }) }))).state).toBe("issued");
-
-    const state2 = newWorld();
-    seedReward(state2, { id: R1, userId: USER_A, kind: "offer_code", state: "held_review" });
-    fakeResolveHeld(state2, R1, true);
-    openSignal(state2, USER_A, "attestation_failed"); // raised after the review
-    expect((await activate(state2, R1, await iosRequest(state2), deps({ ios: makeFakeIosPort({ bits: CLEAR }) }))).state).toBe("held_review");
+    expect((await activate(state, R2, await iosRequest(state), deps({ ios: makeFakeIosPort({ bits: BIT0 }) }))).state).toBe("issued"); // row 5: R1 is now a prior reward
   });
 
   it("a held PLAY is not cleared by a review of the code: the reward stays held", async () => {
@@ -1039,6 +1048,109 @@ describe("M3 — the budget model", () => {
     expect(rewardsState(state).budgetReserved).toBe(15);
     fakeResolveHeld(state, R1, false);
     expect(rewardsState(state).budgetReserved).toBe(0);
+  });
+});
+
+describe("N1 — a clean activation the cap cannot reserve for is HELD, never issued unreserved", () => {
+  it("probe G: cap for ONE code, two clean activations: the first is issued and reserved, the second HELD (and the vendor bit0 is not written for it)", async () => {
+    const state = newWorld();
+    rewardsState(state).budgetCap = 10;
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code", faceValue: 10 });
+    seedReward(state, { id: R2, userId: USER_A, kind: "offer_code", faceValue: 10 });
+    const ios1 = makeFakeIosPort({ bits: CLEAR });
+    expect((await activate(state, R1, await iosRequest(state), deps({ ios: ios1 }))).state).toBe("issued");
+    expect(ios1.calls.setBit0).toBe(1);
+    const ios2 = makeFakeIosPort({ bits: BIT0 }); // row 5: a repeat user — would activate, but there is no budget
+    const out = await activate(state, R2, await iosRequest(state), deps({ ios: ios2 }));
+    expect(out).toMatchObject({ state: "held_review", held: true });
+    expect(ios2.calls.setBit0).toBe(0);
+    const held = rewardsState(state).rewards.get(R2)!;
+    expect(held).toMatchObject({ reservedAmount: 0, state: "held_review" });
+    expect(held.holdDetail).toMatchObject({ heldFor: "offer_budget" });
+    expect(rewardsState(state).budgetReserved).toBe(10); // only the issued code holds it
+    expect(rewardsState(state).applyCalls.at(-1)!.decision).toBe("held_review");
+  });
+  it("a code that already holds a reservation (an earn-time one) is not held for budget", async () => {
+    const state = newWorld();
+    rewardsState(state).budgetCap = 10;
+    rewardsState(state).budgetReserved = 10;
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code", faceValue: 10, reservedAmount: 10 });
+    expect((await activate(state, R1, await iosRequest(state), deps({ ios: makeFakeIosPort({ bits: CLEAR }) }))).state).toBe("issued");
+  });
+  it("entitlements reserve nothing and are never held for budget", async () => {
+    const state = newWorld();
+    rewardsState(state).budgetCap = 0;
+    seedReward(state, { id: R1, userId: USER_A, kind: "entitlement" });
+    expect((await activate(state, R1, await iosRequest(state), deps({ ios: makeFakeIosPort({ bits: CLEAR }) }))).state).toBe("redeemable");
+  });
+});
+
+describe("N2 — no vendor I/O while the offer row is locked", () => {
+  it("the vendor bit0 write happens BEFORE the transition (the only step that locks the offer), for every row-6 activation", async () => {
+    const state = newWorld();
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code", faceValue: 5 });
+    seedReward(state, { id: R2, userId: USER_A, kind: "offer_code", faceValue: 5 });
+    const log: string[] = [];
+    const ios = makeFakeIosPort({ bits: CLEAR });
+    const orig = ios.setBit0.bind(ios);
+    ios.setBit0 = async (t, k) => {
+      log.push(`vendor call with ${rewardsState(state).applyCalls.length} transitions applied`);
+      return orig(t, k);
+    };
+    await activate(state, R1, await iosRequest(state), deps({ ios }));
+    expect(log).toEqual(["vendor call with 0 transitions applied"]);
+    expect(rewardsState(state).applyCalls).toHaveLength(1);
+  });
+  it("a held outcome makes no vendor write at all", async () => {
+    const state = newWorld();
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const ios = makeFakeIosPort({ bits: BIT1 });
+    await activate(state, R1, await iosRequest(state), deps({ ios }));
+    expect(ios.calls.setBit0).toBe(0);
+  });
+});
+
+describe("N4 — the Android substitute survives account deletion (install-link tombstone)", () => {
+  const AND_DEV = "33333333-3333-4333-8333-333333333333";
+  const LINK = "install-link-N4N4N4N4N4";
+  const linkHash = async () => toHex(await sha256(new TextEncoder().encode(LINK)));
+  async function account(state: FakeState, uid: string, dev: string) {
+    state.devices.set(dev, { id: dev, userId: uid });
+    seedDevice(state, { id: dev, userId: uid, platform: "android" });
+    await makeFakeRepo(state, uid).rewards.recordInstallLink(dev, await linkHash());
+  }
+  const signalsOf = (state: FakeState, uid: string, dev: string) => makeFakeRepo(state, uid).rewards.androidInstallSignals(dev);
+
+  it("after 3 accounts with deletions in between, the count still holds", async () => {
+    const state = makeFakeState();
+    await account(state, "acct-1", "dddddddd-0000-4000-8000-000000000001");
+    fakeDeleteAccountDevices(state, "acct-1");
+    await account(state, "acct-2", "dddddddd-0000-4000-8000-000000000002");
+    fakeDeleteAccountDevices(state, "acct-2");
+    await account(state, "acct-3", "dddddddd-0000-4000-8000-000000000003");
+    expect(await signalsOf(state, "acct-3", "dddddddd-0000-4000-8000-000000000003")).toEqual({ accountsOnInstall: 3, voidedAccountUsedInstall: false });
+  });
+
+  it("a fraud-voided account that deletes itself still taints the install: the next account is held", async () => {
+    const state = makeFakeState();
+    await account(state, "acct-1", "dddddddd-0000-4000-8000-000000000001");
+    fakeMarkFraudVoided(state, "acct-1");
+    fakeDeleteAccountDevices(state, "acct-1");
+    const dev = "dddddddd-0000-4000-8000-000000000002";
+    await account(state, USER_A, dev);
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const ch = await issueChallenge(state, USER_A, dev);
+    const req: ActivationRequest = { deviceId: dev, platform: "android", challengeId: ch.challengeId, nonce: ch.nonce, installLinkId: LINK, attestation: { kind: "android", integrityToken: "tok.en.value" } };
+    const out = await activate(state, R1, req, deps({ android: makeFakeAndroidPort({ result: () => ({ grade: "attested" }) }) }));
+    expect(out.state).toBe("held_review");
+    expect(signalKinds(state)).toEqual(["flagged_device_activation"]);
+  });
+
+  it("the same account recorded twice is one tombstone row", async () => {
+    const state = makeFakeState();
+    await account(state, "acct-1", "dddddddd-0000-4000-8000-000000000001");
+    await makeFakeRepo(state, "acct-1").rewards.recordInstallLink("dddddddd-0000-4000-8000-000000000001", await linkHash());
+    expect(rewardsState(state).installTombstones).toHaveLength(1);
   });
 });
 

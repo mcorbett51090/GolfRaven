@@ -1769,10 +1769,12 @@ gone.) Android's two bits are the plan's server-side substitute, below.
 
 **The Android substitute (§7.5, A20 / A2-08).** The handler records the request's `installLinkId` (an opaque,
 client-chosen id, **bound into the Android request hash** so it cannot be altered in transit; stored only as its SHA-256 in
-`device.install_link_hash`, first writer wins) and then reads `app.device_link_signals(device)`: the device rows linked to
-this one by an equal `install_link_hash` or an equal `attest_key_id`. "Seen on > 2 accounts" (≥ 3 distinct accounts,
-this one included) stands in for bit0; "an account voided for fraud used this install" (`device.fraud_voided_at`, set on
-every device of an account by `app.mark_account_devices_fraud_voided`, an admin decision, audited) stands in for bit1. The
+`device.install_link_hash`, first writer wins) **and as a pseudonymous tombstone row that survives account deletion** (N4,
+below), then reads `app.device_link_signals(device)`: the tombstone rows for this install link, plus the live device rows
+linked by an equal `install_link_hash` or `attest_key_id` (the larger of the two counts; the sources identify accounts
+differently, so they cannot be merged exactly and the larger is the safe side). "Seen on > 2 accounts" (≥ 3 distinct
+accounts, this one included) stands in for bit0; "an account voided for fraud used this install" (`fraud_voided_at` on a
+device row **or on a tombstone row**, set by `app.mark_account_devices_fraud_voided`, an admin decision, audited) stands in for bit1. The
 table is unchanged. A device row with **no** link key (no install id ever sent, no attest key) can be linked to nothing,
 so the substitute has no answer and the activation is held (the "no persistent signal" row), never activated and never
 refused. Honest limits (the plan accepts them because the table routes to review rather than refusing): the install id is
@@ -1826,9 +1828,10 @@ idempotent reservation primitive), `device_link_signals`, `mark_account_devices_
 `app.offer_code_reservation_sync`. They own the state machine (`earned → issued | held_review`, `issued → held_review` on
 a second-device re-run, `held_review` untouched by activation, terminal states refused), the budget reservation, the
 expiry pause, the ledger row, and — **independently of the caller** — the database-side backstops for rows 2 and 3: an
-`activate` is refused (SQLSTATE 23514) when the reward rests on an unattestable co-signal (unless a reviewer cleared it),
-its backing play is held (never cleared by a review of the *code*), or the account has an open `attestation_failed`
-signal raised after the review.
+`activate` is refused (SQLSTATE 23514) when the reward rests on an unattestable co-signal (unless a reviewer cleared it —
+row 3 only), its backing play is held (never cleared by a review of the *code*), or the account has an open
+`attestation_failed` signal (row 2: released **only** by the signal's own `cleared_at`; a review of one reward never
+waives it — N3).
 
 **The budget model (pinned in 0027's header; M3).** A *reservation* is the offer's claim on `budget_cap` for one code,
 recorded twice and kept equal: `offer_code.reserved_amount` and `offer.budget_reserved`. One idempotent primitive takes
@@ -1842,9 +1845,16 @@ releases exactly once, and a bare `UPDATE ... SET state = 'void'` releases too);
 the deleting role may update `app.offer` — `private.delete_my_data` runs as `private_definer`, which holds no grant on
 `app.offer` and must not be given one, so **account deletion calls `app.release_account_reservations` first**);
 redemption (`consume_offer_budget`, the redeem path's job). **Approval keeps the reservation**: it pays for the
-redemption even if the offer has ended. It **never refuses**: if `budget_cap` cannot cover a reservation the code is
-still issued or held, unreserved, and a `review_item` (`issued_offer_budget_unreserved` / `held_offer_budget_unreserved`)
-says so. **An ended offer does not block activation** (decided, tested both ways): `offer.status` / `valid_from` /
+redemption even if the offer has ended. It **never refuses**, but it never issues what the cap cannot pay either (N1):
+if `budget_cap` cannot cover a reservation, a code entering `held_review` is still held, unreserved, with one
+`review_item` (`held_offer_budget_unreserved`) saying so (a held code is not payable, so nothing is owed), and a **clean
+activation is HELD instead of issued** (`hold_detail.heldFor = "offer_budget"`) — an issued code is payable, and issuing
+it unreserved lets the offer pay out past its cap (cap 10, face 10: code A issued and reserved, code B issued with
+`reserved_amount` 0, and `consume_offer_budget` for both then fails with 23514 at the till). Approving such a held code
+**takes its reservation at approval** and is **refused (23514) while the cap still cannot cover it** — raise the cap or
+reject. The handler asks first (`Repo#rewards.canReserveBudget`, advisory, no lock) so it can skip the vendor bit0 write for a
+reward that is about to be held; the database stays authoritative. **The earn path, when built, MUST reserve at earn time**
+so a code the cap cannot pay is never earned (F15). **An ended offer does not block activation** (decided, tested both ways): `offer.status` / `valid_from` /
 `valid_to` gate earning and redemption; a code earned while the offer was live is honoured, exactly as §7.5 honours an
 approved held code, and the code's own `expires_at` bounds it.
 
@@ -1856,10 +1866,11 @@ held it (H3/F13). **Approval** (`resolve_held_offer_code`) has two cases (H2):
   that was issued before it was held (`issued_before_hold`; a self-induced re-hold is not a free renewal);
 - **no device ever ran the table on it** (a play-hold cascade, an earn-time hold) → back to **`earned`** with
   `review_cleared_at` set. It is **not** issued: it has no device, §7.5 has not run, and it must not make the account a
-  "repeat user". Activation then treats rows 2 and 3 as cleared **for the reward** (its unattestable basis, and any
-  `attestation_failed` signal raised *before* the review), but rows 1 and 4-6 still run on a real device, an unattestable
-  *device* still holds it, and a signal raised *after* the review still holds it. `hasPriorReward` ignores any reward with
-  no `activated_device_id`.
+  "repeat user". Activation then treats **row 3** as cleared for the reward (its own unattestable basis) and **nothing
+  else**: rows 1 and 4-6 still run on a real device, an unattestable *device* still holds it, and an open
+  `attestation_failed` signal on the account (row 2) still holds it — raised before or after the review — until the signal
+  itself is cleared (N3: the first version waived signals raised before the review, so approving a play-hold quietly
+  released an account-level fraud signal). `hasPriorReward` ignores any reward with no `activated_device_id`.
 
 Rejection voids it and the trigger releases the reservation. A held entitlement reserves nothing; the trail's
 outstanding-redemption figure (§9.6, not built) reads `state = 'held_review'`.
@@ -1869,7 +1880,8 @@ outstanding-redemption figure (§9.6, not built) reads `state = 'held_review'`.
 predicate**), (2) a new statement reads them and releases. The first version used `FOR UPDATE ... WHERE reserved_amount
 > 0`, which under READ COMMITTED *skips* (does not wait for) a row a concurrent activation has locked but not committed;
 the deletion then removed a row that committed **with** a reservation (budget leaked). Taking every code lock before the
-first offer lock also keeps this function out of a lock cycle with an activation (code lock → offer lock). Remaining
+first offer lock, and releasing in **offer-id order**, also keeps this function out of a lock cycle with an activation
+(code lock → offer lock) or another release. Remaining
 cycles (a scoring cascade locks a play's codes in arbitrary order) surface as SQLSTATE `40P01` / `40001`, which
 `mapPgTimeoutError` now maps to a **retryable 503** (a separate set from the timeout codes; the transaction rolled back, so
 nothing was changed).
@@ -1881,6 +1893,38 @@ record, and a data-subject export that withholds a record the service acts on is
 `export_my_data` from 0024's final body (one added block, marked `P3f additions`; verified by diffing the two bodies) and
 flips the registry row under the same self-granting `CURRENT_USER` policy dance 0017/0019/0022 use. `delete_my_data` is not
 redefined (`device_reward_ledger` is already `delete_row`, and no new table or `auth.users` FK was added).
+
+**The install-link tombstone (N4) — a documented retention exception.** The substitute counted live `device` rows, and
+account deletion deletes them (`device` is `delete_row`): a fraud-voided account that deleted itself took its mark with
+it, and each deleted account stopped counting toward "> 2 accounts". So `app.install_link_account` keeps, per (install,
+account): the install link's **SHA-256** (never the raw id), the account's **vault-keyed HMAC pseudonym** (the exact
+scheme of `app.attestation.player_pseudonym`: key id registered in `private.pseudonym_key_registry`, validated by the
+write-time trigger, computed by the `SECURITY DEFINER` `private.account_pseudonyms`, the only new definer function and
+the only reader of the vault here), `first_seen_at` and `fraud_voided_at`. **No user id and no FK to `auth.users`.**
+
+- **`private.delete_my_data` does not touch it, and must not**: it is a fraud tombstone, the same class as
+  `app.receipt_fingerprint` (0003/0014 — "the cross-account fraud-fingerprint retention must survive account deletion").
+  It is not exported (it names nobody). It cannot be tied to a person without the vault key *and* the account id.
+- **Classification.** `private.pii_retention_policy` is derived from FKs to `auth.users`; this table has none, so it is
+  deliberately **absent** — asserted in the matrix (no `user_id`/`device_id`/`email` column, no FK to `auth.users`, no
+  retention-policy row), so a later change that adds a user reference fails the matrix instead of silently turning a
+  tombstone into a personal row. Registry docs: this section is the classification of record.
+- **Rotation.** An account already recorded under *any* active key is not recorded again under the newest, so a key
+  rotation does not count one account twice. A key *retired* from the vault makes its rows unmatchable (the same operational
+  rule as `pseudonym_hmac`: a key the registry references must never be deleted).
+- **The count** is the number of tombstone rows for the install link, so deleting an account does not lower it; after three
+  accounts with deletions in between, the third is still a "> 2 accounts" account. Marking works for an account whose auth
+  row is already gone (it needs only the id), so the fraud decision can still be recorded after a deletion.
+- **Privacy note (needs legal review before launch, follow-up F19):** the install link hash is a persistent device
+  identifier and the pseudonym is linkable by anyone holding the vault key and an account id; retention is justified as
+  fraud prevention (legitimate interest) and is **indefinite until a purge exists** — the 24-month window the receipt
+  fingerprint uses is the intended bound, and the purge job is not built.
+- **Client contract.** `installLinkId` must be an id that **survives an app reinstall on the same device** and is the same
+  for every account on it: the **Android ID** (`Settings.Secure.ANDROID_ID`, the SSAID — scoped to the app signing key,
+  the user and the device, unchanged by uninstall/reinstall of an app signed with the same key, reset by a factory reset)
+  `[unverified — training knowledge]`; **not** a per-install random id, an advertising id, or anything the user resets
+  from settings. 16-128 characters of `[A-Za-z0-9._~-]` (the SSAID is 16 hex). Sent on every Android activation; omitting
+  it holds the activation (there is nothing to link).
 
 ### P3 acceptance test (9) and (5), mapped
 
@@ -1926,6 +1970,17 @@ against an oracle written as a flat ordered rule list, independent of the implem
 | LOW | `device_reward_ledger` export | reduced projection (0028) | pgTAP `14_me_export.sql` |
 | LOW (recorded) | bit0 set at Apple with the activation rolled back; per-actor device bucket; row 2 sub-ms race | F14, F8, F17 | — |
 
+### Gate round 2 (re-gate FAIL: 2 HIGH, 3 MEDIUM, 1 LOW) — finding → fix → tests
+
+| ID | Finding | Fix | Tests |
+|---|---|---|---|
+| **N1** HIGH | A clean activation over the cap was issued unreserved (cap 10, face 10: A issued + reserved, B issued with 0, then the till fails) | the reservation returning "cap cannot cover" HOLDS the code instead of issuing it (`heldFor: offer_budget`, one `review_item`); approval takes a reservation and is refused while the cap is short; handler pre-check skips the vendor write | pgTAP §8b (probe G, till reconciliation, refused/accepted approval); Deno probe G; unit |
+| **N2** HIGH | The offer row lock was held across Apple's `update_two_bits`; a queue on one offer 503'd | the vendor write moved BEFORE the transition (F6 rewritten, F14 widened) | Deno: 6 parallel activations × 2.4 s write, < 5 s, no 503, one write each; unit (ordering) |
+| **N3** MEDIUM | Approving a play-hold quietly waived an open `attestation_failed` signal | `review_cleared_at` waives ROW 3 only; row 2 needs the signal's `cleared_at` (DB backstop, handler, repo) | pgTAP, Deno and unit probe E (open signal: approved + sibling stay held; cleared: both activate) |
+| **N4** MEDIUM | The Android substitute could be erased by deleting accounts | `app.install_link_account`: pseudonymous tombstone that survives deletion; `device_link_signals` / `mark_account_devices_fraud_voided` use it; client contract pinned (SSAID `[unverified]`); retention exception documented | pgTAP §10b (real `delete_my_data`), Deno (fraud-voided account deletes itself; 3 accounts with deletions), unit |
+| **N5** MEDIUM | Cascade lock-order inversion (40P01) | cascade redefined: codes (id) → offers (id) → entitlements (id); release in offer-id order; F13 corrected | Deno: 12 rounds, two plays, opposite offer order |
+| LOW | postgres.js `TypeError … 'write'` after a `transaction_timeout` FATAL killed the runner | reproduced; contained in `privileged.ts` (F20) | Deno: a 13.5 s transaction → 503, no uncaught error |
+
 ### Mutation proofs (all in `/tmp` copies; nothing planted in the tree)
 
 Each of these was applied alone to a `/tmp` copy and the named suite failed (a no-op control mutation passed): 6 on the
@@ -1957,6 +2012,16 @@ the named suite failed; one survivor on the first pass (the `hasPriorReward` dev
 no device, and the re-run caught it. The M1 probe was also run against the *original* single-predicate loop: the deletion
 then collided with the in-flight activation instead of waiting for it, and the probe failed.
 
+Gate round 2 added **9 more mutations**, each applied alone to a `/tmp` copy and killed: a clean activation issued even
+when the cap cannot reserve (N1); approval needing no cap (N1); the handler without its budget pre-check (N1); the vendor
+write moved back after the transition (N2 — the 6-parallel probe then fails and so do two unit tests); the backstop
+waiving row 2 for a review-cleared reward again (N3); the substitute ignoring the tombstone; the fraud mark not written to
+the tombstone; `record_install_link` writing no tombstone (N4 ×3); the cascade restored to 0017's scan-order body (N5 — the
+two-plays probe deadlocks, and was observed to, when the mutated schema leaked into an adjacent run); and the closed-socket
+guard disabled (the LOW test then dies with the uncaught `TypeError`, failing the runner). One survivor on the first pass
+(the Deno probe G passed with the DB hold removed, because the handler's pre-check held first) was closed by a direct
+`applyActivation('activate')` call that bypasses the pre-check, and the re-run caught it.
+
 ### Accepted follow-ups (append-only; F-numbers are P3f's own)
 
 - **F1. Live vendor verification is not exercised** (above). DeviceCheck host / paths / JWT claims / body / the "Failed to
@@ -1973,23 +2038,28 @@ then collided with the in-flight activation instead of waiting for it, and the p
 - **F4. bit0 is not set when a held reward is approved** — approval has no fresh DeviceCheck token (only a hash is stored).
   A device whose first reward was released through review stays "clean". Mitigation to design: record a pending-bit0
   marker on the ledger row and set it on the account's next activation from that device.
-- **F14. bit0 can be set at Apple while the activation rolls back.** bit0 is set last, inside the transaction, so a failure
-  *there* rolls everything back — but a failure *after* the vendor call (the `COMMIT` itself, or a `transaction_timeout`
-  kill between the call and the commit) leaves bit0 set with the reward still `earned`. The retry then reads bit0 and, for
-  an account with no prior reward, holds the reward (row 4). Cheap mitigation to design: store the activating token's hash
-  on the device row *before* the vendor write and treat "bit0 set + this token hash already recorded for this account" as
-  not-a-second-account on the retry.
+- **F14. bit0 can be set at Apple while the activation does not complete (more reachable since N2).** The write now
+  precedes the transition, so a transition that then fails (a database backstop's 23514, a deadlock, a
+  `transaction_timeout` kill, a `COMMIT` failure) or ends **held** (the cap was taken between the handler's advisory
+  budget pre-check and the reservation) leaves bit0 set at Apple for a reward the account never received. The retry then
+  reads bit0 and, for an account with no prior reward, holds the reward (row 4, `multi_account_device`). The common case —
+  a reward the cap cannot cover — is avoided by the pre-check; the residue is a race. Cheap mitigation to design: store the
+  activating token's hash on the device row *before* the vendor write and treat "bit0 set + this token hash already
+  recorded for this account" as not-a-second-account on the retry.
 - **F5. `update_two_bits` writes both bits.** A bit1 set between the read the table ran on and the write is lost (a vendor
   API limitation; re-reading would only narrow the window and add a network round trip to an open transaction).
-- **F6. Network I/O happens inside the database transaction** (reads must precede the offer lock; bit0 must roll back
-  with the transition). **Timing budget (revised):** `lock_timeout` is 5 s and `transaction_timeout` 12 s; the first
-  statement that can wait is the reward row lock (a second request on the *same* reward), and the only other slow steps
-  are the vendor calls — at most **two** per request (iOS: query then, on row 6, update; Android: Google OAuth token, then
-  decode). Each is bounded at **2.5 s** (`VENDOR_CALL_TIMEOUT_MS`), so the worst case is 5 + 2 × 2.5 = **10 s**, leaving 2 s
-  for every other statement and signing. (The earlier 4 s default gave 5 + 8 = 13 s: a slow-but-working vendor on a
-  contended reward could trip `transaction_timeout`, which kills the connection and leaves the outcome unknown.) The
-  later advisory-lock waits cannot add to it: no vendor call happens after one is taken (a held outcome ends the
-  request; row 6 raises no signal). The inequality is pinned by a unit test against the real constants in `privileged.ts`.
+- **F6. Network I/O happens inside the database transaction** (reads must precede the offer lock; the vendor write must
+  roll back with a failed request). **Timing budget (revised twice):** `lock_timeout` is 5 s and `transaction_timeout` 12 s.
+  The vendor calls are at most **two** per request (iOS: query, then on row 6 the update; Android: Google OAuth token, then
+  decode), each bounded at **2.5 s** (`VENDOR_CALL_TIMEOUT_MS`): 5 + 2 × 2.5 = **10 s** worst case, 2 s of headroom, pinned by
+  a unit test against the real constants. **The vendor write now happens BEFORE the database transition (N2).** Round 1
+  called `update_two_bits` after `applyActivation`, i.e. with the *offer row lock held* (the reservation locks it, and
+  every lock lives to the end of the transaction); `lock_timeout` restarts per holder, so activations on one offer queued
+  behind each other's vendor latency — 6 concurrent activations with a 2.4 s write gave two 503s. With the write first, the
+  only lock held across vendor I/O is the caller's **own reward row** (and its device row, from the counter advance), so
+  contention exists only between requests for the *same* reward or device; the offer lock is held for milliseconds. The
+  later advisory-lock waits still cannot add to the budget: no vendor call happens after one is taken. Probe (Deno): 6
+  parallel activations on one offer, each with a 2.4 s write, finish together in well under the 14 s a serialised queue would take (asserted < 7 s) with one write each.
 - **F7. The held-review queue has no Edge Function yet.** `app.resolve_held_offer_code` / `resolve_held_entitlement` exist
   (service_role only, `p_resolved_by` must be an admin, audited) for P5.1a; the caller must authenticate the admin.
   Voiding a held code by *any* path (not only `resolve_held_offer_code`) now releases its reservation, because the
@@ -2011,19 +2081,34 @@ then collided with the in-flight activation instead of waiting for it, and the p
   `offer_code_reservation_sync` trigger reserves and pauses on entry to `held_review` by any path, releases on `void` /
   `expired` / `DELETE`, and is idempotent with the explicit activation path (also closes F7 and M1). **Lock order** with
   P3e's per-play scoring lock was checked and raced (both orders + a mixed load, `rewards-activate.deno.test.ts` "P3e
-  interplay"): scoring takes advisory ns 1 (user, course, date) then updates `offer_code` rows via the cascade — which now
-  also locks the offer row inside the trigger; activation takes the reward row, then advisory ns 4/5 (per user), then the
-  offer row. Both orders take code-then-offer; no lock family is acquired in both orders.
+  interplay"): scoring takes advisory ns 1 (user, course, date) then updates `offer_code` rows via the cascade. **Round 2
+  (N5) found the cascade itself deadlocking**: it locked a play's codes in scan order and each code's offer as it went (via
+  the trigger), so two plays whose codes sit on the same two offers in opposite scan order deadlocked (40P01) inside
+  `reserve_offer_for_code`. `app.play_held_review_cascade` (0017) is now redefined in 0027 to take every lock up front in
+  **one global order**: the play's codes `ORDER BY id`, then their offers `ORDER BY id`, then its entitlements `ORDER BY
+  id`, and only then UPDATE. Every writer follows code → offer: activation (its reward row, then the offer inside
+  `reserve_offer_for_code`), `release_account_reservations` (all the account's codes, then offers in offer-id order),
+  `resolve_held_*` (the code, then the offer). (The earlier line here, "both orders take code-then-offer", was true of
+  activation and false of the cascade.) Probe (Deno): 12 rounds of two plays whose 8 codes cover the same 8 offers in
+  opposite order, held at the same moment from two sessions — no 40P01.
 - **F15. The earn path reserves nothing yet** (M3, stated explicitly): see "the budget model". The hold and issue paths are
   idempotent against an earn-time reservation, so building it later changes nothing here.
 - **F16. DeviceCheck 400 / environment mismatch has no canary.** The split above treats an unreadable 400 as a fault of ours
   (503), but if Apple's environment-mismatch body reads as a token complaint, a production deployment configured
   `development` would grade every token `failed`. Add a deploy-time self-test against the configured environment.
-- **F17. Row 2's sub-millisecond race.** The `attestation_failed` check (handler and DB backstop) reads `created_at >
-  review_cleared_at` at microsecond resolution; a signal and a clearing that land in the same microsecond are ordered
-  arbitrarily. Not reachable by a player (the clearing is an admin action).
-- **F18. The install link is an unauthenticated hint** (A20, accepted by the plan): evaded by a fresh id; an attacker who
-  knew a victim's id could push the victim's install over "> 2 accounts" and cause a *review* (never a refusal).
+- **F17. (withdrawn)** Round 1 recorded a sub-millisecond race between an `attestation_failed` signal and a review
+  clearing. Round 2 (N3) removed the timing comparison altogether: row 2 depends only on the signal's `cleared_at`.
+- **F18. The install link is an unauthenticated hint** (A20, accepted by the plan): evaded by a fresh id or a factory reset;
+  an attacker who knew a victim's id could push the victim's install over "> 2 accounts" and cause a *review* (never a
+  refusal). The tombstone makes the hint *durable*, not authenticated.
+- **F19. The install-link tombstone has no purge and no privacy review.** Retention is indefinite until a job deletes rows
+  older than the intended 24 months; the legal basis (fraud prevention) and the DPIA are a pre-launch item.
+- **F20. postgres.js closed-socket write (contained, not fixed).** After a `transaction_timeout` FATAL, postgres.js 3.4.5
+  can run a queued `nextWrite` against a null socket and throw `TypeError: Cannot read properties of null (reading
+  'write')` from a timer callback — uncatchable by the request, fatal to the `deno test` runner, and a candidate to take down
+  an Edge worker. Reproduced; `privileged.ts` now marks exactly that signature handled on the global `error` /
+  `unhandledrejection` events (logged, nothing else swallowed). The library is pinned and hash-locked, so the real fix is an
+  upgrade; revisit when the pin moves.
 - **Deploy configuration.** Vendor secrets live only in the environment (never in the repo):
   `GR_APPLE_TEAM_ID`, `GR_APPLE_BUNDLE_ID`, `GR_APPLE_DEVICECHECK_KEY_ID`, `GR_APPLE_DEVICECHECK_PRIVATE_KEY` (PKCS#8 PEM),
   `GR_APPLE_DEVICECHECK_ENV` (`production` | `development`); `GR_PLAY_PACKAGE_NAME`, `GR_PLAY_CERT_SHA256` (comma-separated

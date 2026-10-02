@@ -120,7 +120,9 @@ describe("the migration", () => {
     const hits = readdirSync(migrations).filter((n) => /app\.(activate_|resolve_held_)/.test(readFileSync(join(migrations, n), "utf8")));
     expect(hits).toEqual(["0027_rewards_activation.sql"]);
     const text = readFileSync(join(migrations, "0027_rewards_activation.sql"), "utf8").replace(/^\s*--.*$/gm, "");
-    expect(text).not.toMatch(/LANGUAGE\s+\w+\s+SECURITY\s+DEFINER/i);
+    // Exactly ONE SECURITY DEFINER function, and it is the vault reader (N4): no app.* function is one.
+    const definers = [...text.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)\s*\([^$]*?LANGUAGE\s+\w+\s+SECURITY\s+DEFINER/gis)].map((m) => m[1]);
+    expect(definers).toEqual(["private.account_pseudonyms"]);
     expect(text).not.toMatch(/DISABLE ROW LEVEL SECURITY|NO FORCE ROW LEVEL SECURITY/i);
   });
 });

@@ -2264,7 +2264,7 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
       // user's id and a nonexistent id are the same empty result.
       const codes = await trx`
         select oc.id, oc.state, oc.activated_device_id, oc.expires_at, oc.expiry_paused_at,
-               oc.rests_on_unattestable, oc.review_cleared_at::text as review_cleared_at,
+               (oc.rests_on_unattestable and oc.review_cleared_at is null) as rests_on_unattestable,
                coalesce(p.held_review, false) as play_held
         from app.offer_code oc
         left join app.play p on p.id = oc.play_id and p.user_id = oc.user_id
@@ -2272,7 +2272,6 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         for update of oc`;
       const c = codes[0];
       if (c) {
-        const cleared = c.review_cleared_at ?? null;
         return {
           kind: "offer_code",
           id: c.id,
@@ -2280,14 +2279,15 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
           activatedDeviceId: c.activated_device_id ?? null,
           expiresAt: c.expires_at ? c.expires_at.toISOString() : null,
           expiryPaused: c.expiry_paused_at !== null && c.expiry_paused_at !== undefined,
-          // The reward's own flag stops counting once a reviewer cleared it (H2);
-          // a held PLAY is not cleared by a review of the code.
-          restsOnUnattestable: (Boolean(c.rests_on_unattestable) && cleared === null) || Boolean(c.play_held),
-          reviewClearedAt: cleared,
+          // The reward's own flag stops counting once a reviewer cleared it (H2,
+          // folded into the SELECT above); a held PLAY is not cleared by a review
+          // of the code. Row 3 only: a review never waives an account-level signal.
+          restsOnUnattestable: Boolean(c.rests_on_unattestable) || Boolean(c.play_held),
         };
       }
       const ents = await trx`
-        select e.id, e.state, e.activated_device_id, e.rests_on_unattestable, e.review_cleared_at::text as review_cleared_at,
+        select e.id, e.state, e.activated_device_id,
+               (e.rests_on_unattestable and e.review_cleared_at is null) as rests_on_unattestable,
                coalesce(p.held_review, false) as play_held
         from app.entitlement e
         left join app.play p on p.id = e.play_id and p.user_id = e.user_id
@@ -2295,7 +2295,6 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         for update of e`;
       const e = ents[0];
       if (!e) return null;
-      const eCleared = e.review_cleared_at ?? null;
       return {
         kind: "entitlement",
         id: e.id,
@@ -2303,8 +2302,7 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         activatedDeviceId: e.activated_device_id ?? null,
         expiresAt: null,
         expiryPaused: false,
-        restsOnUnattestable: (Boolean(e.rests_on_unattestable) && eCleared === null) || Boolean(e.play_held),
-        reviewClearedAt: eCleared,
+        restsOnUnattestable: Boolean(e.rests_on_unattestable) || Boolean(e.play_held),
       };
     },
 
@@ -2345,18 +2343,26 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         where id = ${deviceId} and user_id = ${uid}`;
     },
 
-    async hasOpenAttestationFailedSignal(since: string | null): Promise<boolean> {
-      // `since` is a reward's review_cleared_at, passed back as the database's
-      // own text (microseconds intact): a signal the reviewer already saw does
-      // not hold the reward again; one raised after the review — including the
-      // one this very request just raised — does.
+    async hasOpenAttestationFailedSignal(): Promise<boolean> {
+      // Only the signal's own cleared_at releases it (N3): a review of one reward
+      // never waives an account-level signal.
       const rows = await trx`
         select exists (
-          select 1 from app.fraud_signal
-          where user_id = ${uid} and kind = 'attestation_failed' and cleared_at is null
-            and created_at > coalesce(${since}::timestamptz, '-infinity'::timestamptz)
+          select 1 from app.fraud_signal where user_id = ${uid} and kind = 'attestation_failed' and cleared_at is null
         ) as open`;
       return Boolean(rows[0]?.open);
+    },
+
+    async canReserveBudget(rewardId: string): Promise<boolean> {
+      // Advisory and lock-free: see RewardsRepo#canReserveBudget. No row of the
+      // result is the caller's to lock; the database re-decides under the offer lock.
+      const rows = await trx`
+        select (o.face_value <= 0 or oc.reserved_amount > 0 or oc.state <> 'earned'
+                or o.budget_used + o.budget_reserved + o.face_value <= o.budget_cap) as ok
+        from app.offer_code oc join app.offer o on o.id = oc.offer_id
+        where oc.id = ${rewardId} and oc.user_id = ${uid}`;
+      // Not a code (an entitlement reserves nothing) or not found: nothing to refuse.
+      return rows.length === 0 ? true : Boolean(rows[0]!.ok);
     },
 
     async raiseAttestationFailedIfNone(detail: Record<string, unknown>): Promise<boolean> {
@@ -2418,11 +2424,11 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
     },
 
     async recordInstallLink(deviceId: string, installLinkHash: string): Promise<void> {
-      // First writer wins: the link is a stable property of the device row. (A
-      // rotated id lands on a NEW device row anyway.)
-      await trx`
-        update app.device set install_link_hash = coalesce(install_link_hash, ${installLinkHash}::text)
-        where id = ${deviceId} and user_id = ${uid}`;
+      // One SQL function (0027 5g): stamps the link on the device row (first
+      // writer wins) and writes the account's pseudonymous tombstone row, which
+      // survives account deletion (N4). service_role holds EXECUTE; the vault key
+      // is read inside a SECURITY DEFINER function, never here.
+      await trx`select app.record_install_link(${uid}, ${deviceId}, ${installLinkHash})`;
     },
 
     async androidInstallSignals(deviceId: string) {
@@ -2471,5 +2477,39 @@ export function loadRewardsAttestationConfig(): RewardsAttestationConfig {
     apple: appleComplete ? { teamId, bundleId, keyId, privateKeyPem, environment: environment as "production" | "development" } : null,
     google: googleComplete ? { packageName, certificateSha256Digests: digests, serviceAccountEmail, serviceAccountPrivateKeyPem } : null,
   };
+}
+// ---- postgres.js closed-socket guard (P3f gate round 2, LOW) ----------------
+// When Postgres kills a connection mid-transaction (`transaction_timeout` is a
+// FATAL that drops the socket — see `mapPgTimeoutError`), postgres.js v3.4.5 can
+// still have a write queued for that connection: its deferred `nextWrite`
+// (connection.js, scheduled through the setImmediate polyfill) then runs with
+// `socket === null` and throws `TypeError: Cannot read properties of null
+// (reading 'write')` FROM A TIMER CALLBACK — an uncaught exception no caller can
+// `catch`. Reproduced here under `deno test` (it fails the whole runner, after
+// the request itself had already been answered with the correct 503); in an Edge
+// isolate an uncaught error event is the kind of thing that can take the worker
+// down, and every other in-flight request on it with it. This is a LIBRARY bug we
+// cannot patch (the import is pinned and hash-locked), so it is CONTAINED: this
+// one exact signature (a TypeError reading 'write' of null, from postgres.js's
+// connection.js `nextWrite`) is marked handled. Anything else — including any
+// other TypeError — is left to surface exactly as before.
+function isPostgresJsClosedSocketWrite(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false;
+  const stack = String(err.stack ?? "");
+  return /reading 'write'/.test(err.message) && /connection\.js/.test(stack) && /nextWrite/.test(stack);
+}
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("error", (ev: Event) => {
+    if (isPostgresJsClosedSocketWrite((ev as ErrorEvent).error)) {
+      ev.preventDefault();
+      console.error("privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction)");
+    }
+  });
+  globalThis.addEventListener("unhandledrejection", (ev: Event) => {
+    if (isPostgresJsClosedSocketWrite((ev as PromiseRejectionEvent).reason)) {
+      ev.preventDefault();
+      console.error("privileged: contained a postgres.js write to an already-closed socket (connection killed mid-transaction)");
+    }
+  });
 }
 // ==== END P3f additions ======================================================
