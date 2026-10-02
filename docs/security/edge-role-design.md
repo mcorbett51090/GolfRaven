@@ -444,3 +444,41 @@ as the row's owner. The delegate binders and the list definers are still unused 
 6. Account deletion and export are one definer call in `edge`, two statements (release, then delete) in `legacy`; same result.
 7. In both modes (they are database changes): `checkin_token.consumed_at` is set-once, `device.attest_counter` monotonic (0032 M2), and
    a device / challenge reference must be the actor's own (0032 M3), which only edge_actor-limited writers could ever have violated.
+
+## 12. Addendum: the sign-in definers (migration 0035, O12), and how they run in `edge` mode (PR3 items)
+
+0035 (`docs/security/p3-money-path-requirements.md`, "O12 — Sign in with Apple, server side") adds **no edge policy and no edge table grant**:
+`private.edge_policy_allowlist` (check 10) is unchanged, `edge_actor` still reads `app.signin_provider_token (user_id, provider)` only, and the new
+`private.signin_revocation_queue` is reachable by `private_definer` alone (checks 11 and 12 see nothing new). Every edge path is a definer:
+
+| Role | Gets | Notes |
+|---|---|---|
+| `edge_actor` | `signin_methods_for_actor`, `signin_link_identity_for_actor`, `signin_store_token_for_actor`, `signin_unlink_identity_for_actor`, `signin_enqueue_revocations_for_actor` (no uid argument; a `kind = 'user'` binding only, a system delegate is refused); plus `get_signin_token_kek`, `signin_find_account_by_email`, `peek_signin_otp_failures` / `hit_signin_otp_failure` | The cores that take a uid (`signin_methods(uuid)` ...) are `service_role` only: `18_signin_providers_edge.sql` proves `edge_actor` cannot call them. |
+| `edge_system` | `claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek` | The drain is system work and acts on no account. `edge_system` has no privilege on the PII-registered grant table (check 12). |
+
+**How `privileged.ts` runs the sign-in lane in `edge` mode (PR2, as built).** The `signin:` seam is `buildSigninRepo(trx, uid, mode)`, switched on
+`mode` the same way App Attest's `register` is:
+- **Per-user operations** (`methods`, `linkIdentity`, `storeToken`, `unlinkIdentity`, `enqueueRevocations`) call the `signin_*_for_actor` definers
+  inside the `edge_actor` transaction `withOwnership` opens (the uid is the bound actor, never an argument). In `legacy` they call the cores as
+  `service_role` with the uid as an argument. No grant or policy was broadened for this.
+- **The OTP failure counter** (`peek_signin_otp_failures`, `hit_signin_otp_failure`; the bucket key is built in the database from a 64-hex
+  email hash) is granted to `edge_actor`, so in `edge` it runs as the calling actor (`signinOtpFailuresFor(actor)`), not as a system actor.
+- **System operations** (`claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek`) run
+  in `edge` as `edge_system` through `openScopedTx("system", { expectedUid: null }, ...)` (`withSigninSystem`), the roles those definers were
+  granted to in 0035. They need no `import-catalog`-style legacy pool. In `legacy` they run through `withOwnership` with the nil-uid
+  `SIGNIN_SYSTEM_ACTOR` (`service_role`). `me-delete` enqueues as the actor, then revokes through the same `signinRevocationDb`.
+
+**PR3 items (O5 in the money-path doc), recorded, not done:**
+1. **The OTP-proven link to ANOTHER account is refused in `edge` mode** (`501 email_proof_link_unavailable`, `repo.signin.crossAccountLink === false`).
+   It has no edge definer on purpose: an `edge_actor` that could attach an identity to any account would be an account-takeover primitive. In
+   `legacy` it is unchanged (the proof's own account is the target). The rest of the §3.4 linking rules (a signed-in user linking their own
+   identity, a provider-email match to the SAME account) work in both modes. PR3 designs a narrow, proof-bound definer (the OTP proof's
+   verifier, not the client, names the target) or keeps this path legacy-only.
+2. `signin_find_account_by_email` answers "does an account hold this email" for any `edge_actor` (returns an id only; no worse than R3).
+3. The drain and the KEK reader are `edge_system` already; PR3 only has to move `signin-revocation-drain` onto `withDelegatedActor` if that
+   becomes the system path's single entry, and to retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
+
+The definers' policies on `app.signin_provider_token` are GUC-windowed
+(`app.signin.target_user_id`, text compare, exact check-7 form), not actor-keyed: the core lane has no actor binding (`bind_actor` is `edge_actor`
+only and was not broadened), and the wrappers call the same cores after resolving the bound uid. `17_signin_providers.sql` group 6 and
+`18_signin_providers_edge.sql` group 4 are the session-reuse cells for that window (P3a follow-up 1).

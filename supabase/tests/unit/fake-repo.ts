@@ -37,6 +37,7 @@ import type {
 } from "../../functions/_shared/types.js";
 import { makeFakeAttestKeyRepo } from "./fake-attest-key-repo.ts";
 import { makeFakeRewardsRepo } from "./fake-rewards-repo.ts";
+import { deleteSigninRows, makeFakeSigninRepo } from "./fake-signin-repo.ts";
 
 const ABSOLUTE_ROW_CAP = 10_000; // mirrors packages/rules' own constant (score-play.ts) — see privileged.ts's own re-import of the SAME vendored value; hardcoded here rather than imported so this fake has zero dependency on the vendor tree's own layout.
 
@@ -517,6 +518,8 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
 
     // P3f: rewards-activate (supabase/tests/unit/fake-rewards-repo.ts).
     rewards: makeFakeRewardsRepo(state, uid),
+    // O12: me-signin-methods / provider-grant revocation (supabase/tests/unit/fake-signin-repo.ts).
+    signin: makeFakeSigninRepo(state, uid),
 
     // App Attest key registration (supabase/tests/unit/fake-attest-key-repo.ts).
     attestKey: makeFakeAttestKeyRepo(state, uid),
@@ -639,6 +642,7 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         for (const [jti, row] of state.checkinTokens) if (row.userId === uid) state.checkinTokens.delete(jti);
         for (const key of [...state.pushTokens.keys()]) if (key.startsWith(`${uid}:`)) state.pushTokens.delete(key);
         state.signinProviders.delete(uid);
+        deleteSigninRows(state, uid);
         state.connectorProviders.delete(uid);
         state.deletedUsers.add(uid);
         return { userId: uid, deletedAt: state.now.toISOString() };

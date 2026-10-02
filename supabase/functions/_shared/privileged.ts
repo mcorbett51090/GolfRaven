@@ -85,7 +85,7 @@
 // the lint's own design, not an oversight to "remove".
 import postgres from "postgres";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
-import { Errors } from "./http.ts";
+import { Errors, HttpError } from "./http.ts";
 
 import type { OwnReward, RewardsRepo } from "./rewards/types.ts";
 import type { RewardsAttestationConfig } from "./rewards/production-ports.ts";
@@ -1241,6 +1241,10 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
     // App Attest key registration (follow-up F2) — implemented in the delimited "App Attest key
     // registration" section at the END of this file (one seam here).
     attestKey: buildAttestKeyRepo(trx, uid, mode),
+
+    // O12: the sign-in-methods repository — implemented in the delimited "O12 sign-in" section at the END of this file (one
+    // seam here, everything else appended below).
+    signin: buildSigninRepo(trx, uid, mode),
 
     device: {
       async findOwn(deviceId: string) {
@@ -2793,6 +2797,7 @@ if (typeof globalThis.addEventListener === "function") {
 
 // ============================================================================
 // ==== App Attest key registration additions — `devices-attest-key` (F2) ======
+// =====================================================================
 // ============================================================================
 // Everything between this banner and the matching END banner belongs to App Attest key registration
 // (`POST /v1/devices/attest-key`, 0034). Appended, not interleaved, like the P3f section above; the only line
@@ -2862,3 +2867,272 @@ export function loadAttestKeyVerifierConfig(): RegistrationVerifierConfig | null
   return { appId: `${teamId}.${bundleId}`, environment, trustAnchorDer: APPLE_APP_ATTEST_ROOT_DER };
 }
 // ==== END App Attest key registration additions ===============================
+
+// ============================================================================
+// ==== O12 sign-in additions — `me-signin-methods`, provider-grant revocation ==
+// ============================================================================
+// Everything between this banner and the matching END banner is the O12 sign-in builder's (build plan §3.4 Auth row, §4.4
+// `signin_provider_token`, §4.8, §7.8; migration 0035). It is appended (not interleaved) on purpose: other builders append their
+// own delimited sections to this file too, and one block per builder keeps the merge to "keep both". The only O12 line elsewhere
+// in this file is the single `signin: buildSigninRepo(trx, uid)` seam inside `buildRepo`. The imports below are ES imports and
+// hoist, so they sit with the code they serve rather than in the header.
+//
+// ⚠ Nothing here has been exercised against Apple, Google or a real Supabase Auth (no credentials, no route): the Apple and Google
+// adapters (_shared/signin/) are proven against scripted fakes, the database half against the real harness cluster.
+
+import { kekFromBase64, type Kek } from "./signin/envelope.ts";
+import type { AppleSecretConfig } from "./signin/apple-client-secret.ts";
+import { NotConfiguredError } from "./signin/errors.ts";
+import { constantTimeEqual } from "./signin/bytes.ts";
+import type { ClaimedRevocation, EmailOtpResult, EmailOtpVerifier, LinkIdentityInput, OtpFailureCounter, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo, SigninSystemOps } from "./signin/types.ts";
+
+/** The Sign in with Apple server configuration, or `null` when ANY of the four values is absent or blank (a half-set configuration is
+ * "not configured", never a default). These are the only environment reads for this feature, and this is the only place they happen.
+ *   GR_APPLE_TEAM_ID            Apple developer team id (shared with the DeviceCheck configuration)
+ *   GR_APPLE_SIWA_CLIENT_ID     the client id: the app's bundle id for the native flow (the `aud` of the identity token)
+ *   GR_APPLE_SIWA_KEY_ID        the id of the Sign in with Apple private key
+ *   GR_APPLE_SIWA_PRIVATE_KEY   that key's `.p8` contents (PKCS#8 PEM); a secret, never logged, never sent to any client
+ * Supabase Auth's OWN Apple provider settings (the Services ID, the team id, the key id and a pre-generated client-secret JWT) are a
+ * dashboard step, not code: see docs/security/p3-money-path-requirements.md ("Sign in with Apple, server side"). */
+export function loadAppleSiwaConfig(): AppleSecretConfig | null {
+  const teamId = (Deno.env.get("GR_APPLE_TEAM_ID") ?? "").trim();
+  const clientId = (Deno.env.get("GR_APPLE_SIWA_CLIENT_ID") ?? "").trim();
+  const keyId = (Deno.env.get("GR_APPLE_SIWA_KEY_ID") ?? "").trim();
+  const privateKeyPem = Deno.env.get("GR_APPLE_SIWA_PRIVATE_KEY") ?? "";
+  if (teamId === "" || clientId === "" || keyId === "" || privateKeyPem.trim() === "") return null;
+  return { teamId, clientId, keyId, privateKeyPem };
+}
+
+/** True only when the request carries the project's service-role key as its bearer token (constant-time). The revocation drain is
+ * system work, called by a scheduler holding that key; Supabase's gateway check alone would also admit an anon key. */
+export function isServiceRoleBearer(req: Request): boolean {
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  const header = req.headers.get("Authorization") ?? "";
+  if (key === "" || !header.toLowerCase().startsWith("bearer ")) return false;
+  return constantTimeEqual(header.slice(header.indexOf(" ") + 1).trim(), key);
+}
+
+/** SQLSTATEs the private.signin_* definers raise (0035) -> the HTTP answers. */
+function signinDbError(err: unknown): unknown {
+  const code = (err as { code?: unknown } | null)?.code;
+  const message = String((err as { message?: unknown } | null)?.message ?? "");
+  if (code === "23505") {
+    return message.startsWith("provider_already_linked")
+      ? Errors.conflict("provider_already_linked", "this account already has a different identity linked for that provider")
+      : Errors.conflict("identity_conflict", "that sign-in identity is already linked to another account");
+  }
+  if (code === "P0002") return Errors.notFound("that sign-in method is not linked");
+  if (code === "55000") return Errors.unprocessable("last_sign_in_method", "the only remaining sign-in method cannot be unlinked");
+  return mapPgTimeoutError(err);
+}
+
+const SIGNIN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const toBytes = (v: unknown): Uint8Array => new Uint8Array(v as ArrayLike<number>);
+
+async function readKek(run: () => Promise<{ o_kek_id: string; o_kek_b64: string }[]>): Promise<Kek> {
+  let rows: { o_kek_id: string; o_kek_b64: string }[];
+  try {
+    rows = await run();
+  } catch (e) {
+    const code = (e as { code?: unknown } | null)?.code;
+    // P0002: no such secret in Vault. 22023: present but not a base64 32-byte key. Both are "the key is not usable": fail closed.
+    if (code === "P0002") throw new NotConfiguredError("kek_missing");
+    if (code === "22023") throw new NotConfiguredError("kek_malformed");
+    throw e;
+  }
+  const row = rows[0];
+  if (!row) throw new NotConfiguredError("kek_missing");
+  return kekFromBase64(row.o_kek_id, row.o_kek_b64); // EnvelopeError('kek_length') if the decoded key is not 32 bytes
+}
+
+/** The system operations (queue claim / complete / purge, the KEK by id, the OTP-failure counter). Same SQL in both modes: the queue
+ * functions are granted to service_role AND edge_system, `get_signin_token_kek` to service_role, edge_actor and edge_system, and the
+ * OTP-failure functions to service_role and edge_actor. WHICH transaction runs them is decided by `withSigninSystem` (queue) and
+ * `signinOtpFailuresFor` (OTP counter) below. */
+function buildSigninSystemOps(trx: TxSql): SigninSystemOps {
+  const kekRows = async (kekId: string | null) =>
+    (await trx`select o_kek_id, o_kek_b64 from private.get_signin_token_kek(${kekId}::text)`) as unknown as { o_kek_id: string; o_kek_b64: string }[];
+  return {
+    async claim(ids, limit, leaseSeconds): Promise<ClaimedRevocation[]> {
+      // Validated, then passed as a literal array text and cast: no id ever reaches the statement unchecked.
+      if (ids !== null && !ids.every((i) => SIGNIN_UUID_RE.test(i))) throw new Error("signin claim: a queue id is not a uuid");
+      const arr = ids === null ? null : `{${ids.join(",")}}`;
+      const rows = await trx`
+        select o_id, o_provider, o_ciphertext, o_dek_wrapped, o_kek_id, o_attempts, o_expires_at
+        from private.claim_signin_revocations(${arr}::uuid[], ${limit}::int, ${leaseSeconds}::int)`;
+      return rows.map(
+        (r): ClaimedRevocation => ({
+          id: r.o_id,
+          provider: r.o_provider,
+          envelope: { ciphertext: toBytes(r.o_ciphertext), dekWrapped: toBytes(r.o_dek_wrapped), kekId: r.o_kek_id },
+          attempts: Number(r.o_attempts),
+          expiresAt: r.o_expires_at instanceof Date ? r.o_expires_at.toISOString() : String(r.o_expires_at),
+        }),
+      );
+    },
+    async complete(id, outcome, errorCode, backoffSeconds): Promise<string> {
+      const rows = await trx`select private.complete_signin_revocation(${id}::uuid, ${outcome}, ${errorCode}, ${backoffSeconds}::int) as state`;
+      return String(rows[0]?.state ?? "pending");
+    },
+    async purge(olderThanDays): Promise<number> {
+      const rows = await trx`select private.purge_signin_revocation_queue(make_interval(days => ${olderThanDays}::int)) as n`;
+      return Number(rows[0]?.n ?? 0);
+    },
+    kekById: (kekId: string) => readKek(() => kekRows(kekId)),
+    async peekOtpFailures(emailHash): Promise<number> {
+      const rows = await trx`select private.peek_signin_otp_failures(${emailHash}) as n`;
+      return Number(rows[0]?.n ?? 0);
+    },
+    async recordOtpFailure(emailHash): Promise<number> {
+      const rows = await trx`select private.hit_signin_otp_failure(${emailHash}) as n`;
+      return Number(rows[0]?.n ?? 0);
+    },
+  };
+}
+
+/** Per-user operations. `legacy`: the 0035 CORE definers with an explicit uid (service_role). `edge`: the `_for_actor` wrappers (edge_actor,
+ * no uid argument: the bound actor of this transaction; a wrong uid cannot even be expressed). The result shapes are identical. The one
+ * operation with no edge form is linking an identity to ANOTHER account (the OTP-proven link): there is deliberately no edge definer for it
+ * (it would be an "attach an identity to any account" primitive), so in edge mode `crossAccountLink` is false and the handler answers 501
+ * before it consumes an OTP or exchanges a code (docs/security/edge-role-design.md §12; PR3 item O5). */
+function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
+  const guard = async <T>(op: () => Promise<T>): Promise<T> => {
+    try {
+      return await op();
+    } catch (e) {
+      throw signinDbError(e);
+    }
+  };
+  const kekRows = async (kekId: string | null) =>
+    (await trx`select o_kek_id, o_kek_b64 from private.get_signin_token_kek(${kekId}::text)`) as unknown as { o_kek_id: string; o_kek_b64: string }[];
+  const edge = mode === "edge";
+  const mustBeSelf = (target: string) => {
+    if (edge && target.toLowerCase() !== uid.toLowerCase()) throw new HttpError(501, "email_proof_link_unavailable", "linking an identity to another account is not available in this mode");
+  };
+  return {
+    crossAccountLink: !edge,
+
+    listMethods: () =>
+      guard(async () => {
+        const rows = edge
+          ? await trx`select o_provider, o_subject, o_email, o_is_private_relay, o_linked_at, o_has_token from private.signin_methods_for_actor()`
+          : await trx`select o_provider, o_subject, o_email, o_is_private_relay, o_linked_at, o_has_token from private.signin_methods(${uid}::uuid)`;
+        return rows.map(
+          (r): SigninMethodRow => ({
+            provider: r.o_provider,
+            subject: r.o_subject,
+            email: r.o_email ?? null,
+            isPrivateRelay: Boolean(r.o_is_private_relay),
+            linkedAt: r.o_linked_at instanceof Date ? r.o_linked_at.toISOString() : String(r.o_linked_at),
+            hasToken: Boolean(r.o_has_token),
+          }),
+        );
+      }),
+
+    findAccountByEmail: (email: string) =>
+      guard(async () => {
+        const rows = await trx`select private.signin_find_account_by_email(${email}) as id`;
+        return (rows[0]?.id as string | null | undefined) ?? null;
+      }),
+
+    linkIdentity: (targetUserId: string, input: LinkIdentityInput) =>
+      guard(async () => {
+        if (!SIGNIN_UUID_RE.test(targetUserId)) throw Errors.internal();
+        mustBeSelf(targetUserId);
+        const rows = edge
+          ? await trx`select private.signin_link_identity_for_actor(${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`
+          : await trx`select private.signin_link_identity(${targetUserId}::uuid, ${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`;
+        return Boolean(rows[0]?.created);
+      }),
+
+    storeToken: (targetUserId: string, provider, envelope) =>
+      guard(async () => {
+        if (!SIGNIN_UUID_RE.test(targetUserId)) throw Errors.internal();
+        mustBeSelf(targetUserId);
+        // Uint8Array parameters, cast to bytea: postgres.js serialises them as bytea (never as text).
+        if (edge) {
+          await trx`select private.signin_store_token_for_actor(${provider}, ${envelope.ciphertext}::bytea, ${envelope.dekWrapped}::bytea, ${envelope.kekId})`;
+        } else {
+          await trx`select private.signin_store_token(${targetUserId}::uuid, ${provider}, ${envelope.ciphertext}::bytea, ${envelope.dekWrapped}::bytea, ${envelope.kekId})`;
+        }
+      }),
+
+    unlinkIdentity: (provider: string) =>
+      guard(async () => {
+        const rows = edge
+          ? await trx`select o_queue_id from private.signin_unlink_identity_for_actor(${provider})`
+          : await trx`select o_queue_id from private.signin_unlink_identity(${uid}::uuid, ${provider})`;
+        return rows.map((r) => r.o_queue_id as string);
+      }),
+
+    enqueueRevocations: () =>
+      guard(async () => {
+        const rows = edge
+          ? await trx`select o_queue_id, o_provider from private.signin_enqueue_revocations_for_actor()`
+          : await trx`select o_queue_id, o_provider from private.signin_enqueue_revocations(${uid}::uuid)`;
+        return rows.map((r): RevocationJob => ({ queueId: r.o_queue_id as string, provider: r.o_provider as string }));
+      }),
+
+    currentKek: () => readKek(() => kekRows(null)),
+    kekById: (kekId: string) => readKek(() => kekRows(kekId)),
+    system: buildSigninSystemOps(trx),
+  };
+}
+
+/** The identity the LEGACY-mode sign-in system operations run under: `withOwnership` needs an actor to build its Repo, and these operations
+ * (the revocation queue) act on no account, so they never read it. */
+const SIGNIN_SYSTEM_ACTOR: Actor = { uid: "00000000-0000-0000-0000-000000000000", role: "authenticated" };
+
+/** The revocation-queue operations, each call its own short transaction. `legacy`: through `withOwnership` as service_role (the nil-uid
+ * actor above is never read). `edge`: through `openScopedTx("system", ...)` as **edge_system**, the role 0035 granted claim / complete /
+ * purge / the KEK reader to (no actor is bound; edge_system has no privilege on any PII table, check 12). The OTP-failure counter is NOT
+ * here: edge_system has no grant on it, so it runs as the caller's actor (`signinOtpFailuresFor`). */
+function withSigninSystem<T>(op: (sys: SigninSystemOps) => Promise<T>): Promise<T> {
+  if (getDbMode() === "edge") {
+    return openScopedTx("system", { expectedUid: null }, (trx) => op(buildSigninSystemOps(trx))).catch((err) => {
+      throw mapPgTimeoutError(err);
+    });
+  }
+  return withOwnership(SIGNIN_SYSTEM_ACTOR, (repo) => op(repo.signin.system));
+}
+
+/** The revocation queue, as the runner (_shared/signin/revocation.ts) needs it. Every call is its OWN short transaction: a vendor call is
+ * never made while one is open. */
+export const signinRevocationDb: RevocationDb = {
+  claim: (ids, limit, leaseSeconds) => withSigninSystem((s) => s.claim(ids, limit, leaseSeconds)),
+  complete: (id, outcome, errorCode, backoffSeconds) => withSigninSystem((s) => s.complete(id, outcome, errorCode, backoffSeconds)),
+  kekById: (kekId) => withSigninSystem((s) => s.kekById(kekId)),
+  purge: (olderThanDays) => withSigninSystem((s) => s.purge(olderThanDays)),
+};
+
+/** The OTP-proof failure counter (§4.7 item 8), run AS THE CALLER (service_role in legacy mode, the bound edge_actor in edge mode: both
+ * hold the two OTP-failure functions and nothing wider is needed). `record` commits on its own, BEFORE the request fails, so a failed
+ * proof always counts (the same ordering rule as hitRateLimitForActor). */
+export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
+  return {
+    peek: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.peekOtpFailures(emailHash)),
+    record: (emailHash) => withOwnership(actor, (repo) => repo.signin.system.recordOtpFailure(emailHash)),
+  };
+}
+
+/** Proof of mailbox control by an email OTP, through Supabase Auth's verifyOtp with the ANON key (the response's session is
+ * discarded: this server never hands one to a client). A wrong or expired code is `{ ok: false }`; a transport or server failure
+ * THROWS, so it is not counted against the address. `[unverified — training knowledge of GoTrue's verifyOtp error statuses]`. */
+export const supabaseEmailOtpVerifier: EmailOtpVerifier = {
+  async verify(email: string, code: string): Promise<EmailOtpResult> {
+    const url = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    if (!url || !anonKey) throw new Error("privileged.ts: SUPABASE_URL/SUPABASE_ANON_KEY are not set in this environment");
+    const client = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    const { data, error } = await client.auth.verifyOtp({ email, token: code, type: "email" });
+    if (error) {
+      const status = (error as { status?: number }).status;
+      if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) return { ok: false };
+      throw new Error("supabase auth verifyOtp failed");
+    }
+    const id = data?.user?.id;
+    if (!id) throw new Error("supabase auth verifyOtp returned no user");
+    return { ok: true, userId: id };
+  },
+};
+// ==== END O12 sign-in additions ==============================================

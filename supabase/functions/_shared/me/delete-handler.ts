@@ -27,11 +27,19 @@
 // them.
 //
 // What THIS module adds, beyond calling `deleteMyData()`:
-//   - the provider-revocation SEAM (AT 6's "revokes connectors";
-//     provider-revocation.ts, clearly marked, P4/P8 as directed) — reads
-//     the caller's own provider rows BEFORE they are deleted, since
-//     `deleteMyData()` removes `signin_provider_token`/`connector_account`
-//     rows unconditionally and there is no other chance to see them.
+//   - the connector-revocation SEAM (AT 6's "revokes connectors";
+//     provider-revocation.ts, clearly marked, P8 as directed) — reads
+//     the caller's own connector rows BEFORE they are deleted, since
+//     `deleteMyData()` removes `connector_account` rows unconditionally
+//     and there is no other chance to see them.
+//   - O12 (0035): the Apple / Google SIGN-IN grants are NOT handled here
+//     any more. `delete-orchestrator.ts` queues them (encrypted, no user
+//     id), revokes them at the providers, and only then calls this handler
+//     with the outcome — so by the time `deleteMyData()` removes the
+//     `signin_provider_token` rows the revocation has been attempted and,
+//     if it failed, is durably queued for a 72 h retry. This closes the
+//     P3d gate accepted follow-up 1 ("provider rows are deleted BEFORE
+//     revocation exists") for Apple and Google.
 //   - nothing else: Auth-user deletion (`deleteAuthUser`,
 //     `_shared/privileged.ts`) is deliberately NOT called from here — it
 //     is an HTTP call to Supabase Auth, not a Postgres statement, so it
@@ -66,21 +74,28 @@
 // data.sql pgTAP suite) already carries it.
 
 import type { Repo } from "../types.ts";
-import { revokeConnectors, revokeSigninProviders, type ProviderRevocationOutcome } from "./provider-revocation.ts";
+import type { RevocationOutcome } from "../signin/revocation.ts";
+import { revokeConnectors, type ProviderRevocationOutcome } from "./provider-revocation.ts";
 
 export interface DeleteMyDataOutcome {
   userId: string;
   deletedAt: string;
-  signinProvidersRevoked: ProviderRevocationOutcome[];
+  /** O12 (0035): what happened to each Apple / Google sign-in grant the account held, as decided by
+   * `delete-orchestrator.ts` BEFORE this handler ran: `revoked`, or `queued_for_retry` (still queued; the drain retries it for 72 h).
+   * Empty when the account had no stored grant. */
+  signinProvidersRevoked: RevocationOutcome[];
   connectorsRevoked: ProviderRevocationOutcome[];
 }
 
-export async function handleMeDelete(repo: Repo): Promise<DeleteMyDataOutcome> {
+/** `signinRevocation` is the outcome list of the revocation attempt that `delete-orchestrator.ts` already made (and queued) before
+ * calling this: this handler no longer reads or revokes sign-in grants itself, because by the time it runs the grants are queued
+ * and the revocation has been attempted. Defaulting to [] keeps a direct call (the unit and integration suites) valid. */
+export async function handleMeDelete(repo: Repo, signinRevocation: RevocationOutcome[] = []): Promise<DeleteMyDataOutcome> {
   // Read BEFORE deleteMyData() removes the rows — see this file's own
   // header for why this ordering is required, not incidental.
-  const [signinProviders, connectorProviders] = await Promise.all([repo.me.listSigninProviders(), repo.me.listConnectorProviders()]);
+  const connectorProviders = await repo.me.listConnectorProviders();
 
-  const signinProvidersRevoked = revokeSigninProviders(signinProviders);
+  const signinProvidersRevoked = signinRevocation;
   const connectorsRevoked = revokeConnectors(connectorProviders);
 
   const result = await repo.me.deleteMyData();

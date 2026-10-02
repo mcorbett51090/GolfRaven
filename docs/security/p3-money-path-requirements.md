@@ -2726,3 +2726,216 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **K10. Certificate-validity skew is ±5 minutes** (clock skew between this server and Apple's issuance). Apple's credential certificates
   are believed short-lived `[unverified]`; if the live run shows a leaf already expired at attestation time, this is the knob and the
   reason code is `chain_validity`.
+
+## O12 — Sign in with Apple, server side (2026-10-02): `me-signin-methods`, the provider-grant revocation on deletion
+
+Build plan §3.4 (Auth row, linking rules (1)-(5)), §4.4 (`signin_provider_token`), §4.7 item 8 (rate limits), §4.8 (envelope
+encryption, the client-secret expiry check), §7.8 (Apple 5.1.1(v)), P4 AT (17)-(19). Migration **`0035_signin_providers.sql`**
+(0033 is the edge-role PR2 migration and 0034 is App Attest's; 0001-0034 are untouched). **Nothing here has been exercised against Apple, Google or a
+real Supabase Auth**: there are no credentials and no route to them in the build environment. The provider adapters are proven against a
+synthetic Apple (run-time-generated keys, a scripted `fetch`), the database half against the real harness cluster. Every Apple-specific
+fact is marked `[unverified — training knowledge]` where it is used; the P4 spike against a real service id and key confirms them (list below).
+
+**This closes the P3d gate round 2 accepted follow-up 1** ("provider rows are deleted BEFORE real Apple/Google revocation exists"), for
+Apple and, in the same shape, for the Google *revocation* half (Google *capture* is a TODO, below). `DELETE /v1/me` now queues the grant,
+revokes it at the provider, and only then deletes; a failed revocation is retried for 72 h and logged and never blocks the deletion.
+
+### What was built
+
+| Piece | Where |
+|---|---|
+| `me-signin-methods` Edge Function: `GET` list; `POST {action: link \| unlink}` | `supabase/functions/me-signin-methods/index.ts`, `_shared/signin/methods-handler.ts`, `request-shape.ts` |
+| Apple identity-token verification (RS256 against Apple's JWKS; `iss`, `aud`, `exp`, `iat`, `sub`, the **nonce** binding) | `_shared/signin/apple-id-token.ts` |
+| Hardened outbound HTTP (https + host allow-list, `redirect: "error"`, timeout, stream size cap, no body in any error) | `_shared/signin/safe-fetch.ts` |
+| Apple client secret, minted server-side as an ES256 JWT from the `.p8` with Web Crypto; cached, re-minted before expiry, **fails closed** | `_shared/signin/apple-client-secret.ts` |
+| Authorization-code exchange and token revocation (Apple); token revocation (Google) | `_shared/signin/apple-client.ts`, `google-client.ts`, `production.ts` |
+| Envelope encryption (AES-256-GCM per-row DEK, wrapped by a Vault-held KEK) | `_shared/signin/envelope.ts`, `private.get_signin_token_kek` |
+| Durable revocation queue + runner + drain endpoint | `private.signin_revocation_queue` (0035), `_shared/signin/revocation.ts`, `supabase/functions/signin-revocation-drain/index.ts` |
+| `DELETE /v1/me` orchestration: queue, revoke, then delete | `_shared/me/delete-orchestrator.ts` (new), `me-delete/index.ts`, `_shared/me/delete-handler.ts` |
+| Configuration (the only env reads) | `loadAppleSiwaConfig()` in the O12 section at the end of `_shared/privileged.ts` |
+| Monthly client-secret expiry check (§4.8) | `_shared/signin/secret-expiry.ts`, `tools/apple/check-siwa-secret-expiry.mjs` |
+| Tests | `supabase/tests/matrix/17_signin_providers.sql`, `18_signin_providers_edge.sql`, `integration/signin-methods.deno.test.ts`, `unit/signin-*.test.ts`, `unit/fake-signin-repo.ts` |
+
+### The §3.4 rules, and where each is enforced
+
+| Rule | Enforcement |
+|---|---|
+| (1) one account per verified email | `private.signin_find_account_by_email` on the (verified) email in the Apple token; a match with another account is never merged. The database refuses to move or duplicate an identity (`signin_link_identity`, 23505 → 409 `identity_conflict`; one Apple per account → 409 `provider_already_linked`). An **unverified** email claim is neither matched nor stored. |
+| (2) never auto-link a social sign-in whose email matches an existing account; email OTP proof first | A link whose Apple email belongs to *another* account is refused, 409 `email_proof_required`, with **no exchange, no write**. With `emailProof.code` the OTP is verified (`EmailOtpVerifier`, Supabase Auth `verifyOtp`) for *that address*; only a verified proof links the identity, and it links to **the account the proof was for**, not to the caller. Failures are counted per target email (**5 per hour, then 429 even for a correct code**); a transport failure is not counted; a proof for a different account than was looked up is 409 `email_proof_mismatch`. |
+| (3) a private-relay address is its own email | Stored and flagged as given. A relay address never takes the proof path (409 `email_belongs_to_another_account` if it matches another account); a relay account links only from this endpoint, signed in, to the **caller**. |
+| (4) unlink only while another method remains | `private.signin_unlink_identity`: one transaction, per-account advisory lock, 55000 → **422 `last_sign_in_method`**. Two concurrent unlinks of a two-method account leave exactly one (integration test, 3 rounds). |
+| rate limits | 10/user/h on link and unlink (`hitRateLimitForActor`, before the transaction opens); 5 failed OTP proofs per target email per hour (`private.hit_signin_otp_failure`, bucket key built in the database from a sha256 of the email — no address is ever in a bucket key). `GET` (list) is not limited. |
+| "another user's id" | The request has **no field that names an account**; `userId` / `user_id` / `uid` / `email` in a body are *rejected* (400), not ignored. Everything is the authenticated caller's own account; another account's method is 404, another account's Apple identity is 409. |
+
+### Design decisions
+
+**Envelope encryption (§4.8) — exactly how.** Per row: a fresh random 32-byte **DEK** encrypts the refresh token with AES-256-GCM (fresh 12-byte
+IV); a **KEK** held in **Supabase Vault** wraps the DEK with AES-256-GCM (fresh IV). Both layers carry AAD: the token layer binds the
+provider, the wrap layer binds the `kek_id`, so a ciphertext cannot be moved to another provider's row or another KEK. Layout of both blobs:
+`0x01 || iv(12) || ciphertext+tag`. Stored in the existing `app.signin_provider_token` columns (`refresh_token_ciphertext`, `dek_wrapped`,
+`kek_id`). The KEK is one 32-byte key, base64, in a Vault secret named `siwa_token_kek_<id>`; `private.get_signin_token_kek(NULL)` returns the
+**newest** (wraps a new DEK), `(<id>)` a named one (unwraps a stored DEK). **The crypto runs in the Edge runtime, not in the database**: the
+plaintext token and the DEK never travel as a query parameter (Postgres logs the parameters of a failing statement), only ciphertext and the
+wrapped DEK do; the KEK comes back as a function *result*, never as a parameter or in a message. Why Vault and not an external KMS: the plan's
+"otherwise Vault" branch, with no vendor contract requiring otherwise; a KMS would implement the same two-method `Kek` shape and nothing else
+changes. **Honest limit (design doc R6):** any runtime allowed to call `get_signin_token_kek` can read the KEK, which is the §4.8 "decrypted only
+inside connector functions" boundary, not a stronger one. **Nothing exports the token**: `0022`'s `pii_export_policy` keeps
+`signin_provider_token` = `exclude` (a pgTAP cell asserts it), and the Edge `me-export` is untouched.
+
+**The revocation queue.** `private.signin_revocation_queue` holds a copy of the grant's envelope (ciphertext, wrapped DEK, `kek_id`, never
+decrypted in the database) and **no column that names a user**, so it survives the account deletion without being a personal row — which is
+why it has no `pii_retention_policy` / `pii_export_policy` classification (neither registry has anything to classify: no FK to `auth.users`;
+a pgTAP cell asserts no such FK and no user/email/handle-named column, so a future one fails). Idempotent on `(provider, md5(ciphertext))`: a
+retried `DELETE /v1/me` re-reads the same still-present grant row and gets the *same* queue row back, attempts and backoff intact. `claim` leases
+rows (`FOR UPDATE SKIP LOCKED`; a held row is skipped, never waited for — integration test with a real second session) and first expires what is
+past 72 h (material wiped, status `expired`, `RAISE LOG` with queue id and provider only); `complete` records `revoked` (material wiped) or a
+*short machine code* (CHECK-constrained to `[a-z0-9_:.-]{1,64}`, anything else becomes `unclassified`: a provider response could echo a token)
+and a backoff of 1 min doubling to 6 h. A superseded token (a re-capture with a different refresh token) is queued as `replaced`.
+**The order in `DELETE /v1/me`:** (1) enqueue in its own committed transaction; (2) revoke at the providers with no transaction open — *before*
+the provider rows are deleted (the integration test observes the grant row still present from inside Apple's revoke call); (3) delete. Step 2
+never throws: a failed or impossible revocation (provider down, Apple unconfigured, KEK missing, decrypt failure) is recorded and logged
+(`{event:"signin_revocation", queueId, provider, outcome, attempts, error}` — no user, no token) and the deletion proceeds. `me-delete`'s
+response now carries per-provider `signinProvidersRevoked: [{queueId, provider, status: revoked | queued_for_retry, error?}]`. A retry of the
+whole request after a partial failure completes and adds no second queue row. The Auth user (and its identities) is deleted afterwards, as
+before.
+
+**The drain.** `signin-revocation-drain` is system work: `POST`, authenticated by the **service-role key as the bearer** (constant-time
+compare in `privileged.ts`; the gateway's JWT check alone would also admit an anon key), runs ≤ 25 due rows and purges finished rows older than
+30 days. It is a deploy step to schedule it (below); nothing in this repo schedules it.
+
+**Apple verification details.** Header `alg` must be exactly `RS256` (none/HS256/RS512/ES256 are refused *before any key is touched*); `kid`
+looked up in a JWKS fetched through the hardened fetcher and cached 1 h (an unknown `kid` refetches at most once a minute; stale-if-error for up
+to 24 h, then fail closed); `iss` exactly `https://appleid.apple.com`; `aud` the configured client id (a string, or an array of exactly that
+one); `exp` in the future; `iat` not in the future (60 s skew); `sub` non-empty; **`nonce` mandatory**: the claim must equal SHA-256-hex of the
+client's raw nonce (Apple's native flow) or the raw nonce itself, compared in constant time; a token without a nonce is refused. The code
+returned by the exchange must belong to **the same Apple user as the identity token** (the id_token Apple returns is verified too, minus the
+nonce); otherwise 422 `authorization_code_mismatch` and the grant that was just minted is revoked. If the database write fails after the
+exchange, the unrecorded grant is revoked too (best effort, logged if it fails): no live token nobody can revoke.
+
+**Client secret (§4.8).** Minted **only on the server**, as an ES256 JWT (`kid` = the key id; `iss` team id, `sub` client id, `aud`
+`https://appleid.apple.com`, `exp` = +10 min), from the `.p8` with Web Crypto; cached and **re-minted when under 2 minutes remain**; an
+absent/blank/unparseable key throws `NotConfiguredError` on first use and nothing substitutes a default (the unit suite's must-fail set covers
+five unconfigured shapes and five unusable-key shapes). A one-line PEM with literal `\n` (how an env var carries it) is accepted. The
+long-lived (≤ 6 months) secret that **Supabase Auth's own** Apple provider setting needs is a *different artifact*; that is the one the monthly
+check guards.
+
+### Configuration — the only env reads, all in `privileged.ts` (`loadAppleSiwaConfig`)
+
+| Variable | Meaning |
+|---|---|
+| `GR_APPLE_TEAM_ID` | Apple developer team id (shared with the DeviceCheck configuration) |
+| `GR_APPLE_SIWA_CLIENT_ID` | the client id: the app's **bundle id** for the native flow (the token's `aud`) |
+| `GR_APPLE_SIWA_KEY_ID` | the Sign in with Apple key's id |
+| `GR_APPLE_SIWA_PRIVATE_KEY` | that key's `.p8` contents (a secret; never logged, never sent to a client) |
+
+**Any one missing or blank → unconfigured → 503 `provider_not_configured` on every Apple operation, never a fallback** (integration test:
+none set, three of four, a blank key). For `DELETE /v1/me` unconfigured does *not* block: the grant is queued as `not_configured_apple`.
+Also read by the drain and the OTP verifier through existing variables only (`SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`SUPABASE_SERVICE_ROLE_KEY`). **Supabase Auth's own Apple provider configuration is a deploy/dashboard step, documented, not built**: enable
+the Apple provider; give it the Services ID / bundle id as the client id, the team id, the key id and a **pre-generated client-secret JWT**
+(≤ 6 months), and put the *same* client id in `GR_APPLE_SIWA_CLIENT_ID`.
+
+### Deploy steps this build cannot do (need real accounts)
+
+1. Create the Sign in with Apple key and the Services ID / App ID capability under the organisation Apple account (P0 prerequisite for P4).
+2. Set the four `GR_APPLE_*` function secrets; configure Supabase Auth's Apple provider (above). Register the custom SMTP domain with Apple's
+   private relay `[unverified; A78]`.
+3. Create the KEK in Vault: one 32-byte key, base64, named `siwa_token_kek_v1` (e.g. `select vault.create_secret(encode(gen_random_bytes(32),
+   'base64'), 'siwa_token_kek_v1')` `[unverified — Vault's creation API]`). **Never delete a `siwa_token_kek_*` secret while any
+   `signin_provider_token` or pending queue row still names its id; there is no re-wrap job yet, so until there is one a KEK is never retired.**
+4. Schedule `signin-revocation-drain` (e.g. every 5 minutes, `POST` with `Authorization: Bearer <service-role key>`).
+5. **Run migration 0035 on a real Supabase branch first** and check the two `[unverified]` database assumptions below.
+6. Calendar the client-secret re-mint, and run the expiry check monthly (next section).
+
+### The monthly client-secret expiry check (§4.8)
+
+`APPLE_SIWA_CLIENT_SECRET_JWT=<the secret pasted into Supabase Auth> node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]` (or the JWT
+on stdin). Exit **0** if more than 30 days remain; exit **1** if it is expired, expires within 30 days, is malformed or has no `exp` (it never
+passes by default); exit 2 with no input. It prints when the secret expires, never the secret. Plain Node, no dependencies; the decision logic
+is mirrored in `_shared/signin/secret-expiry.ts` and one unit test runs both against the same fixtures. **Not wired to a scheduler**: a
+scheduled job needs the JWT as a secret in some CI or cron environment, which is an operator decision (the server's own secrets are 10
+minutes long and cannot expire on anyone; only the dashboard copy can).
+
+### Needs live credentials or a device (not proven here)
+
+- Apple's real JWKS / token / revoke endpoints and shapes, the nonce convention a real iOS build produces, `invalid_grant` vs. other 400 bodies.
+- `signInWithIdToken` / `linkIdentity` behaviour in Supabase Auth, and **GoTrue's automatic linking by email** (below).
+- Supabase Auth's `verifyOtp` error statuses (a wrong/expired code is read as 400/401/403/404/422; anything else throws and is not counted).
+- A real private-relay address through custom SMTP.
+- Android and web sign-in (a *Services ID*, a different `aud`): `GR_APPLE_SIWA_CLIENT_ID` is one value today.
+
+### `[unverified — training knowledge]` (all of it, in one place)
+
+Apple: the issuer string; the JWKS URL `https://appleid.apple.com/auth/keys` and RS256/`kid`; the token and revoke URLs, their form fields and
+status/error conventions; the client-secret claim set and the ≤ 6-month limit; `email_verified` / `is_private_email` possibly being strings; the
+hashed-nonce convention. Google: `https://oauth2.googleapis.com/revoke` and its `invalid_token` 400. Supabase: **(a)** that the project's
+`postgres` role can `GRANT` on `auth.identities` to `private_definer` and that table carries no RLS hiding its rows from a non-owner definer
+(the same class of caveat as Vault, above); **(b)** GoTrue's `auth.identities` columns (`provider_id`, `identity_data`, the generated `email`,
+`ON DELETE CASCADE` from `auth.users`) and that a row INSERTed there is accepted by GoTrue as a real identity — **Supabase's supported surface
+for linking an id-token identity server-side is not known to this build; if the P4 spike finds one, swap the link/unlink definers for it (the
+Edge code reaches them only through `SigninRepo`)**; (c) Vault accepting `siwa_token_kek_<id>` names and `decrypted_secrets` exposing
+`created_at` (0029 already relies on the latter); `verifyOtp`'s error statuses.
+
+### The honest gap that matters most: sign-in itself happens inside GoTrue
+
+§3.4 rule (2) says a *social sign-in* whose email matches an existing account must not auto-link. **A sign-in done natively through Supabase
+Auth (`signInWithIdToken`) happens inside GoTrue, which this server never sees**, and GoTrue links same-verified-email identities
+automatically by default `[unverified — training knowledge]`. What this build enforces is every path that goes through `me-signin-methods`
+(link while signed in, the OTP-proven link, unlink, grant capture). To make rule (2) true at the sign-in moment the P4 spike must either turn
+GoTrue's automatic linking off, or route the first social sign-in through a pre-check. Until it does, a player can still be auto-linked by
+GoTrue before this endpoint is ever called. Also for P4: **a native sign-in creates the Apple identity without going through this endpoint, so
+no refresh token is captured**; the client must call `link` with the token and the authorization code right after sign-in (it is idempotent:
+`created: false`, and the token is stored) or the grant will not be revocable.
+
+### Residual risks and accepted follow-ups (O-numbers are this work's own)
+
+- **O1. No single-use nonce.** The nonce binds a token to a client-held secret and the caller's session, not to "used once"; a replay needs the
+  caller's valid JWT *and* the single-use authorization code. Cheap to add (a nonce tombstone like `consumed_nonce`); not built.
+- **O2. Google capture is a TODO(P4).** `link` for Google is 501 `provider_not_supported` (it needs Google's code exchange and a native-flow
+  decision). The Google *revoker* is built and unit-tested, so nothing changes in the queue once capture exists.
+- **O3. One Apple client id.** Android/web (Services ID) needs a second `aud` and a secret with `sub` = that id.
+- **O4. KEK rotation has no re-wrap job.** A new KEK wraps new DEKs; old KEKs must stay while any row names them.
+- **O5. Edge-role lane (E-numbers continue the PR1 list).** Rebased onto PR2's `EDGE_DB_MODE`. 0035 ships the `_for_actor` wrappers (edge_actor) and
+  grants the queue operations and the KEK reader to `edge_system`, with **no new edge policy and no new edge table grant** (every edge path is a
+  definer; `edge_actor` still reads `(user_id, provider)` only; check 10's allowlist is unchanged and the two new tables are invisible to checks
+  11/12). In `edge` mode `privileged.ts` runs per-user ops through the `_for_actor` definers, the OTP counter as the actor, and the queue ops and
+  KEK reader as `edge_system` (`openScopedTx("system")`); the full Deno suite passes in both modes. Open PR3 items: (i) the **OTP-proven link to
+  another account** has no edge definer on purpose (it would be an "attach an identity to any account" primitive), so it answers
+  `501 email_proof_link_unavailable` in `edge` mode only; (ii) `private.signin_find_account_by_email` is an account-existence oracle for any
+  edge_actor (returns only an id, no worse than R3); (iii) retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
+- **O6. The OTP verification is not bounded by the vendor timeout** (Supabase Auth, through supabase-js): only the 15 s request race bounds it.
+- **O7. `GET` (list) is not rate-limited** (the plan's 10/user/h is for linking); it is one cheap read.
+- **O8. `auth.identities` is written by a definer.** If the real project refuses the grant, the migration fails loudly rather than the endpoint
+  failing at run time (the grant is in 0035 itself).
+
+### Verification (rebased onto App Attest `0daf155`; 0035 follows 0034)
+
+- **`tools/db/test.sh`, the FULL harness, exit 0 in `HARNESS_MODE=superuser` and `restricted`** (a fresh cluster each, each on its own port): the two
+  H2 no-`migration_owner` checks apply 0035; pgTAP **21 files, 1773 assertions** (`17_signin_providers.sql` and `18_signin_providers_edge.sql` beside
+  the App Attest and edge-role files; `10_function_inventory.sql` passes unchanged); the Deno integration suite runs in BOTH `EDGE_DB_MODE`s,
+  **189 tests per mode** (legacy and edge, 17 of them `signin-methods.deno.test.ts`); `verify-function-inventory.mjs` OK (checks 1-13, `edge_policy_allowlist`
+  unchanged, the 8 new `private_definer` policies in the checked-in fixture); service-role lint clean. (One unrelated catalog-promotion test,
+  `split_from conflicts fail closed`, failed once in edge mode on a salt-derived id and passed on the rerun and in the other harness mode.)
+- Units: **40 files / 756 tests** (`pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts`); the lint's own **243** tests.
+  `deno check --frozen` and `deno cache --frozen` (fresh `DENO_DIR`) over the entrypoint lists in CI (11 and 11 files, including `devices-attest-key` and the
+  three sign-in entrypoints), both exit 0; **no new dependency, no new import specifier** (every import is relative; the lint's positive allow-list passes).
+- `check-migrations-immutable.sh --base 0daf155` (34 files byte-identical) and `--self-test`; `gitleaks dir` no leaks; `pnpm -r typecheck` passes for every
+  workspace project (`apps/site` after `GOLFRAVEN_DEMO=1 node scripts/emit-indexability.mjs`).
+- **Edge mode, as built.** Per-user sign-in operations call the `_for_actor` definers as `edge_actor`; the OTP counter runs as the actor; the queue operations and
+  the KEK reader run as `edge_system` (`openScopedTx("system")`). No grant or policy was added or broadened. The one behavioural difference is the OTP-proven
+  link to another account: `501 email_proof_link_unavailable` in `edge` mode only (unit cells in `signin-methods-handler.test.ts`, a mode-aware integration
+  test); recorded as the PR3 item under O5.
+- **60 mutations (run before the rebase), each applied to a `/tmp` copy, every one CAUGHT** (5 survived the first pass and each is now closed by a new cell). TS (44): the id-token
+  `iss` / `aud` / `exp` / nonce-mismatch / missing-nonce / signature-ignored / `alg`-check / reason-drift / JWKS-refetch-floor mutations; handler: rule (2) removed,
+  relay on the proof path, OTP cap not enforced, a transport failure counted, a proof for another account accepted, another Apple user's code accepted,
+  unrecorded grant not revoked, an unverified email trusted, Google link allowed, a second Apple ID allowed; orchestrator: delete before revoke, revocation
+  errors blocking the deletion; revocation: failure code dropped, failures recorded as success, unconfigured Apple treated as revoked, no backoff growth;
+  envelope: provider / kek id not in the AAD, a constant DEK, a constant IV, a kek-id mismatch tolerated; client secret: never re-minted, an unusable key
+  falling back instead of failing closed, a lifetime past Apple's ceiling; safe-fetch: redirects followed, allow-list by suffix, no stream size cap, no timeout,
+  http allowed; Apple client: `invalid_grant` not a grant error, every 400 on revoke treated as revoked, a 5xx on revoke treated as revoked; request shape:
+  an unvalidated OTP code, unknown (user-id) fields ignored; expiry check without its 30-day threshold. SQL (11): the last-method check removed, the
+  identity-conflict check dropped, enqueue resetting a queued row, `pd_signin_token_select` broadened to `true`, the KEK reader granted to `authenticated`,
+  FORCE RLS removed from the queue, `service_role` granted the queue, claim without a lease, claim without `SKIP LOCKED` (caught by the Deno suite with a real second
+  session), purge deleting pending rows, an arbitrary error string stored. `privileged.ts` (5, against the real cluster): `55000` no longer mapped to 422, a half-set
+  Apple configuration counted as configured, the drain's bearer check always true, OTP failures not persisted, `23505` no longer mapped.
+- **Not run:** PG16 (the harness defaults to PG17, `supabase/config.toml`'s pin); any test against a real Supabase project, Apple or Google; prettier and any deploy (out of scope).
