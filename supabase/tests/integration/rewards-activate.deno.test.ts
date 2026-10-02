@@ -18,7 +18,7 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { adminSql, createTestUser, freshUuid, insertCatalogVersion, makeActor, siteVersionFor, FAC_X, CRS_X1, NASHVILLE } from "./_helpers.ts";
-import { hitRateLimitForActor, withOwnership } from "../../functions/_shared/privileged.ts";
+import { getContainedClosedSocketWrites, hitRateLimitForActor, isPostgresJsClosedSocketWrite, withOwnership } from "../../functions/_shared/privileged.ts";
 import { enforceActivationRateLimits, handleActivation, type ActivationDeps } from "../../functions/_shared/rewards/activate-handler.ts";
 import { computeRequestBinding, toBase64Url, toHex } from "../../functions/_shared/rewards/binding.ts";
 import { verifyAppAttestAssertion, verifyP256WebCrypto } from "../../functions/_shared/rewards/app-attest.ts";
@@ -1517,6 +1517,7 @@ Deno.test("N5: two plays whose codes sit on the same offers in OPPOSITE order, h
 
 Deno.test("LOW: a transaction_timeout FATAL (connection killed mid-transaction) answers 503 and does NOT escape as an uncaught postgres.js TypeError", DT, async () => {
   const u = await freshUser("tx-timeout");
+  const before = getContainedClosedSocketWrites();
   let status = 0;
   try {
     await withOwnership(u.actor, async (repo: Repo) => {
@@ -1529,4 +1530,20 @@ Deno.test("LOW: a transaction_timeout FATAL (connection killed mid-transaction) 
   }
   assertEquals(status, 503);
   await new Promise((r) => setTimeout(r, 1500)); // an uncaught error would fail the runner here
+  assert(getContainedClosedSocketWrites() > before, "the guard counted the contained write");
+});
+
+Deno.test("F20: the closed-socket guard matches ONLY the pinned postgres.js module URL (and only that exact TypeError)", DT, () => {
+  const mk = (msg: string, stackFile: string, fn = "nextWrite") => {
+    const e = new TypeError(msg);
+    e.stack = `TypeError: ${msg}\n    at ${fn} (${stackFile}:253:22)`;
+    return e;
+  };
+  const MSG = "Cannot read properties of null (reading 'write')";
+  assertEquals(isPostgresJsClosedSocketWrite(mk(MSG, "https://deno.land/x/postgresjs@v3.4.5/src/connection.js")), true);
+  assertEquals(isPostgresJsClosedSocketWrite(mk(MSG, "https://deno.land/x/postgresjs@v3.4.6/src/connection.js")), false, "another version: not ours");
+  assertEquals(isPostgresJsClosedSocketWrite(mk(MSG, "file:///app/some/connection.js")), false, "same file name elsewhere");
+  assertEquals(isPostgresJsClosedSocketWrite(mk(MSG, "https://deno.land/x/postgresjs@v3.4.5/src/connection.js", "other")), false, "another function");
+  assertEquals(isPostgresJsClosedSocketWrite(mk("Cannot read properties of null (reading 'read')", "https://deno.land/x/postgresjs@v3.4.5/src/connection.js")), false);
+  assertEquals(isPostgresJsClosedSocketWrite(new Error(MSG)), false, "not a TypeError");
 });
