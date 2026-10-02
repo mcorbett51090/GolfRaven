@@ -140,9 +140,10 @@ export const frCA: Record<MessageKey, string> = {
   "me.catalog.keysetProblem": "Cette version n'a pas de clés de signature de catalogue valides : aucun catalogue ne peut être vérifié ni téléchargé.",
   "me.catalog.reset": "Réinitialiser les données du catalogue",
   "me.catalog.reset.confirmTitle": "Réinitialiser les données du catalogue?",
-  "me.catalog.reset.confirmBody": "Cette action supprime le catalogue enregistré et tout paramètre de catalogue endommagé, puis télécharge de nouveau le catalogue. Vos parties et votre compte ne sont pas touchés.",
+  "me.catalog.reset.confirmBody": "Cette action supprime le catalogue enregistré et les paramètres de catalogue endommagés, puis tente de télécharger de nouveau le catalogue. Si le téléchargement échoue, vous n'aurez aucun catalogue tant qu'il n'aura pas réussi. Vos parties et votre compte ne sont pas touchés.",
   "me.catalog.reset.confirm": "Réinitialiser",
-  "me.catalog.reset.done": "Les données du catalogue ont été réinitialisées. Nouveau téléchargement du catalogue…",
+  "me.catalog.reset.done": "Les données du catalogue ont été réinitialisées. Tentative de téléchargement du catalogue…",
+  "me.catalog.reset.nothing": "Rien à réinitialiser : le catalogue enregistré a été conservé.",
   "me.catalog.reset.failed": "Impossible de réinitialiser les données du catalogue. Mettez à jour GolfRaven et réessayez.",
   "me.version": "Version de l'application {version}",
 

@@ -32,16 +32,39 @@
  *        `globalThis.Buffer`, `module.require(...)` and `eval(...)` all leave the
  *        sentinel in the output. The only "text" check left is a substring search
  *        for that sentinel and for `__require`, both tool-generated.
+ *      - `.constructor(...)`: the sentinel only sees the NAMES `eval` / `Function`,
+ *        and string-as-code does not need to name either — `(() => {}).constructor("…")()`,
+ *        `[].constructor.constructor("…")()` and the AsyncFunction / GeneratorFunction
+ *        constructors reached via `Object.getPrototypeOf(async function () {}).constructor`
+ *        all reach `Function` without it. So a property access `constructor` that is
+ *        IMMEDIATELY CALLED (or tagged-template-called) is refused. This one IS a
+ *        text search, but over esbuild's printed output rather than the author's source,
+ *        so it sees one canonical spelling: comments are gone, whitespace is normal, and
+ *        `x["constructor"]`, `x["construct" + "or"]` (folded) and `x?.constructor?.()`
+ *        all print as one of two shapes. The real `manifest-core.ts` output has no such
+ *        call (its only `"constructor"` is a string in a `Set`), so the rule has no
+ *        false positive there; its only false-positive source is a STRING that contains
+ *        the text `.constructor(`, which fails closed (a visible violation, never a miss).
  * 2. TYPES (the TypeScript checker with `lib: es2022` and NO `@types/node`).
  *    esbuild erases types, so `import type { X } from "node:buffer"` and a
  *    `Buffer` annotation vanish from the bundle; the checker cannot resolve
  *    either. This is the one thing layer 1 cannot see.
  *
- * Residual (honest): the bundler resolves modules the way Node does, so a
- * specifier that resolves to an installed package is caught by the
- * "inputs outside `src/`" rule, not by name; a forbidden identifier smuggled
- * through a string that is later evaluated needs `eval`/`Function`, both of which
- * are forbidden; `import.meta` is deliberately allowed.
+ * Residual (honest):
+ *  - The bundler resolves modules the way Node does, so a specifier that resolves
+ *    to an installed package is caught by the "inputs outside `src/`" rule, not by name.
+ *  - `import.meta` is deliberately allowed.
+ *  - Reaching `Function` (and so evaluating a string as code) does NOT need the
+ *    names `eval` / `Function`, so the sentinel alone does not close it; the
+ *    `.constructor(` rule closes the spellings that CALL a `constructor` property.
+ *    It does not see: a destructured `const { constructor: F } = fn; F("…")`, the
+ *    constructor passed as a VALUE (`Reflect.apply(x.constructor, …)`, `.call`,
+ *    `.bind`), a key that is not a literal at build time (`x[k]`, `Reflect.get(x, k)`,
+ *    `Object.getOwnPropertyDescriptor(x, k)` with `k` assembled at runtime), or string-as-code
+ *    through a host API the type layer does not know (the type layer, with no DOM and no
+ *    Node types, does reject `setTimeout("…")`). No static check closes the
+ *    runtime-assembled key; what keeps those out is that a module must import nothing,
+ *    reach no global, and be reviewed. Pinned as known gaps in `manifest-core-neutral.test.ts`.
  */
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -88,7 +111,9 @@ export interface BundleReport {
   output: string;
 }
 
-export type NeutralitySource = { file: string } | { text: string };
+/** `loader: "css"` exists so a non-JS import edge (`@import`, `url()`) can be produced from stdin, which is
+ * exempt from the "outside `src/`" rule; the type layer is only for `ts` sources. */
+export type NeutralitySource = { file: string } | { text: string; loader?: "ts" | "css" };
 
 /** Bundles one source for the `neutral` platform and reports what it found. */
 export async function bundleNeutral(source: NeutralitySource, allowed: readonly string[]): Promise<BundleReport> {
@@ -97,7 +122,7 @@ export async function bundleNeutral(source: NeutralitySource, allowed: readonly 
     const res = await build({
       ...("file" in source
         ? { entryPoints: [source.file] }
-        : { stdin: { contents: source.text, loader: "ts" as const, resolveDir: join(CATALOG_ROOT, "src"), sourcefile: "fixture.ts" } }),
+        : { stdin: { contents: source.text, loader: source.loader ?? ("ts" as const), resolveDir: join(CATALOG_ROOT, "src"), sourcefile: "fixture.ts" } }),
       absWorkingDir: CATALOG_ROOT,
       bundle: true,
       write: false,
@@ -126,6 +151,10 @@ function report(meta: Metafile, output: string, warnings: string[]): BundleRepor
   return { errors: [], warnings, inputs: Object.keys(meta.inputs).map((p) => p.split(sep).join("/")), imports, output };
 }
 
+/** A `constructor` property that is called: `x.constructor(`, `x?.constructor?.(`, `x["constructor"](`, and the
+ * tagged-template forms. Matched against esbuild's PRINTED output (see the header). */
+const CONSTRUCTOR_CALL_RES: readonly RegExp[] = [/(?:\.|\?\.)\s*constructor\s*(?:\?\.\s*)?[(`]/, /\[\s*(["'`])constructor\1\s*\]\s*(?:\?\.\s*)?[(`]/];
+
 /** Every reason the bundle says the source is not neutral, or `[]`. */
 export function bundleViolations(r: BundleReport, allowed: readonly string[]): string[] {
   const out: string[] = [];
@@ -143,6 +172,7 @@ export function bundleViolations(r: BundleReport, allowed: readonly string[]): s
     }
   }
   for (const m of new Set([...r.output.matchAll(SENTINEL_RE)].map((x) => x[1]!))) out.push(`free identifier ${m} (a Node global or dynamic-code escape)`);
+  if (CONSTRUCTOR_CALL_RES.some((re) => re.test(r.output))) out.push("a call of a .constructor property (it reaches Function / AsyncFunction, so it evaluates a string as code without naming eval or Function)");
   if (/\b__require\b/.test(r.output)) out.push("a dynamic import() / require() the bundler could not resolve statically (its __require helper was emitted)");
   return out;
 }

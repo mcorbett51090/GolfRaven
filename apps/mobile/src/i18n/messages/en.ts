@@ -137,9 +137,10 @@ export const en = {
   "me.catalog.keysetProblem": "This build has no valid catalog signing keys, so no catalog can be verified or downloaded.",
   "me.catalog.reset": "Reset catalog data",
   "me.catalog.reset.confirmTitle": "Reset catalog data?",
-  "me.catalog.reset.confirmBody": "This deletes the saved catalog and any damaged catalog settings, then downloads the catalog again. Your plays and account are not affected.",
+  "me.catalog.reset.confirmBody": "This deletes the saved catalog and the damaged catalog settings, then tries to download the catalog again. If the download fails, there will be no catalog until it succeeds. Your plays and account are not affected.",
   "me.catalog.reset.confirm": "Reset",
-  "me.catalog.reset.done": "Catalog data was reset. Downloading the catalog again…",
+  "me.catalog.reset.done": "Catalog data was reset. Trying to download the catalog again…",
+  "me.catalog.reset.nothing": "Nothing needed resetting, so the saved catalog was kept.",
   "me.catalog.reset.failed": "Catalog data could not be reset. Update GolfRaven and try again.",
   "me.version": "App version {version}",
 
