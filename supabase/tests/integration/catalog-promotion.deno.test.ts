@@ -239,7 +239,10 @@ Deno.test("R3: holes, hole details and roster versions/members are imported (and
   const course = await adminSql()`select holes from app.catalog_course where id = ${i.k}`;
   assertEquals(Number(course[0]!.holes), 9);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_hole where course_id = '${i.k}'`), 2);
-  assertEquals(await withOwnership({ uid: freshUuid(), role: "authenticated" }, (repo) => repo.catalog.courseHoleCount(i.k)), 2, "catalog_hole rows win");
+  // (A real user: in EDGE_DB_MODE=edge the actor is BOUND, and `private.bind_actor` refuses a uid that is not in auth.users.)
+  const reader = freshUuid();
+  await createTestUser(reader, "r3-reader");
+  assertEquals(await withOwnership({ uid: reader, role: "authenticated" }, (repo) => repo.catalog.courseHoleCount(i.k)), 2, "catalog_hole rows win");
 
   const rv = await adminSql()`select version, completion_rule, completion_rule_n, completion_rule_source, tracking_starts_on from app.catalog_roster_version where trail_id = ${i.trl} order by version`;
   assertEquals(rv.length, 2);
@@ -270,7 +273,9 @@ Deno.test("R3: an imported course with an UNKNOWN hole count never gets the 9-ho
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "verified", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "No Holes Known" }]), // neither holes nor holesDetail
   });
-  const n = await withOwnership({ uid: freshUuid(), role: "authenticated" }, (repo) => repo.catalog.courseHoleCount(i.k));
+  const reader = freshUuid();
+  await createTestUser(reader, "r3-reader-2");
+  const n = await withOwnership({ uid: reader, role: "authenticated" }, (repo) => repo.catalog.courseHoleCount(i.k));
   assertEquals(n, 0);
   const { dwellHolesFromCount } = await import("../../functions/_shared/evidence/handler.ts");
   assertEquals(dwellHolesFromCount(n), 18);

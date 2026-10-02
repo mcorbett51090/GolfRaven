@@ -1516,6 +1516,12 @@ Deno.test("N5: two plays whose codes sit on the same offers in OPPOSITE order, h
 });
 
 Deno.test("LOW: a transaction_timeout FATAL (connection killed mid-transaction) answers 503 and does NOT escape as an uncaught postgres.js TypeError", DT, async () => {
+  // `transaction_timeout` is PostgreSQL 17+. On 16 the GUC does not exist, privileged.ts (supportsTransactionTimeout) correctly
+  // never sets it, so there is no FATAL to survive: say so loudly rather than fail on a premise the server cannot meet.
+  if ((await adminSql()`select 1 from pg_settings where name = 'transaction_timeout'`).length === 0) {
+    console.warn("SKIPPED (not a pass): this server has no transaction_timeout GUC (PostgreSQL < 17); the FATAL this test provokes cannot happen");
+    return;
+  }
   const u = await freshUser("tx-timeout");
   const before = getContainedClosedSocketWrites();
   let status = 0;
@@ -1529,7 +1535,11 @@ Deno.test("LOW: a transaction_timeout FATAL (connection killed mid-transaction) 
     if (e instanceof HttpError) status = e.status;
   }
   assertEquals(status, 503);
-  await new Promise((r) => setTimeout(r, 1500)); // an uncaught error would fail the runner here
+  // An uncaught error would fail the runner here. The write onto the dead connection happens when the operation's own 13.5 s
+  // sleep ends, i.e. only a few ms after the 12 s kill + 1.5 s this test used to wait -- a margin that edge mode's slightly
+  // longer set-up (role, timeouts, bind) before the sleep tipped the wrong way. Poll for the guard instead of racing it.
+  for (let i = 0; i < 50 && getContainedClosedSocketWrites() <= before; i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 300));
   assert(getContainedClosedSocketWrites() > before, "the guard counted the contained write");
 });
 

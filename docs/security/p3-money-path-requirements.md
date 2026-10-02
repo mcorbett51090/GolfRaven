@@ -2358,3 +2358,107 @@ design). Two provisioning mutations (the plaintext back in the statement; a corr
 and eight pre-existing misconfigurations of an edge role (LOGIN, BYPASSRLS, REPLICATION, CREATEROLE, membership of
 `service_role`, a foreign member with SET, INHERIT, ADMIN) are each refused by 0032's assertion block while a clean cluster
 applies it.
+
+## Owner decisions (2026-10-02)
+
+Recorded from Matt, today. They bind the work below and the launch checklist.
+
+- **Fix-coordinate retention (the §8.6 exception): KEEP re-pick**, with the 30-day `FIX_COORDS_RETENTION_DAYS` limit at stub or split-family
+  courses (`rescoreBacklog.purgeFixCoords` / `private.purge_fix_coords` enforce it). **It must be disclosed in the privacy label.**
+- **Install-link fraud tombstone (`app.install_link_account`, F19): retention is 24 months from `first_seen_at`**, mirroring
+  `receipt_fingerprint`. Implemented in 0033 (`private.purge_install_link_tombstones`, below). Before launch it **still needs privacy-officer /
+  PIA sign-off and a privacy-policy disclosure**.
+- **Git history is NOT rewritten** for the workers.dev subdomain / slug in `fa1429a`: the values are low-sensitivity and already replaced.
+- **Merge bar: CI green AND security gate PASS.**
+
+## Edge role PR2 (2026-10-02): the TypeScript behind `EDGE_DB_MODE` (follow-up 6, step 2 of 4)
+
+Follow-up 6 is still open until PR4 (the default flips, `legacy` is deleted, the lint pass lands). PR2 adds the temporary switch in
+`supabase/functions/_shared/privileged.ts` (`legacy` default = today's path; `edge` = `edge_actor` through `GOLFRAVEN_EDGE_DB_URL`, connecting
+as `edge_gateway`), the startup self-check, `openScopedTx`, and 0033. Design as built, the PR3 boundary and the **behaviour differences between
+the modes**: [`docs/security/edge-role-design.md`](edge-role-design.md) section 11.
+
+- **CI runs the whole Deno integration suite in BOTH modes** (`tools/db/test-deno-integration.sh`; `tools/db/test.sh` clones the database once per
+  mode and generates the `edge_gateway` test password at runtime), in both HARNESS_MODEs. New `edge-role.deno.test.ts` (11 tests): the self-check
+  refuses a non-`edge_gateway` / BYPASSRLS / superuser URL and a membership of `service_role` / `authenticated`, as a plain Error, not cached; an
+  UNSCOPED raw query through `openScopedTx` returns 0 foreign rows (and an unscoped UPDATE changes only the bound actor's row); a forgotten bind and a
+  bind of the wrong uid fail closed before the operation runs; the `edge_system` kind reads no personal data; a rate-limit hit uses the bare key.
+- **A finding the suite made, now closed: dropping `FOR UPDATE` from `lockOwnReward` is NOT safe** (the brief asked for it on the argument that the
+  activation definers lock the row). The handler decides hold-vs-issue from state it reads before those functions lock; under a race the second request
+  turned an already-issued code into `held_review`. 0033 adds `private.lock_own_reward_for_actor` (the same `FOR UPDATE`, taken by a definer for the bound
+  actor; a row lock lasts to the end of the transaction), and edge mode calls it. Legacy keeps its `for update` verbatim.
+- **PR3 boundary:** `import-catalog` stays on the LEGACY pool in `edge` mode (so it needs both URLs): the importer repo, the drain's list reads and both
+  purges are `withSystemCatalogImport`. Not small: the importer statements, the drain's `queued_input` re-read as the row's owner (the definer list omits
+  it), new orchestrator signatures and unit tests. The drains' per-row user transactions do run as edge_actor, binding the owner with `bind_actor`, not a delegate.
+
+- **Verification (PR2 on the npm:-specifier base `b63a018`, 2026-10-02):** `tools/db/test.sh` green in HARNESS_MODE=superuser and =restricted, each on a
+  fresh cluster, on **PostgreSQL 17 and again on PostgreSQL 16**: pgTAP `Files=17, Tests=1439, Result: PASS` (matrix 16 is plan 711); the Deno integration
+  suite **156 passed / 0 failed in `EDGE_DB_MODE=legacy` AND 156 / 0 in `EDGE_DB_MODE=edge`** (each on its own clone of the migrated database);
+  `verify-function-inventory: OK`; `service-role-lint: clean`. Also green: unit suite (29 files, 495 tests), `service-role-lint` tests (4 files, 142; the four
+  structural pins on `privileged.ts` were updated for `openScopedTx` and `buildRepo(..., mode)`, the lint's rules are unchanged -- that is PR4),
+  `deno check --frozen` and `deno cache --frozen` on every entry point against a fresh `DENO_DIR`, `check-migrations-immutable.sh --base d0dc79d` (32 files
+  byte-identical) and `--self-test`, `gitleaks dir` (no leaks). Three test-harness traps closed on the way: `Deno.env` is process-wide, so
+  `edge-role.deno.test.ts` sets `EDGE_DB_MODE=edge` per test and restores it (a file-level set had turned every later file of the `legacy` pass into an
+  edge-mode run); postgres.js v3.4.5 reads a URL password only from userinfo or `PGPASSWORD` (a `?password=` query parameter is sent to the server as a
+  startup parameter and refused), so the test harness hands the generated password over as `PGPASSWORD`; and the `transaction_timeout FATAL` test
+  raced its own 13.5 s sleep against a 12 s kill plus a fixed 1.5 s wait (edge mode's slightly longer set-up tipped it, 3 of 3 in isolation) -- it now polls
+  for the guard, and says SKIPPED (not a pass) on a server without the PostgreSQL 17 `transaction_timeout` GUC.
+
+- **Mutation proofs for the 0033 pieces (2026-10-02, `/tmp` copies only, matrix 16 unless noted; 23 mutants):** the first pass killed 12 and left 11
+  alive, and the survivors were the same layered-defence shape: the purge retention is enforced twice (the `private_definer` policies and the function body's
+  own cutoff), and the hold post-condition's two branches mask each other when the swapped-in body is a pure no-op, so a mutant of one layer was hidden by
+  the other. Matrix 16 now has section 11 (harness role, cells 706-711; plan 711): the two policies proved alone (`private_definer` sees and deletes only
+  rows older than 24 months; the READ policy is widened inside a rolled-back transaction so the DELETE policy stands alone), the function body proved alone
+  (both policies widened in a rolled-back transaction, the 23-month row is still kept), and the post-condition proved per branch (a deliberately incomplete
+  `app.hold_play_rewards`, rolled back, that skips the entitlements, and one that skips the codes; plus the unswapped control). After that every mutant is
+  killed except one: **L3, dropping `AND user_id = v_uid` from `lock_own_reward_for_actor`, is an equivalent mutant** (the actor-keyed
+  `pd_edge_act_offer_code_*` / `pd_edge_act_entitlement_*` policies of 0032 independently hide every other user's row from `private_definer`; the predicate
+  repeats the same rule on purpose). Killed: lock without `FOR UPDATE` (either table), no-actor guard removed, extra EXECUTE grant (matrix 10 inventory),
+  post-condition removed or weakened in either branch or accepting `issued`, cascade dispatch forced to either lane or keyed on `session_user`, retention
+  12 or 36 months in the body or in either policy, read or delete policy `USING (true)`, cutoff dropped from the body, bound check removed, `LIMIT` ignored,
+  EXECUTE granted to `edge_actor`, `PUBLIC` revoke dropped. Section 11 runs as the harness role in both HARNESS_MODEs (a restricted `migration_owner` gets
+  `SET ROLE edge_actor` through a `GRANT ... WITH SET TRUE` that the cell's own `ROLLBACK` undoes).
+
+### PR1b gate LOWs and NITs (all recorded; fixed where cheap)
+
+- **LOW-1 (closed in 0033).** `play_held_review_cascade` chose its lane with `has_table_privilege('app.offer_code', 'UPDATE')`; a role with the table
+  privilege but RLS-limited visibility (`private_definer`) would have held 0 rows silently. It now dispatches on `current_user = 'edge_actor'` (the
+  definer lane) and every other role keeps the direct lane; and `private.hold_play_rewards_for_actor` has a **post-condition**: after the hold, no code or
+  entitlement of the play may remain in a non-held, non-terminal state (it raises 55000).
+- **LOW-2 (closed).** Check 13 now also catches comma lists (`FROM a, pg_class c`) and `DELETE ... USING pg_roles`, with must-fail fixtures (and a
+  clean fixture for qualified comma-list members) in `10_function_inventory.sql`; `verify-function-inventory.mjs` carries the same pattern.
+- **LOW-3 (documented, R2).** `p_decision` stays a caller-supplied argument of `private.activate_*_for_actor` (`activate` or `held_review`): the
+  DeviceCheck verdict, the §7.5 decision table and the "prior reward on this device across accounts" check are **TypeScript-only**. The database
+  backstops rows 2 and 3 (an open `attestation_failed` signal, an unattestable basis, a held play, an unreserved budget) but cannot decide the rest; a
+  compromised runtime can therefore choose `activate` for a reward it should have held, within those backstops. Inside the R6 boundary; a database-side
+  decision table is not planned.
+- **LOW-4 (documented).** `Repo#device.ensureOwn` already uses `ON CONFLICT (id) DO NOTHING` plus a re-read. What remains is an existence oracle on the
+  `app.device` primary key: a probe with another user's device id gets 409 `device_owned_by_other_user`, a fresh id succeeds. The id is an
+  unguessable uuid the caller must already hold; it reveals "this id is registered to someone", nothing else. Same in both modes; accepted.
+- **NIT (closed).** With `--password-env`, `provision-edge-login.sh` unsets the variable before it spawns any child; `test-provision-edge-login.sh`
+  proves it with a psql stand-in that records its environment.
+- **NIT (noted, design doc section 9).** The App Attest key re-registration path (not built) needs a purpose-built definer: the monotonic counter trigger
+  (0032 M2) blocks the counter reset a new key implies, and edge_actor cannot write `attest_key_id` / `attest_public_key`.
+- **NIT (noted).** A single-CTE challenge+token insert is refused under edge_actor (the token's own-challenge `EXISTS` cannot see a row the same statement
+  inserts); the Repo already inserts them in two statements.
+- **Gate ruling, recorded:** un-holding your own play (`play.held_review` is writable by edge_actor, and the scorer legitimately lifts holds) releases
+  **nothing today** (the cascade is one-way). It **must be closed before the earn-path definer ships (E4), and no later than the PR4 gate.**
+
+### Install-link tombstone retention (owner decision, 0033)
+
+`private.purge_install_link_tombstones(p_max_rows integer)` (SECURITY DEFINER, owned by `private_definer`, `search_path = ''`): deletes
+`app.install_link_account` rows whose `first_seen_at` is more than **24 months** old, oldest first, at most `p_max_rows` (1..100000) per call, and returns the
+count. The retention is the constant `v_retention` in the function body; two ROW-NARROW `private_definer` policies (`pd_purge_install_link_read` /
+`_delete`, in the allowlist and the fixture) repeat the cutoff so the function cannot see or delete a younger row even if its body were wrong. EXECUTE:
+`service_role` and `edge_system` only (inventory row; `edge_actor` is refused, with a cell). `16_edge_role.sql` proves a 25-month-old row and a 40-month-old row
+are purged (the bound is honoured, oldest first), a 23-month-old row and a young one are kept, and the NULL / 0 / over-100000 bounds are refused. The import /
+drain pass calls it where it calls the fix-coordinate purge (`drainRescoreBacklog`, `RescoreBacklogResult.tombstonesPurged`).
+
+### Accepted follow-ups (append-only)
+
+- **E5 (launch-blocking).** Both retention purges (`purge_fix_coords`, 30 days; `purge_install_link_tombstones`, 24 months) run ONLY inside a catalog import's
+  drain pass. **Schedule them independently of an import** (a cron / scheduled function) before launch, so a quiet catalog cannot stop retention. Until then the
+  retention promises in the privacy label depend on an import happening.
+- **E6.** Before launch: privacy-officer / PIA sign-off and a privacy-policy disclosure for the install-link tombstone; disclose the fix-coordinate re-pick
+  exception in the privacy label (owner decisions above).
+- **E7 (PR3).** Run `import-catalog` entirely as edge_system with delegate binders; then `edge` mode needs one URL.

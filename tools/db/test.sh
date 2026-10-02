@@ -242,13 +242,17 @@ run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U '$DBUSER' -v ON_ERROR_STOP=
 echo "tools/db/test.sh: provisioning the edge_gateway login (tools/db/provision-edge-login.sh, throwaway random password on stdin)"
 EDGE_GATEWAY_TEST_PW="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PSQL_BIN='${PSQL[0]}' bash '$ROOT_DIR/tools/db/provision-edge-login.sh' --password-stdin"
-unset EDGE_GATEWAY_TEST_PW
+# (EDGE_GATEWAY_TEST_PW is kept, in this shell only, until the Deno step below: edge-mode integration tests connect as
+# edge_gateway with it, as a real client would. It is random, generated here at runtime, and never written to a file.)
 # 5b'. The provisioning script sends a SCRAM-SHA-256 VERIFIER, never the plaintext (edge-role PR1b, gate finding M1):
 # prove the verifier is valid (a real SCRAM login with the plaintext; wrong/missing password refused) and that a FAILED
 # provisioning leaves no plaintext in the server log (with a control that the old plaintext form does leak). It edits
 # and restores this cluster's pg_hba.conf, so it needs the data directory and the server log.
 echo "tools/db/test.sh: provisioning proof -- SCRAM verifier login + no plaintext in the server log (tools/db/test-provision-edge-login.sh)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PGDATA='$PGDATA' PG_LOG='$WORKDIR/postgres.log' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-provision-edge-login.sh'"
+# The proof above sets its own throwaway password; set the one this shell holds again, so the password the edge-mode
+# integration tests present is the one the role has (the harness auth is `trust`, so it is not verified, but it is the real one).
+printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PSQL_BIN='${PSQL[0]}' bash '$ROOT_DIR/tools/db/provision-edge-login.sh' --password-stdin"
 
 echo "tools/db/test.sh: running the pgTAP authorization matrix (as $DBUSER)"
 if command -v pg_prove >/dev/null 2>&1 || run_as_pg "command -v pg_prove" >/dev/null 2>&1; then
@@ -292,8 +296,16 @@ run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAM
 # `migration_owner`, NOSUPERUSER NOBYPASSRLS, under HARNESS_MODE=restricted).
 # A missing `deno` is a HARD failure here (see that script's own header),
 # never a soft skip.
-echo "tools/db/test.sh: Deno integration suite — REAL privileged.ts + handlers against this live cluster (P3c gate round 2, item 0, as $DBUSER)"
-run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
+# EDGE ROLE (PR2): the suite runs once per EDGE_DB_MODE (legacy = service_role, edge = edge_actor through the provisioned
+# edge_gateway login), and it is NOT re-runnable on one database, so each mode gets its own clone of the database as it is
+# NOW (fixtures seeded, matrix ROLLBACKed, concurrency scripts done): CREATE DATABASE ... TEMPLATE, as the bootstrap
+# superuser (the roles, extensions and the cluster-wide grants are shared; no session may be connected to the template).
+echo "tools/db/test.sh: cloning the database once per EDGE_DB_MODE for the Deno integration suite"
+for _mode in legacy edge; do
+  run_as_pg "'$PG_BIN_DIR/psql' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -q -d postgres -c 'CREATE DATABASE \"${DBNAME}_${_mode}\" TEMPLATE \"$DBNAME\"'"
+done
+echo "tools/db/test.sh: Deno integration suite — REAL privileged.ts + handlers against this live cluster, EDGE_DB_MODE=legacy then edge (P3c gate round 2, item 0, as $DBUSER)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' EDGE_GATEWAY_TEST_PASSWORD='${EDGE_GATEWAY_TEST_PW}' EDGE_DB_MODES='${EDGE_DB_MODES:-legacy edge}' EDGE_DB_DATABASES='legacy=${DBNAME}_legacy edge=${DBNAME}_edge' bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
 
 echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
 PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \

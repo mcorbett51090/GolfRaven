@@ -775,6 +775,12 @@ export interface ImporterRepo {
      * At most `limit` rows per call. Returns the number of rows cleared.
      */
     purgeFixCoords(retentionDays: number, limit: number): Promise<number>;
+    /**
+     * F19 retention (owner decision 2026-10-02): the install-link fraud tombstone `app.install_link_account` is kept 24 months
+     * from `first_seen_at` (mirroring `receipt_fingerprint`). Deletes at most `maxRows` expired rows, oldest first, through
+     * `private.purge_install_link_tombstones`; the 24 months are the database's, not this call's. Returns the rows deleted.
+     */
+    purgeInstallLinkTombstones(maxRows: number): Promise<number>;
     /** Set-based keyset page of plays at `courseId` strictly after `after`, ordered by (created_at, id). */
     nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]>;
     advance(id: number, cursor: RescoreCursor | null, done: boolean): Promise<void>;

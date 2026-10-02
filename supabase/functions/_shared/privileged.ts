@@ -153,13 +153,42 @@ type TxSql = postgres.TransactionSql;
 
 let _sql: ReturnType<typeof postgres> | null = null;
 
-function sql(): ReturnType<typeof postgres> {
-  if (_sql) return _sql;
-  const dbUrl = Deno.env.get("SUPABASE_DB_URL");
-  if (!dbUrl) {
-    throw new Error("privileged.ts: SUPABASE_DB_URL is not set in this environment");
-  }
-  _sql = postgres(dbUrl, {
+// ============================================================================
+// EDGE ROLE (follow-up 6, PR2): the TEMPORARY `EDGE_DB_MODE` switch.
+// ============================================================================
+// docs/security/edge-role-design.md. `legacy` (the default) is today's path: one
+// pool from SUPABASE_DB_URL, `SET LOCAL ROLE service_role` (BYPASSRLS) per
+// transaction, ownership enforced only by each Repo method's own `user_id = ${uid}`
+// filter. `edge` runs the user-facing paths as `edge_actor` through a pool opened
+// from GOLFRAVEN_EDGE_DB_URL (connecting as the NOBYPASSRLS login `edge_gateway`):
+// FORCE RLS then backs every Repo method, and the identity is the database-side
+// binding `private.bind_actor(uid)` (a forgotten bind fails closed).
+//
+// Both variables are read ONLY in this file (the lint's allow-listed site). The
+// switch is temporary: PR4 flips the default, deletes the legacy path and adds the
+// lint pass. Until then every behaviour below is written to be observably the same
+// in both modes; the few differences are listed in docs/security/edge-role-design.md
+// §9 ("Behaviour differences between the two modes").
+//
+// PR3 BOUNDARY: the catalog-import system path (`withSystemCatalogImport`, and with
+// it `import-catalog`'s importer / drain-read repositories) stays on the LEGACY
+// pool in `edge` mode, so `edge` mode with `import-catalog` needs BOTH URLs. The
+// per-row user transactions the drains open (`withOwnership`) DO run as edge_actor
+// (they bind the row owner with `bind_actor`, not through a delegate binder: PR3
+// replaces that with `bind_delegate_*` once the importer repo runs as edge_system).
+export type DbMode = "legacy" | "edge";
+
+/** Reads `EDGE_DB_MODE` on every call (cheap; lets a test flip it). Anything but
+ * `legacy`/`edge` (or unset = `legacy`) is a configuration error, never a silent default. */
+export function getDbMode(): DbMode {
+  const raw = Deno.env.get("EDGE_DB_MODE");
+  if (raw === undefined || raw === "" || raw === "legacy") return "legacy";
+  if (raw === "edge") return "edge";
+  throw new Error(`privileged.ts: EDGE_DB_MODE must be 'legacy' or 'edge' (got '${raw}')`);
+}
+
+function openPool(dbUrl: string): ReturnType<typeof postgres> {
+  return postgres(dbUrl, {
     max: 5,
     prepare: true,
     // ⛔ FIX (P3c gate round 4, blocking HIGH's own fix list, items 3-4):
@@ -183,7 +212,145 @@ function sql(): ReturnType<typeof postgres> {
       idle_in_transaction_session_timeout: 30_000, // ms
     },
   });
+}
+
+function sql(): ReturnType<typeof postgres> {
+  if (_sql) return _sql;
+  const dbUrl = Deno.env.get("SUPABASE_DB_URL");
+  if (!dbUrl) {
+    throw new Error("privileged.ts: SUPABASE_DB_URL is not set in this environment");
+  }
+  _sql = openPool(dbUrl);
   return _sql;
+}
+
+let _edgeSql: ReturnType<typeof postgres> | null = null;
+let _edgeChecked: Promise<void> | null = null;
+
+function edgeSql(): ReturnType<typeof postgres> {
+  if (_edgeSql) return _edgeSql;
+  const dbUrl = Deno.env.get("GOLFRAVEN_EDGE_DB_URL");
+  if (!dbUrl) {
+    throw new Error("privileged.ts: EDGE_DB_MODE=edge needs GOLFRAVEN_EDGE_DB_URL (the edge_gateway connection string)");
+  }
+  _edgeSql = openPool(dbUrl);
+  return _edgeSql;
+}
+
+/** Roles the edge connection must never reach: the privileged ones PR1's check 9 keeps out of the closure. */
+const EDGE_FORBIDDEN_MEMBERSHIPS = ["service_role", "authenticated", "anon", "authenticator", "private_definer", "supabase_admin", "postgres"];
+
+/**
+ * The startup self-check (edge mode), run once per pool on its first connection: the
+ * session user is `edge_gateway`; nothing in its membership closure (itself included)
+ * is a superuser or BYPASSRLS; and it is not a member of `service_role`, `authenticated`
+ * (or the other privileged roles above). Any failure rejects with a plain Error — a 500
+ * from every handler, i.e. FAILS CLOSED — and is not cached, so the next request
+ * re-checks (a misconfiguration is never "remembered as fine", a transient error is retried).
+ */
+export async function assertEdgeConnectionSafe(db: ReturnType<typeof postgres>): Promise<void> {
+  const rows = await db`
+    with recursive clo(oid) as (
+      select oid from pg_catalog.pg_roles where rolname = session_user
+      union
+      select m.roleid from pg_catalog.pg_auth_members m join clo c on m.member = c.oid
+    )
+    select session_user::text as su,
+           coalesce(bool_or(r.rolsuper or r.rolbypassrls), false) as privileged,
+           coalesce(array_agg(r.rolname::text order by r.rolname::text), '{}'::text[]) as closure
+    from clo join pg_catalog.pg_roles r on r.oid = clo.oid`;
+  const r = rows[0];
+  const closure: string[] = Array.isArray(r?.closure) ? (r.closure as string[]) : [];
+  const problems: string[] = [];
+  if (r?.su !== "edge_gateway") problems.push(`session_user is '${r?.su}', not 'edge_gateway'`);
+  if (r?.privileged) problems.push("a role in its membership closure is SUPERUSER or BYPASSRLS");
+  const forbidden = closure.filter((n) => EDGE_FORBIDDEN_MEMBERSHIPS.includes(n));
+  if (forbidden.length > 0) problems.push(`it is a member of ${forbidden.join(", ")}`);
+  if (problems.length > 0) {
+    throw new Error(`privileged.ts: the edge database connection is not acceptable (${problems.join("; ")}) — refusing to run (fail closed)`);
+  }
+}
+
+function edgeChecked(): Promise<void> {
+  if (_edgeChecked) return _edgeChecked;
+  const p = assertEdgeConnectionSafe(edgeSql());
+  _edgeChecked = p;
+  p.catch(() => {
+    if (_edgeChecked === p) _edgeChecked = null; // never cache a failure
+  });
+  return p;
+}
+
+/** Tests only: closes both pools and forgets the self-check, so a test can point
+ * `GOLFRAVEN_EDGE_DB_URL` / `SUPABASE_DB_URL` somewhere else and start clean. */
+export async function resetPrivilegedConnectionsForTests(): Promise<void> {
+  const a = _sql;
+  const b = _edgeSql;
+  _sql = null;
+  _edgeSql = null;
+  _edgeChecked = null;
+  _supportsTransactionTimeout = null;
+  await Promise.allSettled([a?.end({ timeout: 1 }), b?.end({ timeout: 1 })]);
+}
+
+/** What `openScopedTx` binds. `expectedUid` is the identity the transaction must END UP
+ * bound to (null: no actor, the `edge_system` kind); `run` performs the bind. Splitting
+ * the two is what makes the post-bind assertion meaningful: it compares the database's own
+ * answer (`private.actor_uid()`) with what the CALLER meant, so a bind that bound somebody
+ * else fails closed. */
+export interface ScopedBind {
+  expectedUid: string | null;
+  run?: (trx: TxSql) => Promise<unknown>;
+}
+
+/** The ordinary user binding: `private.bind_actor(uid)`. */
+export function userBind(uid: string): ScopedBind {
+  return { expectedUid: uid, run: (trx) => trx`select private.bind_actor(${uid}::uuid)` };
+}
+
+/**
+ * THE one way an edge-mode transaction is opened (design §6): in order,
+ *   1. `SET LOCAL ROLE edge_actor | edge_system` (the session user, `edge_gateway`, may SET into both);
+ *   2. the three timeouts (`statement`, `lock`, and `transaction` where PG17+ has it);
+ *   3. the bind (`private.bind_actor(uid)`; the system kind binds nothing);
+ *   4. an assertion that `current_user` is the expected role, that role is neither SUPERUSER nor
+ *      BYPASSRLS, and (actor kind) `private.actor_uid()` equals the expected uid.
+ * Any failure throws before `op` runs. The startup self-check has already passed on this pool.
+ */
+export async function openScopedTx<T>(kind: "actor" | "system", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
+  await edgeChecked();
+  const db = edgeSql();
+  const txTimeoutSupported = await supportsTransactionTimeout(db);
+  const role = kind === "actor" ? "edge_actor" : "edge_system";
+  return await (db.begin(async (trx: TxSql) => {
+    // Literal SQL text (no `${...}`): SET LOCAL takes no bind parameter — see the note above STATEMENT_TIMEOUT.
+    if (kind === "actor") await trx`set local role edge_actor`;
+    else await trx`set local role edge_system`;
+    await trx`set local statement_timeout = '10s'`;
+    await trx`set local lock_timeout = '5s'`;
+    if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
+    if (bind.run) await bind.run(trx);
+    if (kind === "actor") {
+      const check = await trx`
+        select current_user::text as u,
+               (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged,
+               private.actor_uid()::text as actor`;
+      const c = check[0];
+      if (c?.u !== role) throw new Error(`openScopedTx: expected current_user = '${role}' after SET LOCAL ROLE, got '${c?.u}'`);
+      if (c?.privileged !== false) throw new Error(`openScopedTx: role '${role}' is SUPERUSER or BYPASSRLS — refusing to run`);
+      if (bind.expectedUid === null || typeof c?.actor !== "string" || c.actor.toLowerCase() !== bind.expectedUid.toLowerCase()) {
+        throw new Error(`openScopedTx: the bound actor is '${c?.actor ?? null}', expected '${bind.expectedUid}' — refusing to run`);
+      }
+    } else {
+      const check = await trx`
+        select current_user::text as u,
+               (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged`;
+      const c = check[0];
+      if (c?.u !== role) throw new Error(`openScopedTx: expected current_user = '${role}' after SET LOCAL ROLE, got '${c?.u}'`);
+      if (c?.privileged !== false) throw new Error(`openScopedTx: role '${role}' is SUPERUSER or BYPASSRLS — refusing to run`);
+    }
+    return op(trx);
+  }) as Promise<T>);
 }
 
 /**
@@ -221,6 +388,19 @@ function sql(): ReturnType<typeof postgres> {
  * a transaction in the first place.
  */
 export async function hitRateLimitForActor(actor: Actor, bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
+  if (getDbMode() === "edge") {
+    // Edge mode: its own short transaction, as edge_actor, through `private.hit_actor_rate_limit`,
+    // which builds the `<uid>:<key>` bucket IN THE DATABASE from the bound actor (so the Edge code
+    // cannot reach another user's bucket, nor the global one) — the exact key format legacy builds
+    // here, so a bucket counts the same in both modes. The database bounds the key (<= 128 chars),
+    // the window (1 s .. 1 day) and the max (1 .. 1,000,000); a violation raises 22023.
+    const count = await openScopedTx("actor", userBind(actor.uid), async (rateTrx) => {
+      const rows = await rateTrx`select private.hit_actor_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
+      return Number(rows[0]?.count ?? 0);
+    });
+    if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
+    return { ok: true, count };
+  }
   const db = sql();
   const scopedBucketKey = `${actor.uid}:${bucketKey}`;
   // Same reasoning as the round-3 fix this replaces (blocking MEDIUM 3,
@@ -384,7 +564,7 @@ function advisoryLockKeys(namespace: number, id: string): [number, number] {
 // match (`buildRepo(trx, actor)`/`buildRepo(sp, actor)`); their OWN `db`
 // locals stay (that one IS used, to open `sql.begin()`/`sql.savepoint()`
 // in the first place).
-function buildRepo(trx: TxSql, actor: Actor): Repo {
+function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
   const uid = actor.uid;
   return {
     now(): Date {
@@ -1056,7 +1236,7 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     // P3f: the reward-activation repository — implemented in the delimited
     // "P3f" section at the END of this file (one seam here, everything else
     // appended below).
-    rewards: buildRewardsRepo(trx, uid),
+    rewards: buildRewardsRepo(trx, uid, mode),
 
     device: {
       async findOwn(deviceId: string) {
@@ -1293,8 +1473,14 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         // handed back FIRST, in this same transaction (0027's own header). Runs
         // before delete_my_data because that removes the offer_code rows this
         // reads. Idempotent: a retried deletion finds nothing left to release.
-        await trx`select app.release_account_reservations(${uid})`;
-        const rows = await trx`select private.delete_my_data(${uid}) as result`;
+        //
+        // EDGE MODE (PR1b): edge_actor can call neither function, and does not need to —
+        // `private.delete_my_data_for_actor()` deletes the BOUND actor (no uid argument) and releases
+        // the account's reservations itself, first, in the same call.
+        if (mode === "legacy") await trx`select app.release_account_reservations(${uid})`;
+        const rows = mode === "edge"
+          ? await trx`select private.delete_my_data_for_actor() as result`
+          : await trx`select private.delete_my_data(${uid}) as result`;
         const result = rows[0]?.result as { user_id?: string; deleted_at?: string } | undefined;
         if (!result || typeof result.user_id !== "string" || typeof result.deleted_at !== "string") {
           throw new Error("me.deleteMyData: private.delete_my_data returned an unexpected shape");
@@ -1302,7 +1488,9 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         return { userId: result.user_id, deletedAt: result.deleted_at };
       },
       async exportMyData() {
-        const rows = await trx`select private.export_my_data(${uid}) as result`;
+        const rows = mode === "edge"
+          ? await trx`select private.export_my_data_for_actor() as result`
+          : await trx`select private.export_my_data(${uid}) as result`;
         const result = rows[0]?.result as Record<string, unknown> | undefined;
         if (!result || typeof result !== "object") {
           throw new Error("me.exportMyData: private.export_my_data returned an unexpected shape");
@@ -1464,6 +1652,15 @@ async function supportsTransactionTimeout(db: ReturnType<typeof postgres>): Prom
  * some rows written and some not.
  */
 export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
+  if (getDbMode() === "edge") {
+    // Edge mode (see the EDGE ROLE banner): the whole `op(repo)` is ONE transaction as edge_actor,
+    // bound to `actor.uid`; every error maps exactly as in legacy.
+    try {
+      return await openScopedTx("actor", userBind(actor.uid), (trx) => op(buildRepo(trx, actor, "edge")));
+    } catch (err) {
+      throw mapPgTimeoutError(err);
+    }
+  }
   const db = sql();
   const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
@@ -1504,7 +1701,7 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
       if (check[0]?.u !== "service_role") {
         throw new Error(`withOwnership: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
       }
-      const repo = buildRepo(trx, actor);
+      const repo = buildRepo(trx, actor, "legacy");
       return op(repo);
     }) as Promise<T>);
   } catch (err) {
@@ -1543,6 +1740,25 @@ export async function withOwnershipBatch<T>(
   itemCount: number,
   perItem: (repo: Repo, index: number) => Promise<T>,
 ): Promise<Array<{ ok: true; value: T } | { ok: false; error: unknown }>> {
+  if (getDbMode() === "edge") {
+    // Edge mode: the same per-item savepoint isolation, inside one edge_actor transaction.
+    try {
+      return await openScopedTx("actor", userBind(actor.uid), async (trx) => {
+        const out: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
+        for (let i = 0; i < itemCount; i++) {
+          try {
+            const value = (await trx.savepoint(async (sp: TxSql) => perItem(buildRepo(sp, actor, "edge"), i))) as T;
+            out.push({ ok: true, value });
+          } catch (err) {
+            out.push({ ok: false, error: mapPgTimeoutError(err) });
+          }
+        }
+        return out;
+      });
+    } catch (err) {
+      throw mapPgTimeoutError(err);
+    }
+  }
   const db = sql();
   const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
@@ -1572,7 +1788,7 @@ export async function withOwnershipBatch<T>(
           // here always passes a plain (non-array, non-nested-Promise)
           // value through `perItem`, so the cast is sound in practice.
           const value = (await trx.savepoint(async (sp: TxSql) => {
-            const repo = buildRepo(sp, actor);
+            const repo = buildRepo(sp, actor, "legacy");
             return perItem(repo, i);
           })) as T;
           out.push({ ok: true, value });
@@ -2109,6 +2325,12 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
           returning e.id`;
         return rows.length;
       },
+      async purgeInstallLinkTombstones(maxRows: number): Promise<number> {
+        // F19 retention (owner decision 2026-10-02): the 24 months are `private.purge_install_link_tombstones`'s own.
+        // service_role holds EXECUTE (legacy); edge_system does too (the PR3 importer path).
+        const rows = await trx`select private.purge_install_link_tombstones(${maxRows}::int) as n`;
+        return Number(rows[0]?.n ?? 0);
+      },
       async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
         // Stable keyset over (created_at, id): a play inserted while the
         // drain is mid-course has a created_at at/after the cursor, so it
@@ -2182,6 +2404,17 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
  * webhook secret, distinct from — and in addition to — the HMAC check
  * that gates the endpoint at all). */
 export async function hitSystemRateLimit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
+  if (getDbMode() === "edge") {
+    // Edge mode: as edge_system through `private.hit_system_rate_limit`, which stores the bucket as
+    // `system:<key>`. (Behaviour difference from legacy, which stored the bare key: the two modes keep
+    // SEPARATE counters for the same import-catalog key; irrelevant once PR4 deletes legacy.)
+    const count = await openScopedTx("system", { expectedUid: null }, async (rateTrx) => {
+      const rows = await rateTrx`select private.hit_system_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
+      return Number(rows[0]?.count ?? 0);
+    });
+    if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
+    return { ok: true, count };
+  }
   const db = sql();
   return db.begin(async (rateTrx: TxSql) => {
     await rateTrx`set local role service_role`;
@@ -2249,7 +2482,7 @@ function rewardsStateConflict(err: unknown): unknown {
   return err;
 }
 
-function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
+function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
   return {
     async isAppReviewDemoAccount(): Promise<boolean> {
       const rows = await trx`select exists (select 1 from app.app_review_demo_account where user_id = ${uid}) as demo`;
@@ -2262,6 +2495,16 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
       if (!REWARDS_UUID_RE.test(id)) return null;
       // Ownership is part of the WHERE clause, never a post-hoc check: another
       // user's id and a nonexistent id are the same empty result.
+      // EDGE MODE (0033): edge_actor holds no UPDATE on offer_code / entitlement, and `SELECT ... FOR UPDATE`
+      // needs one. The lock is taken by `private.lock_own_reward_for_actor(id)` instead — a definer that does
+      // the same `FOR UPDATE` on the BOUND actor's row, and a row lock lasts until the TRANSACTION ends whoever
+      // took it — so concurrent activations of one reward are serialised exactly as in legacy. (Dropping the
+      // lock altogether, on the argument that `private.activate_*_for_actor` lock the row themselves, was tried
+      // and refuted by the integration suite: the handler DECIDES from the state it reads here, BEFORE those
+      // functions lock, so a racing second request could turn an already-issued code into held_review.)
+      // Legacy keeps its `for update` verbatim.
+      if (mode === "edge") await trx`select private.lock_own_reward_for_actor(${id}::uuid)`;
+      const lockOc = mode === "legacy" ? trx`for update of oc` : trx``;
       const codes = await trx`
         select oc.id, oc.state, oc.activated_device_id, oc.expires_at, oc.expiry_paused_at,
                (oc.rests_on_unattestable and oc.review_cleared_at is null) as rests_on_unattestable,
@@ -2269,7 +2512,7 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         from app.offer_code oc
         left join app.play p on p.id = oc.play_id and p.user_id = oc.user_id
         where oc.id = ${id} and oc.user_id = ${uid}
-        for update of oc`;
+        ${lockOc}`;
       const c = codes[0];
       if (c) {
         return {
@@ -2285,6 +2528,7 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
           restsOnUnattestable: Boolean(c.rests_on_unattestable) || Boolean(c.play_held),
         };
       }
+      const lockEnt = mode === "legacy" ? trx`for update of e` : trx``;
       const ents = await trx`
         select e.id, e.state, e.activated_device_id,
                (e.rests_on_unattestable and e.review_cleared_at is null) as rests_on_unattestable,
@@ -2292,7 +2536,7 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         from app.entitlement e
         left join app.play p on p.id = e.play_id and p.user_id = e.user_id
         where e.id = ${id} and e.user_id = ${uid}
-        for update of e`;
+        ${lockEnt}`;
       const e = ents[0];
       if (!e) return null;
       return {
@@ -2412,11 +2656,18 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
     async applyActivation(input) {
       const detail = input.holdDetail === null ? null : trx.json(input.holdDetail as never);
       try {
+        // EDGE MODE (PR1b): `private.activate_*_for_actor` run the SAME P3f functions as private_definer
+        // for the BOUND actor — there is no user argument (the uid is the binding's), edge_actor cannot
+        // call `app.activate_*`, and the SQLSTATEs (P0002 / 42501 / 55000 / 23514) are the P3f ones.
         if (input.kind === "offer_code") {
-          const rows = await trx`select app.activate_offer_code(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
+          const rows = mode === "edge"
+            ? await trx`select private.activate_offer_code_for_actor(${input.rewardId}::uuid, ${input.deviceId}::uuid, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`
+            : await trx`select app.activate_offer_code(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
           return { state: rows[0]!.state as string };
         }
-        const rows = await trx`select app.activate_entitlement(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
+        const rows = mode === "edge"
+          ? await trx`select private.activate_entitlement_for_actor(${input.rewardId}::uuid, ${input.deviceId}::uuid, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`
+          : await trx`select app.activate_entitlement(${input.rewardId}, ${uid}, ${input.deviceId}, ${input.tokenHash}, ${input.decision}, ${detail}::jsonb) as state`;
         return { state: rows[0]!.state as string };
       } catch (err) {
         throw rewardsStateConflict(err);
@@ -2432,12 +2683,22 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
     },
 
     async androidInstallSignals(deviceId: string) {
-      const rows = await trx`
-        select s.accounts_on_install, s.voided_account_used_install,
-               (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
-        from app.device d
-        cross join lateral app.device_link_signals(d.id) s
-        where d.id = ${deviceId} and d.user_id = ${uid}`;
+      // EDGE MODE (PR1b): `app.device_link_signals` counts accounts ACROSS users, which edge_actor's own-row
+      // policies would silently turn into an undercount (a fail-OPEN); `private.device_link_signals_for_actor`
+      // is the definer that does the cross-account read for the actor's OWN device (same result shape).
+      const rows = mode === "edge"
+        ? await trx`
+          select s.accounts_on_install, s.voided_account_used_install,
+                 (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
+          from app.device d
+          cross join lateral private.device_link_signals_for_actor(d.id) s
+          where d.id = ${deviceId} and d.user_id = ${uid}`
+        : await trx`
+          select s.accounts_on_install, s.voided_account_used_install,
+                 (d.install_link_hash is not null or d.attest_key_id is not null) as linkable
+          from app.device d
+          cross join lateral app.device_link_signals(d.id) s
+          where d.id = ${deviceId} and d.user_id = ${uid}`;
       const r = rows[0];
       if (!r || !r.linkable) return null;
       return { accountsOnInstall: Number(r.accounts_on_install), voidedAccountUsedInstall: Boolean(r.voided_account_used_install) };

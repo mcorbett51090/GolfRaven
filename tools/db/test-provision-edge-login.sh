@@ -108,3 +108,31 @@ fi
 grep -q "ALTER ROLE edge_gateway LOGIN PASSWORD 'SCRAM-SHA-256\$4096:" "$PG_LOG" \
   || fail "the failing provisioning statement was not logged with a SCRAM verifier (log capture or statement shape is not what this test assumes)"
 echo "tools/db/test-provision-edge-login.sh: OK -- a failed provisioning logs a SCRAM verifier and NO plaintext; the control (plaintext form) does leak"
+
+# ---------------------------------------------------------------------------
+# 4. `--password-env`: the variable is unset before any child process exists (PR1b gate NIT).
+# ---------------------------------------------------------------------------
+# A psql stand-in records the environment it was started with; the variable (and so the secret) must not be in it.
+ENV_PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/edge-login-envprobe.XXXXXX")"
+REAL_PSQL="$(command -v psql)"
+cat > "$ENV_PROBE_DIR/psql-probe" <<PROBE
+#!/usr/bin/env bash
+env >> "$ENV_PROBE_DIR/children-env.txt"
+exec "$REAL_PSQL" "\$@"
+PROBE
+chmod +x "$ENV_PROBE_DIR/psql-probe"
+PW_ENV="$(rand 24)"
+EDGE_PROBE_SECRET_VAR="$PW_ENV" PSQL_BIN="$ENV_PROBE_DIR/psql-probe" bash "$ROOT_DIR/tools/db/provision-edge-login.sh" --password-env EDGE_PROBE_SECRET_VAR >/dev/null
+[ -s "$ENV_PROBE_DIR/children-env.txt" ] || fail "the psql probe recorded nothing (the probe is not in the provisioning path, so the --password-env proof would be vacuous)"
+if grep -q "EDGE_PROBE_SECRET_VAR\|$PW_ENV" "$ENV_PROBE_DIR/children-env.txt"; then
+  fail "--password-env: the password variable (or its value) was still in the environment of a child process"
+fi
+rm -rf "$ENV_PROBE_DIR"
+# And the password it carried is the role's real one (the script did its job with the unset variable).
+{ echo "local all edge_gateway scram-sha-256"; cat "$HBA_BACKUP"; } > "$HBA"
+sql "SELECT pg_reload_conf()" >/dev/null
+sleep 0.5
+[ "$(login "$PW_ENV")" = "edge_gateway" ] || fail "--password-env: the role cannot log in with the password the variable carried"
+cp "$HBA_BACKUP" "$HBA"
+sql "SELECT pg_reload_conf()" >/dev/null
+echo "tools/db/test-provision-edge-login.sh: OK -- with --password-env the variable is gone from every child's environment, and the password still took effect"

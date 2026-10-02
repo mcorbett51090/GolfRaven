@@ -77,6 +77,9 @@ else
     exit 2
   fi
   PASSWORD="${!PASSWORD_ENV:-}"
+  # The variable is not needed any more, and every child this script starts (psql, python3) would inherit it if it were
+  # exported (PR1b gate NIT): unset it now, before any child exists. (`--password-stdin` never had the secret in the environment.)
+  unset "$PASSWORD_ENV"
 fi
 
 if [ -z "${PASSWORD:-}" ]; then

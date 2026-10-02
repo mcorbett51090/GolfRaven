@@ -75,8 +75,10 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
     // doc for why it also needs statement_timeout/lock_timeout (it runs
     // the SAME "SET LOCAL ROLE service_role" + role-assertion pattern as
     // withOwnership/withOwnershipBatch, for the same reason).
-    expect(statementTimeoutCount).toBe(3); // withOwnership + withOwnershipBatch + withSystemCatalogImport
-    expect(lockTimeoutCount).toBe(3);
+    // ⛔ UPDATED (edge role PR2): openScopedTx (the edge-mode transaction opener behind withOwnership /
+    // withOwnershipBatch) is a FOURTH site with the same deadlines — it is the one place the edge role sets them.
+    expect(statementTimeoutCount).toBe(4); // withOwnership + withOwnershipBatch + withSystemCatalogImport (legacy) + openScopedTx (edge)
+    expect(lockTimeoutCount).toBe(4);
   });
 
   it("withOwnership and withOwnershipBatch map a statement/lock-timeout SQLSTATE to Errors.serviceUnavailable(), not an opaque 500", () => {
@@ -100,8 +102,12 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
   // old three-arg shape is asserted ABSENT, so this test would fail
   // again if the dead parameter were reintroduced.
   it("withOwnership (and withOwnershipBatch) pass the REAL actor into buildRepo(trx, actor) — never a zero-arg buildRepo(), never an unused _actor, never a reintroduced unused db param", () => {
-    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(trx, actor\);/);
-    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(sp, actor\);/);
+    // ⛔ UPDATED (edge role PR2): buildRepo also takes the EDGE_DB_MODE it is building for ("legacy" here; the edge
+    // branches call buildRepo(trx|sp, actor, "edge") through openScopedTx). The real actor is still passed.
+    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(trx, actor, "legacy"\);/);
+    expect(PRIVILEGED_TS).toMatch(/const repo = buildRepo\(sp, actor, "legacy"\);/);
+    expect(PRIVILEGED_TS).toMatch(/buildRepo\(trx, actor, "edge"\)/);
+    expect(PRIVILEGED_TS).toMatch(/buildRepo\(sp, actor, "edge"\)/);
     expect(PRIVILEGED_TS).not.toMatch(/function withOwnership[^)]*\(_actor: Actor/);
     expect(PRIVILEGED_TS).not.toMatch(/function buildRepo\(\): Repo \{/);
     expect(PRIVILEGED_TS).not.toMatch(/buildRepo\(db, (trx|sp), actor\)/);
@@ -116,10 +122,10 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
   });
 
   it("buildRepo takes the REAL transaction handle and the actor (no unused db param), and returns a Repo", () => {
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor, mode: DbMode\): Repo \{/);
     // Closes over `actor.uid` once — every Repo method built from this
     // function reads `uid` from closure, not a per-call parameter.
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{\s*const uid = actor\.uid;/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor, mode: DbMode\): Repo \{\s*const uid = actor\.uid;/);
     expect(PRIVILEGED_TS).not.toMatch(/function buildRepo\(db: ReturnType<typeof postgres>/);
   });
 
@@ -128,6 +134,6 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
     // file constructs one; `deno check` (this session) confirms it
     // type-checks against that interface, which has no method returning
     // a client.
-    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor\): Repo \{/);
+    expect(PRIVILEGED_TS).toMatch(/function buildRepo\(trx: TxSql, actor: Actor, mode: DbMode\): Repo \{/);
   });
 });

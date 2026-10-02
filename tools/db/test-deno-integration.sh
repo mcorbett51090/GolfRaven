@@ -162,11 +162,42 @@ if [ -f "$DENO_LOCK" ]; then
   LOCK_ARGS=(--lock="$DENO_LOCK" --frozen)
 fi
 
-echo "tools/db/test-deno-integration.sh: running against PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=$PGDATABASE"
-"$DENO_BIN" test \
-  --config "$DENO_CONFIG" \
-  "${LOCK_ARGS[@]}" \
-  --allow-net --allow-env --allow-read --allow-write \
-  "$INTEGRATION_DIR"
-
-echo "tools/db/test-deno-integration.sh: all Deno integration tests passed"
+# ⛔ EDGE ROLE (follow-up 6, PR2): the WHOLE suite runs twice per invocation, once per EDGE_DB_MODE (a TEMPORARY switch read
+# only by supabase/functions/_shared/privileged.ts; PR4 deletes `legacy`):
+#   legacy  today's path: SET LOCAL ROLE service_role (BYPASSRLS) through SUPABASE_DB_URL;
+#   edge    the user-facing paths run as edge_actor through GOLFRAVEN_EDGE_DB_URL, connecting as the provisioned
+#           `edge_gateway` login (tools/db/provision-edge-login.sh, run by tools/db/test.sh before this script).
+# Override with EDGE_DB_MODES="legacy" (or "edge") to run one. Edge mode's connection string is built by
+# supabase/tests/integration/_helpers.ts from PGHOST/PGPORT/PGDATABASE (+ EDGE_GATEWAY_TEST_PASSWORD, which tools/db/test.sh
+# generates at runtime; this script never contains a credential).
+EDGE_DB_MODES="${EDGE_DB_MODES:-legacy edge}"
+# THE SUITE IS NOT RE-RUNNABLE ON ONE DATABASE (fixed catalog versions, a growing "current import", fixed handles): every
+# pass therefore needs its OWN copy of the database. tools/db/test.sh clones one per mode from the freshly-seeded database
+# (CREATE DATABASE ... TEMPLATE) and names them in EDGE_DB_DATABASES ("legacy=<db> edge=<db>"); a standalone run of a single
+# mode may leave it unset and use PGDATABASE.
+MODE_COUNT=0
+for _m in $EDGE_DB_MODES; do MODE_COUNT=$((MODE_COUNT + 1)); done
+if [ "$MODE_COUNT" -gt 1 ] && [ -z "${EDGE_DB_DATABASES:-}" ]; then
+  echo "tools/db/test-deno-integration.sh: FAILED -- running more than one EDGE_DB_MODE needs a fresh database per mode (EDGE_DB_DATABASES='legacy=<db> edge=<db>', which tools/db/test.sh sets); for one mode set EDGE_DB_MODES=legacy|edge" >&2
+  exit 1
+fi
+BASE_PGDATABASE="$PGDATABASE"
+for EDGE_DB_MODE in $EDGE_DB_MODES; do
+  case "$EDGE_DB_MODE" in
+    legacy|edge) ;;
+    *) echo "tools/db/test-deno-integration.sh: EDGE_DB_MODES entries must be 'legacy' or 'edge' (got '$EDGE_DB_MODE')" >&2; exit 1 ;;
+  esac
+  PGDATABASE="$BASE_PGDATABASE"
+  for _pair in ${EDGE_DB_DATABASES:-}; do
+    if [ "${_pair%%=*}" = "$EDGE_DB_MODE" ]; then PGDATABASE="${_pair#*=}"; fi
+  done
+  export EDGE_DB_MODE PGDATABASE
+  echo "tools/db/test-deno-integration.sh: running against PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=$PGDATABASE (EDGE_DB_MODE=$EDGE_DB_MODE)"
+  "$DENO_BIN" test \
+    --config "$DENO_CONFIG" \
+    "${LOCK_ARGS[@]}" \
+    --allow-net --allow-env --allow-read --allow-write \
+    "$INTEGRATION_DIR"
+  echo "tools/db/test-deno-integration.sh: all Deno integration tests passed (EDGE_DB_MODE=$EDGE_DB_MODE)"
+done
+echo "tools/db/test-deno-integration.sh: all Deno integration tests passed in every mode ($EDGE_DB_MODES)"

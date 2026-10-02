@@ -344,6 +344,9 @@ export function makeFakeImporterRepo(state: FakeImporterState): ImporterRepo {
       async purgeFixCoords(_retentionDays: number, _limit: number): Promise<number> {
         return 0; // the real set-based SQL is proven against Postgres
       },
+      async purgeInstallLinkTombstones(_maxRows: number): Promise<number> {
+        return 0; // likewise: private.purge_install_link_tombstones is proven against Postgres (matrix 16)
+      },
       async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
         return state.plays
           .filter((p) => p.courseId === courseId && (after === null || p.playId > after.playId))
