@@ -15,7 +15,7 @@
 -- not that the point is on the curve (the verifier proved that).
 
 BEGIN;
-SELECT plan(84);
+SELECT plan(97);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
@@ -177,6 +177,57 @@ SELECT is((SELECT attest_retired_key_hashes[1] FROM app.device WHERE id = '17000
 SELECT throws_ok($$SELECT app.register_attest_key('00000000-0000-0000-0000-00000000000a', '17000000-0000-0000-0000-0000000000a4', pg_temp.kid(110), pg_temp.pk(110))$$, '23514', NULL, 'a key still on the list cannot return');
 SELECT lives_ok($$SELECT app.register_attest_key('00000000-0000-0000-0000-00000000000a', '17000000-0000-0000-0000-0000000000a4', pg_temp.kid(100), pg_temp.pk(100))$$,
   'a key that has aged off the list can (the documented bound of the history; a key can only be attested once by Apple, so this needs a fresh attestation anyway)');
+
+-- ============================================================================
+-- 7b. The retired list only grows, by exactly the replaced key (0036): a hand-written replacement may not FORGET an entry
+-- ============================================================================
+-- A5 now holds key 21 (counter 0, retired [22, 20] from cell (h) above). Raise its counter (an increase: the trigger lets it
+-- through), then try replacements to a never-used key 24 that each leave a DIFFERENT list behind. Only the exact append is accepted.
+UPDATE app.device SET attest_counter = 6 WHERE id = '17000000-0000-0000-0000-0000000000a5';
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(24), pg_temp.pk(24), pg_temp.kh(21)),
+  '23514', NULL, 'direct: a replacement that forgets BOTH earlier retired entries is refused (0036)');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(24), pg_temp.pk(24), pg_temp.kh(20), pg_temp.kh(21)),
+  '23514', NULL, 'direct: a replacement that forgets ONE earlier retired entry is refused (0036)');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(24), pg_temp.pk(24), pg_temp.kh(20), pg_temp.kh(22), pg_temp.kh(21)),
+  '23514', NULL, 'direct: the right entries in the wrong order are refused (FIFO order is part of the contract)');
+SELECT throws_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L, %L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(24), pg_temp.pk(24), pg_temp.kh(22), pg_temp.kh(20), pg_temp.kh(21), pg_temp.kh(99)),
+  '23514', NULL, 'direct: an extra, unrelated entry smuggled into the list is refused');
+SELECT is((SELECT attest_counter FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a5'), 6::bigint, 'none of the refused statements moved the counter or the list');
+SELECT lives_ok(format($$UPDATE app.device SET attest_key_id = %L, attest_public_key = %L, attest_counter = 0, attest_retired_key_hashes = ARRAY[%L, %L, %L] WHERE id = '17000000-0000-0000-0000-0000000000a5'$$, pg_temp.kid(24), pg_temp.pk(24), pg_temp.kh(22), pg_temp.kh(20), pg_temp.kh(21)),
+  'direct: the exact append (old list, then the replaced key) is accepted');
+SELECT is((SELECT attest_retired_key_hashes FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a5'), ARRAY[pg_temp.kh(22), pg_temp.kh(20), pg_temp.kh(21)], 'and the list is exactly that');
+
+-- AT THE CAP (A4: key 100, 16 retired entries after section 7). A helper attempts a hand-written replacement to key 130 whose
+-- list is built from the row's CURRENT list by `mode`, and answers 'ok' or the SQLSTATE the trigger raised (each attempt is its own
+-- subtransaction, so a refusal changes nothing).
+CREATE FUNCTION pg_temp.replace_at_cap(p_mode text) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE
+  v_dev uuid := '17000000-0000-0000-0000-0000000000a4';
+  v_old text[];
+  v_oldhash text;
+  v_new text[];
+BEGIN
+  SELECT attest_retired_key_hashes, encode(sha256(convert_to(attest_key_id, 'UTF8')), 'hex') INTO v_old, v_oldhash FROM app.device WHERE id = v_dev;
+  v_new := CASE p_mode
+    WHEN 'fifo'          THEN v_old[2:16] || v_oldhash                          -- the oldest drops, the rest keep order
+    WHEN 'drop_newest'   THEN v_old[1:15] || v_oldhash                          -- 16 entries, but the wrong one dropped
+    WHEN 'forget_middle' THEN v_old[1:7] || v_old[9:16] || v_oldhash            -- 16 entries, a middle one forgotten
+    WHEN 'swap'          THEN (v_old[2:16] || v_oldhash)[2:2] || (v_old[2:16] || v_oldhash)[1:1] || (v_old[2:16] || v_oldhash)[3:16]
+    WHEN 'no_old_hash'   THEN v_old[2:16] || encode(sha256('x'::bytea), 'hex')  -- the replaced key is not on the list at all
+  END;
+  UPDATE app.device SET attest_key_id = pg_temp.kid(130), attest_public_key = pg_temp.pk(130), attest_counter = 0, attest_retired_key_hashes = v_new WHERE id = v_dev;
+  RETURN 'ok';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$f$;
+UPDATE app.device SET attest_counter = 7 WHERE id = '17000000-0000-0000-0000-0000000000a4';
+SELECT is(pg_temp.replace_at_cap('drop_newest'), '23514', 'at the cap: dropping the NEWEST entry instead of the oldest is refused');
+SELECT is(pg_temp.replace_at_cap('forget_middle'), '23514', 'at the cap: forgetting a middle entry (still 16 long) is refused');
+SELECT is(pg_temp.replace_at_cap('swap') || pg_temp.replace_at_cap('no_old_hash'), '2351423514', 'at the cap: a reordered list, and one that omits the replaced key, are refused');
+SELECT is(pg_temp.replace_at_cap('fifo'), 'ok', 'at the cap: the exact FIFO result (oldest dropped, replaced key appended) is accepted');
+SELECT is((SELECT cardinality(attest_retired_key_hashes) FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a4'), 16, 'and the list is still 16 long');
+SELECT is((SELECT attest_retired_key_hashes[16] FROM app.device WHERE id = '17000000-0000-0000-0000-0000000000a4'), pg_temp.kh(100), 'with the replaced key (100) last');
 
 -- ============================================================================
 -- 8. Argument validation and ownership

@@ -52,7 +52,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(46);
+SELECT plan(54);
 
 -- Key n: 65 bytes starting 0x04, and the key id that IS its hash (the database checks the shape and that relation).
 CREATE FUNCTION pg_temp.pk(n int) RETURNS bytea LANGUAGE sql IMMUTABLE AS $$ SELECT decode('04' || repeat(lpad(to_hex(n), 2, '0'), 64), 'hex') $$;
@@ -175,8 +175,34 @@ SELECT throws_ok($$SELECT private.register_attest_key_for_actor('ee170000-0000-0
 ROLLBACK;
 
 -- ============================================================================
+-- 5b. The verifier's counter advance is bound to the KEY it verified (LOW-1, privileged.ts advanceAttestCounter)
+-- ============================================================================
+-- The statement the Repo issues in EDGE_DB_MODE=edge, as the bound actor: `... WHERE id AND user_id AND attest_key_id = $key AND
+-- attest_counter < $new`. a3 holds the seeded key 17 (0x11) at counter 0. A WHERE clause on attest_key_id needs SELECT on it, which
+-- edge_actor holds (the key columns are readable, just not writable); the only column it writes is attest_counter.
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee170000-0000-0000-0000-0000000000a0')$$, 'advance: bind UA');
+SELECT is(pg_temp.rows($$UPDATE app.device SET attest_counter = 5, last_seen = now() WHERE id = 'ee170000-0000-0000-0000-00000000a003' AND user_id = 'ee170000-0000-0000-0000-0000000000a0' AND attest_key_id = pg_temp.kid(17) AND attest_counter < 5 RETURNING id$$), 1,
+  'advance: the verified key is still the device''s key: the counter advances (1 row)');
+SELECT is(pg_temp.rows($$UPDATE app.device SET attest_counter = 9, last_seen = now() WHERE id = 'ee170000-0000-0000-0000-00000000a003' AND user_id = 'ee170000-0000-0000-0000-0000000000a0' AND attest_key_id = pg_temp.kid(18) AND attest_counter < 9 RETURNING id$$), 0,
+  'advance: a key that is no longer (or never was) the device''s key advances nothing (0 rows: a retired key''s assertion fails closed)');
+SELECT is(pg_temp.rows($$UPDATE app.device SET attest_counter = 5, last_seen = now() WHERE id = 'ee170000-0000-0000-0000-00000000a003' AND user_id = 'ee170000-0000-0000-0000-0000000000a0' AND attest_key_id = pg_temp.kid(17) AND attest_counter < 5 RETURNING id$$), 0,
+  'advance: the same counter again is a replay (0 rows)');
+SELECT is((SELECT attest_counter FROM app.device WHERE id = 'ee170000-0000-0000-0000-00000000a003'), 5::bigint, 'advance: and the counter is the one the verified key wrote');
+ROLLBACK;
+
+-- ============================================================================
 -- 6. Posture: nothing outside the wrapper changed for the edge roles
 -- ============================================================================
+-- NIT-5: pd_edge_act_device_update is the one UPDATE policy private_definer has on app.device; its expressions are pinned here
+-- straight from pg_policy (not from the allow-list's copy of them), so a widened USING or WITH CHECK fails THIS file too.
+SELECT is((SELECT pg_get_expr(pol.polqual, pol.polrelid) FROM pg_policy pol WHERE pol.polname = 'pd_edge_act_device_update' AND pol.polrelid = (SELECT c.oid FROM pg_class c WHERE c.relnamespace = 'app'::regnamespace AND c.relname = 'device')),
+  '(user_id = ( SELECT private.actor_uid() AS actor_uid))', 'pd_edge_act_device_update USING is exactly the bound actor''s own rows');
+SELECT is((SELECT pg_get_expr(pol.polwithcheck, pol.polrelid) FROM pg_policy pol WHERE pol.polname = 'pd_edge_act_device_update' AND pol.polrelid = (SELECT c.oid FROM pg_class c WHERE c.relnamespace = 'app'::regnamespace AND c.relname = 'device')),
+  '(user_id = ( SELECT private.actor_uid() AS actor_uid))', 'pd_edge_act_device_update WITH CHECK is exactly the bound actor''s own rows');
+SELECT is((SELECT pol.polcmd::text || ':' || array_to_string(pol.polroles::regrole[], ',') || ':' || pol.polpermissive::text FROM pg_policy pol WHERE pol.polname = 'pd_edge_act_device_update' AND pol.polrelid = (SELECT c.oid FROM pg_class c WHERE c.relnamespace = 'app'::regnamespace AND c.relname = 'device')),
+  'w:private_definer:true', 'pd_edge_act_device_update is a permissive UPDATE policy for private_definer alone');
 SELECT is((SELECT count(*)::int FROM pg_policies WHERE schemaname = 'app' AND tablename = 'device' AND 'edge_actor' = ANY (roles) AND cmd = 'UPDATE'), 1,
   'edge_actor still has exactly one UPDATE policy on app.device (0034 added none for edge_actor; its new policy is private_definer''s)');
 SELECT is(pg_temp.col_priv('edge_actor', 'attest_key_id', 'UPDATE') OR pg_temp.col_priv('edge_actor', 'attest_public_key', 'UPDATE')

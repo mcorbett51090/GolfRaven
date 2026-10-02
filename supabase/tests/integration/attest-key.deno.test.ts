@@ -308,6 +308,25 @@ Deno.test("the row lock is real: a second registration that starts while the fir
   assertEquals(((await deviceRow(dev)).attest_retired_key_hashes as string[]).length, 1);
 });
 
+Deno.test("a database P0002 (no such device for this caller) is the documented no-oracle 422 challenge_not_consumable, never a 404 — a nonexistent id and ANOTHER user's id alike", DT, async () => {
+  const u = await freshUser("p0002");
+  const other = await freshUser("p0002-other");
+  const foreignDev = await newDevice(other);
+  const leaf = await genPair("P-256");
+  const keyId = toB64(await sha256(leaf.point));
+  // Straight to the repo (the handler's own-device read would have answered first): the SQL function raises P0002.
+  const answer = (deviceId: string) =>
+    withOwnership(u.actor, (repo: Repo) => repo.attestKey.register({ deviceId, keyId, publicKey: leaf.point })).then(
+      () => null,
+      (e: unknown) => (e instanceof HttpError ? { status: e.status, code: e.code } : { thrown: String(e) }),
+    );
+  const nonexistent = await answer(freshUuid());
+  const foreign = await answer(foreignDev);
+  assertEquals(nonexistent, { status: 422, code: "challenge_not_consumable" });
+  assertEquals(foreign, nonexistent, "another user's device is indistinguishable from a nonexistent one");
+  assertEquals((await deviceRow(foreignDev)).attest_key_id, null, "and nothing was written to the foreign device");
+});
+
 Deno.test("the database refuses what the verifier would never send: a key id that is not the hash of the key, a rolled-back counter", DT, async () => {
   const u = await freshUser("db");
   const dev = await newDevice(u);
@@ -486,4 +505,66 @@ Deno.test("end to end: after a REINSTALL the new key's assertions verify from co
   const sig = (await adminSql()`select detail from app.fraud_signal where user_id = ${u.uid} and kind = 'attestation_failed'`)[0]!.detail as { reasons: string[] };
   assertEquals(sig.reasons, ["key_id_mismatch"]);
   assertNotEquals(Number((await deviceRow(dev)).attest_counter), 99, "the old key's counter was never accepted");
+});
+
+// ===========================================================================
+// The race: a key replacement that commits DURING an in-flight activation (LOW-1)
+// ===========================================================================
+// `deviceAttestState` reads the device row without a lock, then the verifier runs (no database), then
+// `advanceAttestCounter` writes. Under READ COMMITTED a registration that commits in that window changes the row the
+// UPDATE lands on. This test makes the window deterministic: an IosPort whose `verifyAssertion` runs the REAL verifier
+// against the state the handler read (key K1, counter 41, so the assertion is genuinely valid), and THEN commits a
+// replacement K2 through the real register path (its own transaction, its own connection) before returning the ok
+// verdict. Both EDGE_DB_MODEs run this file, so it covers both statements `advanceAttestCounter` can issue.
+Deno.test("race: a key replacement that commits while an activation is in flight does not let the RETIRED key's assertion issue the reward, and the new key does not inherit its counter", DT, async () => {
+  const u = await freshUser("race");
+  const dev = await newDevice(u);
+  const k1 = await genPair("P-256");
+  const k1Id = toB64(await sha256(k1.point));
+  const k2 = await genPair("P-256");
+  const k2Id = toB64(await sha256(k2.point));
+  await register(u, (await buildReq(dev, await issueLive(u, dev), { leaf: k1 })).req);
+
+  // K1 has advanced to 40 on an earlier activation; the in-flight one presents 41.
+  const c0 = await newOfferAndCode(u);
+  assertEquals((await activate(u, c0, await signedActivation(u, dev, c0, { keyId: k1Id, leaf: k1 }, 40))).state, "issued");
+  assertEquals(Number((await deviceRow(dev)).attest_counter), 40);
+
+  // Everything the replacement needs is built BEFORE the activation starts, so the only thing the port does is commit it.
+  const replacement = await buildReq(dev, await issueLive(u, dev), { leaf: k2 });
+  const code = await newOfferAndCode(u);
+  const inFlight = await signedActivation(u, dev, code, { keyId: k1Id, leaf: k1 }, 41);
+
+  const raced: { committed: Awaited<ReturnType<typeof register>> | null } = { committed: null };
+  const racingPort: IosPort = {
+    ...realIosPort(),
+    verifyAssertion: async (input) => {
+      const verdict = await verifyAppAttestAssertion(input, { appId: APP_ID }, { sha256, verifyP256: verifyP256WebCrypto });
+      assertEquals(verdict.ok && verdict.counter, 41, "precondition: the K1 assertion verifies against the state the handler read");
+      raced.committed = await register(u, replacement.req); // commits K2 / counter 0 / K1 retired, in its own transaction
+      return verdict;
+    },
+  };
+  const out = await withOwnership(u.actor, (repo: Repo) => handleActivation(code, inFlight, repo, { ports: { ios: racingPort, android: null }, sha256 }));
+
+  const committed = raced.committed;
+  assert(committed !== null && committed.ok && committed.body.replaced === true, "precondition: the replacement committed during the activation");
+  // The retired key's assertion did NOT issue the reward: fail closed (held), with the replay-class reason.
+  assertEquals(out.state, "held_review", "a retired key's assertion must not be graded attested");
+  const reward = (await adminSql()`select state from app.offer_code where id = ${code}`)[0]!;
+  assertNotEquals(reward.state, "issued");
+  assertEquals((await adminSql()`select count(*)::int as n from app.device_reward_ledger where reward_id = ${code}`)[0]!.n, 0, "the retired key's assertion earned no ledger row (nothing was received)");
+  const sig = (await adminSql()`select detail from app.fraud_signal where user_id = ${u.uid} and kind = 'attestation_failed'`)[0]!.detail as { reasons: string[] };
+  assertEquals(sig.reasons, ["counter_replay"]);
+
+  // The new key did NOT inherit the retired key's counter: it is still 0 and K2's very next assertion (counter 1) verifies.
+  const row = await deviceRow(dev);
+  assertEquals(row.attest_key_id, k2Id);
+  assertEquals(Number(row.attest_counter), 0, "K2 starts from 0, not from K1's 41");
+  // (The failed outcome raised the account's attestation_failed signal, which holds the account's next activation by design; a reviewer
+  // clearing it is what lets the next one through, so clear it as one would and then show K2's own first assertion issues.)
+  await adminSql()`update app.fraud_signal set cleared_at = now() where user_id = ${u.uid} and kind = 'attestation_failed' and cleared_at is null`;
+  const next = await newOfferAndCode(u);
+  assertEquals((await activate(u, next, await signedActivation(u, dev, next, { keyId: k2Id, leaf: k2 }, 1))).state, "issued", "K2 counter 1 verifies: nothing was inherited");
+  assertEquals(Number((await deviceRow(dev)).attest_counter), 1);
 });

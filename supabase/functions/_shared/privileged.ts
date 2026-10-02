@@ -2580,12 +2580,19 @@ function buildRewardsRepo(trx: TxSql, uid: string, mode: DbMode): RewardsRepo {
       };
     },
 
-    async advanceAttestCounter(deviceId: string, counter: number): Promise<boolean> {
+    async advanceAttestCounter(deviceId: string, keyId: string, counter: number): Promise<boolean> {
       // One atomic, monotonic statement: a replayed or racing counter updates 0
       // rows, whichever of two concurrent requests lost.
+      // `attest_key_id = keyId` binds the advance to the key the assertion was VERIFIED against. `deviceAttestState`
+      // reads the row without a lock, so a key replacement (app.register_attest_key: new key, counter reset to 0)
+      // can commit between that read and this UPDATE; under READ COMMITTED the UPDATE then re-evaluates against the
+      // NEW row. Without this predicate the retired key's counter (41) would be written onto the new key (its next
+      // 41 assertions would then fail as replays) and the activation would be graded `attested` on a retired key.
+      // With it, the replaced row no longer matches: 0 rows, and the handler fails closed. Same statement in both
+      // EDGE_DB_MODEs (edge_actor already holds SELECT on app.device, which a WHERE on attest_key_id needs).
       const rows = await trx`
         update app.device set attest_counter = ${counter}, last_seen = now()
-        where id = ${deviceId} and user_id = ${uid} and attest_counter < ${counter}
+        where id = ${deviceId} and user_id = ${uid} and attest_key_id = ${keyId} and attest_counter < ${counter}
         returning id`;
       return rows.length > 0;
     },
@@ -2811,10 +2818,14 @@ function attestKeyError(err: unknown): unknown {
   const code = (err as { code?: unknown } | null)?.code;
   // SQLSTATEs app.register_attest_key raises (0034): 55000 = the device already holds this very key; 23514 = this
   // key was retired on this device and may not return (or the one-way counter trigger refused); P0002 = no such
-  // device for this user; 22023 = a malformed key / non-iOS device (the verifier makes both unreachable).
+  // device for this user (another user's device and a nonexistent one are the same); 22023 = a malformed key /
+  // non-iOS device (the verifier makes both unreachable).
   if (code === "55000") return Errors.conflict("key_already_registered", "this key is already registered on this device");
   if (code === "23514") return Errors.conflict("key_previously_retired", "this key was retired on this device and cannot be registered again");
-  if (code === "P0002") return Errors.notFound("no such device");
+  // P0002 is reachable only when the device vanished (or never was this caller's) between the handler's own-device read and
+  // this call. The documented no-existence-oracle answer for a foreign or nonexistent device is the SAME 422 the handler gives
+  // for an unusable challenge — never a 404 "no such device", which would tell a prober which ids exist.
+  if (code === "P0002") return Errors.unprocessable("challenge_not_consumable", "this challenge could not be used (already used, expired, or not issued to this device)");
   if (code === "22023") return Errors.unprocessable("attestation_rejected", "the attestation could not be verified");
   return err;
 }

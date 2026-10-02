@@ -2517,7 +2517,10 @@ the SAME pattern and code activation uses; no new challenge table). Responses: *
 registration), **200** `{..., replaced:true}` (a reinstall's replacement), **409** `key_already_registered` (that key is already the
 device's; nothing is consumed) or `key_previously_retired`, **422** `attestation_rejected` (the attestation did not verify; ONE generic
 code, the reason is logged server-side only) / `challenge_not_consumable` (also the answer for another user's device and for a
-nonexistent one: no existence oracle) / `platform_mismatch`, **429**, **503** `attestation_not_configured`.
+nonexistent one: no existence oracle; this holds on EVERY path that can say it, including the database's own `P0002` from
+`app.register_attest_key` if the device vanished between the handler's own-device read and the write: `privileged.ts#attestKeyError` maps it to
+this same 422, not to a 404 `no such device`, which was an existence oracle; pinned by a Deno cell that calls the repo directly with a foreign and
+a nonexistent id) / `platform_mismatch`, **429**, **503** `attestation_not_configured`.
 
 **A failed verification still spends the challenge.** It is returned, not thrown, so the transaction commits with the challenge consumed:
 one challenge gives one guess, not a retry loop against the verifier. (A thrown error would have rolled the consumption back.) It raises
@@ -2544,6 +2547,16 @@ backslash, so a template literal and `JSON.stringify` over sorted keys agree and
 nonce string in `S` is the one the server just consumed against the stored SHA-256 of its decoded bytes; `purpose` separates a
 registration hash from an activation hash. Implementation: `string-binding.ts` (generic, `computeStringBinding(sha256, fields)`) and
 `attestKeyChallengeString` / `computeAttestKeyBinding`; unit-pinned byte for byte.
+
+**The nonce spelling is canonical (security-gate NIT-1).** The nonce string goes into `S` as text AND is decoded to
+bytes for the challenge hash, so a decoder that tolerates non-canonical base64url would let one consumed challenge be bound under several
+strings (the last character of a length-`n mod 4 != 0` value carries unused trailing bits that `atob` ignores: `AA`, `AB` and `AP` all
+decode to the single byte `0x00`). `binding.ts#fromBase64UrlStrict`, the decoder `consumeLiveChallenge` uses for both endpoints, now
+requires the round trip `toBase64Url(decode(s)) === s`; a non-canonical spelling is a 400 before the challenge is read or consumed.
+Pinned by `rewards-binding.test.ts` (exhaustive over one byte, plus the 2- and 3-character cases and a length sweep proving canonical
+values still decode) and `activate-handler.test.ts` (the non-canonical spelling of a real nonce: 400, verifier never called, challenge
+still usable with the honest spelling). Not covered: `checkin/token-handler.ts` has its own decoder (it consumes the nonce but binds
+nothing, and is not part of an App Attest or Play Integrity binding); it is unchanged.
 
 **The same problem applied to the existing iOS activation assertion, so it uses the SAME binding (changed 2026-10-02, before anything
 shipped; the path was unreleased and no client exists).** `activate-handler.ts#assessActivatingDevice` used to compute the iOS
@@ -2646,8 +2659,18 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   decrease iff all of: the new counter is 0; the key id and the public key both changed (neither NULL); the OLD key's hash is in the NEW
   retired list; and the NEW key's hash is in neither the OLD nor the NEW retired list. So no assertion ever signed under a key the server
   has seen can be replayed against a lowered counter: the lowered counter belongs to a key with no history. Everything else (the same key,
-  a hand-written rollback, a swap that "forgets" to retire, a retired key coming back, forgetting a retired entry in the same statement) is
-  `23514`. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
+  a hand-written rollback, a swap that "forgets" to retire, a retired key coming back) is `23514`.
+  **Correction (security-gate NIT-2; migration `0036_attest_hardening.sql`).** As shipped in 0034 the trigger did NOT refuse "forgetting a
+  retired entry": it checked the three list conditions above and nothing about the rest of the list, so a hand-written replacement whose NEW
+  list silently omitted some OTHER retired key was accepted (and that key could then be registered again). 0036 redefines the same
+  function (`CREATE OR REPLACE`; same owner, `search_path`, ACL and inventory row, no grant or policy touched) so that, inside the one
+  decrease branch, the NEW list must equal EXACTLY what `app.register_attest_key` writes: the OLD list with the replaced key's hash
+  appended, newest 16 kept (FIFO). That is stricter than "OLD is a subset of NEW" and has no special case at the cap: at 16 the oldest drops
+  and the rest keep their order, anything else (a dropped or reordered entry, a smuggled extra one, the wrong entry dropped at the cap) is
+  `23514`; pgTAP `17_attest_key_registration.sql` section 7b. **Still not enforced, by design of the 0032 trigger:** it is
+  `BEFORE UPDATE OF attest_counter`, so a statement that does not assign `attest_counter` does not fire it and a bare
+  `UPDATE ... SET attest_retired_key_hashes` is not covered by any trigger; only `service_role` and `private_definer` hold UPDATE on that
+  column and the only code that writes it is `app.register_attest_key`. A second trigger on that column is a follow-up, not a claim. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
   believed to allow `attestKey` once per key `[unverified]`; follow-up K6).
   Alternatives rejected: leave the counter alone on replacement (the new key's first 40 assertions would fail as replays and raise an
   account-wide `attestation_failed`); a per-key counter in a side table (a new table with all its registry rows, for what two columns and a
@@ -2660,6 +2683,21 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   `rewards-activate.deno.test.ts#registerKey`, which now also sets `attest_registered_at` (it stands in for a verified registration).
 - After a replacement the OLD key's assertions fail `key_id_mismatch` (graded `failed`, as for any wrong key) and the new key's start from
   counter 1: both proved end to end against real Postgres through the real activation handler.
+  **That holds for a replacement that committed BEFORE the activation read the device. Security-gate LOW-1 found the in-flight case and it
+  is closed.** `deviceAttestState` reads the row without a lock, the verifier then runs with no database, and
+  `advanceAttestCounter` writes. Under READ COMMITTED a registration that commits in that window changes the row the UPDATE lands on: the
+  old `UPDATE ... WHERE id AND user_id AND attest_counter < $new` carried no key predicate, so it re-evaluated against the NEW row
+  (counter 0), wrote the retired key's counter (say 41) onto it, returned "advanced", and the activation was graded `attested` and
+  issued on a retired key, while the new key's next 41 assertions failed as replays and held the account. `advanceAttestCounter` now takes the
+  key id the assertion was verified against and adds `AND attest_key_id = $key` (privileged.ts; the same statement in both
+  `EDGE_DB_MODE`s: `edge_actor` already holds SELECT on `app.device`, and its UPDATE grant is still `attest_counter` / `last_seen` etc. only;
+  no migration, no grant or policy change). Zero rows is treated exactly like a lost replay race: `failed` with reason `counter_replay`, the
+  reward held, never `attested`. A registration that has not yet committed cannot interleave either: the advance takes the device row lock
+  first and the registration (which locks the same row) waits. Proved by `attest-key.deno.test.ts` ("race: ...", an `IosPort` whose
+  `verifyAssertion` runs the REAL verifier on K1 counter 41 and then commits a K2 registration through the real repo before returning; run
+  in both modes: the reward is held, the signal says `counter_replay`, K2's counter stays 0 and K2's counter-1 assertion then issues),
+  `activate-handler.test.ts` (the same interleaving over the fake repo) and pgTAP `17_attest_key_registration_edge.sql` section 5b (the
+  statement as `edge_actor`: 1 row for the current key, 0 for another key, 0 for a replay).
 
 ### Configuration
 
@@ -2677,9 +2715,9 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **Unit (vitest)**: `app-attest-registration.test.ts` (verifier, parsers, pinned root, binding; every must-fail below),
   `attest-key-handler.test.ts` (order of checks, challenge discipline, ownership, rate limits, request shape),
   `attest-key-isolation.test.ts` (source-level guarantees), the file list in `rewards-isolation.test.ts` extended.
-- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 84 assertions: schema, privileges, first registration, the counter,
+- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 97 assertions: schema, privileges, first registration, the counter,
   replacement, the trigger decided by content including hand-written writes, the FIFO cap, validation and ownership, who can read or write
-  the new columns, export and deletion) and `17_attest_key_registration_edge.sql` (the edge_actor lane as a real `edge_gateway` login, 46
+  the new columns, export and deletion) and `17_attest_key_registration_edge.sql` (the edge_actor lane as a real `edge_gateway` login, 54
   assertions: every registration proved by reading the row back, direct writes closed, the counter cannot be lowered by edge_actor, foreign
   device, delegate refused, stale binding).
 - **Deno integration** (`attest-key.deno.test.ts`, real `withOwnership`, real SQL): registration and audit, a key written outside the

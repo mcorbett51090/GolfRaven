@@ -202,8 +202,11 @@ async function assessActivatingDevice(rewardId: string, deviceId: string, req: A
     let grade: Grade;
     let reasons: string[];
     if (verdict.ok) {
-      // Atomic and monotonic: a replayed or racing counter does not advance.
-      if (await repo.rewards.advanceAttestCounter(deviceId, verdict.counter)) {
+      // Atomic, monotonic and key-bound: a replayed or racing counter does not advance, and neither does an
+      // assertion whose key was replaced (by a registration that committed after `deviceAttestState` read it) —
+      // `device.attestKeyId` is non-null here because the verifier only returns ok for a recorded key. Zero rows
+      // is the same fail-closed outcome as a replay: `failed` (held), never `attested`.
+      if (device.attestKeyId !== null && (await repo.rewards.advanceAttestCounter(deviceId, device.attestKeyId, verdict.counter))) {
         grade = "attested";
         reasons = [];
       } else {

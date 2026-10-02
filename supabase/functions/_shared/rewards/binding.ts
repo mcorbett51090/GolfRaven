@@ -113,7 +113,11 @@ export function toBase64Url(bytes: Uint8Array): string {
 }
 
 /** Strict UNPADDED base64url (RFC 4648 §5). `null` on anything else — never a
- * silent partial decode. */
+ * silent partial decode, and never a NON-CANONICAL spelling: when the length is not a multiple of 4 the last
+ * character carries unused trailing bits, which `atob` ignores, so `AA`, `AB` and `AP` all decode to the one byte
+ * 0x00. A nonce is bound as TEXT into the iOS string `S` (string-binding.ts) as well as decoded to bytes for the
+ * challenge hash, so several spellings of one challenge would be several different bindings of the same consumed
+ * nonce. The decode therefore must round-trip: `toBase64Url(bytes) === s`. */
 export function fromBase64UrlStrict(s: string): Uint8Array | null {
   if (!/^[A-Za-z0-9_-]+$/.test(s) || s.length % 4 === 1) return null;
   const padded = s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
@@ -121,7 +125,7 @@ export function fromBase64UrlStrict(s: string): Uint8Array | null {
     const bin = atob(padded);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
+    return toBase64Url(out) === s ? out : null;
   } catch {
     return null;
   }

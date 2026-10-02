@@ -100,6 +100,24 @@ describe("base64 helpers", () => {
   it("strict base64url rejects padding, standard-alphabet characters, junk and impossible lengths", () => {
     for (const bad of ["ab+d", "ab/d", "abc=", "a", "ab cd", "", "ab$d"]) expect(fromBase64UrlStrict(bad), bad).toBeNull();
   });
+  it("strict base64url rejects every NON-CANONICAL spelling (trailing bits must be zero): AA decodes to 0x00, AB and AP must not", () => {
+    // 2 chars = 1 byte + 4 unused bits; 3 chars = 2 bytes + 2 unused bits. Only the all-zero-trailing-bits form is canonical.
+    expect(Array.from(fromBase64UrlStrict("AA")!)).toEqual([0]);
+    for (const bad of ["AB", "AP", "A_", "A-"]) expect(fromBase64UrlStrict(bad), bad).toBeNull();
+    expect(Array.from(fromBase64UrlStrict("AAA")!)).toEqual([0, 0]);
+    for (const bad of ["AAB", "AAD", "AA_"]) expect(fromBase64UrlStrict(bad), bad).toBeNull();
+    // Exhaustive for one byte: exactly one of the 4 x 16 two-character spellings of each byte survives, and it is toBase64Url's.
+    const survivors = new Set<string>();
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for (const a of alphabet) for (const b of alphabet) if (fromBase64UrlStrict(a + b) !== null) survivors.add(a + b);
+    expect(survivors.size).toBe(256);
+    for (let byte = 0; byte < 256; byte++) expect(survivors.has(toBase64Url(new Uint8Array([byte]))), String(byte)).toBe(true);
+    // Every canonical encoding of any length still decodes (no regression for honest clients).
+    for (let n = 1; n <= 40; n++) {
+      const bytes = Uint8Array.from({ length: n }, (_, i) => (i * 37 + n * 11) & 0xff);
+      expect(bytesEqual(fromBase64UrlStrict(toBase64Url(bytes))!, bytes), `len ${n}`).toBe(true);
+    }
+  });
   it("lenient base64 accepts standard or url-safe, padded or not, and rejects junk", () => {
     const bytes = new Uint8Array([0xfb, 0xff, 0xfe, 1, 2]);
     const std = btoa(String.fromCharCode(...bytes));

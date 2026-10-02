@@ -120,6 +120,9 @@ export function seedReward(state: FakeState, r: Partial<FakeReward> & { id: stri
 
 /** Registers a device under `userId` in BOTH the shared fake state and the
  * rewards state. */
+/** The key id a seeded iOS device carries unless the test says otherwise (see `seedDevice`). */
+export const FAKE_ATTEST_KEY_ID = "FAKE-ATTEST-KEY-ID";
+
 export function seedDevice(
   state: FakeState,
   d: {
@@ -136,7 +139,9 @@ export function seedDevice(
   state.devices.set(d.id, { id: d.id, userId: d.userId });
   rewardsState(state).deviceAttest.set(d.id, {
     platform: d.platform,
-    attestKeyId: d.attestKeyId ?? null,
+    // An iOS device defaults to HAVING a key id: `advanceAttestCounter` is bound to the verified key's id (as the SQL is), and a
+    // scripted `ok` verdict (the fake ports) stands for a key that verified. Pass `attestKeyId: null` for a keyless device.
+    attestKeyId: d.attestKeyId !== undefined ? d.attestKeyId : d.platform === "ios" ? FAKE_ATTEST_KEY_ID : null,
     attestCounter: d.attestCounter ?? 0,
     attestPublicKey: d.attestPublicKey ?? null,
     integrityLast: null,
@@ -227,13 +232,13 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
     async deviceAttestState(deviceId: string): Promise<DeviceAttestState | null> {
       const dev = state.devices.get(deviceId);
       if (!dev || dev.userId !== uid) return null;
-      const a = rs.deviceAttest.get(deviceId) ?? { platform: "ios" as const, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false };
+      const a = rs.deviceAttest.get(deviceId) ?? { platform: "ios" as const, attestKeyId: FAKE_ATTEST_KEY_ID, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false };
       return { id: deviceId, platform: a.platform, attestKeyId: a.attestKeyId, attestCounter: a.attestCounter, attestPublicKey: a.attestPublicKey };
     },
-    async advanceAttestCounter(deviceId: string, counter: number): Promise<boolean> {
+    async advanceAttestCounter(deviceId: string, keyId: string, counter: number): Promise<boolean> {
       const a = rs.deviceAttest.get(deviceId);
       const dev = state.devices.get(deviceId);
-      if (!a || !dev || dev.userId !== uid || !(a.attestCounter < counter)) return false;
+      if (!a || !dev || dev.userId !== uid || a.attestKeyId !== keyId || !(a.attestCounter < counter)) return false;
       a.attestCounter = counter;
       return true;
     },

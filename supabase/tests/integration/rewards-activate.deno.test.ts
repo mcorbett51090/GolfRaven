@@ -105,8 +105,18 @@ async function freshUser(label: string) {
 }
 type User = Awaited<ReturnType<typeof freshUser>>;
 
-async function newDevice(u: User, platform: "ios" | "android" = "ios"): Promise<string> {
-  return withOwnership(u.actor, async (repo: Repo) => (await repo.device.ensureOwn(freshUuid(), platform)).id);
+async function newDevice(u: User, platform: "ios" | "android" = "ios", withKey = true): Promise<string> {
+  const id = await withOwnership(u.actor, async (repo: Repo) => (await repo.device.ensureOwn(freshUuid(), platform)).id);
+  if (platform === "ios" && withKey) {
+    // A device a scripted `ok` assertion verdict can stand on. `advanceAttestCounter` is bound to the key id the assertion was verified
+    // against (LOW-1), and `deviceAttestState` hands out a key only when it is REGISTERED, so a scripted-port test needs a registered key
+    // for its `ok` to mean anything — exactly as in production, where the verifier cannot say `ok` for a keyless device. (The scripted
+    // port ignores the key bytes; tests that verify a real assertion call `registerKey`, which overwrites these.)
+    const placeholder = new Uint8Array(65).fill(7);
+    placeholder[0] = 4;
+    await adminSql()`update app.device set attest_key_id = ${"PLACEHOLDER-" + id}, attest_public_key = ${placeholder}, attest_registered_at = now() where id = ${id}`;
+  }
+  return id;
 }
 
 async function newOffer(opts: { faceValue?: number; cap?: number; status?: string } = {}): Promise<string> {
@@ -733,7 +743,7 @@ Deno.test("AT 5: a MISMATCHED body hash (assertion bound to another reward / ano
 
 Deno.test("AT 5: a device with no registered App Attest key is unattestable -> held (routing, not an accusation)", DT, async () => {
   const u = await freshUser("at5-nokey");
-  const dev = await newDevice(u); // no attest_public_key on record
+  const dev = await newDevice(u, "ios", false); // no attest_public_key on record
   const code = await newCode(u);
   const port: IosPort = {
     verifyAssertion: (input) => verifyAppAttestAssertion(input, { appId: APP_ID }, { sha256, verifyP256: verifyP256WebCrypto }),

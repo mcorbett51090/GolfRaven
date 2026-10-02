@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 import { enforceActivationRateLimits, handleActivation, type ActivationDeps } from "../../functions/_shared/rewards/activate-handler.js";
-import { computeRequestBinding, toBase64Url, toHex } from "../../functions/_shared/rewards/binding.js";
+import { bytesEqual, computeRequestBinding, fromBase64Lenient, toBase64Url, toHex } from "../../functions/_shared/rewards/binding.js";
 import { REWARD_ACTIVATION_PURPOSE, computeIosActivationBinding, computeStringBinding } from "../../functions/_shared/rewards/string-binding.js";
 import { verifyAppAttestAssertion, verifyP256WebCrypto } from "../../functions/_shared/rewards/app-attest.js";
 import type { ActivationRequest } from "../../functions/_shared/rewards/request-shape.js";
@@ -428,6 +428,27 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
     expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_replay"]);
   });
 
+  it("a KEY REPLACEMENT that lands between the state read and the atomic advance fails closed: the retired key's counter is not written onto the new key (LOW-1)", async () => {
+    const state = newWorld();
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const { key, port } = await realIos(state, CLEAR, 40);
+    const req = await signedRequest(state, key, { rewardId: R1, counter: 41 });
+    // Registration commits K2 (counter reset to 0) after the handler read K1's state and the verifier accepted counter 41.
+    const wrapped: IosPort = {
+      ...port,
+      verifyAssertion: async (i) => {
+        const r = await port.verifyAssertion(i);
+        const a = rewardsState(state).deviceAttest.get(D1)!;
+        a.attestKeyId = "K2-key-id";
+        a.attestCounter = 0;
+        return r;
+      },
+    };
+    expect((await activate(state, R1, req, deps({ ios: wrapped }))).state).toBe("held_review");
+    expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_replay"]);
+    expect(rewardsState(state).deviceAttest.get(D1)!.attestCounter).toBe(0);
+  });
+
   it("the same signed request cannot be replayed: the challenge is single-use", async () => {
     const state = newWorld();
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
@@ -742,6 +763,30 @@ describe("device and challenge validation", () => {
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const req: ActivationRequest = { deviceId: D1, platform: "android", attestation: { kind: "none", hardwareSupportsAttestation: false } };
     expect(await codeOf(activate(state, R1, req, deps({})))).toBe("platform_mismatch");
+  });
+
+  it("a NON-CANONICAL spelling of the right nonce (same bytes, different trailing bits) is refused 400 before any challenge read, verification or consumption", async () => {
+    const state = newWorld();
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const ios = makeFakeIosPort();
+    const ch = await issueChallenge(state, USER_A, D1);
+    // 32 bytes = 43 characters; the last carries 2 unused bits. Flip one: a different STRING that decodes to the same bytes.
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const last = ch.nonce.at(-1)!;
+    const variant = ch.nonce.slice(0, -1) + alphabet[alphabet.indexOf(last) ^ 1]!;
+    expect(variant).not.toBe(ch.nonce);
+    // Precondition (why this is a malleability): a lenient decoder reads both spellings as the very same bytes.
+    expect(bytesEqual(fromBase64Lenient(variant)!, ch.nonceBytes)).toBe(true);
+    const req = await iosRequest(state, { challenge: { challengeId: ch.challengeId, nonce: variant } });
+    const err = (await activate(state, R1, req, deps({ ios })).then(
+      () => null,
+      (e) => e as HttpError,
+    ))!;
+    expect(err.status).toBe(400);
+    expect(ios.calls.verify).toBe(0);
+    // Nothing was consumed: the honest spelling still works for the same challenge.
+    const ok = await activate(state, R1, await iosRequest(state, { challenge: ch }), deps({ ios }));
+    expect(ok.replay).toBe(false);
   });
 
   it("a challenge that is unknown, another device's, prefetched, expired, used, or presented with the wrong nonce is one and the same 422", async () => {
