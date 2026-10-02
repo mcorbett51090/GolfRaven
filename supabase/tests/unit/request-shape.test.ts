@@ -20,6 +20,10 @@ import { describe, expect, it } from "vitest";
 import { parseEvidenceSubmission, REJECTED_SOURCES } from "../../functions/_shared/evidence/request-shape.js";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
+// P3e round 2 gate, H1: the site version string (yyyymmdd-gitsha7),
+// not the old internal int — every fixture below submits this same
+// well-formed shape.
+const SITE_VERSION = "20260601-abc1234";
 
 function goodFix(overrides: Record<string, unknown> = {}) {
   return {
@@ -42,7 +46,7 @@ function baseBody(overrides: Record<string, unknown> = {}) {
     facilityId: "fac_x",
     courseId: "crs_x1",
     localDate: "2026-06-01",
-    catalogVersion: 1,
+    catalogVersion: SITE_VERSION,
     fix: goodFix(),
     ...overrides,
   };
@@ -133,7 +137,7 @@ describe("parseEvidenceSubmission", () => {
       facilityId: "fac_x",
       courseId: "crs_x1",
       localDate: "2026-06-01",
-      catalogVersion: 1,
+      catalogVersion: SITE_VERSION,
       checkinFix: goodFix({ fixId: "fix_in" }),
       checkoutFix: goodFix({ fixId: "fix_out" }),
       apartMinutes: 95,
@@ -153,7 +157,7 @@ describe("parseEvidenceSubmission", () => {
       facilityId: "fac_x",
       courseId: "crs_x1",
       localDate: "2026-06-01",
-      catalogVersion: 1,
+      catalogVersion: SITE_VERSION,
       checkinFix: goodFix({ fixId: "fix_in" }),
       checkoutFix: goodFix({ fixId: "fix_out" }),
       apartMinutes: 95,
@@ -166,26 +170,37 @@ describe("parseEvidenceSubmission", () => {
     }
   });
 
-  it("rejects manifestSig with a non-base64url signature", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "not+valid/", manifestSha256: "0".repeat(64) } });
+  // ⛔ FIX (P3e round 2 gate, H1): manifestSig is now the REAL P1
+  // manifest.sig.json shape verbatim — {kid, contractVersion, signature,
+  // manifestSha} — not the old {kid, signatureB64Url, manifestSha256}.
+  // `signature` is STANDARD (padded) base64 (B1: the real P1 signer's
+  // own encoding), never base64url — see request-shape.ts's own
+  // `BASE64_STD_RE` note.
+  it("rejects manifestSig with a non-base64 signature", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "not+valid/-not-base64", manifestSha: "0".repeat(64) } });
     expect(result.ok).toBe(false);
   });
 
   // should-fix (P3c gate round 2): "sign a domain-tagged payload that
-  // binds the version and the manifest sha256" — manifestSha256 is now a
+  // binds the version and the manifest sha256" — manifestSha is now a
   // required field of manifestSig itself.
-  it("rejects manifestSig missing manifestSha256", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "AAAA" } });
+  it("rejects manifestSig missing manifestSha", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA" } });
     expect(result.ok).toBe(false);
   });
 
-  it("rejects manifestSig with a non-hex/wrong-length manifestSha256", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "AAAA", manifestSha256: "not-hex" } });
+  it("rejects manifestSig with a non-hex/wrong-length manifestSha", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA", manifestSha: "not-hex" } });
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects manifestSig with a non-integer contractVersion", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1.5, signature: "AAAA", manifestSha: "0".repeat(64) } });
     expect(result.ok).toBe(false);
   });
 
   it("accepts a well-formed manifestSig", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", signatureB64Url: "AAAA", manifestSha256: "0".repeat(64) } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA", manifestSha: "0".repeat(64) } });
     expect(result.ok).toBe(true);
   });
 

@@ -14,7 +14,7 @@
 // expected, not a leak; the process exit at the end of `deno test` closes
 // every socket.
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { adminSql, createTestUser, createCourseWithRadiusAtFacX, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, NASHVILLE } from "./_helpers.ts";
+import { adminSql, createTestUser, createCourseWithRadiusAtFacX, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, SEED_SITE_VERSION, FAC_X, NASHVILLE } from "./_helpers.ts";
 import { hitRateLimitForActor, withOwnership } from "../../functions/_shared/privileged.ts";
 import type { Repo } from "../../functions/_shared/types.ts";
 
@@ -44,6 +44,7 @@ Deno.test("item 2: a throw inside withOwnership rolls back every write the callb
     withOwnership(actor, async (repo) => {
       const device = await repo.device.ensureOwn(null, "ios");
       await repo.evidence.insertIdempotent({
+        kind: "resolved",
         sourceRef,
         inputHash: `hash-${sourceRef}`,
         source: "self_report",
@@ -97,20 +98,15 @@ Deno.test("item 5: evidence.countOpenQueued/listForPlay are scoped per actor", D
     const device = await seedDevice(repo);
     const evqSourceRef = `evq-${freshUuid()}`;
     await repo.evidence.insertIdempotent({
+      kind: "queued",
+      claimedFacilityId: FAC_X,
+      claimedCourseId: null,
+      claimedCatalogVersion: SEED_SITE_VERSION,
+      queuedInput: {},
       sourceRef: evqSourceRef,
       inputHash: `hash-${evqSourceRef}`,
       source: "self_report",
-      facilityId: FAC_X,
-      courseId: null,
-      startedAt: null,
-      endedAt: null,
       localDate: "2026-06-01",
-      summary: {},
-      integrity: {},
-      cosignal: {},
-      attestationGrade: "unattestable",
-      matcherVersion: null,
-      catalogVersion: 1, // status is set directly below (not derived from real skew classification) — just needs a REAL catalog_version row to satisfy the FK
       status: "queued_catalog",
       deviceId: device,
     });
@@ -350,20 +346,15 @@ Deno.test("item 8: concurrent countOpenQueued + insert never overshoots MAX_OPEN
       if (open >= CAP) return false;
       const queuedRaceSourceRef = `queued-race-${freshUuid()}`;
       await repo.evidence.insertIdempotent({
+        kind: "queued",
+        claimedFacilityId: FAC_X,
+        claimedCourseId: null,
+        claimedCatalogVersion: SEED_SITE_VERSION,
+        queuedInput: {},
         sourceRef: queuedRaceSourceRef,
         inputHash: `hash-${queuedRaceSourceRef}`,
         source: "self_report",
-        facilityId: FAC_X,
-        courseId: null,
-        startedAt: null,
-        endedAt: null,
         localDate: "2026-06-01",
-        summary: {},
-        integrity: {},
-        cosignal: {},
-        attestationGrade: "unattestable",
-        matcherVersion: null,
-        catalogVersion: 1, // just needs a REAL catalog_version row to satisfy the FK — status is set directly below
         status: "queued_catalog",
         deviceId,
       });

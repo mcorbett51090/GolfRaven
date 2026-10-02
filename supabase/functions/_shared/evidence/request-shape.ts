@@ -44,6 +44,25 @@
 const ID_LIKE_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const BASE64URL_UNPADDED_RE = /^[A-Za-z0-9_-]{1,128}$/;
+// P3e round 2 gate, H1: `manifestSig.signature` carries the REAL P1
+// artifact signature verbatim (`tools/catalog/src/sign.ts#signBytes` —
+// `cryptoSign(...).toString("base64")`, STANDARD padded base64), not a
+// re-encoded value — see catalog/signature.ts's own `base64ToBytes` note
+// for why this is the correct wire format here even though `fixId`
+// elsewhere in this same file stays base64url-pinned (the money-path
+// doc's own pin is about a value THIS codebase mints, not a third
+// party's fixed output format).
+const BASE64_STD_RE = /^[A-Za-z0-9+/]{1,256}={0,2}$/;
+// P1's own CatalogVersionSchema (tools/catalog/src/manifest.ts) — the
+// TOP-LEVEL site version string this field now carries (P3e round 2
+// gate, H1: "change the intake contract to the site version string").
+// Distinct from packages/catalog/src/ledger.ts's own, deliberately looser
+// per-transition `catalogVersion: z.string().min(1)` (M6) — that is a
+// different field on a different record; this one IS the site's own
+// manifest/versions.json version identifier, which P1 itself always
+// formats as yyyymmdd-gitsha7, so matching that shape here is conformance
+// to P1, not an extra tightening of it.
+const CATALOG_VERSION_RE = /^\d{8}-[0-9a-f]{7}$/;
 const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 // Same plausibility floor/ceiling as packages/rules' own PlausibleEpochMsSchema
@@ -74,6 +93,12 @@ function isUuid(v: unknown): v is string {
 }
 function isBase64UrlId(v: unknown): v is string {
   return typeof v === "string" && BASE64URL_UNPADDED_RE.test(v);
+}
+function isStdBase64(v: unknown): v is string {
+  return typeof v === "string" && v.length % 4 === 0 && BASE64_STD_RE.test(v);
+}
+function isSiteCatalogVersion(v: unknown): v is string {
+  return typeof v === "string" && CATALOG_VERSION_RE.test(v);
 }
 function isLocalDate(v: unknown): v is string {
   if (typeof v !== "string" || !LOCAL_DATE_RE.test(v)) return false;
@@ -155,13 +180,24 @@ interface CommonFields {
   facilityId: string;
   courseId?: string;
   localDate: string;
-  catalogVersion: number;
-  // should-fix (P3c gate round 2): "sign a domain-tagged payload that
-  // binds the version and the manifest sha256" — manifestSha256 is the
-  // claimed content hash the signature is verified to also cover
-  // (handler.ts builds the exact domain-tagged string), not merely the
-  // bare version integer.
-  manifestSig?: { kid: string; signatureB64Url: string; manifestSha256: string };
+  // ⛔ FIX (P3e round 2 gate, H1): a site version STRING
+  // (yyyymmdd-gitsha7 — tools/catalog/src/manifest.ts's own
+  // CatalogVersionSchema), not an internal int. The server resolves it
+  // against `app.catalog_version.site_version` — the internal int
+  // (`version`) is a purely server-side sequence number a client has no
+  // way to know or need to know.
+  catalogVersion: string;
+  // ⛔ FIX (P3e round 2 gate, H1): now the REAL P1 manifest statement's
+  // own fields (`tools/catalog/src/manifest.ts#ManifestStatementSchema`:
+  // catalogVersion/contractVersion/kid/manifestSha) plus the signature —
+  // handler.ts rebuilds the EXACT domain-tagged canonical-JSON bytes the
+  // P1 signer produced and verifies `signature` against them, so a
+  // client can only ever submit a manifestSig it copied verbatim from a
+  // real `manifest.sig.json` it actually has cached, never a value it
+  // constructed itself. `signature` is STANDARD (padded) base64 — see
+  // request-shape.ts's own `BASE64_STD_RE` note for why, distinct from
+  // `fixId`'s base64url pin.
+  manifestSig?: { kid: string; contractVersion: number; signature: string; manifestSha: string };
 }
 
 export type EvidenceSubmission =
@@ -185,19 +221,20 @@ function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): Common
   if (raw.courseId !== undefined && !isIdLike(raw.courseId)) issues.push({ path: "courseId", message: "must be an id-like string when present" });
   if (raw.courseId === null) issues.push({ path: "courseId", message: 'must be OMITTED, not null, when absent (security doc §2: "a SQL NULL maps to an OMITTED JSON field, never a literal null")' });
   if (!isLocalDate(raw.localDate)) issues.push({ path: "localDate", message: "must be a real YYYY-MM-DD calendar date" });
-  if (!(typeof raw.catalogVersion === "number" && Number.isInteger(raw.catalogVersion) && raw.catalogVersion >= 0)) {
-    issues.push({ path: "catalogVersion", message: "must be a non-negative integer" });
+  if (!isSiteCatalogVersion(raw.catalogVersion)) {
+    issues.push({ path: "catalogVersion", message: "must be a yyyymmdd-gitsha7 site catalog version string" });
   }
   if (raw.manifestSig !== undefined) {
     const sig = raw.manifestSig as Record<string, unknown>;
     if (
       !isPlainObject(raw.manifestSig) ||
       !isIdLike(sig.kid) ||
-      !isBase64UrlId(sig.signatureB64Url) ||
-      typeof sig.manifestSha256 !== "string" ||
-      !SHA256_HEX_RE.test(sig.manifestSha256)
+      !(Number.isInteger(sig.contractVersion) && (sig.contractVersion as number) >= 0) ||
+      !isStdBase64(sig.signature) ||
+      typeof sig.manifestSha !== "string" ||
+      !SHA256_HEX_RE.test(sig.manifestSha)
     ) {
-      issues.push({ path: "manifestSig", message: "must be {kid: id-like string, signatureB64Url: base64url string, manifestSha256: 64-char lowercase hex} when present" });
+      issues.push({ path: "manifestSig", message: "must be {kid: id-like string, contractVersion: non-negative int, signature: standard base64 string, manifestSha: 64-char lowercase hex} when present" });
     }
   }
   if (issues.length !== ok0) return null;
@@ -206,8 +243,8 @@ function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): Common
     facilityId: raw.facilityId as string,
     courseId: raw.courseId as string | undefined,
     localDate: raw.localDate as string,
-    catalogVersion: raw.catalogVersion as number,
-    manifestSig: raw.manifestSig as { kid: string; signatureB64Url: string; manifestSha256: string } | undefined,
+    catalogVersion: raw.catalogVersion as string,
+    manifestSig: raw.manifestSig as { kid: string; contractVersion: number; signature: string; manifestSha: string } | undefined,
   };
 }
 

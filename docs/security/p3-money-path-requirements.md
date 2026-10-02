@@ -424,7 +424,9 @@ Status against this doc's own items:
 - **§4/§5 (persisting, receipts) — money-path columns persisted verbatim** (`money`, `heldReview`,
   `hardSignal`, `policyVersion`, `inputDigest` from the scorer's own result, never recomputed).
   Receipts/fingerprints are out of scope this round (no receipt-upload endpoint yet).
-- **Catalog skew (AT 8/15, G3-10) — implemented, with one honest deferral.** Version-window
+- **Catalog skew (AT 8/15, G3-10) — implemented, with one honest deferral.** *(The int
+  `catalogVersion` form described in this bullet is superseded by P3e round 2, H1: the intake
+  contract is now the site version STRING `yyyymmdd-gitsha7` — see the P3e section at the end.)* Version-window
   classification (current/within-5-releases-and-30-days / stale / forged) is real
   (`_shared/catalog/classify-version.ts`). Ed25519 manifest-signature verification is a REAL,
   unit-tested primitive (`_shared/catalog/signature.ts`, Web Crypto — confirmed working under both
@@ -579,9 +581,13 @@ records the DECISIONS, not the diff.
 - **Revoked kid.** A revoked `kid` on the declared version returns `422 catalog_stale` (AT 15) —
   checked independently of the normal skew-window arithmetic, proven against a real
   `app.catalog_signing_key` row.
-- **Signed payload.** The manifest signature is verified over a domain-tagged payload
-  (`golfraven-catalog-manifest-v1:${version}:${manifestSha256}`), binding both the version and the
-  manifest's own claimed content hash.
+- **Signed payload.** *(Superseded by P3e round 2, H1 — see the P3e section at the end of this
+  document.)* The manifest signature is verified over the REAL P1 manifest statement — the
+  `golfraven/catalog/v1/manifest\n` domain tag plus the canonical JSON of
+  `{catalogVersion, contractVersion, kid, manifestSha}`, exactly the bytes
+  `tools/catalog/src/manifest.ts#manifestStatementBytes` signs — never a payload this codebase
+  invented. (This bullet used to pin `golfraven-catalog-manifest-v1:${version}:${manifestSha256}`,
+  which the P1 signer never produces.)
 - **Play status.** `provisional` below the 0.50 badge threshold, `confirmed` at or above it (except a
   `disputed` row, which a re-score never silently un-disputes).
   **Found along the way:** the INSERT's own `status` value was a bare `CASE WHEN ... THEN 'confirmed'
@@ -1454,3 +1460,106 @@ where every schema change in this round went.
   string or other planted marker left anywhere in the tree — confirmed via
   a whole-tree grep for the mutation marker (no matches) and a final `git status --short` re-check before writing this
   report. Nothing committed — HEAD stays at `d7c7127` in the working tree for review.
+
+## P3e — `import-catalog`, catalog skew over site versions, `queued_catalog` draining (round 2)
+
+**Breaking change to the evidence request shape (H1) — no client exists yet.**
+
+- `catalogVersion` is the site version STRING (`yyyymmdd-gitsha7`, `tools/catalog/src/manifest.ts`
+  `CatalogVersionSchema`), no longer an internal int. The server resolves it through
+  `app.catalog_version.site_version`; the int `version` is a server-side publish-order counter.
+- `manifestSig` is the real P1 `manifest.sig.json` shape verbatim: `{kid, contractVersion, signature,
+  manifestSha}`. `signature` is STANDARD (padded) base64 — what `tools/catalog/src/sign.ts#signBytes`
+  emits (B1). `fixId` stays pinned to unpadded base64url (§1 above): that pin is about a value this
+  codebase mints; the artifact signature encoding is a third party's output format. The statement
+  verified is the real domain-tagged canonical JSON (above). An interop test signs with the REAL
+  `tools/catalog` `signManifest`/`signVersions` and imports the result.
+- Skew semantics are unchanged but re-expressed: "5 releases" is the publish-order gap between the
+  two rows' internal `version` ints; "30 days" is `published_at`; "far future" is the build plan's own
+  §3.3(i) rule read off the declared version's date prefix (> now + 1 day, no signature can rescue
+  it); a revoked kid is `422 catalog_stale`; an unregistered kid is `catalog_forged`.
+- "Current" is the greatest `site_version` (rows with a NULL `site_version` — pre-import fixtures —
+  sort last), so importing an older, previously-unseen version never moves the current version.
+
+**Queued rows (B3) and draining (B2, M1).** Migration `0024`: a `queued_catalog` row carries
+`claimed_facility_id`/`claimed_course_id`/`claimed_catalog_version` plus the raw validated submission
+in `queued_input` (server-only; not in `api.my_evidence`, not exported); `facility_id`/`course_id`/
+`catalog_version` stay NULL (CHECK `evidence_queued_claim_shape`), so the deferred evidence FKs can no
+longer turn a 202 into a COMMIT-time 500. Draining NEVER flips a status: each row is re-run through
+the live derivation (tombstone rewrite, course/facility pairing, local date, matcher, `scorePlay`,
+play upsert) in its own actor-scoped transaction (`redrainQueuedEvidenceRow`); the self-report date
+window and clock-skew check are judged as of the row's queue time, not drain time. Outcomes: resolved
+(scored), still queued, `needs_attention` (> 7 days, no `review_item`), or terminal `unknown_id` (the
+import covering the claimed version already ran and the id is still absent, or a structural failure).
+
+**Import (H2/H3/M3/M4).** The importer pulls and verifies EVERY artifact (manifest, versions, ledger,
+`facilities/<region>.json`, `trails.json`, `designers.json`) before any write transaction opens
+(`AbortSignal.timeout`, `redirect: "error"`, byte caps), then applies them set-based (`unnest`
+upserts, verified against real Postgres) in one atomic transaction, exiting early when the current
+version is already imported. A signed ledger that conflicts with stored state (different
+`merged_into`, tombstone reversal) rejects the whole import; `revokedKids[]` is a hard reject for the
+signing kids and is recorded append-only in `app.catalog_kid_revocation` (migration `0025`, INSERT/
+SELECT-only — `catalog_signing_key`'s SELECT-only grant is untouched). The endpoint is HMAC-only
+(secret >= 32 bytes), opaque 401 when unconfigured, and ALWAYS drains, in its own transactions, even
+when the import fails.
+
+**AT 18 — stub -> verified promotion and splits (round 3, R2; migration `0026`).** The importer only
+QUEUES the work: a course whose stored ledger status was `stub` and whose incoming entry is `verified`
+(same id) gets one `app.catalog_rescore_backlog` row (`reason='promotion'`), and a kept course that
+gains a NEW split sibling (`split_from` set on the sibling) gets one (`reason='split'`) — set-based,
+idempotent per (course, reason, catalog version), and a replay of the import is an early exit that
+queues nothing. The drain pass (`import-catalog/index.ts`, after the `queued_catalog` drain, and also
+when the import itself failed) works the backlog a BOUNDED batch at a time (<= 50 plays and <= 5
+courses per pass; a keyset cursor over play ids; a failing play stops its course and is retried, never
+skipped), one short `withOwnership` transaction per play. Promotion: the stored derived fixes carry a
+`verificationTier` frozen at ingest from the then-stub course, so it is rewritten to the course's
+current `verification_status` and the play is re-scored through the live `finalizeScoringForKey`
+(advisory-locked per user/course/date, idempotent). Split: the existing play at the kept course becomes
+a `user` pick of that course (A2-01: at most one per facility + date), so it counts once; a re-pick
+(`repickUserPlay`) MOVES the same play row and its evidence to the sibling (never a second play) and
+re-scores it, refused outside the split family. `Repo#play.uniqueCourseCount()` is the server-side
+`uniqueCourses` (mirrors `playQualifies`: `score_badge >= 0.50 OR money`, ledger status `verified`,
+not void/disputed, merge closure resolved, distinct). Proven against real Postgres: a play at a stub is
+accepted and counts for nothing; after promotion + drain `uniqueCourses` is exactly 1 for each of
+three players (bounded across two passes), a replayed import/drain does not double it, the split case,
+and a re-score racing a live submission converges to the same score as a clean re-run. The live
+re-pick is exposed as a handler capability (`repickUserPlay`) — no HTTP endpoint wraps it yet (client
+UI wiring).
+
+**R3 — what the emitter publishes vs. what has a target table** (checked against
+`packages/catalog/src/schema.ts` and `tools/catalog/src/emit-catalog.ts`; documented field by field in
+`directory-artifact.ts`'s header). Imported: facilities, courses (incl. `holes`), `holesDetail` ->
+`catalog_hole`, trails, `rosterVersions` -> `catalog_roster_version`/`catalog_roster_member` (with
+`removed_on` derived by physical identity, §4.3), designers. Published but with NO target column/table
+(not imported): facility `nameFr`/`town`/`lat`/`lng`/`blurb`/`url`/`access`/`amenities`/`booking`/
+provenance; course `slug`/`par`/`opened`/`tees`/`composite`/provenance and every designer after the
+first; trail `nameFr`/`countries`/`regions`/`kind`/`status`/`operator`/`officialUrl`/`rosterStatus`/
+`blurb`/`lastReviewed`/`sources`; designer `aliases`/`sources`; `offer-terms.json`; `osm/**`. NOT
+published at all: geometry — `Course.geometry` is a pointer, never inline coordinates, so
+`catalog_course.boundary`/`radius_*`/`geometry_kind` stay NULL for every imported course (an imported
+course can never match a polygon or yield a presence co-signal until the geometry pipeline exists).
+Hole count: `courseHoleCount` is the `catalog_hole` count, else the declared `Course.holes`, else 0
+(unknown); a dwell takes the 9-hole bar ONLY for a known count of exactly 9 — unknown or any other
+value (12, 27, ...) takes the stricter 18-hole bar, so an unknown count can never grant a round more
+credit (the old `>= 18 ? 18 : 9` put a 12-hole count in the 9-hole bucket).
+
+**Remaining gaps (named, not built):**
+
+1. Geometry import (see above — nothing to import).
+2. The metadata fields listed above as having no target table.
+3. A HTTP endpoint for `repickUserPlay`.
+
+**Measured (H3):** 40,000 ledger ids + 1,000 facilities + 1,000 courses + trails/designers applied in
+one atomic transaction against real Postgres in ~1.8 s (Deno integration suite, superuser harness),
+well inside the 12 s `transaction_timeout`. A 16 MiB per-shard fetch cap (`maxShardBytes`) is the
+default; a ~40k-id ledger is below it only for compact entries — raise it deliberately if the real
+ledger outgrows it.
+
+**Accepted as follow-ups (recorded, NOT built):**
+
+1. Signature replay within the +-5 minute window: a captured valid webhook signature can be replayed
+   inside its tolerance window and burn the global `import-catalog:system` rate-limit bucket. Fix with
+   a nonce table.
+2. Wiring the deploy webhook and the hourly backstop schedule (deploy-gated).
+3. The service-role lint CLI treats a nonexistent root as clean (exit 0) instead of failing.
+

@@ -52,6 +52,12 @@ export interface LedgerRow {
 
 export interface CatalogVersionRow {
   version: number;
+  /** P3e round 2 gate, H1: the site's own `yyyymmdd-gitsha7` version
+   * string (`tools/catalog/src/manifest.ts`'s `CatalogVersionSchema`) —
+   * `null` only for a pre-import-catalog fixture row that predates this
+   * column (see 0023_catalog_import.sql's own comment). Every row a real
+   * import writes always carries one. */
+  siteVersion: string | null;
   publishedAt: string; // ISO 8601
   contractVersion: string;
   sha256: string;
@@ -88,29 +94,60 @@ export interface StoredEvidenceRow {
   cosignal: Record<string, unknown>;
 }
 
-export interface NewEvidenceRow {
-  sourceRef: string;
-  /** P3c gate round 3, blocking HIGH 1+2: SHA-256 hex of the entire
-   * parsed, validated client submission (handler.ts's own
-   * `computeInputHash`) — stored once at insert, compared on every later
-   * request that resolves to the same (user, source, source_ref) BEFORE
-   * any side effect. See the 0019 migration's own column comment. */
-  inputHash: string;
-  source: string;
-  facilityId: string;
-  courseId: string | null;
-  startedAt: string | null;
-  endedAt: string | null;
-  localDate: string;
-  summary: Record<string, unknown>;
-  integrity: Record<string, unknown>;
-  cosignal: Record<string, unknown>;
-  attestationGrade: "attested" | "unattestable" | "failed";
-  matcherVersion: string | null;
-  catalogVersion: number | null;
-  status: "accepted" | "queued_catalog" | "needs_attention" | "flagged" | "rejected";
-  deviceId: string;
-}
+/** P3e round 2 gate, B3: a discriminated union, not one flat shape with
+ * every field optional — matching `app.evidence`'s own
+ * `evidence_queued_claim_shape` CHECK constraint (0024_evidence_queued_claims.sql):
+ * a `resolved` row (status `accepted`) always carries a real
+ * `facilityId`/`courseId?`/`catalogVersion?`; a `queued` row (status
+ * `queued_catalog`) NEVER does — it carries the unconstrained
+ * `claimedFacilityId`/`claimedCourseId?`/`claimedCatalogVersion` plus the
+ * full `queuedInput` (the validated submission, re-derived at drain time —
+ * B2) instead. The type system now makes "an accepted row with a claimed_*
+ * field" or "a queued row with a resolved facilityId" impossible to
+ * construct, not merely disallowed by convention. */
+export type NewEvidenceRow =
+  | {
+      kind: "resolved";
+      sourceRef: string;
+      inputHash: string;
+      source: string;
+      facilityId: string;
+      courseId: string | null;
+      startedAt: string | null;
+      endedAt: string | null;
+      localDate: string;
+      summary: Record<string, unknown>;
+      integrity: Record<string, unknown>;
+      cosignal: Record<string, unknown>;
+      attestationGrade: "attested" | "unattestable" | "failed";
+      matcherVersion: string | null;
+      /** The RESOLVED internal `app.catalog_version.version` int (the DB
+       * column's own FK target — unchanged by H1's wire-contract change,
+       * which is about what the CLIENT submits, not this internal
+       * bookkeeping value) — `null` only for a row scored before any
+       * catalog was ever imported. The caller resolves the client's own
+       * site-version string to this int via
+       * `Repo#catalog.versionRowBySiteVersion` before calling this. */
+      catalogVersion: number | null;
+      status: "accepted";
+      deviceId: string;
+    }
+  | {
+      kind: "queued";
+      sourceRef: string;
+      inputHash: string;
+      source: string;
+      claimedFacilityId: string;
+      claimedCourseId: string | null;
+      claimedCatalogVersion: string;
+      localDate: string;
+      /** The FULL validated submission (request-shape.ts's own parsed
+       * shape) — re-read at drain time to re-run real intake derivation
+       * (B2), never merely a status flip. */
+      queuedInput: Record<string, unknown>;
+      deviceId: string;
+      status: "queued_catalog";
+    };
 
 export interface InsertEvidenceResult {
   id: string;
@@ -129,7 +166,15 @@ export interface ExistingEvidenceRow {
   id: string;
   status: string;
   inputHash: string;
-  facilityId: string;
+  // ⛔ WIDENED (P3e round 2 gate, B3): a `queued_catalog` row now has NO
+  // resolved facilityId at all (only a `claimed*` one — see
+  // `NewEvidenceRow`'s own `kind: "queued"` branch) — `null` here,
+  // exactly like `courseId` already allowed. Safe: `buildReplayResult`
+  // (evidence/handler.ts) returns unconditionally at its own
+  // `status === "queued_catalog"` check, before it ever reads
+  // `existing.facilityId` — every OTHER caller still supplies a real,
+  // resolved facility id.
+  facilityId: string | null;
   courseId: string | null;
   localDate: string;
 }
@@ -249,6 +294,11 @@ export interface Repo {
   catalog: {
     currentVersion(): Promise<CatalogVersionRow | null>;
     versionRow(version: number): Promise<CatalogVersionRow | null>;
+    /** P3e round 2 gate, H1: resolves a CLIENT-SUBMITTED site version
+     * string (`yyyymmdd-gitsha7`) against `app.catalog_version.site_version`
+     * — the lookup evidence intake actually needs now that the wire
+     * contract carries the site string, not the internal int. */
+    versionRowBySiteVersion(siteVersion: string): Promise<CatalogVersionRow | null>;
     /** Resolves a catalog id THROUGH its merge closure (tombstoned ->
      * merged_into, followed to the survivor) itself — callers never walk
      * the chain by hand. Returns the row the id ULTIMATELY resolves to
@@ -291,6 +341,40 @@ export interface Repo {
      * fires, a rate-limit bucket is hit, or a device row is created.
      * `null` means genuinely new. */
     findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null>;
+    /** AT 18 (promotion): rewrites `verificationTier` inside the stored
+     * derived fixes (`summary.fix/checkinFix/checkoutFix`) of the actor's
+     * ACCEPTED evidence at (courseId, localDate) to the course's CURRENT
+     * `verification_status` — the tier was frozen at ingest time from
+     * the then-stub course. Returns the number of rows rewritten. */
+    refreshFixTiers(courseId: string, localDate: string): Promise<number>;
+    /** P3e round 2 gate, B2/B3: promotes a `queued_catalog` row (`id`) to
+     * `accepted` IN PLACE (same row, same id — never a fresh insert) with
+     * REAL, freshly re-derived facility/course/summary/attestation data —
+     * clears `claimed_facility_id`/`claimed_course_id`/
+     * `claimed_catalog_version`/`queued_input` at the same time (the
+     * `evidence_queued_claim_shape` CHECK only allows those to be
+     * non-null while `status = 'queued_catalog'`). Guarded
+     * `WHERE status = 'queued_catalog'` — a no-op if the row has already
+     * moved on (a concurrent resolution, or an operator manually
+     * resolved it) since the caller read it. */
+    resolveQueuedRow(
+      id: string,
+      resolved: { facilityId: string; courseId: string | null; summary: Record<string, unknown>; integrity: Record<string, unknown>; attestationGrade: "attested" | "unattestable" | "failed"; catalogVersion: number | null },
+    ): Promise<void>;
+    /** P3e round 2 gate, B2/M1: a queued row that will never resolve —
+     * flips `status` to `needs_attention` (age-based, build plan §3.3:
+     * "without a review_item") or `unknown_id` (M1: "an id still absent
+     * after an import that covers its claimed version") — never scored,
+     * never linked to a play. `claimed_*`/`queued_input` are DELIBERATELY
+     * left in place (unlike `resolveQueuedRow`) — they are the only
+     * record of what the row ever claimed, and the CHECK constraint does
+     * not require clearing them outside `queued_catalog`. */
+    markQueuedTerminal(id: string, status: "needs_attention" | "unknown_id"): Promise<void>;
+    /** The row's own device id, needed by drain-time re-derivation
+     * (`redrainQueuedEvidenceRow`) to re-check a fix's checkin-token
+     * against the SAME submitting device the original live request used —
+     * `null` if the row (or its device) is somehow gone. */
+    deviceIdFor(id: string): Promise<string | null>;
   };
 
   play: {
@@ -305,6 +389,24 @@ export interface Repo {
      * an interrupted batch; see `buildReplayResult`'s own doc for both
      * shapes. */
     getForDate(courseId: string, playDate: string): Promise<StoredPlayRow | null>;
+    /** AT 18: how many DISTINCT courses (resolved through the ledger's
+     * `mergedInto` closure) this actor has a QUALIFYING play at — the
+     * server-side `uniqueCourses`, mirroring packages/rules'
+     * `playQualifies` (`score_badge >= 0.50 OR money`, at a `verified`
+     * ledger course, not void/disputed). A stub course counts toward
+     * nothing; a split's kept course counts once. */
+    uniqueCourseCount(): Promise<number>;
+    /** AT 18 (split): marks the play a `user` pick of its own course iff
+     * it has no disambiguation yet and no OTHER user pick exists for the
+     * same (facility, date) (the partial unique index). Returns whether
+     * it was marked. */
+    markUserPick(playId: string): Promise<boolean>;
+    /** AT 18 (re-pick): moves the actor's play at (facility, date) from
+     * `fromCourseId` to `toCourseId` — the evidence rows follow it and
+     * the row stays a `user` pick, so nothing is double-counted. Only
+     * between two courses of the SAME split family (`split_from`). Returns
+     * `ok:false` with a reason instead of throwing. */
+    repickCourse(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true } | { ok: false; reason: "not_same_split_family" | "no_such_play" | "target_play_exists" }>;
   };
 
   fraudSignal: {
@@ -411,4 +513,219 @@ export interface Repo {
     upsert(deviceId: string, expoToken: string): Promise<{ deviceId: string; updatedAt: string }>;
     countForUser(): Promise<number>;
   };
+}
+
+// ============================================================================
+// P3e: `import-catalog` (build plan §3.3) — a SEPARATE, actor-FREE
+// repository interface, not a member of `Repo` above. `Repo` is
+// deliberately per-user (`buildRepo(trx, actor)` closes over `actor.uid`
+// once — see this file's own header); `import-catalog` is a system
+// operation with no user at all (no `auth.users` row, no JWT — see
+// `_shared/catalog/webhook-auth.ts`'s own header for why that is the
+// "explicit system-actor path rather than faking a user" the task asks
+// for). Giving it a SEPARATE interface, rather than bolting write methods
+// onto the shared, actor-scoped `Repo`, keeps every OTHER caller's own
+// type surface (evidence/checkin/me) exactly as narrow as it already is.
+// ============================================================================
+
+export interface ImporterCurrentVersionRow {
+  version: number;
+  siteVersion: string | null;
+}
+
+export interface ImporterSigningKeyRow {
+  kid: string;
+  publicKeyB64Url: string;
+  revokedAt: string | null;
+}
+
+export interface ImportVersionInput {
+  siteVersion: string;
+  contractVersion: string;
+  sha256: string;
+  kid: string;
+  publishedAt: string;
+}
+
+export interface ImportVersionResult {
+  version: number;
+  wasNew: boolean;
+}
+
+export interface LedgerBaseRow {
+  id: string;
+  kind: string;
+  firstCatalogVersionInt: number;
+}
+
+export interface LedgerStateRow {
+  id: string;
+  status: "stub" | "verified";
+  tombstoned: boolean;
+  mergedInto: string | null;
+  verifiedInVersionInt: number | null;
+  /** AT 18: sibling ids a `split` transition of THIS (kept) entry names. */
+  splitSiblings: string[];
+}
+
+/** One `Trail.rosterVersions[]` entry, ready to persist (R3). */
+export interface RosterVersionInput {
+  trailId: string;
+  version: number;
+  effectiveFrom: string; // ISO date
+  completionUnit: "course" | "facility" | "hole";
+  markerUnit: "course" | "facility" | "hole";
+  completionRule: { kind: "all" | "n_of_m"; n: number | null; source: string | null };
+  markerRule: { kind: "all" | "n_of_m"; n: number | null; source: string | null };
+  trackingStartsOn: string | null;
+  members: Array<{ unit: "course" | "facility" | "hole"; courseId: string | null; anyOfCourseIds: string[] | null; facilityId: string | null; holeId: string | null; stopOrder: number | null; removedOn: string | null }>;
+}
+
+/** AT 18 rescore backlog row (migration 0026). */
+export interface RescoreBacklogRow {
+  id: number;
+  courseId: string;
+  reason: "promotion" | "split";
+  cursorPlayId: string | null;
+}
+
+export interface RescorePlayRef {
+  playId: string;
+  userId: string;
+  facilityId: string;
+  courseId: string;
+  playDate: string;
+}
+
+export interface ImporterLedgerRow {
+  id: string;
+  kind: string;
+  status: "stub" | "verified";
+  mergedInto: string | null;
+}
+
+export interface QueuedEvidenceRow {
+  id: string;
+  userId: string;
+  /** P3e round 2 gate, B3: the CLAIMED (unresolved) ids — `facility_id`/
+   * `course_id` are always NULL on a queued row now (see
+   * `evidence_queued_claim_shape`, 0024_evidence_queued_claims.sql). */
+  claimedFacilityId: string;
+  claimedCourseId: string | null;
+  /** P3e round 2 gate, H1/M1: the site version STRING the row was queued
+   * under — compared against the importer's own current site version to
+   * tell "the covering import hasn't run yet, still legitimately queued"
+   * apart from "it ran, and this id still doesn't exist" (M1's terminal
+   * `unknown_id`). */
+  claimedCatalogVersion: string;
+  /** The full validated submission (`app.evidence.queued_input`) —
+   * handed to `evidence/handler.ts#redrainQueuedEvidenceRow` verbatim. */
+  queuedInput: Record<string, unknown>;
+  createdAt: string; // ISO 8601
+}
+
+/** The narrow repository object `privileged.ts#withSystemCatalogImport()`
+ * hands to its callback — the importer's own counterpart to `Repo`. */
+export interface ImporterRepo {
+  now(): Date;
+
+  catalog: {
+    /** Every already-imported `(site_version -> version)` pair — used to
+     * resolve a ledger entry's own `transitions[].catalogVersion` string
+     * to the internal int FK `app.catalog_id_ledger.first_catalog_version`/
+     * `verified_in_version` requires. */
+    listSiteVersions(): Promise<Array<{ siteVersion: string; version: number }>>;
+    currentVersion(): Promise<ImporterCurrentVersionRow | null>;
+    /** Idempotent, keyed by `(site_version, sha256)` (task instruction:
+     * "make the import idempotent, keyed by version and sha") — a
+     * re-import of an already-seen `(siteVersion, sha256)` pair returns
+     * the SAME row, `wasNew: false`, and writes nothing. A genuinely new
+     * `siteVersion` is assigned the next `version` int under an advisory
+     * lock (never a `GENERATED` identity column — see
+     * 0023_catalog_import.sql's own comment for why: two pre-existing
+     * fixture helpers insert an explicit `version` with no `site_version`
+     * at all, and an identity column would reject that). A `siteVersion`
+     * that already exists with a DIFFERENT `sha256` is a real conflict
+     * (append-only violation / a forged replay of an old version number
+     * with new content) — rejected, never silently overwritten. */
+    importVersion(input: ImportVersionInput): Promise<ImportVersionResult>;
+    getSigningKey(kid: string): Promise<ImporterSigningKeyRow | null>;
+    /** M3: records every kid a verified manifest's revokedKids[] names
+     * (append-only, app.catalog_kid_revocation — migration 0025). */
+    recordRevokedKids(kids: string[], catalogVersion: string): Promise<void>;
+    /** Pass 1 of the two-pass ledger apply (import-handler.ts's own doc):
+     * `ON CONFLICT (id) DO NOTHING` inserts, so every id referenced by
+     * ANY entry's own `mergedInto` exists before pass 2 sets it (the
+     * column's own FK — 0002_catalog_tables.sql). Idempotent by
+     * construction. */
+    ensureLedgerIdsExist(rows: LedgerBaseRow[]): Promise<void>;
+    /** Pass 2: applies status/tombstoned/mergedInto/verifiedInVersion —
+     * every id referenced already exists (pass 1 already ran). Append-only
+     * in EFFECT (never clears an already-`verified` status back to `stub`,
+     * never un-tombstones — see import-handler.ts's own doc for exactly
+     * what it will and won't overwrite). */
+    applyLedgerState(rows: LedgerStateRow[]): Promise<void>;
+    /** M3: a human-readable conflict description if any incoming entry
+     * conflicts with already-stored ledger state (different merged_into,
+     * or a tombstone reversal), else null. Set-based. */
+    findLedgerConflict(rows: LedgerStateRow[]): Promise<string | null>;
+    /** Resolves a catalog id through its merge closure — a system-scoped
+     * duplicate of `Repo#catalog.resolveLedgerId`'s own SQL (privileged.ts),
+     * kept SEPARATE rather than shared, per this file's own header on why
+     * `ImporterRepo` doesn't reuse `Repo` machinery. */
+    resolveLedgerId(id: string): Promise<ImporterLedgerRow | null>;
+    // ⛔ NEW (P3e round 2 gate, H2/H3): the REAL directory shards
+    // (`facilities/<region>.json`, `trails.json`, `designers.json` —
+    // `_shared/catalog/directory-artifact.ts`'s own header names exactly
+    // which fields are read and why geometry/roster-membership are
+    // still out of scope). Every one is a SET-BASED upsert (H3: "replace
+    // per-row writes with set-based upserts") — one round trip per
+    // call, not one per row.
+    upsertTrails(rows: { id: string; slug: string; name: string; catalogVersionInt: number }[]): Promise<void>;
+    upsertDesigners(rows: { id: string; name: string; catalogVersionInt: number }[]): Promise<void>;
+    upsertFacilities(rows: { id: string; slug: string; region: string; tz: string; name: string; verificationStatus: string; catalogVersionInt: number }[]): Promise<void>;
+    upsertHoles(rows: { id: string; courseId: string; number: number; catalogVersionInt: number }[]): Promise<void>;
+    /** R3: persists roster versions + members (set-based). A roster version is immutable per (trail, version): an already-stored one is left untouched (its members are only written alongside a NEWLY inserted version row). */
+    upsertRosters(rows: RosterVersionInput[]): Promise<void>;
+    /** AT 18, BEFORE applyLedgerState: the COURSE ids whose stored ledger status is `stub` and whose incoming entry is `verified`. */
+    findStubPromotions(rows: LedgerStateRow[]): Promise<string[]>;
+    /** AT 18, after ensureLedgerIdsExist: records `split_from` on every sibling still lacking one; returns the KEPT ids that gained at least one NEW sibling. */
+    applySplits(rows: LedgerStateRow[]): Promise<string[]>;
+    /** AT 18: queue course ids for re-scoring (idempotent per (course, reason, catalog version)). */
+    enqueueRescore(courseIds: string[], reason: "promotion" | "split", catalogVersionInt: number): Promise<void>;
+    upsertCourses(rows: { id: string; facilityId: string; designerId: string | null; name: string; holes: number | null; verificationStatus: string; closed: boolean; catalogVersionInt: number }[]): Promise<void>;
+  };
+
+  /** AT 18: the re-score backlog (migration 0026) — bounded work per run. */
+  rescoreBacklog: {
+    listOpen(limit: number): Promise<RescoreBacklogRow[]>;
+    /** Set-based keyset page of plays at `courseId` after `afterPlayId`, ordered by play id. */
+    nextPlays(courseId: string, afterPlayId: string | null, limit: number): Promise<RescorePlayRef[]>;
+    advance(id: number, cursorPlayId: string | null, done: boolean): Promise<void>;
+  };
+
+  queuedCatalog: {
+    /** Every open (`status = 'queued_catalog'`) evidence row, oldest
+     * first, bounded — draining processes a bounded batch per run rather
+     * than an unbounded table scan. Cross-user by design (this IS the
+     * system-scoped importer repo) — the caller (drain-orchestrator.ts)
+     * opens a PER-ROW, actor-scoped `Repo` transaction (via an injected
+     * `withOwnership`-shaped function) for the actual re-derivation/
+     * status-write, one row's own `userId` at a time — see that module's
+     * own header for why promotion moved off `ImporterRepo` entirely
+     * (P3e round 2 gate, B2). */
+    listOpen(limit: number): Promise<QueuedEvidenceRow[]>;
+    /** The importer's own current site version string (duplicate of
+     * `catalog.currentVersion()?.siteVersion` — exposed here directly so
+     * drain-orchestrator.ts doesn't need a second call) — M1: compared
+     * against a queued row's own `claimedCatalogVersion` to tell "not yet
+     * imported" apart from "the covering import already ran." */
+    currentSiteVersion(): Promise<string | null>;
+  };
+}
+
+export interface CatalogImportEnvConfig {
+  artifactBaseUrl: string;
+  allowedHosts: string[];
+  webhookHmacSecret: string;
 }

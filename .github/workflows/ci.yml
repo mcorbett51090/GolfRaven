@@ -357,6 +357,7 @@ jobs:
             supabase/functions/evidence-batch/index.ts \
             supabase/functions/checkin-challenge/index.ts \
             supabase/functions/checkin-token/index.ts \
+            supabase/functions/import-catalog/index.ts \
             supabase/functions/_shared/privileged.ts
 
       - name: deno cache --frozen (proves the pinned hashes, tamper-evident)
@@ -403,6 +404,7 @@ jobs:
             supabase/functions/evidence-batch/index.ts \
             supabase/functions/checkin-challenge/index.ts \
             supabase/functions/checkin-token/index.ts \
+            supabase/functions/import-catalog/index.ts \
             supabase/functions/_shared/privileged.ts
 
       - name: deno cache --frozen tamper test (proves the pin-proof step itself catches a real tamper)
