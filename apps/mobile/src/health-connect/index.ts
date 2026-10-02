@@ -1,5 +1,5 @@
-export * from "./types.js";
-export * from "./shape.js";
+export * from "./types";
+export * from "./shape";
 export {
   ensureHealthConnectReady,
   requestGolfReadPermission,
@@ -8,4 +8,4 @@ export {
   fetchConsentRequiredRouteFollowUp,
   HealthConnectUnavailableError,
   HealthConnectPermissionDeniedError,
-} from "./reader.js";
+} from "./reader";

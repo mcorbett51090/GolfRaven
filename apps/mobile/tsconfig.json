@@ -5,11 +5,18 @@
   // "bundler", jsx: "react-jsx"), a different module system from the
   // NodeNext ESM the pure TS packages (catalog/matching/rules) use. This
   // is the same split the Expo TS template itself ships with.
+  //
+  // This program is the APP (everything Metro can bundle). `types: []` keeps
+  // @types/node's globals (Buffer, process, node:*) OUT of it, so app code
+  // that reaches for a Node-only API fails to typecheck here instead of at
+  // runtime on Hermes. Tests (which do use Node) are checked by
+  // tsconfig.test.json.
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "types": []
   },
-  "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["app", "src", "index.ts", "expo-env.d.ts"],
+  "exclude": ["node_modules", "dist", "test"]
 }

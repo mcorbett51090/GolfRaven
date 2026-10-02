@@ -24,12 +24,12 @@ import {
   requestPermission,
   SdkAvailabilityStatus,
 } from "react-native-health-connect";
-import type { RawExerciseSessionRecord, RouteFollowUpResult } from "./types.js";
-import { shapeGolfSessions, shapeRouteFollowUp } from "./shape.js";
-import type { GolfSessionReadResult } from "./types.js";
+import type { RawExerciseSessionRecord, RouteFollowUpResult } from "./types";
+import { shapeGolfSessions, shapeRouteFollowUp } from "./shape";
+import type { GolfSessionReadResult } from "./types";
 
-export type { GolfSessionReadResult, GolfSessionSummary, RouteFollowUpResult } from "./types.js";
-export { shapeGolfSessions, shapeRouteFollowUp, EXERCISE_TYPE_GOLF } from "./shape.js";
+export type { GolfSessionReadResult, GolfSessionSummary, RouteFollowUpResult } from "./types";
+export { shapeGolfSessions, shapeRouteFollowUp, EXERCISE_TYPE_GOLF } from "./shape";
 
 /** Thrown when Health Connect itself isn't usable on this device (not
  * installed, or the installed provider is too old). The X1 harness

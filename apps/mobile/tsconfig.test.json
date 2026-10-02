@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // The test program: the app's sources plus the Node-using tests and
+  // fixtures, with @types/node available.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["app", "src", "test"],
+  "exclude": ["node_modules", "dist"]
+}

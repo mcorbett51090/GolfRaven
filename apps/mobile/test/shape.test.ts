@@ -3,8 +3,8 @@ import {
   EXERCISE_TYPE_GOLF,
   shapeGolfSessions,
   shapeRouteFollowUp,
-} from "../src/health-connect/shape.js";
-import type { RawExerciseRoutePoint, RawExerciseSessionRecord } from "../src/health-connect/types.js";
+} from "../src/health-connect/shape";
+import type { RawExerciseRoutePoint, RawExerciseSessionRecord } from "../src/health-connect/types";
 
 // This file imports only the pure shaping logic (shape.ts), never
 // reader.ts or the package's index.ts — those import
