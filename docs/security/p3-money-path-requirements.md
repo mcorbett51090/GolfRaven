@@ -2203,3 +2203,43 @@ Accepted follow-ups (append-only; E-numbers are this work's own):
   provisioning statement's password literal.
 - **E4.** The earn path (not built) will need a definer: `offer_code_enforce_max_redemptions` counts only visible codes
   under edge_actor, and edge_actor cannot insert `offer_code`.
+
+## Edge role PR1 gate PASS (`ca8b8f1`, 2026-10-02): findings to close before PR2 relies on the policies
+
+The gate passed (no BLOCKER/HIGH): actor binding, escalation, GUC windows and checks 9–12 held under
+real `edge_gateway` probes. These are scheduled as **edge role PR1b** (new migration 0032), which must
+merge before PR2 routes any query through `edge_actor`:
+
+1. **MEDIUM — provisioning leaks the plaintext password to the server log on failure**
+   (`tools/db/provision-edge-login.sh`; `log_min_error_statement=error` logs the failing
+   `ALTER ROLE … PASSWORD`). Send a client-computed SCRAM-SHA-256 verifier instead; fix E3 / design §2.
+2. **MEDIUM — one-way columns are reversible under `edge_actor`:** `checkin_token.consumed_at` can be
+   reset to NULL (presence-token replay) and `device.attest_counter` can be rolled back (defeats App
+   Attest anti-replay, AT 5). Add BEFORE UPDATE one-way triggers (set-once / monotonic), add to R2.
+3. **MEDIUM — own-row WITH CHECK covers `user_id` only:** an actor can write rows that reference another
+   user's device or challenge (`checkin_token`, `evidence.device_id`, `push_token`,
+   `offer_code.activated_device_id`), and the FK check doubles as an existence oracle. Add
+   own-device / own-challenge `EXISTS` to those WITH CHECK clauses (`IS NULL OR EXISTS` for
+   `activated_device_id`).
+4. **MEDIUM (R1, confirmed) — shared offer budget counter writable** by any actor holding a code on the
+   offer (`budget_reserved` settable within `[0, cap − used]`; `release_offer_budget` drains it), and R2
+   (`earned` → `issued` directly). **R1 closure (reserve/release behind definers) is now a precondition
+   of PR4**, not optional PR5.
+5. **LOW —** `private.delete_my_data` reads `pg_catalog` relations unqualified, and `edge_actor` holds
+   TEMP, so a temp `pg_constraint` shadows it (fails closed via the post-condition). Qualify
+   `pg_catalog.*` in a new migration; add an inventory check for unqualified relations in reachable
+   definers.
+6. **LOW —** check 9 misses ADMIN-only membership; check 12 covers too few schemas and never checks
+   schema CREATE. Extend both.
+7. **LOW —** 0030 does not reject a pre-existing misconfigured `edge_*` role (SUPERUSER / BYPASSRLS /
+   REPLICATION / foreign membership); add an asserting DO block.
+8. **LOW —** delegate preconditions are caller-controlled for `edge_system` (it can insert its own open
+   backlog row); reword the design doc (moot under R6).
+9. **LOW —** `review_item` SELECT shows all kinds on own codes; `audit_log` INSERT does not tie
+   `subject_id` to the actor's play; `install_link_account` INSERT does not tie to the actor's device
+   hash / key. Tighten.
+10. **LOW —** add session-reuse pgTAP cells for the three new GUC windows (P3a follow-up 1).
+11. **NIT —** compare `app.edge.link_device_id` as text (a non-uuid session value breaks reads with
+    22P02); `bind_actor` does not exclude soft-deleted / banned users `[unverified]`; `purge_fix_coords`
+    accepts 1-day retention; `rewards-isolation.test.ts` misses a later `ALTER FUNCTION … SECURITY
+    DEFINER` (inventory check 3 backstops it).
