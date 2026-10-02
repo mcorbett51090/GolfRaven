@@ -146,7 +146,7 @@ async function getSigningKeyReadOnly(kid: string) {
 }
 
 Deno.test("auth rejection: verifyWebhookSignature rejects a missing/forged credential — no JWT path exists for this endpoint at all", DT, async () => {
-  const secret = "integration-test-secret-at-least-32-bytes-long";
+  const secret = "s".repeat(48); // runtime-built fake HMAC secret (>= 32 bytes); never a real value
   const body = new TextEncoder().encode("{}");
   const now = new Date();
 

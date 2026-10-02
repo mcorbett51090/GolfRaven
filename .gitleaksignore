@@ -21,3 +21,9 @@ fe6b390e215b383fab9e8feeafb61bbd33052b60:apps/signup-worker/test/router.test.ts:
 685fc71970560bdbd2ec2bc2b944e6fe0c29efc3:supabase/tests/matrix/11_money_path.sql:generic-api-key:459
 685fc71970560bdbd2ec2bc2b944e6fe0c29efc3:supabase/tests/matrix/11_money_path.sql:generic-api-key:467
 685fc71970560bdbd2ec2bc2b944e6fe0c29efc3:supabase/tests/matrix/11_money_path.sql:generic-api-key:569
+
+# 2026-10-02 — P3e import-catalog integration test fixture. The flagged line held the fake HMAC
+# secret "integration-test-secret-at-least-32-bytes-long" for a local-only webhook-auth test. It was
+# never a real secret; the literal is replaced with a runtime-built value ("s".repeat(48)) in the
+# next commit. This entry covers only the historical commit that still contains it.
+5aba031023efdf09b0f2d572a304262d00ba978a:supabase/tests/integration/import-catalog.deno.test.ts:generic-api-key:149
