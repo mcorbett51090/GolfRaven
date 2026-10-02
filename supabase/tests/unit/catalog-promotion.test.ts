@@ -187,12 +187,12 @@ describe("AT 18 — the bounded re-score drain", () => {
   it("works at most `maxPlays` per pass, advances the cursor, and completes the course on the last page — then is a no-op", async () => {
     const { state, importer, withOwnership } = setup(5);
     await seedPlays(state, importer, 5);
-    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursorPlayId: null, catalogVersionInt: 2, done: false });
+    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
     const repo = makeFakeImporterRepo(importer);
 
     const p1 = await drainRescoreBacklog(repo, withOwnership, 2);
     expect(p1).toMatchObject({ playsProcessed: 2, coursesCompleted: 0, failures: 0 });
-    expect(importer.backlog[0]!.cursorPlayId).toBe(importer.plays[1]!.playId);
+    expect(importer.backlog[0]!.cursor?.playId).toBe(importer.plays[1]!.playId);
     const p2 = await drainRescoreBacklog(repo, withOwnership, 2);
     expect(p2.playsProcessed).toBe(2);
     const p3 = await drainRescoreBacklog(repo, withOwnership, 2);
@@ -205,7 +205,7 @@ describe("AT 18 — the bounded re-score drain", () => {
   it("a failing play stops its course for this pass WITHOUT advancing past it (retried, never skipped)", async () => {
     const { state, importer } = setup(3);
     await seedPlays(state, importer, 3);
-    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursorPlayId: null, catalogVersionInt: 2, done: false });
+    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
     let calls = 0;
     const flaky: WithOwnershipFn = async (actor, op) => {
       calls += 1;
@@ -214,7 +214,7 @@ describe("AT 18 — the bounded re-score drain", () => {
     };
     const r = await drainRescoreBacklog(makeFakeImporterRepo(importer), flaky, 10);
     expect(r).toMatchObject({ playsProcessed: 1, failures: 1, coursesCompleted: 0 });
-    expect(importer.backlog[0]).toMatchObject({ cursorPlayId: importer.plays[0]!.playId, done: false });
+    expect(importer.backlog[0]).toMatchObject({ cursor: { playId: importer.plays[0]!.playId }, done: false });
   });
 
   it("promotion rewrites the stored fix tier before re-scoring (the stub-era tier is what made the old score low)", async () => {
@@ -223,7 +223,7 @@ describe("AT 18 — the bounded re-score drain", () => {
     const ev = [...state.evidence.values()][0]!;
     (ev.summary as Record<string, unknown>).fix = { verificationTier: "unverified" };
     state.courseTier.set("crs_x1", "play-verified");
-    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursorPlayId: null, catalogVersionInt: 2, done: false });
+    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
     await drainRescoreBacklog(makeFakeImporterRepo(importer), withOwnership, 10);
     expect(((ev.summary as Record<string, unknown>).fix as Record<string, unknown>).verificationTier).toBe("play-verified");
   });
@@ -231,25 +231,138 @@ describe("AT 18 — the bounded re-score drain", () => {
   it("a split backlog row labels the kept course's play a user pick (once per facility+date)", async () => {
     const { state, importer, withOwnership } = setup(1);
     await seedPlays(state, importer, 1);
-    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "split", cursorPlayId: null, catalogVersionInt: 2, done: false });
+    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "split", cursor: null, catalogVersionInt: 2, done: false });
     await drainRescoreBacklog(makeFakeImporterRepo(importer), withOwnership, 10);
     expect([...state.plays.values()][0]!.courseDisambiguatedBy).toBe("user");
   });
 });
 
-describe("AT 18 — re-pick moves, never doubles", () => {
-  it("moves the play + evidence to the sibling within a split family; refuses outside it", async () => {
+// ---------------------------------------------------------------------------
+// A money-capable dwell round, stored the way live intake stores it (derived
+// fixes + raw coordinates in integrity.fixCoords), then scored through the
+// real finalizeScoringForKey.
+// ---------------------------------------------------------------------------
+import { finalizeScoringForKey, labelSplitPlayAsUserPick } from "../../functions/_shared/evidence/handler.js";
+import { deriveFix } from "../../functions/_shared/evidence/derive-fix.js";
+
+const LOCAL_DATE = "2026-05-31";
+const NOON_MS = Date.parse("2026-05-31T17:00:00Z");
+
+async function seedDwell(state: ReturnType<typeof makeFakeState>, uid: string, courseId: string, opts: { holes?: 9 | 18; withCoords?: boolean; apartMinutes?: number; vendor?: boolean } = {}) {
+  const repo = makeFakeRepo(state, uid);
+  const mk = (fixId: string, at: number) => deriveFix({ fix: { fixId, accuracyMeters: 10, capturedAt: at, simulated: false, foreground: true, fromApp: true }, resolvedFacilityId: "fac_x", localDate: LOCAL_DATE, match: { verificationTier: "play-verified", geometryKind: "polygon", insideBuffer: true }, consumedToken: { attestationGrade: "attested", challengeKind: "live" } });
+  const sourceRef = `dwell-${state.nextId++}`;
+  await repo.evidence.insertIdempotent({
+    kind: "resolved", sourceRef, inputHash: `hash-${sourceRef}`, source: "foreground_dwell", facilityId: "fac_x", courseId, startedAt: null, endedAt: null, localDate: LOCAL_DATE,
+    summary: { localDate: LOCAL_DATE, checkinFix: mk("fix_in", NOON_MS), checkoutFix: mk("fix_out", NOON_MS + (opts.apartMinutes ?? 180) * 60_000), apartMinutes: opts.apartMinutes ?? 180, holes: opts.holes ?? 18 },
+    integrity: opts.withCoords === false ? {} : { fixCoords: { fix_in: { lat: 36.1467, lng: -86.7816 }, fix_out: { lat: 36.1468, lng: -86.7817 } } },
+    cosignal: {}, attestationGrade: "attested", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: FAKE_DEVICE_ID,
+  });
+  if (opts.vendor) {
+    // A mapped, sensor-provenance vendor round (weight 0.85, money-eligible)
+    // beside the attested polygon dwell's presence fix: the combination that
+    // makes this play money-TRUE when it is NOT a user pick.
+    const ref = `vendor-${state.nextId++}`;
+    await repo.evidence.insertIdempotent({
+      kind: "resolved", sourceRef: ref, inputHash: `hash-${ref}`, source: "arccos" as never, facilityId: "fac_x", courseId, startedAt: null, endedAt: null, localDate: LOCAL_DATE,
+      summary: { localDate: LOCAL_DATE, vendorCourseMapped: true, sensorProvenance: true },
+      integrity: {}, cosignal: {}, attestationGrade: "unattestable", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: FAKE_DEVICE_ID,
+    });
+  }
+  return finalizeScoringForKey(repo, "fac_x", courseId, LOCAL_DATE);
+}
+
+describe("NEW-4 (A2-01): a user pick contributes 0 to score_monetary on EVERY scoring path", () => {
+  it("a polygon-attested, play-verified dwell is money-true as a geometry play, and money-false / score_monetary 0 once the play is a user pick (label -> re-score)", async () => {
+    const state = makeFakeState();
+    const before = await seedDwell(state, "user-a", "crs_x1", { vendor: true });
+    expect(before.play.money).toBe(true); // the precondition: this fixture WOULD be money-true
+    expect(before.play.scoreMonetary).toBeGreaterThanOrEqual(0.85);
+
+    const repo = makeFakeRepo(state, "user-a");
+    await labelSplitPlayAsUserPick(repo, { playId: before.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE });
+    const play = [...state.plays.values()][0]!;
+    expect(play.courseDisambiguatedBy).toBe("user");
+    expect(play.money).toBe(false);
+    expect(play.scoreMonetary).toBe(0);
+    // ...and a plain re-finalize (the promotion path, a batch retry) keeps it capped.
+    const again = await finalizeScoringForKey(repo, "fac_x", "crs_x1", LOCAL_DATE);
+    expect(again.play).toMatchObject({ money: false, scoreMonetary: 0 });
+  });
+
+  it("a NEW live submission landing on an already-user-picked play is scored with the cap too", async () => {
+    const state = makeFakeState();
+    const first = await seedDwell(state, "user-a", "crs_x1", { vendor: true });
+    expect(first.play.money).toBe(true);
+    const repo = makeFakeRepo(state, "user-a");
+    await labelSplitPlayAsUserPick(repo, { playId: first.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE });
+    const r = await handleEvidenceIntake({ source: "foreground_checkin", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", courseId: "crs_x1", localDate: LOCAL_DATE, catalogVersion: "20260520-a000001", fix: { fixId: "fix_live", lat: 36.1467, lng: -86.7816, accuracyMeters: 10, capturedAt: NOON_MS, simulated: false, foreground: true, fromApp: true } }, repo);
+    if (r.status !== "accepted") throw new Error("unreachable");
+    expect(r.play.money).toBe(false);
+    expect(r.play.scoreMonetary).toBe(0);
+  });
+});
+
+describe("AT 18 — re-pick: fully re-derived, user plays only, exactly once, audited", () => {
+  function splitWorld() {
     const state = makeFakeState();
     state.ledger.set("crs_s", { id: "crs_s", kind: "course", status: "verified", verifiedInVersion: 1, splitFrom: "crs_x1", tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 });
     state.courseFacility.set("crs_s", "fac_x");
     state.ledger.set("crs_other", { id: "crs_other", kind: "course", status: "verified", verifiedInVersion: 1, splitFrom: null, tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 });
+    return state;
+  }
+  const args = { facilityId: "fac_x", playDate: LOCAL_DATE, fromCourseId: "crs_x1", toCourseId: "crs_s" };
+
+  it("refuses a non-user pick, then (as a user pick) moves the play + evidence once; a second re-pick is refused; outside the family is refused", async () => {
+    const state = splitWorld();
+    const first = await seedDwell(state, "user-a", "crs_x1");
     const repo = makeFakeRepo(state, "user-a");
-    await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", courseId: "crs_x1", localDate: "2026-05-31", catalogVersion: "20260520-a000001" }, repo);
-    const args = { facilityId: "fac_x", playDate: "2026-05-31", fromCourseId: "crs_x1", toCourseId: "crs_s" };
     expect(await repickUserPlay(repo, { ...args, toCourseId: "crs_other" })).toEqual({ ok: false, reason: "not_same_split_family" });
+    expect(await repickUserPlay(repo, args)).toEqual({ ok: false, reason: "not_user_pick" }); // a geometry resolution is not the player's to move
+    await labelSplitPlayAsUserPick(repo, { playId: first.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE });
     expect(await repickUserPlay(repo, args)).toEqual({ ok: true });
     expect(state.plays.size).toBe(1); // moved, not duplicated
-    expect([...state.plays.values()][0]).toMatchObject({ courseId: "crs_s", courseDisambiguatedBy: "user" });
+    expect([...state.plays.values()][0]).toMatchObject({ courseId: "crs_s", courseDisambiguatedBy: "user", money: false, scoreMonetary: 0 });
+    // back again: refused — exactly ONE re-pick per play.
+    expect(await repickUserPlay(repo, { ...args, fromCourseId: "crs_s", toCourseId: "crs_x1" })).toEqual({ ok: false, reason: "already_repicked" });
     expect(await repickUserPlay(repo, args)).toEqual({ ok: false, reason: "no_such_play" });
+  });
+
+  it("re-runs the matcher against the TARGET course from the stored raw coordinates (tier/geometry/insideBuffer), not the old course's", async () => {
+    const state = splitWorld();
+    // At the target the same coordinates are OUTSIDE its (radius, unverified) geometry.
+    state.matches.set("crs_s", { verificationTier: "unverified", geometryKind: "radius", insideBuffer: false });
+    const first = await seedDwell(state, "user-a", "crs_x1");
+    const repo = makeFakeRepo(state, "user-a");
+    await labelSplitPlayAsUserPick(repo, { playId: first.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE });
+    expect(await repickUserPlay(repo, args)).toEqual({ ok: true });
+    const ev = [...state.evidence.values()][0]!;
+    const summary = ev.summary as { checkinFix: Record<string, unknown>; checkoutFix: Record<string, unknown> };
+    expect(summary.checkinFix).toMatchObject({ verificationTier: "unverified", geometryKind: "radius", insideBuffer: false });
+    expect(summary.checkoutFix).toMatchObject({ verificationTier: "unverified", geometryKind: "radius", insideBuffer: false });
+    expect(ev.courseId).toBe("crs_s");
+  });
+
+  it("recomputes the dwell round bar for the target: a 9-hole dwell moved to an 18-hole sibling gets the 18-hole bar", async () => {
+    const state = splitWorld();
+    state.courseHoles.set("crs_x1", 9);
+    state.courseHoles.set("crs_s", 18);
+    const first = await seedDwell(state, "user-a", "crs_x1", { holes: 9, apartMinutes: 100 });
+    const repo = makeFakeRepo(state, "user-a");
+    await labelSplitPlayAsUserPick(repo, { playId: first.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE });
+    expect(await repickUserPlay(repo, args)).toEqual({ ok: true });
+    const ev = [...state.evidence.values()][0]!;
+    expect((ev.summary as Record<string, unknown>).holes).toBe(18);
+    // ...and a move the other way (a different world) would give 9.
+  });
+
+  it("fails closed (cannot_rederive, nothing moves) when a fix's raw coordinates were never stored", async () => {
+    const state = splitWorld();
+    const first = await seedDwell(state, "user-a", "crs_x1", { withCoords: false });
+    const repo = makeFakeRepo(state, "user-a");
+    await labelSplitPlayAsUserPick(repo, { playId: first.play.id, facilityId: "fac_x", courseId: "crs_x1", playDate: LOCAL_DATE });
+    expect(await repickUserPlay(repo, args)).toEqual({ ok: false, reason: "cannot_rederive" });
+    expect([...state.plays.values()][0]!.courseId).toBe("crs_x1");
+    expect([...state.evidence.values()][0]!.courseId).toBe("crs_x1");
   });
 });

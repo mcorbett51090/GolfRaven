@@ -108,6 +108,7 @@ import type {
   QueuedEvidenceRow,
   RateLimitResult,
   Repo,
+  RepickRefusal,
   SigningKeyRow,
   StoredEvidenceRow,
   StoredPlayRow,
@@ -115,6 +116,7 @@ import type {
   UpsertPlayResult,
   CatalogImportEnvConfig,
   RescoreBacklogRow,
+  RescoreCursor,
   RescorePlayRef,
   RosterVersionInput,
 } from "./types.ts";
@@ -443,6 +445,12 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         return { version: r.version, siteVersion: r.site_version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
       },
 
+      async releaseRank(siteVersion: string): Promise<number | null> {
+        const rows = await trx`select count(*)::int as n from app.catalog_version where site_version is not null and site_version <= ${siteVersion}`;
+        const n = Number(rows[0]?.n ?? 0);
+        return n > 0 ? n : null;
+      },
+
       async resolveLedgerId(id: string): Promise<LedgerRow | null> {
         let currentId = id;
         // Ninth-gate-style bounded closure walk (mirrors packages/catalog's
@@ -664,7 +672,18 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       },
 
       async markQueuedTerminal(id: string, status: "needs_attention" | "unknown_id"): Promise<void> {
-        await trx`update app.evidence set status = ${status}::app.evidence_status where id = ${id} and user_id = ${uid} and status = 'queued_catalog'`;
+        // A terminal row keeps NO queued submission: `queued_input` (raw
+        // coordinates and all) and the claimed_* columns are cleared with the
+        // status change, exactly as the column comments in 0024 say. A replay
+        // of such a row needs only its status + input_hash.
+        await trx`
+          update app.evidence set
+            status = ${status}::app.evidence_status,
+            claimed_facility_id = null,
+            claimed_course_id = null,
+            claimed_catalog_version = null,
+            queued_input = null
+          where id = ${id} and user_id = ${uid} and status = 'queued_catalog'`;
       },
 
       async deviceIdFor(id: string): Promise<string | null> {
@@ -859,7 +878,13 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         return rows.length > 0;
       },
 
-      async repickCourse(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true } | { ok: false; reason: "not_same_split_family" | "no_such_play" | "target_play_exists" }> {
+      async disambiguatedBy(courseId: string, playDate: string): Promise<"geometry" | "staff" | "user" | null> {
+        const rows = await trx`select course_disambiguated_by as d from app.play where user_id = ${uid} and course_id = ${courseId} and play_date = ${playDate}`;
+        const d = rows[0]?.d;
+        return d === "geometry" || d === "staff" || d === "user" ? d : null;
+      },
+
+      async repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true; playId: string } | { ok: false; reason: RepickRefusal }> {
         // Serialize against any concurrent scorer of EITHER play — same
         // advisory key family as upsertFromScore, taken in a stable order
         // so two re-picks (or a re-pick and a live submission) cannot
@@ -878,18 +903,39 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
             and (b.split_from = a.id or a.split_from = b.id or (a.split_from is not null and a.split_from = b.split_from))`;
         if (family.length === 0) return { ok: false, reason: "not_same_split_family" };
 
-        const existing = await trx`select id from app.play where user_id = ${uid} and course_id = ${args.fromCourseId} and play_date = ${args.playDate} and facility_id = ${args.facilityId}`;
+        const existing = await trx`
+          select id, course_disambiguated_by as d from app.play
+          where user_id = ${uid} and course_id = ${args.fromCourseId} and play_date = ${args.playDate} and facility_id = ${args.facilityId}`;
         if (existing.length === 0) return { ok: false, reason: "no_such_play" };
         const playId = existing[0]!.id as string;
+        // ONLY a player's own pick may be re-picked; a geometry/staff
+        // resolution is not the player's to move.
+        if (existing[0]!.d !== "user") return { ok: false, reason: "not_user_pick" };
+        // Exactly ONE re-pick per play (audit-backed: app.audit_log is
+        // insert-only, so the count cannot be rewritten).
+        const prior = await trx`
+          select 1 from app.audit_log
+          where actor_user_id = ${uid} and action = 'play.repick' and subject_table = 'play' and subject_id = ${playId}
+          limit 1`;
+        if (prior.length > 0) return { ok: false, reason: "already_repicked" };
         const clash = await trx`
           select id from app.play
           where user_id = ${uid} and facility_id = ${args.facilityId} and play_date = ${args.playDate} and id <> ${playId}
             and (course_id = ${args.toCourseId} or course_disambiguated_by = 'user')`;
         if (clash.length > 0) return { ok: false, reason: "target_play_exists" };
+        return { ok: true, playId };
+      },
 
+      async repickApply(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string; playId: string; rederived: { evidenceId: string; summary: Record<string, unknown> }[] }): Promise<void> {
+        for (const r of args.rederived) {
+          await trx`update app.evidence set summary = ${trx.json(r.summary as never)} where id = ${r.evidenceId} and user_id = ${uid}`;
+        }
         await trx`update app.evidence set course_id = ${args.toCourseId} where user_id = ${uid} and course_id = ${args.fromCourseId} and local_date = ${args.playDate} and facility_id = ${args.facilityId}`;
-        await trx`update app.play set course_id = ${args.toCourseId}, course_disambiguated_by = 'user' where id = ${playId}`;
-        return { ok: true };
+        await trx`update app.play set course_id = ${args.toCourseId}, course_disambiguated_by = 'user' where id = ${args.playId} and user_id = ${uid}`;
+        await trx`
+          insert into app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
+          values (${uid}, 'play.repick', 'play', ${args.playId},
+                  ${trx.json({ facilityId: args.facilityId, playDate: args.playDate, fromCourseId: args.fromCourseId, toCourseId: args.toCourseId } as never)})`;
       },
     },
 
@@ -1675,7 +1721,34 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
              or (l.tombstoned_at is not null and t.tombstoned = 0)
           limit 1`;
         const r = found[0];
-        if (!r) return null;
+        if (!r) {
+          // ⛔ FIX (P3e round 2 gate, LOW): a conflicting `split_from` fails
+          // closed exactly like a conflicting `mergedInto` (M3) — never a
+          // silent "keep the first write" that leaves one signed ledger
+          // contradicting the stored lineage.
+          const claimed = new Map<string, string>();
+          for (const row of rows) {
+            for (const sib of row.splitSiblings) {
+              const prior = claimed.get(sib);
+              if (prior !== undefined && prior !== row.id) {
+                return `id-ledger.json: split sibling "${sib}" is claimed by both "${prior}" and "${row.id}" in one ledger — refusing to pick one`;
+              }
+              claimed.set(sib, row.id);
+            }
+          }
+          if (claimed.size === 0) return null;
+          const sibIds = [...claimed.keys()];
+          const keptIds = sibIds.map((sib) => claimed.get(sib) ?? "");
+          const splitConflict = await trx`
+            select l.id, l.split_from as stored
+            from app.catalog_id_ledger l
+            join unnest(${sibIds}::text[], ${keptIds}::text[]) as t(sib, kept) on t.sib = l.id
+            where l.split_from is not null and l.split_from <> t.kept
+            limit 1`;
+          const c = splitConflict[0];
+          if (!c) return null;
+          return `id-ledger.json: split sibling "${c.id}" is already on file as split from "${c.stored}", but this import claims a different kept course — refusing to silently keep either write`;
+        }
         if (r.stored_merged_into !== null && r.stored_merged_into !== (r.incoming_merged_into || null)) {
           return `id-ledger.json: entry "${r.id}" claims mergedInto ${r.incoming_merged_into ? `"${r.incoming_merged_into}"` : "none"}, but is already on file merged into "${r.stored_merged_into}" — refusing to silently keep either write`;
         }
@@ -1899,21 +1972,36 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
 
     rescoreBacklog: {
       async listOpen(limit: number): Promise<RescoreBacklogRow[]> {
-        const rows = await trx`select id, course_id, reason, cursor_play_id from app.catalog_rescore_backlog where done_at is null order by id limit ${limit}`;
-        return rows.map((r) => ({ id: Number(r.id), courseId: r.course_id as string, reason: r.reason as "promotion" | "split", cursorPlayId: (r.cursor_play_id as string | null) ?? null }));
+        const rows = await trx`select id, course_id, reason, cursor_play_id, cursor_created_at::text as cursor_created_at from app.catalog_rescore_backlog where done_at is null order by id limit ${limit}`;
+        return rows.map((r) => ({
+          id: Number(r.id),
+          courseId: r.course_id as string,
+          reason: r.reason as "promotion" | "split",
+          cursor: r.cursor_play_id ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null,
+        }));
       },
-      async nextPlays(courseId: string, afterPlayId: string | null, limit: number): Promise<RescorePlayRef[]> {
+      async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
+        // Stable keyset over (created_at, id): a play inserted while the
+        // drain is mid-course has a created_at at/after the cursor, so it
+        // can never fall BEHIND it the way a bare random-uuid ordering
+        // would let it (a LOW from the round-2 gate).
+        // The text form is kept END TO END: postgres.js would parse a value it
+        // infers as timestamptz into a JS Date (millisecond precision) and
+        // truncate the cursor — so it is cast text -> timestamptz in SQL.
+        const afterAt = after?.createdAt ?? null;
+        const afterId = after?.playId ?? null;
         const rows = await trx`
-          select id, user_id, facility_id, course_id, play_date from app.play
-          where course_id = ${courseId} and (${afterPlayId}::uuid is null or id > ${afterPlayId}::uuid)
-          order by id limit ${limit}`;
+          select id, user_id, facility_id, course_id, play_date, created_at::text as created_at_text from app.play
+          where course_id = ${courseId} and (${afterId}::uuid is null or (created_at, id) > (${afterAt}::text::timestamptz, ${afterId}::uuid))
+          order by created_at, id limit ${limit}`;
         return rows.map((r) => ({
           playId: r.id as string, userId: r.user_id as string, facilityId: r.facility_id as string, courseId: r.course_id as string,
           playDate: r.play_date instanceof Date ? r.play_date.toISOString().slice(0, 10) : String(r.play_date),
+          createdAt: r.created_at_text as string,
         }));
       },
-      async advance(id: number, cursorPlayId: string | null, done: boolean): Promise<void> {
-        await trx`update app.catalog_rescore_backlog set cursor_play_id = ${cursorPlayId}, done_at = case when ${done} then now() else null end where id = ${id}`;
+      async advance(id: number, cursor: RescoreCursor | null, done: boolean): Promise<void> {
+        await trx`update app.catalog_rescore_backlog set cursor_play_id = ${cursor?.playId ?? null}, cursor_created_at = ${cursor?.createdAt ?? null}::text::timestamptz, done_at = case when ${done} then now() else null end where id = ${id}`;
       },
     },
 

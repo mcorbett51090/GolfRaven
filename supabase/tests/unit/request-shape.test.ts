@@ -171,13 +171,13 @@ describe("parseEvidenceSubmission", () => {
   });
 
   // ⛔ FIX (P3e round 2 gate, H1): manifestSig is now the REAL P1
-  // manifest.sig.json shape verbatim — {kid, contractVersion, signature,
+  // manifest.sig.json shape verbatim — {kid, contractVersion, sig,
   // manifestSha} — not the old {kid, signatureB64Url, manifestSha256}.
   // `signature` is STANDARD (padded) base64 (B1: the real P1 signer's
   // own encoding), never base64url — see request-shape.ts's own
   // `BASE64_STD_RE` note.
   it("rejects manifestSig with a non-base64 signature", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "not+valid/-not-base64", manifestSha: "0".repeat(64) } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, sig: "not+valid/-not-base64", manifestSha: "0".repeat(64) } });
     expect(result.ok).toBe(false);
   });
 
@@ -185,23 +185,45 @@ describe("parseEvidenceSubmission", () => {
   // binds the version and the manifest sha256" — manifestSha is now a
   // required field of manifestSig itself.
   it("rejects manifestSig missing manifestSha", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA" } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, sig: "AAAA" } });
     expect(result.ok).toBe(false);
   });
 
   it("rejects manifestSig with a non-hex/wrong-length manifestSha", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA", manifestSha: "not-hex" } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, sig: "AAAA", manifestSha: "not-hex" } });
     expect(result.ok).toBe(false);
   });
 
   it("rejects manifestSig with a non-integer contractVersion", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1.5, signature: "AAAA", manifestSha: "0".repeat(64) } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1.5, sig: "AAAA", manifestSha: "0".repeat(64) } });
     expect(result.ok).toBe(false);
   });
 
   it("accepts a well-formed manifestSig", () => {
-    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA", manifestSha: "0".repeat(64) } });
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { kid: "k1", contractVersion: 1, sig: "AAAA", manifestSha: "0".repeat(64) } });
     expect(result.ok).toBe(true);
+  });
+
+  // Round 2 gate LOW: P1's own signature-file names, an allow-list, and the
+  // parsed value rebuilt from exactly the known fields.
+  const SIG = { kid: "k1", contractVersion: 1, sig: "AAAA", manifestSha: "0".repeat(64) };
+  it("rejects manifestSig carrying the OLD `signature` field name (the wire name is P1's own `sig`)", () => {
+    const { sig, ...rest } = SIG;
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { ...rest, signature: sig } });
+    expect(result.ok).toBe(false);
+  });
+  it("rejects manifestSig with any unknown key", () => {
+    const result = parseEvidenceSubmission({ ...baseBody(), manifestSig: { ...SIG, extra: "x" } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues.some((i) => i.path === "manifestSig.extra")).toBe(true);
+  });
+  it("accepts the P1 file's own optional catalogVersion only when it equals the submission's, and the parsed value carries exactly the four known fields", () => {
+    const body = baseBody();
+    const same = parseEvidenceSubmission({ ...body, manifestSig: { ...SIG, catalogVersion: body.catalogVersion } });
+    expect(same.ok).toBe(true);
+    if (same.ok) expect(same.value.manifestSig).toEqual(SIG);
+    const other = parseEvidenceSubmission({ ...body, manifestSig: { ...SIG, catalogVersion: "20200101-0000000" } });
+    expect(other.ok).toBe(false);
   });
 
   it("accepts a self_report submission with no fix at all", () => {

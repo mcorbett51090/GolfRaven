@@ -21,22 +21,25 @@ COMMENT ON COLUMN app.catalog_course.holes IS
 --    / newly-split course here (set-based, idempotent per (course, reason,
 --    catalog version)); the drain pass (import-catalog/index.ts, after the
 --    queued_catalog drain) then works the backlog a bounded batch at a
---    time with a keyset cursor over play ids, re-scoring each affected play
+--    time with a STABLE keyset cursor over (play created_at, play id) — so a play inserted mid-drain, whose random uuid may sort before the cursor, still lands after it — re-scoring each affected play
 --    through the live scoring path inside that user's own `withOwnership`
---    transaction. Holds no user identifier: `cursor_play_id` is a play id,
---    deliberately NOT a foreign key (the play may since have been deleted).
+--    transaction. Holds no user identifier: the cursor is a play id +
+--    that play's created_at (stored, so deleting the play cannot move the
+--    cursor), deliberately NOT a foreign key.
 CREATE TABLE app.catalog_rescore_backlog (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   course_id text NOT NULL REFERENCES app.catalog_id_ledger (id),
   reason text NOT NULL CHECK (reason IN ('promotion', 'split')),
   catalog_version int NOT NULL REFERENCES app.catalog_version (version),
   cursor_play_id uuid,
+  cursor_created_at timestamptz,
+  CONSTRAINT catalog_rescore_backlog_cursor_pair CHECK ((cursor_play_id IS NULL) = (cursor_created_at IS NULL)),
   created_at timestamptz NOT NULL DEFAULT now(),
   done_at timestamptz,
   UNIQUE (course_id, reason, catalog_version)
 );
 COMMENT ON TABLE app.catalog_rescore_backlog IS
-  'AT 18 work queue: courses whose plays must be re-scored (stub->verified promotion) or re-labelled (split) after a catalog import. Bounded per drain pass via cursor_play_id. Server-only; no user data.';
+  'AT 18 work queue: courses whose plays must be re-scored (stub->verified promotion) or re-labelled (split) after a catalog import. Bounded per drain pass via the (cursor_created_at, cursor_play_id) keyset. Server-only; no user data.';
 CREATE INDEX catalog_rescore_backlog_open_idx ON app.catalog_rescore_backlog (id) WHERE done_at IS NULL;
 
 ALTER TABLE app.catalog_rescore_backlog ENABLE ROW LEVEL SECURITY;

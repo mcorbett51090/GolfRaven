@@ -120,14 +120,30 @@ describe("handleEvidenceIntake", () => {
   // `manifestSig` uses the REAL P1 manifest.sig.json shape (`{kid,
   // contractVersion, signature, manifestSha}` — B1: STANDARD base64 for
   // `signature`, not base64url).
-  it("422 catalog_stale: a declared version far behind the server's own", async () => {
+  it("422 catalog_stale: a declared version more than 5 RELEASES behind the server's own (ranked by site_version order)", async () => {
     const state = makeFakeState();
-    state.catalogVersions.set(20, { version: 20, siteVersion: "20260601-c000020", publishedAt: "2026-06-01T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" });
+    // Six newer releases after the default fixture (SITE_VERSION_CURRENT,
+    // internal int 1) — rank 7 vs rank 1 = 6 releases behind > 5.
+    for (let i = 0; i < 6; i++) {
+      const v = 10 + i;
+      state.catalogVersions.set(v, { version: v, siteVersion: `2026060${i + 1}-c00000${i}`, publishedAt: "2026-06-01T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" });
+    }
     const repo = makeFakeRepo(state, "user-a");
-    // The default fixture (version 1, SITE_VERSION_CURRENT) is now 19
-    // releases behind the new "current" (version 20) — over the default
-    // 5-release skew window regardless of how recently it was published.
     await expect(handleEvidenceIntake(checkinBody({ catalogVersion: SITE_VERSION_CURRENT }), repo)).rejects.toMatchObject({ code: "catalog_stale" });
+  });
+
+  // Round 2 gate LOW: "5 releases" is RELEASE order, not the internal
+  // import-order int. A rollback republish (an OLDER site version imported
+  // LATER, so it holds the HIGHEST int) must not make a perfectly current
+  // release look 19 behind.
+  it("accepts a version whose internal int is far behind but whose RELEASE rank is within the window (rollback republish)", async () => {
+    const state = makeFakeState();
+    state.catalogVersions.set(20, { version: 20, siteVersion: "20260510-d000020", publishedAt: "2026-05-10T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" });
+    const repo = makeFakeRepo(state, "user-a");
+    // current by site_version order = SITE_VERSION_CURRENT (int 1); the
+    // int-20 row is OLDER. Declaring the int-1 version is the current one.
+    const result = await handleEvidenceIntake(checkinBody({ catalogVersion: SITE_VERSION_CURRENT }), repo);
+    expect(result.status).toBe("accepted");
   });
 
   // ⛔ FIX (P3c gate round 2, should-fix "revoked kid" / AT 15).
@@ -170,7 +186,7 @@ describe("handleEvidenceIntake", () => {
     // as production would with an invalid/forged signature.
     await expect(
       handleEvidenceIntake(
-        checkinBody({ catalogVersion: "20260602-f000002", manifestSig: { kid: "k1", contractVersion: 1, signature: "AAAA", manifestSha: "0".repeat(64) } }),
+        checkinBody({ catalogVersion: "20260602-f000002", manifestSig: { kid: "k1", contractVersion: 1, sig: "AAAA", manifestSha: "0".repeat(64) } }),
         repo,
       ),
     ).rejects.toMatchObject({ code: "catalog_forged" });
@@ -509,3 +525,45 @@ describe("handleEvidenceIntake", () => {
     }
   });
 });
+
+// ============================================================================
+// Round 2 gate NEW-3 (HIGH): replaying a TERMINAL drained row must never 500
+// (a 5xx makes the client outbox retry forever).
+// ============================================================================
+describe("handleEvidenceIntake — replay of a terminal drained row (NEW-3)", () => {
+  /** Submits once (accepted), then rewrites the stored row into the shape a
+   * drain leaves behind: terminal status, NULL facility/course. */
+  async function terminalRow(status: "unknown_id" | "needs_attention") {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    const first = await handleEvidenceIntake(checkinBody(), repo);
+    expect(first.status).toBe("accepted");
+    const row = [...state.evidence.values()][0]! as unknown as { status: string; facilityId: string | null; courseId: string | null };
+    row.status = status;
+    row.facilityId = null;
+    row.courseId = null;
+    return { state, repo };
+  }
+
+  it("unknown_id -> the 422 unknown_id the live submission would have returned (never a 500)", async () => {
+    const { repo } = await terminalRow("unknown_id");
+    await expect(handleEvidenceIntake(checkinBody(), repo)).rejects.toMatchObject({ status: 422, code: "unknown_id" });
+  });
+
+  it("needs_attention -> a stored-state 200 result (never a 5xx), and no new play/evidence/side effect", async () => {
+    const { state, repo } = await terminalRow("needs_attention");
+    const playsBefore = state.plays.size;
+    const evBefore = state.evidence.size;
+    const result = await handleEvidenceIntake(checkinBody(), repo);
+    expect(result).toMatchObject({ status: "needs_attention" });
+    expect(state.plays.size).toBe(playsBefore);
+    expect(state.evidence.size).toBe(evBefore);
+  });
+
+  it("the same holds in batch mode (the batch handler passes the status through)", async () => {
+    const { repo } = await terminalRow("needs_attention");
+    const result = await handleEvidenceIntake(checkinBody(), repo, { batchMode: true, deferScoring: true });
+    expect(result).toMatchObject({ status: "needs_attention" });
+  });
+});
+

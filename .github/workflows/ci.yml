@@ -453,6 +453,7 @@ jobs:
             supabase/functions/evidence-batch/index.ts \
             supabase/functions/checkin-challenge/index.ts \
             supabase/functions/checkin-token/index.ts \
+            supabase/functions/import-catalog/index.ts \
             supabase/functions/_shared/privileged.ts 2>&1)
           TAMPER_EXIT=$?
           set -e

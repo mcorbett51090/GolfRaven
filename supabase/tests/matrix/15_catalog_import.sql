@@ -8,7 +8,7 @@
 -- / 02_grants_trust.sql's own table-agnostic checks don't already reach.
 
 BEGIN;
-SELECT plan(33);
+SELECT plan(35);
 
 -- Every INSERT below needs service_role's own BYPASSRLS + full DML grant
 -- (app.catalog_version has no INSERT policy for any other role — same
@@ -220,6 +220,15 @@ SELECT throws_ok(
   $$INSERT INTO app.catalog_rescore_backlog (course_id, reason, catalog_version) VALUES ('crs_x1', 'bogus', 1)$$,
   '23514', NULL,
   'reason is constrained to promotion|split (must-fail cell)'
+);
+SELECT throws_ok(
+  $$UPDATE app.catalog_rescore_backlog SET cursor_play_id = gen_random_uuid() WHERE course_id = 'crs_x1'$$,
+  '23514', NULL,
+  'the keyset cursor is a PAIR: cursor_play_id without cursor_created_at is rejected (must-fail cell)'
+);
+SELECT lives_ok(
+  $$UPDATE app.catalog_rescore_backlog SET cursor_play_id = gen_random_uuid(), cursor_created_at = now() WHERE course_id = 'crs_x1'$$,
+  'a complete (cursor_created_at, cursor_play_id) pair is accepted'
 );
 SELECT throws_ok(
   $$DELETE FROM app.catalog_rescore_backlog WHERE course_id = 'crs_x1'$$,

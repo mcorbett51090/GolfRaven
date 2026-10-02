@@ -28,6 +28,7 @@ import type {
   QueuedEvidenceRow,
   RescoreBacklogRow,
   RescorePlayRef,
+  RescoreCursor,
   RosterVersionInput,
 } from "../../functions/_shared/types.js";
 
@@ -92,7 +93,9 @@ export interface FakeBacklogRow extends RescoreBacklogRow {
 }
 
 /** Test fixture for the re-score backlog's play listing (AT 18). */
-export interface FakePlayRef extends RescorePlayRef {}
+export interface FakePlayRef extends Omit<RescorePlayRef, "createdAt"> {
+  createdAt?: string;
+}
 
 export interface FakeDesignerRow {
   id: string;
@@ -232,6 +235,23 @@ export function makeFakeImporterRepo(state: FakeImporterState): ImporterRepo {
             return `id-ledger.json: entry "${row.id}" is already tombstoned on file, but this import claims it is not tombstoned — refusing a tombstone reversal`;
           }
         }
+        // split_from conflicts (mirrors privileged.ts): two kept courses
+        // claiming one sibling in a single ledger, or a stored lineage that
+        // disagrees with the incoming one.
+        const claimed = new Map<string, string>();
+        for (const row of rows) {
+          for (const sib of row.splitSiblings) {
+            const prior = claimed.get(sib);
+            if (prior !== undefined && prior !== row.id) return `id-ledger.json: split sibling "${sib}" is claimed by both "${prior}" and "${row.id}" in one ledger — refusing to pick one`;
+            claimed.set(sib, row.id);
+          }
+        }
+        for (const [sib, kept] of claimed) {
+          const stored = state.ledger.get(sib);
+          if (stored && stored.splitFrom !== null && stored.splitFrom !== undefined && stored.splitFrom !== kept) {
+            return `id-ledger.json: split sibling "${sib}" is already on file as split from "${stored.splitFrom}", but this import claims a different kept course — refusing to silently keep either write`;
+          }
+        }
         return null;
       },
       async resolveLedgerId(id: string): Promise<ImporterLedgerRow | null> {
@@ -290,7 +310,7 @@ export function makeFakeImporterRepo(state: FakeImporterState): ImporterRepo {
       async enqueueRescore(courseIds: string[], reason: "promotion" | "split", catalogVersionInt: number): Promise<void> {
         for (const courseId of courseIds) {
           if (!state.backlog.some((b) => b.courseId === courseId && b.reason === reason && b.catalogVersionInt === catalogVersionInt)) {
-            state.backlog.push({ id: state.backlog.length + 1, courseId, reason, cursorPlayId: null, catalogVersionInt, done: false });
+            state.backlog.push({ id: state.backlog.length + 1, courseId, reason, cursor: null, catalogVersionInt, done: false });
           }
         }
       },
@@ -300,15 +320,19 @@ export function makeFakeImporterRepo(state: FakeImporterState): ImporterRepo {
     },
     rescoreBacklog: {
       async listOpen(limit: number): Promise<RescoreBacklogRow[]> {
-        return state.backlog.filter((b) => !b.done).slice(0, limit).map(({ id, courseId, reason, cursorPlayId }) => ({ id, courseId, reason, cursorPlayId }));
+        return state.backlog.filter((b) => !b.done).slice(0, limit).map(({ id, courseId, reason, cursor }) => ({ id, courseId, reason, cursor }));
       },
-      async nextPlays(courseId: string, afterPlayId: string | null, limit: number): Promise<RescorePlayRef[]> {
-        return state.plays.filter((p) => p.courseId === courseId && (afterPlayId === null || p.playId > afterPlayId)).sort((a, b) => (a.playId < b.playId ? -1 : 1)).slice(0, limit);
+      async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
+        return state.plays
+          .filter((p) => p.courseId === courseId && (after === null || p.playId > after.playId))
+          .sort((a, b) => (a.playId < b.playId ? -1 : 1))
+          .slice(0, limit)
+          .map((p) => ({ ...p, createdAt: p.createdAt ?? "" }));
       },
-      async advance(id: number, cursorPlayId: string | null, done: boolean): Promise<void> {
+      async advance(id: number, cursor: RescoreCursor | null, done: boolean): Promise<void> {
         const b = state.backlog.find((x) => x.id === id);
         if (b) {
-          b.cursorPlayId = cursorPlayId;
+          b.cursor = cursor;
           b.done = done;
         }
       },

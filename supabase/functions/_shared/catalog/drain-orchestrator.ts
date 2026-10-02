@@ -26,6 +26,7 @@
 import { decideQueuedDrainOutcome } from "./drain-queued.ts";
 import { redrainQueuedEvidenceRow } from "../evidence/handler.ts";
 import { compareCatalogVersions } from "./manifest-artifact.ts";
+import type { Deadline } from "./time-budget.ts";
 import type { Actor, ImporterRepo, Repo } from "../types.ts";
 
 export interface DrainQueuedCatalogResult {
@@ -34,6 +35,10 @@ export interface DrainQueuedCatalogResult {
   needsAttention: number;
   unknownId: number;
   stillQueued: number;
+  /** Rows whose pass threw (transient infra error) — left queued. */
+  errored: number;
+  /** True when the time budget ended the pass before every scanned row was visited (the rest stay queued for the next run). */
+  truncated: boolean;
 }
 
 const DEFAULT_BATCH_LIMIT = 500;
@@ -56,29 +61,55 @@ export type WithOwnershipFn = <T>(actor: Actor, op: (repo: Repo) => Promise<T>) 
  * SAME snapshot of "what has been imported," so draining 500 rows over
  * several seconds can't have row #1 and row #500 judged against subtly
  * different "current" states. */
-export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnership: WithOwnershipFn, limit: number = DEFAULT_BATCH_LIMIT): Promise<DrainQueuedCatalogResult> {
+export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnership: WithOwnershipFn, limit: number = DEFAULT_BATCH_LIMIT, deadline?: Deadline): Promise<DrainQueuedCatalogResult> {
   const rows = await importerRepo.queuedCatalog.listOpen(limit);
   const currentSiteVersion = await importerRepo.queuedCatalog.currentSiteVersion();
   const now = importerRepo.now();
 
-  const result: DrainQueuedCatalogResult = { scanned: rows.length, resolved: 0, needsAttention: 0, unknownId: 0, stillQueued: 0 };
+  const result: DrainQueuedCatalogResult = { scanned: rows.length, resolved: 0, needsAttention: 0, unknownId: 0, stillQueued: 0, errored: 0, truncated: false };
 
   for (const row of rows) {
+    // Time-boxed (time-budget.ts): never START a per-user transaction the
+    // remaining budget cannot finish; the rest stay queued for the next run.
+    if (deadline && !deadline.canStartUnit()) {
+      result.truncated = true;
+      break;
+    }
     const actor: Actor = { uid: row.userId, role: "authenticated" };
+    const createdAt = new Date(row.createdAt);
+    const aged = now.getTime() - createdAt.getTime() >= MAX_AGE_MS;
     let redrainKind: "resolved" | "still_unresolved" | "terminal_unknown_id";
+    let claimedVersionImported = true;
     try {
-      redrainKind = await withOwnership(actor, async (repo) => {
-        const outcome = await redrainQueuedEvidenceRow(repo, row.id, row.queuedInput, new Date(row.createdAt));
+      const outcomeKind = await withOwnership(actor, async (repo) => {
+        const outcome = await redrainQueuedEvidenceRow(repo, row.id, row.queuedInput, createdAt);
+        if (outcome.kind === "still_unresolved" && outcome.claimedVersionImported === false) claimedVersionImported = false;
         return outcome.kind === "resolved" || outcome.kind === "terminal_unknown_id" ? outcome.kind : "still_unresolved";
       });
+      redrainKind = outcomeKind;
     } catch (err) {
-      // A per-row failure (a transaction timeout, an unexpected
-      // exception inside redrainQueuedEvidenceRow) never aborts the
-      // whole batch — logged, treated as "still unresolved this pass,"
-      // and picked up again on a LATER drain run rather than losing the
-      // row's own chance to resolve on a future pass.
-      console.error(`drainQueuedCatalog: row ${row.id} failed to redrain`, err);
-      redrainKind = "still_unresolved";
+      // ⛔ FIX (P3e round 2 gate, NEW-2): a THROW (lock/statement timeout,
+      // `CONNECTION_CLOSED`/503, deadlock, ...) is a statement about the
+      // infrastructure, never about the row. It used to be folded into
+      // "still unresolved" — which, once a covering import had run, the M1
+      // rule turned into a PERMANENT `unknown_id`. A throw now leaves the
+      // row exactly as it was for the next pass; only an explicit
+      // `terminal_unknown_id` from the redrain itself, or the row's own
+      // 7-day age (-> `needs_attention`, never `unknown_id`), may end it.
+      console.error(`drainQueuedCatalog: row ${row.id} failed to redrain (left queued for the next pass)`, err);
+      result.errored += 1;
+      if (aged) {
+        try {
+          await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(row.id, "needs_attention"));
+          result.needsAttention += 1;
+        } catch (err2) {
+          console.error(`drainQueuedCatalog: row ${row.id} could not be aged out either (left queued)`, err2);
+          result.stillQueued += 1;
+        }
+      } else {
+        result.stillQueued += 1;
+      }
+      continue;
     }
 
     if (redrainKind === "resolved") {
@@ -92,23 +123,34 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
       // transaction shape as a resolution (markQueuedTerminal), not the
       // system-scoped repo (B2's own "no more system-scoped promotion"
       // reasoning applies here identically).
-      await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(row.id, "unknown_id"));
-      result.unknownId += 1;
+      if (await tryMarkTerminal(withOwnership, actor, row.id, "unknown_id")) result.unknownId += 1;
+      else {
+        result.errored += 1;
+        result.stillQueued += 1;
+      }
       continue;
     }
 
     // redrainKind === "still_unresolved": the M1 age/version-coverage
-    // judgment (drain-queued.ts, pure).
-    const coveringImportAlreadyRan = currentSiteVersion !== null && compareCatalogVersions(currentSiteVersion, row.claimedCatalogVersion) >= 0;
-    const decision = decideQueuedDrainOutcome({ redrainKind: "still_unresolved", createdAt: new Date(row.createdAt), now, coveringImportAlreadyRan });
+    // judgment (drain-queued.ts, pure). A claimed version that has not
+    // been imported at all (NEW-1) is never "covered", whatever the
+    // current import is.
+    const coveringImportAlreadyRan = claimedVersionImported && currentSiteVersion !== null && compareCatalogVersions(currentSiteVersion, row.claimedCatalogVersion) >= 0;
+    const decision = decideQueuedDrainOutcome({ redrainKind: "still_unresolved", createdAt, now, coveringImportAlreadyRan });
     switch (decision.kind) {
       case "terminal_unknown_id":
-        await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(row.id, "unknown_id"));
-        result.unknownId += 1;
+        if (await tryMarkTerminal(withOwnership, actor, row.id, "unknown_id")) result.unknownId += 1;
+        else {
+          result.errored += 1;
+          result.stillQueued += 1;
+        }
         break;
       case "needs_attention":
-        await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(row.id, "needs_attention"));
-        result.needsAttention += 1;
+        if (await tryMarkTerminal(withOwnership, actor, row.id, "needs_attention")) result.needsAttention += 1;
+        else {
+          result.errored += 1;
+          result.stillQueued += 1;
+        }
         break;
       default:
         result.stillQueued += 1;
@@ -116,4 +158,19 @@ export async function drainQueuedCatalog(importerRepo: ImporterRepo, withOwnersh
     }
   }
   return result;
+}
+
+const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A failure to WRITE the terminal state is, like any other throw, a
+ * statement about the infrastructure: the row stays queued and is retried
+ * next pass. */
+async function tryMarkTerminal(withOwnership: WithOwnershipFn, actor: Actor, id: string, status: "needs_attention" | "unknown_id"): Promise<boolean> {
+  try {
+    await withOwnership(actor, (repo) => repo.evidence.markQueuedTerminal(id, status));
+    return true;
+  } catch (err) {
+    console.error(`drainQueuedCatalog: row ${id} could not be marked ${status} (left queued)`, err);
+    return false;
+  }
 }

@@ -45,7 +45,7 @@ COMMENT ON COLUMN app.evidence.claimed_catalog_version IS
 
 ALTER TABLE app.evidence ADD COLUMN queued_input jsonb;
 COMMENT ON COLUMN app.evidence.queued_input IS
-  'The FULL validated (request-shape.ts-parsed) submission for a queued_catalog row, server-only (P3e round 2 gate B3: "never exposed through api.* views" — see api.my_evidence and private.export_my_data below, both updated in this migration to exclude it explicitly). Read back at drain time (B2) to re-run the REAL intake derivation (tombstone rewrite, facility/course pairing, localDate, matcher, scorePlay) — never merely a status flip. NULL once the row is drained.';
+  'The FULL validated (request-shape.ts-parsed) submission for a queued_catalog row. Server-only to READ over the API: it is never exposed through any api.* view (api.my_evidence carries the claimed_* columns but not this one), but it IS the caller''s own submitted data, so private.export_my_data (this migration, section 4) DOES include it in the owner''s own export — and it goes with the row on delete_my_data. Read back at drain time (B2) to re-run the REAL intake derivation (tombstone rewrite, facility/course pairing, localDate, matcher, scorePlay) — never merely a status flip. NULL once the row is drained to accepted, needs_attention or unknown_id (the terminal transitions clear it, along with the claimed_* columns).';
 
 ALTER TABLE app.evidence ADD CONSTRAINT evidence_queued_claim_shape CHECK (
   status <> 'queued_catalog'

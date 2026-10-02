@@ -24,6 +24,7 @@ import type { CatalogImportOutcome, RejectedArtifact } from "./import-handler.ts
 import type { DrainQueuedCatalogResult } from "./drain-orchestrator.ts";
 import type { RescoreBacklogResult } from "./rescore-orchestrator.ts";
 import type { CatalogImportEnvConfig, RateLimitResult } from "../types.ts";
+import { type Deadline, makeImportBudget } from "./time-budget.ts";
 
 /** This endpoint's own, small body cap — the webhook payload is a couple
  * of fields or empty; far below http.ts's 64 KB evidence cap. */
@@ -35,13 +36,13 @@ export interface ImportEndpointDeps {
   hitRateLimit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult>;
   /** Phase 1 (network + crypto, no transaction) then phase 2 (atomic DB
    * apply) — see import-handler.ts. */
-  runImport(config: CatalogImportEnvConfig): Promise<CatalogImportOutcome | RejectedArtifact>;
-  /** Drains queued_catalog in its OWN transaction(s). */
-  runDrain(): Promise<DrainQueuedCatalogResult>;
+  runImport(config: CatalogImportEnvConfig, fetchDeadline: Deadline): Promise<CatalogImportOutcome | RejectedArtifact>;
+  /** Drains queued_catalog in its OWN transaction(s), time-boxed by `deadline`. */
+  runDrain(deadline: Deadline): Promise<DrainQueuedCatalogResult>;
   /** AT 18: works the stub->verified / split re-score backlog, a bounded
    * batch per pass, each play in its own user's transaction. Optional so
    * existing callers/tests keep working; failures never mask the others. */
-  runRescore?(): Promise<RescoreBacklogResult>;
+  runRescore?(deadline: Deadline): Promise<RescoreBacklogResult>;
   now(): Date;
 }
 
@@ -103,20 +104,27 @@ export async function handleImportCatalogRequest(req: Request, deps: ImportEndpo
   const rateLimit = await deps.hitRateLimit("import-catalog:system", 3600, IMPORT_RATE_LIMIT_MAX_PER_HOUR);
   if (!rateLimit.ok) return Errors.tooManyRequests("import-catalog rate limit exceeded", rateLimit.retryAfterSeconds).toResponse();
 
+  // Per-PHASE deadlines (time-budget.ts) — measured from here, after auth.
+  const budget = makeImportBudget(() => deps.now().getTime());
+
   // ---- import (never allowed to prevent the drain below) ----
   let importOutcome: CatalogImportOutcome | RejectedArtifact | null = null;
   let importError: unknown = null;
   try {
-    importOutcome = await deps.runImport(config);
+    importOutcome = await deps.runImport(config, budget.fetch);
   } catch (err) {
     importError = err;
     console.error("import-catalog: unhandled error during import", err);
   }
 
   // ---- H4: ALWAYS drain, in its own transaction(s) ----
+  // Whatever the import left of the budget is split between the two drains
+  // (queued first, then the re-score); each stops STARTING work it cannot
+  // finish and leaves the rest for the next run.
+  const { drain: drainDeadline, rescore: rescoreDeadline } = budget.splitRemaining();
   let drained: DrainQueuedCatalogResult | null = null;
   try {
-    drained = await deps.runDrain();
+    drained = await deps.runDrain(drainDeadline);
   } catch (err) {
     console.error("import-catalog: unhandled error during drain", err);
   }
@@ -126,7 +134,7 @@ export async function handleImportCatalogRequest(req: Request, deps: ImportEndpo
   let rescored: RescoreBacklogResult | null = null;
   if (deps.runRescore) {
     try {
-      rescored = await deps.runRescore();
+      rescored = await deps.runRescore(rescoreDeadline);
     } catch (err) {
       console.error("import-catalog: unhandled error during rescore", err);
     }
@@ -144,5 +152,8 @@ export async function handleImportCatalogRequest(req: Request, deps: ImportEndpo
   if (drained === null) {
     return new HttpError(500, "internal_error", "internal error", { imported: importOutcome }).toResponse();
   }
-  return okResponse(200, { imported: importOutcome, drained, rescored });
+  // `truncated`: the budget (not an error) cut a drain short — the rest is
+  // still queued / still in the backlog and the next run continues it.
+  const truncated = drained.truncated || (rescored?.truncated ?? false);
+  return okResponse(200, { imported: importOutcome, drained, rescored, truncated });
 }

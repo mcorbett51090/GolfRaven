@@ -14,7 +14,7 @@ import { buildWebhookSignatureHeader } from "../../functions/_shared/catalog/web
 const SECRET = "s".repeat(40);
 const NOW = new Date("2026-09-25T12:00:00.000Z");
 const CONFIG = { artifactBaseUrl: "https://golfraven.example/catalog/v1", allowedHosts: ["golfraven.example"], webhookHmacSecret: SECRET };
-const DRAINED = { scanned: 0, resolved: 0, needsAttention: 0, unknownId: 0, stillQueued: 0 };
+const DRAINED = { scanned: 0, resolved: 0, needsAttention: 0, unknownId: 0, stillQueued: 0, errored: 0, truncated: false };
 
 function deps(over: Partial<ImportEndpointDeps> = {}): ImportEndpointDeps & { runImport: ReturnType<typeof vi.fn>; runDrain: ReturnType<typeof vi.fn>; hitRateLimit: ReturnType<typeof vi.fn> } {
   return {
@@ -133,3 +133,56 @@ describe("import-catalog endpoint — sequencing (H4: always drain)", () => {
     expect(d.runImport).toHaveBeenCalledOnce();
   });
 });
+
+// ============================================================================
+// Round 2 gate (MEDIUM): explicit per-PHASE deadlines, a truthful result.
+// ============================================================================
+import { FETCH_PHASE_MS, TOTAL_BUDGET_MS, UNIT_RESERVE_MS, makeImportBudget } from "../../functions/_shared/catalog/time-budget.js";
+
+describe("import-catalog endpoint — per-phase time budget", () => {
+  it("hands the import a FETCH deadline and the two drains deadlines carved from what the import left", async () => {
+    let clock = NOW.getTime();
+    const seen: { fetch?: number; drain?: number; rescore?: number } = {};
+    const d = deps({
+      now: () => new Date(clock),
+      runImport: vi.fn(async (_c, fetchDeadline) => {
+        seen.fetch = fetchDeadline.at - clock;
+        clock += 20_000; // the import (fetch + write) takes 20 s
+        return { ok: true, versionsImported: 1, currentVersion: 1 };
+      }) as never,
+      runDrain: vi.fn(async (deadline) => {
+        seen.drain = deadline.at - clock;
+        return DRAINED;
+      }) as never,
+      runRescore: vi.fn(async (deadline) => {
+        seen.rescore = deadline.at - clock;
+        return { backlogRows: 0, playsProcessed: 0, coursesCompleted: 0, failures: 0, truncated: false };
+      }) as never,
+    });
+    const res = await handleImportCatalogRequest(await signedReq("{}", {}), d);
+    expect(res.status).toBe(200);
+    expect(seen.fetch).toBe(FETCH_PHASE_MS);
+    // After a 20 s import, 80 s of the 100 s budget remain: the drain gets half of it, the re-score all of it.
+    expect(seen.drain).toBe((TOTAL_BUDGET_MS - 20_000) / 2);
+    expect(seen.rescore).toBe(TOTAL_BUDGET_MS - 20_000);
+  });
+
+  it("a budget-truncated drain is reported as `truncated: true` in a 200 — a truthful result, not a 503 while work continues unobserved", async () => {
+    const d = deps({ runDrain: vi.fn(async () => ({ ...DRAINED, scanned: 200, stillQueued: 120, truncated: true })) as never });
+    const res = await handleImportCatalogRequest(await signedReq("{}", {}), d);
+    expect(res.status).toBe(200);
+    const body = ((await res.json()) as { data: { truncated: boolean; drained: { stillQueued: number } } }).data;
+    expect(body.truncated).toBe(true);
+    expect(body.drained.stillQueued).toBe(120);
+  });
+
+  it("budget arithmetic: a unit may only START while a full unit's reserve remains", () => {
+    let t = 0;
+    const b = makeImportBudget(() => t);
+    expect(b.total.canStartUnit()).toBe(true);
+    t = TOTAL_BUDGET_MS - UNIT_RESERVE_MS + 1;
+    expect(b.total.canStartUnit()).toBe(false);
+    expect(b.total.remainingMs()).toBe(UNIT_RESERVE_MS - 1);
+  });
+});
+

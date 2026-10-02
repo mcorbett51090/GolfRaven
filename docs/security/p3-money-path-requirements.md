@@ -1468,14 +1468,21 @@ where every schema change in this round went.
 - `catalogVersion` is the site version STRING (`yyyymmdd-gitsha7`, `tools/catalog/src/manifest.ts`
   `CatalogVersionSchema`), no longer an internal int. The server resolves it through
   `app.catalog_version.site_version`; the int `version` is a server-side publish-order counter.
-- `manifestSig` is the real P1 `manifest.sig.json` shape verbatim: `{kid, contractVersion, signature,
-  manifestSha}`. `signature` is STANDARD (padded) base64 — what `tools/catalog/src/sign.ts#signBytes`
-  emits (B1). `fixId` stays pinned to unpadded base64url (§1 above): that pin is about a value this
+- `manifestSig` uses the field names of P1's signature file (`manifest.sig.json` =
+  `{catalogVersion, contractVersion, kid, manifestSha, sig}`), so a client lifts the object straight
+  out of the file: `{kid, contractVersion, manifestSha, sig}`, plus an OPTIONAL `catalogVersion` that
+  duplicates the submission's own top-level `catalogVersion` and, when present, MUST equal it
+  (round 2 gate, LOW: the wire field was `signature`, intake's own name, which differed from P1's
+  `sig`). Any other key is rejected, and the parsed value is rebuilt from exactly those four known
+  fields (never the raw client object). `sig` is STANDARD (padded) base64 — what
+  `tools/catalog/src/sign.ts#signBytes` emits (B1). `fixId` stays pinned to unpadded base64url (§1 above): that pin is about a value this
   codebase mints; the artifact signature encoding is a third party's output format. The statement
   verified is the real domain-tagged canonical JSON (above). An interop test signs with the REAL
   `tools/catalog` `signManifest`/`signVersions` and imports the result.
-- Skew semantics are unchanged but re-expressed: "5 releases" is the publish-order gap between the
-  two rows' internal `version` ints; "30 days" is `published_at`; "far future" is the build plan's own
+- Skew semantics are unchanged but re-expressed: "5 releases" is the gap between the two versions'
+  RELEASE ranks (`Repo#catalog.releaseRank`: how many imported versions have a `site_version` at or
+  before it) — NOT the internal `version` int, which is import order and diverges after a rollback
+  republish (round 2 gate, LOW); "30 days" is `published_at`; "far future" is the build plan's own
   §3.3(i) rule read off the declared version's date prefix (> now + 1 day, no signature can rescue
   it); a revoked kid is `422 catalog_stale`; an unregistered kid is `catalog_forged`.
 - "Current" is the greatest `site_version` (rows with a NULL `site_version` — pre-import fixtures —
@@ -1483,7 +1490,9 @@ where every schema change in this round went.
 
 **Queued rows (B3) and draining (B2, M1).** Migration `0024`: a `queued_catalog` row carries
 `claimed_facility_id`/`claimed_course_id`/`claimed_catalog_version` plus the raw validated submission
-in `queued_input` (server-only; not in `api.my_evidence`, not exported); `facility_id`/`course_id`/
+in `queued_input` (never exposed through an `api.*` view; it IS the caller's own submitted data, so it
+IS in the owner's own `export_my_data` — decided in 0024 section 4, and it goes with the row on
+`delete_my_data`; the column comment in 0024 says the same); `facility_id`/`course_id`/
 `catalog_version` stay NULL (CHECK `evidence_queued_claim_shape`), so the deferred evidence FKs can no
 longer turn a 202 into a COMMIT-time 500. Draining NEVER flips a status: each row is re-run through
 the live derivation (tombstone rewrite, course/facility pairing, local date, matcher, `scorePlay`,
@@ -1491,6 +1500,28 @@ play upsert) in its own actor-scoped transaction (`redrainQueuedEvidenceRow`); t
 window and clock-skew check are judged as of the row's queue time, not drain time. Outcomes: resolved
 (scored), still queued, `needs_attention` (> 7 days, no `review_item`), or terminal `unknown_id` (the
 import covering the claimed version already ran and the id is still absent, or a structural failure).
+Two rules keep a drain from ever killing a row it has not actually judged (round 2 gate):
+
+- **NEW-1 (BLOCKER) — judge ids only against the claimed version's own import.** A newer, validly
+  signed, not-yet-imported claim classifies `ok`; a ledger lookup against the OLDER current import
+  then missed every id and ended every queued row `unknown_id` on the first drain (which runs after
+  EVERY import, failed ones included). Now, if the claimed `site_version` is newer than the current
+  one and has no `catalog_version` row, the redrain returns `still_unresolved` BEFORE any id lookup and
+  the orchestrator does not treat the (older) current import as coverage: the row stays queued and
+  only the 7-day timer can end it, as `needs_attention`. (A claim OLDER than the current import with
+  no row is a stale claim: classified `stale`, judged by M1 as before.)
+- **NEW-2 (HIGH) — a throw is never evidence about a row.** A lock/statement timeout,
+  `CONNECTION_CLOSED`/503 or deadlock inside a row's transaction (or while writing its terminal
+  state) leaves the row queued for the next pass; the only things that may end a row are an explicit
+  `terminal_unknown_id` from the redrain itself or the row's own 7-day age (-> `needs_attention`,
+  never `unknown_id`). The pass reports `errored`.
+
+A terminal row (`needs_attention` / `unknown_id`) keeps no queued submission: `queued_input` (raw
+coordinates and all) and the `claimed_*` columns are cleared with the status change, matching the 0024
+column comments. **NEW-3 (HIGH) — replaying a terminal row never 5xx.** `buildReplayResult` decides from
+`status` BEFORE its null-facility guard: `unknown_id` replays as the `422 unknown_id` the live
+submission would have returned, `needs_attention` as a stored-state `200 {status: "needs_attention"}`
+(a 5xx would make the client outbox retry forever).
 
 **Import (H2/H3/M3/M4).** The importer pulls and verifies EVERY artifact (manifest, versions, ledger,
 `facilities/<region>.json`, `trails.json`, `designers.json`) before any write transaction opens
@@ -1510,14 +1541,34 @@ gains a NEW split sibling (`split_from` set on the sibling) gets one (`reason='s
 idempotent per (course, reason, catalog version), and a replay of the import is an early exit that
 queues nothing. The drain pass (`import-catalog/index.ts`, after the `queued_catalog` drain, and also
 when the import itself failed) works the backlog a BOUNDED batch at a time (<= 50 plays and <= 5
-courses per pass; a keyset cursor over play ids; a failing play stops its course and is retried, never
-skipped), one short `withOwnership` transaction per play. Promotion: the stored derived fixes carry a
+courses per pass, further bounded by the time budget below; a failing play stops its course and is
+retried, never skipped), one short `withOwnership` transaction per play. The cursor is a STABLE
+keyset over `(play created_at, play id)` stored on the backlog row (a deleted play cannot move it):
+the original bare-uuid ordering missed a play inserted mid-drain whose random id sorted before the
+cursor (round 2 gate, LOW). Promotion: the stored derived fixes carry a
 `verificationTier` frozen at ingest from the then-stub course, so it is rewritten to the course's
 current `verification_status` and the play is re-scored through the live `finalizeScoringForKey`
 (advisory-locked per user/course/date, idempotent). Split: the existing play at the kept course becomes
-a `user` pick of that course (A2-01: at most one per facility + date), so it counts once; a re-pick
-(`repickUserPlay`) MOVES the same play row and its evidence to the sibling (never a second play) and
-re-scores it, refused outside the split family. `Repo#play.uniqueCourseCount()` is the server-side
+a `user` pick of that course (A2-01: at most one per facility + date), so it counts once, and is
+RE-SCORED straight away. **NEW-4 (HIGH) — the A2-01 cap applies on every path.** The scorer caps a user
+pick (contributes 0 to `score_monetary`, never `money`) only when each scored evidence row carries
+`courseDisambiguatedBy === "user"`; every scoring path (live intake, `finalizeScoringForKey`, promotion
+re-score, split re-score, re-pick) now reads the play's `course_disambiguated_by`
+(`Repo#play.disambiguatedBy`) and stamps it on every course-anchored scored row — a play labelled
+`user` but scored without the stamp kept `score_monetary` 0.50 (and a money-true fixture stayed
+money-true). A re-pick (`repickUserPlay`) is limited to a `user` pick, to exactly ONE re-pick per
+play (the audit row is the record), and to the split family; it MOVES the same play row and its
+evidence (never a second play) and FULLY RE-DERIVES the stored evidence against the target course:
+each embedded fix is re-matched (`matchFix`: `geometryKind`, `insideBuffer`, `verificationTier`) from
+the raw coordinates stored at intake (`app.evidence.integrity.fixCoords`, kept OUT of `summary` because
+the scorer's fix schema is strict) and a dwell's `holes` is recomputed from the target's hole count
+(a 9-hole dwell moved to an 18-hole sibling gets the 18-hole bar). Evidence without stored
+coordinates fails closed (`cannot_rederive`, nothing moves). The move writes an `app.audit_log` row
+(`play.repick`). Privacy: raw fix coordinates are now retained on accepted evidence rows (they were
+previously dropped after matching); they belong to the owner's own row, ride along in
+`export_my_data` (the `integrity` column) and go with the row on `delete_my_data`. Known limit: if the
+user ALREADY has a `user`-picked play at another course of the same facility + date, the split label
+cannot be applied (A2-01's one-per-facility-date index) and that play keeps its geometry label. `Repo#play.uniqueCourseCount()` is the server-side
 `uniqueCourses` (mirrors `playQualifies`: `score_badge >= 0.50 OR money`, ledger status `verified`,
 not void/disputed, merge closure resolved, distinct). Proven against real Postgres: a play at a stub is
 accepted and counts for nothing; after promotion + drain `uniqueCourses` is exactly 1 for each of
@@ -1543,11 +1594,31 @@ Hole count: `courseHoleCount` is the `catalog_hole` count, else the declared `Co
 value (12, 27, ...) takes the stricter 18-hole bar, so an unknown count can never grant a round more
 credit (the old `>= 18 ? 18 : 9` put a 12-hole count in the 9-hole bucket).
 
+**Time budget (round 2 gate, MEDIUM).** `import-catalog` used to inherit http.ts's single 15 s race
+over sequential 15 s fetches, a 12 s transaction, the drain and the re-score, so a full-directory run
+answered 503 while work continued unobserved. Each PHASE now has its own explicit deadline
+(`catalog/time-budget.ts`): the fetch phase has 40 s TOTAL across all artifact fetches (each fetch also
+capped at 15 s and never allowed past the phase deadline); the import write is one transaction bounded
+by `transaction_timeout` (12 s); what remains of the 100 s whole-request budget is split between the
+queued drain (first half) and the re-score, and each only STARTS a per-user unit (<= 12 s + margin =
+14 s reserve) while the deadline leaves room — whatever is left stays queued / stays in the backlog
+(cursor persisted) for the next run. The response is therefore truthful: it reports each phase's result
+and `truncated: true` when the budget, not an error, cut a drain short; the 100 s http.ts race is only
+the backstop for a phase that blows through its own bound. `[unverified — training knowledge]`: the
+hosting platform's wall-clock ceiling for an Edge Function request — 100 s was chosen to sit under it;
+confirm against the deployed project before relying on the margin (each number is one constant).
+
 **Remaining gaps (named, not built):**
 
 1. Geometry import (see above — nothing to import).
 2. The metadata fields listed above as having no target table.
 3. A HTTP endpoint for `repickUserPlay`.
+4. Queued rows never earn a co-signal (a co-signal is a live-session guarantee; the drain consumes the
+   token for its own side effects but never fabricates one days later) — this fails closed.
+5. The AT 8 retired-MAJOR rule ("a retired major version -> 422") is enforced nowhere (pre-existing, not
+   introduced by P3e).
+6. `tools/db/check-migrations-immutable.sh --self-test` ignores `--base` (it always self-tests against
+   its own fixture).
 
 **Measured (H3):** 40,000 ledger ids + 1,000 facilities + 1,000 courses + trails/designers applied in
 one atomic transaction against real Postgres in ~1.8 s (Deno integration suite, superuser harness),

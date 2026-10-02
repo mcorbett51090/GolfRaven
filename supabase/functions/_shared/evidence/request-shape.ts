@@ -44,7 +44,7 @@
 const ID_LIKE_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const BASE64URL_UNPADDED_RE = /^[A-Za-z0-9_-]{1,128}$/;
-// P3e round 2 gate, H1: `manifestSig.signature` carries the REAL P1
+// P3e round 2 gate, H1: `manifestSig.sig` carries the REAL P1
 // artifact signature verbatim (`tools/catalog/src/sign.ts#signBytes` —
 // `cryptoSign(...).toString("base64")`, STANDARD padded base64), not a
 // re-encoded value — see catalog/signature.ts's own `base64ToBytes` note
@@ -197,7 +197,16 @@ interface CommonFields {
   // constructed itself. `signature` is STANDARD (padded) base64 — see
   // request-shape.ts's own `BASE64_STD_RE` note for why, distinct from
   // `fixId`'s base64url pin.
-  manifestSig?: { kid: string; contractVersion: number; signature: string; manifestSha: string };
+  //
+  // ⛔ FIELD NAMES (round 2 gate, LOW): the P1 signature file is
+  // `{catalogVersion, contractVersion, kid, manifestSha, sig}`; this wire
+  // field now uses P1's OWN names so a client lifts the object straight out
+  // of `manifest.sig.json`. The signature field is `sig` (NOT `signature`),
+  // `catalogVersion` is optional here (it duplicates this submission's own
+  // top-level `catalogVersion` and, when present, MUST equal it), and any
+  // other key is rejected — the parsed value is rebuilt from exactly the
+  // four known fields, never the raw client object.
+  manifestSig?: { kid: string; contractVersion: number; sig: string; manifestSha: string };
 }
 
 export type EvidenceSubmission =
@@ -224,17 +233,26 @@ function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): Common
   if (!isSiteCatalogVersion(raw.catalogVersion)) {
     issues.push({ path: "catalogVersion", message: "must be a yyyymmdd-gitsha7 site catalog version string" });
   }
+  let manifestSig: { kid: string; contractVersion: number; sig: string; manifestSha: string } | undefined;
   if (raw.manifestSig !== undefined) {
     const sig = raw.manifestSig as Record<string, unknown>;
-    if (
-      !isPlainObject(raw.manifestSig) ||
-      !isIdLike(sig.kid) ||
-      !(Number.isInteger(sig.contractVersion) && (sig.contractVersion as number) >= 0) ||
-      !isStdBase64(sig.signature) ||
-      typeof sig.manifestSha !== "string" ||
-      !SHA256_HEX_RE.test(sig.manifestSha)
-    ) {
-      issues.push({ path: "manifestSig", message: "must be {kid: id-like string, contractVersion: non-negative int, signature: standard base64 string, manifestSha: 64-char lowercase hex} when present" });
+    const SIG_KEYS = new Set(["catalogVersion", "contractVersion", "kid", "manifestSha", "sig"]);
+    const shapeOk =
+      isPlainObject(raw.manifestSig) &&
+      isIdLike(sig.kid) &&
+      Number.isInteger(sig.contractVersion) &&
+      (sig.contractVersion as number) >= 0 &&
+      isStdBase64(sig.sig) &&
+      typeof sig.manifestSha === "string" &&
+      SHA256_HEX_RE.test(sig.manifestSha);
+    if (!shapeOk) {
+      issues.push({ path: "manifestSig", message: "must be {kid: id-like string, contractVersion: non-negative int, sig: standard base64 string, manifestSha: 64-char lowercase hex, catalogVersion?: this submission's own catalogVersion} when present" });
+    } else {
+      for (const k of Object.keys(sig)) if (!SIG_KEYS.has(k)) issues.push({ path: `manifestSig.${k}`, message: "unrecognized key" });
+      if (sig.catalogVersion !== undefined && sig.catalogVersion !== raw.catalogVersion) {
+        issues.push({ path: "manifestSig.catalogVersion", message: "must equal this submission's own catalogVersion when present" });
+      }
+      manifestSig = { kid: sig.kid as string, contractVersion: sig.contractVersion as number, sig: sig.sig as string, manifestSha: sig.manifestSha as string };
     }
   }
   if (issues.length !== ok0) return null;
@@ -244,7 +262,7 @@ function parseCommon(raw: Record<string, unknown>, issues: ParseIssue[]): Common
     courseId: raw.courseId as string | undefined,
     localDate: raw.localDate as string,
     catalogVersion: raw.catalogVersion as string,
-    manifestSig: raw.manifestSig as { kid: string; contractVersion: number; signature: string; manifestSha: string } | undefined,
+    manifestSig,
   };
 }
 

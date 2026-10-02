@@ -109,11 +109,11 @@
 
 // @deno-types="../scoring/scoring-types.d.ts"
 import { scorePlay } from "../scoring/vendor/score-play.js";
-import type { Repo, StoredEvidenceRow, ExistingEvidenceRow } from "../types.ts";
+import type { Repo, RepickRefusal, StoredEvidenceRow, ExistingEvidenceRow } from "../types.ts";
 import { HttpError, Errors } from "../http.ts";
 import { parseEvidenceSubmission, type EvidenceSubmission, type FixSubmission } from "./request-shape.ts";
 import { deriveSourceRef } from "./source-ref.ts";
-import { deriveFix, type DerivedFix } from "./derive-fix.ts";
+import { deriveFix, type DerivedFix, type MatchResult } from "./derive-fix.ts";
 import { classifyCatalogSubmission, type ManifestSigClaim } from "../catalog/classify-version.ts";
 import { verifyArtifactSignature } from "../catalog/signature.ts";
 // ⛔ FIX (P3e round 2 gate, H1): the REAL P1 manifest statement bytes —
@@ -196,7 +196,17 @@ export interface EvidenceIntakeDeferred {
   replay: boolean;
 }
 
-export type EvidenceIntakeResult = EvidenceIntakeSuccess | EvidenceIntakeQueued | EvidenceIntakeDeferred;
+/** NEW-3: the stored state of a `queued_catalog` row the drain aged out
+ * (7 days, no covering import). Replaying it returns THIS (HTTP 200 — the
+ * server has the submission and will not re-process it; a 5xx would make
+ * the client's outbox retry forever), never a 500. A replayed `unknown_id`
+ * row is the 422 `unknown_id` the live submission would have returned. */
+export interface EvidenceIntakeNeedsAttention {
+  status: "needs_attention";
+  evidenceId: string;
+}
+
+export type EvidenceIntakeResult = EvidenceIntakeSuccess | EvidenceIntakeQueued | EvidenceIntakeDeferred | EvidenceIntakeNeedsAttention;
 
 export function fixesOf(submission: EvidenceSubmission): FixSubmission[] {
   switch (submission.source) {
@@ -470,6 +480,16 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow, batc
   if (existing.status === "queued_catalog") {
     return { status: "queued_catalog", evidenceId: existing.id };
   }
+  // NEW-3: the two TERMINAL states a drained row can end in carry a NULL
+  // facility (like queued), so they are decided from `status` BEFORE the
+  // null-facility guard below (which would otherwise 500 and make the
+  // client's outbox retry forever).
+  if (existing.status === "unknown_id") {
+    throw Errors.unprocessable("unknown_id", "a referenced catalog id did not resolve once the covering catalog version was imported");
+  }
+  if (existing.status === "needs_attention") {
+    return { status: "needs_attention", evidenceId: existing.id };
+  }
   // B3: only a queued_catalog row has a null facilityId — every OTHER
   // status always carries a resolved one; anything else is a genuine
   // data inconsistency, failed closed here ONCE for every path below.
@@ -658,7 +678,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
         kid: submission.manifestSig.kid,
         // STANDARD (padded) base64 now — the real P1 artifact signature
         // format (signature.ts's own `verifyArtifactSignature`).
-        signature: submission.manifestSig.signature,
+        signature: submission.manifestSig.sig,
         // ⛔ FIX (P3e round 2 gate, H1): the REAL P1 manifest statement
         // (`tools/catalog/src/manifest.ts#ManifestStatementSchema`:
         // catalogVersion/contractVersion/kid/manifestSha, domain-tagged,
@@ -678,8 +698,8 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     {
       declaredVersion: submission.catalogVersion,
       currentVersion: currentVersion?.siteVersion ?? null,
-      currentInternalVersion: currentVersion?.version ?? null,
-      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked, internalVersion: declaredVersionRow.version } : null,
+      currentInternalVersion: await releaseRankOf(repo, currentVersion),
+      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked, internalVersion: (await releaseRankOf(repo, declaredVersionRow)) ?? declaredVersionRow.version } : null,
       now: repo.now(),
       manifestSig,
     },
@@ -874,7 +894,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     endedAt: null,
     localDate: submission.localDate,
     summary,
-    integrity: {},
+    integrity: fixCoordsIntegrity(fixesOf(submission)),
     cosignal: {},
     attestationGrade: worstGrade,
     matcherVersion: null,
@@ -941,7 +961,8 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   }
 
   const priorRows = await repo.evidence.listForPlay(resolvedFacilityId, resolvedCourseId, submission.localDate);
-  const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes);
+  const disambiguatedBy = await repo.play.disambiguatedBy(resolvedCourseId, submission.localDate);
+  const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes, disambiguatedBy);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: resolvedFacilityId,
@@ -970,7 +991,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     courseId: resolvedCourseId,
     facilityId: resolvedFacilityId,
     playDate: submission.localDate,
-    courseDisambiguatedBy: null,
+    courseDisambiguatedBy: disambiguatedBy,
     scoreBadge: outcome.score_badge,
     scoreMonetary: outcome.score_monetary,
     hardSignal: outcome.contributions.some((c) => c.hard),
@@ -1005,6 +1026,16 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     replay: false,
     play: { id: play.id, scoreBadge: outcome.score_badge, scoreMonetary: outcome.score_monetary, presenceSignal: outcome.presence_signal, money: outcome.money, heldReview: outcome.heldReview },
   };
+}
+
+/** The "N releases behind" arithmetic ranks by SITE-version order, not the
+ * internal `version` int (import order — it diverges after a rollback
+ * republish). Falls back to the int only for a row with no `site_version`
+ * (pre-import-catalog fixtures). */
+async function releaseRankOf(repo: Repo, row: { version: number; siteVersion: string | null } | null): Promise<number | null> {
+  if (row === null) return null;
+  if (row.siteVersion === null) return row.version;
+  return (await repo.catalog.releaseRank(row.siteVersion)) ?? row.version;
 }
 
 export interface FinalizeScoringResult {
@@ -1053,7 +1084,8 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
   }
 
   const rows = await repo.evidence.listForPlay(facilityId, courseId, localDate);
-  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows);
+  const disambiguatedBy = await repo.play.disambiguatedBy(courseId, localDate);
+  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows, disambiguatedBy);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: facilityId,
@@ -1076,7 +1108,7 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
     courseId,
     facilityId,
     playDate: localDate,
-    courseDisambiguatedBy: null,
+    courseDisambiguatedBy: disambiguatedBy,
     scoreBadge: outcome.score_badge,
     scoreMonetary: outcome.score_monetary,
     hardSignal: outcome.contributions.some((c) => c.hard),
@@ -1132,7 +1164,12 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
 
 export type RedrainResult =
   | { kind: "resolved"; evidenceId: string; facilityId: string; courseId: string | null; play: EvidenceIntakeSuccess["play"] | null }
-  | { kind: "still_unresolved" }
+  // `claimedVersionImported: false` (NEW-1) = the row's claimed
+  // `site_version` has no `catalog_version` row yet, so its ids were NOT
+  // judged at all — the drain must not treat "a newer import already ran"
+  // as coverage for it. Absent/true = the ids were (or could not be)
+  // judged against the claimed version's own import.
+  | { kind: "still_unresolved"; claimedVersionImported?: boolean }
   | { kind: "terminal_unknown_id" };
 
 /** `queuedInputRaw` is `app.evidence.queued_input` read back — re-parsed
@@ -1166,6 +1203,23 @@ export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, q
   // handleEvidenceIntake's own (H1: site version, real P1 statement). ----
   const currentVersion = await repo.catalog.currentVersion();
   const declaredVersionRow = await repo.catalog.versionRowBySiteVersion(submission.catalogVersion);
+  // ⛔ FIX (P3e round 2 gate, NEW-1, BLOCKER): the ledger can only be
+  // judged against the version the row CLAIMED. A newer, validly signed
+  // claim classifies `ok` even though that version has not been imported
+  // yet (it is the very reason the row was queued) — and a ledger lookup
+  // against the OLDER current import would then miss every id and end the
+  // row `unknown_id`, permanently, on the first drain (which runs after
+  // EVERY import, including a failed one). Until the claimed version has
+  // a `catalog_version` row, the row is simply still unresolved: it stays
+  // queued, and the 7-day timer (not the ledger) is the only thing that
+  // can end it.
+  // (Only the NEWER-than-current case: a claim OLDER than the current
+  // import with no row is a stale claim — classified `stale` below and, once
+  // a covering import has run, judged terminal by M1 as before; the ledger
+  // it is judged against is then the current import's, a superset.)
+  if (declaredVersionRow === null && (currentVersion === null || compareCatalogVersions(submission.catalogVersion, currentVersion.siteVersion ?? "") > 0)) {
+    return { kind: "still_unresolved", claimedVersionImported: false };
+  }
   let declaredVersionKidRevoked = false;
   if (declaredVersionRow) {
     const declaredKey = await repo.catalog.signingKey(declaredVersionRow.kid);
@@ -1174,7 +1228,7 @@ export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, q
   const manifestSig: ManifestSigClaim | undefined = submission.manifestSig
     ? {
         kid: submission.manifestSig.kid,
-        signature: submission.manifestSig.signature,
+        signature: submission.manifestSig.sig,
         payload:
           MANIFEST_DOMAIN +
           canonicalStringify({
@@ -1189,8 +1243,8 @@ export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, q
     {
       declaredVersion: submission.catalogVersion,
       currentVersion: currentVersion?.siteVersion ?? null,
-      currentInternalVersion: currentVersion?.version ?? null,
-      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked, internalVersion: declaredVersionRow.version } : null,
+      currentInternalVersion: await releaseRankOf(repo, currentVersion),
+      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked, internalVersion: (await releaseRankOf(repo, declaredVersionRow)) ?? declaredVersionRow.version } : null,
       now: repo.now(),
       manifestSig,
     },
@@ -1298,7 +1352,7 @@ export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, q
       facilityId: resolvedFacilityId,
       courseId: resolvedCourseId,
       summary,
-      integrity: {},
+      integrity: fixCoordsIntegrity(fixes),
       attestationGrade: worstGrade,
       catalogVersion: declaredVersionRow?.version ?? currentVersion?.version ?? null,
     });
@@ -1345,29 +1399,92 @@ export async function rescorePlayAfterPromotion(repo: Repo, play: { facilityId: 
 /** AT 18 (split, the KEPT course's side): an existing play at the kept
  * course is, after a split, ambiguous between the kept course and its new
  * siblings — it becomes a `user` pick OF THE KEPT COURSE (one per
- * facility+date, A2-01), so it counts once and a later re-pick can move it. */
-export async function labelSplitPlayAsUserPick(repo: Repo, playId: string): Promise<boolean> {
-  return repo.play.markUserPick(playId);
+ * facility+date, A2-01), so it counts once and a later re-pick can move it.
+ *
+ * ⛔ NEW-4: labelling alone left the STORED score untouched (a
+ * polygon-attested, play-verified dwell kept `score_monetary` 0.50 after a
+ * split). The play is therefore RE-SCORED through the live path straight
+ * after — `finalizeScoringForKey` now carries the play's `user` label into
+ * every scored row, so the A2-01 cap applies. Re-scoring runs even when the
+ * label was already present (idempotent). */
+export async function labelSplitPlayAsUserPick(repo: Repo, play: { playId: string; facilityId: string; courseId: string; playDate: string }): Promise<boolean> {
+  const marked = await repo.play.markUserPick(play.playId);
+  await finalizeScoringForKey(repo, play.facilityId, play.courseId, play.playDate);
+  return marked;
 }
 
-export type RepickResult = { ok: true } | { ok: false; reason: "not_same_split_family" | "no_such_play" | "target_play_exists" };
+export type RepickResult = { ok: true } | { ok: false; reason: RepickRefusal };
+
+const NO_MATCH: MatchResult = { verificationTier: "unverified", geometryKind: "radius", insideBuffer: false };
+
+/** Re-derives ONE stored evidence row's `summary` against a DIFFERENT
+ * course: every embedded derived fix gets `verificationTier` /
+ * `geometryKind` / `insideBuffer` from a fresh `matchFix` of its stored raw
+ * coordinates (`integrity.fixCoords`, written at intake), and a dwell's
+ * `holes` is recomputed from the target course's own hole count. Returns
+ * null (-> `cannot_rederive`, nothing moves) when any fix's coordinates
+ * were never stored. Token/attestation/quality fields are about the live
+ * SESSION, not the course, so they are left as they were. */
+async function rederiveSummaryForCourse(repo: Repo, row: StoredEvidenceRow, toCourseId: string, holeCount: number): Promise<Record<string, unknown> | null> {
+  const rawCoords = row.integrity.fixCoords;
+  const coordsByFixId = new Map<string, unknown>(typeof rawCoords === "object" && rawCoords !== null ? Object.entries(rawCoords) : []);
+  const next: Record<string, unknown> = { ...row.summary };
+  for (const key of ["fix", "checkinFix", "checkoutFix"]) {
+    const stored = next[key];
+    if (stored === undefined) continue;
+    if (typeof stored !== "object" || stored === null) return null;
+    const fixId = (stored as { fixId?: unknown }).fixId;
+    const c = typeof fixId === "string" ? coordsByFixId.get(fixId) : undefined;
+    const lat = (c as { lat?: unknown } | undefined)?.lat;
+    const lng = (c as { lng?: unknown } | undefined)?.lng;
+    if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const match = (await repo.catalog.matchFix(toCourseId, lat, lng)) ?? NO_MATCH;
+    next[key] = { ...stored, verificationTier: match.verificationTier, geometryKind: match.geometryKind, insideBuffer: match.insideBuffer };
+  }
+  if (row.source === "foreground_dwell") next.holes = dwellHolesFromCount(holeCount);
+  return next;
+}
 
 /** AT 18 (split): the player re-picks which course of a split facility a
  * play was at. The play (and its evidence) MOVES — never a second play —
- * then is re-scored at the new course. */
+ * and is FULLY re-derived against the target course (matcher + hole bar),
+ * then re-scored through the live path, still a `user` pick (so A2-01's
+ * cap applies at the new course too).
+ *
+ * Limits (all enforced in `Repo#play.repickPrepare`): only a `user` pick
+ * can be re-picked, exactly ONCE (audit-backed in `app.audit_log`), and
+ * only within the split family. */
 export async function repickUserPlay(repo: Repo, args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<RepickResult> {
-  const moved = await repo.play.repickCourse(args);
-  if (!moved.ok) return moved;
-  await repo.evidence.refreshFixTiers(args.toCourseId, args.playDate);
+  const prep = await repo.play.repickPrepare(args);
+  if (!prep.ok) return prep;
+  const rows = (await repo.evidence.listForPlay(args.facilityId, args.fromCourseId, args.playDate)).filter((r) => r.courseId === args.fromCourseId);
+  const holeCount = await repo.catalog.courseHoleCount(args.toCourseId);
+  const rederived: { evidenceId: string; summary: Record<string, unknown> }[] = [];
+  for (const row of rows) {
+    const summary = await rederiveSummaryForCourse(repo, row, args.toCourseId, holeCount);
+    if (summary === null) return { ok: false, reason: "cannot_rederive" };
+    rederived.push({ evidenceId: row.id, summary });
+  }
+  await repo.play.repickApply({ ...args, playId: prep.playId, rederived });
   await finalizeScoringForKey(repo, args.facilityId, args.toCourseId, args.playDate);
   return { ok: true };
+}
+
+/** The raw fix coordinates, kept in `app.evidence.integrity.fixCoords`
+ * (NOT in `summary`: the scorer's fix schema is strict, and these must
+ * never reach it). Needed ONLY so a re-pick can re-run the matcher against
+ * a different course; they belong to the owner's own row, ride along in
+ * `export_my_data`, and go with the row on `delete_my_data`. */
+function fixCoordsIntegrity(fixes: FixSubmission[]): Record<string, unknown> {
+  if (fixes.length === 0) return {};
+  return { fixCoords: Object.fromEntries(fixes.map((f) => [f.fixId, { lat: f.lat, lng: f.lng }])) };
 }
 
 /** Rebuilds one `scorePlay` `Evidence[]` ROW from an already-stored
  * `StoredEvidenceRow` — the shared shape both `reconstructEvidenceForScoring`
  * (a NEW submission's prior rows) and `buildReplayResult` (a replay's
  * ENTIRE row set, including what was originally "this" row) use. */
-function reconstructOneStoredRow(row: StoredEvidenceRow): Record<string, unknown> {
+function reconstructOneStoredRow(row: StoredEvidenceRow, disambiguatedBy: Disambiguation = null): Record<string, unknown> {
   return {
     id: row.id,
     facilityId: row.facilityId,
@@ -1375,15 +1492,24 @@ function reconstructOneStoredRow(row: StoredEvidenceRow): Record<string, unknown
     localDate: row.localDate,
     source: row.source,
     ...row.summary,
+    // NEW-4 (A2-01): the PLAY's disambiguation is carried into every
+    // course-anchored scored row — `internal/classify.ts#applyCourseCaps`
+    // reads it per row, so a `user` pick contributes 0 to
+    // `score_monetary`. Set AFTER the summary spread so a stored summary
+    // can never override the play's own label.
+    ...(disambiguatedBy !== null && row.courseId !== null ? { courseDisambiguatedBy: disambiguatedBy } : {}),
   };
 }
+
+/** The play's own `course_disambiguated_by` (see `Repo#play.disambiguatedBy`). */
+type Disambiguation = "geometry" | "staff" | "user" | null;
 
 /** P3c gate round 3: the replay path's own scoring input — EVERY row
  * comes from `listForPlay` (already persisted), unlike
  * `reconstructEvidenceForScoring` below, which also assembles one FRESH
  * (not-yet-persisted) row for a genuinely new submission. */
-function reconstructEvidenceFromStoredRows(rows: StoredEvidenceRow[]): Record<string, unknown>[] {
-  return rows.map(reconstructOneStoredRow);
+function reconstructEvidenceFromStoredRows(rows: StoredEvidenceRow[], disambiguatedBy: Disambiguation = null): Record<string, unknown>[] {
+  return rows.map((r) => reconstructOneStoredRow(r, disambiguatedBy));
 }
 
 /** Rebuilds the `scorePlay` `Evidence[]` input from: every PRIOR stored
@@ -1411,14 +1537,16 @@ function reconstructEvidenceForScoring(
   resolvedFacilityId: string,
   resolvedCourseId: string,
   holes: 9 | 18,
+  disambiguatedBy: Disambiguation = null,
 ): Record<string, unknown>[] {
-  const rows: Record<string, unknown>[] = priorRows.filter((row) => row.id !== insertedId).map(reconstructOneStoredRow);
+  const rows: Record<string, unknown>[] = priorRows.filter((row) => row.id !== insertedId).map((r) => reconstructOneStoredRow(r, disambiguatedBy));
   const fresh: Record<string, unknown> = {
     id: insertedId,
     facilityId: resolvedFacilityId,
     courseId: resolvedCourseId,
     localDate: submission.localDate,
     source: submission.source,
+    ...(disambiguatedBy !== null ? { courseDisambiguatedBy: disambiguatedBy } : {}),
   };
   switch (submission.source) {
     case "foreground_checkin":

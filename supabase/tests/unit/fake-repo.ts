@@ -132,6 +132,8 @@ export interface FakeState {
   evidenceCreatedAt: Map<string, string>;
   /** AT 18: course id -> current verification_status, for refreshFixTiers. */
   courseTier: Map<string, "unverified" | "listed-verified" | "play-verified">;
+  /** Play ids that already used their one re-pick (the real one is an audit_log row). */
+  repicks: Set<string>;
 }
 
 export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
@@ -167,6 +169,7 @@ export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
     nextId: 1,
     evidenceCreatedAt: new Map(),
     courseTier: new Map(),
+    repicks: new Set(),
     ...overrides,
   };
 }
@@ -210,9 +213,15 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
 
     catalog: {
       async currentVersion(): Promise<CatalogVersionRow | null> {
+        // Mirrors the real `order by site_version desc nulls last, version desc`.
         let max: CatalogVersionRow | null = null;
+        const better = (a: CatalogVersionRow, b: CatalogVersionRow): boolean => {
+          if (a.siteVersion !== null && b.siteVersion !== null && a.siteVersion !== b.siteVersion) return a.siteVersion > b.siteVersion;
+          if ((a.siteVersion === null) !== (b.siteVersion === null)) return a.siteVersion !== null;
+          return a.version > b.version;
+        };
         for (const row of state.catalogVersions.values()) {
-          if (!max || row.version > max.version) max = row;
+          if (!max || better(row, max)) max = row;
         }
         return max;
       },
@@ -226,6 +235,11 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
           if (row.siteVersion === siteVersion) return row;
         }
         return null;
+      },
+      async releaseRank(siteVersion: string): Promise<number | null> {
+        let n = 0;
+        for (const row of state.catalogVersions.values()) if (row.siteVersion !== null && row.siteVersion !== undefined && row.siteVersion <= siteVersion) n += 1;
+        return n > 0 ? n : null;
       },
       async resolveLedgerId(id: string): Promise<LedgerRow | null> {
         let current = id;
@@ -386,8 +400,8 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         state.evidence.set(id, resolvedRow);
       },
       // ⛔ NEW (P3e round 2 gate, B2/M1): flips status only — claimed_*/
-      // queued_input stay in place (the real SQL's own doc: "the only
-      // record of what the row ever claimed"), guarded the same way.
+      // queued_input stay in place in THIS fake (the real SQL clears them with the
+      // status change; asserted against real Postgres), guarded the same way.
       async markQueuedTerminal(id: string, terminalStatus: "needs_attention" | "unknown_id"): Promise<void> {
         const row = state.evidence.get(id);
         if (!row || row.userId !== uid || row.status !== "queued_catalog") return;
@@ -448,15 +462,31 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         play.courseDisambiguatedBy = "user";
         return true;
       },
-      async repickCourse(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }) {
+      async disambiguatedBy(courseId: string, playDate: string) {
+        return state.plays.get(`${uid}:${courseId}:${playDate}`)?.courseDisambiguatedBy ?? null;
+      },
+      async repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }) {
         const fromKey = `${uid}:${args.fromCourseId}:${args.playDate}`;
         const play = state.plays.get(fromKey);
         const fromLedger = state.ledger.get(args.fromCourseId);
         const toLedger = state.ledger.get(args.toCourseId);
-        const sameFamily = Boolean(fromLedger && toLedger && (toLedger.splitFrom === args.fromCourseId || fromLedger.splitFrom === args.toCourseId || (fromLedger.splitFrom && fromLedger.splitFrom === toLedger.splitFrom)));
+        const sameFamily = Boolean(fromLedger && toLedger && args.fromCourseId !== args.toCourseId && (toLedger.splitFrom === args.fromCourseId || fromLedger.splitFrom === args.toCourseId || (fromLedger.splitFrom && fromLedger.splitFrom === toLedger.splitFrom)));
         if (!sameFamily) return { ok: false as const, reason: "not_same_split_family" as const };
         if (!play) return { ok: false as const, reason: "no_such_play" as const };
-        if (state.plays.has(`${uid}:${args.toCourseId}:${args.playDate}`)) return { ok: false as const, reason: "target_play_exists" as const };
+        if (play.courseDisambiguatedBy !== "user") return { ok: false as const, reason: "not_user_pick" as const };
+        if (state.repicks.has(play.id)) return { ok: false as const, reason: "already_repicked" as const };
+        const clash = [...state.plays.values()].some((o) => o.userId === uid && o.facilityId === args.facilityId && o.playDate === args.playDate && o.id !== play.id && (o.courseId === args.toCourseId || o.courseDisambiguatedBy === "user"));
+        if (clash) return { ok: false as const, reason: "target_play_exists" as const };
+        return { ok: true as const, playId: play.id };
+      },
+      async repickApply(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string; playId: string; rederived: { evidenceId: string; summary: Record<string, unknown> }[] }) {
+        const fromKey = `${uid}:${args.fromCourseId}:${args.playDate}`;
+        const play = state.plays.get(fromKey);
+        if (!play) return;
+        for (const r of args.rederived) {
+          const ev = state.evidence.get(r.evidenceId);
+          if (ev && ev.userId === uid) ev.summary = r.summary;
+        }
         state.plays.delete(fromKey);
         play.courseId = args.toCourseId;
         play.courseDisambiguatedBy = "user";
@@ -464,7 +494,7 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         for (const ev of state.evidence.values()) {
           if (ev.userId === uid && ev.kind === "resolved" && ev.courseId === args.fromCourseId && ev.localDate === args.playDate) ev.courseId = args.toCourseId;
         }
-        return { ok: true as const };
+        state.repicks.add(args.playId);
       },
     },
 

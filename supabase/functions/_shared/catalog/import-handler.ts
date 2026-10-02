@@ -372,22 +372,25 @@ export async function applyImportPlan(plan: VerifiedArtifactPlan, repo: Importer
     const baseRows: LedgerBaseRow[] = [];
     const stateRows: LedgerStateRow[] = [];
     for (const entry of ledgerResult.value.entries) {
+      // ⛔ FIX (P3e round 2 gate, M6): a ledger transition's `catalogVersion`
+      // is `z.string().min(1)` in P1's own schema — NOT necessarily one of
+      // this catalog's site versions (the interop test feeds an arbitrary
+      // string). An unknown one must never reject the whole signed import:
+      // it falls back to the IMPORTING version's own int (the conservative
+      // choice — the id is treated as first seen / verified in this
+      // import, never earlier), and is logged.
+      const resolveVersionInt = (versionStr: string): number => {
+        const mapped = siteVersionMap.get(versionStr);
+        if (mapped !== undefined) return mapped;
+        console.warn(`applyImportPlan: id-ledger.json entry "${entry.id}" names catalogVersion "${versionStr}", which is not a known site version — using the importing version ${manifest.catalogVersion} (int ${currentImport.version})`);
+        return currentImport.version;
+      };
       const firstVersionStr = firstMintedVersion(entry, compareCatalogVersions);
-      const firstVersionInt = siteVersionMap.get(firstVersionStr);
-      if (firstVersionInt === undefined) {
-        return { ok: false, reason: `id-ledger.json: entry "${entry.id}" references unknown catalogVersion "${firstVersionStr}"` };
-      }
-      baseRows.push({ id: entry.id, kind: entry.kind, firstCatalogVersionInt: firstVersionInt });
+      baseRows.push({ id: entry.id, kind: entry.kind, firstCatalogVersionInt: resolveVersionInt(firstVersionStr) });
 
       let verifiedInVersionInt: number | null = null;
       const verifiedStr = latestVerifiedVersion(entry, compareCatalogVersions);
-      if (verifiedStr) {
-        const mapped = siteVersionMap.get(verifiedStr);
-        if (mapped === undefined) {
-          return { ok: false, reason: `id-ledger.json: entry "${entry.id}" references unknown catalogVersion "${verifiedStr}"` };
-        }
-        verifiedInVersionInt = mapped;
-      }
+      if (verifiedStr) verifiedInVersionInt = resolveVersionInt(verifiedStr);
       stateRows.push({ id: entry.id, status: entry.status ?? "stub", tombstoned: entry.tombstoned, mergedInto: entry.mergedInto, verifiedInVersionInt, splitSiblings: entry.splitSiblings });
     }
 

@@ -450,16 +450,19 @@ Deno.test("AT 15: a revoked-kid current version is 422 catalog_stale, against a 
 
 Deno.test("AT 8: a version far behind the real current is 422 catalog_stale", DT, async () => {
   const actor = await withFreshUser("stale-behind");
-  const version = 88002;
   const kid = `kid-fresh-${freshUuid()}`;
   await insertSigningKey(kid, null);
-  await insertCatalogVersion(version, new Date(), kid);
+  // Round 2 gate (LOW): "5 releases" is now RELEASE order (the rank of each
+  // version's own site_version among the imported ones), not the internal
+  // int — so "far behind" needs six real releases after the baseline, not
+  // one row with a big int.
+  for (let version = 88002; version <= 88007; version++) await insertCatalogVersion(version, new Date(), kid);
 
   let threw: unknown = null;
   try {
-    // catalogVersion 1 (the seeded fac_x baseline) is now `version -
-    // 899`-ish releases behind this test's own newly-inserted version —
-    // well past the 5-version skew window.
+    // catalogVersion 1 (the seeded fac_x baseline) is now more than 5
+    // releases behind this test's own newly-inserted newest version — past
+    // the skew window.
     await evidence(actor, checkinBody({ catalogVersion: SEED_SITE_VERSION }));
   } catch (err) {
     threw = err;

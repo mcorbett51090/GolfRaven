@@ -82,6 +82,8 @@ export interface MatchResult {
  * `cosignal` are the raw jsonb payloads `app.evidence` stores (§4.4
  * line 833); the handler reassembles the typed `Evidence` row the bundled
  * scorer expects from these before calling it. */
+export type RepickRefusal = "not_same_split_family" | "no_such_play" | "target_play_exists" | "not_user_pick" | "already_repicked" | "cannot_rederive";
+
 export interface StoredEvidenceRow {
   id: string;
   source: string;
@@ -299,6 +301,8 @@ export interface Repo {
      * — the lookup evidence intake actually needs now that the wire
      * contract carries the site string, not the internal int. */
     versionRowBySiteVersion(siteVersion: string): Promise<CatalogVersionRow | null>;
+    /** Release-order rank of a site version: how many imported versions have a `site_version` at or before it (so the gap between two ranks is the number of RELEASES between them — never the internal `version` int, which is import order and diverges after a rollback republish). `null` when it has no `site_version` (pre-import-catalog fixtures). */
+    releaseRank(siteVersion: string): Promise<number | null>;
     /** Resolves a catalog id THROUGH its merge closure (tombstoned ->
      * merged_into, followed to the survivor) itself — callers never walk
      * the chain by hand. Returns the row the id ULTIMATELY resolves to
@@ -401,12 +405,25 @@ export interface Repo {
      * same (facility, date) (the partial unique index). Returns whether
      * it was marked. */
     markUserPick(playId: string): Promise<boolean>;
-    /** AT 18 (re-pick): moves the actor's play at (facility, date) from
-     * `fromCourseId` to `toCourseId` — the evidence rows follow it and
-     * the row stays a `user` pick, so nothing is double-counted. Only
-     * between two courses of the SAME split family (`split_from`). Returns
-     * `ok:false` with a reason instead of throwing. */
-    repickCourse(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true } | { ok: false; reason: "not_same_split_family" | "no_such_play" | "target_play_exists" }>;
+    /** A2-01: the play's recorded `course_disambiguated_by` at (course,
+     * date), or null when there is no play yet / no label. The scorer caps
+     * a `user` pick (contributes 0 to `score_monetary`) ONLY when every
+     * scored evidence row carries this label, so every scoring path reads
+     * it here first (plain SELECT, no lock). */
+    disambiguatedBy(courseId: string, playDate: string): Promise<"geometry" | "staff" | "user" | null>;
+    /** AT 18 (re-pick) step 1 — takes the advisory locks of BOTH plays (the
+     * same key family as `upsertFromScore`, stable order) and checks every
+     * precondition: same split family, a play exists at `fromCourseId`, it
+     * is a `user` pick, it has NOT been re-picked before (exactly ONE
+     * re-pick, recorded in `app.audit_log`), and no other play occupies the
+     * target. Returns `ok:false` with a reason instead of throwing. */
+    repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true; playId: string } | { ok: false; reason: RepickRefusal }>;
+    /** AT 18 (re-pick) step 2 — moves the play (and its evidence rows, each
+     * with its RE-DERIVED `summary`/`integrity` — supplied by the handler
+     * after re-running the matcher against the target course) to
+     * `toCourseId`, keeps it a `user` pick, and writes the audit row. Must
+     * follow a successful `repickPrepare` in the SAME transaction. */
+    repickApply(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string; playId: string; rederived: { evidenceId: string; summary: Record<string, unknown> }[] }): Promise<void>;
   };
 
   fraudSignal: {
@@ -586,7 +603,13 @@ export interface RescoreBacklogRow {
   id: number;
   courseId: string;
   reason: "promotion" | "split";
-  cursorPlayId: string | null;
+  /** Stable keyset position: (play created_at as Postgres text, play id). */
+  cursor: RescoreCursor | null;
+}
+
+export interface RescoreCursor {
+  createdAt: string;
+  playId: string;
 }
 
 export interface RescorePlayRef {
@@ -595,6 +618,8 @@ export interface RescorePlayRef {
   facilityId: string;
   courseId: string;
   playDate: string;
+  /** The play's `created_at` as Postgres text (microsecond-exact, round-trips into the cursor). */
+  createdAt: string;
 }
 
 export interface ImporterLedgerRow {
@@ -699,9 +724,9 @@ export interface ImporterRepo {
   /** AT 18: the re-score backlog (migration 0026) — bounded work per run. */
   rescoreBacklog: {
     listOpen(limit: number): Promise<RescoreBacklogRow[]>;
-    /** Set-based keyset page of plays at `courseId` after `afterPlayId`, ordered by play id. */
-    nextPlays(courseId: string, afterPlayId: string | null, limit: number): Promise<RescorePlayRef[]>;
-    advance(id: number, cursorPlayId: string | null, done: boolean): Promise<void>;
+    /** Set-based keyset page of plays at `courseId` strictly after `after`, ordered by (created_at, id). */
+    nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]>;
+    advance(id: number, cursor: RescoreCursor | null, done: boolean): Promise<void>;
   };
 
   queuedCatalog: {

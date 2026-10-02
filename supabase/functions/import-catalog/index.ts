@@ -24,11 +24,9 @@ import { drainQueuedCatalog } from "../_shared/catalog/drain-orchestrator.ts";
 import { drainRescoreBacklog } from "../_shared/catalog/rescore-orchestrator.ts";
 import { handleImportCatalogRequest } from "../_shared/catalog/import-endpoint.ts";
 import { makeDrainReadRepo } from "../_shared/catalog/drain-read-repo.ts";
+import { PER_FETCH_MS, TOTAL_BUDGET_MS, type Deadline } from "../_shared/catalog/time-budget.ts";
 import { serve } from "std/http/server";
 
-/** Per-fetch hard deadline (M4) — a stalled artifact host can never hang
- * this function. */
-const FETCH_TIMEOUT_MS = 15_000;
 
 /** The Edge Runtime's own outbound fetch, bounded by (a) a hard deadline
  * (`AbortSignal.timeout`), (b) `redirect: "error"` — a redirect (e.g.
@@ -38,8 +36,12 @@ const FETCH_TIMEOUT_MS = 15_000;
  * http.ts#readJsonBody uses for a request body. A missing/lying
  * `Content-Length` on the RESPONSE is as untrustworthy as one on a
  * request, so the streamed check is the real enforcement. */
-const realFetchBytes: FetchBytes = async (url, maxBytes) => {
-  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "error" });
+const makeFetchBytes = (fetchDeadline: Deadline): FetchBytes => async (url, maxBytes) => {
+  // Per-fetch hard deadline (M4), never past the whole fetch PHASE's own
+  // deadline (time-budget.ts) — sequential fetches cannot add up past it.
+  const allowedMs = Math.min(PER_FETCH_MS, fetchDeadline.remainingMs());
+  if (allowedMs <= 0) throw new Error(`import-catalog: fetch phase budget exhausted before ${url}`);
+  const res = await fetch(url, { signal: AbortSignal.timeout(allowedMs), redirect: "error" });
   if (!res.ok) throw new Error(`import-catalog: fetch ${url} -> HTTP ${res.status}`);
   const declared = res.headers.get("content-length");
   if (declared !== null) {
@@ -73,29 +75,35 @@ const realFetchBytes: FetchBytes = async (url, maxBytes) => {
  * write transaction (M4). */
 const getSigningKeyReadOnly = (kid: string) => withSystemCatalogImport((repo) => repo.catalog.getSigningKey(kid));
 
-/** A bounded batch per run (handleRequest races every request against a
- * 15 s deadline; each row is its own per-user transaction, so an
- * interrupted run just resumes on the next one). */
-const DRAIN_BATCH_LIMIT = 50;
+/** A cap per run — the real bound is the time budget (time-budget.ts):
+ * each row is its own per-user transaction, a new one is only started
+ * while the phase deadline leaves room, and whatever is left stays queued
+ * for the next run. */
+const DRAIN_BATCH_LIMIT = 200;
 
 /** Each drain read/advance is its own short system transaction — see
  * drain-read-repo.ts. */
 const drainReadRepo = makeDrainReadRepo(withSystemCatalogImport);
 
 serve((req) =>
-  handleRequest(() =>
-    handleImportCatalogRequest(req, {
-      getConfig: getCatalogImportEnvConfig,
-      hitRateLimit: hitSystemRateLimit,
-      now: () => new Date(),
-      runImport: async (config) => {
-        const plan = await fetchAndVerifyArtifact({ artifactBaseUrl: config.artifactBaseUrl, allowedHosts: config.allowedHosts }, realFetchBytes, getSigningKeyReadOnly);
-        if (!plan.ok) return plan;
-        return applyImportPlanAtomically(plan, withSystemCatalogImport);
-      },
-      // H4: its own transaction(s) — independent of whatever the import did.
-      runDrain: () => drainQueuedCatalog(drainReadRepo, withOwnership, DRAIN_BATCH_LIMIT),
-      runRescore: () => drainRescoreBacklog(drainReadRepo, withOwnership),
-    }),
+  handleRequest(
+    () =>
+      handleImportCatalogRequest(req, {
+        getConfig: getCatalogImportEnvConfig,
+        hitRateLimit: hitSystemRateLimit,
+        now: () => new Date(),
+        runImport: async (config, fetchDeadline) => {
+          const plan = await fetchAndVerifyArtifact({ artifactBaseUrl: config.artifactBaseUrl, allowedHosts: config.allowedHosts }, makeFetchBytes(fetchDeadline), getSigningKeyReadOnly);
+          if (!plan.ok) return plan;
+          return applyImportPlanAtomically(plan, withSystemCatalogImport);
+        },
+        // H4: its own transaction(s) — independent of whatever the import did.
+        runDrain: (deadline) => drainQueuedCatalog(drainReadRepo, withOwnership, DRAIN_BATCH_LIMIT, deadline),
+        runRescore: (deadline) => drainRescoreBacklog(drainReadRepo, withOwnership, undefined, deadline),
+      }),
+    // The per-PHASE deadlines above are the mechanism; this race (the
+    // whole-request budget) is only the backstop for a phase that blows
+    // through its own bound.
+    TOTAL_BUDGET_MS,
   ),
 );

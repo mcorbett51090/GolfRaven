@@ -258,10 +258,15 @@ describe("import-catalog — rejections", () => {
     expect(outcome.reason).toBe("artifact_base_url_not_https");
   });
 
-  it("rejects a ledger entry whose transition names a catalogVersion absent from versions.json", async () => {
+  // ⛔ M6 (P3e round 2 gate): P1's own ledger schema types a transition's
+  // `catalogVersion` as `z.string().min(1)` — NOT necessarily a site
+  // version this catalog knows. It must never reject a signed import; the
+  // entry falls back to the IMPORTING version's own int and the fact is
+  // logged. (This test used to assert the opposite — the old reject.)
+  it.each(["20200101-0000000", "an arbitrary string, not a site version at all"])("imports a ledger entry whose transition names an unknown catalogVersion (%s), falling back to the importing version", async (arbitrary) => {
     const { privateKey, publicKeyB64Url } = await generateKeypair();
-    const badLedger = { entries: { [FAC_ID]: { id: FAC_ID, transitions: [{ type: "minted", catalogVersion: "20200101-0000000" }] } } };
-    const ledgerBytes = jsonBytes(badLedger);
+    const ledger = { entries: { [FAC_ID]: { id: FAC_ID, transitions: [{ type: "minted", catalogVersion: arbitrary }, { type: "verified", catalogVersion: arbitrary }] } } };
+    const ledgerBytes = jsonBytes(ledger);
     const artifact = await buildSignedArtifact({
       privateKey,
       kid: "kid-1",
@@ -276,10 +281,15 @@ describe("import-catalog — rejections", () => {
     const state = makeFakeImporterState(NOW);
     state.signingKeys.set("kid-1", { kid: "kid-1", publicKeyB64Url, revokedAt: null });
     const repo = makeFakeImporterRepo(state);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const outcome = await runImport({ artifactBaseUrl: BASE_URL, allowedHosts: ALLOWED_HOSTS }, repo, fetcherFor(artifact), getSigningKeyFor(repo));
-    expect(outcome.ok).toBe(false);
-    if (outcome.ok) throw new Error("unreachable");
-    expect(outcome.reason).toContain("unknown catalogVersion");
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(outcome.ledgerEntriesApplied).toBe(1);
+    const importingInt = state.versions.find((v) => v.siteVersion === "20260925-bbbbbbb")!.version;
+    expect(state.ledger.get(FAC_ID)).toMatchObject({ firstCatalogVersion: importingInt, verifiedInVersion: importingInt });
+    expect(warn).toHaveBeenCalled(); // logged, not silent
+    warn.mockRestore();
   });
 });
 
@@ -653,6 +663,35 @@ describe("import-catalog — H3: early exit when the version is already imported
     if (!second.ok) throw new Error("unreachable");
     expect((second as { alreadyImported?: boolean }).alreadyImported).toBe(true);
     expect((second as { ledgerEntriesApplied?: number }).ledgerEntriesApplied).toBe(0);
+  });
+});
+
+// ⛔ NEW (P3e round 2 gate, LOW): a conflicting split_from fails closed, like M3.
+describe("import-catalog — split_from conflicts fail closed (like M3)", () => {
+  it("an import claiming a DIFFERENT kept course for an already-split sibling is rejected, whole", async () => {
+    const state = makeFakeImporterState(NOW);
+    const repo = makeFakeImporterRepo(state);
+    state.ledger.set("crs_sib", { id: "crs_sib", kind: "course", status: "verified", mergedInto: null, tombstonedAt: null, firstCatalogVersion: 1, verifiedInVersion: 1, splitFrom: "crs_keptA" });
+    const conflict = await repo.catalog.findLedgerConflict([
+      { id: "crs_keptB", status: "verified", tombstoned: false, mergedInto: null, verifiedInVersionInt: 1, splitSiblings: ["crs_sib"] },
+    ]);
+    expect(conflict).toContain("already on file as split from \"crs_keptA\"");
+  });
+
+  it("the SAME kept course re-asserting an already-recorded split is not a conflict", async () => {
+    const state = makeFakeImporterState(NOW);
+    const repo = makeFakeImporterRepo(state);
+    state.ledger.set("crs_sib", { id: "crs_sib", kind: "course", status: "verified", mergedInto: null, tombstonedAt: null, firstCatalogVersion: 1, verifiedInVersion: 1, splitFrom: "crs_keptA" });
+    expect(await repo.catalog.findLedgerConflict([{ id: "crs_keptA", status: "verified", tombstoned: false, mergedInto: null, verifiedInVersionInt: 1, splitSiblings: ["crs_sib"] }])).toBeNull();
+  });
+
+  it("two kept courses claiming one sibling inside a single ledger is a conflict", async () => {
+    const repo = makeFakeImporterRepo(makeFakeImporterState(NOW));
+    const conflict = await repo.catalog.findLedgerConflict([
+      { id: "crs_a", status: "verified", tombstoned: false, mergedInto: null, verifiedInVersionInt: 1, splitSiblings: ["crs_sib"] },
+      { id: "crs_b", status: "verified", tombstoned: false, mergedInto: null, verifiedInVersionInt: 1, splitSiblings: ["crs_sib"] },
+    ]);
+    expect(conflict).toContain("claimed by both");
   });
 });
 

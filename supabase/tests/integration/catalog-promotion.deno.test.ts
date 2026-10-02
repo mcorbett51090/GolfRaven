@@ -147,8 +147,12 @@ async function newUser(label: string): Promise<Actor> {
 }
 
 /** A dwell round (2 h apart, both fixes live+attested, inside a polygon) the
- * way live intake would have stored it, with the course's tier AS OF NOW. */
-async function seedDwellAndScore(actor: Actor, facilityId: string, courseId: string, tier: "unverified" | "play-verified") {
+ * way live intake would have stored it, with the course's tier AS OF NOW —
+ * including `integrity.fixCoords` (the raw coordinates intake now keeps so a
+ * re-pick can re-run the matcher). `vendor: true` adds a mapped sensor-
+ * provenance vendor round beside it: the combination that makes the play
+ * money-TRUE as long as it is NOT a user pick. */
+async function seedDwellAndScore(actor: Actor, facilityId: string, courseId: string, tier: "unverified" | "play-verified", opts: { vendor?: boolean; holes?: 9 | 18 } = {}) {
   const localDate = todayChicago();
   const noonUtcMs = Date.parse(`${localDate}T17:00:00Z`); // 12:00 Chicago (CDT/CST both keep this on the same local day)
   const mk = (fixId: string, capturedAt: number) =>
@@ -159,23 +163,34 @@ async function seedDwellAndScore(actor: Actor, facilityId: string, courseId: str
       match: { verificationTier: tier, geometryKind: "polygon", insideBuffer: true },
       consumedToken: { attestationGrade: "attested", challengeKind: "live" },
     });
+  const inId = `in${freshUuid().slice(0, 8)}`;
+  const outId = `out${freshUuid().slice(0, 8)}`;
   return withOwnership(actor, async (repo) => {
     const device = await repo.device.ensureOwn(null, "ios");
     const sourceRef = `dwell-${freshUuid()}`;
     await repo.evidence.insertIdempotent({
       kind: "resolved", sourceRef, inputHash: `hash-${sourceRef}`, source: "foreground_dwell", facilityId, courseId,
       startedAt: null, endedAt: null, localDate,
-      summary: { localDate, checkinFix: mk(`in${freshUuid().slice(0, 8)}`, noonUtcMs), checkoutFix: mk(`out${freshUuid().slice(0, 8)}`, noonUtcMs + 120 * 60_000), apartMinutes: 120, holes: 18 },
-      integrity: {}, cosignal: {}, attestationGrade: "attested", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: device.id,
+      summary: { localDate, checkinFix: mk(inId, noonUtcMs), checkoutFix: mk(outId, noonUtcMs + 120 * 60_000), apartMinutes: 120, holes: opts.holes ?? 18 },
+      integrity: { fixCoords: { [inId]: { lat: 36.1467, lng: -86.7816 }, [outId]: { lat: 36.1468, lng: -86.7817 } } },
+      cosignal: {}, attestationGrade: "attested", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: device.id,
     });
+    if (opts.vendor) {
+      const ref = `vendor-${freshUuid()}`;
+      await repo.evidence.insertIdempotent({
+        kind: "resolved", sourceRef: ref, inputHash: `hash-${ref}`, source: "arccos", facilityId, courseId,
+        startedAt: null, endedAt: null, localDate, summary: { localDate, vendorCourseMapped: true, sensorProvenance: true },
+        integrity: {}, cosignal: {}, attestationGrade: "unattestable", matcherVersion: null, catalogVersion: null, status: "accepted", deviceId: device.id,
+      });
+    }
     return finalizeScoringForKey(repo, facilityId, courseId, localDate);
   });
 }
 
 const playScore = async (uid: string, courseId: string) => {
   await ensureServiceRole();
-  const rows = await adminSql()`select score_badge, status, course_disambiguated_by, id from app.play where user_id = ${uid} and course_id = ${courseId}`;
-  return rows[0] ? { badge: Number(rows[0].score_badge), status: rows[0].status as string, pick: rows[0].course_disambiguated_by as string | null, id: rows[0].id as string } : null;
+  const rows = await adminSql()`select score_badge, score_monetary, money, status, course_disambiguated_by, id from app.play where user_id = ${uid} and course_id = ${courseId}`;
+  return rows[0] ? { badge: Number(rows[0].score_badge), monetary: Number(rows[0].score_monetary), money: Boolean(rows[0].money), status: rows[0].status as string, pick: rows[0].course_disambiguated_by as string | null, id: rows[0].id as string } : null;
 };
 const uniqueCourses = (actor: Actor) => withOwnership(actor, (repo) => repo.play.uniqueCourseCount());
 
@@ -241,56 +256,76 @@ Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after 
   for (const u of users) assertEquals(await uniqueCourses(u), 1, "an idempotent replay must not double the count");
 });
 
-Deno.test("AT 18 (split): the kept course counts once as a USER pick; a re-pick MOVES the play (never double counts)", DT, async () => {
+Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_monetary 0, money false); a re-pick MOVES the play, re-derived, exactly once, audited (never double counts)", DT, async () => {
   const i = ids();
   const pub = await newPublisher();
   const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "2")}`;
   const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "3")}`;
   const ledger1 = { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "verified", transitions: mint(v1) } };
-  await pub.publish(v1, { "id-ledger.json": { entries: ledger1 }, "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 18 }]) });
+  await pub.publish(v1, { "id-ledger.json": { entries: ledger1 }, "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 9 }]) });
   await giveCoursePolygon(i.k);
 
   const actor = await newUser("split");
-  const scored = await seedDwellAndScore(actor, i.fac, i.k, "play-verified");
+  const scored = await seedDwellAndScore(actor, i.fac, i.k, "play-verified", { vendor: true, holes: 9 });
   assert(scored.play.scoreBadge >= 0.5);
+  assertEquals(scored.play.money, true, "the fixture is money-true while it is NOT a user pick");
+  assert(scored.play.scoreMonetary >= 0.85);
   assertEquals(await uniqueCourses(actor), 1);
   assertEquals((await playScore(actor.uid, i.k))!.pick, null);
 
-  // v2: K splits; S is the new, verified sibling.
+  // v2: K splits; S is the new, verified sibling (an 18-hole course, no polygon yet).
   const o2 = await pub.publish(v2, {
     "id-ledger.json": { entries: {
       ...ledger1,
       [i.k]: { id: i.k, status: "verified", transitions: [...mint(v1), { type: "split", catalogVersion: v2, siblingIds: [i.s] }] },
       [i.s]: { id: i.s, status: "verified", transitions: mint(v2) },
     } },
-    "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 9 }, { id: i.s, name: "Promo S", holes: 9 }]),
+    "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 9 }, { id: i.s, name: "Promo S", holes: 18 }]),
   });
   assertEquals(o2.splitCourses, 1);
-  await giveCoursePolygon(i.s);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_id_ledger where id = '${i.s}' and split_from = '${i.k}'`), 1);
 
   await drainRescoreBacklog(drainRepo, withOwnership, 50);
   const afterSplit = (await playScore(actor.uid, i.k))!;
   assertEquals(afterSplit.pick, "user", "the existing play becomes a user pick of the KEPT course");
+  // NEW-4 (A2-01): the label is not enough — the play was RE-SCORED with the cap.
+  assertEquals(afterSplit.monetary, 0, "a user pick contributes 0 to score_monetary");
+  assertEquals(afterSplit.money, false, "...so a fixture that was money-true is money-false once it is a user pick");
   assertEquals(await uniqueCourses(actor), 1, "the kept course counts once");
 
-  // Re-pick K -> S: the SAME play row moves, evidence follows, still exactly 1.
+  // A player who is NOT a user pick must be untouched by the cap (control).
+  const other = await newUser("split-control");
+  const ctrl = await seedDwellAndScore(other, i.fac, i.s, "play-verified", { vendor: true });
+  assertEquals(ctrl.play.money, true, "a geometry play at the sibling is still money-true — the cap is for user picks only");
+
+  // Re-pick K -> S: the SAME play row moves, evidence follows (RE-DERIVED against S), still exactly 1.
+  // S has no polygon: the stored fixes must be re-matched, not carried over from K.
   const moved = await withOwnership(actor, (repo) => repickUserPlay(repo, { facilityId: i.fac, playDate: todayChicago(), fromCourseId: i.k, toCourseId: i.s }));
   assertEquals(moved, { ok: true });
   assertEquals(await playScore(actor.uid, i.k), null, "nothing left at the kept course for that date");
   const atS = (await playScore(actor.uid, i.s))!;
   assertEquals(atS.id, afterSplit.id, "the SAME play row moved");
   assertEquals(atS.pick, "user");
+  assertEquals(atS.monetary, 0);
   assertEquals(await rawCount(`select count(*)::int as n from app.play where user_id = '${actor.uid}'`), 1);
-  assertEquals(await rawCount(`select count(*)::int as n from app.evidence where user_id = '${actor.uid}' and course_id = '${i.s}'`), 1, "the evidence moved with it");
-  assertEquals(await uniqueCourses(actor), 1, "a re-pick never double counts");
+  assertEquals(await rawCount(`select count(*)::int as n from app.evidence where user_id = '${actor.uid}' and course_id = '${i.s}'`), 2, "the evidence (dwell + vendor round) moved with it");
+  await ensureServiceRole();
+  const ev = await adminSql()`select summary from app.evidence where user_id = ${actor.uid} and source = 'foreground_dwell'`;
+  const sum = ev[0]!.summary as { checkinFix: { geometryKind: string; insideBuffer: boolean }; holes: number };
+  assertEquals(sum.checkinFix.geometryKind, "radius", "re-matched against S (no polygon), not K's");
+  assertEquals(sum.checkinFix.insideBuffer, false);
+  assertEquals(sum.holes, 18, "the 9-hole dwell moved to an 18-hole sibling gets the 18-hole bar");
+  assertEquals(await uniqueCourses(actor), 1, "S's re-derived (radius, outside) play is still a user pick capped at 0.50 — it still counts once at S, and never double (K has nothing left)");
 
-  // And back again, still 1; a course outside the split family is refused.
+  // The re-pick is audited, and exactly ONE is allowed: back again is refused.
+  assertEquals(await rawCount(`select count(*)::int as n from app.audit_log where actor_user_id = '${actor.uid}' and action = 'play.repick' and subject_id = '${afterSplit.id}'`), 1);
   const back = await withOwnership(actor, (repo) => repickUserPlay(repo, { facilityId: i.fac, playDate: todayChicago(), fromCourseId: i.s, toCourseId: i.k }));
-  assertEquals(back, { ok: true });
-  assertEquals(await uniqueCourses(actor), 1);
-  const refused = await withOwnership(actor, (repo) => repickUserPlay(repo, { facilityId: i.fac, playDate: todayChicago(), fromCourseId: i.k, toCourseId: "crs_y1" }));
+  assertEquals(back, { ok: false, reason: "already_repicked" });
+  const refused = await withOwnership(actor, (repo) => repickUserPlay(repo, { facilityId: i.fac, playDate: todayChicago(), fromCourseId: i.s, toCourseId: "crs_y1" }));
   assertEquals(refused, { ok: false, reason: "not_same_split_family" });
+  // A geometry-resolved (non-user) play is not the player's to move.
+  const notUser = await withOwnership(other, (repo) => repickUserPlay(repo, { facilityId: i.fac, playDate: todayChicago(), fromCourseId: i.s, toCourseId: i.k }));
+  assertEquals(notUser, { ok: false, reason: "not_user_pick" });
 });
 
 Deno.test("AT 18 (concurrency): the promotion re-score racing a LIVE submission for the same play ends consistent — one play, no deadlock, same score as a final re-run", DT, async () => {
@@ -393,4 +428,90 @@ Deno.test("R3: an imported course with an UNKNOWN hole count never gets the 9-ho
   assertEquals(n, 0);
   const { dwellHolesFromCount } = await import("../../functions/_shared/evidence/handler.ts");
   assertEquals(dwellHolesFromCount(n), 18);
+});
+
+Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sorts BEFORE the cursor is still reached (a stable (created_at, id) keyset, not bare uuid order)", DT, async () => {
+  const i = ids();
+  const pub = await newPublisher();
+  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "6")}`;
+  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "7")}`;
+  await pub.publish(v1, {
+    "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "stub", transitions: mint(v1) } } },
+    "facilities/us.json": facilityShard(i, "unverified", [{ id: i.k, name: "Promo K", holes: 18 }]),
+  });
+  await giveCoursePolygon(i.k);
+  const users = [await newUser("k1"), await newUser("k2"), await newUser("k3")];
+  for (const u of users) await seedDwellAndScore(u, i.fac, i.k, "unverified");
+  await pub.publish(v2, {
+    "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "verified", transitions: [...mint(v1), { type: "verified", catalogVersion: v2 }] } } },
+    "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 18 }]),
+  });
+
+  const pass1 = await drainRescoreBacklog(drainRepo, withOwnership, 2);
+  assertEquals(pass1.playsProcessed, 2);
+
+  // A new play lands while the drain is mid-course, and its id is the
+  // SMALLEST possible uuid — i.e. behind any cursor under bare id ordering.
+  const late = await newUser("k-late");
+  await withOwnership(late, (repo) =>
+    repo.play.upsertFromScore({ courseId: i.k, facilityId: i.fac, playDate: todayChicago(), courseDisambiguatedBy: null, scoreBadge: 0, scoreMonetary: 0, hardSignal: false, presenceSignal: false, money: false, heldReview: false, policyVersion: "1", inputDigest: "d".repeat(64), evidenceIds: [] }),
+  );
+  await ensureServiceRole();
+  await adminSql()`update app.play set id = '00000000-0000-4000-8000-0000000000aa' where user_id = ${late.uid} and course_id = ${i.k}`;
+
+  const pass2 = await drainRescoreBacklog(drainRepo, withOwnership, 50);
+  assertEquals(pass2.failures, 0);
+  assertEquals(pass2.playsProcessed, 2, "the last original play AND the late one (id behind the cursor)");
+  assertEquals(pass2.coursesCompleted, 1);
+});
+
+Deno.test("M6 (interop): a ledger transition naming an ARBITRARY catalogVersion string does not reject the import — it falls back to the importing version", DT, async () => {
+  const i = ids();
+  const pub = await newPublisher();
+  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "9")}`;
+  const arbitrary = "not a site version at all / 2026";
+  const o = await pub.publish(v1, {
+    "id-ledger.json": { entries: {
+      [i.fac]: { id: i.fac, status: "verified", transitions: [{ type: "minted", catalogVersion: arbitrary }, { type: "verified", catalogVersion: arbitrary }] },
+    } },
+  });
+  assert(o.ok);
+  const importing = await adminSql()`select version from app.catalog_version where site_version = ${v1}`;
+  const row = await adminSql()`select first_catalog_version, verified_in_version from app.catalog_id_ledger where id = ${i.fac}`;
+  assertEquals(row[0]!.first_catalog_version, importing[0]!.version);
+  assertEquals(row[0]!.verified_in_version, importing[0]!.version);
+});
+
+Deno.test("split_from conflicts fail closed (LOW): a later ledger naming a DIFFERENT kept course for an already-split sibling is rejected whole, and the stored lineage is untouched", DT, async () => {
+  const i = ids();
+  const pub = await newPublisher();
+  const k2 = i.mk("crs", "00000Q");
+  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "a")}`;
+  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "b")}`;
+  const base = {
+    [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) },
+    [i.k]: { id: i.k, status: "verified", transitions: [...mint(v1), { type: "split", catalogVersion: v1, siblingIds: [i.s] }] },
+    [k2]: { id: k2, status: "verified", transitions: mint(v1) },
+    [i.s]: { id: i.s, status: "verified", transitions: mint(v1) },
+  };
+  const first = await pub.publish(v1, { "id-ledger.json": { entries: base } });
+  assert(first.ok);
+  assertEquals(await rawCount(`select count(*)::int as n from app.catalog_id_ledger where id = '${i.s}' and split_from = '${i.k}'`), 1);
+
+  // v2: k2 now claims S as ITS split sibling (and K no longer does).
+  let rejected: unknown = null;
+  try {
+    await pub.publish(v2, {
+      "id-ledger.json": { entries: {
+        ...base,
+        [i.k]: { id: i.k, status: "verified", transitions: mint(v1) },
+        [k2]: { id: k2, status: "verified", transitions: [...mint(v1), { type: "split", catalogVersion: v2, siblingIds: [i.s] }] },
+      } },
+    });
+  } catch (err) {
+    rejected = err;
+  }
+  assert(rejected !== null, "the conflicting ledger must be rejected");
+  assert(String((rejected as Error).message).includes(i.s), `the reason must name the conflicting sibling: ${(rejected as Error).message}`);
+  assertEquals(await rawCount(`select count(*)::int as n from app.catalog_id_ledger where id = '${i.s}' and split_from = '${i.k}'`), 1, "the stored lineage is unchanged");
 });
