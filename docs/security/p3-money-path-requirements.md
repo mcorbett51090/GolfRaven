@@ -2667,11 +2667,38 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   decrease branch, the NEW list must equal EXACTLY what `app.register_attest_key` writes: the OLD list with the replaced key's hash
   appended, newest 16 kept (FIFO). That is stricter than "OLD is a subset of NEW" and has no special case at the cap: at 16 the oldest drops
   and the rest keep their order, anything else (a dropped or reordered entry, a smuggled extra one, the wrong entry dropped at the cap) is
-  `23514`; pgTAP `17_attest_key_registration.sql` section 7b. **Still not enforced, by design of the 0032 trigger:** it is
-  `BEFORE UPDATE OF attest_counter`, so a statement that does not assign `attest_counter` does not fire it and a bare
-  `UPDATE ... SET attest_retired_key_hashes` is not covered by any trigger; only `service_role` and `private_definer` hold UPDATE on that
-  column and the only code that writes it is `app.register_attest_key`. A second trigger on that column is a follow-up, not a claim. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
+  `23514`; pgTAP `17_attest_key_registration.sql` section 7b. **Not enforced at 0036 (closed by 0038, next paragraph):** the trigger was
+  `BEFORE UPDATE OF attest_counter`, so a statement that did not assign `attest_counter` did not fire it and a bare
+  `UPDATE ... SET attest_retired_key_hashes` was not covered by any trigger; only `service_role` and `private_definer` hold UPDATE on that
+  column and the only code that writes it is `app.register_attest_key`. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
   believed to allow `attestKey` once per key `[unverified]`; follow-up K6).
+  **Correction (security-gate LOW-A; migration `0038_attest_trigger_key_change.sql`).** Everything above that says "a retired key coming back
+  is `23514`" and "the counter may fall only for a replacement" described what the trigger was MEANT to enforce; at 0036 it decided on "the
+  counter went down", not on "the key changed", and returned at once when the counter had not fallen. As `service_role` (or `private_definer`) three
+  hand-written statements were accepted: **P15** `SET attest_key_id = <retired key>, attest_public_key = <its public key>, attest_counter =
+  <the old value>` (a retired key returns with its old counter window reopened; the retired list still names it); **P16** the same swap
+  without assigning the counter (the trigger did not fire); **P17** wipe the retired list (no counter change, no trigger), then replace
+  onto the retired key. Only `service_role` and `private_definer` can write those columns and `app.register_attest_key` refuses a retired key, so this was
+  defence in depth, but the sentence was not true of the database. 0038 drops and recreates the same trigger
+  (`device_attest_counter_monotonic_trg`) as `BEFORE UPDATE OF attest_counter, attest_key_id, attest_public_key,
+  attest_retired_key_hashes` and redefines the same function (`CREATE OR REPLACE`; owner, empty `search_path`, ACL and the
+  `private.function_inventory` row unchanged; no grant, policy or RLS setting touched) so it decides on whether the KEY changed, by
+  content, never by role: **key unchanged** (id and public key both equal) means the counter may not decrease and the retired list may not
+  change; **first registration** (no key id and no public key before) means the counter and the list stay as they are (the counter
+  is left alone because `register_attest_key` leaves it alone; it is 0 on every reachable keyless row, and the existing suite registers
+  a keyless device that sits at 5); **replacement** (both before, both after, both different) means exactly what
+  `register_attest_key` writes: counter 0, the new key's hash in neither the OLD nor the NEW list, the NEW list equal to (OLD list ||
+  hash of the replaced key) trimmed to the newest 16, and `attest_registered_at` set; **anything else is `23514`**.
+  **Clearing a key is refused** (NEW key NULL while OLD is not, or a half-key): no legitimate path clears a key, because a device is
+  deleted, never updated, when its account goes (`private.delete_my_data` and the `auth.users` cascade use the DELETE policy
+  `pd_delete_device_user_id`), and a cleared-then-reinstalled key is the rollback this closes. What is still NOT enforced, stated: the trigger
+  cannot tell a VERIFIED registration from an unverified one (Apple's chain is checked in TypeScript), so `attest_registered_at` is only required
+  to be set on a replacement, not proven (and not required to move forward: it is the writing transaction's `now()`, and two registrations racing for the row lock take it in the opposite order to their start times, which `attest-key.deno.test.ts` "two concurrent registrations" caught in a first draft); a statement touching none of the four columns is not covered; `TRUNCATE`, `ALTER TABLE ... DISABLE
+  TRIGGER` and a superuser are outside any row trigger. Proved by pgTAP `17_attest_key_registration.sql` (sections 5b, 6, 7, 7b: P15, P16, P17,
+  a key change at a counter that is not 0, a key change onto a retired key, a list change with the key unchanged, clearing a key, the
+  at-cap FIFO accept and refuse, and must-pass cells for every legitimate shape). Test fixtures that wrote keys by hand in a shape the new trigger refuses were
+  changed to a legitimate shape, not the trigger to fit them (`rewards-activate.deno.test.ts#registerKey` now replaces the placeholder key the
+  way `register_attest_key` would, then advances the counter; the pgTAP A5 cell that set a retired list by hand now builds that state through the function).
   Alternatives rejected: leave the counter alone on replacement (the new key's first 40 assertions would fail as replays and raise an
   account-wide `attestation_failed`); a per-key counter in a side table (a new table with all its registry rows, for what two columns and a
   trigger do); a role-based exemption in the trigger (then every role that may hold it holds a rollback).
@@ -2691,11 +2718,15 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   issued on a retired key, while the new key's next 41 assertions failed as replays and held the account. `advanceAttestCounter` now takes the
   key id the assertion was verified against and adds `AND attest_key_id = $key` (privileged.ts; the same statement in both
   `EDGE_DB_MODE`s: `edge_actor` already holds SELECT on `app.device`, and its UPDATE grant is still `attest_counter` / `last_seen` etc. only;
-  no migration, no grant or policy change). Zero rows is treated exactly like a lost replay race: `failed` with reason `counter_replay`, the
-  reward held, never `attested`. A registration that has not yet committed cannot interleave either: the advance takes the device row lock
+  no migration, no grant or policy change). Zero rows fails closed exactly like a lost replay race: `failed`, the
+  reward held, never `attested`. **Reason, since NIT-A:** the handler re-reads the device (only on this failure path, same transaction) and records `key_replaced` when the key it
+  verified against is no longer the device's key, and `counter_replay` otherwise (the counter was not higher, or the device is gone); no schema change
+  (`fraud_signal.detail` is jsonb), same grade, same held outcome, and the same account-wide `attestation_failed` signal as before. The signal is deliberately kept: a
+  retired key's assertion reaching the server is a reinstall racing an activation or a captured assertion, and a reviewer has to see which; the reason
+  tells them, and clearing the signal is still a human act. A registration that has not yet committed cannot interleave either: the advance takes the device row lock
   first and the registration (which locks the same row) waits. Proved by `attest-key.deno.test.ts` ("race: ...", an `IosPort` whose
   `verifyAssertion` runs the REAL verifier on K1 counter 41 and then commits a K2 registration through the real repo before returning; run
-  in both modes: the reward is held, the signal says `counter_replay`, K2's counter stays 0 and K2's counter-1 assertion then issues),
+  in both modes: the reward is held, the signal says `key_replaced` (it said `counter_replay` before NIT-A), K2's counter stays 0 and K2's counter-1 assertion then issues),
   `activate-handler.test.ts` (the same interleaving over the fake repo) and pgTAP `17_attest_key_registration_edge.sql` section 5b (the
   statement as `edge_actor`: 1 row for the current key, 0 for another key, 0 for a replay).
 
@@ -2715,7 +2746,7 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **Unit (vitest)**: `app-attest-registration.test.ts` (verifier, parsers, pinned root, binding; every must-fail below),
   `attest-key-handler.test.ts` (order of checks, challenge discipline, ownership, rate limits, request shape),
   `attest-key-isolation.test.ts` (source-level guarantees), the file list in `rewards-isolation.test.ts` extended.
-- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 97 assertions: schema, privileges, first registration, the counter,
+- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 126 assertions: schema, privileges, first registration, the counter,
   replacement, the trigger decided by content including hand-written writes, the FIFO cap, validation and ownership, who can read or write
   the new columns, export and deletion) and `17_attest_key_registration_edge.sql` (the edge_actor lane as a real `edge_gateway` login, 54
   assertions: every registration proved by reading the row back, direct writes closed, the counter cannot be lowered by edge_actor, foreign

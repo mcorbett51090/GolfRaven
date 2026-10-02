@@ -549,13 +549,14 @@ Deno.test("race: a key replacement that commits while an activation is in flight
 
   const committed = raced.committed;
   assert(committed !== null && committed.ok && committed.body.replaced === true, "precondition: the replacement committed during the activation");
-  // The retired key's assertion did NOT issue the reward: fail closed (held), with the replay-class reason.
+  // The retired key's assertion did NOT issue the reward: fail closed (held), with the distinct `key_replaced` reason (NIT-A): the key it was verified against is no longer the device's key,
+  // which is not the same thing as a counter that was not higher (`counter_replay`, covered by rewards-activate.deno.test.ts AT 5).
   assertEquals(out.state, "held_review", "a retired key's assertion must not be graded attested");
   const reward = (await adminSql()`select state from app.offer_code where id = ${code}`)[0]!;
   assertNotEquals(reward.state, "issued");
   assertEquals((await adminSql()`select count(*)::int as n from app.device_reward_ledger where reward_id = ${code}`)[0]!.n, 0, "the retired key's assertion earned no ledger row (nothing was received)");
   const sig = (await adminSql()`select detail from app.fraud_signal where user_id = ${u.uid} and kind = 'attestation_failed'`)[0]!.detail as { reasons: string[] };
-  assertEquals(sig.reasons, ["counter_replay"]);
+  assertEquals(sig.reasons, ["key_replaced"]);
 
   // The new key did NOT inherit the retired key's counter: it is still 0 and K2's very next assertion (counter 1) verifies.
   const row = await deviceRow(dev);

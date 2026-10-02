@@ -628,7 +628,17 @@ async function registerKey(deviceId: string, counter = 5) {
   const key = await generateP256();
   // `attest_registered_at` stands in for a VERIFIED registration (0034): rewards-activate hands the assertion verifier a key
   // only when it was written by app.register_attest_key. (The real registration path is attest-key.deno.test.ts.)
-  await adminSql()`update app.device set attest_key_id = ${KEY_ID}, attest_public_key = ${key.publicKeyRaw}, attest_counter = ${counter}, attest_registered_at = now() where id = ${deviceId}`;
+  // Since 0038 the counter trigger refuses a key swap that is not a REPLACEMENT as app.register_attest_key writes it (counter 0, the
+  // replaced key appended to the retired list, registered_at set), so a device that already carries `newDevice`'s placeholder key is
+  // replaced in that shape (the old key's hash is read from the row itself, in the same statement) and the counter is then ADVANCED
+  // (an increase, which is always allowed). A keyless device takes the first-registration shape. Not a weakening of the trigger.
+  await adminSql()`
+    update app.device set
+      attest_retired_key_hashes = case when attest_key_id is null then attest_retired_key_hashes
+                                       else attest_retired_key_hashes || encode(sha256(convert_to(attest_key_id, 'UTF8')), 'hex') end,
+      attest_key_id = ${KEY_ID}, attest_public_key = ${key.publicKeyRaw}, attest_counter = 0, attest_registered_at = now()
+    where id = ${deviceId}`;
+  await adminSql()`update app.device set attest_counter = ${counter} where id = ${deviceId}`;
   const fake = iosPort({ bits: CLEAR });
   const port: IosPort = {
     verifyAssertion: (input) => verifyAppAttestAssertion(input, { appId: APP_ID }, { sha256, verifyP256: verifyP256WebCrypto }),
