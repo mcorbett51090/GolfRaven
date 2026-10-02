@@ -455,6 +455,52 @@ const ESM_SH_URL = /^https:\/\/esm\.sh\/((?:@[a-z0-9._~-]+\/)?[a-z0-9._~-]+)@([^
 const RANGE_OPERATOR = /^(?:[\^~*<>]|%3[CE])/i;
 const EXACT_VERSION_ONLY = new RegExp(`^${SEMVER_EXACT_LOCK}$`);
 
+// Range satisfaction for a redirect's target (supply-chain gate on PR #20,
+// MEDIUM): `ws@^8.14.2` -> `ws@8.0.0` passed every other check, and Deno
+// loads the downgrade. Deliberately tiny and conservative. Understood: ONE
+// comparator, no spaces, a FULL `M.m.p` with no pre-release / build
+// metadata, prefixed by `^`, `~`, `>=`, `>`, `<=` or `<` (the URL-encoded
+// `%3E` / `%3C` forms of the angle brackets are decoded first). Everything
+// else -- `*`, `x`/partial versions (`^8`, `~8.14`), bare/exact, `||`,
+// hyphen or space-joined ranges, pre-release or build in the range -- is NOT
+// understood and FAILS CLOSED. A target carrying a pre-release or build tag
+// is never in range: under semver a pre-release only satisfies a range that
+// names a pre-release on the same M.m.p, and no range form here can.
+const SEMVER_CORE = "(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)";
+const RANGE_RE = new RegExp(`^(\\^|~|>=|>|<=|<)${SEMVER_CORE}$`);
+const TARGET_CORE_RE = new RegExp(`^${SEMVER_CORE}$`);
+
+type Triple = [bigint, bigint, bigint];
+
+function cmpTriple(a: Triple, b: Triple): number {
+  for (let i = 0; i < 3; i++) if (a[i]! !== b[i]!) return a[i]! < b[i]! ? -1 : 1;
+  return 0;
+}
+
+/** `undefined` when `version` satisfies `range`; otherwise a short reason (including "range not understood"). */
+export function semverRangeProblem(range: string, version: string): string | undefined {
+  const decoded = range.replace(/^%3E/i, ">").replace(/^%3C/i, "<");
+  const r = RANGE_RE.exec(decoded);
+  if (r === null) return `the range "${range}" is not a supported semver range (only one of ^ ~ >= > <= < followed by a full x.y.z is understood; anything else fails closed)`;
+  const v = TARGET_CORE_RE.exec(version);
+  if (v === null) return `the version "${version}" is not a plain x.y.z (a pre-release or build tag never satisfies a range here)`;
+  const lo: Triple = [BigInt(r[2]!), BigInt(r[3]!), BigInt(r[4]!)];
+  const t: Triple = [BigInt(v[1]!), BigInt(v[2]!), BigInt(v[3]!)];
+  const op = r[1]!;
+  let ok: boolean;
+  if (op === "^") {
+    // Highest bound: bump the left-most non-zero component (npm caret rules).
+    const hi: Triple = lo[0] > 0n ? [lo[0] + 1n, 0n, 0n] : lo[1] > 0n ? [0n, lo[1] + 1n, 0n] : [0n, 0n, lo[2] + 1n];
+    ok = cmpTriple(t, lo) >= 0 && cmpTriple(t, hi) < 0;
+  } else if (op === "~") {
+    ok = cmpTriple(t, lo) >= 0 && cmpTriple(t, [lo[0], lo[1] + 1n, 0n]) < 0;
+  } else {
+    const c = cmpTriple(t, lo);
+    ok = op === ">=" ? c >= 0 : op === ">" ? c > 0 : op === "<=" ? c <= 0 : c < 0;
+  }
+  return ok ? undefined : `the version ${version} does not satisfy the range ${range}`;
+}
+
 export interface CommittedLockContext {
   /** pinned-import-targets.json entries: no redirect key may equal one. */
   pinnedImportTargets?: string[];
@@ -486,6 +532,11 @@ export function lockRedirectAndRemoteProblems(lock: Record<string, unknown>, ctx
         }
         if (t[1] !== f[1]) problems.push(`${where}: the target is a different package ("${t[1]}" vs "${f[1]}")`);
         if (!EXACT_VERSION_ONLY.test(t[2]!)) problems.push(`${where}: the target version "${t[2]}" is not an exact version`);
+        else {
+          // The target must be INSIDE the key's range: a floating resolution that lands below the range (ws@^8.14.2 -> ws@8.0.0) is a downgrade past a fix.
+          const rangeProblem = semverRangeProblem(f[2]!, t[2]!);
+          if (rangeProblem !== undefined) problems.push(`${where}: ${rangeProblem}`);
+        }
         if ((t[3] ?? "") !== (f[3] ?? "")) problems.push(`${where}: the target's sub-path/query differs from the key's`);
       }
     }

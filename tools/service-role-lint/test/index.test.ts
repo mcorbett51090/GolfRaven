@@ -400,6 +400,70 @@ describe("pinned import-target allow-list (M2)", () => {
       mutate(copy);
       expect(committedLockProblems(copy, ctx).length).toBeGreaterThan(0);
     });
+
+    // Supply-chain gate (PR #20, MEDIUM): the redirect target must SATISFY the
+    // key's range. Each case below changes ONLY the target's version (or the
+    // key's range syntax) and is asserted on the range-specific message, so a
+    // different rule cannot make it pass by accident.
+    const WS_KEY = "https://esm.sh/ws@^8.14.2?target=denonext";
+    const redirects = (l: Record<string, Record<string, unknown>>): Record<string, unknown> => l.redirects!;
+    const rangeMutations: Array<[string, (l: Record<string, Record<string, unknown>>) => void, RegExp]> = [
+      ["ws@^8.14.2 -> ws@8.0.0 (downgrade below the range)", (l) => (redirects(l)[WS_KEY] = "https://esm.sh/ws@8.0.0?target=denonext"), /does not satisfy the range \^8\.14\.2/],
+      ["ws@^8.14.2 -> ws@9.0.0 (major bump above the range)", (l) => (redirects(l)[WS_KEY] = "https://esm.sh/ws@9.0.0?target=denonext"), /does not satisfy/],
+      [
+        "~ range with a minor bump: @types/ws@~8.18.1 -> 8.19.0",
+        (l) => (redirects(l)["https://esm.sh/@types/ws@~8.18.1/index.d.mts"] = "https://esm.sh/@types/ws@8.19.0/index.d.mts"),
+        /does not satisfy the range ~8\.18\.1/,
+      ],
+      ["~ range below its floor: tr46@~0.0.3 -> 0.0.2", (l) => (redirects(l)["https://esm.sh/tr46@~0.0.3?target=denonext"] = "https://esm.sh/tr46@0.0.2?target=denonext"), /does not satisfy/],
+      [
+        ">= range below its floor: utf-8-validate@>=5.0.2 -> 5.0.1",
+        (l) => (redirects(l)["https://esm.sh/utf-8-validate@%3E=5.0.2?target=denonext"] = "https://esm.sh/utf-8-validate@5.0.1?target=denonext"),
+        /does not satisfy/,
+      ],
+      [
+        "^0.x crossing a minor: ^0.2.3 -> 0.3.0",
+        (l) => (redirects(l)["https://esm.sh/zero-minor@^0.2.3?target=denonext"] = "https://esm.sh/zero-minor@0.3.0?target=denonext"),
+        /does not satisfy the range \^0\.2\.3/,
+      ],
+      [
+        "^0.0.x crossing a patch: ^0.0.3 -> 0.0.4",
+        (l) => (redirects(l)["https://esm.sh/zero-patch@^0.0.3?target=denonext"] = "https://esm.sh/zero-patch@0.0.4?target=denonext"),
+        /does not satisfy/,
+      ],
+      ["a pre-release target never satisfies a range", (l) => (redirects(l)[WS_KEY] = "https://esm.sh/ws@8.22.0-beta.1?target=denonext"), /not a plain x\.y\.z/],
+      ["unknown range syntax: *", (l) => (redirects(l)["https://esm.sh/starry@*?target=denonext"] = "https://esm.sh/starry@1.0.0?target=denonext"), /not a supported semver range/],
+      ["unknown range syntax: partial ^8", (l) => (redirects(l)["https://esm.sh/partial@^8?target=denonext"] = "https://esm.sh/partial@8.0.0?target=denonext"), /not a supported semver range/],
+      ["unknown range syntax: ~8.14", (l) => (redirects(l)["https://esm.sh/partial@~8.14?target=denonext"] = "https://esm.sh/partial@8.14.0?target=denonext"), /not a supported semver range/],
+      [
+        "unknown range syntax: union ^1.0.0||^2.0.0",
+        (l) => (redirects(l)["https://esm.sh/union@^1.0.0||^2.0.0?target=denonext"] = "https://esm.sh/union@2.0.0?target=denonext"),
+        /not a supported semver range/,
+      ],
+      [
+        "unknown range syntax: pre-release in the range ^1.0.0-beta.1",
+        (l) => (redirects(l)["https://esm.sh/pre@^1.0.0-beta.1?target=denonext"] = "https://esm.sh/pre@1.0.0?target=denonext"),
+        /not a supported semver range/,
+      ],
+      ["unknown range syntax: %3E operator with a partial", (l) => (redirects(l)["https://esm.sh/gt@%3E=5?target=denonext"] = "https://esm.sh/gt@5.0.0?target=denonext"), /not a supported semver range/],
+    ];
+    it.each(rangeMutations)("must-fail range-satisfaction mutation of the REAL lock: %s", (_name, mutate, message) => {
+      const copy = JSON.parse(JSON.stringify(lock)) as Record<string, Record<string, unknown>>;
+      mutate(copy);
+      const problems = committedLockProblems(copy, ctx);
+      expect(problems.some((p) => message.test(p)), problems.join("\n")).toBe(true);
+    });
+
+    const passMutations: Array<[string, (l: Record<string, Record<string, unknown>>) => void]> = [
+      ["ws@^8.14.2 -> ws@8.14.2 (the range floor itself)", (l) => (redirects(l)[WS_KEY] = "https://esm.sh/ws@8.14.2?target=denonext")],
+      ["ws@^8.14.2 -> ws@8.99.99 (in range)", (l) => (redirects(l)[WS_KEY] = "https://esm.sh/ws@8.99.99?target=denonext")],
+      ["@types/ws@~8.18.1 -> 8.18.9 (in the ~ range)", (l) => (redirects(l)["https://esm.sh/@types/ws@~8.18.1/index.d.mts"] = "https://esm.sh/@types/ws@8.18.9/index.d.mts")],
+    ];
+    it.each(passMutations)("must-pass in-range target on the REAL lock: %s", (_name, mutate) => {
+      const copy = JSON.parse(JSON.stringify(lock)) as Record<string, Record<string, unknown>>;
+      mutate(copy);
+      expect(committedLockProblems(copy, ctx)).toEqual([]);
+    });
   });
 
   it("flags a bare specifier resolved to a target that looks legitimate but is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {

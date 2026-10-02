@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildConfigIndex, deriveRepoRoot, lockLayoutProblems, npmLockTableProblems, stripJsonComments } from "../src/config.js";
+import { buildConfigIndex, deriveRepoRoot, lockLayoutProblems, npmLockTableProblems, semverRangeProblem, stripJsonComments } from "../src/config.js";
 import { lintDirectory } from "../src/index.js";
 import { importMapTargetProblem } from "../src/lint.js";
 
@@ -597,5 +597,64 @@ describe("stripJsonComments", () => {
       url: "https://esm.sh/zod@3.23.8",
       note: "a /* not a comment */ still a string",
     });
+  });
+});
+
+describe("config.ts — semverRangeProblem (redirect target must satisfy the esm.sh key's range; unknown syntax fails closed)", () => {
+  it.each([
+    ["^8.14.2", "8.14.2"],
+    ["^8.14.2", "8.22.0"],
+    ["^8.14.2", "8.99.99"],
+    ["^1.2.3", "1.9.0"],
+    ["^0.2.3", "0.2.3"],
+    ["^0.2.3", "0.2.9"],
+    ["^0.0.3", "0.0.3"],
+    ["~0.0.3", "0.0.3"],
+    ["~0.0.3", "0.0.9"],
+    ["~8.18.1", "8.18.2"],
+    ["%3E=5.0.2", "5.0.2"],
+    ["%3E=5.0.2", "6.0.6"],
+    ["%3e=5.0.2", "5.0.3"],
+    [">5.0.2", "5.0.3"],
+    ["<=5.0.2", "5.0.2"],
+    ["%3C5.0.2", "5.0.1"],
+  ])("must-pass: %s accepts %s", (range, version) => {
+    expect(semverRangeProblem(range, version)).toBeUndefined();
+  });
+
+  it.each([
+    ["^8.14.2", "8.0.0"],
+    ["^8.14.2", "8.14.1"],
+    ["^8.14.2", "9.0.0"],
+    ["^0.2.3", "0.3.0"],
+    ["^0.2.3", "0.2.2"],
+    ["^0.2.3", "1.0.0"],
+    ["^0.0.3", "0.0.4"],
+    ["^0.0.3", "0.0.2"],
+    ["~8.18.1", "8.19.0"],
+    ["~8.18.1", "8.18.0"],
+    ["~8.18.1", "9.0.0"],
+    ["~0.0.3", "0.1.0"],
+    ["%3E=5.0.2", "5.0.1"],
+    [">5.0.2", "5.0.2"],
+    ["<=5.0.2", "5.0.3"],
+    ["%3C5.0.2", "5.0.2"],
+  ])("must-fail: %s rejects %s", (range, version) => {
+    expect(semverRangeProblem(range, version)).toMatch(/does not satisfy the range/);
+  });
+
+  it.each(["*", "x", "^8", "~8.14", "8.14.2", "^8.14.2 ", ">=1.0.0 <2.0.0", "^1.0.0||^2.0.0", "1.0.0 - 2.0.0", "^8.14.2-beta.1", "^8.14.2+build", "^08.14.2", "%3E5", "%5E8.14.2", "=8.14.2", "latest", ""])(
+    "must-fail closed: unknown range syntax %j",
+    (range) => {
+      expect(semverRangeProblem(range, "8.14.2")).toMatch(/not a supported semver range/);
+    },
+  );
+
+  it.each(["8.22.0-beta.1", "8.22.0+build", "8.22", "v8.22.0", "08.22.0", ""])("must-fail closed: target version %j is not a plain x.y.z", (version) => {
+    expect(semverRangeProblem("^8.14.2", version)).toMatch(/not a plain x\.y\.z/);
+  });
+
+  it("does not lose precision on versions beyond Number.MAX_SAFE_INTEGER", () => {
+    expect(semverRangeProblem(">=9007199254740993.0.0", "9007199254740992.0.0")).toMatch(/does not satisfy/);
   });
 });

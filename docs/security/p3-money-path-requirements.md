@@ -1758,6 +1758,15 @@ Carried from the P3d round-4 gate (recommended, not blocking):
    in a function's `deno.json` import map (local Deno 2.5.2 does; no deploy was run). Revert path: restore the
    four `https://esm.sh/...` values in `deno.json` and `pinned-import-targets.json` (the positive allow-list will then
    reject them, so it needs a reviewed change too) and regenerate the lock.
+   **Range check added (2026-10-02, supply-chain gate on PR #20, MEDIUM; closes the redirect-version limit above).** A redirect
+   target's version must now SATISFY its esm.sh key's range, via `semverRangeProblem` in `config.ts`: `ws@^8.14.2` redirected to
+   `ws@8.0.0` (a downgrade below a security fix, with `remote` hashes from a plain `deno cache`) passed every earlier rule and
+   Deno loaded it; it now fails, while an in-range target such as `8.14.2` passes. The range forms in the committed lock are
+   `^x.y.z`, `~x.y.z` and `%3E=x.y.z`. The checker understands exactly one comparator (`^ ~ >= > <= <`, the `%3E`/`%3C` encodings
+   decoded) followed by a full `x.y.z`, with npm caret/tilde semantics (`^0.x` stops at the next minor, `^0.0.x` at the next
+   patch). **Fails closed:** any other range syntax (`*`, `x`/partial versions such as `^8`, `~8.14`, exact or bare, `||`
+   unions, space/hyphen ranges, a pre-release or build tag in the range), and any target carrying a pre-release or build tag.
+   Must-fail mutations of the real lock and unit tests for each live in `tools/service-role-lint/test/`.
 6. `check-migrations-immutable.sh` on `push`: try `git fetch --no-tags origin "$GH_EVENT_BEFORE"` before
    failing closed after a force-push, and print `commit-tree` stderr in the self-test failure branch.
 
