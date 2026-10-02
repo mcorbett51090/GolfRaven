@@ -1011,9 +1011,11 @@ SELECT is(
   (SELECT EXISTS (SELECT 1 FROM unnest(p.proconfig) c WHERE c LIKE 'search_path=%') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'app' AND p.proname = 'play_held_review_cascade'),
   true, 'N5: app.play_held_review_cascade now pins search_path'
 );
+-- (0032 moved the cascade's BODY, unchanged, into app.hold_play_rewards so the edge role's definer runs the same code;
+-- the trigger function calls it. The lock order now lives there.)
 SELECT ok(
-  (SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'app' AND p.proname = 'play_held_review_cascade') ~ 'ORDER BY id FOR UPDATE',
-  'N5: the cascade locks the play''s rows ORDER BY id before it updates them'
+  (SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'app' AND p.proname = 'hold_play_rewards') ~ 'ORDER BY id FOR UPDATE',
+  'N5: the cascade (app.hold_play_rewards, 0032) locks the play''s rows ORDER BY id before it updates them'
 );
 
 -- ============================================================================

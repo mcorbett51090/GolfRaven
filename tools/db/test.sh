@@ -243,6 +243,12 @@ echo "tools/db/test.sh: provisioning the edge_gateway login (tools/db/provision-
 EDGE_GATEWAY_TEST_PW="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PSQL_BIN='${PSQL[0]}' bash '$ROOT_DIR/tools/db/provision-edge-login.sh' --password-stdin"
 unset EDGE_GATEWAY_TEST_PW
+# 5b'. The provisioning script sends a SCRAM-SHA-256 VERIFIER, never the plaintext (edge-role PR1b, gate finding M1):
+# prove the verifier is valid (a real SCRAM login with the plaintext; wrong/missing password refused) and that a FAILED
+# provisioning leaves no plaintext in the server log (with a control that the old plaintext form does leak). It edits
+# and restores this cluster's pg_hba.conf, so it needs the data directory and the server log.
+echo "tools/db/test.sh: provisioning proof -- SCRAM verifier login + no plaintext in the server log (tools/db/test-provision-edge-login.sh)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PGDATA='$PGDATA' PG_LOG='$WORKDIR/postgres.log' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-provision-edge-login.sh'"
 
 echo "tools/db/test.sh: running the pgTAP authorization matrix (as $DBUSER)"
 if command -v pg_prove >/dev/null 2>&1 || run_as_pg "command -v pg_prove" >/dev/null 2>&1; then

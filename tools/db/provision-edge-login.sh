@@ -12,13 +12,28 @@
 # THE PASSWORD IS NEVER A LITERAL ARGUMENT. It is read from, in this order:
 #   1. `--password-stdin`            the first line of standard input (preferred; wins over the variable)
 #   2. the environment variable named by `--password-env NAME`  (default name: EDGE_GATEWAY_PASSWORD)
-# and it is sent to psql on STANDARD INPUT, so it never appears in a process list or a shell history of
-# this script's own command line. There is deliberately no `--password VALUE` option.
+# There is deliberately no `--password VALUE` option, so it never appears in a process list or a shell history
+# of this script's own command line.
+#
+# THE PLAINTEXT NEVER REACHES THE SERVER (0032, gate finding M1). The script computes the SCRAM-SHA-256 verifier
+# itself (PBKDF2-HMAC-SHA256, 4096 iterations, a fresh 16-byte salt -- the format PostgreSQL stores and its own
+# `PQencryptPasswordConn` produces) and sends `ALTER ROLE edge_gateway LOGIN PASSWORD 'SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>'`.
+# The old form sent `PASSWORD '<plaintext>'`, and a FAILING ALTER ROLE is logged in full when
+# log_min_error_statement is `error` (the default): a plaintext secret in the server log. A verifier in a log is
+# useless for anything but an offline guess against a 4096-round PBKDF2, and the client's own handshake never
+# needs the plaintext on the server. Requires python3 (stdlib only). The password must be printable ASCII
+# (0x20-0x7e): SASLprep normalisation is not implemented here, and for ASCII it is the identity; a generated
+# password (`openssl rand -base64 24`, `head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'`) always qualifies.
+# The verifier is computed from the password read from stdin of a python3 child; it is never an argument.
 #
 # Connection: the standard libpq environment only (PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD, ...), exactly
 # as tools/db/verify-function-inventory.mjs and the test harness do; there is no connection-URL argument.
 # Run it as the migrating role or a superuser. Note `[unverified]`: the statement carries the password, so on a
 # server with log_statement = 'ddl' or 'all' it can reach the server log; run it with that off.
+#
+# Proof: tools/db/test-provision-edge-login.sh (run by tools/db/test.sh) logs in with the plaintext over a real
+# SCRAM handshake, shows a wrong password is refused, and shows a FAILED provisioning (as a role without CREATEROLE)
+# leaves no plaintext in the server log -- with a control that the old plaintext form DID leak.
 #
 # Usage:
 #   EDGE_GATEWAY_PASSWORD=... tools/db/provision-edge-login.sh
@@ -44,7 +59,7 @@ while [ "$#" -gt 0 ]; do
     --connection-limit)
       [ "$#" -ge 2 ] || { echo "provision-edge-login.sh: --connection-limit needs a number" >&2; exit 2; }
       CONN_LIMIT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 0 ;;
     *) echo "provision-edge-login.sh: unknown argument '$1' (there is deliberately no way to pass the password as an argument)" >&2; exit 2 ;;
   esac
 done
@@ -71,10 +86,32 @@ fi
 case "$PASSWORD" in
   *$'\n'*|*$'\r'*) echo "provision-edge-login.sh: the password must be a single line" >&2; exit 2 ;;
 esac
+# Printable ASCII only (see the header: no SASLprep here). LC_ALL=C so the range is bytes, not a locale collation.
+if ! printf '%s' "$PASSWORD" | LC_ALL=C grep -qE '^[ -~]+$'; then
+  echo "provision-edge-login.sh: the password must be printable ASCII (generate one: openssl rand -base64 24)" >&2
+  exit 2
+fi
+command -v python3 >/dev/null 2>&1 || { echo "provision-edge-login.sh: python3 is required (it computes the SCRAM-SHA-256 verifier)" >&2; exit 2; }
 
-# The literal for the ALTER ROLE statement. standard_conforming_strings is on, so the only character to
-# escape inside '...' is the single quote itself.
-ESCAPED="${PASSWORD//\'/\'\'}"
+# The SCRAM-SHA-256 verifier, computed here, so the server only ever sees the verifier. The password goes to the
+# python3 child on STDIN (printf is a shell builtin: no argv, no process-list entry).
+VERIFIER="$(printf '%s' "$PASSWORD" | python3 -c '
+import base64, hashlib, hmac, os, sys
+pw = sys.stdin.buffer.read()
+iterations = 4096
+salt = os.urandom(16)
+salted = hashlib.pbkdf2_hmac("sha256", pw, salt, iterations)
+client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+stored_key = hashlib.sha256(client_key).digest()
+server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+b64 = lambda b: base64.b64encode(b).decode("ascii")
+sys.stdout.write("SCRAM-SHA-256$%d:%s$%s:%s" % (iterations, b64(salt), b64(stored_key), b64(server_key)))
+')"
+case "$VERIFIER" in
+  'SCRAM-SHA-256$4096:'*) ;;
+  *) echo "provision-edge-login.sh: could not compute the SCRAM-SHA-256 verifier" >&2; exit 1 ;;
+esac
+unset PASSWORD
 
 # The role must already exist (the migration creates it); fail loudly rather than creating a second,
 # differently-configured one here.
@@ -84,12 +121,13 @@ if [ "$EXISTS" != "1" ]; then
   exit 1
 fi
 
-SQL="ALTER ROLE edge_gateway LOGIN PASSWORD '${ESCAPED}'"
+# Base64 and '$', ':' contain no quote, so the verifier needs no escaping inside '...'.
+SQL="ALTER ROLE edge_gateway LOGIN PASSWORD '${VERIFIER}'"
 if [ -n "$CONN_LIMIT" ]; then
   SQL="${SQL} CONNECTION LIMIT ${CONN_LIMIT}"
 fi
 
-# Statement on STDIN: not on the command line, so not in `ps`.
+# Statement on STDIN: not on the command line, so not in `ps` (and it carries a verifier, not the password).
 printf '%s;\n' "$SQL" | "$PSQL_BIN" -X -q -v ON_ERROR_STOP=1 >/dev/null
 
 # Post-condition: still not a superuser / bypassrls, and can log in. (The migration's own checks
@@ -99,4 +137,4 @@ if [ "$CHECK" != "t" ]; then
   echo "provision-edge-login.sh: edge_gateway is not in the expected state after provisioning (LOGIN, NOSUPERUSER, NOBYPASSRLS)" >&2
   exit 1
 fi
-echo "provision-edge-login.sh: edge_gateway can now log in (password set; not echoed)"
+echo "provision-edge-login.sh: edge_gateway can now log in (SCRAM-SHA-256 verifier set; the password was never sent to the server)"

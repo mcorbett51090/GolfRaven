@@ -2243,3 +2243,73 @@ merge before PR2 routes any query through `edge_actor`:
     22P02); `bind_actor` does not exclude soft-deleted / banned users `[unverified]`; `purge_fix_coords`
     accepts 1-day retention; `rewards-isolation.test.ts` misses a later `ALTER FUNCTION … SECURITY
     DEFINER` (inventory check 3 backstops it).
+
+## Edge role PR1b (2026-10-02): the gate findings closed in 0032 (follow-up 6, step 1b of 4)
+
+All eleven findings of the PR1 gate (the section above) are closed in `supabase/migrations/0032_edge_role_hardening.sql`
+(0030/0031 are merged and untouched), the provisioning script, the inventory checks and the matrix. Follow-up 6 is
+still open until PR4; R1 and R2 of PR1 are **closed**, which makes the budget closure no longer a PR4 precondition
+(it is done). Design as built: [`docs/security/edge-role-design.md`](edge-role-design.md).
+
+1. **MEDIUM, provisioning leaked the plaintext (closed).** `tools/db/provision-edge-login.sh` computes the SCRAM-SHA-256
+   verifier client-side (python3 stdlib) and sends `PASSWORD 'SCRAM-SHA-256$4096:...'`. New
+   `tools/db/test-provision-edge-login.sh` (run by `test.sh`): a real SCRAM login with the plaintext succeeds through a
+   temporary `pg_hba` rule, a wrong and a missing password are refused, a FAILED provisioning (as a role without
+   CREATEROLE) logs a verifier and no plaintext, and the old plaintext form leaks into the same log (the control).
+   **E3 update:** the `log_statement` caveat is gone; what stays `[unverified]` on a real Supabase project is the
+   `CREATE ROLE`/`ALTER ROLE` privilege of the project's `postgres`, the Supavisor tenant entry and `pg_hba` limits.
+2. **MEDIUM, reversible one-way columns (closed).** BEFORE UPDATE triggers: `checkin_token.consumed_at` is set-once for
+   every role; `device.attest_counter` never decreases. Must-fail and control cells in `16_edge_role.sql` 7c.
+3. **MEDIUM, own-row WITH CHECK covered only `user_id` (closed).** `checkin_challenge`, `checkin_token`, `evidence` and
+   `push_token` INSERT policies require the referenced device (and challenge) to be the actor's own;
+   `offer_code.activated_device_id` is moot (no UPDATE at all). **The existence oracle is closed, not merely
+   documented:** RLS `WITH CHECK` runs before the foreign-key trigger, so a foreign id and a nonexistent id fail the same
+   check with the same SQLSTATE and message (compared string for string in 7d).
+4. **MEDIUM, R1 + R2 (closed).** edge_actor holds no UPDATE on `offer` / `offer_code` / `entitlement`, no INSERT on
+   `device_reward_ledger`, nothing on `review_item`, and no EXECUTE on `app.activate_*`, `reserve_offer_for_code`,
+   `release_offer_budget`, `release_account_reservations`. Activation is `private.activate_offer_code_for_actor` /
+   `activate_entitlement_for_actor` (no user argument; they call the UNCHANGED P3f functions as `private_definer` under
+   actor-keyed policies); the held-review cascade's body moved unchanged into `app.hold_play_rewards`, reached by
+   edge_actor through `private.hold_play_rewards_for_actor`; `delete_my_data_for_actor` releases the account's
+   reservations itself. P3f's 0027/0029 functions are not edited. Must-fail: setting the budget counter, calling
+   `release_offer_budget`, setting a code's or entitlement's state. Must-pass: activation (issued, held, held for budget,
+   idempotent replay), the cascade (also under a rescore delegate), deletion handing a shared offer's reservation back.
+5. **LOW, `delete_my_data` unqualified catalog reads (closed).** Redefined from its 0022 body with `pg_catalog.`
+   qualified; new inventory check 13 flags an unqualified `pg_*` relation in any SECURITY DEFINER body.
+6. **LOW, checks 9 and 12 (closed).** 9 flags ADMIN OPTION on an edge-role membership held by anything but a superuser or
+   CREATEROLE role; 12 covers every non-system schema (extension-owned relations exempt) and checks schema CREATE. Both
+   have must-fail fixtures.
+7. **LOW, misconfigured pre-existing edge role (closed).** An asserting DO block at the top of 0032.
+8. **LOW, delegate preconditions (documented).** They are caller-controllable for edge_system (it can insert its own open
+   backlog row); stated honestly in the design doc, moot under R6, not restricted (the importer needs that INSERT).
+9. **LOW, `review_item` / `audit_log` / `install_link_account` (closed).** `review_item` is unreachable for edge_actor;
+   the `audit_log` INSERT is tied to the actor's own play; the tombstone INSERT is tied to the actor's own device's link
+   hash and to the key that produced the pseudonym.
+10. **LOW, GUC-window session reuse (closed).** `16_edge_role.sql` 10j and 10k: windows read empty after a COMMIT, a
+    planted non-uuid value does not raise in a definer's read, planted windows do not widen an export or a list, the
+    purge window works across a COMMIT.
+11. **NIT (closed).** `pd_device_link_read` compares the device GUC as text; `purge_fix_coords` refuses retention under 7
+    days; `rewards-isolation.test.ts` also catches a later `ALTER FUNCTION ... SECURITY DEFINER`.
+    **Still open `[unverified]`:** `bind_actor` does not exclude soft-deleted / banned `auth.users` (the harness shim has
+    no such columns); check on a real project before PR2.
+
+Findings noticed while closing these, for the PR4 gate: an actor with a compromised runtime can still un-hold its own play
+(`play.held_review` is writable by design: the scorer lifts holds) and choose its own device's `install_link_hash`; both
+sit inside the R6 trust boundary (design doc R2 note and R8).
+
+**Verification (PR1b, on `3ec13a7` = main `7250568`'s tree for 0001-0031).** `tools/db/test.sh` exit 0 in
+`HARNESS_MODE=superuser` and `restricted` (a fresh cluster each): pgTAP 17 files, 1403 assertions (`16_edge_role.sql` 678,
+`10_function_inventory.sql` 50); Deno integration 145 tests; function inventory OK; service-role lint clean; the new
+provisioning proof passes. Also: PG16 (all 17 files and the inventory script), `16_edge_role.sql` three runs in a row
+on one cluster in each mode (re-runnable), units 29 files / 495 tests, the lint's own 112 tests, `deno check --frozen`,
+`check-migrations-immutable.sh --base 7250568` (31 files) and `--base 4f7117c` (29), `--self-test`, gitleaks. 23
+mutations were applied to `/tmp` copies (each budget/state/ledger/review_item write left granted, the cascade definer's
+held-play check, a delegate let through, deletion not releasing, the cascade trigger forced onto its direct lane, each
+M2 trigger weakened or never firing, each M3 device/challenge check dropped, both L5 ties dropped, the device GUC cast
+back to uuid, the retention minimum, delete_my_data left unqualified, a broadened `pd_edge_act_play_select`) and every one
+was caught except one EQUIVALENT mutant (dropping the owner check inside `hold_play_rewards_for_actor`: the actor-keyed
+`pd_edge_act_play_select` policy already hides another user's play from that function, so the two layers are redundant by
+design). Two provisioning mutations (the plaintext back in the statement; a corrupted verifier) are caught by the new proof,
+and eight pre-existing misconfigurations of an edge role (LOGIN, BYPASSRLS, REPLICATION, CREATEROLE, membership of
+`service_role`, a foreign member with SET, INHERIT, ADMIN) are each refused by 0032's assertion block while a clean cluster
+applies it.

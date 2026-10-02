@@ -1,13 +1,14 @@
-# Edge Function NOBYPASSRLS role: design, as built (PR1, database only)
+# Edge Function NOBYPASSRLS role: design, as built (PR1 and PR1b, database only)
 
 Accepted follow-up 6 of the P3c gate (`docs/security/p3-money-path-requirements.md`, "Updated Accepted follow-ups"):
 before the first real deploy, the Edge Function connection moves from a blanket `service_role` (BYPASSRLS)
 to a dedicated NOBYPASSRLS login role with actor-scoped policies or SECURITY DEFINER functions.
 
-This document started as the design written against `02a422e` and is now updated to what PR1 built. PR1 is the
-database side only: migrations `0030_edge_role_core.sql` and `0031_edge_role_policies.sql`, the provisioning script,
-the inventory checks 9-12 and the pgTAP file `supabase/tests/matrix/16_edge_role.sql`. **Nothing in the TypeScript
-uses any of it yet** (PR2-PR4). `service_role`, `anon` and `authenticated` are untouched, so nothing that works
+This document started as the design written against `02a422e` and is now updated to what PR1 and PR1b built. They are
+the database side only: migrations `0030_edge_role_core.sql` and `0031_edge_role_policies.sql` (PR1, merged) and
+`0032_edge_role_hardening.sql` (PR1b, the security-gate findings), the provisioning script, the inventory checks 9-13
+and the pgTAP file `supabase/tests/matrix/16_edge_role.sql`. **Nothing in the TypeScript uses any of it yet**
+(PR2-PR4). `service_role`, `anon` and `authenticated` are untouched, so nothing that works
 today stops working. Items marked `[unverified]` were not checked against a real Supabase project.
 
 Numbering note: the migrations are 0030 and 0031 because 0029 is the P3f follow-up that domain-separates the tombstone
@@ -44,10 +45,17 @@ authorised against the session user's memberships, and `edge_gateway` has none o
 
 - **Provisioning.** The migration creates `edge_gateway` NOLOGIN. LOGIN and the password come only from
   `tools/db/provision-edge-login.sh` (idempotent `ALTER ROLE edge_gateway LOGIN PASSWORD ...`). The password is read
-  from an environment variable or from stdin and is sent to `psql` on stdin; there is no argument that takes it.
-  It refuses an empty or multi-line password and re-checks the role afterwards. `[unverified]` `ALTER ROLE ...
-  PASSWORD` can appear in server logs under `log_statement = 'ddl'` or `'all'`; run it on a connection with that
-  off, or pre-hash the password (SCRAM) before sending it.
+  from an environment variable or from stdin; there is no argument that takes it. **The plaintext never reaches the
+  server (PR1b, finding M1).** The script computes the SCRAM-SHA-256 verifier itself (PBKDF2-HMAC-SHA256, 4096
+  rounds, a fresh 16-byte salt, python3 stdlib, the password handed to the child on stdin) and sends
+  `PASSWORD 'SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>'`. The earlier form sent the plaintext, and a FAILING
+  `ALTER ROLE` is logged in full when `log_min_error_statement` is `error` (the default). It refuses an empty,
+  multi-line or non-printable-ASCII password (no SASLprep here; a generated password always qualifies) and re-checks
+  the role afterwards. `tools/db/test-provision-edge-login.sh` (run by `test.sh`) proves three things: the verifier
+  is valid (a real SCRAM-SHA-256 login with the plaintext through a temporary `pg_hba` rule; a wrong and a missing
+  password are refused), a provisioning run that FAILS (as a role without CREATEROLE) leaves no plaintext in the
+  server log, and, as the control that makes the second claim meaningful, the old plaintext form does leak into the
+  same log. A verifier in a log is only an offline-guess target against 4096 PBKDF2 rounds.
 - **No `migration_owner`.** The migrations never name it; `CURRENT_USER` is used wherever the migrating role is
   meant. HARNESS_MODE=restricted runs both migrations as a NOSUPERUSER CREATEROLE role, which is the proof that
   creating the roles needs no superuser. A non-superuser cannot even re-assert `NOSUPERUSER`/`NOBYPASSRLS`, so the
@@ -68,7 +76,12 @@ edge grant at all. Each `private_definer` policy on it admits only the current b
   `ROLLBACK TO SAVEPOINT`.)
 - **Delegates (edge_system only):** `bind_delegate_for_queued_evidence(evidence_id)` binds the owner of one
   evidence row that is still `queued_catalog`; `bind_delegate_for_rescore(backlog_id, play_id)` binds the owner of one
-  play at the course of an open backlog row. They bind with `kind = 'system_delegate'`. The caller then does
+  play at the course of an open backlog row. **These preconditions are caller-controllable for edge_system (PR1b,
+  L4):** edge_system may INSERT its own `catalog_rescore_backlog` row for any course, which makes "an open backlog
+  row at that course" true for it, so it can bind the owner of any play at any course. The same holds for a queued
+  evidence row only through edge_actor (edge_system cannot insert evidence). Restricting the backlog INSERT is not
+  cheap (the importer writes those rows legitimately), and it is moot under R6: the runtime that holds edge_system
+  can already bind any uid with edge_actor. The preconditions bound a BUG in the importer, not a compromised runtime. They bind with `kind = 'system_delegate'`. The caller then does
   `SET LOCAL ROLE edge_actor` in the same transaction and acts as that user. A delegate-bound transaction cannot be
   re-bound, cannot call `delete_my_data_for_actor` or `export_my_data_for_actor`, and edge_actor cannot call the
   binders.
@@ -86,22 +99,22 @@ must not write. FORCE RLS stays on every table; nothing was removed or broadened
 
 | Table | Read | Write (policy / columns) |
 |---|---|---|
-| `device` | own | INSERT own (id, user_id, platform); UPDATE own (attest_counter, devicecheck_token_hash, integrity_last, last_seen, install_link_hash). Not attest_key_id / attest_public_key / fraud_voided_at |
-| `evidence` | own | INSERT own; UPDATE own (course_id, facility_id, summary, integrity, attestation_grade, catalog_version, status, claimed_*, queued_input) |
+| `device` | own | INSERT own (id, user_id, platform); UPDATE own (attest_counter, devicecheck_token_hash, integrity_last, last_seen, install_link_hash). Not attest_key_id / attest_public_key / fraud_voided_at. `attest_counter` is MONOTONIC (trigger, PR1b M2) |
+| `evidence` | own | INSERT own, and `device_id` NULL or the actor's own device (PR1b M3); UPDATE own (course_id, facility_id, summary, integrity, attestation_grade, catalog_version, status, claimed_*, queued_input) |
 | `play` | own | INSERT own; UPDATE own (score columns, course_id, course_disambiguated_by, held_review, status ...). The held-review cascade fires from this UPDATE |
 | `play_evidence` | own | INSERT with own play AND own evidence |
 | `fraud_signal` | own, columns id/user_id/kind/detail/created_at/cleared_at (not cleared_by) | INSERT own |
-| `checkin_challenge` | own | INSERT own with `staff_user_id IS NULL`; UPDATE own (used_at only) |
-| `checkin_token` | own | INSERT own; UPDATE own (consumed_at only) |
-| `push_token` | own | INSERT own; UPDATE own (expo_token, updated_at) |
+| `checkin_challenge` | own | INSERT own with `staff_user_id IS NULL` on the actor's own device (PR1b M3); UPDATE own (used_at only; one-way trigger) |
+| `checkin_token` | own | INSERT own on the actor's own device AND own challenge (PR1b M3); UPDATE own (consumed_at only; SET-ONCE trigger, PR1b M2: cannot be reset or moved) |
+| `push_token` | own | INSERT own on the actor's own device (PR1b M3); UPDATE own (expo_token, updated_at) |
 | `signin_provider_token`, `connector_account` | own, columns user_id and provider only (never the ciphertext) | none |
 | `app_review_demo_account` | own | none |
-| `device_reward_ledger` | own | INSERT own on the actor's own device |
-| `offer_code`, `entitlement` | own (SELECT *) | UPDATE own (state, reserved_amount, activated_device_id, devicecheck_token_hash, activated_at, hold_detail; entitlement has no reserved_amount). No INSERT, no DELETE |
-| `offer` | an offer on which the actor holds a code | UPDATE budget_reserved only, same predicate (residual R1) |
-| `review_item` | the actor's own budget-unreserved items (columns kind, subject_table, subject_id, resolved_at) | INSERT: subject_table = offer_code, the two budget-unreserved kinds, own code |
-| `audit_log` | own `play.repick` rows | INSERT own `play.repick` rows |
-| `install_link_account` (P3f round 3) | rows whose `account_pseudonym` is one of the actor's own (columns install_link_hash, account_pseudonym) | INSERT for the actor's own pseudonym. No UPDATE, no DELETE |
+| `device_reward_ledger` | own | **none** (PR1b M4: only the activation definers write it) |
+| `offer_code`, `entitlement` | own (SELECT *) | **none** (PR1b M4). State, reservation and activation columns move only through `private.activate_*_for_actor` and the cascade definer. `SELECT ... FOR UPDATE` is refused too (it needs UPDATE) |
+| `offer` | an offer on which the actor holds a code | **none** (PR1b M4: R1 closed). `budget_reserved` is written only by the P3f functions running as `private_definer` |
+| `review_item` | **none** (PR1b L5/M4) | **none**: `reserve_offer_for_code` writes and reads it as `private_definer` |
+| `audit_log` | own `play.repick` rows | INSERT own `play.repick` rows whose `subject_id` is one of the actor's own plays (PR1b L5) |
+| `install_link_account` (P3f round 3) | rows whose `account_pseudonym` is one of the actor's own (columns install_link_hash, account_pseudonym) | INSERT for the actor's own pseudonym, under the key that produced it, on an install the actor's own device is linked to (PR1b L5). No UPDATE, no DELETE |
 | `catalog_version`, `catalog_id_ledger`, `catalog_facility`, `catalog_course`, `catalog_hole` | `USING (true)` (new policies; 0008's name `authenticated` and are untouched) | none |
 | `catalog_signing_key`, `catalog_kid_revocation`, `catalog_rescore_backlog` | `USING (true)`, columns only: (kid, public_key_b64url, revoked_at), (kid, recorded_at), (course_id, done_at) | none |
 
@@ -130,35 +143,54 @@ Everything else, including every PII-registered table, is denied. Cross-user wor
 | `private.bind_actor_internal(uuid, text)` | nobody | the shared core of the three binders |
 | `private.hit_actor_rate_limit(key, window, max)` | edge_actor | builds `<uid>:<key>` in the database (the exact format the 0022 purge matches); window 1s..1 day, max 1..1,000,000; never raises over the cap |
 | `private.hit_system_rate_limit(key, window, max)` | edge_system | builds `system:<key>` |
-| `private.delete_my_data_for_actor()`, `private.export_my_data_for_actor()` | edge_actor | the 0015/0022/0021 functions for the BOUND `kind = user` actor; no uid argument |
+| `private.delete_my_data_for_actor()`, `private.export_my_data_for_actor()` | edge_actor | the 0015/0022/0021 functions for the BOUND `kind = user` actor; no uid argument. Since PR1b `delete_my_data_for_actor` first calls `app.release_account_reservations(uid)` itself, so the shared offer budget is handed back inside the one call |
+| `private.activate_offer_code_for_actor(code, device, token_hash, decision, hold_detail)`, `private.activate_entitlement_for_actor(...)` | edge_actor | PR1b M4. The unchanged P3f `app.activate_*` run as `private_definer` with the BOUND `kind = user` actor's uid (no user argument; a system delegate is refused). `app.activate_*` is no longer callable by edge_actor |
+| `private.hold_play_rewards_for_actor(play)` | edge_actor | PR1b M4. The held-review cascade for a HELD play of the bound actor (any binding kind), called by the trigger function; the body is `app.hold_play_rewards(play)` (service_role and `private_definer` only) |
 | `private.record_consumed_nonce(hash, expires_at)` | edge_actor, service_role | the nonce tombstone insert (section 5) |
 | `private.device_link_signals_for_actor(device)` | edge_actor | `app.device_link_signals` across accounts for the actor's own device (live devices and the tombstone) |
 | `private.list_queued_catalog(limit)` | edge_system | queued rows and their owners; **no `queued_input`** |
 | `private.list_rescore_plays(course, after_created_at, after_id, limit)` | edge_system | the keyset page of plays at a course with an open backlog row |
-| `private.purge_fix_coords(retention_days, limit)` | edge_system | the fix-coordinate retention purge across users; retention pinned to 1..30 days |
-| `app.activate_offer_code`, `app.activate_entitlement`, `app.reserve_offer_for_code`, `app.release_offer_budget`, `app.release_account_reservations`, `app.record_install_link` | edge_actor | the P3f invoker-rights functions, unchanged; `p_user_id` is data, not authority (the own-row policies make another user's id a `P0002`) |
+| `private.purge_fix_coords(retention_days, limit)` | edge_system | the fix-coordinate retention purge across users; retention pinned to 7..30 days (1..30 in PR1; the importer uses 30) |
+| `app.record_install_link` | edge_actor | the P3f invoker-rights tombstone writer, unchanged (its INSERT is held to the actor's own device and key by the L5 policy) |
 | `private.account_pseudonyms(uuid)`, `private.validate_and_register_pseudonym_hmac_id(uuid)` | edge_actor (and service_role as before) | run by the tombstone policy / trigger as the writing role (residual R3) |
 
 Not granted to any edge role: `resolve_held_*`, `mark_account_devices_fraud_voided` (admin paths),
 `reserve_offer_budget` / `consume_offer_budget`, `dedupe_receipt_fingerprint`, `app.device_link_signals` (it would
 silently undercount under own-row policies), `private.hit_rate_limit`, `private.delete_my_data`,
-`private.export_my_data`, the purge functions.
+`private.export_my_data`, the purge functions, and (PR1b M4) `app.activate_offer_code`, `app.activate_entitlement`,
+`app.reserve_offer_for_code`, `app.release_offer_budget`, `app.release_account_reservations`, `app.hold_play_rewards`.
+
+**What `private_definer` holds for the activation definers (PR1b, all actor-keyed, all in
+`private.definer_policy_allowlist` and `definer_policy_exprs.txt`):** SELECT/UPDATE on the bound actor's own
+`offer_code` and `entitlement` rows; SELECT on its own `device`, `play`, `fraud_signal`, `device_reward_ledger` rows
+and INSERT on its own ledger rows; SELECT on an `offer` the actor holds a code on, plus UPDATE of `budget_reserved`
+only (column grant); SELECT/INSERT on `review_item` for the two budget kinds on one of the actor's own codes.
+0027's rule "private_definer must not be given a grant on app.offer" protected the DELETE branch of
+`app.offer_code_reservation_sync`, which asks `has_table_privilege('app.offer', 'UPDATE')`. That is a TABLE-level
+question: a column grant leaves it false, so a bare DELETE still does not release, and
+`delete_my_data_for_actor` therefore releases first.
 
 Every new function is SECURITY DEFINER, owned by `private_definer`, `search_path = ''`, inside the 0020/0022
 ownership bracket, in `private.function_inventory` (with the new `expected_edge_actor` / `expected_edge_system`
 columns), and has must-fail cells in `16_edge_role.sql`.
 
-## 5. Triggers, and why the held-review cascade is NOT redefined
+## 5. Triggers, the held-review cascade, and the one-way columns
 
-- **Held-review cascade** (`app.play_held_review_cascade`, 0017; P3f round 3 only reordered its locks). It stays an
-  invoker-rights trigger. It is safe under edge_actor because (1) the play, its codes and its entitlements belong to
-  one user (the composite FKs force `play.user_id = code.user_id`), (2) edge_actor has UPDATE on exactly the columns
-  the cascade writes under the same own-row policy, and `SELECT ... FOR UPDATE` on `offer_code`, `offer` and
-  `entitlement` (the round-3 lock order) needs only those UPDATE grants and policies, and (3) the P3f reservation
-  trigger that the state change fires runs as the same role and is covered by the `offer` / `review_item` policies.
-  A later change to the cascade body therefore needs nothing from this work, and there is no cascade block to
-  re-derive on a rebase. Proven in `16_edge_role.sql` section 10a (rows move, budget reserved, expiry paused,
-  deferred guards accept the result).
+- **Held-review cascade** (`app.play_held_review_cascade`, 0017; locks reordered by P3f round 3). PR1 left it an
+  invoker-rights trigger because edge_actor could write the reward rows under own-row policies. PR1b (M4) took that
+  write away, so the cascade now has two lanes. Its BODY moved, unchanged, into `app.hold_play_rewards(play_id)`.
+  The trigger function calls it directly when the invoking role can write the reward rows itself
+  (`has_table_privilege('app.offer_code', 'UPDATE')`: service_role, the table owner), exactly as before; otherwise
+  (edge_actor) it calls `private.hold_play_rewards_for_actor(play_id)`, which checks that the play is a HELD play of
+  the bound actor and runs the same body as `private_definer` under the actor-keyed policies. The P3f reservation
+  trigger the state change fires then runs as `private_definer` too. Proven in `16_edge_role.sql` section 10a (rows
+  move, budget reserved, expiry paused, deferred guards accept the result; a code not backed by the play is untouched;
+  a delegate-bound rescore can hold the owner's play). `15_rewards_activation.sql` N5 now reads the lock order from
+  `app.hold_play_rewards`.
+- **One-way columns** (PR1b M2, for every role): `app.checkin_token_consumed_at_once` refuses any UPDATE that touches
+  `consumed_at` once it is set (no reset to NULL, no move, no identical re-write; modelled on 0017's
+  `checkin_challenge_used_at_once`), and `app.device_attest_counter_monotonic` refuses a lower `attest_counter`.
+  Both close a replay window edge_actor's column grants had opened.
 - **Nonce tombstone** (`app.checkin_challenge_tombstone_nonce`, 0017): redefined in 0031, the one trigger function
   that had to change. It now calls `private.record_consumed_nonce`, which inserts and turns the unique violation
   into the same `23514` error. A nonce recorded once can never be recorded again, row or no row, across commits
@@ -170,7 +202,9 @@ columns), and has must-fail cells in `16_edge_role.sql`.
   - check 2 now also compares `expected_edge_actor` / `expected_edge_system` with the real EXECUTE grants;
   - **9** the membership closure of the three edge roles reaches no role outside them; none holds SUPERUSER,
     BYPASSRLS, CREATEROLE, CREATEDB, REPLICATION or INHERIT; only `edge_gateway` can log in; nobody else can
-    `SET ROLE` to one; `edge_gateway` is a SET TRUE / INHERIT FALSE member of the other two;
+    `SET ROLE` to one; `edge_gateway` is a SET TRUE / INHERIT FALSE member of the other two; and (PR1b L2) no
+    membership of an edge role carries ADMIN OPTION unless its holder is a superuser or a CREATEROLE role (the
+    migrating role);
   - **10** every policy that applies to edge_actor or edge_system (directly or through PUBLIC) equals a row of
     `private.edge_policy_allowlist` (role, command, deparsed text), and every row names a live policy, both
     directions. A checked-in fixture `supabase/tests/fixtures/edge_policy_exprs.txt` makes a self-consistent
@@ -179,8 +213,21 @@ columns), and has must-fail cells in `16_edge_role.sql`.
     `current_user`; the only function dependencies allowed are `actor_uid` and, for the pseudonym-keyed tombstone,
     `account_pseudonyms`); an actor-scope policy must contain it; an open-read policy must be `SELECT USING (true)`;
   - **12** no edge_system policy or privilege on any PII-registered table (retention or export registry); no edge
-    role holds a privilege outside schema `app`, or on an `app` table without FORCE RLS.
-  Each has a must-fail fixture in the matrix (a planted policy, grant, membership or attribute) proving it fires.
+    role holds a privilege outside schema `app`, or on an `app` table without FORCE RLS, **in every non-system
+    schema** (PR1b L2: not a fixed list; extension-owned relations such as postgis' `spatial_ref_sys` are exempt);
+    and no edge role can CREATE in any schema (`has_schema_privilege`);
+  - **13** (PR1b L1) no SECURITY DEFINER function in `app` / `api` / `private` reads an UNQUALIFIED `pg_*` relation.
+    edge_actor holds TEMP, and `pg_temp` is searched before `pg_catalog` for relations even with `search_path = ''`,
+    so a temp table named `pg_constraint` would shadow the catalog under a definer (it failed closed through
+    `delete_my_data`'s post-condition, but it should not be shadowable at all). 0032 qualified `delete_my_data`'s four.
+    The check scans ALL definers, a superset of "reachable from edge_*"; comments are stripped and a `pg_*` name
+    followed by `.` or `(` (a schema qualifier, a function) is not a relation read.
+  - **L3** (PR1b) is an asserting DO block at the top of 0032, not a check: it refuses to run if a pre-existing
+    edge role holds SUPERUSER / BYPASSRLS / REPLICATION / CREATEROLE / CREATEDB / INHERIT, if edge_actor or
+    edge_system can log in, if an edge role is a member of any role but `edge_gateway -> edge_actor | edge_system`,
+    or if a role outside the set is a member of an edge role other than a superuser / CREATEROLE role holding it
+    without SET or INHERIT. (0030's `CREATE ROLE IF NOT EXISTS` skips a role that already exists, however it is set.)
+  Each has a must-fail fixture in the matrix (a planted policy, grant, membership, schema, definer or attribute) proving it fires.
   Check 6 and the new fixture read through `psqlJsonRows`: a deparsed sub-select policy contains real newlines, which
   the tab/newline `psql()` helper would split into bogus rows.
 - `supabase/tests/matrix/16_edge_role.sql` runs as a real `edge_gateway` connection (it reconnects with `\c`; see
@@ -191,8 +238,20 @@ columns), and has must-fail cells in `16_edge_role.sql`.
   access, the edge_system importer statements and definers, the delegate binders and their misuse, and the
   must-pass flows (cascade, activation including the budget-held path, nonce tombstone across a COMMIT, rate-limit
   increments committing, the purge keeping the `me-delete` bucket, delete and export, PostGIS, the cross-account
-  link signal, the install-link tombstone). Phase 0 seeds three throw-away users (committed), phase 2 removes
-  them with `private.delete_my_data`.
+  link signal, the install-link tombstone). PR1b added: section 7b (every direct write to the offer budget, a code's
+  or entitlement's state, the ledger and the review queue is refused; the invoker-rights P3f functions are not
+  callable; the cascade definer refuses a play that is not a held play of the actor), 7c (M2: the legitimate consume
+  and counter advance still work, the reset and the rollback are refused), 7d (M3: foreign-device and foreign-challenge
+  rows are refused, and the foreign id and a NONEXISTENT id fail with an identical SQLSTATE and message, so the FK
+  existence oracle is closed), the activation definers (own code, idempotent replay, foreign code `P0002`, foreign
+  device `42501`, unbound and delegate refused), L5 cells, the session-reuse cells for the three GUC windows (10j: a
+  window reads empty after a COMMIT, a planted non-uuid value does not raise `22P02` in a definer's read, planted
+  windows do not widen an export or a list), and the committed cells (10k: the purge window across a COMMIT; B's
+  deletion handing its reservation on a shared offer back, read by D who holds another code on that offer).
+  Phase 0 seeds three throw-away users (committed); phase 2 removes them with `private.delete_my_data` and, as the
+  table-owning harness role through a temporary CURRENT_USER policy, the entitlement and tombstone rows
+  `delete_my_data` keeps by design, so the file is **re-runnable on the same cluster** (verified three times in a
+  row in each harness mode).
 
 ## 7. Deviations from the original design, and why
 
@@ -202,10 +261,12 @@ columns), and has must-fail cells in `16_edge_role.sql`.
    `edge_gateway`.
 3. **`fraud_signal` is not insert-only.** P3f reads the actor's own open `attestation_failed` and once-keyed
    signals (columns exclude `cleared_by`).
-4. **The held-review cascade is not redefined and gets no definer** (section 5). The design planned
-   `private.cascade_play_held_review` with the GUC pattern; it turned out to be unnecessary.
-5. **The shared offer budget row is written under a policy, not a definer wrapper** (R1): a wrapper would mean
-   redefining P3f's functions.
+4. **The held-review cascade** (PR1: not redefined, no definer; PR1b: two lanes, section 5). The design planned
+   `private.cascade_play_held_review` with the GUC pattern; PR1b built it differently, with the body extracted into
+   `app.hold_play_rewards` and an actor-keyed definer, because the GUC window would not have worked for service_role.
+5. **The shared offer budget row** (PR1: written under a policy, residual R1; PR1b: edge_actor has no write on it at
+   all). The activation definers do NOT redefine P3f's functions: they call the unchanged `app.activate_*`, which run
+   as `private_definer`. That is why PR1b needed no edit to 0027/0029.
 6. **Tables the design only gestured at**: `offer`, `offer_code`, `entitlement`, `device_reward_ledger`,
    `review_item`, `audit_log`, `app_review_demo_account`, `install_link_account`, and their column grants.
 7. **Three definers the design did not list**: `device_link_signals_for_actor` (the P3f function under edge_actor
@@ -219,24 +280,49 @@ columns), and has must-fail cells in `16_edge_role.sql`.
    do not depend on it.
 10. **Check 12 also checks privileges, FORCE RLS and schema reach**, not only policies.
 11. **`edge_policy_allowlist` has a checked-in fixture** (the design had the allowlist only).
-12. **Test-support changes**: `rewards-isolation.test.ts` now matches function DEFINITIONS (it grepped every
+12. **PR1b names and shapes the gate did not dictate.** The definers are `private.activate_*_for_actor` (no user
+    argument; the gate said "keyed to the actor's own code, amount never caller-chosen", which the P3f functions
+    already satisfy once the actor is the binding's); `private.delete_my_data_for_actor` now releases the account's
+    reservations itself (PR2 no longer calls `app.release_account_reservations`); `purge_fix_coords` requires 7..30
+    days; `pd_device_link_read` compares the GUC as text.
+13. **The FK existence oracle is closed, not documented** (finding M3). The gate expected the nonexistent-id FK
+    error to stay different. RLS `WITH CHECK` runs BEFORE the foreign-key trigger, so with the own-device /
+    own-challenge `EXISTS` in the policy both a foreign id and a nonexistent id fail the same WITH CHECK (42501, same
+    message); the FK is never reached. Proved by comparing the two error strings in `16_edge_role.sql` 7d.
+14. **`SELECT ... FOR UPDATE` on reward rows is gone for edge_actor** (it needs UPDATE). `Repo#rewards.lockOwnReward`
+    must drop `FOR UPDATE`; the activation definers take the row lock themselves before deciding.
+15. **Test-support changes**: `rewards-isolation.test.ts` now matches function DEFINITIONS (it grepped every
     migration for `app.activate_`, which 0031's GRANTs trip); `verify-function-inventory.mjs` check 6 reads through
     JSON rows; `16_edge_role.sql` has no `finish()` (it counts rows its own ROLLBACKs discard).
 
 ## 8. Residual risks
 
-- **R1** edge_actor can UPDATE `offer.budget_reserved` (only that column, only on an offer where it holds a code,
-  bounded by the CHECK constraints). The reservation trigger and the P3f functions are invoker-rights and write it
-  as the writing role.
-- **R2** edge_actor can UPDATE its own `offer_code` / `entitlement` state columns directly, bypassing the activation
-  functions' backstops. Same trust boundary as binding any uid. PR5: move activation behind definers.
+- **R1 (closed in PR1b, M4)** edge_actor could UPDATE `offer.budget_reserved` on an offer it held a code on, anywhere
+  in `[0, cap - used]`, and could call `release_offer_budget` with an arbitrary amount. Now: no UPDATE grant, no
+  policy, no EXECUTE; the counter moves only inside the P3f functions running as `private_definer`, by the offer's
+  `face_value` or the code's own `reserved_amount`, for the bound actor's own codes.
+- **R2 (closed in PR1b, M4)** edge_actor could set its own `offer_code` / `entitlement` state directly (`earned` ->
+  `issued`). Now: no UPDATE grant at all; state moves only through the activation definers and the cascade definer.
+  The gate also asked for `checkin_token.consumed_at` (reset to NULL: presence-token replay) and `device.attest_counter`
+  (rolled back 100 -> 1: App Attest anti-replay) to be listed with R2: they are closed too, by the M2 triggers, for every
+  role, not merely for edge_actor.
+  What remains of its spirit: the scoring columns edge_actor may write on its own `play` (notably `held_review`) feed
+  the activation backstops, so an actor with a compromised runtime could un-hold its own play before activating. That
+  is inside the R6 trust boundary (the runtime computes the score); a one-way `held_review` would also forbid the
+  legitimate re-score that lifts a hold, so it is not done here. It is called out for the PR4 gate.
 - **R3** `private.account_pseudonyms(uuid)` accepts any uid, so edge_actor can compute any account's vault-keyed
   pseudonym. No worse than `bind_actor(any uid)`; it reveals only an HMAC.
 - **R4** `record_consumed_nonce` can be called directly: it can burn a nonce hash the caller already knows (a DoS of
   one challenge). It cannot un-burn one.
 - **R5** a binding row (uid + pid) outlives its transaction until the pid is reused. UNLOGGED, one row per
   backend, dead to `actor_uid()`.
-- **R6** the actor can still bind any uid (section 3).
+- **R6** the actor can still bind any uid (section 3). Honest corollary for PR1b: M2/M3/M4 stop a BUG or an injected
+  statement in an otherwise honest handler from reaching another user's rows, another user's device, the shared budget,
+  or a replay window. They do not stop a fully compromised runtime, which can bind any uid and then do whatever that
+  user may do, including activating that user's rewards through the definers.
+- **R8** `device.install_link_hash` stays writable by edge_actor on its own device (the install-link substitute reads
+  it); a user can therefore choose which install their device is linked to. The substitute already treats the hash as an
+  unauthenticated hint (0027).
 - **R7** PostgreSQL 16+ (`GRANT ... WITH INHERIT FALSE, SET TRUE`, `pg_auth_members.set_option`), `xid8`.
   `[unverified]` on a real Supabase project: `CREATE ROLE`/`ALTER ROLE ... LOGIN PASSWORD` for the project's own
   `postgres`, Supavisor tenant config for the new user, and `pg_hba` limits for it.
@@ -253,8 +339,19 @@ columns), and has must-fail cells in `16_edge_role.sql`.
   `private.device_link_signals_for_actor`.
 - **Drain / rescore** become: edge_system lists, binds the delegate for ONE row, `SET LOCAL ROLE edge_actor`, works,
   commits. One bind per transaction; a delegate cannot delete or export; `queued_input` is read as the owner.
-- **`deleteMyData`** is `app.release_account_reservations(uid)` then `private.delete_my_data_for_actor()` in one
-  bound transaction. `deleteAuthUser` uses the admin client, which this work does not touch (PR5).
+- **`deleteMyData`** is just `private.delete_my_data_for_actor()` in one bound transaction (PR1b: it releases the
+  account's reservations itself; do NOT call `app.release_account_reservations`, edge_actor cannot). `deleteAuthUser`
+  uses the admin client, which this work does not touch (PR5).
+- **Rewards (PR1b):** activation is `private.activate_offer_code_for_actor(code, device, token_hash, decision,
+  hold_detail)` / `activate_entitlement_for_actor(...)` (no user id; `kind = user` binding only). Drop `FOR UPDATE`
+  from `lockOwnReward`. `review_item`, the ledger, `offer_code`/`entitlement` state and `offer` budget are not writable
+  or (review_item) readable by edge_actor; the "budget held" review item is written and deduped inside the definer.
+  The earn path, when built, needs a definer of its own (it inserts `offer_code` and reserves at earn time).
+- **One-way columns (PR1b):** a consume of an already-consumed `checkin_token` and an `attest_counter` decrease are
+  `23514`. The verifier's `WHERE attest_counter < $new` and the consume's `WHERE consumed_at IS NULL` already avoid
+  both; a retry that re-sets the same value on a consumed token now fails loudly instead of being a no-op.
+- **Own-device references (PR1b):** inserting `checkin_challenge`, `checkin_token`, `evidence` or `push_token`
+  naming a device (or challenge) that is not the actor's own is `42501` whether it exists or not.
 - **Each transaction pays one more round trip** (the bind). Put it first, before any savepoint, and keep the
   15 s / 12 s time budgets in mind.
 - **Run the whole Deno suite in both harness modes against the edge role** (PR2 behind a temporary
@@ -267,7 +364,8 @@ columns), and has must-fail cells in `16_edge_role.sql`.
 
 ## 10. Sequencing
 
-1. **PR1 (this): database only.** 0030 + 0031, provisioning script, checks 9-12, matrix 16.
+1. **PR1 (merged): database only.** 0030 + 0031, provisioning script, checks 9-12, matrix 16.
+   **PR1b (this): the security-gate findings.** 0032, SCRAM provisioning, checks 9/12 extended and 13, matrix 16/10/15.
 2. PR2: `privileged.ts` behind a temporary `EDGE_DB_MODE`; startup self-check (session_user = edge_gateway, no
    super / bypassrls in the membership closure); single `openScopedTx(kind, bind, op)`.
 3. PR3: the system path (`withDelegatedActor`, the list definers).
