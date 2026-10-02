@@ -409,7 +409,14 @@ describe("should-fix 10: performance", () => {
     }
     expect(() => simplifyToMaxPoints(points, 500)).not.toThrow();
     expect(simplifyToMaxPoints(points, 500)).toHaveLength(500);
-  });
+    // This test asserts CORRECTNESS ON A HUGE INPUT (no native recursion, so no
+    // RangeError; the cap is honoured), not speed: there is no elapsed-time
+    // bound here. It simplifies 200,000 points twice (once under `not.toThrow`,
+    // once for the length), which took 5.8 s under machine load and tripped
+    // vitest's 5 s default, so it gets an explicit 30 s ceiling. That is a hang
+    // guard only, deliberately NOT a performance assertion; the speed bound for
+    // matching lives in the 18,000-fix test above.
+  }, 30_000);
 });
 
 describe("mutation-catching boundary fixtures", () => {

@@ -3,6 +3,8 @@
  * that cancels the body, and no redirects. Driven with a fake `fetch`, so the
  * limits are proved without a network.
  */
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { createFetchBytes } from "../src/catalog/manager";
 
@@ -40,6 +42,7 @@ describe("createFetchBytes", () => {
     const r = await f(URL_, { maxBytes: 100, etag: '"old"' });
     expect(r).toEqual({ status: 200, bytes: new Uint8Array([1, 2, 3]), etag: '"x"' });
     expect(seen?.redirect).toBe("error");
+    expect(seen?.credentials).toBe("omit"); // expo/fetch defaults to "include"; the catalog is public
     expect((seen?.headers as Record<string, string>)["If-None-Match"]).toBe('"old"');
     expect(seen?.signal).toBeInstanceOf(AbortSignal);
   });
@@ -121,5 +124,27 @@ describe("createFetchBytes", () => {
     const f = createFetchBytes(fakeFetch(() => res));
     expect((await f(URL_, { maxBytes: 50 })).bytes).toHaveLength(50);
     await expect(f(URL_, { maxBytes: 49 })).rejects.toThrow(/exceeds 49/);
+  });
+});
+
+// LOW-C: on a device the byte cap must apply WHILE streaming, which RN's default `fetch` is not believed to allow.
+// The runtime composition root therefore injects `expo/fetch`. Node cannot run its native module, so these pin the
+// wiring and the facts it rests on in the installed package (`[unverified — device]` for the behaviour itself).
+describe("the runtime uses a streaming fetch (LOW-C)", () => {
+  const here = (rel: string): string => new URL(rel, import.meta.url).pathname;
+  const services = readFileSync(here("../src/runtime/services.ts"), "utf8");
+  const expoDir = createRequire(import.meta.url).resolve("expo/package.json").replace(/package\.json$/, "");
+
+  it("services.ts hands the catalog manager createFetchBytes(expo/fetch's fetch)", () => {
+    expect(services).toMatch(/import \{ fetch as expoFetch \} from "expo\/fetch";/);
+    expect(services).toMatch(/fetchBytes: createFetchBytes\(expoFetch\)/);
+  });
+
+  it("the installed expo exports `expo/fetch`, whose response has a stream `body`, and its native layers implement redirect: 'error'", () => {
+    expect(readFileSync(`${expoDir}fetch.js`, "utf8")).toContain("winter/fetch/index");
+    expect(readFileSync(`${expoDir}src/winter/fetch/fetch.ts`, "utf8")).toMatch(/export async function fetch\(/);
+    expect(readFileSync(`${expoDir}src/winter/fetch/FetchResponse.ts`, "utf8")).toMatch(/get body\(\): ReadableStream/);
+    expect(readFileSync(`${expoDir}ios/Fetch/NativeResponse.swift`, "utf8")).toContain("redirectMode == .error");
+    expect(readFileSync(`${expoDir}android/src/main/java/expo/modules/fetch/NativeResponse.kt`, "utf8")).toContain("NativeRequestRedirect.ERROR");
   });
 });

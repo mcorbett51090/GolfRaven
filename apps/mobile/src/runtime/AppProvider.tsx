@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ActivityIndicator, View } from "react-native";
 import type { Session } from "../api";
 import { buildIndex, type CatalogIndex } from "../browse";
-import type { CatalogState, RefreshOutcome } from "../catalog/manager";
+import type { CatalogResetReport, CatalogState, RefreshOutcome } from "../catalog/manager";
 import type { CatalogSnapshot } from "../catalog/snapshot";
 import { resolveLocale, translate, plural, LOCALES, type Locale, type MessageKey, type Params, type PluralBase } from "../i18n";
 import type { OutboxItem } from "../outbox";
@@ -34,6 +34,9 @@ export interface AppContextValue {
   isDemo: boolean;
   index: CatalogIndex | null;
   refreshCatalog: () => Promise<RefreshOutcome>;
+  /** Me → "Reset catalog data" (the way out of `TRUST_STATE_CORRUPT`): drops the cache and any UNREADABLE trust
+   * rows, keeps valid ones, then re-downloads (`CatalogManager.resetCatalogData`). */
+  resetCatalog: () => Promise<CatalogResetReport>;
   /** Force-update screen was dismissed for this session. */
   updateDismissed: boolean;
   dismissUpdate: () => void;
@@ -106,6 +109,13 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     return outcome;
   }, [services]);
 
+  const resetCatalog = useCallback(async () => {
+    const report = await services.catalog.resetCatalogData();
+    setCatalogState(services.catalog.getState());
+    if (!report.stillCorrupt) void refreshCatalog(); // fetch and verify the catalog again
+    return report;
+  }, [services, refreshCatalog]);
+
   const syncOutbox = useCallback(async () => {
     await services.outboxRunner.run();
     await reloadOutbox();
@@ -152,6 +162,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     isDemo,
     index,
     refreshCatalog,
+    resetCatalog,
     updateDismissed,
     dismissUpdate: () => setUpdateDismissed(true),
     session,

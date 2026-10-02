@@ -21,10 +21,12 @@ export const frCA: Record<MessageKey, string> = {
   "common.close": "Fermer",
   "common.back": "Retour",
   "common.notYet": "Disponible dans une prochaine version.",
+  "common.cancel": "Annuler",
 
   "banner.demo": "Données de démonstration. Ce n'est pas le vrai catalogue.",
   "banner.outOfDate": "Catalogue périmé. Affichage du dernier catalogue vérifié.",
   "banner.outOfDate.action": "Vérifier de nouveau",
+  "banner.trustCorrupt": "Les données du catalogue sur cet appareil sont endommagées : aucun catalogue ne peut être utilisé ni téléchargé. Allez à l'onglet Moi et choisissez « Réinitialiser les données du catalogue ».",
 
   "catalog.empty.title": "Aucun catalogue pour l'instant",
   "catalog.empty.body": "Connectez-vous à Internet pour télécharger le catalogue des terrains.",
@@ -136,6 +138,12 @@ export const frCA: Record<MessageKey, string> = {
   "me.catalog.outcome.network_error": "Impossible de joindre le serveur du catalogue.",
   "me.catalog.outcome.disabled": "Aucune source de catalogue n'est configurée dans cette version.",
   "me.catalog.keysetProblem": "Cette version n'a pas de clés de signature de catalogue valides : aucun catalogue ne peut être vérifié ni téléchargé.",
+  "me.catalog.reset": "Réinitialiser les données du catalogue",
+  "me.catalog.reset.confirmTitle": "Réinitialiser les données du catalogue?",
+  "me.catalog.reset.confirmBody": "Cette action supprime le catalogue enregistré et tout paramètre de catalogue endommagé, puis télécharge de nouveau le catalogue. Vos parties et votre compte ne sont pas touchés.",
+  "me.catalog.reset.confirm": "Réinitialiser",
+  "me.catalog.reset.done": "Les données du catalogue ont été réinitialisées. Nouveau téléchargement du catalogue…",
+  "me.catalog.reset.failed": "Impossible de réinitialiser les données du catalogue. Mettez à jour GolfRaven et réessayez.",
   "me.version": "Version de l'application {version}",
 
   "ageGate.title": "Avant de continuer",

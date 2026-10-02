@@ -1,5 +1,6 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
+import { Alert } from "react-native";
 import { useApp } from "../../src/runtime/AppProvider";
 import { LOCALES, type MessageKey } from "../../src/i18n";
 import { CatalogBanners } from "../../src/screens/CatalogBanners";
@@ -16,10 +17,25 @@ export default function MeScreen() {
   const { t, session, explicitLocale, setExplicitLocale, catalogState, refreshCatalog, services } = app;
   const router = useRouter();
   const [outcome, setOutcome] = useState<MessageKey | null>(null);
+  const [resetNote, setResetNote] = useState<MessageKey | null>(null);
 
   async function check(): Promise<void> {
     const o = await refreshCatalog();
-    setOutcome(`me.catalog.outcome.${o.kind}`);
+    setResetNote(null);
+    // A corrupt trust state is explained by the banner (with the way out); "failed verification" would be wrong.
+    setOutcome(o.kind === "rejected" && o.issues.some((i) => i.code === "TRUST_STATE_CORRUPT") ? null : `me.catalog.outcome.${o.kind}`);
+  }
+
+  async function reset(): Promise<void> {
+    const report = await app.resetCatalog();
+    setOutcome(null);
+    setResetNote(report.stillCorrupt ? "me.catalog.reset.failed" : "me.catalog.reset.done");
+  }
+  function confirmReset(): void {
+    Alert.alert(t("me.catalog.reset.confirmTitle"), t("me.catalog.reset.confirmBody"), [
+      { text: t("common.cancel"), style: "cancel" },
+      { text: t("me.catalog.reset.confirm"), style: "destructive", onPress: () => void reset() },
+    ]);
   }
 
   return (
@@ -64,6 +80,8 @@ export default function MeScreen() {
         <Body>{catalogState.snapshot ? t("me.catalog.version", { version: catalogState.snapshot.catalogVersion }) : t("me.catalog.none")}</Body>
         <Button variant="secondary" title={t("me.catalog.refresh")} onPress={() => void check()} />
         {outcome ? <Body muted>{t(outcome)}</Body> : null}
+        <Button variant="secondary" title={t("me.catalog.reset")} onPress={confirmReset} />
+        {resetNote ? <Body muted>{t(resetNote)}</Body> : null}
         {services.keysetProblem ? <Body muted>{t("me.catalog.keysetProblem")}</Body> : null}
         <Body muted>{t("me.version", { version: services.config.appVersion })}</Body>
       </Card>

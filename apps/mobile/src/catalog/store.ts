@@ -39,6 +39,17 @@ export function maxCatalogVersion(a: string, b: string): string {
   return compareCatalogVersions(a, b) >= 0 ? a : b;
 }
 
+/** The next value of the floor row when a manifest at `version` has verified:
+ * the higher of the two, as the `updateMeta` callback wants it (`undefined` =
+ * leave the row unchanged). NEVER lowers the floor, and never heals a corrupt
+ * row (that is the reset action's job, and only an explicit one). */
+export function raisedFloor(current: string | null, version: string): string | undefined {
+  const f = readFloor(current);
+  if (f.kind === "corrupt") return undefined;
+  if (f.kind === "ok" && compareCatalogVersions(f.version, version) >= 0) return undefined;
+  return version;
+}
+
 /** Asserted by the store, atomically with the write: `catalogVersion` is the
  * version of the catalog being saved. */
 export interface SaveGuard {
@@ -69,6 +80,10 @@ export interface CatalogCacheStore {
    * (`true`). A slow refresh that verified an older manifest therefore
    * cannot overwrite a newer catalog saved while it was in flight. */
   saveCatalog(catalog: StoredCatalog, guard?: SaveGuard): Promise<boolean>;
+  /** Drops ONLY the cached catalog (its files and its `etag` / `fetchedAt`).
+   * Every other meta row — the anti-rollback floor, the revoked set, a stored
+   * update requirement — is untouched. */
+  clearCatalog(): Promise<void>;
   readMeta(key: string): Promise<string | null>;
   writeMeta(key: string, value: string): Promise<void>;
   deleteMeta(key: string): Promise<void>;
@@ -98,6 +113,10 @@ export class MemoryCatalogCacheStore implements CatalogCacheStore {
     }
     this.catalog = clone(catalog);
     return Promise.resolve(true);
+  }
+  clearCatalog(): Promise<void> {
+    this.catalog = null;
+    return Promise.resolve();
   }
   private raiseFloor(floor: FloorRead, version: string): void {
     this.meta.set(META_MAX_VERIFIED_VERSION, floor.kind === "ok" ? maxCatalogVersion(floor.version, version) : version);
@@ -177,6 +196,13 @@ export class SqliteCatalogCacheStore implements CatalogCacheStore {
       await meta("etag", c.etag);
       await meta("fetchedAt", c.fetchedAt);
       return true;
+    });
+  }
+
+  async clearCatalog(): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx.run("DELETE FROM catalog_files");
+      await tx.run("DELETE FROM catalog_meta WHERE key IN ('etag', 'fetchedAt')");
     });
   }
 

@@ -37,7 +37,31 @@
  *      never overwrite a newer catalog.
  *
  * `refresh()` is single-flight (concurrent callers share one promise) and
- * `loadCached()` / `refresh()` never interleave.
+ * `loadCached()` / `refresh()` / `resetCatalogData()` never interleave.
+ *
+ * **Recovering from `TRUST_STATE_CORRUPT` (`resetCatalogData`, Me → "Reset
+ * catalog data").** Refusing everything is right, but a user must not be stuck
+ * with it until they reinstall. The reset is deliberately NOT a wipe:
+ *   - it ALWAYS drops the cached catalog (it is re-downloaded and re-verified);
+ *   - a trust-state row that is still VALID is KEPT — the persisted floor
+ *     (`maxVerifiedCatalogVersion`) and the revoked set. Clearing a valid floor
+ *     would hand an attacker (or a bad CDN node) a one-tap rollback, and a valid
+ *     revoked set a one-tap un-revocation. This is enforced inside one atomic
+ *     `updateMeta` per row, which only clears a row that is unreadable AT THAT
+ *     INSTANT, so even a racing writer cannot get a valid row cleared;
+ *   - an UNREADABLE row is cleared, because nothing about it can be recovered.
+ *     A cleared floor is re-seeded from the compiled-in `MIN_CATALOG_VERSION`
+ *     (absent if none is set); a stored update requirement is cleared with it,
+ *     since it can no longer be ordered against the floor.
+ * The trade-off, stated plainly: clearing a CORRUPT revoked set forgets which
+ * keys were revoked until the next verified manifest re-lists them (a
+ * manifest's `revokedKids[]` is applied after it verifies, so a manifest signed by a
+ * since-revoked key but newer than the floor is acceptable in that window).
+ * Clearing a CORRUPT floor re-opens rollback down to the compiled-in minimum
+ * until the next verified manifest raises it again. Both are bounded by the
+ * keyset compiled into the app and, once set, `MIN_CATALOG_VERSION`; and
+ * neither is reachable without the stored row having ALREADY been damaged, in
+ * which state the app refuses every catalog anyway.
  *
  * On every load the cached catalog is re-verified with the CURRENT keyset
  * and revoked set, so a tampered database row, a later key revocation or a
@@ -57,7 +81,7 @@ import type { CatalogCrypto } from "./crypto";
 import { MIN_CATALOG_VERSION, type TrustedKey } from "./keys";
 import { isBelowMinAppVersion } from "./semver";
 import { buildSnapshot, SnapshotParseError, type CatalogSnapshot } from "./snapshot";
-import { META_MAX_VERIFIED_VERSION, maxCatalogVersion, readFloor, type CatalogCacheStore, type StoredCatalog } from "./store";
+import { META_MAX_VERIFIED_VERSION, maxCatalogVersion, raisedFloor, readFloor, type CatalogCacheStore, type StoredCatalog } from "./store";
 import { verifyCatalogEnvelope, type VerifyIssue } from "./verify";
 
 export interface FetchResult {
@@ -84,21 +108,41 @@ function originOf(url: string): string | null {
   return m ? m[1]!.toLowerCase() : null;
 }
 
+/** The part of `fetch` this module uses. Both the global `fetch` and
+ * `expo/fetch`'s `fetch` satisfy it, so the composition root chooses (LOW-C). */
+export type FetchLike = (
+  url: string,
+  init: { headers: Record<string, string>; redirect: "error"; credentials: "omit"; signal: AbortSignal },
+) => Promise<Response>;
+
 /**
  * `fetch`-backed implementation, hardened:
  *  - a whole-request timeout (`AbortController`), covering the body read;
  *  - redirects are refused (`redirect: "error"`), and a response that
  *    reports it was redirected, or whose final URL is another origin, is
  *    refused too (RN's XHR-backed `fetch` may ignore the `redirect` option);
+ *  - no cookies or credentials are sent (`credentials: "omit"`): the catalog
+ *    is public, and `expo/fetch` defaults to `include`;
  *  - the body is read as a STREAM and cancelled the moment it exceeds
  *    `maxBytes`, where the runtime exposes `response.body` (Node, `expo/fetch`).
- *    Where it does not (RN's default `fetch`), `content-length` is checked up
- *    front and the buffered length afterwards — the timeout still bounds it
+ *    Where it does not (RN's default global `fetch` is XHR-backed and is
+ *    believed to expose none), `content-length` is checked up
+ *    front and the buffered length afterwards — the cap then applies only AFTER
+ *    the download, bounded by the timeout alone
  *    `[unverified — device: whether RN 0.86's fetch exposes a body stream]`.
+ *
+ * **The app does not use that fallback.** The runtime composition root
+ * (`src/runtime/services.ts`) injects `expo/fetch`'s `fetch` (Expo SDK 57,
+ * `expo@57.0.24`: `node_modules/expo/fetch.js`, whose `FetchResponse` has a
+ * native-backed `ReadableStream` `body`, and whose native layers implement
+ * `redirect: "error"` on iOS and Android), so on a device the byte cap is
+ * enforced WHILE streaming. The streaming / redirect / cancel behaviour of that
+ * native module is `[unverified — device]`: this environment can read its source
+ * and type-check against it, not run it.
  * Integrity never depends on any of this: every byte is still SHA-256 /
  * signature checked by the caller.
  */
-export function createFetchBytes(fetchImpl: typeof fetch): FetchBytes {
+export function createFetchBytes(fetchImpl: FetchLike): FetchBytes {
   return async (url, options) => {
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
@@ -108,7 +152,7 @@ export function createFetchBytes(fetchImpl: typeof fetch): FetchBytes {
       if (options.etag) headers["If-None-Match"] = options.etag;
       let res: Response;
       try {
-        res = await fetchImpl(url, { headers, redirect: "error", signal: controller.signal });
+        res = await fetchImpl(url, { headers, redirect: "error", credentials: "omit", signal: controller.signal });
       } catch (err) {
         if (controller.signal.aborted) throw new Error(`${url}: timed out after ${timeoutMs} ms`);
         throw err;
@@ -198,6 +242,28 @@ export interface CatalogState {
   lastOutcome: RefreshOutcome | null;
 }
 
+/** True when the install's own trust state (revoked set / version floor) is
+ * unreadable and the app is therefore refusing every catalog — the case the
+ * UI shows a dedicated message for, with the "Reset catalog data" way out,
+ * instead of the generic "catalog out of date" banner. */
+export function isTrustStateCorrupt(state: Pick<CatalogState, "cacheDropped" | "lastOutcome">): boolean {
+  const corrupt = (issues: readonly { code: string }[] | null | undefined): boolean => issues?.some((i) => i.code === "TRUST_STATE_CORRUPT") === true;
+  return corrupt(state.cacheDropped) || (state.lastOutcome?.kind === "rejected" && corrupt(state.lastOutcome.issues));
+}
+
+/** What `resetCatalogData` did, for the UI to report. */
+export interface CatalogResetReport {
+  /** The revoked-key set was unreadable and was cleared (a readable one is never touched). */
+  revokedCleared: boolean;
+  /** The version floor was unreadable and was cleared (a readable one is never touched). */
+  floorCleared: boolean;
+  /** The value the cleared floor was re-seeded with (the compiled-in minimum), or `null`. */
+  floorReseededTo: string | null;
+  /** The trust state is STILL unreadable afterwards. Only a malformed compiled-in
+   * minimum can cause this (a build defect, not stored data): update the app. */
+  stillCorrupt: boolean;
+}
+
 export interface CatalogManagerOptions {
   /** `https://host/` base; the artifact lives under `catalog/v1/`. `null`
    * disables network refresh (cache only). */
@@ -221,7 +287,7 @@ const META_UPDATE_REQUIRED = "updateRequired";
 type Trust = { ok: true; revoked: Set<string>; floor: string | null } | { ok: false; issue: VerifyIssue };
 
 function trustCorrupt(what: string): { ok: false; issue: VerifyIssue } {
-  return { ok: false, issue: { code: "TRUST_STATE_CORRUPT", message: `${what} is unreadable; refusing every catalog until the app data is reset` } };
+  return { ok: false, issue: { code: "TRUST_STATE_CORRUPT", message: `${what} is unreadable; refusing every catalog until the catalog data is reset (Me → Reset catalog data)` } };
 }
 
 /** Parses the persisted revoked set. `null` = unreadable (NOT empty). */
@@ -277,14 +343,10 @@ export class CatalogManager {
     return { ok: true, revoked, floor };
   }
 
-  /** Raises the persisted floor to `version` (atomic; never lowers it). */
+  /** Raises the persisted floor to `version` (atomic; never lowers it —
+   * `raisedFloor` is the rule, and `test/catalog-floor.test.ts` pins it). */
   private async raiseFloor(version: string): Promise<void> {
-    await this.opts.store.updateMeta(META_MAX_VERIFIED_VERSION, (cur) => {
-      const f = readFloor(cur);
-      if (f.kind === "corrupt") return undefined; // never silently heal an unreadable floor
-      if (f.kind === "ok" && compareCatalogVersions(f.version, version) >= 0) return undefined;
-      return version;
-    });
+    await this.opts.store.updateMeta(META_MAX_VERIFIED_VERSION, (cur) => raisedFloor(cur, version));
   }
 
   /** Verifies a stored catalog against the current keyset; returns the
@@ -359,6 +421,46 @@ export class CatalogManager {
   /** Loads and re-verifies whatever is cached. Never touches the network. */
   loadCached(): Promise<CatalogState> {
     return this.exclusive(() => this.loadCachedNow());
+  }
+
+  /**
+   * The user's way out of `TRUST_STATE_CORRUPT` (see the header). Drops the
+   * cached catalog; clears ONLY an unreadable revoked set / floor row (a valid
+   * one is kept); re-seeds a cleared floor from the compiled-in minimum; then
+   * reloads state. Never touches the network and never throws for a bad row.
+   */
+  resetCatalogData(): Promise<CatalogResetReport> {
+    return this.exclusive(() => this.resetNow());
+  }
+
+  private async resetNow(): Promise<CatalogResetReport> {
+    const { store } = this.opts;
+    await store.clearCatalog();
+
+    // Each row is judged inside its own atomic update: a row that is readable at that instant is never cleared.
+    let revokedCleared = false;
+    await store.updateMeta(META_REVOKED, (cur) => {
+      if (parseRevoked(cur) !== null) return undefined;
+      revokedCleared = true;
+      return null;
+    });
+
+    const compiled = this.opts.compiledMinCatalogVersion ?? MIN_CATALOG_VERSION;
+    const seed = compiled !== "" && readFloor(compiled).kind === "ok" ? compiled : null;
+    let floorCleared = false;
+    await store.updateMeta(META_MAX_VERIFIED_VERSION, (cur) => {
+      if (readFloor(cur).kind !== "corrupt") return undefined;
+      floorCleared = true;
+      return seed; // null deletes the row; a version re-seeds it
+    });
+    // A requirement cannot be ordered against a floor that was just discarded.
+    if (floorCleared) await store.deleteMeta(META_UPDATE_REQUIRED);
+
+    this.loaded = false;
+    this.state = { ...this.state, snapshot: null, cacheDropped: null, outOfDateBanner: false, lastOutcome: null };
+    await this.loadCachedNow();
+    const trust = await this.readTrust();
+    return { revokedCleared, floorCleared, floorReseededTo: floorCleared ? seed : null, stillCorrupt: !trust.ok };
   }
 
   private async loadCachedNow(): Promise<CatalogState> {
@@ -485,11 +587,10 @@ export class CatalogManager {
       // 4. Force update: keep the cache, download nothing.
       if (isBelowMinAppVersion(this.opts.appVersion, manifest.minAppVersion)) {
         const info: UpdateRequired = { minAppVersion: manifest.minAppVersion, catalogVersion: manifest.catalogVersion };
-        const existing = await this.readStoredRequirement();
-        // Never replace a requirement set by a NEWER manifest with an older one.
-        if (!existing || compareCatalogVersions(manifest.catalogVersion, existing.catalogVersion) >= 0) {
-          await store.writeMeta(META_UPDATE_REQUIRED, JSON.stringify(info));
-        }
+        // No "older requirement overwrites a newer one" check: the floor (step 1) already refuses any manifest older
+        // than one verified before, and a requirement is only ever written by a verified manifest — so this one is the newest.
+        // (`resetCatalogData` clears the requirement whenever it re-seeds a corrupt floor, to keep that invariant.)
+        await store.writeMeta(META_UPDATE_REQUIRED, JSON.stringify(info));
         const reloaded = await this.loadCachedNow();
         return this.finish({ kind: "update_required", ...info }, { snapshot: reloaded.snapshot, cacheDropped: reloaded.cacheDropped, updateRequired: reloaded.updateRequired ?? info, outOfDateBanner: false });
       }
