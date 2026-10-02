@@ -24,6 +24,8 @@
 // to do. Grouped into narrow, per-resource objects (§4.7.1a: "named
 // methods over fixed tables") rather than one flat 20-method interface.
 
+import type { RewardsRepo } from "./rewards/types.ts";
+
 export type ActorRole = "authenticated" | "staff" | "manager" | "operator" | "admin";
 
 /** The caller, resolved from their own JWT by
@@ -466,6 +468,10 @@ export interface Repo {
      * always inserts, unchanged from before. */
     insert(kind: string, detail: Record<string, unknown>): Promise<void>;
   };
+
+  /** P3f: `POST /v1/rewards/{id}/activate` (build plan §7.5, A2-08) — the
+   * reward-activation reads and writes, defined in ./rewards/types.ts. */
+  rewards: RewardsRepo;
 
   device: {
     /** Looks up a device WITHOUT creating one — P3c gate round 2, item 7

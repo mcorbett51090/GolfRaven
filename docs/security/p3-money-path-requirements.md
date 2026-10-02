@@ -1715,3 +1715,184 @@ Carried from the P3d round-4 gate (recommended, not blocking):
    2026-10-02 despite immutable cache headers, which broke `deno cache --frozen` until re-pinned.
 6. `check-migrations-immutable.sh` on `push`: try `git fetch --no-tags origin "$GH_EVENT_BEFORE"` before
    failing closed after a force-push, and print `commit-tree` stderr in the self-test failure branch.
+
+## P3f (2026-10-02): `POST /v1/rewards/{id}/activate`, the §7.5 decision table, and the `held_review` semantics
+
+New Edge Function `supabase/functions/rewards-activate/` (thin entrypoint) over `supabase/functions/_shared/rewards/`, and
+one new migration, `supabase/migrations/0027_rewards_activation.sql` (0023-0026 belong to P3e; no existing migration was
+edited, and `export_my_data` / `delete_my_data` are **not** redefined — see "Registry" below).
+
+> ⚠ **LIVE VENDOR VERIFICATION IS NOT EXERCISED.** There is no Apple or Google credential and no network route to either
+> vendor in the build environment. DeviceCheck, App Attest and Play Integrity are built behind narrow injected interfaces
+> and tested against scripted `fetch` and against assertions this repo's own tests construct. Every statement about
+> Apple's or Google's wire formats below is `[unverified — training knowledge]`. A real-device conformance run is a
+> pre-ship item (follow-ups F1-F3).
+
+### What was built
+
+| Piece | File | Notes |
+|---|---|---|
+| §7.5 decision table (pure) | `_shared/rewards/decision-table.ts` | rows 1-6 in plan order, first match wins; imports only types |
+| Request binding | `_shared/rewards/binding.ts` | `SHA-256(canonical_body ‖ server_challenge)` for both `clientDataHash` (iOS) and `requestHash` (Android); canonical body = `{challengeId, deviceId, platform, rewardId}` |
+| App Attest assertion verifier | `_shared/rewards/app-attest.ts` | local crypto (strict CBOR, DER→raw, ECDSA P-256 via Web Crypto): signature, `rpIdHash`, monotonic counter, key id |
+| Play Integrity verdict check (pure) | `_shared/rewards/play-integrity.ts` | `requestHash`, package, certificate digest, `deviceIntegrity`, freshness |
+| Vendor adapters (production) | `devicecheck-client.ts`, `play-integrity-client.ts`, `production-ports.ts`, `vendor-http.ts` | ES256 / RS256 JWTs via Web Crypto; **no new dependency**, `deno.lock` unchanged |
+| Handler (pure, DI'd) | `_shared/rewards/activate-handler.ts` | runs inside `withOwnership`; rate limits are hit before the transaction |
+| Request shape | `_shared/rewards/request-shape.ts` | strict; the reward id comes **only** from the URL |
+| Repo seam | `privileged.ts` | one `rewards: buildRewardsRepo(trx, uid)` line in `buildRepo`, one delimited `P3f additions` section appended at the end, and one `release_account_reservations` call in `me.deleteMyData()` |
+| Schema + functions | `0027_rewards_activation.sql` | see below |
+
+### Decision table and the DI vendor boundary
+
+`decideActivation(facts)` takes five facts and returns `{row, outcome, signals, setBit0}`; it never does I/O. The handler
+builds the facts: bits from the vendor, `accountHasOpenAttestationFailed` / `accountHasPriorReward` from the database,
+`rewardRestsOnUnattestable` from the reward's own flag OR its backing play's `held_review`, and the activating device's
+own attestation grade. Three inputs the plan's table does not name each make the outcome **more** restrictive, never
+less: a `failed` grade joins row 2, an `unattestable` grade joins row 3 (§7.5 "Role"), and "no persistent signal"
+(Android without device recall, A20) is held. There is **no outcome called refused**. The app-review demo account is
+answered **403** before any reward is read (§4.7.7), so it cannot probe for ids either.
+
+The handler sees only three small interfaces (`IosPort`: `verifyAssertion`, `readBits`, `setBit0`; `AndroidPort`:
+`verifyIntegrity`, `setBit0`; plus `Repo#rewards`). `null` for a platform means "not configured".
+
+**Fail-closed behaviour** (each is a test):
+
+- An unconfigured platform (`ports.ios === null` / `ports.android === null`) → any request carrying that platform's
+  attestation material gets **503 `attestation_not_configured`** before any write.
+- An incomplete configuration (one variable missing or empty) is "not configured", never a default. The loader is
+  `loadRewardsAttestationConfig()` in `privileged.ts` (the only file allowed to read the environment).
+- A vendor outage / 429 / 5xx / network error / timeout → **503 `attestation_unavailable`**; DeviceCheck's 401/403 (our
+  credentials rejected) → `attestation_not_configured`. In both, the whole transaction rolls back (reward stays
+  `earned`, challenge unconsumed, counter unchanged) so the same request can be retried.
+- A DeviceCheck 200 whose body is not the documented JSON or the one documented "never set" phrase is
+  `VendorUnavailableError`, **not** "bits clear".
+- Unreadable bits on an `attested` grade never become clean (503). On a non-attested grade the read is best-effort,
+  because the reward is held whatever the bits say; it only decides whether row 1's signal is raised.
+- A DeviceCheck token Apple rejects, an integrity token Google cannot decode, a wrong `requestHash`, a signature over a
+  different request, a replayed or non-monotonic counter, an unknown key id → graded `failed` → `fraud_signal(
+  attestation_failed)` **at intake** and the reward goes to `held_review`. No registered App Attest key → `unattestable`.
+- bit0 is set at the vendor **last**, after the database transition, inside the same transaction: a failure to set it
+  rolls everything back (proved against real Postgres), so bit0 is never claimed set when it was not. `update_two_bits`
+  writes both bits, so bit1 is written back **as the table read it** — an admin's bit1 is never cleared by this call.
+- The App Attest assertion is bound to the request: an assertion for another reward, device, platform or challenge does
+  not verify (AT 5). The challenge is live-only, single-use, device-bound and 120 s.
+
+### Schema (0027)
+
+`device.attest_public_key` (65-byte raw P-256 point, nullable); `offer.face_value`, `offer_code.reserved_amount`;
+`offer_code.rests_on_unattestable`, `entitlement.rests_on_unattestable` (row 3's input, written only by the earning
+path); `UNIQUE (device_id, reward_kind, reward_id)` + a `user_id` index on `device_reward_ledger` (the table itself
+already existed: FORCE RLS, no client policy). Five plain (invoker-rights, **not** SECURITY DEFINER, `search_path` pinned,
+EXECUTE `service_role` only) functions in `app`: `activate_offer_code`, `activate_entitlement`,
+`resolve_held_offer_code`, `resolve_held_entitlement`, `release_account_reservations`. They own the state machine
+(`earned → issued | held_review`, `issued → held_review` on a second-device re-run, `held_review` untouched by activation,
+terminal states refused), the budget reservation, the expiry pause, the ledger row, and — **independently of the caller**
+— the database-side backstops for rows 2 and 3: an `activate` is refused (SQLSTATE 23514) when the reward rests on an
+unattestable co-signal, its backing play is held, or the account has an open `attestation_failed` signal.
+
+`held_review` semantics: a held offer code **reserves** its face value in `offer.budget_reserved` (never refused: if the
+cap cannot cover it the code is still held, unreserved, and a `review_item` says so) and its expiry clock **pauses**
+(`expiry_paused_at`). Approval (`resolve_held_offer_code`) issues it with the **full validity counted from the approval
+date**, honoured even if the offer ended meanwhile, leaving the reservation in place so it pays for the redemption
+(`consume_offer_budget` then moves it to `budget_used`). Rejection voids it and releases the reservation. A held
+entitlement reserves nothing; the trail's outstanding-redemption figure (§9.6, not built) reads `state = 'held_review'`.
+Account deletion would otherwise leak a held code's reservation, so `Repo#me.deleteMyData()` calls
+`app.release_account_reservations(uid)` in the delete transaction before `private.delete_my_data`.
+
+**Registry (no migration-registry change needed).** `device_reward_ledger` is already `delete_row` in
+`private.pii_retention_policy` (0014) and `exclude` in `private.pii_export_policy` (0022, reason: "client read is nobody
+(admin)"). No table or `auth.users` FK was added, and `export_my_data` selects its columns by name, so the new columns are
+not exported. Nothing in 0027 redefines either function; when P3e's 0024 lands the highest-numbered migration still
+carries one body of each.
+
+### P3 acceptance test (9) and (5), mapped
+
+Unit = `supabase/tests/unit/activate-handler.test.ts` (fake Repo, scripted ports); Deno = `supabase/tests/integration/
+rewards-activate.deno.test.ts` (real `withOwnership`, real SQL); pgTAP = `supabase/tests/matrix/15_rewards_activation.sql`.
+
+| AT fixture | Unit | Deno | pgTAP |
+|---|---|---|---|
+| same account, second offer on the same device → issued | "same account, second offer…" | "AT 9: same account, second offer…" | activate/ledger cells §3 |
+| special marker on a second trail → issued | "…special marker on a second trail…" | "AT 9: same account, special marker…" | §5 |
+| same account after reinstall → issued | "…after REINSTALL…" + "own already-issued reward re-activated…" | "AT 9: …REINSTALL…" + "…OWN issued reward…" | — |
+| new account on a bit0 device → `held_review`, not refused | "a new account on a bit0 device…" | "AT 9: a NEW account on a bit0 device…" | hold cells §3c |
+| any account on a bit1 device → `held_review` | "ANY account on a bit1 device…" | "AT 9: ANY account on a bit1 device…" | — |
+| server-side re-score reads no bits until activation | "…reads NO bits until activation" + `rewards-isolation.test.ts` | "AT 9: …RE-SCORE reads no bits…" (a real `handleEvidenceIntake` pass) | — |
+| second-device redemption re-runs the table | "…SECOND device re-runs the table…" (+ flagged → held) | "AT 9: …SECOND device re-runs…" | §3b/§3d |
+| held code whose offer ends is honoured, budget reserved | "…offer ends during review…" | "AT 9: a held code whose offer ends…" (real approval, real `consume_offer_budget`) | §3f, §4 |
+| precedence: unattestable reward on a clean device → held; open `attestation_failed` → held | "precedence (G3-08)…" ×3 | "AT 9 precedence…" | rows 2/3 backstop cells §3h |
+| `failed` raises a `fraud_signal`; no token → `failed` on capable hardware, `unattestable` otherwise | "a FAILED verdict…", "a submission with NO token…" | same | — |
+| AT 5: mismatched body hash, replayed counter, wrong Play `requestHash` rejected | "AT (5)…" (real verifier) + `app-attest.test.ts`, `play-integrity.test.ts` | "AT 5: …" ×6 incl. a counter race | — |
+| §4.7.7: A activates B's code / entitlement → **404** | "ownership: another user's reward is a 404…" | "§4.7.7: player A activating player B's…" | DB-level `P0002` cells |
+| §4.7 item 8 rate limits: 10/user/h, 20/device/day | `enforceActivationRateLimits` tests | "rate limit: …" ×3 (real `hitRateLimitForActor`) | — |
+
+The decision table itself is additionally checked **exhaustively** (5 bit states × 3 grades × 2 × 2 × 2 = 120 inputs)
+against an oracle written as a flat ordered rule list, independent of the implementation.
+
+### Mutation proofs (all in `/tmp` copies; nothing planted in the tree)
+
+Each of these was applied alone to a `/tmp` copy and the named suite failed (a no-op control mutation passed): 6 on the
+decision table, 14 on the handler (held release, signal at intake, fail-open on unreadable
+bits, bit0-before-apply, challenge consume / kind / device, counter advance, both rate-limit caps, second-device
+shortcut, both no-token grades, row-1 signal), 21 on the verifiers / adapters / request shape (counter, `rpIdHash`,
+signature, key id, unregistered key, `requestHash`, package, certificate digest, device integrity, freshness, recall
+bits fail-open, unrecognised DeviceCheck body, unconfigured, 403 mapping, half-configured port, bit1 clear, body-supplied
+reward id, missing challenge), 16 on 0027 (rows 2/3 and held-play backstops, no reservation, cap ignored, no expiry
+pause, approval not restarting validity / leaving the clock paused / releasing the reservation, reject not releasing,
+ownership and device clauses, held released by activate, admin check, an `authenticated` EXECUTE grant, ledger
+uniqueness, terminal states) and 13 on `Repo#rewards` / `deleteMyData` against real Postgres (offer_code / entitlement
+ownership, counter monotonicity, prior-reward blind to the ledger or counting held rewards, signal de-dupe and
+`cleared_at`, backing-play hold, SQLSTATE 55000 / 23514 mapping, verdict shape, deletion not releasing). Three survivors
+were found on the first pass (counter-advance monotonicity, held-counts-as-prior, 55000 mapping) and closed with new
+tests; the re-run caught all three.
+
+### Accepted follow-ups (append-only; F-numbers are P3f's own)
+
+- **F1. Live vendor verification is not exercised** (above). DeviceCheck host / paths / JWT claims / body / the "Failed to
+  find bit state" phrase, the App Attest assertion layout (CBOR map, 37-byte `authenticatorData`, `nonce =
+  SHA-256(authData ‖ clientDataHash)`, signature over `nonce` with ECDSA-SHA256), and the Play Integrity verdict field
+  names are all `[unverified]`.
+- **F2. App Attest key registration is not built.** Nothing verifies an attestation object against Apple's root or writes
+  `device.attest_public_key`, so a real iOS device has no key on record and **every iOS assertion grades `unattestable` →
+  `held_review`** until it ships. This is the standing condition of follow-up 9 above, now enforced end to end.
+- **F3. Android device recall (A20) is unsettled.** The production Android port reports no bits and refuses to write any,
+  so an attested Android activation routes to `held_review` ("no persistent signal"). The field carrying recall bits
+  (`deviceIntegrity.deviceRecall.values.{bitFirst,bitSecond}`) is the least certain name in this change.
+- **F4. bit0 is not set when a held reward is approved** — approval has no fresh DeviceCheck token (only a hash is stored).
+  A device whose first reward was released through review stays "clean". Mitigation to design: record a pending-bit0
+  marker on the ledger row and set it on the account's next activation from that device.
+- **F5. `update_two_bits` writes both bits.** A bit1 set between the read the table ran on and the write is lost (a vendor
+  API limitation; re-reading would only narrow the window and add a network round trip to an open transaction).
+- **F6. Network I/O happens inside the database transaction** (reads must precede the offer lock; bit0 must roll back
+  with the transition). Each vendor call is bounded at 4 s (`platformVendorHttp`); an iOS request makes at most two
+  (read, then set), so 8 s plus statements stays under `transaction_timeout` 12 s and the 15 s HTTP race. A concurrent
+  second request for the same reward waits on the row lock and 503s at `lock_timeout` 5 s if the first is slow.
+- **F7. The held-review queue has no Edge Function yet.** `app.resolve_held_offer_code` / `resolve_held_entitlement` exist
+  (service_role only, `p_resolved_by` must be an admin, audited) for P5.1a; the caller must authenticate the admin.
+  Voiding a held code by any path other than `resolve_held_offer_code` would leak its reservation.
+- **F8. Per-device rate limit is actor-scoped.** `hitRateLimitForActor` prefixes the actor's uid (as for evidence), so the
+  20/device/day bucket bounds one account's use of a device, not several accounts' use of it. Multi-account detection is
+  the bits' job, not the limiter's.
+- **F9. `offer.face_value` is an addition the plan does not list** (the plan has "redemptions × face value" for
+  settlement but no column). It is `ADD COLUMN IF NOT EXISTS ... DEFAULT 0` so a parallel builder adding it first cannot
+  make the migration set fail; confirm the intended source of face value (OfferTerms is catalog-side). `consume_offer_
+  budget` clamps `budget_reserved` at 0, so redemption must consume exactly `offer_code.reserved_amount` or it can eat
+  another held code's reservation.
+- **F10. `hardwareSupportsAttestation` is a client self-report** (follow-up 9, unchanged): a lying client gains
+  `unattestable` instead of `failed`; both are held, neither can reach activate.
+- **F11. No expiry sweeper exists.** `expiry_paused_at IS NOT NULL` must be read as "not expiring" by whatever builds it.
+- **F12. CI lists — done by the coordinator** at the P3e rebase: `rewards-activate/index.ts` is in the three `deno check` /
+  `deno cache --frozen` / tamper steps of `.github/workflows/ci.yml`.
+- **F13. A play hold does not reserve budget.** The 0017 cascade (`play_held_review_cascade`) moves a play's codes to
+  `held_review` directly; only `app.activate_offer_code` reserves and pauses. A cascade-held code therefore has
+  `reserved_amount = 0` and a running expiry clock until a reviewer acts, and approving it honours it unreserved.
+  Closing it means a hold-side trigger on `offer_code` (not built; it touches 0017's cascade). **Lock order** with P3e's
+  per-play scoring lock was checked and raced (both orders + a mixed load, `rewards-activate.deno.test.ts` "P3e
+  interplay"): scoring takes advisory ns 1 (user, course, date) then updates `offer_code` rows via the cascade;
+  activation takes the reward row, then advisory ns 4/5 (per user), then the offer row. No lock family is acquired in
+  both orders, and neither path takes the other's advisory key.
+- **Deploy configuration.** Vendor secrets live only in the environment (never in the repo):
+  `GR_APPLE_TEAM_ID`, `GR_APPLE_BUNDLE_ID`, `GR_APPLE_DEVICECHECK_KEY_ID`, `GR_APPLE_DEVICECHECK_PRIVATE_KEY` (PKCS#8 PEM),
+  `GR_APPLE_DEVICECHECK_ENV` (`production` | `development`); `GR_PLAY_PACKAGE_NAME`, `GR_PLAY_CERT_SHA256` (comma-separated
+  base64url), `GR_PLAY_SERVICE_ACCOUNT_EMAIL`, `GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY` (PEM). The existing "pin `--config` at
+  deploy time" requirement applies to this function unchanged.

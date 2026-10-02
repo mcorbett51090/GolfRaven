@@ -35,6 +35,7 @@ import type {
   UpsertPlayInput,
   UpsertPlayResult,
 } from "../../functions/_shared/types.js";
+import { makeFakeRewardsRepo } from "./fake-rewards-repo.ts";
 
 const ABSOLUTE_ROW_CAP = 10_000; // mirrors packages/rules' own constant (score-play.ts) — see privileged.ts's own re-import of the SAME vendored value; hardcoded here rather than imported so this fake has zero dependency on the vendor tree's own layout.
 
@@ -512,6 +513,9 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         state.fraudSignals.push({ kind, detail });
       },
     },
+
+    // P3f: rewards-activate (supabase/tests/unit/fake-rewards-repo.ts).
+    rewards: makeFakeRewardsRepo(state, uid),
 
     device: {
       async findOwn(deviceId: string) {
