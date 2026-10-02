@@ -25,7 +25,7 @@
 //   3. terminal / expired -> 409;
 //   4. resolve the device (device cap, platform);
 //   5. grade the activating device: consume the single-use challenge, verify the
-//      assertion / integrity verdict against SHA-256(canonical_body ‖ challenge),
+//      assertion (iOS: clientDataHash = SHA-256(UTF-8(S)), S a canonical string carrying the nonce as text, string-binding.ts) / integrity verdict (Android: requestHash = SHA-256(canonical_body ‖ challenge), binding.ts),
 //      advance the App Attest counter atomically;
 //   6. read the persistent bits: DeviceCheck on iOS; on Android the server-side
 //      substitute (§7.5, A20) from the `device` rows linked by install id / attest
@@ -48,6 +48,7 @@ import { Errors, HttpError } from "../http.ts";
 import type { Repo } from "../types.ts";
 import { computeRequestBinding, fromBase64UrlStrict, toBase64Url, toHex, type BoundBody, type Sha256Fn } from "./binding.ts";
 import { decideActivation, type BitsInput } from "./decision-table.ts";
+import { computeIosActivationBinding } from "./string-binding.ts";
 import type { ActivationRequest } from "./request-shape.ts";
 import {
   type AndroidInstallSignals,
@@ -134,10 +135,16 @@ function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
-/** Single-use challenge, bound to this device and live (120 s TTL). Every
- * failure is the same 422 — which of "wrong id", "wrong device", "used",
+/** Single-use challenge, bound to this device and live (120 s TTL). Exported
+ * for `devices-attest-key` (App Attest key registration), which consumes the
+ * SAME kind of challenge the SAME way. Every failure is the same 422 — which of "wrong id", "wrong device", "used",
  * "expired", "wrong nonce" it was is not something to tell a prober. */
-async function consumeLiveChallenge(req: ActivationRequest, deviceId: string, repo: Repo, sha256: Sha256Fn): Promise<Uint8Array> {
+export async function consumeLiveChallenge(
+  req: { challengeId?: string; nonce?: string },
+  deviceId: string,
+  repo: Pick<Repo, "challenge" | "now">,
+  sha256: Sha256Fn,
+): Promise<Uint8Array> {
   const notConsumable = () => Errors.unprocessable("challenge_not_consumable", "this challenge could not be used (already used, expired, or not issued to this device)");
   const nonceBytes = req.nonce !== undefined ? fromBase64UrlStrict(req.nonce) : null;
   if (!req.challengeId || !nonceBytes) throw Errors.badRequest("challengeId and an unpadded base64url nonce are required");
@@ -178,14 +185,17 @@ async function assessActivatingDevice(rewardId: string, deviceId: string, req: A
   if (att.kind === "ios") {
     const port = deps.ports.ios;
     if (!port) throw fail503("attestation_not_configured", "iOS device attestation is not configured on this deployment; the reward was not changed");
-    const nonceBytes = await consumeLiveChallenge(req, deviceId, repo, deps.sha256);
+    await consumeLiveChallenge(req, deviceId, repo, deps.sha256);
     // H1: the DeviceCheck token's hash is part of what the assertion signs. The
     // token is the one input to the persistent-bit lookup; if it were not bound,
     // a valid assertion from one device could ride next to another device's
     // clean token.
     const tokenHash = toHex(await deps.sha256(utf8(att.deviceCheckToken)));
-    const bound: BoundBody = { rewardId, deviceId, platform: "ios", challengeId: req.challengeId!, deviceCheckTokenSha256: tokenHash };
-    const clientDataHash = await computeRequestBinding(deps.sha256, bound, nonceBytes);
+    // iOS binding (string form, string-binding.ts): clientDataHash = SHA-256(UTF-8(S)), S a canonical JSON string that
+    // carries the nonce as TEXT (`req.nonce`, the very string consumeLiveChallenge just consumed) and the token hash.
+    // A React Native module can only hash a string, so the raw-bytes form (still used for Android's requestHash below)
+    // could not be produced by an iOS client. Same construction as key registration, purpose "reward_activation".
+    const clientDataHash = await computeIosActivationBinding(deps.sha256, { rewardId, deviceId, challengeId: req.challengeId!, deviceCheckTokenSha256: tokenHash, nonce: req.nonce! });
     const device = await repo.rewards.deviceAttestState(deviceId);
     if (!device) throw Errors.internal();
     const verdict = await port.verifyAssertion({ assertionB64: att.assertion, keyId: att.keyId, clientDataHash, device });

@@ -21,6 +21,7 @@ import { adminSql, createTestUser, freshUuid, insertCatalogVersion, makeActor, s
 import { getContainedClosedSocketWrites, hitRateLimitForActor, isPostgresJsClosedSocketWrite, withOwnership } from "../../functions/_shared/privileged.ts";
 import { enforceActivationRateLimits, handleActivation, type ActivationDeps } from "../../functions/_shared/rewards/activate-handler.ts";
 import { computeRequestBinding, toBase64Url, toHex } from "../../functions/_shared/rewards/binding.ts";
+import { computeIosActivationBinding } from "../../functions/_shared/rewards/string-binding.ts";
 import { verifyAppAttestAssertion, verifyP256WebCrypto } from "../../functions/_shared/rewards/app-attest.ts";
 import type { ActivationRequest } from "../../functions/_shared/rewards/request-shape.ts";
 import {
@@ -615,7 +616,9 @@ const KEY_ID = toB64(new Uint8Array(32).fill(7));
 
 async function registerKey(deviceId: string, counter = 5) {
   const key = await generateP256();
-  await adminSql()`update app.device set attest_key_id = ${KEY_ID}, attest_public_key = ${key.publicKeyRaw}, attest_counter = ${counter} where id = ${deviceId}`;
+  // `attest_registered_at` stands in for a VERIFIED registration (0034): rewards-activate hands the assertion verifier a key
+  // only when it was written by app.register_attest_key. (The real registration path is attest-key.deno.test.ts.)
+  await adminSql()`update app.device set attest_key_id = ${KEY_ID}, attest_public_key = ${key.publicKeyRaw}, attest_counter = ${counter}, attest_registered_at = now() where id = ${deviceId}`;
   const fake = iosPort({ bits: CLEAR });
   const port: IosPort = {
     verifyAssertion: (input) => verifyAppAttestAssertion(input, { appId: APP_ID }, { sha256, verifyP256: verifyP256WebCrypto }),
@@ -629,15 +632,17 @@ async function signedReq(
   u: User,
   deviceId: string,
   key: Awaited<ReturnType<typeof generateP256>>,
-  o: { rewardId: string; counter: number; bindRewardId?: string; bindChallenge?: Uint8Array; sendToken?: string },
+  o: { rewardId: string; counter: number; bindRewardId?: string; bindNonce?: string; sendToken?: string },
 ): Promise<ActivationRequest> {
   const ch = await issueLive(u, deviceId);
   // H1: the assertion covers the SHA-256 of the DeviceCheck token the request carries.
-  const hash = await computeRequestBinding(
-    sha256,
-    { rewardId: o.bindRewardId ?? o.rewardId, deviceId, platform: "ios", challengeId: ch.challengeId, deviceCheckTokenSha256: await digestHex(new TextEncoder().encode(SIGNED_TOKEN)) },
-    o.bindChallenge ?? ch.nonceBytes,
-  );
+  const hash = await computeIosActivationBinding(sha256, {
+    rewardId: o.bindRewardId ?? o.rewardId,
+    deviceId,
+    challengeId: ch.challengeId,
+    deviceCheckTokenSha256: await digestHex(new TextEncoder().encode(SIGNED_TOKEN)),
+    nonce: o.bindNonce ?? ch.nonce,
+  });
   const built = await buildAssertion({ key, appId: APP_ID, counter: o.counter, clientDataHash: hash });
   return { deviceId, platform: "ios", challengeId: ch.challengeId, nonce: ch.nonce, attestation: { kind: "ios", keyId: KEY_ID, assertion: built.assertionB64, deviceCheckToken: o.sendToken ?? SIGNED_TOKEN } };
 }
@@ -722,7 +727,7 @@ Deno.test("AT 5: a MISMATCHED body hash (assertion bound to another reward / ano
   const dev2 = await newDevice(u2);
   const r2 = await registerKey(dev2, 5);
   const code2 = await newCode(u2);
-  const out2 = await activate(u2, code2.id, await signedReq(u2, dev2, r2.key, { rewardId: code2.id, counter: 6, bindChallenge: new Uint8Array(32).fill(3) }), deps({ ios: r2.port }));
+  const out2 = await activate(u2, code2.id, await signedReq(u2, dev2, r2.key, { rewardId: code2.id, counter: 6, bindNonce: toBase64Url(new Uint8Array(32).fill(3)) }), deps({ ios: r2.port }));
   assertEquals(out2.state, "held_review");
 });
 

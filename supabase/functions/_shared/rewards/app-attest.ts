@@ -2,7 +2,7 @@
 //
 // App Attest ASSERTION verification (build plan §7.5): "The server verifies the
 // signature, the `rpIdHash`, and that the counter is monotonic per key", with
-// `clientDataHash = SHA-256(canonical_body ‖ server_challenge)` (binding.ts).
+// `clientDataHash` = SHA-256 of a canonical string that carries the server nonce as text (string-binding.ts; was `SHA-256(canonical_body ‖ server_challenge)` in binding.ts, which Android still uses).
 //
 // This is local cryptography — no Apple network call — over the public key the
 // server stored when the key was registered (`app.device.attest_public_key`).

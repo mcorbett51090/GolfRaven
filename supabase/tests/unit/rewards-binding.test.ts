@@ -115,3 +115,41 @@ describe("base64 helpers", () => {
     expect(bytesEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2, 3]))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The iOS activation binding is the STRING form (string-binding.ts); binding.ts above still serves Android.
+// ---------------------------------------------------------------------------
+import { computeAttestKeyBinding } from "../../functions/_shared/rewards/app-attest-registration.js";
+import { REWARD_ACTIVATION_PURPOSE, computeIosActivationBinding, iosActivationChallengeString } from "../../functions/_shared/rewards/string-binding.js";
+
+describe("iOS activation binding (string form)", () => {
+  const body = {
+    rewardId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    deviceCheckTokenSha256: "ab".repeat(32),
+    nonce: "abcDEF_-0123",
+  };
+
+  it("is SHA-256 of the one ASCII string a client builds, the nonce as text and the token hash inside it", async () => {
+    const s = iosActivationChallengeString(body);
+    expect(s).toBe(
+      `{"challengeId":"${body.challengeId}","deviceCheckTokenSha256":"${body.deviceCheckTokenSha256}","deviceId":"${body.deviceId}","nonce":"${body.nonce}","platform":"ios","purpose":"${REWARD_ACTIVATION_PURPOSE}","rewardId":"${body.rewardId}"}`,
+    );
+    expect(toHex(await computeIosActivationBinding(sha256, body))).toBe(toHex(await sha256(new TextEncoder().encode(s))));
+  });
+
+  it("binds every field, including the DeviceCheck token hash (H1) and the nonce text", async () => {
+    const ref = toHex(await computeIosActivationBinding(sha256, body));
+    for (const k of Object.keys(body) as Array<keyof typeof body>) {
+      expect(toHex(await computeIosActivationBinding(sha256, { ...body, [k]: "x" })), k).not.toBe(ref);
+    }
+  });
+
+  it("is domain-separated from key registration and from the raw-bytes (Android) form", async () => {
+    const reg = await computeAttestKeyBinding(sha256, { challengeId: body.challengeId, deviceId: body.deviceId, keyId: "k", nonce: body.nonce });
+    expect(toHex(reg)).not.toBe(toHex(await computeIosActivationBinding(sha256, body)));
+    const raw = await computeRequestBinding(sha256, { rewardId: body.rewardId, deviceId: body.deviceId, platform: "ios", challengeId: body.challengeId, deviceCheckTokenSha256: body.deviceCheckTokenSha256 }, new TextEncoder().encode(body.nonce));
+    expect(toHex(raw)).not.toBe(toHex(await computeIosActivationBinding(sha256, body)));
+  });
+});

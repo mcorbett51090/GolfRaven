@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 import { enforceActivationRateLimits, handleActivation, type ActivationDeps } from "../../functions/_shared/rewards/activate-handler.js";
 import { computeRequestBinding, toBase64Url, toHex } from "../../functions/_shared/rewards/binding.js";
+import { REWARD_ACTIVATION_PURPOSE, computeIosActivationBinding, computeStringBinding } from "../../functions/_shared/rewards/string-binding.js";
 import { verifyAppAttestAssertion, verifyP256WebCrypto } from "../../functions/_shared/rewards/app-attest.js";
 import type { ActivationRequest } from "../../functions/_shared/rewards/request-shape.js";
 import { VendorNotConfiguredError, VendorUnavailableError, VendorRejectedError, type IosPort } from "../../functions/_shared/rewards/types.js";
@@ -327,22 +328,21 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
   async function signedRequest(
     state: FakeState,
     key: Awaited<ReturnType<typeof generateP256>>,
-    o: { rewardId: string; counter: number; bindRewardId?: string; bindChallengeBytes?: Uint8Array; sendToken?: string; bindToken?: string | null },
+    o: { rewardId: string; counter: number; bindRewardId?: string; bindNonce?: string; sendToken?: string; bindToken?: string | null },
   ) {
     const ch = await issueChallenge(state, USER_A, D1);
     // H1: the assertion covers the hash of the DeviceCheck token the request carries.
     const bindToken = o.bindToken === undefined ? SIGNED_TOKEN : o.bindToken;
-    const hash = await computeRequestBinding(
-      sha256,
-      {
-        rewardId: o.bindRewardId ?? o.rewardId,
-        deviceId: D1,
-        platform: "ios",
-        challengeId: ch.challengeId,
-        ...(bindToken !== null ? { deviceCheckTokenSha256: await tokenSha(bindToken) } : {}),
-      },
-      o.bindChallengeBytes ?? ch.nonceBytes,
-    );
+    // The iOS binding is the STRING form (string-binding.ts): the nonce travels as text inside the signed string.
+    const hash = await computeStringBinding(sha256, {
+      challengeId: ch.challengeId,
+      deviceId: D1,
+      nonce: o.bindNonce ?? ch.nonce,
+      platform: "ios",
+      purpose: REWARD_ACTIVATION_PURPOSE,
+      rewardId: o.bindRewardId ?? o.rewardId,
+      ...(bindToken !== null ? { deviceCheckTokenSha256: await tokenSha(bindToken) } : {}),
+    });
     const built = await buildAssertion({ key, appId: APP_ID, counter: o.counter, clientDataHash: hash });
     const req: ActivationRequest = {
       deviceId: D1,
@@ -403,7 +403,7 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
     const state = newWorld();
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const { key, port } = await realIos(state);
-    const req = await signedRequest(state, key, { rewardId: R1, counter: 6, bindChallengeBytes: new Uint8Array(32).fill(1) });
+    const req = await signedRequest(state, key, { rewardId: R1, counter: 6, bindNonce: toBase64Url(new Uint8Array(32).fill(1)) });
     expect((await activate(state, R1, req, deps({ ios: port }))).state).toBe("held_review");
     expect(signalKinds(state)).toContain("attestation_failed");
   });
@@ -439,7 +439,7 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
     expect(await codeOf(activate(state, R2, req, deps({ ios: port })))).toBe("challenge_not_consumable");
   });
 
-  it("the verifier is handed SHA-256(canonical_body ‖ challenge) built from the request's own fields", async () => {
+  it("the verifier is handed SHA-256(UTF-8(S)), S the canonical string built from the request's own fields (nonce as TEXT)", async () => {
     const state = newWorld();
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const ios = makeFakeIosPort({ bits: CLEAR });
@@ -447,12 +447,15 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
     const req = await iosRequest(state, { challenge: ch });
     await activate(state, R1, req, deps({ ios }));
     const token = (req.attestation as { deviceCheckToken: string }).deviceCheckToken;
-    const expected = await computeRequestBinding(
-      sha256,
-      { rewardId: R1, deviceId: D1, platform: "ios", challengeId: ch.challengeId, deviceCheckTokenSha256: toHex(await sha256(new TextEncoder().encode(token))) },
-      ch.nonceBytes,
-    );
+    const tokenHash = toHex(await sha256(new TextEncoder().encode(token)));
+    const expected = await computeIosActivationBinding(sha256, { rewardId: R1, deviceId: D1, challengeId: ch.challengeId, deviceCheckTokenSha256: tokenHash, nonce: ch.nonce });
     expect(toHex(ios.lastVerifyInput!.clientDataHash)).toBe(toHex(expected));
+    // ...and that is exactly the hash of the literal string a client writes by hand.
+    const literal = `{"challengeId":"${ch.challengeId}","deviceCheckTokenSha256":"${tokenHash}","deviceId":"${D1}","nonce":"${ch.nonce}","platform":"ios","purpose":"reward_activation","rewardId":"${R1}"}`;
+    expect(toHex(ios.lastVerifyInput!.clientDataHash)).toBe(toHex(await sha256(new TextEncoder().encode(literal))));
+    // The raw-bytes form is NOT what the iOS branch computes any more (it still serves Android).
+    const rawForm = await computeRequestBinding(sha256, { rewardId: R1, deviceId: D1, platform: "ios", challengeId: ch.challengeId, deviceCheckTokenSha256: tokenHash }, ch.nonceBytes);
+    expect(toHex(ios.lastVerifyInput!.clientDataHash)).not.toBe(toHex(rawForm));
   });
 });
 

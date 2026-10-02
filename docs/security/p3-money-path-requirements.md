@@ -2082,9 +2082,15 @@ guard disabled (the LOW test then dies with the uncaught `TypeError`, failing th
   find bit state" phrase, the App Attest assertion layout (CBOR map, 37-byte `authenticatorData`, `nonce =
   SHA-256(authData ‖ clientDataHash)`, signature over `nonce` with ECDSA-SHA256), and the Play Integrity verdict field
   names are all `[unverified]`.
-- **F2. App Attest key registration is not built.** Nothing verifies an attestation object against Apple's root or writes
-  `device.attest_public_key`, so a real iOS device has no key on record and **every iOS assertion grades `unattestable` →
-  `held_review`** until it ships. This is the standing condition of follow-up 9 above, now enforced end to end.
+- **F2. App Attest key registration — BUILT, NOT YET RUN AGAINST A REAL DEVICE (updated 2026-10-02).** When this was written
+  nothing verified an attestation object against Apple's root or wrote `device.attest_public_key`, so every iOS assertion graded
+  `unattestable` → `held_review`. `POST /v1/devices/attest-key` (`supabase/functions/devices-attest-key/`, migration 0034) now does
+  both: see "App Attest key registration" at the end of this document. **What remains is a live conformance run on a physical
+  iPhone**: every step of Apple's validation procedure is implemented from training knowledge and marked `[unverified]` until that
+  run (no Apple device, account or network route exists in the build environment; the attestations in the tests are synthetic).
+  Until the run, treat iOS attestation as untested in production: the endpoint fails closed (a rejected registration leaves the
+  device `unattestable`, i.e. held, exactly as before), so the risk of shipping it unverified is false rejections, never a false accept
+  of a forged attestation.
 - **F3. Android device recall (A20) is unsettled — and no longer used.** The production Android port has no persistent-bit
   methods; the two bits are the server-side substitute (above), which is weaker than device recall (a factory reset
   evades it; the install id is an unauthenticated hint). Whether Play Integrity device recall exists, and under what
@@ -2471,3 +2477,252 @@ drain pass calls it where it calls the fix-coordinate purge (`drainRescoreBacklo
 - **E6.** Before launch: privacy-officer / PIA sign-off and a privacy-policy disclosure for the install-link tombstone; disclose the fix-coordinate re-pick
   exception in the privacy label (owner decisions above).
 - **E7 (PR3).** Run `import-catalog` entirely as edge_system with delegate binders; then `edge` mode needs one URL.
+
+## App Attest key registration (2026-10-02): follow-up F2 closed in code, not yet on a device
+
+New Edge Function `supabase/functions/devices-attest-key/` (thin entrypoint) over `supabase/functions/_shared/rewards/`, and one
+migration, `supabase/migrations/0034_attest_key_registration.sql` (0033 is another builder's, 0035 Sign in with Apple's; 0001-0032 are
+untouched). It lets an iOS install register its App Attest key, so `rewards-activate` can grade that device `attested`.
+
+> ⚠ **LIVE VERIFICATION IS NOT EXERCISED.** There is no iPhone, Apple account or network route to Apple in the build environment. Every
+> statement below about Apple's attestation object, certificate chain and validation procedure is `[unverified — training knowledge]`
+> until a real-device run (follow-up K1). The tests build synthetic attestations (a throw-away root, an intermediate and a leaf with the
+> nonce extension) with Web Crypto, so they prove the server is **self-consistent and fails closed**, not that a real device's
+> attestation verifies. The one real Apple artifact exercised is the pinned root certificate (parsed; fingerprint pinned; see below).
+
+### What was built
+
+| Piece | File | Notes |
+|---|---|---|
+| Endpoint | `devices-attest-key/index.ts`, `_shared/rewards/attest-key-handler.ts`, `attest-key-request.ts` | `POST /v1/devices/attest-key`; JWT, strict body, rate limits before the transaction, `withOwnership`; unconfigured = 503 before any read or write |
+| Verifier | `_shared/rewards/app-attest-registration.ts` | pure, DI'd; `createAttestationVerifier(config, { sha256 })`; every failure a named reason, nothing throws to the caller |
+| Parsers | `der.ts`, `cbor-strict.ts`, `x509-lite.ts` | strict DER (minimal lengths, minimal non-negative INTEGERs, exact times), strict CBOR (no tags/floats/indefinite/64-bit/duplicate keys), a chain checker for exactly `leaf <- intermediate <- anchor` (ECDSA P-256/P-384, SHA-256/384, via Web Crypto). **No new dependency; `deno.lock` and the import map are unchanged.** |
+| Pinned trust anchor | `_shared/rewards/apple-app-attest-root.ts` | Apple's App Attestation Root CA as public data; see "Trust anchor" |
+| Binding | `_shared/rewards/string-binding.ts` (+ `attestKeyChallengeString` in the verifier); also used by the iOS branch of `activate-handler.ts` | see "Challenge and clientDataHash" |
+| Repo seam | `privileged.ts` | one `attestKey: buildAttestKeyRepo(trx, uid)` line in `buildRepo`, one delimited "App Attest key registration additions" section appended at the end (repo + config loader), and a one-statement change to `Repo#rewards.deviceAttestState` (below) |
+| Schema | `0034_attest_key_registration.sql` | three columns, the redefined counter trigger, `app.register_attest_key`, the edge wrapper, registries; **no new table** |
+| Reused | `activate-handler.ts#consumeLiveChallenge` (now exported, param type narrowed, behaviour unchanged) | the SAME single-use live challenge check as activation |
+
+### Endpoint contract
+
+`POST /v1/devices/attest-key`, body (exactly these five fields; unknown fields are a 400):
+
+```
+{ "deviceId": "<uuid>", "challengeId": "<uuid>", "nonce": "<unpadded base64url>",
+  "keyId": "<44-char standard base64 from generateKey>", "attestation": "<base64 CBOR attestation object>" }
+```
+
+Obtain the challenge from `POST /v1/checkin/challenge` first (a LIVE challenge: 120 s, single-use, bound to the device and the caller;
+the SAME pattern and code activation uses; no new challenge table). Responses: **201** `{deviceId, keyId, replaced:false}` (first
+registration), **200** `{..., replaced:true}` (a reinstall's replacement), **409** `key_already_registered` (that key is already the
+device's; nothing is consumed) or `key_previously_retired`, **422** `attestation_rejected` (the attestation did not verify; ONE generic
+code, the reason is logged server-side only) / `challenge_not_consumable` (also the answer for another user's device and for a
+nonexistent one: no existence oracle) / `platform_mismatch`, **429**, **503** `attestation_not_configured`.
+
+**A failed verification still spends the challenge.** It is returned, not thrown, so the transaction commits with the challenge consumed:
+one challenge gives one guess, not a retry loop against the verifier. (A thrown error would have rolled the consumption back.) It raises
+**no** `fraud_signal`: the likeliest cause of a rejection is an honest build/configuration mismatch (a development build against a
+production deployment: wrong aaguid), and an account-wide `attestation_failed` signal would hold every reward the account has; the device
+simply stays `unattestable`, as today.
+
+### Challenge and clientDataHash (the §7.5 interop note)
+
+The first design hashed `SHA-256(canonical_body ‖ RAW nonce bytes)`, the construction `binding.ts` used for activation. The mobile
+builder's library spike found that the recommended React Native module, `@expo/app-integrity` 57.0.2, **takes the challenge as a string
+and hashes that string with SHA-256 itself** before calling App Attest (for both `attestKeyAsync` and `generateAssertionAsync`)
+`[unverified: relayed, not checked here]`. Raw nonce bytes do not survive a round trip through a JS string, so a client built on it could
+not produce the old binding. Registration therefore uses a **string binding**:
+
+```
+S              = {"challengeId":"<uuid>","deviceId":"<uuid>","keyId":"<keyId>","nonce":"<nonce>","platform":"ios","purpose":"attest_key_registration"}
+clientDataHash = SHA-256(UTF-8(S))
+```
+
+keys sorted, no whitespace, UUIDs lowercase, `keyId` the string `generateKey` returned, **`nonce` the unpadded base64url STRING the
+challenge endpoint returned, not decoded**. The client passes `S` as the module's `challenge`. `S` is printable ASCII with no quote or
+backslash, so a template literal and `JSON.stringify` over sorted keys agree and there is no encoding question. Nothing is weakened: the
+nonce string in `S` is the one the server just consumed against the stored SHA-256 of its decoded bytes; `purpose` separates a
+registration hash from an activation hash. Implementation: `string-binding.ts` (generic, `computeStringBinding(sha256, fields)`) and
+`attestKeyChallengeString` / `computeAttestKeyBinding`; unit-pinned byte for byte.
+
+**The same problem applied to the existing iOS activation assertion, so it uses the SAME binding (changed 2026-10-02, before anything
+shipped; the path was unreleased and no client exists).** `activate-handler.ts#assessActivatingDevice` used to compute the iOS
+`clientDataHash` as `computeRequestBinding(sha256, bound, nonceBytes)` = `SHA-256(canonical_body ‖ raw nonce bytes)`, which a
+string-hashing module cannot produce. The iOS branch now calls `computeIosActivationBinding` (`string-binding.ts`), with `req.nonce`
+(the string `consumeLiveChallenge` just consumed). **Android is unchanged**: Play Integrity's `requestHash` is a string the app computes
+itself (a SHA-256 over a `Uint8Array` in JS), so `binding.ts` still serves it. `binding.ts` is otherwise untouched.
+
+**One contract for both iOS endpoints.** In both, `clientDataHash = SHA-256(UTF-8(S))` and the client passes `S` as the module's
+`challenge` (`attestKeyAsync(keyId, S)` for registration, `generateAssertionAsync(keyId, S)` for activation). `S` is canonical JSON: keys
+sorted, no whitespace, printable ASCII, UUIDs lowercase, the nonce the unpadded base64url STRING the challenge endpoint returned (not
+decoded):
+
+| Endpoint | `S` (keys in this order) |
+|---|---|
+| `POST /v1/devices/attest-key` | `{"challengeId":…,"deviceId":…,"keyId":…,"nonce":…,"platform":"ios","purpose":"attest_key_registration"}` |
+| `POST /v1/rewards/{id}/activate` (iOS) | `{"challengeId":…,"deviceCheckTokenSha256":"<hex sha256 of the DeviceCheck token sent>","deviceId":…,"nonce":…,"platform":"ios","purpose":"reward_activation","rewardId":…}` |
+
+`purpose` domain-separates the two (and both from the Android raw-bytes `requestHash`). **H1 is preserved**: the DeviceCheck token's hash is
+inside `S`, so a valid assertion from one device still cannot ride next to another device's clean token (the swapped-token must-fail case,
+P3f AT-5 / H1, passes unchanged in behaviour: unit and Deno). The request body, `request-shape.ts`, the verifier (`app-attest.ts`, which
+takes `clientDataHash` as given) and the decision table are unchanged. Tests moved: `activate-handler.test.ts` (the verifier is handed the
+hash of the literal string, and not the raw-bytes form), `rewards-binding.test.ts` (new string-form cells: literal, every field incl. the token
+hash, domain separation), `rewards-activate.deno.test.ts` and `attest-key.deno.test.ts` (their assertion builders). No pgTAP pins the binding.
+Mutation checks: reverting the iOS branch to raw bytes, and dropping the token hash from `S`, each fail several unit tests.
+
+Separately, and independent of the binding: the module reportedly has **no DeviceCheck token API and no config plugin**, so the App Attest
+entitlement must be added by hand and activation's `deviceCheckToken` still needs a native module (or another library); that gap is the mobile
+builder's, recorded here only because it decides whether a custom native module exists anyway.
+
+**This contract (both endpoints, the string form, the module's hashing of a UTF-8 string, lowercase UUIDs) is `[unverified]` and needs a
+real-device run** before any client is built against it.
+
+### The verification procedure, step by step (every step `[unverified — training knowledge]`)
+
+Apple's server-side validation of an attestation object, as implemented in `app-attest-registration.ts` (reason codes in brackets; the
+verifier returns the first that fails, in this order):
+
+| # | Step | Reason on failure |
+|---|---|---|
+| 0 | the client's key id is the canonical 44-char standard base64 of 32 bytes; `clientDataHash` is 32 bytes; the object is base64 and at most 16 KiB | `key_id_malformed`, `attestation_malformed_base64`, `attestation_too_large` |
+| 1 | decode the CBOR map: exactly `fmt` = `"apple-appattest"`, `attStmt` = exactly `{x5c: [credCert, intermediate], receipt}`, `authData`; `authData` = `rpIdHash(32) ‖ flags(1) ‖ counter(4) ‖ aaguid(16) ‖ credIdLen(2) ‖ credId ‖ COSE_Key`, flags AT set / ED clear, nothing after the key | `attestation_malformed_cbor`, `attestation_bad_structure`, `attestation_bad_fmt`, `authdata_malformed` |
+| 2 | verify the x5c chain to the pinned root: names chain by byte equality, every certificate valid at `now` (± 5 min), the intermediate a CA, the leaf not a CA and P-256, each signature verifies | `chain_parse`, `chain_names`, `chain_validity`, `chain_not_a_ca`, `chain_leaf_is_ca`, `chain_leaf_key`, `chain_signature` |
+| 3 | `nonce = SHA-256(authData ‖ clientDataHash)` equals the single OCTET STRING in the credCert extension `1.2.840.113635.100.8.2` (accepted as `SEQUENCE { OCTET STRING }` or `SEQUENCE { [1] { OCTET STRING } }`) | `nonce_missing`, `nonce_mismatch` |
+| 4 | SHA-256 of the credCert's public key (the 65-byte uncompressed point) equals the key id | `key_id_mismatch` |
+| 5 | `rpIdHash` = SHA-256(`"<TeamID>.<BundleID>"`) | `rp_id_mismatch` |
+| 6 | `counter` = 0 | `counter_not_zero` |
+| 7 | `aaguid` = `appattestdevelop` (development) or `appattest` + seven `0x00` bytes (production): **16 bytes either way** (the brief said "plus 9 zero bytes"; `appattest` is already 9 of the 16) | `aaguid_mismatch` |
+| 8 | `credentialId` = the key id | `credential_id_mismatch` |
+| + | extras, refuse-only: the COSE key is the credCert's key; the key is a valid P-256 point | `cose_key_mismatch`, `public_key_invalid` |
+
+Not done: the `receipt` (an opaque Apple-signed blob for Apple's fraud-metric endpoint) is parsed as bytes and ignored. Deliberately not
+done: revocation, name constraints, key usage / EKU, and refusing on an **unrecognised critical extension** (the chain is rooted in a
+pinned Apple CA, so the check buys nothing and an unknown Apple extension would turn into a false rejection; follow-up K5).
+
+### Trust anchor
+
+Apple's App Attestation Root CA is **pinned in code** (`apple-app-attest-root.ts`, public data). `createAttestationVerifier` takes
+`trustAnchorDer` as a constructor parameter; the only production value is `APPLE_APP_ATTEST_ROOT_DER`, set in
+`privileged.ts#loadAttestKeyVerifierConfig` and nowhere else. Tests construct a verifier with a throw-away root. Pinned by tests
+(`attest-key-isolation.test.ts`): `createAttestationVerifier` is built only by `devices-attest-key/index.ts`; `trustAnchorDer` is assigned
+exactly once outside the verifier, in `privileged.ts`, from the pinned constant; no source mentions an anchor/root environment variable;
+the Deno suite sets plausible variable names and shows the anchor does not move.
+
+- **Provenance `[unverified against a second source]`.** Fetched 2026-10-02 from
+  `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem` by an agent whose outbound TLS passes through a
+  TLS-terminating egress proxy, so the bytes are "what the proxy served for Apple's URL". Subject = issuer =
+  `CN=Apple App Attestation Root CA, O=Apple Inc., ST=California`; EC P-384, `ecdsa-with-SHA384`; valid 2020-03-18 .. 2045-03-15; serial
+  `0B:F3:BE:0E:F1:CD:D2:E0:FB:8C:6E:72:1F:62:17:98`; SHA-256 of the DER
+  `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`. **Before this ships, a human compares that
+  fingerprint with the one Apple publishes (or fetches the URL from a clean machine) and confirms they are equal** (follow-up K2). A unit
+  test pins the SHA-256 of the embedded bytes to the constant and checks the certificate parses, is a CA, is self-signed and signs itself;
+  it cannot tell you the constant was right to begin with.
+
+### Schema (0034) and the re-registration decision
+
+No table is added, so there is nothing new to classify in `private.pii_retention_policy` / `pii_export_policy`, and **no edge_actor policy**
+(edge_actor reaches the key columns only through the definer; its column grant on `app.device` still excludes `attest_key_id` /
+`attest_public_key` and now the two new columns). What changed:
+
+- `app.device` gains `attest_registered_at` (set only by the registration function) and `attest_retired_key_hashes text[]` (the SHA-256 of
+  the last 16 retired key id strings); `CHECK` constraints cap the list at 16 and require a key id and public key whenever
+  `attest_registered_at` is set. Neither column is exported or exposed through `api.my_device`.
+- **`app.register_attest_key(p_user_id, p_device_id, p_key_id, p_public_key)`**: invoker-rights, the shape of `app.activate_*`
+  (`service_role` today; `private_definer` for the wrapper). It checks the key is a 65-byte uncompressed point **and that the key id is
+  the base64 SHA-256 of it** (the database refuses to pair an id with a key that does not hash to it), locks the caller's own iOS device
+  row, refuses the same key (`55000`) and a retired key (`23514`), writes the key, and audits (`audit_log`
+  `device.attest_key_registered` / `device.attest_key_replaced`, with 16-hex hash prefixes and the counter the old key reached; never a key
+  id or key). A first registration leaves the counter as it was.
+- **`private.register_attest_key_for_actor(p_device_id, p_key_id, p_public_key)`**: `SECURITY DEFINER`, owned by `private_definer`, the
+  only EXECUTE for `edge_actor`; reads the BOUND `kind = user` actor (a system delegate is refused), calls the function above as
+  `private_definer` under the new actor-keyed policy `pd_edge_act_device_update` (registered in `private.definer_policy_allowlist` and
+  `definer_policy_exprs.txt`) and a column grant limited to what the function writes. `app.register_attest_key` itself is **not**
+  callable by `edge_actor`. PR2-PR4 note: `Repo#attestKey.register` becomes `select private.register_attest_key_for_actor(deviceId, keyId, publicKey)`;
+  `deviceKey` and `deviceAttestState` are plain reads inside edge_actor's SELECT grant.
+- **Re-registration (a reinstall means a new key).** The Secure Enclave key does not survive a reinstall; an install that kept its device id
+  asks to register the new key on the SAME row. The old counter (say 40) cannot carry over (the new key's assertions start at 1), but
+  0032's trigger forbids any counter decrease. Decision: **a counter may fall only when a key is replaced by a key this row has never used,
+  and that is decided by the CONTENT of the UPDATE, not by who runs it.** The redefined `app.device_attest_counter_monotonic()` allows a
+  decrease iff all of: the new counter is 0; the key id and the public key both changed (neither NULL); the OLD key's hash is in the NEW
+  retired list; and the NEW key's hash is in neither the OLD nor the NEW retired list. So no assertion ever signed under a key the server
+  has seen can be replayed against a lowered counter: the lowered counter belongs to a key with no history. Everything else (the same key,
+  a hand-written rollback, a swap that "forgets" to retire, a retired key coming back, forgetting a retired entry in the same statement) is
+  `23514`. The retired list is FIFO-capped at 16 (a key that aged off could return, but that needs a fresh Apple attestation, and Apple is
+  believed to allow `attestKey` once per key `[unverified]`; follow-up K6).
+  Alternatives rejected: leave the counter alone on replacement (the new key's first 40 assertions would fail as replays and raise an
+  account-wide `attestation_failed`); a per-key counter in a side table (a new table with all its registry rows, for what two columns and a
+  trigger do); a role-based exemption in the trigger (then every role that may hold it holds a rollback).
+- **An attested grade requires a REGISTERED key.** `Repo#rewards.deviceAttestState` (privileged.ts, a one-statement change inside the
+  P3f section) now returns the stored key id and public key only when `attest_registered_at` is set, i.e. only for a key written by
+  `app.register_attest_key` after a verified attestation. A key written any other way reads as "no key" and grades `unattestable`, never
+  `attested`. The §7.5 decision table and `app-attest.ts` are unchanged; `activate-handler.ts` changed only in the iOS binding (see the
+  interop note) and the exported challenge helper. The activation suites changed only for that binding and one line in
+  `rewards-activate.deno.test.ts#registerKey`, which now also sets `attest_registered_at` (it stands in for a verified registration).
+- After a replacement the OLD key's assertions fail `key_id_mismatch` (graded `failed`, as for any wrong key) and the new key's start from
+  counter 1: both proved end to end against real Postgres through the real activation handler.
+
+### Configuration
+
+Read **only** in `privileged.ts` (`loadAttestKeyVerifierConfig`); a missing or malformed variable means unconfigured and the endpoint
+answers 503 before any read or write: `GR_APPLE_TEAM_ID`, `GR_APPLE_BUNDLE_ID` (the same two the DeviceCheck/assertion path reads; the
+App ID is `<team>.<bundle>`) and **`GR_APPLE_APPATTEST_ENV`** (`production` | `development`: which aaguid an attestation must carry). It
+is its own variable rather than `GR_APPLE_DEVICECHECK_ENV` because it is a property of the app build's entitlement, DeviceCheck's is a
+property of the API host, and registration needs no DeviceCheck credential; in a normal deployment the two agree. There is no
+environment-mismatch canary (a deploy configured `production` receiving a development build rejects with `aaguid_mismatch`, logged
+server-side; compare follow-up F16). The trust anchor is **not** configuration. Rate limits (`devices-attest-key:user` 10/h,
+`devices-attest-key:device:<id>` 10/day) have no plan-stated numbers.
+
+### Tests (what each proves)
+
+- **Unit (vitest)**: `app-attest-registration.test.ts` (verifier, parsers, pinned root, binding; every must-fail below),
+  `attest-key-handler.test.ts` (order of checks, challenge discipline, ownership, rate limits, request shape),
+  `attest-key-isolation.test.ts` (source-level guarantees), the file list in `rewards-isolation.test.ts` extended.
+- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 84 assertions: schema, privileges, first registration, the counter,
+  replacement, the trigger decided by content including hand-written writes, the FIFO cap, validation and ownership, who can read or write
+  the new columns, export and deletion) and `17_attest_key_registration_edge.sql` (the edge_actor lane as a real `edge_gateway` login, 46
+  assertions: every registration proved by reading the row back, direct writes closed, the counter cannot be lowered by edge_actor, foreign
+  device, delegate refused, stale binding).
+- **Deno integration** (`attest-key.deno.test.ts`, real `withOwnership`, real SQL): registration and audit, a key written outside the
+  verified path is not handed to the verifier, replacement, the same key, a failed attestation spends the challenge, a replayed challenge and
+  two concurrent requests on one challenge, another user's device, Android, an uncommitted-first-registration row-lock probe, the database's own
+  refusals, account deletion, the config loader, the production wiring rejecting a test-root chain, and **two end-to-end tests through
+  `handleActivation` with the real assertion verifier** (before registration: held `unattestable`; after: `attested` and `issued`; after a
+  reinstall: the new key verifies from counter 1 and the old key is `failed`).
+- **Must-fail cells**: wrong root, same-name root with another key, broken chain, wrong issuer name, intermediate not a CA, leaf claiming to
+  be a CA, expired / not-yet-valid leaf, wrong x5c count, non-P-256 leaf, wrong nonce, missing nonce extension, a replayed or re-bound
+  challenge / device / key, wrong rpIdHash (and a verifier configured for another app), nonzero counter, wrong aaguid in both directions,
+  keyId mismatch, credentialId mismatch, COSE mismatch, bad flags / trailing bytes / truncated authData, wrong fmt, malformed key id /
+  base64 / oversize, malformed CBOR (truncated, trailing, indefinite, tag, junk), structurally wrong objects, malformed DER (trailing
+  byte, non-minimal length, mutated TBS, v1, mismatched inner algorithm, padded signature INTEGER), another user's device, a nonexistent
+  device, another user's challenge, another device's challenge, a prefetched / expired challenge, a wrong nonce, an Android device.
+- **Mutation proofs** (applied to `/tmp` copies, nothing planted in the tree), each caught by the named layer: verifier checks removed
+  one at a time (nonce, rpIdHash, counter, aaguid, key-id hash, credentialId, COSE key, fmt, chain names, intermediate signature, leaf
+  signature, validity, intermediate-is-CA, DER minimal / negative INTEGER, trailing certificate bytes, binding purpose / device / nonce
+  dropped, key sorting) by the unit suite; handler (failure thrown instead of returned, device ownership, platform check, same-key
+  pre-check, unconfigured accepted) by the unit suite; SQL (trigger allows any decrease, a role-based exemption, no retired check, the
+  OLD list not checked, no key-id-hash check, no owner in the device select, an edge grant on the app function or on a key column, a
+  broadened `pd_edge_act_device_update`, a delegate allowed, no FIFO trim, audit actions swapped, first registration resetting the counter)
+  by pgTAP or the standalone inventory check; and (Deno) the registered-key gate removed, the row lock removed, an error mapping removed,
+  and the trust anchor read from the environment (also by the isolation test).
+
+### Accepted follow-ups (K-numbers are this work's own)
+
+- **K1. Live conformance run on a physical iPhone.** Run a development build, `generateKey` + `attestKey`, POST the result, and confirm
+  a 201. Each reason code is a lead if it fails: `chain_*` (the intermediate's actual extensions, basicConstraints, validity),
+  `nonce_*` (the extension's DER shape), `aaguid_mismatch` (environment), `cose_key_mismatch` (an extra check not on Apple's list),
+  `authdata_malformed` (flags), `attestation_bad_structure` (extra `attStmt` keys). Then repeat with a production-environment build
+  (TestFlight) against a `production` deployment, then run an activation with the registered key (this also exercises the assertion verifier's
+  own unverified layout, F1). The same run settles the string-binding contract above and the activation proposal.
+- **K2. Compare the pinned root's fingerprint with Apple's published one** (provenance above).
+- **K3. The `receipt` is ignored.** It could feed Apple's fraud-metric endpoint; not built.
+- **K4. One key per device row; a second account on the same install needs a new key.** Apple allows `attestKey` once per key, so two
+  accounts cannot register the SAME key, and `app.device_link_signals` (which links device rows by `attest_key_id`) therefore does not link
+  two accounts on one iOS install by key. iOS multi-account detection is DeviceCheck's job (the bits), as before.
+- **K5. Unrecognised critical extensions are not rejected** (above).
+- **K6. The retired-key history is bounded at 16.**
+- **K7. Rate-limit numbers (10/h, 10/day) have no plan-stated source.**
+- **K8. No iOS client exists.** The wire contract above is the specification; see the interop note for the library question.
+- **K9. No environment-mismatch canary** (compare F16).
+- **K10. Certificate-validity skew is ±5 minutes** (clock skew between this server and Apple's issuance). Apple's credential certificates
+  are believed short-lived `[unverified]`; if the live run shows a leaf already expired at attestation time, this is the knob and the
+  reason code is `chain_validity`.
