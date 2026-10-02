@@ -66,11 +66,17 @@ describe("privileged.ts — withOwnership is genuinely implemented (P3c), not th
   // statement/lock wait fails INSIDE the transaction (rolling it back)
   // rather than the HTTP layer timing out while the write keeps running
   // and later commits behind the client's back.
-  it("withOwnership and withOwnershipBatch both set statement_timeout and lock_timeout below the 15s HTTP request race", () => {
+  it("withOwnership, withOwnershipBatch and withSystemCatalogImport all set statement_timeout and lock_timeout below the 15s HTTP request race", () => {
     const statementTimeoutCount = (PRIVILEGED_TS.match(/set local statement_timeout = '10s'/g) ?? []).length;
     const lockTimeoutCount = (PRIVILEGED_TS.match(/set local lock_timeout = '5s'/g) ?? []).length;
-    expect(statementTimeoutCount).toBe(2); // withOwnership + withOwnershipBatch
-    expect(lockTimeoutCount).toBe(2);
+    // ⛔ UPDATED (P3e, import-catalog): withSystemCatalogImport (privileged.ts's
+    // additive end-of-file section) is a THIRD legitimate transaction
+    // wrapper with the same deadline discipline — see that function's own
+    // doc for why it also needs statement_timeout/lock_timeout (it runs
+    // the SAME "SET LOCAL ROLE service_role" + role-assertion pattern as
+    // withOwnership/withOwnershipBatch, for the same reason).
+    expect(statementTimeoutCount).toBe(3); // withOwnership + withOwnershipBatch + withSystemCatalogImport
+    expect(lockTimeoutCount).toBe(3);
   });
 
   it("withOwnership and withOwnershipBatch map a statement/lock-timeout SQLSTATE to Errors.serviceUnavailable(), not an opaque 500", () => {

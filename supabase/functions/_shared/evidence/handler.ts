@@ -109,13 +109,20 @@
 
 // @deno-types="../scoring/scoring-types.d.ts"
 import { scorePlay } from "../scoring/vendor/score-play.js";
-import type { Repo, StoredEvidenceRow, ExistingEvidenceRow } from "../types.ts";
+import type { Repo, RepickRefusal, StoredEvidenceRow, ExistingEvidenceRow } from "../types.ts";
 import { HttpError, Errors } from "../http.ts";
 import { parseEvidenceSubmission, type EvidenceSubmission, type FixSubmission } from "./request-shape.ts";
 import { deriveSourceRef } from "./source-ref.ts";
-import { deriveFix, type DerivedFix } from "./derive-fix.ts";
+import { deriveFix, type DerivedFix, type MatchResult } from "./derive-fix.ts";
 import { classifyCatalogSubmission, type ManifestSigClaim } from "../catalog/classify-version.ts";
-import { verifyManifestSignature } from "../catalog/signature.ts";
+import { verifyArtifactSignature } from "../catalog/signature.ts";
+// ⛔ FIX (P3e round 2 gate, H1): the REAL P1 manifest statement bytes —
+// `MANIFEST_DOMAIN` + `canonicalStringify` — a direct port of
+// `tools/catalog/src/manifest.ts`'s own (see manifest-artifact.ts's own
+// header). The old payload (`golfraven-catalog-manifest-v1:${int}:${sha}`)
+// was never a shape the real P1 signer ever produced, so no real
+// `manifest.sig.json` signature could ever verify against it.
+import { canonicalStringify, compareCatalogVersions, MANIFEST_DOMAIN } from "../catalog/manifest-artifact.ts";
 
 const MAX_OPEN_QUEUED_PER_USER = 20; // build plan §4.7 item 8 / AT 8, item 15
 const CLOCK_SKEW_MAX_MS = 24 * 60 * 60 * 1000; // security doc §3
@@ -189,9 +196,19 @@ export interface EvidenceIntakeDeferred {
   replay: boolean;
 }
 
-export type EvidenceIntakeResult = EvidenceIntakeSuccess | EvidenceIntakeQueued | EvidenceIntakeDeferred;
+/** NEW-3: the stored state of a `queued_catalog` row the drain aged out
+ * (7 days, no covering import). Replaying it returns THIS (HTTP 200 — the
+ * server has the submission and will not re-process it; a 5xx would make
+ * the client's outbox retry forever), never a 500. A replayed `unknown_id`
+ * row is the 422 `unknown_id` the live submission would have returned. */
+export interface EvidenceIntakeNeedsAttention {
+  status: "needs_attention";
+  evidenceId: string;
+}
 
-function fixesOf(submission: EvidenceSubmission): FixSubmission[] {
+export type EvidenceIntakeResult = EvidenceIntakeSuccess | EvidenceIntakeQueued | EvidenceIntakeDeferred | EvidenceIntakeNeedsAttention;
+
+export function fixesOf(submission: EvidenceSubmission): FixSubmission[] {
   switch (submission.source) {
     case "foreground_checkin":
       return [submission.fix];
@@ -209,7 +226,7 @@ function fixesOf(submission: EvidenceSubmission): FixSubmission[] {
  * reason, simply isn't a co-signal — never a structural error on its
  * own (a stale/expired token is a normal, scoreable shape, not an
  * attack). */
-async function consumeTokenForFix(repo: Repo, submittingDeviceId: string, fix: FixSubmission) {
+export async function consumeTokenForFix(repo: Repo, submittingDeviceId: string, fix: FixSubmission) {
   if (!fix.checkinTokenJti) return null;
   return repo.checkinToken.consumeForFix(fix.checkinTokenJti, submittingDeviceId, fix.capturedAt);
 }
@@ -218,12 +235,12 @@ async function consumeTokenForFix(repo: Repo, submittingDeviceId: string, fix: F
  * "clock skew over 24h raises a fraud_signal". Returns the offending
  * fixIds (empty when every fix is within tolerance) so the caller can
  * raise ONE fraud_signal naming all of them, rather than one per fix. */
-function findClockSkewedFixIds(fixes: FixSubmission[], now: Date): string[] {
+export function findClockSkewedFixIds(fixes: FixSubmission[], now: Date): string[] {
   const nowMs = now.getTime();
   return fixes.filter((f) => Math.abs(nowMs - f.capturedAt) > CLOCK_SKEW_MAX_MS).map((f) => f.fixId);
 }
 
-async function resolveCourseAnchor(repo: Repo, courseId: string | undefined): Promise<
+export async function resolveCourseAnchor(repo: Repo, courseId: string | undefined): Promise<
   | { kind: "none" }
   | { kind: "resolved"; id: string }
   | { kind: "unknown" }
@@ -379,7 +396,7 @@ function assertSelfReportDateWindow(localDate: string, facilityTz: string, now: 
  * request's writes (token consumption, the evidence insert, a fraud
  * signal) — a genuinely new submission never reaches those with an
  * unverified date. */
-function assertServerDerivableLocalDate(submission: EvidenceSubmission, facilityTz: string, now: Date): void {
+export function assertServerDerivableLocalDate(submission: EvidenceSubmission, facilityTz: string, now: Date): void {
   const anchorMs = anchorCapturedAtMs(submission);
   if (anchorMs === null) {
     assertSelfReportDateWindow(submission.localDate, facilityTz, now);
@@ -463,6 +480,23 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow, batc
   if (existing.status === "queued_catalog") {
     return { status: "queued_catalog", evidenceId: existing.id };
   }
+  // NEW-3: the two TERMINAL states a drained row can end in carry a NULL
+  // facility (like queued), so they are decided from `status` BEFORE the
+  // null-facility guard below (which would otherwise 500 and make the
+  // client's outbox retry forever).
+  if (existing.status === "unknown_id") {
+    throw Errors.unprocessable("unknown_id", "a referenced catalog id did not resolve once the covering catalog version was imported");
+  }
+  if (existing.status === "needs_attention") {
+    return { status: "needs_attention", evidenceId: existing.id };
+  }
+  // B3: only a queued_catalog row has a null facilityId — every OTHER
+  // status always carries a resolved one; anything else is a genuine
+  // data inconsistency, failed closed here ONCE for every path below.
+  if (existing.facilityId === null) {
+    console.error(`buildReplayResult: non-queued evidence row has a null facilityId (evidenceId=${existing.id}, status=${existing.status})`);
+    throw Errors.internal();
+  }
   if (existing.courseId === null) {
     return {
       status: "accepted",
@@ -495,6 +529,19 @@ async function buildReplayResult(repo: Repo, existing: ExistingEvidenceRow, batc
     // be — the batch handler's own backfill step fills in the real
     // `play` once the group's scoring pass completes.
     if (batchMode) {
+      // `existing.facilityId` is typed `string | null` (B3: a
+      // `queued_catalog` row carries no resolved facilityId), but this
+      // branch is reached only when `status !== "queued_catalog"` (that
+      // case returns at this function's own top) — every other status
+      // always has a resolved facilityId. Assert rather than silently
+      // widen `EvidenceIntakeDeferred.facilityId` itself, so a genuine
+      // data inconsistency (an accepted/other row with a null
+      // facilityId) still fails loudly instead of leaking `null` into a
+      // field every other reader assumes is always a real id.
+      if (existing.facilityId === null) {
+        console.error(`buildReplayResult: non-queued evidence row has a null facilityId (evidenceId=${existing.id}, status=${existing.status})`);
+        throw Errors.internal();
+      }
       return { status: "deferred", evidenceId: existing.id, facilityId: existing.facilityId, courseId: existing.courseId, localDate: existing.localDate, replay: true };
     }
     // ⛔ FIX (P3d gate round 3, S2, MEDIUM): "batch phase A commits, then
@@ -613,9 +660,12 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   }
   const device = knownDevice ?? (await repo.device.ensureOwn(submission.deviceId, null));
 
-  // ---- Catalog skew (AT 8 / AT 15 / G3-10) — BEFORE any id lookup. ----
+  // ---- Catalog skew (AT 8 / AT 15 / G3-10) — BEFORE any id lookup.
+  // ⛔ FIX (P3e round 2 gate, H1): `submission.catalogVersion` is now the
+  // SITE version string; resolved against `catalog_version.site_version`,
+  // never the internal int. ----
   const currentVersion = await repo.catalog.currentVersion();
-  const declaredVersionRow = await repo.catalog.versionRow(submission.catalogVersion);
+  const declaredVersionRow = await repo.catalog.versionRowBySiteVersion(submission.catalogVersion);
   // AT 15: "a revoked-kid version gets 422 catalog_stale" — looked up
   // from the SAME signing-key table manifestSig verification uses.
   let declaredVersionKidRevoked = false;
@@ -626,28 +676,37 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   const manifestSig: ManifestSigClaim | undefined = submission.manifestSig
     ? {
         kid: submission.manifestSig.kid,
-        signatureB64Url: submission.manifestSig.signatureB64Url,
-        // should-fix (P3c gate round 2): "sign a domain-tagged payload
-        // that binds the version and the manifest sha256" — a bare
-        // integer signature could be replayed against a DIFFERENT
-        // future release that happens to share a version number; this
-        // binds the signature to the SPECIFIC content the client claims
-        // that version's manifest hashes to.
-        payload: `golfraven-catalog-manifest-v1:${submission.catalogVersion}:${submission.manifestSig.manifestSha256}`,
+        // STANDARD (padded) base64 now — the real P1 artifact signature
+        // format (signature.ts's own `verifyArtifactSignature`).
+        signature: submission.manifestSig.sig,
+        // ⛔ FIX (P3e round 2 gate, H1): the REAL P1 manifest statement
+        // (`tools/catalog/src/manifest.ts#ManifestStatementSchema`:
+        // catalogVersion/contractVersion/kid/manifestSha, domain-tagged,
+        // canonical JSON) — a real `manifest.sig.json` signature verifies
+        // against exactly these bytes, unmodified.
+        payload:
+          MANIFEST_DOMAIN +
+          canonicalStringify({
+            catalogVersion: submission.catalogVersion,
+            contractVersion: submission.manifestSig.contractVersion,
+            kid: submission.manifestSig.kid,
+            manifestSha: submission.manifestSig.manifestSha,
+          }),
       }
     : undefined;
   const versionOutcome = await classifyCatalogSubmission(
     {
       declaredVersion: submission.catalogVersion,
-      currentVersion: currentVersion?.version ?? null,
-      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked } : null,
+      currentVersion: currentVersion?.siteVersion ?? null,
+      currentInternalVersion: await releaseRankOf(repo, currentVersion),
+      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked, internalVersion: (await releaseRankOf(repo, declaredVersionRow)) ?? declaredVersionRow.version } : null,
       now: repo.now(),
       manifestSig,
     },
     async (claim) => {
       const key = await repo.catalog.signingKey(claim.kid);
       if (!key || key.revokedAt) return false;
-      return verifyManifestSignature({ publicKeyB64Url: key.publicKeyB64Url, signatureB64Url: claim.signatureB64Url, payload: claim.payload });
+      return verifyArtifactSignature({ publicKeyB64Url: key.publicKeyB64Url, signatureB64Url: claim.signature, payload: claim.payload });
     },
   );
   if (versionOutcome.kind === "stale") throw Errors.unprocessable("catalog_stale", "submitted catalogVersion is outside the accepted skew window, or its signing kid is revoked");
@@ -656,10 +715,8 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   // "an id newer than the server's import returns 202" (AT 8) — reachable
   // when the (verified, per above) declared version is itself newer than
   // what the server has imported: by definition the ledger cannot have
-  // this id yet. See classify-version.ts's own header for why, absent
-  // any registered signing key, this path never actually verifies in
-  // this environment (documented deferral).
-  if (currentVersion !== null && versionOutcome.resolvedVersion > currentVersion.version) {
+  // this id yet.
+  if (currentVersion === null || compareCatalogVersions(versionOutcome.resolvedVersion, currentVersion.siteVersion ?? "") > 0) {
     // ⛔ FIX (P3c gate round 2, item 8): count-then-insert race — the
     // 20-open-queued cap is now checked and reserved under the SAME
     // advisory lock `evidence.countOpenQueued` itself takes (see
@@ -669,21 +726,21 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     if (openCount >= MAX_OPEN_QUEUED_PER_USER) {
       throw Errors.tooManyRequests(`this account already has ${MAX_OPEN_QUEUED_PER_USER} open queued_catalog evidence rows`);
     }
+    // ⛔ FIX (P3e round 2 gate, B3): the CLAIM, never a resolved
+    // facility_id/course_id/catalog_version (those FKs would reject an
+    // id the server doesn't have yet) — and the FULL validated
+    // submission in `queued_input`, so drain time (B2) can re-run real
+    // intake derivation instead of merely flipping a status.
     const inserted = await repo.evidence.insertIdempotent({
+      kind: "queued",
       sourceRef,
       inputHash,
       source: submission.source,
-      facilityId: submission.facilityId,
-      courseId: submission.courseId ?? null,
-      startedAt: null,
-      endedAt: null,
+      claimedFacilityId: submission.facilityId,
+      claimedCourseId: submission.courseId ?? null,
+      claimedCatalogVersion: submission.catalogVersion,
       localDate: submission.localDate,
-      summary: { queuedForCatalogVersion: submission.catalogVersion },
-      integrity: {},
-      cosignal: {},
-      attestationGrade: "unattestable",
-      matcherVersion: null,
-      catalogVersion: submission.catalogVersion,
+      queuedInput: submission as unknown as Record<string, unknown>,
       status: "queued_catalog",
       deviceId: device.id,
     });
@@ -699,7 +756,10 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
       if (inserted.inputHash !== inputHash) {
         throw Errors.conflict("evidence_conflict", "a concurrent replay of this evidence id was submitted with different content than what is already on file");
       }
-      return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: submission.facilityId, courseId: submission.courseId ?? null, localDate: submission.localDate }, batchMode);
+      // facilityId/courseId are null here, matching the real row (a
+      // queued row never sets them — B3) — buildReplayResult's own
+      // queued_catalog branch never reads them anyway.
+      return buildReplayResult(repo, { id: inserted.id, status: inserted.status, inputHash: inserted.inputHash, facilityId: null, courseId: null, localDate: submission.localDate }, batchMode);
     }
     return { status: "queued_catalog", evidenceId: inserted.id };
   }
@@ -800,7 +860,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   let holes: 9 | 18 = 18;
   if (submission.source === "foreground_dwell" && resolvedCourseId) {
     const holeCount = await repo.catalog.courseHoleCount(resolvedCourseId);
-    if (holeCount > 0) holes = holeCount >= 18 ? 18 : 9;
+    holes = dwellHolesFromCount(holeCount);
   }
 
   const summary: Record<string, unknown> = { localDate: submission.localDate };
@@ -824,6 +884,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   Object.assign(summary, fixPayload);
 
   const inserted = await repo.evidence.insertIdempotent({
+    kind: "resolved",
     sourceRef,
     inputHash,
     source: submission.source,
@@ -833,11 +894,19 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     endedAt: null,
     localDate: submission.localDate,
     summary,
-    integrity: {},
+    integrity: await fixCoordsIntegrity(repo, resolvedCourseId, fixesOf(submission)),
     cosignal: {},
     attestationGrade: worstGrade,
     matcherVersion: null,
-    catalogVersion: currentVersion?.version ?? submission.catalogVersion,
+    // ⛔ FIX (P3e round 2 gate, H1): the RESOLVED version's own internal
+    // int (`declaredVersionRow.version` — `submission.catalogVersion`
+    // always equals `versionOutcome.resolvedVersion`, per
+    // classify-version.ts's own contract, so the row already fetched for
+    // it is the right one), falling back to `currentVersion` only when
+    // the submission's own version row is somehow absent (should not
+    // happen once versionOutcome is "ok", but fails closed to the best
+    // available int rather than a hard error).
+    catalogVersion: declaredVersionRow?.version ?? currentVersion?.version ?? null,
     status: "accepted",
     deviceId: device.id,
   });
@@ -891,8 +960,12 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     };
   }
 
+  // Serialize with any concurrent scorer of this play BEFORE reading the
+  // evidence set (see `Repo#play.lockForScoring`).
+  await repo.play.lockForScoring(resolvedCourseId, submission.localDate);
   const priorRows = await repo.evidence.listForPlay(resolvedFacilityId, resolvedCourseId, submission.localDate);
-  const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes);
+  const disambiguation = await repo.play.disambiguation(resolvedCourseId, submission.localDate);
+  const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes, disambiguation.effective);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: resolvedFacilityId,
@@ -921,7 +994,7 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
     courseId: resolvedCourseId,
     facilityId: resolvedFacilityId,
     playDate: submission.localDate,
-    courseDisambiguatedBy: null,
+    courseDisambiguatedBy: disambiguation.stored,
     scoreBadge: outcome.score_badge,
     scoreMonetary: outcome.score_monetary,
     hardSignal: outcome.contributions.some((c) => c.hard),
@@ -958,6 +1031,16 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   };
 }
 
+/** The "N releases behind" arithmetic ranks by SITE-version order, not the
+ * internal `version` int (import order — it diverges after a rollback
+ * republish). Falls back to the int only for a row with no `site_version`
+ * (pre-import-catalog fixtures). */
+async function releaseRankOf(repo: Repo, row: { version: number; siteVersion: string | null } | null): Promise<number | null> {
+  if (row === null) return null;
+  if (row.siteVersion === null) return row.version;
+  return (await repo.catalog.releaseRank(row.siteVersion)) ?? row.version;
+}
+
 export interface FinalizeScoringResult {
   play: EvidenceIntakeSuccess["play"];
 }
@@ -983,6 +1066,15 @@ export interface FinalizeScoringResult {
  * underlying `app.evidence` row was actually stored under (P3c gate
  * round 2, item 11's own reasoning: a tombstoned id is rewritten to its
  * survivor BEFORE the row is ever persisted) — never re-resolved here. */
+/** R3: the dwell round-length bar for a course. ONLY a known count of
+ * exactly 9 earns the lower 9-hole threshold; an unknown count (0 — e.g. an
+ * imported course whose artifact carried neither `holesDetail` nor
+ * `holes`) and any other value (12, 27, ...) take the STRICTER 18-hole
+ * threshold — an unknown hole count can never grant a round more credit. */
+export function dwellHolesFromCount(holeCount: number): 9 | 18 {
+  return holeCount === 9 ? 9 : 18;
+}
+
 export async function finalizeScoringForKey(repo: Repo, facilityId: string, courseId: string, localDate: string): Promise<FinalizeScoringResult> {
   const facilityTz = await repo.catalog.facilityTz(facilityId);
   if (!facilityTz) {
@@ -994,8 +1086,10 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
     throw Errors.internal();
   }
 
+  await repo.play.lockForScoring(courseId, localDate);
   const rows = await repo.evidence.listForPlay(facilityId, courseId, localDate);
-  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows);
+  const disambiguation = await repo.play.disambiguation(courseId, localDate);
+  const evidenceForScoring = reconstructEvidenceFromStoredRows(rows, disambiguation.effective);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: facilityId,
@@ -1018,7 +1112,7 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
     courseId,
     facilityId,
     playDate: localDate,
-    courseDisambiguatedBy: null,
+    courseDisambiguatedBy: disambiguation.stored,
     scoreBadge: outcome.score_badge,
     scoreMonetary: outcome.score_monetary,
     hardSignal: outcome.contributions.some((c) => c.hard),
@@ -1046,11 +1140,371 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
   };
 }
 
+// ============================================================================
+// P3e round 2 gate, B2 ("Draining launders rows... never promote without
+// re-running intake"): `_shared/catalog/drain-orchestrator.ts` calls this
+// for every `queued_catalog` row whose catalog-skew classification now
+// resolves — it re-runs the REAL derivation (tombstone rewrite via
+// `resolveLedgerId`, facility/course pairing, localDate, the matcher, the
+// scorer), through the SAME functions live intake uses
+// (`resolveCourseAnchor`/`assertServerDerivableLocalDate`/`fixesOf`/
+// `findClockSkewedFixIds`/`consumeTokenForFix`/`deriveFix`/
+// `finalizeScoringForKey`, all exported above for exactly this reuse),
+// never a hand-rolled reimplementation and never a raw status flip.
+//
+// Kept a SEPARATE function from `handleEvidenceIntake` rather than a
+// branch inside it: draining is not a live HTTP request (no rate limit to
+// check, no NEW device to resolve or cap, no `findExisting`/replay
+// question — the row it's re-evaluating already exists, by definition),
+// and folding "re-evaluate an existing row" into the single-item live
+// pipeline's `findExisting`-then-insert shape (P3c gate round 3's own,
+// carefully hardened replay/conflict design) risked reintroducing exactly
+// the class of subtle regression that design was built to prevent. What
+// this function DOES share, deliberately, is every derivation PRIMITIVE
+// the live path uses — the duplication is in the outer SEQUENCING
+// (insert-a-new-row vs. update-an-existing-one), not in how any single
+// fact (a resolved id, a local date, a fix's grade) gets computed.
+// ============================================================================
+
+export type RedrainResult =
+  | { kind: "resolved"; evidenceId: string; facilityId: string; courseId: string | null; play: EvidenceIntakeSuccess["play"] | null }
+  // `claimedVersionImported: false` (NEW-1) = the row's claimed
+  // `site_version` has no `catalog_version` row yet, so its ids were NOT
+  // judged at all — the drain must not treat "a newer import already ran"
+  // as coverage for it. Absent/true = the ids were (or could not be)
+  // judged against the claimed version's own import.
+  | { kind: "still_unresolved"; claimedVersionImported?: boolean }
+  | { kind: "terminal_unknown_id" };
+
+/** `queuedInputRaw` is `app.evidence.queued_input` read back — re-parsed
+ * (not merely cast) via `parseEvidenceSubmission`, the SAME strict
+ * validator a live submission goes through, so a stored value that
+ * somehow no longer parses (should be unreachable — it was written FROM
+ * an already-validated submission) fails safely rather than propagating
+ * a malformed shape into the scorer. The row's own `device_id`
+ * (`Repo#evidence.deviceIdFor`) is looked up internally — the SAME
+ * submitting device a live request's checkin-token check would use. */
+export async function redrainQueuedEvidenceRow(repo: Repo, existingId: string, queuedInputRaw: unknown, asOf: Date = repo.now()): Promise<RedrainResult> {
+  // `asOf` = when the row was QUEUED (the caller passes created_at). The
+  // self-report date window and the clock-skew check are properties of
+  // the SUBMISSION at the time the client made it — judging them against
+  // drain time would wrongly 422/flag a perfectly good row that merely
+  // waited (up to 7 days) for its catalog import. Version classification
+  // below deliberately still uses the real `repo.now()`.
+  const parsed = parseEvidenceSubmission(queuedInputRaw);
+  if (!parsed.ok) {
+    console.error(`redrainQueuedEvidenceRow: stored queued_input for evidence ${existingId} no longer parses: ${parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`);
+    return { kind: "terminal_unknown_id" };
+  }
+  const submission = parsed.value;
+  const deviceId = await repo.evidence.deviceIdFor(existingId);
+  if (!deviceId) {
+    console.error(`redrainQueuedEvidenceRow: evidence ${existingId} has no device_id on record`);
+    return { kind: "terminal_unknown_id" };
+  }
+
+  // ---- Re-run catalog-skew classification — identical shape to
+  // handleEvidenceIntake's own (H1: site version, real P1 statement). ----
+  const currentVersion = await repo.catalog.currentVersion();
+  const declaredVersionRow = await repo.catalog.versionRowBySiteVersion(submission.catalogVersion);
+  // ⛔ FIX (P3e round 2 gate, NEW-1, BLOCKER): the ledger can only be
+  // judged against the version the row CLAIMED. A newer, validly signed
+  // claim classifies `ok` even though that version has not been imported
+  // yet (it is the very reason the row was queued) — and a ledger lookup
+  // against the OLDER current import would then miss every id and end the
+  // row `unknown_id`, permanently, on the first drain (which runs after
+  // EVERY import, including a failed one). Until the claimed version has
+  // a `catalog_version` row, the row is simply still unresolved: it stays
+  // queued, and the 7-day timer (not the ledger) is the only thing that
+  // can end it.
+  // (Only the NEWER-than-current case: a claim OLDER than the current
+  // import with no row is a stale claim — classified `stale` below and, once
+  // a covering import has run, judged terminal by M1 as before; the ledger
+  // it is judged against is then the current import's, a superset.)
+  if (declaredVersionRow === null && (currentVersion === null || compareCatalogVersions(submission.catalogVersion, currentVersion.siteVersion ?? "") > 0)) {
+    return { kind: "still_unresolved", claimedVersionImported: false };
+  }
+  let declaredVersionKidRevoked = false;
+  if (declaredVersionRow) {
+    const declaredKey = await repo.catalog.signingKey(declaredVersionRow.kid);
+    declaredVersionKidRevoked = Boolean(declaredKey?.revokedAt);
+  }
+  const manifestSig: ManifestSigClaim | undefined = submission.manifestSig
+    ? {
+        kid: submission.manifestSig.kid,
+        signature: submission.manifestSig.sig,
+        payload:
+          MANIFEST_DOMAIN +
+          canonicalStringify({
+            catalogVersion: submission.catalogVersion,
+            contractVersion: submission.manifestSig.contractVersion,
+            kid: submission.manifestSig.kid,
+            manifestSha: submission.manifestSig.manifestSha,
+          }),
+      }
+    : undefined;
+  const versionOutcome = await classifyCatalogSubmission(
+    {
+      declaredVersion: submission.catalogVersion,
+      currentVersion: currentVersion?.siteVersion ?? null,
+      currentInternalVersion: await releaseRankOf(repo, currentVersion),
+      declaredVersionRow: declaredVersionRow ? { publishedAt: declaredVersionRow.publishedAt, kidRevoked: declaredVersionKidRevoked, internalVersion: (await releaseRankOf(repo, declaredVersionRow)) ?? declaredVersionRow.version } : null,
+      now: repo.now(),
+      manifestSig,
+    },
+    async (claim) => {
+      const key = await repo.catalog.signingKey(claim.kid);
+      if (!key || key.revokedAt) return false;
+      return verifyArtifactSignature({ publicKeyB64Url: key.publicKeyB64Url, signatureB64Url: claim.signature, payload: claim.payload });
+    },
+  );
+  if (versionOutcome.kind !== "ok") {
+    // Still not resolvable THIS pass — the drain-orchestrator's own
+    // age/version-coverage rule (M1, build plan §3.3) decides whether
+    // that means "leave it queued" or "terminal, the covering import
+    // already ran."
+    return { kind: "still_unresolved" };
+  }
+
+  try {
+    // ---- Facility + course id resolution — identical to
+    // handleEvidenceIntake's own (tombstone rewrite via resolveLedgerId,
+    // forged-pairing check). ----
+    const facilityLedger = await repo.catalog.resolveLedgerId(submission.facilityId);
+    if (!facilityLedger || facilityLedger.kind !== "facility") return { kind: "terminal_unknown_id" };
+    const resolvedFacilityId = facilityLedger.id;
+    const facilityTz = await repo.catalog.facilityTz(resolvedFacilityId);
+    if (!facilityTz) return { kind: "terminal_unknown_id" };
+
+    const courseAnchor = await resolveCourseAnchor(repo, submission.courseId);
+    if (courseAnchor.kind === "unknown") return { kind: "terminal_unknown_id" };
+    let resolvedCourseId: string | null = null;
+    if (courseAnchor.kind === "resolved") {
+      const ledgerRow = await repo.catalog.resolveLedgerId(courseAnchor.id);
+      if (!ledgerRow || ledgerRow.kind !== "course") return { kind: "terminal_unknown_id" };
+      const courseFacilityId = await repo.catalog.courseFacilityId(ledgerRow.id);
+      if (!courseFacilityId) return { kind: "terminal_unknown_id" };
+      if (courseFacilityId !== resolvedFacilityId) return { kind: "terminal_unknown_id" };
+      resolvedCourseId = ledgerRow.id;
+    }
+
+    // Throws HttpError (local_date_mismatch/local_date_out_of_window) on
+    // a genuine mismatch — caught below, terminal (this NEVER ran at
+    // live-submit time, since the version-skew queue branch runs BEFORE
+    // this check — this is the FIRST time it's actually evaluated).
+    assertServerDerivableLocalDate(submission, facilityTz, asOf);
+
+    const fixes = fixesOf(submission);
+    const skewedFixIds = findClockSkewedFixIds(fixes, asOf);
+    if (skewedFixIds.length > 0) {
+      await repo.fraudSignal.insert("clock_skew", { fixIds: skewedFixIds, evidenceSource: submission.source, drained: true });
+    }
+
+    const derivedFixesByFixId = new Map<string, DerivedFix>();
+    for (const fix of fixes) {
+      const perFixMatch = resolvedCourseId ? await repo.catalog.matchFix(resolvedCourseId, fix.lat, fix.lng) : null;
+      // Drain-time: the original checkin-token session's own window is
+      // long past by the time a row is ever drained (queued for at least
+      // one import cycle) — consumeTokenForFix still runs (never a
+      // structural error on an already-consumed/expired token, per its
+      // own doc) but legitimately produces no fresh co-signal days
+      // later, which is correct: a co-signal is a LIVE-session
+      // guarantee, not something drain should ever fabricate
+      // retroactively.
+      const consumedToken = await consumeTokenForFix(repo, deviceId, fix);
+      derivedFixesByFixId.set(fix.fixId, deriveFix({ fix, resolvedFacilityId, localDate: submission.localDate, match: perFixMatch, consumedToken }));
+    }
+
+    const anyFailedGrade = [...derivedFixesByFixId.values()].some((f) => f.token.present && f.token.grade === "failed");
+    if (anyFailedGrade) {
+      await repo.fraudSignal.insert("attestation_failed", { evidenceSource: submission.source, facilityId: resolvedFacilityId, drained: true });
+    }
+    const worstGrade: "attested" | "unattestable" | "failed" = anyFailedGrade
+      ? "failed"
+      : [...derivedFixesByFixId.values()].every((f) => f.token.present && f.token.grade === "attested")
+        ? "attested"
+        : "unattestable";
+
+    let holes: 9 | 18 = 18;
+    if (submission.source === "foreground_dwell" && resolvedCourseId) {
+      const holeCount = await repo.catalog.courseHoleCount(resolvedCourseId);
+      holes = dwellHolesFromCount(holeCount);
+    }
+
+    const summary: Record<string, unknown> = { localDate: submission.localDate };
+    let fixPayload: Record<string, unknown> = {};
+    switch (submission.source) {
+      case "foreground_checkin": {
+        const f = derivedFixesByFixId.get(submission.fix.fixId)!;
+        fixPayload = { fix: f };
+        break;
+      }
+      case "foreground_dwell": {
+        const a = derivedFixesByFixId.get(submission.checkinFix.fixId)!;
+        const b = derivedFixesByFixId.get(submission.checkoutFix.fixId)!;
+        fixPayload = { checkinFix: a, checkoutFix: b, apartMinutes: submission.apartMinutes, holes };
+        break;
+      }
+      default:
+        fixPayload = {};
+    }
+    Object.assign(summary, fixPayload);
+
+    // Promotes the row IN PLACE — same id, real derived data, status ->
+    // accepted (B3's own resolveQueuedRow contract).
+    await repo.evidence.resolveQueuedRow(existingId, {
+      facilityId: resolvedFacilityId,
+      courseId: resolvedCourseId,
+      summary,
+      integrity: await fixCoordsIntegrity(repo, resolvedCourseId, fixes),
+      attestationGrade: worstGrade,
+      catalogVersion: declaredVersionRow?.version ?? currentVersion?.version ?? null,
+    });
+
+    if (resolvedCourseId === null) {
+      // Facility-level evidence never anchors a play row on its own —
+      // same H3 residual rule the live path's own facility-level branch
+      // documents.
+      return { kind: "resolved", evidenceId: existingId, facilityId: resolvedFacilityId, courseId: null, play: null };
+    }
+
+    // ---- The ACTUAL fix for probe D: this is a REAL score, through the
+    // SAME finalizeScoringForKey the live batch path uses — reads back
+    // EVERY accepted row (including the one this call just promoted,
+    // above) via listForPlay and runs the real scorer, never a raw
+    // status flip with no scoring at all. ----
+    const { play } = await finalizeScoringForKey(repo, resolvedFacilityId, resolvedCourseId, submission.localDate);
+    return { kind: "resolved", evidenceId: existingId, facilityId: resolvedFacilityId, courseId: resolvedCourseId, play };
+  } catch (err) {
+    if (err instanceof HttpError) {
+      // unknown_id / facility_course_mismatch / local_date_mismatch /
+      // local_date_out_of_window — every one of these is a genuine,
+      // terminal "this claim can never resolve," not a transient
+      // condition draining should retry indefinitely.
+      return { kind: "terminal_unknown_id" };
+    }
+    throw err;
+  }
+}
+
+/** AT 18 (stub -> verified promotion): re-scores ONE affected play for the
+ * actor, through the SAME live scoring path (`finalizeScoringForKey` —
+ * `scorePlay` + `upsertFromScore`, advisory-locked per (user, course,
+ * date), idempotent on replay). The only extra step is
+ * `refreshFixTiers`: a stored derived fix's `verificationTier` was frozen
+ * at ingest from the then-STUB course, so it is rewritten to the course's
+ * CURRENT `verification_status` first — without that, re-running the
+ * scorer over the stored rows would reproduce the old (stub) score. */
+export async function rescorePlayAfterPromotion(repo: Repo, play: { facilityId: string; courseId: string; playDate: string }): Promise<FinalizeScoringResult> {
+  await repo.play.lockForScoring(play.courseId, play.playDate);
+  await repo.evidence.refreshFixTiers(play.courseId, play.playDate);
+  return finalizeScoringForKey(repo, play.facilityId, play.courseId, play.playDate);
+}
+
+/** AT 18 (split, the KEPT course's side): an existing play at the kept
+ * course is, after a split, ambiguous between the kept course and its new
+ * siblings — it becomes a `user` pick OF THE KEPT COURSE (one per
+ * facility+date, A2-01), so it counts once and a later re-pick can move it.
+ *
+ * ⛔ NEW-4: labelling alone left the STORED score untouched (a
+ * polygon-attested, play-verified dwell kept `score_monetary` 0.50 after a
+ * split). The play is therefore RE-SCORED through the live path straight
+ * after — `finalizeScoringForKey` now carries the play's `user` label into
+ * every scored row, so the A2-01 cap applies. Re-scoring runs even when the
+ * label was already present (idempotent). */
+export async function labelSplitPlayAsUserPick(repo: Repo, play: { playId: string; facilityId: string; courseId: string; playDate: string }): Promise<boolean> {
+  const marked = await repo.play.markUserPick(play.playId);
+  await finalizeScoringForKey(repo, play.facilityId, play.courseId, play.playDate);
+  return marked;
+}
+
+export type RepickResult = { ok: true } | { ok: false; reason: RepickRefusal };
+
+const NO_MATCH: MatchResult = { verificationTier: "unverified", geometryKind: "radius", insideBuffer: false };
+
+/** Re-derives ONE stored evidence row's `summary` against a DIFFERENT
+ * course: every embedded derived fix gets `verificationTier` /
+ * `geometryKind` / `insideBuffer` from a fresh `matchFix` of its stored raw
+ * coordinates (`integrity.fixCoords`, written at intake), and a dwell's
+ * `holes` is recomputed from the target course's own hole count. Returns
+ * null (-> `cannot_rederive`, nothing moves) when any fix's coordinates
+ * were never stored. Token/attestation/quality fields are about the live
+ * SESSION, not the course, so they are left as they were. */
+async function rederiveSummaryForCourse(repo: Repo, row: StoredEvidenceRow, toCourseId: string, holeCount: number): Promise<Record<string, unknown> | null> {
+  const rawCoords = row.integrity.fixCoords;
+  const coordsByFixId = new Map<string, unknown>(typeof rawCoords === "object" && rawCoords !== null ? Object.entries(rawCoords) : []);
+  const next: Record<string, unknown> = { ...row.summary };
+  for (const key of ["fix", "checkinFix", "checkoutFix"]) {
+    const stored = next[key];
+    if (stored === undefined) continue;
+    if (typeof stored !== "object" || stored === null) return null;
+    const fixId = (stored as { fixId?: unknown }).fixId;
+    const c = typeof fixId === "string" ? coordsByFixId.get(fixId) : undefined;
+    const lat = (c as { lat?: unknown } | undefined)?.lat;
+    const lng = (c as { lng?: unknown } | undefined)?.lng;
+    if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    const match = (await repo.catalog.matchFix(toCourseId, lat, lng)) ?? NO_MATCH;
+    next[key] = { ...stored, verificationTier: match.verificationTier, geometryKind: match.geometryKind, insideBuffer: match.insideBuffer };
+  }
+  if (row.source === "foreground_dwell") next.holes = dwellHolesFromCount(holeCount);
+  return next;
+}
+
+/** AT 18 (split): the player re-picks which course of a split facility a
+ * play was at. The play (and its evidence) MOVES — never a second play —
+ * and is FULLY re-derived against the target course (matcher + hole bar),
+ * then re-scored through the live path, still a `user` pick (so A2-01's
+ * cap applies at the new course too).
+ *
+ * Limits (all enforced in `Repo#play.repickPrepare`): only a `user` pick
+ * can be re-picked, exactly ONCE (audit-backed in `app.audit_log`), and
+ * only within the split family. */
+export async function repickUserPlay(repo: Repo, args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<RepickResult> {
+  const prep = await repo.play.repickPrepare(args);
+  if (!prep.ok) return prep;
+  const rows = (await repo.evidence.listForPlay(args.facilityId, args.fromCourseId, args.playDate)).filter((r) => r.courseId === args.fromCourseId);
+  const holeCount = await repo.catalog.courseHoleCount(args.toCourseId);
+  const rederived: { evidenceId: string; summary: Record<string, unknown> }[] = [];
+  for (const row of rows) {
+    const summary = await rederiveSummaryForCourse(repo, row, args.toCourseId, holeCount);
+    if (summary === null) return { ok: false, reason: "cannot_rederive" };
+    rederived.push({ evidenceId: row.id, summary });
+  }
+  await repo.play.repickApply({ ...args, playId: prep.playId, rederived });
+  await finalizeScoringForKey(repo, args.facilityId, args.toCourseId, args.playDate);
+  return { ok: true };
+}
+
+/** The raw fix coordinates, kept in `app.evidence.integrity.fixCoords`
+ * (NOT in `summary`: the scorer's fix schema is strict, and these must
+ * never reach it). Needed ONLY so a re-pick can re-run the matcher against
+ * a different course.
+ *
+ * ⛔ MINIMISATION (round 3 gate, HIGH; build plan §8.6 "No raw routes on the
+ * server by default. The play location is the course id" and §3.3 "Raw routes
+ * stay on the device"). They are stored ONLY when a re-pick can actually
+ * happen — the course is a ledger STUB at intake (G3-01: only stubs split) or
+ * is already in a split family (`Repo#catalog.repickEligible`) — and never for
+ * a row with no course. A verified, never-split course stores NO coordinates.
+ * They are cleared again (a) when the single re-pick is used
+ * (`Repo#play.repickApply`), (b) once the course can no longer be re-picked
+ * (promoted with its backlog row done), and (c) after
+ * `FIX_COORDS_RETENTION_DAYS` — all by `rescoreBacklog.purgeFixCoords`, run
+ * set-based every import/drain pass. A row without coordinates simply fails
+ * closed at re-pick (`cannot_rederive`). */
+export const FIX_COORDS_RETENTION_DAYS = 30;
+
+async function fixCoordsIntegrity(repo: Repo, courseId: string | null, fixes: FixSubmission[]): Promise<Record<string, unknown>> {
+  if (fixes.length === 0 || courseId === null) return {};
+  if (!(await repo.catalog.repickEligible(courseId))) return {};
+  return { fixCoords: Object.fromEntries(fixes.map((f) => [f.fixId, { lat: f.lat, lng: f.lng }])) };
+}
+
 /** Rebuilds one `scorePlay` `Evidence[]` ROW from an already-stored
  * `StoredEvidenceRow` — the shared shape both `reconstructEvidenceForScoring`
  * (a NEW submission's prior rows) and `buildReplayResult` (a replay's
  * ENTIRE row set, including what was originally "this" row) use. */
-function reconstructOneStoredRow(row: StoredEvidenceRow): Record<string, unknown> {
+function reconstructOneStoredRow(row: StoredEvidenceRow, disambiguatedBy: Disambiguation = null): Record<string, unknown> {
   return {
     id: row.id,
     facilityId: row.facilityId,
@@ -1058,15 +1512,24 @@ function reconstructOneStoredRow(row: StoredEvidenceRow): Record<string, unknown
     localDate: row.localDate,
     source: row.source,
     ...row.summary,
+    // NEW-4 (A2-01): the PLAY's disambiguation is carried into every
+    // course-anchored scored row — `internal/classify.ts#applyCourseCaps`
+    // reads it per row, so a `user` pick contributes 0 to
+    // `score_monetary`. Set AFTER the summary spread so a stored summary
+    // can never override the play's own label.
+    ...(disambiguatedBy !== null && row.courseId !== null ? { courseDisambiguatedBy: disambiguatedBy } : {}),
   };
 }
+
+/** The play's own `course_disambiguated_by` (see `Repo#play.disambiguation`). */
+type Disambiguation = "geometry" | "staff" | "user" | null;
 
 /** P3c gate round 3: the replay path's own scoring input — EVERY row
  * comes from `listForPlay` (already persisted), unlike
  * `reconstructEvidenceForScoring` below, which also assembles one FRESH
  * (not-yet-persisted) row for a genuinely new submission. */
-function reconstructEvidenceFromStoredRows(rows: StoredEvidenceRow[]): Record<string, unknown>[] {
-  return rows.map(reconstructOneStoredRow);
+function reconstructEvidenceFromStoredRows(rows: StoredEvidenceRow[], disambiguatedBy: Disambiguation = null): Record<string, unknown>[] {
+  return rows.map((r) => reconstructOneStoredRow(r, disambiguatedBy));
 }
 
 /** Rebuilds the `scorePlay` `Evidence[]` input from: every PRIOR stored
@@ -1094,14 +1557,16 @@ function reconstructEvidenceForScoring(
   resolvedFacilityId: string,
   resolvedCourseId: string,
   holes: 9 | 18,
+  disambiguatedBy: Disambiguation = null,
 ): Record<string, unknown>[] {
-  const rows: Record<string, unknown>[] = priorRows.filter((row) => row.id !== insertedId).map(reconstructOneStoredRow);
+  const rows: Record<string, unknown>[] = priorRows.filter((row) => row.id !== insertedId).map((r) => reconstructOneStoredRow(r, disambiguatedBy));
   const fresh: Record<string, unknown> = {
     id: insertedId,
     facilityId: resolvedFacilityId,
     courseId: resolvedCourseId,
     localDate: submission.localDate,
     source: submission.source,
+    ...(disambiguatedBy !== null ? { courseDisambiguatedBy: disambiguatedBy } : {}),
   };
   switch (submission.source) {
     case "foreground_checkin":

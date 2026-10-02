@@ -93,17 +93,32 @@ import type {
   ChallengeRow,
   ConsumedCheckinToken,
   ExistingEvidenceRow,
+  ImporterCurrentVersionRow,
+  ImporterLedgerRow,
+  ImporterRepo,
+  ImporterSigningKeyRow,
+  ImportVersionInput,
+  ImportVersionResult,
   InsertEvidenceResult,
+  LedgerBaseRow,
   LedgerRow,
+  LedgerStateRow,
   MatchResult,
   NewEvidenceRow,
+  QueuedEvidenceRow,
   RateLimitResult,
   Repo,
+  RepickRefusal,
   SigningKeyRow,
   StoredEvidenceRow,
   StoredPlayRow,
   UpsertPlayInput,
   UpsertPlayResult,
+  CatalogImportEnvConfig,
+  RescoreBacklogRow,
+  RescoreCursor,
+  RescorePlayRef,
+  RosterVersionInput,
 } from "./types.ts";
 // Type-only: erased at runtime, so this does NOT make ABSOLUTE_ROW_CAP a
 // second source of truth — it re-reads the SAME constant score-play.ts
@@ -384,22 +399,69 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     // transaction.
 
     catalog: {
+      // ⛔ FIX (P3e round 2 gate, LOW: "don't let rollback move the
+      // current version: importing an older valid version records it but
+      // never becomes the drain's currentVersion"). `version int` is
+      // assigned `max(version)+1` on FIRST SIGHT of a `site_version`
+      // (privileged.ts's own `ImporterRepo#catalog.importVersion`) — so a
+      // previously-unseen but chronologically OLDER `site_version`
+      // (a rollback republish) would still get the numerically HIGHEST
+      // `version` int, and `order by version desc` would wrongly report
+      // it as current. `site_version` is `yyyymmdd-gitsha7` — fixed-width
+      // digits then fixed-width lowercase hex — so plain text ordering
+      // already matches `compareCatalogVersions`'s own date-primary/
+      // sha-tiebreak semantics; `nulls last` falls back to the old
+      // `version`-int ordering ONLY when every row is a pre-import-catalog
+      // fixture with `site_version IS NULL` (0023's own migration note),
+      // so `supabase/tests/helpers.sql`'s seed row and every existing
+      // skew-window test fixture (`insertCatalogVersion`) keep behaving
+      // exactly as before.
       async currentVersion(): Promise<CatalogVersionRow | null> {
         const rows = await trx`
-          select version, contract_version, sha256, kid, published_at
-          from app.catalog_version order by version desc limit 1`;
+          select version, site_version, contract_version, sha256, kid, published_at
+          from app.catalog_version order by site_version desc nulls last, version desc limit 1`;
         const r = rows[0];
         if (!r) return null;
-        return { version: r.version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
+        return { version: r.version, siteVersion: r.site_version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
       },
 
       async versionRow(version: number): Promise<CatalogVersionRow | null> {
         const rows = await trx`
-          select version, contract_version, sha256, kid, published_at
+          select version, site_version, contract_version, sha256, kid, published_at
           from app.catalog_version where version = ${version}`;
         const r = rows[0];
         if (!r) return null;
-        return { version: r.version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
+        return { version: r.version, siteVersion: r.site_version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
+      },
+
+      // ⛔ NEW (P3e round 2 gate, H1): evidence intake now resolves the
+      // client's own submitted SITE version string, not an internal int.
+      async versionRowBySiteVersion(siteVersion: string): Promise<CatalogVersionRow | null> {
+        const rows = await trx`
+          select version, site_version, contract_version, sha256, kid, published_at
+          from app.catalog_version where site_version = ${siteVersion}`;
+        const r = rows[0];
+        if (!r) return null;
+        return { version: r.version, siteVersion: r.site_version, contractVersion: r.contract_version, sha256: r.sha256, kid: r.kid, publishedAt: r.published_at.toISOString() };
+      },
+
+      async repickEligible(courseId: string): Promise<boolean> {
+        const rows = await trx`
+          select exists (
+            select 1 from app.catalog_id_ledger l
+            where l.id = ${courseId}
+              and (l.status = 'stub'
+                   or l.split_from is not null
+                   or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id)
+                   or exists (select 1 from app.catalog_rescore_backlog b where b.course_id = l.id and b.done_at is null))
+          ) as e`;
+        return Boolean(rows[0]?.e);
+      },
+
+      async releaseRank(siteVersion: string): Promise<number | null> {
+        const rows = await trx`select count(*)::int as n from app.catalog_version where site_version is not null and site_version <= ${siteVersion}`;
+        const n = Number(rows[0]?.n ?? 0);
+        return n > 0 ? n : null;
       },
 
       async resolveLedgerId(id: string): Promise<LedgerRow | null> {
@@ -444,7 +506,14 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       },
 
       async courseHoleCount(courseId: string): Promise<number> {
-        const rows = await trx`select count(*)::int as n from app.catalog_hole where course_id = ${courseId}`;
+        // R3: catalog_hole rows (Course.holesDetail) when present, else the
+        // course's DECLARED count (Course.holes), else 0 = unknown — and the
+        // handler treats anything but exactly 9 as 18 (the stricter dwell bar).
+        const rows = await trx`
+          select coalesce(
+            nullif((select count(*) from app.catalog_hole where course_id = ${courseId}), 0),
+            (select holes from app.catalog_course where id = ${courseId}),
+            0)::int as n`;
         return rows[0]?.n ?? 0;
       },
 
@@ -471,7 +540,9 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       },
 
       async signingKey(kid: string): Promise<SigningKeyRow | null> {
-        const rows = await trx`select kid, public_key_b64url, revoked_at from app.catalog_signing_key where kid = ${kid}`;
+        const rows = await trx`select k.kid, k.public_key_b64url,
+            coalesce(k.revoked_at, (select r.recorded_at from app.catalog_kid_revocation r where r.kid = k.kid)) as revoked_at
+          from app.catalog_signing_key k where k.kid = ${kid}`;
         const r = rows[0];
         if (!r) return null;
         return { kid: r.kid, publicKeyB64Url: r.public_key_b64url, revokedAt: r.revoked_at ? r.revoked_at.toISOString() : null };
@@ -493,18 +564,37 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       },
 
       async insertIdempotent(row: NewEvidenceRow): Promise<InsertEvidenceResult> {
-        const inserted = await trx`
-          insert into app.evidence (
-            user_id, device_id, source, source_ref, input_hash, course_id, facility_id,
-            started_at, ended_at, local_date, summary, integrity, cosignal,
-            attestation_grade, matcher_version, catalog_version, status
-          ) values (
-            ${uid}, ${row.deviceId}, ${row.source}::app.evidence_source, ${row.sourceRef}, ${row.inputHash}, ${row.courseId}, ${row.facilityId},
-            ${row.startedAt}, ${row.endedAt}, ${row.localDate}, ${trx.json(row.summary as never)}, ${trx.json(row.integrity as never)}, ${trx.json(row.cosignal as never)},
-            ${row.attestationGrade}::app.attestation_grade, ${row.matcherVersion}, ${row.catalogVersion}, ${row.status}::app.evidence_status
-          )
-          on conflict (user_id, source, source_ref) do nothing
-          returning id, status, input_hash`;
+        // ⛔ FIX (P3e round 2 gate, B3): two structurally distinct INSERT
+        // shapes now, matching the discriminated `NewEvidenceRow` union
+        // and `app.evidence`'s own `evidence_queued_claim_shape` CHECK —
+        // a `queued` row writes claimed_*/queued_input and leaves
+        // facility_id/course_id/catalog_version NULL (never a value that
+        // could trip their FKs on an id the server doesn't have yet); a
+        // `resolved` row is the original, unchanged shape.
+        const inserted =
+          row.kind === "queued"
+            ? await trx`
+                insert into app.evidence (
+                  user_id, device_id, source, source_ref, input_hash, local_date, status,
+                  claimed_facility_id, claimed_course_id, claimed_catalog_version, queued_input
+                ) values (
+                  ${uid}, ${row.deviceId}, ${row.source}::app.evidence_source, ${row.sourceRef}, ${row.inputHash}, ${row.localDate}, ${row.status}::app.evidence_status,
+                  ${row.claimedFacilityId}, ${row.claimedCourseId}, ${row.claimedCatalogVersion}, ${trx.json(row.queuedInput as never)}
+                )
+                on conflict (user_id, source, source_ref) do nothing
+                returning id, status, input_hash`
+            : await trx`
+                insert into app.evidence (
+                  user_id, device_id, source, source_ref, input_hash, course_id, facility_id,
+                  started_at, ended_at, local_date, summary, integrity, cosignal,
+                  attestation_grade, matcher_version, catalog_version, status
+                ) values (
+                  ${uid}, ${row.deviceId}, ${row.source}::app.evidence_source, ${row.sourceRef}, ${row.inputHash}, ${row.courseId}, ${row.facilityId},
+                  ${row.startedAt}, ${row.endedAt}, ${row.localDate}, ${trx.json(row.summary as never)}, ${trx.json(row.integrity as never)}, ${trx.json(row.cosignal as never)},
+                  ${row.attestationGrade}::app.attestation_grade, ${row.matcherVersion}, ${row.catalogVersion}, ${row.status}::app.evidence_status
+                )
+                on conflict (user_id, source, source_ref) do nothing
+                returning id, status, input_hash`;
         if (inserted[0]) {
           return { id: inserted[0].id, wasNew: true, status: inserted[0].status, inputHash: inserted[0].input_hash };
         }
@@ -520,6 +610,21 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         const existing = await trx`select id, status, input_hash from app.evidence where user_id = ${uid} and source = ${row.source}::app.evidence_source and source_ref = ${row.sourceRef}`;
         if (!existing[0]) throw new Error("insertIdempotent: conflict reported but no existing row found");
         return { id: existing[0].id, wasNew: false, status: existing[0].status, inputHash: existing[0].input_hash };
+      },
+
+      async refreshFixTiers(courseId: string, localDate: string): Promise<number> {
+        const rows = await trx`
+          update app.evidence e set summary = (
+            select coalesce(jsonb_object_agg(t.k,
+              case when t.k in ('fix', 'checkinFix', 'checkoutFix') and jsonb_typeof(t.v) = 'object'
+                   then jsonb_set(t.v, '{verificationTier}', to_jsonb(c.verification_status::text))
+                   else t.v end), '{}'::jsonb)
+            from jsonb_each(e.summary) as t(k, v))
+          from app.catalog_course c
+          where c.id = e.course_id and e.user_id = ${uid} and e.course_id = ${courseId}
+            and e.local_date = ${localDate} and e.status = 'accepted'
+          returning e.id`;
+        return rows.length;
       },
 
       async findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null> {
@@ -553,6 +658,50 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         // method's own local_date already IS everywhere else it's read.
         const localDate = r.local_date instanceof Date ? r.local_date.toISOString().slice(0, 10) : r.local_date;
         return { id: r.id, status: r.status, inputHash: r.input_hash, facilityId: r.facility_id, courseId: r.course_id, localDate };
+      },
+
+      // ⛔ NEW (P3e round 2 gate, B2/B3): promotes a queued_catalog row IN
+      // PLACE — see types.ts's own doc for the full contract. Guarded
+      // `WHERE status = 'queued_catalog'` so a row already resolved by a
+      // concurrent drain (or moved on some other way) is left untouched.
+      async resolveQueuedRow(
+        id: string,
+        resolved: { facilityId: string; courseId: string | null; summary: Record<string, unknown>; integrity: Record<string, unknown>; attestationGrade: "attested" | "unattestable" | "failed"; catalogVersion: number | null },
+      ): Promise<void> {
+        await trx`
+          update app.evidence set
+            status = 'accepted',
+            facility_id = ${resolved.facilityId},
+            course_id = ${resolved.courseId},
+            summary = ${trx.json(resolved.summary as never)},
+            integrity = ${trx.json(resolved.integrity as never)},
+            attestation_grade = ${resolved.attestationGrade}::app.attestation_grade,
+            catalog_version = ${resolved.catalogVersion},
+            claimed_facility_id = null,
+            claimed_course_id = null,
+            claimed_catalog_version = null,
+            queued_input = null
+          where id = ${id} and user_id = ${uid} and status = 'queued_catalog'`;
+      },
+
+      async markQueuedTerminal(id: string, status: "needs_attention" | "unknown_id"): Promise<void> {
+        // A terminal row keeps NO queued submission: `queued_input` (raw
+        // coordinates and all) and the claimed_* columns are cleared with the
+        // status change, exactly as the column comments in 0024 say. A replay
+        // of such a row needs only its status + input_hash.
+        await trx`
+          update app.evidence set
+            status = ${status}::app.evidence_status,
+            claimed_facility_id = null,
+            claimed_course_id = null,
+            claimed_catalog_version = null,
+            queued_input = null
+          where id = ${id} and user_id = ${uid} and status = 'queued_catalog'`;
+      },
+
+      async deviceIdFor(id: string): Promise<string | null> {
+        const rows = await trx`select device_id from app.evidence where id = ${id} and user_id = ${uid}`;
+        return rows[0]?.device_id ?? null;
       },
 
       async listForPlay(facilityId: string, courseId: string, localDate: string): Promise<StoredEvidenceRow[]> {
@@ -705,6 +854,136 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
           money: Boolean(r.money),
           heldReview: Boolean(r.held_review),
         };
+      },
+
+      // AT 18 — server-side `uniqueCourses` (see types.ts's own doc).
+      async uniqueCourseCount(): Promise<number> {
+        // A2-01 / §4.2: plays that are USER PICKS (labelled `user`, or unlabelled
+        // at a split-family course) count at most ONCE per (facility, date) —
+        // the labelled one wins, then the lowest course id — however many
+        // split-ambiguous plays that facility-date holds. Geometry/staff
+        // resolved plays are unaffected.
+        const rows = await trx`
+          with recursive cand as (
+            select p.id, p.course_id, p.facility_id, p.play_date,
+                   (coalesce(p.course_disambiguated_by = 'user', false)
+                    or (p.course_disambiguated_by is null and exists (
+                         select 1 from app.catalog_id_ledger l
+                         where l.id = p.course_id
+                           and (l.split_from is not null or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id))))) as user_pick,
+                   coalesce(p.course_disambiguated_by = 'user', false) as labelled
+            from app.play p
+            join app.catalog_id_ledger l on l.id = p.course_id and l.status = 'verified'
+            where p.user_id = ${uid}
+              and p.status not in ('void', 'disputed')
+              and (p.score_badge >= 0.50 or p.money)
+          ), q as (
+            select course_id as start_id from (
+              select c.*, row_number() over (partition by c.facility_id, c.play_date, c.user_pick order by c.labelled desc, c.course_id) as rn from cand c
+            ) r
+            where not r.user_pick or r.rn = 1
+          ), walk(start_id, cur_id, depth) as (
+            select start_id, start_id, 0 from q
+            union all
+            select w.start_id, l.merged_into, w.depth + 1
+            from walk w join app.catalog_id_ledger l on l.id = w.cur_id
+            where l.merged_into is not null and l.merged_into <> w.cur_id and w.depth < 10
+          )
+          select count(distinct w.cur_id)::int as n
+          from walk w
+          where not exists (select 1 from app.catalog_id_ledger l where l.id = w.cur_id and l.merged_into is not null and l.merged_into <> w.cur_id)`;
+        return Number(rows[0]?.n ?? 0);
+      },
+
+      async markUserPick(playId: string): Promise<boolean> {
+        const rows = await trx`
+          update app.play p set course_disambiguated_by = 'user'
+          where p.id = ${playId} and p.user_id = ${uid} and p.course_disambiguated_by is null
+            and not exists (
+              select 1 from app.play o
+              where o.user_id = p.user_id and o.facility_id = p.facility_id and o.play_date = p.play_date
+                and o.course_disambiguated_by = 'user' and o.id <> p.id)
+          returning p.id`;
+        return rows.length > 0;
+      },
+
+      async lockForScoring(courseId: string, playDate: string): Promise<void> {
+        const [k1, k2] = advisoryLockKeys(1, `${uid}:${courseId}:${playDate}`);
+        await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+      },
+
+      async disambiguation(courseId: string, playDate: string): Promise<{ stored: "geometry" | "staff" | "user" | null; effective: "geometry" | "staff" | "user" | null }> {
+        const rows = await trx`
+          select
+            (select course_disambiguated_by::text from app.play where user_id = ${uid} and course_id = ${courseId} and play_date = ${playDate}) as stored,
+            exists (
+              select 1 from app.catalog_id_ledger l
+              where l.id = ${courseId}
+                and (l.split_from is not null or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id))
+            ) as split_family`;
+        const d = rows[0]?.stored;
+        const stored = d === "geometry" || d === "staff" || d === "user" ? d : null;
+        // §4.2: a play at a split-family course with no geometry/staff
+        // resolution IS a user pick, whether or not the one-per-facility-date
+        // label could be written.
+        return { stored, effective: stored ?? (rows[0]?.split_family ? "user" : null) };
+      },
+
+      async repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }): Promise<{ ok: true; playId: string } | { ok: false; reason: RepickRefusal }> {
+        // Serialize against any concurrent scorer of EITHER play — same
+        // advisory key family as upsertFromScore, taken in a stable order
+        // so two re-picks (or a re-pick and a live submission) cannot
+        // deadlock.
+        const keys = [`${uid}:${args.fromCourseId}:${args.playDate}`, `${uid}:${args.toCourseId}:${args.playDate}`].map((k) => advisoryLockKeys(1, k)).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        for (const [k1, k2] of keys) await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+
+        const family = await trx`
+          select 1
+          from app.catalog_id_ledger a
+          join app.catalog_id_ledger b on b.id = ${args.toCourseId}
+          join app.catalog_course ca on ca.id = a.id and ca.facility_id = ${args.facilityId}
+          join app.catalog_course cb on cb.id = b.id and cb.facility_id = ${args.facilityId}
+          where a.id = ${args.fromCourseId}
+            and a.id <> b.id
+            and (b.split_from = a.id or a.split_from = b.id or (a.split_from is not null and a.split_from = b.split_from))`;
+        if (family.length === 0) return { ok: false, reason: "not_same_split_family" };
+
+        const existing = await trx`
+          select id, course_disambiguated_by as d from app.play
+          where user_id = ${uid} and course_id = ${args.fromCourseId} and play_date = ${args.playDate} and facility_id = ${args.facilityId}`;
+        if (existing.length === 0) return { ok: false, reason: "no_such_play" };
+        const playId = existing[0]!.id as string;
+        // ONLY a player's own pick may be re-picked; a geometry/staff
+        // resolution is not the player's to move.
+        if (existing[0]!.d !== "user") return { ok: false, reason: "not_user_pick" };
+        // Exactly ONE re-pick per play (audit-backed: app.audit_log is
+        // insert-only, so the count cannot be rewritten).
+        const prior = await trx`
+          select 1 from app.audit_log
+          where actor_user_id = ${uid} and action = 'play.repick' and subject_table = 'play' and subject_id = ${playId}
+          limit 1`;
+        if (prior.length > 0) return { ok: false, reason: "already_repicked" };
+        const clash = await trx`
+          select id from app.play
+          where user_id = ${uid} and facility_id = ${args.facilityId} and play_date = ${args.playDate} and id <> ${playId}
+            and (course_id = ${args.toCourseId} or course_disambiguated_by = 'user')`;
+        if (clash.length > 0) return { ok: false, reason: "target_play_exists" };
+        return { ok: true, playId };
+      },
+
+      async repickApply(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string; playId: string; rederived: { evidenceId: string; summary: Record<string, unknown> }[] }): Promise<void> {
+        for (const r of args.rederived) {
+          await trx`update app.evidence set summary = ${trx.json(r.summary as never)} where id = ${r.evidenceId} and user_id = ${uid}`;
+        }
+        await trx`update app.evidence set course_id = ${args.toCourseId} where user_id = ${uid} and course_id = ${args.fromCourseId} and local_date = ${args.playDate} and facility_id = ${args.facilityId}`;
+        await trx`update app.play set course_id = ${args.toCourseId}, course_disambiguated_by = 'user' where id = ${args.playId} and user_id = ${uid}`;
+        // §8.6: the single re-pick is now used — the raw coordinates have
+        // nothing left to do, so they go with it.
+        await trx`update app.evidence set integrity = integrity - 'fixCoords' where user_id = ${uid} and course_id = ${args.toCourseId} and local_date = ${args.playDate} and facility_id = ${args.facilityId} and integrity ? 'fixCoords'`;
+        await trx`
+          insert into app.audit_log (actor_user_id, action, subject_table, subject_id, detail)
+          values (${uid}, 'play.repick', 'play', ${args.playId},
+                  ${trx.json({ facilityId: args.facilityId, playDate: args.playDate, fromCourseId: args.fromCourseId, toCourseId: args.toCourseId } as never)})`;
       },
     },
 
@@ -1292,4 +1571,632 @@ export async function withOwnershipBatch<T>(
     // for consistency.
     throw mapPgTimeoutError(err);
   }
+}
+
+// ============================================================================
+// P3e: `import-catalog` (build plan §3.3) — a CLEARLY DELIMITED, ADDITIVE
+// section appended at the end of the file per this task's own
+// instruction ("keep edits to privileged.ts minimal and additive: a
+// clearly delimited new section at the end, not interleaved with
+// existing code, because another builder is editing that file and the
+// two will be merged"). Nothing above this line is touched beyond the
+// single `import type {...}` block widening near the top of the file.
+//
+// SYSTEM-ACTOR DESIGN (task instruction: "if import-catalog is a
+// non-user (system) actor, design an explicit system-actor path rather
+// than faking a user — document why it is safe"):
+//
+// Every OTHER privileged operation in this file (`withOwnership`,
+// `withOwnershipBatch`, `hitRateLimitForActor`) takes an `Actor { uid,
+// role }` — a real Supabase-Auth-JWT-verified user id
+// (`getActorFromRequest`, above), because every table those operations
+// touch is owned by a specific player (`user_id` FKs into `auth.users`)
+// and RLS/ownership checks are meaningless without one.
+//
+// `import-catalog` is not a user at all: it has no JWT, no `auth.users`
+// row, and — this is the part that makes a system-actor path SAFE rather
+// than merely convenient — every table it writes to carries no
+// `user_id`/actor-identity column whatsoever:
+//   - `app.catalog_version`, `app.catalog_id_ledger` (0002_catalog_tables.sql):
+//     global, shared catalog state, not owned by any one user.
+//   - `app.evidence.status` (the ONE column `queuedCatalog.promoteToAccepted`/
+//     `markNeedsAttention` below ever writes) — scoped not by an actor id
+//     the caller claims, but by the row's OWN, already-persisted identity
+//     (`WHERE id = $1 AND status = 'queued_catalog'`) — there is no
+//     "actor.uid" this write could need or could get wrong, because it
+//     never reads or writes `app.evidence.user_id` at all.
+// There is therefore no ownership/authorization DECISION a fake `Actor`
+// could stand in for — the authorization boundary for this whole file
+// (build plan §4.7.1a: "the authorization boundary on writes is each
+// Edge Function's own ownership and scope check") is instead the
+// CALLER-level HMAC check (`_shared/catalog/webhook-auth.ts`) that
+// `import-catalog/index.ts` runs BEFORE ever reaching
+// `withSystemCatalogImport` at all — same shape as `hitRateLimitForActor`
+// being called before `withOwnership` opens, just with a different (non
+// -JWT) credential. `withSystemCatalogImport` below takes NO actor
+// parameter, constructs NO `Actor` object, and reads NO `auth.users`
+// row — "explicit", not "an Actor with a placeholder uid", because a
+// placeholder uid is exactly the "faking a user" shape the task warns
+// against (it would silently create a code path where a FUTURE change
+// could scope a query by that fake uid and nobody would notice it was
+// never a real one).
+// ============================================================================
+
+/** Same `SET LOCAL ROLE service_role` + role-assertion + timeout
+ * discipline as `withOwnership`'s own doc — see that function for the
+ * full "Conditions on the BYPASSRLS design" reasoning, unchanged here.
+ *
+ * ⛔ FIX (P3e round 2 gate: "align `withSystemCatalogImport` with P3d's
+ * own `supportsTransactionTimeout()`/`mapPgTimeoutError()` CONNECTION_CLOSED
+ * pattern"). This function's own round-1 `transaction_timeout` guard was a
+ * bespoke try/catch on the SET LOCAL statement itself, string-matching
+ * "unrecognized configuration parameter" — written before P3d's own
+ * empirical finding (see `mapPgTimeoutError`'s own doc, above): exceeding
+ * `transaction_timeout` is not a catchable, session-continues error at
+ * all, it's a FATAL that closes the connection outright, surfaced by
+ * postgres.js as `.code === "CONNECTION_CLOSED"` — a case this function's
+ * own try/catch never handled (it only ever guarded the SET statement,
+ * never a later query inside the same transaction actually timing out).
+ * Reuses `withOwnership`'s own two pieces instead of re-deriving them:
+ * `supportsTransactionTimeout()` (cached PG-version feature probe, so
+ * this function no longer needs its own "is this GUC recognized" guess)
+ * and `mapPgTimeoutError()` (now maps CONNECTION_CLOSED -> 503 for this
+ * function's own callers too, not just `withOwnership`'s). */
+export async function withSystemCatalogImport<T>(op: (repo: ImporterRepo) => Promise<T>): Promise<T> {
+  const db = sql();
+  const txTimeoutSupported = await supportsTransactionTimeout(db);
+  try {
+    return await (db.begin(async (trx: TxSql) => {
+      await trx`set local role service_role`;
+      await trx`set local statement_timeout = '10s'`;
+      await trx`set local lock_timeout = '5s'`;
+      if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
+      const check = await trx`select current_user as u`;
+      if (check[0]?.u !== "service_role") {
+        throw new Error(`withSystemCatalogImport: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+      }
+      const repo = buildImporterRepo(trx);
+      return op(repo);
+    }) as Promise<T>);
+  } catch (err) {
+    throw mapPgTimeoutError(err);
+  }
+}
+
+/** Same FNV-1a-based advisory-lock-key derivation as `advisoryLockKeys`
+ * above, namespaced separately (3) so it can never collide with the
+ * per-user queued-catalog-cap lock (namespace 2) or any future one —
+ * this file's own existing helper takes an actor-scoped `id` string;
+ * this call site's own "id" is a FIXED key (there is only ever one
+ * "assign the next catalog_version" serialization point, system-wide,
+ * not one per anything), so it reuses `advisoryLockKeys` directly rather
+ * than duplicating the hash. */
+function buildImporterRepo(trx: TxSql): ImporterRepo {
+  return {
+    now(): Date {
+      return new Date();
+    },
+
+    catalog: {
+      async listSiteVersions(): Promise<Array<{ siteVersion: string; version: number }>> {
+        const rows = await trx`select site_version, version from app.catalog_version where site_version is not null`;
+        return rows.map((r) => ({ siteVersion: r.site_version, version: r.version }));
+      },
+
+      async currentVersion(): Promise<ImporterCurrentVersionRow | null> {
+        const rows = await trx`select version, site_version from app.catalog_version order by site_version desc nulls last, version desc limit 1`;
+        const r = rows[0];
+        if (!r) return null;
+        return { version: r.version, siteVersion: r.site_version };
+      },
+
+      async importVersion(input: ImportVersionInput): Promise<ImportVersionResult> {
+        const existing = await trx`select version, sha256 from app.catalog_version where site_version = ${input.siteVersion}`;
+        if (existing[0]) {
+          if (existing[0].sha256 !== input.sha256) {
+            throw new Error(`importVersion: siteVersion "${input.siteVersion}" was already imported with a different sha256 — append-only violation, refusing to overwrite`);
+          }
+          return { version: existing[0].version, wasNew: false };
+        }
+        // Serializes concurrent "assign the next int version" attempts —
+        // held until COMMIT, same pattern as evidence.countOpenQueued's
+        // own advisory lock (P3c gate round 2, item 8) for the same class
+        // of count-then-insert race.
+        const [k1, k2] = advisoryLockKeys(3, "catalog_version_assign");
+        await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+        // Re-check under the lock — another concurrent call may have
+        // inserted this exact siteVersion between this call's own
+        // unlocked check above and acquiring the lock just now.
+        const recheck = await trx`select version, sha256 from app.catalog_version where site_version = ${input.siteVersion}`;
+        if (recheck[0]) {
+          if (recheck[0].sha256 !== input.sha256) {
+            throw new Error(`importVersion: siteVersion "${input.siteVersion}" was already imported with a different sha256 — append-only violation, refusing to overwrite`);
+          }
+          return { version: recheck[0].version, wasNew: false };
+        }
+        const maxRow = await trx`select coalesce(max(version), 0)::int as max from app.catalog_version`;
+        const nextVersion = Number(maxRow[0]?.max ?? 0) + 1;
+        await trx`
+          insert into app.catalog_version (version, site_version, contract_version, sha256, kid, published_at)
+          values (${nextVersion}, ${input.siteVersion}, ${input.contractVersion}, ${input.sha256}, ${input.kid}, ${input.publishedAt})`;
+        return { version: nextVersion, wasNew: true };
+      },
+
+      async getSigningKey(kid: string): Promise<ImporterSigningKeyRow | null> {
+        const rows = await trx`select k.kid, k.public_key_b64url,
+            coalesce(k.revoked_at, (select r.recorded_at from app.catalog_kid_revocation r where r.kid = k.kid)) as revoked_at
+          from app.catalog_signing_key k where k.kid = ${kid}`;
+        const r = rows[0];
+        if (!r) return null;
+        return { kid: r.kid, publicKeyB64Url: r.public_key_b64url, revokedAt: r.revoked_at ? r.revoked_at.toISOString() : null };
+      },
+
+      // M3 (migration 0025): append-only; never updates/deletes.
+      async recordRevokedKids(kids: string[], catalogVersion: string): Promise<void> {
+        if (kids.length === 0) return;
+        await trx`
+          insert into app.catalog_kid_revocation (kid, first_revoked_in_catalog_version)
+          select k, ${catalogVersion} from unnest(${kids as never}::text[]) as k
+          on conflict (kid) do nothing`;
+      },
+
+      // ⛔ H3 (P3e round 2 gate): SET-BASED — one statement per call
+      // over parallel `unnest` arrays, never one round trip per ledger
+      // id (a ~40k-id ledger would otherwise blow the 12s
+      // transaction_timeout on round trips alone).
+      async ensureLedgerIdsExist(rows: LedgerBaseRow[]): Promise<void> {
+        if (rows.length === 0) return;
+        await trx`
+          insert into app.catalog_id_ledger (id, kind, status, first_catalog_version)
+          select t.id, t.kind, 'stub'::app.ledger_status, t.first_version
+          from unnest(${rows.map((r) => r.id)}::text[], ${rows.map((r) => r.kind)}::text[], ${rows.map((r) => r.firstCatalogVersionInt)}::int[]) as t(id, kind, first_version)
+          on conflict (id) do nothing`;
+      },
+
+      // M3: fail-closed ledger conflict detection, set-based. Reads the
+      // STORED columns directly (NOT resolveLedgerId, which walks the
+      // merge closure and so never shows a merged row's own merged_into).
+      // A conflict is: stored merged_into differs from the incoming one
+      // (including incoming null), or a stored tombstone the incoming
+      // entry no longer claims (a tombstone reversal).
+      async findLedgerConflict(rows: LedgerStateRow[]): Promise<string | null> {
+        if (rows.length === 0) return null;
+        const found = await trx`
+          select l.id, l.merged_into as stored_merged_into, t.merged_into as incoming_merged_into, (l.tombstoned_at is not null) as stored_tombstoned, (t.tombstoned = 1) as incoming_tombstoned
+          from app.catalog_id_ledger l
+          join unnest(${rows.map((r) => r.id)}::text[], ${rows.map((r) => r.mergedInto ?? "")}::text[], ${rows.map((r) => (r.tombstoned ? 1 : 0))}::int[]) as t(id, merged_into, tombstoned) on t.id = l.id
+          where (l.merged_into is not null and l.merged_into is distinct from nullif(t.merged_into, ''))
+             or (l.tombstoned_at is not null and t.tombstoned = 0)
+          limit 1`;
+        const r = found[0];
+        if (!r) {
+          // ⛔ FIX (P3e round 2 gate, LOW): a conflicting `split_from` fails
+          // closed exactly like a conflicting `mergedInto` (M3) — never a
+          // silent "keep the first write" that leaves one signed ledger
+          // contradicting the stored lineage.
+          const claimed = new Map<string, string>();
+          for (const row of rows) {
+            for (const sib of row.splitSiblings) {
+              const prior = claimed.get(sib);
+              if (prior !== undefined && prior !== row.id) {
+                return `id-ledger.json: split sibling "${sib}" is claimed by both "${prior}" and "${row.id}" in one ledger — refusing to pick one`;
+              }
+              claimed.set(sib, row.id);
+            }
+          }
+          if (claimed.size === 0) return null;
+          const sibIds = [...claimed.keys()];
+          const keptIds = sibIds.map((sib) => claimed.get(sib) ?? "");
+          const splitConflict = await trx`
+            select l.id, l.split_from as stored
+            from app.catalog_id_ledger l
+            join unnest(${sibIds}::text[], ${keptIds}::text[]) as t(sib, kept) on t.sib = l.id
+            where l.split_from is not null and l.split_from <> t.kept
+            limit 1`;
+          const c = splitConflict[0];
+          if (!c) return null;
+          return `id-ledger.json: split sibling "${c.id}" is already on file as split from "${c.stored}", but this import claims a different kept course — refusing to silently keep either write`;
+        }
+        if (r.stored_merged_into !== null && r.stored_merged_into !== (r.incoming_merged_into || null)) {
+          return `id-ledger.json: entry "${r.id}" claims mergedInto ${r.incoming_merged_into ? `"${r.incoming_merged_into}"` : "none"}, but is already on file merged into "${r.stored_merged_into}" — refusing to silently keep either write`;
+        }
+        return `id-ledger.json: entry "${r.id}" is already tombstoned on file, but this import claims it is not tombstoned — refusing a tombstone reversal`;
+      },
+
+      async applyLedgerState(rows: LedgerStateRow[]): Promise<void> {
+        // Two-pass design (import-handler.ts's own doc): every id this
+        // batch's own `mergedInto` could reference already exists by now
+        // (ensureLedgerIdsExist just ran for the WHOLE shard, including
+        // every survivor id) — this statement can safely set it.
+        //
+        // Append-only IN EFFECT: `verified_in_version`/`tombstoned_at` only
+        // ever move FORWARD (`greatest`, `coalesce(tombstoned_at, now())`),
+        // `status` only ever moves stub -> verified, never back (G3-01).
+        if (rows.length === 0) return;
+        await trx`
+          update app.catalog_id_ledger l set
+            status = case when l.status = 'verified' or t.status = 'verified' then 'verified'::app.ledger_status else 'stub'::app.ledger_status end,
+            verified_in_version = nullif(greatest(coalesce(l.verified_in_version, 0), t.verified_version), 0),
+            tombstoned_at = case when t.tombstoned = 1 then coalesce(l.tombstoned_at, now()) else l.tombstoned_at end,
+            merged_into = coalesce(l.merged_into, nullif(t.merged_into, ''))
+          from unnest(
+            ${rows.map((r) => r.id)}::text[],
+            ${rows.map((r) => r.status)}::text[],
+            ${rows.map((r) => (r.tombstoned ? 1 : 0))}::int[],
+            ${rows.map((r) => r.mergedInto ?? "")}::text[],
+            ${rows.map((r) => r.verifiedInVersionInt ?? 0)}::int[]
+          ) as t(id, status, tombstoned, merged_into, verified_version)
+          where l.id = t.id`;
+      },
+
+      async resolveLedgerId(id: string): Promise<ImporterLedgerRow | null> {
+        // System-scoped duplicate of Repo#catalog.resolveLedgerId's own
+        // merge-closure walk (buildRepo, above) — see this section's own
+        // header for why ImporterRepo intentionally does not share
+        // machinery with the actor-scoped Repo.
+        let currentId = id;
+        for (let hop = 0; hop < 10; hop++) {
+          const rows = await trx`select id, kind, status, merged_into from app.catalog_id_ledger where id = ${currentId}`;
+          const r = rows[0];
+          if (!r) return null;
+          if (r.merged_into && r.merged_into !== currentId) {
+            currentId = r.merged_into;
+            continue;
+          }
+          return { id: r.id, kind: r.kind, status: r.status, mergedInto: r.merged_into };
+        }
+        return null;
+      },
+
+      // ⛔ NEW (P3e round 2 gate, H2/H3): the real directory shards, one
+      // SET-BASED statement per call (`unnest` over parallel arrays) —
+      // not one round trip per row. Every id referenced here was already
+      // established in `app.catalog_id_ledger` by `ensureLedgerIdsExist`
+      // (import-handler.ts's own ordering: ledger pass, THEN directory
+      // pass), so these FKs are always satisfied.
+      async upsertTrails(rows: { id: string; slug: string; name: string; catalogVersionInt: number }[]): Promise<void> {
+        if (rows.length === 0) return;
+        await trx`
+          insert into app.catalog_trail (id, slug, name, catalog_version)
+          select * from unnest(
+            ${rows.map((r) => r.id)}::text[],
+            ${rows.map((r) => r.slug)}::text[],
+            ${rows.map((r) => r.name)}::text[],
+            ${rows.map((r) => r.catalogVersionInt)}::int[]
+          )
+          on conflict (id) do update set
+            slug = excluded.slug, name = excluded.name, catalog_version = excluded.catalog_version`;
+      },
+
+      async upsertDesigners(rows: { id: string; name: string; catalogVersionInt: number }[]): Promise<void> {
+        if (rows.length === 0) return;
+        await trx`
+          insert into app.catalog_designer (id, name, catalog_version)
+          select * from unnest(
+            ${rows.map((r) => r.id)}::text[],
+            ${rows.map((r) => r.name)}::text[],
+            ${rows.map((r) => r.catalogVersionInt)}::int[]
+          )
+          on conflict (id) do update set
+            name = excluded.name, catalog_version = excluded.catalog_version`;
+      },
+
+      async upsertFacilities(rows: { id: string; slug: string; region: string; tz: string; name: string; verificationStatus: string; catalogVersionInt: number }[]): Promise<void> {
+        if (rows.length === 0) return;
+        await trx`
+          insert into app.catalog_facility (id, slug, region, tz, name, catalog_version)
+          select * from unnest(
+            ${rows.map((r) => r.id)}::text[],
+            ${rows.map((r) => r.slug)}::text[],
+            ${rows.map((r) => r.region)}::text[],
+            ${rows.map((r) => r.tz)}::text[],
+            ${rows.map((r) => r.name)}::text[],
+            ${rows.map((r) => r.catalogVersionInt)}::int[]
+          )
+          on conflict (id) do update set
+            slug = excluded.slug, region = excluded.region, tz = excluded.tz,
+            name = excluded.name, catalog_version = excluded.catalog_version`;
+        // verification_status lives on app.catalog_facility too, but the
+        // column doesn't exist there (0002 — only app.catalog_course has
+        // one). See upsertCourses's own note: this importer's chosen
+        // reading is that a COURSE's verification_status mirrors its
+        // facility's own Facility.verification.status (the artifact
+        // carries no separate per-course verification field at all).
+      },
+
+      async upsertHoles(rows: { id: string; courseId: string; number: number; catalogVersionInt: number }[]): Promise<void> {
+        if (rows.length === 0) return;
+        await trx`
+          insert into app.catalog_hole (id, course_id, number, catalog_version)
+          select * from unnest(
+            ${rows.map((r) => r.id)}::text[], ${rows.map((r) => r.courseId)}::text[],
+            ${rows.map((r) => r.number)}::int[], ${rows.map((r) => r.catalogVersionInt)}::int[])
+          on conflict (id) do update set course_id = excluded.course_id, number = excluded.number, catalog_version = excluded.catalog_version`;
+      },
+
+      // R3 — roster versions + members, set-based through jsonb_to_recordset
+      // (members carry an `anyOf` ARRAY, which a 1-D unnest cannot). A roster
+      // version is immutable: members are written ONLY alongside a newly
+      // inserted version row (the CTE's `returning` join), so a re-import of
+      // an already-stored version is a no-op.
+      async upsertRosters(rows: RosterVersionInput[]): Promise<void> {
+        if (rows.length === 0) return;
+        const versions = rows.map((r) => ({
+          trail_id: r.trailId, version: r.version, completion_unit: r.completionUnit, marker_unit: r.markerUnit,
+          completion_rule: r.completionRule.kind, completion_rule_n: r.completionRule.n, completion_rule_source: r.completionRule.source,
+          marker_rule: r.markerRule.kind, marker_rule_n: r.markerRule.n, marker_rule_source: r.markerRule.source,
+          tracking_starts_on: r.trackingStartsOn, effective_from: `${r.effectiveFrom}T00:00:00Z`,
+        }));
+        const members = rows.flatMap((r) => r.members.map((m) => ({
+          trail_id: r.trailId, roster_version: r.version, unit: m.unit, course_id: m.courseId, any_of: m.anyOfCourseIds,
+          facility_id: m.facilityId, hole_id: m.holeId, stop_order: m.stopOrder, removed_on: m.removedOn,
+        })));
+        await trx`
+          with v as (
+            insert into app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, completion_rule, completion_rule_n, completion_rule_source, marker_rule, marker_rule_n, marker_rule_source, tracking_starts_on, effective_from)
+            select x.trail_id, x.version, x.completion_unit::app.roster_unit, x.marker_unit::app.roster_unit,
+                   x.completion_rule::app.roster_rule_kind, x.completion_rule_n, x.completion_rule_source,
+                   x.marker_rule::app.roster_rule_kind, x.marker_rule_n, x.marker_rule_source,
+                   x.tracking_starts_on, x.effective_from
+            from jsonb_to_recordset(${trx.json(versions as never)}) as x(trail_id text, version int, completion_unit text, marker_unit text, completion_rule text, completion_rule_n int, completion_rule_source text, marker_rule text, marker_rule_n int, marker_rule_source text, tracking_starts_on date, effective_from timestamptz)
+            on conflict (trail_id, version) do nothing
+            returning trail_id, version
+          )
+          insert into app.catalog_roster_member (trail_id, roster_version, unit, course_id, any_of_course_ids, facility_id, hole_id, stop_order, removed_on)
+          select m.trail_id, m.roster_version, m.unit::app.roster_unit, m.course_id,
+                 case when m.any_of is null then null else array(select jsonb_array_elements_text(m.any_of)) end,
+                 m.facility_id, m.hole_id, m.stop_order, m.removed_on
+          from jsonb_to_recordset(${trx.json(members as never)}) as m(trail_id text, roster_version int, unit text, course_id text, any_of jsonb, facility_id text, hole_id text, stop_order int, removed_on date)
+          join v on v.trail_id = m.trail_id and v.version = m.roster_version`;
+      },
+
+      async findStubPromotions(rows: LedgerStateRow[]): Promise<string[]> {
+        if (rows.length === 0) return [];
+        const found = await trx`
+          select l.id from app.catalog_id_ledger l
+          join unnest(${rows.map((r) => r.id)}::text[], ${rows.map((r) => r.status)}::text[]) as t(id, status) on t.id = l.id
+          where l.kind = 'course' and l.status = 'stub' and t.status = 'verified'`;
+        return found.map((r) => r.id as string);
+      },
+
+      async applySplits(rows: LedgerStateRow[]): Promise<string[]> {
+        const sibs: string[] = [];
+        const kepts: string[] = [];
+        for (const r of rows) for (const sib of r.splitSiblings) {
+          sibs.push(sib);
+          kepts.push(r.id);
+        }
+        if (sibs.length === 0) return [];
+        const changed = await trx`
+          update app.catalog_id_ledger l set split_from = t.kept
+          from unnest(${sibs}::text[], ${kepts}::text[]) as t(sib, kept)
+          where l.id = t.sib and l.split_from is null and l.id <> t.kept
+          returning t.kept`;
+        return [...new Set(changed.map((r) => r.kept as string))];
+      },
+
+      async enqueueRescore(courseIds: string[], reason: "promotion" | "split", catalogVersionInt: number): Promise<void> {
+        if (courseIds.length === 0) return;
+        await trx`
+          insert into app.catalog_rescore_backlog (course_id, reason, catalog_version)
+          select c, ${reason}, ${catalogVersionInt} from unnest(${courseIds}::text[]) as c
+          on conflict (course_id, reason, catalog_version) do nothing`;
+      },
+
+      async upsertCourses(rows: { id: string; facilityId: string; designerId: string | null; name: string; holes: number | null; verificationStatus: string; closed: boolean; catalogVersionInt: number }[]): Promise<void> {
+        if (rows.length === 0) return;
+        // Deliberately excludes designer_id from this bulk statement:
+        // app.catalog_course.designer_id REFERENCES app.catalog_designer(id)
+        // — a course whose claimed designer wasn't ALSO present in this
+        // same import's designers.json (a legitimate, unremarkable case:
+        // designers.json is optional, per emit-catalog.ts) must not fail
+        // the WHOLE bulk insert over one dangling FK. Inserted NULL here,
+        // then set in a SEPARATE, per-row-guarded pass below that only
+        // touches rows whose designer id actually resolves.
+        await trx`
+          insert into app.catalog_course (id, facility_id, name, holes, verification_status, closed, catalog_version)
+          select t.id, t.facility_id, t.name, t.holes, t.verification_status, t.closed = 1, t.catalog_version from unnest(
+            ${rows.map((r) => r.id)}::text[],
+            ${rows.map((r) => r.facilityId)}::text[],
+            ${rows.map((r) => r.name)}::text[],
+            ${rows.map((r) => r.holes)}::int[],
+            ${rows.map((r) => r.verificationStatus)}::app.verification_status[],
+            ${rows.map((r) => (r.closed ? 1 : 0))}::int[],
+            ${rows.map((r) => r.catalogVersionInt)}::int[]
+          ) as t(id, facility_id, name, holes, verification_status, closed, catalog_version)
+          on conflict (id) do update set
+            facility_id = excluded.facility_id, name = excluded.name, holes = coalesce(excluded.holes, app.catalog_course.holes),
+            verification_status = excluded.verification_status, closed = excluded.closed,
+            catalog_version = excluded.catalog_version`;
+        const withDesigner = rows.filter((r) => r.designerId !== null);
+        if (withDesigner.length > 0) {
+          await trx`
+            update app.catalog_course c set designer_id = d.designer_id
+            from unnest(${withDesigner.map((r) => r.id)}::text[], ${withDesigner.map((r) => r.designerId)}::text[]) as d(course_id, designer_id)
+            where c.id = d.course_id and exists (select 1 from app.catalog_designer where id = d.designer_id)`;
+        }
+      },
+    },
+
+    rescoreBacklog: {
+      async listOpen(limit: number, sweepDelaySeconds: number): Promise<RescoreBacklogRow[]> {
+        const rows = await trx`
+          select id, course_id, reason, cursor_play_id, cursor_created_at::text as cursor_created_at, finished_at::text as finished_at, swept,
+                 (finished_at is not null and clock_timestamp() >= finished_at + make_interval(secs => ${sweepDelaySeconds}::double precision)) as sweep_ready
+          from app.catalog_rescore_backlog where done_at is null order by id limit ${limit}`;
+        return rows.map((r) => ({
+          id: Number(r.id),
+          courseId: r.course_id as string,
+          reason: r.reason as "promotion" | "split",
+          cursor: r.cursor_play_id ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null,
+          finishedAt: (r.finished_at as string | null) ?? null,
+          swept: Boolean(r.swept),
+          sweepReady: Boolean(r.sweep_ready),
+        }));
+      },
+      async markFinished(id: number, cursor: RescoreCursor | null): Promise<void> {
+        await trx`
+          update app.catalog_rescore_backlog set
+            cursor_play_id = ${cursor?.playId ?? null}, cursor_created_at = ${cursor?.createdAt ?? null}::text::timestamptz,
+            finished_at = coalesce(finished_at, clock_timestamp())
+          where id = ${id}`;
+      },
+      async beginSweep(id: number, cursor: RescoreCursor | null, overlapSeconds: number): Promise<RescoreCursor | null> {
+        // Rewind by the overlap, in SQL on the stored (microsecond-exact)
+        // timestamp; the nil uuid sorts before every real id, so every play at
+        // or after the rewound instant is revisited. With no cursor at all
+        // (a course with no plays) there is nothing to rewind.
+        if (cursor === null) {
+          await trx`update app.catalog_rescore_backlog set swept = true where id = ${id}`;
+          return null;
+        }
+        const rows = await trx`
+          update app.catalog_rescore_backlog set
+            swept = true,
+            cursor_play_id = '00000000-0000-0000-0000-000000000000'::uuid,
+            cursor_created_at = ${cursor.createdAt}::text::timestamptz - make_interval(secs => ${overlapSeconds}::double precision)
+          where id = ${id}
+          returning cursor_play_id, cursor_created_at::text as cursor_created_at`;
+        const r = rows[0];
+        return r ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null;
+      },
+      async purgeFixCoords(retentionDays: number, limit: number): Promise<number> {
+        const rows = await trx`
+          with doomed as (
+            select e.id from app.evidence e
+            where e.integrity ? 'fixCoords'
+              and (
+                e.created_at < now() - make_interval(days => ${retentionDays}::int)
+                or e.course_id is null
+                or not exists (
+                  select 1 from app.catalog_id_ledger l
+                  where l.id = e.course_id
+                    and (l.status = 'stub'
+                         or l.split_from is not null
+                         or exists (select 1 from app.catalog_id_ledger s where s.split_from = l.id)
+                         or exists (select 1 from app.catalog_rescore_backlog b where b.course_id = l.id and b.done_at is null))
+                )
+              )
+            order by e.created_at
+            limit ${limit}
+          )
+          update app.evidence e set integrity = e.integrity - 'fixCoords'
+          from doomed d where e.id = d.id
+          returning e.id`;
+        return rows.length;
+      },
+      async nextPlays(courseId: string, after: RescoreCursor | null, limit: number): Promise<RescorePlayRef[]> {
+        // Stable keyset over (created_at, id): a play inserted while the
+        // drain is mid-course has a created_at at/after the cursor, so it
+        // can never fall BEHIND it the way a bare random-uuid ordering
+        // would let it (a LOW from the round-2 gate).
+        // The text form is kept END TO END: postgres.js would parse a value it
+        // infers as timestamptz into a JS Date (millisecond precision) and
+        // truncate the cursor — so it is cast text -> timestamptz in SQL.
+        const afterAt = after?.createdAt ?? null;
+        const afterId = after?.playId ?? null;
+        const rows = await trx`
+          select id, user_id, facility_id, course_id, play_date, created_at::text as created_at_text from app.play
+          where course_id = ${courseId} and (${afterId}::uuid is null or (created_at, id) > (${afterAt}::text::timestamptz, ${afterId}::uuid))
+          order by created_at, id limit ${limit}`;
+        return rows.map((r) => ({
+          playId: r.id as string, userId: r.user_id as string, facilityId: r.facility_id as string, courseId: r.course_id as string,
+          playDate: r.play_date instanceof Date ? r.play_date.toISOString().slice(0, 10) : String(r.play_date),
+          createdAt: r.created_at_text as string,
+        }));
+      },
+      async advance(id: number, cursor: RescoreCursor | null, done: boolean): Promise<void> {
+        await trx`update app.catalog_rescore_backlog set cursor_play_id = ${cursor?.playId ?? null}, cursor_created_at = ${cursor?.createdAt ?? null}::text::timestamptz, done_at = case when ${done} then now() else null end where id = ${id}`;
+      },
+    },
+
+    queuedCatalog: {
+      // ⛔ FIX (P3e round 2 gate, B2): no more system-scoped
+      // promoteToAccepted/markNeedsAttention here — draining now goes
+      // through the actor-scoped `Repo#evidence.resolveQueuedRow`/
+      // `markQueuedTerminal` (a PER-ROW `withOwnership` transaction,
+      // opened by drain-orchestrator.ts) so a promotion can actually
+      // re-run real intake derivation (facility/course resolution, the
+      // matcher, scorePlay) instead of being a raw, unscored status flip
+      // — see this file's own `Repo#evidence` section, and
+      // evidence/handler.ts#redrainQueuedEvidenceRow's header, for the
+      // full "why".
+      async listOpen(limit: number): Promise<QueuedEvidenceRow[]> {
+        const rows = await trx`
+          select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, queued_input, created_at
+          from app.evidence
+          where status = 'queued_catalog'
+          order by created_at asc
+          limit ${limit}`;
+        return rows.map((r) => ({
+          id: r.id,
+          userId: r.user_id,
+          claimedFacilityId: r.claimed_facility_id,
+          claimedCourseId: r.claimed_course_id,
+          claimedCatalogVersion: r.claimed_catalog_version,
+          queuedInput: r.queued_input,
+          createdAt: r.created_at.toISOString(),
+        }));
+      },
+
+      async currentSiteVersion(): Promise<string | null> {
+        const rows = await trx`select site_version from app.catalog_version order by site_version desc nulls last, version desc limit 1`;
+        return rows[0]?.site_version ?? null;
+      },
+    },
+  };
+}
+
+/** Same short-own-transaction shape as `hitRateLimitForActor` (see that
+ * function's own doc for why a rate-limit hit must never open a SECOND
+ * connection from inside an already-open transaction) — the system
+ * -scoped counterpart: no `Actor` to prefix the bucket key with (this
+ * section's own header on why import-catalog has none), so the caller's
+ * own bucket key IS the whole key, unscoped. Used by
+ * `import-catalog/index.ts` as a coarse defense-in-depth cap on the HMAC
+ * -authenticated endpoint itself (bounds the blast radius of a leaked
+ * webhook secret, distinct from — and in addition to — the HMAC check
+ * that gates the endpoint at all). */
+export async function hitSystemRateLimit(bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
+  const db = sql();
+  return db.begin(async (rateTrx: TxSql) => {
+    await rateTrx`set local role service_role`;
+    const check = await rateTrx`select current_user as u`;
+    if (check[0]?.u !== "service_role") {
+      throw new Error(`hitSystemRateLimit: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
+    }
+    const rows = await rateTrx`select private.hit_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}) as count`;
+    const count = Number(rows[0]?.count ?? 0);
+    if (count > max) {
+      return { ok: false, count, retryAfterSeconds: windowSeconds };
+    }
+    return { ok: true, count };
+  }) as Promise<RateLimitResult>;
+}
+
+export type { CatalogImportEnvConfig } from "./types.ts";
+
+/** The ONE place `import-catalog/index.ts` reads its own env config from —
+ * every value here is either a narrow, single-purpose secret
+ * (`CATALOG_IMPORT_HMAC_SECRET` — never `service_role`, never a DB
+ * credential) or plain operational config (the artifact URL, its host
+ * allow-list), but NONE of the three is on
+ * `tools/service-role-lint`'s own `PUBLIC_ENV_VAR_ALLOWLIST`
+ * (`SUPABASE_URL`/`SUPABASE_ANON_KEY`/`ENVIRONMENT`/`NODE_ENV`/
+ * `DENO_ENV`) — so, per that lint's own rule, this file (the sole
+ * allow-listed `Deno.env.get` site for anything else) is the only place
+ * they may be read. Returns `null` (never throws) when any is missing —
+ * the caller maps that to a clean 500 ("this environment is not
+ * configured for catalog import") rather than a raw exception; task
+ * instruction: "No secrets, emails, or phone numbers in any file" —
+ * nothing here is a literal secret VALUE, only the env VAR NAMES that
+ * name where one lives. */
+export function getCatalogImportEnvConfig(): CatalogImportEnvConfig | null {
+  const artifactBaseUrl = Deno.env.get("CATALOG_ARTIFACT_BASE_URL");
+  const allowedHostsRaw = Deno.env.get("CATALOG_ARTIFACT_ALLOWED_HOSTS");
+  const webhookHmacSecret = Deno.env.get("CATALOG_IMPORT_HMAC_SECRET");
+  if (!artifactBaseUrl || !allowedHostsRaw || !webhookHmacSecret) return null;
+  const allowedHosts = allowedHostsRaw.split(",").map((h) => h.trim()).filter((h) => h.length > 0);
+  if (allowedHosts.length === 0) return null;
+  return { artifactBaseUrl, allowedHosts, webhookHmacSecret };
 }

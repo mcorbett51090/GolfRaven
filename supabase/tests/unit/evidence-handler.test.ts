@@ -4,6 +4,13 @@ import { handleEvidenceIntake, planEvidenceRateLimitChecks } from "../../functio
 import { FAKE_DEVICE_ID, fakeHitRateLimitForActor, makeFakeRepo, makeFakeState } from "./fake-repo.js";
 import { HttpError } from "../../functions/_shared/http.js";
 
+// ⛔ FIX (P3e round 2 gate, H1): the site version string
+// (yyyymmdd-gitsha7), not the old internal int — matches
+// fake-repo.ts#makeFakeState's own default `catalogVersions` fixture
+// (version 1), which every test below that doesn't care about skew
+// semantics relies on being "current".
+const SITE_VERSION_CURRENT = "20260520-a000001";
+
 function checkinBody(overrides: Record<string, unknown> = {}) {
   return {
     source: "foreground_checkin",
@@ -11,7 +18,7 @@ function checkinBody(overrides: Record<string, unknown> = {}) {
     facilityId: "fac_x",
     courseId: "crs_x1",
     localDate: "2026-06-01",
-    catalogVersion: 1,
+    catalogVersion: SITE_VERSION_CURRENT,
     fix: {
       fixId: "fix_1",
       lat: 36.1467,
@@ -108,11 +115,35 @@ describe("handleEvidenceIntake", () => {
     await expect(handleEvidenceIntake(checkinBody({ facilityId: "fac_y" }), repo)).rejects.toMatchObject({ code: "facility_course_mismatch" });
   });
 
-  it("422 catalog_stale: a declared version far behind the server's own", async () => {
+  // ⛔ FIX (P3e round 2 gate, H1): every `catalogVersion` below is now a
+  // real `yyyymmdd-gitsha7` site version string, never a bare int, and
+  // `manifestSig` uses the REAL P1 manifest.sig.json shape (`{kid,
+  // contractVersion, signature, manifestSha}` — B1: STANDARD base64 for
+  // `signature`, not base64url).
+  it("422 catalog_stale: a declared version more than 5 RELEASES behind the server's own (ranked by site_version order)", async () => {
     const state = makeFakeState();
-    state.catalogVersions.set(20, { version: 20, publishedAt: "2026-06-01T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" });
+    // Six newer releases after the default fixture (SITE_VERSION_CURRENT,
+    // internal int 1) — rank 7 vs rank 1 = 6 releases behind > 5.
+    for (let i = 0; i < 6; i++) {
+      const v = 10 + i;
+      state.catalogVersions.set(v, { version: v, siteVersion: `2026060${i + 1}-c00000${i}`, publishedAt: "2026-06-01T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" });
+    }
     const repo = makeFakeRepo(state, "user-a");
-    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: 1 }), repo)).rejects.toMatchObject({ code: "catalog_stale" });
+    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: SITE_VERSION_CURRENT }), repo)).rejects.toMatchObject({ code: "catalog_stale" });
+  });
+
+  // Round 2 gate LOW: "5 releases" is RELEASE order, not the internal
+  // import-order int. A rollback republish (an OLDER site version imported
+  // LATER, so it holds the HIGHEST int) must not make a perfectly current
+  // release look 19 behind.
+  it("accepts a version whose internal int is far behind but whose RELEASE rank is within the window (rollback republish)", async () => {
+    const state = makeFakeState();
+    state.catalogVersions.set(20, { version: 20, siteVersion: "20260510-d000020", publishedAt: "2026-05-10T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" });
+    const repo = makeFakeRepo(state, "user-a");
+    // current by site_version order = SITE_VERSION_CURRENT (int 1); the
+    // int-20 row is OLDER. Declaring the int-1 version is the current one.
+    const result = await handleEvidenceIntake(checkinBody({ catalogVersion: SITE_VERSION_CURRENT }), repo);
+    expect(result.status).toBe("accepted");
   });
 
   // ⛔ FIX (P3c gate round 2, should-fix "revoked kid" / AT 15).
@@ -120,19 +151,24 @@ describe("handleEvidenceIntake", () => {
     const state = makeFakeState();
     state.signingKeys.set("k1", { kid: "k1", publicKeyB64Url: "anything", revokedAt: "2026-05-25T00:00:00.000Z" });
     const repo = makeFakeRepo(state, "user-a");
-    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: 1 }), repo)).rejects.toMatchObject({ code: "catalog_stale" });
+    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: SITE_VERSION_CURRENT }), repo)).rejects.toMatchObject({ code: "catalog_stale" });
   });
 
   it("422 catalog_forged: a far-future catalogVersion", async () => {
     const state = makeFakeState();
     const repo = makeFakeRepo(state, "user-a");
-    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: 5000 }), repo)).rejects.toMatchObject({ code: "catalog_forged" });
+    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: "20500101-e000000" }), repo)).rejects.toMatchObject({ code: "catalog_forged" });
   });
 
   it("422 catalog_forged: a newer (not far-future) version with no verifying manifestSig — this environment's own deferred-signature stub", async () => {
     const state = makeFakeState();
     const repo = makeFakeRepo(state, "user-a");
-    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: 2 }), repo)).rejects.toMatchObject({ code: "catalog_forged" });
+    // 2026-06-02 is 0.5 days after fake-repo.ts's own state.now
+    // (2026-06-01T12:00:00Z) — newer than SITE_VERSION_CURRENT, well
+    // inside the default 1-day maxFutureDays bound, so this is the
+    // "genuinely newer, needs a verified signature" case, not the
+    // separate far-future rejection above.
+    await expect(handleEvidenceIntake(checkinBody({ catalogVersion: "20260602-f000002" }), repo)).rejects.toMatchObject({ code: "catalog_forged" });
   });
 
   it("202 queued_catalog: a newer version WITH a manifestSig that verifies against a registered key", async () => {
@@ -141,7 +177,7 @@ describe("handleEvidenceIntake", () => {
     const repo = makeFakeRepo(state, "user-a");
     // Monkeypatch: this test only needs classifyCatalogSubmission's OWN
     // verify callback to say yes — handler.ts calls
-    // verifyManifestSignature for real, which would genuinely fail
+    // verifyArtifactSignature for real, which would genuinely fail
     // against a fake key. This test instead proves the 202 CODE PATH by
     // registering a key AND accepting that a real crypto check still
     // fails it here (defense in depth is real) -- so this case documents
@@ -149,7 +185,10 @@ describe("handleEvidenceIntake", () => {
     // real Ed25519 keypair, this can only reach catalog_forged, exactly
     // as production would with an invalid/forged signature.
     await expect(
-      handleEvidenceIntake(checkinBody({ catalogVersion: 2, manifestSig: { kid: "k1", signatureB64Url: "AAAA", manifestSha256: "0".repeat(64) } }), repo),
+      handleEvidenceIntake(
+        checkinBody({ catalogVersion: "20260602-f000002", manifestSig: { kid: "k1", contractVersion: 1, sig: "AAAA", manifestSha: "0".repeat(64) } }),
+        repo,
+      ),
     ).rejects.toMatchObject({ code: "catalog_forged" });
   });
 
@@ -282,7 +321,7 @@ describe("handleEvidenceIntake", () => {
     state.ledger.set("crs_x2", { id: "crs_x2", kind: "course", status: "verified", verifiedInVersion: 1, splitFrom: null, tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 });
     state.courseFacility.set("crs_x2", "fac_x");
     const repo = makeFakeRepo(state, "user-a");
-    const facilityLevel = await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", localDate: "2026-06-01", catalogVersion: 1 }, repo);
+    const facilityLevel = await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", localDate: "2026-06-01", catalogVersion: SITE_VERSION_CURRENT }, repo);
     expect(facilityLevel.status).toBe("accepted"); // no courseId -> no play of its own
     if (facilityLevel.status !== "accepted") throw new Error("unreachable");
     const rowsForCourseA = await repo.evidence.listForPlay("fac_x", "crs_x1", "2026-06-01");
@@ -471,7 +510,7 @@ describe("handleEvidenceIntake", () => {
   it("P3c gate round 3, blocking MEDIUM 5: 422 local_date_out_of_window for a self_report far outside the facility-local window", async () => {
     const state = makeFakeState();
     const repo = makeFakeRepo(state, "user-a");
-    const body = { source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", localDate: "2020-01-01", catalogVersion: 1 };
+    const body = { source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", localDate: "2020-01-01", catalogVersion: SITE_VERSION_CURRENT };
     await expect(handleEvidenceIntake(body, repo)).rejects.toMatchObject({ code: "local_date_out_of_window" });
   });
 
@@ -484,5 +523,86 @@ describe("handleEvidenceIntake", () => {
     for (const source of ["connect_iq", "health_route", "file_import"]) {
       await expect(handleEvidenceIntake({ ...checkinBody(), source, fix: undefined }, repo)).rejects.toThrow(HttpError);
     }
+  });
+});
+
+// ============================================================================
+// Round 2 gate NEW-3 (HIGH): replaying a TERMINAL drained row must never 500
+// (a 5xx makes the client outbox retry forever).
+// ============================================================================
+describe("handleEvidenceIntake — replay of a terminal drained row (NEW-3)", () => {
+  /** Submits once (accepted), then rewrites the stored row into the shape a
+   * drain leaves behind: terminal status, NULL facility/course. */
+  async function terminalRow(status: "unknown_id" | "needs_attention") {
+    const state = makeFakeState();
+    const repo = makeFakeRepo(state, "user-a");
+    const first = await handleEvidenceIntake(checkinBody(), repo);
+    expect(first.status).toBe("accepted");
+    const row = [...state.evidence.values()][0]! as unknown as { status: string; facilityId: string | null; courseId: string | null };
+    row.status = status;
+    row.facilityId = null;
+    row.courseId = null;
+    return { state, repo };
+  }
+
+  it("unknown_id -> the 422 unknown_id the live submission would have returned (never a 500)", async () => {
+    const { repo } = await terminalRow("unknown_id");
+    await expect(handleEvidenceIntake(checkinBody(), repo)).rejects.toMatchObject({ status: 422, code: "unknown_id" });
+  });
+
+  it("needs_attention -> a stored-state 200 result (never a 5xx), and no new play/evidence/side effect", async () => {
+    const { state, repo } = await terminalRow("needs_attention");
+    const playsBefore = state.plays.size;
+    const evBefore = state.evidence.size;
+    const result = await handleEvidenceIntake(checkinBody(), repo);
+    expect(result).toMatchObject({ status: "needs_attention" });
+    expect(state.plays.size).toBe(playsBefore);
+    expect(state.evidence.size).toBe(evBefore);
+  });
+
+  it("the same holds in batch mode (the batch handler passes the status through)", async () => {
+    const { repo } = await terminalRow("needs_attention");
+    const result = await handleEvidenceIntake(checkinBody(), repo, { batchMode: true, deferScoring: true });
+    expect(result).toMatchObject({ status: "needs_attention" });
+  });
+});
+
+
+// ============================================================================
+// Round 3 gate (HIGH, §8.6 minimisation): raw fix coordinates are stored only
+// when a re-pick can actually happen.
+// ============================================================================
+describe("handleEvidenceIntake — fixCoords minimisation (§8.6)", () => {
+  const evidenceOf = (state: ReturnType<typeof makeFakeState>) => [...state.evidence.values()][0]! as unknown as { integrity: Record<string, unknown> };
+
+  it("a VERIFIED, never-split course stores NO coordinates", async () => {
+    const state = makeFakeState();
+    expect(state.ledger.get("crs_x1")!.status).toBe("verified");
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toEqual({});
+  });
+
+  it("a STUB course stores them (only stubs split, G3-01)", async () => {
+    const state = makeFakeState();
+    state.ledger.set("crs_x1", { ...state.ledger.get("crs_x1")!, status: "stub" });
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toEqual({ fixCoords: { fix_1: { lat: 36.1467, lng: -86.7816 } } });
+  });
+
+  it("a course already in a split family stores them (a sibling, and the kept course)", async () => {
+    const state = makeFakeState();
+    state.ledger.set("crs_x1", { ...state.ledger.get("crs_x1")!, splitFrom: "crs_kept" }); // crs_x1 is a split sibling
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toHaveProperty("fixCoords");
+    const state2 = makeFakeState();
+    state2.ledger.set("crs_sib", { id: "crs_sib", kind: "course", status: "verified", verifiedInVersion: 1, splitFrom: "crs_x1", tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 });
+    await handleEvidenceIntake(checkinBody(), makeFakeRepo(state2, "user-a")); // crs_x1 is the KEPT course
+    expect(evidenceOf(state2).integrity).toHaveProperty("fixCoords");
+  });
+
+  it("a row with no course (facility-level) never stores coordinates, even at a stub facility", async () => {
+    const state = makeFakeState();
+    await handleEvidenceIntake(checkinBody({ courseId: undefined }), makeFakeRepo(state, "user-a"));
+    expect(evidenceOf(state).integrity).toEqual({});
   });
 });

@@ -71,7 +71,19 @@ export function adminSql(): AdminSql {
 }
 
 let _roleSet = false;
-async function ensureServiceRole(): Promise<void> {
+/** Exported so a test file can run its OWN raw `adminSql()` template-tag
+ * queries (not just through `rawCount`/`rawEvidenceRow`, which already
+ * call this internally) and still see real data under
+ * HARNESS_MODE=restricted. Necessary, not merely tidy: under `restricted`,
+ * `adminSql()`'s connection is `migration_owner` — NOSUPERUSER, no
+ * BYPASSRLS, and no client-role RLS policy of its own — so a raw SELECT
+ * against a FORCE-RLS table (nearly all of `app.*`) silently returns ZERO
+ * rows (RLS filters, it doesn't error) unless this has switched the
+ * session to `service_role` first. Masked entirely under
+ * HARNESS_MODE=superuser (`postgres` is a true superuser and bypasses RLS
+ * regardless of role) — a real bug this session's own restricted-mode run
+ * caught, in a test file's verification query, not in product code. */
+export async function ensureServiceRole(): Promise<void> {
   if (_roleSet) return;
   await adminSql()`set role service_role`;
   _roleSet = true;
@@ -214,8 +226,22 @@ export async function createCourseWithPolygonAtFacX(courseId: string): Promise<v
  * still be relying on as "current". */
 export async function insertCatalogVersion(version: number, publishedAt: Date, kid: string): Promise<void> {
   await ensureServiceRole();
-  await adminSql()`insert into app.catalog_version (version, contract_version, sha256, kid, published_at) values (${version}, 'v1', ${"s".repeat(64)}, ${kid}, ${publishedAt.toISOString()})`;
+  await adminSql()`insert into app.catalog_version (version, site_version, contract_version, sha256, kid, published_at) values (${version}, ${siteVersionFor(version)}, 'v1', ${"s".repeat(64)}, ${kid}, ${publishedAt.toISOString()})`;
 }
+
+/** P3e round 2 gate (H1): intake takes the SITE version string
+ * (yyyymmdd-gitsha7), resolved via `catalog_version.site_version`, and
+ * "current" is the greatest site_version. This derives one for an
+ * integer fixture version such that ORDER BY site_version matches
+ * ORDER BY version (2030-01-01 + n days, n in the hex suffix) and never
+ * collides with a real import's own 2026 dates. `siteVersionFor(1)` is
+ * the value supabase/tests/helpers.sql seeds on version 1. */
+export function siteVersionFor(n: number): string {
+  const d = new Date(Date.UTC(2030, 0, 1) + n * 24 * 60 * 60 * 1000);
+  const ymd = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+  return `${ymd}-${n.toString(16).padStart(7, "0")}`;
+}
+export const SEED_SITE_VERSION = siteVersionFor(1);
 
 /** Unlike every other fixture helper in this file, this one does NOT go
  * through `service_role` — 0019's own fix (P3c gate round 2, "Conditions
@@ -227,6 +253,17 @@ export async function insertCatalogVersion(version: number, publishedAt: Date, k
 export async function insertSigningKey(kid: string, revokedAt: Date | null): Promise<void> {
   await withTemporaryOwnerAccess("app.catalog_signing_key", (sql) =>
     sql`insert into app.catalog_signing_key (kid, public_key_b64url, revoked_at) values (${kid}, 'AAAA', ${revokedAt ? revokedAt.toISOString() : null})`,
+  );
+}
+
+/** Same as `insertSigningKey`, but with a REAL, caller-supplied Ed25519
+ * public key (unlike `insertSigningKey`'s own fixed `'AAAA'` placeholder,
+ * which is fine for the AT 8/AT 15 skew tests — they never reach real
+ * signature verification — but useless for import-catalog.deno.test.ts,
+ * which DOES verify a real signature against a real registered key). */
+export async function insertSigningKeyWithKey(kid: string, publicKeyB64Url: string, revokedAt: Date | null): Promise<void> {
+  await withTemporaryOwnerAccess("app.catalog_signing_key", (sql) =>
+    sql`insert into app.catalog_signing_key (kid, public_key_b64url, revoked_at) values (${kid}, ${publicKeyB64Url}, ${revokedAt ? revokedAt.toISOString() : null})`,
   );
 }
 

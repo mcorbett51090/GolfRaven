@@ -36,8 +36,11 @@ INSERT INTO app.admin_user (user_id) VALUES ('00000000-0000-0000-0000-4000000000
 INSERT INTO app.app_review_demo_account (user_id) VALUES ('00000000-0000-0000-0000-5000000000e0');
 
 -- Catalog: one trail (T), two facilities (X, Y), one course each.
-INSERT INTO app.catalog_version (version, contract_version, sha256, kid, published_at)
-VALUES (1, 'v1', repeat('a', 64), 'kid1', now());
+-- P3e round 2 gate (H1): the seed row carries a site_version too (intake
+-- now resolves the client's yyyymmdd-gitsha7 string via it) — the SAME
+-- value integration/_helpers.ts#siteVersionFor(1) derives.
+INSERT INTO app.catalog_version (version, site_version, contract_version, sha256, kid, published_at)
+VALUES (1, '20300102-0000001', 'v1', repeat('a', 64), 'kid1', now());
 
 INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES
   ('trl_t', 'trail', 'verified', 1),

@@ -38,10 +38,14 @@ import type {
 
 const ABSOLUTE_ROW_CAP = 10_000; // mirrors packages/rules' own constant (score-play.ts) — see privileged.ts's own re-import of the SAME vendored value; hardcoded here rather than imported so this fake has zero dependency on the vendor tree's own layout.
 
-interface FakeEvidenceRow extends NewEvidenceRow {
+// ⛔ FIX (P3e round 2 gate, B3): `NewEvidenceRow` is now a discriminated
+// UNION (types.ts) — `interface X extends A | B` is not valid TS, so this
+// moves to a type-alias intersection, which distributes over the union
+// correctly.
+type FakeEvidenceRow = NewEvidenceRow & {
   id: string;
   userId: string;
-}
+};
 
 interface FakePlayRow extends UpsertPlayInput {
   id: string;
@@ -116,13 +120,32 @@ export interface FakeState {
   deletedUsers: Set<string>;
   pushTokens: Map<string, FakePushTokenRow>; // `${userId}:${deviceId}` -> row
   nextId: number;
+  // ⛔ NEW (P3e round 2 gate, B2/M1): `NewEvidenceRow` genuinely has no
+  // `createdAt` field (real Postgres defaults `app.evidence.created_at`;
+  // the app never supplies it) — but `ImporterRepo.queuedCatalog.listOpen`'s
+  // own `QueuedEvidenceRow.createdAt` needs a real, test-controllable
+  // value for the age-based `needs_attention` decision
+  // (drain-orchestrator.test.ts's own "old, still-unresolved row" case).
+  // A side-table keyed by evidence id, set by `insertIdempotent` (to
+  // `state.now` at insert time) and overridable via
+  // `setEvidenceCreatedAt` below — never part of `FakeEvidenceRow` itself.
+  evidenceCreatedAt: Map<string, string>;
+  /** AT 18: course id -> current verification_status, for refreshFixTiers. */
+  courseTier: Map<string, "unverified" | "listed-verified" | "play-verified">;
+  /** Play ids that already used their one re-pick (the real one is an audit_log row). */
+  repicks: Set<string>;
 }
 
 export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
   return {
     now: new Date("2026-06-01T12:00:00.000Z"),
     rateLimits: new Map(),
-    catalogVersions: new Map([[1, { version: 1, publishedAt: "2026-05-20T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" }]]),
+    // ⛔ FIX (P3e round 2 gate, H1): every row now carries the site's own
+    // `yyyymmdd-gitsha7` string too — `evidence-handler.test.ts`'s own
+    // `checkinBody()` default `catalogVersion` is this EXACT string, so
+    // every test that doesn't care about skew semantics keeps working
+    // unmodified.
+    catalogVersions: new Map([[1, { version: 1, siteVersion: "20260520-a000001", publishedAt: "2026-05-20T00:00:00.000Z", contractVersion: "v1", sha256: "x", kid: "k1" }]]),
     ledger: new Map([
       ["fac_x", { id: "fac_x", kind: "facility", status: "verified", verifiedInVersion: 1, splitFrom: null, tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 }],
       ["crs_x1", { id: "crs_x1", kind: "course", status: "verified", verifiedInVersion: 1, splitFrom: null, tombstonedAt: null, mergedInto: null, firstCatalogVersion: 1 }],
@@ -144,8 +167,18 @@ export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
     deletedUsers: new Set(),
     pushTokens: new Map(),
     nextId: 1,
+    evidenceCreatedAt: new Map(),
+    courseTier: new Map(),
+    repicks: new Set(),
     ...overrides,
   };
+}
+
+/** Test-only override for a queued row's simulated `created_at` — see
+ * `FakeState.evidenceCreatedAt`'s own doc for why this lives outside
+ * `NewEvidenceRow` entirely. */
+export function setEvidenceCreatedAt(state: FakeState, id: string, iso: string): void {
+  state.evidenceCreatedAt.set(id, iso);
 }
 
 /** The default device fixture's id — tests reference this instead of
@@ -180,14 +213,38 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
 
     catalog: {
       async currentVersion(): Promise<CatalogVersionRow | null> {
+        // Mirrors the real `order by site_version desc nulls last, version desc`.
         let max: CatalogVersionRow | null = null;
+        const better = (a: CatalogVersionRow, b: CatalogVersionRow): boolean => {
+          if (a.siteVersion !== null && b.siteVersion !== null && a.siteVersion !== b.siteVersion) return a.siteVersion > b.siteVersion;
+          if ((a.siteVersion === null) !== (b.siteVersion === null)) return a.siteVersion !== null;
+          return a.version > b.version;
+        };
         for (const row of state.catalogVersions.values()) {
-          if (!max || row.version > max.version) max = row;
+          if (!max || better(row, max)) max = row;
         }
         return max;
       },
       async versionRow(version: number): Promise<CatalogVersionRow | null> {
         return state.catalogVersions.get(version) ?? null;
+      },
+      // ⛔ NEW (P3e round 2 gate, H1): evidence intake now resolves the
+      // client's own submitted SITE version string, not the internal int.
+      async versionRowBySiteVersion(siteVersion: string): Promise<CatalogVersionRow | null> {
+        for (const row of state.catalogVersions.values()) {
+          if (row.siteVersion === siteVersion) return row;
+        }
+        return null;
+      },
+      async repickEligible(courseId: string): Promise<boolean> {
+        const l = state.ledger.get(courseId);
+        if (!l) return false;
+        return l.status === "stub" || l.splitFrom !== null || [...state.ledger.values()].some((o) => o.splitFrom === courseId);
+      },
+      async releaseRank(siteVersion: string): Promise<number | null> {
+        let n = 0;
+        for (const row of state.catalogVersions.values()) if (row.siteVersion !== null && row.siteVersion !== undefined && row.siteVersion <= siteVersion) n += 1;
+        return n > 0 ? n : null;
       },
       async resolveLedgerId(id: string): Promise<LedgerRow | null> {
         let current = id;
@@ -236,6 +293,7 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         }
         const id = freshId("ev");
         state.evidence.set(id, { ...row, id, userId: uid });
+        state.evidenceCreatedAt.set(id, state.now.toISOString());
         return { id, wasNew: true, status: row.status, inputHash: row.inputHash };
       },
       // ⛔ P3c gate round 3, blocking HIGH 1+2 ("replay handling"): mirrors
@@ -244,10 +302,36 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
       // side effect, so the fake must support it for every unit test that
       // exercises `handleEvidenceIntake` at all (every one of them, since
       // it is now the FIRST repo call the handler makes).
+      // AT 18: the fake has no course verification registry — a test that
+      // needs a tier change sets `state.courseTier` (see FakeState).
+      async refreshFixTiers(courseId: string, localDate: string): Promise<number> {
+        const tier = state.courseTier.get(courseId);
+        if (!tier) return 0;
+        let n = 0;
+        for (const row of state.evidence.values()) {
+          if (row.userId !== uid || row.kind !== "resolved" || row.courseId !== courseId || row.localDate !== localDate || row.status !== "accepted") continue;
+          for (const k of ["fix", "checkinFix", "checkoutFix"]) {
+            const f = (row.summary as Record<string, unknown>)[k];
+            if (f && typeof f === "object") (f as Record<string, unknown>).verificationTier = tier;
+          }
+          n += 1;
+        }
+        return n;
+      },
       async findExisting(source: string, sourceRef: string): Promise<ExistingEvidenceRow | null> {
         for (const row of state.evidence.values()) {
           if (row.userId === uid && row.source === source && row.sourceRef === sourceRef) {
-            return { id: row.id, status: row.status, inputHash: row.inputHash, facilityId: row.facilityId, courseId: row.courseId, localDate: row.localDate };
+            // P3e round 2 gate, B3: a `queued` row's facility_id/course_id
+            // columns are ALWAYS NULL now (the claimed_* columns carry the
+            // unresolved claim instead) — mirrors the real DB row shape.
+            return {
+              id: row.id,
+              status: row.status,
+              inputHash: row.inputHash,
+              facilityId: row.kind === "resolved" ? row.facilityId : null,
+              courseId: row.kind === "resolved" ? row.courseId : null,
+              localDate: row.localDate,
+            };
           }
         }
         return null;
@@ -283,6 +367,56 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         }
         return out;
       },
+      // ⛔ NEW (P3e round 2 gate, B2/B3) — mirrors privileged.ts's own
+      // real SQL exactly: a partial UPDATE (facility_id/course_id/
+      // summary/integrity/attestation_grade/catalog_version + status ->
+      // 'accepted', claimed_*/queued_input cleared), NEVER a fresh row —
+      // every OTHER field (cosignal, matcherVersion, source, sourceRef,
+      // inputHash, deviceId, localDate, startedAt, endedAt) stays exactly
+      // what it already was. Guarded on `status === 'queued_catalog'`,
+      // same as the real `WHERE ... and status = 'queued_catalog'`.
+      async resolveQueuedRow(
+        id: string,
+        resolved: { facilityId: string; courseId: string | null; summary: Record<string, unknown>; integrity: Record<string, unknown>; attestationGrade: "attested" | "unattestable" | "failed"; catalogVersion: number | null },
+      ): Promise<void> {
+        const row = state.evidence.get(id);
+        if (!row || row.userId !== uid || row.status !== "queued_catalog" || row.kind !== "queued") return;
+        const resolvedRow: FakeEvidenceRow = {
+          id: row.id,
+          userId: row.userId,
+          kind: "resolved",
+          sourceRef: row.sourceRef,
+          inputHash: row.inputHash,
+          source: row.source,
+          facilityId: resolved.facilityId,
+          courseId: resolved.courseId,
+          startedAt: null,
+          endedAt: null,
+          localDate: row.localDate,
+          summary: resolved.summary,
+          integrity: resolved.integrity,
+          cosignal: {},
+          attestationGrade: resolved.attestationGrade,
+          matcherVersion: null,
+          catalogVersion: resolved.catalogVersion,
+          status: "accepted",
+          deviceId: row.deviceId,
+        };
+        state.evidence.set(id, resolvedRow);
+      },
+      // ⛔ NEW (P3e round 2 gate, B2/M1): flips status only — claimed_*/
+      // queued_input stay in place in THIS fake (the real SQL clears them with the
+      // status change; asserted against real Postgres), guarded the same way.
+      async markQueuedTerminal(id: string, terminalStatus: "needs_attention" | "unknown_id"): Promise<void> {
+        const row = state.evidence.get(id);
+        if (!row || row.userId !== uid || row.status !== "queued_catalog") return;
+        (row as { status: string }).status = terminalStatus;
+      },
+      async deviceIdFor(id: string): Promise<string | null> {
+        const row = state.evidence.get(id);
+        if (!row || row.userId !== uid) return null;
+        return row.deviceId ?? null;
+      },
     },
 
     play: {
@@ -290,7 +424,9 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         const key = `${uid}:${input.courseId}:${input.playDate}`;
         const existing = state.plays.get(key);
         const id = existing?.id ?? freshId("play");
-        state.plays.set(key, { ...input, id, userId: uid });
+        // Mirrors the real ON CONFLICT DO UPDATE, which never touches
+        // course_disambiguated_by (a re-pick / split label must survive a re-score).
+        state.plays.set(key, { ...input, courseDisambiguatedBy: existing?.courseDisambiguatedBy ?? input.courseDisambiguatedBy, id, userId: uid });
         for (const evidenceId of input.evidenceIds) {
           if (!state.playEvidence.some((pe) => pe.playId === id && pe.evidenceId === evidenceId)) {
             state.playEvidence.push({ playId: id, evidenceId });
@@ -303,6 +439,71 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         const row = state.plays.get(key);
         if (!row) return null;
         return { id: row.id, scoreBadge: row.scoreBadge, scoreMonetary: row.scoreMonetary, presenceSignal: row.presenceSignal, money: row.money, heldReview: row.heldReview };
+      },
+      // AT 18 — in-memory twins of privileged.ts's SQL (the REAL SQL is
+      // proven against Postgres by import-catalog / catalog-promotion
+      // .deno.test.ts; these exist so handler-level unit tests can run).
+      async uniqueCourseCount(): Promise<number> {
+        const resolved = new Set<string>();
+        for (const p of state.plays.values()) {
+          if (p.userId !== uid) continue;
+          if (!(p.scoreBadge >= 0.5 || p.money)) continue;
+          if (state.ledger.get(p.courseId)?.status !== "verified") continue;
+          let cur = p.courseId;
+          for (let i = 0; i < 10; i++) {
+            const m = state.ledger.get(cur)?.mergedInto;
+            if (!m || m === cur) break;
+            cur = m;
+          }
+          resolved.add(cur);
+        }
+        return resolved.size;
+      },
+      async markUserPick(playId: string): Promise<boolean> {
+        const play = [...state.plays.values()].find((p) => p.id === playId && p.userId === uid);
+        if (!play || play.courseDisambiguatedBy !== null) return false;
+        const clash = [...state.plays.values()].some((o) => o.userId === uid && o.facilityId === play.facilityId && o.playDate === play.playDate && o.courseDisambiguatedBy === "user" && o.id !== play.id);
+        if (clash) return false;
+        play.courseDisambiguatedBy = "user";
+        return true;
+      },
+      async lockForScoring(_courseId: string, _playDate: string): Promise<void> {},
+      async disambiguation(courseId: string, playDate: string) {
+        const stored = state.plays.get(`${uid}:${courseId}:${playDate}`)?.courseDisambiguatedBy ?? null;
+        const l = state.ledger.get(courseId);
+        const family = Boolean(l && (l.splitFrom !== null || [...state.ledger.values()].some((o) => o.splitFrom === courseId)));
+        return { stored, effective: stored ?? (family ? ("user" as const) : null) };
+      },
+      async repickPrepare(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string }) {
+        const fromKey = `${uid}:${args.fromCourseId}:${args.playDate}`;
+        const play = state.plays.get(fromKey);
+        const fromLedger = state.ledger.get(args.fromCourseId);
+        const toLedger = state.ledger.get(args.toCourseId);
+        const sameFamily = Boolean(fromLedger && toLedger && args.fromCourseId !== args.toCourseId && (toLedger.splitFrom === args.fromCourseId || fromLedger.splitFrom === args.toCourseId || (fromLedger.splitFrom && fromLedger.splitFrom === toLedger.splitFrom)));
+        if (!sameFamily) return { ok: false as const, reason: "not_same_split_family" as const };
+        if (!play) return { ok: false as const, reason: "no_such_play" as const };
+        if (play.courseDisambiguatedBy !== "user") return { ok: false as const, reason: "not_user_pick" as const };
+        if (state.repicks.has(play.id)) return { ok: false as const, reason: "already_repicked" as const };
+        const clash = [...state.plays.values()].some((o) => o.userId === uid && o.facilityId === args.facilityId && o.playDate === args.playDate && o.id !== play.id && (o.courseId === args.toCourseId || o.courseDisambiguatedBy === "user"));
+        if (clash) return { ok: false as const, reason: "target_play_exists" as const };
+        return { ok: true as const, playId: play.id };
+      },
+      async repickApply(args: { facilityId: string; playDate: string; fromCourseId: string; toCourseId: string; playId: string; rederived: { evidenceId: string; summary: Record<string, unknown> }[] }) {
+        const fromKey = `${uid}:${args.fromCourseId}:${args.playDate}`;
+        const play = state.plays.get(fromKey);
+        if (!play) return;
+        for (const r of args.rederived) {
+          const ev = state.evidence.get(r.evidenceId);
+          if (ev && ev.userId === uid) ev.summary = r.summary;
+        }
+        state.plays.delete(fromKey);
+        play.courseId = args.toCourseId;
+        play.courseDisambiguatedBy = "user";
+        state.plays.set(`${uid}:${args.toCourseId}:${args.playDate}`, play);
+        for (const ev of state.evidence.values()) {
+          if (ev.userId === uid && ev.kind === "resolved" && ev.courseId === args.fromCourseId && ev.localDate === args.playDate) ev.courseId = args.toCourseId;
+        }
+        state.repicks.add(args.playId);
       },
     },
 

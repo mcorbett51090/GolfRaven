@@ -16,7 +16,7 @@
 // orchestration (including the should-fix 1 grouping/deferral logic),
 // never a parallel reimplementation that could silently drift from it.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { createTestUser, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, CRS_X1 } from "./_helpers.ts";
+import { createTestUser, createCourseWithPolygonAtFacX, freshUuid, makeActor, rawCount, FAC_X, CRS_X1, SEED_SITE_VERSION } from "./_helpers.ts";
 import { hitRateLimitForActor, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleEvidenceBatchIntake, RATE_LIMIT_PER_USER_DAY } from "../../functions/_shared/evidence/batch-handler.ts";
 import { handleEvidenceIntake, finalizeScoringForKey, type EvidenceIntakeResult } from "../../functions/_shared/evidence/handler.ts";
@@ -44,7 +44,7 @@ function checkinBody(overrides: Record<string, unknown> = {}) {
     facilityId: FAC_X,
     courseId: CRS_X1,
     localDate: "2026-06-01",
-    catalogVersion: 1,
+    catalogVersion: SEED_SITE_VERSION,
     fix: {
       fixId: `fix_${freshUuid()}`,
       lat: 36.1467,

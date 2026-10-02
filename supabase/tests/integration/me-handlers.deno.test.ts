@@ -10,7 +10,7 @@
 // a SECOND session.
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { adminSql, createCourseWithPolygonAtFacX, createTestUser, freshUuid, insertCatalogVersion, makeActor, rawCount, FAC_X, NASHVILLE } from "./_helpers.ts";
+import { adminSql, createCourseWithPolygonAtFacX, createTestUser, freshUuid, insertCatalogVersion, makeActor, SEED_SITE_VERSION, siteVersionFor, rawCount, FAC_X, NASHVILLE } from "./_helpers.ts";
 import { withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleMeDelete } from "../../functions/_shared/me/delete-handler.ts";
 import { handleMeExport } from "../../functions/_shared/me/export-handler.ts";
@@ -46,6 +46,7 @@ Deno.test("me-export: returns only the caller's own evidence/device/push_token r
   const aDeviceId = await withOwnership(a.actor, async (repo: Repo) => {
     const device = await repo.device.ensureOwn(null, "ios");
     await repo.evidence.insertIdempotent({
+      kind: "resolved",
       sourceRef,
       inputHash: `hash-${sourceRef}`,
       source: "self_report",
@@ -97,6 +98,7 @@ Deno.test("me-delete: removes evidence/device/push_token rows, and a retry is id
   await withOwnership(a.actor, async (repo: Repo) => {
     const device = await repo.device.ensureOwn(null, "ios");
     await repo.evidence.insertIdempotent({
+      kind: "resolved",
       sourceRef,
       inputHash: `hash-${sourceRef}`,
       source: "self_report",
@@ -121,6 +123,7 @@ Deno.test("me-delete: removes evidence/device/push_token rows, and a retry is id
   await withOwnership(b.actor, async (repo: Repo) => {
     const device = await repo.device.ensureOwn(null, "ios");
     await repo.evidence.insertIdempotent({
+      kind: "resolved",
       sourceRef: bSourceRef,
       inputHash: `hash-${bSourceRef}`,
       source: "self_report",
@@ -334,7 +337,7 @@ Deno.test("follow-up 13: the SAME held lock, through the full evidence-intake pi
           facilityId: FAC_X,
           courseId,
           localDate: todayInFacilityTz,
-          catalogVersion: freshCatalogVersion,
+          catalogVersion: siteVersionFor(freshCatalogVersion),
           fix: {
             fixId: `fix_${freshUuid()}`,
             lat: NASHVILLE.lat,

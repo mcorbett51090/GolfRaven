@@ -21,6 +21,8 @@ import {
   freshUuid,
   makeActor,
   insertCatalogVersion,
+  SEED_SITE_VERSION,
+  siteVersionFor,
   insertSigningKey,
   rawCount,
   FAC_X,
@@ -55,7 +57,7 @@ function checkinBody(overrides: Record<string, unknown> = {}) {
     facilityId: FAC_X,
     courseId: CRS_X1,
     localDate: "2026-06-01",
-    catalogVersion: 1,
+    catalogVersion: SEED_SITE_VERSION,
     fix: {
       fixId: `fix_${freshUuid()}`,
       lat: NASHVILLE.lat,
@@ -105,7 +107,7 @@ Deno.test("item 1: a facility-level (no courseId) row is visible to a SECOND cou
   // real calendar date this suite happens to run on.
   const todayInFacilityTz = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
-  const facLevel = await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: todayInFacilityTz, catalogVersion: 1 });
+  const facLevel = await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: todayInFacilityTz, catalogVersion: SEED_SITE_VERSION });
   assertEquals(facLevel.status, "accepted");
 
   const playA = await evidence(actor, checkinBody({ courseId: CRS_X1, localDate: todayInFacilityTz, fix: { ...checkinBody().fix as object, capturedAt: Date.now() } }));
@@ -316,7 +318,7 @@ Deno.test("P3c gate round 3, blocking MEDIUM 5: 422 local_date_out_of_window for
   const actor = await withFreshUser("self-report-window");
   let threw: unknown = null;
   try {
-    await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: "2020-01-01", catalogVersion: 1 });
+    await evidence(actor, { source: "self_report", deviceId: freshUuid(), facilityId: FAC_X, localDate: "2020-01-01", catalogVersion: SEED_SITE_VERSION });
   } catch (err) {
     threw = err;
   }
@@ -438,7 +440,7 @@ Deno.test("AT 15: a revoked-kid current version is 422 catalog_stale, against a 
 
   let threw: unknown = null;
   try {
-    await evidence(actor, checkinBody({ catalogVersion: version }));
+    await evidence(actor, checkinBody({ catalogVersion: siteVersionFor(version) }));
   } catch (err) {
     threw = err;
   }
@@ -448,17 +450,20 @@ Deno.test("AT 15: a revoked-kid current version is 422 catalog_stale, against a 
 
 Deno.test("AT 8: a version far behind the real current is 422 catalog_stale", DT, async () => {
   const actor = await withFreshUser("stale-behind");
-  const version = 88002;
   const kid = `kid-fresh-${freshUuid()}`;
   await insertSigningKey(kid, null);
-  await insertCatalogVersion(version, new Date(), kid);
+  // Round 2 gate (LOW): "5 releases" is now RELEASE order (the rank of each
+  // version's own site_version among the imported ones), not the internal
+  // int — so "far behind" needs six real releases after the baseline, not
+  // one row with a big int.
+  for (let version = 88002; version <= 88007; version++) await insertCatalogVersion(version, new Date(), kid);
 
   let threw: unknown = null;
   try {
-    // catalogVersion 1 (the seeded fac_x baseline) is now `version -
-    // 899`-ish releases behind this test's own newly-inserted version —
-    // well past the 5-version skew window.
-    await evidence(actor, checkinBody({ catalogVersion: 1 }));
+    // catalogVersion 1 (the seeded fac_x baseline) is now more than 5
+    // releases behind this test's own newly-inserted newest version — past
+    // the skew window.
+    await evidence(actor, checkinBody({ catalogVersion: SEED_SITE_VERSION }));
   } catch (err) {
     threw = err;
   }
