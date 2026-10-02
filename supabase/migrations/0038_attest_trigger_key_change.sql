@@ -23,18 +23,28 @@
 --     (same trigger name; DROP + CREATE is the only way to change an UPDATE OF column list).
 --  2. The body decides on the KEY, by CONTENT, never by role:
 --       key UNCHANGED (key id AND public key both IS NOT DISTINCT FROM OLD)
---           the counter must not decrease and the retired list must be exactly what it was;
---       FIRST registration (OLD has no key id and no public key)
+--           the counter must not decrease and the retired list must be exactly what it was (the key is not re-checked: rows
+--           written before 0038 are not judged retroactively);
+--       key CHANGED, any shape: the NEW key must be WHOLE and BOUND -- both columns non-null, and attest_key_id =
+--           encode(sha256(attest_public_key), 'base64'), the exact expression app.register_attest_key checks (0034). A half key, a
+--           mismatched pair and a cleared key are 23514 before anything below is considered. (Added after security-gate LOW A/B on
+--           the first 0038: the "never used" test compared the key-id LABEL only, so a retired public key under a fresh label,
+--           a key id with no public key, and a key id paired with someone else's public key were all accepted.) NOT enforced: the
+--           public key's own shape beyond the existing 65-byte CHECK (register_attest_key also requires the leading 0x04 and that
+--           shape is verified by the Edge Function; a hand-written key with another leading byte is still accepted);
+--       FIRST registration (OLD has no key id and no public key; the bound key is required, as above)
 --           the counter stays where it was (app.register_attest_key does not touch it: a keyless device's counter is 0 on every
 --           reachable path, and the existing 17_ suite registers a keyless device that sits at 5 and expects 5), and the list
 --           stays unchanged; this is also the only way a keyless row may gain a key, so a key can never be "cleared" and then
 --           re-installed to restart the counter;
 --       REPLACEMENT (OLD has both, NEW has both, both differ) -- exactly what app.register_attest_key writes:
---           counter = 0; the new key's hash is NOT in the OLD list, not in the NEW list, and is not the old key's own;
+--           counter = 0; the new (bound) key's id hash is NOT in the OLD list, not in the NEW list, and is not the old key's own
+--           (the OLD-list test is separate on purpose: at the 16-entry cap the FIFO drops the oldest retired entry from the NEW list,
+--           so a replacement onto that oldest retired key is caught only by it);
 --           the NEW list = (OLD list || hash of the replaced key) trimmed to the newest 16 (FIFO); attest_registered_at is
 --           set (the function writes now(); it is deliberately NOT compared with the old value, see below);
---       anything else is 23514. That includes CLEARING a key (NEW key NULL while OLD is not), a half-key, and a swap with
---       the counter, list or provenance left as they were.
+--       anything else is 23514. That includes CLEARING a key (NEW key NULL while OLD is not), a half-key, a mismatched pair, and
+--       a swap with the counter, list or provenance left as they were.
 --  3. Clearing a key: refused, because no legitimate path does it. A device is DELETED, never updated, when its account goes
 --     (private.delete_my_data / the auth.users ON DELETE CASCADE; pd_delete_device_user_id is a DELETE policy), the key columns have
 --     no writer but app.register_attest_key, and a cleared-then-reinstalled key is the very rollback this closes.
@@ -80,7 +90,20 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- 2. The key changed. First registration: a device with no key at all gains one; the counter and the list stay as they are.
+  -- 2. The key changed (any shape: first registration, replacement, clear, half-key). Whatever it becomes, the NEW key must be WHOLE and
+  -- BOUND, exactly as app.register_attest_key requires (0034): both columns present together, and the key id IS the base64 SHA-256 of
+  -- the public key (the same expression, pg_catalog.encode(pg_catalog.sha256(public_key), 'base64')). Without the binding the
+  -- "never used before" test below would compare a LABEL, and a retired public key could come back under a fresh key-id string
+  -- (security-gate LOW A on 0038); a half key would also leave a row that register_attest_key can never register on again.
+  -- Clearing a key (NEW both NULL) lands here too.
+  IF NEW.attest_key_id IS NULL OR NEW.attest_public_key IS NULL
+     OR NEW.attest_key_id <> pg_catalog.encode(pg_catalog.sha256(NEW.attest_public_key), 'base64')
+  THEN
+    RAISE EXCEPTION 'device: a key is written whole and bound -- both the key id and the public key, the key id being the base64 SHA-256 of the public key -- and is never cleared or half-written (id=%)', OLD.id
+      USING ERRCODE = '23514';
+  END IF;
+
+  -- 3. First registration: a device with no key at all gains one; the counter and the list stay as they are.
   IF OLD.attest_key_id IS NULL AND OLD.attest_public_key IS NULL THEN
     IF NEW.attest_counter = OLD.attest_counter
        AND NEW.attest_retired_key_hashes IS NOT DISTINCT FROM OLD.attest_retired_key_hashes
@@ -91,7 +114,7 @@ BEGIN
       USING ERRCODE = '23514';
   END IF;
 
-  -- 3. The key changed and the device already had one: the ONE legitimate shape is a replacement by a key this row has never used,
+  -- 4. The key changed and the device already had one: the ONE legitimate shape is a replacement by a key this row has never used,
   -- written exactly as app.register_attest_key writes it. A key is never cleared and never half-replaced.
   IF OLD.attest_key_id IS NOT NULL AND NEW.attest_key_id IS NOT NULL
      AND NEW.attest_key_id IS DISTINCT FROM OLD.attest_key_id
@@ -108,6 +131,9 @@ BEGIN
     IF pg_catalog.cardinality(v_expected) > 16 THEN
       v_expected := v_expected[pg_catalog.cardinality(v_expected) - 15 : pg_catalog.cardinality(v_expected)];
     END IF;
+    -- v_new_hash is the hash of a key id that is now bound to its public key (step 2), so "never used" is about the KEY, not its label.
+    -- The OLD-list check is its own wall: at the 16-entry cap the FIFO drops the oldest entry from the NEW list, so a replacement ONTO
+    -- that oldest retired key passes the NEW-list check and is caught only here.
     IF v_new_hash <> v_old_hash
        AND v_old_hash = ANY (NEW.attest_retired_key_hashes)
        AND NOT (v_new_hash = ANY (OLD.attest_retired_key_hashes))

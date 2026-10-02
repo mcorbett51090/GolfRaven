@@ -112,9 +112,15 @@ async function newDevice(u: User, platform: "ios" | "android" = "ios", withKey =
     // against (LOW-1), and `deviceAttestState` hands out a key only when it is REGISTERED, so a scripted-port test needs a registered key
     // for its `ok` to mean anything — exactly as in production, where the verifier cannot say `ok` for a keyless device. (The scripted
     // port ignores the key bytes; tests that verify a real assertion call `registerKey`, which overwrites these.)
-    const placeholder = new Uint8Array(65).fill(7);
+    // A placeholder key UNIQUE PER DEVICE (the install link groups accounts by an equal attest_key_id, so two devices must not share one) and BOUND
+    // (0038: the key id is the base64 SHA-256 of the public key, as app.register_attest_key requires): 0x04 || SHA-256(id) || SHA-256(id + ":2").
+    const enc = new TextEncoder();
+    const placeholder = new Uint8Array(65);
     placeholder[0] = 4;
-    await adminSql()`update app.device set attest_key_id = ${"PLACEHOLDER-" + id}, attest_public_key = ${placeholder}, attest_registered_at = now() where id = ${id}`;
+    placeholder.set(await sha256(enc.encode(id)), 1);
+    placeholder.set(await sha256(enc.encode(id + ":2")), 33);
+    const placeholderId = toB64(await sha256(placeholder));
+    await adminSql()`update app.device set attest_key_id = ${placeholderId}, attest_public_key = ${placeholder}, attest_registered_at = now() where id = ${id}`;
   }
   return id;
 }
@@ -622,13 +628,14 @@ Deno.test("AT 9 / G3-08: no token -> failed on hardware that supports attestatio
 // AT (5): body-hash binding and counter replay with the REAL assertion verifier
 // ===========================================================================
 const APP_ID = "TEAMID1234.com.example.golfraven";
-const KEY_ID = toB64(new Uint8Array(32).fill(7));
+// The key id is DERIVED from the key (0038: the counter trigger refuses a key id that is not the base64 SHA-256 of the public key).
+const keyIdOf = async (key: Awaited<ReturnType<typeof generateP256>>) => toB64(await sha256(key.publicKeyRaw));
 
 async function registerKey(deviceId: string, counter = 5) {
   const key = await generateP256();
   // `attest_registered_at` stands in for a VERIFIED registration (0034): rewards-activate hands the assertion verifier a key
   // only when it was written by app.register_attest_key. (The real registration path is attest-key.deno.test.ts.)
-  // Since 0038 the counter trigger refuses a key swap that is not a REPLACEMENT as app.register_attest_key writes it (counter 0, the
+  // Since 0038 the counter trigger refuses a key swap that is not a REPLACEMENT as app.register_attest_key writes it (a bound key id, counter 0, the
   // replaced key appended to the retired list, registered_at set), so a device that already carries `newDevice`'s placeholder key is
   // replaced in that shape (the old key's hash is read from the row itself, in the same statement) and the counter is then ADVANCED
   // (an increase, which is always allowed). A keyless device takes the first-registration shape. Not a weakening of the trigger.
@@ -636,7 +643,7 @@ async function registerKey(deviceId: string, counter = 5) {
     update app.device set
       attest_retired_key_hashes = case when attest_key_id is null then attest_retired_key_hashes
                                        else attest_retired_key_hashes || encode(sha256(convert_to(attest_key_id, 'UTF8')), 'hex') end,
-      attest_key_id = ${KEY_ID}, attest_public_key = ${key.publicKeyRaw}, attest_counter = 0, attest_registered_at = now()
+      attest_key_id = ${await keyIdOf(key)}, attest_public_key = ${key.publicKeyRaw}, attest_counter = 0, attest_registered_at = now()
     where id = ${deviceId}`;
   await adminSql()`update app.device set attest_counter = ${counter} where id = ${deviceId}`;
   const fake = iosPort({ bits: CLEAR });
@@ -664,7 +671,7 @@ async function signedReq(
     nonce: o.bindNonce ?? ch.nonce,
   });
   const built = await buildAssertion({ key, appId: APP_ID, counter: o.counter, clientDataHash: hash });
-  return { deviceId, platform: "ios", challengeId: ch.challengeId, nonce: ch.nonce, attestation: { kind: "ios", keyId: KEY_ID, assertion: built.assertionB64, deviceCheckToken: o.sendToken ?? SIGNED_TOKEN } };
+  return { deviceId, platform: "ios", challengeId: ch.challengeId, nonce: ch.nonce, attestation: { kind: "ios", keyId: await keyIdOf(key), assertion: built.assertionB64, deviceCheckToken: o.sendToken ?? SIGNED_TOKEN } };
 }
 async function counterOf(deviceId: string): Promise<number> {
   return Number((await adminSql()`select attest_counter from app.device where id = ${deviceId}`)[0]!.attest_counter);

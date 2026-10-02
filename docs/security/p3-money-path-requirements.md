@@ -2684,21 +2684,26 @@ No table is added, so there is nothing new to classify in `private.pii_retention
   attest_retired_key_hashes` and redefines the same function (`CREATE OR REPLACE`; owner, empty `search_path`, ACL and the
   `private.function_inventory` row unchanged; no grant, policy or RLS setting touched) so it decides on whether the KEY changed, by
   content, never by role: **key unchanged** (id and public key both equal) means the counter may not decrease and the retired list may not
-  change; **first registration** (no key id and no public key before) means the counter and the list stay as they are (the counter
+  change (a key that is not changing is not re-judged: rows written before 0038 are left alone); **whenever the key changes, whatever the shape,
+  the NEW key must be WHOLE and BOUND** (security-gate LOW A/B on the first 0038): both columns non-null, and `attest_key_id =
+  encode(sha256(attest_public_key), 'base64')`, the exact expression `register_attest_key` checks (0034). Without it the "never used before" test compared
+  the key-id LABEL, so a retired public key came back under a fresh label, a key id with no public key was accepted on a keyless device (and
+  then blocked `register_attest_key` there for good), and a key id paired with another key's public key was accepted; each is now `23514`, as is a cleared key.
+  The retired-list membership checks therefore run on a bound identity. **First registration** (no key id and no public key before; the bound key is required as above) means the counter and the list stay as they are (the counter
   is left alone because `register_attest_key` leaves it alone; it is 0 on every reachable keyless row, and the existing suite registers
   a keyless device that sits at 5); **replacement** (both before, both after, both different) means exactly what
-  `register_attest_key` writes: counter 0, the new key's hash in neither the OLD nor the NEW list, the NEW list equal to (OLD list ||
+  `register_attest_key` writes: counter 0, the new (bound) key's id hash in neither the OLD nor the NEW list (the OLD-list test is a wall of its own: at the 16-entry cap the FIFO drops the oldest retired entry from the NEW list, so a replacement ONTO that key is caught only by it; security-gate LOW C), the NEW list equal to (OLD list ||
   hash of the replaced key) trimmed to the newest 16, and `attest_registered_at` set; **anything else is `23514`**.
   **Clearing a key is refused** (NEW key NULL while OLD is not, or a half-key): no legitimate path clears a key, because a device is
   deleted, never updated, when its account goes (`private.delete_my_data` and the `auth.users` cascade use the DELETE policy
-  `pd_delete_device_user_id`), and a cleared-then-reinstalled key is the rollback this closes. What is still NOT enforced, stated: the trigger
+  `pd_delete_device_user_id`), and a cleared-then-reinstalled key is the rollback this closes. What is still NOT enforced, stated: the public key's own shape beyond the 65-byte CHECK (`register_attest_key` also requires the leading `0x04`; a hand-written key with another leading byte is still accepted); the trigger
   cannot tell a VERIFIED registration from an unverified one (Apple's chain is checked in TypeScript), so `attest_registered_at` is only required
   to be set on a replacement, not proven (and not required to move forward: it is the writing transaction's `now()`, and two registrations racing for the row lock take it in the opposite order to their start times, which `attest-key.deno.test.ts` "two concurrent registrations" caught in a first draft); a statement touching none of the four columns is not covered; `TRUNCATE`, `ALTER TABLE ... DISABLE
   TRIGGER` and a superuser are outside any row trigger. Proved by pgTAP `17_attest_key_registration.sql` (sections 5b, 6, 7, 7b: P15, P16, P17,
   a key change at a counter that is not 0, a key change onto a retired key, a list change with the key unchanged, clearing a key, the
-  at-cap FIFO accept and refuse, and must-pass cells for every legitimate shape). Test fixtures that wrote keys by hand in a shape the new trigger refuses were
+  at-cap FIFO accept and refuse, a retired public key under a fresh label, half keys and mismatched pairs at first registration and at replacement, the at-cap replacement onto the oldest retired key, and must-pass cells for every legitimate shape, including a correctly bound first registration and replacement). Test fixtures that wrote keys by hand in a shape the new trigger refuses were
   changed to a legitimate shape, not the trigger to fit them (`rewards-activate.deno.test.ts#registerKey` now replaces the placeholder key the
-  way `register_attest_key` would, then advances the counter; the pgTAP A5 cell that set a retired list by hand now builds that state through the function).
+  way `register_attest_key` would, then advances the counter, and every fixture key id is now DERIVED from its key (`registerKey`, `newDevice`'s per-device placeholder, the shared key in `15_rewards_activation.sql`); the pgTAP A5 cell that set a retired list by hand now builds that state through the function).
   Alternatives rejected: leave the counter alone on replacement (the new key's first 40 assertions would fail as replays and raise an
   account-wide `attestation_failed`); a per-key counter in a side table (a new table with all its registry rows, for what two columns and a
   trigger do); a role-based exemption in the trigger (then every role that may hold it holds a rollback).
@@ -2746,7 +2751,7 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **Unit (vitest)**: `app-attest-registration.test.ts` (verifier, parsers, pinned root, binding; every must-fail below),
   `attest-key-handler.test.ts` (order of checks, challenge discipline, ownership, rate limits, request shape),
   `attest-key-isolation.test.ts` (source-level guarantees), the file list in `rewards-isolation.test.ts` extended.
-- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 126 assertions: schema, privileges, first registration, the counter,
+- **pgTAP**: `17_attest_key_registration.sql` (service_role lane, 136 assertions: schema, privileges, first registration, the counter,
   replacement, the trigger decided by content including hand-written writes, the FIFO cap, validation and ownership, who can read or write
   the new columns, export and deletion) and `17_attest_key_registration_edge.sql` (the edge_actor lane as a real `edge_gateway` login, 54
   assertions: every registration proved by reading the row back, direct writes closed, the counter cannot be lowered by edge_actor, foreign
