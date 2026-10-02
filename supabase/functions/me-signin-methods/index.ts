@@ -9,7 +9,7 @@
 // credentials and no route in the build environment): with the four GR_APPLE_* values unset, `apple` below is null and every Apple
 // operation answers 503 `provider_not_configured`; nothing is ever treated as verified.
 
-import { getActorFromRequest, hitRateLimitForActor, loadAppleSiwaConfig, signinOtpFailuresFor, signinRevocationDb, supabaseEmailOtpVerifier, withOwnership } from "../_shared/privileged.ts";
+import { getActorFromRequest, hitRateLimitForActor, loadAppleSiwaConfig, signinEmailProofs, signinOtpFailuresFor, signinRevocationDb, supabaseEmailOtpVerifier, withOwnership } from "../_shared/privileged.ts";
 import { errorResponse, handleRequest, okResponse, readJsonBody, Errors } from "../_shared/http.ts";
 import { buildSigninPorts, platformFetch } from "../_shared/signin/production.ts";
 import { handleLinkProvider, handleListMethods, handleUnlinkProvider, type SigninDeps } from "../_shared/signin/methods-handler.ts";
@@ -28,6 +28,7 @@ function depsFor(actor: Actor): SigninDeps {
     otpFailures: signinOtpFailuresFor(actor),
     apple: ports.apple,
     emailOtp: supabaseEmailOtpVerifier,
+    emailProofs: signinEmailProofs(),
     revocation: { db: signinRevocationDb, apple: ports.apple, google: ports.google, log },
     log,
   };

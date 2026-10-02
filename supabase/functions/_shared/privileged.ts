@@ -3011,8 +3011,8 @@ export function loadAttestKeyVerifierConfig(): RegistrationVerifierConfig | null
 import { kekFromBase64, type Kek } from "./signin/envelope.ts";
 import type { AppleSecretConfig } from "./signin/apple-client-secret.ts";
 import { NotConfiguredError } from "./signin/errors.ts";
-import { constantTimeEqual } from "./signin/bytes.ts";
-import type { ClaimedRevocation, EmailOtpResult, EmailOtpVerifier, LinkIdentityInput, OtpFailureCounter, OtpReservation, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo, SigninSystemOps } from "./signin/types.ts";
+import { constantTimeEqual, sha256Hex } from "./signin/bytes.ts";
+import type { ClaimedRevocation, EmailOtpResult, EmailOtpVerifier, EmailProofInput, EmailProofMinter, LinkIdentityInput, OtpFailureCounter, OtpReservation, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo, SigninSystemOps } from "./signin/types.ts";
 
 /** The Sign in with Apple server configuration, or `null` when ANY of the four values is absent or blank (a half-set configuration is
  * "not configured", never a default). These are the only environment reads for this feature, and this is the only place they happen.
@@ -3051,6 +3051,9 @@ function signinDbError(err: unknown): unknown {
   }
   if (code === "P0002") return Errors.notFound("that sign-in method is not linked");
   if (code === "55000") return Errors.unprocessable("last_sign_in_method", "the only remaining sign-in method cannot be unlinked");
+  // 0039: the proof-bound link refused (no such proof, already used, expired, issued to another caller / identity / address, the address changed
+  // hands, or the minter found no GoTrue sign-in to corroborate). One answer for all of them: which one it was is in the database log, not on the wire.
+  if (code === "28000" && message.startsWith("email_proof_refused")) return Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
   return mapPgTimeoutError(err);
 }
 
@@ -3126,14 +3129,21 @@ function buildSigninSystemOps(trx: TxSql, mode: DbMode): SigninSystemOps {
       if (edge) await trx`select private.release_signin_otp_attempt_for_actor(${emailHash}, ${windowStart}::timestamptz) as n`;
       else await trx`select private.release_signin_otp_attempt(${emailHash}, ${windowStart}::timestamptz) as n`;
     },
+    // 0039: the same SQL in both modes (granted to service_role and edge_system; it acts on no account).
+    async purgeEmailProofs(): Promise<number> {
+      const rows = await trx`select private.purge_signin_email_proofs() as n`;
+      return Number(rows[0]?.n ?? 0);
+    },
   };
 }
 
 /** Per-user operations. `legacy`: the 0035 CORE definers with an explicit uid (service_role). `edge`: the `_for_actor` wrappers (edge_actor,
  * no uid argument: the bound actor of this transaction; a wrong uid cannot even be expressed). The result shapes are identical. The one
- * operation with no edge form is linking an identity to ANOTHER account (the OTP-proven link): there is deliberately no edge definer for it
- * (it would be an "attach an identity to any account" primitive), so in edge mode `crossAccountLink` is false and the handler answers 501
- * before it consumes an OTP or exchanges a code (docs/security/edge-role-design.md §12; PR3 item O5). */
+ * operation with no direct edge form is linking an identity to ANOTHER account (the OTP-proven link). A definer that took the target as an
+ * argument would be an "attach an identity to any account" primitive, so in edge mode (0039) the target is the PROOF's: the handler mints a
+ * single-use proof after the OTP verifies (`signinEmailProofs`, edge_system, in its own transaction) and `linkIdentityWithProof` redeems it as
+ * the bound caller; `linkIdentity` / `storeToken` still refuse any account but the caller's (`mustBeSelf`). `crossAccountLink` is true in both
+ * modes; `proofBoundLink` is the edge one (docs/security/edge-role-design.md §12). */
 function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
   const guard = async <T>(op: () => Promise<T>): Promise<T> => {
     try {
@@ -3145,11 +3155,14 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
   const kekRows = async (kekId: string | null) =>
     (await trx`select o_kek_id, o_kek_b64 from private.get_signin_token_kek(${kekId}::text)`) as unknown as { o_kek_id: string; o_kek_b64: string }[];
   const edge = mode === "edge";
+  // The DIRECT path (a uid argument) never names another account in edge mode: that is the proof-bound path's job. A handler that reaches this with
+  // a foreign uid is a bug, and the answer is a refusal, not a link.
   const mustBeSelf = (target: string) => {
-    if (edge && target.toLowerCase() !== uid.toLowerCase()) throw new HttpError(501, "email_proof_link_unavailable", "linking an identity to another account is not available in this mode");
+    if (edge && target.toLowerCase() !== uid.toLowerCase()) throw new HttpError(403, "cross_account_link_requires_proof", "an identity is linked to another account only through a verified email proof");
   };
   return {
-    crossAccountLink: !edge,
+    crossAccountLink: true,
+    proofBoundLink: edge,
 
     listMethods: () =>
       guard(async () => {
@@ -3181,6 +3194,18 @@ function buildSigninRepo(trx: TxSql, uid: string, mode: DbMode): SigninRepo {
         const rows = edge
           ? await trx`select private.signin_link_identity_for_actor(${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`
           : await trx`select private.signin_link_identity(${targetUserId}::uuid, ${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay}) as created`;
+        return Boolean(rows[0]?.created);
+      }),
+
+    linkIdentityWithProof: (proofId: string, input: LinkIdentityInput, envelope) =>
+      guard(async () => {
+        if (!edge) throw Errors.internal(); // legacy links the proven account directly (linkIdentity); it has no proof lane
+        if (!SIGNIN_UUID_RE.test(proofId)) throw Errors.internal();
+        // ONE definer call: it redeems the proof under the target's advisory lock, links the identity and stores the token for the PROOF's account.
+        const rows = await trx`
+          select private.signin_link_identity_with_proof_for_actor(
+            ${proofId}::uuid, ${input.provider}, ${input.subject}, ${input.email}, ${input.emailVerified}, ${input.isPrivateRelay},
+            ${envelope.ciphertext}::bytea, ${envelope.dekWrapped}::bytea, ${envelope.kekId}) as created`;
         return Boolean(rows[0]?.created);
       }),
 
@@ -3259,6 +3284,39 @@ export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
     release: (emailHash, windowStart) => withOwnership(actor, (repo) => repo.signin.system.releaseOtpAttempt(emailHash, windowStart)),
   };
 }
+
+/** The minter of the single-use email-OTP link proof (0039), `edge` mode only: `private.signin_record_email_proof`, run as **edge_system** in its
+ * OWN transaction (`openScopedTx("system")`, no actor bound: the definer refuses inside an actor-bound transaction), committed before the link
+ * transaction that redeems the proof. The address and the subject are hashed here; the database re-derives both and checks the address against the
+ * target's own `auth.users.email` and the target's GoTrue sign-in stamp. Not a per-user operation: it is `edge_system` because the edge runtime has no
+ * `service_role` pool to mint with (PR4b deletes the legacy one) and the per-user lane (`edge_actor`) must never write the proof table. In `legacy`
+ * mode nothing calls it (`proofBoundLink` is false). */
+export function signinEmailProofs(): EmailProofMinter {
+  return {
+    async record(input: EmailProofInput): Promise<string> {
+      if (getDbMode() !== "edge") throw Errors.internal();
+      const emailHash = await sha256Hex(input.email.trim().toLowerCase());
+      const subHash = await sha256Hex(`${input.provider}:${input.subject}`);
+      try {
+        return await openScopedTx("system", { expectedUid: null }, async (trx) => {
+          const rows = await trx`
+            select private.signin_record_email_proof(${input.callerUserId}::uuid, ${input.targetUserId}::uuid, ${emailHash}, ${input.provider}, ${subHash}) as id`;
+          const id = rows[0]?.id;
+          if (typeof id !== "string" || !SIGNIN_UUID_RE.test(id)) throw Errors.internal();
+          return id;
+        });
+      } catch (e) {
+        // P0002 here is "no such caller / target account" (it vanished between the lookup and the mint): the same answer as any other refusal, not
+        // signinDbError's "that sign-in method is not linked".
+        if ((e as { code?: unknown } | null)?.code === "P0002") throw Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
+        throw signinDbError(e);
+      }
+    },
+  };
+}
+
+/** Deletes email-OTP link proofs an hour past their expiry (0039): system work, run by the revocation drain next to the queue purge. */
+export const purgeSigninEmailProofs = (): Promise<number> => withSigninSystem((s) => s.purgeEmailProofs());
 
 /** Proof of mailbox control by an email OTP, through Supabase Auth's verifyOtp with the ANON key (the response's session is
  * discarded: this server never hands one to a client). A wrong or expired code is `{ ok: false }`; a transport or server failure

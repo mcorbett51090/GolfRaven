@@ -1,4 +1,4 @@
-# Edge Function NOBYPASSRLS role: design, as built (PR1, PR1b: database; PR2: the TypeScript behind a switch; PR3: the system path)
+# Edge Function NOBYPASSRLS role: design, as built (PR1, PR1b: database; PR2: the TypeScript behind a switch; PR3: the system path; PR4a: the proof-bound sign-in link)
 
 Accepted follow-up 6 of the P3c gate (`docs/security/p3-money-path-requirements.md`, "Updated Accepted follow-ups"):
 before the first real deploy, the Edge Function connection moves from a blanket `service_role` (BYPASSRLS)
@@ -9,7 +9,7 @@ the database side only: migrations `0030_edge_role_core.sql` and `0031_edge_role
 `0032_edge_role_hardening.sql` (PR1b, the security-gate findings), the provisioning script, the inventory checks 9-13
 and the pgTAP file `supabase/tests/matrix/16_edge_role.sql`. PR2 (section 11) routes the TypeScript through it behind the
 temporary `EDGE_DB_MODE` switch (default `legacy`, so nothing that works today changes); PR3 (section 13) moves the system path (the importer repo and the
-drains) onto `edge_system` and the delegate binders; PR4 finishes the move. `service_role`, `anon` and `authenticated` are untouched, so nothing that works
+drains) onto `edge_system` and the delegate binders; PR4a (section 12.1, migration `0039`) builds the one path PR3 left refused in `edge` mode, the OTP-proven cross-account Sign in with Apple link; PR4 finishes the move. `service_role`, `anon` and `authenticated` are untouched, so nothing that works
 today stops working. Items marked `[unverified]` were not checked against a real Supabase project.
 
 Numbering note: the migrations are 0030 and 0031 because 0029 is the P3f follow-up that domain-separates the tombstone
@@ -317,7 +317,7 @@ columns), and has must-fail cells in `16_edge_role.sql`.
   one challenge). It cannot un-burn one.
 - **R5** a binding row (uid + pid) outlives its transaction until the pid is reused. UNLOGGED, one row per
   backend, dead to `actor_uid()`.
-- **R6** the actor can still bind any uid (section 3). Honest corollary for PR1b: M2/M3/M4 stop a BUG or an injected
+- **R6** (PR4a adds nothing to it and takes nothing from it: section 12.1, "What a fully compromised runtime can still do") the actor can still bind any uid (section 3). Honest corollary for PR1b: M2/M3/M4 stop a BUG or an injected
   statement in an otherwise honest handler from reaching another user's rows, another user's device, the shared budget,
   or a replay window. They do not stop a fully compromised runtime, which can bind any uid and then do whatever that
   user may do, including activating that user's rewards through the definers.
@@ -388,7 +388,8 @@ PR3 did the delegate flow and the importer repo as edge_system (section 13). Wha
 3. **PR3 (this): the system path** (`withDelegatedActor`, the importer repo as edge_system, the list and purge definers); no migration
    (section 13). Not done in PR2 because it is not small (the importer repo's statements, the drain's `queued_input` re-read as the row's
    owner, new orchestrator signatures and their unit tests); `import-catalog` stayed on the legacy pool in `edge` mode until PR3.
-4. PR4: flip the default, delete the legacy path, add the lint pass. Gate before the first deploy.
+3a. **PR4a: the proof-bound cross-account sign-in link** (migration 0039, section 12.1). The owner decided (2026-10-02) to build it rather than ship the `501` as the production answer; PR4b deletes `legacy`.
+4. PR4 (PR4b): flip the default, delete the legacy path, add the lint pass. Gate before the first deploy.
 5. PR5 (optional): revoke `service_role` DML on `app.*` and EXECUTE on `private.*`; JWT-verifying binder; activation
    behind definers (R2).
 
@@ -461,8 +462,8 @@ through the `bind_delegate_*` binders. PR3 replaced all of that; the delegate bi
 
 | Role | Gets | Notes |
 |---|---|---|
-| `edge_actor` | `signin_methods_for_actor`, `signin_link_identity_for_actor`, `signin_store_token_for_actor`, `signin_unlink_identity_for_actor`, `signin_enqueue_revocations_for_actor` (no uid argument; a `kind = 'user'` binding only, a system delegate is refused); plus `signin_find_account_by_email_for_actor` (F7) and, since 0037 (L1), `peek_signin_otp_failures_for_actor`, `reserve_signin_otp_attempt_for_actor`, `release_signin_otp_attempt_for_actor` (each refuses with 42501 unless a `kind = 'user'` actor is bound in the transaction); plus `get_signin_token_kek` | The cores that take a uid (`signin_methods(uuid)` ...), the unbound email lookup (`signin_find_account_by_email`) and the three OTP-counter cores (`peek_` / `reserve_` / `release_signin_otp_*`) are `service_role` only: `18_signin_providers_edge.sql` proves `edge_actor` cannot call them. (This row said, before 0037, that `edge_actor` held `peek_signin_otp_failures` and a `hit_signin_otp_failure`; the second name never existed, and the first was the unbound-callable defect L1 below.) |
-| `edge_system` | `claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek` | The drain is system work and acts on no account. `edge_system` has no privilege on the PII-registered grant table (check 12). |
+| `edge_actor` | `signin_methods_for_actor`, `signin_link_identity_for_actor`, `signin_store_token_for_actor`, `signin_unlink_identity_for_actor`, `signin_enqueue_revocations_for_actor` (no uid argument; a `kind = 'user'` binding only, a system delegate is refused); plus `signin_find_account_by_email_for_actor` (F7) and, since 0037 (L1), `peek_signin_otp_failures_for_actor`, `reserve_signin_otp_attempt_for_actor`, `release_signin_otp_attempt_for_actor` (each refuses with 42501 unless a `kind = 'user'` actor is bound in the transaction); plus `get_signin_token_kek`; plus, since 0039 (PR4a), `signin_link_identity_with_proof_for_actor` (a `kind = 'user'` binding; the proof-bound cross-account link, section 12.1) | The cores that take a uid (`signin_methods(uuid)` ...), the unbound email lookup (`signin_find_account_by_email`) and the three OTP-counter cores (`peek_` / `reserve_` / `release_signin_otp_*`) are `service_role` only: `18_signin_providers_edge.sql` proves `edge_actor` cannot call them. (This row said, before 0037, that `edge_actor` held `peek_signin_otp_failures` and a `hit_signin_otp_failure`; the second name never existed, and the first was the unbound-callable defect L1 below.) |
+| `edge_system` | `claim_signin_revocations`, `complete_signin_revocation`, `purge_signin_revocation_queue`, `get_signin_token_kek`; since 0039 `signin_record_email_proof` (the ONLY writer of the proof table, section 12.1) and `purge_signin_email_proofs` | The drain is system work and acts on no account. `edge_system` has no privilege on the PII-registered grant table (check 12). |
 
 **How `privileged.ts` runs the sign-in lane in `edge` mode (PR2, as built).** The `signin:` seam is `buildSigninRepo(trx, uid, mode)`, switched on
 `mode` the same way App Attest's `register` is:
@@ -483,13 +484,15 @@ through the `bind_delegate_*` binders. PR3 replaced all of that; the delegate bi
   in `edge` as `edge_system` through `openScopedTx("system", { expectedUid: null }, ...)` (`withSigninSystem`), the roles those definers were
   granted to in 0035. They need no `import-catalog`-style legacy pool. In `legacy` they run through `withOwnership` with the nil-uid
   `SIGNIN_SYSTEM_ACTOR` (`service_role`). `me-delete` enqueues as the actor, then revokes through the same `signinRevocationDb`.
+- **The proof lane (0039, PR4a)**: `signinEmailProofs().record(...)` mints through `openScopedTx("system")` as `edge_system` in its OWN committed transaction (no actor bound);
+  `repo.signin.linkIdentityWithProof(...)` redeems it in the per-user `edge_actor` transaction. `repo.signin.proofBoundLink` is true in `edge`, false in `legacy`; `crossAccountLink` is
+  true in both. `linkIdentity` / `storeToken` (the uid-taking direct path) still refuse any account but the caller's in `edge` (`403 cross_account_link_requires_proof`).
 
 **PR3 items (O5 in the money-path doc), recorded, not done:**
-1. **The OTP-proven link to ANOTHER account is refused in `edge` mode** (`501 email_proof_link_unavailable`, `repo.signin.crossAccountLink === false`).
-   It has no edge definer on purpose: an `edge_actor` that could attach an identity to any account would be an account-takeover primitive. In
-   `legacy` it is unchanged (the proof's own account is the target). The rest of the §3.4 linking rules (a signed-in user linking their own
-   identity, a provider-email match to the SAME account) work in both modes. PR3 designs a narrow, proof-bound definer (the OTP proof's
-   verifier, not the client, names the target) or keeps this path legacy-only.
+1. **The OTP-proven link to ANOTHER account (CLOSED by PR4a, migration 0039; section 12.1).** It was refused in `edge` mode (`501 email_proof_link_unavailable`,
+   `repo.signin.crossAccountLink === false`) because a definer that took the target account as an argument is an "attach an identity to any account" primitive. The owner decided on 2026-10-02 to build it.
+   The target is now a DATABASE fact, bound to a single-use proof; the `501` is gone in both modes (the handler keeps it only as a guard for a repo that reports `crossAccountLink === false`, which neither
+   mode does).
 2. `signin_find_account_by_email` is service_role only; an `edge_actor` reaches it through `signin_find_account_by_email_for_actor`, which refuses (42501) unless a kind = `user` actor is bound (an unbound actor or a system delegate learns nothing; must-fail cells in `18_signin_providers_edge.sql`). A bound user can still ask "does an account hold this email" (an id only; no worse than R3).
 3. The drain and the KEK reader are `edge_system` already; PR3 only has to move `signin-revocation-drain` onto `withDelegatedActor` if that
    becomes the system path's single entry, and to retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
@@ -499,9 +502,55 @@ The definers' policies on `app.signin_provider_token` are GUC-windowed
 only and was not broadened), and the wrappers call the same cores after resolving the bound uid. `17_signin_providers.sql` group 6 and
 `18_signin_providers_edge.sql` group 4 are the session-reuse cells for that window (P3a follow-up 1).
 
+### 12.1 PR4a: the proof-bound cross-account link (migration 0039, as built)
+
+**What the rule is.** Build plan 3.4 rule 2: an Apple identity whose verified email belongs to ANOTHER account is never auto-linked. The player proves the existing account with an email OTP to that
+address, and the identity is linked to the **proven account, never to the caller**. `legacy` does it with `private.signin_link_identity(<proven uid>, ...)` as `service_role`. `edge` has no `service_role`.
+
+**Who vouches for "the OTP verified".** Supabase Auth (GoTrue `verifyOtp`, anon key). The database cannot call GoTrue, so the Edge runtime's word that it verified is unavoidable. The design makes that word
+NOT sufficient on its own and makes the link's target a database fact:
+
+| Piece | What it is |
+|---|---|
+| `private.signin_email_proof` | One row per verified OTP: `caller_user_id` (the session that proved), `target_user_id` (the account whose mailbox was proven), `provider`, `email_hash`, `sub_hash` (sha256 of `provider:subject`, so the Apple `sub` itself is never stored), `created_at`, `expires_at` (the minter sets **5 minutes**; a CHECK caps any row at **10**), `consumed_at`. `caller <> target` is a CHECK. FORCE RLS, no grant to any edge or client role, four `private_definer` policies keyed on GUC windows (check-7 form), `UPDATE` only on `consumed_at`. FKs to `auth.users ON DELETE CASCADE`. |
+| `private.signin_record_email_proof(caller, target, email_hash, provider, sub_hash)` | The **only writer**. **`edge_system` EXECUTE only** (not `edge_actor`, not `service_role`). Refuses (a) inside ANY transaction that has an actor bound (so `SET ROLE edge_system` inside a per-user transaction is not a way in; a delegate binding counts); (b) unless the proven address hashes to the target's CURRENT `auth.users.email` (the email binding is checked, not asserted); (c) unless the target's `auth.users.last_sign_in_at` is within 60 seconds of now, GoTrue's own record that a `verifyOtp` for that account just happened; (d) unless caller and target exist and differ. It also deletes a bounded batch of proofs an hour past their expiry. |
+| `private.signin_link_identity_with_proof_for_actor(proof_id, provider, provider_sub, email, verified, relay, ciphertext, dek_wrapped, kek_id)` | **`edge_actor` EXECUTE only**, `kind = 'user'` binding required (an unbound actor and a system delegate get 42501). Takes the TARGET's per-account advisory lock (the lock link / unlink / store_token / enqueue / delete all take), locks the proof `FOR UPDATE` and refuses unless it is **unconsumed, unexpired (`clock_timestamp()`, not the transaction start), issued to THIS caller, for THIS provider and subject hash, for THIS address hash, and the target's address still hashes to it**; refuses an unverified or private-relay email (rule 3). Marks it consumed, then calls the 0035 cores `signin_link_identity` and `signin_store_token` on **`proof.target_user_id`**: `actor_uid()` appears nowhere below the checks. One definer does the link AND the token store, so the proof is consumed exactly once; any failure (the duplicate-identity `23505`, the one-Apple-per-account `23505`, a bad envelope) rolls the whole thing back and leaves the proof unconsumed. |
+| `private.purge_signin_email_proofs()` | System work (`edge_system`, `service_role`): rows an hour past expiry. Run by `signin-revocation-drain` next to the queue purge; `private.delete_my_data` (redefined from 0032's body with exactly one added statement) deletes the account's proofs as caller or target. |
+| Registries | `private.pii_retention_policy` (both user-id columns, `delete_row`), `private.pii_export_policy` (`exclude`), `private.definer_policy_allowlist` (four rows) and its fixture, `private.function_inventory` (three rows). `private.edge_policy_allowlist` and its fixture are **unchanged**; checks 9-13 pass untouched. |
+
+**Why `edge_system` mints, and what was considered.**
+
+| Option | Verdict |
+|---|---|
+| `service_role`-only minter (the suggested shape) | **Impossible in `edge` mode**: the runtime has no `service_role` pool once PR4b deletes `legacy`, and it must not keep one. |
+| Option 1: mint through `edge_system`, short TTL, bound to a sub hash | **Chosen as the base.** `edge_system` is the narrowest role the runtime holds that is not the per-user lane; the proof is minted and redeemed in different transactions by different roles. |
+| Option 2: make GoTrue's own result the binding, by checking `auth.users` in the database | **Chosen as the second factor, not as the binding.** On its own it cannot bind the Apple `sub`, and it is a coincidence window (anyone who signed in recently looks "proven"). Combined with Option 1 it makes the runtime's claim checkable: the minter refuses unless GoTrue's `last_sign_in_at` for the TARGET agrees, and the proof's email hash must be the target's own. |
+| Option 3a: have the database verify the OTP itself from `auth.one_time_tokens` (compare `sha224(email || code)`, consume the row) | Rejected: it depends on GoTrue's internal token table, hash format and token types, none of which are a supported surface or were checked against a real project, and it would bypass GoTrue's own throttling. |
+| Option 3b: redeem as the target (a short-lived token for the target's session) | Rejected: it hands the edge runtime a credential for the proven account, which is the capability this design exists not to create. |
+
+**What a fully compromised Edge runtime can still do (R6), stated plainly.** It holds the `edge_gateway` login, so it can `SET ROLE edge_actor`, `bind_actor(<any uid>)` and call the PRE-EXISTING 0035 wrapper
+`signin_link_identity_for_actor` to attach any Apple identity to THAT account, with no proof at all (and `legacy` could do the same with `service_role`); it also holds the GoTrue service key, so it can cause a
+`verifyOtp`-style sign-in for any user and therefore satisfy the minter's corroboration. **The proof path adds no capability a compromised runtime lacks and removes none**: it is strictly narrower than
+what R6 already allows. What it buys is against the weaker attackers R6 does not describe: a **handler bug**, or an **injected statement inside a per-user (`edge_actor`-bound) transaction**, can no longer reach
+another account through this feature. It cannot mint (no EXECUTE; and `SET ROLE edge_system` inside a bound transaction is refused by the minter itself); it can redeem only a proof that exists, that was issued to
+THIS caller, for THIS Apple subject and THIS address, that the database checked against the target's own email and GoTrue's sign-in stamp, and that has not been used or expired. A runtime that merely
+**forgets to verify the OTP** cannot mint unless the target happened to sign in within the last 60 seconds. Closing R6 itself is PR5 (a JWT-verifying binder), unchanged by this work.
+
+**Honest limits.** (1) The corroboration proves "the target signed in recently", not "this caller's code was the one"; the OTP itself is still GoTrue's word relayed by the runtime, and the 5-per-hour OTP cap (0037) is
+unchanged. (2) `last_sign_in_at` is `[unverified]`: GoTrue is believed to stamp it when `verifyOtp` issues its session (recalled from its token issuing path, not read from a live project); where it does not, every mint
+refuses (`409 email_proof_refused`), which fails CLOSED and would show at once in the P4 spike. The `GRANT SELECT (last_sign_in_at) ON auth.users` to `private_definer` is asserted in the migration (a refused grant
+only warns). (3) The window is 60 seconds either side of the database clock, so a skew between GoTrue and Postgres hosts of that size refuses genuine proofs. (4) `lower()` in the database and `toLowerCase()` in
+the Edge code agree for ASCII addresses; a non-ASCII address that hashes differently is refused (fail closed). (5) `private.delete_my_data` is now redefined in 0039: the next change to it must start from 0039's copy,
+not 0032's. (6) Proof retention is the minter's own bounded purge, the drain's purge and the account deletion; if nothing is minted and the drain is not scheduled, an hour-stale proof (two user ids and two hashes)
+can stay until the next of those.
+
+**Proofs.** `supabase/tests/matrix/19_signin_proof_link.sql` (structure, scoping, constraints, purge, account deletion), `19_signin_proof_link_edge.sql` (the minter and redeemer as the real roles, every refusal, the
+committed flow), `tools/db/test-signin-proof-concurrency.sh` (two real sessions), the Deno suite in both modes (`signin-methods.deno.test.ts`), the handler wiring in `signin-methods-handler.test.ts`. Numbers and
+mutation results: `docs/security/p3-money-path-requirements.md`, "Edge role PR4a".
+
 ## 13. PR3: the system path (as built)
 
-PR3 moves `import-catalog` entirely onto the edge roles. **There is no migration 0039:** every statement the importer repo runs fits inside the `edge_system`
+PR3 moves `import-catalog` entirely onto the edge roles. **There is no migration for the importer (0039 is PR4a's, section 12.1, and touches none of this):** every statement the importer repo runs fits inside the `edge_system`
 column grants and policies 0031 already gave it (the whole catalog suites, import / drain / promotion / minimisation / drain-resilience, pass in `edge` mode, and
 the pgTAP matrix 16 already proves the grants and the must-fail cells), and every cross-user read or purge the importer needs already had a definer (0030
 `list_queued_catalog`, `list_rescore_plays`, `purge_fix_coords`, the two delegate binders; 0033 `purge_install_link_tombstones`). So `edge_system`'s grants, the
@@ -553,10 +602,9 @@ cells widen the policy to `true` in a rolled-back transaction, prove with a cont
 for any course (L4), and a runtime holding the edge login can still `bind_actor` any uid. What PR3 buys is that the system path no longer needs the `bind_actor` escape hatch, so the
 only way to act as a user in the system path is a delegate whose preconditions the database checks.
 
-**What stays legacy-only in `edge` mode.** Nothing in `privileged.ts`'s importer, drain, rescore or purge paths. The one `edge`-mode refusal is the OTP-proven link to ANOTHER account
-(section 12, item 1): it answers `501 email_proof_link_unavailable` in `edge`, unchanged. **Decision deferred, and recorded here rather than built:** a cross-account definer would be an
-account-takeover primitive if it trusted its caller for the target account; the narrow, proof-bound design (the OTP verifier, not the client, names the target) is not built in PR3.
-PR4 must either build it or ship the 501 as the production behaviour for the `edge` role (a product decision, not a technical one).
+**What stays legacy-only in `edge` mode.** Nothing in `privileged.ts`'s importer, drain, rescore or purge paths. The one `edge`-mode refusal PR3 left, the OTP-proven link to ANOTHER account
+(`501 email_proof_link_unavailable`), was **built in PR4a** (section 12.1, migration 0039) on the owner's decision of 2026-10-02: a proof-bound definer pair, not a definer that takes the target as an argument. The `501` is not
+the production answer in either mode.
 
 **Sign in with Apple (section 12, item 3): left as is, on purpose.** `signin-revocation-drain` (and the KEK reader, and `me-delete`'s revocation) already runs as `edge_system` through
 `openScopedTx("system", ...)` (`withSigninSystem`), and it acts on no account: it claims queue rows and completes them. `withDelegatedActor` is a per-ROW USER transaction, not a single system
@@ -583,7 +631,7 @@ accepts postgres.js's named prepared statements `[unverified — training knowle
 **PR4 blockers recorded by PR3** (also in `docs/security/p3-money-path-requirements.md`, "Edge role PR3"):
 
 1. Delete `legacy` (`sql()`, the `service_role` branches, `SIGNIN_SYSTEM_ACTOR`, the `hitSystemRateLimit` / `hitRateLimitForActor` legacy buckets) and add the lint pass (section 9).
-2. The OTP-proven cross-account link: build the proof-bound definer, or ship the 501 as the production answer (deferred, above).
+2. ~~The OTP-proven cross-account link~~ **done in PR4a** (section 12.1): the proof-bound definers exist and run in `edge`; PR4b only deletes the `legacy` direct path and collapses the handler's `proofBoundLink` branch.
 3. E5 (launch-blocking): both retention purges run only inside a catalog import's drain pass; schedule them independently.
 4. The Supavisor / `prepare: true` check above, and the first real provisioning of `edge_gateway` on the hosted project (R7: `CREATE ROLE`, tenant config, `pg_hba`), both `[unverified]`.
 5. The R2 gate ruling: `play.held_review` is writable by `edge_actor`; close it before the earn-path definer (E4) and no later than the PR4 gate.

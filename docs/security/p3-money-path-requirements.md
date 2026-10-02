@@ -2883,7 +2883,7 @@ revokes it at the provider, and only then deletes; a failed revocation is retrie
 | Rule | Enforcement |
 |---|---|
 | (1) one account per verified email | `private.signin_find_account_by_email` (service_role only, deterministic `ORDER BY`; an edge_actor reaches it through `signin_find_account_by_email_for_actor`, which refuses unless a kind = `user` actor is bound: F7) on the (verified) email in the Apple token; a match with another account is never merged. The database refuses to move or duplicate an identity (`signin_link_identity`, 23505 → 409 `identity_conflict`; one Apple per account → 409 `provider_already_linked`). An **unverified** email claim is neither matched nor stored. |
-| (2) never auto-link a social sign-in whose email matches an existing account; email OTP proof first | A link whose Apple email belongs to *another* account is refused, 409 `email_proof_required`, with **no exchange, no write**. With `emailProof.code` the OTP is verified (`EmailOtpVerifier`, Supabase Auth `verifyOtp`) for *that address*; only a verified proof links the identity, and it links to **the account the proof was for**, not to the caller. The attempt is **reserved before the code is checked**, in one statement that checks the cap and increments (`private.reserve_signin_otp_attempt`; F3: the earlier peek-then-record let 20 parallel wrong proofs all reach the verifier), and given back only for a proof that succeeded or never reached a verdict. So at most **5 wrong proofs per target email per hour reach the verifier, then 429 even for a correct code**; a transport failure is not counted. The session `verifyOtp` creates for the proven account is signed out (`signOut({scope:"local"})`) immediately (F5); in `edge` mode this path answers 501 (O5); a proof for a different account than was looked up is 409 `email_proof_mismatch`. |
+| (2) never auto-link a social sign-in whose email matches an existing account; email OTP proof first | A link whose Apple email belongs to *another* account is refused, 409 `email_proof_required`, with **no exchange, no write**. With `emailProof.code` the OTP is verified (`EmailOtpVerifier`, Supabase Auth `verifyOtp`) for *that address*; only a verified proof links the identity, and it links to **the account the proof was for**, not to the caller. The attempt is **reserved before the code is checked**, in one statement that checks the cap and increments (`private.reserve_signin_otp_attempt`; F3: the earlier peek-then-record let 20 parallel wrong proofs all reach the verifier), and given back only for a proof that succeeded or never reached a verdict. So at most **5 wrong proofs per target email per hour reach the verifier, then 429 even for a correct code**; a transport failure is not counted. The session `verifyOtp` creates for the proven account is signed out (`signOut({scope:"local"})`) immediately (F5); a proof for a different account than was looked up is 409 `email_proof_mismatch`. **Edge mode (0039, "Edge role PR4a" below): the `501` this row used to carry is gone.** After the OTP verifies, a single-use proof row is minted by `edge_system` (bound to the caller, the target, the address and the Apple subject; checked against the target's own `auth.users` row and GoTrue's sign-in stamp) and redeemed by the bound caller, which links and stores the token for the proof's target, never the caller. |
 | (3) a private-relay address is its own email | Stored and flagged as given. A relay address never takes the proof path (409 `email_belongs_to_another_account` if it matches another account); a relay account links only from this endpoint, signed in, to the **caller**. |
 | (4) unlink only while another method remains | `private.signin_unlink_identity`: one transaction, per-account advisory lock, 55000 → **422 `last_sign_in_method`**. Two concurrent unlinks of a two-method account leave exactly one (integration test, 3 rounds). |
 | rate limits | 10/user/h on link and unlink (`hitRateLimitForActor`, before the transaction opens); 5 failed OTP proofs per target email per hour (`private.reserve_signin_otp_attempt` / `release_signin_otp_attempt`, bucket key built in the database from a sha256 of the email — no address is ever in a bucket key; since 0037 `reserve` returns the hour window it charged and `release` takes that window, and the edge lane calls the `_for_actor` wrappers, see Round 3). `GET` (list) is not limited. |
@@ -3027,8 +3027,8 @@ no refresh token is captured**; the client must call `link` with the token and t
   definer; `edge_actor` still reads `(user_id, provider)` only; check 10's allowlist is unchanged and the two new tables are invisible to checks
   11/12). In `edge` mode `privileged.ts` runs per-user ops through the `_for_actor` definers, the OTP counter as the actor, and the queue ops and
   KEK reader as `edge_system` (`openScopedTx("system")`); the full Deno suite passes in both modes. Open PR3 items: (i) the **OTP-proven link to
-  another account** has no edge definer on purpose (it would be an "attach an identity to any account" primitive), so it answers
-  `501 email_proof_link_unavailable` in `edge` mode only; (ii) `private.signin_find_account_by_email` is service_role only and an edge_actor reaches it through `signin_find_account_by_email_for_actor`, which requires a kind = `user` binding (F7: it was callable by any edge_actor with no binding check); a bound user still gets an id-only existence answer (no worse than R3); the edge-mode refusal to link another account's identity (`mustBeSelf`) has its own integration cell that calls `repo.signin.linkIdentity(otherUid, ...)` directly (F4); (iii) retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
+  another account** had no edge definer on purpose (it would be an "attach an identity to any account" primitive) and answered
+  `501 email_proof_link_unavailable` in `edge` mode only; **closed by PR4a (migration 0039, "Edge role PR4a" below): a proof-bound definer pair, not a definer that takes the target**; (ii) `private.signin_find_account_by_email` is service_role only and an edge_actor reaches it through `signin_find_account_by_email_for_actor`, which requires a kind = `user` binding (F7: it was callable by any edge_actor with no binding check); a bound user still gets an id-only existence answer (no worse than R3); the edge-mode refusal to link another account's identity (`mustBeSelf`) has its own integration cell that calls `repo.signin.linkIdentity(otherUid, ...)` directly (F4); (iii) retire `SIGNIN_SYSTEM_ACTOR` with the legacy path in PR4.
 - **O6. The OTP verification is not bounded by the vendor timeout** (Supabase Auth, through supabase-js): only the 15 s request race bounds it.
 - **O7. `GET` (list) is not rate-limited** (the plan's 10/user/h is for linking); it is one cheap read.
 - **O8. `auth.identities` is written by a definer.** A GRANT the grantor may not make (no GRANT OPTION) does **not** fail: PostgreSQL only warns ("no privileges
@@ -3136,3 +3136,80 @@ answers 501 there, O5) and is proved in `legacy`.
 **Honest limits.** (1) A BOUND user actor can still `release` / `reserve` for any address (the counter is keyed by the target address's hash); L1 closes "any connection", not "a signed-in caller going around the Edge code" (edge-role-design.md §12). (2) The Deno L2 cell is proved in `legacy` and `edge` against correct code, but its mutation (SQL release on the current window) was run in `legacy` only. (3) A rollover cannot be produced inside one pgTAP transaction (`now()` is fixed), so the L2 pgTAP cells stage it as "the reservation sits in the previous window's bucket row", which is what the database sees; the unit cell moves a fake clock mid-proof. (4) The in-database `now()` window arithmetic and the Edge code's `windowStart` round trip as an ISO string with millisecond precision (hour-aligned, so exact).
 
 Numbers: `tools/db/test.sh` exit 0 in `HARNESS_MODE=superuser` and `restricted` (each a fresh cluster; both H2 no-`migration_owner` checks apply 0037); pgTAP **21 files, 1835 assertions** (`17_signin_providers.sql` 162, was 150; `18_signin_providers_edge.sql` 83, was 65); the Deno suite **198 tests in each of `EDGE_DB_MODE=legacy` and `edge`** (one new); `verify-function-inventory.mjs` OK; vitest **40 files / 767 tests** (one new; the F3 and L2 cells run with the 25 ms verifier); the lint **316** tests and clean over `supabase/functions`; `pnpm -r typecheck` exit 0; `deno check --frozen` and `deno cache --frozen` (fresh `DENO_DIR`) over the 11 CI entrypoints exit 0; `check-migrations-immutable.sh --base 127970f` (36 files byte-identical) and `--self-test` OK; `gitleaks dir` no leaks. Not run: prettier (out of scope), any deploy, a real Supabase project.
+
+## Edge role PR4a (2026-10-02): the proof-bound cross-account Sign in with Apple link in `EDGE_DB_MODE=edge` (migration `0039_signin_proof_bound_link.sql`)
+
+The owner decided (2026-10-02) to build the OTP-proven link in `edge` mode rather than ship the `501 email_proof_link_unavailable` as the production answer (the PR3 blocker, O5 (i)). Migrations 0001-0038 are untouched
+(`check-migrations-immutable.sh --base 10e3afa`, 38 files byte-identical). Full design, the options considered and the trust argument against R6:
+[`docs/security/edge-role-design.md`](edge-role-design.md) section 12.1. **Nothing here has been exercised against a real Supabase Auth**: the OTP is a scripted verifier that stamps `auth.users.last_sign_in_at` the way GoTrue
+is believed to.
+
+### What 0039 contains
+
+| Object | What |
+|---|---|
+| `private.signin_email_proof` | The single-use proof: `caller_user_id`, `target_user_id` (both FK to `auth.users ON DELETE CASCADE`), `provider`, `email_hash`, `sub_hash` (sha256 of `provider:subject`), `created_at`, `expires_at` (the minter sets 5 minutes; a CHECK caps 10), `consumed_at`; `caller <> target`. FORCE RLS, **no edge or client grant**, `UPDATE (consumed_at)` only, four `private_definer` policies (check-7 GUC form: the proof id, the account-deletion window, or an hour past expiry). |
+| `private.signin_record_email_proof(...)` | The only writer. **`edge_system` EXECUTE only.** Refuses inside any actor-bound transaction; refuses unless the address hashes to the target's current `auth.users.email`; refuses unless the target's GoTrue `last_sign_in_at` is within 60 s; caller and target must exist and differ; deletes a bounded batch of hour-stale proofs. |
+| `private.signin_link_identity_with_proof_for_actor(...)` | **`edge_actor` EXECUTE only**, `kind = 'user'` binding. Per-account advisory lock on the target, `FOR UPDATE` on the proof; refuses a proof that is consumed, expired, issued to another caller, for another provider / subject hash / address hash, or whose address no longer belongs to the target; refuses an unverified or relay email; then consumes it and calls the 0035 cores (`signin_link_identity`, `signin_store_token`) on **`proof.target_user_id`**. One call links AND stores the token (the proof is consumed once). |
+| `private.purge_signin_email_proofs()` | `edge_system`, `service_role`; run by `signin-revocation-drain`. |
+| `private.delete_my_data` | Redefined from 0032's body with exactly ONE added statement (delete the account's proofs as caller or target); the diff against 0032 is that one hunk. |
+| Grant | `GRANT SELECT (last_sign_in_at) ON auth.users TO private_definer`, **asserted** in the migration (a refused grant only warns, O8). |
+| Registries | `pii_retention_policy` (2 rows, `delete_row`), `pii_export_policy` (`exclude`), `definer_policy_allowlist` (4) + `definer_policy_exprs.txt`, `function_inventory` (3). `edge_policy_allowlist` and its fixture unchanged. |
+
+TypeScript: `SigninRepo.proofBoundLink` (true in `edge`) and `linkIdentityWithProof`; `SigninDeps.emailProofs` (`signinEmailProofs()`, mints through `openScopedTx("system")` in its own committed transaction); the handler mints right
+after the OTP verifies (and after the 5/hour cap's reserve and release, F3/L2 unchanged), before the Apple code exchange, and redeems in the same transaction that used to link and store. `crossAccountLink` is true in both modes;
+`mustBeSelf` stays (the direct path refuses another account, now `403 cross_account_link_requires_proof`). The F5 sign-out is untouched. `legacy` is unchanged (direct link to the proven account; deleted in PR4b). The drain also purges proofs.
+
+### The trust argument against R6, in one paragraph
+
+A fully compromised runtime can already `bind_actor(<any uid>)` and call the 0035 self-link wrapper, and it holds the GoTrue service key, so the proof path **adds nothing to and removes nothing from R6**. What it adds is against a
+handler bug or an injected statement in a per-user transaction: that actor cannot mint (no EXECUTE, and `SET ROLE edge_system` inside a bound transaction is refused by the minter), and can redeem only a proof issued to it, for
+that Apple subject and that address, that the database itself checked against the target's own email and GoTrue's sign-in stamp. A runtime that skips verifying the OTP cannot mint unless the target signed in within 60 s.
+
+### Tests
+
+- **pgTAP** `19_signin_proof_link.sql` (58 cells: structure, constraints, scoping, purge, account deletion, session reuse) and `19_signin_proof_link_edge.sql` (78 cells, as the real `edge_gateway` login): edge_actor cannot
+  mint (unbound, bound, and as edge_system inside a bound or delegate transaction); the minter refuses a wrong address, a stale / absent / future sign-in stamp, caller = target and bad arguments; an unbound actor and a system delegate
+  cannot redeem; a proof for sub A cannot link sub B (or another provider or address); an expired, consumed (replayed), other-caller or changed-hands proof is refused; the link lands on the TARGET and the caller gains no method; the duplicate
+  identity, one-Apple-per-account and last-method rules hold; the committed flow; retention (the minter removes an hour-stale proof and leaves a 15-minute one).
+- **Two real sessions** `tools/db/test-signin-proof-concurrency.sh` (wired into `test.sh`): session A redeems and holds the transaction, B waits (>= 0.8 s) and is refused `28000 already used`; and 6 symmetric races, each with exactly one winner, one
+  identity and one grant on the target, none on the caller.
+- **Deno, `legacy` and `edge`** (`signin-methods.deno.test.ts`, 33 tests per mode, was 24): the full OTP-proven flow succeeds in both modes and lands on the proven account (identity AND grant, the stored token decrypts); the **OTP cap holds under 20-parallel
+  load in `edge` now** (the F3 cell no longer skips it); the F5 sign-out happens in the full flow in both modes; edge-only cells (they `return` in `legacy`): replay refused, sub A cannot link sub B / another provider / address, other caller and the target
+  itself cannot redeem, an expired proof, the minter refusing with no GoTrue sign-in (409 before any code is exchanged), concurrent redemption (4 parallel, 3 rounds: exactly one winner), account deletion and the purge.
+- **Unit** `signin-methods-handler.test.ts` (+16): order verify, mint, exchange, redeem; the proof carries exactly caller / target / address hash / subject hash and neither raw value; no mint on a wrong code, a transport failure or a changed-hands
+  proof; mint refusal is 409 with nothing exchanged and the OTP attempt given back; no minter on a proof-bound repo is 503 before any OTP is spent; a refused redemption revokes the grant; single use; `mustBeSelf`; the OTP cap in the proof shape.
+
+### Mutation proofs (each applied to a world-readable `/tmp` copy, the whole suite then run, every one CAUGHT)
+
+| Mutation | Caught by |
+|---|---|
+| link to `actor_uid()` instead of the proof's target | pgTAP edge (3 cells fail, then the file aborts on a later error), concurrency script, Deno `edge` (5 of 33 fail) |
+| skip the consumed check | pgTAP edge (3), concurrency script (both sessions win), Deno `edge` (replay, concurrent) |
+| skip the subject-hash binding | pgTAP edge (4), Deno `edge` (sub A / sub B) |
+| skip expiry | pgTAP edge (1), Deno `edge` (expired) |
+| grant proof minting to `edge_actor` | pgTAP 19 (3 cells), `10_function_inventory.sql`, `verify-function-inventory.mjs` (`edge_actor EXECUTE expected=f actual=t`) |
+| also: remove the GoTrue sign-in corroboration | pgTAP edge (3), Deno `edge` (1) |
+| also: allow minting inside an actor-bound transaction | pgTAP edge (2) |
+| also: omit the proof deletion from `delete_my_data` | pgTAP 19 (2), Deno `edge` (1) |
+| also: skip the caller binding (`caller_user_id <> actor`) | pgTAP edge (2), Deno `edge` (1) |
+| also: remove the minter's stale-row purge | pgTAP edge (1) |
+
+### Not verified (`[unverified]`), in one place
+
+- **GoTrue**: that `verifyOtp` stamps `auth.users.last_sign_in_at` (recalled from its token-issuing path, not read from a live project); that `auth.users.last_sign_in_at` exists and is `SELECT`-grantable to `private_definer` on the real project
+  (0016 already relies on the same mechanism for `id, email`; the migration asserts it); the clock skew between GoTrue and the database. Where the stamp is not written every mint refuses with `409 email_proof_refused`: fail closed, visible at once in the P4 spike.
+- Everything the O12 section lists as unverified is still so (Apple, `verifyOtp`'s error statuses, `auth.identities` columns, GoTrue's automatic linking by email).
+- The `edge` handler path was exercised against a scripted OTP verifier and the real harness cluster, never against Supabase Auth.
+
+### Verification
+
+- **`tools/db/test.sh`, the FULL harness, exit 0 in `HARNESS_MODE=superuser` AND `restricted`** (a fresh cluster each, ports 5745 / 5746): pgTAP **`Files=23, Tests=2012, Result: PASS`** (21 files / 1876 on `10e3afa`; +136 =
+  58 in `19_signin_proof_link.sql` and 78 in `19_signin_proof_link_edge.sql`; `10_function_inventory.sql` and `16_edge_role.sql` pass unchanged); `tools/db/test-signin-proof-concurrency.sh` PASS (blocking case: B waited ~1.3 s then was
+  refused; 6 symmetric races, one winner each); the Deno integration suite **220 passed / 0 failed in `EDGE_DB_MODE=legacy` AND 220 / 0 in `edge`, in each harness mode** (211 per mode before; +9, all in `signin-methods.deno.test.ts`,
+  24 to 33 tests); `verify-function-inventory.mjs: OK` (checks 1-13, `edge_policy_allowlist` and its fixture unchanged, the 4 new `private_definer` policies in `definer_policy_exprs.txt`); service-role lint clean. The superuser-only cells print
+  `skipped` under `restricted`, as before.
+- **Unit**: `pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts` **42 files / 809 tests** (793 before; +16 in `signin-methods-handler.test.ts`); the lint's own **4 files / 316** tests; `pnpm -r typecheck`
+  exit 0 for every workspace project (`@golfraven/catalog-tools...` built first, `pnpm install --frozen-lockfile`, `GOLFRAVEN_DEMO=1 node scripts/emit-indexability.mjs` in `apps/site`); `deno check --frozen` and `deno cache --frozen` over
+  the 11 CI entry points on a fresh `DENO_DIR`, both exit 0 (no new import specifier: every import is relative); `check-migrations-immutable.sh --base 10e3afa` (38 files byte-identical) and `--self-test` OK; `gitleaks dir` no leaks.
+- **Not run**: prettier (out of scope, never run), any deploy, a real Supabase project, Apple, Google or GoTrue; PG16 (the harness uses PG17).

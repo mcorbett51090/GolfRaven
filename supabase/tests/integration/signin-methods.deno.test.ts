@@ -6,6 +6,9 @@
 // cannot). Only the OUTSIDE world is synthetic: a synthetic Apple (a run-time-generated RSA key, a fake JWKS served through an
 // injected `fetch`, identity tokens minted here) and a scripted email-OTP verifier. No secret exists anywhere in this file.
 //
+// Edge role PR4a (0039) adds the proof-bound cross-account link: the OTP-proven flow now runs in BOTH modes (the scripted verifier stamps
+// auth.users.last_sign_in_at the way GoTrue is believed to), and the cells named "PR4a" prove the single-use proof against the real definers.
+//
 // What this proves that the vitest suite (same scenarios, fake Repo) cannot: the SQLSTATE -> HTTP mapping of the real definers,
 // the real Vault KEK path (private.get_signin_token_kek, real envelope round trip through bytea columns), the real advisory-lock
 // serialisation of concurrent unlinks, the real durable queue (a revocation row that survives the account's deletion), and the
@@ -14,7 +17,7 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, makeActor, rawCount } from "./_helpers.ts";
-import { hitRateLimitForActor, isServiceRoleBearer, getDbMode, loadAppleSiwaConfig, makeEmailOtpVerifier, type OtpAuthClient, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
+import { hitRateLimitForActor, isServiceRoleBearer, getDbMode, loadAppleSiwaConfig, makeEmailOtpVerifier, type OtpAuthClient, purgeSigninEmailProofs, type Repo, signinEmailProofs, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleLinkProvider, handleListMethods, handleUnlinkProvider, type SigninDeps } from "../../functions/_shared/signin/methods-handler.ts";
 import { orchestrateMeDelete } from "../../functions/_shared/me/delete-orchestrator.ts";
 import { runRevocations, type RevocationDeps } from "../../functions/_shared/signin/revocation.ts";
@@ -102,10 +105,37 @@ function depsFor(uid: string, world: ReturnType<typeof appleWorld>, otp: EmailOt
     otpFailures: signinOtpFailuresFor(actor),
     apple: world.ports.apple,
     emailOtp: otp,
+    emailProofs: signinEmailProofs(),
     revocation: { db: signinRevocationDb, apple: world.ports.apple, google: world.ports.google, log: (e) => log.push(e) },
     log: (e) => log.push(e),
   };
 }
+
+/** What GoTrue leaves behind when verifyOtp succeeds: the proven account has just signed in (`auth.users.last_sign_in_at`). The proof minter
+ * corroborates the OTP against exactly this. `[unverified: real GoTrue is believed to stamp it; the harness stamps it by hand]` */
+async function stampSignIn(uid: string, secondsAgo = 0): Promise<void> {
+  await ensureServiceRole();
+  await adminSql()`update auth.users set last_sign_in_at = clock_timestamp() - make_interval(secs => ${secondsAgo}::int) where id = ${uid}`;
+}
+
+/** A scripted verifier that behaves like GoTrue: a `res.ok` proof also stamps the proven account's sign-in. */
+const gotrueLike = (res: EmailOtpResult, calls: string[], stamp = true): EmailOtpVerifier => ({
+  async verify(email) {
+    calls.push(email);
+    if (res.ok && stamp) await stampSignIn(res.userId);
+    return res;
+  },
+});
+
+const ENVELOPE = () => ({ ciphertext: new Uint8Array(40).fill(7), dekWrapped: new Uint8Array(70).fill(9), kekId: KEK_ID });
+
+/** Proof rows of an account, as private_definer through the account-deletion window (the only way a definer can list them). */
+type ProofRow = Record<string, string | boolean>;
+const proofRows = (uid: string): Promise<ProofRow[]> =>
+  asDefiner(async (sql) => {
+    await sql`select set_config('app.delete_my_data.target_user_id', ${uid}, true)`;
+    return (await sql`select id, caller_user_id, target_user_id, provider, email_hash, sub_hash, consumed_at is not null as consumed, expires_at > now() as live, expires_at <= created_at + interval '10 minutes' as capped from private.signin_email_proof where caller_user_id = ${uid} or target_user_id = ${uid} order by created_at, id`) as unknown as ProofRow[];
+  });
 
 async function newUser(label: string, extraIdentities: Array<{ provider: string; subject: string }> = []) {
   const uid = freshUuid();
@@ -227,8 +257,8 @@ Deno.test("link: an Apple email that matches ANOTHER account is never auto-linke
   const world = appleWorld(script);
   const token = await mintIdentityToken(appleKey, `apple-sub-collide-${RUN}`, { rawNonce: RAW_NONCE, claims: { email: bob.email.toUpperCase() } });
   const e = await httpError(handleLinkProvider(await linkReq({ identityToken: token }), alice.uid, depsFor(alice.uid, world)));
-  // edge mode has no cross-account link definer (edge-role-design.md §12): it answers 501 before inviting a proof; legacy asks for one.
-  assertEquals([e.status, e.code], getDbMode() === "edge" ? [501, "email_proof_link_unavailable"] : [409, "email_proof_required"]);
+  // both modes ask for a proof (the 501 an edge-mode runtime used to answer here is gone, 0039)
+  assertEquals([e.status, e.code], [409, "email_proof_required"]);
   assertEquals(await identityCount(alice.uid), 1);
   assertEquals(await identityCount(bob.uid), 1);
   assertEquals(await rawCount(`select count(*) as n from auth.identities where provider = 'apple' and provider_id = 'apple-sub-collide-${RUN}'`), 0);
@@ -239,29 +269,9 @@ Deno.test("link: with a valid email-OTP proof the identity goes to the account w
   await setupOnce();
   const alice = await newUser("pa");
   const bob = await newUser("pb");
-  const mk = (res: EmailOtpResult, calls: string[]): EmailOtpVerifier => ({
-    async verify(email) {
-      calls.push(email);
-      return res;
-    },
-  });
+  // A verifier that behaves like GoTrue: a correct code also stamps the proven account's sign-in (what the edge-mode proof minter corroborates).
+  const mk = (res: EmailOtpResult, calls: string[]): EmailOtpVerifier => gotrueLike(res, calls);
   const sub = `apple-sub-proof-${freshUuid().slice(0, 8)}`;
-
-  if (getDbMode() === "edge") {
-    // No edge definer attaches an identity to ANOTHER account (edge-role-design.md §12): 501 before any proof is invited, spent or counted.
-    const calls: string[] = [];
-    const script: AppleScript = { nextRefreshToken: "r.p", nextSubject: sub, revoked: [], revokeStatus: 200 };
-    const world = appleWorld(script);
-    const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
-    const e = await httpError(handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, mk({ ok: true, userId: bob.uid }, calls))));
-    assertEquals([e.status, e.code], [501, "email_proof_link_unavailable"]);
-    assertEquals(calls, [], "the verifier was never called");
-    assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await sha256Hex(bob.email)), 0, "nothing was counted");
-    assertEquals(await identityCount(bob.uid), 1);
-    assertEquals(await identityCount(alice.uid), 1);
-    assertEquals(world.calls.filter((c) => c.url === APPLE_TOKEN_URL).length, 0, "no authorization code was exchanged");
-    return;
-  }
 
   // five wrong proofs
   for (let i = 0; i < 5; i++) {
@@ -542,8 +552,6 @@ Deno.test("F3: 20 PARALLEL wrong email proofs reach the verifier exactly 5 times
   await setupOnce();
   const alice = await newUser("f3a");
   const bob = await newUser("f3b");
-  // Edge mode refuses the cross-account link before any proof (F4), so the proof path is only reachable in legacy mode.
-  if (getDbMode() === "edge") return;
   let verifierCalls = 0;
   const slow: EmailOtpVerifier = {
     async verify() {
@@ -614,7 +622,7 @@ Deno.test("L2: a release names the window the attempt was reserved in; releasing
   assertEquals(code, "22023", "a window that is not hour-aligned is refused");
 });
 
-Deno.test("F4: edge mode REFUSES to link or store a grant for ANOTHER account, called directly on the repo (mustBeSelf)", DT, async () => {
+Deno.test("F4: edge mode REFUSES to link or store a grant for ANOTHER account, called directly on the repo (mustBeSelf: only a proof links another account)", DT, async () => {
   await setupOnce();
   const alice = await newUser("f4a");
   const bob = await newUser("f4b");
@@ -625,13 +633,13 @@ Deno.test("F4: edge mode REFUSES to link or store a grant for ANOTHER account, c
     return;
   }
   const link = await httpError(withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(bob.uid, input)));
-  assertEquals([link.status, link.code], [501, "email_proof_link_unavailable"]);
+  assertEquals([link.status, link.code], [403, "cross_account_link_requires_proof"]);
   const store = await httpError(withOwnership(makeActor(alice.uid), (repo) => repo.signin.storeToken(bob.uid, "apple", env)));
-  assertEquals([store.status, store.code], [501, "email_proof_link_unavailable"]);
+  assertEquals([store.status, store.code], [403, "cross_account_link_requires_proof"]);
   assertEquals(await identityCount(bob.uid), 1, "nothing was linked to Bob");
   assertEquals(await tokenCount(bob.uid), 0, "no grant was stored for Bob");
-  // and the repo reports that it cannot do it, so the handler answers before spending a proof
-  assertEquals(await withOwnership(makeActor(alice.uid), (repo) => Promise.resolve(repo.signin.crossAccountLink)), false);
+  // the repo has a route to another account since 0039, and it is the PROOF-bound one (the direct path above is refused)
+  assertEquals(await withOwnership(makeActor(alice.uid), (repo) => Promise.resolve([repo.signin.crossAccountLink, repo.signin.proofBoundLink])), [true, true]);
   // linking to SELF still works in edge mode
   assertEquals(await withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(alice.uid, input)), true);
 });
@@ -740,6 +748,227 @@ Deno.test("F6: the enqueue inside the delete transaction holds the per-account l
   await deleting;
   await linking;
   assertEquals(order, ["delete-tx-commits", "link-done"]);
+});
+
+// ── edge role PR4a (0039): the proof-bound cross-account link ────────────────────────────────────────────────────────────
+/** A caller (Alice) with a target (Bob) whose mailbox the proof is about; Bob has just signed in per GoTrue's stamp. */
+async function proofPair(label: string) {
+  const alice = await newUser(`${label}a`);
+  const bob = await newUser(`${label}b`);
+  await stampSignIn(bob.uid);
+  return { alice, bob };
+}
+const oneProof = async (uid: string) => {
+  const rows = await proofRows(uid);
+  assertEquals(rows.length, 1, "exactly one proof row");
+  return rows[0]!;
+};
+const proofInput = (sub: string, email: string) => ({ provider: "apple" as const, subject: sub, email, emailVerified: true, isPrivateRelay: false });
+const asCaller = <T>(uid: string, f: (signin: Repo["signin"]) => Promise<T>) => withOwnership(makeActor(uid), (repo) => f(repo.signin));
+
+Deno.test("PR4a: the OTP-proven link works in BOTH modes end to end: it lands on the proven account (identity AND grant), the caller gains nothing, the proof is consumed, and its stored token decrypts", DT, async () => {
+  await setupOnce();
+  const { alice, bob } = await proofPair("pr4a1");
+  const sub = `apple-sub-pr4a1-${RUN}`;
+  const calls: string[] = [];
+  const script: AppleScript = { nextRefreshToken: "r.pr4a1", nextSubject: sub, revoked: [], revokeStatus: 200 };
+  const world = appleWorld(script);
+  const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
+  const out = await handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, gotrueLike({ ok: true, userId: bob.uid }, calls)));
+  assertEquals([out.linkedTo, out.methods], ["proven_account", null]);
+  assertEquals(calls, [bob.email]);
+  assertEquals(await rawCount(`select count(*) as n from auth.identities where user_id = '${bob.uid}' and provider = 'apple' and provider_id = '${sub}'`), 1, "the identity is on the PROVEN account");
+  assertEquals(await tokenCount(bob.uid), 1, "the grant is stored for the proven account");
+  assertEquals(await identityCount(alice.uid), 1, "the caller's methods are untouched");
+  assertEquals(await tokenCount(alice.uid), 0, "no grant was stored for the caller");
+  assertEquals(script.revoked, [], "a successful link revokes nothing");
+  // the token Bob now holds really is the one Apple minted
+  const row = (await adminSql()`select refresh_token_ciphertext, dek_wrapped, kek_id from app.signin_provider_token where user_id = ${bob.uid} and provider = 'apple'`)[0]!;
+  const raw = Uint8Array.from(atob((await adminSql()`select o_kek_b64 from private.get_signin_token_kek(${KEK_ID}::text)`)[0]!.o_kek_b64), (c) => c.charCodeAt(0));
+  assertEquals(await decryptToken({ ciphertext: new Uint8Array(row.refresh_token_ciphertext), dekWrapped: new Uint8Array(row.dek_wrapped), kekId: row.kek_id }, "apple", { kekId: KEK_ID, key: raw }), "r.pr4a1");
+  if (getDbMode() !== "edge") {
+    assertEquals((await proofRows(bob.uid)).length, 0, "legacy links the proven account directly: no proof row exists");
+    return;
+  }
+  // edge: exactly one proof, between these two accounts, hashed, capped at 10 minutes, and consumed by the link
+  const p = await oneProof(bob.uid);
+  assertEquals([p.caller_user_id, p.target_user_id, p.provider, p.consumed, p.capped], [alice.uid, bob.uid, "apple", true, true]);
+  assertEquals(p.email_hash, await sha256Hex(bob.email));
+  assertEquals(p.sub_hash, await sha256Hex(`apple:${sub}`));
+  assertEquals((await proofRows(alice.uid)).length, 1, "the same single row, seen from the caller's side");
+});
+
+Deno.test("PR4a (edge): a REPLAYED proof is refused (single use), by the caller it was issued to, through the real repo", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  const { alice, bob } = await proofPair("pr4a2");
+  const sub = `apple-sub-pr4a2-${RUN}`;
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
+  assertEquals(await asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())), true);
+  assertEquals(await identityCount(bob.uid), 2);
+  const replay = await httpError(asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())));
+  assertEquals([replay.status, replay.code], [409, "email_proof_refused"]);
+  assertEquals(await identityCount(bob.uid), 2, "the replay linked nothing");
+  assertEquals((await oneProof(bob.uid)).consumed, true);
+});
+
+Deno.test("PR4a (edge): a proof minted for Apple sub A can NOT link sub B (nor another provider, nor another address); sub A still links afterwards", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  const { alice, bob } = await proofPair("pr4a3");
+  const subA = `apple-sub-pr4a3a-${RUN}`;
+  const subB = `apple-sub-pr4a3b-${RUN}`;
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: subA });
+  for (const [label, input] of [
+    ["another subject", proofInput(subB, bob.email)],
+    ["another provider", { ...proofInput(subA, bob.email), provider: "google" as const }],
+    ["another address", proofInput(subA, alice.email)],
+  ] as const) {
+    const e = await httpError(asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, input, ENVELOPE())));
+    assertEquals([e.status, e.code], [409, "email_proof_refused"], label);
+  }
+  assertEquals(await rawCount(`select count(*) as n from auth.identities where provider_id in ('${subA}', '${subB}')`), 0, "none of the refused links created an identity");
+  assertEquals(await tokenCount(bob.uid), 0);
+  assertEquals((await oneProof(bob.uid)).consumed, false, "a refusal does not burn the proof");
+  assertEquals(await asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(subA, bob.email), ENVELOPE())), true, "the proof's own identity links");
+});
+
+Deno.test("PR4a (edge): a proof is redeemable only by the caller it was issued to; the target cannot redeem it for itself and a stranger cannot", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  const { alice, bob } = await proofPair("pr4a4");
+  const mallory = await newUser("pr4a4m");
+  const sub = `apple-sub-pr4a4-${RUN}`;
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
+  for (const who of [mallory.uid, bob.uid]) {
+    const e = await httpError(asCaller(who, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())));
+    assertEquals([e.status, e.code], [409, "email_proof_refused"]);
+  }
+  assertEquals(await rawCount(`select count(*) as n from auth.identities where provider_id = '${sub}'`), 0);
+  assertEquals(await asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())), true);
+});
+
+Deno.test("PR4a (edge): an EXPIRED proof is refused (the row is fabricated through the only writer's own INSERT window: the minter never writes one)", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  const { alice, bob } = await proofPair("pr4a5");
+  const sub = `apple-sub-pr4a5-${RUN}`;
+  // a proof that expired 10 minutes ago, written as private_definer with the INSERT window open on its id (the minter would never write it)
+  const pid = freshUuid();
+  await asDefiner(async (sql) => {
+    await sql`select set_config('app.signin.proof_id', ${pid}, true)`;
+    await sql`insert into private.signin_email_proof (id, caller_user_id, target_user_id, email_hash, provider, sub_hash, created_at, expires_at)
+              values (${pid}, ${alice.uid}, ${bob.uid}, ${await sha256Hex(bob.email)}, 'apple', ${await sha256Hex(`apple:${sub}`)}, now() - interval '15 minutes', now() - interval '10 minutes')`;
+  });
+  const e = await httpError(asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())));
+  assertEquals([e.status, e.code], [409, "email_proof_refused"]);
+  assertEquals(await rawCount(`select count(*) as n from auth.identities where provider_id = '${sub}'`), 0);
+});
+
+Deno.test("PR4a (edge): the minter refuses when GoTrue shows no sign-in for the target (a verifier that 'verified' without a session), and the handler answers 409 before any code is exchanged", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  const alice = await newUser("pr4a6a");
+  const bob = await newUser("pr4a6b"); // never signed in: last_sign_in_at is NULL
+  const sub = `apple-sub-pr4a6-${RUN}`;
+  const script: AppleScript = { nextRefreshToken: "r.pr4a6", nextSubject: sub, revoked: [], revokeStatus: 200 };
+  const world = appleWorld(script);
+  const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
+  const calls: string[] = [];
+  const e = await httpError(handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, gotrueLike({ ok: true, userId: bob.uid }, calls, false))));
+  assertEquals([e.status, e.code], [409, "email_proof_refused"]);
+  assertEquals(calls, [bob.email], "the verifier ran");
+  assertEquals(world.calls.filter((c) => c.url === APPLE_TOKEN_URL).length, 0, "no authorization code was exchanged");
+  assertEquals((await proofRows(bob.uid)).length, 0, "no proof was minted");
+  assertEquals(await identityCount(bob.uid), 1);
+  assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await sha256Hex(bob.email)), 0, "the OTP attempt was given back (the code itself was fine)");
+  // a stale stamp (the target signed in 10 minutes ago) is no corroboration either
+  await stampSignIn(bob.uid, 600);
+  const e2 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub }));
+  assertEquals([e2.status, e2.code], [409, "email_proof_refused"]);
+  // ... and neither is the wrong address for the target
+  await stampSignIn(bob.uid);
+  const e3 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: alice.email, provider: "apple", subject: sub }));
+  assertEquals([e3.status, e3.code], [409, "email_proof_refused"]);
+  // ... nor an account that does not exist (it vanished between the lookup and the mint): the same refusal, not a "not linked" 404
+  const e4 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: freshUuid(), email: bob.email, provider: "apple", subject: sub }));
+  assertEquals([e4.status, e4.code], [409, "email_proof_refused"]);
+  assertEquals((await proofRows(bob.uid)).length, 0);
+});
+
+Deno.test("PR4a (edge): CONCURRENT redemption of one proof yields exactly one link and one refusal (per-account advisory lock + FOR UPDATE), repeated", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  for (let round = 0; round < 3; round++) {
+    const { alice, bob } = await proofPair(`pr4a7r${round}`);
+    const sub = `apple-sub-pr4a7-${round}-${RUN}`;
+    const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
+    const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE()))));
+    assertEquals(attempts.filter((a) => a.status === "fulfilled").length, 1, "exactly one redemption wins");
+    for (const a of attempts) {
+      if (a.status === "rejected") assert(a.reason instanceof HttpError && a.reason.status === 409 && a.reason.code === "email_proof_refused", "every loser is the 409 refusal");
+    }
+    assertEquals(await rawCount(`select count(*) as n from auth.identities where provider = 'apple' and provider_id = '${sub}'`), 1, "exactly one identity");
+    assertEquals(await tokenCount(bob.uid), 1, "exactly one grant");
+  }
+});
+
+Deno.test("PR4a: the F5 sign-out still happens in the full proven flow (both modes): verifyOtp then signOut(local), and the link lands on the proven account", DT, async () => {
+  await setupOnce();
+  const { alice, bob } = await proofPair("pr4a8");
+  const sub = `apple-sub-pr4a8-${RUN}`;
+  const events: string[] = [];
+  const client: OtpAuthClient = {
+    auth: {
+      async verifyOtp(args) {
+        events.push(`verifyOtp:${args.email}`);
+        await stampSignIn(bob.uid); // GoTrue's session issue stamps the sign-in
+        return { data: { user: { id: bob.uid } }, error: null };
+      },
+      async signOut(opts) {
+        events.push(`signOut:${opts.scope}`);
+        return { error: null };
+      },
+    },
+  };
+  const script: AppleScript = { nextRefreshToken: "r.pr4a8", nextSubject: sub, revoked: [], revokeStatus: 200 };
+  const world = appleWorld(script);
+  const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
+  const out = await handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, makeEmailOtpVerifier(() => client)));
+  assertEquals(out.linkedTo, "proven_account");
+  assertEquals(events, [`verifyOtp:${bob.email}`, "signOut:local"], "the session the proof created was signed out");
+  assertEquals(await rawCount(`select count(*) as n from auth.identities where user_id = '${bob.uid}' and provider_id = '${sub}'`), 1);
+});
+
+Deno.test("PR4a (edge): the proof rows are deleted with the account (delete_my_data) as caller or as target, and purged an hour past expiry; a live proof of others survives both", DT, async () => {
+  await setupOnce();
+  if (getDbMode() !== "edge") return;
+  const { alice, bob } = await proofPair("pr4a9");
+  const carol = await newUser("pr4a9c");
+  await stampSignIn(carol.uid);
+  const dave = await newUser("pr4a9d");
+  const mint = (caller: string, target: { uid: string; email: string }, sub: string) => signinEmailProofs().record({ callerUserId: caller, targetUserId: target.uid, email: target.email, provider: "apple", subject: `${sub}-${RUN}` });
+  await mint(alice.uid, bob, "pr4a9-ab");
+  await stampSignIn(alice.uid);
+  await mint(dave.uid, alice, "pr4a9-da");
+  await mint(dave.uid, carol, "pr4a9-dc");
+  assertEquals((await proofRows(alice.uid)).length, 2, "alice is a party to two proofs");
+  await withOwnership(makeActor(alice.uid), (repo) => repo.me.deleteMyData());
+  assertEquals((await proofRows(alice.uid)).length, 0, "both of alice's proofs went with her account (as caller and as target)");
+  assertEquals((await proofRows(carol.uid)).length, 1, "a proof between two OTHER accounts is untouched");
+  assertEquals((await proofRows(bob.uid)).length, 0, "(bob's only proof was alice's)");
+  // the purge: an hour past expiry only
+  const stale = freshUuid();
+  await asDefiner(async (sql) => {
+    await sql`select set_config('app.signin.proof_id', ${stale}, true)`;
+    await sql`insert into private.signin_email_proof (id, caller_user_id, target_user_id, email_hash, provider, sub_hash, created_at, expires_at)
+              values (${stale}, ${dave.uid}, ${carol.uid}, ${await sha256Hex(carol.email)}, 'apple', ${await sha256Hex("apple:stale-" + RUN)}, now() - interval '3 hours', now() - interval '2 hours 55 minutes')`;
+  });
+  assertEquals((await proofRows(carol.uid)).length, 2);
+  assert((await purgeSigninEmailProofs()) >= 1, "the purge removed the stale proof");
+  const left = await proofRows(carol.uid);
+  assertEquals(left.length, 1, "only the live proof is left");
+  assertEquals(left[0]!.live, true);
 });
 
 Deno.test("cleanup: the throw-away KEK is removed", DT, async () => {

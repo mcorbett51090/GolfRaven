@@ -282,6 +282,9 @@ run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAM
 echo "tools/db/test.sh: money-path concurrency checks (H3 + should-fix, as $DBUSER)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-money-path-concurrency.sh'"
 
+echo "tools/db/test.sh: email-OTP link proof redemption concurrency check (edge role PR4a, 0039; two real edge_gateway sessions, run with $DBUSER as the seeding role)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-signin-proof-concurrency.sh'"
+
 # ⛔ FIX (P3c gate round 2, item 0 — required first): the CI blind spot.
 # Every HIGH/MEDIUM item in that gate round was found ONLY by running the
 # REAL privileged.ts (and the handlers built on it) under Deno against a

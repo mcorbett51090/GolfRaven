@@ -11,7 +11,7 @@ import type { LinkRequest } from "../../functions/_shared/signin/request-shape.t
 import type { AppleSigninPort, EmailOtpResult, EmailOtpVerifier, OtpFailureCounter } from "../../functions/_shared/signin/types.ts";
 import type { VerifiedAppleIdentity } from "../../functions/_shared/signin/apple-id-token.ts";
 import { makeFakeState, type FakeState } from "./fake-repo.ts";
-import { addAccount, addKek, makeFakeRevocationDb, makeFakeSigninRepo, signinFake } from "./fake-signin-repo.ts";
+import { addAccount, addKek, makeFakeEmailProofs, makeFakeRevocationDb, makeFakeSigninRepo, signinFake, stampSignIn } from "./fake-signin-repo.ts";
 
 const ALICE = "aaaaaaaa-0000-4000-8000-000000000001";
 const BOB = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -43,9 +43,11 @@ interface Harness {
     /** Runs inside the verifier, after its delay: lets a cell move the clock past the top of the hour mid-proof. */
     onVerify: (() => void) | null;
   };
+  /** Every outside-world step in the order it happened ("otp.verify", "proof.record", "apple.exchange", ...), for ordering assertions. */
+  events: string[];
 }
 
-function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountLink?: boolean } = {}): Harness {
+function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountLink?: boolean; proofBound?: boolean; emailProofs?: "fake" | "none" } = {}): Harness {
   const state = makeFakeState();
   addKek(state, "k1");
   addAccount(state, ALICE, "alice@example.test");
@@ -61,6 +63,7 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountL
     revokeError: null,
     port: undefined as unknown as AppleSigninPort,
   };
+  const events: string[] = [];
   apple.port = {
     async verifyIdentityToken(token, nonce) {
       apple.verifyCalls.push({ token, nonce });
@@ -68,6 +71,7 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountL
       return apple.identity;
     },
     async exchangeAuthorizationCode(code) {
+      events.push("apple.exchange");
       apple.exchangeCalls.push(code);
       if (apple.exchangeError) throw apple.exchangeError;
       return apple.grant;
@@ -105,20 +109,33 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; crossAccountL
       await new Promise((r) => setTimeout(r, 25));
       otp.onVerify?.();
       if (otp.throws) throw new Error("gotrue unreachable");
+      events.push(`otp.verify:${otp.result.ok ? "ok" : "refused"}`);
+      // GoTrue's side effect on a verified code: the proven account has just signed in (what the proof minter corroborates).
+      if (otp.result.ok) stampSignIn(state, otp.result.userId);
       return otp.result;
     },
   };
   const log: Array<Record<string, unknown>> = [];
   const configured = opts.appleConfigured ?? true;
+  const fakeProofs = makeFakeEmailProofs(state);
   const deps: SigninDeps = {
-    withRepo: (op) => op(makeFakeSigninRepo(state, actor, { crossAccountLink: opts.crossAccountLink })),
+    withRepo: (op) => op(makeFakeSigninRepo(state, actor, { crossAccountLink: opts.crossAccountLink, proofBoundLink: opts.proofBound })),
     otpFailures: counter,
     apple: configured ? apple.port : null,
     emailOtp: verifier,
+    emailProofs:
+      opts.emailProofs === "none"
+        ? null
+        : {
+            async record(input) {
+              events.push("proof.record");
+              return fakeProofs.record(input);
+            },
+          },
     revocation: { db: makeFakeRevocationDb(state), apple: configured ? apple.port : null, google: null, log: (e) => log.push(e) },
     log: (e) => log.push(e),
   };
-  return { state, deps, log, apple, otp };
+  return { state, deps, log, apple, otp, events };
 }
 
 const linkReq = (over: Partial<LinkRequest> = {}): LinkRequest => ({ action: "link", provider: "apple", identityToken: "aaa.bbb.ccc", authorizationCode: "auth-code-1", nonce: "raw-nonce-0123", ...over });
@@ -338,7 +355,7 @@ describe("link: never auto-link a social identity whose email matches an existin
     expect(h.otp.verifierCalls).toHaveLength(0);
   });
 
-  it("edge mode (no cross-account link): Bob's email answers 501 email_proof_link_unavailable BEFORE any proof is invited, counted or consumed, and no code is exchanged", async () => {
+  it("a repo with NO route to another account (the guard; neither database mode since 0039): Bob's email answers 501 email_proof_link_unavailable BEFORE any proof is invited, counted or consumed, and no code is exchanged", async () => {
     const h = harness(ALICE, { crossAccountLink: false });
     h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
     for (const emailProof of [undefined, { code: "123456" }]) {
@@ -353,7 +370,7 @@ describe("link: never auto-link a social identity whose email matches an existin
     expect(h.otp.failures.size).toBe(0);
   });
 
-  it("edge mode still links the caller's OWN Apple identity (no foreign email, or the caller's own email match)", async () => {
+  it("a repo with no cross-account route still links the caller's OWN Apple identity (no foreign email, or the caller's own email match)", async () => {
     const h = harness(ALICE, { crossAccountLink: false });
     h.apple.identity = { subject: "apple-sub-own", email: null, emailVerified: false, isPrivateRelay: false };
     h.apple.grant = { refreshToken: "r.own", subject: "apple-sub-own" };
@@ -487,6 +504,205 @@ describe("link: never auto-link a social identity whose email matches an existin
     const sneaky: LinkRequest = { ...linkReq(), userId: BOB };
     await handleLinkProvider(sneaky, ALICE, h.deps);
     expect(signinFake(h.state).identities.find((i) => i.provider === "apple")!.userId).toBe(ALICE);
+  });
+});
+
+describe("link: the PROOF-BOUND cross-account link (edge mode, 0039)", () => {
+  /** Alice proves Bob's mailbox for an Apple identity carrying Bob's address. */
+  function proofHarness(over: { emailProofs?: "fake" | "none" } = {}): Harness {
+    const h = harness(ALICE, { proofBound: true, ...over });
+    h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
+    h.apple.grant = { refreshToken: "r.refresh-token-B1", subject: "apple-sub-1" };
+    h.otp.result = { ok: true, userId: BOB };
+    return h;
+  }
+  const proofReq = () => linkReq({ emailProof: { code: "123456" } });
+
+  it("the full OTP-proven flow succeeds and lands on the proven account (Bob), never on the caller; the proof path, not the direct one, did it", async () => {
+    const h = proofHarness();
+    const r = await handleLinkProvider(proofReq(), ALICE, h.deps);
+    expect(r.linkedTo).toBe("proven_account");
+    expect(r.methods).toBeNull();
+    const f = signinFake(h.state);
+    expect(f.identities.find((i) => i.provider === "apple")!.userId).toBe(BOB);
+    expect(f.tokens.map((t) => t.userId)).toEqual([BOB]);
+    expect(f.identities.filter((i) => i.userId === ALICE).map((i) => i.provider)).toEqual(["email"]);
+    // the direct uid-taking calls were never made: the identity and its token went through the proof-bound definer, once
+    expect(f.calls.filter((c) => c.startsWith("linkIdentity:") || c.startsWith("storeToken:"))).toEqual([]);
+    expect(f.calls.filter((c) => c.startsWith("linkIdentityWithProof:"))).toHaveLength(1);
+    expect(h.log.find((e) => e.event === "signin_link")).toMatchObject({ to: "proven_account", proofBound: true });
+  });
+
+  it("the order is verify OTP, record the proof, exchange the code, redeem the proof: nothing is minted before the OTP verified and nothing is exchanged before the proof exists", async () => {
+    const h = proofHarness();
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    expect(h.events).toEqual(["otp.verify:ok", "proof.record", "apple.exchange"]);
+    const calls = signinFake(h.state).calls;
+    expect(calls.indexOf(`proof.record:${ALICE}->${BOB}`)).toBeLessThan(calls.findIndex((c) => c.startsWith("linkIdentityWithProof:")));
+  });
+
+  it("the proof is minted for exactly the caller, the proven target, the address and the Apple SUBJECT of the token", async () => {
+    const h = proofHarness();
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    const [p] = signinFake(h.state).proofs;
+    expect(p).toMatchObject({ callerUserId: ALICE, targetUserId: BOB, provider: "apple", consumed: true });
+    expect(p!.emailHash).toBe(await sha256Hex("bob@example.test"));
+    expect(p!.subHash).toBe(await sha256Hex("apple:apple-sub-1"));
+    expect(JSON.stringify(p)).not.toContain("apple-sub-1");
+    expect(JSON.stringify(p)).not.toContain("bob@example.test");
+  });
+
+  it("a wrong code, a refused code and an OTP transport failure mint NO proof", async () => {
+    for (const mode of ["wrong", "throws"] as const) {
+      const h = proofHarness();
+      if (mode === "wrong") h.otp.result = { ok: false };
+      else h.otp.throws = true;
+      await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+      expect(signinFake(h.state).proofs).toEqual([]);
+      expect(h.events).not.toContain("proof.record");
+      expect(h.apple.exchangeCalls).toHaveLength(0);
+    }
+  });
+
+  it("a proof for a DIFFERENT account than the one looked up (the address changed hands) mints nothing: 409 email_proof_mismatch", async () => {
+    const h = proofHarness();
+    h.otp.result = { ok: true, userId: CAROL };
+    const e = await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+    expect([e.status, e.code]).toEqual([409, "email_proof_mismatch"]);
+    expect(signinFake(h.state).proofs).toEqual([]);
+  });
+
+  it("the database refusing to mint (no GoTrue sign-in to corroborate the proof) is 409 email_proof_refused: nothing is exchanged, linked or stored, and the OTP attempt was given back", async () => {
+    const h = proofHarness();
+    const verifierStamp = h.deps.emailOtp!.verify;
+    h.deps.emailOtp = {
+      async verify(email, code) {
+        const out = await verifierStamp(email, code);
+        signinFake(h.state).lastSignInMs.clear(); // undo the fake GoTrue side effect: the verifier "verified" but the database sees no sign-in
+        return out;
+      },
+    };
+    const e = await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+    expect([e.status, e.code]).toEqual([409, "email_proof_refused"]);
+    const f = signinFake(h.state);
+    expect(f.proofs).toEqual([]);
+    expect(f.identities.some((i) => i.provider === "apple")).toBe(false);
+    expect(f.tokens).toEqual([]);
+    expect(h.apple.exchangeCalls).toHaveLength(0);
+    expect([...h.otp.failures.values()].every((v) => v === 0)).toBe(true);
+  });
+
+  it("no proof minter configured on a proof-bound repo -> 503 BEFORE any OTP is reserved, verified or counted (never a silent direct link)", async () => {
+    const h = proofHarness({ emailProofs: "none" });
+    const e = await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+    expect(e.status).toBe(503);
+    expect(h.otp.verifierCalls).toHaveLength(0);
+    expect(h.otp.failures.size).toBe(0);
+    expect(signinFake(h.state).identities.some((i) => i.provider === "apple")).toBe(false);
+  });
+
+  it("the redemption refused by the database (e.g. the proof expired between mint and link) revokes the grant minted for it and leaves nothing linked", async () => {
+    const h = proofHarness();
+    signinFake(h.state).failNext.set(
+      "linkIdentityWithProof",
+      Object.assign(new HttpError(409, "email_proof_refused", "that email proof cannot be used; request a new code and try again"), {}),
+    );
+    const e = await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+    expect([e.status, e.code]).toEqual([409, "email_proof_refused"]);
+    expect(h.apple.revoked).toEqual(["r.refresh-token-B1"]);
+    expect(signinFake(h.state).identities.some((i) => i.provider === "apple")).toBe(false);
+    expect(signinFake(h.state).tokens).toEqual([]);
+  });
+
+  it("the proof is single-use: redeeming it again is refused, and a proof minted for Apple sub A cannot link sub B or be used by another caller (the fake mirrors the definer)", async () => {
+    const h = proofHarness();
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    const f = signinFake(h.state);
+    const proofId = f.proofs[0]!.id;
+    const env = { ciphertext: new Uint8Array(40).fill(1), dekWrapped: new Uint8Array(70).fill(2), kekId: "k1" };
+    const input = { provider: "apple" as const, subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
+    const repo = makeFakeSigninRepo(h.state, ALICE, { proofBoundLink: true });
+    expect((await failure(repo.linkIdentityWithProof(proofId, input, env))).code).toBe("email_proof_refused"); // replay
+    // a fresh proof: wrong subject, wrong caller
+    stampSignIn(h.state, BOB);
+    const minted = await makeFakeEmailProofs(h.state).record({ callerUserId: ALICE, targetUserId: BOB, email: "bob@example.test", provider: "apple", subject: "apple-sub-A" });
+    expect((await failure(repo.linkIdentityWithProof(minted, { ...input, subject: "apple-sub-B" }, env))).code).toBe("email_proof_refused");
+    expect((await failure(makeFakeSigninRepo(h.state, CAROL, { proofBoundLink: true }).linkIdentityWithProof(minted, { ...input, subject: "apple-sub-A" }, env))).code).toBe("email_proof_refused");
+    expect(f.identities.filter((i) => i.provider === "apple")).toHaveLength(1); // only the first, legitimate link exists
+  });
+
+  it("the edge repo's DIRECT path still refuses any account but the caller's (mustBeSelf): a handler bug cannot link or store for Bob without a proof", async () => {
+    const h = proofHarness();
+    const repo = makeFakeSigninRepo(h.state, ALICE, { proofBoundLink: true });
+    const input = { provider: "apple" as const, subject: "apple-sub-x", email: null, emailVerified: false, isPrivateRelay: false };
+    expect((await failure(repo.linkIdentity(BOB, input))).code).toBe("cross_account_link_requires_proof");
+    expect((await failure(repo.storeToken(BOB, "apple", { ciphertext: new Uint8Array(40), dekWrapped: new Uint8Array(70), kekId: "k1" }))).code).toBe("cross_account_link_requires_proof");
+    expect(await repo.linkIdentity(ALICE, input)).toBe(true);
+  });
+
+  it("the caller's OWN Apple identity needs no proof and no minter call even on a proof-bound repo", async () => {
+    const h = proofHarness();
+    h.apple.identity = { subject: "apple-sub-own", email: "alice@example.test", emailVerified: true, isPrivateRelay: false };
+    h.apple.grant = { refreshToken: "r.own", subject: "apple-sub-own" };
+    const r = await handleLinkProvider(linkReq(), ALICE, h.deps);
+    expect(r.linkedTo).toBe("self");
+    expect(h.events).toEqual(["apple.exchange"]);
+    expect(signinFake(h.state).proofs).toEqual([]);
+    expect(signinFake(h.state).calls.filter((c) => c.startsWith("linkIdentity:"))).toEqual([`linkIdentity:${ALICE}`]);
+  });
+
+  it("legacy shape (not proof-bound): the minter is never called even when one is wired, and the proven account is linked directly, as before", async () => {
+    const h = harness(ALICE, { proofBound: false });
+    h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
+    h.apple.grant = { refreshToken: "r.refresh-token-B1", subject: "apple-sub-1" };
+    h.otp.result = { ok: true, userId: BOB };
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    expect(h.events).toEqual(["otp.verify:ok", "apple.exchange"]);
+    expect(signinFake(h.state).proofs).toEqual([]);
+    expect(signinFake(h.state).calls).toContain(`linkIdentity:${BOB}`);
+  });
+
+  it("the OTP cap still holds in the proof-bound shape: 20 PARALLEL wrong proofs reach the verifier exactly 5 times and mint nothing", async () => {
+    const h = proofHarness();
+    h.otp.result = { ok: false };
+    const results = await Promise.all(Array.from({ length: 20 }, () => failure(handleLinkProvider(proofReq(), ALICE, h.deps))));
+    expect(h.otp.verifierCalls).toHaveLength(5);
+    expect(results.filter((e) => e.status === 422)).toHaveLength(5);
+    expect(results.filter((e) => e.status === 429)).toHaveLength(15);
+    expect(signinFake(h.state).proofs).toEqual([]);
+  });
+
+  it("a private-relay address that is another account's email still never takes the proof path", async () => {
+    const h = proofHarness();
+    addAccount(h.state, CAROL, "relay9@privaterelay.appleid.com");
+    h.apple.identity = { subject: "apple-sub-2", email: "relay9@privaterelay.appleid.com", emailVerified: true, isPrivateRelay: true };
+    const e = await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+    expect([e.status, e.code]).toEqual([409, "email_belongs_to_another_account"]);
+    expect(h.otp.verifierCalls).toHaveLength(0);
+    expect(signinFake(h.state).proofs).toEqual([]);
+  });
+
+  it("the last-method rule is untouched by the proof path: the proven account can still unlink only while another method remains", async () => {
+    const h = proofHarness();
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    const bobDeps: SigninDeps = { ...h.deps, withRepo: (op) => op(makeFakeSigninRepo(h.state, BOB, { proofBoundLink: true })) };
+    const r = await handleUnlinkProvider({ action: "unlink", provider: "apple" }, bobDeps);
+    expect(r.methods.map((m) => m.provider).sort()).toEqual(["email", "google"]);
+    // Bob has email + google: unlinking google leaves email; unlinking email then is the LAST method
+    await handleUnlinkProvider({ action: "unlink", provider: "google" }, bobDeps);
+    expect((await failure(handleUnlinkProvider({ action: "unlink", provider: "email" }, bobDeps))).code).toBe("last_sign_in_method");
+  });
+
+  it("delete_my_data removes the proofs the account is a party to (and only those)", async () => {
+    const h = proofHarness();
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    stampSignIn(h.state, BOB);
+    await makeFakeEmailProofs(h.state).record({ callerUserId: CAROL, targetUserId: BOB, email: "bob@example.test", provider: "apple", subject: "s" });
+    stampSignIn(h.state, ALICE);
+    await makeFakeEmailProofs(h.state).record({ callerUserId: CAROL, targetUserId: ALICE, email: "alice@example.test", provider: "apple", subject: "s2" });
+    const { deleteSigninRows } = await import("./fake-signin-repo.ts");
+    deleteSigninRows(h.state, ALICE);
+    expect(signinFake(h.state).proofs.map((p) => [p.callerUserId, p.targetUserId])).toEqual([[CAROL, BOB]]);
   });
 });
 
