@@ -38,6 +38,30 @@ export function ids() {
   };
 }
 
+const issuedSiteVersions = new Set<string>();
+/** A fresh site version `<yyyymmdd>-<7 hex>` for a fixture release.
+ *
+ * ⛔ Do NOT derive it from `ids().salt` (`salt.slice(..).replace(/[^0-9a-f]/g, fill)`): that squeezes the 32 Crockford
+ * symbols onto 16 hex digits + the fill digit, so the fill digit appears with p = 17/32 per position (~20 bits of
+ * entropy, not 28) and two tests that use the same date + fill digit collide ~2e-4 of the time per pair. A colliding
+ * string is NOT an error in the importer: `importVersion` finds the row (the Publisher's fake sha256 depends only on the
+ * history position, so it matches), reports `wasNew: false`, and `applyImportPlan` early-exits with
+ * `alreadyImported: true` -- the ledger is silently not applied and the test then fails on an unrelated-looking
+ * assertion. This draws the 7 hex from a UUID (full 28 bits) and re-draws if the string was already issued in this
+ * process or is already in `app.catalog_version`, so it cannot collide with anything already imported. */
+export async function freshSiteVersion(date: string): Promise<string> {
+  await ensureServiceRole();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const v = `${date}-${freshUuid().replace(/-/g, "").slice(0, 7)}`;
+    if (issuedSiteVersions.has(v)) continue;
+    const taken = await adminSql()`select 1 from app.catalog_version where site_version = ${v}`;
+    if (taken.length > 0) continue;
+    issuedSiteVersions.add(v);
+    return v;
+  }
+  throw new Error(`freshSiteVersion: no unused site version found for ${date} after 20 draws`);
+}
+
 export async function generateKeypair() {
   const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
   const raw = await crypto.subtle.exportKey("raw", kp.publicKey);

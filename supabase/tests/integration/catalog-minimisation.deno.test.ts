@@ -16,13 +16,12 @@ import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-re
 import { handleEvidenceIntake } from "../../functions/_shared/evidence/handler.ts";
 import { handleMeExport } from "../../functions/_shared/me/export-handler.ts";
 import { adminSql, ensureServiceRole, freshUuid, rawCount } from "./_helpers.ts";
-import { closeStaleBacklog, facilityShard, giveCoursePolygon, ids, mint, newPublisher, newUser, playScore, seedDwellAndScore, seedDwellInRepo, todayChicago, uniqueCourses, type Actor } from "./_publisher.ts";
+import { closeStaleBacklog, facilityShard, freshSiteVersion, giveCoursePolygon, ids, mint, newPublisher, newUser, playScore, seedDwellAndScore, seedDwellInRepo, todayChicago, uniqueCourses, type Actor } from "./_publisher.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 const drainRepo = makeDrainReadRepo(withSystemCatalogImport);
 const NO_GRACE = { sweepDelaySeconds: 0 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const hex = (salt: string, n: number, fill: string) => salt.slice(n, n + 7).toLowerCase().replace(/[^0-9a-f]/g, fill).padEnd(7, fill);
 
 async function currentSiteVersion(): Promise<string> {
   await ensureServiceRole();
@@ -52,7 +51,7 @@ const coordsOf = async (evidenceId: string) => {
 Deno.test("§8.6: a VERIFIED course stores no coordinates, a STUB course stores them, a row with no course never does — and the export reflects it", DT, async () => {
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${hex(i.salt, 0, "c")}`;
+  const v1 = await freshSiteVersion("20260901");
   const verifiedCourse = i.mk("crs", "0000VV");
   await pub.publish(v1, {
     "id-ledger.json": { entries: {
@@ -85,8 +84,8 @@ Deno.test("§8.6 trigger (b): coordinates are kept while the course's rescore ba
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${hex(i.salt, 1, "d")}`;
-  const v2 = `20260925-${hex(i.salt, 8, "e")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   await pub.publish(v1, {
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "stub", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "unverified", [{ id: i.k, name: "Promo K", holes: 18 }]),
@@ -129,7 +128,7 @@ Deno.test("§8.6 trigger (c): after the fixed retention window the coordinates g
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${hex(i.salt, 2, "f")}`;
+  const v1 = await freshSiteVersion("20260901");
   await pub.publish(v1, {
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "stub", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "unverified", [{ id: i.k, name: "Stub K", holes: 18 }]),
@@ -158,8 +157,8 @@ Deno.test("A2-01 / §4.2 (MEDIUM): two courses of one facility both split — th
   const pub = await newPublisher();
   const k2 = i.mk("crs", "00000Q");
   const s2 = i.mk("crs", "00000R");
-  const v1 = `20260901-${hex(i.salt, 3, "a")}`;
-  const v2 = `20260925-${hex(i.salt, 9, "b")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   const ledger1 = {
     [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) },
     [i.k]: { id: i.k, status: "verified", transitions: mint(v1) },
@@ -204,8 +203,8 @@ Deno.test("keyset straggler (LOW): a play whose transaction STARTED before the c
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${hex(i.salt, 4, "9")}`;
-  const v2 = `20260925-${hex(i.salt, 10, "8")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   await pub.publish(v1, {
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "stub", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "unverified", [{ id: i.k, name: "Promo K", holes: 18 }]),

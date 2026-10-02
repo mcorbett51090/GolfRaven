@@ -25,7 +25,7 @@ import { drainRescoreBacklog } from "../../functions/_shared/catalog/rescore-orc
 import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-repo.ts";
 import { finalizeScoringForKey, handleEvidenceIntake, repickUserPlay } from "../../functions/_shared/evidence/handler.ts";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawCount } from "./_helpers.ts";
-import { closeStaleBacklog, facilityShard, giveCoursePolygon, ids, mint, newPublisher, newUser, playScore, seedDwellAndScore, todayChicago, uniqueCourses } from "./_publisher.ts";
+import { closeStaleBacklog, facilityShard, freshSiteVersion, giveCoursePolygon, ids, mint, newPublisher, newUser, playScore, seedDwellAndScore, todayChicago, uniqueCourses } from "./_publisher.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 const drainRepo = makeDrainReadRepo(withSystemCatalogImport);
@@ -36,8 +36,8 @@ Deno.test("AT 18: a play at a STUB is accepted but counts toward nothing; after 
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "0")}`;
-  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "1")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
 
   // v1: facility verified, COURSE a stub (its facility shard says "unverified").
   await pub.publish(v1, {
@@ -101,8 +101,8 @@ Deno.test("AT 18 (split): the kept course counts once as a USER pick (score_mone
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "2")}`;
-  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "3")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   const ledger1 = { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "verified", transitions: mint(v1) } };
   await pub.publish(v1, { "id-ledger.json": { entries: ledger1 }, "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 9 }]) });
   await giveCoursePolygon(i.k);
@@ -177,8 +177,8 @@ Deno.test("AT 18 (concurrency): the promotion re-score racing a LIVE submission 
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "4")}`;
-  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "5")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   await pub.publish(v1, {
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "stub", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "unverified", [{ id: i.k, name: "Promo K", holes: 18 }]),
@@ -216,8 +216,8 @@ Deno.test("AT 18 (concurrency): the promotion re-score racing a LIVE submission 
 Deno.test("R3: holes, hole details and roster versions/members are imported (and a re-import is a no-op)", DT, async () => {
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "6")}`;
-  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "7")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   const trail = (members2: unknown[]) => [{ id: i.trl, slug: `promo-trail-${i.salt.toLowerCase()}`, name: "Promo Trail", rosterVersions: [
     { version: 1, effectiveFrom: "2026-01-01", completionUnit: "course", markerUnit: "facility", completionRule: { kind: "all" }, markerRule: { kind: "all" }, members: [{ unit: "course", courseId: i.k, stopOrder: 0 }, { unit: "facility", facilityId: i.fac }, { unit: "hole", holeId: i.hol1, courseId: i.k }] },
     { version: 2, effectiveFrom: "2026-03-01", completionUnit: "course", markerUnit: "facility", completionRule: { kind: "n-of-m", n: 1, ruleSource: { url: "https://example.test/rule", retrieved: "2026-02-01" } }, markerRule: { kind: "all" }, trackingStartsOn: "2026-03-15", members: members2 },
@@ -268,7 +268,7 @@ Deno.test("R3: holes, hole details and roster versions/members are imported (and
 Deno.test("R3: an imported course with an UNKNOWN hole count never gets the 9-hole dwell bar (fails closed to 18)", DT, async () => {
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "8")}`;
+  const v1 = await freshSiteVersion("20260901");
   await pub.publish(v1, {
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "verified", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "No Holes Known" }]), // neither holes nor holesDetail
@@ -285,8 +285,8 @@ Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sort
   await closeStaleBacklog();
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "6")}`;
-  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "7")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   await pub.publish(v1, {
     "id-ledger.json": { entries: { [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) }, [i.k]: { id: i.k, status: "stub", transitions: mint(v1) } } },
     "facilities/us.json": facilityShard(i, "unverified", [{ id: i.k, name: "Promo K", holes: 18 }]),
@@ -326,7 +326,7 @@ Deno.test("backlog keyset (LOW): a play created MID-DRAIN whose random uuid sort
 Deno.test("M6 (interop): a ledger transition naming an ARBITRARY catalogVersion string does not reject the import — it falls back to the importing version", DT, async () => {
   const i = ids();
   const pub = await newPublisher();
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "9")}`;
+  const v1 = await freshSiteVersion("20260901");
   const arbitrary = "not a site version at all / 2026";
   const o = await pub.publish(v1, {
     "id-ledger.json": { entries: {
@@ -344,8 +344,8 @@ Deno.test("split_from conflicts fail closed (LOW): a later ledger naming a DIFFE
   const i = ids();
   const pub = await newPublisher();
   const k2 = i.mk("crs", "00000Q");
-  const v1 = `20260901-${i.salt.slice(0, 7).toLowerCase().replace(/[^0-9a-f]/g, "a")}`;
-  const v2 = `20260925-${i.salt.slice(7, 14).toLowerCase().replace(/[^0-9a-f]/g, "b")}`;
+  const v1 = await freshSiteVersion("20260901");
+  const v2 = await freshSiteVersion("20260925");
   const base = {
     [i.fac]: { id: i.fac, status: "verified", transitions: mint(v1) },
     [i.k]: { id: i.k, status: "verified", transitions: [...mint(v1), { type: "split", catalogVersion: v1, siblingIds: [i.s] }] },
