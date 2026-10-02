@@ -164,6 +164,29 @@ const KNOWN_REGISTRY_HOST_PREFIXES = [
   "jsr.io/",
 ];
 
+// Supply-chain follow-up (esm.sh stub -> `npm:` migration, P3d round 4 /
+// P3e follow-ups): an `npm:` import-map TARGET is only "exact, pinned,
+// versioned" if it names ONE registry version -- `npm:<name>@<x.y.z>[-pre]
+// [/subpath]`. Deno's lockfile pins an npm package by registry tarball
+// integrity, but only for whatever version the specifier resolves to: a
+// range/tag/bare name (`npm:zod`, `npm:zod@^4`, `npm:zod@4`,
+// `npm:zod@latest`, `npm:zod@*`) lets a lock regeneration pick a
+// different version silently, which is exactly what the esm.sh stubs'
+// re-route risk was. So an unpinned `npm:` target is rejected HERE,
+// independent of (and before) the allow-list membership check -- adding a
+// range to pinned-import-targets.json would still not make it pass.
+const EXACT_NPM_TARGET =
+  /^npm:(?:@[a-z0-9~][a-z0-9._~-]*\/)?[a-z0-9~][a-z0-9._~-]*@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(\/[^\s?#]*)?$/;
+
+/** true for a non-`npm:` string (not this check's concern); for an `npm:` string, true only if it is an exact-version pin with no `..` sub-path segment. */
+export function isExactPinnedNpmTargetOrNotNpm(target: string): boolean {
+  if (!target.startsWith("npm:")) return true;
+  const m = EXACT_NPM_TARGET.exec(target);
+  if (m === null) return false;
+  const subpath = m[1] ?? "";
+  return !subpath.split("/").some((seg) => seg === ".." || seg === ".");
+}
+
 function normalizePackageSpecifier(spec: string): string {
   let s = spec.replace(/^https?:\/\//, "");
   for (const prefix of KNOWN_REGISTRY_HOST_PREFIXES) {
@@ -386,6 +409,13 @@ function isBannedSpecifierOrAlias(
     // pinned, versioned" string by construction, independent of whether
     // it happens to collide with a pinned entry.
     return { banned: true, reason: "alias target is a prefix mapping (trailing '/'), not a single exact pinned target", resolvedVia: resolved };
+  }
+  if (!isExactPinnedNpmTargetOrNotNpm(resolved)) {
+    return {
+      banned: true,
+      reason: `alias target "${resolved}" is an npm: specifier that is not an exact version pin (npm:<name>@<major.minor.patch>[/subpath]) -- a bare name, range, or dist-tag lets the resolved version drift`,
+      resolvedVia: resolved,
+    };
   }
   if (!pinnedImportTargets.has(resolved)) {
     return {

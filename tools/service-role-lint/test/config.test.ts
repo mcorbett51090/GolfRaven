@@ -69,6 +69,54 @@ describe("config.ts — M2 (post-P3a re-gate): config files anywhere, regardless
   });
 });
 
+describe("config.ts — exact-pinned npm: targets (esm.sh stub -> npm: migration)", () => {
+  const PINNED_NPM = new Set(["npm:zod@4.6.5", "npm:@noble/hashes@2.4.0/utils.js"]);
+
+  it("good control: exact-pinned npm: targets (bare package, and scoped package with a sub-path) that ARE on the allow-list produce zero findings", () => {
+    const dir = join(FIXTURES_ROOT, "npm-pinned-good");
+    expect(buildConfigIndex(dir, PINNED_NPM, dir).results).toEqual([]);
+  });
+
+  it("must-fail: `npm:zod@^4` (a range) is rejected as not an exact pin", () => {
+    const dir = join(FIXTURES_ROOT, "npm-unpinned");
+    const messages = buildConfigIndex(dir, PINNED_NPM, dir).results.flatMap((r) => r.findings.map((f) => f.message));
+    expect(messages.some((m) => m.includes('imports["zod"]') && m.includes("not an exact version pin"))).toBe(true);
+  });
+
+  it("must-fail: an unpinned npm: target is rejected EVEN WHEN it is (wrongly) listed on the pinned allow-list", () => {
+    const dir = join(FIXTURES_ROOT, "npm-unpinned");
+    const listed = new Set(["npm:zod@^4"]);
+    const messages = buildConfigIndex(dir, listed, dir).results.flatMap((r) => r.findings.map((f) => f.message));
+    expect(messages.some((m) => m.includes("not an exact version pin"))).toBe(true);
+  });
+
+  it.each(["npm:zod", "npm:zod@4", "npm:zod@4.6", "npm:zod@latest", "npm:zod@*", "npm:zod@>=4", "npm:zod@~4.6.5", "npm:/zod@4.6.5", "npm:zod@4.6.5/../evil.js"])(
+    "must-fail: `%s` is not an exact pin",
+    (target) => {
+      const dir = mkdtempSync(join(tmpdir(), "srl-npm-unpinned-"));
+      try {
+        writeFileSync(join(dir, "deno.json"), JSON.stringify({ imports: { zod: target } }));
+        const messages = buildConfigIndex(dir, new Set([target]), dir).results.flatMap((r) => r.findings.map((f) => f.message));
+        expect(messages.some((m) => m.includes("not an exact version pin"))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("an exact pin that is NOT on the allow-list is still rejected by the allow-list (exactness is necessary, not sufficient)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "srl-npm-notlisted-"));
+    try {
+      writeFileSync(join(dir, "deno.json"), JSON.stringify({ imports: { lodash: "npm:lodash@4.17.21" } }));
+      const messages = buildConfigIndex(dir, PINNED_NPM, dir).results.flatMap((r) => r.findings.map((f) => f.message));
+      expect(messages.some((m) => m.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
+      expect(messages.some((m) => m.includes("not an exact version pin"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("config.ts — allowed top-level keys", () => {
   it("does not flag compilerOptions/lint/fmt/tasks alongside imports", () => {
     // P3c: this fixture's own deno.json pins zod@4.6.5 (bumped alongside
@@ -76,7 +124,7 @@ describe("config.ts — allowed top-level keys", () => {
     // so it needs its OWN pinned set here rather than the module-level
     // PINNED (still zod@3.23.8, used by unrelated scopes/workspace/jsonc
     // fixtures elsewhere in this file that were never updated).
-    const pinnedForThisFixture = new Set(["https://esm.sh/zod@4.6.5"]);
+    const pinnedForThisFixture = new Set(["npm:zod@4.6.5"]);
     const index = buildConfigIndex(join(FIXTURES_ROOT, "good-control", "somefn"), pinnedForThisFixture, join(FIXTURES_ROOT, "good-control", "somefn"));
     expect(index.results).toEqual([]);
   });
@@ -212,13 +260,32 @@ describe("config.ts — round 2 (post-P3a re-gate): config-level remaps and lock
     tmpRoot = mkdtempSync(join(tmpdir(), "srl-lock-badkeys-"));
     writeFileSync(
       join(tmpRoot, "deno.lock"),
-      JSON.stringify({ version: "4", remote: {}, npm: { evil: true }, workspace: { members: { "./fn": { imports: { admin: "https://evil.example.com/x.ts" } } } } }),
+      JSON.stringify({ version: "4", remote: {}, jsr: { evil: true }, workspace: { members: { "./fn": { imports: { admin: "https://evil.example.com/x.ts" } } } } }),
     );
 
     const index = buildConfigIndex(tmpRoot, new Set(), tmpRoot);
     const messages = index.results.flatMap((r) => r.findings.map((f) => f.message));
-    expect(messages.some((m) => m.includes('disallowed top-level key "npm"'))).toBe(true);
+    expect(messages.some((m) => m.includes('disallowed top-level key "jsr"'))).toBe(true);
     expect(messages.some((m) => m.includes('"workspace" contains an "imports"/"importMap" override'))).toBe(true);
+  });
+
+  it("npm lock entry carrying a `tarball` URL override is rejected (would route a pinned npm: package to a non-registry host)", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-lock-npm-tarball-"));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
+    writeFileSync(
+      join(tmpRoot, "deno.lock"),
+      JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": { integrity: "sha512-aaaa", tarball: "https://evil.example.com/zod.tgz" } } }),
+    );
+    const index = buildConfigIndex(tmpRoot, new Set(["npm:zod@4.6.5"]), tmpRoot);
+    expect(index.results.some((r) => r.findings.some((f) => f.message.includes('"tarball" URL override')))).toBe(true);
+  });
+
+  it("npm lock entry with no integrity hash is rejected", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-lock-npm-noint-"));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
+    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": {} } }));
+    const index = buildConfigIndex(tmpRoot, new Set(["npm:zod@4.6.5"]), tmpRoot);
+    expect(index.results.some((r) => r.findings.some((f) => f.message.includes('no "integrity" hash')))).toBe(true);
   });
 
   it("good control: a deno.lock with ONLY pinned remotes, alongside a valid pinned import, produces zero findings", () => {
@@ -227,8 +294,8 @@ describe("config.ts — round 2 (post-P3a re-gate): config-level remaps and lock
     // note on this same bump; this test reads the REAL committed
     // pinned-import-targets.json (no explicit pinned set passed to
     // lintDirectory), so it must match whatever's actually pinned there.
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@4.6.5" } }));
-    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "4", remote: { "https://esm.sh/zod@4.6.5": "sha256-aaaa" } }));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
+    writeFileSync(join(tmpRoot, "deno.lock"), JSON.stringify({ version: "5", specifiers: { "npm:zod@4.6.5": "4.6.5" }, npm: { "zod@4.6.5": { integrity: "sha512-aaaa" } }, remote: {} }));
     writeFileSync(join(tmpRoot, "index.ts"), `import { z } from "zod"; export const s = z.object({});`);
 
     const results = lintDirectory(tmpRoot, tmpRoot);

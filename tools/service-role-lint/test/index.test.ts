@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -240,13 +240,38 @@ describe("pinned import-target allow-list (M2)", () => {
     // vendor/ actually imports it for real (see that directory's own
     // generate-bundle.sh doc). Nothing else in supabase/functions/**
     // depended on the old pin.
-    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "https://esm.sh/zod@4.6.5" } }));
+    writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: "npm:zod@4.6.5" } }));
     const fnDir = join(tmpRoot, "some-fn");
     mkdirSync(fnDir, { recursive: true });
     writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);
 
     const results = lintDirectory(tmpRoot, tmpRoot);
     expect(results).toHaveLength(0);
+  });
+
+  it.each(["npm:zod", "npm:zod@^4"])(
+    "end to end through the committed allow-list: an unpinned `%s` target in a real deno.json is flagged (config level AND at the importing file)",
+    (target) => {
+      tmpRoot = mkdtempSync(join(tmpdir(), "srl-npm-unpinned-"));
+      writeFileSync(join(tmpRoot, "deno.json"), JSON.stringify({ imports: { zod: target } }));
+      const fnDir = join(tmpRoot, "some-fn");
+      mkdirSync(fnDir, { recursive: true });
+      writeFileSync(join(fnDir, "index.ts"), `import { z } from "zod"; export const schema = z.object({});`);
+
+      const results = lintDirectory(tmpRoot, tmpRoot);
+      const configResult = results.find((r) => r.filePath.endsWith("deno.json"));
+      expect(configResult?.findings.some((f) => f.message.includes("not an exact version pin"))).toBe(true);
+      const srcResult = results.find((r) => r.filePath.endsWith("index.ts"));
+      expect(srcResult?.findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not an exact version pin"))).toBe(true);
+    },
+  );
+
+  it("the committed pinned-import-targets.json holds no esm.sh stub URL and every npm: entry is an exact pin (regression guard for the esm.sh -> npm: migration)", () => {
+    const list = JSON.parse(readFileSync(join(import.meta.dirname, "..", "pinned-import-targets.json"), "utf8")) as string[];
+    expect(list.some((t) => t.includes("esm.sh"))).toBe(false);
+    const npmTargets = list.filter((t) => t.startsWith("npm:"));
+    expect(npmTargets.length).toBeGreaterThan(0);
+    for (const t of npmTargets) expect(t).toMatch(/^npm:(@[^/@]+\/)?[^/@]+@\d+\.\d+\.\d+(\/\S*)?$/);
   });
 
   it("flags a bare specifier resolved to a target that looks legitimate but is NOT on the pinned allow-list (adding a dependency must be a reviewed diff)", () => {

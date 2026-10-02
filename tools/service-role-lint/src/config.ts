@@ -90,6 +90,7 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { isExactPinnedNpmTargetOrNotNpm } from "./lint.js";
 import type { Finding, LintResult } from "./lint.js";
 
 /** The three config file shapes Deno recognises, in the order this module checks for them. */
@@ -108,7 +109,7 @@ const ANCESTOR_CHECK_FILENAMES = [...CONFIG_FILENAMES, LOCK_FILENAME] as const;
 const ALLOWED_TOP_LEVEL_KEYS = new Set(["imports", "compilerOptions", "lint", "fmt", "tasks"]);
 
 /** deno.lock's own allowed top-level keys (round 2, "Lockfile" requirement). */
-const LOCK_ALLOWED_TOP_LEVEL_KEYS = new Set(["version", "remote", "specifiers", "redirects", "workspace"]);
+const LOCK_ALLOWED_TOP_LEVEL_KEYS = new Set(["version", "remote", "specifiers", "npm", "redirects", "workspace"]);
 
 // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): the `node_modules`
 // exclusion that used to live here (mirroring index.ts's own, now also
@@ -286,6 +287,13 @@ function validateSingleConfigFile(filePath: string, pinnedImportTargets: Set<str
         const upper = v.toUpperCase();
         if (upper.includes("@SUPABASE/") || upper.includes("SUPABASE-JS")) {
           problems.push(configProblem(filePath, `imports["${k}"] = "${v}" contains '@supabase/' or 'supabase-js'`));
+        } else if (!isExactPinnedNpmTargetOrNotNpm(v)) {
+          problems.push(
+            configProblem(
+              filePath,
+              `imports["${k}"] = "${v}" is an npm: specifier that is not an exact version pin (npm:<name>@<major.minor.patch>[/subpath]) -- a bare name, range, or dist-tag lets the resolved version drift; it is rejected even if listed on the pinned-import-targets allow-list`,
+            ),
+          );
         } else if (!pinnedImportTargets.has(v)) {
           problems.push(configProblem(filePath, `imports["${k}"] = "${v}" is not on the committed pinned-import-targets allow-list -- add it there as its own reviewed diff`));
         }
@@ -365,6 +373,35 @@ function validateLockFile(filePath: string, pinnedImportTargets: Set<string>): C
               `deno.lock "remote" key "${key}" is not on the committed pinned-import-targets allow-list (every remote entry must itself be an exact pinned target -- see this module's own note on deciding "under a pinned target's module graph" statically)`,
             ),
           );
+        }
+      }
+    }
+  }
+
+  // `npm` table (Deno lock v5; present since the esm.sh stub -> `npm:`
+  // migration): each entry pins a registry tarball by integrity hash.
+  // An entry may not carry a `tarball` field -- Deno uses it to fetch a
+  // package from an arbitrary URL instead of the configured registry,
+  // which would route a "pinned" npm: target to a non-registry host
+  // (integrity would still be checked, but it would be the integrity of
+  // whatever that URL served when the lock was written). Fail closed:
+  // `integrity` must also be present and a string for every entry.
+  const npmTable = obj.npm;
+  if (npmTable !== undefined) {
+    if (typeof npmTable !== "object" || npmTable === null || Array.isArray(npmTable)) {
+      problems.push(configProblem(filePath, `deno.lock "npm" is not a JSON object`));
+    } else {
+      for (const [pkg, entry] of Object.entries(npmTable as Record<string, unknown>)) {
+        const e = typeof entry === "object" && entry !== null && !Array.isArray(entry) ? (entry as Record<string, unknown>) : undefined;
+        if (e === undefined) {
+          problems.push(configProblem(filePath, `deno.lock "npm" entry "${pkg}" is not a JSON object`));
+          continue;
+        }
+        if (typeof e.integrity !== "string" || e.integrity === "") {
+          problems.push(configProblem(filePath, `deno.lock "npm" entry "${pkg}" has no "integrity" hash -- every npm package must be pinned by registry tarball integrity`));
+        }
+        if (Object.prototype.hasOwnProperty.call(e, "tarball")) {
+          problems.push(configProblem(filePath, `deno.lock "npm" entry "${pkg}" carries a "tarball" URL override -- banned: it can route a pinned npm: package to a non-registry host`));
         }
       }
     }

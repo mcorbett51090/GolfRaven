@@ -483,6 +483,58 @@ jobs:
           fi
           echo "deno cache --frozen tamper test: PASS (tampered hash correctly rejected: exit code $TAMPER_EXIT, 'Integrity check failed' message present: $(echo "$TAMPER_OUTPUT" | grep -q "Integrity check failed" && echo yes || echo no))"
 
+      - name: deno cache --frozen npm tamper test (proves a tampered npm integrity hash is rejected, fresh DENO_DIR)
+        # Supply-chain follow-up (esm.sh stub -> exact npm: specifiers,
+        # P3d round 4 / P3e follow-ups): zod / @noble/hashes / tz-lookup
+        # are now pinned by Deno's `npm:` resolution, whose lockfile
+        # entries are registry TARBALL integrity hashes (the "npm" table
+        # of supabase/tests/deno.lock), not the "remote" table the
+        # esm.sh tamper test above flips. This is the same kind of proof
+        # for that second table, run every CI invocation.
+        #
+        # ⚠️ MUST use a FRESH, empty DENO_DIR (verified empirically, Deno
+        # 2.5.2): Deno checks an npm tarball's integrity against the
+        # lockfile only when it DOWNLOADS the tarball. Against an
+        # already-populated cache (the earlier `deno check`/`deno cache`
+        # steps in this job fill the default DENO_DIR) a tampered npm
+        # integrity in the lock is NOT noticed -- `deno cache --frozen`
+        # exited 0 -- so a test run against the warm default cache would
+        # fail its own "must reject" assertion for the wrong reason.
+        # Remote (esm.sh/deno.land) entries do not have this property:
+        # the esm.sh test above is valid on a warm cache.
+        run: |
+          set -euo pipefail
+          export TAMPER_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TAMPER_DIR"' EXIT
+          python3 - <<'PY'
+          import json, os, sys
+          f = open("supabase/tests/deno.lock"); data = json.load(f); f.close()
+          npm = data["npm"]
+          target = "zod@4.6.5"
+          if target not in npm: sys.exit(f"npm tamper test setup: {target!r} not found in supabase/tests/deno.lock npm table -- the pin moved; update this script's own target to match")
+          orig = npm[target]["integrity"]
+          npm[target]["integrity"] = orig[:7] + ("A" if orig[7] != "A" else "B") + orig[8:]
+          out = open(os.path.join(os.environ["TAMPER_DIR"], "tampered.lock"), "w"); json.dump(data, out); out.close()
+          PY
+          set +e
+          NPM_TAMPER_OUTPUT=$(DENO_DIR="$TAMPER_DIR/deno-dir" deno cache --config supabase/functions/deno.json --lock="$TAMPER_DIR/tampered.lock" --frozen \
+            supabase/functions/evidence/index.ts 2>&1)
+          NPM_TAMPER_EXIT=$?
+          set -e
+          echo "$NPM_TAMPER_OUTPUT"
+          if [ "$NPM_TAMPER_EXIT" -eq 0 ]; then
+            echo "FAILED: 'deno cache --frozen' exited 0 against a lockfile with a deliberately tampered npm: integrity hash (fresh DENO_DIR) -- npm pins are not actually verified." >&2
+            exit 1
+          fi
+          # Require the SPECIFIC signal (same discipline as the esm.sh
+          # test above): Deno 2.5.2 reports "Tarball checksum did not
+          # match what was provided by npm registry for zod@4.6.5".
+          if ! echo "$NPM_TAMPER_OUTPUT" | grep -q "Tarball checksum did not match"; then
+            echo "FAILED: 'deno cache --frozen' exited $NPM_TAMPER_EXIT against the tampered npm lockfile but without the 'Tarball checksum did not match' message -- this does not look like the integrity failure this step exists to prove (could be a network error). Output above." >&2
+            exit 1
+          fi
+          echo "deno cache --frozen npm tamper test: PASS (tampered npm integrity rejected: exit code $NPM_TAMPER_EXIT)"
+
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
     runs-on: ubuntu-latest

@@ -479,6 +479,31 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
     expect(findings.some((f) => f.rule === "dynamic-code-execution")).toBe(false);
   });
 
+  it("passes (must-pass control) a bare specifier whose import-map target is an exact-pinned npm: specifier on the allow-list", () => {
+    expect(lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "npm:zod@4.6.5" }, ["npm:zod@4.6.5"])).toEqual([]);
+  });
+
+  it.each(["npm:zod", "npm:zod@^4", "npm:zod@4", "npm:zod@4.6", "npm:zod@latest", "npm:zod@*", "npm:zod@~4.6.5", "npm:zod@>=4.6.5", "npm:zod@4.6.5/../evil.js"])(
+    "must-fail: an import-map target `%s` is not an exact npm: pin -- rejected even when listed on the pinned allow-list",
+    (target) => {
+      const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: target }, [target]);
+      expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("not an exact version pin"))).toBe(true);
+    },
+  );
+
+  it("must-fail: an exact npm: pin that is NOT on the allow-list is rejected by the allow-list, not by the exactness check", () => {
+    const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: "npm:zod@4.6.5" }, []);
+    expect(findings.some((f) => f.message.includes("not on the committed pinned-import-targets allow-list"))).toBe(true);
+    expect(findings.some((f) => f.message.includes("not an exact version pin"))).toBe(false);
+  });
+
+  it("must-fail: a DIRECT npm: specifier in source stays banned even when it is an exact pin that is on the allow-list (only import-map keys are allowed)", () => {
+    const findings = lintSource(`import { z } from "npm:zod@4.6.5"; export const s = z;`, "supabase/functions/some-fn/index.ts", {
+      pinnedImportTargets: ["npm:zod@4.6.5"],
+    });
+    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes("direct URL/npm:"))).toBe(true);
+  });
+
   it("clean negative control: a legitimate dependency imported ONLY through an exact-key, pinned-target import map, an in-bounds relative import, an allow-listed Deno.env.get read, and ordinary arr[i]/obj[key] access produce ZERO findings", () => {
     expect(
       lintFixtureWithMap("good/legit-remote-import.ts", { zod: "https://esm.sh/zod@3.23.8" }, ["https://esm.sh/zod@3.23.8"]),
