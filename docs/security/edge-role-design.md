@@ -1,4 +1,4 @@
-# Edge Function NOBYPASSRLS role: design, as built (PR1, PR1b: database; PR2: the TypeScript behind a switch)
+# Edge Function NOBYPASSRLS role: design, as built (PR1, PR1b: database; PR2: the TypeScript behind a switch; PR3: the system path)
 
 Accepted follow-up 6 of the P3c gate (`docs/security/p3-money-path-requirements.md`, "Updated Accepted follow-ups"):
 before the first real deploy, the Edge Function connection moves from a blanket `service_role` (BYPASSRLS)
@@ -8,7 +8,8 @@ This document started as the design written against `02a422e` and is now updated
 the database side only: migrations `0030_edge_role_core.sql` and `0031_edge_role_policies.sql` (PR1, merged) and
 `0032_edge_role_hardening.sql` (PR1b, the security-gate findings), the provisioning script, the inventory checks 9-13
 and the pgTAP file `supabase/tests/matrix/16_edge_role.sql`. PR2 (section 11) routes the TypeScript through it behind the
-temporary `EDGE_DB_MODE` switch (default `legacy`, so nothing that works today changes); PR3-PR4 finish the move. `service_role`, `anon` and `authenticated` are untouched, so nothing that works
+temporary `EDGE_DB_MODE` switch (default `legacy`, so nothing that works today changes); PR3 (section 13) moves the system path (the importer repo and the
+drains) onto `edge_system` and the delegate binders; PR4 finishes the move. `service_role`, `anon` and `authenticated` are untouched, so nothing that works
 today stops working. Items marked `[unverified]` were not checked against a real Supabase project.
 
 Numbering note: the migrations are 0030 and 0031 because 0029 is the P3f follow-up that domain-separates the tombstone
@@ -273,7 +274,7 @@ columns), and has must-fail cells in `16_edge_role.sql`.
    silently undercounts and fails open), `purge_fix_coords` (edge_system cannot touch `evidence`), and the
    rate-limit key bounds.
 8. **`list_queued_catalog` omits `queued_input`.** The raw coordinates leave the owner's transaction only to the
-   owner: the drain re-reads the row after binding the delegate. PR3 must follow.
+   owner: the drain re-reads the row after binding the delegate. PR3 did (section 13: `Repo#evidence.readQueuedInput`).
 9. **`pd_fix_coords_read` is a GUC-scoped window**, not row-narrow. An UPDATE re-checks the NEW row against the
    SELECT policy (the 0016 `_r` companion finding), and a purged row no longer carries the key a narrow policy
    would test. The window is opened and closed inside `purge_fix_coords`; the UPDATE policy and the column grant
@@ -330,7 +331,7 @@ columns), and has must-fail cells in `16_edge_role.sql`.
 ## 9. What PR2-PR4 must watch
 
 (PR2 has done the items on rewards, deletion, export, rate-limit keys, `device_link_signals` and `lockOwnReward` below; see section 11.
-What it did NOT do and PR3 / PR4 still must: the delegate flow, the importer repo as edge_system, the lint pass, and deleting `legacy`.)
+PR3 did the delegate flow and the importer repo as edge_system (section 13). What PR4 still must: the lint pass, and deleting `legacy`.)
 
 - **Every Repo statement must stay inside the column grants.** A statement that writes or reads a column outside
   them fails with `42501` at run time, not at deploy time. `SELECT *` is a `42501` on the column-grant tables
@@ -340,7 +341,7 @@ What it did NOT do and PR3 / PR4 still must: the delegate flow, the importer rep
   System buckets gain a `system:` prefix.
 - **`app.device_link_signals`** is denied to edge_actor: `Repo#rewards.androidInstallSignals` must call
   `private.device_link_signals_for_actor`.
-- **Drain / rescore** become: edge_system lists, binds the delegate for ONE row, `SET LOCAL ROLE edge_actor`, works,
+- **Drain / rescore** (done in PR3, section 13): edge_system lists, binds the delegate for ONE row, `SET LOCAL ROLE edge_actor`, works,
   commits. One bind per transaction; a delegate cannot delete or export; `queued_input` is read as the owner.
 - **`deleteMyData`** is just `private.delete_my_data_for_actor()` in one bound transaction (PR1b: it releases the
   account's reservations itself; do NOT call `app.release_account_reservations`, edge_actor cannot). `deleteAuthUser`
@@ -384,16 +385,16 @@ What it did NOT do and PR3 / PR4 still must: the delegate flow, the importer rep
    **PR1b (this): the security-gate findings.** 0032, SCRAM provisioning, checks 9/12 extended and 13, matrix 16/10/15.
 2. **PR2 (this): `privileged.ts` behind a temporary `EDGE_DB_MODE`** (section 11); startup self-check (session_user =
    edge_gateway, no super / bypassrls in the membership closure); single `openScopedTx(kind, bind, op)`; migration 0033.
-3. PR3: the system path (`withDelegatedActor`, the importer repo as edge_system, the list definers). **Not done in PR2**:
-   it is not small (the importer repo's statements, the drain's `queued_input` re-read as the row's owner, new
-   orchestrator signatures and their unit tests), so `import-catalog` stays on the legacy pool in `edge` mode.
+3. **PR3 (this): the system path** (`withDelegatedActor`, the importer repo as edge_system, the list and purge definers); no migration
+   (section 13). Not done in PR2 because it is not small (the importer repo's statements, the drain's `queued_input` re-read as the row's
+   owner, new orchestrator signatures and their unit tests); `import-catalog` stayed on the legacy pool in `edge` mode until PR3.
 4. PR4: flip the default, delete the legacy path, add the lint pass. Gate before the first deploy.
 5. PR5 (optional): revoke `service_role` DML on `app.*` and EXECUTE on `private.*`; JWT-verifying binder; activation
    behind definers (R2).
 
 ## 11. PR2: the TypeScript behind `EDGE_DB_MODE` (as built)
 
-**The switch.** `EDGE_DB_MODE` is `legacy` (the default; today's `service_role` path, byte-for-byte) or `edge`. It, and
+**The switch.** `EDGE_DB_MODE` is `legacy` (the default; today's `service_role` path; see difference 8 below for the one place it is NOT byte-for-byte what it was before PR2) or `edge`. It, and
 `GOLFRAVEN_EDGE_DB_URL`, are read ONLY in `supabase/functions/_shared/privileged.ts` (the lint's allow-listed site); anything but
 `legacy` / `edge` is a configuration error, never a silent default. CI runs the whole Deno integration suite in BOTH modes
 (`tools/db/test-deno-integration.sh`, called by `tools/db/test.sh`, which clones the database once per mode because the suite is
@@ -404,7 +405,8 @@ not re-runnable on one database), in both HARNESS_MODEs.
   self-check** (`assertEdgeConnectionSafe`): `session_user` is `edge_gateway`; nothing in its membership closure is SUPERUSER or
   BYPASSRLS; it is a member of none of `service_role`, `authenticated`, `anon`, `authenticator`, `private_definer`, `supabase_admin`,
   `postgres`. Any failure is a plain `Error` (a 500 from every handler: fail closed) and is **not cached**, so the next request
-  re-checks. A success is remembered for the pool's life (one check per pool); the per-transaction assertion below still runs every time.
+  re-checks. PR2 remembered a success for the pool's life; **PR3 repeats the check** (section 13: every 5 minutes or 1000 transactions);
+  the per-transaction assertion below still runs every time.
 - **`openScopedTx(kind, bind, op)`** is the one way a transaction is opened: (1) `SET LOCAL ROLE edge_actor | edge_system`; (2) the
   three timeouts (statement, lock, and transaction on PG17+); (3) the bind (`private.bind_actor(uid)` via `userBind(uid)`; the system
   kind binds nothing); (4) an assertion that `current_user` is the expected role, that role is neither SUPERUSER nor BYPASSRLS, and
@@ -425,11 +427,10 @@ not re-runnable on one database), in both HARNESS_MODEs.
 - No `SELECT *`, `RETURNING *` or CTE challenge+token insert exists in `privileged.ts` (the Repo inserts a challenge and its token in
   separate statements); `RETURNING` / `ON CONFLICT` statements run under the SELECT policies (the whole suite passes in edge mode).
 
-**PR3 boundary (what stays legacy).** `withSystemCatalogImport` (the importer repo, the drain's list reads, the fix-coordinate purge, the
-tombstone purge) stays on the legacy pool: `import-catalog` in `edge` mode needs BOTH URLs. The drain's and the rescore's per-row USER
-transactions are `withOwnership` and so DO run as edge_actor, but they bind the row's owner with `bind_actor` (an edge_actor may bind any uid,
-R6), not through the `bind_delegate_*` binders; PR3 replaces that once the importer repo runs as edge_system and re-reads `queued_input`
-as the row's owner. The delegate binders and the list definers are still unused by TypeScript.
+**PR3 boundary (what stayed legacy in PR2; all of it moved in PR3, section 13).** In PR2 `withSystemCatalogImport` (the importer repo, the drain's
+list reads, the fix-coordinate purge, the tombstone purge) stayed on the legacy pool, so `import-catalog` in `edge` mode needed BOTH URLs, and the drains'
+per-row USER transactions were `withOwnership`: they ran as edge_actor but bound the row's owner with `bind_actor` (an edge_actor may bind any uid, R6), not
+through the `bind_delegate_*` binders. PR3 replaced all of that; the delegate binders and the list definers are now used by the TypeScript.
 
 **Behaviour differences between the modes** (everything else is intended to be identical and is proved by the same suite in both):
 1. An actor whose uid is not in `auth.users` is refused in `edge` (`bind_actor: no such user`, a 500) before any statement; in `legacy` the
@@ -438,12 +439,19 @@ as the row's owner. The delegate binders and the list definers are still unused 
 2. `hitSystemRateLimit` buckets are stored as `system:<key>` in `edge`, bare in `legacy` (separate counters for the same key until PR4).
    `hitRateLimitForActor` buckets are identical (`<uid>:<key>`); the database now bounds the key (<= 128 chars), window (1 s..1 day) and
    max (1..1,000,000), raising 22023, which no caller exceeds.
-3. The startup self-check and the per-transaction assertions exist only in `edge`.
-4. `edge` needs two URLs when `import-catalog` runs (above).
-5. The drain's per-row transactions bind with `bind_actor`, not a delegate (above).
+3. The self-check (startup, and since PR3 periodic) and the per-transaction assertions exist only in `edge`.
+4. ~~`edge` needs two URLs when `import-catalog` runs.~~ **Closed in PR3:** `import-catalog` in `edge` mode needs `GOLFRAVEN_EDGE_DB_URL` only.
+5. ~~The drain's per-row transactions bind with `bind_actor`, not a delegate.~~ **Closed in PR3:** in `edge` they bind through `bind_delegate_*`; in `legacy` they are
+   `withOwnership` (service_role has no binder).
 6. Account deletion and export are one definer call in `edge`, two statements (release, then delete) in `legacy`; same result.
 7. In both modes (they are database changes): `checkin_token.consumed_at` is set-once, `device.attest_counter` monotonic (0032 M2), and
    a device / challenge reference must be the actor's own (0032 M3), which only edge_actor-limited writers could ever have violated.
+8. **The 24-month install-link tombstone purge runs in BOTH modes** (correction, PR3). The first sentence of this section used to call `legacy` "today's
+   path, byte-for-byte". It is today's path plus 0033's retention purge: the owner decision of 2026-10-02 (F19) put `private.purge_install_link_tombstones`
+   into the drain pass (`drainRescoreBacklog`) for every mode, so a `legacy` deployment also deletes tombstones older than 24 months, with `service_role`
+   holding EXECUTE exactly as `edge_system` does. It is not an `edge`-only behaviour and it is not gated by `EDGE_DB_MODE`.
+9. (PR3) The queued-catalog list no longer carries `queued_input` in EITHER mode: the drain always re-reads the raw submission inside the row's own transaction
+   (`Repo#evidence.readQueuedInput`). In `legacy` this changes where the value is read from, not what the drain decides.
 
 ## 12. Addendum: the sign-in definers (migration 0035, O12), and how they run in `edge` mode (PR3 items)
 
@@ -490,3 +498,94 @@ The definers' policies on `app.signin_provider_token` are GUC-windowed
 (`app.signin.target_user_id`, text compare, exact check-7 form), not actor-keyed: the core lane has no actor binding (`bind_actor` is `edge_actor`
 only and was not broadened), and the wrappers call the same cores after resolving the bound uid. `17_signin_providers.sql` group 6 and
 `18_signin_providers_edge.sql` group 4 are the session-reuse cells for that window (P3a follow-up 1).
+
+## 13. PR3: the system path (as built)
+
+PR3 moves `import-catalog` entirely onto the edge roles. **There is no migration 0039:** every statement the importer repo runs fits inside the `edge_system`
+column grants and policies 0031 already gave it (the whole catalog suites, import / drain / promotion / minimisation / drain-resilience, pass in `edge` mode, and
+the pgTAP matrix 16 already proves the grants and the must-fail cells), and every cross-user read or purge the importer needs already had a definer (0030
+`list_queued_catalog`, `list_rescore_plays`, `purge_fix_coords`, the two delegate binders; 0033 `purge_install_link_tombstones`). So `edge_system`'s grants, the
+policies, `private.edge_policy_allowlist` and its fixture, the definer inventory and FORCE RLS are all **unchanged**. This is a claim about the current
+migrations; had a statement needed a grant, the rule was the narrowest one in 0039 with an allowlist row, a fixture and must-fail cells, and never anything on
+a PII table (check 12).
+
+**What runs as what, in `edge` mode.**
+
+| Piece | Role | Mechanism |
+|---|---|---|
+| Importer repo (`withSystemCatalogImport`): signing-key read, `importVersion`, ledger / directory / roster upserts, `enqueueRescore`, backlog `listOpen` / `markFinished` / `beginSweep` / `advance`, `currentSiteVersion` | `edge_system` | the existing column grants and policies, statements unchanged |
+| Queued-catalog list (`queuedCatalog.listOpen`) | `edge_system` | `private.list_queued_catalog(limit)`: no `queued_input`, at most 500 rows |
+| Rescore page (`rescoreBacklog.nextPlays`) | `edge_system` | `private.list_rescore_plays(course, after_created_at, after_id, limit)`: only a course with an OPEN backlog row, at most 500 rows (the orchestrator never asks for more: `MAX_RESCORE_PAGE`, because a clamp the caller does not know about would read a full page as a short one and close the course early) |
+| Fix-coordinate purge | `edge_system` | `private.purge_fix_coords(30, 5000)`: retention pinned to 7..30 days, only removes the `fixCoords` key from rows that carry it |
+| Install-link tombstone purge | `edge_system` | `private.purge_install_link_tombstones(5000)`: the 24 months are the function's (runs in both modes) |
+| Coarse rate limit (`hitSystemRateLimit`) | `edge_system` | `private.hit_system_rate_limit` (PR2) |
+| The drain's per-row transaction | starts as `edge_system`, ends as `edge_actor` | `withDelegatedActor`, below |
+| The re-score's per-play transaction | starts as `edge_system`, ends as `edge_actor` | `withDelegatedActor`, below |
+
+`import-catalog` in `edge` mode therefore needs **`GOLFRAVEN_EDGE_DB_URL` only**. `withSystemCatalogImport`'s edge branch returns before `sql()` (the legacy pool) is
+reached, and no other call on the path opens it. Proved by running the whole pipeline (key read, import, both drains, both purges, the rate limit) with
+`SUPABASE_DB_URL` unset and again pointing at an unusable host, with a control that the same URL breaks `legacy`
+(`edge-system-path.deno.test.ts`, section A). A missing edge URL fails closed.
+
+**`withDelegatedActor(delegate, actor, op)`** (`privileged.ts`; types in `types.ts`):
+
+- `delegate` is `{ kind: "queued_evidence", evidenceId }` or `{ kind: "rescore", backlogId, playId }`. `actor` is the owner the caller EXPECTS (the system list's `user_id`).
+- `edge`: `openScopedTx("delegate", delegateBind(...))`, one transaction: `SET LOCAL ROLE edge_system`, the three timeouts, `select private.bind_delegate_for_queued_evidence($id)`
+  (valid only while that evidence row is `queued_catalog`) or `bind_delegate_for_rescore($backlog, $play)` (valid only while the backlog row is open and the play is at its course),
+  then `SET LOCAL ROLE edge_actor`, then the same assertions as the user kind: `current_user = edge_actor`, not super / BYPASSRLS, and `private.actor_uid()` equals the EXPECTED
+  owner. A delegate therefore acts as the owner of the row it names, and a caller that names someone else's row while expecting another user fails closed before `op` runs.
+  The timeouts are set in `openScopedTx` and nowhere else (the structural pin in `with-ownership.test.ts` still counts four sites).
+- A delegate-bound transaction has `kind = 'system_delegate'`: it cannot be re-bound, and `delete_my_data_for_actor`, `export_my_data_for_actor`, the reward-activation definers and the
+  sign-in wrappers refuse it (42501). The drain needs none of them. Proved (`export_my_data_for_actor` is refused in a delegated transaction and works in the user-bound control).
+- `legacy`: exactly `withOwnership(actor, op)` (service_role has no binder).
+- The queued drain **re-reads `queued_input` as the row's owner**: `Repo#evidence.readQueuedInput(id)` (own row, `status = 'queued_catalog'`) runs first inside the per-row transaction.
+  `list_queued_catalog` omits the raw submission, so raw coordinates leave the owner's transaction only to the owner. This holds in BOTH modes (the legacy list no longer selects `queued_input`
+  either; one behaviour, one set of tests). A row a concurrent drain resolved between the list and the transaction reads as "gone" and is left alone (counted in `scanned` only).
+- Signatures: `drainQueuedCatalog(importerRepo, withDelegatedActor, limit, deadline)`, `drainRescoreBacklog(importerRepo, withDelegatedActor, maxPlays, deadline, opts)`; the parameter type is
+  `WithDelegatedActorFn` (re-exported from both orchestrators). They import nothing from `privileged.ts`; `import-catalog/index.ts` is the wiring.
+
+**Layered defences in the binders, proved alone (pgTAP 16, cells 712-713).** `bind_delegate_for_queued_evidence` checks `status = 'queued_catalog'` in its body AND `pd_queued_catalog_read` hides every
+other row from `private_definer`; `bind_delegate_for_rescore` checks `p.course_id = v_course` in its body AND `pd_rescore_play_read` shows only plays at a course with SOME open backlog row. Each
+layer alone gives the same `P0002` and message, so deleting the body's predicate left every cell of matrix 16 and the whole Deno suite green (observed, by mutation, before the cells existed). The two
+cells widen the policy to `true` in a rolled-back transaction, prove with a control that the row is then visible to `private_definer`, and expect the body's refusal.
+
+**Honest limit (unchanged from section 3 / R6).** The preconditions bound a BUG in the importer, not a compromised runtime: a runtime holding `edge_system` can insert its own backlog row
+for any course (L4), and a runtime holding the edge login can still `bind_actor` any uid. What PR3 buys is that the system path no longer needs the `bind_actor` escape hatch, so the
+only way to act as a user in the system path is a delegate whose preconditions the database checks.
+
+**What stays legacy-only in `edge` mode.** Nothing in `privileged.ts`'s importer, drain, rescore or purge paths. The one `edge`-mode refusal is the OTP-proven link to ANOTHER account
+(section 12, item 1): it answers `501 email_proof_link_unavailable` in `edge`, unchanged. **Decision deferred, and recorded here rather than built:** a cross-account definer would be an
+account-takeover primitive if it trusted its caller for the target account; the narrow, proof-bound design (the OTP verifier, not the client, names the target) is not built in PR3.
+PR4 must either build it or ship the 501 as the production behaviour for the `edge` role (a product decision, not a technical one).
+
+**Sign in with Apple (section 12, item 3): left as is, on purpose.** `signin-revocation-drain` (and the KEK reader, and `me-delete`'s revocation) already runs as `edge_system` through
+`openScopedTx("system", ...)` (`withSigninSystem`), and it acts on no account: it claims queue rows and completes them. `withDelegatedActor` is a per-ROW USER transaction, not a single system
+entry (the importer repo is `withSystemCatalogImport`, the revocation queue is `withSigninSystem`), so moving the revocation drain onto it would add a delegate binder with nothing to bind to.
+`SIGNIN_SYSTEM_ACTOR` still retires with the `legacy` path in PR4.
+
+**The periodic self-check** (carried PR2 finding). PR2 remembered a passing `assertEdgeConnectionSafe` for the pool's life, so `ALTER ROLE edge_gateway BYPASSRLS` or
+`GRANT service_role TO edge_gateway` made after the first request went unseen until the worker was recycled. The schedule is now `edge-selfcheck-gate.ts`: re-check after 5 minutes since the last
+success or 1000 transactions, whichever comes first (one small catalog query per repeat; nothing within the window). A failure is never remembered (the next transaction checks again, so recovery
+is seen at once), concurrent callers share one in-flight check, and a failed repeat withdraws the earlier success. It narrows the window from the worker's lifetime to the interval; it does not close it,
+and the per-transaction role assertion (edge_actor / edge_system gaining SUPERUSER or BYPASSRLS) still covers those two roles at once. Unit-tested (`edge-selfcheck-gate.test.ts`, fake clock) and proved against
+a real cluster (`edge-role.deno.test.ts`: a BYPASSRLS login and a `service_role` membership are refused after the interval, and after the call budget inside it; reverted afterwards).
+
+**Test harness: the throwaway password is no longer on a command line.** `tools/db/test.sh` passed `EDGE_GATEWAY_TEST_PASSWORD='...'` inside the `su -c "<string>"` for the Deno step, which `ps`
+shows to any local user for the whole run. It now pipes the password on stdin, and `test-deno-integration.sh` reads one line into its own environment (`EDGE_GATEWAY_TEST_PASSWORD_STDIN=1`).
+
+**PR4 pre-deploy check, `[unverified]`: Supavisor transaction mode and `prepare: true`.** The edge pool is built by `openPool(...)` with `prepare: true`, exactly like the legacy pool, and PR3
+does not change it. Nothing in this repo has been run through Supavisor. Two things must be checked against the real project before the first deploy: (1) whether the pooler in transaction mode
+accepts postgres.js's named prepared statements `[unverified — training knowledge: pooler support for named statements has varied by version and mode]`; if it does not, the edge pool needs
+`prepare: false` (a one-line change in `openPool`, which shares the option with the legacy pool until PR4 deletes it); (2) that one transaction stays on one server connection end to end, because
+`private.actor_binding` is keyed on the backend pid AND the transaction, and `openScopedTx` relies on `SET LOCAL ROLE`, `SET LOCAL` timeouts and the bind all landing on the same server session
+(a pooler that moved a transaction's statements between server connections would fail closed, since `actor_uid()` would read NULL, but it would fail every request).
+
+**PR4 blockers recorded by PR3** (also in `docs/security/p3-money-path-requirements.md`, "Edge role PR3"):
+
+1. Delete `legacy` (`sql()`, the `service_role` branches, `SIGNIN_SYSTEM_ACTOR`, the `hitSystemRateLimit` / `hitRateLimitForActor` legacy buckets) and add the lint pass (section 9).
+2. The OTP-proven cross-account link: build the proof-bound definer, or ship the 501 as the production answer (deferred, above).
+3. E5 (launch-blocking): both retention purges run only inside a catalog import's drain pass; schedule them independently.
+4. The Supavisor / `prepare: true` check above, and the first real provisioning of `edge_gateway` on the hosted project (R7: `CREATE ROLE`, tenant config, `pg_hba`), both `[unverified]`.
+5. The R2 gate ruling: `play.held_review` is writable by `edge_actor`; close it before the earn-path definer (E4) and no later than the PR4 gate.
+6. `import-catalog` in production needs `GOLFRAVEN_EDGE_DB_URL` and no longer needs `SUPABASE_DB_URL`: the deploy config for that function changes with the default flip.
+7. The self-check interval (5 minutes / 1000 transactions) is a default chosen without a measured cost; confirm it against real request rates (a repeat is one catalog query).

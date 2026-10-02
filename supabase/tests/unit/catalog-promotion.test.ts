@@ -6,14 +6,14 @@
 // uniqueCourses query) is proven against Postgres in
 // integration/catalog-promotion.deno.test.ts.
 import { describe, expect, it } from "vitest";
-import { drainRescoreBacklog, type WithOwnershipFn } from "../../functions/_shared/catalog/rescore-orchestrator.js";
+import { drainRescoreBacklog, MAX_RESCORE_PAGE, type WithDelegatedActorFn } from "../../functions/_shared/catalog/rescore-orchestrator.js";
 import { applyImportPlan, fetchAndVerifyArtifact } from "../../functions/_shared/catalog/import-handler.js";
 import { parseFacilitiesShard, parseTrailsShard } from "../../functions/_shared/catalog/directory-artifact.js";
 import { dwellHolesFromCount, handleEvidenceIntake, repickUserPlay } from "../../functions/_shared/evidence/handler.js";
 import { makeFakeRepo, makeFakeState, FAKE_DEVICE_ID } from "./fake-repo.js";
 import { makeFakeImporterRepo, makeFakeImporterState } from "./fake-importer-repo.js";
 import { buildSignedArtifact, generateKeypair, jsonBytes } from "./catalog-artifact-fixtures.js";
-import type { Actor, Repo } from "../../functions/_shared/types.js";
+import type { Actor, DelegateRef, Repo } from "../../functions/_shared/types.js";
 
 const NOW = new Date("2026-09-25T00:00:00.000Z");
 const C = "01ARZ3NDEKTSV4RRFFQ69G5F"; // + 2 chars => 26
@@ -172,8 +172,8 @@ describe("AT 18 — the bounded re-score drain", () => {
   function setup(nPlays: number) {
     const state = makeFakeState();
     const importer = makeFakeImporterState(NOW);
-    const withOwnership: WithOwnershipFn = async (actor: Actor, op: (repo: Repo) => Promise<unknown>) => op(makeFakeRepo(state, actor.uid)) as never;
-    return { state, importer, withOwnership, nPlays };
+    const withDelegate: WithDelegatedActorFn = async (_delegate: DelegateRef, actor: Actor, op: (repo: Repo) => Promise<unknown>) => op(makeFakeRepo(state, actor.uid)) as never;
+    return { state, importer, withDelegate, nPlays };
   }
   async function seedPlays(state: ReturnType<typeof makeFakeState>, importer: ReturnType<typeof makeFakeImporterState>, n: number) {
     // one self_report play per date at crs_x1 (state.now = 2026-06-01)
@@ -188,21 +188,54 @@ describe("AT 18 — the bounded re-score drain", () => {
   }
 
   it("works at most `maxPlays` per pass, advances the cursor, and completes the course on the last page — then is a no-op", async () => {
-    const { state, importer, withOwnership } = setup(5);
+    const { state, importer, withDelegate } = setup(5);
     await seedPlays(state, importer, 5);
     importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
     const repo = makeFakeImporterRepo(importer);
 
-    const p1 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
+    const p1 = await drainRescoreBacklog(repo, withDelegate, 2, undefined, NO_GRACE);
     expect(p1).toMatchObject({ playsProcessed: 2, coursesCompleted: 0, failures: 0 });
     expect(importer.backlog[0]!.cursor?.playId).toBe(importer.plays[1]!.playId);
-    const p2 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
+    const p2 = await drainRescoreBacklog(repo, withDelegate, 2, undefined, NO_GRACE);
     expect(p2.playsProcessed).toBe(2);
-    const p3 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
+    const p3 = await drainRescoreBacklog(repo, withDelegate, 2, undefined, NO_GRACE);
     expect(p3).toMatchObject({ playsProcessed: 1, coursesCompleted: 1 });
     expect(importer.backlog[0]!.done).toBe(true);
-    const p4 = await drainRescoreBacklog(repo, withOwnership, 2, undefined, NO_GRACE);
+    const p4 = await drainRescoreBacklog(repo, withDelegate, 2, undefined, NO_GRACE);
     expect(p4).toMatchObject({ backlogRows: 0, playsProcessed: 0 });
+  });
+
+  it("PR3: every play's transaction names the backlog row and that PLAY as the delegate and the play's OWNER as the expected actor (one transaction per play)", async () => {
+    const { state, importer } = setup(3);
+    await seedPlays(state, importer, 3);
+    importer.backlog.push({ id: 7, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
+    const calls: Array<{ delegate: DelegateRef; uid: string }> = [];
+    const spy: WithDelegatedActorFn = async (delegate, actor, op) => {
+      calls.push({ delegate, uid: actor.uid });
+      return op(makeFakeRepo(state, actor.uid)) as never;
+    };
+    const r = await drainRescoreBacklog(makeFakeImporterRepo(importer), spy, 10, undefined, NO_GRACE);
+    expect(r.playsProcessed).toBe(3);
+    expect(calls).toEqual(importer.plays.map((p) => ({ delegate: { kind: "rescore", backlogId: 7, playId: p.playId }, uid: "user-a" })));
+  });
+
+  it("PR3: a page request never exceeds the database's page cap (MAX_RESCORE_PAGE): a clamp the caller does not know about would read a full page as a short one and close the course early", async () => {
+    const importer = makeFakeImporterState(NOW);
+    importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
+    const repo = makeFakeImporterRepo(importer);
+    const requested: number[] = [];
+    const real = repo.rescoreBacklog.nextPlays.bind(repo.rescoreBacklog);
+    repo.rescoreBacklog.nextPlays = (courseId, after, limit) => {
+      requested.push(limit);
+      return real(courseId, after, limit);
+    };
+    const never: WithDelegatedActorFn = async () => {
+      throw new Error("no play to process");
+    };
+    await drainRescoreBacklog(repo, never, MAX_RESCORE_PAGE * 3, undefined, NO_GRACE);
+    expect(requested.length).toBeGreaterThan(0);
+    for (const n of requested) expect(n).toBeLessThanOrEqual(MAX_RESCORE_PAGE);
+    expect(requested[0]).toBe(MAX_RESCORE_PAGE);
   });
 
   it("a failing play stops its course for this pass WITHOUT advancing past it (retried, never skipped)", async () => {
@@ -210,7 +243,7 @@ describe("AT 18 — the bounded re-score drain", () => {
     await seedPlays(state, importer, 3);
     importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
     let calls = 0;
-    const flaky: WithOwnershipFn = async (actor, op) => {
+    const flaky: WithDelegatedActorFn = async (_delegate, actor, op) => {
       calls += 1;
       if (calls === 2) throw new Error("simulated transaction failure");
       return op(makeFakeRepo(state, actor.uid)) as never;
@@ -221,21 +254,21 @@ describe("AT 18 — the bounded re-score drain", () => {
   });
 
   it("promotion rewrites the stored fix tier before re-scoring (the stub-era tier is what made the old score low)", async () => {
-    const { state, importer, withOwnership } = setup(1);
+    const { state, importer, withDelegate } = setup(1);
     await seedPlays(state, importer, 1);
     const ev = [...state.evidence.values()][0]!;
     (ev.summary as Record<string, unknown>).fix = { verificationTier: "unverified" };
     state.courseTier.set("crs_x1", "play-verified");
     importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
-    await drainRescoreBacklog(makeFakeImporterRepo(importer), withOwnership, 10);
+    await drainRescoreBacklog(makeFakeImporterRepo(importer), withDelegate, 10);
     expect(((ev.summary as Record<string, unknown>).fix as Record<string, unknown>).verificationTier).toBe("play-verified");
   });
 
   it("a split backlog row labels the kept course's play a user pick (once per facility+date)", async () => {
-    const { state, importer, withOwnership } = setup(1);
+    const { state, importer, withDelegate } = setup(1);
     await seedPlays(state, importer, 1);
     importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "split", cursor: null, catalogVersionInt: 2, done: false });
-    await drainRescoreBacklog(makeFakeImporterRepo(importer), withOwnership, 10);
+    await drainRescoreBacklog(makeFakeImporterRepo(importer), withDelegate, 10);
     expect([...state.plays.values()][0]!.courseDisambiguatedBy).toBe("user");
   });
 });
@@ -374,7 +407,7 @@ describe("backlog straggler sweep (round 3 gate, LOW): a course closes only afte
   async function world(nPlays: number) {
     const state = makeFakeState();
     const importer = makeFakeImporterState(NOW);
-    const withOwnership: WithOwnershipFn = async (actor: Actor, op: (repo: Repo) => Promise<unknown>) => op(makeFakeRepo(state, actor.uid)) as never;
+    const withDelegate: WithDelegatedActorFn = async (_delegate: DelegateRef, actor: Actor, op: (repo: Repo) => Promise<unknown>) => op(makeFakeRepo(state, actor.uid)) as never;
     for (let i = 0; i < nPlays; i++) {
       const d = `2026-05-${String(31 - i).padStart(2, "0")}`;
       const r = await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", courseId: "crs_x1", localDate: d, catalogVersion: "20260520-a000001" }, makeFakeRepo(state, "user-a"));
@@ -383,37 +416,37 @@ describe("backlog straggler sweep (round 3 gate, LOW): a course closes only afte
     }
     importer.plays.sort((a, b) => (a.playId < b.playId ? -1 : 1));
     importer.backlog.push({ id: 1, courseId: "crs_x1", reason: "promotion", cursor: null, catalogVersionInt: 2, done: false });
-    return { state, importer, withOwnership, repo: makeFakeImporterRepo(importer) };
+    return { state, importer, withDelegate, repo: makeFakeImporterRepo(importer) };
   }
 
   it("a short page does NOT close the course: it records finished_at and waits out the grace; only a later run begins the sweep and closes it", async () => {
-    const { importer, withOwnership, repo } = await world(2);
+    const { importer, withDelegate, repo } = await world(2);
     importer.backlog[0]!.graceElapsed = false;
-    const r1 = await drainRescoreBacklog(repo, withOwnership, 10);
+    const r1 = await drainRescoreBacklog(repo, withDelegate, 10);
     expect(r1).toMatchObject({ playsProcessed: 2, coursesCompleted: 0 });
     expect(importer.backlog[0]).toMatchObject({ done: false, finishedAt: "now" });
     expect(importer.backlog[0]!.swept ?? false).toBe(false);
     // still inside the grace: nothing closes
-    const r2 = await drainRescoreBacklog(repo, withOwnership, 10);
+    const r2 = await drainRescoreBacklog(repo, withDelegate, 10);
     expect(r2.coursesCompleted).toBe(0);
     expect(importer.backlog[0]!.swept ?? false).toBe(false);
     // grace elapsed: the sweep begins and, finding nothing further, closes the row in the same run
     importer.backlog[0]!.graceElapsed = true;
-    const r3 = await drainRescoreBacklog(repo, withOwnership, 10);
+    const r3 = await drainRescoreBacklog(repo, withDelegate, 10);
     expect(r3.coursesCompleted).toBe(1);
     expect(importer.backlog[0]).toMatchObject({ done: true, swept: true });
   });
 
   it("a play that lands during the grace (a straggler) is picked up by the later run's pass", async () => {
-    const { state, importer, withOwnership, repo } = await world(1);
+    const { state, importer, withDelegate, repo } = await world(1);
     importer.backlog[0]!.graceElapsed = false;
-    await drainRescoreBacklog(repo, withOwnership, 10);
+    await drainRescoreBacklog(repo, withDelegate, 10);
     // a late committer
     const r = await handleEvidenceIntake({ source: "self_report", deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", courseId: "crs_x1", localDate: "2026-05-20", catalogVersion: "20260520-a000001" }, makeFakeRepo(state, "user-a"));
     if (r.status !== "accepted") throw new Error("unreachable");
     importer.plays.push({ playId: "zzz_straggler", userId: "user-a", facilityId: "fac_x", courseId: "crs_x1", playDate: "2026-05-20" });
     importer.backlog[0]!.graceElapsed = true;
-    const r2 = await drainRescoreBacklog(repo, withOwnership, 10);
+    const r2 = await drainRescoreBacklog(repo, withDelegate, 10);
     expect(r2.playsProcessed).toBeGreaterThanOrEqual(1);
     expect(r2.coursesCompleted).toBe(1);
   });

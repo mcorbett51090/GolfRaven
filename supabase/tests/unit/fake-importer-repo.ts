@@ -374,7 +374,6 @@ export function makeFakeImporterRepo(state: FakeImporterState): ImporterRepo {
             claimedFacilityId: q.claimedFacilityId,
             claimedCourseId: q.claimedCourseId,
             claimedCatalogVersion: q.claimedCatalogVersion,
-            queuedInput: q.queuedInput,
             createdAt: q.createdAt,
           }));
       },

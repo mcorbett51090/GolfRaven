@@ -5,7 +5,7 @@
 // / `markNeedsAttention` — a raw status flip, with no re-derivation and
 // no re-score at all (exactly the bug B2 fixes; see drain-orchestrator.ts's
 // own header for the full "why"). `drainQueuedCatalog` now takes
-// `(importerRepo, withOwnership, limit)` and every "resolved" outcome
+// `(importerRepo, withDelegatedActor, limit)` and every "resolved" outcome
 // goes through the REAL `redrainQueuedEvidenceRow` (evidence/handler.ts)
 // via an actor-scoped `Repo` — this file drives that with `makeFakeRepo`
 // (fake-repo.ts, already proven correct by evidence-handler.test.ts's own
@@ -21,9 +21,9 @@
 // Postgres, `ImporterRepo` and `Repo` are two different privilege-scoped
 // views over the very same `app.evidence` table.
 import { describe, expect, it } from "vitest";
-import { drainQueuedCatalog, type WithOwnershipFn } from "../../functions/_shared/catalog/drain-orchestrator.js";
+import { drainQueuedCatalog, type WithDelegatedActorFn } from "../../functions/_shared/catalog/drain-orchestrator.js";
 import { makeFakeRepo, makeFakeState, setEvidenceCreatedAt, FAKE_DEVICE_ID, type FakeState } from "./fake-repo.js";
-import type { Actor, ImporterRepo, QueuedEvidenceRow, Repo } from "../../functions/_shared/types.js";
+import type { Actor, DelegateRef, ImporterRepo, QueuedEvidenceRow, Repo } from "../../functions/_shared/types.js";
 import { canonicalStringify, MANIFEST_DOMAIN } from "../../functions/_shared/catalog/manifest-artifact.js";
 import { generateKeypair, signBytes } from "./catalog-artifact-fixtures.js";
 import { makeDeadline } from "../../functions/_shared/catalog/time-budget.js";
@@ -46,7 +46,6 @@ function buildImporterShim(state: FakeState): ImporterRepo {
             claimedFacilityId: row.claimedFacilityId,
             claimedCourseId: row.claimedCourseId,
             claimedCatalogVersion: row.claimedCatalogVersion,
-            queuedInput: row.queuedInput,
             createdAt,
             createdAtMs: Date.parse(createdAt),
           });
@@ -65,13 +64,13 @@ function buildImporterShim(state: FakeState): ImporterRepo {
   };
 }
 
-/** The exact `WithOwnershipFn` shape `privileged.ts#withOwnership` has —
- * closes over the SAME `FakeState` the importer shim reads, so a write
- * `redrainQueuedEvidenceRow` makes (via `repo.evidence.resolveQueuedRow`)
- * is immediately visible to a LATER call in the same drain pass, exactly
- * as one real Postgres transaction's writes are visible to the next. */
-function buildFakeWithOwnership(state: FakeState): WithOwnershipFn {
-  return async (actor: Actor, op: (repo: Repo) => Promise<unknown>) => {
+/** The exact `WithDelegatedActorFn` shape `privileged.ts#withDelegatedActor` has (edge role PR3) — closes over the SAME `FakeState` the
+ * importer shim reads, so a write `redrainQueuedEvidenceRow` makes (via `repo.evidence.resolveQueuedRow`) is immediately visible to a
+ * LATER call in the same drain pass, exactly as one real Postgres transaction's writes are visible to the next. Like the real one it
+ * ignores the delegate for the Repo it builds (the owner is the actor); the delegate is what the database checks, and the tests below
+ * assert the drain NAMES the right one. */
+function buildFakeWithDelegate(state: FakeState): WithDelegatedActorFn {
+  return async (_delegate: DelegateRef, actor: Actor, op: (repo: Repo) => Promise<unknown>) => {
     const repo = makeFakeRepo(state, actor.uid);
     return op(repo);
   };
@@ -115,7 +114,7 @@ describe("drainQueuedCatalog (B2: real re-derivation, never a raw status flip)",
     const state = makeFakeState();
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
 
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(result).toEqual({ scanned: 1, resolved: 1, needsAttention: 0, unknownId: 0, stillQueued: 0, errored: 0, truncated: false });
 
     const row = state.evidence.get(id)!;
@@ -137,7 +136,7 @@ describe("drainQueuedCatalog (B2: real re-derivation, never a raw status flip)",
     // crs_ghost deliberately absent from the ledger.
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_ghost", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
 
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(result.unknownId).toBe(1);
     expect(result.resolved).toBe(0);
     const row = state.evidence.get(id)!;
@@ -169,7 +168,7 @@ describe("drainQueuedCatalog (B2: real re-derivation, never a raw status flip)",
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260602-b000002", localDate: "2026-06-01" });
     setEvidenceCreatedAt(state, id, new Date(NOW.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString());
 
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(result.needsAttention).toBe(1);
     const row = state.evidence.get(id)!;
     expect(row.status).toBe("needs_attention");
@@ -180,7 +179,7 @@ describe("drainQueuedCatalog (B2: real re-derivation, never a raw status flip)",
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260602-b000002", localDate: "2026-06-01" });
     setEvidenceCreatedAt(state, id, state.now.toISOString());
 
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(result.stillQueued).toBe(1);
     const row = state.evidence.get(id)!;
     expect(row.status).toBe("queued_catalog");
@@ -200,7 +199,7 @@ describe("drainQueuedCatalog (B2: real re-derivation, never a raw status flip)",
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_ghost_facility", catalogVersion: "20260101-0000000", localDate: "2026-06-01" });
     setEvidenceCreatedAt(state, id, state.now.toISOString()); // fresh — would stay queued on age alone
 
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(result.unknownId).toBe(1);
     expect(result.stillQueued).toBe(0);
     const row = state.evidence.get(id)!;
@@ -215,26 +214,26 @@ describe("drainQueuedCatalog (B2: real re-derivation, never a raw status flip)",
       setEvidenceCreatedAt(state, id, new Date(NOW.getTime() + i * 1000).toISOString());
       ids.push(id);
     }
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 3);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 3);
     expect(result.scanned).toBe(3);
   });
 
-  it("a per-row failure (withOwnership throws) never aborts the rest of the batch", async () => {
+  it("a per-row failure (the delegated transaction throws) never aborts the rest of the batch", async () => {
     const state = makeFakeState();
     const okId = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
     // A claimed version NEWER than current (unsigned) and a FRESH row —
     // even after the thrown exception forces redrainKind to
     // "still_unresolved", this must land on plain `still_queued` (never
-    // `needs_attention`/`unknown_id`, which would call `withOwnership`
+    // `needs_attention`/`unknown_id`, which would call `the delegated transaction`
     // a SECOND time for user-b, throwing again, uncaught, outside this
     // test's own control — see this file's own header note on why the
     // age/coverage judgment needs a not-yet-imported claim).
     const failingId = await insertQueuedRow(state, "user-b", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260602-b000002", localDate: "2026-06-01" });
     setEvidenceCreatedAt(state, failingId, new Date(NOW.getTime() - 1000).toISOString()); // scanned first, but still FRESH relative to the 7-day needs_attention window
 
-    const flakyWithOwnership: WithOwnershipFn = async (actor, op) => {
+    const flakyWithOwnership: WithDelegatedActorFn = async (delegate, actor, op) => {
       if (actor.uid === "user-b") throw new Error("simulated transaction failure");
-      return buildFakeWithOwnership(state)(actor, op);
+      return buildFakeWithDelegate(state)(delegate, actor, op);
     };
 
     const result = await drainQueuedCatalog(buildImporterShim(state), flakyWithOwnership, 10);
@@ -272,17 +271,17 @@ describe("NEW-1: a drain before the covering import never kills queued rows", ()
     const a = await insertQueuedRow(state, "user-a", { facilityId: "fac_new", courseId: "crs_new", catalogVersion: V_NEWER, localDate: "2026-06-01", manifestSig });
     const b = await insertQueuedRow(state, "user-b", { facilityId: "fac_new", courseId: "crs_new", catalogVersion: V_NEWER, localDate: "2026-06-01", manifestSig });
 
-    const first = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const first = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(first).toMatchObject({ scanned: 2, resolved: 0, unknownId: 0, needsAttention: 0, stillQueued: 2 });
     // ...and again (the drain runs after EVERY import, including failed ones).
-    const second = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const second = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(second).toMatchObject({ unknownId: 0, stillQueued: 2 });
     expect(state.evidence.get(a)!.status).toBe("queued_catalog");
     expect(state.evidence.get(b)!.status).toBe("queued_catalog");
 
     // 7 days on, with the covering import STILL not run: needs_attention.
     for (const id of [a, b]) setEvidenceCreatedAt(state, id, new Date(state.now.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString());
-    const third = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const third = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(third).toMatchObject({ needsAttention: 2, unknownId: 0 });
     expect(state.evidence.get(a)!.status).toBe("needs_attention");
   });
@@ -291,11 +290,11 @@ describe("NEW-1: a drain before the covering import never kills queued rows", ()
     const state = makeFakeState();
     const manifestSig = await signedClaimOfNewer(state);
     const a = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: V_NEWER, localDate: "2026-06-01", manifestSig });
-    const before = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const before = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(before.stillQueued).toBe(1);
     // The covering import lands.
     state.catalogVersions.set(2, { version: 2, siteVersion: V_NEWER, publishedAt: "2026-06-02T00:00:00.000Z", contractVersion: "1", sha256: "x", kid: "kv" });
-    const after = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const after = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(after.resolved).toBe(1);
     expect(state.evidence.get(a)!.status).toBe("accepted");
   });
@@ -310,17 +309,17 @@ describe("NEW-2: a transient error never makes a row terminal", () => {
     // Only the REDRAIN throws (a healthy connection would then happily mark
     // the row terminal — which is exactly what the old code did).
     let calls = 0;
-    const throwing: WithOwnershipFn = async (actor, op) => {
+    const throwing: WithDelegatedActorFn = async (delegate, actor, op) => {
       calls += 1;
       if (calls === 1) throw Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
-      return buildFakeWithOwnership(state)(actor, op);
+      return buildFakeWithDelegate(state)(delegate, actor, op);
     };
     const result = await drainQueuedCatalog(buildImporterShim(state), throwing, 10);
     expect(result).toMatchObject({ scanned: 1, errored: 1, stillQueued: 1, unknownId: 0, needsAttention: 0, resolved: 0 });
     expect(state.evidence.get(id)!.status).toBe("queued_catalog");
 
     // Next pass, healthy: it resolves.
-    const retry = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10);
+    const retry = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
     expect(retry.resolved).toBe(1);
   });
 
@@ -329,10 +328,10 @@ describe("NEW-2: a transient error never makes a row terminal", () => {
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
     setEvidenceCreatedAt(state, id, new Date(state.now.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString());
     let calls = 0;
-    const flaky: WithOwnershipFn = async (actor, op) => {
+    const flaky: WithDelegatedActorFn = async (delegate, actor, op) => {
       calls += 1;
       if (calls === 1) throw new Error("deadlock detected");
-      return buildFakeWithOwnership(state)(actor, op);
+      return buildFakeWithDelegate(state)(delegate, actor, op);
     };
     const result = await drainQueuedCatalog(buildImporterShim(state), flaky, 10);
     expect(result).toMatchObject({ errored: 1, needsAttention: 1, unknownId: 0 });
@@ -344,10 +343,10 @@ describe("NEW-2: a transient error never makes a row terminal", () => {
     // structural failure -> terminal_unknown_id from the redrain itself
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_ghost", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
     let calls = 0;
-    const flaky: WithOwnershipFn = async (actor, op) => {
+    const flaky: WithDelegatedActorFn = async (delegate, actor, op) => {
       calls += 1;
       if (calls === 1) throw new Error("CONNECTION_CLOSED");
-      return buildFakeWithOwnership(state)(actor, op);
+      return buildFakeWithDelegate(state)(delegate, actor, op);
     };
     const result = await drainQueuedCatalog(buildImporterShim(state), flaky, 10);
     expect(calls).toBe(1); // ONE transaction per unit — no second terminal-write transaction
@@ -366,9 +365,100 @@ describe("time budget: the drain stops starting work it cannot finish", () => {
     const state = makeFakeState();
     const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
     const spent = makeDeadline(() => 1_000, 1_000 + 5_000); // 5 s left < one unit's reserve
-    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithOwnership(state), 10, spent);
+    const result = await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10, spent);
     expect(result).toMatchObject({ scanned: 1, resolved: 0, truncated: true });
     expect(state.evidence.get(id)!.status).toBe("queued_catalog");
   });
 });
 
+
+// ============================================================================
+// Edge role PR3: the drain is a DELEGATED actor, and the system list carries no raw submission.
+// ============================================================================
+
+describe("PR3: delegated per-row transactions (signature + contract)", () => {
+  it("every row's transaction names its own evidence row as the delegate and its OWNER as the expected actor — one transaction per row, nobody else's uid", async () => {
+    const state = makeFakeState();
+    const a = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
+    const b = await insertQueuedRow(state, "user-b", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
+    setEvidenceCreatedAt(state, a, new Date(NOW.getTime() - 2000).toISOString());
+    setEvidenceCreatedAt(state, b, new Date(NOW.getTime() - 1000).toISOString());
+
+    const calls: Array<{ delegate: DelegateRef; uid: string }> = [];
+    const spy: WithDelegatedActorFn = (delegate, actor, op) => {
+      calls.push({ delegate, uid: actor.uid });
+      return buildFakeWithDelegate(state)(delegate, actor, op);
+    };
+    const result = await drainQueuedCatalog(buildImporterShim(state), spy, 10);
+    expect(result.resolved).toBe(2);
+    expect(calls).toEqual([
+      { delegate: { kind: "queued_evidence", evidenceId: a }, uid: "user-a" },
+      { delegate: { kind: "queued_evidence", evidenceId: b }, uid: "user-b" },
+    ]);
+  });
+
+  it("the drain works from a list that carries NO queuedInput: it re-reads the raw submission inside the owner's transaction (Repo#evidence.readQueuedInput)", async () => {
+    const state = makeFakeState();
+    const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
+    const shim = buildImporterShim(state);
+    const listed = await shim.queuedCatalog.listOpen(10);
+    expect(listed).toHaveLength(1);
+    expect(Object.keys(listed[0]!)).not.toContain("queuedInput");
+    let reads = 0;
+    const counting: WithDelegatedActorFn = (delegate, actor, op) =>
+      buildFakeWithDelegate(state)(delegate, actor, (repo) => {
+        const real = repo.evidence.readQueuedInput.bind(repo.evidence);
+        repo.evidence.readQueuedInput = async (eid) => {
+          reads += 1;
+          return real(eid);
+        };
+        return op(repo);
+      });
+    const result = await drainQueuedCatalog(shim, counting, 10);
+    expect(result.resolved).toBe(1);
+    expect(reads).toBe(1);
+    expect(state.evidence.get(id)!.status).toBe("accepted");
+  });
+
+  it("readQueuedInput is scoped to the bound owner and to queued_catalog: another user's id and a resolved row read as null", async () => {
+    const state = makeFakeState();
+    const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
+    expect(await makeFakeRepo(state, "user-b").evidence.readQueuedInput(id)).toBeNull();
+    const own = await makeFakeRepo(state, "user-a").evidence.readQueuedInput(id);
+    expect(own).not.toBeNull();
+    await drainQueuedCatalog(buildImporterShim(state), buildFakeWithDelegate(state), 10);
+    expect(await makeFakeRepo(state, "user-a").evidence.readQueuedInput(id)).toBeNull();
+  });
+
+  it("a row a concurrent drain already resolved between the list and the transaction is left alone: counted in `scanned` only, never re-run from a stale submission", async () => {
+    const state = makeFakeState();
+    const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
+    const racing: WithDelegatedActorFn = async (delegate, actor, op) => {
+      (state.evidence.get(id) as { status: string }).status = "needs_attention"; // someone else got there first
+      return buildFakeWithDelegate(state)(delegate, actor, op);
+    };
+    const result = await drainQueuedCatalog(buildImporterShim(state), racing, 10);
+    expect(result).toEqual({ scanned: 1, resolved: 0, needsAttention: 0, unknownId: 0, stillQueued: 0, errored: 0, truncated: false });
+    expect(state.evidence.get(id)!.status).toBe("needs_attention");
+  });
+
+  it("the age-out fallback (a throw on a row older than 7 days) goes through the SAME delegate, for the same owner", async () => {
+    const state = makeFakeState();
+    const id = await insertQueuedRow(state, "user-a", { facilityId: "fac_x", courseId: "crs_x1", catalogVersion: "20260520-a000001", localDate: "2026-06-01" });
+    setEvidenceCreatedAt(state, id, new Date(state.now.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString());
+    const seen: DelegateRef[] = [];
+    let calls = 0;
+    const flaky: WithDelegatedActorFn = (delegate, actor, op) => {
+      seen.push(delegate);
+      calls += 1;
+      if (calls === 1) throw new Error("deadlock detected");
+      return buildFakeWithDelegate(state)(delegate, actor, op);
+    };
+    const result = await drainQueuedCatalog(buildImporterShim(state), flaky, 10);
+    expect(result).toMatchObject({ errored: 1, needsAttention: 1 });
+    expect(seen).toEqual([
+      { kind: "queued_evidence", evidenceId: id },
+      { kind: "queued_evidence", evidenceId: id },
+    ]);
+  });
+});

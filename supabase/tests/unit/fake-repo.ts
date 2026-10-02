@@ -420,6 +420,12 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         if (!row || row.userId !== uid) return null;
         return row.deviceId ?? null;
       },
+      // Edge role PR3: the drain re-reads the raw submission as the row's owner (same status + ownership guards as the real SQL).
+      async readQueuedInput(id: string): Promise<{ queuedInput: unknown } | null> {
+        const row = state.evidence.get(id);
+        if (!row || row.userId !== uid || row.status !== "queued_catalog" || row.kind !== "queued") return null;
+        return { queuedInput: row.queuedInput };
+      },
     },
 
     play: {

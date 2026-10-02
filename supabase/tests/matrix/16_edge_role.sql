@@ -176,7 +176,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(711);
+SELECT plan(713);
 
 -- ----------------------------------------------------------------------------
 -- Test-only helpers (session-local, in pg_temp; never part of a migration)
@@ -1432,6 +1432,70 @@ ROLLBACK;
 \echo ok 711 - hold post-condition (control): with the real app.hold_play_rewards the same hold raises nothing
 \else
 \echo not ok 711 - hold post-condition (control): with the real app.hold_play_rewards the same hold raises nothing
+\endif
+
+-- 712-713 (edge role PR3): the delegate binders' OWN preconditions, each proved ALONE. Two of them are layered defences: the evidence
+-- row's `status = 'queued_catalog'` is checked by the binder body AND hidden from private_definer by pd_queued_catalog_read, and the
+-- play's `course_id = backlog.course_id` is checked by the body AND (partly) by pd_rescore_play_read, which shows private_definer only
+-- plays at a course with SOME open backlog row. A mutant that deletes the body's check is therefore masked by the policy: the same
+-- P0002 with the same message comes out of the policy's NOT FOUND (observed: removing the status predicate from the binder left
+-- every cell of this file and of the Deno suite green). Each cell widens the policy to true in a rolled-back transaction (so the
+-- body is all that stands), proves with a control that the row IS now visible to private_definer, and expects the body's refusal.
+-- (The accepted row is A's a0e01: B is deleted by cell group 10k before this point, so b0e01 no longer exists.)
+BEGIN;
+ALTER POLICY pd_queued_catalog_read ON app.evidence USING (true);
+SET LOCAL ROLE private_definer;
+SELECT (count(*) = 1) AS visible FROM app.evidence WHERE id = 'eeee0000-0000-0000-0000-0000000a0e01' AND status <> 'queued_catalog' \gset
+RESET ROLE;
+GRANT edge_system TO CURRENT_USER WITH INHERIT FALSE, SET TRUE; -- rolled back; a restricted harness role may not SET ROLE edge_system otherwise
+SET LOCAL ROLE edge_system;
+DO $d$ DECLARE s text; BEGIN
+  BEGIN
+    PERFORM private.bind_delegate_for_queued_evidence('eeee0000-0000-0000-0000-0000000a0e01');
+    s := 'no error';
+  EXCEPTION WHEN OTHERS THEN s := SQLSTATE || ':' || SQLERRM; END;
+  PERFORM set_config('edge16.bq', s, true);
+END $d$;
+SELECT (current_setting('edge16.bq') = 'P0002:bind_delegate_for_queued_evidence: no queued_catalog evidence row with that id') AS good \gset
+ROLLBACK;
+\if :visible
+\if :good
+\echo ok 712 - delegate binder (queued) body alone: with pd_queued_catalog_read widened and the accepted row visible to private_definer, the binder still refuses it (the status predicate in the body is what holds)
+\else
+\echo not ok 712 - delegate binder (queued) body alone: with pd_queued_catalog_read widened and the accepted row visible to private_definer, the binder still refuses it (the status predicate in the body is what holds)
+\endif
+\else
+\echo not ok 712 - delegate binder (queued) body alone: the control failed (the widened policy did not make the accepted row visible, so the cell proves nothing)
+\endif
+
+BEGIN;
+SET LOCAL ROLE service_role;
+INSERT INTO app.catalog_rescore_backlog (course_id, reason, catalog_version) VALUES ('crs_y1', 'promotion', 1) RETURNING id \gset bl_
+RESET ROLE;
+ALTER POLICY pd_rescore_play_read ON app.play USING (true);
+SET LOCAL ROLE private_definer;
+SELECT (count(*) = 1) AS visible FROM app.play WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND course_id <> 'crs_y1' \gset
+RESET ROLE;
+GRANT edge_system TO CURRENT_USER WITH INHERIT FALSE, SET TRUE; -- rolled back
+SET LOCAL ROLE edge_system;
+SELECT set_config('edge16.bl', :'bl_id', true);
+DO $d$ DECLARE s text; BEGIN
+  BEGIN
+    PERFORM private.bind_delegate_for_rescore(current_setting('edge16.bl')::bigint, 'eeee0000-0000-0000-0000-0000000a0a02');
+    s := 'no error';
+  EXCEPTION WHEN OTHERS THEN s := SQLSTATE || ':' || SQLERRM; END;
+  PERFORM set_config('edge16.br', s, true);
+END $d$;
+SELECT (current_setting('edge16.br') = 'P0002:bind_delegate_for_rescore: that play is not at the backlog row''s course') AS good \gset
+ROLLBACK;
+\if :visible
+\if :good
+\echo ok 713 - delegate binder (rescore) body alone: with pd_rescore_play_read widened and a play at ANOTHER course visible to private_definer, the binder still refuses it (the course predicate in the body is what holds)
+\else
+\echo not ok 713 - delegate binder (rescore) body alone: with pd_rescore_play_read widened and a play at ANOTHER course visible to private_definer, the binder still refuses it (the course predicate in the body is what holds)
+\endif
+\else
+\echo not ok 713 - delegate binder (rescore) body alone: the control failed (the widened policy did not make the other-course play visible, so the cell proves nothing)
 \endif
 
 SET ROLE service_role;

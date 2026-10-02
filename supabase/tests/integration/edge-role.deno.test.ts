@@ -24,6 +24,7 @@ import {
   hitRateLimitForActor,
   openScopedTx,
   resetPrivilegedConnectionsForTests,
+  setEdgeSelfCheckScheduleForTests,
   userBind,
   withOwnership,
 } from "../../functions/_shared/privileged.ts";
@@ -175,7 +176,8 @@ edgeTest("self-check: edge_gateway made BYPASSRLS, or a member of service_role /
       await raw.unsafe("revoke service_role from edge_gateway");
       assertEquals(await withOwnership(sticky, async () => "ok"), "ok", "the failure was not remembered");
       await raw.unsafe("grant service_role to edge_gateway");
-      // ...but a SUCCESS is remembered for the pool's life (one check per pool, on its first use): this is the documented cost.
+      // ...but a SUCCESS is remembered until the schedule's interval runs out (PR3: 5 minutes / 1000 transactions in production, so a
+      // test that finishes in milliseconds sees it remembered); the periodic re-check itself is proved in the next test.
       assertEquals(await withOwnership(sticky, async () => "ok"), "ok");
     } finally {
       await raw.unsafe("revoke service_role from edge_gateway");
@@ -198,6 +200,78 @@ edgeTest("self-check: edge_gateway made BYPASSRLS, or a member of service_role /
     // ...and the clean connection passes again (nothing was left behind, nothing was cached).
     await withEdgeUrl(GOOD_EDGE_URL, async () => {
       assertEquals(await withOwnership(makeActor((await withFreshUserWithDevice("after")).uid), async () => "ok"), "ok");
+    });
+  } finally {
+    await raw.end({ timeout: 1 });
+  }
+});
+
+edgeTest("PR3 periodic self-check: a change made AFTER the first success (BYPASSRLS, a forbidden membership) is refused once the interval or the call budget runs out, a refusal is never remembered, and recovery is seen at once (needs a superuser harness; reverted afterwards)", async () => {
+  const raw = rawHarness();
+  try {
+    const me = await raw`select rolsuper from pg_roles where rolname = session_user`;
+    if (!me[0]?.rolsuper) {
+      console.log("edge-role periodic self-check cells: skipped (the harness role is not a superuser; HARNESS_MODE=superuser runs them)");
+      return;
+    }
+    const user = makeActor((await withFreshUserWithDevice("periodic")).uid);
+    const ok = () => withOwnership(user, async () => "ok");
+
+    // --- the INTERVAL ---
+    await resetPrivilegedConnectionsForTests();
+    let now = 1_000_000;
+    const checks = setEdgeSelfCheckScheduleForTests({ intervalMs: 60_000, everyNCalls: 0, now: () => now });
+    try {
+      assertEquals(await ok(), "ok");
+      assertEquals(checks(), 1, "the first transaction ran the self-check");
+      await raw.unsafe("alter role edge_gateway bypassrls"); // an operator's change AFTER the first success
+      assertEquals(await ok(), "ok", "inside the interval the earlier success is trusted (the documented window)");
+      assertEquals(checks(), 1, "...and costs no round trip");
+      now += 60_000;
+      const err = await assertRejects(() => withOwnership(user, async () => "must never run")) as Error;
+      assert(err.message.includes("the edge database connection is not acceptable"), err.message);
+      assert(err.message.includes("SUPERUSER or BYPASSRLS"), err.message);
+      assert(!(err instanceof HttpError), "a server fault (500), never an HttpError the client could act on");
+      assertEquals(checks(), 2, "once the interval elapsed the next transaction re-checked");
+      // a refusal is not remembered, and the earlier success is withdrawn: the NEXT call checks again and is refused again
+      await assertRejects(() => withOwnership(user, async () => "must never run"), Error, "SUPERUSER or BYPASSRLS");
+      assertEquals(checks(), 3);
+      // every entry point is behind the same gate
+      await assertRejects(() => hitRateLimitForActor(user, "edge-role-periodic", 60, 5), Error, "not acceptable");
+      await assertRejects(() => openScopedTx("system", { expectedUid: null }, async () => 1), Error, "not acceptable");
+      await raw.unsafe("alter role edge_gateway nobypassrls");
+      assertEquals(await ok(), "ok", "recovery is seen at once: the refusal was not cached");
+      // a forbidden membership, the other thing the check asserts
+      await raw.unsafe("grant service_role to edge_gateway");
+      now += 60_000;
+      await assertRejects(() => withOwnership(user, async () => "must never run"), Error, "member of service_role");
+      await raw.unsafe("revoke service_role from edge_gateway");
+      assertEquals(await ok(), "ok");
+    } finally {
+      await raw.unsafe("alter role edge_gateway nobypassrls");
+      await raw.unsafe("revoke service_role from edge_gateway").catch(() => {});
+      await resetPrivilegedConnectionsForTests();
+    }
+
+    // --- the CALL BUDGET (the interval is an hour: only the count can fire) ---
+    now = 5_000_000;
+    const budgetChecks = setEdgeSelfCheckScheduleForTests({ intervalMs: 3_600_000, everyNCalls: 3, now: () => now });
+    try {
+      assertEquals(await ok(), "ok"); // check #1
+      assertEquals(await ok(), "ok");
+      assertEquals(await ok(), "ok");
+      assertEquals(await ok(), "ok"); // the third cheap pass
+      assertEquals(budgetChecks(), 1);
+      await raw.unsafe("alter role edge_gateway bypassrls");
+      await assertRejects(() => withOwnership(user, async () => "must never run"), Error, "SUPERUSER or BYPASSRLS");
+      assertEquals(budgetChecks(), 2, "the call budget re-checked inside the interval");
+    } finally {
+      await raw.unsafe("alter role edge_gateway nobypassrls");
+      await resetPrivilegedConnectionsForTests();
+    }
+    // nothing was left behind
+    await withEdgeUrl(GOOD_EDGE_URL, async () => {
+      assertEquals(await withOwnership(makeActor((await withFreshUserWithDevice("periodic-after")).uid), async () => "ok"), "ok");
     });
   } finally {
     await raw.end({ timeout: 1 });

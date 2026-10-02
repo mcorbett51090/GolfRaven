@@ -10,7 +10,7 @@
 //   LOW    (keyset): a straggler (a long transaction that commits after the
 //          cursor passed its timestamp) is picked up by the closing sweep.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
+import { withDelegatedActor, withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
 import { drainRescoreBacklog } from "../../functions/_shared/catalog/rescore-orchestrator.ts";
 import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-repo.ts";
 import { handleEvidenceIntake } from "../../functions/_shared/evidence/handler.ts";
@@ -101,7 +101,7 @@ Deno.test("§8.6 trigger (b): coordinates are kept while the course's rescore ba
     "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "Promo K", holes: 18 }]),
   });
   // K is promoted (no longer a stub) but its backlog row is OPEN: coordinates stay.
-  const open = await drainRescoreBacklog(drainRepo, withOwnership, 1);
+  const open = await drainRescoreBacklog(drainRepo, withDelegatedActor, 1);
   assertEquals(open.coursesCompleted, 0);
   for (const e of evs) assert((await coordsOf(e)) !== null, "backlog row still open -> coordinates retained");
 
@@ -109,7 +109,7 @@ Deno.test("§8.6 trigger (b): coordinates are kept while the course's rescore ba
   let completed = 0;
   let purged = 0;
   for (let pass = 0; pass < 10 && completed === 0; pass++) {
-    const r = await drainRescoreBacklog(drainRepo, withOwnership, 50, undefined, NO_GRACE);
+    const r = await drainRescoreBacklog(drainRepo, withDelegatedActor, 50, undefined, NO_GRACE);
     completed += r.coursesCompleted;
     purged += r.coordsPurged;
   }
@@ -139,10 +139,10 @@ Deno.test("§8.6 trigger (c): after the fixed retention window the coordinates g
   const freshEv = await liveCheckin(fresh, i.fac, i.k);
   await ensureServiceRole();
   await adminSql()`update app.evidence set created_at = now() - interval '29 days' where id = ${oldEv}`;
-  const inside = await drainRescoreBacklog(drainRepo, withOwnership, 50, undefined, NO_GRACE);
+  const inside = await drainRescoreBacklog(drainRepo, withDelegatedActor, 50, undefined, NO_GRACE);
   assert((await coordsOf(oldEv)) !== null, `29 days: still inside the window (${JSON.stringify(inside)})`);
   await adminSql()`update app.evidence set created_at = now() - interval '31 days' where id = ${oldEv}`;
-  const after = await drainRescoreBacklog(drainRepo, withOwnership, 50, undefined, NO_GRACE);
+  const after = await drainRescoreBacklog(drainRepo, withDelegatedActor, 50, undefined, NO_GRACE);
   assert(after.coordsPurged >= 1);
   assertEquals(await coordsOf(oldEv), null, "31 days: past the retention window -> cleared");
   assert((await coordsOf(freshEv)) !== null, "a row inside the window keeps its coordinates (the course is still a stub)");
@@ -186,7 +186,7 @@ Deno.test("A2-01 / §4.2 (MEDIUM): two courses of one facility both split — th
     } },
     "facilities/us.json": facilityShard(i, "play-verified", [{ id: i.k, name: "K", holes: 9 }, { id: i.s, name: "S", holes: 9 }, { id: k2, name: "K2", holes: 9 }, { id: s2, name: "S2", holes: 9 }]),
   });
-  await drainRescoreBacklog(drainRepo, withOwnership, 50, undefined, NO_GRACE);
+  await drainRescoreBacklog(drainRepo, withDelegatedActor, 50, undefined, NO_GRACE);
 
   const pa = (await playScore(actor.uid, i.k))!;
   const pb = (await playScore(actor.uid, k2))!;
@@ -234,7 +234,7 @@ Deno.test("keyset straggler (LOW): a play whose transaction STARTED before the c
 
   // Drain with a 2 s grace: the (committed) plays are re-scored and the cursor passes the
   // straggler's timestamp; the row is NOT closed (it records finished_at and waits out the grace).
-  const first = await drainRescoreBacklog(drainRepo, withOwnership, 50, undefined, { sweepDelaySeconds: 2 });
+  const first = await drainRescoreBacklog(drainRepo, withDelegatedActor, 50, undefined, { sweepDelaySeconds: 2 });
   assertEquals(first.playsProcessed, 2);
   assertEquals(first.coursesCompleted, 0, "a short page does not close the course");
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_rescore_backlog where course_id = '${i.k}' and done_at is null and finished_at is not null`), 1);
@@ -248,7 +248,7 @@ Deno.test("keyset straggler (LOW): a play whose transaction STARTED before the c
   // After the grace, the sweep rewinds the cursor and reaches it.
   await sleep(2200);
   let completed = 0;
-  for (let pass = 0; pass < 6 && completed === 0; pass++) completed += (await drainRescoreBacklog(drainRepo, withOwnership, 50, undefined, { sweepDelaySeconds: 2 })).coursesCompleted;
+  for (let pass = 0; pass < 6 && completed === 0; pass++) completed += (await drainRescoreBacklog(drainRepo, withDelegatedActor, 50, undefined, { sweepDelaySeconds: 2 })).coursesCompleted;
   assertEquals(completed, 1);
   assertEquals((await playScore(late.uid, i.k))!.status, "confirmed", "the straggler was swept and re-scored at the promoted tier");
   assertEquals(await uniqueCourses(late), 1);

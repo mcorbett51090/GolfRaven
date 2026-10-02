@@ -305,7 +305,10 @@ for _mode in legacy edge; do
   run_as_pg "'$PG_BIN_DIR/psql' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -q -d postgres -c 'CREATE DATABASE \"${DBNAME}_${_mode}\" TEMPLATE \"$DBNAME\"'"
 done
 echo "tools/db/test.sh: Deno integration suite — REAL privileged.ts + handlers against this live cluster, EDGE_DB_MODE=legacy then edge (P3c gate round 2, item 0, as $DBUSER)"
-run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' EDGE_GATEWAY_TEST_PASSWORD='${EDGE_GATEWAY_TEST_PW}' EDGE_DB_MODES='${EDGE_DB_MODES:-legacy edge}' EDGE_DB_DATABASES='legacy=${DBNAME}_legacy edge=${DBNAME}_edge' bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
+# The throwaway edge_gateway password goes to the Deno step on STDIN, never inside this command string: `su -c "<string>"` puts the whole
+# string on the child's command line, which any local user can read in `ps` for as long as the step runs (edge role PR3, PR2 gate LOW).
+# test-deno-integration.sh reads one line from stdin into its own environment (EDGE_GATEWAY_TEST_PASSWORD_STDIN=1 says to).
+printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' EDGE_GATEWAY_TEST_PASSWORD_STDIN=1 EDGE_DB_MODES='${EDGE_DB_MODES:-legacy edge}' EDGE_DB_DATABASES='legacy=${DBNAME}_legacy edge=${DBNAME}_edge' bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
 
 echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
 PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \

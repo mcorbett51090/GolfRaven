@@ -22,7 +22,7 @@
 // `Repo#evidence.resolveQueuedRow` write, reached only by re-running real
 // intake derivation (redrainQueuedEvidenceRow, evidence/handler.ts).
 import { assert, assertEquals, assertNotEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withSystemCatalogImport, withOwnership, getCatalogImportEnvConfig } from "../../functions/_shared/privileged.ts";
+import { withSystemCatalogImport, withOwnership, withDelegatedActor, getCatalogImportEnvConfig } from "../../functions/_shared/privileged.ts";
 import { fetchAndVerifyArtifact, applyImportPlanAtomically, type FetchBytes, type GetSigningKey } from "../../functions/_shared/catalog/import-handler.ts";
 import { drainQueuedCatalog } from "../../functions/_shared/catalog/drain-orchestrator.ts";
 import { canonicalStringify, MANIFEST_DOMAIN, VERSIONS_DOMAIN } from "../../functions/_shared/catalog/manifest-artifact.ts";
@@ -399,7 +399,7 @@ Deno.test("draining: a queued_catalog row whose claimed facility ALREADY resolve
     insert into app.evidence (user_id, source, source_ref, input_hash, status, device_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, queued_input, local_date)
     values (${uid}, 'self_report', ${"drain-test-" + freshUuid()}, ${"h".repeat(64)}, 'queued_catalog', ${deviceId}, ${FAC_Y}, ${CRS_Y1}, ${claimedVersion}, ${adminSql().json(queuedInput)}, ${TODAY_CHICAGO})`;
 
-  const drainResult = await withSystemCatalogImport((repo) => drainQueuedCatalog(repo, withOwnership, 10));
+  const drainResult = await withSystemCatalogImport((repo) => drainQueuedCatalog(repo, withDelegatedActor, 10));
   assert(drainResult.resolved >= 1, `expected at least 1 resolved, got ${JSON.stringify(drainResult)}`);
 
   const rows = await adminSql()`select status, facility_id, catalog_version, claimed_facility_id from app.evidence where user_id = ${uid}`;
@@ -452,7 +452,7 @@ Deno.test("probe D regression: a drained (promoted) row never quarantines, and a
     insert into app.evidence (user_id, source, source_ref, input_hash, status, device_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, queued_input, local_date)
     values (${uid}, 'self_report', ${"probe-d-" + freshUuid()}, ${"j".repeat(64)}, 'queued_catalog', ${deviceId}, ${FAC_Y}, ${CRS_Y1}, ${claimedVersion}, ${adminSql().json(queuedInput)}, ${TODAY_CHICAGO})`;
 
-  const drainResult = await withSystemCatalogImport((repo) => drainQueuedCatalog(repo, withOwnership, 10));
+  const drainResult = await withSystemCatalogImport((repo) => drainQueuedCatalog(repo, withDelegatedActor, 10));
   assert(drainResult.resolved >= 1, `expected the queued row to resolve, got ${JSON.stringify(drainResult)}`);
 
   const fraudSignalsAfterDrain = await rawCount(`select count(*)::int as n from app.fraud_signal where kind = 'quarantined_evidence_row'`);
@@ -514,7 +514,7 @@ Deno.test("H4: drainQueuedCatalog runs and resolves rows via its own transaction
 
   // No import call at all in this test — draining alone, against
   // whatever the cluster's own current state already is.
-  const drainResult = await withSystemCatalogImport((repo) => drainQueuedCatalog(repo, withOwnership, 10));
+  const drainResult = await withSystemCatalogImport((repo) => drainQueuedCatalog(repo, withDelegatedActor, 10));
   assert(drainResult.resolved >= 1, `expected the row to resolve via draining alone, got ${JSON.stringify(drainResult)}`);
 });
 

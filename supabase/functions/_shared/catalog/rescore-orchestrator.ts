@@ -4,7 +4,7 @@
 // (migration 0026, `ImporterRepo#rescoreBacklog`) a BOUNDED amount per
 // pass. The import transaction only INSERTS backlog rows (set-based, one
 // per promoted / newly-split course); everything per-play happens here, one
-// short `withOwnership` transaction per play (the play's own user), so a
+// short `withDelegatedActor` transaction per play (the play's own user), so a
 // promotion that touches thousands of plays can never blow the 12 s
 // transaction_timeout — it just takes several passes. The cursor
 // (a stable (created_at, id) keyset) advances ONLY past plays that
@@ -12,7 +12,7 @@
 // and is retried next pass, never skipped.
 
 import { FIX_COORDS_RETENTION_DAYS, labelSplitPlayAsUserPick, rescorePlayAfterPromotion } from "../evidence/handler.ts";
-import type { Actor, ImporterRepo, Repo } from "../types.ts";
+import type { Actor, ImporterRepo, WithDelegatedActorFn } from "../types.ts";
 import type { Deadline } from "./time-budget.ts";
 
 export interface RescoreBacklogResult {
@@ -28,7 +28,15 @@ export interface RescoreBacklogResult {
   tombstonesPurged: number;
 }
 
-export type WithOwnershipFn = <T>(actor: Actor, op: (repo: Repo) => Promise<T>) => Promise<T>;
+/** Edge role PR3: per-play transactions go through `privileged.ts#withDelegatedActor` (injected, so this module stays privileged.ts-free).
+ * In `edge` mode it binds the play's owner with `private.bind_delegate_for_rescore(backlogId, playId)` (valid only while the backlog
+ * row is open and the play is at its course); in `legacy` mode it is `withOwnership(actor, op)`. */
+export type { WithDelegatedActorFn };
+
+/** The most plays one `list_rescore_plays` page can return (the database definer clamps its limit to this). A page is full when it
+ * holds exactly the requested count, so the request itself never exceeds it: a clamp the caller did not know about would read a full
+ * page as a short one and close the course early. */
+export const MAX_RESCORE_PAGE = 500;
 
 export const DEFAULT_RESCORE_MAX_PLAYS = 50;
 const DEFAULT_RESCORE_MAX_COURSES = 5;
@@ -61,7 +69,7 @@ export interface RescoreOptions {
   sweepDelaySeconds?: number;
 }
 
-export async function drainRescoreBacklog(importerRepo: ImporterRepo, withOwnership: WithOwnershipFn, maxPlays: number = DEFAULT_RESCORE_MAX_PLAYS, deadline?: Deadline, opts: RescoreOptions = {}): Promise<RescoreBacklogResult> {
+export async function drainRescoreBacklog(importerRepo: ImporterRepo, withDelegatedActor: WithDelegatedActorFn, maxPlays: number = DEFAULT_RESCORE_MAX_PLAYS, deadline?: Deadline, opts: RescoreOptions = {}): Promise<RescoreBacklogResult> {
   const sweepDelay = opts.sweepDelaySeconds ?? RESCORE_SWEEP_DELAY_SECONDS;
   const rows = await importerRepo.rescoreBacklog.listOpen(DEFAULT_RESCORE_MAX_COURSES, sweepDelay);
   const result: RescoreBacklogResult = { backlogRows: rows.length, playsProcessed: 0, coursesCompleted: 0, failures: 0, truncated: false, coordsPurged: 0, tombstonesPurged: 0 };
@@ -77,7 +85,7 @@ export async function drainRescoreBacklog(importerRepo: ImporterRepo, withOwners
         result.truncated = true;
         break outer;
       }
-      const requested = budget;
+      const requested = Math.min(budget, MAX_RESCORE_PAGE);
       const plays = await importerRepo.rescoreBacklog.nextPlays(row.courseId, row.cursor, requested);
       let cursor = row.cursor;
       let failed = false;
@@ -90,7 +98,7 @@ export async function drainRescoreBacklog(importerRepo: ImporterRepo, withOwners
         }
         const actor: Actor = { uid: p.userId, role: "authenticated" };
         try {
-          await withOwnership(actor, async (repo) => {
+          await withDelegatedActor({ kind: "rescore", backlogId: row.id, playId: p.playId }, actor, async (repo) => {
             if (row.reason === "promotion") await rescorePlayAfterPromotion(repo, { facilityId: p.facilityId, courseId: p.courseId, playDate: p.playDate });
             else await labelSplitPlayAsUserPick(repo, { playId: p.playId, facilityId: p.facilityId, courseId: p.courseId, playDate: p.playDate });
           });

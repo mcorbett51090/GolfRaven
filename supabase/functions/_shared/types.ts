@@ -391,6 +391,15 @@ export interface Repo {
      * against the SAME submitting device the original live request used —
      * `null` if the row (or its device) is somehow gone. */
     deviceIdFor(id: string): Promise<string | null>;
+    /**
+     * Edge role PR3: the raw submission (`app.evidence.queued_input`) of a still-`queued_catalog` row of THIS actor, read
+     * INSIDE the per-row transaction the drain opens as the row's owner. The system list (`private.list_queued_catalog`)
+     * deliberately omits it (raw coordinates leave the owner's transaction only to the owner), so the drain never has it
+     * until it is bound to the owner. Returns `null` if the row is no longer `queued_catalog` (a concurrent drain resolved it) or
+     * is not this actor's; otherwise `{ queuedInput }`, whose value is whatever is stored (re-validated by the caller, so a NULL
+     * or malformed one still ends the row terminally rather than leaving it queued forever).
+     */
+    readQueuedInput(id: string): Promise<{ queuedInput: unknown } | null>;
   };
 
   play: {
@@ -691,11 +700,25 @@ export interface QueuedEvidenceRow {
    * apart from "it ran, and this id still doesn't exist" (M1's terminal
    * `unknown_id`). */
   claimedCatalogVersion: string;
-  /** The full validated submission (`app.evidence.queued_input`) —
-   * handed to `evidence/handler.ts#redrainQueuedEvidenceRow` verbatim. */
-  queuedInput: Record<string, unknown>;
+  // Edge role PR3: NO `queuedInput` here. The system list never carries the raw submission (`private.list_queued_catalog`
+  // omits it); the drain re-reads it as the row's OWNER, inside the per-row transaction (`Repo#evidence.readQueuedInput`).
   createdAt: string; // ISO 8601
 }
+
+/**
+ * Edge role PR3: which row a delegated transaction acts on. A delegate is the system path's way of acting as ONE user for ONE
+ * unit of work, and the database binds it only while the unit's precondition holds (migration 0030):
+ *   queued_evidence  `private.bind_delegate_for_queued_evidence(evidenceId)`: valid only while that evidence row is `queued_catalog`;
+ *   rescore          `private.bind_delegate_for_rescore(backlogId, playId)`: valid only while the backlog row is open and the play
+ *                    is at that backlog row's course.
+ * The owner it binds is the row's, never a value the caller supplies; the caller's `Actor` is what it EXPECTS, and a mismatch fails
+ * closed before any work runs.
+ */
+export type DelegateRef = { kind: "queued_evidence"; evidenceId: string } | { kind: "rescore"; backlogId: number; playId: string };
+
+/** The shape `privileged.ts#withDelegatedActor` has. `edge`: a transaction that binds the owner through the delegate binder and then
+ * acts as `edge_actor`. `legacy`: exactly `withOwnership(actor, op)` (the delegate is ignored; there is no binder in service_role mode). */
+export type WithDelegatedActorFn = <T>(delegate: DelegateRef, actor: Actor, op: (repo: Repo) => Promise<T>) => Promise<T>;
 
 /** The narrow repository object `privileged.ts#withSystemCatalogImport()`
  * hands to its callback — the importer's own counterpart to `Repo`. */
@@ -800,7 +823,7 @@ export interface ImporterRepo {
      * than an unbounded table scan. Cross-user by design (this IS the
      * system-scoped importer repo) — the caller (drain-orchestrator.ts)
      * opens a PER-ROW, actor-scoped `Repo` transaction (via an injected
-     * `withOwnership`-shaped function) for the actual re-derivation/
+     * `withDelegatedActor`-shaped function, PR3) for the actual re-derivation/
      * status-write, one row's own `userId` at a time — see that module's
      * own header for why promotion moved off `ImporterRepo` entirely
      * (P3e round 2 gate, B2). */

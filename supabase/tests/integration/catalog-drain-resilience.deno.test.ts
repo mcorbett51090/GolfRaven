@@ -12,7 +12,7 @@
 //   LOW: a terminal row keeps no queued submission (queued_input and the
 //     claimed_* columns are cleared).
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
+import { withDelegatedActor, withOwnership, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
 import { drainQueuedCatalog } from "../../functions/_shared/catalog/drain-orchestrator.ts";
 import { makeDrainReadRepo } from "../../functions/_shared/catalog/drain-read-repo.ts";
 import { handleEvidenceIntake } from "../../functions/_shared/evidence/handler.ts";
@@ -21,7 +21,7 @@ import { facilityShard, ids, mint, newPublisher } from "./_publisher.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 const drainRepo = makeDrainReadRepo(withSystemCatalogImport);
-const drain = () => drainQueuedCatalog(drainRepo, withOwnership, 500);
+const drain = () => drainQueuedCatalog(drainRepo, withDelegatedActor, 500);
 
 const todayChicago = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

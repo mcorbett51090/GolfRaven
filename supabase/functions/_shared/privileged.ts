@@ -86,6 +86,7 @@
 import postgres from "postgres";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { Errors, HttpError } from "./http.ts";
+import { makeSelfCheckGate, type SelfCheckGate } from "./edge-selfcheck-gate.ts";
 
 import type { OwnReward, RewardsRepo } from "./rewards/types.ts";
 import type { RewardsAttestationConfig } from "./rewards/production-ports.ts";
@@ -117,6 +118,7 @@ import type {
   UpsertPlayInput,
   UpsertPlayResult,
   CatalogImportEnvConfig,
+  DelegateRef,
   RescoreBacklogRow,
   RescoreCursor,
   RescorePlayRef,
@@ -170,12 +172,13 @@ let _sql: ReturnType<typeof postgres> | null = null;
 // in both modes; the few differences are listed in docs/security/edge-role-design.md
 // §9 ("Behaviour differences between the two modes").
 //
-// PR3 BOUNDARY: the catalog-import system path (`withSystemCatalogImport`, and with
-// it `import-catalog`'s importer / drain-read repositories) stays on the LEGACY
-// pool in `edge` mode, so `edge` mode with `import-catalog` needs BOTH URLs. The
-// per-row user transactions the drains open (`withOwnership`) DO run as edge_actor
-// (they bind the row owner with `bind_actor`, not through a delegate binder: PR3
-// replaces that with `bind_delegate_*` once the importer repo runs as edge_system).
+// PR3 (edge role): the system path is edge_system too. `withSystemCatalogImport` (the importer repo, the drains' list reads, the
+// fix-coordinate purge, the install-link tombstone purge) runs as `edge_system` through GOLFRAVEN_EDGE_DB_URL, so `import-catalog` in
+// `edge` mode needs ONLY that URL and never opens the legacy pool. The drains' per-row USER transactions are `withDelegatedActor`:
+// edge_system binds the row's owner through `private.bind_delegate_for_queued_evidence` / `bind_delegate_for_rescore` (each valid only
+// while its row's precondition holds), then the same transaction acts as `edge_actor`. Nothing in `edge` mode calls `bind_actor` for the
+// system path any more. What stays legacy-only in `edge` mode: nothing in this file; the one `edge`-mode refusal is the OTP-proven
+// cross-account sign-in link (501, docs/security/edge-role-design.md section 12).
 export type DbMode = "legacy" | "edge";
 
 /** Reads `EDGE_DB_MODE` on every call (cheap; lets a test flip it). Anything but
@@ -225,7 +228,6 @@ function sql(): ReturnType<typeof postgres> {
 }
 
 let _edgeSql: ReturnType<typeof postgres> | null = null;
-let _edgeChecked: Promise<void> | null = null;
 
 function edgeSql(): ReturnType<typeof postgres> {
   if (_edgeSql) return _edgeSql;
@@ -241,12 +243,13 @@ function edgeSql(): ReturnType<typeof postgres> {
 const EDGE_FORBIDDEN_MEMBERSHIPS = ["service_role", "authenticated", "anon", "authenticator", "private_definer", "supabase_admin", "postgres"];
 
 /**
- * The startup self-check (edge mode), run once per pool on its first connection: the
+ * The self-check (edge mode), run on a pool's first connection and then periodically (see `edgeChecked`): the
  * session user is `edge_gateway`; nothing in its membership closure (itself included)
  * is a superuser or BYPASSRLS; and it is not a member of `service_role`, `authenticated`
  * (or the other privileged roles above). Any failure rejects with a plain Error — a 500
  * from every handler, i.e. FAILS CLOSED — and is not cached, so the next request
  * re-checks (a misconfiguration is never "remembered as fine", a transient error is retried).
+ * WHEN it runs is `edgeChecked()`'s schedule below: on first use, then periodically (PR3).
  */
 export async function assertEdgeConnectionSafe(db: ReturnType<typeof postgres>): Promise<void> {
   const rows = await db`
@@ -271,14 +274,42 @@ export async function assertEdgeConnectionSafe(db: ReturnType<typeof postgres>):
   }
 }
 
-function edgeChecked(): Promise<void> {
-  if (_edgeChecked) return _edgeChecked;
-  const p = assertEdgeConnectionSafe(edgeSql());
-  _edgeChecked = p;
-  p.catch(() => {
-    if (_edgeChecked === p) _edgeChecked = null; // never cache a failure
+/**
+ * The self-check SCHEDULE (edge role PR3). PR2 ran `assertEdgeConnectionSafe` once per pool and remembered the success for the pool's
+ * life; a worker lives for hours, and `ALTER ROLE edge_gateway BYPASSRLS` or `GRANT service_role TO edge_gateway` made after the first
+ * request went unseen until the worker was recycled. The check now repeats: after EDGE_SELF_CHECK_INTERVAL_MS since the last success, or
+ * EDGE_SELF_CHECK_EVERY_N_TX transactions, whichever comes first. A repeat costs one small catalog query; within the window the gate costs
+ * nothing. A failure is never remembered (the next transaction checks again), and a repeat that fails refuses exactly as the first does:
+ * a plain Error, a 500 from every handler. The schedule logic is `edge-selfcheck-gate.ts` (unit-tested without a database).
+ *
+ * Honest limit: this narrows the window from "the worker's lifetime" to the interval; it does not close it. A change made just after a
+ * check is seen up to one interval (or N transactions) later, and the per-transaction assertion in `openScopedTx` is what covers the roles
+ * the transaction switches INTO (edge_actor / edge_system gaining SUPERUSER or BYPASSRLS) at once.
+ */
+const EDGE_SELF_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const EDGE_SELF_CHECK_EVERY_N_TX = 1000;
+
+function newEdgeSelfCheckGate(over: { intervalMs?: number; everyNCalls?: number; now?: () => number } = {}): SelfCheckGate {
+  return makeSelfCheckGate({
+    check: () => assertEdgeConnectionSafe(edgeSql()),
+    intervalMs: over.intervalMs ?? EDGE_SELF_CHECK_INTERVAL_MS,
+    everyNCalls: over.everyNCalls ?? EDGE_SELF_CHECK_EVERY_N_TX,
+    now: over.now,
   });
-  return p;
+}
+
+let _edgeGate: SelfCheckGate = newEdgeSelfCheckGate();
+
+function edgeChecked(): Promise<void> {
+  return _edgeGate.ensure();
+}
+
+/** Tests only: replaces the self-check schedule (a tiny interval, a fake clock, a call budget) and forgets earlier successes. The next
+ * `resetPrivilegedConnectionsForTests` puts the production schedule back. Returns how many checks the gate has started, as a function. */
+export function setEdgeSelfCheckScheduleForTests(over: { intervalMs?: number; everyNCalls?: number; now?: () => number }): () => number {
+  const gate = newEdgeSelfCheckGate(over);
+  _edgeGate = gate;
+  return () => gate.checksStarted;
 }
 
 /** Tests only: closes both pools and forgets the self-check, so a test can point
@@ -288,7 +319,8 @@ export async function resetPrivilegedConnectionsForTests(): Promise<void> {
   const b = _edgeSql;
   _sql = null;
   _edgeSql = null;
-  _edgeChecked = null;
+  _edgeGate.reset();
+  _edgeGate = newEdgeSelfCheckGate();
   _supportsTransactionTimeout = null;
   await Promise.allSettled([a?.end({ timeout: 1 }), b?.end({ timeout: 1 })]);
 }
@@ -309,19 +341,34 @@ export function userBind(uid: string): ScopedBind {
 }
 
 /**
+ * The system path's binding (edge role PR3): the DELEGATE binders, callable by `edge_system` only. Each binds the owner of ONE row, and only
+ * while that row's precondition holds (migration 0030): `bind_delegate_for_queued_evidence` while the evidence is still `queued_catalog`;
+ * `bind_delegate_for_rescore` while the backlog row is open and the play is at its course. `expectedUid` is the owner the caller believes the
+ * row has (the drain read it from the system list); the transaction compares it with the database's own answer and refuses on a mismatch,
+ * so a delegate can only ever act as the owner of the row it names.
+ */
+export function delegateBind(ref: DelegateRef, expectedUid: string): ScopedBind {
+  if (ref.kind === "queued_evidence") {
+    return { expectedUid, run: (trx) => trx`select private.bind_delegate_for_queued_evidence(${ref.evidenceId}::uuid)` };
+  }
+  return { expectedUid, run: (trx) => trx`select private.bind_delegate_for_rescore(${ref.backlogId}::bigint, ${ref.playId}::uuid)` };
+}
+
+/**
  * THE one way an edge-mode transaction is opened (design §6): in order,
  *   1. `SET LOCAL ROLE edge_actor | edge_system` (the session user, `edge_gateway`, may SET into both);
  *   2. the three timeouts (`statement`, `lock`, and `transaction` where PG17+ has it);
- *   3. the bind (`private.bind_actor(uid)`; the system kind binds nothing);
+ *   3. the bind (`private.bind_actor(uid)`; the system kind binds nothing; the DELEGATE kind starts as `edge_system`, calls a delegate
+ *      binder, and only then switches to `edge_actor`: `bind_delegate_*` is `edge_system`-only, and the work that follows is the owner's);
  *   4. an assertion that `current_user` is the expected role, that role is neither SUPERUSER nor
- *      BYPASSRLS, and (actor kind) `private.actor_uid()` equals the expected uid.
- * Any failure throws before `op` runs. The startup self-check has already passed on this pool.
+ *      BYPASSRLS, and (actor / delegate kinds) `private.actor_uid()` equals the expected uid.
+ * Any failure throws before `op` runs. The self-check has already passed on this pool (and repeats, see `edgeChecked`).
  */
-export async function openScopedTx<T>(kind: "actor" | "system", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
+export async function openScopedTx<T>(kind: "actor" | "system" | "delegate", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
   await edgeChecked();
   const db = edgeSql();
   const txTimeoutSupported = await supportsTransactionTimeout(db);
-  const role = kind === "actor" ? "edge_actor" : "edge_system";
+  const role = kind === "system" ? "edge_system" : "edge_actor";
   return await (db.begin(async (trx: TxSql) => {
     // Literal SQL text (no `${...}`): SET LOCAL takes no bind parameter — see the note above STATEMENT_TIMEOUT.
     if (kind === "actor") await trx`set local role edge_actor`;
@@ -330,7 +377,10 @@ export async function openScopedTx<T>(kind: "actor" | "system", bind: ScopedBind
     await trx`set local lock_timeout = '5s'`;
     if (txTimeoutSupported) await trx`set local transaction_timeout = '12s'`;
     if (bind.run) await bind.run(trx);
-    if (kind === "actor") {
+    // A delegate acts as the owner it just bound: from here on the transaction is edge_actor's (the binding stays: it is keyed on the
+    // backend and the transaction, not on the role).
+    if (kind === "delegate") await trx`set local role edge_actor`;
+    if (kind !== "system") {
       const check = await trx`
         select current_user::text as u,
                (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged,
@@ -884,6 +934,14 @@ function buildRepo(trx: TxSql, actor: Actor, mode: DbMode): Repo {
       async deviceIdFor(id: string): Promise<string | null> {
         const rows = await trx`select device_id from app.evidence where id = ${id} and user_id = ${uid}`;
         return rows[0]?.device_id ?? null;
+      },
+
+      // Edge role PR3: the drain's re-read of the raw submission AS THE ROW'S OWNER (see types.ts). Guarded by status so a row a
+      // concurrent drain already resolved reads as "gone", never as a stale submission to re-run.
+      async readQueuedInput(id: string): Promise<{ queuedInput: unknown } | null> {
+        const rows = await trx`select queued_input from app.evidence where id = ${id} and user_id = ${uid} and status = 'queued_catalog'`;
+        const r = rows[0];
+        return r ? { queuedInput: r.queued_input } : null;
       },
 
       async listForPlay(facilityId: string, courseId: string, localDate: string): Promise<StoredEvidenceRow[]> {
@@ -1718,6 +1776,29 @@ export async function withOwnership<T>(actor: Actor, op: Op<T>): Promise<T> {
 }
 
 /**
+ * Edge role PR3: the system path's per-row USER transaction — the drain (`queued_catalog`) and the re-score backlog act on one user's rows
+ * on the user's behalf, with no JWT. In `edge` mode this is NOT `withOwnership`: the transaction starts as `edge_system`, binds the row's
+ * owner through the delegate binder named by `delegate` (`private.bind_delegate_for_queued_evidence` / `bind_delegate_for_rescore`, each
+ * valid only while the row's own precondition holds: the evidence is still `queued_catalog`; the backlog row is open and the play is at
+ * its course), then switches to `edge_actor`, so FORCE RLS scopes every statement to that one user exactly as for a signed-in request.
+ * `actor.uid` is the owner the caller EXPECTS (the system list's `user_id`); the database's answer is compared with it before `op` runs.
+ * A delegate-bound transaction cannot be re-bound, and cannot delete or export the account, activate a reward, or touch sign-in state
+ * (those definers require a `kind = 'user'` binding): it can do the ordinary per-user Repo work the drain needs and nothing wider.
+ *
+ * In `legacy` mode there is no binder (service_role), and this is exactly `withOwnership(actor, op)`; the delegate is not consulted.
+ */
+export async function withDelegatedActor<T>(delegate: DelegateRef, actor: Actor, op: Op<T>): Promise<T> {
+  if (getDbMode() === "edge") {
+    try {
+      return await openScopedTx("delegate", delegateBind(delegate, actor.uid), (trx) => op(buildRepo(trx, actor, "edge")));
+    } catch (err) {
+      throw mapPgTimeoutError(err);
+    }
+  }
+  return withOwnership(actor, op);
+}
+
+/**
  * The batch counterpart to `withOwnership` (P3c gate round 3, blocking
  * MEDIUM 4: "Batch: one failing item aborts the whole transaction").
  * `evidence-batch/index.ts` is the one caller — every item runs inside
@@ -1891,6 +1972,16 @@ export async function withOwnershipBatch<T>(
  * and `mapPgTimeoutError()` (now maps CONNECTION_CLOSED -> 503 for this
  * function's own callers too, not just `withOwnership`'s). */
 export async function withSystemCatalogImport<T>(op: (repo: ImporterRepo) => Promise<T>): Promise<T> {
+  if (getDbMode() === "edge") {
+    // Edge role PR3: the importer repo runs as `edge_system` through the edge pool, so `import-catalog` in `edge` mode needs ONLY
+    // GOLFRAVEN_EDGE_DB_URL: this branch never calls `sql()`, the legacy pool. Every statement stays inside edge_system's column grants and
+    // policies (0031); what edge_system cannot read (evidence, plays) goes through the list / purge definers (see buildImporterRepo).
+    try {
+      return await openScopedTx("system", { expectedUid: null }, (trx) => op(buildImporterRepo(trx, "edge")));
+    } catch (err) {
+      throw mapPgTimeoutError(err);
+    }
+  }
   const db = sql();
   const txTimeoutSupported = await supportsTransactionTimeout(db);
   try {
@@ -1903,7 +1994,7 @@ export async function withSystemCatalogImport<T>(op: (repo: ImporterRepo) => Pro
       if (check[0]?.u !== "service_role") {
         throw new Error(`withSystemCatalogImport: expected current_user = 'service_role' after SET LOCAL ROLE, got '${check[0]?.u}'`);
       }
-      const repo = buildImporterRepo(trx);
+      const repo = buildImporterRepo(trx, "legacy");
       return op(repo);
     }) as Promise<T>);
   } catch (err) {
@@ -1919,7 +2010,7 @@ export async function withSystemCatalogImport<T>(op: (repo: ImporterRepo) => Pro
  * "assign the next catalog_version" serialization point, system-wide,
  * not one per anything), so it reuses `advisoryLockKeys` directly rather
  * than duplicating the hash. */
-function buildImporterRepo(trx: TxSql): ImporterRepo {
+function buildImporterRepo(trx: TxSql, mode: DbMode): ImporterRepo {
   return {
     now(): Date {
       return new Date();
@@ -2309,6 +2400,13 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
         return r ? { playId: r.cursor_play_id as string, createdAt: r.cursor_created_at as string } : null;
       },
       async purgeFixCoords(retentionDays: number, limit: number): Promise<number> {
+        if (mode === "edge") {
+          // edge_system has no privilege on app.evidence: the SAME statement runs inside `private.purge_fix_coords` (0030/0032) as
+          // `private_definer`, which can only remove the `fixCoords` key from rows that still carry it, with the retention pinned to 7..30 days
+          // and the limit to 1..10000 (a violation raises 22023). The importer passes 30 days and 5000.
+          const purged = await trx`select private.purge_fix_coords(${retentionDays}::int, ${limit}::int) as n`;
+          return Number(purged[0]?.n ?? 0);
+        }
         const rows = await trx`
           with doomed as (
             select e.id from app.evidence e
@@ -2349,6 +2447,19 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
         // truncate the cursor — so it is cast text -> timestamptz in SQL.
         const afterAt = after?.createdAt ?? null;
         const afterId = after?.playId ?? null;
+        if (mode === "edge") {
+          // edge_system has no privilege on app.play: `private.list_rescore_plays` (0030) is the same keyset page, readable only for a course
+          // that has an OPEN backlog row, capped at 500 rows (the orchestrator never asks for more: MAX_RESCORE_PAGE). The cursor stays text end
+          // to end and is cast to timestamptz in SQL, exactly as below, so the keyset keeps its microseconds.
+          const listed = await trx`
+            select play_id, user_id, facility_id, course_id, play_date, created_at_text
+            from private.list_rescore_plays(${courseId}, ${afterAt}::text::timestamptz, ${afterId}::uuid, ${limit}::int)`;
+          return listed.map((r) => ({
+            playId: r.play_id as string, userId: r.user_id as string, facilityId: r.facility_id as string, courseId: r.course_id as string,
+            playDate: r.play_date instanceof Date ? r.play_date.toISOString().slice(0, 10) : String(r.play_date),
+            createdAt: r.created_at_text as string,
+          }));
+        }
         const rows = await trx`
           select id, user_id, facility_id, course_id, play_date, created_at::text as created_at_text from app.play
           where course_id = ${courseId} and (${afterId}::uuid is null or (created_at, id) > (${afterAt}::text::timestamptz, ${afterId}::uuid))
@@ -2376,19 +2487,25 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
       // evidence/handler.ts#redrainQueuedEvidenceRow's header, for the
       // full "why".
       async listOpen(limit: number): Promise<QueuedEvidenceRow[]> {
-        const rows = await trx`
-          select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, queued_input, created_at
-          from app.evidence
-          where status = 'queued_catalog'
-          order by created_at asc
-          limit ${limit}`;
+        // Edge role PR3, both modes: the raw submission (`queued_input`) is NOT listed. The drain reads it as the row's owner, inside the
+        // per-row transaction (`Repo#evidence.readQueuedInput`), so raw coordinates leave the owner's transaction only to the owner.
+        // `edge`: `private.list_queued_catalog` (edge_system has no privilege on app.evidence; the definer returns exactly these columns,
+        // capped at 500 rows). `legacy`: the same columns straight from the table.
+        const rows =
+          mode === "edge"
+            ? await trx`select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, created_at from private.list_queued_catalog(${limit}::int)`
+            : await trx`
+                select id, user_id, claimed_facility_id, claimed_course_id, claimed_catalog_version, created_at
+                from app.evidence
+                where status = 'queued_catalog'
+                order by created_at asc
+                limit ${limit}`;
         return rows.map((r) => ({
           id: r.id,
           userId: r.user_id,
           claimedFacilityId: r.claimed_facility_id,
           claimedCourseId: r.claimed_course_id,
           claimedCatalogVersion: r.claimed_catalog_version,
-          queuedInput: r.queued_input,
           createdAt: r.created_at.toISOString(),
         }));
       },
