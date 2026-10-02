@@ -117,7 +117,12 @@ describe("the rewards modules", () => {
 describe("the migration", () => {
   it("0027 is the only migration that defines the activation functions, and none of them is SECURITY DEFINER", () => {
     const migrations = join(FUNCTIONS, "..", "migrations");
-    const hits = readdirSync(migrations).filter((n) => /app\.(activate_|resolve_held_)/.test(readFileSync(join(migrations, n), "utf8")));
+    // DEFINITIONS only (comments stripped): a later migration may legitimately GRANT EXECUTE on these functions
+    // (0031_edge_role_policies.sql gives the edge_actor role EXECUTE on the activation functions) without defining them.
+    const stripComments = (sql: string) => sql.replace(/^\s*--.*$/gm, "");
+    const hits = readdirSync(migrations).filter((n) =>
+      /CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+app\.(activate_|resolve_held_)/i.test(stripComments(readFileSync(join(migrations, n), "utf8"))),
+    );
     expect(hits).toEqual(["0027_rewards_activation.sql"]);
     const text = readFileSync(join(migrations, "0027_rewards_activation.sql"), "utf8").replace(/^\s*--.*$/gm, "");
     // Exactly ONE SECURITY DEFINER function, and it is the vault reader (N4): no app.* function is one.

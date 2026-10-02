@@ -2148,3 +2148,98 @@ The P3f security gate passed with no BLOCKER or HIGH; N1–N5 re-probed fixed on
    or ends held); worst case remains a row-4 review, never an issued or refused reward.
 5. **LOW —** `mark_account_devices_fraud_voided` writes the raw user id into `audit_log.subject_id`,
    which can re-link the tombstone for fraud-voided accounts (intended for fraud audit; revisit with F19).
+
+## Edge role PR1 (2026-10-02): the NOBYPASSRLS login role, database side (follow-up 6, step 1 of 4)
+
+Follow-up 6 ("move to a dedicated `NOBYPASSRLS` login role before the first real deploy") is **still open**: it closes at
+PR4, when `privileged.ts` stops using `service_role`. PR1 ships only the database half, and nothing in the TypeScript
+uses it yet. Full design as built, the table-to-mechanism matrix, deviations and PR2-PR4 notes:
+[`docs/security/edge-role-design.md`](edge-role-design.md).
+
+- **Migrations** `0030_edge_role_core.sql` (roles `edge_gateway` / `edge_actor` / `edge_system`; `private.actor_binding`,
+  `bind_actor`, `actor_uid()`; the delegate binders; rate-limit, delete and export wrappers; the nonce, link-signal,
+  list and purge definers; registries) and `0031_edge_role_policies.sql` (every grant and policy; the nonce-tombstone
+  trigger-function redefinition). `edge_gateway` is created NOLOGIN: LOGIN and the password come only from
+  `tools/db/provision-edge-login.sh` (env var or stdin, never an argument). `service_role`, `anon` and
+  `authenticated` are untouched, so nothing that works today changes.
+- **Identity is the binding, not a GUC.** An edge_actor transaction calls `private.bind_actor(uid)` once; every policy is
+  `user_id = (select private.actor_uid())`. The binding is valid only for the transaction that made it, so a pooled
+  connection, a rolled-back savepoint or a forgotten bind fails closed. A compromised Edge runtime can still bind any
+  uid (the authenticator trust model); what changes is that the connection cannot forge identity by setting a session
+  variable and every cross-user path is a named function.
+- **The held-review cascade is not redefined.** It stays an invoker-rights trigger and works under edge_actor because the
+  play, its codes and its entitlements belong to one user and edge_actor has UPDATE on exactly the columns it writes
+  (P3f round 3's lock-order rewrite needs nothing more). The one trigger function that had to change is the nonce
+  tombstone, which now calls `private.record_consumed_nonce`.
+- **Checks 9-12** in `tools/db/verify-function-inventory.mjs` and `supabase/tests/matrix/10_function_inventory.sql`: the
+  membership closure is clean; the live edge policies equal `private.edge_policy_allowlist` both ways (plus the checked-in
+  fixture `supabase/tests/fixtures/edge_policy_exprs.txt`); edge policies read `private.actor_uid()` and no other
+  identity source; no edge_system policy or privilege on a PII-registered table, and no edge privilege outside FORCE-RLS
+  `app` tables. Check 2 now also compares the new `expected_edge_actor` / `expected_edge_system` EXECUTE columns. Each
+  check has a must-fail fixture.
+- **`supabase/tests/matrix/16_edge_role.sql`** (585 assertions) runs as a real `edge_gateway` login (it reconnects: `SET
+  ROLE` is judged by the session user, so escalation cells are only meaningful on that connection). Every UPDATE cell
+  asserts a ROW COUNT with a control on the actor's own row, because under RLS an UPDATE with no policy is a silent 0.
+- **Accepted residual risks** (details in the design doc): R1 edge_actor can UPDATE `offer.budget_reserved` on an offer it
+  holds a code on; R2 it can UPDATE its own `offer_code` / `entitlement` state directly, bypassing the activation
+  functions' backstops (PR5 moves activation behind definers); R3 `private.account_pseudonyms(uuid)` accepts any uid.
+- **Verification (final P3f 0027/0028/0029, rebased on `6e436a4`, both harness modes):** `tools/db/test.sh` exit 0 in
+  `HARNESS_MODE=superuser` and `restricted`: pgTAP 17 files, 1302 assertions; Deno integration 145 tests; function
+  inventory OK; service-role lint clean. Also green: `check-migrations-immutable.sh --self-test` and `--base 4f7117c` (29 files),
+  vitest units (29 files, 494 tests), `deno check --frozen`, gitleaks. Eighteen mutation proofs, each applied to a `/tmp`
+  copy, were each caught (the actor binding ignoring the transaction, a second bind allowed, a staff-issued challenge
+  allowed, a broadened or open policy, a table grant to edge_system, a missing review_item read, a no-op tombstone, an
+  un-prefixed rate-limit key, a delegate allowed to delete, an uncapped purge retention, a missing offer_code UPDATE
+  policy (the silent-0 case), `edge_gateway` made a member of `service_role`, an `auth.uid()` policy, a check that ignores
+  policy text, and policy-text drift in a fixture).
+
+Accepted follow-ups (append-only; E-numbers are this work's own):
+
+- **E1.** Close follow-up 6 at PR4. Until then the Edge functions still run as `service_role`.
+- **E2.** PR5: revoke `service_role` DML on `app.*` and EXECUTE on `private.*`; move activation behind definers (R2);
+  optionally verify the JWT in the database.
+- **E3.** `[unverified]` on a real Supabase project: `CREATE ROLE` / `ALTER ROLE ... LOGIN PASSWORD` for the project's
+  `postgres`, the Supavisor tenant entry and `pg_hba` limits for `edge_gateway`, and whether `log_statement` records the
+  provisioning statement's password literal.
+- **E4.** The earn path (not built) will need a definer: `offer_code_enforce_max_redemptions` counts only visible codes
+  under edge_actor, and edge_actor cannot insert `offer_code`.
+
+## Edge role PR1 gate PASS (`ca8b8f1`, 2026-10-02): findings to close before PR2 relies on the policies
+
+The gate passed (no BLOCKER/HIGH): actor binding, escalation, GUC windows and checks 9–12 held under
+real `edge_gateway` probes. These are scheduled as **edge role PR1b** (new migration 0032), which must
+merge before PR2 routes any query through `edge_actor`:
+
+1. **MEDIUM — provisioning leaks the plaintext password to the server log on failure**
+   (`tools/db/provision-edge-login.sh`; `log_min_error_statement=error` logs the failing
+   `ALTER ROLE … PASSWORD`). Send a client-computed SCRAM-SHA-256 verifier instead; fix E3 / design §2.
+2. **MEDIUM — one-way columns are reversible under `edge_actor`:** `checkin_token.consumed_at` can be
+   reset to NULL (presence-token replay) and `device.attest_counter` can be rolled back (defeats App
+   Attest anti-replay, AT 5). Add BEFORE UPDATE one-way triggers (set-once / monotonic), add to R2.
+3. **MEDIUM — own-row WITH CHECK covers `user_id` only:** an actor can write rows that reference another
+   user's device or challenge (`checkin_token`, `evidence.device_id`, `push_token`,
+   `offer_code.activated_device_id`), and the FK check doubles as an existence oracle. Add
+   own-device / own-challenge `EXISTS` to those WITH CHECK clauses (`IS NULL OR EXISTS` for
+   `activated_device_id`).
+4. **MEDIUM (R1, confirmed) — shared offer budget counter writable** by any actor holding a code on the
+   offer (`budget_reserved` settable within `[0, cap − used]`; `release_offer_budget` drains it), and R2
+   (`earned` → `issued` directly). **R1 closure (reserve/release behind definers) is now a precondition
+   of PR4**, not optional PR5.
+5. **LOW —** `private.delete_my_data` reads `pg_catalog` relations unqualified, and `edge_actor` holds
+   TEMP, so a temp `pg_constraint` shadows it (fails closed via the post-condition). Qualify
+   `pg_catalog.*` in a new migration; add an inventory check for unqualified relations in reachable
+   definers.
+6. **LOW —** check 9 misses ADMIN-only membership; check 12 covers too few schemas and never checks
+   schema CREATE. Extend both.
+7. **LOW —** 0030 does not reject a pre-existing misconfigured `edge_*` role (SUPERUSER / BYPASSRLS /
+   REPLICATION / foreign membership); add an asserting DO block.
+8. **LOW —** delegate preconditions are caller-controlled for `edge_system` (it can insert its own open
+   backlog row); reword the design doc (moot under R6).
+9. **LOW —** `review_item` SELECT shows all kinds on own codes; `audit_log` INSERT does not tie
+   `subject_id` to the actor's play; `install_link_account` INSERT does not tie to the actor's device
+   hash / key. Tighten.
+10. **LOW —** add session-reuse pgTAP cells for the three new GUC windows (P3a follow-up 1).
+11. **NIT —** compare `app.edge.link_device_id` as text (a non-uuid session value breaks reads with
+    22P02); `bind_actor` does not exclude soft-deleted / banned users `[unverified]`; `purge_fix_coords`
+    accepts 1-day retention; `rewards-isolation.test.ts` misses a later `ALTER FUNCTION … SECURITY
+    DEFINER` (inventory check 3 backstops it).

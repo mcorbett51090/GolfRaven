@@ -25,6 +25,10 @@
 #      matrix tests exercise), as service_role (SET ROLE, in the same
 #      session — service_role already has full DML + BYPASSRLS, matching
 #      how these rows would really be written by an Edge Function).
+#   5b. Give the `edge_gateway` role (created NOLOGIN by migration 0030) its
+#      LOGIN and a throwaway random password with
+#      tools/db/provision-edge-login.sh, so matrix 16_edge_role.sql can
+#      reconnect as it (the only way `SET ROLE` escalation is testable).
 #   6. Run every supabase/tests/matrix/*.sql file with pg_prove (falls back
 #      to psql + runtests() if pg_prove is unavailable).
 #   6b. Replay/idempotency + money-path concurrency checks (real, two
@@ -226,6 +230,19 @@ done
 # every table these fixtures write to.
 echo "tools/db/test.sh: seeding test fixtures (supabase/tests/helpers.sql, as service_role)"
 run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U '$DBUSER' -v ON_ERROR_STOP=1 -d '$DBNAME' -c 'SET ROLE service_role;' -f '$SUPABASE_DIR/tests/helpers.sql'"
+
+# 5b. The Edge login role (supabase/migrations/0030_edge_role_core.sql creates `edge_gateway` NOLOGIN; a
+# migration never carries a credential). tools/db/provision-edge-login.sh gives it LOGIN and a password, exactly
+# as a real environment does it once at deploy time. The password here is random, throwaway and sent to the
+# script on STDIN (never as an argument); the harness cluster's own auth is `trust`, so what this step proves is
+# that the role is a real, loginable one -- which supabase/tests/matrix/16_edge_role.sql needs, because
+# `SET ROLE` escalation can only be tested from a connection whose SESSION user is edge_gateway. Runs as the
+# bootstrap superuser in BOTH harness modes (the migrating role holds ADMIN on the role in restricted mode, but
+# provisioning is an operator step, not a migration one).
+echo "tools/db/test.sh: provisioning the edge_gateway login (tools/db/provision-edge-login.sh, throwaway random password on stdin)"
+EDGE_GATEWAY_TEST_PW="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER=postgres PGDATABASE='$DBNAME' PSQL_BIN='${PSQL[0]}' bash '$ROOT_DIR/tools/db/provision-edge-login.sh' --password-stdin"
+unset EDGE_GATEWAY_TEST_PW
 
 echo "tools/db/test.sh: running the pgTAP authorization matrix (as $DBUSER)"
 if command -v pg_prove >/dev/null 2>&1 || run_as_pg "command -v pg_prove" >/dev/null 2>&1; then
