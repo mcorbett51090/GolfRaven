@@ -301,6 +301,26 @@ CREATE TABLE IF NOT EXISTS auth.users (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- `auth.identities` (0035, O12 sign-in linking): one row per (provider, provider_id), owned by one user. Real
+-- Supabase's table also carries `id`, `last_sign_in_at`, `updated_at` and a GENERATED `email` column
+-- (lower(identity_data ->> 'email')); this shim reproduces those so a definer written against either shape works
+-- against both. `[unverified — training knowledge of GoTrue's auth.identities shape: the provider_id column (added
+-- 2024), the generated email column and ON DELETE CASCADE from auth.users are recalled, not read from a live
+-- project; migration 0035's header names this as a verify-on-a-real-branch item]`.
+CREATE TABLE IF NOT EXISTS auth.identities (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider_id text NOT NULL,
+  user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  identity_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  provider text NOT NULL,
+  last_sign_in_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  email text GENERATED ALWAYS AS (lower(identity_data ->> 'email')) STORED,
+  UNIQUE (provider_id, provider)
+);
+CREATE INDEX IF NOT EXISTS identities_user_id_idx ON auth.identities (user_id);
+
 -- [unverified — training knowledge of Supabase internals] `auth.uid()` and
 -- `auth.role()` read the `sub` / `role` claims out of the current session's
 -- JWT, which PostgREST makes available as the Postgres GUC
@@ -338,6 +358,9 @@ $$;
 
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT SELECT, INSERT ON auth.users TO service_role;
+-- Test seeding only (supabase/tests/matrix/17_signin_providers.sql and the Deno suite create and read identity
+-- rows the way GoTrue would); no migration grants this to service_role.
+GRANT SELECT, INSERT, DELETE ON auth.identities TO service_role;
 -- migration_owner gets its OWN, separate WITH GRANT OPTION grants (S1,
 -- gate round 3), not folded into the lines above, so only migration_owner
 -- (never anon/authenticated/service_role) can re-grant these onward. It
@@ -354,6 +377,9 @@ GRANT SELECT, INSERT ON auth.users TO service_role;
 -- instead of at migration time.
 GRANT USAGE ON SCHEMA auth TO migration_owner WITH GRANT OPTION;
 GRANT SELECT ON auth.users TO migration_owner WITH GRANT OPTION;
+-- 0035_signin_providers.sql grants private_definer a narrow slice of auth.identities; same GRANT OPTION reasoning as
+-- auth.users above (without it the later GRANT silently no-ops with a WARNING).
+GRANT SELECT, INSERT, DELETE ON auth.identities TO migration_owner WITH GRANT OPTION;
 -- INSERT (not UPDATE/DELETE — helpers.sql never does either): fixture
 -- account seeding in supabase/tests/helpers.sql now runs `SET ROLE
 -- service_role` first (tools/db/test.sh, S1 gate round 3), matching how a

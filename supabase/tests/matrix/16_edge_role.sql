@@ -1361,9 +1361,9 @@ SET LOCAL ROLE service_role;
 SELECT (private.purge_install_link_tombstones(100000) = 1) AS good \gset
 ROLLBACK;
 \if :good
-\echo ok 708 - purge body: with both policies widened, the function's own 24-month cutoff still keeps every younger row (exactly the 25-month row goes)
+\echo ok 708 - purge body: with both policies widened, the 24-month cutoff inside the function still keeps every younger row (exactly the 25-month row goes)
 \else
-\echo not ok 708 - purge body: with both policies widened, the function's own 24-month cutoff still keeps every younger row (exactly the 25-month row goes)
+\echo not ok 708 - purge body: with both policies widened, the 24-month cutoff inside the function still keeps every younger row (exactly the 25-month row goes)
 \endif
 
 -- 709-711: the hold post-condition. A's play 0a02 backs the issued code 0901 AND the entitlement 0801 (see 10a).

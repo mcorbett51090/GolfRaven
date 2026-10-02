@@ -25,6 +25,7 @@
 // methods over fixed tables") rather than one flat 20-method interface.
 
 import type { AttestKeyRepo, RewardsRepo } from "./rewards/types.ts";
+import type { SigninRepo } from "./signin/types.ts";
 
 export type ActorRole = "authenticated" | "staff" | "manager" | "operator" | "admin";
 
@@ -476,6 +477,9 @@ export interface Repo {
   /** App Attest key registration (`POST /v1/devices/attest-key`, P3f follow-up F2) — defined in
    * ./rewards/types.ts. */
   attestKey: AttestKeyRepo;
+
+  /** O12: `me-signin-methods` and the provider-grant revocation (build plan §3.4, §7.8) — defined in ./signin/types.ts. */
+  signin: SigninRepo;
 
   device: {
     /** Looks up a device WITHOUT creating one — P3c gate round 2, item 7

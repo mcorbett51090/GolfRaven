@@ -75,21 +75,30 @@ describe("handleMeDelete", () => {
     expect(second.userId).toBe("user-a");
   });
 
-  it("reads signin/connector providers BEFORE deletion and returns a deferred revocation outcome for each (the P4/P8 seam)", async () => {
+  it("reads connector providers BEFORE deletion and returns a deferred outcome for each (the P8 seam); the sign-in outcomes are the ones the orchestrator passed in (O12)", async () => {
     const state = makeFakeState({
       signinProviders: new Map([["user-a", ["apple", "google"]]]),
       connectorProviders: new Map([["user-a", ["ghin"]]]),
     });
     const repo = makeFakeRepo(state, "user-a");
+    const signin = [
+      { queueId: "q1", provider: "apple", status: "revoked" as const },
+      { queueId: "q2", provider: "google", status: "queued_for_retry" as const, error: "revoke_5xx" },
+    ];
 
-    const result = await handleMeDelete(repo);
+    const result = await handleMeDelete(repo, signin);
 
-    expect(result.signinProvidersRevoked).toHaveLength(2);
-    expect(result.signinProvidersRevoked.map((r) => r.provider).sort()).toEqual(["apple", "google"]);
-    expect(result.signinProvidersRevoked.every((r) => r.deferred === true && r.revoked === false)).toBe(true);
+    // handled by delete-orchestrator.ts BEFORE this handler runs: passed through verbatim, never recomputed or deferred here
+    expect(result.signinProvidersRevoked).toEqual(signin);
     expect(result.connectorsRevoked).toHaveLength(1);
     expect(result.connectorsRevoked[0].provider).toBe("ghin");
     expect(result.connectorsRevoked[0].deferred).toBe(true);
+  });
+
+  it("without an orchestrator outcome (a direct call) the sign-in outcome list is empty, not a fabricated 'deferred' marker", async () => {
+    const state = makeFakeState({ signinProviders: new Map([["user-a", ["apple"]]]) });
+    const result = await handleMeDelete(makeFakeRepo(state, "user-a"));
+    expect(result.signinProvidersRevoked).toEqual([]);
   });
 
   it("returns no revocation outcomes for an actor with no provider grants", async () => {
