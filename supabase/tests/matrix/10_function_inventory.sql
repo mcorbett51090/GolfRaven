@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(42);
+SELECT plan(50);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -559,6 +559,10 @@ SELECT 'role ' || m.rolname || ' can SET ROLE to / inherit from edge role ' || r
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
 WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system') AND (am.set_option OR am.inherit_option)
 UNION ALL
+SELECT 'edge role membership holds ADMIN OPTION for a role that is neither a superuser nor a CREATEROLE role (only the migrating role may): ' || m.rolname || ' -> ' || r.rolname
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND am.admin_option AND NOT (m.rolsuper OR m.rolcreaterole)
+UNION ALL
 SELECT 'edge_gateway is not a SET TRUE, INHERIT FALSE member of ' || t.rolname
 FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system')
   AND NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.member
@@ -658,12 +662,28 @@ UNION ALL
 SELECT 'an edge role holds a privilege on a table outside app, or on an app table without FORCE ROW LEVEL SECURITY: ' || n.nspname || '.' || cl.relname || ' (' || r.rolname || ')'
 FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
 CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
-WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname IN ('app', 'private', 'api', 'auth', 'storage', 'vault')
+WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.deptype = 'e')
   AND (has_any_column_privilege(r.rolname, cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, cl.oid, 'DELETE,TRUNCATE,TRIGGER'))
   AND (n.nspname <> 'app' OR NOT (cl.relrowsecurity AND cl.relforcerowsecurity))
+UNION ALL
+SELECT 'an edge role can CREATE in schema ' || n.nspname || ' (' || r.rolname || ')'
+FROM pg_namespace n
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
+  AND has_schema_privilege(r.rolname, n.oid, 'CREATE')
   ) AS t(v)
 $f$;
 
+
+CREATE FUNCTION pg_temp.edge_check_13() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+SELECT 'SECURITY DEFINER function reads an unqualified pg_ relation (a temp relation of that name would shadow the catalog): ' || n.nspname || '.' || p.proname || ' -> ' || m[1]
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\n]*', '', 'g'), '\m(?:from|join|update|into|table)\s+(pg_[a-z_]+)\M(?!\.|\s*\()', 'gi') AS m
+WHERE p.prosecdef AND n.nspname IN ('app', 'api', 'private')
+  ) AS t(v)
+$f$;
 
 -- ---- check 9: the membership closure of the three edge roles is clean ----
 SELECT is(pg_temp.edge_check_9(), NULL::text[], 'check 9: no edge role reaches a role outside {edge_gateway, edge_actor, edge_system}; none holds SUPERUSER/BYPASSRLS/CREATEROLE/CREATEDB/REPLICATION/INHERIT; only edge_gateway can log in; nobody else can SET ROLE to one');
@@ -682,6 +702,12 @@ ALTER ROLE edge_actor NOCREATEROLE;
 GRANT edge_actor TO zz_edge_member WITH SET TRUE;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '%zz_edge_member can SET ROLE to / inherit from edge role edge_actor%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL: another role can SET ROLE to edge_actor');
+SELECT tests.clear_actor();
+REVOKE edge_actor FROM zz_edge_member;
+GRANT edge_actor TO zz_edge_member WITH ADMIN TRUE, SET FALSE, INHERIT FALSE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%ADMIN OPTION%zz_edge_member -> edge_actor') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (L2): a non-superuser, non-CREATEROLE role holds ADMIN OPTION on edge_actor (it could re-grant it)');
+SELECT is((SELECT bool_or(v LIKE '%SET ROLE to / inherit from%') FROM unnest(pg_temp.edge_check_9()) v), false, 'check 9 (L2): ... and ONLY the admin finding fires (the membership has neither SET nor INHERIT)');
 SELECT tests.clear_actor();
 REVOKE edge_actor FROM zz_edge_member;
 DROP ROLE zz_edge_member;
@@ -751,7 +777,40 @@ SELECT is((SELECT bool_or(v LIKE '%private.consumed_nonce (edge_actor)') FROM un
 SELECT tests.clear_actor();
 REVOKE SELECT ON private.consumed_nonce FROM edge_actor;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12: clean again after every fixture is undone');
+SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12: clean again after the earlier fixtures are undone');
+-- 0032 L2: every non-system schema is covered (not a fixed list), and schema CREATE is checked.
+SELECT tests.clear_actor();
+CREATE SCHEMA zz_edge_schema;
+CREATE TABLE zz_edge_schema.zz_edge_t (a int);
+GRANT USAGE ON SCHEMA zz_edge_schema TO edge_actor;
+GRANT SELECT ON zz_edge_schema.zz_edge_t TO edge_actor;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%zz_edge_schema.zz_edge_t (edge_actor)') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL (L2): an edge role granted a table in a schema that is NOT in the old fixed list (zz_edge_schema)');
+SELECT tests.clear_actor();
+GRANT CREATE ON SCHEMA zz_edge_schema TO edge_system;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'an edge role can CREATE in schema zz_edge_schema (edge_system)') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL (L2): edge_system can CREATE in a schema');
+SELECT tests.clear_actor();
+DROP SCHEMA zz_edge_schema CASCADE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12: clean again after the schema fixtures are dropped (postgis'' own public tables are exempt)');
+
+-- ---- check 13 (0032, L1): no SECURITY DEFINER function reads an unqualified pg_* relation ----
+SELECT is(pg_temp.edge_check_13(), NULL::text[], 'check 13: no SECURITY DEFINER function in app/api/private reads an unqualified pg_* relation (private.delete_my_data qualified them in 0032)');
+SELECT tests.clear_actor();
+CREATE FUNCTION private.zz_edge_shadow() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT count(*)::int FROM pg_class $z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '%private.zz_edge_shadow -> pg_class') FROM unnest(pg_temp.edge_check_13()) v), true, 'check 13 MUST FAIL: a definer that reads pg_class unqualified');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_edge_shadow();
+CREATE FUNCTION private.zz_edge_shadow() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$
+  -- the word pg_class in a comment is not a read:  FROM pg_class
+  SELECT count(*)::int FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = pg_catalog.current_schema() $z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_13(), NULL::text[], 'check 13: a definer that qualifies pg_catalog (and mentions an unqualified name only in a comment) is clean');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_edge_shadow();
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 SELECT * FROM finish();
 ROLLBACK;

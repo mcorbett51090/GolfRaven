@@ -131,6 +131,18 @@ describe("the migration", () => {
     expect(text).not.toMatch(/DISABLE ROW LEVEL SECURITY|NO FORCE ROW LEVEL SECURITY/i);
   });
 
+  it("no migration turns an activation / reservation function into SECURITY DEFINER by ALTER FUNCTION either", () => {
+    // 0032 NIT: the check above reads 0027's CREATE statements only; a LATER `ALTER FUNCTION app.activate_offer_code(...)
+    // SECURITY DEFINER` would bypass it (inventory check 3 backstops it in the database; this keeps it out of review too).
+    // The sanctioned way to give the edge role these paths is a private.* definer that CALLS the invoker-rights function.
+    const migrations = join(FUNCTIONS, "..", "migrations");
+    const stripComments = (sql: string) => sql.replace(/^\s*--.*$/gm, "");
+    const offenders = readdirSync(migrations).filter((n) =>
+      /ALTER\s+FUNCTION\s+app\.(activate_|resolve_held_|reserve_offer|release_offer|release_account|consume_offer|hold_play|play_held_review|offer_code_reservation)\w*\s*\([^)]*\)[^;]*\bSECURITY\s+DEFINER/i.test(stripComments(readFileSync(join(migrations, n), "utf8"))),
+    );
+    expect(offenders).toEqual([]);
+  });
+
   it("0029 redefines exactly one function — the install-link pseudonym — with a domain-separated HMAC input", () => {
     const text = readFileSync(join(FUNCTIONS, "..", "migrations", "0029_install_link_pseudonym_domain.sql"), "utf8").replace(/^\s*--.*$/gm, "");
     expect([...text.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)/gi)].map((m) => m[1])).toEqual(["private.account_pseudonyms"]);

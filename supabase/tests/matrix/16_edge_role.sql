@@ -106,6 +106,9 @@ INSERT INTO app.play (id, user_id, course_id, facility_id, play_date, policy_ver
   ('eeee0000-0000-0000-0000-0000000a0a02', 'eeee0000-0000-0000-0000-0000000000a0', 'crs_x1', 'fac_x', current_date - 3, 'v1', 'confirmed', 0.60),
   ('eeee0000-0000-0000-0000-0000000b0a01', 'eeee0000-0000-0000-0000-0000000000b0', 'crs_x1', 'fac_x', current_date - 3, 'v1', 'confirmed', 0.60),
   ('eeee0000-0000-0000-0000-0000000b0a02', 'eeee0000-0000-0000-0000-0000000000b0', 'crs_y1', 'fac_y', current_date - 2, 'v1', 'confirmed', 0.60);
+-- B's play b0a02 is already HELD (it backs no reward): the cascade definer's "is it the bound actor's play" check is only
+-- meaningful against a play that really is held and really is someone else's.
+UPDATE app.play SET held_review = true WHERE id = 'eeee0000-0000-0000-0000-0000000b0a02';
 INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES
   ('eeee0000-0000-0000-0000-0000000b0a01', 'eeee0000-0000-0000-0000-0000000b0e01', 'eeee0000-0000-0000-0000-0000000000b0'),
   ('eeee0000-0000-0000-0000-0000000a0a02', 'eeee0000-0000-0000-0000-0000000a0e01', 'eeee0000-0000-0000-0000-0000000000a0');
@@ -119,6 +122,7 @@ INSERT INTO app.fraud_signal (user_id, kind, detail) VALUES
 -- this is also the service_role path of the redefined trigger function).
 INSERT INTO app.checkin_challenge (id, user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES
   ('eeee0000-0000-0000-0000-0000000a0c01', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'fac_x', 'edge-seed-nonce-a-' || :'run', 'live', now() - interval '1 minute', now() + interval '1 hour'),
+  ('eeee0000-0000-0000-0000-0000000a0c02', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'fac_x', 'edge-seed-nonce-a2-' || :'run', 'live', now() - interval '1 minute', now() + interval '1 hour'),
   ('eeee0000-0000-0000-0000-0000000b0c01', 'eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-00000000b001', 'fac_x', 'edge-seed-nonce-b-' || :'run', 'live', now() - interval '1 minute', now() + interval '1 hour');
 INSERT INTO app.checkin_token (jti, challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES
   ('eeee0000-0000-0000-0000-0000000a0d01', 'eeee0000-0000-0000-0000-0000000a0c01', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'fac_x', 'unattestable', 'live', now() - interval '1 minute', now() + interval '1 hour'),
@@ -139,6 +143,7 @@ INSERT INTO app.connector_account (id, user_id, provider, external_user_id, refr
 INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, activated_device_id, activated_at, expires_at, play_id) VALUES
   ('eeee0000-0000-0000-0000-0000000a0901', 'eeee0000-0000-0000-0000-00000000e101', 'eeee0000-0000-0000-0000-0000000000a0', 'fac_x', 'issued', 'eeee0000-0000-0000-0000-00000000a001', now(), now() + interval '30 days', 'eeee0000-0000-0000-0000-0000000a0a02');
 INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state) VALUES
+  ('eeee0000-0000-0000-0000-0000000d0903', 'eeee0000-0000-0000-0000-00000000e102', 'eeee0000-0000-0000-0000-0000000000d0', 'fac_x', 'earned'),
   ('eeee0000-0000-0000-0000-0000000a0903', 'eeee0000-0000-0000-0000-00000000e103', 'eeee0000-0000-0000-0000-0000000000a0', 'fac_x', 'earned'),
   ('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-00000000e104', 'eeee0000-0000-0000-0000-0000000000a0', 'fac_x', 'earned');
 INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, activated_device_id, activated_at, expires_at, play_id, reserved_amount) VALUES
@@ -161,7 +166,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(585);
+SELECT plan(678);
 
 -- ----------------------------------------------------------------------------
 -- Test-only helpers (session-local, in pg_temp; never part of a migration)
@@ -217,8 +222,7 @@ BEGIN
       $q$SELECT count(*) FROM app.checkin_token WHERE user_id = '{B}'$q$, $q$SELECT count(*) FROM app.checkin_token WHERE user_id = '{A}'$q$,
       $q$UPDATE app.checkin_token SET consumed_at = now() WHERE user_id = '{B}' AND consumed_at IS NULL$q$, $q$UPDATE app.checkin_token SET consumed_at = now() WHERE user_id = '{A}' AND consumed_at IS NULL$q$,
       $q$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES ('eeee0000-0000-0000-0000-0000000b0c01', '{B}', '{DB}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$q$,
-      $q$WITH c AS (INSERT INTO app.checkin_challenge (user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES ('{A}', '{DA}', 'fac_x', 'edge-c-' || gen_random_uuid(), 'live', clock_timestamp(), now() + interval '2 minutes') RETURNING id)
-         INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) SELECT id, '{A}', '{DA}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes' FROM c$q$),
+      $q$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES ('eeee0000-0000-0000-0000-0000000a0c02', '{A}', '{DA}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$q$),
     ('push_token',
       $q$SELECT count(*) FROM app.push_token WHERE user_id = '{B}'$q$, $q$SELECT count(*) FROM app.push_token WHERE user_id = '{A}'$q$,
       $q$UPDATE app.push_token SET expo_token = 'x' WHERE user_id = '{B}'$q$, $q$UPDATE app.push_token SET expo_token = 'x' WHERE user_id = '{A}'$q$,
@@ -235,30 +239,23 @@ BEGIN
       NULL::text, NULL::text, NULL::text, NULL::text),
     ('device_reward_ledger',
       $q$SELECT count(*) FROM app.device_reward_ledger WHERE user_id = '{B}'$q$, $q$SELECT count(*) FROM app.device_reward_ledger WHERE user_id = '{A}'$q$,
-      NULL::text, NULL::text,
-      $q$INSERT INTO app.device_reward_ledger (device_id, user_id, reward_kind, reward_id) VALUES ('{DB}', '{B}', 'offer', gen_random_uuid())$q$,
-      $q$INSERT INTO app.device_reward_ledger (device_id, user_id, reward_kind, reward_id) VALUES ('{DA}', '{A}', 'offer', gen_random_uuid())$q$),
+      NULL::text, NULL::text, NULL::text, NULL::text),
+    -- offer_code / entitlement / offer / review_item: READ-ONLY (or nothing) for edge_actor since 0032 (M4); the writes
+    -- are the definers' (section 7b proves every direct write is refused, section 10 proves the definer paths).
     ('offer_code',
       $q$SELECT count(*) FROM app.offer_code WHERE user_id = '{B}'$q$, $q$SELECT count(*) FROM app.offer_code WHERE user_id = '{A}'$q$,
-      $q$UPDATE app.offer_code SET hold_detail = hold_detail WHERE user_id = '{B}'$q$, $q$UPDATE app.offer_code SET hold_detail = hold_detail WHERE user_id = '{A}'$q$,
-      NULL::text, NULL::text),
+      NULL::text, NULL::text, NULL::text, NULL::text),
     ('entitlement',
       $q$SELECT count(*) FROM app.entitlement WHERE user_id = '{B}'$q$, $q$SELECT count(*) FROM app.entitlement WHERE user_id = '{A}'$q$,
-      $q$UPDATE app.entitlement SET hold_detail = hold_detail WHERE user_id = '{B}'$q$, $q$UPDATE app.entitlement SET hold_detail = hold_detail WHERE user_id = '{A}'$q$,
-      NULL::text, NULL::text),
+      NULL::text, NULL::text, NULL::text, NULL::text),
     ('offer',
       $q$SELECT count(*) FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e102'$q$, $q$SELECT count(*) FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e101'$q$,
-      $q$UPDATE app.offer SET budget_reserved = budget_reserved WHERE id = 'eeee0000-0000-0000-0000-00000000e102'$q$, $q$UPDATE app.offer SET budget_reserved = budget_reserved WHERE id = 'eeee0000-0000-0000-0000-00000000e101'$q$,
-      NULL::text, NULL::text),
-    ('review_item',
-      NULL::text, NULL::text, NULL::text, NULL::text,
-      $q$INSERT INTO app.review_item (kind, subject_table, subject_id, detail) VALUES ('held_offer_budget_unreserved', 'offer_code', 'eeee0000-0000-0000-0000-0000000b0901', '{}')$q$,
-      $q$INSERT INTO app.review_item (kind, subject_table, subject_id, detail) VALUES ('held_offer_budget_unreserved', 'offer_code', 'eeee0000-0000-0000-0000-0000000a0901', '{}')$q$),
+      NULL::text, NULL::text, NULL::text, NULL::text),
     ('audit_log',
       $q$SELECT count(*) FROM app.audit_log WHERE actor_user_id = '{B}'$q$, $q$SELECT count(*) FROM app.audit_log WHERE actor_user_id = '{A}'$q$,
       NULL::text, NULL::text,
-      $q$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{B}', 'play.repick', 'play', 'x')$q$,
-      $q$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{A}', 'play.repick', 'play', 'x')$q$)
+      $q$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{B}', 'play.repick', 'play', 'eeee0000-0000-0000-0000-0000000b0a01')$q$,
+      $q$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{A}', 'play.repick', 'play', 'eeee0000-0000-0000-0000-0000000a0a01')$q$)
   ) AS t(tbl, fsel, osel, fupd, oupd, fins, oins)
   LOOP
     IF c.oins IS NOT NULL THEN
@@ -295,7 +292,7 @@ DECLARE
 BEGIN
   FOREACH t IN ARRAY ARRAY['device', 'evidence', 'play', 'play_evidence', 'fraud_signal', 'checkin_challenge', 'checkin_token',
                            'push_token', 'signin_provider_token', 'connector_account', 'app_review_demo_account',
-                           'device_reward_ledger', 'offer_code', 'entitlement', 'offer', 'audit_log', 'install_link_account', 'review_item']
+                           'device_reward_ledger', 'offer_code', 'entitlement', 'offer', 'audit_log', 'install_link_account']
   LOOP
     EXECUTE format('SELECT count(*) FROM app.%I', t) INTO v_n;
     RETURN NEXT is(v_n, 0, p_label || ': ' || t || ' -- sees no rows');
@@ -329,6 +326,17 @@ BEGIN
   EXECUTE pg_temp.subst(p_sql);
   GET DIAGNOSTICS v_n = ROW_COUNT;
   RETURN v_n;
+END
+$f$;
+
+-- SQLSTATE and message of a statement that is expected to fail, as one string (the oracle comparison in section 7d).
+-- The statement runs inside a subtransaction (the EXCEPTION block), so a failure leaves the caller's transaction usable.
+CREATE FUNCTION pg_temp.err(p_sql text) RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+  EXECUTE pg_temp.subst(p_sql);
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  RETURN SQLSTATE || ': ' || SQLERRM;
 END
 $f$;
 
@@ -505,9 +513,11 @@ SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a
 SELECT * FROM pg_temp.own_row_cells();
 SELECT pg_temp.throws($$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES ('eeee0000-0000-0000-0000-0000000a0a01', 'eeee0000-0000-0000-0000-0000000b0e01', '{A}')$$, '42501', 'new row violates row-level security policy for table "play_evidence"', 'play_evidence: A''s play linked to B''s evidence is refused');
 SELECT pg_temp.throws($$INSERT INTO app.play_evidence (play_id, evidence_id, user_id) VALUES ('eeee0000-0000-0000-0000-0000000b0a02', 'eeee0000-0000-0000-0000-0000000a0e02', '{A}')$$, '42501', 'new row violates row-level security policy for table "play_evidence"', 'play_evidence: B''s play linked to A''s evidence is refused');
-SELECT pg_temp.throws($$INSERT INTO app.device_reward_ledger (device_id, user_id, reward_kind, reward_id) VALUES ('{DB}', '{A}', 'offer', gen_random_uuid())$$, '42501', 'new row violates row-level security policy for table "device_reward_ledger"', 'device_reward_ledger: A''s reward on B''s device is refused');
-SELECT pg_temp.throws($$INSERT INTO app.review_item (kind, subject_table, subject_id, detail) VALUES ('held_offer_budget_unreserved', 'play', 'eeee0000-0000-0000-0000-0000000a0a01', '{}')$$, '42501', 'new row violates row-level security policy for table "review_item"', 'review_item: only an offer_code subject is allowed');
-SELECT pg_temp.throws($$INSERT INTO app.review_item (kind, subject_table, subject_id, detail) VALUES ('anything_else', 'offer_code', 'eeee0000-0000-0000-0000-0000000a0901', '{}')$$, '42501', 'new row violates row-level security policy for table "review_item"', 'review_item: only the two budget-unreserved kinds are allowed');
+SELECT pg_temp.throws($$INSERT INTO app.device_reward_ledger (device_id, user_id, reward_kind, reward_id) VALUES ('{DA}', '{A}', 'offer', gen_random_uuid())$$, '42501', 'permission denied for table device_reward_ledger', 'device_reward_ledger: edge_actor cannot write the ledger at all (0032: only the activation definers do, for the bound actor)');
+SELECT pg_temp.throws($$SELECT count(*) FROM app.review_item$$, '42501', 'permission denied for table review_item', 'review_item: edge_actor cannot read the review queue (0032: reserve_offer_for_code runs as private_definer)');
+SELECT pg_temp.throws($$INSERT INTO app.review_item (kind, subject_table, subject_id, detail) VALUES ('held_offer_budget_unreserved', 'offer_code', 'eeee0000-0000-0000-0000-0000000a0901', '{}')$$, '42501', 'permission denied for table review_item', 'review_item: edge_actor cannot write the review queue, not even for its own code');
+SELECT pg_temp.throws($$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{A}', 'play.repick', 'play', 'eeee0000-0000-0000-0000-0000000b0a01')$$, '42501', 'new row violates row-level security policy for table "audit_log"', 'audit_log: must-fail (L5) -- a re-pick audit row for B''s play, written as A, is refused');
+SELECT pg_temp.throws($$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{A}', 'play.repick', 'play', 'x')$$, '42501', 'new row violates row-level security policy for table "audit_log"', 'audit_log: must-fail (L5) -- a subject_id that names no play of the actor''s is refused');
 SELECT pg_temp.throws($$INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES ('{A}', 'admin.anything', 'play', 'x')$$, '42501', 'new row violates row-level security policy for table "audit_log"', 'audit_log: only the play.repick action can be written');
 SELECT pg_temp.throws($$INSERT INTO app.checkin_challenge (user_id, staff_user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES ('{A}', '{A}', '{DA}', 'fac_x', 'edge-c-' || gen_random_uuid(), 'live', clock_timestamp(), now() + interval '2 minutes')$$, '42501', 'new row violates row-level security policy for table "checkin_challenge"', 'checkin_challenge: a staff-issued challenge is not an edge_actor path');
 SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action <> 'play.repick'), 0, 'audit_log: A''s own non-repick audit row (seeded by the harness) is not visible to the actor');
@@ -570,6 +580,98 @@ FROM unnest(ARRAY['play', 'evidence', 'offer_code']) AS t;
 ROLLBACK;
 
 -- ============================================================================
+-- 7b. M4 (0032; R1 and R2 of 0031 closed): nothing edge_actor can write moves the shared budget or a reward's state
+-- ============================================================================
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'M4: bind A');
+SELECT pg_temp.throws($$UPDATE app.offer SET budget_reserved = 0 WHERE id = 'eeee0000-0000-0000-0000-00000000e101'$$, '42501', 'permission denied for table offer', 'M4 must-fail: the offer budget counter cannot be set to 0 (the "free budget" attack)');
+SELECT pg_temp.throws($$UPDATE app.offer SET budget_reserved = 90 WHERE id = 'eeee0000-0000-0000-0000-00000000e101'$$, '42501', 'permission denied for table offer', 'M4 must-fail: ... nor to cap minus used (the "starve everyone else" attack)');
+SELECT pg_temp.throws($$UPDATE app.offer SET budget_reserved = budget_reserved - 10 WHERE id = 'eeee0000-0000-0000-0000-00000000e102'$$, '42501', 'permission denied for table offer', 'M4 must-fail: ... nor lowered on an offer another account''s code reserved against');
+SELECT pg_temp.throws($$SELECT app.release_offer_budget('eeee0000-0000-0000-0000-00000000e101', 1000000)$$, '42501', 'permission denied for function release_offer_budget', 'M4 must-fail: release_offer_budget with an arbitrary amount is not callable');
+SELECT pg_temp.throws($$SELECT app.reserve_offer_for_code('eeee0000-0000-0000-0000-00000000e101', 'eeee0000-0000-0000-0000-0000000a0903', 'held_offer_budget_unreserved')$$, '42501', 'permission denied for function reserve_offer_for_code', 'M4 must-fail: reserve_offer_for_code is not callable');
+SELECT pg_temp.throws($$SELECT app.release_account_reservations('{A}')$$, '42501', 'permission denied for function release_account_reservations', 'M4 must-fail: release_account_reservations is not callable (account deletion does it inside the definer)');
+SELECT pg_temp.throws($$SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000a0903', '{A}', '{DA}', 'x', 'activate')$$, '42501', 'permission denied for function activate_offer_code', 'M4 must-fail: the invoker-rights app.activate_offer_code (caller-chosen user id) is not callable');
+SELECT pg_temp.throws($$SELECT app.activate_entitlement('eeee0000-0000-0000-0000-0000000a0801', '{A}', '{DA}', 'x', 'activate')$$, '42501', 'permission denied for function activate_entitlement', 'M4 must-fail: ... nor app.activate_entitlement');
+SELECT pg_temp.throws($$UPDATE app.offer_code SET state = 'issued' WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'$$, '42501', 'permission denied for table offer_code', 'M4 must-fail (R2): earned -> issued cannot be set directly');
+SELECT pg_temp.throws($$UPDATE app.offer_code SET state = 'earned' WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'$$, '42501', 'permission denied for table offer_code', 'M4 must-fail (R2): an issued code cannot be set back to earned');
+SELECT pg_temp.throws($$UPDATE app.offer_code SET state = 'void' WHERE user_id = '{A}'$$, '42501', 'permission denied for table offer_code', 'M4 must-fail: a code cannot be voided directly (the void path releases its reservation, so it is the trigger''s job)');
+SELECT pg_temp.throws($$UPDATE app.offer_code SET reserved_amount = 0 WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'$$, '42501', 'permission denied for table offer_code', 'M4 must-fail: reserved_amount cannot be zeroed directly');
+SELECT pg_temp.throws($$UPDATE app.offer_code SET activated_device_id = '{DB}' WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'$$, '42501', 'permission denied for table offer_code', 'M4 must-fail (M3): activated_device_id cannot be pointed at B''s device (no UPDATE grant at all)');
+SELECT pg_temp.throws($$UPDATE app.offer_code SET hold_detail = '{}' WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'$$, '42501', 'permission denied for table offer_code', 'M4 must-fail: hold_detail is no longer writable either');
+SELECT pg_temp.throws($$UPDATE app.entitlement SET state = 'redeemable' WHERE id = 'eeee0000-0000-0000-0000-0000000a0801'$$, '42501', 'permission denied for table entitlement', 'M4 must-fail (R2): an entitlement state cannot be set directly');
+SELECT pg_temp.throws($$SELECT id FROM app.offer_code WHERE user_id = '{A}' FOR UPDATE$$, '42501', 'permission denied for table offer_code', 'M4: SELECT ... FOR UPDATE on offer_code is refused (it needs UPDATE): the activation definers take that lock themselves (PR2: drop FOR UPDATE from rewards.lockOwnReward)');
+SELECT pg_temp.throws($$SELECT id FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e101' FOR UPDATE$$, '42501', 'permission denied for table offer', 'M4: ... and on offer');
+SELECT pg_temp.throws($$INSERT INTO app.device_reward_ledger (device_id, user_id, reward_kind, reward_id) VALUES ('{DA}', '{A}', 'offer', gen_random_uuid())$$, '42501', 'permission denied for table device_reward_ledger', 'M4 must-fail: no direct ledger insert (it would pre-empt a reward for the device)');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e101'), 0, 'M4 control: every refused write left the budget counter where it was (E1 = 0)');
+SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 'earned', 'M4 control: ... and the earned code is still earned');
+SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), 'issued', 'M4 control: ... and the issued code is still issued');
+-- the cascade definer cannot be used as a way to hold (or poke at) plays that are not held, or not the actor's
+SELECT pg_temp.throws($$SELECT private.hold_play_rewards_for_actor('eeee0000-0000-0000-0000-0000000a0a02')$$, '42501', 'hold_play_rewards_for_actor: that play is not a held play of the bound actor', 'M4 must-fail: the cascade definer refuses a play that is not held');
+SELECT pg_temp.throws($$SELECT private.hold_play_rewards_for_actor('eeee0000-0000-0000-0000-0000000b0a02')$$, '42501', 'hold_play_rewards_for_actor: that play is not a held play of the bound actor', 'M4 must-fail: ... and a play that IS held (seeded) but is B''s, not the actor''s');
+SELECT pg_temp.throws($$SELECT app.hold_play_rewards('eeee0000-0000-0000-0000-0000000a0a02')$$, '42501', 'permission denied for function hold_play_rewards', 'M4 must-fail: the cascade body itself is not callable by edge_actor');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT throws_ok($$SELECT private.hold_play_rewards_for_actor('eeee0000-0000-0000-0000-0000000a0a02')$$, '42501', 'hold_play_rewards_for_actor: no actor is bound in this transaction', 'M4: the cascade definer, unbound, raises');
+SELECT throws_ok($$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0903', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, '42501', 'activate_offer_code_for_actor: no actor is bound in this transaction', 'M4: activate_offer_code_for_actor, unbound, raises');
+SELECT throws_ok($$SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000a0801', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, '42501', 'activate_entitlement_for_actor: no actor is bound in this transaction', 'M4: activate_entitlement_for_actor, unbound, raises');
+ROLLBACK;
+
+-- ============================================================================
+-- 7c. M2 (0032): one-way columns are one-way for edge_actor too
+-- ============================================================================
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'M2: bind A');
+SELECT is(pg_temp.rows($$UPDATE app.checkin_token SET consumed_at = now() WHERE jti = 'eeee0000-0000-0000-0000-0000000a0d01' AND consumed_at IS NULL$$), 1, 'M2 control: the legitimate consume (consumed_at NULL -> now) still affects 1 row');
+SELECT pg_temp.throws($$UPDATE app.checkin_token SET consumed_at = NULL WHERE jti = 'eeee0000-0000-0000-0000-0000000a0d01'$$, '23514', NULL, 'M2 must-fail: a consumed token cannot be reset to unconsumed (presence-token replay)');
+SELECT pg_temp.throws($$UPDATE app.checkin_token SET consumed_at = now() + interval '1 day' WHERE jti = 'eeee0000-0000-0000-0000-0000000a0d01'$$, '23514', NULL, 'M2 must-fail: ... nor moved to another time');
+SELECT pg_temp.throws($$UPDATE app.checkin_token SET consumed_at = consumed_at WHERE jti = 'eeee0000-0000-0000-0000-0000000a0d01'$$, '23514', NULL, 'M2 must-fail: ... nor re-written with the identical value');
+SELECT is((SELECT consumed_at IS NOT NULL FROM app.checkin_token WHERE jti = 'eeee0000-0000-0000-0000-0000000a0d01'), true, 'M2 control: the token is still consumed');
+SELECT is(pg_temp.rows($$UPDATE app.device SET attest_counter = 100 WHERE id = '{DA}' AND user_id = '{A}' AND attest_counter < 100$$), 1, 'M2 control: the verifier''s monotonic advance (WHERE attest_counter < new) affects 1 row');
+SELECT pg_temp.throws($$UPDATE app.device SET attest_counter = 1 WHERE id = '{DA}' AND user_id = '{A}'$$, '23514', NULL, 'M2 must-fail: the App Attest counter cannot be rolled back (100 -> 1)');
+SELECT pg_temp.throws($$UPDATE app.device SET attest_counter = 99 WHERE id = '{DA}' AND user_id = '{A}'$$, '23514', NULL, 'M2 must-fail: ... not even by one');
+SELECT is(pg_temp.rows($$UPDATE app.device SET attest_counter = 100, last_seen = now() WHERE id = '{DA}' AND user_id = '{A}'$$), 1, 'M2 control: re-writing the same counter is harmless (no decrease)');
+SELECT is(pg_temp.rows($$UPDATE app.device SET attest_counter = 101 WHERE id = '{DA}' AND user_id = '{A}'$$), 1, 'M2 control: a further advance still works');
+SELECT is((SELECT attest_counter FROM app.device WHERE id = 'eeee0000-0000-0000-0000-00000000a001'), 101::bigint, 'M2 control: the counter is 101');
+ROLLBACK;
+
+-- ============================================================================
+-- 7d. M3 (0032): a row may only reference the actor's OWN device / challenge -- and a foreign id and a nonexistent id
+--     are indistinguishable (RLS WITH CHECK runs before the FK trigger, so the FK existence oracle is never reached)
+-- ============================================================================
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'M3: bind A');
+SELECT pg_temp.throws($$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES ('eeee0000-0000-0000-0000-0000000a0c02', '{A}', '{DB}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$$, '42501', 'new row violates row-level security policy for table "checkin_token"', 'M3 must-fail: a token on A''s own challenge but B''s device');
+SELECT pg_temp.throws($$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES ('eeee0000-0000-0000-0000-0000000b0c01', '{A}', '{DA}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$$, '42501', 'new row violates row-level security policy for table "checkin_token"', 'M3 must-fail: a token on B''s challenge with A''s own device');
+SELECT pg_temp.throws($$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES (gen_random_uuid(), '{A}', '{DA}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$$, '42501', 'new row violates row-level security policy for table "checkin_token"', 'M3 must-fail: a token on a challenge that does not exist (same refusal as a foreign one)');
+SELECT pg_temp.throws($$INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, local_date) VALUES ('{A}', '{DB}', 'self_report', 'edge-m3-' || gen_random_uuid(), 'h', current_date)$$, '42501', 'new row violates row-level security policy for table "evidence"', 'M3 must-fail: evidence naming B''s device');
+SELECT pg_temp.lives($$INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, local_date) VALUES ('{A}', NULL, 'self_report', 'edge-m3-' || gen_random_uuid(), 'h', current_date)$$, 'M3 control: evidence with NO device (device_id is nullable) is fine');
+SELECT pg_temp.lives($$INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, local_date) VALUES ('{A}', '{DA}', 'self_report', 'edge-m3-' || gen_random_uuid(), 'h', current_date)$$, 'M3 control: evidence naming A''s own device is fine');
+SELECT pg_temp.throws($$INSERT INTO app.push_token (user_id, device_id, expo_token) VALUES ('{A}', '{DB}', 'x') ON CONFLICT (user_id, device_id) DO UPDATE SET expo_token = excluded.expo_token$$, '42501', 'new row violates row-level security policy for table "push_token"', 'M3 must-fail: a push token on B''s device (the upsert shape too)');
+SELECT pg_temp.throws($$INSERT INTO app.checkin_challenge (user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES ('{A}', '{DB}', 'fac_x', 'edge-m3-' || gen_random_uuid(), 'live', clock_timestamp(), now() + interval '2 minutes')$$, '42501', 'new row violates row-level security policy for table "checkin_challenge"', 'M3 must-fail: a challenge issued against B''s device');
+-- The oracle: foreign id vs nonexistent id -> identical SQLSTATE AND message, for every device/challenge reference.
+SELECT is(
+  pg_temp.err($$INSERT INTO app.push_token (user_id, device_id, expo_token) VALUES ('{A}', '{DB}', 'x')$$),
+  pg_temp.err($$INSERT INTO app.push_token (user_id, device_id, expo_token) VALUES ('{A}', gen_random_uuid(), 'x')$$),
+  'M3 oracle closed: push_token -- a foreign device id and a nonexistent one fail identically');
+SELECT is(
+  pg_temp.err($$INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, local_date) VALUES ('{A}', '{DB}', 'self_report', 'edge-m3-' || gen_random_uuid(), 'h', current_date)$$),
+  pg_temp.err($$INSERT INTO app.evidence (user_id, device_id, source, source_ref, input_hash, local_date) VALUES ('{A}', gen_random_uuid(), 'self_report', 'edge-m3-' || gen_random_uuid(), 'h', current_date)$$),
+  'M3 oracle closed: evidence -- a foreign device id and a nonexistent one fail identically');
+SELECT is(
+  pg_temp.err($$INSERT INTO app.checkin_challenge (user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES ('{A}', '{DB}', 'fac_x', 'edge-m3-' || gen_random_uuid(), 'live', clock_timestamp(), now() + interval '2 minutes')$$),
+  pg_temp.err($$INSERT INTO app.checkin_challenge (user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES ('{A}', gen_random_uuid(), 'fac_x', 'edge-m3-' || gen_random_uuid(), 'live', clock_timestamp(), now() + interval '2 minutes')$$),
+  'M3 oracle closed: checkin_challenge -- a foreign device id and a nonexistent one fail identically');
+SELECT is(
+  pg_temp.err($$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES ('eeee0000-0000-0000-0000-0000000b0c01', '{A}', '{DA}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$$),
+  pg_temp.err($$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES (gen_random_uuid(), '{A}', '{DA}', 'fac_x', 'unattestable', 'live', clock_timestamp(), now() + interval '10 minutes')$$),
+  'M3 oracle closed: checkin_token -- a foreign challenge id and a nonexistent one fail identically');
+ROLLBACK;
+
+-- ============================================================================
 -- 8. No private.* tables, no admin functions, for either role
 -- ============================================================================
 BEGIN;
@@ -599,7 +701,13 @@ FROM (VALUES
   ('device_link_signals', $s$SELECT * FROM app.device_link_signals('{DA}')$s$),
   ('reserve_offer_budget', $s$SELECT app.reserve_offer_budget('eeee0000-0000-0000-0000-00000000e101', 1)$s$),
   ('consume_offer_budget', $s$SELECT app.consume_offer_budget('eeee0000-0000-0000-0000-00000000e101', 1)$s$),
-  ('dedupe_receipt_fingerprint', $s$SELECT app.dedupe_receipt_fingerprint(gen_random_uuid(), '{A}', 'p', 'fac_x', current_date, NULL)$s$)
+  ('dedupe_receipt_fingerprint', $s$SELECT app.dedupe_receipt_fingerprint(gen_random_uuid(), '{A}', 'p', 'fac_x', current_date, NULL)$s$),
+  ('activate_offer_code', $s$SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000a0903', '{A}', '{DA}', 'x', 'activate')$s$),
+  ('activate_entitlement', $s$SELECT app.activate_entitlement('eeee0000-0000-0000-0000-0000000a0801', '{A}', '{DA}', 'x', 'activate')$s$),
+  ('reserve_offer_for_code', $s$SELECT app.reserve_offer_for_code('eeee0000-0000-0000-0000-00000000e101', 'eeee0000-0000-0000-0000-0000000a0901', 'x')$s$),
+  ('release_offer_budget', $s$SELECT app.release_offer_budget('eeee0000-0000-0000-0000-00000000e101', 1)$s$),
+  ('release_account_reservations', $s$SELECT app.release_account_reservations('{A}')$s$),
+  ('hold_play_rewards', $s$SELECT app.hold_play_rewards('eeee0000-0000-0000-0000-0000000a0a01')$s$)
 ) AS q(fn, sql);
 ROLLBACK;
 BEGIN;
@@ -629,7 +737,11 @@ FROM (VALUES
   ('device_link_signals', $s$SELECT * FROM app.device_link_signals('{DA}')$s$),
   ('record_install_link', $s$SELECT app.record_install_link('{A}', '{DA}', repeat('e', 64))$s$),
   ('account_pseudonyms', $s$SELECT * FROM private.account_pseudonyms('{A}')$s$),
-  ('validate_and_register_pseudonym_hmac_id', $s$SELECT private.validate_and_register_pseudonym_hmac_id(gen_random_uuid())$s$)
+  ('validate_and_register_pseudonym_hmac_id', $s$SELECT private.validate_and_register_pseudonym_hmac_id(gen_random_uuid())$s$),
+  ('activate_offer_code_for_actor', $s$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0903', '{DA}', 'x', 'activate')$s$),
+  ('activate_entitlement_for_actor', $s$SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000a0801', '{DA}', 'x', 'activate')$s$),
+  ('hold_play_rewards_for_actor', $s$SELECT private.hold_play_rewards_for_actor('eeee0000-0000-0000-0000-0000000a0a01')$s$),
+  ('hold_play_rewards', $s$SELECT app.hold_play_rewards('eeee0000-0000-0000-0000-0000000a0a01')$s$)
 ) AS q(fn, sql);
 ROLLBACK;
 
@@ -712,6 +824,8 @@ SELECT is(private.purge_fix_coords(30, 100) >= 2, true, 'purge_fix_coords: purge
 SELECT is(private.purge_fix_coords(30, 100), 0, 'purge_fix_coords: idempotent (nothing left to purge)');
 SELECT throws_ok($$SELECT private.purge_fix_coords(31, 10)$$, '22023', NULL, 'purge_fix_coords: a retention above 30 days is refused');
 SELECT throws_ok($$SELECT private.purge_fix_coords(0, 10)$$, '22023', NULL, 'purge_fix_coords: a retention of 0 is refused');
+SELECT throws_ok($$SELECT private.purge_fix_coords(1, 10)$$, '22023', 'purge_fix_coords: retention must be between 7 and 30 days', 'purge_fix_coords: a one-day retention is refused (0032 NIT: the minimum is 7 days)');
+SELECT throws_ok($$SELECT private.purge_fix_coords(6, 10)$$, '22023', 'purge_fix_coords: retention must be between 7 and 30 days', 'purge_fix_coords: six days is refused too');
 SELECT throws_ok($$SELECT private.purge_fix_coords(30, 0)$$, '22023', NULL, 'purge_fix_coords: a limit of 0 is refused');
 -- the delegate: bind the owner of ONE queued row, then act as that user
 SELECT is(private.bind_delegate_for_queued_evidence('eeee0000-0000-0000-0000-0000000a0e03'), 'eeee0000-0000-0000-0000-0000000000a0'::uuid, 'delegate: binds the owner of the queued row (returns the uid)');
@@ -726,6 +840,8 @@ SELECT is((SELECT queued_input::text FROM app.evidence WHERE id = 'eeee0000-0000
 SELECT throws_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000b0')$$, '42501', 'bind_actor: this transaction already has a bound actor', 'delegate: the delegate-bound transaction cannot be re-pointed at another user');
 SELECT throws_ok($$SELECT private.delete_my_data_for_actor()$$, '42501', 'delete_my_data_for_actor: a system delegate may not delete an account', 'delegate: a system delegate cannot delete the account');
 SELECT throws_ok($$SELECT private.export_my_data_for_actor()$$, '42501', 'export_my_data_for_actor: a system delegate may not export an account', 'delegate: a system delegate cannot export the account');
+SELECT throws_ok($$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0903', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, '42501', 'activate_offer_code_for_actor: a system delegate may not activate a reward', 'delegate: a system delegate cannot activate a code');
+SELECT throws_ok($$SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000a0801', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, '42501', 'activate_entitlement_for_actor: a system delegate may not activate a reward', 'delegate: ... nor an entitlement');
 SET LOCAL ROLE edge_system;
 SELECT throws_ok($$SELECT private.bind_delegate_for_queued_evidence('eeee0000-0000-0000-0000-0000000a0e03')$$, '42501', 'bind_actor: this transaction already has a bound actor', 'delegate: switching back to edge_system does not allow a second bind');
 ROLLBACK;
@@ -745,13 +861,18 @@ SELECT is(private.bind_delegate_for_rescore((SELECT id FROM app.catalog_rescore_
 SET LOCAL ROLE edge_actor;
 SELECT is((SELECT count(*)::int FROM app.play WHERE user_id = 'eeee0000-0000-0000-0000-0000000000b0'), 2, 'delegate (rescore): acting as B, B''s plays are visible');
 SELECT is((SELECT count(*)::int FROM app.play WHERE user_id = 'eeee0000-0000-0000-0000-0000000000a0'), 0, 'delegate (rescore): and A''s are not');
+-- a rescore may put the owner's play on hold: the cascade runs for ANY binding kind (the play must be the bound owner's)
+SELECT is(pg_temp.rows($$UPDATE app.play SET held_review = true WHERE id = 'eeee0000-0000-0000-0000-0000000b0a01'$$), 1, 'delegate (rescore): the delegate can hold the bound owner''s play (1 row)');
+SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000b0901'), 'held_review', 'delegate (rescore): ... and the cascade moved the owner''s code (any binding kind may hold the bound owner''s rewards)');
 ROLLBACK;
 
 
 -- ============================================================================
 -- 10. Must-pass: what the Edge code does today still moves rows under edge_actor
 -- ============================================================================
--- 10a. The held-review cascade (0017, invoker-rights, NOT redefined) and the P3f reservation trigger.
+-- 10a. The held-review cascade: since 0032 the trigger function hands an edge_actor's held play to
+-- private.hold_play_rewards_for_actor (the same body, run as private_definer for the bound actor), and the P3f
+-- reservation trigger it fires runs as private_definer too.
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'cascade: bind A');
@@ -760,11 +881,12 @@ SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-
 SELECT is(pg_temp.rows($$UPDATE app.play SET held_review = true WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = '{A}'$$), 1, 'cascade: the actor can put its own play on hold (1 row, not a silent 0)');
 SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), 'held_review', 'cascade: the backing offer code moved to held_review under edge_actor');
 SELECT is((SELECT state::text FROM app.entitlement WHERE id = 'eeee0000-0000-0000-0000-0000000a0801'), 'held_review', 'cascade: the backing entitlement moved to held_review under edge_actor');
-SELECT is((SELECT reserved_amount::int FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), 10, 'cascade: the P3f trigger reserved the code''s face value');
-SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e101'), 10, 'cascade: the shared offer budget row was updated by the trigger, as edge_actor');
+SELECT is((SELECT reserved_amount::int FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), 10, 'cascade: the P3f trigger reserved the code''s face value (offer_code.reserved_amount)');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e101'), 10, 'cascade: the shared offer budget row was updated by the P3f trigger (as private_definer: edge_actor holds no write on app.offer)');
 SELECT is((SELECT expiry_paused_at IS NOT NULL FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), true, 'cascade: the expiry clock paused');
 SELECT is((SELECT issued_before_hold FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0901'), true, 'cascade: issued_before_hold recorded (the trigger''s own NEW assignments are not privilege-checked)');
 SELECT lives_ok($$SET CONSTRAINTS ALL IMMEDIATE$$, 'cascade: the deferred play-guard constraint triggers (private_definer) accept the result');
+SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 'earned', 'cascade: a code NOT backed by the held play is untouched');
 SELECT is(pg_temp.rows($$UPDATE app.play SET held_review = false WHERE id = 'eeee0000-0000-0000-0000-0000000a0a02' AND user_id = '{A}'$$), 1, 'cascade: lifting the hold is also a counted write');
 ROLLBACK;
 -- The same hold by B changes nothing of A's.
@@ -777,20 +899,26 @@ SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000
 SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e102'), 10, 'cascade: B''s code already held its reservation (idempotent: no double reservation)');
 ROLLBACK;
 
--- 10b. Activation (P3f, invoker-rights, p_user_id is data not authority)
+-- 10b. Activation (0032): private.activate_*_for_actor run the unchanged P3f functions as private_definer for the BOUND
+-- actor; there is no user argument, so "naming another user" is not a thing an actor can do.
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'activation: bind A');
-SELECT is((SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000a0903', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'issued', 'activation: an earned code activates under edge_actor');
-SELECT is((SELECT reserved_amount::int FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 10, 'activation: it reserved the offer''s face value');
-SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e103'), 10, 'activation: the offer budget row moved');
-SELECT is((SELECT count(*)::int FROM app.device_reward_ledger WHERE reward_id = 'eeee0000-0000-0000-0000-0000000a0903'), 1, 'activation: the ledger row was written');
-SELECT is((SELECT app.activate_entitlement('eeee0000-0000-0000-0000-0000000a0801', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'held_review')::text), 'held_review', 'activation: an entitlement can be held under edge_actor');
-SELECT throws_ok($$SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000b0901', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, 'P0002', NULL, 'activation: must-fail -- A cannot activate B''s code (the row is invisible)');
-SELECT throws_ok($$SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000b0901', 'eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-00000000b001', 'x', 'activate')$$, 'P0002', NULL, 'activation: must-fail -- naming B as p_user_id changes nothing');
-SELECT throws_ok($$SELECT app.activate_entitlement('eeee0000-0000-0000-0000-0000000b0801', 'eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-00000000b001', 'x', 'activate')$$, 'P0002', NULL, 'activation: must-fail -- A cannot activate B''s entitlement');
-SELECT is((SELECT app.release_account_reservations('eeee0000-0000-0000-0000-0000000000b0')::int), 0, 'activation: release_account_reservations(B) as A releases nothing (B''s codes are invisible)');
-SELECT is(pg_temp.rows($$INSERT INTO app.review_item (kind, subject_table, subject_id, detail) VALUES ('issued_offer_budget_unreserved', 'offer_code', 'eeee0000-0000-0000-0000-0000000a0903', '{}')$$), 1, 'activation: the "budget could not be reserved" review item can be written for the actor''s own code');
+SELECT is((SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0903', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'issued', 'activation: an earned code activates through the definer');
+SELECT is((SELECT state::text FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 'issued', 'activation: the code is issued (visible to the actor)');
+SELECT is((SELECT reserved_amount::int FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 10, 'activation: it reserved the offer''s face value, not an amount the caller chose');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e103'), 10, 'activation: the shared offer budget row moved, by the definer');
+SELECT is((SELECT activated_device_id FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0903'), 'eeee0000-0000-0000-0000-00000000a001'::uuid, 'activation: the activation device was recorded');
+SELECT is((SELECT count(*)::int FROM app.device_reward_ledger WHERE reward_id = 'eeee0000-0000-0000-0000-0000000a0903'), 1, 'activation: the ledger row was written (by the definer)');
+SELECT is((SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0903', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'issued', 'activation: replaying the same activation is idempotent (issued, one reservation)');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e103'), 10, 'activation: ... and reserved nothing more');
+SELECT is((SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000a0801', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'held_review')::text), 'held_review', 'activation: an entitlement can be held through the definer');
+SELECT is((SELECT state::text FROM app.entitlement WHERE id = 'eeee0000-0000-0000-0000-0000000a0801'), 'held_review', 'activation: the entitlement is held_review (visible to the actor)');
+SELECT throws_ok($$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000b0901', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'activate')$$, 'P0002', NULL, 'activation: must-fail -- A cannot activate B''s code (not the bound actor''s: the P3f function finds no such code for A)');
+SELECT throws_ok($$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-00000000b001', 'x', 'activate')$$, '42501', NULL, 'activation: must-fail -- A''s own code, B''s device (the device is not the actor''s)');
+SELECT throws_ok($$SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000b0801', 'eeee0000-0000-0000-0000-00000000b001', 'x', 'activate')$$, 'P0002', NULL, 'activation: must-fail -- A cannot activate B''s entitlement');
+SELECT throws_ok($$SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-00000000a001', 'x', 'bogus')$$, '22023', NULL, 'activation: a bogus decision is refused by the P3f function (22023)');
+SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'private' AND p.proname IN ('activate_offer_code_for_actor', 'activate_entitlement_for_actor') AND pg_get_function_arguments(p.oid) ~* 'user'), 0, 'activation: neither definer has a user argument at all');
 ROLLBACK;
 
 -- 10c. The nonce tombstone (the redefined trigger function) -- including across a COMMIT
@@ -852,8 +980,6 @@ SELECT is(position('eeee0000-0000-0000-0000-0000000000a0' in private.export_my_d
 SELECT is(position('eeee0000-0000-0000-0000-00000000a001' in private.export_my_data_for_actor()::text), 0, 'export: contains none of A''s rows (A''s device id)');
 SELECT is(position('eeee0000-0000-0000-0000-0000000000d0' in private.export_my_data_for_actor()::text), 0, 'export: contains nothing of D');
 SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e102'), 10, 'delete: before -- B''s code holds a reservation on the shared offer');
-SELECT is((SELECT app.release_account_reservations('eeee0000-0000-0000-0000-0000000000b0')::int), 10, 'delete: app.release_account_reservations returns what B''s codes reserved');
-SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e102'), 0, 'delete: the shared offer budget row was handed back (invoker-rights function, edge_actor policies)');
 SELECT is(private.delete_my_data_for_actor() ->> 'user_id', 'eeee0000-0000-0000-0000-0000000000b0', 'delete: delete_my_data_for_actor deletes the BOUND actor');
 SELECT is((SELECT count(*)::int FROM app.device), 0, 'delete: B''s devices are gone');
 SELECT is((SELECT count(*)::int FROM app.play), 0, 'delete: B''s plays are gone');
@@ -894,6 +1020,14 @@ SELECT lives_ok($$SELECT app.record_install_link('eeee0000-0000-0000-0000-000000
 SELECT is((SELECT count(*)::int FROM app.install_link_account WHERE install_link_hash = repeat('e', 64)), 1, 'tombstone: ... and wrote no second row');
 SELECT throws_ok($$SELECT app.record_install_link('eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-00000000b001', repeat('b', 64))$$, '42501', NULL, 'tombstone: must-fail -- A cannot record an install link for B''s device (the device row is invisible, so the function raises instead of writing)');
 SELECT throws_ok($$SELECT app.record_install_link('eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000b001', repeat('c', 64))$$, '42501', NULL, 'tombstone: must-fail -- A cannot stamp its own uid on B''s device');
+SELECT lives_ok($$INSERT INTO app.device (id, user_id, platform) VALUES ('eeee0000-0000-0000-0000-00000000a002', 'eeee0000-0000-0000-0000-0000000000a0', 'ios')$$, 'tombstone: A registers a second device of its own');
+SELECT is(pg_temp.rows($$UPDATE app.device SET install_link_hash = repeat('c', 64) WHERE id = 'eeee0000-0000-0000-0000-00000000a002'$$), 1, 'tombstone: ... and links it to install c');
+SELECT throws_ok(format($$INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id)
+  SELECT repeat('b', 64), a.pseudonym, a.key_id FROM private.account_pseudonyms(%L) a WHERE a.preferred$$, 'eeee0000-0000-0000-0000-0000000000a0'),
+  '42501', 'new row violates row-level security policy for table "install_link_account"', 'tombstone: must-fail (L5) -- A''s OWN pseudonym on an install A has no device on (B''s install b) is refused');
+SELECT throws_ok(format($$INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id)
+  SELECT repeat('c', 64), a.pseudonym, gen_random_uuid() FROM private.account_pseudonyms(%L) a WHERE a.preferred$$, 'eeee0000-0000-0000-0000-0000000000a0'),
+  NULL, NULL, 'tombstone: must-fail (L5) -- A''s own pseudonym under a key id that did not produce it is refused');
 SELECT throws_ok(format($$INSERT INTO app.install_link_account (install_link_hash, account_pseudonym, account_pseudonym_hmac_id)
   SELECT repeat('c', 64), a.pseudonym, a.key_id FROM private.account_pseudonyms(%L) a WHERE a.preferred$$, 'eeee0000-0000-0000-0000-0000000000b0'),
   '42501', 'new row violates row-level security policy for table "install_link_account"', 'tombstone: must-fail -- A cannot insert a row carrying B''s pseudonym');
@@ -905,17 +1039,16 @@ SELECT throws_ok($$DELETE FROM app.install_link_account$$, '42501', NULL, 'tombs
 SELECT throws_ok($$SELECT account_pseudonym_hmac_id FROM app.install_link_account$$, '42501', NULL, 'tombstone: the hmac key id column is not readable');
 ROLLBACK;
 
--- 10h. A clean activation the cap cannot cover is HELD (P3f round 3, N1): reserve_offer_for_code reads review_item
+-- 10h. A clean activation the cap cannot cover is HELD (P3f round 3, N1): reserve_offer_for_code writes and reads review_item,
+-- which since 0032 happens as private_definer (edge_actor cannot touch review_item at all)
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'held for budget: bind A');
-SELECT is((SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'held_review', 'held for budget: a clean activation on an offer whose cap (5) cannot cover the face value (10) is HELD, not issued');
+SELECT is((SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'held_review', 'held for budget: a clean activation on an offer whose cap (5) cannot cover the face value (10) is HELD, not issued');
 SELECT is((SELECT reserved_amount::int FROM app.offer_code WHERE id = 'eeee0000-0000-0000-0000-0000000a0904'), 0, 'held for budget: it holds no reservation');
-SELECT is((SELECT count(*)::int FROM app.review_item WHERE subject_id = 'eeee0000-0000-0000-0000-0000000a0904' AND kind = 'held_offer_budget_unreserved'), 1, 'held for budget: exactly ONE review item names it (the once-per-code check reads review_item as edge_actor)');
-SELECT is((SELECT app.activate_offer_code('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'held_review', 'held for budget: a second activation is an idempotent no-op');
-SELECT is((SELECT count(*)::int FROM app.review_item WHERE subject_id = 'eeee0000-0000-0000-0000-0000000a0904'), 1, 'held for budget: still one review item');
-SELECT is(pg_temp.rows($$SELECT 1 FROM app.review_item WHERE subject_id = 'eeee0000-0000-0000-0000-0000000b0901'$$), 0, 'held for budget: review items of other accounts'' codes are invisible');
-SELECT throws_ok($$SELECT detail FROM app.review_item$$, '42501', NULL, 'held for budget: review_item.detail is not readable (column grant)');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e104'), 0, 'held for budget: and the offer reserved nothing');
+SELECT is((SELECT private.activate_offer_code_for_actor('eeee0000-0000-0000-0000-0000000a0904', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'activate')::text), 'held_review', 'held for budget: a second activation is an idempotent no-op');
+SELECT throws_ok($$SELECT count(*) FROM app.review_item$$, '42501', 'permission denied for table review_item', 'held for budget: the review item the definer wrote is NOT readable by edge_actor');
 ROLLBACK;
 
 -- 10i. The Repo's own statements (supabase/functions/_shared/privileged.ts), shape for shape, as the bound actor.
@@ -984,8 +1117,8 @@ SELECT is(pg_temp.rows($$SELECT count(*)::int FROM app.checkin_challenge WHERE d
 SELECT is(pg_temp.rows($$SELECT id, device_id, facility_id, nonce_hash, kind, expires_at, used_at FROM app.checkin_challenge WHERE id = 'eeee0000-0000-0000-0000-0000000a0c01' AND user_id = '{A}'$$), 1, 'repo challenge.getOwn');
 SELECT is(pg_temp.rows($$UPDATE app.checkin_challenge SET used_at = now() WHERE id = 'eeee0000-0000-0000-0000-0000000a0c01' AND user_id = '{A}' AND nonce_hash = (SELECT nonce_hash FROM app.checkin_challenge WHERE id = 'eeee0000-0000-0000-0000-0000000a0c01') AND used_at IS NULL RETURNING id$$), 1, 'repo challenge.consume');
 SELECT is(pg_temp.rows($$UPDATE app.checkin_challenge SET used_at = now() WHERE id = 'eeee0000-0000-0000-0000-0000000a0c01' AND user_id = '{A}' AND used_at IS NULL RETURNING id$$), 0, 'repo challenge.consume: a second consume is 0 rows');
-SELECT is(pg_temp.rows($$WITH c AS (INSERT INTO app.checkin_challenge (user_id, staff_user_id, device_id, facility_id, nonce_hash, kind, issued_at, expires_at) VALUES ('{A}', null, '{DA}', 'fac_x', 'repo-nonce-' || gen_random_uuid(), 'live', clock_timestamp(), now() + interval '2 minutes') RETURNING id)
-  INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) SELECT id, '{A}', '{DA}', 'fac_x', 'unattestable'::app.attestation_grade, 'live', clock_timestamp(), now() + interval '10 minutes' FROM c RETURNING jti, expires_at$$), 1, 'repo checkinToken.insert (with RETURNING)');
+SELECT is(pg_temp.rows($$INSERT INTO app.checkin_token (challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at)
+  VALUES ('eeee0000-0000-0000-0000-0000000a0c02', '{A}', '{DA}', 'fac_x', 'unattestable'::app.attestation_grade, 'live', clock_timestamp(), now() + interval '10 minutes') RETURNING jti, expires_at$$), 1, 'repo checkinToken.insert (with RETURNING; the challenge already exists -- the Repo inserts it in an earlier statement)');
 SELECT is(pg_temp.rows($$UPDATE app.checkin_token SET consumed_at = now() FROM app.checkin_challenge cc WHERE checkin_token.challenge_id = cc.id AND checkin_token.jti = 'eeee0000-0000-0000-0000-0000000a0d01' AND checkin_token.user_id = '{A}' AND checkin_token.device_id = '{DA}' AND checkin_token.consumed_at IS NULL AND checkin_token.expires_at > now() AND cc.issued_at <= now() AND now() <= cc.expires_at RETURNING checkin_token.facility_id, checkin_token.attestation_grade, checkin_token.challenge_kind$$), 1, 'repo checkinToken.consumeForFix (UPDATE ... FROM challenge ... RETURNING)');
 -- push token, me
 SELECT is(pg_temp.rows($$INSERT INTO app.push_token (user_id, device_id, expo_token, updated_at) VALUES ('{A}', '{DA}', 'ExpoX', now()) ON CONFLICT (user_id, device_id) DO UPDATE SET expo_token = excluded.expo_token, updated_at = excluded.updated_at RETURNING device_id, updated_at$$), 1, 'repo pushToken.upsert');
@@ -995,9 +1128,9 @@ SELECT is(pg_temp.rows($$SELECT DISTINCT provider FROM app.connector_account WHE
 SELECT is(pg_temp.rows($$SELECT count(*)::int FROM app.device WHERE user_id = '{A}'$$), 1, 'repo device.countForUser');
 -- rewards
 SELECT is(pg_temp.rows($$SELECT oc.id, oc.state, oc.activated_device_id, oc.expires_at, oc.expiry_paused_at, oc.rests_on_unattestable, oc.review_cleared_at::text AS review_cleared_at, coalesce(p.held_review, false) AS play_held
-  FROM app.offer_code oc LEFT JOIN app.play p ON p.id = oc.play_id AND p.user_id = oc.user_id WHERE oc.id = 'eeee0000-0000-0000-0000-0000000a0901' AND oc.user_id = '{A}' FOR UPDATE OF oc$$), 1, 'repo rewards.lockOwnReward (offer code: join + FOR UPDATE OF)');
+  FROM app.offer_code oc LEFT JOIN app.play p ON p.id = oc.play_id AND p.user_id = oc.user_id WHERE oc.id = 'eeee0000-0000-0000-0000-0000000a0901' AND oc.user_id = '{A}'$$), 1, 'repo rewards.lockOwnReward (offer code: the join, WITHOUT FOR UPDATE: edge_actor cannot lock reward rows since 0032, the activation definers lock them)');
 SELECT is(pg_temp.rows($$SELECT e.id, e.state, e.activated_device_id, e.rests_on_unattestable, e.review_cleared_at::text AS review_cleared_at, coalesce(p.held_review, false) AS play_held
-  FROM app.entitlement e LEFT JOIN app.play p ON p.id = e.play_id AND p.user_id = e.user_id WHERE e.id = 'eeee0000-0000-0000-0000-0000000a0801' AND e.user_id = '{A}' FOR UPDATE OF e$$), 1, 'repo rewards.lockOwnReward (entitlement)');
+  FROM app.entitlement e LEFT JOIN app.play p ON p.id = e.play_id AND p.user_id = e.user_id WHERE e.id = 'eeee0000-0000-0000-0000-0000000a0801' AND e.user_id = '{A}'$$), 1, 'repo rewards.lockOwnReward (entitlement, without FOR UPDATE)');
 SELECT is(pg_temp.rows($$SELECT (EXISTS (SELECT 1 FROM app.device_reward_ledger WHERE user_id = '{A}') OR EXISTS (SELECT 1 FROM app.offer_code WHERE user_id = '{A}' AND state IN ('issued', 'redeemed') AND activated_device_id IS NOT NULL) OR EXISTS (SELECT 1 FROM app.entitlement WHERE user_id = '{A}' AND state IN ('redeemable', 'vouchered', 'redeemed') AND activated_device_id IS NOT NULL)) AS prior$$), 1, 'repo rewards.hasPriorReward');
 SELECT is(pg_temp.rows($$SELECT EXISTS (SELECT 1 FROM app.app_review_demo_account WHERE user_id = '{A}') AS demo$$), 1, 'repo rewards.isAppReviewDemoAccount');
 SELECT is((SELECT s.accounts_on_install FROM app.device d CROSS JOIN LATERAL private.device_link_signals_for_actor(d.id) s WHERE d.id = 'eeee0000-0000-0000-0000-00000000a001' AND d.user_id = 'eeee0000-0000-0000-0000-0000000000a0'), 3, 'repo rewards.androidInstallSignals: the LATERAL join over the actor''s own device (PR2 swaps the function name)');
@@ -1011,6 +1144,92 @@ SELECT is(pg_temp.rows($$SELECT coalesce(nullif((SELECT count(*) FROM app.catalo
 SELECT is(pg_temp.rows($$SELECT k.kid, k.public_key_b64url, coalesce(k.revoked_at, (SELECT r.recorded_at FROM app.catalog_kid_revocation r WHERE r.kid = k.kid)) AS revoked_at FROM app.catalog_signing_key k WHERE k.kid = 'kid1'$$), 0, 'repo catalog.signingKey (the key table is empty in the harness; the statement runs)');
 SELECT is(pg_temp.rows($$SELECT EXISTS (SELECT 1 FROM app.catalog_id_ledger l WHERE l.id = 'crs_x1' AND (l.status = 'stub' OR l.split_from IS NOT NULL OR EXISTS (SELECT 1 FROM app.catalog_id_ledger s WHERE s.split_from = l.id) OR EXISTS (SELECT 1 FROM app.catalog_rescore_backlog b WHERE b.course_id = l.id AND b.done_at IS NULL))) AS e$$), 1, 'repo catalog.repickEligible');
 SELECT is((SELECT ST_DWithin(radius_center::geography, ST_SetSRID(ST_MakePoint(-86.0, 36.0), 4326)::geography, coalesce(radius_m, 0) + 50) FROM app.catalog_course WHERE id = 'crs_edge_geo'), true, 'repo catalog.matchFix: the radius branch');
+ROLLBACK;
+
+-- 10j. L6 (0032): the three GUC windows (app.edge.link_*, app.edge.purge_fix_coords, and the pd_fix_coords_read window)
+-- are TRANSACTION-local and read through nullif(current_setting(.., true), ''); a pooled connection that is reused, or one a
+-- caller pre-loaded with session-level values, must neither break a later read nor widen what a definer can see.
+-- (1) the link window after a COMMIT, and a later transaction on the same connection
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'reuse (link): bind A in transaction 1');
+SELECT is((SELECT accounts_on_install FROM private.device_link_signals_for_actor('eeee0000-0000-0000-0000-00000000a001')), 3, 'reuse (link): the signal is computed in transaction 1');
+COMMIT;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT is(nullif(current_setting('app.edge.link_device_id', true), ''), NULL, 'reuse (link): after the COMMIT app.edge.link_device_id reads empty');
+SELECT is(nullif(current_setting('app.edge.link_hash', true), ''), NULL, 'reuse (link): ... app.edge.link_hash too');
+SELECT is(nullif(current_setting('app.edge.link_attest_key', true), ''), NULL, 'reuse (link): ... and app.edge.link_attest_key');
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'reuse (link): bind A in transaction 2 on the same connection');
+SELECT is((SELECT accounts_on_install FROM private.device_link_signals_for_actor('eeee0000-0000-0000-0000-00000000a001')), 3, 'reuse (link): the same answer on the reused connection');
+SELECT throws_ok($$SELECT * FROM private.device_link_signals_for_actor('eeee0000-0000-0000-0000-00000000b001')$$, 'P0002', NULL, 'reuse (link): a refused call leaves nothing behind either');
+SELECT is(nullif(current_setting('app.edge.link_device_id', true), ''), NULL, 'reuse (link): ... the device GUC is cleared on the refusal path');
+ROLLBACK;
+-- (2) a session-level NON-UUID value left in the device GUC (NIT: compared as text) must not make a definer's read of app.device raise 22P02
+BEGIN;
+SELECT set_config('app.edge.link_device_id', 'not-a-uuid', false);
+COMMIT;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT is(current_setting('app.edge.link_device_id', true), 'not-a-uuid', 'reuse (NIT): the planted non-uuid value survives the COMMIT (session level), as a pooled connection would carry it');
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000a0')$$, 'reuse (NIT): bind A');
+SELECT is((SELECT private.activate_entitlement_for_actor('eeee0000-0000-0000-0000-0000000a0801', 'eeee0000-0000-0000-0000-00000000a001', 'tokhash', 'held_review')::text), 'held_review', 'reuse (NIT): a definer reading app.device (activation) does NOT raise 22P02 under the planted value');
+SELECT is((SELECT count(*)::int FROM app.device WHERE user_id = 'eeee0000-0000-0000-0000-0000000000a0'), 1, 'reuse (NIT): and edge_actor''s own reads are unaffected');
+ROLLBACK;
+BEGIN;
+SELECT set_config('app.edge.link_device_id', '', false);
+COMMIT;
+-- (3) forged SESSION-level windows (all four) do not widen what a definer sees: B's export holds nothing of A, edge_system's
+-- list returns only queued rows, and the planted values are not honoured as an identity
+BEGIN;
+SELECT set_config('app.edge.link_device_id', 'eeee0000-0000-0000-0000-00000000a001', false),
+       set_config('app.edge.link_hash', repeat('e', 64), false),
+       set_config('app.edge.link_attest_key', 'forged', false),
+       set_config('app.edge.purge_fix_coords', 'on', false);
+COMMIT;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000b0')$$, 'reuse (forged): bind B with all four windows planted at A''s values');
+SELECT is(position('eeee0000-0000-0000-0000-00000000a001' in private.export_my_data_for_actor()::text), 0, 'reuse (forged): B''s export contains none of A''s devices');
+SELECT is(position('eeee0000-0000-0000-0000-0000000a0e01' in private.export_my_data_for_actor()::text), 0, 'reuse (forged): ... none of A''s evidence (the purge window is open: it does not widen an export)');
+SELECT is((SELECT count(*)::int FROM app.device), 1, 'reuse (forged): edge_actor itself still sees only B''s device');
+SET LOCAL ROLE edge_system;
+SELECT is((SELECT count(*)::int FROM private.list_queued_catalog(100)), 1, 'reuse (forged): list_queued_catalog still returns only the queued rows, with the purge window open');
+ROLLBACK;
+BEGIN;
+SELECT set_config('app.edge.link_device_id', '', false),
+       set_config('app.edge.link_hash', '', false),
+       set_config('app.edge.link_attest_key', '', false),
+       set_config('app.edge.purge_fix_coords', '', false);
+COMMIT;
+
+-- ----------------------------------------------------------------------------
+-- 10k. Committed cells (these change data the groups above rely on, so they run LAST):
+--      the purge window across a COMMIT, and account deletion handing the reservation back
+-- ----------------------------------------------------------------------------
+BEGIN;
+SET LOCAL ROLE edge_system;
+SELECT is(private.purge_fix_coords(30, 100) >= 1, true, 'reuse (purge): purge_fix_coords in transaction 1 (committed)');
+COMMIT;
+BEGIN;
+SET LOCAL ROLE edge_system;
+SELECT is(nullif(current_setting('app.edge.purge_fix_coords', true), ''), NULL, 'reuse (purge): after the COMMIT the purge window reads empty');
+SELECT is(private.purge_fix_coords(30, 100), 0, 'reuse (purge): a second call on the reused connection is correct (nothing left to purge)');
+SELECT is(nullif(current_setting('app.edge.purge_fix_coords', true), ''), NULL, 'reuse (purge): ... and closes the window again');
+ROLLBACK;
+-- B deletes its account (committed): the definer hands B's reservation on offer E2 back BEFORE the delete. D holds an
+-- earned code on the same offer, so D can still see the offer afterwards and read the shared counter.
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000b0')$$, 'delete (committed): bind B');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e102'), 10, 'delete (committed): before -- B''s code holds a reservation of 10 on the shared offer');
+SELECT is(private.delete_my_data_for_actor() ->> 'user_id', 'eeee0000-0000-0000-0000-0000000000b0', 'delete (committed): the account is deleted');
+COMMIT;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('eeee0000-0000-0000-0000-0000000000d0')$$, 'delete (committed): bind D, who holds another code on the same offer');
+SELECT is((SELECT budget_reserved::int FROM app.offer WHERE id = 'eeee0000-0000-0000-0000-00000000e102'), 0, 'delete (committed): the shared offer budget counter was handed back by delete_my_data_for_actor (and not released twice)');
+SELECT is((SELECT count(*)::int FROM app.offer_code WHERE user_id = 'eeee0000-0000-0000-0000-0000000000d0'), 1, 'delete (committed): D''s own code is untouched');
 ROLLBACK;
 
 -- No finish(): it counts the rows pgTAP keeps in a temp table, which every ROLLBACK above discards, so it would

@@ -495,16 +495,17 @@ for (const [schema, table, column] of missingRCompanion) {
 }
 
 
-// 9-12. The edge roles (supabase/migrations/0030_edge_role_core.sql, 0031_edge_role_policies.sql;
-// docs/security/edge-role-design.md). The four queries below are the SAME text as the session-local functions
+// 9-13. The edge roles (supabase/migrations/0030_edge_role_core.sql, 0031_edge_role_policies.sql, 0032_edge_role_hardening.sql;
+// docs/security/edge-role-design.md). The five queries below are the SAME text as the session-local functions
 // in supabase/tests/matrix/10_function_inventory.sql, which proves each one on the clean schema and must-fails
 // it on a planted defect; here they run against the live cluster as a standalone CLI check. Each returns one
 // row per violation (none = clean).
 //
 //  9  the membership closure of edge_gateway / edge_actor / edge_system is clean: it reaches no role outside
 //     the three, none holds SUPERUSER / BYPASSRLS / CREATEROLE / CREATEDB / REPLICATION / INHERIT, only
-//     edge_gateway can log in, nobody else can SET ROLE to one of them, and edge_gateway holds
-//     SET TRUE / INHERIT FALSE membership of the other two.
+//     edge_gateway can log in, nobody else can SET ROLE to one of them, edge_gateway holds
+//     SET TRUE / INHERIT FALSE membership of the other two, and (0032, L2) no membership of an edge role carries
+//     ADMIN OPTION unless its holder is a superuser or a CREATEROLE role (the migrating role).
 //  10 every RLS policy that applies to edge_actor or edge_system (directly or through PUBLIC) is in
 //     private.edge_policy_allowlist with the same role, command and deparsed text, and every allowlist row
 //     names a live policy (both directions) -- plus the checked-in fixture (below) so a self-consistent
@@ -514,7 +515,12 @@ for (const [schema, table, column] of missingRCompanion) {
 //     install-link tombstone, account_pseudonyms()); an actor-scope policy
 //     must contain it; an open_read policy must be SELECT USING (true).
 //  12 edge_system has no policy and no privilege on any PII-registered table; no edge role holds a privilege
-//     outside schema app, or on an app table without FORCE ROW LEVEL SECURITY.
+//     outside schema app, or on an app table without FORCE ROW LEVEL SECURITY -- in EVERY non-system schema (0032, L2:
+//     not a fixed list; extension-owned relations such as postgis' spatial_ref_sys are exempt) -- and no edge role
+//     can CREATE in any schema.
+//  13 (0032, L1) no SECURITY DEFINER function in app/api/private reads an UNQUALIFIED pg_* relation: edge_actor holds
+//     TEMP, pg_temp is searched before pg_catalog for relations even with search_path = '', so a temp table named
+//     pg_constraint would shadow the catalog under the definer. (All definers, a superset of "reachable from edge_*".)
 const edgeChecks = [
   [9, "membership closure / attributes", `WITH RECURSIVE edge AS (
   SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')
@@ -536,6 +542,10 @@ UNION ALL
 SELECT 'role ' || m.rolname || ' can SET ROLE to / inherit from edge role ' || r.rolname
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
 WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system') AND (am.set_option OR am.inherit_option)
+UNION ALL
+SELECT 'edge role membership holds ADMIN OPTION for a role that is neither a superuser nor a CREATEROLE role (only the migrating role may): ' || m.rolname || ' -> ' || r.rolname
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND am.admin_option AND NOT (m.rolsuper OR m.rolcreaterole)
 UNION ALL
 SELECT 'edge_gateway is not a SET TRUE, INHERIT FALSE member of ' || t.rolname
 FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system')
@@ -621,9 +631,20 @@ UNION ALL
 SELECT 'an edge role holds a privilege on a table outside app, or on an app table without FORCE ROW LEVEL SECURITY: ' || n.nspname || '.' || cl.relname || ' (' || r.rolname || ')'
 FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
 CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
-WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname IN ('app', 'private', 'api', 'auth', 'storage', 'vault')
+WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.deptype = 'e')
   AND (has_any_column_privilege(r.rolname, cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, cl.oid, 'DELETE,TRUNCATE,TRIGGER'))
-  AND (n.nspname <> 'app' OR NOT (cl.relrowsecurity AND cl.relforcerowsecurity))`],
+  AND (n.nspname <> 'app' OR NOT (cl.relrowsecurity AND cl.relforcerowsecurity))
+UNION ALL
+SELECT 'an edge role can CREATE in schema ' || n.nspname || ' (' || r.rolname || ')'
+FROM pg_namespace n
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'
+  AND has_schema_privilege(r.rolname, n.oid, 'CREATE')`],
+  [13, "definer bodies: unqualified catalog relations", `SELECT 'SECURITY DEFINER function reads an unqualified pg_ relation (a temp relation of that name would shadow the catalog): ' || n.nspname || '.' || p.proname || ' -> ' || m[1]
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\\n]*', '', 'g'), '\\m(?:from|join|update|into|table)\\s+(pg_[a-z_]+)\\M(?!\\.|\\s*\\()', 'gi') AS m
+WHERE p.prosecdef AND n.nspname IN ('app', 'api', 'private')`],
 ];
 for (const [num, label, sql] of edgeChecks) {
   for (const [violation] of psql(sql)) {
