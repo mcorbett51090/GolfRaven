@@ -284,10 +284,15 @@ describe("pinned import-target allow-list (M2)", () => {
   describe("committed supabase/tests/deno.lock (npm table)", () => {
     const repoRoot = join(import.meta.dirname, "..", "..", "..");
     const lock = JSON.parse(readFileSync(join(repoRoot, "supabase", "tests", "deno.lock"), "utf8")) as Record<string, Record<string, unknown>>;
+    // Redirect keys may not equal a pinned target or an import-map value.
+    const ctx = {
+      pinnedImportTargets: JSON.parse(readFileSync(join(repoRoot, "tools", "service-role-lint", "pinned-import-targets.json"), "utf8")) as string[],
+      importMapValues: Object.values((JSON.parse(readFileSync(join(repoRoot, "supabase", "functions", "deno.json"), "utf8")) as { imports: Record<string, string> }).imports),
+    };
 
     it("passes the layout and npm-table rules (version 5, allow-listed tables, sha512 integrity on every entry, no tarball override, no dangling/downgraded specifier, no orphan entry)", () => {
       expect(Object.keys(lock.npm ?? {}).length).toBeGreaterThan(0);
-      expect(committedLockProblems(lock)).toEqual([]);
+      expect(committedLockProblems(lock, ctx)).toEqual([]);
       expect(lock.version).toBe("5");
     });
 
@@ -352,12 +357,48 @@ describe("pinned import-target allow-list (M2)", () => {
         },
       ],
       ['an unknown top-level table ("packages") alongside the v5 tables', (l) => ((l as Record<string, unknown>).packages = { npm: {} })],
+      [
+        "redirect: same-host, deno.land postgresjs v3.4.5 -> v3.4.4 (plus a matching remote hash)",
+        (l) => {
+          (l.redirects as Record<string, unknown>)["https://deno.land/x/postgresjs@v3.4.5/mod.js"] = "https://deno.land/x/postgresjs@v3.4.4/mod.js";
+          (l.remote as Record<string, unknown>)["https://deno.land/x/postgresjs@v3.4.4/mod.js"] = "f".repeat(64);
+        },
+      ],
+      [
+        "redirect: cross-host, deno.land postgresjs -> esm.sh/postgres@3.4.4 (plus a matching remote hash)",
+        (l) => {
+          (l.redirects as Record<string, unknown>)["https://deno.land/x/postgresjs@v3.4.5/mod.js"] = "https://esm.sh/postgres@3.4.4";
+          (l.remote as Record<string, unknown>)["https://esm.sh/postgres@3.4.4"] = "f".repeat(64);
+        },
+      ],
+      [
+        "redirect FROM a pinned target / import-map value (std/http/server)",
+        (l) => ((l.redirects as Record<string, unknown>)["https://deno.land/std@0.224.0/http/server.ts"] = "https://deno.land/std@0.224.1/http/server.ts"),
+      ],
+      [
+        "redirect from a floating esm.sh key to a DIFFERENT package",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/ws@^8.14.2?target=denonext"] = "https://esm.sh/evil-ws@8.22.0?target=denonext"),
+      ],
+      [
+        "redirect from a floating esm.sh key to a different ORIGIN",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/ws@^8.14.2?target=denonext"] = "https://evil.example.com/ws@8.22.0?target=denonext"),
+      ],
+      [
+        "redirect from a floating esm.sh key to a non-exact version",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/ws@^8.14.2?target=denonext"] = "https://esm.sh/ws@^8?target=denonext"),
+      ],
+      [
+        "redirect from an esm.sh key WITHOUT a range operator (an exact stub)",
+        (l) => ((l.redirects as Record<string, unknown>)["https://esm.sh/@supabase/supabase-js@2.45.4"] = "https://esm.sh/@supabase/supabase-js@2.45.3"),
+      ],
+      ["remote key on a foreign host", (l) => ((l.remote as Record<string, unknown>)["https://evil.example.com/x.js"] = "f".repeat(64))],
+      ["remote deno.land key that is not a versioned path", (l) => ((l.remote as Record<string, unknown>)["https://deno.land/x/postgresjs/mod.js"] = "f".repeat(64))],
       ['version "4" with otherwise-valid v5 tables', (l) => ((l as Record<string, unknown>).version = "4")],
     ];
     it.each(mutations)("must-fail mutation of the REAL lock: %s", (_name, mutate) => {
       const copy = JSON.parse(JSON.stringify(lock)) as Record<string, Record<string, Record<string, unknown>>>;
       mutate(copy);
-      expect(committedLockProblems(copy).length).toBeGreaterThan(0);
+      expect(committedLockProblems(copy, ctx).length).toBeGreaterThan(0);
     });
   });
 

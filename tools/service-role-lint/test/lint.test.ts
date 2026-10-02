@@ -514,9 +514,16 @@ describe("bad fixtures (must fail) — post-P3a re-gate M2 (module allow-list, h
     "https://esm.sh@evil.com/zod@4.6.5",
     "http://deno.land/std@0.224.0/http/server.ts",
     "https://deno.land:8443/std@0.224.0/http/server.ts",
+    "https://deno.land/std@0.224.0/..\\x/attacker_admin/mod.ts",
+    "https://deno.land/x/postgresjs@v3.4.5/..\\..\\x/evil/mod.ts",
+    "https://deno.land/std@0.224.0/http\\..\\..\\x/postgresjs@v3.4.4/mod.js",
+    "https://deno.land/std@0.224.0/http/../../x/postgresjs@v3.4.4/mod.js",
   ])("must-fail (supply-chain gate bypass): an import-map target %j is rejected at the importing file even when listed on the allow-list", (target) => {
     const findings = lintFixtureWithMap("bad/npm-unpinned-importmap-target.ts", { zod: target }, [target]);
-    expect(findings.some((f) => f.rule === "banned-import-specifier" && f.message.includes(`alias target ${JSON.stringify(target)}`))).toBe(true);
+    // Some targets name a banned driver package (postgresjs) and are rejected by that earlier rule instead; either way they must be banned.
+    expect(
+      findings.some((f) => f.rule === "banned-import-specifier" && (f.message.includes(`alias target ${JSON.stringify(target)}`) || f.message.includes("banned Supabase/Postgres-driver package"))),
+    ).toBe(true);
   });
 
   it("must-pass control: an exact jsr: pin that is on the allow-list resolves clean", () => {

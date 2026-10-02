@@ -126,6 +126,9 @@ describe("config.ts — import-map target bypasses (supply-chain gate: Deno norm
 
   it("has a fixture per bypass shape (guards against the fixture dir silently emptying)", () => {
     expect(cases).toEqual([
+      "backslash-mixed-segments",
+      "backslash-std-dotdot",
+      "backslash-x-dotdot",
       "blob-scheme",
       "cdn-esm-run",
       "cdn-esm-sh-trailing-dot",
@@ -135,6 +138,7 @@ describe("config.ts — import-map target bypasses (supply-chain gate: Deno norm
       "deno-land-port",
       "deno-land-unversioned",
       "deno-land-x-no-v",
+      "dot-segment-normalised",
       "esm-sh-range",
       "file-scheme",
       "http-deno-land",
@@ -202,7 +206,11 @@ describe("config.ts — npmLockTableProblems (the deno.lock npm table; Deno --fr
   const lock = (): Record<string, unknown> => ({
     version: "5",
     specifiers: { "npm:zod@4.6.5": "4.6.5", "npm:@types/node@*": "24.2.0" },
-    npm: { "zod@4.6.5": { integrity: VALID_INTEGRITY }, "@types/node@24.2.0": { integrity: VALID_INTEGRITY, dependencies: ["undici-types"] } },
+    npm: {
+      "zod@4.6.5": { integrity: VALID_INTEGRITY },
+      "@types/node@24.2.0": { integrity: VALID_INTEGRITY, dependencies: ["undici-types"] },
+      "undici-types@7.10.0": { integrity: VALID_INTEGRITY },
+    },
   });
 
   it("good control: a well-formed npm table (scoped package, dependencies field) has no problems", () => {
@@ -266,9 +274,8 @@ describe("config.ts — npmLockTableProblems (the deno.lock npm table; Deno --fr
     const l = lock();
     (l.npm as Record<string, unknown>)["left-pad@1.3.0"] = { integrity: VALID_INTEGRITY };
     expect(npmLockTableProblems(l).some((m) => m.includes("orphan") && m.includes("left-pad@1.3.0"))).toBe(true);
-    const ok = lock();
-    (ok.npm as Record<string, unknown>)["undici-types@7.10.0"] = { integrity: VALID_INTEGRITY };
-    expect(npmLockTableProblems(ok)).toEqual([]);
+    // undici-types@7.10.0 is in the fixture and reachable ONLY through @types/node's dependencies: no orphan finding.
+    expect(npmLockTableProblems(lock())).toEqual([]);
   });
 
   it("a `_peer` suffix on a specifier value is ignored when comparing to the named exact version", () => {
@@ -282,6 +289,19 @@ describe("config.ts — npmLockTableProblems (the deno.lock npm table; Deno --fr
   it("lockLayoutProblems: only version 5 and the allow-listed tables", () => {
     expect(lockLayoutProblems({ version: "5", specifiers: {}, npm: {}, redirects: {}, remote: {}, workspace: {} })).toEqual([]);
     expect(lockLayoutProblems({ version: "3", packages: { specifiers: {}, npm: {} } }).length).toBe(2);
+  });
+
+  it("LOW: a dependency edge must resolve to exactly one npm key (an extra package cannot ride along through a name-prefix match)", () => {
+    const l = lock();
+    (l.npm as Record<string, unknown>)["undici-types@6.0.0"] = { integrity: VALID_INTEGRITY };
+    const messages = npmLockTableProblems(l);
+    expect(messages.some((m) => m.includes("ambiguous") && m.includes("undici-types"))).toBe(true);
+  });
+
+  it("LOW: a `dependencies` edge that resolves to no npm entry is flagged", () => {
+    const l = lock();
+    ((l.npm as Record<string, Record<string, unknown>>)["@types/node@24.2.0"]!).dependencies = ["nonexistent-pkg"];
+    expect(npmLockTableProblems(l).some((m) => m.includes("resolves to no npm entry"))).toBe(true);
   });
 
   it("must-fail: `npm` is not an object", () => {

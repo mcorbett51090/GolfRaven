@@ -204,6 +204,12 @@ export function importMapTargetProblem(target: string): string | undefined {
   if (/[\s\u0000-\u001f\u007f-\u009f]/u.test(target)) {
     return "target contains whitespace or a control character -- Deno normalises these away, so the lint and Deno would read different specifiers";
   }
+  // WHATWG URL treats `\` as `/` in https: URLs, so `..\x/evil/mod.ts`
+  // is a traversal the `/`-segment checks below never see. Reject it
+  // outright, in any target.
+  if (target.includes("\\")) {
+    return "target contains a backslash -- WHATWG URL parsing treats it as '/', so the path would resolve somewhere the lint did not check";
+  }
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(target)?.[1];
   if (scheme !== undefined && scheme !== scheme.toLowerCase()) {
     return `target has a non-lowercase scheme "${scheme}:" -- Deno treats it as the lowercase scheme, so the lint and Deno would read different specifiers`;
@@ -215,6 +221,17 @@ export function importMapTargetProblem(target: string): string | undefined {
       return `target is a ${scheme}: specifier that is not an exact version pin (${scheme}:${scheme === "jsr" ? "@scope/" : ""}<name>@<major.minor.patch>[/subpath], no %, no ./.. segments) -- a bare name, range, dist-tag or build-metadata suffix lets the resolved version drift`;
     }
     return undefined;
+  }
+  if (scheme === "https") {
+    // Any normalisation (dot-segments, percent/case/host rewriting, IDN) means the
+    // raw string is not what Deno will fetch; require it to be its own canonical form.
+    let href: string | undefined;
+    try {
+      href = new URL(target).href;
+    } catch {
+      href = undefined;
+    }
+    if (href !== target) return "target is not in canonical URL form (new URL(target).href differs: dot-segments, host or percent normalisation) -- Deno would fetch something other than the string the lint checked";
   }
   const denoLand = DENO_LAND_STD_TARGET.exec(target) ?? DENO_LAND_X_TARGET.exec(target);
   if (denoLand !== null && !(denoLand[1] ?? "").split("/").some((seg) => seg === ".." || seg === ".")) return undefined;

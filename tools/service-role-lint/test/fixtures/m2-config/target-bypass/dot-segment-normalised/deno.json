@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "dep": "https://deno.land/std@0.224.0/http/../../x/postgresjs@v3.4.4/mod.js"
+  }
+}

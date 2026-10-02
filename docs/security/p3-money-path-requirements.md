@@ -1735,9 +1735,17 @@ Carried from the P3d round-4 gate (recommended, not blocking):
    reachable entry's dependencies). The check runs as a test in `tools/service-role-lint/test/index.test.ts`
    against the real lock (CI runs it through `pnpm -r test`), because that lock lives outside the linted
    `supabase/functions` tree; each probe above is also a must-fail mutation of the real lock.
+   The same check covers the lock's `redirects` and `remote` tables, which frozen Deno also lets swap a module
+   (a `redirects` entry from `deno.land/x/postgresjs@v3.4.5/mod.js` to another driver, with a matching `remote`
+   hash, exits 0): every redirect key must be an `https://esm.sh/` URL whose version carries a range operator
+   (`^ ~ > < * %3E %3C`, the legitimate floating resolutions under the supabase-js stub), no key may start under
+   `deno.land` or equal a pinned target / import-map value, and the target must be the same origin, same package,
+   same sub-path, with an exact version. `remote` keys must be on `deno.land` (canonical versioned `/std@` or
+   `/x/<name>@v` paths only) or `esm.sh` (no range). **Limit:** there is no full import-graph reachability walk
+   for `remote`, and the redirect target's version is not checked to satisfy the key's range.
    Import-map targets (`importMapTargetProblem`) are a POSITIVE allow-list, not a CDN deny-list: only an exact
    `npm:`/`jsr:` pin, or `https://deno.land/std@x.y.z/...` / `https://deno.land/x/<name>@vX.Y.Z/...` matched
-   against the raw string (so ASCII lowercase host, no port, userinfo or trailing dot). Whitespace/control
+   against the raw string (so ASCII lowercase host, no port, userinfo or trailing dot), with no backslash anywhere (WHATWG reads `\` as `/`) and `new URL(target).href === target` for `https:`. Whitespace/control
    characters and non-lowercase schemes are rejected first (Deno normalises `NPM:zod@^4`, ` npm:zod@^4` and
    `n\tpm:zod@^4` to a range). Everything else is rejected: `esm.sh` (including `esm.sh.`), `esm.run`, jsdelivr,
    unpkg, skypack, `ga.jspm.io`, IDN lookalikes, `data:`, `blob:`, `file:`, `node:`, `http:`. There is no
