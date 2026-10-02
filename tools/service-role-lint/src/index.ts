@@ -190,3 +190,4 @@ export function lintDirectory(functionsRoot: string, repoRoot?: string): LintRes
 export { buildConfigIndex, deriveRepoRoot } from "./config.js";
 export { lintSource } from "./lint.js";
 export type { Finding, LintOptions, LintResult, RuleId } from "./lint.js";
+export { lintPrivilegedSource } from "./privileged-lint.js";

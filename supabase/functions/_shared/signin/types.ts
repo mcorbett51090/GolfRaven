@@ -35,23 +35,15 @@ export interface RevocationJob {
  * (`Repo#signin`); every method is one of the private.signin_* definers of 0035. Errors are already mapped to HttpErrors:
  * 409 identity_conflict / provider_already_linked, 404 not_linked, 422 last_sign_in_method, 503 on a timeout. */
 export interface SigninRepo {
-  /** false when this transaction has no way at all to link an identity to ANOTHER account (the OTP-proven link). Both database modes
-   * can since 0039 (`legacy` directly, `edge` through a proof); a repo that cannot makes the handler answer 501 before it spends an OTP or
-   * a code. */
-  readonly crossAccountLink: boolean;
-  /** true when the OTP-proven link goes through a database-checked PROOF (`edge`, 0039): the handler mints one after the OTP verifies
-   * (`SigninDeps.emailProofs`) and redeems it with `linkIdentityWithProof`; `linkIdentity` / `storeToken` then refuse any account but the
-   * caller's. false (`legacy`, deleted in PR4b): the handler links to the proven account directly, as before. */
-  readonly proofBoundLink: boolean;
   /** The caller's own sign-in methods. */
   listMethods(): Promise<SigninMethodRow[]>;
   /** The account holding an email, or null (§3.4 rule 1). Cross-user by design; returns only an id. */
   findAccountByEmail(email: string): Promise<string | null>;
-  /** Links an identity to `targetUserId` (the caller, or, on the OTP-proven path, the account whose mailbox the caller proved).
-   * true = created, false = this account already held that identity. */
+  /** Links an identity to the CALLER's own account (`targetUserId` must be the caller's uid; any other account is a 403: the OTP-proven link to
+   * another account is `linkIdentityWithProof`). true = created, false = this account already held that identity. */
   linkIdentity(targetUserId: string, input: LinkIdentityInput): Promise<boolean>;
   storeToken(targetUserId: string, provider: "apple" | "google", envelope: Envelope): Promise<void>;
-  /** `proofBoundLink` only. Redeems the proof ATOMICALLY and links the identity AND stores its token for the PROOF's target account (never the
+  /** Redeems the proof ATOMICALLY and links the identity AND stores its token for the PROOF's target account (never the
    * caller's): one definer call, so the proof is consumed exactly once. true = created, false = that account already held that identity. A
    * proof that is expired, already used, issued to another caller, or for another identity / address is 409 `email_proof_refused`. */
   linkIdentityWithProof(proofId: string, input: LinkIdentityInput, envelope: Envelope): Promise<boolean>;
@@ -142,7 +134,7 @@ export interface EmailProofInput {
 
 /** Mints the single-use, short-lived proof of a verified email OTP (`private.signin_record_email_proof`, 0039). Runs in its OWN transaction as
  * `edge_system`, never as the per-user actor, and the database refuses unless the target's own address and GoTrue's sign-in stamp agree. Returns
- * the proof id (a random uuid that never leaves the server). Used only when `SigninRepo.proofBoundLink`. */
+ * the proof id (a random uuid that never leaves the server). */
 export interface EmailProofMinter {
   record(input: EmailProofInput): Promise<string>;
 }

@@ -6,9 +6,9 @@
 //
 //   1. import-catalog's drains are DELEGATED: index.ts hands `withDelegatedActor` (never `withOwnership`) to both orchestrators, and the
 //      orchestrators open per-row transactions only through the function they are given.
-//   2. `withSystemCatalogImport` has an edge branch that runs as edge_system and returns BEFORE the legacy pool is touched.
-//   3. `withDelegatedActor` binds through the delegate binders (the "delegate" kind of openScopedTx), never through `bind_actor`, and its
-//      legacy branch is exactly `withOwnership`.
+//   2. `withSystemCatalogImport` runs as edge_system and reads no other connection (PR4b: there is no legacy pool left to fall back to).
+//   3. `withDelegatedActor` binds through the delegate binders (the "delegate" kind of openScopedTx), never through `bind_actor`, and has
+//      no `withOwnership` fallback.
 //   4. In edge mode the importer repo reads and purges through the edge_system definers, not through app.evidence / app.play.
 //   5. The self-check is scheduled (periodic), not once per pool.
 
@@ -58,8 +58,8 @@ describe("PR3: withDelegatedActor", () => {
     expect(body).toMatch(/openScopedTx\("delegate", delegateBind\(delegate, actor\.uid\)/);
     expect(body).not.toMatch(/userBind|bind_actor/);
   });
-  it("its legacy branch is exactly withOwnership(actor, op)", () => {
-    expect(body).toMatch(/return withOwnership\(actor, op\);/);
+  it("has no withOwnership fallback (PR4b: the legacy branch is gone)", () => {
+    expect(body).not.toMatch(/withOwnership/);
   });
   it("the delegate binders are called only in delegateBind, and only as edge_system (the transaction starts as edge_system, switches to edge_actor AFTER the bind)", () => {
     const calls = PRIV.match(/private\.bind_delegate_for_(queued_evidence|rescore)\(/g) ?? [];
@@ -76,26 +76,21 @@ describe("PR3: withDelegatedActor", () => {
   });
 });
 
-describe("PR3: the importer repo runs as edge_system in edge mode", () => {
+describe("PR3: the importer repo runs as edge_system", () => {
   const body = fnBody(PRIV, "withSystemCatalogImport");
-  it("the edge branch comes first, runs as edge_system, and returns before sql() (the legacy pool) is reached", () => {
-    const edge = body.indexOf('if (getDbMode() === "edge")');
-    const legacyPool = body.indexOf("sql()");
-    expect(edge).toBeGreaterThan(-1);
-    expect(legacyPool).toBeGreaterThan(edge);
-    const edgeBranch = body.slice(edge, legacyPool);
-    expect(edgeBranch).toMatch(/openScopedTx\("system", \{ expectedUid: null \}, \(trx\) => op\(buildImporterRepo\(trx, "edge"\)\)\)/);
-    expect(edgeBranch).not.toMatch(/sql\(\)/);
+  it("runs as edge_system through openScopedTx and nothing else (no pool of its own, no mode switch)", () => {
+    expect(body).toMatch(/openScopedTx\("system", \{ expectedUid: null \}, \(trx\) => op\(buildImporterRepo\(trx\)\)\)/);
+    expect(body).not.toMatch(/sql\(\)|getDbMode|EDGE_DB_MODE/);
   });
 
-  it("in edge mode the three cross-user statements go through the edge_system definers", () => {
+  it("the cross-user statements go through the edge_system definers", () => {
     expect(PRIV).toMatch(/private\.list_queued_catalog\(/);
     expect(PRIV).toMatch(/private\.list_rescore_plays\(/);
     expect(PRIV).toMatch(/private\.purge_fix_coords\(/);
     expect(PRIV).toMatch(/private\.purge_install_link_tombstones\(/);
   });
 
-  it("the queued list carries no raw submission in either mode (the drain re-reads it as the owner)", () => {
+  it("the queued list carries no raw submission (the drain re-reads it as the owner)", () => {
     const listOpen = PRIV.slice(PRIV.indexOf("async listOpen(limit: number): Promise<QueuedEvidenceRow[]>"));
     const stmt = listOpen.slice(0, listOpen.indexOf("currentSiteVersion"));
     expect(stmt).not.toMatch(/queued_input/);

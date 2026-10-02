@@ -239,7 +239,7 @@ Deno.test("R3: holes, hole details and roster versions/members are imported (and
   const course = await adminSql()`select holes from app.catalog_course where id = ${i.k}`;
   assertEquals(Number(course[0]!.holes), 9);
   assertEquals(await rawCount(`select count(*)::int as n from app.catalog_hole where course_id = '${i.k}'`), 2);
-  // (A real user: in EDGE_DB_MODE=edge the actor is BOUND, and `private.bind_actor` refuses a uid that is not in auth.users.)
+  // (A real user: the actor is BOUND, and `private.bind_actor` refuses a uid that is not in auth.users.)
   const reader = freshUuid();
   await createTestUser(reader, "r3-reader");
   assertEquals(await withOwnership({ uid: reader, role: "authenticated" }, (repo) => repo.catalog.courseHoleCount(i.k)), 2, "catalog_hole rows win");

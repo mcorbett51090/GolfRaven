@@ -302,16 +302,15 @@ jobs:
         # is already on PATH (installed above) for the harness's own
         # tools/db/test-deno-integration.sh step.
         #
-        # Edge role PR2: that Deno step runs the WHOLE suite twice, once
-        # per EDGE_DB_MODE (legacy = service_role BYPASSRLS; edge = the
-        # NOBYPASSRLS edge_gateway/edge_actor role), each against its own
-        # clone of the migrated database. The edge login's password is
-        # generated at runtime by tools/db/test.sh — never a literal here.
-        # EDGE_DB_MODES is spelled out so dropping a mode is a visible diff.
+        # Edge role: that Deno step runs the whole suite ONCE, in the only
+        # mode there is (PR4b deleted EDGE_DB_MODE and the service_role
+        # pool): every database path is the NOBYPASSRLS edge_gateway /
+        # edge_actor / edge_system role, against its own clone of the
+        # migrated database. The edge login's password is generated at
+        # runtime by tools/db/test.sh — never a literal here.
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: superuser
-          EDGE_DB_MODES: "legacy edge"
 
       - name: Run tools/db/test.sh (HARNESS_MODE=restricted)
         # S1 close-out (gate round 3): "add a harness mode where tests run
@@ -322,17 +321,15 @@ jobs:
         # the two runs never share state) connects migrations/fixtures/
         # pgTAP/the Deno integration suite as `migration_owner` instead —
         # LOGIN, CREATEDB, CREATEROLE, explicitly NOSUPERUSER NOBYPASSRLS
-        # (supabase/tests/shim.sql) — proving "Conditions on the
-        # BYPASSRLS design"'s own `SET LOCAL ROLE service_role`
-        # activation works from a connecting role that is NOT already
-        # service_role, in BOTH harness shapes. Extension installation
+        # (supabase/tests/shim.sql) — proving the migrations, fixtures,
+        # matrix and Deno suite work from a connecting role that is not a
+        # superuser, in BOTH harness shapes. Extension installation
         # stays on the step above (bootstrap-as-superuser in either mode,
-        # per the harness's own header comment). The Deno suite runs in
-        # both EDGE_DB_MODEs here as well (see the step above).
+        # per the harness's own header comment). The Deno suite runs once
+        # here as well (see the step above).
         run: bash tools/db/test.sh
         env:
           HARNESS_MODE: restricted
-          EDGE_DB_MODES: "legacy edge"
 
       - name: Run supabase/tests/unit (vitest — P3c pure/DI'd handler modules)
         # Task instruction: "put handler logic in pure, dependency-injected
@@ -384,6 +381,7 @@ jobs:
             supabase/functions/me-delete/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
+            supabase/functions/retention-purge/index.ts \
             supabase/functions/_shared/privileged.ts
 
       - name: deno cache --frozen (proves the pinned hashes, tamper-evident)
@@ -436,6 +434,7 @@ jobs:
             supabase/functions/me-delete/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
+            supabase/functions/retention-purge/index.ts \
             supabase/functions/_shared/privileged.ts
 
       - name: deno cache --frozen tamper test (proves the pin-proof step itself catches a real tamper)
@@ -490,6 +489,7 @@ jobs:
             supabase/functions/me-delete/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
+            supabase/functions/retention-purge/index.ts \
             supabase/functions/_shared/privileged.ts 2>&1)
           TAMPER_EXIT=$?
           set -e

@@ -166,7 +166,7 @@ export function makeFakeEmailProofs(state: FakeState): EmailProofMinter {
   };
 }
 
-export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossAccountLink?: boolean; proofBoundLink?: boolean } = {}): SigninRepo {
+export function makeFakeSigninRepo(state: FakeState, uid: string): SigninRepo {
   const f = signinFake(state);
   const methodsOf = (u: string): SigninMethodRow[] =>
     f.identities
@@ -178,7 +178,6 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
     if (!last) throw new NotConfiguredError("kek_missing");
     return { kekId: last[0], key: last[1] };
   };
-  const proofBound = opts.proofBoundLink ?? false;
   /** The direct core path (private.signin_link_identity) on `target`, shared by linkIdentity and the proof-bound link. */
   const linkCore = (target: string, input: LinkIdentityInput): boolean => {
     const owner = f.identities.find((i) => i.provider === input.provider && i.subject === input.subject);
@@ -199,13 +198,11 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
     f.tokens = f.tokens.filter((t) => !(t.userId === target && t.provider === provider));
     f.tokens.push({ userId: target, provider, envelope });
   };
-  /** Direct (uid-taking) writes: in the proof-bound (edge) shape only the caller's own account, as privileged.ts#mustBeSelf. */
+  /** Direct (uid-taking) writes: only the caller's own account, as privileged.ts#mustBeSelf. */
   const mustBeSelf = (target: string) => {
-    if (proofBound && target !== uid) throw new HttpError(403, "cross_account_link_requires_proof", "an identity is linked to another account only through a verified email proof");
+    if (target !== uid) throw new HttpError(403, "cross_account_link_requires_proof", "an identity is linked to another account only through a verified email proof");
   };
   return {
-    crossAccountLink: opts.crossAccountLink ?? true,
-    proofBoundLink: proofBound,
     async listMethods() {
       f.calls.push("listMethods");
       maybeFail(f, "listMethods");
@@ -232,7 +229,6 @@ export function makeFakeSigninRepo(state: FakeState, uid: string, opts: { crossA
     async linkIdentityWithProof(proofId, input, envelope) {
       f.calls.push(`linkIdentityWithProof:${proofId}`);
       maybeFail(f, "linkIdentityWithProof");
-      if (!proofBound) throw Errors.internal();
       const refused = () => Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
       const proof = f.proofs.find((p) => p.id === proofId);
       if (!proof || proof.consumed || proof.expiresAtMs <= state.now.getTime() || proof.callerUserId !== uid) throw refused();

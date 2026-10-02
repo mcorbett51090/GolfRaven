@@ -299,19 +299,18 @@ run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAM
 # `migration_owner`, NOSUPERUSER NOBYPASSRLS, under HARNESS_MODE=restricted).
 # A missing `deno` is a HARD failure here (see that script's own header),
 # never a soft skip.
-# EDGE ROLE (PR2): the suite runs once per EDGE_DB_MODE (legacy = service_role, edge = edge_actor through the provisioned
-# edge_gateway login), and it is NOT re-runnable on one database, so each mode gets its own clone of the database as it is
-# NOW (fixtures seeded, matrix ROLLBACKed, concurrency scripts done): CREATE DATABASE ... TEMPLATE, as the bootstrap
-# superuser (the roles, extensions and the cluster-wide grants are shared; no session may be connected to the template).
-echo "tools/db/test.sh: cloning the database once per EDGE_DB_MODE for the Deno integration suite"
-for _mode in legacy edge; do
-  run_as_pg "'$PG_BIN_DIR/psql' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -q -d postgres -c 'CREATE DATABASE \"${DBNAME}_${_mode}\" TEMPLATE \"$DBNAME\"'"
-done
-echo "tools/db/test.sh: Deno integration suite — REAL privileged.ts + handlers against this live cluster, EDGE_DB_MODE=legacy then edge (P3c gate round 2, item 0, as $DBUSER)"
+# EDGE ROLE: the suite runs ONCE (PR4b deleted the `legacy` service_role mode and its second pass): every database path in privileged.ts is
+# edge_actor / edge_system through the provisioned edge_gateway login. It is NOT re-runnable on one database, so it gets its own clone of the
+# database as it is NOW (fixtures seeded, matrix ROLLBACKed, concurrency scripts done): CREATE DATABASE ... TEMPLATE, as the bootstrap
+# superuser (the roles, extensions and the cluster-wide grants are shared; no session may be connected to the template). The steps after it
+# keep seeing the pristine database.
+echo "tools/db/test.sh: cloning the database for the Deno integration suite"
+run_as_pg "'$PG_BIN_DIR/psql' -h '$PGSOCK' -p '$PGPORT' -U postgres -v ON_ERROR_STOP=1 -q -d postgres -c 'CREATE DATABASE \"${DBNAME}_deno\" TEMPLATE \"$DBNAME\"'"
+echo "tools/db/test.sh: Deno integration suite — REAL privileged.ts + handlers against this live cluster, as edge_actor / edge_system (P3c gate round 2, item 0; run as $DBUSER)"
 # The throwaway edge_gateway password goes to the Deno step on STDIN, never inside this command string: `su -c "<string>"` puts the whole
 # string on the child's command line, which any local user can read in `ps` for as long as the step runs (edge role PR3, PR2 gate LOW).
 # test-deno-integration.sh reads one line from stdin into its own environment (EDGE_GATEWAY_TEST_PASSWORD_STDIN=1 says to).
-printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' EDGE_GATEWAY_TEST_PASSWORD_STDIN=1 EDGE_DB_MODES='${EDGE_DB_MODES:-legacy edge}' EDGE_DB_DATABASES='legacy=${DBNAME}_legacy edge=${DBNAME}_edge' bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
+printf '%s\n' "$EDGE_GATEWAY_TEST_PW" | run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='${DBNAME}_deno' PATH=\"$PG_BIN_DIR:\$PATH\" DENO_BIN='${DENO_BIN:-deno}' DENO_DIR='${DENO_DIR:-}' EDGE_GATEWAY_TEST_PASSWORD_STDIN=1 bash '$ROOT_DIR/tools/db/test-deno-integration.sh'"
 
 echo "tools/db/test.sh: function inventory + search_path check (B2, standalone)"
 PGHOST="$PGSOCK" PGPORT="$PGPORT" PGUSER=postgres PGDATABASE="$DBNAME" PATH="$PG_BIN_DIR:$PATH" \

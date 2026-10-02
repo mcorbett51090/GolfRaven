@@ -515,7 +515,7 @@ Deno.test("end to end: after a REINSTALL the new key's assertions verify from co
 // UPDATE lands on. This test makes the window deterministic: an IosPort whose `verifyAssertion` runs the REAL verifier
 // against the state the handler read (key K1, counter 41, so the assertion is genuinely valid), and THEN commits a
 // replacement K2 through the real register path (its own transaction, its own connection) before returning the ok
-// verdict. Both EDGE_DB_MODEs run this file, so it covers both statements `advanceAttestCounter` can issue.
+// verdict. (The statement `advanceAttestCounter` issues is one statement now that the legacy mode is gone.)
 Deno.test("race: a key replacement that commits while an activation is in flight does not let the RETIRED key's assertion issue the reward, and the new key does not inherit its counter", DT, async () => {
   const u = await freshUser("race");
   const dev = await newDevice(u);

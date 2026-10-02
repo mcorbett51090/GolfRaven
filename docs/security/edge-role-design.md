@@ -1,4 +1,4 @@
-# Edge Function NOBYPASSRLS role: design, as built (PR1, PR1b: database; PR2: the TypeScript behind a switch; PR3: the system path; PR4a: the proof-bound sign-in link)
+# Edge Function NOBYPASSRLS role: design, as built (PR1, PR1b: database; PR2: the TypeScript behind a switch; PR3: the system path; PR4a: the proof-bound sign-in link; PR4b: edge is the only mode)
 
 Accepted follow-up 6 of the P3c gate (`docs/security/p3-money-path-requirements.md`, "Updated Accepted follow-ups"):
 before the first real deploy, the Edge Function connection moves from a blanket `service_role` (BYPASSRLS)
@@ -9,8 +9,10 @@ the database side only: migrations `0030_edge_role_core.sql` and `0031_edge_role
 `0032_edge_role_hardening.sql` (PR1b, the security-gate findings), the provisioning script, the inventory checks 9-13
 and the pgTAP file `supabase/tests/matrix/16_edge_role.sql`. PR2 (section 11) routes the TypeScript through it behind the
 temporary `EDGE_DB_MODE` switch (default `legacy`, so nothing that works today changes); PR3 (section 13) moves the system path (the importer repo and the
-drains) onto `edge_system` and the delegate binders; PR4a (section 12.1, migration `0039`) builds the one path PR3 left refused in `edge` mode, the OTP-proven cross-account Sign in with Apple link; PR4 finishes the move. `service_role`, `anon` and `authenticated` are untouched, so nothing that works
-today stops working. Items marked `[unverified]` were not checked against a real Supabase project.
+drains) onto `edge_system` and the delegate binders; PR4a (section 12.1, migration `0039`) builds the one path PR3 left refused in `edge` mode, the OTP-proven cross-account Sign in with Apple link; **PR4b (section 14) finishes the move: `edge` is the only mode, the `legacy` service_role
+path and `EDGE_DB_MODE` are deleted, a lint pass keeps them deleted, retention runs on its own schedule (E5), concurrent drains no longer double-process (PR3 gate P1), and the R2 `held_review` question is ruled. The deploy runbook is section 15.** The sections below this paragraph that
+describe `EDGE_DB_MODE`, `legacy` and "PR4 must" (sections 1, 9, 11, 13) are history: read section 14 for what is true now. `service_role`, `anon` and `authenticated` are untouched in the database (PR5 is where `service_role`'s DML on `app.*` is revoked), but nothing in the Edge runtime connects as or switches to `service_role` any more.
+Items marked `[unverified]` were not checked against a real Supabase project.
 
 Numbering note: the migrations are 0030 and 0031 because 0029 is the P3f follow-up that domain-separates the tombstone
 pseudonym (`private.account_pseudonyms` now hashes `'install_link_account:' || user_id`, prefers the newest vault key by
@@ -310,7 +312,9 @@ columns), and has must-fail cells in `16_edge_role.sql`.
   What remains of its spirit: the scoring columns edge_actor may write on its own `play` (notably `held_review`) feed
   the activation backstops, so an actor with a compromised runtime could un-hold its own play before activating. That
   is inside the R6 trust boundary (the runtime computes the score); a one-way `held_review` would also forbid the
-  legitimate re-score that lifts a hold, so it is not done here. It is called out for the PR4 gate.
+  legitimate re-score that lifts a hold, so it is not done here. **PR4b ruling (section 14.6): confirmed, with evidence. A legitimate path
+  clears `held_review` (the scorer, `Repo#play.upsertFromScore`), so the column stays writable both ways for edge_actor and the residue stays inside R6; it is
+  pinned by a Deno cell and a pgTAP cell so a later one-way change fails loudly, and the earn-path definer (E4) must re-decide it.**
 - **R3** `private.account_pseudonyms(uuid)` accepts any uid, so edge_actor can compute any account's vault-keyed
   pseudonym. No worse than `bind_actor(any uid)`; it reveals only an HMAC.
 - **R4** `record_consumed_nonce` can be called directly: it can burn a nonce hash the caller already knows (a DoS of
@@ -331,7 +335,7 @@ columns), and has must-fail cells in `16_edge_role.sql`.
 ## 9. What PR2-PR4 must watch
 
 (PR2 has done the items on rewards, deletion, export, rate-limit keys, `device_link_signals` and `lockOwnReward` below; see section 11.
-PR3 did the delegate flow and the importer repo as edge_system (section 13). What PR4 still must: the lint pass, and deleting `legacy`.)
+PR3 did the delegate flow and the importer repo as edge_system (section 13). PR4b did the lint pass and deleted `legacy` (section 14).)
 
 - **Every Repo statement must stay inside the column grants.** A statement that writes or reads a column outside
   them fails with `42501` at run time, not at deploy time. `SELECT *` is a `42501` on the column-grant tables
@@ -371,10 +375,9 @@ PR3 did the delegate flow and the importer repo as edge_system (section 13). Wha
   naming a device (or challenge) that is not the actor's own is `42501` whether it exists or not.
 - **Each transaction pays one more round trip** (the bind). Put it first, before any savepoint, and keep the
   15 s / 12 s time budgets in mind.
-- **Run the whole Deno suite in both harness modes against the edge role** (PR2 behind a temporary
-  `EDGE_DB_MODE`, default legacy, both modes in CI). PR4 flips the default, deletes the legacy path and adds the
-  lint pass (no `service_role` / `set role` literals except the two allowed, no `SUPABASE_DB_URL`, no stray
-  `.begin(` / `.savepoint(`, no `set_config(` / `current_setting(` in TypeScript).
+- **Run the whole Deno suite against the edge role** (PR2 ran it behind a temporary `EDGE_DB_MODE`, both modes in CI; **done in PR4b: it runs once, in the only mode, in both HARNESS_MODEs**).
+  PR4b also added the lint pass (no `service_role` / `set role` literals except the two edge roles, no `SUPABASE_DB_URL`, no stray
+  `.begin(` / `.savepoint(`, no `set_config(` / `current_setting(` in TypeScript, no `EDGE_DB_MODE`; section 14.3).
 - **New GET endpoints:** JWT client plus the `api.my_*` views, not `privileged.ts`.
 - **P3 follow-ups that touch the earn path** (`offer_code_enforce_max_redemptions` counts only visible codes under
   edge_actor) need a definer; edge_actor cannot insert `offer_code` today.
@@ -389,11 +392,14 @@ PR3 did the delegate flow and the importer repo as edge_system (section 13). Wha
    (section 13). Not done in PR2 because it is not small (the importer repo's statements, the drain's `queued_input` re-read as the row's
    owner, new orchestrator signatures and their unit tests); `import-catalog` stayed on the legacy pool in `edge` mode until PR3.
 3a. **PR4a: the proof-bound cross-account sign-in link** (migration 0039, section 12.1). The owner decided (2026-10-02) to build it rather than ship the `501` as the production answer; PR4b deletes `legacy`.
-4. PR4 (PR4b): flip the default, delete the legacy path, add the lint pass. Gate before the first deploy.
+4. PR4b (built, section 14): flip the default, delete the legacy path, add the lint pass, schedule retention independently (E5), lock the drain row (PR3 gate P1), rule on R2. **No migration** (the planned `0040` was not needed). Gate before the first deploy.
 5. PR5 (optional): revoke `service_role` DML on `app.*` and EXECUTE on `private.*`; JWT-verifying binder; activation
    behind definers (R2).
 
 ## 11. PR2: the TypeScript behind `EDGE_DB_MODE` (as built)
+
+> **History (PR4b).** The `EDGE_DB_MODE` switch, the `legacy` mode and everything below that compares the two modes were deleted in PR4b (section 14.1). `edge` is the only mode; this section is kept
+> because the `edge` half of it (the self-check, `openScopedTx`, the Repo changes) is exactly what runs.
 
 **The switch.** `EDGE_DB_MODE` is `legacy` (the default; today's `service_role` path; see difference 8 below for the one place it is NOT byte-for-byte what it was before PR2) or `edge`. It, and
 `GOLFRAVEN_EDGE_DB_URL`, are read ONLY in `supabase/functions/_shared/privileged.ts` (the lint's allow-listed site); anything but
@@ -628,7 +634,7 @@ accepts postgres.js's named prepared statements `[unverified — training knowle
 `private.actor_binding` is keyed on the backend pid AND the transaction, and `openScopedTx` relies on `SET LOCAL ROLE`, `SET LOCAL` timeouts and the bind all landing on the same server session
 (a pooler that moved a transaction's statements between server connections would fail closed, since `actor_uid()` would read NULL, but it would fail every request).
 
-**PR4 blockers recorded by PR3** (also in `docs/security/p3-money-path-requirements.md`, "Edge role PR3"):
+**PR4 blockers recorded by PR3** (also in `docs/security/p3-money-path-requirements.md`, "Edge role PR3"). **Status after PR4b: items 1, 2, 3, 5 and 6 are closed (section 14); 4 and 7 are deploy-time checks, written up as the runbook (section 15).**
 
 1. Delete `legacy` (`sql()`, the `service_role` branches, `SIGNIN_SYSTEM_ACTOR`, the `hitSystemRateLimit` / `hitRateLimitForActor` legacy buckets) and add the lint pass (section 9).
 2. ~~The OTP-proven cross-account link~~ **done in PR4a** (section 12.1): the proof-bound definers exist and run in `edge`; PR4b only deletes the `legacy` direct path and collapses the handler's `proofBoundLink` branch.
@@ -637,3 +643,132 @@ accepts postgres.js's named prepared statements `[unverified — training knowle
 5. The R2 gate ruling: `play.held_review` is writable by `edge_actor`; close it before the earn-path definer (E4) and no later than the PR4 gate.
 6. `import-catalog` in production needs `GOLFRAVEN_EDGE_DB_URL` and no longer needs `SUPABASE_DB_URL`: the deploy config for that function changes with the default flip.
 7. The self-check interval (5 minutes / 1000 transactions) is a default chosen without a measured cost; confirm it against real request rates (a repeat is one catalog query).
+
+## 14. PR4b: edge is the only mode (as built)
+
+PR4b is the last step of follow-up 6. **There is no migration** (0001-0039 are byte-identical; `tools/db/check-migrations-immutable.sh --base 8cd86f7`): every retention purge already had a bounded definer that `edge_system` may EXECUTE, `FOR UPDATE` on the drain's evidence row needs only the column `UPDATE` edge_actor already holds on that table, and the R2 ruling changes nothing in the database.
+`private.edge_policy_allowlist`, its fixture, the definer inventory, FORCE RLS and checks 9-13 are untouched.
+
+### 14.1 What was deleted
+
+| Deleted | Where |
+|---|---|
+| `EDGE_DB_MODE`, `getDbMode`, `DbMode`, the `mode` parameter of `buildRepo` / `buildRewardsRepo` / `buildAttestKeyRepo` / `buildImporterRepo` / `buildSigninRepo` / `buildSigninSystemOps` | `privileged.ts` |
+| the `service_role` pool: `sql()`, `_sql`, every `SET LOCAL ROLE service_role` + role assertion, every read of `SUPABASE_DB_URL` for database access | `privileged.ts` |
+| `withOwnership`'s, `withOwnershipBatch`'s, `withDelegatedActor`'s, `withSystemCatalogImport`'s, `hitRateLimitForActor`'s and `hitSystemRateLimit`'s legacy branches; the legacy `private.hit_rate_limit` buckets (the bare system key); `SIGNIN_SYSTEM_ACTOR` | `privileged.ts` |
+| legacy-only repo branches: `release_account_reservations` + `private.delete_my_data(uid)` / `export_my_data(uid)`, `app.activate_*` with a uid, `app.device_link_signals`, `app.register_attest_key`, the in-line `for update of oc / e`, the table scans in `purgeFixCoords` / `nextPlays` / `queuedCatalog.listOpen`, the uid-taking `signin_*` cores | `privileged.ts` |
+| `SigninRepo.crossAccountLink`, `SigninRepo.proofBoundLink` (the handler always mints and redeems a proof; the `501 email_proof_link_unavailable` guard and the direct "link to the proven uid" branch are gone) | `signin/types.ts`, `signin/methods-handler.ts` |
+| the second Deno pass: `EDGE_DB_MODES`, `EDGE_DB_DATABASES`, the per-mode database clones, the `for` loop | `tools/db/test.sh`, `tools/db/test-deno-integration.sh`, `.github/workflows/ci.yml` (the suite runs **once**, against one clone, in both HARNESS_MODEs) |
+| `SUPABASE_DB_URL` as a test input | `supabase/tests/integration/_helpers.ts` |
+
+Tests deleted because they existed only to prove legacy behaviour: the `EDGE_DB_MODE` accepts-only-legacy/edge cell (`edge-role.deno.test.ts`); the "control: the same URL breaks `legacy` mode" cell inside `edge-system-path.deno.test.ts`; the unit cells "a repo with NO route to another account (the guard) answers 501", "a repo with no cross-account route still links the caller's OWN identity" and "legacy shape (not proof-bound)" (`signin-methods-handler.test.ts`); the `legacy` early-returns and `getDbMode() !== "edge"` guards in `signin-methods.deno.test.ts` (the cells themselves now run unconditionally); the `service_role`-shape pins in `with-ownership.test.ts` (rewritten for `openScopedTx`). Every test that ran in both modes still runs, in edge.
+
+### 14.2 What still uses the service-role key, and why
+
+`SUPABASE_SERVICE_ROLE_KEY` is read in exactly two functions of `privileged.ts`, and the lint allows no others:
+
+1. **`adminClient`**: a supabase-js client keyed with it, used only for GoTrue **admin** calls that have no database form: `auth.admin.deleteUser` (`deleteAuthUser`, from `me-delete`, after the database deletion committed). It never reaches Postgres. Removing it needs a GoTrue admin path that does not use the service key; that is not available (PR5 follow-up).
+2. **`isServiceRoleBearer`**: a constant-time **comparison** of an inbound bearer token with the key, so a scheduler that holds the key (Supabase's documented cron pattern) can call `signin-revocation-drain` and `retention-purge`. It authenticates the caller and opens nothing. A leaked scheduler token buys "run an idempotent, bounded, rate-limited maintenance pass".
+
+`verifyOtp` is **not** a use of the key: it runs with the anon key. Supabase injects the key into every function's environment whether or not code reads it `[unverified - training knowledge]`, so reading it in these two places adds no exposure. Nothing in `privileged.ts` connects to the database as `service_role`, switches to it, or names it except `EDGE_FORBIDDEN_MEMBERSHIPS`, the self-check's list of roles the edge login must **not** belong to.
+
+### 14.3 The lint pass (design section 5 "Code")
+
+`tools/service-role-lint/src/privileged-lint.ts` (`lintPrivilegedSource`) runs over exactly `supabase/functions/_shared/privileged.ts`, which the general rules still exempt by exact path. It reads the AST: comments are not scanned, string literals, template literals (the tagged ones are the SQL) and identifiers are.
+
+| Rule | Fails on |
+|---|---|
+| `privileged-forbidden-role` | a `service_role` literal; `SET [LOCAL\|SESSION] ROLE` to anything but `edge_actor` / `edge_system` (an allow-list, case-insensitive, quoted or not, prefix lookalikes refused); `RESET ROLE`; `SET SESSION AUTHORIZATION`; a role-switch whose role is a `${...}` hole. The one exemption is the array `EDGE_FORBIDDEN_MEMBERSHIPS` |
+| `privileged-db-url` | `SUPABASE_DB_URL`, `DATABASE_URL`, any `*DB_URL*` other than `GOLFRAVEN_EDGE_DB_URL` |
+| `privileged-service-key` | `SERVICE_ROLE_KEY` anywhere but `adminClient` and `isServiceRoleBearer` (a deliberate widening of the brief's "outside `adminClient`": the bearer comparison, 14.2) |
+| `privileged-env-access` | `Deno.env` in any shape but `Deno.env.get("<literal>")` (a computed name could build any banned name; `toObject()` reads all) |
+| `privileged-stray-transaction` | `.begin(` outside `openScopedTx`; `.savepoint(` outside `withOwnershipBatch` (the per-item isolation of one batch, itself inside an `openScopedTx` transaction; the only caller); `begin` / `savepoint` destructured off a connection |
+| `privileged-stray-pool` | a call of the `postgres` driver outside `openPool` (not in the brief: a second pool is how a second path would return) |
+| `privileged-guc-in-ts` | `set_config(` / `current_setting(` in TypeScript. The one legitimate read, the server version, now reads `pg_settings` |
+| `privileged-edge-db-mode` | `EDGE_DB_MODE` in any literal or identifier |
+
+Each rule has a must-fail fixture under `tools/service-role-lint/test/fixtures/privileged/bad/` (20 fixtures), a must-pass fixture of every shape the real file uses, and cells in `test/privileged-lint.test.ts`; the real file must pass. Each rule was also proved by mutating a `/tmp` copy of the real file (money-path doc, "Edge role PR4b").
+`retention-purge/index.ts` needs no special case: it is an ordinary function file, so the general rules (no `Deno` references, no driver, no client) apply to it, and it is in the CI `deno check` / `deno cache` lists.
+
+### 14.4 E5: the independent retention schedule (launch-blocking, closed in code; scheduling is a deploy step)
+
+`supabase/functions/retention-purge/index.ts` over the pure handler `_shared/retention/purge-handler.ts` and `privileged.ts#retentionPurgeSteps`. One run purges, **as `edge_system`**, four classes, each through a bounded definer that `edge_system` already held EXECUTE on:
+
+| Step | Definer | Bound per batch | Removes |
+|---|---|---|---|
+| `fix_coords` | `private.purge_fix_coords(30, 5000)` | 5000 (the definer allows 10000) | only the `fixCoords` key of evidence rows past 30 days or no longer re-pickable |
+| `install_link_tombstones` | `private.purge_install_link_tombstones(5000)` | 5000 (the definer allows 100000) | tombstones older than 24 months (the function's own constant; two row-narrow policies repeat the cutoff) |
+| `signin_email_proofs` | `private.purge_signin_email_proofs()` | one pass | proofs an hour past expiry |
+| `signin_revocation_queue` | `private.purge_signin_revocation_queue(30 days)` | one pass | finished (revoked / expired) rows older than 30 days; never a pending one |
+
+- **Authentication.** The scheduler's bearer is the service-role key, compared in constant time (`isServiceRoleBearer`, the check `signin-revocation-drain` makes). A wrong or missing bearer is `401` **before** the rate limit and before any connection is used: an unauthenticated caller spends nothing. (`405` for anything but POST comes first.)
+- **Rate limit.** One coarse system bucket (`system:retention-purge`, `hitSystemRateLimit`), **12 per hour**; the 13th is `429` with `retryAfterSeconds: 3600`. An hourly scheduler uses 1; the rest is headroom for a retry or a manual run.
+- **Bounded per run.** A batched step repeats while a batch comes back full, at most `MAX_BATCHES_PER_STEP = 10` times (so at most 50 000 rows per step per run), and no new batch **starts** after `RUN_BUDGET_MS = 30 s`. What is left is reported `truncated` and the next run continues (every purge is oldest-first). `complete: false` on every run for days means the backlog outruns the schedule: run it more often.
+- **Idempotent.** Each purge deletes only what is already past its retention; a second run removes nothing the first did not.
+- **Safe to run concurrently.** Each batch is its own short `edge_system` transaction that first takes `pg_try_advisory_xact_lock` on its step (namespace 6): a run that finds the step held reports it `busy` and moves on instead of waiting for, or deadlocking over, the same rows, and two runs never double-count a batch.
+- **Failure isolation.** One class failing does not stop the others; the response is `500 retention_step_failed` carrying every step's result with only a short code (the SQLSTATE) per failure, never database text, so a scheduler's monitoring sees it.
+- **What it does not do.** The **72-hour expiry of a pending revocation row** (which wipes its credential material) is not a purge and is not separate: it runs inside `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`. **That drain's schedule is therefore also a retention dependency** (section 15). The drain and the importer keep their own purge calls (cheap, idempotent); retention no longer *depends* on them.
+- **Not covered, and why (decision for the owner).** `private.purge_consumed_nonce()` (7 days past expiry) and `private.purge_rate_limit_buckets()` (2 days) are **`service_role`-only** and nothing schedules them; the edge runtime cannot call them. Both are TTL hygiene (hashes and `<uid>:<key>` counters), not part of the E5 retention promises, and granting `edge_system` EXECUTE on them would be a broadened grant, so it is not done here. Schedule them from `pg_cron` as the project's admin role `[unverified - training knowledge: that the hosted `postgres` role may EXECUTE a function granted to `service_role` only; if it may not, the fix is a migration granting `edge_system` EXECUTE (an inventory row and a must-fail cell for `edge_actor`) and two more `retention-purge` steps]`. Growth is slow (one row per bucket per window); this does not block launch, but it should not be forgotten.
+
+### 14.5 PR3 gate P1: concurrent drains double-processed a row (closed)
+
+`Repo#evidence.readQueuedInput`, the first statement of the drain's per-row transaction, now reads the row `FOR UPDATE SKIP LOCKED`. A second drain that listed the same row finds it locked and gets **no row**, which the drain already reads as "gone" (counted in `scanned` only), so it skips the row instead of re-deriving it.
+
+- **`SKIP LOCKED`, not `NOWAIT`.** NOWAIT raises `55P03`, which `mapPgTimeoutError` turns into a 503; the drain would count the row `errored` and, for an aged row, try to age it out. SKIP LOCKED is the answer this call already has for "not yours to work on any more", and it does not wait, so a drain never sits behind another for the 5 s lock timeout. A row the first drain committed while the second was queued fails the `status = 'queued_catalog'` re-check (READ COMMITTED re-evaluates a locked row's new version), so it too is "gone".
+- **Privileges: nothing was broadened.** `SELECT ... FOR UPDATE` needs `UPDATE` privilege on at least one column and passes the `UPDATE` policy's `USING`. edge_actor holds column `UPDATE` on `app.evidence` (course_id, status, claimed_*, queued_input ... , 0031) and the `edge_actor_evidence_update` policy `user_id = actor_uid()`, so the lock works as-is for a user-bound and a delegate-bound transaction alike (both run as edge_actor). That is the reverse of the reward rows (design section 7, item 14), where edge_actor holds no `UPDATE` at all and the lock needed `private.lock_own_reward_for_actor`.
+- **Proof: two real sessions** (`edge-system-path.deno.test.ts`, section D). Session A holds a delegated transaction open after reading the row; session B's re-read returns no row, without waiting, and the row is readable again once A commits. Then a **real second drain** over the held row makes no resolve attempt and reports no error (a blocked drain would have hit the lock timeout), and the next pass resolves the row exactly once.
+- **Observation, not changed.** A second drain whose bind happens **after** the first committed gets `P0002` from the delegate binder (the row is no longer `queued_catalog`) before `readQueuedInput` runs, so it counts that row `errored` / `stillQueued` rather than "gone". The row is correctly left alone; only the counter is misleading. Mapping that `P0002` to "gone" in the drain is a small follow-up.
+
+### 14.6 The R2 `held_review` ruling
+
+**Ruling: `edge_actor` keeps write access to `held_review` in both directions; the residue stays inside R6.** Nothing was made one-way, and nothing was broadened.
+
+Every path that sets or clears the column (searched: `grep -rn held_review` over migrations, `privileged.ts`, the handlers, the rules package and the tests):
+
+| Path | Sets | Clears | Runs as |
+|---|---|---|---|
+| `Repo#play.upsertFromScore` (`INSERT ... ON CONFLICT DO UPDATE SET held_review = excluded.held_review`): the evidence intake handler, the queued-evidence drain's redrain, the re-score backlog drain, the re-pick | yes | **yes** | edge_actor (user-bound, or delegate-bound) |
+| `app.play_held_review_cascade` (0017, 0027, 0033) / `private.hold_play_rewards_for_actor` | no (it reacts to the column; it moves the backing code and entitlement to `held_review`, **one-way**: it fires only on `NEW.held_review AND NOT OLD.held_review`) | no | invoker / `private_definer` |
+| reviewer tooling `app.resolve_held_offer_code` / `resolve_held_entitlement` (0027) | no | **no**: they move the reward row; a held PLAY is not cleared by a review of the code | `service_role` only |
+| every other writer | none exist | none exist | |
+
+So a legitimate edge_actor path **does** clear it. The evidence: `computeHeldReview` in `packages/rules/src/score-play.ts` is `held = no attested contribution AND some non-attested one`, recomputed from **all** the day's evidence on every re-score, so a play first scored held (an unattestable staff-hard scan, `score-play-golden.test.ts` #15) is un-held when an attested booking-hard contribution arrives (`score-play-regate3.test.ts`: `[unattestable staff-hard, attested booking-hard]` gives `heldReview = false`). A one-way column would forbid that re-score, and moving it behind a definer is a change to the scorer's trust model (R6: the runtime computes the score), not a hardening of it.
+
+Why the residue is acceptable now: (1) lifting a hold **releases nothing**: the cascade is one-way and the backing code stays `held_review` until a reviewer's `app.resolve_held_*` moves it (a pgTAP cell asserts it in the same cell as the counted write); (2) an actor with a compromised runtime can already bind any uid (R6) and decide `activate` for its own rewards within the database's backstops (LOW-3), so "un-hold your own play" adds nothing it lacked. **Pinned**, so a later change is a deliberate diff: `16_edge_role.sql` (the cascade cell: the lift is one counted write and releases nothing) and `edge-role.deno.test.ts` ("R2 ruling": a play scored held is un-held through the real Repo as edge_actor). **For the earn-path definer (E4):** re-decide this when `offer_code` can be inserted at earn time, because an earn that trusts `play.held_review` as a backstop is only as strong as who may write it; the options then are a `held_review` that only a definer may clear (the scorer calls it) or an earn path that re-derives the hold itself.
+
+### 14.7 Mutation proofs and numbers
+
+Numbers, the mutation table and the `[unverified]` list are in `docs/security/p3-money-path-requirements.md`, "Edge role PR4b".
+
+## 15. Deploy runbook (edge role)
+
+Everything here is a deploy step this repository cannot perform; items marked `[unverified]` were not checked against a real Supabase project (training knowledge).
+
+**1. One database URL.** Every function that touches the database reads **`GOLFRAVEN_EDGE_DB_URL` only** (the `edge_gateway` connection string). `SUPABASE_DB_URL` is not read by any code (the lint fails the build on it); the platform may still inject it `[unverified]`, harmlessly. `import-catalog` no longer needs `SUPABASE_DB_URL` either (PR3 blocker 6): its deploy config changes with PR4b.
+
+**2. Provision `edge_gateway`.** Migrations 0030-0039 create it `NOLOGIN` with no credential. Once per environment, from an admin role that may `ALTER ROLE edge_gateway`, against the **direct** database connection (not the pooler):
+```
+<read the generated password from your secret manager> | PGHOST=<direct host> PGPORT=5432 PGUSER=<admin> PGDATABASE=postgres bash tools/db/provision-edge-login.sh --password-stdin
+```
+The script sends a SCRAM-SHA-256 verifier, never the plaintext. Then `supabase secrets set GOLFRAVEN_EDGE_DB_URL=<url>` with the pooled URL of that login. `[unverified]`: that the hosted project lets `ALTER ROLE ... LOGIN PASSWORD` for a role the migration created, that Supavisor accepts the tenant-qualified user name for it (`edge_gateway.<project-ref>`), and that `pg_hba` admits it (R7). The first request runs the self-check (`session_user = edge_gateway`, no SUPERUSER / BYPASSRLS anywhere in its closure, no membership of `service_role` / `authenticated` / `anon` / `authenticator` / `private_definer` / `supabase_admin` / `postgres`); a failure is a 500 from every handler (fail closed) and says why in the function log. To rotate: re-run the script, then update the secret.
+
+**3. Supavisor transaction mode and `prepare: true` `[unverified]`.** `openPool` builds the one pool with `prepare: true`. Nothing in this repository has run through Supavisor. Two things to check before the first real request: (a) that the pooler in transaction mode accepts postgres.js's named prepared statements (symptoms of "no": `prepared statement "..." does not exist` or a bind-parameter-count error on the second use of a statement; support has varied by pooler version and mode); (b) that one transaction stays on one server connection end to end (the binding is keyed on the backend pid and the transaction; a pooler that moved statements between connections would fail every request closed, with `openScopedTx: the bound actor is 'null'`). **One-line fallback for (a):** in `openPool` (`privileged.ts`) change `prepare: true` to `prepare: false` (it is the only pool now). If (b) fails, use the session-mode / direct URL for `GOLFRAVEN_EDGE_DB_URL` and size `max` (5 per worker) against the project's connection limit.
+
+**4. The self-check interval is an unmeasured default.** `EDGE_SELF_CHECK_INTERVAL_MS = 5 min` or `EDGE_SELF_CHECK_EVERY_N_TX = 1000` transactions, whichever comes first (`privileged.ts`); a repeat is one small catalog query, and nothing runs inside the window. Confirm against real request rates: at ~20 requests/s the transaction budget fires about every 50 s, at low rates the 5 minutes do. Count the check query in `pg_stat_statements` after a week and move either constant if it is noise or if the window (how long an `ALTER ROLE edge_gateway BYPASSRLS` goes unseen) is too long. The per-transaction role assertion covers `edge_actor` / `edge_system` at once either way.
+
+**5. Retention schedule.** Schedule `retention-purge` **hourly** (a jittered minute such as :17), `POST` with `Authorization: Bearer <service-role key>` and an empty body. Hourly because the shortest retention it enforces is the sign-in proof (an hour past expiry); fix coordinates (30 days), tombstones (24 months) and the revocation queue (30 days) would be fine daily. The rate limit allows 12 an hour. Mechanism `[unverified - training knowledge]`: Supabase's documented pattern is `pg_cron` + `pg_net` (`select cron.schedule('retention-purge', '17 * * * *', $$ select net.http_post(url := 'https://<project-ref>.supabase.co/functions/v1/retention-purge', headers := jsonb_build_object('Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key')), body := '{}'::jsonb) $$)`, the key held in Vault, never in the job text); any external scheduler that can send the bearer works equally. **Not added as a migration on purpose**: nothing here proved `pg_cron` is available in the harness or on the project. Alert on a non-2xx (`500 retention_step_failed` names the step and its SQLSTATE) and on `complete: false` several runs in a row. **Also schedule `signin-revocation-drain` (every 5 minutes, same bearer): it retries revocations for 72 h and its claim is what expires and wipes a pending row's credential material, so it is a retention dependency too.** And decide the two service_role-only purges (14.4).
+
+**6. Environment, per function.** `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are platform-injected `[unverified]`; the rest are secrets you set. An unset optional vendor value makes that path answer 503 / fail closed, never fall back.
+
+| Function | `GOLFRAVEN_EDGE_DB_URL` | Platform keys it reads | Its own variables |
+|---|---|---|---|
+| `evidence`, `evidence-batch`, `checkin-challenge`, `checkin-token`, `me-export`, `me-push-token` | yes | `SUPABASE_URL`, `SUPABASE_ANON_KEY` (JWT check) | none |
+| `devices-attest-key` | yes | URL, anon | `GR_APPLE_TEAM_ID`, `GR_APPLE_BUNDLE_ID`, `GR_APPLE_APPATTEST_ENV` |
+| `rewards-activate` | yes | URL, anon | `GR_APPLE_TEAM_ID`, `GR_APPLE_BUNDLE_ID`, `GR_APPLE_DEVICECHECK_KEY_ID`, `GR_APPLE_DEVICECHECK_PRIVATE_KEY`, `GR_APPLE_DEVICECHECK_ENV`; `GR_PLAY_PACKAGE_NAME`, `GR_PLAY_CERT_SHA256`, `GR_PLAY_SERVICE_ACCOUNT_EMAIL`, `GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY` |
+| `me-signin-methods` | yes | URL, anon (JWT check **and** `verifyOtp`) | `GR_APPLE_TEAM_ID`, `GR_APPLE_SIWA_CLIENT_ID`, `GR_APPLE_SIWA_KEY_ID`, `GR_APPLE_SIWA_PRIVATE_KEY` |
+| `me-delete` | yes | URL, anon, **service-role key** (`deleteAuthUser`) | the four `GR_APPLE_SIWA_*` (unset: grants stay queued for the 72 h retry) |
+| `signin-revocation-drain` | yes | **service-role key** (bearer comparison) | the four `GR_APPLE_SIWA_*` |
+| `retention-purge` | yes | **service-role key** (bearer comparison) | none |
+| `import-catalog` | yes (**not** `SUPABASE_DB_URL`) | none (HMAC-only, no JWT path) | `CATALOG_ARTIFACT_BASE_URL`, `CATALOG_ARTIFACT_ALLOWED_HOSTS`, `CATALOG_IMPORT_HMAC_SECRET` |
+
+Pin `--config supabase/functions/deno.json` at deploy time (the existing `[unverified]` flag): the import map is what resolves `postgres`, `zod` and the rest.

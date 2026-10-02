@@ -14,10 +14,11 @@
 //                                           `email_proof_required` unless it carries `emailProof.code`; the code is checked by the
 //                                           injected EmailOtpVerifier against THAT account's address, failures are counted (5 per
 //                                           target email per hour, 429 after) and only on a verified proof is the identity
-//                                           linked — to the account the proof was for. In `edge` mode (0039) the target is a DATABASE fact:
+//                                           linked — to the account the proof was for. The target is a DATABASE fact (0039):
 //                                           after the OTP verifies a single-use proof row is minted (edge_system, bound to the caller, the
 //                                           target, the address and the Apple subject, checked against auth.users and GoTrue's sign-in stamp)
-//                                           and redeemed by the bound caller; `legacy` links directly, as before (deleted in PR4b).
+//                                           and redeemed by the bound caller. (The direct "link to the proven uid" path of the legacy
+//                                           service_role mode was deleted in PR4b.)
 //   (3) an Apple private-relay address is its own email
 //                                        -> it is stored as given and flagged; a relay address never takes the OTP-proof path (it
 //                                           is not a mailbox the player reads as that account): a relay account links only from
@@ -45,7 +46,7 @@ export interface SigninDeps {
   /** `null` = Apple is not configured: every Apple operation answers 503, never a fallback. */
   apple: AppleSigninPort | null;
   emailOtp: EmailOtpVerifier | null;
-  /** Mints the database-checked proof of a verified OTP (`edge`, 0039). Required when the repo is `proofBoundLink`; unused otherwise. */
+  /** Mints the database-checked proof of a verified OTP (0039). Required for the OTP-proven cross-account link; `null` / absent = 503 there. */
   emailProofs?: EmailProofMinter | null;
   revocation: RevocationDeps;
   log(event: Record<string, unknown>): void;
@@ -114,8 +115,6 @@ export async function handleLinkProvider(req: LinkRequest, actorUid: string, dep
   const state = await deps.withRepo(async (repo) => ({
     methods: await repo.listMethods(),
     owner: email !== null ? await repo.findAccountByEmail(email) : null,
-    crossAccountLink: repo.crossAccountLink,
-    proofBoundLink: repo.proofBoundLink,
   }));
   const existingApple = state.methods.find((m) => m.provider === "apple");
   if (existingApple && existingApple.subject !== identity.subject) {
@@ -124,21 +123,16 @@ export async function handleLinkProvider(req: LinkRequest, actorUid: string, dep
 
   // 3. Rules (1)-(3): another account holds this email -> never auto-link; OTP proof first.
   let targetUid = actorUid;
-  /** Set only on the proof-bound path (`edge`): the database-checked proof the link below redeems. */
+  /** Set only on the cross-account path: the database-checked proof the link below redeems. */
   let proofId: string | null = null;
   if (email !== null && state.owner !== null && state.owner !== actorUid) {
     if (identity.isPrivateRelay) {
       throw Errors.conflict("email_belongs_to_another_account", "that Apple relay address is already the sign-in email of another account");
     }
-    if (!state.crossAccountLink) {
-      // A repo with no route at all to another account (neither mode has been since 0039; kept as a guard). Say so BEFORE inviting a proof, so
-      // no OTP is requested, counted or consumed and no authorization code is exchanged for a link that cannot happen.
-      throw new HttpError(501, "email_proof_link_unavailable", "linking this Apple ID to the existing account is not available in this mode");
-    }
     if (!req.emailProof) {
       throw Errors.conflict("email_proof_required", "an account with this email already exists; prove it with a code sent to that address", { emailProofRequired: true });
     }
-    const proven = await proveEmail(email, req.emailProof.code, state.owner, actorUid, identity.subject, state.proofBoundLink, deps);
+    const proven = await proveEmail(email, req.emailProof.code, state.owner, actorUid, identity.subject, deps);
     targetUid = proven.userId;
     proofId = proven.proofId;
   }
@@ -171,8 +165,7 @@ export async function handleLinkProvider(req: LinkRequest, actorUid: string, dep
     const input = { provider: "apple" as const, subject: identity.subject, email, emailVerified: identity.emailVerified, isPrivateRelay: identity.isPrivateRelay };
     created = await deps.withRepo(async (repo) => {
       // The proof-bound link redeems the proof, links the identity AND stores the token for the PROOF's account in ONE definer call (so the proof
-      // is consumed exactly once); the caller's own uid appears nowhere in it. Anything else is the direct path (the caller's own account, or
-      // `legacy`'s proven account).
+      // is consumed exactly once); the caller's own uid appears nowhere in it. Anything else is the direct path (the caller's own account).
       if (proofId !== null) return repo.linkIdentityWithProof(proofId, input, envelope);
       const made = await repo.linkIdentity(targetUid, input);
       await repo.storeToken(targetUid, "apple", envelope);
@@ -190,19 +183,18 @@ export async function handleLinkProvider(req: LinkRequest, actorUid: string, dep
 }
 
 /** §3.4 rule 2 + §4.7 item 8: an email OTP to the target address, at most 5 failures per target email per hour. Returns the account id the
- * proof was for and, when the repo is `proofBoundLink` (`edge`, 0039), the id of the single-use proof minted right after the OTP verified. */
+ * proof was for and the id of the single-use proof minted right after the OTP verified (0039). */
 async function proveEmail(
   email: string,
   code: string,
   ownerUid: string,
   actorUid: string,
   subject: string,
-  proofBound: boolean,
   deps: SigninDeps,
-): Promise<{ userId: string; proofId: string | null }> {
+): Promise<{ userId: string; proofId: string }> {
   const hash = await sha256Hex(email.trim().toLowerCase());
   if (deps.emailOtp === null) throw notConfigured("Email proof");
-  if (proofBound && !deps.emailProofs) throw notConfigured("Email proof");
+  if (!deps.emailProofs) throw notConfigured("Email proof");
   // The attempt is TAKEN before the code is checked, atomically (cap check + increment in one statement), so N parallel wrong proofs
   // cannot all pass a read of the count and reach the verifier (security gate F3: check-then-act let 20 through). It is given back only
   // when the proof succeeded or never produced a verdict.
@@ -235,11 +227,10 @@ async function proveEmail(
     // The address changed hands between the lookup and the proof. Refuse; never link to a different account than was looked up.
     throw Errors.conflict("email_proof_mismatch", "the proven account is not the account that was looked up; try again");
   }
-  if (!proofBound) return { userId: result.userId, proofId: null };
   // The OTP verified. Record it in the database as a single-use proof bound to THIS caller, THIS target, THIS address and THIS Apple subject: the
   // database re-checks the address against the target's own auth.users row and GoTrue's sign-in stamp, and only the link that redeems the proof
   // can attach the identity (to the proof's target, never to the caller). A refusal (409 email_proof_refused) means the proof was not minted.
-  const proofId = await deps.emailProofs!.record({ callerUserId: actorUid, targetUserId: result.userId, email, provider: "apple", subject });
+  const proofId = await deps.emailProofs.record({ callerUserId: actorUid, targetUserId: result.userId, email, provider: "apple", subject });
   return { userId: result.userId, proofId };
 }
 

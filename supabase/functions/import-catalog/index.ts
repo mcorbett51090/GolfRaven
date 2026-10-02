@@ -11,7 +11,7 @@
 // AUTH: HMAC-only, no JWT path at all — see import-endpoint.ts /
 // webhook-auth.ts.
 //
-// EDGE ROLE (PR3): in `EDGE_DB_MODE=edge` every database call below runs through GOLFRAVEN_EDGE_DB_URL and never opens the legacy pool:
+// EDGE ROLE: every database call below runs through GOLFRAVEN_EDGE_DB_URL (there is no other database path since PR4b):
 // the importer repo, the drain's list reads and both purges are `edge_system` (`withSystemCatalogImport`); the drains' per-row USER
 // transactions are `withDelegatedActor` (edge_system binds the row's owner through a delegate binder, then acts as edge_actor); the rate
 // limit is `hitSystemRateLimit` (edge_system). So this function needs ONE connection string, not two.

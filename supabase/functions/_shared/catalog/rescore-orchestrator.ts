@@ -29,8 +29,8 @@ export interface RescoreBacklogResult {
 }
 
 /** Edge role PR3: per-play transactions go through `privileged.ts#withDelegatedActor` (injected, so this module stays privileged.ts-free).
- * In `edge` mode it binds the play's owner with `private.bind_delegate_for_rescore(backlogId, playId)` (valid only while the backlog
- * row is open and the play is at its course); in `legacy` mode it is `withOwnership(actor, op)`. */
+ * It binds the play's owner with `private.bind_delegate_for_rescore(backlogId, playId)` (valid only while the backlog
+ * row is open and the play is at its course) and then runs as `edge_actor`. */
 export type { WithDelegatedActorFn };
 
 /** The most plays one `list_rescore_plays` page can return (the database definer clamps its limit to this). A page is full when it

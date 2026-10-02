@@ -2477,6 +2477,7 @@ drain pass calls it where it calls the fix-coordinate purge (`drainRescoreBacklo
 - **E6.** Before launch: privacy-officer / PIA sign-off and a privacy-policy disclosure for the install-link tombstone; disclose the fix-coordinate re-pick
   exception in the privacy label (owner decisions above).
 - **E7 (PR3).** Run `import-catalog` entirely as edge_system with delegate binders; then `edge` mode needs one URL. **Closed by edge role PR3** (section "Edge role PR3" below).
+- **E5 (CLOSED in code by edge role PR4b; scheduling is a deploy step).** `retention-purge` runs all four retention classes as `edge_system`, independently of an import; schedule it hourly (design doc section 15). Two `service_role`-only TTL purges (`purge_consumed_nonce`, `purge_rate_limit_buckets`) stay unscheduled: an owner decision (design doc 14.4).
 
 ## Edge role PR3 (2026-10-02): the system path (follow-up 6, step 3 of 4)
 
@@ -3213,3 +3214,44 @@ that Apple subject and that address, that the database itself checked against th
   exit 0 for every workspace project (`@golfraven/catalog-tools...` built first, `pnpm install --frozen-lockfile`, `GOLFRAVEN_DEMO=1 node scripts/emit-indexability.mjs` in `apps/site`); `deno check --frozen` and `deno cache --frozen` over
   the 11 CI entry points on a fresh `DENO_DIR`, both exit 0 (no new import specifier: every import is relative); `check-migrations-immutable.sh --base 10e3afa` (38 files byte-identical) and `--self-test` OK; `gitleaks dir` no leaks.
 - **Not run**: prettier (out of scope, never run), any deploy, a real Supabase project, Apple, Google or GoTrue; PG16 (the harness uses PG17).
+
+## Edge role PR4b (2026-10-02): edge is the only mode (follow-up 6, step 4 of 4)
+
+Design as built, the runbook and the rulings: [`docs/security/edge-role-design.md`](edge-role-design.md) sections 14 and 15. **No migration** (the planned `0040` was not needed; `check-migrations-immutable.sh --base 8cd86f7`: 39 files byte-identical). FORCE RLS, grants, policies, `edge_policy_allowlist` and checks 9-13 are untouched.
+
+- **Deleted:** `EDGE_DB_MODE`, the `service_role` pool and every `SET LOCAL ROLE service_role`, `SUPABASE_DB_URL` as a database input, every legacy repo branch, `SIGNIN_SYSTEM_ACTOR`, the legacy rate-limit buckets, `SigninRepo.crossAccountLink` / `proofBoundLink`, the second Deno pass. Tests deleted (legacy-only): the `EDGE_DB_MODE` accepts-only-legacy/edge cell, the "legacy mode is broken by that URL" control, three handler unit cells (the 501 guard, "no cross-account route still links own", "legacy shape"); the service_role-shape pins of `with-ownership.test.ts` were rewritten. One existing cell was re-aimed, not deleted: `catalog-drain-resilience` NEW-2 provoked its lock timeout by holding the evidence row, which the drain now skips by design; it holds the play row the re-score upserts instead.
+- **Still uses the service-role key:** `adminClient` (`auth.admin.deleteUser`) and `isServiceRoleBearer` (a constant-time bearer comparison for `signin-revocation-drain` and `retention-purge`). Nothing connects to Postgres as `service_role`.
+- **Lint pass:** `privileged-lint.ts`, eight rules, 20 must-fail fixtures; see the design doc 14.3. `.savepoint(` is allowed in `withOwnershipBatch` (its only caller) and the service key in `isServiceRoleBearer`; both widen the brief and are justified there.
+- **E5:** `retention-purge` (hourly; bearer, 12/hour rate limit, 10 batches x 5000 rows and 30 s per run, per-step try-lock, per-step failure isolation). Added to the CI `deno check` / `deno cache` lists.
+- **PR3 gate P1:** `readQueuedInput` locks the row `FOR UPDATE SKIP LOCKED`; edge_actor's existing column `UPDATE` suffices, no grant added.
+- **R2 ruling:** a legitimate path clears `held_review` (the scorer, `upsertFromScore`), so it stays writable both ways, inside R6; pinned by a Deno cell and one pgTAP cell.
+
+### Tests
+
+New: `retention-purge.deno.test.ts` (10 cells: each class purged and a young row of each kept, a pending revocation row never purged, idempotent re-run, bounded run, database bounds, bad bearer and absent key, 6 concurrent runs x 2 rounds, a held step skipped, one class failing (superuser harness), the rate limit), `retention-purge-handler.test.ts` (20 unit cells), the two P1 cells and the R2 cell in `edge-system-path` / `edge-role`, `privileged-lint.test.ts` (+ 21 fixtures).
+
+### Verification (final tree, after the container restart; nothing from before it is counted)
+
+- **`tools/db/test.sh`, exit 0 in `HARNESS_MODE=superuser` AND `restricted`** (fresh clusters, ports 5701 / 5702): pgTAP `Files=23, Tests=2012, Result: PASS` (unchanged: the R2 pgTAP check extends an existing cell); all three concurrency scripts PASS; Deno integration **232 passed / 0 failed once, in each harness mode** (was 220 per mode x 2 passes; the superuser-only cells print `skipped` under `restricted`); `verify-function-inventory.mjs: OK`; service-role lint clean.
+- **Unit:** `pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts` 43 files / 826 tests (was 42 / 809); lint package 5 files / 356 tests (was 4 / 316); `pnpm -r typecheck` exit 0 (`pnpm install --frozen-lockfile`, `@golfraven/catalog-tools...` built, `emit-indexability` first).
+- `deno check --frozen` and `deno cache --frozen` over the 12 CI entry points on fresh `DENO_DIR`s: both exit 0. `gitleaks dir`: no leaks. Migrations immutable (above).
+- **Not run:** prettier (out of scope), any deploy, a real Supabase project, Supavisor, `pg_cron`.
+
+### Mutation proofs (each on a world-readable `/tmp` copy or a cloned lab database, never in the repo; every one CAUGHT)
+
+| Mutation | Caught by |
+|---|---|
+| reintroduce a `SUPABASE_DB_URL` read | lint `privileged-db-url` (exit 1) |
+| `set local role service_role` / `... postgres` / `... ${role}` | lint `privileged-forbidden-role` (3 mutations) |
+| service-role key read outside the two functions | lint `privileged-service-key` |
+| stray `.begin(` / stray `.savepoint(` / a second `postgres(` pool | lint `privileged-stray-transaction` (2), `privileged-stray-pool` |
+| `set_config(` / `current_setting(` in TS | lint `privileged-guc-in-ts` (2) |
+| a reintroduced `EDGE_DB_MODE` read; a computed `Deno.env.get`; `Deno.env.toObject()`; a `service_role` literal outside the memberships array | lint `privileged-edge-db-mode`, `privileged-env-access` (2), `privileged-forbidden-role` |
+| remove the drain row lock | the two P1 cells (2 of 14 in `edge-system-path`) |
+| remove each of the four purges from `retention-purge` | `retention-purge.deno` (7, 3, 4, 2 failures) |
+| remove the per-step try-lock / the bearer check / the batch cap / the rate limit | `retention-purge.deno` (1, 2, 1, 1 failures) |
+| make `held_review` one-way (a trigger on a cloned database) | the R2 Deno cell and the pgTAP 16 cascade cell (the file aborts at test 500) |
+
+### `[unverified]`
+
+Everything in the design doc's runbook (section 15): Supavisor transaction mode with `prepare: true`, the hosted `ALTER ROLE ... LOGIN` / tenant user / `pg_hba` for `edge_gateway`, `pg_cron` + `pg_net` as the scheduling mechanism, that the platform injects `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_DB_URL`, whether the hosted admin role may EXECUTE the two `service_role`-only purges, and the self-check interval (an unmeasured default).
