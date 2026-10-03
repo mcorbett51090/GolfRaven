@@ -31,8 +31,11 @@ Versions are exact (the repo's `save-exact=true`). "In slice" means installed an
 | SQLite (catalog cache, outbox, device flags) | `expo-sqlite` **57.0.3** | yes | API **[verified]**; SQL tested on Node's SQLite, not the on-device engine |
 | i18n EN / FR-CA | `expo-localization` **57.0.2** for device locale + a small typed translator (no i18n library) | yes | **[verified]** |
 | Ed25519 + SHA-256 for the signed catalog | `@noble/curves` **2.4.0** + `@noble/hashes` **2.4.0** | yes | interop with the Node signer **[verified]** (finding F5) |
-| Secure storage (refresh token) | `expo-secure-store` **57.0.4**, plugin option `faceIDPermission: false` | **no** (no token exists yet) | API and plugin **[verified]**; Keychain/Keystore behaviour **[unverified — needs a device]** |
-| Sign in with Apple | `expo-apple-authentication` **57.0.2** | **no** (stub providers) | API and plugin **[verified]**; flow **[unverified — needs a device]** |
+| Secure storage (refresh token, age flag, device id) | `expo-secure-store` **57.0.4**, **no config plugin** (see "Secure storage" below) | **yes (P4.2a)** | API **[verified]**; Keychain/Keystore behaviour **[unverified — needs a device]** |
+| Sign in with Apple | `expo-apple-authentication` **57.0.2** (plugin used: entitlement) | **yes (P4.2a)** | API, plugin and the generated entitlement **[verified]**; flow **[unverified — needs a device]** |
+| Supabase Auth client | `@supabase/auth-js` **2.65.0** (the auth-js inside the supabase-js 2.45.4 the Edge Functions pin), **not** `@supabase/supabase-js` (finding F6) | **yes (P4.2a)** | wire calls run against a fake GoTrue in Node **[verified]**; React Native runtime and a real GoTrue **[unverified]** |
+| CSPRNG, share sheet | `expo-crypto` **57.0.3** (`getRandomBytes`), `expo-file-system` **57.0.7** + `expo-sharing` **57.0.21** | **yes (P4.2a)** | APIs **[verified]** against the `.d.ts`; behaviour **[unverified — needs a device]** |
+| Runtime response validation | `zod` **4.6.5** (already in the lock, same version the Edge Functions use) | **yes (P4.2a)** | **[verified]** |
 | App Attest / Play Integrity | `@expo/app-integrity` **57.0.2** **plus a small local Expo module for DeviceCheck**, and a server/client binding decision (finding F4) | **no** | API **[verified]**; **gaps found** |
 | HealthKit | `@kingstinct/react-native-healthkit` **16.0.0** + `react-native-nitro-modules` **0.37.1**, plugin options `background: false`, `NSHealthUpdateUsageDescription: false` | **no** (counsel L7) | plugin source **[verified]**; reads **[unverified — needs a device]** |
 | Health Connect | `react-native-health-connect` **4.1.3** (already present, unchanged) | already there | manifest output **[verified]** |
@@ -123,9 +126,24 @@ every genuine fixture verifies, every tampered one fails, in `test/catalog-verif
 emits) while public keys are unpadded base64url; the app decodes each correctly. **[verified]** Verification speed
 on a phone is **[unverified — needs a device]**; the cache is re-verified on every load, so measure it.
 
+### F6. `@supabase/supabase-js` cannot be bundled by Metro; use `@supabase/auth-js` (P4.2a)
+
+`@supabase/supabase-js` 2.45.4 (the version `supabase/functions/_shared/privileged.ts` imports) depends on `@supabase/realtime-js`, which requires
+Node's `ws`, which requires `stream`. `expo export --platform android|ios` failed with `Unable to resolve module stream from …/ws/lib/stream.js`
+(observed 2026-10-03). The app only needs the Auth client, so it depends on **`@supabase/auth-js` 2.65.0** (exactly the auth-js that supabase-js 2.45.4
+pins) and builds `GoTrueClient` the way `createClient` does. Both platforms then bundle **[verified]**. Three behaviours of auth-js 2.65.0 found while
+testing it against a fake GoTrue, each handled in `src/auth/supabase-auth.ts` and covered by `test/supabase-auth.test.ts`:
+
+1. `getSession()` refreshes only a token that has **already expired** (its 10 s margin is for its background timer, which is off here); `getAccessToken`
+   adds a 60 s early-refresh margin.
+2. A failed refresh is retried by the library with backoff for up to ~30 s; a person waiting on a request cannot wait that long, so each library call
+   that may refresh is bounded (10 s) and every request has a timeout (15 s). Offline with a still-valid token, the current token is used.
+3. If the storage adapter's `getItem` rejects, auth-js reads it from its own initialisation, so the rejection is **unhandled**; the session adapter turns a
+   failed read into "no session" (the age flag's store does the opposite: a failed read must not look like "no flag").
+
 ## Per-concern notes
 
-### Secure storage — `expo-secure-store` 57.0.4 (not installed yet)
+### Secure storage — `expo-secure-store` 57.0.4 (installed in P4.2a)
 
 - API: `setItemAsync` / `getItemAsync` / `deleteItemAsync` (+ sync variants), `isAvailableAsync`,
   `keychainAccessible` option with `AFTER_FIRST_UNLOCK`, `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`, `WHEN_UNLOCKED`,
@@ -137,8 +155,12 @@ on a phone is **[unverified — needs a device]**; the cache is re-verified on e
   `fullBackupContent` / `dataExtractionRules` at `secure_store_*` rules so items stay out of backups. **[verified]**
 - Recommended for the refresh token: `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY` **[unverified — training knowledge]**.
   Whether the iOS Keychain item survives an uninstall/reinstall, and the Android Keystore-backed encryption details,
-  are **[unverified — needs a device]**. This matters for the age gate (§7.8): that flag deliberately lives in SQLite
-  (removed on uninstall), not here.
+  are **[unverified — needs a device]**.
+- **P4.2a decision:** the age flag (§7.8, O18) moved HERE from SQLite (LOW-D: SQLite's file is in the iOS backup set). All items use
+  `AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY` (not `WHEN_UNLOCKED_…`: a read at launch must not fail because the screen is locked, which for the
+  age flag would look like "no flag"). The config plugin is **not** used: the module autolinks without it, and the plugin's Face ID string and
+  Android backup rules are unneeded (`allowBackup` is already false). The consequence to know: an iOS Keychain item outlives an uninstall
+  `[unverified — training knowledge]`, so the "on that install" retry refusal now outlives a reinstall on iOS.
 
 ### SQLite — `expo-sqlite` 57.0.3
 
@@ -149,7 +171,7 @@ can interleave; the app uses the exclusive form). **[verified]** The stores are 
 `PRAGMA user_version` migrations) on Node's `node:sqlite` (SQLite 3.51.2). The engine bundled in `expo-sqlite` is
 **[unverified — needs a device]**; avoid SQL newer than that engine until checked.
 
-### Sign in with Apple — `expo-apple-authentication` 57.0.2 (not installed yet)
+### Sign in with Apple — `expo-apple-authentication` 57.0.2 (installed in P4.2a)
 
 - `signInAsync` returns a credential with nullable `identityToken` and `authorizationCode` (both needed: the first for
   the Supabase id-token flow, the second to obtain the grant that §7.8 revokes on deletion). **[verified]**

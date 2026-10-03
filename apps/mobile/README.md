@@ -2,9 +2,13 @@
 
 GolfRaven's mobile app (Expo SDK 57 / React Native 0.86, build plan §3.1 row G, §7).
 
-**Status: P4.1 first slice** — the app shell, the signed catalog cache, the outbox model, EN/FR-CA scaffolding and the
-16+ age screen, all running against a **mock of `api.*`**. It started before M-freeze, the K3/K4 verdicts and the
+**Status: P4.1 first slice + P4.2a** — the app shell, the signed catalog cache, the outbox model, EN/FR-CA scaffolding and the
+16+ age screen (P4.1), and, from P4.2a, a **real `ApiClient`** for the Edge Functions that exist (sign-in methods, delete,
+export, push token), secure token storage, Sign in with Apple / email OTP sign-in, account linking, deletion and export. The
+mock of `api.*` survives for tests and the `__DEV__` demo only. It started before M-freeze, the K3/K4 verdicts and the
 production catalog keyset, on the owner's instruction; read **"What is gated"** below before relying on any of it.
+**Not in P4.2a (that is P4.2b):** evidence submission, the attestation client, check-in challenges, the offline TOTP, Wallet activation.
+**Nothing here has run on a device or against a real Supabase project / Apple / Google** `[unverified]`.
 The P0 Android Health Connect reader for check **X1** is still here, unchanged in behaviour.
 
 - Library choices and the findings behind them: [`SPIKE.md`](SPIKE.md).
@@ -18,17 +22,21 @@ app/                    expo-router routes ONLY (thin screens). Note: never crea
   _layout.tsx           providers + the minAppVersion force-update gate
   (tabs)/               Trails (+ directory), Played, Achievements, Wallet (conditional), Me
   trail/[id] facility/[id] course/[id]   guest-browsable detail pages
-  age-gate.tsx sign-in.tsx force-update.tsx dev/x1.tsx
+  age-gate.tsx sign-in.tsx sign-in-methods.tsx force-update.tsx dev/x1.tsx
 src/
   catalog/              signed-catalog verifier + cache (the fail-closed core)
   outbox/               §7.6 outbox: pure state machine, stores, runner
   db/                   SqlDatabase interface, migrations, expo-sqlite adapter
-  age/ signin/          O18 age gate; stub sign-in providers; startSignIn()
-  api/                  ApiClient interface + the in-memory mock of api.*
+  age/ signin/          O18 age gate (flag in the secure store); sign-in state machines, nonce, Apple/Google adapters
+  api/                  ApiClient interface; the real HTTP client (zod-validated, retry policy); the in-memory mock (dev/tests only)
+  auth/                 AuthService seam; supabase-auth.ts (@supabase/auth-js, session in the secure store); mock-auth.ts (dev only)
+  secure/               SecureStore interface + expo-secure-store adapter (session, O18 age flag, device id)
+  account/              Me → Sign-in methods link flow, account deletion + local wipe, data export + share sheet
+  push/                 push-token registration (client call + adapter; the native module is a follow-up)
   wallet/               O17 visibility rule
   browse/               pure selectors for the guest screens
   i18n/                 en + fr-CA catalogues, plural rules, locale resolution
-  runtime/              composition root and React context (the only place that wires things)
+  runtime/              composition root and React context (the only place that wires things); backend selection (real/demo/unconfigured)
   screens/ ui/ demo/    shared screen pieces, components, a labelled dev-only demo catalog
   health-connect/       P0 X1 reader (below)
 test/                   vitest; test/support has the real-signer fixtures and the node:sqlite adapter
@@ -42,10 +50,16 @@ test/                   vitest; test/support has the real-signer fixtures and th
 | **Guest browse (P4 AT 13)** | Trails list, Directory, region filter, Trail page (roster stops, `0 of n`), Facility page, Course page with booking rail, all with no account. "Near me" and "in progress" are not built. |
 | **Signed catalog cache (AT 12)** | Fetches `catalog/v1/{manifest,manifest.sig,versions,versions.sig}.json` from `EXPO_PUBLIC_CATALOG_BASE_URL`; verifies the Ed25519 signatures over the exact bytes with the **same** canonical-JSON / domain-tag code the signer uses (`@golfraven/catalog-tools/manifest-core`); honours `minAppVersion` (force-update screen, cached catalog stays readable) and `revokedKids`; checks every shard's SHA-256 and length before swapping the cache atomically; re-verifies the cache on every load. A bad signature is never applied and raises the "catalog out of date" banner. **Rollbacks:** a manifest older than the highest `catalogVersion` this install has ever verified (`maxVerifiedCatalogVersion`, its own SQLite row, raised on every verified manifest — including `update_required` and same-version ones) is refused, and that floor survives the cache being dropped (revocation, keyset change, corruption). It does **not** survive an uninstall / "clear data" or the in-memory fallback store (SQLite could not be opened); an optional compiled-in `MIN_CATALOG_VERSION` (`src/catalog/keys.ts`, empty for now) bounds those cases once set. `refresh()` is single-flight and the floor is re-checked inside the save transaction. A corrupt revoked-set or floor row refuses every catalog (`TRUST_STATE_CORRUPT`) instead of reading as empty. The app shows a dedicated banner (not "catalog out of date") and **Me → Reset catalog data** is the way out (the button is shown only in that state, and `resetCatalogData()` is a no-op on a healthy install, so it can never strand a readable catalog): it drops the cache, clears **only unreadable** trust rows (re-seeding a cleared floor from `MIN_CATALOG_VERSION`) and **keeps a valid floor and a valid revoked set** (clearing those would be a one-tap rollback / un-revocation). Trade-off: clearing a *corrupt* revoked set forgets revocations until the next verified manifest re-lists them, and clearing a *corrupt* floor re-opens rollback down to the compiled-in minimum until the next verified manifest raises it (`src/catalog/manager.ts` header). Fetches have a timeout, a streamed size cap and refuse redirects, and send no cookies; the runtime injects `expo/fetch` (`src/runtime/services.ts`), whose body is a native stream, so the cap applies while streaming `[the stream cap, redirect refusal and cancellation are unverified on a device — only the installed expo source was read]`; RN's global `fetch`, believed to expose no body stream, is only the fallback used by tests. |
 | **Outbox (AT 11)** | `pending → sent → accepted \| queued \| retry \| needs_attention` as a pure, tested state machine; SQLite persistence behind `OutboxStore`; a runner with crash recovery, backoff + jitter + `Retry-After`, 422 `catalog_stale` re-match, "Unlisted course" hold, 90-day dead letters. Matching is stubbed (see below). |
-| **Age gate (AT 20)** | Neutral birth-year screen, runs before any provider; under the minimum only a device-local flag is kept and the retry is refused; the year is never stored. Providers are **stubs** that sign in to a local mock session. |
+| **Age gate (AT 20)** | Neutral birth-year screen, runs before any provider; under the minimum only a device-local flag is kept and the retry is refused; the year is never stored. **The flag lives in the secure store** (`…ThisDeviceOnly` Keychain class, so it is not in an iCloud backup or a device migration); an old SQLite flag is moved across once and deleted; if the secure store fails the gate **fails closed** (sign-in blocked, browse still works). |
+| **Real `ApiClient` (P4.2a)** | `src/api/http-client.ts` against `<EXPO_PUBLIC_API_BASE_URL>/<function>`: `me-signin-methods` (list / link / unlink), `me-delete`, `me-export`, `me-push-token`. Every response is validated with zod; the shapes were **recorded from the server's own handlers** (`test/fixtures/edge-contract.json`), every error status is mapped to an `ApiError`, bearer = Supabase access token (one forced refresh on a 401), idempotent calls retry (network / 5xx / short 429), `link`/`unlink` never do. Details and the endpoint table: header of `http-client.ts`. Evidence submission is **P4.2b** (every send is a "not now" and the outbox keeps the item). No endpoint serves `getPolicy` / plays / achievements / programmes yet, so the real client answers the compiled default (16) and "nothing" **without a request**. |
+| **Release builds never use the mock** | Three layers (`src/dev-guard.ts`): selection (`runtime/backend.ts`: real / demo / unconfigured, demo only when `__DEV__` and no server configured), construction (a mock needs a token only `devOnly(true)` can issue), bundling (nothing imports a mock statically; the one `require` is under `__DEV__`; `expo export --no-bytecode` of both platforms was grepped: no mock string in the release bundle). A release build with no server config is **unconfigured**: network calls fail with `not_configured`, nothing is faked. `test/backend.test.ts`. |
+| **Token storage** | `expo-secure-store` 57.0.4 via `src/secure/`, every item `keychainAccessible: AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`. The Supabase session (access + refresh token) is persisted by `@supabase/auth-js` 2.65.0 through that store under one key and nowhere else (`test/supabase-auth.test.ts` runs the real library against a fake GoTrue). Never SQLite, never AsyncStorage (not installed; scanned). |
+| **Sign-in (O12/O18)** | Age screen first, then **Sign in with Apple** (`expo-apple-authentication`, iOS), **email OTP** (Supabase Auth codes), **Google** behind an adapter that says "not configured" (no native SDK in this build). Apple: a CSPRNG raw nonce, **SHA-256 hex to Apple, raw to the server and to Supabase Auth**; right after sign-in the app calls `link` once to hand the server the authorization code so the grant can be revoked on deletion. Apple is listed first and is present wherever Google is (AT 17). `src/signin/flow.ts`. |
+| **Me → Sign-in methods (AT 18)** | List, remove (never the last: 422 `last_sign_in_method`), add Sign in with Apple. **Never auto-links:** on `409 email_proof_required` the flow stops; a code is sent only when the player taps "Send me a code" (Auth with `shouldCreateUser: false`), and the proof is sent only when they type it and confirm. 422 wrong code (attempts left), 429 lockout, 409 relay / already-linked / refused, 501, 502/503 all have copy. A private-relay Apple account links only here. `src/account/link-flow.ts`. |
+| **Delete / export / push** | Delete: confirm (en, fr-CA) → `DELETE me-delete` → wipe the session, the outbox and user caches; **the device-local age flag, the device id, the language and the public signed catalog are kept**. Export: `GET me-export` → a dated `.json` in the cache dir → the share sheet → deleted again. Push: `POST me-push-token` behind a permission prompt asked only from a button; `expo-notifications` is **not** installed, so the control is disabled in this build. |
 | **i18n (EN / FR-CA)** | Typed catalogues with a parity test; French is machine-drafted and unreviewed. Catalog `nameFr` / `blurbFr` are used in fr-CA. |
 | **Wallet (O17)** | Tab hidden unless some trail's mock programme status is `pilot`/`live`; contents are placeholders. |
-| **Policy gates** | `test/policy.test.ts`: no `app.config.*` (a dynamic config could hide things from a scan of `app.json`); the static **and** Expo-resolved config is clean; no background-location / `SYSTEM_ALERT_WINDOW` permission, permission names compared short or qualified; config plugins limited to an allow-list; `android.allowBackup` is `false`; the **generated** `AndroidManifest.xml` and `Info.plist` are clean (AT 5); no ads/analytics SDK in the lockfile (AT 7). The generated-file tests skip locally unless you ran `expo prebuild --no-install`, and **fail** under `CI` if the files are missing; the `verify` job runs prebuild first. |
+| **Policy gates** | `test/policy.test.ts` (and `test/config-api.test.ts`: only public `EXPO_PUBLIC_*` values are read, a `service_role` / secret key is refused, no secret-shaped literal ships): no `app.config.*` (a dynamic config could hide things from a scan of `app.json`); the static **and** Expo-resolved config is clean; no background-location / `SYSTEM_ALERT_WINDOW` permission, permission names compared short or qualified; config plugins limited to an allow-list; `android.allowBackup` is `false`; the **generated** `AndroidManifest.xml` and `Info.plist` are clean (AT 5); no ads/analytics SDK in the lockfile (AT 7). The generated-file tests skip locally unless you ran `expo prebuild --no-install`, and **fail** under `CI` if the files are missing; the `verify` job runs prebuild first. |
 
 ## Configuration
 
@@ -53,8 +67,11 @@ test/                   vitest; test/support has the real-signer fixtures and th
 |---|---|
 | `EXPO_PUBLIC_CATALOG_BASE_URL` | `https://host[/path]` serving `catalog/v1/`. Unset: no network refresh; in a `__DEV__` build the screens show a labelled **demo** catalog (it never touches the verifier). |
 | `EXPO_PUBLIC_STORE_URL` | `https://…` store listing for the force-update screen. |
+| `EXPO_PUBLIC_API_BASE_URL` | The project's **Edge Functions root**, e.g. `https://<ref>.supabase.co/functions/v1` (`https://` only; local `http://` only in a dev build). The client appends `/<function-name>`. |
+| `EXPO_PUBLIC_SUPABASE_URL` | The project URL (`https://<ref>.supabase.co`, an origin, no path). Auth is `<url>/auth/v1`. |
+| `EXPO_PUBLIC_SUPABASE_ANON_KEY` | The **public** anon / `sb_publishable_…` key. A `service_role` JWT, an `sb_secret_…` key, or a JWT whose role cannot be read is refused at parse time. |
 
-Public values only; nothing secret belongs here. `src/catalog/keys.ts` ships an **empty** keyset until the production
+All three server values must be valid for a build to talk to a server; with any missing, a **release** build is `unconfigured` (no network API, no fake data) and a **dev** build is the labelled `demo`. Public values only; nothing secret belongs here. `src/catalog/keys.ts` ships an **empty** keyset until the production
 keyset exists (§3.5), so a build today verifies nothing and **no catalog can be applied**: set a keyset locally to
 try a signed catalog (a development build trusts whatever is compiled in; a release build additionally needs ≥ 2 keys,
 see "What is gated"), and never commit a private key.
@@ -71,29 +88,44 @@ see "What is gated"), and never commit a private key.
 - **Counsel L7:** no HealthKit read before it signs; HealthKit is not installed.
 - **§7.5 attestation decisions:** see SPIKE.md finding F4 (the Expo App Attest module hashes the challenge string, which
   does not match the server's raw-nonce binding, and has no DeviceCheck token).
-- **Stubbed on purpose:** real `api.*`, sign-in, deletion, push, share cards, the on-device matcher, file import,
-  the user-pick flow (§4.3), the private-club trail note (O8), App Attest. Effects worth knowing, in `src/runtime/services.ts`:
-  `rematch` only checks the stored course still exists in the current catalog and, with no verified snapshot (every build
-  until the keyset exists), returns `{ ok: false }` — so a 422 `catalog_stale` answer **dead-letters** the play;
-  `findCourseForUnlisted` always returns `null`, so an "Unlisted course" play never becomes sendable; `resolveQueued`
+- **Still stubbed or not built (after P4.2a):** evidence submission and the attestation client (P4.2b: `submitEvidence` on the real client
+  is a "not now" answer, so plays stay in the outbox; no endpoint feeds `getPolicy` / plays / achievements / programmes, so the
+  real client answers the compiled default and "nothing" with no request), share cards, the on-device matcher, file import, the user-pick
+  flow (§4.3), the private-club trail note (O8), App Attest, Wallet activation, check-in challenges, the offline TOTP. Effects worth
+  knowing, in `src/runtime/services.ts`: `rematch` only checks the stored course still exists in the current catalog and, with no
+  verified snapshot (every build until the keyset exists), returns `{ ok: false }` — so a 422 `catalog_stale` answer **dead-letters**
+  the play; `findCourseForUnlisted` always returns `null`, so an "Unlisted course" play never becomes sendable; `resolveQueued`
   (`src/outbox/machine.ts`) has **no caller**, so a `queued` play never leaves `queued` on the device.
-- **`expo-secure-store` (P4.2):** not installed. The stub sign-in keeps its mock session in memory only. Real sign-in needs a
-  hardware-backed store for the refresh token, and nothing secret may go in SQLite, `AsyncStorage` or the `EXPO_PUBLIC_*` env.
-- **Backups (P4.2, iOS):** `android.allowBackup` is `false`, so Android does not copy `golfraven.db` (and the device-local
-  under-age flag in it) off the device `[Android 12+ device-to-device transfer: unverified]`. **iOS is not closed, and cannot be
-  closed without a native change.** `expo-sqlite` 57.0.3 keeps the file in `<Documents>/SQLite` (`defaultDatabaseDirectory`),
-  which iCloud/iTunes backups include `[backup behaviour: unverified, never run on a device]`. Checked in the installed
-  packages' source (`test/ios-backup.test.ts` pins it): `openDatabaseAsync(name, options, directory)` takes a directory but
-  nothing sets `NSURLIsExcludedFromBackupKey`, and neither `expo-sqlite` nor `expo-file-system` 57.0.7 (a dependency of `expo`,
-  not of this app) has such an option. **Moving the DB is not a fix:** the only directory that is excluded by default is
-  `Library/Caches`, which iOS may purge under storage pressure — that would silently delete the outbox and the age flag
-  (and let an under-age user retry), and `Library/Application Support` is backed up like Documents. **Exact P4.2 action** (pick one,
-  both need a package this slice may not add): (1) a small Expo native module / config-plugin-injected Swift that, before
-  the DB is opened, calls `var v = URLResourceValues(); v.isExcludedFromBackup = true; try dir.setResourceValues(v)` on the
-  `Documents/SQLite` directory (setting it on the directory covers the DB, `-wal` and `-shm` `[Apple behaviour: from training
-  knowledge, unverified]`), then re-applies it on every launch; or (2) stop keeping the flag in SQLite and store it in the iOS
-  Keychain as a `ThisDeviceOnly` item (`expo-secure-store`, `keychainAccessible: WHEN_UNLOCKED_THIS_DEVICE_ONLY`, which P4.2
-  needs anyway for the refresh token). Until then the flag can ride an iCloud/iTunes backup to a restored device.
+- **Pending owner keys / native modules (P4.2a leaves these as adapters):**
+  - **Google sign-in:** the flow, nonce handling and "not configured" path exist; there is **no native Google SDK** (no Expo 57 package in the
+    lock) and no OAuth client. The Google button is not shown until an adapter reports `available` (`signin/google.ts` says how). Server side,
+    linking Google is still a 501 (server O2), so no Google grant is captured or revocable yet.
+  - **Sign in with Apple on Android** needs a web flow and a Services ID (server O3): the Apple button is shown on Android only when Google is
+    offered (AT 17) and then reports "not available on this device".
+  - **Push notifications:** `expo-notifications` (a native module plus push credentials) is not installed; the registration call, device id and
+    state machine are real and tested, the control is disabled. Follow-up: implement `PushAdapter` over it, pin it, allow-list its plugin.
+  - **Supabase project values and Apple/Google provider configuration** (`EXPO_PUBLIC_*` above, the Apple Services/App ID, key and entitlement
+    on the owner's Apple account): none exist in this repo, by design.
+- **Supabase Auth auto-links same-email identities at sign-in `[unverified — training knowledge; server doc "the honest gap"]`.** The app never
+  links by email match (its own `link` calls carry no proof unless the player typed one), but a native Apple/Google sign-in whose verified
+  email matches an existing account can still be linked **inside GoTrue** before the app is involved. Closing that is a Supabase Auth setting /
+  a pre-check the owner has to decide (server doc, `docs/security/p3-money-path-requirements.md` O12), not something the client can do.
+- **Outbox is per device, not per user.** Deletion wipes it, but plain sign-out does not, and nothing yet binds an item to a user id: before
+  P4.2b submits evidence, switching accounts on one device must not send account A's queued plays as account B.
+- **iOS Keychain items survive an uninstall** `[from the Keychain's documented behaviour, not observed on a device]`, so a reinstalled app may
+  find the previous session (and the age flag, which only strengthens the retry refusal). A first-launch marker that clears a stale session is a
+  follow-up; deciding it is a product call.
+- **Backups (iOS):** the under-age flag, the session and the device id are `…ThisDeviceOnly` Keychain items (`AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`;
+  option `keychainAccessible` and the constant read from the installed `.d.ts` and Swift source, `test/secure-storage.test.ts`), so they are not in
+  an iCloud/iTunes backup or a device migration `[Keychain backup semantics: not observed on a device]`. `android.allowBackup` is `false`.
+  **`golfraven.db` itself is still in `<Documents>/SQLite` on iOS and still in the backup set** (catalog cache + the evidence outbox, i.e. a
+  player's own pending plays): `expo-sqlite` 57.0.3 takes a directory but nothing sets `NSURLIsExcludedFromBackupKey`, and neither it nor
+  `expo-file-system` 57.0.7 has such an option (`test/ios-backup.test.ts` pins that). Moving the DB is not a fix (`Library/Caches` is purgeable,
+  `Library/Application Support` is backed up). Closing it needs a small native module / config-plugin Swift that sets `isExcludedFromBackup` on the
+  `Documents/SQLite` directory before the DB opens `[Apple behaviour: training knowledge, unverified]`; not built here.
+- **`expo-secure-store`'s config plugin is deliberately not used:** the module autolinks without it, and the plugin would add an unused Face ID
+  usage string and Android backup-rule attributes (backup is already off). `expo-apple-authentication`'s plugin is used (it sets the
+  `com.apple.developer.applesignin` entitlement, confirmed in a generated `ios/` from `expo prebuild`) and is on the policy allow-list with that reason.
 - **Open decisions flagged in code:** the year-only age boundary (`src/age/gate.ts`), whether a `401` should retry
   instead of dead-lettering (`src/outbox/machine.ts`), what happens to a cache signed by a key that is later revoked
   (it is dropped; `src/catalog/manager.ts`).
@@ -107,6 +139,9 @@ see "What is gated"), and never commit a private key.
   memory and `node:sqlite` stores (anti-rollback, races, force-update), the fetch limits, the outbox, i18n parity, the age
   gate, policy scans.
 - `pnpm build` — no-op; there is no EAS build or `expo export` in CI yet.
+- Release-bundle check for the mock (P4.2a): `expo export --platform android|ios --no-bytecode` in a scratch copy, then grep the bundle for
+  `mock-user-`, `demo-authorization-code`, `mock-access-token`, `createMockApi`, `createMockAuth`, `MOCK_OTP_CODE`: all absent (recorded
+  in the PR notes; `test/backend.test.ts` guards the source-level half in CI).
 - Local checks that are not in CI: `pnpm exec expo export --platform android` (and `ios`) proves Metro can bundle the
   app (`--no-bytecode` and a grep show what a release bundle contains). CI **does** run
   `expo prebuild --no-install` before the tests, so the policy test scans the **generated** `AndroidManifest.xml` and
@@ -178,5 +213,5 @@ surface — update `shape.ts`/`reader.ts` and this README once it's known.
 
 ## Everything else
 
-Sync lanes 2-5, course-matching integration, the attestation client and real sign-in are later P4 work; see "What is
-gated" above.
+Sync lanes 2-5, course-matching integration, evidence submission, the attestation client, check-in challenges and Wallet activation
+are P4.2b / later P4 work; see "What is gated" above.

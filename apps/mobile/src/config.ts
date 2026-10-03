@@ -2,12 +2,12 @@
  * Build-time app configuration. Values come from Expo's public env
  * (`EXPO_PUBLIC_*`, inlined by Metro at build time — written as
  * `process.env.EXPO_PUBLIC_X`, the static form Expo's Babel preset inlines)
- * — never a secret: the catalog is public data and the keyset is public keys.
+ * — never a secret: the catalog is public data, the keyset is public keys, and the Supabase key is the PUBLIC anon/publishable one.
  */
 import Constants from "expo-constants";
-import { SUPPORTED_CONTRACT_MAJOR, parseCatalogBaseUrl, parseStoreUrl } from "./config-values";
+import { SUPPORTED_CONTRACT_MAJOR, parseApiBaseUrl, parseCatalogBaseUrl, parseStoreUrl, parseSupabaseAnonKey, parseSupabaseUrl } from "./config-values";
 
-export { SUPPORTED_CONTRACT_MAJOR, parseCatalogBaseUrl } from "./config-values";
+export { SUPPORTED_CONTRACT_MAJOR, parseApiBaseUrl, parseCatalogBaseUrl, parseSupabaseAnonKey, parseSupabaseUrl } from "./config-values";
 
 export interface AppConfig {
   /** Where `catalog/v1/` is served from; `null` = no network catalog. */
@@ -21,6 +21,11 @@ export interface AppConfig {
   supportedContractMajor: number;
   /** Where the force-update screen sends the player. */
   storeUrl: string | null;
+  /** The Edge Functions root (`EXPO_PUBLIC_API_BASE_URL`); `null` = no network API. */
+  apiBaseUrl: string | null;
+  /** The Supabase project URL and PUBLIC key for Auth (`EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY`). Both public by design. */
+  supabaseUrl: string | null;
+  supabaseAnonKey: string | null;
 }
 
 export function readAppConfig(): AppConfig {
@@ -29,5 +34,8 @@ export function readAppConfig(): AppConfig {
     appVersion: Constants.expoConfig?.version ?? "0.0.0",
     supportedContractMajor: SUPPORTED_CONTRACT_MAJOR,
     storeUrl: parseStoreUrl(process.env.EXPO_PUBLIC_STORE_URL),
+    apiBaseUrl: parseApiBaseUrl(process.env.EXPO_PUBLIC_API_BASE_URL, { allowLocalHttp: __DEV__ }),
+    supabaseUrl: parseSupabaseUrl(process.env.EXPO_PUBLIC_SUPABASE_URL, { allowLocalHttp: __DEV__ }),
+    supabaseAnonKey: parseSupabaseAnonKey(process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY),
   };
 }

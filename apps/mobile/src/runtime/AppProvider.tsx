@@ -1,6 +1,7 @@
 import { getLocales } from "expo-localization";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, View } from "react-native";
+import { deleteAccountAndWipeLocal, type DeleteOutcome } from "../account";
 import type { Session } from "../api";
 import { buildIndex, type CatalogIndex } from "../browse";
 import { resetCatalogAndMaybeRedownload, type CatalogResetReport, type CatalogState, type RefreshOutcome } from "../catalog/manager";
@@ -42,8 +43,10 @@ export interface AppContextValue {
   dismissUpdate: () => void;
 
   session: Session | null;
-  startMockSession: (provider: Session["provider"]) => void;
-  endSession: () => void;
+  /** Ends the session (revoked at the server best-effort, removed from the secure store always). */
+  signOut: () => Promise<void>;
+  /** Me → Delete account: the server deletion, then the local wipe (session, outbox, caches; the age flag is kept). */
+  deleteAccount: () => Promise<DeleteOutcome>;
   programmes: Record<string, ProgrammeStatus>;
   walletVisible: boolean;
 
@@ -89,7 +92,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 function Ready({ services, children }: { services: AppServices; children: ReactNode }) {
   const [explicitLocale, setExplicit] = useState<Locale | null>(null);
   const [catalogState, setCatalogState] = useState<CatalogState>(services.catalog.getState());
-  const [session, setSession] = useState<Session | null>(services.api.getSession());
+  const [session, setSession] = useState<Session | null>(services.auth.current());
   const [programmes, setProgrammes] = useState<Record<string, ProgrammeStatus>>({});
   const [outboxItems, setOutboxItems] = useState<OutboxItem[]>([]);
   const [updateDismissed, setUpdateDismissed] = useState(false);
@@ -120,10 +123,15 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     await reloadOutbox();
   }, [services, reloadOutbox]);
 
-  // Startup: stored language, cached catalog (re-verified), then one refresh.
+  // The session follows the auth service (sign-in, sign-out, a refresh the server refused).
+  useEffect(() => services.auth.subscribe(setSession), [services]);
+
+  // Startup: stored session, stored language, cached catalog (re-verified), then one refresh.
   useEffect(() => {
     let alive = true;
     void (async () => {
+      const restored = await services.auth.restore();
+      if (alive) setSession(restored);
       const stored = await services.flags.get(LOCALE_FLAG);
       if (alive && stored && (LOCALES as readonly string[]).includes(stored)) setExplicit(stored as Locale);
       const loaded = await services.catalog.loadCached();
@@ -165,10 +173,23 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     updateDismissed,
     dismissUpdate: () => setUpdateDismissed(true),
     session,
-    startMockSession: (provider) => setSession(services.api.startMockSession(provider)),
-    endSession: () => {
-      services.api.endSession();
+    signOut: async () => {
+      await services.auth.signOut();
       setSession(null);
+    },
+    deleteAccount: async () => {
+      const outcome = await deleteAccountAndWipeLocal({
+        api: services.api,
+        auth: services.auth,
+        outbox: services.outboxStore,
+        secure: services.secure,
+        clearUserCaches: () => setProgrammes({}),
+      });
+      if (outcome.status === "deleted") {
+        setSession(null);
+        await reloadOutbox();
+      }
+      return outcome;
     },
     programmes,
     walletVisible: walletTabVisible(programmes),

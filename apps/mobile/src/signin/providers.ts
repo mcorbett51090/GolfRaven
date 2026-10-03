@@ -1,37 +1,32 @@
 /**
- * Sign-in provider registry (build plan §3.4 Auth, §7.8 Apple 4.8; P4 ACs
- * 17 and 20). **Stubs only in P4.1**: real Sign in with Apple, Google and
- * email OTP are P4.2. What this slice fixes is the SHAPE and the one
- * invariant that must hold from day one: no provider is ever called before
- * the age gate says `eligible` (`start.ts`).
+ * Sign-in providers (build plan §3.4 Auth, §7.8 Apple 4.8; P4 ACs 17 and 20).
+ *
+ * The invariant that must hold: no provider is ever called before the age gate says `eligible` (`flow.ts` is the only path to one).
  */
 export type SignInProviderId = "apple" | "google" | "email";
 
-export interface SignInResult {
-  ok: true;
-  provider: SignInProviderId;
-  /** True for every provider in this slice: no real account exists. */
-  stub: boolean;
+export const SIGN_IN_PROVIDER_IDS: readonly SignInProviderId[] = ["apple", "google", "email"];
+
+export interface OfferedProvidersInput {
+  /** `Platform.OS`. */
+  platform: string;
+  /** True only when a native Google sign-in is built into this binary AND configured (it is not, today: `google.ts`). */
+  googleConfigured: boolean;
 }
 
-export interface SignInProvider {
-  id: SignInProviderId;
-  signIn(): Promise<SignInResult>;
-}
-
-/** Apple 4.8 (O12): offering Google makes Sign in with Apple mandatory, with
- * equal prominence — so Apple is listed FIRST and is always present
- * whenever Google is. (Whether Android shows the Apple button via a web flow
- * is a P4.2 call `[unverified — training knowledge]`; the plan's AT 17 says
- * the button is present in every build that offers Google.) */
-export function offeredProviders(): SignInProviderId[] {
-  return ["apple", "google", "email"];
-}
-
-export function stubProvider(id: SignInProviderId): SignInProvider {
-  return { id, signIn: () => Promise.resolve({ ok: true, provider: id, stub: true }) };
-}
-
-export function stubProviders(): Record<SignInProviderId, SignInProvider> {
-  return { apple: stubProvider("apple"), google: stubProvider("google"), email: stubProvider("email") };
+/**
+ * The buttons the sign-in screen shows, in order.
+ *
+ * Apple 4.8 / P4 AT 17: offering Google makes Sign in with Apple mandatory, with equal prominence, in EVERY build that offers Google. So Apple
+ * is present whenever Google is (`googleConfigured`), listed before it, and is always present on iOS, where it is native. A build that
+ * does not offer Google (today: every build, until the owner's Google client and a native package exist) and is not iOS shows email only,
+ * because a dead Apple button on Android would only mislead; the moment Google is offered there, Apple appears with it.
+ * `[Apple on Android needs a web flow and a Services ID (server-side O3); until then the Apple button on Android reports "unavailable"]`
+ */
+export function offeredProviders(input: OfferedProvidersInput): SignInProviderId[] {
+  const out: SignInProviderId[] = [];
+  if (input.platform === "ios" || input.googleConfigured) out.push("apple");
+  if (input.googleConfigured) out.push("google");
+  out.push("email");
+  return out;
 }

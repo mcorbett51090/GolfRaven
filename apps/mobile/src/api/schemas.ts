@@ -1,0 +1,79 @@
+/**
+ * Runtime validation of every response the real client accepts (zod 4.6.5, already used server-side). The shapes are copied from the
+ * server handlers and their tests, not invented:
+ *
+ *  - envelope: `{ "data": T }` on success (`okResponse`), `{ "error": { code, message, details? } }` on failure (`errorResponse`),
+ *    `supabase/functions/_shared/http.ts`;
+ *  - `GET /me-signin-methods`          -> `{ methods: MethodView[] }`                      `_shared/signin/methods-handler.ts#handleListMethods`
+ *  - `POST /me-signin-methods` link    -> `{ linked, linkedTo, methods | null }`           `#handleLinkProvider` (`LinkResult`)
+ *  - `POST /me-signin-methods` unlink  -> `{ methods, revocation }`                        `#handleUnlinkProvider` (`UnlinkResult`)
+ *  - `DELETE /me-delete`               -> `{ userId, deletedAt, authUserDeleted, authUserAlreadyGone, signinProvidersRevoked, connectorsRevoked }`
+ *                                         `me-delete/index.ts`
+ *  - `GET /me-export`                  -> `{ generatedAt, userId, data }`                  `_shared/me/export-handler.ts` (`MeExportEnvelope`)
+ *  - `POST /me-push-token`             -> `{ deviceId, updatedAt }`                        `_shared/me/push-token-handler.ts` (`PushTokenResult`)
+ *
+ * A response that does not match is `bad_response`, never a partial success. Unknown EXTRA keys are ignored (zod's default "strip"): the
+ * server may add fields without breaking an installed app; a missing or wrongly typed one is refused.
+ */
+import { z } from "zod";
+
+export const providerSchema = z.enum(["apple", "google", "email"]);
+
+/** `MethodView` (methods-handler.ts). */
+export const methodViewSchema = z.object({
+  provider: z.string().min(1),
+  linkedAt: z.string().min(1),
+  isPrivateRelay: z.boolean(),
+  /** false for the only remaining method (unlinking it is a 422). */
+  canUnlink: z.boolean(),
+});
+
+export const listMethodsSchema = z.object({ methods: z.array(methodViewSchema) });
+
+export const linkResultSchema = z.object({
+  linked: z.object({ provider: z.literal("apple"), created: z.boolean(), isPrivateRelay: z.boolean() }),
+  linkedTo: z.enum(["self", "proven_account"]),
+  methods: z.array(methodViewSchema).nullable(),
+});
+
+/** `RevocationOutcome` (signin/revocation.ts). */
+export const revocationOutcomeSchema = z.object({
+  queueId: z.string(),
+  provider: z.string(),
+  status: z.enum(["revoked", "queued_for_retry"]),
+  error: z.string().optional(),
+});
+
+export const unlinkResultSchema = z.object({ methods: z.array(methodViewSchema), revocation: z.array(revocationOutcomeSchema) });
+
+/** `ProviderRevocationOutcome` (me/provider-revocation.ts). */
+const connectorRevocationSchema = z.object({ provider: z.string(), revoked: z.boolean(), deferred: z.boolean(), reason: z.string() });
+
+export const deleteResultSchema = z.object({
+  userId: z.string().min(1),
+  deletedAt: z.string().min(1),
+  authUserDeleted: z.boolean(),
+  authUserAlreadyGone: z.boolean(),
+  signinProvidersRevoked: z.array(revocationOutcomeSchema),
+  connectorsRevoked: z.array(connectorRevocationSchema),
+});
+
+export const exportResultSchema = z.object({
+  generatedAt: z.string().min(1),
+  userId: z.string().min(1),
+  data: z.record(z.string(), z.unknown()),
+});
+
+export const pushTokenResultSchema = z.object({ deviceId: z.string().min(1), updatedAt: z.string().min(1) });
+
+/** The failure envelope. Anything else (an HTML gateway page, an empty body) is mapped by status alone. */
+export const errorEnvelopeSchema = z.object({
+  error: z.object({ code: z.string(), message: z.string().optional(), details: z.unknown().optional() }),
+});
+
+export const retryDetailsSchema = z.object({ retryAfterSeconds: z.number().positive().finite() });
+export const attemptsDetailsSchema = z.object({ attemptsRemaining: z.number().int().nonnegative() });
+
+/** The success envelope `{ data: ... }`; the payload is then checked against the call's own schema (a missing `data` is `undefined`, which no
+ * payload schema accepts). */
+export const successEnvelopeSchema = z.object({ data: z.unknown() });

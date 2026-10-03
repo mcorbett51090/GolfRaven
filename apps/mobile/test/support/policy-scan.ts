@@ -33,8 +33,14 @@ const FORBIDDEN_NORMALIZED = new Set(FORBIDDEN_ANDROID_PERMISSIONS.map(normalize
 /** The ONLY config plugins this app may use. An allow-list, not a deny-list:
  * a new plugin (a background-geolocation library, an `expo-location` with no
  * props that still contributes permissions at prebuild, a local plugin that
- * rewrites the manifest) must be added here on purpose, in review. */
-export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set(["expo-router", "expo-localization", "react-native-health-connect", "expo-build-properties"]);
+ * rewrites the manifest) must be added here on purpose, in review.
+ *
+ * `expo-apple-authentication` (P4.2a): its plugin sets the `com.apple.developer.applesignin` entitlement on iOS, which Sign in with Apple
+ * needs (Apple 4.8: mandatory once Google is offered); it adds no permission and no Info.plist usage string, and does nothing on Android.
+ * `expo-secure-store` is deliberately NOT here: it works without its plugin, and the plugin would add an unused Face ID usage string and
+ * Android backup-rule attributes (backup is already off). `expo-sharing`, `expo-file-system`, `expo-crypto` and `@supabase/supabase-js`
+ * have no config plugin in use. */
+export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set(["expo-router", "expo-localization", "react-native-health-connect", "expo-apple-authentication", "expo-build-properties"]);
 
 /** Config-plugin props that turn background location on. */
 const BACKGROUND_PLUGIN_PROPS = new Set([

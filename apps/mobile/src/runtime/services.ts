@@ -4,8 +4,21 @@
  * the modules it composes (and is tested there).
  */
 import { fetch as expoFetch } from "expo/fetch";
-import { MemoryDeviceFlagStore, SqliteDeviceFlagStore, AgeGate, type DeviceFlagStore } from "../age";
-import { createMockApi, type MockApi } from "../api";
+import {
+  AGE_FLAG_KEY,
+  AgeGate,
+  MemoryDeviceFlagStore,
+  SecureDeviceFlagStore,
+  SqliteDeviceFlagStore,
+  failClosedAgeFlags,
+  migrateAgeFlag,
+  type DeviceFlagStore,
+} from "../age";
+import type { ApiClient } from "../api";
+import type { AuthService } from "../auth";
+import { createSupabaseAuth } from "../auth/supabase-auth";
+import { createExpoFileSharer } from "../account/expo-share";
+import type { FileSharer } from "../account";
 import { nobleCatalogCrypto } from "../catalog/crypto";
 import { resolveTrustAnchors, TRUSTED_KEYSET } from "../catalog/keys";
 import { CatalogManager, createFetchBytes } from "../catalog/manager";
@@ -13,18 +26,43 @@ import { MemoryCatalogCacheStore, SqliteCatalogCacheStore } from "../catalog/sto
 import { readAppConfig, type AppConfig } from "../config";
 import { openAppDatabase } from "../db/expo-sqlite-adapter";
 import { MemoryOutboxStore, OutboxRunner, SqliteOutboxStore, type OutboxItem, type OutboxStore, type RematchResult } from "../outbox";
-import { stubProviders } from "../signin";
+import { unavailablePushAdapter, type PushAdapter } from "../push";
+import { createExpoSecureStore } from "../secure/expo-secure-store";
+import type { SecureStore } from "../secure";
+import { createExpoAppleAdapter } from "../signin/apple-expo";
+import { expoRandomBytes } from "../signin/expo-random";
+import { notConfiguredGoogle, type AppleAdapter, type GoogleAdapter, type RandomBytes } from "../signin";
 import { buildIndex } from "../browse";
+import { Platform } from "react-native";
+import { createBackend, type BackendKind } from "./backend";
+import { createDeviceIdProvider } from "./device-id";
+import { loadDevMocks } from "./dev-backend";
 
 export interface AppServices {
   config: AppConfig;
   catalog: CatalogManager;
   outboxStore: OutboxStore;
   outboxRunner: OutboxRunner;
-  api: MockApi;
+  /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
+  api: ApiClient;
+  auth: AuthService;
+  backend: BackendKind;
+  /** The dev mock API (a `MockApi`) in the `demo` backend; `null` everywhere else (the dev panel narrows it). */
+  devHandle: unknown;
   ageGate: AgeGate;
+  /** Preferences (language). NOT the age flag: that is in the secure store (`ageGate`). */
   flags: DeviceFlagStore;
-  providers: ReturnType<typeof stubProviders>;
+  secure: SecureStore;
+  apple: AppleAdapter;
+  google: GoogleAdapter;
+  random: RandomBytes;
+  push: PushAdapter;
+  deviceId: () => Promise<string>;
+  sharer: FileSharer;
+  /** `Platform.OS`. */
+  platform: string;
+  /** True when the age flag could not be moved to / read from the secure store: sign-in is blocked (fail closed). */
+  ageStoreProblem: boolean;
   /** False when SQLite could not be opened and the app fell back to memory. */
   persistent: boolean;
   /** Why the compiled-in keyset was refused (release builds only), or `null`.
@@ -72,11 +110,30 @@ export async function createServices(): Promise<AppServices> {
     fetchBytes: createFetchBytes(expoFetch),
   });
 
-  const api = createMockApi({
-    programmes: {},
-    plays: [],
-    achievements: [],
+  // The secure store holds the session, the age flag and the device id. The age flag used to live in SQLite (`device_flags`): move it once,
+  // then delete it from SQLite. If that, or the secure store itself, fails, the age gate FAILS CLOSED (sign-in blocked, guest browse works)
+  // rather than reading an unreadable store as "no flag".
+  const secure = createExpoSecureStore();
+  const secureFlags = new SecureDeviceFlagStore(secure);
+  let ageFlags: DeviceFlagStore = secureFlags;
+  let ageStoreProblem = false;
+  try {
+    if (persistent) await migrateAgeFlag(flags, secureFlags);
+    await secureFlags.get(AGE_FLAG_KEY); // proves the store is readable before the gate relies on it
+  } catch {
+    ageFlags = failClosedAgeFlags();
+    ageStoreProblem = true;
+  }
+
+  const backend = createBackend({
+    isDev: __DEV__,
+    config,
+    secure,
+    fetch: expoFetch,
+    createAuth: createSupabaseAuth,
+    loadDevMocks,
   });
+  const api = backend.api;
 
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
@@ -115,9 +172,20 @@ export async function createServices(): Promise<AppServices> {
     outboxStore,
     outboxRunner,
     api,
-    ageGate: new AgeGate(flags),
+    auth: backend.auth,
+    backend: backend.kind,
+    devHandle: backend.devHandle,
+    ageGate: new AgeGate(ageFlags),
     flags,
-    providers: stubProviders(),
+    secure,
+    apple: backend.demoAdapters?.apple ?? createExpoAppleAdapter(Platform.OS),
+    google: backend.demoAdapters?.google ?? notConfiguredGoogle(),
+    random: expoRandomBytes,
+    push: unavailablePushAdapter(),
+    deviceId: createDeviceIdProvider(secure, expoRandomBytes),
+    sharer: createExpoFileSharer(),
+    platform: Platform.OS,
+    ageStoreProblem,
     persistent,
     keysetProblem: anchors.problem,
   };

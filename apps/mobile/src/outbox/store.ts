@@ -25,6 +25,8 @@ export interface OutboxStore {
   update(item: OutboxItem): Promise<void>;
   /** Only the runner's 90-day dead-letter expiry calls this. */
   delete(id: string): Promise<void>;
+  /** Account deletion only (`account/delete.ts`): the outbox is the deleted player's own data, so it is wiped with the account. */
+  deleteAll(): Promise<void>;
 }
 
 function assertSameIdentity(prev: OutboxItem, next: OutboxItem): void {
@@ -62,6 +64,10 @@ export class MemoryOutboxStore implements OutboxStore {
   }
   delete(id: string): Promise<void> {
     this.byId.delete(id);
+    return Promise.resolve();
+  }
+  deleteAll(): Promise<void> {
+    this.byId.clear();
     return Promise.resolve();
   }
 }
@@ -119,5 +125,9 @@ export class SqliteOutboxStore implements OutboxStore {
 
   async delete(id: string): Promise<void> {
     await this.db.run("DELETE FROM outbox WHERE id = ?", [id]);
+  }
+
+  async deleteAll(): Promise<void> {
+    await this.db.run("DELETE FROM outbox");
   }
 }
