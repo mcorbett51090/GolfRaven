@@ -600,7 +600,38 @@ export interface Repo {
     upsert(deviceId: string, expoToken: string): Promise<{ deviceId: string; updatedAt: string }>;
     countForUser(): Promise<number>;
   };
+
+  /** P4.2b-3a: the offline staff code (build plan §7.6 "Offline staff path (G-P1-07)"; migration 0045). Nothing per-device is stored: the seed is
+   * DERIVED inside Postgres (HMAC-SHA256 under a Vault key that never leaves it), so these two methods are the only DB surface the Edge code has. */
+  offlineCode: {
+    /** `POST /v1/me/offline-seed`: the TOTP seed of the CALLER'S OWN device, optionally rotating it first (seed version + 1, which invalidates every
+     * code from the old seed). `null` = not the caller's device (another account's, or none: the same answer, no oracle on device ids). Never creates a
+     * device. A missing derivation key is a 503 `offline_seed_unavailable`. The returned bytes are a secret: the caller must not log them. */
+    provisionSeed(deviceId: string, rotate: boolean): Promise<OfflineSeedProvision | null>;
+    /** The staff lane's ATOMIC replay record (P5 composes: derive the player's seed -> `verifyOfflineCode` -> THIS -> evidence). Records an accepted
+     * (device, seed version, step) at `facilityId`, where the CALLER must hold a staff or manager scope (403 otherwise); the caller's own device is a
+     * 422 `self_attestation_refused` (A2-21). Concurrent callers racing on the same step get exactly one `"recorded"`; the rest `"replayed"`. */
+    recordStep(input: OfflineStepInput): Promise<OfflineStepRecordResult>;
+  };
 }
+
+/** What `Repo#offlineCode.provisionSeed` returns: the raw 32-byte seed, its version, and the database clock at issue (ISO-8601). */
+export interface OfflineSeedProvision {
+  seed: Uint8Array;
+  seedVersion: number;
+  issuedAt: string;
+}
+
+export interface OfflineStepInput {
+  deviceId: string;
+  seedVersion: number;
+  step: number;
+  facilityId: string;
+}
+
+/** `recorded`: first use of that step of that seed. `replayed`: already used. `stale_seed_version`: the device has been rotated since the seed was
+ * derived. `step_out_of_window`: further than 2 steps from the database clock. `no_such_device`. */
+export type OfflineStepRecordResult = "recorded" | "replayed" | "stale_seed_version" | "step_out_of_window" | "no_such_device";
 
 // ============================================================================
 // P3e: `import-catalog` (build plan §3.3) — a SEPARATE, actor-FREE

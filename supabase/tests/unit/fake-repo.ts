@@ -39,6 +39,7 @@ import type {
 import { fakeAttestDevices, makeFakeAttestKeyRepo } from "./fake-attest-key-repo.ts";
 import { makeFakeRewardsRepo, registerFakeDevice, rewardsState } from "./fake-rewards-repo.ts";
 import { deleteSigninRows, makeFakeSigninRepo } from "./fake-signin-repo.ts";
+import { makeFakeOfflineCodeRepo } from "./fake-offline-code-repo.ts";
 
 const ABSOLUTE_ROW_CAP = 10_000; // mirrors packages/rules' own constant (score-play.ts) — see privileged.ts's own re-import of the SAME vendored value; hardcoded here rather than imported so this fake has zero dependency on the vendor tree's own layout.
 
@@ -532,6 +533,9 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
 
     // App Attest key registration (supabase/tests/unit/fake-attest-key-repo.ts).
     attestKey: makeFakeAttestKeyRepo(state, uid),
+
+    // P4.2b-3a: the offline staff code (supabase/tests/unit/fake-offline-code-repo.ts).
+    offlineCode: makeFakeOfflineCodeRepo(state, uid),
 
     device: {
       async findOwn(deviceId: string) {

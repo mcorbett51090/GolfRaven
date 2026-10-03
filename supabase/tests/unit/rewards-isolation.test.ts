@@ -54,7 +54,7 @@ const VERIFICATION_ONLY = ["attestation-evidence.ts", "binding.ts", "string-bind
 const BIT_NAMES = /query_two_bits|update_two_bits|queryTwoBits|updateTwoBits|readBits|setBit0|deviceRecall|api\.devicecheck|devicecheck-client/i;
 const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-const EARNING_SIDE = ["_shared/evidence", "_shared/scoring", "_shared/checkin", "_shared/catalog", "_shared/me", "evidence", "evidence-batch", "checkin-challenge", "checkin-token", "me-delete", "me-export", "me-push-token"];
+const EARNING_SIDE = ["_shared/evidence", "_shared/scoring", "_shared/checkin", "_shared/catalog", "_shared/me", "evidence", "evidence-batch", "checkin-challenge", "checkin-token", "me-delete", "me-export", "me-push-token", "me-offline-seed", "_shared/offline-code"];
 
 describe("the earning side never reads a persistent device bit", () => {
   const earningFiles = EARNING_SIDE.flatMap((d) => {
@@ -149,7 +149,7 @@ describe("the earning side's RUNTIME import closure never reaches a persistent-b
   const closureRel = [...closure.files].map(rel).sort();
 
   it("starts from every earning-side entrypoint (checkin-token among them) and is not vacuous: it reaches the verifiers and privileged.ts", () => {
-    for (const entry of ["checkin-token", "checkin-challenge", "evidence", "evidence-batch", "me-delete", "me-export", "me-push-token"]) {
+    for (const entry of ["checkin-token", "checkin-challenge", "evidence", "evidence-batch", "me-delete", "me-export", "me-push-token", "me-offline-seed"]) {
       expect(roots.map(rel), entry).toContain(`${entry}/index.ts`);
     }
     for (const reached of ["checkin-token/index.ts", "_shared/checkin/token-handler.ts", "_shared/rewards/verification-ports.ts", "_shared/rewards/app-attest.ts", "_shared/rewards/play-integrity-client.ts", "_shared/rewards/attestation-evidence.ts", "_shared/privileged.ts"]) {
