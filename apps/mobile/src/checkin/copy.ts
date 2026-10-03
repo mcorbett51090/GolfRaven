@@ -29,6 +29,8 @@ export function checkInFailureText(o: CheckInFailure, t: Translate, names: Check
       return t("checkin.err.disabled");
     case "signed_out":
       return t("checkin.err.signed_out");
+    case "account_changed":
+      return t("checkin.err.account_changed");
     case "no_geometry":
       return t("checkin.err.no_geometry");
     case "no_catalog":
@@ -62,6 +64,12 @@ export function markerFailureText(o: MarkerFailure, t: Translate, facility: stri
       return t("marker.err.not_here", { facility });
     case "no_challenge":
       return t("marker.err.no_challenge");
+    case "reserved":
+      return t("marker.err.reserved");
+    case "limit":
+      return t(o.scope === "facility_day" ? "marker.err.limit.facility_day" : "marker.err.limit.overall");
+    case "no_timezone":
+      return t("checkin.err.no_timezone");
     case "signed_out":
       return t("marker.err.signed_out");
     case "disabled":

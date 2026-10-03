@@ -10,6 +10,7 @@ import { frCA } from "../src/i18n/messages/fr-CA";
 const CHECKIN: CheckInFailure[] = [
   { kind: "disabled" },
   { kind: "signed_out" },
+  { kind: "account_changed" },
   { kind: "no_geometry" },
   { kind: "no_catalog" },
   { kind: "no_timezone" },
@@ -32,7 +33,7 @@ const CHECKIN: CheckInFailure[] = [
 const MARKER: MarkerFailure[] = [
   { kind: "disabled" }, { kind: "signed_out" }, { kind: "no_catalog" }, { kind: "no_geometry" }, { kind: "permission", status: "denied" }, { kind: "permission", status: "blocked" }, { kind: "permission", status: "approximate" },
   { kind: "services_off" }, { kind: "no_fix", reason: "timeout" }, { kind: "no_fix", reason: "unavailable" }, { kind: "stale_fix" }, { kind: "simulated" }, { kind: "inaccurate", accuracyMeters: 90 },
-  { kind: "not_here", distanceMeters: 800 }, { kind: "no_challenge" }, { kind: "failed", message: "x" },
+  { kind: "not_here", distanceMeters: 800 }, { kind: "no_challenge" }, { kind: "reserved" }, { kind: "limit", scope: "facility_day" }, { kind: "limit", scope: "overall" }, { kind: "no_timezone" }, { kind: "failed", message: "x" },
 ];
 
 describe.each([["en"], ["fr-CA"]] as const)("copy (%s)", (locale) => {
@@ -80,6 +81,15 @@ describe("the words are honest", () => {
     expect(en["checkin.err.blocked"]).toMatch(/Settings/);
     expect(en["checkin.err.approximate"]).toMatch(/precise/i);
     expect(frCA["checkin.err.blocked"]).toMatch(/Réglages/);
+  });
+
+  it("the account-changed and marker-limit sentences say what happened and what to do", () => {
+    expect(en["checkin.err.account_changed"]).toMatch(/nothing was recorded/i);
+    expect(frCA["checkin.err.account_changed"]).toMatch(/rien n'a été enregistré/);
+    expect(en["marker.err.limit.facility_day"]).toMatch(/today/);
+    expect(en["marker.err.limit.overall"]).toMatch(/tomorrow/i);
+    expect(en["marker.err.reserved"]).toMatch(/kept for check-ins/);
+    expect(frCA["marker.err.reserved"]).toMatch(/réservés aux présences/);
   });
 
   it("needsSettings is true exactly for a blocked or approximate permission", () => {

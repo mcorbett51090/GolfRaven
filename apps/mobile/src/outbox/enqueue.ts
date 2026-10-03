@@ -12,12 +12,13 @@ import { UNOWNED, type NewOutboxItem, type OutboxItem } from "./types";
 /** What a caller supplies. There is deliberately no `ownerUserId`: it is read from the session. */
 export type OutboxDraft = Omit<NewOutboxItem, "ownerUserId">;
 
-export type OutboxEnqueueFailure = "signed_out";
+/** `account_changed`: the caller started the work for one user and a different one is signed in now (P4.2c-1): nothing is written for either. */
+export type OutboxEnqueueFailure = "signed_out" | "account_changed";
 
 export class OutboxEnqueueError extends Error {
   readonly code: OutboxEnqueueFailure;
   constructor(code: OutboxEnqueueFailure) {
-    super(`outbox: cannot enqueue (${code}): sign in first`);
+    super(code === "signed_out" ? `outbox: cannot enqueue (${code}): sign in first` : `outbox: cannot enqueue (${code}): the signed-in account changed`);
     this.name = "OutboxEnqueueError";
     this.code = code;
   }

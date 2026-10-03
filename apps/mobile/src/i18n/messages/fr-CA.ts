@@ -354,4 +354,8 @@ export const frCA: Record<MessageKey, string> = {
   "marker.err.not_here": "Vous ne semblez pas être à {facility}.",
   "marker.err.no_challenge": "Aucun contrôle de sécurité sauvegardé n'était disponible. Connectez-vous à Internet un instant, puis réessayez.",
   "marker.err.signed_out": "Connectez-vous pour utiliser cette fonction.",
+  "checkin.err.account_changed": "Le compte connecté a changé pendant l'enregistrement de votre présence : rien n'a été enregistré. Réessayez.",
+  "marker.err.reserved": "Vos contrôles de sécurité sauvegardés sont réservés aux présences. Connectez-vous à Internet un instant pour en obtenir d'autres, puis réessayez.",
+  "marker.err.limit.facility_day": "Vous avez déjà sauvegardé une vérification de marqueur dans cet établissement aujourd'hui.",
+  "marker.err.limit.overall": "Vous avez sauvegardé le maximum de vérifications de marqueur permis pour l'instant. Réessayez demain.",
 };

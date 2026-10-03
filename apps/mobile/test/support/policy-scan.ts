@@ -54,6 +54,9 @@ export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set([
   // nothing else: no Android permission, no Info.plist key. Its source is `modules/golfraven-attest/app.plugin.js`; what it writes is checked in the generated
   // entitlements file (`scanEntitlements`) and the generated manifest (`scanAndroidGrantedPermissions`), not taken on trust.
   "./modules/golfraven-attest/app.plugin.js",
+  // P4.2c-1: removes `expo-location`'s `LocationTaskService` (a `foregroundServiceType="location"` service for background updates) from the merged Android manifest with `tools:node="remove"`.
+  // It touches nothing else; the app manifest it writes is checked in `scanLocationDeclarations` (`android-location-service`). The removal itself happens in Gradle's manifest merger `[unverified: not run here]`.
+  "./plugins/with-no-location-service.js",
 ]);
 
 /** The iOS entitlements this app may have, with the values each may take. An allow-list, like the plugins: a new entitlement (push, associated domains, HealthKit, ...) is added here
@@ -251,6 +254,15 @@ export function scanInfoPlist(plist: string): Violation[] {
   return out;
 }
 
+/** True when the manifest has a `<service>` for expo-location's `LocationTaskService`, by its fully-qualified name, with `tools:node="remove"`. */
+export function hasLocationServiceRemoval(xml: string): boolean {
+  for (const m of xml.matchAll(new RegExp(`<service\\b${TAG_ATTRS}>`, "g"))) {
+    const attrs = m[1] ?? "";
+    if (attr(attrs, "android:name") === "expo.modules.location.services.LocationTaskService" && attr(attrs, "tools:node")?.trim() === "remove") return true;
+  }
+  return false;
+}
+
 /** P4.2c: what the GENERATED files must say about location, positively (the negative half is `scanInfoPlist` / `scanAndroidManifest`): the iOS Info.plist has a non-empty
  * `NSLocationWhenInUseUsageDescription` and no `NSLocationAlways*` / `NSMotionUsageDescription` / location background mode; the Android manifest GRANTS `ACCESS_FINE_LOCATION` and
  * `ACCESS_COARSE_LOCATION` and no other location-related permission (background, foreground-service-location, activity recognition). Each argument is optional so a test can scan one platform. */
@@ -268,6 +280,9 @@ export function scanLocationDeclarations(files: { infoPlist?: string; androidMan
   if (files.androidManifest !== undefined) {
     const granted = grantedAndroidPermissions(files.androidManifest);
     const location = granted.filter((p) => /LOCATION|ACTIVITY_RECOGNITION/i.test(p));
+    if (!hasLocationServiceRemoval(files.androidManifest)) {
+      out.push({ rule: "android-location-service", detail: "manifest must remove expo-location's LocationTaskService (tools:node=\"remove\", fully-qualified name)" });
+    }
     for (const need of ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"]) {
       if (!granted.includes(need)) out.push({ rule: "android-location-missing", detail: `manifest does not grant ${need}` });
     }

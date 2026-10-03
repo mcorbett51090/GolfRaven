@@ -12,7 +12,8 @@ import * as Location from "expo-location";
 import type { FixAttempt, LocationPermission, LocationPort } from "./location";
 
 function toPermission(r: Location.LocationPermissionResponse): LocationPermission {
-  if (r.granted) return { status: "granted", approximate: r.android?.accuracy === "coarse" };
+  // Approximate = Android's "Approximate" grant (`android.accuracy === "coarse"`) or iOS 14+'s "Precise Location: Off" (`ios.accuracy === "reduced"`, `PermissionDetailsLocationIOS`).
+  if (r.granted) return { status: "granted", approximate: r.android?.accuracy === "coarse" || r.ios?.accuracy === "reduced" };
   if (r.status === Location.PermissionStatus.UNDETERMINED && r.canAskAgain) return { status: "undetermined" };
   return { status: "denied", canAskAgain: r.canAskAgain };
 }

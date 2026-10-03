@@ -36,6 +36,13 @@ export interface MarkerCosignalStore {
   deleteOwner(ownerUserId: string): Promise<void>;
 }
 
+/** How many of `owner`'s marker records on `deviceId` still hold a prefetched challenge the SERVER counts as open: consumed locally (`held`), never redeemed (nothing sends the record), not yet
+ * expired. The challenge manager's top-up subtracts this from its room (`ChallengeManagerDeps.openElsewhere`) so the client's estimate matches the server's cap of 10 open per device. */
+export async function heldOpenCount(store: Pick<MarkerCosignalStore, "listByOwner">, owner: string, deviceId: string, now: number): Promise<number> {
+  const rows = await store.listByOwner(owner);
+  return rows.filter((r) => r.deviceId === deviceId && r.challenge.state === "held" && r.challenge.expiresAt > now).length;
+}
+
 function assertOwned(r: MarkerCosignal): void {
   if (typeof r.ownerUserId !== "string" || r.ownerUserId === "") throw new Error("marker: refusing to store a co-signal with no owner");
 }
