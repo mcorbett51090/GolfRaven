@@ -40,6 +40,18 @@ describe("createAttestation: NativeAttestor + NativeRedeemer only where it can a
     }
   });
 
+  it("the activation seam (P4.2c): withAssertionLock runs under the lock check-in uses, and markAttestedActivation makes a later Android local failure defer instead of going token-less", async () => {
+    const a = await make({ platform: "android", playCloudProjectNumber: "123456789012" });
+    expect(await a.withAssertionLock(USER, DEVICE, async (g) => (g.check(), "ok"))).toBe("ok");
+    expect(await a.state.hasAttestedAndroid(USER, DEVICE)).toBe(false);
+    await a.markAttestedActivation(USER, DEVICE);
+    expect(await a.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
+    const rig = makeRig("android");
+    rig.module.always.integrityToken = { ok: false, code: "unavailable", message: "x" };
+    await rig.state.markAttestedAndroid(USER, DEVICE);
+    await expect(rig.redeemer.redeem(input(), rig.io())).rejects.toMatchObject({ name: "AttestationDeferred" });
+  });
+
   it("one lock instance and one state store are handed out, for reward activation (P4.2c) to share: the counter is shared with check-in", async () => {
     const a = await make({});
     expect(a.locks).toBeDefined();

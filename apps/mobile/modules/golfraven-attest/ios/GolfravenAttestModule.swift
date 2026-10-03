@@ -27,6 +27,8 @@ private func failure(from error: Error?) -> [String: Any] {
     case .invalidKey:
       return failure("invalid_key", "App Attest key is invalid")
     case .serverUnavailable:
+      // Reported as "unavailable" so the JS layer keeps the SAME key and retries `attestKey` with it (Apple: retry with the same key after serverUnavailable; do not
+      // generate another). The key id is remembered by `src/attest/state-store.ts` (`getUnattestedKey`); this file keeps no state.
       return failure("unavailable", "Apple attestation service unavailable")
     case .featureUnsupported:
       return failure("unsupported", "App Attest is not supported")

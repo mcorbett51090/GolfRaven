@@ -10,7 +10,9 @@
  *     counts the deferrals on the held challenge and, after `ATTEST_MAX_DEFERRALS`, drops the challenge: the play goes with no challenge (x0.6, no co-signal, no fraud
  *     signal) rather than as a token-less request that would raise one. A device that has never shown it can attest sends token-less with `false` (`unattestable`).
  *  3. ONE ASSERTION IN FLIGHT PER KEY (iOS). The lock for (user, device) is taken before the key is read or registered and released when the HTTP response of the request that
- *     carries the assertion returns or fails (or the hold timeout fires): `mutex.ts`.
+ *     carries the assertion returns or fails: `mutex.ts`. The hold timeout does not abandon a running holder: it ABORTS it. The holder calls `guard.check()` before every side
+ *     effect (state write, native call, HTTP request), runs a SENT request through `guard.effect` (the lock is kept until it settles), and each native call has its own timeout.
+ *     An aborted holder therefore performs no further effect, so it can never register a key or send a request outside the lock (PR #42 gate HIGH-1).
  *  4. A 503 `attestation_unavailable` / `attestation_not_configured` from `checkin-token` is the vendor being down: the challenge was NOT consumed. It is rethrown as the ApiError it is
  *     (`evidence/send.ts` answers a retry and leaves the held challenge untouched); nothing here drops or consumes anything.
  *  5. iOS key lifecycle: no registered key -> `generateKey`, register at `devices-attest-key` (LIVE challenge, key id bound), keep it in the secure store; `DCError.invalidKey` on an
@@ -20,7 +22,7 @@ import { isApiError, type ApiError } from "../api/errors";
 import type { CheckinTokenRequest, CheckinTokenResult, IssuedChallenge } from "../api/types";
 import { androidCheckinRequestBinding, attestKeyBinding, iosCheckinBinding } from "./binding";
 import { jwtSubject } from "./jwt";
-import { KeyedMutex, LockTimeoutError } from "./mutex";
+import { KeyedMutex, LockAbortedError, LockTimeoutError, withAssertionLock, type LockGuard } from "./mutex";
 import type { AttestStateStore } from "./state-store";
 import type { AttestResult, Attestor } from "./types";
 
@@ -28,8 +30,17 @@ import type { AttestResult, Attestor } from "./types";
  * span roughly 30 to 60 minutes of retrying; a challenge also expires on its own (24 h prefetched). */
 export const ATTEST_MAX_DEFERRALS = 8;
 
-/** Longest one assertion lock may be held: above the HTTP timeout (20 s) plus the native call and a key registration round trip. */
+/** How long a holder may keep taking its own steps before the lock aborts it (`mutex.ts`). A request already sent is never abandoned, whatever this is. */
 export const ASSERTION_LOCK_HOLD_MS = 90_000;
+
+/** Each native call (generateKey, attestKey, generateAssertion, the integrity request) is bounded on its own; past this it counts as a transient local failure and its late
+ * result, if any, is discarded. Below the lock hold time, so one stuck call cannot by itself use up the lock. */
+export const NATIVE_CALL_TIMEOUT_MS = 30_000;
+
+/** After the server answers that it cannot hold an App Attest key (503 `attestation_not_configured` from `devices-attest-key`, or a refusal of the key itself) or the device cannot
+ * do App Attest at all, key registration is not attempted again for this long (persisted per user and device). Without it every outbox retry would spend a live challenge (the
+ * 30/h limit is shared with live check-in) and an Apple `attestKey`. An hour: long enough to stop the churn, short enough to pick up a fixed deployment the same session. */
+export const REGISTRATION_BACKOFF_MS = 60 * 60_000;
 
 /** The attestation could not be produced right now and a token-less request must NOT be sent instead (rule 2). Retry later. */
 export class AttestationDeferred extends Error {
@@ -89,6 +100,12 @@ export interface NativeRedeemerDeps {
   attestor: Attestor;
   state: AttestStateStore;
   locks: KeyedMutex;
+  /** Epoch ms. Default `Date.now`. */
+  now?: () => number;
+  /** Per native call. Default `NATIVE_CALL_TIMEOUT_MS`. */
+  nativeTimeoutMs?: number;
+  /** Default `REGISTRATION_BACKOFF_MS`. */
+  registrationBackoffMs?: number;
 }
 
 /** ApiError kinds that are the transport or the account, not an answer about the attestation: they pass through unchanged (the send is retried / the session is refreshed). */
@@ -98,8 +115,31 @@ const PASS_THROUGH = new Set(["network", "server", "unavailable", "rate_limited"
  * kind of key cannot help. `devices-attest-key` answers these two codes with a 422. */
 const KEY_REFUSED_CODES = new Set(["attestation_rejected", "platform_mismatch"]);
 
+/** `devices-attest-key` answers this 503 BEFORE it reads or writes anything (`attest-key-handler.ts`, recorded `attestkey_503_not_configured`): the deployment cannot hold an
+ * App Attest key, nothing was applied, and asking again soon cannot change that. */
+function isNotConfigured503(e: unknown): boolean {
+  return isApiError(e) && e.status === 503 && e.code === "attestation_not_configured";
+}
+
+/** Did this failed request DEFINITELY not take effect at the server? A 4xx (including 429 and 401) was refused before any grading; a 503 `attestation_*` is the vendor-outage
+ * rollback of `checkin-token`. Anything else (a lost response, a 5xx or 502 / 503 / 504 without that code, a 2xx whose body could not be read) MAY have been applied. */
+export function isDefiniteNonApplication(e: unknown): boolean {
+  if (!isApiError(e)) return false;
+  if (e.kind === "not_configured") return true; // no request was made at all
+  if (e.status !== null && e.status >= 400 && e.status < 500) return true;
+  return e.status === 503 && e.code !== null && e.code.startsWith("attestation_");
+}
+
 export class NativeRedeemer implements CheckinRedeemer {
-  constructor(private readonly d: NativeRedeemerDeps) {}
+  private readonly now: () => number;
+  private readonly nativeTimeoutMs: number;
+  private readonly backoffMs: number;
+
+  constructor(private readonly d: NativeRedeemerDeps) {
+    this.now = d.now ?? Date.now;
+    this.nativeTimeoutMs = d.nativeTimeoutMs ?? NATIVE_CALL_TIMEOUT_MS;
+    this.backoffMs = d.registrationBackoffMs ?? REGISTRATION_BACKOFF_MS;
+  }
 
   async redeem(input: RedeemInput, io: RedeemIo): Promise<CheckinTokenResult> {
     const sub = jwtSubject(input.accessToken);
@@ -112,15 +152,41 @@ export class NativeRedeemer implements CheckinRedeemer {
     return io.post(wireRequest(input));
   }
 
+  /** One native call, bounded: past the timeout it is a transient local failure and its late result is discarded. */
+  private native<T>(call: () => Promise<AttestResult<T>>): Promise<AttestResult<T>> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ kind: "failed", message: `the native call did not answer within ${this.nativeTimeoutMs} ms`, code: "unavailable" }), this.nativeTimeoutMs);
+      let p: Promise<AttestResult<T>>;
+      try {
+        p = call();
+      } catch (e) {
+        clearTimeout(timer);
+        resolve({ kind: "failed", message: e instanceof Error ? e.message : "native call threw" });
+        return;
+      }
+      p.then(
+        (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        },
+        (e: unknown) => {
+          clearTimeout(timer);
+          resolve({ kind: "failed", message: e instanceof Error ? e.message : "native call rejected" });
+        },
+      );
+    });
+  }
+
   // ---- Android ----------------------------------------------------------------------------------------------------------------------------
 
   private async redeemAndroid(ctx: RedeemInput, io: RedeemIo): Promise<CheckinTokenResult> {
     let token: string | null = null;
     try {
-      const r = await this.d.attestor.integrityToken(androidCheckinRequestBinding({ challengeId: ctx.challengeId, deviceId: ctx.deviceId, userId: ctx.userId }, ctx.nonce));
+      const hash = androidCheckinRequestBinding({ challengeId: ctx.challengeId, deviceId: ctx.deviceId, userId: ctx.userId }, ctx.nonce);
+      const r = await this.native(() => this.d.attestor.integrityToken(hash));
       if (r.kind === "ok") token = r.value.integrityToken;
     } catch {
-      token = null; // a non-canonical nonce (the binding refuses it) or a native failure: the same local failure
+      token = null; // a non-canonical nonce (the binding refuses it): the same local failure
     }
     if (token === null) {
       // A LOCAL failure. Rule 2: if this device ever attested, a token-less request is graded `failed` + fraud signal: retry later instead.
@@ -137,9 +203,10 @@ export class NativeRedeemer implements CheckinRedeemer {
     try {
       result = await io.post(wireRequest(ctx, { platform: "android", integrityToken: token }));
     } catch (e) {
-      // The token was SENT and the outcome is unknown (a lost response, a 5xx): the server may have graded it `attested`. Treat the device as having attested (the unsafe reading is
-      // "never"): a later local failure then defers instead of sending a token-less request. A 503 attestation_* (vendor outage) and every 4xx are definite non-applications.
-      if (isApiError(e) && (e.kind === "network" || e.kind === "server")) await this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined);
+      // The token was SENT. Unless the request DEFINITELY did not take effect (`isDefiniteNonApplication`), the server may have graded it `attested` (a lost response, a 5xx, a gateway
+      // 502 / 504, a 503 without an `attestation_*` code, a 2xx body that could not be read): treat the device as having attested (the unsafe reading is "never"), so a later local
+      // failure defers instead of sending a token-less request.
+      if (!isDefiniteNonApplication(e)) await this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined);
       throw e;
     }
     if (result.attestationGrade === "attested") await this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined);
@@ -149,14 +216,14 @@ export class NativeRedeemer implements CheckinRedeemer {
   // ---- iOS --------------------------------------------------------------------------------------------------------------------------------
 
   private redeemIos(ctx: RedeemInput, io: RedeemIo): Promise<CheckinTokenResult> {
-    return this.d.locks.run(`ios:${ctx.userId}:${ctx.deviceId.toLowerCase()}`, () => this.redeemIosLocked(ctx, io)).catch((e: unknown) => {
+    return withAssertionLock(this.d.locks, ctx.userId, ctx.deviceId, (g) => this.redeemIosLocked(ctx, io, g)).catch((e: unknown) => {
       if (e instanceof LockTimeoutError) throw new AttestationDeferred("assertion_lock_timeout");
       throw e;
     });
   }
 
-  private async redeemIosLocked(ctx: RedeemInput, io: RedeemIo): Promise<CheckinTokenResult> {
-    const { state, attestor } = this.d;
+  private async redeemIosLocked(ctx: RedeemInput, io: RedeemIo, g: LockGuard): Promise<CheckinTokenResult> {
+    const { state } = this.d;
     let rec: Awaited<ReturnType<AttestStateStore["getIosKey"]>>;
     try {
       rec = await state.getIosKey(ctx.userId, ctx.deviceId);
@@ -167,40 +234,53 @@ export class NativeRedeemer implements CheckinRedeemer {
     let reregistered = false;
     if (rec?.state === "registered") keyId = rec.keyId;
     else {
-      // `rec` is `pending` when an earlier registration's outcome is unknown: the server may already hold a key for this device, so a refusal must not read as "none".
-      const reg = await this.registerKey(ctx, io, rec !== null);
+      let backoffUntil: number;
+      try {
+        backoffUntil = await state.getRegistrationBackoffUntil(ctx.userId, ctx.deviceId);
+      } catch {
+        throw new AttestationDeferred("key_state_unreadable");
+      }
+      let reg: string | "refused";
+      if (this.now() < backoffUntil) reg = "refused"; // the server (or the device) cannot hold a key: not asked again until the backoff ends
+      else reg = await this.registerKey(ctx, io, g, rec !== null);
       if (reg === "refused") {
-        if (rec !== null) throw new AttestationDeferred("key_registration_refused"); // the server may still hold a key: no token-less request (rule 2)
-        return io.post(wireRequest(ctx)); // the server refused our key and holds none for this device: unattestable, honestly
+        // `rec` is `pending` when an earlier registration's outcome is unknown: the server may already hold a key for this device, so a refusal must not read as "none".
+        if (rec !== null) throw new AttestationDeferred("key_registration_refused"); // the server may hold a key: no token-less request (rule 2)
+        return g.effect(() => io.post(wireRequest(ctx))); // the server holds no key for this device and cannot take one: unattestable, honestly
       }
       keyId = reg;
       reregistered = true;
     }
 
-    const assertOnce = (k: string): Promise<AttestResult<{ assertion: string }>> => {
+    const assertOnce = async (k: string): Promise<AttestResult<{ assertion: string }>> => {
+      let hash: Uint8Array;
       try {
-        return attestor.assert(k, iosCheckinBinding({ challengeId: ctx.challengeId, deviceId: ctx.deviceId, userId: ctx.userId, nonce: ctx.nonce })).catch((): AttestResult<{ assertion: string }> => ({ kind: "failed", message: "assertion threw" }));
+        hash = iosCheckinBinding({ challengeId: ctx.challengeId, deviceId: ctx.deviceId, userId: ctx.userId, nonce: ctx.nonce });
       } catch {
-        return Promise.resolve({ kind: "failed", message: "assertion could not be built" }); // e.g. a non-canonical nonce: the binding refuses it
+        return { kind: "failed", message: "assertion could not be built" }; // e.g. a non-canonical nonce: the binding refuses it
       }
+      g.check();
+      return this.native(() => this.d.attestor.assert(k, hash));
     };
     let r = await assertOnce(keyId);
     if (r.kind === "failed" && r.code === "invalid_key" && !reregistered) {
       // The key is gone (a reinstall destroys the Secure Enclave key; the Keychain item survives). The record is downgraded to `pending` (the server still holds the OLD key, so a
       // token-less request stays forbidden) and a fresh key is registered, once.
+      g.check();
       try {
         await state.setIosKey(ctx.userId, ctx.deviceId, { state: "pending" });
       } catch {
         throw new AttestationDeferred("key_state_unwritable");
       }
-      const reg = await this.registerKey(ctx, io, true);
+      const reg = await this.registerKey(ctx, io, g, true);
       if (reg === "refused") throw new AttestationDeferred("key_registration_refused"); // the server still holds the old key: no token-less request (rule 2)
       keyId = reg;
       r = await assertOnce(keyId);
     }
     if (r.kind !== "ok") throw new AttestationDeferred(r.kind === "failed" && r.code === "invalid_key" ? "key_invalid_after_registration" : "assertion_unavailable");
 
-    const result = await io.post(wireRequest(ctx, { platform: "ios", keyId, assertion: r.value.assertion }));
+    const assertion = r.value.assertion;
+    const result = await g.effect(() => io.post(wireRequest(ctx, { platform: "ios", keyId: keyId, assertion })));
     if (result.attestationGrade === "unattestable") {
       // We presented a verifiable assertion and the server has no registered key for this device (`key_not_registered`): our record is wrong (the server was reset, or a
       // registration we believe succeeded did not). Drop it so the next redemption registers again.
@@ -209,48 +289,90 @@ export class NativeRedeemer implements CheckinRedeemer {
     return result;
   }
 
-  /** Registers a fresh App Attest key. Returns its key id, or `"refused"` when the server refused the key itself (a build / configuration mismatch). Throws
-   * `AttestationDeferred` for a local failure and the `ApiError` for a transport failure. `hadKey`: a key may already be on record at the server (a registered key was
-   * dropped, or an earlier registration's outcome is unknown), so a refusal keeps the `pending` mark instead of clearing it. */
-  private async registerKey(ctx: RedeemInput, io: RedeemIo, hadKey: boolean): Promise<string | "refused"> {
+  /** Registers an App Attest key. Returns its key id, or `"refused"` when the server cannot or will not hold a key for this device (a refusal of the key itself, a deployment with no
+   * App Attest configuration) or the device cannot do App Attest at all: the registration is then not attempted again until the backoff ends. Throws `AttestationDeferred` for a
+   * local failure and the `ApiError` for a transport failure. `hadKey`: a key may already be on record at the server (a registered key was dropped, or an earlier registration's
+   * outcome is unknown), so a refusal keeps the `pending` mark instead of clearing it.
+   *
+   * ORDER, so that a failure never costs more than it must: the key is made (or the unattested one from an earlier try reused) BEFORE the live challenge is requested, so a local
+   * failure never spends a live challenge (the 30/h limit is shared with live check-in); `pending` is written right before the registration request is sent, so a failure before it
+   * leaves no record. Every step first checks the lock guard (`mutex.ts`): an aborted holder does nothing more. */
+  private async registerKey(ctx: RedeemInput, io: RedeemIo, g: LockGuard, hadKey: boolean): Promise<string | "refused"> {
     const { state, attestor } = this.d;
-    const live = await this.guardApi(() => io.requestLiveChallenge());
-    const gen = await attestor.generateKey().catch(() => null);
-    if (gen === null || gen.kind !== "ok") throw new AttestationDeferred("generate_key_failed");
-    const keyId = gen.value.keyId;
-    const binding = { challengeId: live.id, deviceId: ctx.deviceId, keyId, nonce: live.nonce };
-    let attestation: string;
+    const backoff = async (): Promise<void> => {
+      await state.setRegistrationBackoffUntil(ctx.userId, ctx.deviceId, this.now() + this.backoffMs).catch(() => undefined);
+    };
+
+    // 1. the key (local)
+    let keyId: string | null = null;
     try {
-      const att = await attestor.attestKey(keyId, attestKeyBinding(binding));
-      if (att.kind !== "ok") throw new Error("attestKey");
-      attestation = att.value.attestation;
+      keyId = await state.getUnattestedKey(ctx.userId, ctx.deviceId);
     } catch {
+      keyId = null;
+    }
+    if (keyId === null) {
+      g.check();
+      const gen = await this.native(() => attestor.generateKey());
+      g.check(); // a native call that returned after the lock gave up on this holder changes nothing
+      if (gen.kind === "unattestable") {
+        await backoff();
+        return "refused"; // this device cannot do App Attest at all
+      }
+      if (gen.kind !== "ok") throw new AttestationDeferred("generate_key_failed");
+      keyId = gen.value.keyId;
+      g.check();
+      await state.setUnattestedKey(ctx.userId, ctx.deviceId, keyId).catch(() => undefined); // an optimisation only: lets a retry reuse the SAME key
+    }
+
+    // 2. the live challenge (a request: it is held as an effect, so the lock is not released under it)
+    const live = await this.guardApi(() => g.effect(() => io.requestLiveChallenge()));
+
+    // 3. attestKey (local; Apple's service)
+    g.check();
+    const att = await this.native(() => attestor.attestKey(keyId!, attestKeyBinding({ challengeId: live.id, deviceId: ctx.deviceId, keyId: keyId!, nonce: live.nonce })));
+    g.check();
+    if (att.kind !== "ok") {
+      if (att.kind === "failed" && att.code === "unavailable") throw new AttestationDeferred("attest_key_unavailable"); // Apple's service: the SAME key is kept and retried next time
+      await state.clearUnattestedKey(ctx.userId, ctx.deviceId).catch(() => undefined); // any other failure burns this key
+      if (att.kind === "unattestable") {
+        await backoff();
+        return "refused";
+      }
       throw new AttestationDeferred("attest_key_failed");
     }
-    // Everything above is local or a read: nothing has been sent that could register a key. From here on the server MAY know this device can attest (a registration can be
-    // applied although its answer is lost), so `pending` is written BEFORE the request, and no token-less request is sent while it stands.
+    await state.clearUnattestedKey(ctx.userId, ctx.deviceId).catch(() => undefined); // attested: it cannot be attested again, whatever the server says next
+    const attestation = att.value.attestation;
+
+    // 4. the registration request. From here on the server MAY know this device can attest (a registration can be applied although its answer is lost), so `pending` is written
+    //    BEFORE the request, and no token-less request is sent while it stands.
+    g.check();
     try {
       await state.setIosKey(ctx.userId, ctx.deviceId, { state: "pending" });
     } catch {
       throw new AttestationDeferred("key_state_unwritable");
     }
     try {
-      await io.registerKey({ deviceId: ctx.deviceId, challengeId: live.id, nonce: live.nonce, keyId, attestation });
+      await g.effect(() => io.registerKey({ deviceId: ctx.deviceId, challengeId: live.id, nonce: live.nonce, keyId: keyId!, attestation }));
     } catch (e) {
       if (isApiError(e) && e.kind === "conflict" && e.code === "key_already_registered") {
         // The server already holds exactly this key (an earlier request of ours was applied and its answer was lost): it is registered.
-      } else if (isApiError(e) && e.kind === "rejected" && e.code !== null && KEY_REFUSED_CODES.has(e.code)) {
+      } else if ((isApiError(e) && e.kind === "rejected" && e.code !== null && KEY_REFUSED_CODES.has(e.code)) || isNotConfigured503(e)) {
+        // Nothing was registered: a refusal of the key, or a deployment that cannot hold one (answered before anything is read or written). Without an earlier key the server holds none:
+        // clear the mark; either way do not ask again for a while.
         if (!hadKey) await state.clearIosKey(ctx.userId, ctx.deviceId).catch(() => undefined);
+        await backoff();
         return "refused";
       } else {
         throw this.registrationError(e);
       }
     }
+    // The registration took effect: record it (no abort check: the lock is still held by this holder, and the state must follow the server).
     try {
       await state.setIosKey(ctx.userId, ctx.deviceId, { state: "registered", keyId });
     } catch {
       throw new AttestationDeferred("key_state_unwritable");
     }
+    await state.clearRegistrationBackoff(ctx.userId, ctx.deviceId).catch(() => undefined);
     return keyId;
   }
 
@@ -265,6 +387,7 @@ export class NativeRedeemer implements CheckinRedeemer {
   /** A registration-phase error. Transport / account errors pass through (the caller's retry logic handles them); any other answer here is about the REGISTRATION (a used or
    * expired live challenge, a malformed request), never about the held check-in challenge, so it must not reach `evidence/send.ts` as a refusal of that challenge. */
   private registrationError(e: unknown): unknown {
+    if (e instanceof LockAbortedError) return e;
     if (isApiError(e)) return PASS_THROUGH.has((e as ApiError).kind) ? e : new AttestationDeferred(`registration_${e.code ?? e.kind}`);
     return new AttestationDeferred("registration_failed");
   }

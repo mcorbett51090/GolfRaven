@@ -125,6 +125,16 @@ describe("the requests the recorder built for the REAL challenges (accepted by t
   });
 });
 
+describe("PR #42 gate (d): the checkin-token answer does NOT expose WHY an assertion was graded `failed`", () => {
+  it("a `failed` grade carries only jti / expiresAt / attestationGrade: `key_id_mismatch` (a stale local key) cannot be told from a counter replay, a wrong rpId or a wrong binding, so the client cannot recover from it without guessing (the reason goes only to the fraud signal's detail, `token-handler.ts`)", () => {
+    for (const name of ["token_201_failed_wrong_binding_ios", "token_201_failed_wrong_binding_android", "token_201_failed_attested_before_no_token"]) {
+      const data = JSON.parse(recorded(name).body).data as Record<string, unknown>;
+      expect(Object.keys(data).sort(), name).toEqual(["attestationGrade", "expiresAt", "jti"]);
+      expect(data["attestationGrade"], name).toBe("failed");
+    }
+  });
+});
+
 describe("bytesToBase64 (the form a hash crosses the native bridge in)", () => {
   it("equals Node's for every length residue, including padding", () => {
     for (let n = 0; n <= 40; n += 1) {
@@ -182,7 +192,7 @@ describe("NativeAttestor over the (fake) module", () => {
     m.next.generateAssertion = [{ ok: false, code: "invalid_key", message: "gone" }];
     expect(await a.assert("k", hash32)).toEqual({ kind: "failed", message: "generateAssertion: gone", code: "invalid_key" });
     m.next.generateAssertion = [{ ok: false, code: "unavailable", message: "Apple is down" }];
-    expect(await a.assert("k", hash32)).toEqual({ kind: "failed", message: "generateAssertion: Apple is down", code: "other" });
+    expect(await a.assert("k", hash32)).toEqual({ kind: "failed", message: "generateAssertion: Apple is down", code: "unavailable" });
     m.next.generateKey = [{ ok: false, code: "unsupported", message: "simulator" }];
     expect(await a.generateKey()).toEqual({ kind: "unattestable", reason: "platform_unsupported" });
     const before = m.events.length;

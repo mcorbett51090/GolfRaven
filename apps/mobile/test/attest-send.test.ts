@@ -243,14 +243,34 @@ describe("end to end: the real HTTP client, the native redeemer over a fake modu
     expect(await state.getIosKey("user-a", "11111111-1111-4111-8111-111111111111")).toBeNull();
   });
 
-  it("iOS registration answer attestkey_503_not_configured: a retry with the held challenge untouched (not a refusal of the challenge), the key stays `pending`", async () => {
-    const { api, seen, state } = client("ios", [{ respond: "challenge_live_201" }, { respond: "attestkey_503_not_configured" }]);
-    const item = held();
-    const answer = await api.submitEvidence(item, CREDS);
-    expect(answer).toMatchObject({ kind: "response", status: 503, code: "attestation_not_configured" });
-    expect(applyAnswer(item, answer, T0, () => 0.5).status).toBe("retry");
-    expect(seen.map((s) => fn(s.url))).toEqual(["checkin-challenge", "devices-attest-key"]); // no checkin-token request, no evidence
-    expect(await state.getIosKey("user-a", "11111111-1111-4111-8111-111111111111")).toEqual({ state: "pending" });
+  it("iOS registration answer attestkey_503_not_configured (the real handler answers it BEFORE touching anything): nothing was applied, so no `pending` is left behind, the check-in goes token-less with the claim FALSE, and the registration is not retried inside the backoff", async () => {
+    expect(recorded("attestkey_503_not_configured").status).toBe(503);
+    const { api, seen, state } = client("ios", [{ respond: "challenge_live_201" }, { respond: "attestkey_503_not_configured" }, { respond: "token_201_unattestable" }, { respond: "evidence_accepted_with_challenge" }]);
+    const answer = await api.submitEvidence(held(), CREDS);
+    expect(answer).toMatchObject({ kind: "response", status: 200 });
+    expect(seen.map((s) => fn(s.url))).toEqual(["checkin-challenge", "devices-attest-key", "checkin-token", "evidence"]);
+    expect(seen[2]!.body).toEqual({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", nonce: NONCE, hardwareSupportsAttestation: false });
+    expect(await state.getIosKey("user-a", "11111111-1111-4111-8111-111111111111")).toBeNull();
+    // the retry of another item (inside the backoff) makes NO registration attempt at all
+    seen.length = 0;
+    await api.submitEvidence({ ...held({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), id: "ev2", sourceRef: "r2" }, CREDS);
+    expect(seen.map((s) => fn(s.url))).toEqual(["checkin-token", "evidence"]);
+  });
+
+  it.each([
+    ["a gateway 504", { status: 504, body: "" }],
+    ["a 502", { status: 502, body: "<html>" }],
+    ["a 503 with no attestation_* code", { status: 503, body: "{}" }],
+    ["a 201 whose body is not the contract", { status: 201, body: "not json" }],
+  ] as const)("Android, a token SENT and answered by %s (outcome unknown): the device is treated as attested-before, so the next local failure sends NOTHING token-less", async (_n, step) => {
+    const { api, seen, state, module } = client("android", [step, step, step]);
+    await api.submitEvidence(held(), CREDS);
+    expect(await state.hasAttestedAndroid("user-a", "11111111-1111-4111-8111-111111111111")).toBe(true);
+    seen.length = 0;
+    module.always.integrityToken = { ok: false, code: "unavailable", message: "no network to Google" };
+    const answer = await api.submitEvidence(held({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), CREDS);
+    expect(answer.kind).toBe("network_error");
+    expect(seen).toEqual([]);
   });
 
   it("iOS registration answer attestkey_422_challenge_not_consumable is about the LIVE registration challenge: a counted deferral of the check-in, never `none / unusable` for the held challenge", async () => {

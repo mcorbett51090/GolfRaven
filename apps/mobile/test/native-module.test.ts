@@ -86,6 +86,14 @@ describe("the native code is declarative: it calls the platform API and reports 
     }
   });
 
+  it("Android: every synchronous Play Integrity call is guarded (a throw resolves { ok:false }, never reaches the bridge), and permanent error codes map to `unsupported` while the rest are `unavailable`", () => {
+    const code = kotlin.replace(/\/\/.*$/gm, "");
+    expect((code.match(/catch \(e: Exception\)/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(code).toMatch(/PERMANENT_CODES = setOf\(/);
+    expect(code).toMatch(/failure\("unsupported", message\) else failure\("unavailable", message\)/);
+    expect(code).toMatch(/StandardIntegrityException/);
+  });
+
   it("the Cloud project number comes from the JS call (EXPO_PUBLIC_PLAY_CLOUD_PROJECT_NUMBER), not from native code: no number is hard-coded", () => {
     expect(kotlin).not.toMatch(/\b\d{9,}\b/);
     expect(kotlin).toMatch(/cloudProjectNumber\.toLongOrNull\(\)/);

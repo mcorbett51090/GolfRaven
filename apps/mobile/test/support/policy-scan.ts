@@ -177,21 +177,36 @@ export function scanAndroidGrantedPermissions(xml: string): Violation[] {
     .map((p) => ({ rule: "android-new-permission", detail: `manifest grants ${p}, which is not on the allow-list (test/support/policy-scan.ts ALLOWED_GRANTED_ANDROID_PERMISSIONS)` }));
 }
 
-/** Scan of a generated entitlements plist (`ios/<App>/<App>.entitlements`, after `expo prebuild`): only the allow-listed entitlements, each with an allowed value. */
+/** Scan of a generated entitlements plist (`ios/<App>/<App>.entitlements`, after `expo prebuild`): only the allow-listed entitlements, each with an allowed value.
+ * FAIL CLOSED: every `<key>` in the file is enumerated FIRST (whatever the type of its value: string, array, dict, integer, real, data, date, boolean, an empty element);
+ * a key not on the allow-list is a violation whatever its value looks like, and an allow-listed key must hold exactly a string or an array of strings, each allowed. */
 export function scanEntitlements(plist: string): Violation[] {
   const out: Violation[] = [];
-  const dict = /<dict>([\s\S]*)<\/dict>/.exec(plist)?.[1] ?? "";
-  // top-level `<key>K</key>` followed by its value element (a string, or an array of strings)
-  for (const m of dict.matchAll(/<key>([^<]+)<\/key>\s*(<string>([^<]*)<\/string>|<array>([\s\S]*?)<\/array>|<true\/>|<false\/>)/g)) {
+  for (const m of plist.matchAll(/<key>([^<]*)<\/key>/g)) {
     const key = m[1]!;
     const rule = ALLOWED_IOS_ENTITLEMENTS[key];
     if (!rule) {
       out.push({ rule: "ios-entitlement", detail: `entitlements file has ${key}, which is not on the allow-list (test/support/policy-scan.ts ALLOWED_IOS_ENTITLEMENTS)` });
       continue;
     }
-    const values = m[3] !== undefined ? [m[3]] : [...(m[4] ?? "").matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1]!);
-    for (const v of values) if (!rule.values.includes(v)) out.push({ rule: "ios-entitlement-value", detail: `${key} is ${JSON.stringify(v)}; allowed: ${rule.values.join(", ")}` });
-    if (values.length === 0) out.push({ rule: "ios-entitlement-value", detail: `${key} has no allowed value` });
+    // the value element that follows this key
+    const after = plist.slice((m.index ?? 0) + m[0].length);
+    const v = /^\s*(?:<string>([^<]*)<\/string>|<array>([\s\S]*?)<\/array>)/.exec(after);
+    let values: string[] | null = null;
+    if (v) {
+      if (v[1] !== undefined) values = [v[1]];
+      else {
+        const body = v[2] ?? "";
+        const strings = [...body.matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1]!);
+        // an array holding anything but strings (a dict, an integer, ...) is not an allowed value
+        values = body.replace(/<string>[^<]*<\/string>/g, "").trim() === "" ? strings : null;
+      }
+    }
+    if (values === null || values.length === 0) {
+      out.push({ rule: "ios-entitlement-value", detail: `${key} must be a string or an array of strings from: ${rule.values.join(", ")}` });
+      continue;
+    }
+    for (const x of values) if (!rule.values.includes(x)) out.push({ rule: "ios-entitlement-value", detail: `${key} is ${JSON.stringify(x)}; allowed: ${rule.values.join(", ")}` });
   }
   return out;
 }

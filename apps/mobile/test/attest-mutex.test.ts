@@ -1,6 +1,6 @@
 /** The per-key assertion lock (PR #40 gate LOW-1): strictly sequential per key, released on success, on error AND on timeout, independent across keys. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KeyedMutex, LockTimeoutError } from "../src/attest";
+import { KeyedMutex, LockAbortedError, LockTimeoutError, assertionLockKey, withAssertionLock } from "../src/attest";
 
 const deferred = <T = void>() => {
   let resolve!: (v: T) => void;
@@ -136,5 +136,117 @@ describe("KeyedMutex", () => {
     const m = new KeyedMutex({ holdTimeoutMs: 1_000 });
     await m.run("k", async () => "fast");
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // ---- PR #42 gate HIGH-1: abort, not abandonment ---------------------------------------------------------------------------------------------
+
+  it("after the hold time the guard is ABORTED: check() and effect() throw, so a holder that resumes performs no further side effect; the caller gets LockTimeoutError and the next waiter runs", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 1_000 });
+    const stuck = deferred();
+    const log: string[] = [];
+    const p1 = m.run("k", async (g) => {
+      await stuck.promise; // stuck in a native call
+      log.push("resumed");
+      expect(g.aborted).toBe(true);
+      g.check(); // throws: the holder stops here
+      log.push("NEVER: a side effect after the abort");
+    });
+    const p1Result = p1.then(() => "resolved", (e: unknown) => e);
+    const p2 = m.run("k", async (g) => {
+      g.check();
+      log.push("second ran");
+      return "second";
+    });
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(await p1Result).toBeInstanceOf(LockTimeoutError);
+    await expect(p2).resolves.toBe("second");
+    stuck.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(log).toEqual(["second ran", "resumed"]);
+  });
+
+  it("guard.effect after the abort throws LockAbortedError (the request is never sent)", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 1_000 });
+    const stuck = deferred();
+    let sent = false;
+    let thrown: unknown = null;
+    const p1 = m.run("k", async (g) => {
+      await stuck.promise;
+      try {
+        await g.effect(async () => {
+          sent = true;
+        });
+      } catch (e) {
+        thrown = e;
+      }
+    });
+    p1.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(1_001);
+    stuck.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(thrown).toBeInstanceOf(LockAbortedError);
+    expect(sent).toBe(false);
+  });
+
+  it("an effect IN FLIGHT keeps the lock past the hold time: the next waiter does not start until it settles, and the holder's value is returned, not discarded", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 1_000 });
+    const response = deferred<string>();
+    const log: string[] = [];
+    const p1 = m.run("k", async (g) => {
+      const r = await g.effect(() => response.promise);
+      log.push(`got ${r}`);
+      return r;
+    });
+    const p2 = m.run("k", async () => {
+      log.push("second ran");
+      return "second";
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(log).toEqual([]); // far past the hold time: still held, the second has not run
+    expect(m.pendingKeys()).toEqual(["k"]);
+    response.resolve("answer");
+    await expect(p1).resolves.toBe("answer");
+    await expect(p2).resolves.toBe("second");
+    expect(log).toEqual(["got answer", "second ran"]);
+  });
+
+  it("an effect that FAILS after the abort releases the lock too (and an aborted holder's next check() ends it as a LockTimeoutError)", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 1_000 });
+    const response = deferred<string>();
+    const p1 = m.run("k", async (g) => {
+      await g.effect(() => response.promise);
+      g.check();
+    });
+    const p1Result = p1.then(() => "resolved", (e: unknown) => e);
+    const p2 = m.run("k", async () => "second");
+    await vi.advanceTimersByTimeAsync(5_000);
+    response.reject(new Error("network"));
+    expect(await p1Result).toMatchObject({ message: "network" });
+    await expect(p2).resolves.toBe("second");
+  });
+
+  it("withAssertionLock / assertionLockKey: one key per (user, device lowercased); the seam shares the lock with a plain run on that key", async () => {
+    expect(assertionLockKey("u", "ABC-1")).toBe(assertionLockKey("u", "abc-1"));
+    expect(assertionLockKey("u", "abc-1")).not.toBe(assertionLockKey("v", "abc-1"));
+    expect(assertionLockKey("u", "abc-1")).not.toBe(assertionLockKey("u", "abc-2"));
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000 });
+    const gate = deferred();
+    const log: string[] = [];
+    const a = withAssertionLock(m, "u", "ABC-1", async () => {
+      log.push("a");
+      await gate.promise;
+    });
+    const b = m.run(assertionLockKey("u", "abc-1"), async () => {
+      log.push("b");
+    });
+    await tick();
+    expect(log).toEqual(["a"]);
+    gate.resolve();
+    await Promise.all([a, b]);
+    expect(log).toEqual(["a", "b"]);
   });
 });

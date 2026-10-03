@@ -12,12 +12,24 @@ package expo.modules.golfravenattest
 import android.content.Context
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.StandardIntegrityManager
+import com.google.android.play.core.integrity.StandardIntegrityException
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
 private fun failure(code: String, message: String): Map<String, Any> =
   mapOf("ok" to false, "code" to code, "message" to message)
+
+// Play Integrity error codes (StandardIntegrityErrorCode / the documented table) [unverified: not checked against the library]. PERMANENT on this device, so asking again cannot
+// help: API_NOT_AVAILABLE (-1), PLAY_STORE_NOT_FOUND (-2), PLAY_SERVICES_NOT_FOUND (-6), APP_NOT_INSTALLED (-5), APP_UID_MISMATCH (-7) -> "unsupported".
+// Everything else (network, Play Store account, too many requests, Google server, a stale provider, internal) is transient -> "unavailable".
+private val PERMANENT_CODES = setOf(-1, -2, -5, -6, -7)
+
+private fun failureFrom(e: Exception, fallback: String): Map<String, Any> {
+  val code = (e as? StandardIntegrityException)?.errorCode
+  val message = e.message ?: fallback
+  return if (code != null && code in PERMANENT_CODES) failure("unsupported", message) else failure("unavailable", message)
+}
 
 class GolfravenAttestModule : Module() {
   private val lock = Any()
@@ -47,20 +59,30 @@ class GolfravenAttestModule : Module() {
     }
 
     AsyncFunction("integrityToken") { cloudProjectNumber: String, requestHash: String, promise: Promise ->
-      val context: Context? = appContext.reactContext
-      val project = cloudProjectNumber.toLongOrNull()
-      if (context == null || project == null) {
-        promise.resolve(failure("other", "no application context or a malformed Cloud project number"))
-        return@AsyncFunction
-      }
-      withProvider(context, project, promise) { tokenProvider ->
-        tokenProvider
-          .request(StandardIntegrityManager.StandardIntegrityTokenRequest.builder().setRequestHash(requestHash).build())
-          .addOnSuccessListener { response -> promise.resolve(mapOf("ok" to true, "token" to response.token())) }
-          .addOnFailureListener { e ->
+      // Nothing here may throw into the bridge: every synchronous call is guarded and every failure resolves { ok: false }.
+      try {
+        val context: Context? = appContext.reactContext
+        val project = cloudProjectNumber.toLongOrNull()
+        if (context == null || project == null) {
+          promise.resolve(failure("other", "no application context or a malformed Cloud project number"))
+          return@AsyncFunction
+        }
+        withProvider(context, project, promise) { tokenProvider ->
+          try {
+            tokenProvider
+              .request(StandardIntegrityManager.StandardIntegrityTokenRequest.builder().setRequestHash(requestHash).build())
+              .addOnSuccessListener { response -> promise.resolve(mapOf("ok" to true, "token" to response.token())) }
+              .addOnFailureListener { e ->
+                synchronized(lock) { provider = null }
+                promise.resolve(failureFrom(e, "Play Integrity request failed"))
+              }
+          } catch (e: Exception) {
             synchronized(lock) { provider = null }
-            promise.resolve(failure("unavailable", e.message ?: "Play Integrity request failed"))
+            promise.resolve(failureFrom(e, "Play Integrity request threw"))
           }
+        }
+      } catch (e: Exception) {
+        promise.resolve(failureFrom(e, "Play Integrity call threw"))
       }
     }
   }
@@ -76,15 +98,19 @@ class GolfravenAttestModule : Module() {
       use(cached)
       return
     }
-    IntegrityManagerFactory.createStandard(context)
-      .prepareIntegrityToken(StandardIntegrityManager.PrepareIntegrityTokenRequest.builder().setCloudProjectNumber(project).build())
-      .addOnSuccessListener { prepared ->
-        synchronized(lock) {
-          provider = prepared
-          providerProject = project
+    try {
+      IntegrityManagerFactory.createStandard(context)
+        .prepareIntegrityToken(StandardIntegrityManager.PrepareIntegrityTokenRequest.builder().setCloudProjectNumber(project).build())
+        .addOnSuccessListener { prepared ->
+          synchronized(lock) {
+            provider = prepared
+            providerProject = project
+          }
+          use(prepared)
         }
-        use(prepared)
-      }
-      .addOnFailureListener { e -> promise.resolve(failure("unavailable", e.message ?: "Play Integrity could not be prepared")) }
+        .addOnFailureListener { e -> promise.resolve(failureFrom(e, "Play Integrity could not be prepared")) }
+    } catch (e: Exception) {
+      promise.resolve(failureFrom(e, "Play Integrity could not be prepared"))
+    }
   }
 }

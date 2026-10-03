@@ -4,7 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AttestationDeferred, PlainRedeemer, attestKeyBinding, bytesToBase64Url, bytesToHex, iosCheckinBinding, wireRequest } from "../src/attest";
+import { AttestationDeferred, PlainRedeemer, assertionLockKey, attestKeyBinding, bytesToBase64Url, bytesToHex, iosCheckinBinding, withAssertionLock, wireRequest } from "../src/attest";
 import { ApiError } from "../src/api/errors";
 import { apiError } from "./support/fakes";
 import { CHALLENGE, DEVICE, NONCE, USER, grade, input, makeRig, tokenFor } from "./support/attest-rig";
@@ -158,8 +158,16 @@ describe("rule 2 — NEVER TOKEN-LESS ONCE THE DEVICE HAS SHOWN IT CAN ATTEST (A
     for (const [e, marked] of [
       [apiError("network", 0, null), true],
       [apiError("server", 500, "internal_error"), true],
+      [apiError("unavailable", 504, null), true], // a gateway timeout: the request may have been executed
+      [apiError("unavailable", 502, null), true],
+      [apiError("unavailable", 503, null), true], // a 503 that is NOT the attestation_* rollback
+      [apiError("unavailable", 503, "service_unavailable"), true],
+      [apiError("bad_response", 201, null), true], // a 201 whose body could not be read: it WAS applied
       [apiError("unavailable", 503, "attestation_unavailable"), false],
+      [apiError("unavailable", 503, "attestation_not_configured"), false],
       [apiError("rejected", 422, "challenge_used"), false],
+      [apiError("rejected", 400, "bad_request"), false],
+      [apiError("unauthenticated", 401, null), false],
       [apiError("rate_limited", 429, "rate_limited"), false],
     ] as const) {
       const rig = makeRig("android");
@@ -238,7 +246,7 @@ describe("rule 5 — iOS key lifecycle", () => {
     const rig = makeRig("ios");
     const r = await rig.redeemer.redeem(input(), rig.io());
     expect(r.attestationGrade).toBe("attested");
-    expect(rig.timeline).toEqual(["http:live", "native:generateKey", "native:attestKey", "http:register", "native:generateAssertion", "http:post:start", "http:post:end"]);
+    expect(rig.timeline).toEqual(["native:generateKey", "http:live", "native:attestKey", "http:register", "native:generateAssertion", "http:post:start", "http:post:end"]);
     const reg = rig.registrations[0]!;
     const live = { id: "dddddddd-dddd-4ddd-8ddd-000000000001", nonce: NONCE };
     expect(reg).toMatchObject({ deviceId: DEVICE, challengeId: live.id, nonce: live.nonce });
@@ -289,7 +297,7 @@ describe("rule 5 — iOS key lifecycle", () => {
     rig.module.destroyKeys(); // the Secure Enclave key is gone, the Keychain record is not
     const r = await rig.redeemer.redeem(input(), rig.io());
     expect(r.attestationGrade).toBe("attested");
-    expect(rig.timeline).toEqual(["native:generateAssertion", "http:live", "native:generateKey", "native:attestKey", "http:register", "native:generateAssertion", "http:post:start", "http:post:end"]);
+    expect(rig.timeline).toEqual(["native:generateAssertion", "native:generateKey", "http:live", "native:attestKey", "http:register", "native:generateAssertion", "http:post:start", "http:post:end"]);
     const fresh = rig.registrations[0]!.keyId;
     expect(fresh).not.toBe(oldKey);
     expect(await rig.state.getIosKey(USER, DEVICE)).toEqual({ state: "registered", keyId: fresh });
@@ -332,6 +340,93 @@ describe("rule 5 — iOS key lifecycle", () => {
     expect(rig.posts).toEqual([{ challengeId: CHALLENGE, nonce: NONCE, hardwareSupportsAttestation: false }]);
     expect(await rig.state.getIosKey(USER, DEVICE)).toBeNull();
     expect(rig.module.ops("generateAssertion")).toEqual([]);
+  });
+
+  describe("PR #42 gate MEDIUM-2: a deployment that cannot hold an App Attest key (503 attestation_not_configured from devices-attest-key)", () => {
+    const e503 = () => apiError("unavailable", 503, "attestation_not_configured");
+
+    it("nothing was applied: the `pending` mark is cleared (no earlier key), THIS redemption goes token-less with the claim false, and the registration is not retried for the backoff", async () => {
+      let t = 1_000_000;
+      const rig = makeRig("ios", { now: () => t, backoffMs: 60_000 });
+      rig.registerReplies = [e503()];
+      await rig.redeemer.redeem(input(), rig.io());
+      expect(rig.posts).toEqual([{ challengeId: CHALLENGE, nonce: NONCE, hardwareSupportsAttestation: false }]);
+      expect(await rig.state.getIosKey(USER, DEVICE)).toBeNull(); // no `pending` left behind
+      expect(await rig.state.getRegistrationBackoffUntil(USER, DEVICE)).toBe(t + 60_000);
+      expect(rig.registrations).toHaveLength(1);
+      // every retry inside the backoff: no live challenge, no generateKey, no attestKey, no registration, token-less again
+      rig.timeline.length = 0;
+      const keys = rig.module.ops("generateKey").length;
+      for (let i = 0; i < 3; i += 1) {
+        t += 10_000;
+        await rig.redeemer.redeem(input(), rig.io());
+      }
+      expect(rig.timeline.filter((x) => x !== "http:post:start" && x !== "http:post:end")).toEqual([]);
+      expect(rig.module.ops("generateKey")).toHaveLength(keys);
+      expect(rig.registrations).toHaveLength(1);
+      expect(rig.posts.every((p) => !p.hardwareSupportsAttestation && p.attestation === undefined)).toBe(true);
+      // after the backoff ONE new attempt is made (a fixed deployment is picked up); success clears the backoff
+      t += 60_000;
+      rig.registerReplies = [undefined];
+      rig.postReplies = [grade("attested")];
+      const r = await rig.redeemer.redeem(input(), rig.io());
+      expect(r.attestationGrade).toBe("attested");
+      expect(rig.registrations).toHaveLength(2);
+      expect(await rig.state.getRegistrationBackoffUntil(USER, DEVICE)).toBe(0);
+      expect(await rig.state.getIosKey(USER, DEVICE)).toMatchObject({ state: "registered" });
+    });
+
+    it("the backoff is PERSISTED: a new redeemer over the same secure store (an app restart) still honours it", async () => {
+      const t = 5_000_000;
+      const rig = makeRig("ios", { now: () => t, backoffMs: 60_000 });
+      rig.registerReplies = [e503()];
+      await rig.redeemer.redeem(input(), rig.io());
+      const again = makeRig("ios", { now: () => t + 1_000, backoffMs: 60_000 });
+      for (const k of rig.secure.keys()) await again.secure.set(k, (await rig.secure.get(k))!);
+      await again.redeemer.redeem(input(), again.io());
+      expect(again.timeline.filter((x) => x.startsWith("native:") || x === "http:live" || x === "http:register")).toEqual([]);
+      expect(again.posts[0]).toEqual({ challengeId: CHALLENGE, nonce: NONCE, hardwareSupportsAttestation: false });
+    });
+
+    it("when a key MAY already be on record (a dropped invalid key, or a pending mark) the same 503 defers instead of going token-less, keeps `pending`, and still sets the backoff", async () => {
+      const t = 9_000_000;
+      const rig = await registeredIos();
+      const rig2 = makeRig("ios", { now: () => t, backoffMs: 60_000 });
+      for (const k of rig.secure.keys()) await rig2.secure.set(k, (await rig.secure.get(k))!);
+      rig2.module.keys.add((await rig2.state.getIosKey(USER, DEVICE) as { keyId: string }).keyId);
+      rig2.module.destroyKeys();
+      rig2.registerReplies = [e503()];
+      await expect(rig2.redeemer.redeem(input(), rig2.io())).rejects.toMatchObject({ reason: "key_registration_refused" });
+      expect(await rig2.state.getIosKey(USER, DEVICE)).toEqual({ state: "pending" });
+      expect(rig2.posts).toEqual([]);
+      expect(await rig2.state.getRegistrationBackoffUntil(USER, DEVICE)).toBe(t + 60_000);
+      // inside the backoff nothing is attempted and nothing is sent
+      rig2.timeline.length = 0;
+      await expect(rig2.redeemer.redeem(input(), rig2.io())).rejects.toMatchObject({ reason: "key_registration_refused" });
+      expect(rig2.timeline).toEqual([]);
+    });
+
+    it("any OTHER 503 from devices-attest-key (a gateway, a transient outage) is still transient: rethrown for a retry, `pending` kept, no backoff", async () => {
+      for (const code of [null, "service_unavailable", "attestation_unavailable"]) {
+        const rig = makeRig("ios");
+        const e = apiError("unavailable", 503, code);
+        rig.registerReplies = [e];
+        await expect(rig.redeemer.redeem(input(), rig.io())).rejects.toBe(e);
+        expect(await rig.state.getIosKey(USER, DEVICE), String(code)).toEqual({ state: "pending" });
+        expect(await rig.state.getRegistrationBackoffUntil(USER, DEVICE), String(code)).toBe(0);
+      }
+    });
+
+    it("a refusal of the key itself (422 attestation_rejected) sets the same backoff, so a mismatched build does not spend a live challenge on every retry", async () => {
+      const t = 3_000_000;
+      const rig = makeRig("ios", { now: () => t, backoffMs: 60_000 });
+      rig.registerReplies = [apiError("rejected", 422, "attestation_rejected")];
+      await rig.redeemer.redeem(input(), rig.io());
+      expect(await rig.state.getRegistrationBackoffUntil(USER, DEVICE)).toBe(t + 60_000);
+      rig.timeline.length = 0;
+      await rig.redeemer.redeem(input(), rig.io());
+      expect(rig.timeline).toEqual(["http:post:start", "http:post:end"]);
+    });
   });
 
   it("a refusal when the server MAY already hold a key (a registered key was dropped for invalidKey; or a `pending` record) defers instead of going token-less, and keeps the `pending` mark", async () => {
@@ -379,18 +474,50 @@ describe("rule 5 — iOS key lifecycle", () => {
     await expect(rig4.redeemer.redeem(input(), rig4.io())).rejects.toBe(e401);
   });
 
-  it("generateKey / attestKey failing LOCALLY defer, send nothing, and leave NO record: no registration was sent, so the server cannot hold a key (`pending` is written only right before the registration request)", async () => {
+  it("generateKey failing LOCALLY defers, sends nothing, spends NO live challenge (the key is made BEFORE the challenge is requested) and leaves no record", async () => {
     const a = makeRig("ios");
-    a.module.always.generateKey = { ok: false, code: "unavailable", message: "x" };
+    a.module.always.generateKey = { ok: false, code: "other", message: "x" };
     await expect(a.redeemer.redeem(input(), a.io())).rejects.toMatchObject({ reason: "generate_key_failed" });
-    const b = makeRig("ios");
-    b.module.always.attestKey = { ok: false, code: "unavailable", message: "x" };
-    await expect(b.redeemer.redeem(input(), b.io())).rejects.toMatchObject({ reason: "attest_key_failed" });
-    for (const r of [a, b]) {
-      expect(await r.state.getIosKey(USER, DEVICE)).toBeNull();
-      expect(r.registrations).toEqual([]);
-      expect(r.posts).toEqual([]);
-    }
+    expect(a.timeline).toEqual(["native:generateKey"]); // no http:live
+    expect(await a.state.getIosKey(USER, DEVICE)).toBeNull();
+    expect(a.registrations).toEqual([]);
+    expect(a.posts).toEqual([]);
+  });
+
+  it("attestKey failing with a service outage keeps the SAME key and retries it next time (no new generateKey); any other attestKey failure burns the key", async () => {
+    const rig = makeRig("ios");
+    rig.module.next.attestKey = [{ ok: false, code: "unavailable", message: "Apple attestation service down" }];
+    await expect(rig.redeemer.redeem(input(), rig.io())).rejects.toMatchObject({ reason: "attest_key_unavailable" });
+    expect(await rig.state.getIosKey(USER, DEVICE)).toBeNull();
+    const kept = await rig.state.getUnattestedKey(USER, DEVICE);
+    expect(kept).toMatch(/^[A-Za-z0-9+/]{43}=$/);
+    const r = await rig.redeemer.redeem(input(), rig.io());
+    expect(r.attestationGrade).toBe("attested");
+    expect(rig.module.ops("generateKey")).toHaveLength(1); // the same key
+    expect(rig.registrations).toHaveLength(1);
+    expect(rig.registrations[0]!.keyId).toBe(kept);
+    expect(await rig.state.getUnattestedKey(USER, DEVICE)).toBeNull(); // attested: cleared
+
+    const burn = makeRig("ios");
+    burn.module.next.attestKey = [{ ok: false, code: "other", message: "invalid input" }];
+    await expect(burn.redeemer.redeem(input(), burn.io())).rejects.toMatchObject({ reason: "attest_key_failed" });
+    expect(await burn.state.getUnattestedKey(USER, DEVICE)).toBeNull();
+    await burn.redeemer.redeem(input(), burn.io());
+    expect(burn.module.ops("generateKey")).toHaveLength(2); // a new key
+  });
+
+  it("the device cannot do App Attest at all (generateKey / attestKey answer `unsupported`): nothing is registered, it goes token-less with the claim false, and registration is not retried for the backoff (the `unattestable` mapping matters)", async () => {
+    const rig = makeRig("ios");
+    rig.module.next.generateKey = [{ ok: false, code: "unsupported", message: "featureUnsupported" }];
+    await rig.redeemer.redeem(input(), rig.io());
+    expect(rig.posts).toEqual([{ challengeId: CHALLENGE, nonce: NONCE, hardwareSupportsAttestation: false }]);
+    expect(rig.timeline).not.toContain("http:live");
+    expect(await rig.state.getRegistrationBackoffUntil(USER, DEVICE)).toBeGreaterThan(Date.now());
+    const k = makeRig("ios");
+    k.module.next.attestKey = [{ ok: false, code: "unsupported", message: "x" }];
+    await k.redeemer.redeem(input(), k.io());
+    expect(k.posts).toEqual([{ challengeId: CHALLENGE, nonce: NONCE, hardwareSupportsAttestation: false }]);
+    expect(await k.state.getIosKey(USER, DEVICE)).toBeNull();
   });
 
   it("a failure BEFORE the registration is sent (a 429 on the live challenge) leaves no `pending` mark, so a build whose registrations are later REFUSED still falls back to token-less `unattestable` (not a permanent deferral)", async () => {
@@ -505,28 +632,215 @@ describe("rule 3 — ONE ASSERTION IN FLIGHT PER KEY: held from generateAssertio
     await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
   });
 
-  it("released on TIMEOUT: a request that never answers is abandoned after the hold time as a deferral, and the next check-in proceeds", async () => {
+  // ---- PR #42 gate HIGH-1: a lock timeout must not leave the abandoned holder running OUTSIDE the lock -----------------------------------------------
+
+  /** The state the client and the (scripted) server end in: the key the client believes in, and the last key the server was asked to register. */
+  const consistent = async (rig: ReturnType<typeof makeRig>): Promise<void> => {
+    const rec = await rig.state.getIosKey(USER, DEVICE);
+    const serverKey = rig.registrations.length > 0 ? rig.registrations[rig.registrations.length - 1]!.keyId : null;
+    expect(rec).toEqual(serverKey === null ? null : { state: "registered", keyId: serverKey });
+    // every assertion-carrying post names the key the server holds
+    for (const p of rig.posts) if (p.attestation?.platform === "ios") expect(p.attestation.keyId).toBe(serverKey);
+  };
+
+  it("the gate's PoC: the first holder stalls in generateKey past the hold time; the next check-in registers key B; when the first resumes it does NOTHING (no key A registered, no state written): client and server end holding the same key", async () => {
     vi.useFakeTimers();
-    const rig = makeRig("ios", { holdMs: 5_000 });
-    await rig.redeemer.redeem(input(), rig.io()); // register the key first
-    rig.timeline.length = 0;
-    rig.module.events.length = 0;
-    rig.posts.length = 0;
-    rig.registrations.length = 0;
-    const never = deferred<ReturnType<typeof grade>>();
-    rig.postReplies = [() => never.promise, grade("attested")];
+    const rig = makeRig("ios", { holdMs: 5_000, nativeTimeoutMs: 600_000 });
+    const gate = deferred();
+    rig.module.stall.generateKey = [gate.promise];
     const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io());
-    const p1Result = p1.then(
-      () => "resolved",
-      (e: unknown) => e,
-    );
+    const p1Result = p1.then(() => "resolved", (e: unknown) => e);
     const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
-    await vi.advanceTimersByTimeAsync(4_999);
-    expect(rig.module.ops("generateAssertion")).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(2);
+    await vi.advanceTimersByTimeAsync(5_001);
     expect(await p1Result).toMatchObject({ name: "AttestationDeferred", reason: "assertion_lock_timeout" });
     await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.registrations).toHaveLength(1);
+    const before = { events: rig.timeline.length, posts: rig.posts.length, key: await rig.state.getIosKey(USER, DEVICE) };
+    gate.resolve(); // the stuck native call finally returns key A
+    await vi.advanceTimersByTimeAsync(10);
+    expect(rig.timeline.length).toBe(before.events + 0); // nothing new: no live challenge, no attestKey, no register, no assertion, no post
+    expect(rig.posts.length).toBe(before.posts);
+    expect(rig.registrations).toHaveLength(1);
+    expect(await rig.state.getIosKey(USER, DEVICE)).toEqual(before.key);
+    expect(await rig.state.getUnattestedKey(USER, DEVICE)).toBeNull(); // the abandoned holder did not even store key A
+    await consistent(rig);
+  });
+
+  it.each(["generateKey", "attestKey", "generateAssertion"] as const)("NO side effect after abort, whichever native call the holder was stuck in (%s): nothing it does on resuming reaches the state, the server or the key", async (op) => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000, nativeTimeoutMs: 600_000 });
+    if (op === "generateAssertion") {
+      await rig.redeemer.redeem(input(), rig.io()); // a registered key first
+      rig.timeline.length = 0;
+      rig.posts.length = 0; // (the registration stays on record: it is what the server holds)
+    }
+    const gate = deferred();
+    rig.module.stall[op] = [gate.promise];
+    const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io());
+    const p1Result = p1.then(() => "resolved", (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await p1Result).toMatchObject({ reason: "assertion_lock_timeout" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    const snapshot = JSON.stringify({ t: rig.timeline, p: rig.posts, r: rig.registrations, k: await rig.state.getIosKey(USER, DEVICE), u: await rig.state.getUnattestedKey(USER, DEVICE), s: rig.secure.dump() });
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(JSON.stringify({ t: rig.timeline, p: rig.posts, r: rig.registrations, k: await rig.state.getIosKey(USER, DEVICE), u: await rig.state.getUnattestedKey(USER, DEVICE), s: rig.secure.dump() })).toBe(snapshot);
+    await consistent(rig);
+  });
+
+  it("an aborted holder whose stuck native call returns a FAILURE still writes nothing: generateKey `unsupported` after the abort sets no backoff, and an `invalid_key` assertion after the abort does not downgrade the record or register a key", async () => {
+    vi.useFakeTimers();
+    // (a) generateKey answers `unsupported` after the abort
+    const a = makeRig("ios", { holdMs: 5_000, nativeTimeoutMs: 600_000 });
+    const gA = deferred();
+    a.module.stall.generateKey = [gA.promise];
+    a.module.next.generateKey = [{ ok: false, code: "unsupported", message: "x" }];
+    const a1 = a.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), a.io()).then(() => "ok", (e: unknown) => e);
+    a.module.next.generateKey = [{ ok: false, code: "unsupported", message: "x" }];
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await a1).toMatchObject({ reason: "assertion_lock_timeout" });
+    expect(await a.state.getRegistrationBackoffUntil(USER, DEVICE)).toBe(0);
+    gA.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await a.state.getRegistrationBackoffUntil(USER, DEVICE)).toBe(0); // the abandoned holder wrote no backoff
+    // (b) an invalid_key assertion after the abort
+    const b = makeRig("ios", { holdMs: 5_000, nativeTimeoutMs: 600_000 });
+    vi.useRealTimers();
+    await b.redeemer.redeem(input(), b.io());
+    vi.useFakeTimers();
+    b.timeline.length = 0;
+    const regs = b.registrations.length;
+    const keyBefore = await b.state.getIosKey(USER, DEVICE);
+    const gB = deferred();
+    b.module.stall.generateAssertion = [gB.promise];
+    b.module.next.generateAssertion = [{ ok: false, code: "invalid_key", message: "gone" }];
+    const b1 = b.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), b.io()).then(() => "ok", (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await b1).toMatchObject({ reason: "assertion_lock_timeout" });
+    gB.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(b.registrations).toHaveLength(regs);
+    expect(await b.state.getIosKey(USER, DEVICE)).toEqual(keyBefore); // not downgraded to `pending`
+    expect(b.timeline.filter((x) => x === "http:live" || x === "http:register" || x === "native:generateKey")).toEqual([]);
+  });
+
+  it("a holder stuck BEFORE its first native call (a slow secure-store read) that resumes after the abort does not generate an assertion", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000 });
+    vi.useRealTimers();
+    await rig.redeemer.redeem(input(), rig.io()); // a registered key
+    vi.useFakeTimers();
+    rig.timeline.length = 0;
+    rig.posts.length = 0;
+    const gate = deferred();
+    const realGet = rig.secure.get.bind(rig.secure);
+    let first = true;
+    rig.secure.get = async (k: string) => {
+      if (first) {
+        first = false;
+        await gate.promise;
+      }
+      return realGet(k);
+    };
+    const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io()).then(() => "ok", (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await p1).toMatchObject({ reason: "assertion_lock_timeout" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    const assertions = rig.module.ops("generateAssertion").length;
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(rig.module.ops("generateAssertion")).toHaveLength(assertions); // none for the abandoned holder
+    expect(rig.posts).toHaveLength(1);
+  });
+
+  it("the lock is NOT released while a request that was SENT is in flight: a post that outlives the hold time keeps the next check-in waiting, and its real answer is returned (not thrown away)", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000 });
+    await rig.redeemer.redeem(input(), rig.io());
+    rig.timeline.length = 0;
+    rig.posts.length = 0;
+    const slow = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => slow.promise, grade("attested")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
+    await vi.advanceTimersByTimeAsync(60_000); // far past the hold time
+    expect(rig.timeline).toEqual(["native:generateAssertion", "http:post:start"]); // the second has NOT asserted
+    slow.resolve(grade("attested"));
+    await expect(p1).resolves.toMatchObject({ attestationGrade: "attested" }); // the sent request's answer is kept
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.timeline).toEqual(["native:generateAssertion", "http:post:start", "http:post:end", "native:generateAssertion", "http:post:start", "http:post:end"]);
+  });
+
+  it("the same for a key REGISTRATION in flight: it is never abandoned, the key is recorded as it settles, and the waiting check-in then asserts with THAT key", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000 });
+    const slow = deferred();
+    rig.registerReplies = [() => slow.promise];
+    const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(rig.registrations).toHaveLength(1);
+    expect(rig.module.ops("generateKey")).toHaveLength(1); // p2 has not started a second registration
+    slow.resolve();
+    // p1 was told to stop at its next step (the aborted holder performs no further effect: its assertion is not generated), p2 then reuses the registered key
+    await expect(p1).rejects.toMatchObject({ reason: "assertion_lock_timeout" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.registrations).toHaveLength(1);
+    expect(await rig.state.getIosKey(USER, DEVICE)).toEqual({ state: "registered", keyId: rig.registrations[0]!.keyId });
+    await consistent(rig);
+  });
+
+  it("each native call has its OWN timeout: a stuck attestKey is a transient local failure after it, the lock is released normally and the key is kept for a retry", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 90_000, nativeTimeoutMs: 1_000 });
+    rig.module.stall.attestKey = [deferred().promise]; // never answers
+    const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io());
+    const p1Result = p1.then(() => "resolved", (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(await p1Result).toMatchObject({ reason: "attest_key_unavailable" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.module.ops("generateKey")).toHaveLength(1); // p2 retried the SAME key
+    // an assertion that never answers
+    const rig2 = makeRig("ios", { holdMs: 90_000, nativeTimeoutMs: 1_000 });
+    await rig2.redeemer.redeem(input(), rig2.io());
+    rig2.module.stall.generateAssertion = [deferred().promise];
+    const q = rig2.redeemer.redeem(input(), rig2.io());
+    const qResult = q.then(() => "resolved", (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(await qResult).toMatchObject({ reason: "assertion_unavailable" });
+  });
+
+  it("assertionLockKey lowercases the device id: the same device spelled in upper and lower case is ONE lock (serialised), and the lock is the one the activation seam takes", async () => {
+    expect(assertionLockKey(USER, DEVICE.toUpperCase())).toBe(assertionLockKey(USER, DEVICE));
+    const rig = await registeredIos();
+    const gate = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => gate.promise, grade()];
+    const p1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02", deviceId: DEVICE.toUpperCase() }), rig.io());
+    await tick();
+    expect(rig.module.ops("generateAssertion")).toHaveLength(1);
+    gate.resolve(grade());
+    await Promise.all([p1, p2]);
     expect(rig.module.ops("generateAssertion")).toHaveLength(2);
+  });
+
+  it("the activation seam (P4.2c): withAssertionLock takes the EXACT lock check-in uses, so a check-in assertion waits for an activation holding it, and the other way round", async () => {
+    const rig = await registeredIos();
+    const holder = deferred();
+    const seam = withAssertionLock(rig.locks, USER, DEVICE.toUpperCase(), async (g) => {
+      g.check();
+      await holder.promise;
+      return "activated";
+    });
+    const redeem = rig.redeemer.redeem(input(), rig.io());
+    await tick();
+    expect(rig.module.ops("generateAssertion")).toHaveLength(0); // waiting behind the activation
+    holder.resolve();
+    expect(await seam).toBe("activated");
+    await expect(redeem).resolves.toMatchObject({ attestationGrade: "attested" });
   });
 
   it("different keys (another account, or another device) do NOT wait for each other", async () => {

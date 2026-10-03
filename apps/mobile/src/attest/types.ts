@@ -24,8 +24,9 @@ export type UnattestableReason =
   | "not_configured"; // attestation is supported but not set up (no Cloud project number, no App Attest entitlement)
 
 /** Why a platform call failed, when the caller must react differently. `invalid_key`: App Attest says the key is no longer usable (`DCError.invalidKey`:
- * the app was reinstalled or the key was lost), so the caller drops it and registers a fresh one; everything else is `other`. */
-export type AttestFailureCode = "invalid_key" | "other";
+ * the app was reinstalled or the key was lost), so the caller drops it and registers a fresh one; `unavailable` is a transient platform failure (Apple's or Google's service, e.g.
+ * `DCError.serverUnavailable`): the same key may be retried; everything else is `other`. */
+export type AttestFailureCode = "invalid_key" | "unavailable" | "other";
 
 export type AttestResult<T> = { kind: "ok"; value: T } | { kind: "unattestable"; reason: UnattestableReason } | { kind: "failed"; message: string; code?: AttestFailureCode };
 

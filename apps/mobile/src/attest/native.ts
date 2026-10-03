@@ -43,7 +43,7 @@ function isText(v: unknown, re: RegExp): v is string {
   return typeof v === "string" && re.test(v);
 }
 
-function failed<T>(message: string, code?: "invalid_key" | "other"): AttestResult<T> {
+function failed<T>(message: string, code?: "invalid_key" | "unavailable" | "other"): AttestResult<T> {
   return { kind: "failed", message, ...(code ? { code } : {}) };
 }
 
@@ -70,7 +70,7 @@ export class NativeAttestor implements Attestor {
     if (typeof r !== "object" || r === null) return failed(`${what}: the native module returned no result`);
     if (!r.ok) {
       if (r.code === "unsupported") return { kind: "unattestable", reason: "platform_unsupported" };
-      return failed(`${what}: ${r.message}`, r.code === "invalid_key" ? "invalid_key" : "other");
+      return failed(`${what}: ${r.message}`, r.code === "invalid_key" ? "invalid_key" : r.code === "unavailable" ? "unavailable" : "other");
     }
     const v = pick(r);
     return v === null ? failed(`${what}: the native module returned a malformed result`) : { kind: "ok", value: v };

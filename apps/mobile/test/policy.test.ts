@@ -228,6 +228,24 @@ describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it m
     expect(Object.keys(ALLOWED_IOS_ENTITLEMENTS).sort()).toEqual(["com.apple.developer.applesignin", "com.apple.developer.devicecheck.appattest-environment"]);
   });
 
+  it("PR #42 gate LOW-2: the entitlement scan FAILS CLOSED: an unknown key is a violation whatever its value element is (integer, empty string, data, date, real, dict, array, boolean), and an allow-listed key must hold a string or an array of strings", () => {
+    const unknownValues = ["<integer>1</integer>", "<string/>", "<string></string>", "<data>AAAA</data>", "<date>2026-01-01T00:00:00Z</date>", "<real>1.5</real>", "<dict><key>x</key><string>y</string></dict>", "<array/>", "<array><integer>1</integer></array>", "<true/>", "<false/>"];
+    for (const v of unknownValues) {
+      const r = scanEntitlements(plist(SIWA + `<key>com.apple.developer.healthkit</key>${v}`));
+      // (a nested dict's own keys are reported too: stricter, never looser)
+      expect(r.filter((x) => x.rule === "ios-entitlement" && x.detail.includes("com.apple.developer.healthkit")), v).toHaveLength(1);
+    }
+    // the unknown key FIRST, then an allowed one: neither hides the other
+    expect(scanEntitlements(plist(`<key>aps-environment</key><integer>1</integer>${SIWA}`)).map((x) => x.rule)).toEqual(["ios-entitlement"]);
+    for (const bad of ["<integer>1</integer>", "<string/>", "<true/>", "<data>AAAA</data>", "<dict/>", "<array/>", "<array><integer>1</integer></array>", "<array><string>Default</string><dict/></array>"]) {
+      expect(scanEntitlements(plist(`<key>com.apple.developer.applesignin</key>${bad}`)).map((x) => x.rule), bad).toEqual(["ios-entitlement-value"]);
+      expect(scanEntitlements(plist(`<key>com.apple.developer.devicecheck.appattest-environment</key>${bad}`)).map((x) => x.rule), bad).toEqual(["ios-entitlement-value"]);
+    }
+    // an empty file (no keys at all) is not a violation by itself, a malformed value for a known key still is
+    expect(scanEntitlements(plist(""))).toEqual([]);
+    expect(scanEntitlements(plist(SIWA + ATTEST("production")))).toEqual([]);
+  });
+
   it("app.json sets no entitlement directly (the App Attest one comes from the audited plugin); one that is not allow-listed fails the config scan", () => {
     expect(appJson.expo?.ios?.entitlements).toBeUndefined();
     const e = structuredClone(appJson.expo!);
@@ -282,5 +300,28 @@ describe("AT 7 — no ads or analytics SDK in the lockfile", () => {
   it("does not flag look-alike names", () => {
     const fake = "lockfileVersion: '9.0'\n\npackages:\n\n  expo-insights-viewer-not-really@1.0.0:\n    resolution: {x}\n\n  amplitude-ish@1.0.0:\n    resolution: {x}\n\nsnapshots:\n";
     expect(findDeniedSdks(fake)).toEqual([]);
+  });
+});
+
+describe("PR #42 gate LOW-1 — the gitleaks allowlist for the fixture's scripted integrity token is anchored", () => {
+  const toml = readFileSync(here("../../../.gitleaks.toml"), "utf8");
+  const entry = toml.slice(toml.lastIndexOf("[[allowlists]]"));
+  const regex = /regexes = \['''(.+)'''\]/.exec(entry)?.[1] ?? "";
+  const re = new RegExp(regex);
+  const TOKEN = `it-${"A".repeat(43)}`;
+
+  it("the entry is the last one, names the scripted token, has no `paths` (gitleaks 8.30.1 skips a path-allowlisted file entirely, even under AND) and anchors the WHOLE line", () => {
+    expect(entry).toMatch(/integrityToken/);
+    expect(entry).not.toMatch(/^paths\s*=/m);
+    expect(regex.startsWith("^")).toBe(true);
+    expect(regex.endsWith("$")).toBe(true);
+  });
+
+  it("it matches exactly the fixture's member lines and nothing wider", () => {
+    expect(re.test(`        "integrityToken": "${TOKEN}"`)).toBe(true);
+    expect(re.test(`        "integrityToken": "${TOKEN}",`)).toBe(true);
+    for (const wider of [`"integrityToken": "${TOKEN}", "x": "ghp_${"a1B2".repeat(9)}"`, `x "integrityToken": "${TOKEN}"`, `"integrityToken": "${TOKEN}A"`, `"integrityToken": "eyJhbGciOi.${"a".repeat(40)}"`, `"integrityToken": "it-${"A".repeat(42)}"`, `"integrityToken": "${TOKEN}" // ${["AK", "IA"].join("")}-shaped trailing text`]) {
+      expect(re.test(wider), wider).toBe(false);
+    }
   });
 });

@@ -56,7 +56,7 @@ vi.mock("../../../supabase/functions/_shared/privileged.ts", () => ({
 
 import { handleChallengeRequest, RATE_LIMIT_PER_USER_HOUR as CHALLENGE_RATE } from "../../../supabase/functions/_shared/checkin/challenge-handler.ts";
 import { seedDevice, rewardsState } from "../../../supabase/tests/unit/fake-rewards-repo.ts";
-import { seedAttestDevice } from "../../../supabase/tests/unit/fake-attest-key-repo.ts";
+import { fakeAttestDevices, seedAttestDevice } from "../../../supabase/tests/unit/fake-attest-key-repo.ts";
 import { enforceAttestKeyRateLimits, handleAttestKey } from "../../../supabase/functions/_shared/rewards/attest-key-handler.ts";
 import { parseAttestKeyBody } from "../../../supabase/functions/_shared/rewards/attest-key-request.ts";
 import type { AttestationRegistrationVerifier } from "../../../supabase/functions/_shared/rewards/app-attest-registration.ts";
@@ -361,8 +361,11 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
     r.attestkey_201_registered = await attestKeyEndpoint(e.state, e.repo, await regBody(live!), scriptedRegistrationVerifier);
     // The same key again (an earlier request was applied and its answer lost): 409, nothing consumed.
     r.attestkey_409_already_registered = await attestKeyEndpoint(e.state, e.repo, await regBody(live!), scriptedRegistrationVerifier);
-    // The fake rewards repo keeps its own device table: mirror the key the REAL registration handler just recorded, so the check-in verifier sees a registered key.
-    rewardsState(e.state).deviceAttest.get(FAKE_DEVICE_ID)!.attestKeyId = keyId;
+    // The fake rewards repo keeps its own device table: copy the key the REAL registration handler just stored, so the check-in verifier sees a registered key.
+    const stored = fakeAttestDevices(e.state).get(FAKE_DEVICE_ID)!;
+    expect(stored.keyId, "the real registration handler recorded the key").toBe(keyId);
+    // copy what the REAL handler stored (key id, public key, registration time), not a constant of this script
+    Object.assign(rewardsState(e.state).deviceAttest.get(FAKE_DEVICE_ID)!, { attestKeyId: stored.keyId, attestPublicKey: stored.publicKey });
     let counter = 0;
     const ports: VerificationPorts = { ios: scriptedIos(() => (counter += 1)), android: null };
     const [c1, c2] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID, prefetchCount: 2 });

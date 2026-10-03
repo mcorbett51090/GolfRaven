@@ -48,7 +48,7 @@ export interface Rig {
   io(): RedeemIo;
 }
 
-export function makeRig(platform: "ios" | "android", opts: { cloud?: string | null; holdMs?: number } = {}): Rig {
+export function makeRig(platform: "ios" | "android", opts: { cloud?: string | null; holdMs?: number; nativeTimeoutMs?: number; now?: () => number; backoffMs?: number } = {}): Rig {
   const module = new FakeNativeAttestModule();
   const secure = new MemorySecureStore();
   const state = new AttestStateStore(secure);
@@ -66,7 +66,7 @@ export function makeRig(platform: "ios" | "android", opts: { cloud?: string | nu
     secure,
     state,
     locks,
-    redeemer: new NativeRedeemer({ attestor, state, locks }),
+    redeemer: new NativeRedeemer({ attestor, state, locks, ...(opts.nativeTimeoutMs !== undefined ? { nativeTimeoutMs: opts.nativeTimeoutMs } : {}), ...(opts.now ? { now: opts.now } : {}), ...(opts.backoffMs !== undefined ? { registrationBackoffMs: opts.backoffMs } : {}) }),
     posts: [],
     registrations: [],
     timeline,

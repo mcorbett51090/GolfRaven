@@ -24,6 +24,8 @@ function part(name: string, v: string): string {
   return v;
 }
 
+const unattestedKey = (userId: string, deviceId: string): string => `gr.attest.ios_unattested.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
+const backoffKey = (userId: string, deviceId: string): string => `gr.attest.ios_reg_backoff.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 const iosKey = (userId: string, deviceId: string): string => `gr.attest.ios_key.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 const androidKey = (userId: string, deviceId: string): string => `gr.attest.android_attested.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 
@@ -52,6 +54,36 @@ export class AttestStateStore {
     await this.secure.delete(iosKey(userId, deviceId));
   }
 
+  /** A key `generateKey` made that `attestKey` has NOT yet attested (Apple's service was unavailable): it is kept and the SAME key retried at the next registration, rather
+   * than generating a new one (Apple: retry `attestKey` with the same key after a `serverUnavailable`). `null` when there is none. */
+  async getUnattestedKey(userId: string, deviceId: string): Promise<string | null> {
+    const v = await this.secure.get(unattestedKey(userId, deviceId));
+    return v !== null && KEY_ID_RE.test(v) ? v : null;
+  }
+
+  async setUnattestedKey(userId: string, deviceId: string, keyId: string): Promise<void> {
+    await this.secure.set(unattestedKey(userId, deviceId), keyId);
+  }
+
+  async clearUnattestedKey(userId: string, deviceId: string): Promise<void> {
+    await this.secure.delete(unattestedKey(userId, deviceId));
+  }
+
+  /** Until when (epoch ms) a key registration must not be attempted again: set when the server answered that it cannot hold a key (503 `attestation_not_configured`, or a refusal
+   * of the key itself) so that every outbox retry does not spend a live challenge and an Apple `attestKey`. Persisted, per user and device. `0` = no backoff. */
+  async getRegistrationBackoffUntil(userId: string, deviceId: string): Promise<number> {
+    const n = Number(await this.secure.get(backoffKey(userId, deviceId)));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  async setRegistrationBackoffUntil(userId: string, deviceId: string, untilMs: number): Promise<void> {
+    await this.secure.set(backoffKey(userId, deviceId), String(Math.trunc(untilMs)));
+  }
+
+  async clearRegistrationBackoff(userId: string, deviceId: string): Promise<void> {
+    await this.secure.delete(backoffKey(userId, deviceId));
+  }
+
   async hasAttestedAndroid(userId: string, deviceId: string): Promise<boolean> {
     return (await this.secure.get(androidKey(userId, deviceId))) === "1";
   }
@@ -64,5 +96,7 @@ export class AttestStateStore {
   async wipeUser(userId: string, deviceId: string): Promise<void> {
     await this.secure.delete(iosKey(userId, deviceId));
     await this.secure.delete(androidKey(userId, deviceId));
+    await this.secure.delete(unattestedKey(userId, deviceId));
+    await this.secure.delete(backoffKey(userId, deviceId));
   }
 }
