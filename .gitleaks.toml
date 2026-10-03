@@ -40,3 +40,14 @@ useDefault = true
 description = "money-path test: the fixed fake Vault-key UUID (a0000000-1111-...) beside a pseudonym_hmac_vN name — not a real secret line"
 regexTarget = "line"
 regexes = ['''a0000000-1111-.*pseudonym_hmac_v[0-9]''']
+
+# 2026-10-03 — mobile edge-contract fixture (apps/mobile/test/fixtures/edge-contract.json). The
+# recorder's SCRIPTED Play Integrity port (apps/mobile/scripts/record-edge-contract.rec.ts) accepts
+# exactly "it-" + base64url(SHA-256 binding), 43 chars — a deterministic test value derived from the
+# recorded binding, never a Google token (a real Play Integrity token is a JWE starting "eyJ"). The
+# key name "integrityToken" plus the hash's entropy trips generic-api-key. Line-scoped and anchored to
+# that exact shape, so a real token on any line still fails.
+[[allowlists]]
+description = "mobile edge-contract fixture: scripted Play Integrity test token 'it-' + 43-char base64url binding hash — not a real token"
+regexTarget = "line"
+regexes = ['''"integrityToken": "it-[A-Za-z0-9_-]{43}"''']

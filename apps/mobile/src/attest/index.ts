@@ -1,3 +1,10 @@
 export * from "./binding";
+export * from "./jwt";
+export * from "./mutex";
+export * from "./native";
+export type * from "./native-module";
+export * from "./redeemer";
+export * from "./setup";
+export * from "./state-store";
 export * from "./types";
 export * from "./unattestable";

@@ -17,7 +17,7 @@ import type {
   LinkSignInRequest,
   LinkSignInResult,
   CheckinChallengeRequest,
-  CheckinTokenRequest,
+  CheckinRedeemInput,
   CheckinTokenResult,
   IssuedChallenge,
   PlaySummary,
@@ -138,7 +138,7 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
         Array.from({ length: n }, (_, i): IssuedChallenge => ({ id: `demo-challenge-${i}`, nonce: `demo_nonce_${i}`, expiresAt: new Date(Date.now() + ttl).toISOString(), kind: req.prefetchCount ? "prefetched" : "live" })),
       );
     },
-    redeemCheckinChallenge(req: CheckinTokenRequest): Promise<CheckinTokenResult> {
+    redeemCheckinChallenge(req: CheckinRedeemInput): Promise<CheckinTokenResult> {
       return Promise.resolve({ jti: `demo_jti_${req.challengeId}`.replace(/[^A-Za-z0-9_-]/g, "_"), expiresAt: iso, attestationGrade: "unattestable" });
     },
     registerPushToken(req): Promise<PushTokenResult> {

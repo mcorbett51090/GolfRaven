@@ -205,6 +205,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
         auth: services.auth,
         outbox: services.outboxStore,
         challenges: services.challengeStore,
+        attestState: { wipeUser: async (userId) => services.attestState.wipeUser(userId, await services.deviceId()) },
         sharer: services.sharer,
         currentUserId: () => services.auth.current()?.userId ?? null,
         secure: services.secure,

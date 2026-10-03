@@ -4,7 +4,6 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHttpApiClient, type ApiClient } from "../src/api";
-import { UnattestableAttestor } from "../src/attest";
 import { buildEvidenceBody, parseEvidencePayload, toJsonValue, type EvidencePayload } from "../src/evidence";
 import { BATCH_MAX_BYTES, BATCH_MAX_ITEMS, SERVER_MAX_BODY_BYTES, batchRequestBytes, planBatches, selectBatchEntries, type BatchEntry } from "../src/evidence/batch";
 import { MemoryOutboxStore, OutboxRunner, SqliteOutboxStore, createItem, type OutboxItem, type OutboxStore } from "../src/outbox";
@@ -44,7 +43,6 @@ describe.each(STORES)("evidence through the runner (%s)", (_n, makeStore) => {
       rng: () => 0.5,
       sleep: () => Promise.resolve(),
       now: () => clock.now,
-      attestor: new UnattestableAttestor(),
       persistEvidencePayload: async (item, payload) => {
         persisted.push({ id: item.id, payload, at: seen.length });
         const stored = await store.get(item.id);

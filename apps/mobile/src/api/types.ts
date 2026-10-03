@@ -121,10 +121,24 @@ export interface CheckinChallengeRequest {
   prefetchCount?: number;
 }
 
+/** The device attestation a redemption may carry (`token-request-shape.ts`): an App Attest assertion (iOS) or a Play Integrity token (Android). */
+export type CheckinAttestationBlock = { platform: "ios"; keyId: string; assertion: string } | { platform: "android"; integrityToken: string };
+
+/** The WIRE body of `POST checkin-token`. Strict at the server: an unknown key is a 400. `hardwareSupportsAttestation` is true only when `attestation` is present
+ * (`attest/redeemer.ts` `wireRequest` is the only constructor). */
 export interface CheckinTokenRequest {
   challengeId: string;
   nonce: string;
   hardwareSupportsAttestation: boolean;
+  attestation?: CheckinAttestationBlock;
+}
+
+/** What a caller gives to redeem a challenge: the attestation (and so the wire body) is built by the client's redeemer, bound to these. `deviceId` is the device the
+ * challenge was issued to. */
+export interface CheckinRedeemInput {
+  challengeId: string;
+  nonce: string;
+  deviceId: string;
 }
 
 /** The check-in challenge endpoints. Both take the OWNER's credentials explicitly (the bearer is `credentials.accessToken`, never whatever is
@@ -132,7 +146,7 @@ export interface CheckinTokenRequest {
  * 30 and 60 per user per hour), and both throw `ApiError`. */
 export interface CheckinApi {
   requestCheckinChallenges(req: CheckinChallengeRequest, credentials: EvidenceCredentials): Promise<IssuedChallenge[]>;
-  redeemCheckinChallenge(req: CheckinTokenRequest, credentials: EvidenceCredentials): Promise<CheckinTokenResult>;
+  redeemCheckinChallenge(req: CheckinRedeemInput, credentials: EvidenceCredentials): Promise<CheckinTokenResult>;
 }
 
 export interface ApiClient extends EvidenceSubmitter, CheckinApi {

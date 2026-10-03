@@ -77,6 +77,27 @@ describe("metro.config.js runs the public-env guard", () => {
     }
   });
 
+  it("the guard script MISSING (a broken checkout) is reported honestly as 'could not run', checked BEFORE spawning: not as a finding, and not as Node's own 'Cannot find module'", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gr-metro-"));
+    try {
+      symlinkSync(join(APP, "node_modules"), join(dir, "node_modules"));
+      copyFileSync(CONFIG, join(dir, "metro.config.js"));
+      // no scripts/ directory at all
+      const r = load(join(dir, "metro.config.js"), {});
+      expect(r.code).not.toBe(0);
+      expect(r.err).toMatch(/env guard could not run/);
+      expect(r.err).toMatch(/check-public-env\.mjs does not exist/);
+      expect(r.err).toMatch(/NOT checked/);
+      expect(r.err).toMatch(/broken checkout, not a finding/);
+      expect(r.err).not.toMatch(/secret-shaped value/);
+      expect(r.err).not.toMatch(/Cannot find module/); // the guard was never spawned
+      // and it still blocks with a SECRET in the environment: a missing guard does not become a pass
+      expect(load(join(dir, "metro.config.js"), { EXPO_PUBLIC_SUPABASE_ANON_KEY: serviceRole }).code).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("source: the config calls the guard script before exporting Expo's defaults, and the explicit scripts remain", () => {
     const src = readFileSync(CONFIG, "utf8");
     expect(src).toMatch(/check-public-env\.mjs/);

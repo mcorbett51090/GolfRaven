@@ -13,7 +13,7 @@
  * | `submitEvidence`        | `POST <evidence body>` (`evidence/payload.ts`)       | `evidence`          |
  * | `submitEvidenceBatch`   | `POST { items: [<evidence body>] }`                  | `evidence-batch`    |
  * | `requestCheckinChallenges` | `POST { deviceId, facilityId?, prefetchCount? }`  | `checkin-challenge` |
- * | `redeemCheckinChallenge`| `POST { challengeId, nonce, hardwareSupportsAttestation }` | `checkin-token` |
+ * | `redeemCheckinChallenge`| `POST { challengeId, nonce, hardwareSupportsAttestation, attestation? }` (`attest/redeemer.ts` builds it) | `checkin-token` |
  *
  * Auth: `Authorization: Bearer <Supabase access token>` from `getAccessToken()` (the auth service refreshes an expired token itself); a `401`
  * forces ONE refresh and one repeat of the request, then surfaces as `unauthenticated`. No cookies, no redirects.
@@ -31,7 +31,7 @@
  * convention and is unverified against a real project: nothing here has ever called a server.]`
  */
 import { DEFAULT_MIN_AGE } from "../age/gate";
-import { UnattestableAttestor, type Attestor } from "../attest";
+import { PlainRedeemer, type CheckinRedeemer, type RedeemIo } from "../attest";
 import { planBatches, selectBatchEntries } from "../evidence/batch";
 import { sendEvidenceBatch, sendEvidenceItem } from "../evidence/send";
 import type { WireBody } from "../evidence/payload";
@@ -41,6 +41,7 @@ import { ApiError, kindForStatus } from "./errors";
 import { answerFromHttp, answersFromBatchHttp } from "./evidence-answer";
 import { retryAfterSecondsFrom } from "./retry-after";
 import {
+  attestKeyResultSchema,
   challengesResultSchema,
   checkinTokenResultSchema,
   deleteResultSchema,
@@ -53,7 +54,7 @@ import {
   unlinkResultSchema,
 } from "./schemas";
 import type { z } from "zod";
-import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinTokenRequest, PlaySummary } from "./types";
+import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinRedeemInput, PlaySummary } from "./types";
 
 export { retryAfterSecondsFrom };
 
@@ -83,8 +84,8 @@ export interface HttpApiOptions {
   rng?: () => number;
   sleep?: (ms: number) => Promise<void>;
   policy?: Partial<{ [K in keyof typeof HTTP_POLICY]: number }>;
-  /** Device attestation (`attest/`). Default: `UnattestableAttestor` (no native module in this build). */
-  attestor?: Attestor;
+  /** How a check-in redemption is built and attested (`attest/redeemer.ts`). Default: `PlainRedeemer` (no attestation: `hardwareSupportsAttestation: false`). */
+  redeemer?: CheckinRedeemer;
   now?: () => number;
   /** Writes an item's payload into its stored row (the redeemed check-in jti, `evidence/send.ts`). */
   persistEvidencePayload?: (item: OutboxItem, payload: JsonValue) => Promise<void>;
@@ -97,8 +98,8 @@ interface CallSpec<T extends z.ZodType> {
   schema: T;
   /** Safe to repeat after a transport failure / 5xx. */
   idempotent: boolean;
-  /** The success status (default 200; the two check-in endpoints answer 201). */
-  okStatus?: number;
+  /** The success status (default 200; the two check-in endpoints answer 201; `devices-attest-key` answers 201 or 200). */
+  okStatus?: number | readonly number[];
   /** A bearer chosen by the caller: used as is, never replaced or refreshed (a `401` is surfaced, not retried with another user's token). */
   accessToken?: string;
 }
@@ -117,7 +118,7 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
   const rng = opts.rng ?? Math.random;
   const sleep = opts.sleep ?? realSleep;
   const base = opts.baseUrl.replace(/\/+$/, "");
-  const attestor = opts.attestor ?? new UnattestableAttestor();
+  const redeemer = opts.redeemer ?? new PlainRedeemer();
   const now = opts.now ?? Date.now;
 
   interface Raw {
@@ -222,8 +223,9 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         }
         throw e;
       }
-      const okStatus = spec.okStatus ?? 200;
-      if (res.status === okStatus) {
+      const okStatuses = spec.okStatus === undefined ? [200] : typeof spec.okStatus === "number" ? [spec.okStatus] : spec.okStatus;
+      const okStatus = okStatuses[0] ?? 200;
+      if (okStatuses.includes(res.status)) {
         let json: unknown;
         try {
           json = JSON.parse(res.text);
@@ -238,7 +240,7 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         }
         return inner.data;
       }
-      if (res.status >= 200 && res.status < 400) throw new ApiError({ kind: "bad_response", status: res.status, message: `unexpected success status ${res.status} (the contract answers ${okStatus})` });
+      if (res.status >= 200 && res.status < 400) throw new ApiError({ kind: "bad_response", status: res.status, message: `unexpected success status ${res.status} (the contract answers ${okStatuses.join(" or ")})` });
       const err = failure(res);
       last = err;
       const retryable = err.kind === "server" || err.kind === "unavailable" || err.kind === "rate_limited";
@@ -267,6 +269,21 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
   async function postEvidence(fn: string, body: unknown, accessToken: string): Promise<ServerAnswer> {
     const raw = await rawPost(fn, body, accessToken);
     return "answer" in raw ? raw.answer : answerFromHttp(raw);
+  }
+
+  /** The HTTP a redemption needs, as the owner of `accessToken` (never whoever is signed in by now): the three calls `attest/redeemer.ts` makes. None is retried here. */
+  function redeemIo(accessToken: string, deviceId: string): RedeemIo {
+    return {
+      post: (wire) => call({ fn: "checkin-token", method: "POST", body: wire, schema: checkinTokenResultSchema, idempotent: false, okStatus: 201, accessToken }),
+      requestLiveChallenge: async () => {
+        const [c] = (await call({ fn: "checkin-challenge", method: "POST", body: { deviceId }, schema: challengesResultSchema, idempotent: false, okStatus: 201, accessToken })).challenges;
+        if (!c || c.kind !== "live") throw new ApiError({ kind: "bad_response", status: 201, message: "checkin-challenge returned no live challenge" });
+        return c;
+      },
+      registerKey: async (req) => {
+        await call({ fn: "devices-attest-key", method: "POST", body: req, schema: attestKeyResultSchema, idempotent: false, okStatus: [201, 200], accessToken });
+      },
+    };
   }
 
   return {
@@ -329,16 +346,8 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         accessToken: credentials.accessToken,
       }).then((r) => r.challenges);
     },
-    redeemCheckinChallenge(req: CheckinTokenRequest, credentials: EvidenceCredentials) {
-      return call({
-        fn: "checkin-token",
-        method: "POST",
-        body: { challengeId: req.challengeId, nonce: req.nonce, hardwareSupportsAttestation: req.hardwareSupportsAttestation },
-        schema: checkinTokenResultSchema,
-        idempotent: false,
-        okStatus: 201,
-        accessToken: credentials.accessToken,
-      });
+    redeemCheckinChallenge(req: CheckinRedeemInput, credentials: EvidenceCredentials) {
+      return redeemer.redeem({ ...req, userId: credentials.userId, accessToken: credentials.accessToken }, redeemIo(credentials.accessToken, req.deviceId));
     },
 
     /** `POST evidence` (`evidence/send.ts`): ONE request, never retried here (the outbox owns retries; `source_ref` makes its replays safe); the
@@ -347,10 +356,8 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     submitEvidence(item: OutboxItem, credentials: EvidenceCredentials): Promise<ServerAnswer> {
       return sendEvidenceItem(
         {
-          attestor,
           now,
-          redeem: (req, accessToken) =>
-            call({ fn: "checkin-token", method: "POST", body: req, schema: checkinTokenResultSchema, idempotent: false, okStatus: 201, accessToken }),
+          redeem: (req, creds) => redeemer.redeem({ ...req, userId: creds.userId, accessToken: creds.accessToken }, redeemIo(creds.accessToken, req.deviceId)),
           post: (body, accessToken) => postEvidence("evidence", body, accessToken),
           ...(opts.persistEvidencePayload ? { persistPayload: opts.persistEvidencePayload } : {}),
         },

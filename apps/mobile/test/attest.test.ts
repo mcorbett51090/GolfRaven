@@ -127,19 +127,15 @@ describe("UnattestableAttestor: the only attestor this build ships", () => {
     expect(new UnattestableAttestor().capability).toEqual({ platform: "none", hardwareSupportsAttestation: false });
   });
 
-  it("the evidence flow carries exactly that: redemption sends hardwareSupportsAttestation:false; an attestor that claims support sends true (the seam P4.2b-2 plugs into)", async () => {
-    const held = (): OutboxItem => {
-      const base = itemFor(wireOf("evidence_accepted_no_challenge"), 1);
-      const p = JSON.parse(JSON.stringify(base.payload)) as { challenges: Record<string, unknown> };
-      const k = Object.keys(p.challenges)[0]!;
-      p.challenges[k] = { state: "held", challengeId: "chal_9", nonce: "bm9uY2U", kind: "prefetched", expiresAt: T0 + 10 * 3600_000 };
-      return { ...createItem({ id: "ev1", sourceRef: "r", ownerUserId: "user-a", courseId: base.courseId, catalogVersion: base.catalogVersion, payload: p as never }, T0), status: "sent" };
-    };
-    for (const [attestor, expected] of [[undefined, false], [{ capability: { platform: "ios", hardwareSupportsAttestation: true } } as unknown as Attestor, true]] as const) {
-      const f = scriptedFetch({ respond: "token_201_unattestable" }, { respond: "evidence_accepted_with_challenge" });
-      const api = createHttpApiClient({ baseUrl: "https://p.supabase.co/functions/v1", fetch: f.fetch, getAccessToken: () => Promise.reject(new Error("no")), now: () => T0, ...(attestor ? { attestor } : {}) });
-      await api.submitEvidence(held(), { userId: "user-a", accessToken: "tok" });
-      expect((f.seen[0]!.body as { hardwareSupportsAttestation: boolean }).hardwareSupportsAttestation).toBe(expected);
-    }
+  it("the evidence flow carries exactly that: with the default redeemer, redemption sends hardwareSupportsAttestation:false and NO attestation block", async () => {
+    const base = itemFor(wireOf("evidence_accepted_no_challenge"), 1);
+    const p = JSON.parse(JSON.stringify(base.payload)) as { challenges: Record<string, unknown> };
+    const k = Object.keys(p.challenges)[0]!;
+    p.challenges[k] = { state: "held", challengeId: "chal_9", nonce: "bm9uY2U", kind: "prefetched", expiresAt: T0 + 10 * 3600_000 };
+    const held: OutboxItem = { ...createItem({ id: "ev1", sourceRef: "r", ownerUserId: "user-a", courseId: base.courseId, catalogVersion: base.catalogVersion, payload: p as never }, T0), status: "sent" };
+    const f = scriptedFetch({ respond: "token_201_unattestable" }, { respond: "evidence_accepted_with_challenge" });
+    const api = createHttpApiClient({ baseUrl: "https://p.supabase.co/functions/v1", fetch: f.fetch, getAccessToken: () => Promise.reject(new Error("no")), now: () => T0 });
+    await api.submitEvidence(held, { userId: "user-a", accessToken: "tok" });
+    expect(f.seen[0]!.body).toEqual({ challengeId: "chal_9", nonce: "bm9uY2U", hardwareSupportsAttestation: false });
   });
 });

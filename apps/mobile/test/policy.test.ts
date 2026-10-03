@@ -15,9 +15,14 @@ import {
   findDeniedSdks,
   findDynamicConfigs,
   lockfilePackageNames,
+  ALLOWED_GRANTED_ANDROID_PERMISSIONS,
+  ALLOWED_IOS_ENTITLEMENTS,
+  grantedAndroidPermissions,
   normalizeAndroidPermission,
+  scanAndroidGrantedPermissions,
   scanAndroidManifest,
   scanAppConfig,
+  scanEntitlements,
   scanInfoPlist,
 } from "./support/policy-scan";
 
@@ -204,6 +209,52 @@ describe("AT 5 — generated manifest and Info.plist scanners", () => {
   };
   generated("the generated AndroidManifest.xml is clean (and has allowBackup=false)", here("../android/app/src/main/AndroidManifest.xml"), scanAndroidManifest);
   generated("the generated Info.plist is clean", here("../ios/GolfRaven/Info.plist"), scanInfoPlist);
+  generated("the generated AndroidManifest.xml grants only the allow-listed permissions (a native module adds none; P4.2b-2)", here("../android/app/src/main/AndroidManifest.xml"), scanAndroidGrantedPermissions);
+  generated("the generated entitlements are the allow-listed ones: Sign in with Apple and App Attest (development | production), nothing else (P4.2b-2)", here("../ios/GolfRaven/GolfRaven.entitlements"), scanEntitlements);
+});
+
+describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it must stay inside", () => {
+  const plist = (body: string): string => `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>${body}</dict></plist>`;
+  const SIWA = "<key>com.apple.developer.applesignin</key><array><string>Default</string></array>";
+  const ATTEST = (v: string): string => `<key>com.apple.developer.devicecheck.appattest-environment</key><string>${v}</string>`;
+
+  it("the entitlement scanner accepts exactly the two allow-listed entitlements, and the App Attest value only as development | production", () => {
+    expect(scanEntitlements(plist(SIWA + ATTEST("production")))).toEqual([]);
+    expect(scanEntitlements(plist(SIWA + ATTEST("development")))).toEqual([]);
+    expect(scanEntitlements(plist(ATTEST("staging"))).map((v) => v.rule)).toEqual(["ios-entitlement-value"]);
+    expect(scanEntitlements(plist(SIWA + "<key>aps-environment</key><string>production</string>")).map((v) => v.rule)).toEqual(["ios-entitlement"]);
+    expect(scanEntitlements(plist(SIWA + "<key>com.apple.developer.healthkit</key><true/>")).map((v) => v.rule)).toEqual(["ios-entitlement"]);
+    expect(scanEntitlements(plist(`<key>com.apple.developer.applesignin</key><array><string>Other</string></array>`)).map((v) => v.rule)).toEqual(["ios-entitlement-value"]);
+    expect(Object.keys(ALLOWED_IOS_ENTITLEMENTS).sort()).toEqual(["com.apple.developer.applesignin", "com.apple.developer.devicecheck.appattest-environment"]);
+  });
+
+  it("app.json sets no entitlement directly (the App Attest one comes from the audited plugin); one that is not allow-listed fails the config scan", () => {
+    expect(appJson.expo?.ios?.entitlements).toBeUndefined();
+    const e = structuredClone(appJson.expo!);
+    e.ios = { ...e.ios, entitlements: { "com.apple.developer.healthkit": true } };
+    expect(rules({ expo: e })).toContain("ios-entitlement");
+    e.ios = { ...e.ios, entitlements: { "com.apple.developer.devicecheck.appattest-environment": "production" } };
+    expect(rules({ expo: e })).not.toContain("ios-entitlement");
+  });
+
+  it("the local attestation plugin is the one allow-listed local plugin, and it is in the real app.json", () => {
+    const local = [...ALLOWED_PLUGINS].filter((p) => p.startsWith("."));
+    expect(local).toEqual(["./modules/golfraven-attest/app.plugin.js"]);
+    const used = (appJson.expo?.plugins ?? []).map((p) => (Array.isArray(p) ? p[0] : p));
+    expect(used).toContain("./modules/golfraven-attest/app.plugin.js");
+    expect(existsSync(here("../modules/golfraven-attest/app.plugin.js"))).toBe(true);
+  });
+
+  it("the Android granted-permission scan: the allow-listed three pass; removals do not count as granted; any new permission (a dangerous one included) fails", () => {
+    const m = (body: string): string => `<manifest xmlns:tools="x">${body}</manifest>`;
+    const grant = (n: string): string => `<uses-permission android:name="${n}"/>`;
+    expect(scanAndroidGrantedPermissions(m([...ALLOWED_GRANTED_ANDROID_PERMISSIONS].map(grant).join("")))).toEqual([]);
+    expect(scanAndroidGrantedPermissions(m('<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'))).toEqual([]);
+    for (const bad of ["android.permission.CAMERA", "android.permission.READ_PHONE_STATE", "android.permission.ACCESS_FINE_LOCATION", "com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE", "READ_CONTACTS"]) {
+      expect(scanAndroidGrantedPermissions(m(grant(bad))).map((v) => v.rule), bad).toEqual(["android-new-permission"]);
+    }
+    expect(grantedAndroidPermissions(m(grant("VIBRATE") + grant("android.permission.INTERNET")))).toEqual(["android.permission.INTERNET", "android.permission.VIBRATE"]);
+  });
 });
 
 describe("AT 7 — no ads or analytics SDK in the lockfile", () => {

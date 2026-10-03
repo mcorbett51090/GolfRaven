@@ -5,7 +5,7 @@
  * — never a secret: the catalog is public data, the keyset is public keys, and the Supabase key is the PUBLIC anon/publishable one.
  */
 import Constants from "expo-constants";
-import { SUPPORTED_CONTRACT_MAJOR, parseApiBaseUrl, parseCatalogBaseUrl, parseStoreUrl, parseSupabaseAnonKey, parseSupabaseUrl } from "./config-values";
+import { SUPPORTED_CONTRACT_MAJOR, parseApiBaseUrl, parseCatalogBaseUrl, parsePlayCloudProjectNumber, parseStoreUrl, parseSupabaseAnonKey, parseSupabaseUrl } from "./config-values";
 
 export { SUPPORTED_CONTRACT_MAJOR, parseApiBaseUrl, parseCatalogBaseUrl, parseSupabaseAnonKey, parseSupabaseUrl } from "./config-values";
 
@@ -26,6 +26,8 @@ export interface AppConfig {
   /** The Supabase project URL and PUBLIC key for Auth (`EXPO_PUBLIC_SUPABASE_URL` / `EXPO_PUBLIC_SUPABASE_ANON_KEY`). Both public by design. */
   supabaseUrl: string | null;
   supabaseAnonKey: string | null;
+  /** `EXPO_PUBLIC_PLAY_CLOUD_PROJECT_NUMBER`: the Cloud project number Play Integrity requests are made for (public). `null` = Android cannot attest. */
+  playCloudProjectNumber: string | null;
 }
 
 export function readAppConfig(): AppConfig {
@@ -37,5 +39,6 @@ export function readAppConfig(): AppConfig {
     apiBaseUrl: parseApiBaseUrl(process.env.EXPO_PUBLIC_API_BASE_URL, { allowLocalHttp: __DEV__ }),
     supabaseUrl: parseSupabaseUrl(process.env.EXPO_PUBLIC_SUPABASE_URL, { allowLocalHttp: __DEV__ }),
     supabaseAnonKey: parseSupabaseAnonKey(process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY),
+    playCloudProjectNumber: parsePlayCloudProjectNumber(process.env.EXPO_PUBLIC_PLAY_CLOUD_PROJECT_NUMBER),
   };
 }

@@ -45,7 +45,8 @@
             "minSdkVersion": 26
           }
         }
-      ]
+      ],
+      "./modules/golfraven-attest/app.plugin.js"
     ]
   }
 }

@@ -6,7 +6,6 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { deleteAccountAndWipeLocal } from "../src/account";
 import { createHttpApiClient, ApiError, type CheckinApi, type IssuedChallenge } from "../src/api";
-import { UnattestableAttestor } from "../src/attest";
 import {
   ChallengeManager,
   MAX_PREFETCHED,
@@ -174,7 +173,7 @@ function rig(makeStore: () => ChallengeStore = () => new MemoryChallengeStore())
       return who.user === u ? `token-${u}` : null;
     },
   };
-  const manager = new ChallengeManager({ store, api, session, deviceId: async () => DEV, attestor: new UnattestableAttestor(), now: () => clock.now });
+  const manager = new ChallengeManager({ store, api, session, deviceId: async () => DEV, now: () => clock.now });
   return { clock, who, tokens, store, api, session, manager };
 }
 
@@ -250,7 +249,7 @@ describe("ChallengeManager.prefetch", () => {
     const api = createHttpApiClient({ baseUrl: "https://p.supabase.co/functions/v1", fetch: f.fetch, getAccessToken: () => Promise.reject(new Error("no")), sleep: async () => undefined });
     const store = new MemoryChallengeStore();
     const now = Date.parse("2026-06-01T12:00:00.000Z");
-    const m = new ChallengeManager({ store, api, session: { currentUserId: () => A, accessTokenFor: async () => "tok" }, deviceId: async () => DEV, attestor: new UnattestableAttestor(), now: () => now });
+    const m = new ChallengeManager({ store, api, session: { currentUserId: () => A, accessTokenFor: async () => "tok" }, deviceId: async () => DEV, now: () => now });
     expect(await m.prefetch()).toEqual({ kind: "filled", added: 10, usable: 10 });
     const rows = await store.listByOwner(A);
     expect(new Set(rows.map((r) => r.expiresAt))).toEqual(new Set([Date.parse("2026-06-02T12:00:00.000Z")]));
@@ -267,7 +266,7 @@ describe("ChallengeManager.prefetch", () => {
     ] as [Step, string][]) {
       const f = scriptedFetch(step);
       const api = createHttpApiClient({ baseUrl: "https://p.supabase.co/functions/v1", fetch: f.fetch, getAccessToken: () => Promise.reject(new Error("no")), sleep: async () => undefined });
-      const m = new ChallengeManager({ store: new MemoryChallengeStore(), api, session: { currentUserId: () => A, accessTokenFor: async () => "tok" }, deviceId: async () => DEV, attestor: new UnattestableAttestor(), now: () => T });
+      const m = new ChallengeManager({ store: new MemoryChallengeStore(), api, session: { currentUserId: () => A, accessTokenFor: async () => "tok" }, deviceId: async () => DEV, now: () => T });
       expect(await m.prefetch(), reason).toEqual({ kind: "failed", reason });
       expect(f.seen, "a challenge request is not retried").toHaveLength(1);
     }
@@ -332,13 +331,13 @@ describe("ChallengeManager.acquireForFix", () => {
     expect(await r.store.countUsable(A, DEV, T)).toBe(10);
   });
 
-  it("online: a LIVE challenge is requested and redeemed on the spot (as the owner, attestor capability reported), the pool is untouched", async () => {
+  it("online: a LIVE challenge is requested and redeemed on the spot (as the owner, bound to the device it was issued to), the pool is untouched", async () => {
     const r = rig();
     await r.manager.prefetch();
     const c = await r.manager.acquireForFix(A, T, { live: true, facilityId: "fac_x" });
     expect(c).toMatchObject({ state: "redeemed", kind: "live", grade: "unattestable" });
     expect(r.api.requests[1]).toEqual({ req: { deviceId: DEV, facilityId: "fac_x" }, token: `token-${A}` });
-    expect(r.api.redemptions).toEqual([{ req: { challengeId: "s2-0", nonce: "bm9uY2U0", hardwareSupportsAttestation: false }, token: `token-${A}` }]);
+    expect(r.api.redemptions).toEqual([{ req: { challengeId: "s2-0", nonce: "bm9uY2U0", deviceId: DEV }, token: `token-${A}` }]);
     expect(await r.store.countUsable(A, DEV, T)).toBe(10);
   });
 
@@ -626,7 +625,7 @@ describe("wiring (source checks: composition code with no UI harness here)", () 
   it("the composition root builds ONE store pair over the same database and the prefetch runs after a sync, not before", () => {
     const services = read("../src/runtime/services.ts");
     expect(services).toMatch(/challengeStore = new SqliteChallengeStore\(db\)/);
-    expect(services).toMatch(/new ChallengeManager\(\{ store: challengeStore, api, session, deviceId, attestor,/);
+    expect(services).toMatch(/new ChallengeManager\(\{ store: challengeStore, api, session, deviceId,/);
     const provider = read("../src/runtime/AppProvider.tsx");
     expect(provider.indexOf("outboxRunner.run()")).toBeLessThan(provider.indexOf("prefetchChallenges(services.challenges)"));
   });

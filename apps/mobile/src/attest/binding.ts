@@ -11,9 +11,13 @@
  * `canonical JSON` = keys sorted recursively, no whitespace, `JSON.stringify` escaping; an `undefined` / non-finite value is an error, an absent
  * optional field is ABSENT (never null). UUIDs are lowercase (Swift's `UUID.uuidString` is uppercase: lowercase it first, done here).
  *
- * What there is NOT: a binding for the evidence / `checkin-token` request. The server's `checkin-token` handler does not read any attestation
- * material today (it grades every call "no token", `token-handler.ts`), so there is nothing to bind to; P4.2b-2 needs the server to define it
- * (`README.md`, "What P4.2b-2 must plug in").
+ * The CHECK-IN binding (P4.2b-2; the server's `checkin-token` verifies an attestation since PR #40: `rewards/binding.ts` `CHECKIN_TOKEN_PURPOSE`,
+ * `computeCheckinAndroidBinding`, `rewards/string-binding.ts` `computeIosCheckinBinding`): purpose `golfraven/checkin-token/v1`, the challenge id, the device
+ * the CHALLENGE was issued to, the account (the JWT `sub`, bound as written: the server does not case-fold it) and the raw nonce. An activation or key
+ * registration attestation cannot verify as a check-in, nor the reverse, because the purpose differs.
+ *   - iOS     `S` = {"challengeId","deviceId","nonce","platform":"ios","purpose","userId"} (canonical JSON), `clientDataHash` = SHA-256(UTF-8(S))
+ *   - Android `requestHash` = base64url_nopad( SHA-256( canonical_body || raw nonce bytes ) ), canonical_body = {"challengeId","deviceId","platform":"android","purpose","userId"}
+ * Recorded vectors (the values the task for P4.2b-2 and `docs/security/p3-money-path-requirements.md` give): `test/attest-checkin.test.ts`.
  */
 import { sha256 } from "@noble/hashes/sha2.js";
 import { base64UrlToBytes, bytesToHex, utf8Encode } from "../catalog/bytes";
@@ -153,3 +157,65 @@ export function attestKeyBinding(b: AttestKeyBoundBody): Uint8Array {
 }
 
 export { bytesToHex };
+
+// ---- check-in token (P4.2b-2) --------------------------------------------------------------------------------------------------------------------
+
+/** Domain separator of a check-in attestation, both platforms (`rewards/binding.ts` `CHECKIN_TOKEN_PURPOSE`). */
+export const CHECKIN_TOKEN_PURPOSE = "golfraven/checkin-token/v1";
+
+export interface CheckinBoundBody {
+  challengeId: string;
+  /** The device the CHALLENGE was issued to (the server reads it from the challenge row, not from the request). */
+  deviceId: string;
+  /** The authenticated account: the access token's `sub`, exactly as written. */
+  userId: string;
+}
+
+/** The Android canonical body bytes of a check-in (UTF-8 of the canonical JSON); the raw nonce bytes follow it in the hash input. */
+export function androidCheckinBoundBodyBytes(b: CheckinBoundBody): Uint8Array {
+  return utf8Encode(
+    canonicalJson({
+      challengeId: lower(b.challengeId),
+      deviceId: lower(b.deviceId),
+      platform: "android",
+      purpose: CHECKIN_TOKEN_PURPOSE,
+      userId: b.userId,
+    }),
+  );
+}
+
+/** Play Integrity `requestHash` of a check-in, BEFORE base64url: SHA-256(canonical_body || RAW nonce bytes). The nonce is decoded strictly (the
+ * server requires the one canonical spelling whenever an attestation is presented); a non-canonical nonce throws. */
+export function androidCheckinRequestBinding(b: CheckinBoundBody, nonce: string): Uint8Array {
+  const raw = nonceBytesStrict(nonce);
+  if (raw === null) throw new Error("androidCheckinRequestBinding: the nonce is not canonical unpadded base64url");
+  return sha256(concatBytes(androidCheckinBoundBodyBytes(b), raw));
+}
+
+/** The `requestHash` string Play Integrity is given: base64url, no padding, of the 32 bytes above (what the server compares with the verdict's `requestHash`). */
+export function androidCheckinRequestHash(b: CheckinBoundBody, nonce: string): string {
+  return bytesToBase64Url(androidCheckinRequestBinding(b, nonce));
+}
+
+export interface IosCheckinBoundBody extends CheckinBoundBody {
+  /** The nonce STRING exactly as the challenge endpoint returned it (unpadded, canonical base64url): bound as text. */
+  nonce: string;
+}
+
+/** `S` for `generateAssertion` of a check-in token. */
+export function iosCheckinChallengeString(b: IosCheckinBoundBody): string {
+  if (nonceBytesStrict(b.nonce) === null) throw new Error("iosCheckinChallengeString: the nonce is not canonical unpadded base64url");
+  return canonicalJson({
+    challengeId: lower(b.challengeId),
+    deviceId: lower(b.deviceId),
+    nonce: b.nonce,
+    platform: "ios",
+    purpose: CHECKIN_TOKEN_PURPOSE,
+    userId: b.userId,
+  });
+}
+
+/** `clientDataHash` of a check-in assertion = SHA-256(UTF-8(S)). */
+export function iosCheckinBinding(b: IosCheckinBoundBody): Uint8Array {
+  return sha256(utf8Encode(iosCheckinChallengeString(b)));
+}

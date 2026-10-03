@@ -15,7 +15,8 @@ import {
   type DeviceFlagStore,
 } from "../age";
 import type { ApiClient } from "../api";
-import { UnattestableAttestor, type Attestor } from "../attest";
+import { createAttestation, type AttestStateStore, type Attestor } from "../attest";
+import { loadNativeAttestModule } from "../attest/native-module-loader";
 import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type ChallengeStore } from "../challenges";
 import { enqueueEvidence, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
 import type { AuthService } from "../auth";
@@ -62,8 +63,11 @@ export interface AppServices {
   challengeStore: ChallengeStore;
   /** Prefetch and consume check-in challenges (`challenges/manager.ts`). */
   challenges: ChallengeManager;
-  /** The device-attestation seam; this build ships `UnattestableAttestor` only (native modules are P4.2b-2). */
+  /** The device-attestation seam (P4.2b-2): `NativeAttestor` where the local module is linked and the device supports it, `UnattestableAttestor` otherwise
+   * (Expo Go, web, an iOS simulator, an Android build with no Play Cloud project number). */
   attestor: Attestor;
+  /** What this install remembers about its attestation, per user and device (`attest/state-store.ts`); account deletion wipes the deleted user's. */
+  attestState: AttestStateStore;
   /** The only way a play enters the outbox: builds the payload, consumes one challenge per fix, enqueues for the signed-in user. */
   enqueueEvidence: (input: EvidenceInput) => Promise<EvidenceEnqueued>;
   /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
@@ -151,10 +155,16 @@ export async function createServices(): Promise<AppServices> {
     ageStoreProblem = true;
   }
 
-  const attestor = new UnattestableAttestor();
+  const attestation = await createAttestation({
+    module: loadNativeAttestModule(),
+    platform: Platform.OS,
+    playCloudProjectNumber: config.playCloudProjectNumber,
+    secure,
+  });
+  const attestor = attestation.attestor;
   const backend = createBackend({
     evidence: {
-      attestor,
+      redeemer: attestation.redeemer,
       // The check-in token a send redeems is written into the item's row before the evidence request (crash safety, `evidence/send.ts`).
       persistEvidencePayload: async (item, payload) => {
         const stored = await outboxStore.get(item.id);
@@ -179,7 +189,7 @@ export async function createServices(): Promise<AppServices> {
     accessTokenFor: (userId: string, o?: { forceRefresh?: boolean }) => auth.getAccessToken({ forUserId: userId, ...(o?.forceRefresh ? { forceRefresh: true } : {}) }),
   };
   const deviceId = createDeviceIdProvider(secure, expoRandomBytes);
-  const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, attestor, now: () => Date.now() });
+  const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, now: () => Date.now() });
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
     api,
@@ -225,6 +235,7 @@ export async function createServices(): Promise<AppServices> {
     challengeStore,
     challenges,
     attestor,
+    attestState: attestation.state,
     enqueueEvidence: (input) =>
       enqueueEvidence(
         {

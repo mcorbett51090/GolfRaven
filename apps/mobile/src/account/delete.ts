@@ -37,6 +37,9 @@ export interface DeleteDeps {
   outbox: Pick<OutboxStore, "deleteByOwners">;
   /** The prefetched check-in challenges (`challenges/store.ts`): the deleted user's are removed. */
   challenges: Pick<ChallengeStore, "deleteOwner">;
+  /** The attestation records this install keeps per user (`attest/state-store.ts`: the App Attest key id, the Android "has attested" mark): the deleted user's are removed.
+   * Optional: absent in tests that do not exercise it. The device id and every other user's records stay. */
+  attestState?: { wipeUser(userId: string): Promise<void> };
   /** A data export left in the cache for a receiving app is deleted too (`FileSharer.purgeStale`, best effort, never throws). */
   sharer: Pick<FileSharer, "purgeStale">;
   /** The signed-in user's id, read BEFORE the server call (the fallback when the server's answer never arrived). */
@@ -88,6 +91,9 @@ export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<Delet
   await attempt("outbox", () => deps.outbox.deleteByOwners(owners));
   await attempt("challenges", async () => {
     if (deletedUser !== null && deletedUser !== UNOWNED) await deps.challenges.deleteOwner(deletedUser);
+  });
+  await attempt("attest-state", async () => {
+    if (deletedUser !== null && deletedUser !== UNOWNED && deps.attestState) await deps.attestState.wipeUser(deletedUser);
   });
   await attempt("export-cache", () => deps.sharer.purgeStale());
   await attempt("caches", () => deps.clearUserCaches());

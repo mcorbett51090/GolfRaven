@@ -23,6 +23,13 @@ export interface Vectors {
     androidRequestBindingNoInstallLink: { challengeBase64Url: string; hashHex: string };
     iosActivation: { body: { rewardId: string; deviceId: string; challengeId: string; deviceCheckTokenSha256: string; nonce: string }; challengeString: string; hashHex: string };
     iosAttestKey: { body: { challengeId: string; deviceId: string; keyId: string; nonce: string }; challengeString: string; hashHex: string };
+    /** The check-in binding for the fixed inputs of the security doc, as the server's own functions produced it (P4.2b-2). */
+    checkin: {
+      body: { challengeId: string; deviceId: string; userId: string };
+      nonce: string;
+      ios: { challengeString: string; clientDataHashHex: string };
+      android: { canonicalBodyUtf8: string; requestHash: string };
+    };
     canonicalJsonSample: { input: unknown; output: string };
   };
 }

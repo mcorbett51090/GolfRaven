@@ -1,7 +1,8 @@
 /**
- * The device-attestation SEAM (build plan §7.5, ruling C5). The app depends on this interface only; the native implementations (iOS App Attest via
- * DeviceCheck, Android Play Integrity) are P4.2b-2 and are NOT in this build: the only implementation shipped is `UnattestableAttestor`
- * (`unattestable.ts`), which says, truthfully, "this build cannot attest".
+ * The device-attestation SEAM (build plan §7.5, ruling C5). The app depends on this interface only. Two implementations: `NativeAttestor`
+ * (`native.ts`, P4.2b-2: the local Expo module over iOS App Attest + DeviceCheck and Android Play Integrity), used only where the module is present
+ * and reports support, and `UnattestableAttestor` (`unattestable.ts`) everywhere else (Expo Go, web, tests, an iOS simulator, an Android build with
+ * no Cloud project number), which says, truthfully, "this build cannot attest".
  *
  * Roles and byte layouts (all of them are what the SERVER verifies today, `supabase/functions/_shared/rewards/`; see `binding.ts`):
  *  - iOS `attestKey` (once per install, `POST devices-attest-key`): `clientDataHash` = SHA-256(UTF-8(S)), S the canonical string of
@@ -18,16 +19,20 @@
 export type AttestPlatform = "ios" | "android" | "none";
 
 export type UnattestableReason =
-  | "not_implemented" // this build has no native attestation module (P4.2b-1): the only reason `UnattestableAttestor` gives
+  | "not_implemented" // this build has no native attestation module (Expo Go, web, tests): the default reason of `UnattestableAttestor`
   | "platform_unsupported" // the platform / hardware reports it cannot attest (App Attest unsupported, no Play services)
   | "not_configured"; // attestation is supported but not set up (no Cloud project number, no App Attest entitlement)
 
-export type AttestResult<T> = { kind: "ok"; value: T } | { kind: "unattestable"; reason: UnattestableReason } | { kind: "failed"; message: string };
+/** Why a platform call failed, when the caller must react differently. `invalid_key`: App Attest says the key is no longer usable (`DCError.invalidKey`:
+ * the app was reinstalled or the key was lost), so the caller drops it and registers a fresh one; everything else is `other`. */
+export type AttestFailureCode = "invalid_key" | "other";
+
+export type AttestResult<T> = { kind: "ok"; value: T } | { kind: "unattestable"; reason: UnattestableReason } | { kind: "failed"; message: string; code?: AttestFailureCode };
 
 export interface Attestor {
-  /** What this device can do, read before any request. `hardwareSupportsAttestation` is the SELF-REPORT the server's G3-08 "no token" rule takes
-   * (`checkin-token` / `rewards-activate` `kind: "none"`): `false` => the server grades the request `unattestable`; `true` with no verified token
-   * => `failed`. An implementation that returns `true` MUST then attest every request. */
+  /** What this device can do, read before any request. This is CAPABILITY, not the wire claim: the `hardwareSupportsAttestation` field a request carries
+   * is the SELF-REPORT the server's G3-08 "no token" rule takes (`false` => a token-less request is graded `unattestable`; `true` with no verified token
+   * => `failed` plus a fraud signal), and it is derived PER REQUEST by `redeemer.ts` as "this request carries an attestation": never true without one. */
   readonly capability: { platform: AttestPlatform; hardwareSupportsAttestation: boolean };
 
   /** iOS: `DCAppAttestService.generateKey()`. The key id is part of the registration hash, so it is generated first. */

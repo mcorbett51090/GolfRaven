@@ -9,9 +9,9 @@
  * It walks every file under the directory (JS bundles, Hermes bytecode, assets: read as bytes, so a string table is searched too) and reports:
  *   - `jwt_non_anon_role`: three base64url segments whose decoded payload is a JSON object with a `role` other than `anon` (a `service_role`
  *     or `authenticated` token);
- *   - `sb_secret_key`: a Supabase secret API key, `sb_secret_` followed by at least 16 key characters (`[A-Za-z0-9_-]`; a real key's body is ~30).
- *     The bare prefix is NOT a finding: the app's own parser contains the literal (`startsWith("sb_secret_")`, `src/config-values.ts`), so every
- *     export has it, and Hermes bytecode packs strings together, so the literal sits next to its neighbour (`sb_secret_shaped…`).
+ *   - `sb_secret_key`: ANY occurrence of `sb_secret_` (a Supabase secret API key prefix). There is no length threshold: the app's own parser used to contain the
+ *     literal, which forced one (Hermes packs strings together, so the bare prefix sat next to its neighbour), but it now builds it from parts
+ *     (`SB_SECRET_PREFIX` in `src/config-values.ts`), so a clean export contains no occurrence at all.
  * It prints the file (relative to the scanned directory) and the finding KIND, never the value.
  *
  * Usage: `node scripts/scan-bundle.mjs [dir]` (default `dist`). Exit codes: 0 clean, 1 a finding, 2 the scan could not run (missing or empty
@@ -21,7 +21,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SB_SECRET = /sb_secret_[A-Za-z0-9_-]{16,}/;
+// ANY occurrence of the prefix is a finding (no length threshold): the app's own parser builds the literal from parts (`SB_SECRET_PREFIX`, `src/config-values.ts`), so a
+// clean export contains none, and a secret key in a bundle is caught whatever follows the prefix.
+const SB_SECRET = /sb_secret_/;
 const JWT = /eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+/g;
 
 /** The finding kinds in one file's bytes (a Set: one line per file and kind, however many times it occurs). */

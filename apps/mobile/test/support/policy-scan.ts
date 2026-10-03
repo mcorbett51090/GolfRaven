@@ -40,7 +40,28 @@ const FORBIDDEN_NORMALIZED = new Set(FORBIDDEN_ANDROID_PERMISSIONS.map(normalize
  * `expo-secure-store` is deliberately NOT here: it works without its plugin, and the plugin would add an unused Face ID usage string and
  * Android backup-rule attributes (backup is already off). `expo-sharing`, `expo-file-system`, `expo-crypto` and `@supabase/supabase-js`
  * have no config plugin in use. */
-export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set(["expo-router", "expo-localization", "react-native-health-connect", "expo-apple-authentication", "expo-build-properties"]);
+export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set([
+  "expo-router",
+  "expo-localization",
+  "react-native-health-connect",
+  "expo-apple-authentication",
+  "expo-build-properties",
+  // P4.2b-2: the local attestation module's config plugin. It sets the App Attest entitlement (development | production, from the build-time GOLFRAVEN_APP_ATTEST_ENV) and
+  // nothing else: no Android permission, no Info.plist key. Its source is `modules/golfraven-attest/app.plugin.js`; what it writes is checked in the generated
+  // entitlements file (`scanEntitlements`) and the generated manifest (`scanAndroidGrantedPermissions`), not taken on trust.
+  "./modules/golfraven-attest/app.plugin.js",
+]);
+
+/** The iOS entitlements this app may have, with the values each may take. An allow-list, like the plugins: a new entitlement (push, associated domains, HealthKit, ...) is added here
+ * on purpose, in review, with its reason. */
+export const ALLOWED_IOS_ENTITLEMENTS: Readonly<Record<string, { values: readonly string[]; why: string }>> = {
+  "com.apple.developer.applesignin": { values: ["Default"], why: "Sign in with Apple (P4.2a, `expo-apple-authentication`'s plugin)" },
+  "com.apple.developer.devicecheck.appattest-environment": { values: ["development", "production"], why: "App Attest (P4.2b-2, `modules/golfraven-attest/app.plugin.js`)" },
+};
+
+/** The Android permissions the GENERATED manifest may GRANT (a `tools:node="remove"` entry grants nothing). Today: network, the vibrate of Expo's template, and the one Health
+ * Connect read the X1 reader needs. P4.2b-2 added none (the Play Integrity library asks for no permission `[unverified: its merged manifest was not built here]`). */
+export const ALLOWED_GRANTED_ANDROID_PERMISSIONS: ReadonlySet<string> = new Set(["android.permission.INTERNET", "android.permission.VIBRATE", "android.permission.health.READ_EXERCISE"]);
 
 /** Config-plugin props that turn background location on. */
 const BACKGROUND_PLUGIN_PROPS = new Set([
@@ -92,6 +113,9 @@ export function scanAppConfig(config: ExpoConfig): Violation[] {
   }
   const modes = infoPlist["UIBackgroundModes"];
   if (Array.isArray(modes) && modes.includes("location")) out.push({ rule: "ios-background-modes", detail: "app config sets UIBackgroundModes: location" });
+  for (const k of Object.keys(expo.ios?.entitlements ?? {})) {
+    if (!(k in ALLOWED_IOS_ENTITLEMENTS)) out.push({ rule: "ios-entitlement", detail: `app config sets entitlement ${k}, which is not on the allow-list (test/support/policy-scan.ts ALLOWED_IOS_ENTITLEMENTS)` });
+  }
   for (const entry of expo.plugins ?? []) {
     const [name, props] = Array.isArray(entry) ? (entry as [unknown, unknown]) : [entry, undefined];
     if (typeof name !== "string") {
@@ -130,6 +154,44 @@ export function scanAndroidManifest(xml: string): Violation[] {
   const app = new RegExp(`<application\\b${TAG_ATTRS}>`).exec(xml);
   if (app && attr(app[1] ?? "", "android:allowBackup")?.trim() !== "false") {
     out.push({ rule: "android-allow-backup", detail: "manifest <application> must set android:allowBackup=\"false\"" });
+  }
+  return out;
+}
+
+/** Every permission a generated `AndroidManifest.xml` GRANTS (a `tools:node="remove"` entry grants nothing), qualified. */
+export function grantedAndroidPermissions(xml: string): string[] {
+  const out = new Set<string>();
+  for (const m of xml.matchAll(new RegExp(`<uses-permission(?:-sdk-23)?\\b${TAG_ATTRS}>`, "g"))) {
+    const attrs = m[1] ?? "";
+    const name = attr(attrs, "android:name");
+    if (!name || attr(attrs, "tools:node")?.trim() === "remove") continue;
+    out.add(name.includes(".") ? name : `android.permission.${name}`);
+  }
+  return [...out].sort();
+}
+
+/** The generated manifest grants nothing outside `ALLOWED_GRANTED_ANDROID_PERMISSIONS`: a new native module cannot quietly add a permission (a dangerous one least of all). */
+export function scanAndroidGrantedPermissions(xml: string): Violation[] {
+  return grantedAndroidPermissions(xml)
+    .filter((p) => !ALLOWED_GRANTED_ANDROID_PERMISSIONS.has(p))
+    .map((p) => ({ rule: "android-new-permission", detail: `manifest grants ${p}, which is not on the allow-list (test/support/policy-scan.ts ALLOWED_GRANTED_ANDROID_PERMISSIONS)` }));
+}
+
+/** Scan of a generated entitlements plist (`ios/<App>/<App>.entitlements`, after `expo prebuild`): only the allow-listed entitlements, each with an allowed value. */
+export function scanEntitlements(plist: string): Violation[] {
+  const out: Violation[] = [];
+  const dict = /<dict>([\s\S]*)<\/dict>/.exec(plist)?.[1] ?? "";
+  // top-level `<key>K</key>` followed by its value element (a string, or an array of strings)
+  for (const m of dict.matchAll(/<key>([^<]+)<\/key>\s*(<string>([^<]*)<\/string>|<array>([\s\S]*?)<\/array>|<true\/>|<false\/>)/g)) {
+    const key = m[1]!;
+    const rule = ALLOWED_IOS_ENTITLEMENTS[key];
+    if (!rule) {
+      out.push({ rule: "ios-entitlement", detail: `entitlements file has ${key}, which is not on the allow-list (test/support/policy-scan.ts ALLOWED_IOS_ENTITLEMENTS)` });
+      continue;
+    }
+    const values = m[3] !== undefined ? [m[3]] : [...(m[4] ?? "").matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1]!);
+    for (const v of values) if (!rule.values.includes(v)) out.push({ rule: "ios-entitlement-value", detail: `${key} is ${JSON.stringify(v)}; allowed: ${rule.values.join(", ")}` });
+    if (values.length === 0) out.push({ rule: "ios-entitlement-value", detail: `${key} has no allowed value` });
   }
   return out;
 }

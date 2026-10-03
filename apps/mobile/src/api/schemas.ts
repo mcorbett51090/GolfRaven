@@ -97,3 +97,6 @@ export const checkinTokenResultSchema = z.object({
   expiresAt: z.string().min(1),
   attestationGrade: z.enum(["attested", "unattestable", "failed"]),
 });
+
+/** `POST devices-attest-key` answer (`attest-key-handler.ts`): 201 `registered`, 200 when it replaced an earlier key. */
+export const attestKeyResultSchema = z.object({ deviceId: z.string().min(1), keyId: z.string().min(1), replaced: z.boolean() });
