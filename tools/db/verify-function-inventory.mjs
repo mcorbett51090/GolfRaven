@@ -85,30 +85,33 @@ for (const [fn] of uninventoried) {
 }
 
 // 2. Every inventory row's EXECUTE grants match, for each role (anon, authenticated, service_role and, since
-// 0030, the two edge roles: private.function_inventory.expected_edge_actor / expected_edge_system).
+// 0030, the two edge roles: private.function_inventory.expected_edge_actor / expected_edge_system; and, since 0041, the proof minter
+// edge_signin_minter: expected_edge_signin_minter, true for exactly one function).
 const grantRows = psql(`
   SELECT
     fi.schema_name, fi.function_name, fi.identity_args,
     fi.expected_anon, fi.expected_authenticated, fi.expected_service_role,
-    fi.expected_edge_actor, fi.expected_edge_system,
+    fi.expected_edge_actor, fi.expected_edge_system, fi.expected_edge_signin_minter,
     has_function_privilege('anon', p.oid, 'EXECUTE'),
     has_function_privilege('authenticated', p.oid, 'EXECUTE'),
     has_function_privilege('service_role', p.oid, 'EXECUTE'),
     has_function_privilege('edge_actor', p.oid, 'EXECUTE'),
-    has_function_privilege('edge_system', p.oid, 'EXECUTE')
+    has_function_privilege('edge_system', p.oid, 'EXECUTE'),
+    has_function_privilege('edge_signin_minter', p.oid, 'EXECUTE')
   FROM private.function_inventory fi
   JOIN pg_proc p ON p.proname = fi.function_name
   JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = fi.schema_name
   WHERE pg_get_function_identity_arguments(p.oid) = fi.identity_args
 `);
 for (const row of grantRows) {
-  const [schema, name, args, expAnon, expAuth, expSvc, expEdgeActor, expEdgeSystem, actAnon, actAuth, actSvc, actEdgeActor, actEdgeSystem] = row;
+  const [schema, name, args, expAnon, expAuth, expSvc, expEdgeActor, expEdgeSystem, expEdgeMinter, actAnon, actAuth, actSvc, actEdgeActor, actEdgeSystem, actEdgeMinter] = row;
   const label = `${schema}.${name}(${args})`;
   if (expAnon !== actAnon) failures.push(`${label}: anon EXECUTE expected=${expAnon} actual=${actAnon}`);
   if (expAuth !== actAuth) failures.push(`${label}: authenticated EXECUTE expected=${expAuth} actual=${actAuth}`);
   if (expSvc !== actSvc) failures.push(`${label}: service_role EXECUTE expected=${expSvc} actual=${actSvc}`);
   if (expEdgeActor !== actEdgeActor) failures.push(`${label}: edge_actor EXECUTE expected=${expEdgeActor} actual=${actEdgeActor}`);
   if (expEdgeSystem !== actEdgeSystem) failures.push(`${label}: edge_system EXECUTE expected=${expEdgeSystem} actual=${actEdgeSystem}`);
+  if (expEdgeMinter !== actEdgeMinter) failures.push(`${label}: edge_signin_minter EXECUTE expected=${expEdgeMinter} actual=${actEdgeMinter}`);
 }
 
 // 3. Every SECURITY DEFINER function/procedure ANYWHERE (not just
@@ -524,7 +527,7 @@ for (const [schema, table, column] of missingRCompanion) {
 //     pg_constraint would shadow the catalog under the definer. (All definers, a superset of "reachable from edge_*".)
 const edgeChecks = [
   [9, "membership closure / attributes", `WITH RECURSIVE edge AS (
-  SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')
+  SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter')
 ), closure(roleid, path) AS (
   SELECT e.oid, ARRAY[e.oid] FROM edge e
   UNION
@@ -536,22 +539,36 @@ UNION ALL
 SELECT 'edge role attribute: ' || r.rolname || ' has ' || a.attr
 FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('CREATEROLE', r.rolcreaterole),
   ('CREATEDB', r.rolcreatedb), ('REPLICATION', r.rolreplication), ('INHERIT', r.rolinherit)) AS a(attr, is_on)
-WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND a.is_on
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND a.is_on
 UNION ALL
-SELECT 'edge role can log in but must not: ' || rolname FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system') AND rolcanlogin
+SELECT 'edge role can log in but must not: ' || rolname FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter') AND rolcanlogin
 UNION ALL
 SELECT 'role ' || m.rolname || ' can SET ROLE to / inherit from edge role ' || r.rolname
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system') AND (am.set_option OR am.inherit_option)
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND (am.set_option OR am.inherit_option)
 UNION ALL
 SELECT 'edge role membership holds ADMIN OPTION for a role that is neither a superuser nor a CREATEROLE role (only the migrating role may): ' || m.rolname || ' -> ' || r.rolname
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND am.admin_option AND NOT (m.rolsuper OR m.rolcreaterole)
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND am.admin_option AND NOT (m.rolsuper OR m.rolcreaterole)
 UNION ALL
 SELECT 'edge_gateway is not a SET TRUE, INHERIT FALSE member of ' || t.rolname
-FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system')
+FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter')
   AND NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.member
-                  WHERE am.roleid = t.oid AND g.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option)`],
+                  WHERE am.roleid = t.oid AND g.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option)
+UNION ALL
+SELECT 'edge_gateway membership of ' || r.rolname || ' has INHERIT or lacks SET (every grant row must be SET TRUE, INHERIT FALSE)'
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE m.rolname = 'edge_gateway' AND r.rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter') AND (am.inherit_option OR NOT am.set_option)
+UNION ALL
+SELECT 'edge role is missing (migration 0041 creates edge_signin_minter): ' || n.rolname
+FROM (VALUES ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter')) n(rolname) WHERE NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = n.rolname)
+UNION ALL
+SELECT 'edge_signin_minter is a member of ' || r.rolname || ' (the minter must be a member of nothing)'
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member WHERE m.rolname = 'edge_signin_minter'
+UNION ALL
+SELECT 'edge role ' || m.rolname || ' is a member of edge_signin_minter (only edge_gateway may be)'
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname = 'edge_signin_minter' AND m.rolname IN ('edge_actor', 'edge_system')`],
   [10, "policy allowlist, both directions", `WITH live AS (
   SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
          CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' END AS command,
@@ -579,7 +596,11 @@ WHERE NOT EXISTS (
   SELECT 1 FROM live l
   WHERE al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
     AND al.command = l.command AND al.role_name = l.role_name
-    AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)`],
+    AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)
+UNION ALL
+SELECT 'a policy applies to edge_signin_minter (it may have none): ' || n.nspname || '.' || cl.relname || '.' || pol.polname
+FROM pg_policy pol JOIN pg_class cl ON cl.oid = pol.polrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE (SELECT oid FROM pg_roles WHERE rolname = 'edge_signin_minter') = ANY (pol.polroles)`],
   [11, "identity source", `WITH live AS (
   SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
          CASE pol.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' WHEN '*' THEN 'ALL' END AS command,
@@ -631,7 +652,7 @@ WHERE has_any_column_privilege('edge_system', cl.oid, 'SELECT,INSERT,UPDATE,REFE
 UNION ALL
 SELECT 'an edge role holds a privilege on a table outside app, or on an app table without FORCE ROW LEVEL SECURITY: ' || n.nspname || '.' || cl.relname || ' (' || r.rolname || ')'
 FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
-CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter')) r
 WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.deptype = 'e')
   AND (has_any_column_privilege(r.rolname, cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, cl.oid, 'DELETE,TRUNCATE,TRIGGER'))
@@ -639,9 +660,16 @@ WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog'
 UNION ALL
 SELECT 'an edge role can CREATE in schema ' || n.nspname || ' (' || r.rolname || ')'
 FROM pg_namespace n
-CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter')) r
 WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'
-  AND has_schema_privilege(r.rolname, n.oid, 'CREATE')`],
+  AND has_schema_privilege(r.rolname, n.oid, 'CREATE')
+UNION ALL
+SELECT 'edge_signin_minter holds a privilege on a relation (it may hold none, in any schema): ' || n.nspname || '.' || cl.relname
+FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.deptype = 'e')
+  AND CASE WHEN cl.relkind = 'S' THEN has_sequence_privilege('edge_signin_minter', cl.oid, 'USAGE,SELECT,UPDATE')
+           ELSE has_any_column_privilege('edge_signin_minter', cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege('edge_signin_minter', cl.oid, 'DELETE,TRUNCATE,TRIGGER') END`],
   [13, "definer bodies: unqualified catalog relations", `SELECT 'SECURITY DEFINER function reads an unqualified pg_ relation (a temp relation of that name would shadow the catalog): ' || n.nspname || '.' || p.proname || ' -> ' || m[1]
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\\n]*', '', 'g'), '(?:\\m(?:from|join|update|into|table|using)\\s+|,\\s*)(pg_[a-z_]+)\\M(?!\\.|\\s*\\()', 'gi') AS m

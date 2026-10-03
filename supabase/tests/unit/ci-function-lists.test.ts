@@ -24,6 +24,14 @@ function functionEntrypoints(): string[] {
     .sort();
 }
 
+/** The full text of the step whose name starts with `stepNamePrefix` (its `- name:` line up to the next step). */
+function stepBlock(stepNamePrefix: string): string {
+  const start = CI.indexOf(`- name: ${stepNamePrefix}`);
+  if (start < 0) throw new Error(`ci.yml has no step named "${stepNamePrefix}..."`);
+  const next = CI.indexOf("\n      - name:", start + 1);
+  return CI.slice(start, next < 0 ? undefined : next);
+}
+
 /** The `supabase/functions/**` paths named in the `run:` block of the step whose name starts with `stepNamePrefix`. */
 function listedPaths(stepNamePrefix: string): string[] {
   const start = CI.indexOf(`- name: ${stepNamePrefix}`);
@@ -58,6 +66,22 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
       expect(stale, `listed in "${step}" but no such function`).toEqual([]);
       // the shared module the functions all import is checked too
       expect(listed).toContain("supabase/functions/_shared/privileged.ts");
+    });
+  }
+
+  // PR #34 gate NIT: a list that is complete is still no proof if the step can be skipped or made non-fatal. None of the three may carry a step-level
+  // `if:` (a skipped step reports success) or `continue-on-error:` (a failing step reports success). Comment lines are not YAML keys and are ignored.
+  for (const step of STEPS) {
+    it(`"${step}" has no step-level if: and no continue-on-error: (it always runs, and its failure fails the job)`, () => {
+      const keys = stepBlock(step)
+        .split("\n")
+        .filter((l) => !/^\s*#/.test(l))
+        // a step-level key sits at the step's own indent (8 spaces: `      - name:` is the dash at 6, its keys at 8); deeper lines are inside run: / env: / with:
+        .filter((l) => /^ {8}[A-Za-z_-]+:/.test(l) || /^ {6}- [A-Za-z_-]+:/.test(l))
+        .map((l) => l.trim().replace(/^- /, "").split(":")[0]!);
+      expect(keys, "the step's keys were parsed").toContain("run");
+      expect(keys).not.toContain("if");
+      expect(keys).not.toContain("continue-on-error");
     });
   }
 

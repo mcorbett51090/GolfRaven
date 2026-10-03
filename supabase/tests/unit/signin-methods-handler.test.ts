@@ -2,7 +2,7 @@
 // which mirrors the 0035 definers; the same scenarios run against the real SQL in the Deno integration suite).
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { HttpError } from "../../functions/_shared/http.ts";
+import { Errors, HttpError } from "../../functions/_shared/http.ts";
 import { handleLinkProvider, handleListMethods, handleUnlinkProvider, type SigninDeps } from "../../functions/_shared/signin/methods-handler.ts";
 import { AppleGrantError, AppleTokenError, NotConfiguredError, VendorUnavailableError } from "../../functions/_shared/signin/errors.ts";
 import { decryptToken } from "../../functions/_shared/signin/envelope.ts";
@@ -11,7 +11,7 @@ import type { LinkRequest } from "../../functions/_shared/signin/request-shape.t
 import type { AppleSigninPort, EmailOtpResult, EmailOtpVerifier, OtpFailureCounter } from "../../functions/_shared/signin/types.ts";
 import type { VerifiedAppleIdentity } from "../../functions/_shared/signin/apple-id-token.ts";
 import { makeFakeState, type FakeState } from "./fake-repo.ts";
-import { addAccount, addKek, makeFakeEmailProofs, makeFakeRevocationDb, makeFakeSigninRepo, signinFake, stampSignIn } from "./fake-signin-repo.ts";
+import { addAccount, addKek, addSession, makeFakeEmailProofs, makeFakeRevocationDb, makeFakeSigninRepo, signinFake, stampSignIn } from "./fake-signin-repo.ts";
 
 const ALICE = "aaaaaaaa-0000-4000-8000-000000000001";
 const BOB = "bbbbbbbb-0000-4000-8000-000000000002";
@@ -42,6 +42,11 @@ interface Harness {
     releases: Array<{ hash: string; windowStart: string }>;
     /** Runs inside the verifier, after its delay: lets a cell move the clock past the top of the hour mid-proof. */
     onVerify: (() => void) | null;
+    /** The session ids verifyOtp created, and the ones `closeSession` signed out (each by id, in order): the sign-out must name exactly the session minted against. */
+    sessionsCreated: string[];
+    signedOut: string[];
+    /** A verifier whose response carries no session id (the access token had no `session_id` claim). */
+    noSessionId: boolean;
   };
   /** Every outside-world step in the order it happened ("otp.verify", "proof.record", "apple.exchange", ...), for ordering assertions. */
   events: string[];
@@ -81,7 +86,7 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; emailProofs?:
       if (apple.revokeError) throw apple.revokeError;
     },
   };
-  const otp: Harness["otp"] = { failures: new Map(), verifierCalls: [], result: { ok: false }, throws: false, windowStart: "2030-01-01T10:00:00.000Z", releases: [], onVerify: null };
+  const otp: Harness["otp"] = { failures: new Map(), verifierCalls: [], result: { ok: false }, throws: false, windowStart: "2030-01-01T10:00:00.000Z", releases: [], onVerify: null, sessionsCreated: [], signedOut: [], noSessionId: false };
   // Mirrors private.reserve_signin_otp_attempt / release_signin_otp_attempt: take-with-cap is ONE step, release never goes below zero, and
   // a release decrements only the window it names (`failures` holds the CURRENT window's counts; a release naming an older window is a no-op on it, L2).
   const counter: OtpFailureCounter = {
@@ -110,9 +115,22 @@ function harness(actor = ALICE, opts: { appleConfigured?: boolean; emailProofs?:
       otp.onVerify?.();
       if (otp.throws) throw new Error("gotrue unreachable");
       events.push(`otp.verify:${otp.result.ok ? "ok" : "refused"}`);
-      // GoTrue's side effect on a verified code: the proven account has just signed in (what the proof minter corroborates).
-      if (otp.result.ok) stampSignIn(state, otp.result.userId);
-      return otp.result;
+      if (!otp.result.ok) return { ok: false };
+      // GoTrue's side effects on a verified code: the proven account has just signed in AND a session exists for it (what the proof minter corroborates).
+      stampSignIn(state, otp.result.userId);
+      const sid = addSession(state, otp.result.userId);
+      otp.sessionsCreated.push(sid);
+      events.push("otp.session:open");
+      return {
+        ok: true,
+        userId: otp.result.userId,
+        sessionId: otp.noSessionId ? null : sid,
+        async closeSession() {
+          events.push("otp.session:signout");
+          otp.signedOut.push(sid);
+          signinFake(state).sessions.delete(sid);
+        },
+      };
     },
   };
   const log: Array<Record<string, unknown>> = [];
@@ -420,7 +438,7 @@ describe("link: never auto-link a social identity whose email matches an existin
     const h = harness(ALICE);
     h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
     await failure(handleLinkProvider(linkReq({ emailProof: { code: "000000" } }), ALICE, h.deps));
-    expect(h.otp.failures.get(await sha256Hex("bob@example.test"))).toBe(1);
+    expect(h.otp.failures.get(await sha256Hex(`signin-otp-target:${BOB}`))).toBe(1);
   });
 
   it("F3: 20 PARALLEL wrong proofs reach the verifier at most 5 times (the attempt is reserved before verifying, not read-then-written)", async () => {
@@ -437,7 +455,7 @@ describe("link: never auto-link a social identity whose email matches an existin
   it("L2: a proof that straddles the top of the hour releases the window it reserved in and does NOT refund the new window", async () => {
     const h = harness(ALICE);
     h.apple.identity = { subject: "apple-sub-1", email: "bob@example.test", emailVerified: true, isPrivateRelay: false };
-    const hash = await sha256Hex("bob@example.test");
+    const hash = await sha256Hex(`signin-otp-target:${BOB}`);
     const w1 = h.otp.windowStart;
     h.otp.throws = true; // a transport failure: the attempt is given back
     h.otp.onVerify = () => {
@@ -512,7 +530,7 @@ describe("link: the PROOF-BOUND cross-account link (0039)", () => {
   it("the order is verify OTP, record the proof, exchange the code, redeem the proof: nothing is minted before the OTP verified and nothing is exchanged before the proof exists", async () => {
     const h = proofHarness();
     await handleLinkProvider(proofReq(), ALICE, h.deps);
-    expect(h.events).toEqual(["otp.verify:ok", "proof.record", "apple.exchange"]);
+    expect(h.events).toEqual(["otp.verify:ok", "otp.session:open", "proof.record", "otp.session:signout", "apple.exchange"]);
     const calls = signinFake(h.state).calls;
     expect(calls.indexOf(`proof.record:${ALICE}->${BOB}`)).toBeLessThan(calls.findIndex((c) => c.startsWith("linkIdentityWithProof:")));
   });
@@ -526,6 +544,70 @@ describe("link: the PROOF-BOUND cross-account link (0039)", () => {
     expect(p!.subHash).toBe(await sha256Hex("apple:apple-sub-1"));
     expect(JSON.stringify(p)).not.toContain("apple-sub-1");
     expect(JSON.stringify(p)).not.toContain("bob@example.test");
+  });
+
+  it("the proof is bound to the session verifyOtp created (0041, b): the minter is handed THAT session's id, and exactly that session is signed out, after the mint", async () => {
+    const h = proofHarness();
+    await handleLinkProvider(proofReq(), ALICE, h.deps);
+    const f = signinFake(h.state);
+    expect(h.otp.sessionsCreated).toHaveLength(1);
+    expect(f.proofs[0]!.sessionId).toBe(h.otp.sessionsCreated[0]);
+    expect(h.otp.signedOut).toEqual(h.otp.sessionsCreated); // exactly that session, once
+    expect(f.sessions.size).toBe(0); // and it is gone
+    expect(h.events.indexOf("proof.record")).toBeLessThan(h.events.indexOf("otp.session:signout")); // the database checks the session: it must still exist at the mint
+    expect(JSON.stringify(h.log)).not.toContain(h.otp.sessionsCreated[0]!); // the id is a secret: never logged
+  });
+
+  it("the verifyOtp session is signed out on EVERY path out of the proof: address changed hands, the database refusing to mint, a response with no session id", async () => {
+    // address changed hands
+    const a = proofHarness();
+    a.otp.result = { ok: true, userId: CAROL };
+    expect((await failure(handleLinkProvider(proofReq(), ALICE, a.deps))).code).toBe("email_proof_mismatch");
+    expect(a.otp.signedOut).toEqual(a.otp.sessionsCreated);
+    expect(a.otp.sessionsCreated).toHaveLength(1);
+    // the database refuses the mint (the minter's own session check fails: the fake session is removed under it)
+    const b = proofHarness();
+    b.deps.emailProofs = {
+      async record() {
+        throw Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
+      },
+    };
+    expect((await failure(handleLinkProvider(proofReq(), ALICE, b.deps))).code).toBe("email_proof_refused");
+    expect(b.otp.signedOut).toEqual(b.otp.sessionsCreated);
+    expect(b.otp.sessionsCreated).toHaveLength(1);
+    // a verifier response with no session id: nothing can be bound, so nothing is minted; the session it did create is still closed
+    const c = proofHarness();
+    c.otp.noSessionId = true;
+    const e = await failure(handleLinkProvider(proofReq(), ALICE, c.deps));
+    expect([e.status, e.code]).toEqual([409, "email_proof_refused"]);
+    expect(signinFake(c.state).proofs).toEqual([]);
+    expect(c.events).not.toContain("proof.record");
+    expect(c.otp.signedOut).toEqual(c.otp.sessionsCreated);
+    expect(c.log.some((l) => l.event === "signin_otp_session_id_missing")).toBe(true);
+    expect(c.apple.exchangeCalls).toHaveLength(0);
+  });
+
+  it("the fake minter mirrors the database: a session of ANOTHER account, a stale one, an unknown one, and a session that already minted a proof are all refused", async () => {
+    const h = proofHarness();
+    const minter = makeFakeEmailProofs(h.state);
+    const base = { callerUserId: ALICE, targetUserId: BOB, email: "bob@example.test", provider: "apple" as const, subject: "s" };
+    stampSignIn(h.state, BOB);
+    expect((await failure(minter.record({ ...base, sessionId: addSession(h.state, CAROL) }))).code).toBe("email_proof_refused");
+    expect((await failure(minter.record({ ...base, sessionId: addSession(h.state, BOB, h.state.now.getTime() - 10 * 60_000) }))).code).toBe("email_proof_refused");
+    expect((await failure(minter.record({ ...base, sessionId: "00000000-0000-4000-a000-ffffffffffff" }))).code).toBe("email_proof_refused");
+    const good = addSession(h.state, BOB);
+    await minter.record({ ...base, sessionId: good });
+    expect((await failure(minter.record({ ...base, subject: "s2", sessionId: good }))).code).toBe("email_proof_refused");
+  });
+
+  it("the OTP attempt counter is keyed on the TARGET ACCOUNT the database resolved, not on a spelling of the address (0041, L2)", async () => {
+    const h = proofHarness();
+    h.otp.result = { ok: false };
+    for (const spelling of ["bob@example.test", "  BOB@Example.TEST ", "Bob@example.test"]) {
+      h.apple.identity = { subject: "apple-sub-1", email: spelling, emailVerified: true, isPrivateRelay: false };
+      await failure(handleLinkProvider(proofReq(), ALICE, h.deps));
+    }
+    expect([...h.otp.failures.entries()]).toEqual([[await sha256Hex(`signin-otp-target:${BOB}`), 3]]);
   });
 
   it("a wrong code, a refused code and an OTP transport failure mint NO proof", async () => {
@@ -601,7 +683,7 @@ describe("link: the PROOF-BOUND cross-account link (0039)", () => {
     expect((await failure(repo.linkIdentityWithProof(proofId, input, env))).code).toBe("email_proof_refused"); // replay
     // a fresh proof: wrong subject, wrong caller
     stampSignIn(h.state, BOB);
-    const minted = await makeFakeEmailProofs(h.state).record({ callerUserId: ALICE, targetUserId: BOB, email: "bob@example.test", provider: "apple", subject: "apple-sub-A" });
+    const minted = await makeFakeEmailProofs(h.state).record({ callerUserId: ALICE, targetUserId: BOB, email: "bob@example.test", provider: "apple", subject: "apple-sub-A", sessionId: addSession(h.state, BOB) });
     expect((await failure(repo.linkIdentityWithProof(minted, { ...input, subject: "apple-sub-B" }, env))).code).toBe("email_proof_refused");
     expect((await failure(makeFakeSigninRepo(h.state, CAROL).linkIdentityWithProof(minted, { ...input, subject: "apple-sub-A" }, env))).code).toBe("email_proof_refused");
     expect(f.identities.filter((i) => i.provider === "apple")).toHaveLength(1); // only the first, legitimate link exists
@@ -662,9 +744,9 @@ describe("link: the PROOF-BOUND cross-account link (0039)", () => {
     const h = proofHarness();
     await handleLinkProvider(proofReq(), ALICE, h.deps);
     stampSignIn(h.state, BOB);
-    await makeFakeEmailProofs(h.state).record({ callerUserId: CAROL, targetUserId: BOB, email: "bob@example.test", provider: "apple", subject: "s" });
+    await makeFakeEmailProofs(h.state).record({ callerUserId: CAROL, targetUserId: BOB, email: "bob@example.test", provider: "apple", subject: "s", sessionId: addSession(h.state, BOB) });
     stampSignIn(h.state, ALICE);
-    await makeFakeEmailProofs(h.state).record({ callerUserId: CAROL, targetUserId: ALICE, email: "alice@example.test", provider: "apple", subject: "s2" });
+    await makeFakeEmailProofs(h.state).record({ callerUserId: CAROL, targetUserId: ALICE, email: "alice@example.test", provider: "apple", subject: "s2", sessionId: addSession(h.state, ALICE) });
     const { deleteSigninRows } = await import("./fake-signin-repo.ts");
     deleteSigninRows(h.state, ALICE);
     expect(signinFake(h.state).proofs.map((p) => [p.callerUserId, p.targetUserId])).toEqual([[CAROL, BOB]]);

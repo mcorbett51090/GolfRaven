@@ -136,3 +136,46 @@ sleep 0.5
 cp "$HBA_BACKUP" "$HBA"
 sql "SELECT pg_reload_conf()" >/dev/null
 echo "tools/db/test-provision-edge-login.sh: OK -- with --password-env the variable is gone from every child's environment, and the password still took effect"
+
+# ---------------------------------------------------------------------------
+# 5. The minting role (migration 0041): provisioning accepts the correctly configured role and REFUSES a misconfigured one.
+# ---------------------------------------------------------------------------
+# (the harness cluster has 0041 applied, so the happy path ran above: every provisioning in this file passed the minter post-condition.)
+# The misconfigurations below are made by the bootstrap superuser and undone straight after, so the cluster is left as it was.
+PW_M="$(rand 24)"
+mutate_minter() { sql "$1" >/dev/null; }
+expect_refused() { # $1 = label
+  set +e
+  printf '%s\n' "$PW_M" | bash "$ROOT_DIR/tools/db/provision-edge-login.sh" --password-stdin >/dev/null 2>"$ENV_PROBE_ERR"
+  local rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "provisioning blessed a misconfigured minter ($1)"
+  grep -q "edge_signin_minter is not in the expected state" "$ENV_PROBE_ERR" || fail "provisioning refused ($1) but not for the minter's state: $(cat "$ENV_PROBE_ERR")"
+}
+ENV_PROBE_ERR="$(mktemp "${TMPDIR:-/tmp}/edge-login-minter.XXXXXX")"
+printf '%s\n' "$PW_M" | bash "$ROOT_DIR/tools/db/provision-edge-login.sh" --password-stdin >/dev/null 2>"$ENV_PROBE_ERR" || fail "provisioning refused a correctly configured minter: $(cat "$ENV_PROBE_ERR")"
+mutate_minter "ALTER ROLE edge_signin_minter LOGIN"
+expect_refused "LOGIN"
+mutate_minter "ALTER ROLE edge_signin_minter NOLOGIN"
+mutate_minter "GRANT edge_actor TO edge_signin_minter"
+expect_refused "a member of edge_actor"
+mutate_minter "REVOKE edge_actor FROM edge_signin_minter"
+mutate_minter "GRANT edge_signin_minter TO edge_actor"
+expect_refused "edge_actor a member of it"
+mutate_minter "REVOKE edge_signin_minter FROM edge_actor"
+# The membership is re-granted by the role that GRANTED it (the migrating role: postgres in superuser mode, migration_owner in restricted mode), so the
+# fixtures replace that one grant row and leave the cluster with exactly the row it started with (a REVOKE by another grantor would leave the original behind).
+GRANTOR="$(sql "SELECT g.rolname FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.grantor WHERE r.rolname = 'edge_signin_minter' AND m.rolname = 'edge_gateway'" | tr -d '[:space:]')"
+[ -n "$GRANTOR" ] || fail "edge_gateway has no membership of edge_signin_minter in the harness cluster (is 0041 applied?)"
+regrant() { # $1 = options
+  mutate_minter "REVOKE edge_signin_minter FROM edge_gateway GRANTED BY $GRANTOR"
+  mutate_minter "GRANT edge_signin_minter TO edge_gateway WITH $1 GRANTED BY $GRANTOR"
+}
+regrant "INHERIT TRUE, SET TRUE"
+expect_refused "edge_gateway holds it WITH INHERIT"
+regrant "INHERIT FALSE, SET FALSE"
+expect_refused "edge_gateway holds it without SET"
+regrant "INHERIT FALSE, SET TRUE"
+printf '%s\n' "$PW_M" | bash "$ROOT_DIR/tools/db/provision-edge-login.sh" --password-stdin >/dev/null 2>"$ENV_PROBE_ERR" || fail "provisioning refused the minter after every fixture was undone: $(cat "$ENV_PROBE_ERR")"
+rm -f "$ENV_PROBE_ERR"
+echo "tools/db/test-provision-edge-login.sh: OK -- provisioning accepts the correctly configured edge_signin_minter and refuses it with LOGIN, a membership of another role, edge_actor as a member, edge_gateway with INHERIT, and edge_gateway without SET"

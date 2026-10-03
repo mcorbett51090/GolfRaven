@@ -13,12 +13,18 @@ function openPool() {
   return postgres(dbUrl, { max: 5 });
 }
 
-export async function openScopedTx(db: ReturnType<typeof postgres>, kind: "actor" | "system") {
+export async function openScopedTx(kind: "actor" | "system" | "signin_mint", db: ReturnType<typeof postgres>) {
   return db.begin(async (trx) => {
     if (kind === "actor") await trx`set local role edge_actor`;
+    else if (kind === "signin_mint") await trx`set local role edge_signin_minter`;
     else await trx`SET LOCAL ROLE edge_system`;
     return 1;
   });
+}
+
+// the one caller of the minter kind (a literal kind; the role name never appears here)
+export function signinEmailProofs(db: ReturnType<typeof postgres>) {
+  return openScopedTx("signin_mint", db);
 }
 
 export async function withOwnershipBatch(trx: { savepoint<T>(cb: (sp: unknown) => Promise<T>): Promise<T> }) {

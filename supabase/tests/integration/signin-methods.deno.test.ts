@@ -9,6 +9,10 @@
 // Edge role PR4a (0039) adds the proof-bound cross-account link: the OTP-proven flow now runs in BOTH modes (the scripted verifier stamps
 // auth.users.last_sign_in_at the way GoTrue is believed to), and the cells named "PR4a" prove the single-use proof against the real definers.
 //
+// Edge role PR #35 (0041) hardens it: the proof is MINTED by the dedicated role edge_signin_minter (an edge_system transaction can no longer mint), is bound to the
+// GoTrue SESSION verifyOtp created (a row of auth.sessions that the scripted verifier inserts, and that `closeSession` removes after the mint), and the address / subject
+// are normalised and hashed only in the database. The cells named "PR35" prove those against the real definers.
+//
 // What this proves that the vitest suite (same scenarios, fake Repo) cannot: the SQLSTATE -> HTTP mapping of the real definers,
 // the real Vault KEK path (private.get_signin_token_kek, real envelope round trip through bytea columns), the real advisory-lock
 // serialisation of concurrent unlinks, the real durable queue (a revocation row that survives the account's deletion), and the
@@ -17,7 +21,7 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, makeActor, rawCount } from "./_helpers.ts";
-import { hitRateLimitForActor, isServiceRoleBearer, loadAppleSiwaConfig, makeEmailOtpVerifier, type OtpAuthClient, purgeSigninEmailProofs, type Repo, signinEmailProofs, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
+import { hitRateLimitForActor, isServiceRoleBearer, loadAppleSiwaConfig, makeEmailOtpVerifier, openScopedTx, type OtpAuthClient, purgeSigninEmailProofs, type Repo, sessionIdOfAccessToken, signinEmailProofs, signinOtpFailuresFor, signinRevocationDb, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleLinkProvider, handleListMethods, handleUnlinkProvider, type SigninDeps } from "../../functions/_shared/signin/methods-handler.ts";
 import { orchestrateMeDelete } from "../../functions/_shared/me/delete-orchestrator.ts";
 import { runRevocations, type RevocationDeps } from "../../functions/_shared/signin/revocation.ts";
@@ -28,7 +32,7 @@ import { decryptToken, encryptToken } from "../../functions/_shared/signin/envel
 import { sha256Hex } from "../../functions/_shared/signin/bytes.ts";
 import { HttpError } from "../../functions/_shared/http.ts";
 import type { LinkRequest } from "../../functions/_shared/signin/request-shape.ts";
-import type { EmailOtpResult, EmailOtpVerifier } from "../../functions/_shared/signin/types.ts";
+import type { EmailOtpVerifier } from "../../functions/_shared/signin/types.ts";
 import type { AppleSecretConfig } from "../../functions/_shared/signin/apple-client-secret.ts";
 import { CLIENT_ID, TEAM_ID, fakeFetch, json, jwksBody, makeP8, makeRsaKey, mintIdentityToken as mintFixed, type TokenOverrides, type TestRsaKey } from "../unit/signin-test-helpers.ts";
 
@@ -118,12 +122,43 @@ async function stampSignIn(uid: string, secondsAgo = 0): Promise<void> {
   await adminSql()`update auth.users set last_sign_in_at = clock_timestamp() - make_interval(secs => ${secondsAgo}::int) where id = ${uid}`;
 }
 
-/** A scripted verifier that behaves like GoTrue: a `res.ok` proof also stamps the proven account's sign-in. */
-const gotrueLike = (res: EmailOtpResult, calls: string[], stamp = true): EmailOtpVerifier => ({
+/** What a verifier script says: a wrong code, or a correct one for this account. */
+type OtpScript = { ok: false } | { ok: true; userId: string };
+
+/** What GoTrue's verifyOtp leaves in auth.sessions for the proven account (0041, (b)); the harness inserts it by hand. `[unverified: real GoTrue creates it]` */
+async function newSession(uid: string, secondsAgo = 0): Promise<string> {
+  await ensureServiceRole();
+  const id = freshUuid();
+  await adminSql()`insert into auth.sessions (id, user_id, created_at) values (${id}, ${uid}, clock_timestamp() - make_interval(secs => ${secondsAgo}::int))`;
+  return id;
+}
+const sessionExists = async (id: string): Promise<boolean> => (await rawCount(`select count(*) as n from auth.sessions where id = '${id}'`)) === 1;
+
+/** The failure counter's bucket key (0041, L2): the TARGET ACCOUNT, not a spelling of its address. */
+const otpKey = (targetUid: string): Promise<string> => sha256Hex(`signin-otp-target:${targetUid}`);
+
+/** A scripted verifier that behaves like GoTrue: a `res.ok` proof also stamps the proven account's sign-in AND creates its session (the one the proof will be
+ * bound to), and hands the caller a `closeSession` that deletes exactly that session, the way a scope-local sign-out does. `stamp = false` is a verifier that
+ * "verified" with no sign-in and no session behind it. `sessionIds` / `signouts` record what it created and what was signed out. */
+const gotrueLike = (res: OtpScript, calls: string[], stamp = true, sessionIds: string[] = [], signouts: string[] = []): EmailOtpVerifier => ({
   async verify(email) {
     calls.push(email);
-    if (res.ok && stamp) await stampSignIn(res.userId);
-    return res;
+    if (!res.ok) return { ok: false };
+    let sid: string = freshUuid(); // with stamp = false: a session id that does not exist
+    if (stamp) {
+      await stampSignIn(res.userId);
+      sid = await newSession(res.userId);
+    }
+    sessionIds.push(sid);
+    return {
+      ok: true,
+      userId: res.userId,
+      sessionId: sid,
+      async closeSession() {
+        signouts.push(sid);
+        await adminSql()`delete from auth.sessions where id = ${sid}`;
+      },
+    };
   },
 });
 
@@ -270,7 +305,7 @@ Deno.test("link: with a valid email-OTP proof the identity goes to the account w
   const alice = await newUser("pa");
   const bob = await newUser("pb");
   // A verifier that behaves like GoTrue: a correct code also stamps the proven account's sign-in (what the edge-mode proof minter corroborates).
-  const mk = (res: EmailOtpResult, calls: string[]): EmailOtpVerifier => gotrueLike(res, calls);
+  const mk = (res: OtpScript, calls: string[]): EmailOtpVerifier => gotrueLike(res, calls);
   const sub = `apple-sub-proof-${freshUuid().slice(0, 8)}`;
 
   // five wrong proofs
@@ -281,7 +316,7 @@ Deno.test("link: with a valid email-OTP proof the identity goes to the account w
     const e = await httpError(handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "000000" } }, alice.uid, depsFor(alice.uid, world, mk({ ok: false }, []))));
     assertEquals([e.status, e.code], [422, "email_proof_invalid"]);
   }
-  const hash = await sha256Hex(bob.email);
+  const hash = await otpKey(bob.uid);
   assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(hash), 5);
   assertEquals(await identityCount(bob.uid), 1, "no wrong proof linked anything");
 
@@ -571,7 +606,7 @@ Deno.test("F3: 20 PARALLEL wrong email proofs reach the verifier exactly 5 times
   assertEquals(verifierCalls, 5, "no more than 5 wrong proofs ever reach the verifier");
   assertEquals(results.filter((e) => e.status === 422).length, 5);
   assertEquals(results.filter((e) => e.status === 429).length, 15);
-  assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await sha256Hex(bob.email)), 5);
+  assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await otpKey(bob.uid)), 5);
   assertEquals(await identityCount(bob.uid), 1, "nothing was linked");
 });
 
@@ -638,13 +673,21 @@ Deno.test("F4: the repo REFUSES to link or store a grant for ANOTHER account, ca
   assertEquals(await withOwnership(makeActor(alice.uid), (repo) => repo.signin.linkIdentity(alice.uid, input)), true);
 });
 
-Deno.test("F5: the GoTrue session verifyOtp establishes is signed out (scope local) on a successful proof; a failed sign-out does not fail the proof", DT, async () => {
+/** A GoTrue-shaped access token: a JWT whose payload carries `session_id`. The signature part is filler: the code reads the claim only (the database verifies the id). */
+const fakeAccessToken = (claims: Record<string, unknown>): string => {
+  const b64u = (o: unknown) => btoa(JSON.stringify(o)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${b64u({ alg: "HS256", typ: "JWT" })}.${b64u(claims)}.c2lnbmF0dXJl`;
+};
+
+Deno.test("F5 / PR35: verifyOtp's session is signed out (scope local) only when the CALLER closes it; its id is the access token's session_id claim; a failed sign-out does not fail the proof", DT, async () => {
   const calls: string[] = [];
-  const mk = (over: { verifyError?: { status?: number }; user?: { id?: string } | null; signOutThrows?: boolean }): OtpAuthClient => ({
+  const SID = "22222222-2222-4222-8222-222222222222";
+  const mk = (over: { verifyError?: { status?: number }; user?: { id?: string } | null; signOutThrows?: boolean; token?: unknown }): OtpAuthClient => ({
     auth: {
       async verifyOtp(args) {
         calls.push(`verifyOtp:${args.email}:${args.type}`);
-        return { data: over.verifyError ? null : { user: over.user === undefined ? { id: "11111111-1111-4111-8111-111111111111" } : over.user }, error: over.verifyError ?? null };
+        const token = over.token === undefined ? fakeAccessToken({ session_id: SID, sub: "x" }) : (over.token as string);
+        return { data: over.verifyError ? null : { user: over.user === undefined ? { id: "11111111-1111-4111-8111-111111111111" } : over.user, session: { access_token: token } }, error: over.verifyError ?? null };
       },
       async signOut(opts) {
         calls.push(`signOut:${opts.scope}`);
@@ -654,12 +697,16 @@ Deno.test("F5: the GoTrue session verifyOtp establishes is signed out (scope loc
     },
   });
   const ok = await makeEmailOtpVerifier(() => mk({})).verify("a@x.test", "123456");
-  assertEquals(ok, { ok: true, userId: "11111111-1111-4111-8111-111111111111" });
-  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"], "the session was signed out, locally, after the proof");
+  assert(ok.ok);
+  assertEquals([ok.userId, ok.sessionId], ["11111111-1111-4111-8111-111111111111", SID], "the session id is the access token's session_id claim");
+  assertEquals(calls, ["verifyOtp:a@x.test:email"], "the session is still OPEN when verify returns: the proof is bound to it, so it cannot be signed out before the mint");
+  await ok.closeSession();
+  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"], "closeSession signs out that session, locally");
   calls.length = 0;
   const thrown = await makeEmailOtpVerifier(() => mk({ signOutThrows: true })).verify("a@x.test", "123456");
-  assertEquals(thrown.ok, true, "a sign-out that fails does not fail the proof");
-  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"]);
+  assert(thrown.ok);
+  await thrown.closeSession(); // does not throw
+  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"], "a sign-out that fails does not fail the proof (closeSession never throws)");
   calls.length = 0;
   assertEquals(await makeEmailOtpVerifier(() => mk({ verifyError: { status: 400 } })).verify("a@x.test", "000000"), { ok: false });
   assertEquals(calls, ["verifyOtp:a@x.test:email"], "a refused code created no session: nothing to sign out");
@@ -680,6 +727,25 @@ Deno.test("F5: the GoTrue session verifyOtp establishes is signed out (scope loc
   }
   assert(noUser);
   assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"]);
+  // a token with no usable session_id claim yields a null session id (the handler then refuses to mint) and the session is still closable
+  calls.length = 0;
+  const bad = await makeEmailOtpVerifier(() => mk({ token: "not-a-jwt" })).verify("a@x.test", "123456");
+  assert(bad.ok);
+  assertEquals(bad.sessionId, null);
+  await bad.closeSession();
+  assertEquals(calls, ["verifyOtp:a@x.test:email", "signOut:local"]);
+});
+
+Deno.test("PR35: sessionIdOfAccessToken reads the session_id claim of a JWT and nothing else (base64url, padding, a non-uuid, a missing claim, garbage, a non-string)", () => {
+  const SID = "33333333-3333-4333-8333-333333333333";
+  assertEquals(sessionIdOfAccessToken(fakeAccessToken({ session_id: SID })), SID);
+  assertEquals(sessionIdOfAccessToken(fakeAccessToken({ session_id: SID.toUpperCase() })), SID, "lower-cased");
+  // base64url characters (- and _) and a payload whose length needs padding
+  assertEquals(sessionIdOfAccessToken(fakeAccessToken({ session_id: SID, note: "??>>~~" })), SID);
+  assertEquals(sessionIdOfAccessToken(fakeAccessToken({ session_id: "not-a-uuid" })), null);
+  assertEquals(sessionIdOfAccessToken(fakeAccessToken({ session_id: 42 })), null);
+  assertEquals(sessionIdOfAccessToken(fakeAccessToken({ sub: "x" })), null, "no claim");
+  for (const junk of ["", "a.b", "a.b.c.d", "a..c", "a.%%%.c", `x.${btoa("not json")}.y`, undefined, null, 7, {}]) assertEquals(sessionIdOfAccessToken(junk), null, String(junk));
 });
 
 Deno.test("F6: a grant stored while the deletion is revoking at Apple (a racing link) is queued inside the delete transaction and revoked, never deleted unqueued", DT, async () => {
@@ -792,7 +858,7 @@ Deno.test("PR4a: a REPLAYED proof is refused (single use), by the caller it was 
   await setupOnce();
   const { alice, bob } = await proofPair("pr4a2");
   const sub = `apple-sub-pr4a2-${RUN}`;
-  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub, sessionId: await newSession(bob.uid) });
   assertEquals(await asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())), true);
   assertEquals(await identityCount(bob.uid), 2);
   const replay = await httpError(asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())));
@@ -806,7 +872,7 @@ Deno.test("PR4a: a proof minted for Apple sub A can NOT link sub B (nor another 
   const { alice, bob } = await proofPair("pr4a3");
   const subA = `apple-sub-pr4a3a-${RUN}`;
   const subB = `apple-sub-pr4a3b-${RUN}`;
-  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: subA });
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: subA, sessionId: await newSession(bob.uid) });
   for (const [label, input] of [
     ["another subject", proofInput(subB, bob.email)],
     ["another provider", { ...proofInput(subA, bob.email), provider: "google" as const }],
@@ -826,7 +892,7 @@ Deno.test("PR4a: a proof is redeemable only by the caller it was issued to; the 
   const { alice, bob } = await proofPair("pr4a4");
   const mallory = await newUser("pr4a4m");
   const sub = `apple-sub-pr4a4-${RUN}`;
-  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub, sessionId: await newSession(bob.uid) });
   for (const who of [mallory.uid, bob.uid]) {
     const e = await httpError(asCaller(who, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE())));
     assertEquals([e.status, e.code], [409, "email_proof_refused"]);
@@ -866,17 +932,17 @@ Deno.test("PR4a: the minter refuses when GoTrue shows no sign-in for the target 
   assertEquals(world.calls.filter((c) => c.url === APPLE_TOKEN_URL).length, 0, "no authorization code was exchanged");
   assertEquals((await proofRows(bob.uid)).length, 0, "no proof was minted");
   assertEquals(await identityCount(bob.uid), 1);
-  assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await sha256Hex(bob.email)), 0, "the OTP attempt was given back (the code itself was fine)");
+  assertEquals(await signinOtpFailuresFor(makeActor(alice.uid)).peek(await otpKey(bob.uid)), 0, "the OTP attempt was given back (the code itself was fine)");
   // a stale stamp (the target signed in 10 minutes ago) is no corroboration either
   await stampSignIn(bob.uid, 600);
-  const e2 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub }));
+  const e2 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub, sessionId: await newSession(bob.uid) }));
   assertEquals([e2.status, e2.code], [409, "email_proof_refused"]);
   // ... and neither is the wrong address for the target
   await stampSignIn(bob.uid);
-  const e3 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: alice.email, provider: "apple", subject: sub }));
+  const e3 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: alice.email, provider: "apple", subject: sub, sessionId: await newSession(bob.uid) }));
   assertEquals([e3.status, e3.code], [409, "email_proof_refused"]);
   // ... nor an account that does not exist (it vanished between the lookup and the mint): the same refusal, not a "not linked" 404
-  const e4 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: freshUuid(), email: bob.email, provider: "apple", subject: sub }));
+  const e4 = await httpError(signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: freshUuid(), email: bob.email, provider: "apple", subject: sub, sessionId: await newSession(bob.uid) }));
   assertEquals([e4.status, e4.code], [409, "email_proof_refused"]);
   assertEquals((await proofRows(bob.uid)).length, 0);
 });
@@ -886,7 +952,7 @@ Deno.test("PR4a: CONCURRENT redemption of one proof yields exactly one link and 
   for (let round = 0; round < 3; round++) {
     const { alice, bob } = await proofPair(`pr4a7r${round}`);
     const sub = `apple-sub-pr4a7-${round}-${RUN}`;
-    const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub });
+    const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: sub, sessionId: await newSession(bob.uid) });
     const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => asCaller(alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, bob.email), ENVELOPE()))));
     assertEquals(attempts.filter((a) => a.status === "fulfilled").length, 1, "exactly one redemption wins");
     for (const a of attempts) {
@@ -897,20 +963,23 @@ Deno.test("PR4a: CONCURRENT redemption of one proof yields exactly one link and 
   }
 });
 
-Deno.test("PR4a: the F5 sign-out still happens in the full proven flow : verifyOtp then signOut(local), and the link lands on the proven account", DT, async () => {
+Deno.test("PR4a / PR35: the F5 sign-out still happens in the full proven flow, AFTER the mint (the proof is bound to that session): verifyOtp, the mint, then signOut(local) of exactly that session; the link lands on the proven account", DT, async () => {
   await setupOnce();
   const { alice, bob } = await proofPair("pr4a8");
   const sub = `apple-sub-pr4a8-${RUN}`;
   const events: string[] = [];
+  let sessionId = "";
   const client: OtpAuthClient = {
     auth: {
       async verifyOtp(args) {
         events.push(`verifyOtp:${args.email}`);
-        await stampSignIn(bob.uid); // GoTrue's session issue stamps the sign-in
-        return { data: { user: { id: bob.uid } }, error: null };
+        await stampSignIn(bob.uid); // GoTrue's session issue stamps the sign-in ...
+        sessionId = await newSession(bob.uid); // ... and creates the session whose id is in the access token
+        return { data: { user: { id: bob.uid }, session: { access_token: fakeAccessToken({ session_id: sessionId }) } }, error: null };
       },
       async signOut(opts) {
-        events.push(`signOut:${opts.scope}`);
+        events.push(`signOut:${opts.scope}:${(await sessionExists(sessionId)) ? "session-present" : "session-gone"}`);
+        await adminSql()`delete from auth.sessions where id = ${sessionId}`; // what GoTrue's scope-local logout does
         return { error: null };
       },
     },
@@ -918,10 +987,213 @@ Deno.test("PR4a: the F5 sign-out still happens in the full proven flow : verifyO
   const script: AppleScript = { nextRefreshToken: "r.pr4a8", nextSubject: sub, revoked: [], revokeStatus: 200 };
   const world = appleWorld(script);
   const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
-  const out = await handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, makeEmailOtpVerifier(() => client)));
+  const deps = depsFor(alice.uid, world, makeEmailOtpVerifier(() => client));
+  const realMinter = deps.emailProofs!;
+  deps.emailProofs = {
+    async record(input) {
+      events.push(`mint:${input.sessionId === sessionId ? "the-verifyOtp-session" : "OTHER-SESSION"}`);
+      return realMinter.record(input);
+    },
+  };
+  const out = await handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, deps);
   assertEquals(out.linkedTo, "proven_account");
-  assertEquals(events, [`verifyOtp:${bob.email}`, "signOut:local"], "the session the proof created was signed out");
+  assertEquals(events, [`verifyOtp:${bob.email}`, "mint:the-verifyOtp-session", "signOut:local:session-present"], "the mint saw the session; the sign-out came after it and named that session");
+  assertEquals(await sessionExists(sessionId), false, "the session is gone afterwards");
   assertEquals(await rawCount(`select count(*) as n from auth.identities where user_id = '${bob.uid}' and provider_id = '${sub}'`), 1);
+  assertEquals((await oneProof(bob.uid)).consumed, true);
+});
+
+// ── edge role PR #35 (0041): the dedicated minter, the session binding, one normalisation ────────────────────────────────
+
+const pgCode = async (p: Promise<unknown>): Promise<string> => {
+  try {
+    await p;
+  } catch (e) {
+    return String((e as { code?: unknown } | null)?.code);
+  }
+  return "no error";
+};
+
+Deno.test("PR35 L1: a mint attempted from inside an edge_system transaction (the drain / queue / import / retention lanes) is REFUSED, with a perfectly valid argument set", DT, async () => {
+  await setupOnce();
+  const { alice, bob } = await proofPair("pr35a");
+  const sid = await newSession(bob.uid);
+  // the very arguments the real minter would use, from a lane that is edge_system (any of them: drain, queue, import, retention-purge)
+  const code = await pgCode(
+    openScopedTx("system", { expectedUid: null }, (trx) => trx`select private.signin_record_email_proof(${alice.uid}::uuid, ${bob.uid}::uuid, ${bob.email}, 'apple', ${"pr35a-" + RUN}, ${sid}::uuid)`),
+  );
+  assertEquals(code, "42501", "permission denied: EXECUTE was moved to edge_signin_minter");
+  assertEquals((await proofRows(bob.uid)).length, 0, "no proof was minted");
+  // ... and the same arguments through the real minter path work (the control: the refusal above was the ROLE, not the arguments)
+  const pid = await signinEmailProofs().record({ callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple", subject: `pr35a-${RUN}`, sessionId: sid });
+  assert(pid.length === 36);
+  assertEquals((await proofRows(bob.uid)).length, 1);
+  // the system lanes cannot even see the session ids: edge_system has no privilege on auth.sessions
+  assertEquals(await pgCode(openScopedTx("system", { expectedUid: null }, (trx) => trx`select id from auth.sessions limit 1`)), "42501");
+  // an actor-bound (per-user) transaction cannot mint either
+  const actorCode = await pgCode(
+    openScopedTx("actor", { expectedUid: alice.uid, run: (trx) => trx`select private.bind_actor(${alice.uid}::uuid)` }, (trx) => trx`select private.signin_record_email_proof(${alice.uid}::uuid, ${bob.uid}::uuid, ${bob.email}, 'apple', ${"pr35a2-" + RUN}, ${sid}::uuid)`),
+  );
+  assertEquals(actorCode, "42501");
+});
+
+Deno.test("PR35 L1: the signin_mint transaction runs as edge_signin_minter and can do nothing else; a bound actor / a bind inside it is refused before the operation runs", DT, async () => {
+  await setupOnce();
+  const { alice, bob } = await proofPair("pr35b");
+  const who = await openScopedTx("signin_mint", { expectedUid: null }, async (trx) => (await trx`select current_user::text as u`)[0]!.u);
+  assertEquals(who, "edge_signin_minter");
+  for (const [label, run] of [
+    ["read the proof table", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select count(*) from private.signin_email_proof`],
+    ["read auth.sessions", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select count(*) from auth.sessions`],
+    ["read auth.users", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select count(*) from auth.users`],
+    ["read app.play", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select count(*) from app.play`],
+    ["purge proofs", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select private.purge_signin_email_proofs()`],
+    ["bind an actor", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select private.bind_actor(${alice.uid}::uuid)`],
+    ["call a system function", (trx: Parameters<Parameters<typeof openScopedTx>[2]>[0]) => trx`select private.hit_system_rate_limit('pr35', interval '1 minute', 5)`],
+  ] as const) {
+    assertEquals(await pgCode(openScopedTx("signin_mint", { expectedUid: null }, async (trx) => await run(trx))), "42501", label);
+  }
+  // the kind binds no actor: a bind passed to it is refused before anything runs (the mint definer refuses inside a bound transaction anyway)
+  let ran = false;
+  const err = await openScopedTx("signin_mint", { expectedUid: alice.uid, run: (trx) => trx`select 1` }, async () => {
+    ran = true;
+  }).catch((e: unknown) => e as Error);
+  assert(err instanceof Error && /binds no actor/.test(err.message), "refused");
+  assertEquals(ran, false);
+  assertEquals((await proofRows(bob.uid)).length, 0);
+});
+
+Deno.test("PR35 (b): the mint refuses without a FRESH session of the TARGET with that id; a session mints one proof only; the refusals mint nothing", DT, async () => {
+  await setupOnce();
+  const { alice, bob } = await proofPair("pr35c");
+  const carol = await newUser("pr35cc");
+  const base = { callerUserId: alice.uid, targetUserId: bob.uid, email: bob.email, provider: "apple" as const, subject: `pr35c-${RUN}` };
+  const refused = async (sessionId: string, label: string) => {
+    const e = await httpError(signinEmailProofs().record({ ...base, sessionId }));
+    assertEquals([e.status, e.code], [409, "email_proof_refused"], label);
+  };
+  await refused(freshUuid(), "a session id that does not exist (an injected mint cannot guess the victim's)");
+  await refused(await newSession(carol.uid), "a real, fresh session of ANOTHER account");
+  await refused(await newSession(bob.uid, 600), "the target's own session from 10 minutes ago");
+  await refused(await newSession(bob.uid, -600), "a session dated 10 minutes in the future");
+  assertEquals((await proofRows(bob.uid)).length, 0, "none of the refusals minted a proof");
+  const good = await newSession(bob.uid);
+  await signinEmailProofs().record({ ...base, sessionId: good });
+  await refused(good, "the same session a second time (one session, one proof)");
+  assertEquals((await proofRows(bob.uid)).length, 1);
+  // a malformed id never reaches the database
+  const e = await httpError(signinEmailProofs().record({ ...base, sessionId: "not-a-uuid" }));
+  assertEquals([e.status, e.code], [409, "email_proof_refused"]);
+});
+
+Deno.test("PR35 (b): the verifyOtp session is signed out on EVERY path of the handler (a successful link, a mint the database refuses, an address that changed hands), and its id is never logged", DT, async () => {
+  await setupOnce();
+  const run = async (label: string, how: { otherAccount?: boolean; staleStampAfterVerify?: boolean }, expectCode: string | null) => {
+    const { alice, bob } = await proofPair(`pr35d${label}`);
+    const stranger = how.otherAccount ? await newUser(`pr35d${label}x`) : null;
+    const sessionIds: string[] = [];
+    const signouts: string[] = [];
+    const log: Array<Record<string, unknown>> = [];
+    const sub = `apple-sub-pr35d-${label}-${RUN}`;
+    const world = appleWorld({ nextRefreshToken: `r.pr35d.${label}`, nextSubject: sub, revoked: [], revokeStatus: 200 });
+    const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: bob.email } });
+    const inner = gotrueLike({ ok: true, userId: stranger?.uid ?? bob.uid }, [], true, sessionIds, signouts);
+    const verifier: EmailOtpVerifier = {
+      async verify(email, code) {
+        const out = await inner.verify(email, code);
+        // the target's GoTrue sign-in stamp goes stale under the verifier: the database will refuse to mint
+        if (how.staleStampAfterVerify) await stampSignIn(bob.uid, 600);
+        return out;
+      },
+    };
+    const out = await handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, verifier, log)).then(
+      () => null,
+      (e: unknown) => e as HttpError,
+    );
+    assertEquals(out?.code ?? null, expectCode, label);
+    assertEquals(sessionIds.length, 1, `${label}: verifyOtp created one session`);
+    assertEquals(signouts, sessionIds, `${label}: exactly that session was signed out`);
+    assertEquals(await sessionExists(sessionIds[0]!), false, `${label}: and it is gone`);
+    assert(!JSON.stringify(log).includes(sessionIds[0]!), `${label}: the session id is never logged`);
+    if (expectCode !== null) assertEquals((await proofRows(bob.uid)).length, 0, `${label}: no proof was minted`);
+  };
+  await run("ok", {}, null);
+  await run("hands", { otherAccount: true }, "email_proof_mismatch");
+  await run("stale", { staleStampAfterVerify: true }, "email_proof_refused");
+});
+
+Deno.test("PR35 L2: ONE normalisation, in the database: the mint and the redemption agree with lower(btrim()) for case, spaces, tab, NBSP, em space, newline, U+0130, plus tags and a trailing dot (JavaScript hashes nothing)", DT, async () => {
+  await setupOnce();
+  const spellings: Array<[string, (e: string) => string]> = [
+    ["upper case", (e) => e.toUpperCase()],
+    ["surrounding spaces", (e) => `   ${e}  `],
+    ["a tab", (e) => `\t${e}\t`],
+    ["a no-break space", (e) => `\u00a0${e}\u00a0`],
+    ["an em space", (e) => `${e}\u2003`],
+    ["a newline", (e) => `${e}\n`],
+    ["a plus tag", (e) => e.replace("@", "+tag@")],
+    ["U+0130 for an i", (e) => e.replace("i", "\u0130")],
+    ["a trailing dot", (e) => `${e}.`],
+  ];
+  let n = 0;
+  for (const [label, spell] of spellings) {
+    n++;
+    // MINT: accepted exactly when the database says the variant is the target's address (a fresh pair, so one Apple identity per account is never in the way)
+    const m = await proofPair(`pr35e${n}m`);
+    const variant = spell(m.bob.email);
+    const dbSame = async (v: string): Promise<boolean> => (await adminSql()`select lower(btrim(${v})) = lower(btrim(${m.bob.email})) as s`)[0]!.s as boolean;
+    const sameMint = await dbSame(variant);
+    const sub = `pr35e-${n}-${RUN}`;
+    const mint = signinEmailProofs().record({ callerUserId: m.alice.uid, targetUserId: m.bob.uid, email: variant, provider: "apple", subject: sub, sessionId: await newSession(m.bob.uid) });
+    if (!sameMint) {
+      const e = await httpError(mint);
+      assertEquals([e.status, e.code], [409, "email_proof_refused"], `mint with ${label}: the database says it is another address`);
+      assertEquals((await proofRows(m.bob.uid)).length, 0);
+    } else {
+      const pid = await mint;
+      const row = await oneProof(m.bob.uid);
+      assertEquals(row.email_hash, await sha256Hex(m.bob.email), `mint with ${label}: the stored hash is sha256 of the target's own normalised address`);
+      // REDEEM with the SAME variant the proof was minted for: links (one rule on both sides)
+      assertEquals(await asCaller(m.alice.uid, (r) => r.linkIdentityWithProof(pid, proofInput(sub, variant), ENVELOPE())), true, `link with ${label}`);
+      assertEquals(await rawCount(`select count(*) as n from auth.identities where user_id = '${m.bob.uid}' and provider_id = '${sub}'`), 1, `${label}: linked to the target`);
+    }
+    // REDEEM with the variant a proof for the CANONICAL address was minted for: judged by the same expression
+    const r = await proofPair(`pr35e${n}r`);
+    const rv = spell(r.bob.email);
+    const rsub = `pr35e-${n}-r-${RUN}`;
+    const rpid = await signinEmailProofs().record({ callerUserId: r.alice.uid, targetUserId: r.bob.uid, email: r.bob.email, provider: "apple", subject: rsub, sessionId: await newSession(r.bob.uid) });
+    const sameRedeem = (await adminSql()`select lower(btrim(${rv})) = lower(btrim(${r.bob.email})) as s`)[0]!.s as boolean;
+    const outcome = await asCaller(r.alice.uid, (repo) => repo.linkIdentityWithProof(rpid, proofInput(rsub, rv), ENVELOPE())).then(
+      () => "linked",
+      (e: unknown) => `${(e as HttpError).status}:${(e as HttpError).code}`,
+    );
+    assertEquals(outcome, sameRedeem ? "linked" : "409:email_proof_refused", `redeem with ${label}: agrees with the database's own comparison`);
+  }
+});
+
+Deno.test("PR35 L2: through the handler, an Apple address the database treats as another address is NOT the proof path (a direct link to the caller) and one it treats as the same IS (to the target). The claim is trimmed / lower-cased once at parse time (apple-id-token.ts); every comparison after it is the database's", DT, async () => {
+  await setupOnce();
+  for (const [label, spell] of [
+    ["upper case", (e: string) => e.toUpperCase()],
+    ["a tab", (e: string) => `\t${e}`],
+    ["a plus tag", (e: string) => e.replace("@", "+x@")],
+    ["U+0130", (e: string) => e.replace("i", "\u0130")],
+  ] as const) {
+    const key = label.replace(/\W/g, "");
+    const { alice, bob } = await proofPair(`pr35f${key}`);
+    const claim = spell(bob.email);
+    // what the handler hands the database: the parse-time normalisation of the claim; the database's rule decides from there
+    const parsed = claim.trim().toLowerCase();
+    const same = (await adminSql()`select lower(btrim(${parsed})) = lower(${bob.email}) as s`)[0]!.s as boolean;
+    const sub = `apple-sub-pr35f-${key}-${RUN}`;
+    const world = appleWorld({ nextRefreshToken: "r.pr35f", nextSubject: sub, revoked: [], revokeStatus: 200 });
+    const token = await mintIdentityToken(appleKey, sub, { rawNonce: RAW_NONCE, claims: { email: claim } });
+    const calls: string[] = [];
+    const out = await handleLinkProvider({ ...(await linkReq({ identityToken: token })), emailProof: { code: "123456" } }, alice.uid, depsFor(alice.uid, world, gotrueLike({ ok: true, userId: bob.uid }, calls)));
+    assertEquals(out.linkedTo, same ? "proven_account" : "self", `${label}: the database decides`);
+    assertEquals(calls.length, same ? 1 : 0, `${label}: the OTP verifier ran only on the proof path`);
+    assertEquals(await rawCount(`select count(*) as n from auth.identities where provider_id = '${sub}' and user_id = '${same ? bob.uid : alice.uid}'`), 1, label);
+  }
 });
 
 Deno.test("PR4a: the proof rows are deleted with the account (delete_my_data) as caller or as target, and purged an hour past expiry; a live proof of others survives both", DT, async () => {
@@ -930,7 +1202,7 @@ Deno.test("PR4a: the proof rows are deleted with the account (delete_my_data) as
   const carol = await newUser("pr4a9c");
   await stampSignIn(carol.uid);
   const dave = await newUser("pr4a9d");
-  const mint = (caller: string, target: { uid: string; email: string }, sub: string) => signinEmailProofs().record({ callerUserId: caller, targetUserId: target.uid, email: target.email, provider: "apple", subject: `${sub}-${RUN}` });
+  const mint = async (caller: string, target: { uid: string; email: string }, sub: string) => signinEmailProofs().record({ callerUserId: caller, targetUserId: target.uid, email: target.email, provider: "apple", subject: `${sub}-${RUN}`, sessionId: await newSession(target.uid) });
   await mint(alice.uid, bob, "pr4a9-ab");
   await stampSignIn(alice.uid);
   await mint(dave.uid, alice, "pr4a9-da");

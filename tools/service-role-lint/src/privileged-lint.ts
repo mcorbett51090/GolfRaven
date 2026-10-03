@@ -32,6 +32,20 @@
 //   privileged-unsafe-sql         (PR4c) `.unsafe(` with anything but one string literal (a concatenation forms `SET LOCAL ROLE postgres` across two
 //                                 literals), and `unsafe` taken off a connection in any other shape (an alias, a destructure).
 //
+//   privileged-driver-import     (PR #34 gate LOW-1) the driver is imported exactly once, by the specifier `postgres`. Any other import (static, `export ... from`,
+//                                 `require(`) whose specifier contains `postgres` / `postgresjs` is a second handle on the driver (`import pg3 from
+//                                 "https://deno.land/x/postgresjs@v3.4.5/mod.js"` is the exact URL the import map resolves `postgres` to), a second value import
+//                                 of `postgres` is too, and `createRequire` (`createRequire(import.meta.url)("postgres")`) / `node:module` may not appear.
+//   privileged-global-access      also (PR #34 LOW-1): any member access whose property name is `Deno` (`x.Deno`, `this.Deno`, `e.currentTarget.Deno`, a
+//                                 destructure `{ Deno: d } = x`), wherever it appears: the allowed `addEventListener` hands its listener an event and a `this`
+//                                 whose chain reaches the global object.
+//   privileged-unsafe-sql         also (PR #34 LOW-1): any `.file(` (postgres.js `sql.file(path)` runs a file as SQL, the same raw-SQL entry as `.unsafe(`).
+//   privileged-mint-scope         (edge role PR #35, migration 0041) the minter role `edge_signin_minter` and the `"signin_mint"` kind of `openScopedTx` are
+//                                 the ONE capability that can write the email-proof table. The role name may appear only inside `openScopedTx` (the one
+//                                 function that switches roles); the kind string only inside `openScopedTx` and `signinEmailProofs` (the one caller);
+//                                 every `openScopedTx(` call passes a string-literal kind (so the scope above can be read off the text); and
+//                                 `openScopedTx` is only ever called, never aliased or passed.
+//
 // PR4c (LOW-1) also tightened two of the rules above:
 //   * `Deno` is now an ALLOW-list, not a shape list: ANY reference to the identifier `Deno` other than the exact chain `Deno.env.get("<one string
 //     literal>")` is a privileged-env-access finding (`const { env } = Deno` followed by a computed name no longer slips past, because the destructure is
@@ -60,12 +74,24 @@ type PrivilegedRuleId =
   | "privileged-global-access"
   | "privileged-computed-member"
   | "privileged-unsafe-sql"
+  | "privileged-driver-import"
+  | "privileged-mint-scope"
   | "parse-error";
 
 export type PrivilegedFinding = Omit<Finding, "rule"> & { rule: PrivilegedRuleId };
 
-/** The only roles a transaction may switch into (the edge roles; the login `edge_gateway` is a member of both with SET). */
+/** The roles a transaction may switch into (the edge roles; the login `edge_gateway` is a member of each with SET). `edge_signin_minter` is allowed only in
+ * MINT_ROLE_FUNCTIONS (see `privileged-mint-scope`). */
 const ALLOWED_ROLES = new Set(["edge_actor", "edge_system"]);
+const MINTER_ROLE = "edge_signin_minter";
+const MINT_KIND = "signin_mint";
+/** The only function that may name the minter role (it is the only one that switches roles). */
+const MINT_ROLE_FUNCTIONS = new Set(["openScopedTx"]);
+/** The only functions that may name the `signin_mint` kind: the one that implements it, and the one that uses it. */
+const MINT_KIND_FUNCTIONS = new Set(["openScopedTx", "signinEmailProofs"]);
+/** The one specifier the driver is imported by (supabase/functions/deno.json maps it to a pinned URL). */
+const DRIVER_SPECIFIER = "postgres";
+const SCOPED_TX_FUNCTION = "openScopedTx";
 /** The only functions that may mention the service-role key (see the file header and the comment above `adminClient` in privileged.ts). */
 const SERVICE_KEY_FUNCTIONS = new Set(["adminClient", "isServiceRoleBearer"]);
 /** The only function that may open a transaction / a pool / a savepoint. */
@@ -154,6 +180,22 @@ export function lintPrivilegedSource(source: string): PrivilegedFinding[] {
     }
   }
 
+  // PR #34 LOW-1: the driver is imported ONCE, by the specifier `postgres`. Every other way to name it is a second, unchecked handle.
+  let driverValueImports = 0;
+  const looksLikeDriver = (spec: string): boolean => /postgres/i.test(spec);
+  for (const stmt of ast.body) {
+    if (stmt.type === AST_NODE_TYPES.ImportDeclaration && stmt.importKind !== "type") {
+      const spec = String(stmt.source.value);
+      if (spec === DRIVER_SPECIFIER) driverValueImports += 1;
+      else if (looksLikeDriver(spec)) add("privileged-driver-import", stmt, `an import of \`${spec}\`: the driver is imported once, as "${DRIVER_SPECIFIER}" (the import map's pinned URL); any other specifier that names it is a second handle on the driver`);
+      if (spec === "node:module" || spec === "module") add("privileged-driver-import", stmt, `an import of \`${spec}\`: createRequire builds a require() that loads the driver (or anything) by a name no scan sees`);
+    }
+    if ((stmt.type === AST_NODE_TYPES.ExportAllDeclaration || stmt.type === AST_NODE_TYPES.ExportNamedDeclaration) && stmt.source && looksLikeDriver(String(stmt.source.value))) {
+      add("privileged-driver-import", stmt, `a re-export from \`${String(stmt.source.value)}\`: a second handle on the driver`);
+    }
+  }
+  if (driverValueImports > 1) add("privileged-driver-import", ast, `the driver "${DRIVER_SPECIFIER}" is imported ${driverValueImports} times: exactly one import is allowed`);
+
   // Ancestors, nearest last. FunctionDeclaration names are what the allow-lists key on.
   const stack: TSESTree.Node[] = [];
   const inFunction = (names: Set<string>): boolean => stack.some((n) => n.type === AST_NODE_TYPES.FunctionDeclaration && n.id !== null && names.has(n.id.name));
@@ -187,8 +229,17 @@ export function lintPrivilegedSource(source: string): PrivilegedFinding[] {
       } else if (m[4] !== undefined) {
         const target = m[4] === HOLE ? HOLE : m[4].replace(/^"|"$/g, "").toLowerCase();
         if (target === HOLE) add("privileged-forbidden-role", node, "SET ROLE with a role that is not a literal: the role must be spelled out (edge_actor | edge_system)");
-        else if (!ALLOWED_ROLES.has(target)) add("privileged-forbidden-role", node, `SET ROLE ${target}: only edge_actor and edge_system may be switched to`);
+        else if (target === MINTER_ROLE) {
+          // allowed only inside openScopedTx; outside it the text scan below reports the role name as a privileged-mint-scope finding
+        } else if (!ALLOWED_ROLES.has(target)) add("privileged-forbidden-role", node, `SET ROLE ${target}: only edge_actor and edge_system may be switched to`);
       }
+    }
+    // privileged-mint-scope: the minter role and the kind that uses it
+    if (new RegExp(MINTER_ROLE, "i").test(text) && !inFunction(MINT_ROLE_FUNCTIONS)) {
+      add("privileged-mint-scope", node, `the minter role \`${MINTER_ROLE}\` outside ${[...MINT_ROLE_FUNCTIONS].join(" / ")}: only the one function that switches roles may name it (it is the only role that can write the email-proof table)`);
+    }
+    if (new RegExp(`\\b${MINT_KIND}\\b`).test(text) && !inFunction(MINT_KIND_FUNCTIONS)) {
+      add("privileged-mint-scope", node, `the \`${MINT_KIND}\` transaction kind outside ${[...MINT_KIND_FUNCTIONS].join(" / ")}: only the minter path may open a transaction as the minter role`);
     }
     // privileged-guc-in-ts
     if (/\b(set_config|current_setting)\s*\(/i.test(text)) {
@@ -312,6 +363,42 @@ export function lintPrivilegedSource(source: string): PrivilegedFinding[] {
       add("privileged-global-access", node, "dynamic import(): it can load code (a data: URL, another driver) that this pass never sees");
     }
 
+    // ---- privileged-driver-import: createRequire (PR #34 LOW-1), `require(` and a dynamic import of the driver ----
+    if (node.type === AST_NODE_TYPES.Identifier && node.name === "createRequire") {
+      add("privileged-driver-import", node, "`createRequire`: it builds a require() that can load the driver (`createRequire(import.meta.url)(\"postgres\")`) or any module by a name no scan sees");
+    }
+    if (node.type === AST_NODE_TYPES.CallExpression && node.callee.type === AST_NODE_TYPES.Identifier && node.callee.name === "require") {
+      const a = node.arguments[0];
+      const spec = a === undefined ? undefined : constString(a);
+      if (spec === undefined || looksLikeDriver(spec)) add("privileged-driver-import", node, "`require(` of the driver or of a name that is not a literal: a second handle on the driver");
+    }
+
+    // ---- privileged-global-access: any `.Deno` member, wherever it appears (PR #34 LOW-1) ----
+    if (node.type === AST_NODE_TYPES.MemberExpression && propertyName(node) === "Deno") {
+      add("privileged-global-access", node, "a member access named `Deno` (`x.Deno`, `this.Deno`, `e.currentTarget.Deno`): an event's currentTarget or a function's `this` is the global object, which reaches `Deno.env` by a chain the Deno-identifier rule never sees");
+    }
+    if (node.type === AST_NODE_TYPES.ObjectPattern) {
+      for (const p of node.properties) {
+        if (p.type === AST_NODE_TYPES.Property && ((!p.computed && p.key.type === AST_NODE_TYPES.Identifier && p.key.name === "Deno") || (p.key.type === AST_NODE_TYPES.Literal && p.key.value === "Deno"))) {
+          add("privileged-global-access", p, "a destructure that takes `Deno` off another object (`const { Deno: d } = e.currentTarget`): the same reach as `x.Deno`");
+        }
+      }
+    }
+
+    // ---- privileged-mint-scope: openScopedTx is called with a literal kind, and never aliased ----
+    if (node.type === AST_NODE_TYPES.CallExpression && node.callee.type === AST_NODE_TYPES.Identifier && node.callee.name === SCOPED_TX_FUNCTION) {
+      const k = node.arguments[0];
+      if (!(k !== undefined && ((k.type === AST_NODE_TYPES.Literal && typeof k.value === "string") || (k.type === AST_NODE_TYPES.TemplateLiteral && k.expressions.length === 0)))) {
+        add("privileged-mint-scope", node, "openScopedTx( called with a kind that is not a string literal: the minter scope can only be checked when the kind is spelled out");
+      }
+    }
+    if (node.type === AST_NODE_TYPES.Identifier && node.name === SCOPED_TX_FUNCTION && isReference(node) && !isAmbientDeclaration()) {
+      const parent = stack[stack.length - 1];
+      const isCallee = parent?.type === AST_NODE_TYPES.CallExpression && parent.callee === node;
+      const isDeclaration = parent?.type === AST_NODE_TYPES.FunctionDeclaration && parent.id === node;
+      if (!isCallee && !isDeclaration) add("privileged-mint-scope", node, "a reference to openScopedTx that is not a call (an alias, an argument): the literal-kind check cannot follow it");
+    }
+
     // ---- privileged-computed-member ----
     if (node.type === AST_NODE_TYPES.MemberExpression && node.computed && !isPlainLiteralKey(node.property)) {
       add("privileged-computed-member", node, "computed member access with a key that is not a string or number literal: a key built at run time reaches any member (`db[\"be\" + \"gin\"]`) by a name no text scan sees");
@@ -335,9 +422,12 @@ export function lintPrivilegedSource(source: string): PrivilegedFinding[] {
         add("privileged-unsafe-sql", node, ".unsafe( with anything but a single string literal (or `unsafe` used in another shape): raw SQL assembled at run time (`\"SET LOCAL \" + \"ROLE postgres\"`) is invisible to the SQL-text rules");
       }
     }
+    if (node.type === AST_NODE_TYPES.MemberExpression && propertyName(node) === "file") {
+      add("privileged-unsafe-sql", node, ".file( : postgres.js runs a file as SQL, a raw-SQL entry point outside every SQL-text rule (the file is read at run time)");
+    }
     if (node.type === AST_NODE_TYPES.ObjectPattern) {
       for (const p of node.properties) {
-        if (p.type === AST_NODE_TYPES.Property && !p.computed && p.key.type === AST_NODE_TYPES.Identifier && p.key.name === "unsafe") {
+        if (p.type === AST_NODE_TYPES.Property && !p.computed && p.key.type === AST_NODE_TYPES.Identifier && (p.key.name === "unsafe" || p.key.name === "file")) {
           add("privileged-unsafe-sql", p, "`unsafe` destructured off a connection: the raw-SQL entry point, taken out of reach of the .unsafe( literal-argument rule");
         }
       }

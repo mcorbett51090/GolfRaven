@@ -3145,6 +3145,8 @@ The owner decided (2026-10-02) to build the OTP-proven link in `edge` mode rathe
 [`docs/security/edge-role-design.md`](edge-role-design.md) section 12.1. **Nothing here has been exercised against a real Supabase Auth**: the OTP is a scripted verifier that stamps `auth.users.last_sign_in_at` the way GoTrue
 is believed to.
 
+> **Superseded in part by 0041 ("Edge role PR #35" below):** the minter is no longer `edge_system` but the dedicated role `edge_signin_minter`, the mint also takes a GoTrue session id, and the address and subject are hashed in the database only. Read the PR #35 section for the current shape; the rows below describe 0039 as it merged.
+
 ### What 0039 contains
 
 | Object | What |
@@ -3304,3 +3306,69 @@ New: `supabase/tests/matrix/20_retention_hygiene_purges.sql` (63 cells, every gr
 ### `[unverified]`
 
 The runbook additions in design section 15 (item 0 deploy order's isolate-recycling remark, 3a, 7): isolate counts and pooler pool sizes, `verify_jwt` defaults and the non-JWT secret keys against the bearer pattern, and whether the platform injects `SUPABASE_DB_URL`. Nothing was run against a real Supabase project, Supavisor or `pg_cron`; prettier was not run.
+
+## Edge role PR #35 (2026-10-03): hardening the proof-bound link after the PR #31 gate, and the PR #34 lint finding (migration `0041_signin_proof_hardening.sql`)
+
+The PR #31 gate passed 0039 with L1 (LOW), L2 (LOW/NIT) and N2 (NIT); the PR #34 gate left one LOW in the privileged-file lint (LOW-1). All four are addressed here. Migrations 0001-0040 are untouched
+(`check-migrations-immutable.sh --base ed2defe`: 40 files byte-identical; `--self-test` OK). Base: `ed2defe` (identical in content to main `93e732d` after PR4c merged). Design, the options and the **changed trust argument**:
+[`docs/security/edge-role-design.md`](edge-role-design.md) section 12.1.1. **Nothing here has been exercised against a real Supabase Auth**: the session row and its `session_id` claim are scripted.
+
+### What 0041 contains
+
+| Finding | What was built | Not built, and why |
+|---|---|---|
+| **L1 (a)** any unbound `edge_system` transaction (drain, queue, import, retention) could mint | The role `edge_signin_minter` (NOLOGIN NOINHERIT NOBYPASSRLS, a member of nothing); `edge_gateway` a member `INHERIT FALSE, SET TRUE`; `USAGE` on `private` and `EXECUTE` on `signin_record_email_proof` **moved** from `edge_system` (the 0039 five-argument function is dropped, a six-argument one is created); `openScopedTx` kind `"signin_mint"`; lint rule `privileged-mint-scope`; checks 2, 9, 10, 12 and the self-check/provisioning updated; the "no actor bound" precondition holds under the new role. | A second login for the minter (a credential boundary instead of a privilege boundary): it would need a second pool and secret; recorded as a design option, not a defect (design 12.1.1, "What was not built"). |
+| **L1 (b)** bind the proof to the session `verifyOtp` created | Built. The mint takes `p_session_id` and refuses unless `auth.sessions` has that id **for the target**, created within 60 s; `private.signin_email_proof.session_id` under a UNIQUE index (one session, one proof); `EmailOtpResult` carries `sessionId` (the access token's `session_id` claim) and `closeSession()`; the handler signs out exactly that session after the mint, in a `finally`. `private_definer` gets `SELECT (id, user_id, created_at) ON auth.sessions` (asserted). | Columns are `[unverified — training knowledge]`: `auth.sessions.id / user_id / created_at`, that `verifyOtp` creates the row, that the token's `session_id` claim is its id, that the grant is legal on a hosted project. Built anyway because every failure is closed (every mint refuses, visible at once in the P4 spike), the columns are the three most basic of the table, and GoTrue's own `/logout` identifies the session by that claim. The P4 spike item and its order are in design 12.1.1. |
+| **L2** normalisation | The mint takes the RAW address and the RAW subject and does `lower(btrim())` and `sha256` itself, with the redemption's expression; JavaScript hashes neither. The OTP failure counter's bucket is keyed on the **target account the database resolved** (`sha256("signin-otp-target:" \|\| owner uid)`), so no spelling buys fresh attempts. | The Apple claim is still trimmed and lower-cased once at parse time (`apple-id-token.ts`); every comparison after it is the database's (design 12.1.1, L2 fact 1). |
+| **N2** stale proofs visible to any `private_definer` code | `pd_signin_proof_select` / `_delete` admit stale rows only inside the purge window `app.signin.proof_purge = 'on'` (check-7 form), opened and closed by `purge_signin_email_proofs` and the mint's own bounded cleanup. `definer_policy_allowlist` rows and `definer_policy_exprs.txt` regenerated. | |
+| **PR #34 LOW-1** lint | `privileged-driver-import` (exactly one driver import, by the specifier `postgres`; any other import / re-export / `require(` naming `postgres` or `postgresjs`, a second value import of the specifier, `createRequire`, `node:module`); any member named `Deno` (`x.Deno`, `this.Deno`, `e.currentTarget.Deno`, a destructure key) under `privileged-global-access`; `.file(` and a destructured `file` under `privileged-unsafe-sql`; `privileged-mint-scope`. A dynamic `import(` of anything was already `privileged-global-access`. The CI function-list guard now also fails if any of the three deno steps has a step-level `if:` or `continue-on-error:` (the NIT). | |
+
+**The grants, all of them:** `GRANT edge_signin_minter TO edge_gateway WITH INHERIT FALSE, SET TRUE`; `GRANT USAGE ON SCHEMA private TO edge_signin_minter`; `GRANT EXECUTE ON FUNCTION private.signin_record_email_proof(uuid, uuid, text, text, text, uuid) TO edge_signin_minter`
+(the move; `edge_system` loses its EXECUTE with the dropped function); `GRANT SELECT (id, user_id, created_at) ON auth.sessions TO private_definer`. Nothing else is granted to anyone; `edge_policy_allowlist` and its fixture are unchanged (`private.definer_policy_allowlist` and `definer_policy_exprs.txt` change for the two N2 policies).
+
+**Provisioning and the self-check.** `tools/db/provision-edge-login.sh` creates nothing and grants nothing; it now refuses to bless a login next to a misconfigured minter (LOGIN, INHERIT, a member of any role, `edge_gateway`'s grant with INHERIT / ADMIN or without SET, any such row) and only notes when 0041 is not yet applied;
+`test-provision-edge-login.sh` proves the accept and five refusals (it re-grants by the original grantor so the cluster ends with exactly the row it started with, in both harness modes). `assertEdgeConnectionSafe` needed no list change (a deny-list of privileged roles; its membership-closure walk already refuses a BYPASSRLS role anywhere in the closure); a Deno cell proves the closure is exactly the four roles and
+that the minter made BYPASSRLS is refused by both the gate and the `signin_mint` transaction's own assertion. `private.function_inventory.expected_edge_signin_minter` is a new column (true for one function).
+
+### The trust argument, changed (full table in design 12.1.1)
+
+An injected statement in a system lane that cannot change role **can no longer mint at all** (`42501`): that is (a), a privilege boundary. One that can also switch role (`SET ROLE` / `set_config('role', ...)`: `edge_gateway` holds `SET` on all three roles) **can reach the minter role**, exactly as it can already reach `edge_actor`
+and `bind_actor(<any uid>)` (R6, unchanged); it still **cannot mint without the victim's live session id**, which no edge role can read: that is (b), a secret. The pgTAP cell `KNOWN LIMIT (R6)` pins the first half so the role is not read as more than it is. R6 itself is unchanged, and closing it is PR5.
+
+### Tests
+
+- **pgTAP**: `19_signin_proof_link.sql` 58 to **78** (the role by the catalog: attributes, no membership, `edge_gateway`'s one SET TRUE / INHERIT FALSE row, one executable function, no relation / sequence / CREATE / policy / `auth.sessions` privilege; the old function gone; the unique index; the N2 window: nothing visible or deletable with no window, only the exact value `on` opens it, only stale rows through it);
+  `19_signin_proof_link_edge.sql` 78 to **127** (as the real `edge_gateway` login: `edge_system` cannot mint, bound or unbound or as a lane; `edge_actor`, a bound actor, a system delegate and the delegate-as-`edge_actor` cannot; the minter inside a bound / delegate transaction is refused; the minter can read and call nothing else and cannot `SET ROLE` to `service_role` / `authenticated` / `private_definer` / `postgres`;
+  the `KNOWN LIMIT (R6)` cell; session refusals: unknown id, another account's fresh session, a 10-minute-old one, a future-dated one, a second mint on one session in the same and in a later transaction, a NULL session; and the L2 cells: spaces, case, TAB, NBSP, EM SPACE, U+0130 for an ASCII i, a target whose own address contains U+0130, plus tags, and the subject as exact bytes, each for the mint and the redeemer, asserted against the plain SQL comparison in whatever database they run);
+  `10_function_inventory.sql` 53 to **70** (checks 2, 9, 10 and 12 for the role, with 11 must-fail cells). Whole matrix: 24 files, **2161 tests** (was 2075), PASS in both harness modes.
+- **Deno** (`signin-methods.deno.test.ts` 40 tests, was 33; `edge-role.deno.test.ts` +1; whole suite **248**, was 240): a mint attempted from inside an `edge_system` transaction with a perfectly valid argument set is refused `42501` and the same arguments through the real minter work; `edge_system` cannot read `auth.sessions`; the `signin_mint` transaction runs as the minter and can do nothing else and refuses a bind;
+  the session refusals through the real minter; verifyOtp's session is signed out after the mint on every handler path (success, a mint the database refuses, an address that changed hands) and its id is never logged; `sessionIdOfAccessToken` (base64url, padding, a non-uuid, a missing claim, garbage); the full flow's order is verifyOtp, mint, sign-out of exactly that session; the L2 end to end (nine spellings through the real mint and redeemer; four through the handler); the self-check and the minter.
+- **Concurrency** `tools/db/test-signin-proof-concurrency.sh` (mints as the minter with a session): blocking case and 6 symmetric races, one winner each.
+- **Unit** (`pnpm --filter @golfraven/rules exec vitest run ...`): **44 files / 842 tests** (835 before: +4 in `signin-methods-handler.test.ts` for the session binding, sign-out on every path, the fake minter's session rules and the per-target counter key; +3 CI guard cells); the lint's own **5 files / 401 tests** (382 before: +19 = 13 new must-fail fixtures, one cell each, the must-pass fixture extended with the minter shapes, and 6 edge-case tests).
+
+### Mutation proofs (each applied to a world-readable `/tmp` copy, the relevant suites then run, every one CAUGHT; no mutated text is left in the tree)
+
+| Mutation | Caught by |
+|---|---|
+| re-grant the mint EXECUTE to `edge_system` (a following migration, so 0041's own assertions are bypassed) | matrix 10 (the `edge_system EXECUTE mismatches` block raises), matrix 19 (1 cell), matrix 19 edge (2), `verify-function-inventory.mjs` (check 2), Deno `PR35 L1` |
+| drop the no-actor-bound check from the minter | matrix 19 edge (3: the minter in a bound transaction, a delegate binding, the delegate as `edge_actor`) |
+| give the minter an extra privilege: `SELECT` on `app.play` / on the proof table / on `auth.sessions`, or `EXECUTE` on the purge | matrix 10 (check 12 / the minter's EXECUTE block, 3-4 cells), matrix 19 (1-3), matrix 19 edge (1-2), `verify-function-inventory.mjs` (check 12 / check 2) |
+| normalisation mismatch, in the database (the mint no longer lower-cases the address) | matrix 19 edge (7 cells, and the file aborts on the first accepted mint) |
+| normalisation mismatch, in the Edge code (`input.email.trim().toLowerCase()` before the mint) | Deno `PR35 L2` (1 of 248) |
+| drop the session check from the minter | matrix 19 edge (4: unknown id, another account's session, a stale one, a future one) |
+| the `signin_mint` kind opens as `edge_system` | Deno (16 of 248: every mint, the L1 cells, the self-check cell) |
+| the session is signed out BEFORE the mint / never signed out | Deno (5 / 2 of 248) |
+| lint, on a copy of the real `privileged.ts`: a second driver import by the pinned URL; `createRequire(...)("postgres")`; `e.currentTarget.Deno` and `this.Deno` inside the real `addEventListener` listeners; `t.file(...)`; the minter role outside `openScopedTx`; the `signin_mint` kind in `withSigninSystem`; a computed kind; an alias of `openScopedTx` | each exits 1 naming `privileged-driver-import` / `privileged-global-access` / `privileged-unsafe-sql` / `privileged-mint-scope`; the real file is clean |
+| CI guard, on a copy of `ci.yml`: a step-level `if:` and, separately, `continue-on-error:` on the `deno check` step | `ci-function-lists.test.ts` (1 cell each) |
+
+### Not verified (`[unverified]`), in one place
+
+- **GoTrue** (as 0039, plus): `auth.sessions.id / user_id / created_at`; that `verifyOtp` creates the row and commits it before returning; that the access token's `session_id` claim is that id; that the grant is legal for the migrating role on a hosted project; the 60 s windows against the database clock. Where any of it is untrue every mint refuses (`409 email_proof_refused`; no `session_id` logs `signin_otp_session_id_missing`): fail closed.
+- Everything 0039 and the O12 section list as unverified is still so. The `edge` handler path was exercised against a scripted verifier and the real harness cluster, never against Supabase Auth.
+- `pnpm -r typecheck`: 12 of 13 projects pass; `tools/catalog` fails with `Cannot find module 'esbuild'` in `test/neutrality.ts` in this sandbox (the file and its dependencies are untouched by this change; `@golfraven/catalog-tools...` was built first as the PR4a notes require).
+
+### Verification
+
+- **`tools/db/test.sh`, exit 0 in `HARNESS_MODE=superuser` AND `restricted`** (ports 5742 / 5743, private log dir): pgTAP `Files=24, Tests=2161, Result: PASS` in each; `tools/db/test-signin-proof-concurrency.sh` PASS; `test-provision-edge-login.sh` OK (the new accept + five refusals); the H2 `no migration_owner` checks (both approximations) pass with the new `auth.sessions` grant; the Deno integration suite **248 passed / 0 failed** in each;
+  `verify-function-inventory.mjs: OK`; service-role lint clean.
+- `deno check --frozen` and `deno cache --frozen` over the CI entry points on a fresh `DENO_DIR`: both exit 0; `supabase/tests/deno.lock` unchanged (no new import specifier). `check-migrations-immutable.sh --base ed2defe`: OK (40 files). `gitleaks dir . --config .gitleaks.toml`: no leaks.
