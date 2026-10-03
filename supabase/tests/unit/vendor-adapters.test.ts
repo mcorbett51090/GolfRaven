@@ -16,7 +16,7 @@ import { createIntegrityDecoder, isCompletePlayIntegrityConfig, type PlayIntegri
 import { buildAndroidPort, buildAttestationPorts, buildIosPort } from "../../functions/_shared/rewards/production-ports.js";
 import { fromBase64UrlStrict } from "../../functions/_shared/rewards/binding.js";
 import { verifyP256WebCrypto } from "../../functions/_shared/rewards/app-attest.js";
-import { VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "../../functions/_shared/rewards/types.js";
+import { VendorForbiddenError, VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "../../functions/_shared/rewards/types.js";
 import { pemToDer, type VendorHttp } from "../../functions/_shared/rewards/vendor-http.js";
 import { sha256, toB64 } from "./rewards-test-crypto.js";
 
@@ -219,6 +219,36 @@ describe("Play Integrity decoder adapter", () => {
     await expect(run(text(200, "not json"))).rejects.toBeInstanceOf(VendorUnavailableError);
     await expect(run(json(200, {}))).rejects.toBeInstanceOf(VendorUnavailableError);
     await expect(run(json(200, { tokenPayloadExternal: "x" }))).rejects.toBeInstanceOf(VendorUnavailableError);
+  });
+
+  it("Google's 403 on the DECODE is a `VendorForbiddenError` (a NotConfigured subtype, so grading and the 503 are unchanged), not \"our credentials\": it names both readings, and it keeps the cached OAuth token", async () => {
+    const http = scriptedHttp([tokenOk(), text(403, ""), json(200, { tokenPayloadExternal: PAYLOAD })]);
+    const decoder = createIntegrityDecoder(googleConfig(), http);
+    const err = await decoder.decode("A").then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(VendorForbiddenError);
+    expect(err).toBeInstanceOf(VendorNotConfiguredError);
+    expect((err as Error).message).toMatch(/another app or project/);
+    expect((err as Error).message).not.toMatch(/credentials/i);
+    // the next decode reuses the token: an attacker repeating a foreign-app token cannot force an OAuth exchange per request
+    await decoder.decode("B");
+    expect(http.calls.filter((c) => c.url.includes("oauth2"))).toHaveLength(1);
+  });
+
+  it("... whereas a 401 on the decode IS \"our credentials\" and discards the cached token (the next decode re-exchanges)", async () => {
+    const http = scriptedHttp([tokenOk(), text(401, ""), tokenOk(), json(200, { tokenPayloadExternal: PAYLOAD })]);
+    const decoder = createIntegrityDecoder(googleConfig(), http);
+    const err = await decoder.decode("A").then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(VendorNotConfiguredError);
+    expect(err).not.toBeInstanceOf(VendorForbiddenError);
+    expect((err as Error).message).toMatch(/our credentials/);
+    await decoder.decode("B");
+    expect(http.calls.filter((c) => c.url.includes("oauth2"))).toHaveLength(2);
+  });
+
+  it("a 403 on the OAuth exchange itself is still \"our credentials\" (not the ambiguous decode 403)", async () => {
+    const err = await createIntegrityDecoder(googleConfig(), scriptedHttp([text(403, "")])).decode("T").then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(VendorNotConfiguredError);
+    expect(err).not.toBeInstanceOf(VendorForbiddenError);
   });
 
   it("an OAuth failure is not configured (bad credentials) or unavailable (Google down)", async () => {

@@ -52,12 +52,22 @@
 // nonce, no token, a token that expired or was consumed — stays `422 challenge_used`. The concurrent case is covered too: a request that
 // loses the atomic consume to an identical one answers with the winner's token.
 //
-// THE NO-ATTESTATION RULE (the capability dodge closed). `hardwareSupportsAttestation` is a self-report, so "I cannot attest" proves
-// nothing about a device that HAS attested. A request with no attestation grades `failed`, whatever it claims, when this account's device
-// has shown it can attest: iOS = a REGISTERED App Attest key on the device row (`Repo#rewards.deviceAttestState` returns a key only for a
-// verified registration, 0034); Android = a token previously issued on this device graded `attested` (`Repo#checkinToken.hasAttestedOnDevice`).
-// Otherwise the claim decides, as before. Cost to an honest client: once a device has a registered key or an attested token, a check-in
-// that omits the attestation is `failed` (and raises the signal); the client must send one, or accept that.
+// THE NO-ATTESTATION RULE (the capability claim NARROWED for honest clients, not closed). `hardwareSupportsAttestation` is a self-report, so
+// "I cannot attest" proves nothing about a device that HAS attested. A request with no attestation grades `failed`, whatever it claims, when this
+// account's device row has shown it can attest: iOS = a REGISTERED App Attest key (`Repo#rewards.deviceAttestState` returns a key only for a
+// verified registration, 0034); either platform = a token previously issued on the device graded `attested` (`Repo#checkinToken.hasAttestedOnDevice`)
+// or an activation verdict of `attested` recorded on it (`Repo#rewards.hasAttestedVerdictOnDevice`, 0043). The rule is ONE function shared with
+// rewards-activate (rewards/attestation-evidence.ts#gradeNoAttestation). Otherwise the claim decides, as before.
+// ⚠ The evidence is bound to the DEVICE ID, which the client chooses (up to 20 per account): an attacker claims "incapable" on a device id that
+// has never attested and gets `unattestable` instead of `failed`. That is not closed (see docs/security/p3-money-path-requirements.md,
+// "Attestation follow-ups", where the account-level variant is evaluated and left as an owner decision). Cost to an honest client: once a device
+// has shown it can attest, a check-in that omits the attestation is `failed` (and raises the signal); the client must send one, or accept that.
+// The signal is opened the same way as for a presented attestation (`raiseAttestationFailedIfNone`: one OPEN signal per account, serialised).
+//
+// OUT-OF-ORDER ASSERTIONS. The App Attest counter is shared by `checkin-token` and `rewards-activate` and is strictly monotonic. Two assertions of
+// one key in flight at once can commit out of order; the lower one then grades `failed` (never `attested`, strictness is unchanged) with the reason
+// `counter_out_of_order` rather than `counter_replay`, so a reviewer can tell an honest client's race from a replay. The mobile client's contract is
+// one assertion in flight per key across BOTH endpoints (docs/security/p3-money-path-requirements.md, "Attestation follow-ups").
 //
 // P3c gate round 2 fixes:
 //   - should-fix "nonce": the caller must now present the RAW nonce
@@ -74,8 +84,10 @@ import type { Repo } from "../types.ts";
 import { Errors, HttpError } from "../http.ts";
 import { computeCheckinAndroidBinding, fromBase64UrlStrict, toBase64Url, type Sha256Fn } from "../rewards/binding.ts";
 import { computeIosCheckinBinding } from "../rewards/string-binding.ts";
-import { VendorNotConfiguredError, VendorUnavailableError, type Grade } from "../rewards/types.ts";
+import { VendorForbiddenError, VendorNotConfiguredError, VendorUnavailableError, type Grade } from "../rewards/types.ts";
+import { logVendorFault } from "../rewards/vendor-log.ts";
 import type { VerificationPorts } from "../rewards/verification-ports.ts";
+import { gradeNoAttestation, lostAdvanceReason, noAttestationReasons } from "../rewards/attestation-evidence.ts";
 import type { CheckinAttestation, TokenRequest } from "./token-request-shape.ts";
 
 export type { CheckinAttestation, TokenRequest } from "./token-request-shape.ts";
@@ -123,6 +135,12 @@ const fail503 = (code: "attestation_not_configured" | "attestation_unavailable",
  * fail closed, the transaction rolls back (the challenge is not consumed, nothing is written), safe to retry. Anything else is not ours to
  * interpret and propagates. NEITHER is ever graded `failed`. */
 function mapVendorError(e: unknown): unknown {
+  if (e instanceof VendorForbiddenError) {
+    // Google's 403 on the decode: ours or the caller's (a token from another app) `[unverified]`. Same 503 and the same non-grading as NotConfigured
+    // (a subtype), but logged at warn level and rate-limited, never as "our credentials are wrong": any account can send such a token.
+    logVendorFault("checkin-token", "decode_forbidden", e.message);
+    return fail503("attestation_not_configured", "device attestation is not available on this deployment; no check-in token was issued");
+  }
   if (e instanceof VendorNotConfiguredError) {
     console.error("checkin-token: attestation vendor is not configured:", e.message);
     return fail503("attestation_not_configured", "device attestation is not available on this deployment; no check-in token was issued");
@@ -163,8 +181,7 @@ async function gradePresentedAttestation(
     if (device.attestKeyId !== null && (await repo.rewards.advanceAttestCounter(challenge.deviceId, device.attestKeyId, verdict.counter))) {
       return { grade: "attested", reasons: [] };
     }
-    const current = device.attestKeyId === null ? null : await repo.rewards.deviceAttestState(challenge.deviceId);
-    return { grade: "failed", reasons: [current !== null && current.attestKeyId !== device.attestKeyId ? "key_replaced" : "counter_replay"] };
+    return { grade: "failed", reasons: [await lostAdvanceReason(challenge.deviceId, device.attestKeyId, verdict.counter, repo)] };
   }
 
   const port = deps.ports.android;
@@ -193,13 +210,6 @@ async function originalTokenForRepeat(
   const token = await repo.checkinToken.findByChallenge(challenge.id);
   if (!token || token.consumedAt !== null || !(Date.parse(token.expiresAt) > repo.now().getTime())) return null;
   return { jti: token.jti, expiresAt: token.expiresAt, attestationGrade: token.attestationGrade };
-}
-
-/** Has this account's device shown it can attest? (the no-attestation rule, see the header) */
-async function deviceHasShownAttestation(deviceId: string, repo: Repo): Promise<boolean> {
-  const state = await repo.rewards.deviceAttestState(deviceId);
-  if (state !== null && state.attestKeyId !== null) return true;
-  return repo.checkinToken.hasAttestedOnDevice(deviceId);
 }
 
 export async function handleTokenRequest(body: TokenRequest, repo: Repo, digestHex: DigestHexFn, attest?: CheckinAttestationDeps): Promise<IssuedToken> {
@@ -272,16 +282,19 @@ export async function handleTokenRequest(body: TokenRequest, repo: Repo, digestH
       await repo.rewards.raiseAttestationFailedIfNone({ challengeId: challenge.id, deviceId: challenge.deviceId, platform: att.platform, reasons: verdict.reasons, source: "checkin-token" });
     }
   } else {
-    // G3-08's "no token" rule: `failed` on hardware that supports attestation, otherwise `unattestable`. The caller's own claim counts only
-    // when the server has no evidence to the contrary: a device with a registered App Attest key (or a prior `attested` token) CAN attest,
-    // whatever this request says.
-    const claimedCapable = body.hardwareSupportsAttestation;
-    const provenCapable = claimedCapable ? false : await deviceHasShownAttestation(challenge.deviceId, repo);
-    attestationGrade = claimedCapable || provenCapable ? "failed" : "unattestable";
-    if (attestationGrade === "failed") {
-      await repo.fraudSignal.insert("attestation_failed", {
-        challengeId: body.challengeId,
-        reason: claimedCapable ? "hardware_supports_attestation_but_no_verified_token" : "device_has_attested_before_but_no_verified_token",
+    // G3-08's "no token" rule (rewards/attestation-evidence.ts#gradeNoAttestation, shared with rewards-activate): `failed` on hardware that
+    // supports attestation, otherwise `unattestable`; the claim counts only when the server has no evidence to the contrary for this device.
+    const verdict = await gradeNoAttestation(body.hardwareSupportsAttestation, challenge.deviceId, repo);
+    attestationGrade = verdict.grade;
+    if (verdict.grade === "failed") {
+      // Deduplicated like the presented-attestation path (one OPEN signal per account, serialised), and in the same vocabulary as activation.
+      // `platform` is null: no attestation block names one.
+      await repo.rewards.raiseAttestationFailedIfNone({
+        challengeId: challenge.id,
+        deviceId: challenge.deviceId,
+        platform: null,
+        reasons: noAttestationReasons(verdict),
+        source: "checkin-token",
       });
     }
   }

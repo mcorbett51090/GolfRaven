@@ -61,6 +61,8 @@ export interface FakeDeviceAttest {
   attestCounter: number;
   attestPublicKey: Uint8Array | null;
   integrityLast: { grade: Grade } | null;
+  /** 0043 `first_attested_at` as a boolean: set the first time an `attested` verdict is recorded, and never cleared (the trigger's rule). */
+  firstAttested: boolean;
   tokenHash: string | null;
   /** SHA-256 hex of the Android install link id (0027 `install_link_hash`). */
   installLinkHash: string | null;
@@ -146,6 +148,7 @@ export function seedDevice(
     attestCounter: d.attestCounter ?? 0,
     attestPublicKey: d.attestPublicKey ?? null,
     integrityLast: null,
+    firstAttested: false,
     tokenHash: null,
     installLinkHash: d.installLinkHash ?? null,
     fraudVoided: d.fraudVoided ?? false,
@@ -157,7 +160,7 @@ export function seedDevice(
 export function registerFakeDevice(state: FakeState, id: string, platform: "ios" | "android" | null): void {
   const rs = rewardsState(state);
   if (rs.deviceAttest.has(id)) return;
-  rs.deviceAttest.set(id, { platform, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false });
+  rs.deviceAttest.set(id, { platform, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, firstAttested: false, tokenHash: null, installLinkHash: null, fraudVoided: false });
 }
 
 export function openSignal(state: FakeState, userId: string, kind: string): void {
@@ -241,7 +244,7 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
     async deviceAttestState(deviceId: string): Promise<DeviceAttestState | null> {
       const dev = state.devices.get(deviceId);
       if (!dev || dev.userId !== uid) return null;
-      const a = rs.deviceAttest.get(deviceId) ?? { platform: null, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false };
+      const a = rs.deviceAttest.get(deviceId) ?? { platform: null, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, firstAttested: false, tokenHash: null, installLinkHash: null, fraudVoided: false };
       return { id: deviceId, platform: a.platform, attestKeyId: a.attestKeyId, attestCounter: a.attestCounter, attestPublicKey: a.attestPublicKey };
     },
     async advanceAttestCounter(deviceId: string, keyId: string, counter: number): Promise<boolean> {
@@ -255,7 +258,14 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
       const a = rs.deviceAttest.get(deviceId);
       if (!a) return;
       a.integrityLast = { grade: verdict.grade };
+      if (verdict.grade === "attested") a.firstAttested = true; // app.device_first_attested_stamp: sticky, unlike integrityLast
       if (verdict.tokenHash) a.tokenHash = verdict.tokenHash;
+    },
+    async hasAttestedVerdictOnDevice(deviceId: string): Promise<boolean> {
+      const dev = state.devices.get(deviceId);
+      const a = rs.deviceAttest.get(deviceId);
+      if (!dev || dev.userId !== uid || !a) return false;
+      return a.firstAttested || a.integrityLast?.grade === "attested";
     },
     async hasOpenAttestationFailedSignal(): Promise<boolean> {
       return rs.signals.some((s) => s.userId === uid && s.kind === "attestation_failed" && !s.cleared);

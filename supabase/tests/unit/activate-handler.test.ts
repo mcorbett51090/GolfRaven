@@ -26,6 +26,7 @@ const USER_A = "user-a";
 const USER_B = "user-b";
 const D1 = "11111111-1111-4111-8111-111111111111"; // seeded by makeFakeState for user-a
 const D2 = "22222222-2222-4222-8222-222222222222";
+const D3 = "33333333-3333-4333-8333-333333333333";
 const R1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const R2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const R3 = "aaaaaaaa-0000-4000-8000-000000000003";
@@ -331,6 +332,45 @@ describe("AT (9): §7.5 golden fixtures", () => {
     expect((await activate(withToken, R1, req, deps({}))).state).toBe("held_review");
     expect(signalKinds(withToken)).toEqual(["attestation_failed"]);
   });
+
+  // NIT-3 (0043): an ACTIVATION that graded `attested` is evidence of capability too, and it is sticky.
+  it("the capability dodge, Android: a device whose ACTIVATION verdict was `attested` (no attested check-in token at all) that claims it cannot attest is `failed`", async () => {
+    const state = newWorld();
+    seedDevice(state, { id: D2, userId: USER_A, platform: "android" });
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    await makeFakeRepo(state, USER_A).rewards.recordDeviceVerdict(D2, { grade: "attested", tokenHash: "h" }); // what a successful Android activation records
+    const req: ActivationRequest = { deviceId: D2, platform: "android", attestation: { kind: "none", hardwareSupportsAttestation: false } };
+    expect((await activate(state, R1, req, deps({}))).state).toBe("held_review");
+    expect(signalKinds(state)).toEqual(["attestation_failed"]);
+    expect(rewardsState(state).signals[0]!.detail).toMatchObject({ reasons: ["no_attestation_token", "device_has_attested_before"], source: "rewards-activate" });
+  });
+
+  it("... and it stays evidence after a LATER `failed` / `unattestable` verdict overwrote integrity_last (the sticky mark), while a device that only ever had `unattestable` / `failed` is still believed", async () => {
+    const state = newWorld();
+    seedDevice(state, { id: D2, userId: USER_A, platform: "android" });
+    seedDevice(state, { id: D3, userId: USER_A, platform: "android" });
+    const repo = makeFakeRepo(state, USER_A);
+    await repo.rewards.recordDeviceVerdict(D2, { grade: "attested", tokenHash: null });
+    await repo.rewards.recordDeviceVerdict(D2, { grade: "failed", tokenHash: null });
+    await repo.rewards.recordDeviceVerdict(D3, { grade: "unattestable", tokenHash: null });
+    await repo.rewards.recordDeviceVerdict(D3, { grade: "failed", tokenHash: null });
+    expect(rewardsState(state).deviceAttest.get(D2)!.integrityLast).toEqual({ grade: "failed" }); // the exported "last verdict" was overwritten
+    expect(await repo.rewards.hasAttestedVerdictOnDevice(D2)).toBe(true);
+    expect(await repo.rewards.hasAttestedVerdictOnDevice(D3)).toBe(false);
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const believed: ActivationRequest = { deviceId: D3, platform: "android", attestation: { kind: "none", hardwareSupportsAttestation: false } };
+    expect((await activate(state, R1, believed, deps({}))).state).toBe("held_review");
+    expect(signalKinds(state)).toEqual([]); // D3 never attested: `unattestable`, no signal
+  });
+
+  it("the evidence is the device's OWN: another account's attested verdict on the same id, or another device of the same account, is not evidence (the account-level rule is NOT applied)", async () => {
+    const state = newWorld();
+    seedDevice(state, { id: D2, userId: USER_A, platform: "android" });
+    seedDevice(state, { id: D3, userId: USER_A, platform: "android" });
+    await makeFakeRepo(state, USER_A).rewards.recordDeviceVerdict(D2, { grade: "attested", tokenHash: null });
+    expect(await makeFakeRepo(state, USER_B).rewards.hasAttestedVerdictOnDevice(D2)).toBe(false);
+    expect(await makeFakeRepo(state, USER_A).rewards.hasAttestedVerdictOnDevice(D3)).toBe(false);
+  });
 });
 
 // ===========================================================================
@@ -442,7 +482,7 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
     expect(signalKinds(state)).toContain("attestation_failed");
   });
 
-  it("a REPLAYED counter (assertion counter <= stored) is failed", async () => {
+  it("a REPLAYED counter (assertion counter EQUAL to the stored one) is failed (counter_not_monotonic)", async () => {
     const state = newWorld();
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const { key, port } = await realIos(state, CLEAR, 5);
@@ -451,13 +491,33 @@ describe("AT (5): body-hash binding and counter replay, end to end with the real
     expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_not_monotonic"]);
   });
 
-  it("a counter that passes verification but loses the atomic advance (a race) is also failed", async () => {
+  it("an OUT-OF-ORDER counter (assertion counter BELOW the stored one: counter 7 committed before 6) is failed too, with the distinct reason `counter_out_of_order` (LOW-1)", async () => {
+    const state = newWorld();
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const { key, port } = await realIos(state, CLEAR, 7);
+    const req = await signedRequest(state, key, { rewardId: R1, counter: 6 });
+    expect((await activate(state, R1, req, deps({ ios: port }))).state).toBe("held_review"); // strict monotonicity: held, never attested
+    expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_out_of_order"]);
+    expect(rewardsState(state).deviceAttest.get(D1)!.attestCounter).toBe(7); // not lowered
+  });
+
+  it("a counter that passes verification but loses the atomic advance to a HIGHER counter (a race) is failed with `counter_out_of_order`", async () => {
     const state = newWorld();
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const { key, port } = await realIos(state);
     const req = await signedRequest(state, key, { rewardId: R1, counter: 6 });
     // A concurrent request advanced the counter between verification and the UPDATE.
     const wrapped: IosPort = { ...port, verifyAssertion: async (i) => { const r = await port.verifyAssertion(i); rewardsState(state).deviceAttest.get(D1)!.attestCounter = 9; return r; } };
+    expect((await activate(state, R1, req, deps({ ios: wrapped }))).state).toBe("held_review");
+    expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_out_of_order"]);
+  });
+
+  it("a counter that loses the atomic advance to an EQUAL counter (the same assertion twice at once) stays `counter_replay`", async () => {
+    const state = newWorld();
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const { key, port } = await realIos(state);
+    const req = await signedRequest(state, key, { rewardId: R1, counter: 6 });
+    const wrapped: IosPort = { ...port, verifyAssertion: async (i) => { const r = await port.verifyAssertion(i); rewardsState(state).deviceAttest.get(D1)!.attestCounter = 6; return r; } };
     expect((await activate(state, R1, req, deps({ ios: wrapped }))).state).toBe("held_review");
     expect(rewardsState(state).signals.find((s) => s.kind === "attestation_failed")?.detail.reasons).toEqual(["counter_replay"]);
   });

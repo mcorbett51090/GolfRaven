@@ -46,6 +46,7 @@
 
 import { Errors, HttpError } from "../http.ts";
 import type { Repo } from "../types.ts";
+import { gradeNoAttestation, lostAdvanceReason, noAttestationReasons } from "./attestation-evidence.ts";
 import { computeRequestBinding, fromBase64UrlStrict, toBase64Url, toHex, type BoundBody, type Sha256Fn } from "./binding.ts";
 import { decideActivation, type BitsInput } from "./decision-table.ts";
 import { computeIosActivationBinding } from "./string-binding.ts";
@@ -57,10 +58,12 @@ import {
   type Grade,
   type OwnReward,
   type RewardKind,
+  VendorForbiddenError,
   VendorNotConfiguredError,
   VendorRejectedError,
   VendorUnavailableError,
 } from "./types.ts";
+import { logVendorFault } from "./vendor-log.ts";
 
 /** Build plan §4.7 item 8: "Reward activation (`rewards-activate`) | 10/user/h, 20/device/day". */
 export const RATE_LIMIT_PER_USER_HOUR = 10;
@@ -110,6 +113,12 @@ const fail503 = (code: "attestation_not_configured" | "attestation_unavailable",
  * Unavailable are both 503 (fail closed, nothing written, safe to retry);
  * anything else is not ours to interpret and propagates. */
 function mapVendorError(e: unknown): unknown {
+  if (e instanceof VendorForbiddenError) {
+    // Google's 403 on the decode: ours or the caller's (a token from another app) `[unverified]`. Same 503 as NotConfigured (a subtype), logged at warn
+    // level and rate-limited (vendor-log.ts), never as "our credentials are wrong".
+    logVendorFault("rewards-activate", "decode_forbidden", e.message);
+    return fail503("attestation_not_configured", "device attestation is not available on this deployment; the reward was not changed");
+  }
   if (e instanceof VendorNotConfiguredError) {
     console.error("rewards-activate: attestation vendor is not configured:", e.message);
     return fail503("attestation_not_configured", "device attestation is not available on this deployment; the reward was not changed");
@@ -163,13 +172,6 @@ export async function consumeLiveChallenge(
   return nonceBytes;
 }
 
-/** Has this account's device shown it can attest? iOS: a registered App Attest key. Android: a check-in token graded `attested` on it. */
-async function deviceHasShownAttestation(deviceId: string, repo: Repo): Promise<boolean> {
-  const state = await repo.rewards.deviceAttestState(deviceId);
-  if (state !== null && state.attestKeyId !== null) return true;
-  return repo.checkinToken.hasAttestedOnDevice(deviceId);
-}
-
 async function assessActivatingDevice(rewardId: string, deviceId: string, req: ActivationRequest, repo: Repo, deps: ActivationDeps): Promise<Assessment> {
   const att = req.attestation;
 
@@ -180,14 +182,14 @@ async function assessActivatingDevice(rewardId: string, deviceId: string, req: A
   if (att.kind === "none") {
     const port = att.deviceCheckToken !== undefined ? deps.ports.ios : null;
     const token = att.deviceCheckToken;
-    // The claim is a self-report, so it counts only when the server has no evidence to the contrary (the same rule as checkin-token's
-    // no-attestation path, checkin/token-handler.ts): a device with a REGISTERED App Attest key (`deviceAttestState` returns a key only
-    // for a verified registration, 0034) or a check-in token previously graded `attested` on it CAN attest, so "I cannot" is `failed`.
-    const claimedCapable = att.hardwareSupportsAttestation;
-    const provenCapable = claimedCapable ? false : await deviceHasShownAttestation(deviceId, repo);
+    // The claim is a self-report, so it counts only when the server has no evidence to the contrary for THIS device row: a registered App
+    // Attest key, a check-in token graded `attested`, or an activation verdict of `attested` recorded on it (0043). The rule is the one
+    // checkin-token applies (attestation-evidence.ts#gradeNoAttestation). NARROWED for honest clients, not closed: the device id is client-chosen
+    // (see that module's header and the security doc, "Attestation follow-ups"). `failed` opens the signal below, at intake, deduplicated.
+    const verdict = await gradeNoAttestation(att.hardwareSupportsAttestation, deviceId, repo);
     return {
-      grade: claimedCapable || provenCapable ? "failed" : "unattestable",
-      reasons: provenCapable ? ["no_attestation_token", "device_has_attested_before"] : ["no_attestation_token"],
+      grade: verdict.grade,
+      reasons: noAttestationReasons(verdict),
       tokenHash: token !== undefined ? toHex(await deps.sha256(utf8(token))) : null,
       readBits: port && token !== undefined ? () => port.readBits(token) : null,
       setBit0: null,
@@ -223,13 +225,13 @@ async function assessActivatingDevice(rewardId: string, deviceId: string, req: A
         reasons = [];
       } else {
         grade = "failed";
-        // Two different reasons for the same zero rows (NIT-A): the counter was not higher (a replay, or a lost race with another
-        // advance) vs the key this assertion was verified against is no longer the device's key (a registration replaced it between
-        // the read and the write). The grade and the held outcome are identical; only the diagnostic differs, so an operator reading
-        // the signal can tell a reinstall racing an activation from a replay. The re-read runs only on this failure path, on the
-        // same transaction (READ COMMITTED sees the committed replacement), and decides nothing: it can only relabel a `failed`.
-        const current = device.attestKeyId === null ? null : await repo.rewards.deviceAttestState(deviceId);
-        reasons = current !== null && current.attestKeyId !== device.attestKeyId ? ["key_replaced"] : ["counter_replay"];
+        // Three different reasons for the same zero rows (NIT-A; out-of-order since LOW-1): the key this assertion was verified against is no longer
+        // the device's key (`key_replaced`: a registration replaced it between the read and the write); a LOWER counter is now stored
+        // (`counter_out_of_order`: a concurrent assertion with a higher counter committed first, an honest client's race); or the counter was not
+        // higher otherwise (`counter_replay`). The grade and the held outcome are identical; only the diagnostic differs, so an operator reading the
+        // signal can tell a reinstall racing an activation, or two assertions in flight, from a replay. The re-read runs only on this failure path, on
+        // the same transaction (READ COMMITTED sees the committed change), and decides nothing: it can only relabel a `failed`.
+        reasons = [await lostAdvanceReason(deviceId, device.attestKeyId, verdict.counter, repo)];
       }
     } else {
       grade = verdict.grade;

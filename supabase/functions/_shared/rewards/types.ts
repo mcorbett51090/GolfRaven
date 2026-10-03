@@ -86,6 +86,10 @@ export interface RewardsRepo {
   /** Records the last verdict on the device row (grade + time only — the
    * column is exported to the player, so no reasons) and the token hash. */
   recordDeviceVerdict(deviceId: string, verdict: { grade: Grade; tokenHash: string | null }): Promise<void>;
+  /** Has a verdict of `attested` ever been recorded on this device by an activation (0043)? The Android half of "this device has shown it
+   * can attest" that an ACTIVATION supplies (a check-in token graded `attested` is the other, `Repo#checkinToken.hasAttestedOnDevice`). Sticky:
+   * a later `failed` / `unattestable` verdict, which overwrites the exported `integrity_last`, does not erase it. */
+  hasAttestedVerdictOnDevice(deviceId: string): Promise<boolean>;
   /** Table row 2's input: the account has an OPEN `attestation_failed` signal.
    * Only the signal's own `cleared_at` releases it — never a review of a reward
    * (N3). */
@@ -146,6 +150,17 @@ export class VendorNotConfiguredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "VendorNotConfiguredError";
+  }
+}
+/** Google answered 403 to `decodeIntegrityToken`. A `VendorNotConfiguredError` in every respect that matters (an `instanceof` check for the parent matches,
+ * so grading and the HTTP mapping are unchanged: 503 `attestation_not_configured`, nothing consumed, nothing graded), with ONE difference: it is not
+ * logged as "our credentials are wrong". A 403 here has two readings this code cannot tell apart `[unverified]`: our service account lacks access to the
+ * app, OR the token was minted for another app / project (which any caller can send). The handlers log it at warn level, rate-limited
+ * (vendor-log.ts), so a caller cannot use it to flood or to raise a false credentials alarm. */
+export class VendorForbiddenError extends VendorNotConfiguredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "VendorForbiddenError";
   }
 }
 /** Transient: network failure, timeout, 5xx, 429. Retrying is safe. */

@@ -3427,9 +3427,9 @@ was issued to; `nonce` is the string `POST /v1/checkin/challenge` returned.
 |---|---|---|
 | valid attestation over the binding | `attested` | none |
 | iOS: key registered to THIS user's device, signature valid, `rpIdHash` right, counter strictly greater, stored counter advanced atomically (`UPDATE ... WHERE attest_key_id = $key AND attest_counter < $new`) | `attested` | none |
-| attestation presented but invalid (wrong purpose / nonce / challenge / device / user, replayed or non-increasing counter, lost advance race, replaced key, key of another account, malformed, wrong Android `requestHash` / package / certificate / `deviceIntegrity` / freshness, Google's 400 "cannot decode") | `failed` | `fraud_signal(attestation_failed)` via `raiseAttestationFailedIfNone` (one open per account; detail = `{challengeId, deviceId, platform, reasons, source:"checkin-token"}`, no key material) |
+| attestation presented but invalid (wrong purpose / nonce / challenge / device / user, replayed or non-increasing counter, lost advance race, replaced key, key of another account, malformed, wrong Android `requestHash` / package / certificate / `deviceIntegrity` / freshness, Google's 400 "cannot decode") | `failed` | `fraud_signal(attestation_failed)` via `raiseAttestationFailedIfNone` (one open per account; detail = `{challengeId, deviceId, platform, reasons, source:"checkin-token"}`, no key material). A counter LOWER than the stored one carries `counter_out_of_order`, an EQUAL one `counter_not_monotonic` / `counter_replay` (see "Attestation follow-ups") |
 | iOS attestation on a device with NO registered key | `unattestable` (`key_not_registered`), as activation | none |
-| no attestation, and the claim says capable **or** the device has a registered key / a prior `attested` token | `failed` | `attestation_failed` (reason `hardware_supports_attestation_but_no_verified_token` / `device_has_attested_before_but_no_verified_token`) |
+| no attestation, and the claim says capable **or** the device row has shown it can attest (a registered key, a prior `attested` token, or an `attested` activation verdict, 0043) | `failed` | `attestation_failed` via the SAME `raiseAttestationFailedIfNone` (one open per account; since the follow-ups the no-attestation path no longer inserts one per request); detail `{challengeId, deviceId, platform:null, reasons:["no_attestation_token"] (+ `"device_has_attested_before"` when the evidence, not the claim, decided), source:"checkin-token"}`, the same vocabulary as activation |
 | no attestation, claim says incapable, no such evidence | `unattestable` | none |
 
 A failed attempt **spends its challenge** (the failure is returned as a graded token, never thrown), so there is no free second guess on one nonce.
@@ -3452,12 +3452,16 @@ Everything else about a used challenge stays `422 challenge_used` (another nonce
 
 ### The no-attestation rule, and activation
 
-`hardwareSupportsAttestation` is a self-report. A request without an attestation is `failed` whatever it claims when the server has evidence the device can attest:
-iOS, a **registered** App Attest key on the device (`deviceAttestState` returns a key only for a verified registration, 0034); Android, a token previously issued on
-the device graded `attested` (`Repo#checkinToken.hasAttestedOnDevice`; there is no Android device-level record without a migration). **Cost to an honest client:** once a
-device has a key or an attested token, a check-in that omits the attestation is `failed` and raises the signal, which holds the account's activations (§7.5 row 2).
-The same rule is applied in `rewards-activate`'s `kind:"none"` path (`activate-handler.ts#assessActivatingDevice`, a small local change; reason
-`device_has_attested_before`). **Still open:** a device that never registered a key and never attested can still claim `false` and be believed, as before.
+`hardwareSupportsAttestation` is a self-report. A request without an attestation is `failed` whatever it claims when the server has evidence that THIS DEVICE ROW can
+attest: iOS, a **registered** App Attest key (`deviceAttestState` returns a key only for a verified registration, 0034); either platform, a token previously issued on
+the device graded `attested` (`Repo#checkinToken.hasAttestedOnDevice`), or an activation verdict of `attested` recorded on it (`Repo#rewards.hasAttestedVerdictOnDevice`,
+sticky, migration `0043`; before the follow-ups the Android half counted check-in tokens only). **Narrowed for honest clients, not closed:** the evidence is bound to a
+device ID that the client chooses (up to `MAX_DEVICES_PER_USER` = 20 per account), so an attacker claims "incapable" on a device id that has never attested and is still
+believed (see "Attestation follow-ups", LOW-2, for what that costs and the account-level variant that was NOT implemented). **Cost to an honest client:** once a
+device has shown it can attest, a check-in that omits the attestation is `failed` and raises the signal, which holds the account's activations (§7.5 row 2).
+The rule is ONE function, `rewards/attestation-evidence.ts#gradeNoAttestation`, called by both `checkin-token` and `rewards-activate` (`kind:"none"`; reason
+`device_has_attested_before`); each handler used to carry a verbatim copy. **Still open:** a device that never registered a key and never attested can still claim
+`false` and be believed, as before.
 
 ### Architecture
 
@@ -3495,7 +3499,7 @@ The same rule is applied in `rewards-activate`'s `kind:"none"` path (`activate-h
   `gitleaks dir .` clean. `pnpm -r typecheck` / `test`: every project passes except `tools/catalog` (`Cannot find module 'esbuild'`) and `apps/mobile` (its dependencies, e.g. `zod`, `expo-file-system`, are not installed in this
   sandbox); both fail identically without this change and neither is touched by it.
 
-**Mutation proofs** (each applied to a `/tmp` copy, the unit suite run, success = a test that passes unmutated now fails; **36 of 36 caught**, copies deleted, no mutated text in the tree): the purpose constant replaced by the
+**Mutation proofs** (each applied to a `/tmp` copy, the unit suite run, success = a test that passes unmutated now fails; **36 of 36 caught**, copies deleted, no mutated text left in the tree): the purpose constant replaced by the
 activation purpose; the purpose dropped from the iOS string / from the Android body; `userId` dropped from iOS; the nonce dropped from iOS and from Android; `deviceId` dropped from Android; the counter advance skipped; the verifier's
 `<=` loosened to `<`; the key-id owner check removed; the iOS nonce bound as `""`; the account bound as `""`; each Android check removed alone (`requestHash`, package, certificate digest, `deviceIntegrity`); a vendor error mapped to
 `failed` in the handler and, separately, in the port; the signal not raised; unknown keys accepted (attestation block and top level); idempotency: nonce check dropped, token expiry ignored, consumed token ignored, replay re-graded
@@ -3542,3 +3546,124 @@ an Android device first seen at `checkin-challenge` and then activated on Androi
 the handlers, plus attest-key, push-token and check-in token, and a source guard that `ensureOwn` never defaults to `'ios'`. **Mutants (11, all caught, copies deleted):** unit suite: activation's claim replaced by the
 request's platform, the mismatch refusal removed, attest-key's claim removed, attest-key accepting Android, check-in token's claim removed, a failed block labelling, push-token's claim removed, `ensureOwn` defaulting
 to `'ios'`; real database: the `platform IS NULL` guard removed (last wins), `UPDATE (platform)` also granted to `edge_actor` (the migration's own assertion aborts), the `kind = 'user'` check removed.
+
+## Attestation follow-ups (2026-10-03): the PR #40 security-gate LOWs and NITs (migrations `0043_device_first_attested.sql` and `0044_export_first_attested.sql`)
+
+Server-side only. Nothing on the wire changed: no request shape, no response body, no recorded mobile fixture (the edge-contract recorder was run in verify mode and is unchanged).
+
+### LOW-1: out-of-order assertions of one key get their own reason
+
+**The case.** The App Attest counter is shared by `checkin-token` and `rewards-activate` and is strictly monotonic. A client with two assertions of one key in flight can have them commit out of order
+(counter 7 commits before 6). The lower one is refused, which is correct, and it grades `failed` and raises `fraud_signal(attestation_failed)`, which holds the account's activations (§7.5 row 2).
+Before this change it carried `counter_not_monotonic` or `counter_replay`, the same words as a replay, so a reviewer could not tell an honest race from an attack.
+
+**What changed: the reason only.** Strict monotonicity, the grade (`failed`), the signal kind, the held outcome and the counter (never lowered) are all unchanged. The reason is stored where the others are, in
+`fraud_signal.detail.reasons`; no schema change. Three diagnostics for "the counter did not advance", all stored on the same signal:
+
+| Reason | Where it is decided | Meaning |
+|---|---|---|
+| `counter_out_of_order` (new) | the verifier (`app-attest.ts`): presented counter **below** the stored one; and the lost-advance re-read (`rewards/attestation-evidence.ts#lostAdvanceReason`): the stored counter is now **above** the presented one | a later assertion of this key committed first: an honest client with more than one assertion in flight |
+| `counter_not_monotonic` | the verifier: presented counter **equal** to the stored one | the same counter presented twice (a replay), seen before the advance |
+| `counter_replay` | the lost-advance re-read: the stored counter is now **equal** to the presented one (or there is nothing to compare) | two identical assertions racing, seen at the advance |
+| `key_replaced` (unchanged) | the lost-advance re-read: the key on the device is no longer the one verified | a registration replaced the key between the read and the write |
+
+(The owner's note read "equal stays `counter_replay`". The equal case already had two names depending on where it was seen, `counter_not_monotonic` at the verifier and `counter_replay` at the advance; both are kept as they were
+so no stored or documented reason changes meaning. Only "lower" is new.) The re-read behind `lostAdvanceReason` was already there for `key_replaced`; it runs only on this failure path, on the same transaction, and decides nothing. Both
+handlers call the one function (each used to carry a copy).
+
+**An out-of-order failure still holds the account's activations until a reviewer clears the signal.** That is deliberate (strictness stays), and it is why the client requirement below exists.
+
+### LOW-1(b): MOBILE CLIENT REQUIREMENT (implemented by mobile P4.2b-2): one assertion in flight per key, across BOTH endpoints
+
+The counter lives on the device row and both `POST /v1/checkin/token` (an iOS check-in attestation) and `POST /v1/rewards/{id}/activate` (an iOS activation assertion) advance it. Therefore:
+
+1. **Serialise.** Per App Attest key, at most ONE assertion may be between "generate" (`generateAssertionAsync`) and "the server answered (or the request definitively failed)" at any time, **across both endpoints and across every code path** (foreground check-in, a prefetched-challenge redemption, an activation, a retry). One in-process queue/mutex keyed by key id is the intended shape.
+2. **Generate late.** Generate the assertion immediately before sending the request that carries it, not when the challenge is prefetched or queued, and never generate two ahead and send them in parallel. An assertion whose request was never sent still consumed a counter value on the device: that is harmless (a gap is fine, the server only requires strictly greater) as long as the next one is generated after it.
+3. **Do not retry an assertion in parallel; retry sequentially with a fresh one.** After a timeout or a lost response, wait for the first request to settle before generating the next assertion (an idempotent redemption of the same challenge returns the original token without re-verifying, so a repeat of the SAME check-in request is safe; a NEW assertion must come after).
+4. **Order matters, gaps do not.** The server accepts any strictly increasing sequence per key. It refuses an assertion whose counter is not above the stored one, whatever the reason. A client that ever sends counter N after N+k has committed will be graded `failed` and will open the signal.
+5. **A key replacement resets the counter** (a new key starts from 0); the old key's in-flight assertions are then `key_replaced` / `key_id_mismatch`. Do not register a new key while an assertion for the old one is in flight.
+
+This is a client contract only; nothing server-side serialises the endpoints (a lock held across both would turn a client mistake into a latency problem for every other request of the account).
+
+### LOW-2: the capability claim is NARROWED for honest clients, not closed
+
+**Wording fixed** (code comments `checkin/token-handler.ts` header, `rewards/request-shape.ts`, the new `rewards/attestation-evidence.ts` header, and this document's "no-attestation rule" section, which used to say the dodge was closed). The evidence of capability is bound to a **device id the client chooses**
+(up to `MAX_DEVICES_PER_USER` = 20 per account; a new id is a new device row). So a real device that has attested cannot later claim it cannot, but an attacker can claim "incapable" on a device id that has never attested and is believed.
+What that buys the attacker is `unattestable` instead of `failed`: both are held in activation (§7.5 rows 2/3) and neither is a co-signal at check-in, so it avoids a *signal*, not a reward.
+
+**The account-level rule, evaluated: NOT implemented. Open owner decision.** Candidate: "if any device on the account has ever attested, a no-attestation request on any device of that account grades `failed`."
+
+| Variant | Effect | Verdict |
+|---|---|---|
+| A. account-level `failed` | closes the fresh-device-id claim; but an honest account with a second, genuinely incapable device (an old iPad below the App Attest OS floor, an Android without Play services or not Play-certified, a work phone, a device with attestation temporarily unsupported) would grade `failed`, open `attestation_failed`, and **hold every activation on the account**, a false fraud signal on a legitimate multi-device user, repeatedly (the signal re-opens after each clear) | **rejected** |
+| B. account-level `unattestable` (never `failed`) | the owner's "safe variant" | **no behaviour change**: a no-attestation request that claims "incapable" on a device with no evidence already grades `unattestable`, so there is nothing for B to add |
+| C. reviewer context only: when the account has an attested device and a no-attestation request arrives from another, record that on the held reward's hold detail / the signal | information for a human, no grade or hold change; costs one extra query on every no-attestation request, and needs a reviewer surface to read it | not implemented: it is a product decision about what reviewers see, and the dashboards that would show it are not in this repository |
+
+**Recommendation: keep the per-device rule as it is (accept the residual), and do not implement A.** The residual is bounded: the attacker gains no reward (the request is held either way), needs only ONE device slot in total (a device id that has never attested can be reused for the dodge indefinitely, so the 20-device cap is no cost per attempt), and is already rate-limited (`checkin-token` 60/h per user; activation 10/h per user and 20/day per device). If the owner wants the signal, do C, not A. The stronger lever is on the client: register an App Attest key on **every capable iOS device early** (a registered key is permanent, unforgeable evidence on that row), and the dodge then requires a device id the account has never used.
+**Decision needed from the owner:** (1) accept the residual as is (recommended), (2) ask for C, (3) ask for A and accept the false-positive cost for multi-device honest users.
+
+### NIT-2: the no-attestation `failed` path is deduplicated
+
+`checkin-token`'s no-attestation `failed` path inserted a `fraud_signal` on every request (`Repo#fraudSignal.insert`), so a client repeating it opened a signal per request. It now calls
+`Repo#rewards.raiseAttestationFailedIfNone`, exactly as the presented-attestation path does (one OPEN signal per account, serialised by an advisory lock; clearing it lets the next failure open a new one). The detail is the activation vocabulary:
+`{challengeId, deviceId, platform: null, reasons: ["no_attestation_token"] (+ "device_has_attested_before" when the evidence decided), source: "checkin-token"}` (it was `{challengeId, reason}` with two different `reason` words).
+**The activation side already had the pattern** (`activate-handler.ts` step 7 raises through `raiseAttestationFailedIfNone` for every `failed` grade, `kind:"none"` included), so nothing changed there beyond the shared rule below.
+
+### NIT-3: an Android ACTIVATION counts as evidence of capability (migration `0043`), and the rule is one function
+
+Android had no device-level evidence except a check-in token graded `attested`, so an Android device that attested only at activation could still claim "I cannot attest". An activation records its verdict as `app.device.integrity_last = {grade, at}`, but that column is the **last** verdict: a later `failed` / `unattestable` verdict overwrites it
+and would erase the evidence. So the evidence had to be sticky, which needs a schema change:
+
+- `app.device.first_attested_at timestamptz` (NULL = never). **Stamped once by a `BEFORE INSERT OR UPDATE OF integrity_last, first_attested_at` trigger** (`app.device_first_attested_stamp`) when an `attested` verdict is written to `integrity_last` (on INSERT the value the statement assigned is discarded and the stamp is derived from the inserted verdict, so a `service_role` INSERT cannot plant a stamp that the UPDATE arm would then make permanent: the PR #41 gate's `'2001-01-01'` case); **never cleared or moved** (whatever an UPDATE assigns to it, the trigger restores the old value, by content and not by role).
+- **No grant added or widened.** `edge_actor` holds no UPDATE and no INSERT on the column (only the trigger writes it; Postgres checks column privileges on the columns an UPDATE names, not on columns a BEFORE trigger changes); it reads it through its existing table-level SELECT and the existing own-row policy. No policy added, `FORCE ROW LEVEL SECURITY` untouched (asserted in the migration and in pgTAP). The trigger function is `SECURITY INVOKER`, empty `search_path`, EXECUTEd by no role, with its `private.function_inventory` row.
+- **Edge read** (`Repo#rewards.hasAttestedVerdictOnDevice`): `first_attested_at IS NOT NULL OR integrity_last ->> 'grade' = 'attested'`, own device only. The second arm means a row written before `0043` (no stamp, no backfill: an UPDATE inside a migration is filtered by FORCE RLS for the owner, and the databases are pre-launch) still counts until its next verdict.
+- **Exported** by `GET /v1/me/export` since migration `0044_export_first_attested.sql` (privacy default: include). It is a timestamp about the account's own device, the same kind of fact as `integrity_last`, `first_seen` and `last_seen`, which the export already carries, and the no-attestation rule acts on it. `0044` rebuilds `private.export_my_data` from `0028`'s final body with exactly one change: `first_attested_at` is added to the device block's explicit column list, after `integrity_last`. A timestamptz serialises like `first_seen` (an ISO-8601 string, or JSON `null` for a device that never attested; the key is always present). `0043` itself deliberately left it out; `0044` supersedes that.
+- **Deploy order:** apply `0043` before the Edge code (an older schema answers 42703 to the read); `0044` follows it.
+
+**One shared rule.** `rewards/attestation-evidence.ts` now holds `deviceHasShownAttestation` (registered key, `attested` check-in token, `attested` activation verdict), `gradeNoAttestation`, `noAttestationReasons` and `lostAdvanceReason`; `checkin/token-handler.ts` and `rewards/activate-handler.ts` call them (each carried a verbatim copy before). It is on the earning side's verification-only allow-list (it reads no persistent bit).
+
+### NIT-4: the isolation test is now transitive
+
+`rewards-isolation.test.ts` checked the **direct** imports of earning-side files only, so an allow-listed verification-only module that later imported `devicecheck-client.ts` would have reached the persistent-bit adapter with every assertion green.
+`supabase/tests/unit/import-closure.ts` computes the **runtime import closure** (type-only imports ignored; comments, strings, templates with `${}` nesting and **regular-expression literals** tokenised, so none can hide an import, which a `/^\/*/` regex did to the first version of the scanner, a hidden `_shared/http.ts` import the PR #41 gate reproduced; string-named re-exports, non-ASCII identifiers and `new URL("./x", import.meta.url)` are edges; `import { type A }` conservatively counted, dynamic `import()` with a non-literal argument and unresolvable relative imports reported, never skipped) from `checkin-token/index.ts` and every earning-side entrypoint and file.
+The test asserts that `devicecheck-client.ts`, `production-ports.ts`, `activate-handler.ts` and `rewards-activate/index.ts` are **unreachable** (the chain is printed if one is), that **no file in the closure names a persistent-bit call** (`rewards/types.ts`, which types the iOS port's methods, is the one exception), and that every `_shared/rewards/` file in the closure is verification-only or the one pure constant `privileged.ts` embeds
+(`apple-app-attest-root.ts`). The walker has its own tests on synthetic graphs (`import-closure.test.ts`). **Why a tokenizer and not `deno info --json`:** `deno` is installed in the CI job that runs the unit suite, but the unit suite also runs wherever a developer has no Deno and no network, and `deno info` must fetch the remote modules (esm.sh, deno.land) to resolve the graph; a unit test that fails offline, or that needs a second toolchain, was not added. The tokenizer decides regex-versus-division by the usual previous-token heuristic; its one known limit is a regex literal right after `)` (`if (x) /re/.test(y)`), read as a division: if such a regex's body also contains `/*` or `//` it can still hide the text after it. Not covered; the walker's other safeguard is that every earning-side file is scanned by the by-name text checks too. **Proven by mutation** (below): an import added to an allow-listed module's own dependency, which the old direct-import checks cannot see, fails the new test.
+Finding while writing it: `checkin-token/index.ts` reaches `privileged.ts`, which holds only `import type` of `production-ports.ts` (erased), so the earning side's closure is clean.
+
+### Google's 403 on `decodeIntegrityToken` (the gate's unverified note): handled without changing grading `[unverified]`
+
+`play-integrity-client.ts` mapped a 403 on the decode call to `VendorNotConfiguredError` ("Google rejected our credentials"), which is a 503 and a `console.error` line. **If Google answers 403 rather than 400 for a token minted for another app or project `[unverified: not checked here, no network]`,** any signed-in account can trigger that: a 503 for itself, a credentials-sounding error line in our log, and (the cache was dropped on every 401/403) one OAuth exchange per request.
+Changes, all minimal, grading untouched:
+
+- a decode 403 is now `VendorForbiddenError`, **a subclass of `VendorNotConfiguredError`**: the same 503 `attestation_not_configured`, the same non-grading, nothing consumed. Its message names both readings and does not say "credentials". A 403 on the OAuth exchange itself is still "our credentials". A 401 on the decode is unchanged.
+- the handlers log it at **warn** level through `rewards/vendor-log.ts`, **at most one line per (endpoint, kind) per minute** per isolate, with the count suppressed; an attacker cannot flood the log or raise a false credentials alarm.
+- the cached OAuth token is no longer discarded on a 403 (a fresh token would be refused the same way); it is still discarded on a 401.
+
+**What is not known:** which status Google really answers for a foreign-app token (400 would be graded `failed`, as for an undecodable token; 403 is the 503 above), and whether a 403 can also mean our service account lost access to the app. The code treats both readings as possible and does not guess. If 403 is confirmed for foreign tokens, grading it `failed` would be a deliberate follow-up (an attacker could then open signals for themselves only: the signal is per account).
+
+### Tests and verification (attestation follow-ups; final tree, nothing from before the last edit is counted)
+
+- **Unit** (`pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts`): **51 files / 1007 tests** (was 48 / 942). New files: `attestation-evidence.test.ts` (the shared rules' tables), `import-closure.test.ts` (the walker on synthetic graphs),
+  `vendor-log.test.ts` (the rate-limited line and both handlers' 503); changed: `app-attest`, `checkin-token-attestation`, `checkin-token-idempotency`, `activate-handler`, `vendor-adapters`, `rewards-isolation` (now with the transitive closure), the fakes.
+- **pgTAP** (`tools/db/test.sh`, both `HARNESS_MODE`s): **Files=27, Tests=2264, PASS** in both (was 25 / 2200). New: `22_device_first_attested.sql` (40: schema, stamping, stickiness, only a verdict can set it, posture, export) and `22_device_first_attested_edge.sql` (23: the real `recordDeviceVerdict` / `hasAttestedVerdictOnDevice` statements as an `edge_actor` login, no direct path, another account's device invisible). `0044` added 4 cells: 3 in `22_device_first_attested.sql` (the export carries the stamp, JSON `null` for a never-attested device, another account's export has none) and 1 in `14_me_export.sql` that pins the device block's exact column set.
+- **Deno integration** (same script, both modes): **276 passed, 0 failed** (was 268; `me-handlers.deno.test.ts` +1 for the exported column): `checkin-attest.deno.test.ts` +4 (out-of-order on the real database, the equal-counter race, the deduplicated no-attestation signal, the Android activation evidence with a later `failed` verdict) and `rewards-activate.deno.test.ts` +3 (equal race, out-of-order, the Android dodge through activation); the unequal-race cells changed from `counter_replay` to `counter_out_of_order`.
+- `verify-function-inventory` OK and `service-role-lint` clean (inside both `test.sh` runs and standalone); `tools/db/check-migrations-immutable.sh --base origin/main` OK (42 existing migrations byte-identical; `0043` is new); `deno check --frozen` and `deno cache --frozen` over every entrypoint exit 0 with `supabase/tests/deno.lock` unchanged;
+  `gitleaks dir .` no leaks; `GOLFRAVEN_DEMO=1 pnpm -r test` exit 0 for every project (including `apps/mobile` 1191 tests and `tools/catalog`, which could not run in the previous round's sandbox).
+- **The mobile edge-contract recorder, verify mode, passes with NO change to any recorded fixture** (no server answer on the wire changed: the new reasons live only in `fraud_signal.detail`).
+
+**Mutation proofs** (each applied to a world-readable `/tmp` copy, the suite run, success = a test that passes unmutated now fails; **24 of 24 caught**, copies deleted, a search of the repository for the mutation marker prints nothing):
+1a (7): the verifier's out-of-order reason collapsed into the replay reason; the verifier's equal-counter refusal removed (strictness loosened); the lost-advance reason `>` loosened to `>=`; `counter_out_of_order` never reported; `key_replaced` never reported; the activation handler and the check-in handler each bypassing the shared reason function with a constant.
+3 (5): the no-attestation path inserting a signal per request again (the dedupe removed); the activation-verdict arm of the evidence dropped; the check-in-token arm dropped; the evidence ignored (claim always believed); the proven reason not told apart; plus, against a real database, **the trigger made non-sticky (killed by pgTAP, 8 cells)** and **`hasAttestedVerdictOnDevice` reading `integrity_last` only (killed by the two Android Deno cells)**.
+4 (5): the walker not recursing; `import type` followed as a runtime import; comments not stripped; and the two **transitive** proofs: an `import "./devicecheck-client.ts"` added to the allow-listed `vendor-http.ts` (reachability, and the by-name check, fail with the chain printed; the old direct-import checks cannot see this hop), and a persistent-bit name added to `signin/bytes.ts`, a file reached only through `privileged.ts` and on no old list (only the new closure test fails).
+5 (5): the decode 403 mapped back to the credentials error; the cached token discarded on 403 again; the logger's rate limit removed; each handler's 403 branch removed.
+Control: a **type-only** `import type {} from "./devicecheck-client.ts"` in `vendor-http.ts` does **not** make the adapter reachable (the reachability test still passes); only the two by-name text checks, which also reject the adapter's NAME in a comment-free line, object to it.
+
+**`0044` mutation proofs** (world-readable `/tmp` copies of the migration, `tools/db/test.sh`, copies deleted, no mutated text left in the tree; **2 of 2 caught, by pgTAP**): `first_attested_at` dropped from the export's device block (killed by the pinned column set in `14_me_export.sql` and two cells in `22_device_first_attested.sql`), and `first_attested_at` read from the wrong column (`first_seen AS first_attested_at`; killed by the never-attested-device-exports-JSON-null cell). The Deno cell covers the same path through the real handler. The mobile edge-contract recorder (whose `me-export` answer comes from the unit fake, which does not model SQL columns) is unchanged in verify mode and no fixture changed.
+
+### PR #41 gate follow-ups (third commit; `0043` and `0044` were not on `main` yet, so `0043` was edited rather than superseded)
+
+- **NIT-1, INSERT could set the stamp (`0043`).** The trigger was `BEFORE UPDATE` only, so a `service_role` INSERT could write any `first_attested_at` (the gate wrote `'2001-01-01'`) and the UPDATE arm then made it permanent. It is now `BEFORE INSERT OR UPDATE OF integrity_last, first_attested_at`, branching on `TG_OP`: on INSERT the assigned value is discarded and the stamp is derived from the inserted `integrity_last` (`now()` if `attested`, NULL otherwise; `OLD` is not read); the UPDATE arm is unchanged. The migration header and the function-inventory note say so. pgTAP: +6 cells in `22_device_first_attested.sql` (a bogus stamp with no verdict gives NULL and is not made permanent by a later verdict; an `attested` INSERT is stamped `now()`, not the assigned value; `unattestable` / `failed` / NULL verdicts give NULL; the trigger fires on INSERT and UPDATE). The "row written before `0043`" cells (`22_*` and `22_*_edge`) can no longer be produced through the trigger, so they switch it off for that one INSERT (as the table owner) and on again.
+- **NIT-2.** The `0043` header no longer says the column is not exported (`0044` exports it) and its "nothing but a verdict write can set it" claim now reads "by any role, on INSERT or UPDATE".
+- **NIT-3.** The residual cost of the capability claim is **one** device slot in total (a device id that never attests can be reused for the dodge indefinitely), not one per attempt.
+- **LOW-1, the walker missed imports behind regex literals.** A regex such as `/^\/*/` was read as the start of a block comment, hiding everything up to the next `*` + `/`, a real import included (the gate hid one in `_shared/http.ts` and the tests still passed). `import-closure.ts` now tokenises strings, templates (with `${}` nesting) and regex literals (the previous-token heuristic) before stripping comments, and also follows string-named re-exports, non-ASCII identifiers and `new URL("./x", import.meta.url)`. Fixtures: `/^\/*/` then an import, `/[//]/` and `/[///]/` then an import, an escaped slash in a regex, a string with `/*` and with an escaped quote, a template with `//` including a nested `${ }` template, and the gate's `http.ts` reproduction end to end.
+- **Mutation proofs:** INSERT arm removed from the trigger, INSERT arm keeping the assigned value, INSERT arm always stamping (all three caught by pgTAP, 3 of 3); the gate's `_shared/http.ts` reproduction applied to a copy (fails `rewards-isolation.test.ts`, with the chain printed), regex detection disabled, the character class ignored, template nesting not tracked, the unicode flag dropped, the `new URL` edge not recorded, string escapes ignored (all caught, 7 of 7).

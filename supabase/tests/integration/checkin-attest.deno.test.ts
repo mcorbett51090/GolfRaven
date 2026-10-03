@@ -152,7 +152,44 @@ Deno.test("checkin-attest: a counter that verifies but loses the ATOMIC advance 
   const out = await redeem(u, await iosReq(u, dev.id, dev.key, ch, 6), { ...iosDeps(u), ports: racing });
   assertEquals(out.attestationGrade, "failed");
   assertEquals(await counterOf(dev.id), 9);
+  assertEquals(((await signals(u))[0]!.detail as Record<string, unknown>).reasons, ["counter_out_of_order"]);
+});
+
+Deno.test("checkin-attest: a counter that loses the atomic advance to an EQUAL one stays `counter_replay`", DT, async () => {
+  const u = await freshUser("race-equal");
+  const dev = await deviceWithKey(u, 5);
+  const ch = await issue(u, dev.id);
+  const real = buildIosAssertionPort(APP_ID, { sha256, verifyP256: verifyP256WebCrypto });
+  const racing: VerificationPorts = {
+    android: null,
+    ios: {
+      verifyAssertion: async (input) => {
+        const r = await real.verifyAssertion(input);
+        await adminSql()`update app.device set attest_counter = 6 where id = ${dev.id}`; // an identical request advanced it to the very same counter
+        return r;
+      },
+    },
+  };
+  const out = await redeem(u, await iosReq(u, dev.id, dev.key, ch, 6), { ...iosDeps(u), ports: racing });
+  assertEquals(out.attestationGrade, "failed");
+  assertEquals(await counterOf(dev.id), 6);
   assertEquals(((await signals(u))[0]!.detail as Record<string, unknown>).reasons, ["counter_replay"]);
+});
+
+Deno.test("checkin-attest (LOW-1): OUT-OF-ORDER assertions of one key, 7 committed then 6: 7 is `attested`, 6 is `failed` with `counter_out_of_order` (an honest race, not a replay), the counter stays 7", DT, async () => {
+  const u = await freshUser("ooo");
+  const dev = await deviceWithKey(u, 5);
+  const c6 = await issue(u, dev.id);
+  const c7 = await issue(u, dev.id);
+  const r6 = await iosReq(u, dev.id, dev.key, c6, 6);
+  const r7 = await iosReq(u, dev.id, dev.key, c7, 7);
+  assertEquals((await redeem(u, r7, iosDeps(u))).attestationGrade, "attested");
+  assertEquals((await redeem(u, r6, iosDeps(u))).attestationGrade, "failed");
+  assertEquals(await counterOf(dev.id), 7);
+  const sigs = await signals(u);
+  assertEquals(sigs.length, 1);
+  assertEquals((sigs[0]!.detail as Record<string, unknown>).reasons, ["counter_out_of_order"]);
+  // the same on the other path: the lost advance race, with the verifier having read the counter BEFORE 7 committed, is covered above (race).
 });
 
 Deno.test("checkin-attest: no attestation on a device with no registered key is graded as before (claim true -> failed + signal; false -> unattestable)", DT, async () => {
@@ -280,6 +317,54 @@ Deno.test("checkin-attest: the no-attestation rule — a device with a registere
   assertEquals((await redeem(u, att, { userId: u.uid, ports: { ios: null, android: ok }, sha256 })).attestationGrade, "attested");
   const c4 = await issue(u, andDev);
   assertEquals((await redeem(u, { challengeId: c4.id, nonce: c4.nonce, hardwareSupportsAttestation: false }, none)).attestationGrade, "failed");
+});
+
+Deno.test("checkin-attest (NIT-2): the no-attestation `failed` path opens ONE signal per account (not one per request), in the same `reasons` vocabulary as activation", DT, async () => {
+  const u = await freshUser("dedupe");
+  const keyed = await deviceWithKey(u, 5);
+  const none = { userId: u.uid, ports: { ios: null, android: null }, sha256 } as CheckinAttestationDeps;
+  for (let i = 0; i < 3; i++) {
+    const c = await issue(u, keyed.id);
+    assertEquals((await redeem(u, { challengeId: c.id, nonce: c.nonce, hardwareSupportsAttestation: i === 1 }, none)).attestationGrade, "failed");
+  }
+  assertEquals((await tokenRows(u)).length, 3, "every request still issued its (failed) token");
+  const sigs = await signals(u);
+  assertEquals(sigs.length, 1, "...but they share one open signal");
+  assertEquals(sigs[0]!.detail, { challengeId: sigs[0]!.detail.challengeId, deviceId: keyed.id, platform: null, reasons: ["no_attestation_token", "device_has_attested_before"], source: "checkin-token" });
+  // clearing it lets the next failure open a new one
+  await adminSql()`update app.fraud_signal set cleared_at = now() where user_id = ${u.uid} and kind = 'attestation_failed'`;
+  const c4 = await issue(u, keyed.id);
+  assertEquals((await redeem(u, { challengeId: c4.id, nonce: c4.nonce, hardwareSupportsAttestation: true }, none)).attestationGrade, "failed");
+  const after = await signals(u);
+  assertEquals(after.length, 2);
+  assertEquals(after.filter((x) => x.cleared_at === null).length, 1);
+});
+
+Deno.test("checkin-attest (NIT-3, 0043): an Android device whose ACTIVATION verdict was `attested` (no attested token at all) is `failed` when it sends no attestation and claims it cannot attest, even after a later `failed` verdict; another device of the account is not evidence", DT, async () => {
+  const u = await freshUser("android-activation");
+  const dev = await withOwnership(u.actor, async (repo: Repo) => (await repo.device.ensureOwn(freshUuid(), "android")).id);
+  const other = await withOwnership(u.actor, async (repo: Repo) => (await repo.device.ensureOwn(freshUuid(), "android")).id);
+  const none = { userId: u.uid, ports: { ios: null, android: null }, sha256 } as CheckinAttestationDeps;
+  // control: before any verdict the claim is believed
+  const c0 = await issue(u, dev);
+  assertEquals((await redeem(u, { challengeId: c0.id, nonce: c0.nonce, hardwareSupportsAttestation: false }, none)).attestationGrade, "unattestable");
+  // an attested activation verdict (privileged.ts#recordDeviceVerdict), then a later failed one that overwrites integrity_last
+  await withOwnership(u.actor, (repo: Repo) => repo.rewards.recordDeviceVerdict(dev, { grade: "attested", tokenHash: null }));
+  await withOwnership(u.actor, (repo: Repo) => repo.rewards.recordDeviceVerdict(dev, { grade: "failed", tokenHash: null }));
+  assertEquals((await tokenRows(u)).filter((r) => r.attestation_grade === "attested").length, 0, "the only evidence is the activation's");
+  const c1 = await issue(u, dev);
+  assertEquals((await redeem(u, { challengeId: c1.id, nonce: c1.nonce, hardwareSupportsAttestation: false }, none)).attestationGrade, "failed");
+  const sigs = await signals(u);
+  assertEquals(sigs.length, 1);
+  assertEquals((sigs[0]!.detail as Record<string, unknown>).reasons, ["no_attestation_token", "device_has_attested_before"]);
+  // the account's OTHER device never attested: its claim is believed (the account-level rule is not applied)
+  const c2 = await issue(u, other);
+  assertEquals((await redeem(u, { challengeId: c2.id, nonce: c2.nonce, hardwareSupportsAttestation: false }, none)).attestationGrade, "unattestable");
+  // another account sees nothing of this device
+  const b = await freshUser("android-activation-b");
+  assertEquals(await withOwnership(b.actor, (repo: Repo) => repo.rewards.hasAttestedVerdictOnDevice(dev)), false);
+  assertEquals(await withOwnership(u.actor, (repo: Repo) => repo.rewards.hasAttestedVerdictOnDevice(dev)), true);
+  assertEquals(await withOwnership(u.actor, (repo: Repo) => repo.rewards.hasAttestedVerdictOnDevice(other)), false);
 });
 
 Deno.test("checkin-attest: consumeForFix clamps to the CHALLENGE's window — a fix captured hours before the redemption of a prefetched challenge is accepted (the token's own 15 min window would refuse it)", DT, async () => {

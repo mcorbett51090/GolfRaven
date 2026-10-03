@@ -2574,6 +2574,20 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
         where id = ${deviceId} and user_id = ${uid}`;
     },
 
+    async hasAttestedVerdictOnDevice(deviceId: string): Promise<boolean> {
+      // 0043: `first_attested_at` is stamped, once and never cleared, by a trigger the first time an `attested` verdict is written to
+      // `integrity_last` (recordDeviceVerdict), so a LATER `failed` / `unattestable` verdict, which overwrites `integrity_last`, does not erase
+      // the evidence. `integrity_last` is also read, so a row written before 0043 (which has no stamp) still counts.
+      // Own device only (user_id): another account's device is not visible and reads false.
+      const rows = await trx`
+        select exists (
+          select 1 from app.device
+          where id = ${deviceId} and user_id = ${uid}
+            and (first_attested_at is not null or integrity_last ->> 'grade' = 'attested')
+        ) as attested`;
+      return Boolean(rows[0]?.attested);
+    },
+
     async hasOpenAttestationFailedSignal(): Promise<boolean> {
       // Only the signal's own cleared_at releases it (N3): a review of one reward
       // never waives an account-level signal.

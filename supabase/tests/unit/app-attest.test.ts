@@ -68,9 +68,17 @@ describe("AT 5: a mismatched request hash, a replayed counter and a tampered ass
     expect(await verify({ signWithHash: otherChallenge })).toMatchObject({ ok: false, grade: "failed" });
   });
 
-  it("a replayed counter (equal to, or below, the stored one) fails", async () => {
+  it("a replayed counter (EQUAL to the stored one) fails, as `counter_not_monotonic`", async () => {
     expect(await verify({ counter: 4 })).toMatchObject({ ok: false, grade: "failed", reason: "counter_not_monotonic" });
-    expect(await verify({ counter: 3 })).toMatchObject({ ok: false, grade: "failed", reason: "counter_not_monotonic" });
+  });
+
+  it("a counter BELOW the stored one fails too (strict monotonicity), with the distinct reason `counter_out_of_order` (an honest race, not a replay)", async () => {
+    expect(await verify({ counter: 3 })).toMatchObject({ ok: false, grade: "failed", reason: "counter_out_of_order" });
+    expect(await verify({ counter: 0 })).toMatchObject({ ok: false, grade: "failed", reason: "counter_out_of_order" });
+  });
+
+  it("only a counter strictly ABOVE the stored one verifies", async () => {
+    expect(await verify({ counter: 5 })).toEqual({ ok: true, counter: 5 });
   });
 
   it("a signature from a different key fails", async () => {

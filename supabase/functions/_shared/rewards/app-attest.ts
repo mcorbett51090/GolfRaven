@@ -242,6 +242,10 @@ export async function verifyAppAttestAssertion(
   // platform, challenge — or a tampered body) lands here.
   if (!valid) return { ok: false, grade: "failed", reason: "bad_signature_or_request_hash" };
 
-  if (auth.counter <= device.attestCounter) return { ok: false, grade: "failed", reason: "counter_not_monotonic" };
+  // STRICTLY greater, unchanged. The two failures are told apart for the reviewer only (same grade, same signal): a counter LOWER than the stored one
+  // means a later assertion of this key (higher counter) committed first, so an honest client with two assertions in flight, whereas EQUAL is
+  // the same counter presented twice (a replay).
+  if (auth.counter < device.attestCounter) return { ok: false, grade: "failed", reason: "counter_out_of_order" };
+  if (auth.counter === device.attestCounter) return { ok: false, grade: "failed", reason: "counter_not_monotonic" };
   return { ok: true, counter: auth.counter };
 }
