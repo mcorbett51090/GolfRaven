@@ -10,7 +10,7 @@
  * "Configured" means ALL of `EXPO_PUBLIC_API_BASE_URL`, `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` parsed (`config-values.ts`):
  * half a configuration is no configuration, so a build can never talk to a server it cannot authenticate to.
  */
-import { createHttpApiClient, createUnconfiguredApi, type ApiClient, type HttpFetch } from "../api";
+import { createHttpApiClient, createUnconfiguredApi, type ApiClient, type HttpApiOptions, type HttpFetch } from "../api";
 import { AuthError, type AuthService } from "../auth/types";
 import { devOnly } from "../dev-guard";
 import type { SecureStore } from "../secure";
@@ -52,6 +52,8 @@ export interface BackendDeps {
   createAuth: (opts: { url: string; anonKey: string; storage: SecureStore }) => AuthService;
   /** Loads the dev mocks. Called ONLY for `demo`; the app passes a loader that is `null` outside `__DEV__` (`runtime/dev-backend.ts`). */
   loadDevMocks: (() => DevMocks) | null;
+  /** Evidence-lane wiring for the real client (`attest/` seam; the payload write the check-in redemption needs). */
+  evidence?: Pick<HttpApiOptions, "attestor" | "persistEvidencePayload">;
 }
 
 export interface Backend {
@@ -68,7 +70,7 @@ export function createBackend(deps: BackendDeps): Backend {
   if (kind === "real") {
     const { apiBaseUrl, supabaseUrl, supabaseAnonKey } = deps.config;
     const auth = deps.createAuth({ url: supabaseUrl as string, anonKey: supabaseAnonKey as string, storage: deps.secure });
-    const api = createHttpApiClient({ baseUrl: apiBaseUrl as string, fetch: deps.fetch, getAccessToken: (o) => auth.getAccessToken(o) });
+    const api = createHttpApiClient({ baseUrl: apiBaseUrl as string, fetch: deps.fetch, getAccessToken: (o) => auth.getAccessToken(o), ...deps.evidence });
     return { kind, api, auth, demoAdapters: null, devHandle: null };
   }
   if (kind === "demo") {

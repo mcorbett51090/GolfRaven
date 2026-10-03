@@ -22,6 +22,7 @@ export type NeedsAttentionReason =
   | "unexpected_status" // a status the contract does not define for this call
   | "rematch_failed" // 422 catalog_stale, and the stored summary no longer matches the new catalog
   | "queue_expired" // queued_catalog unresolved after 7 days (server-side decision, mirrored)
+  | "unsendable" // the stored payload cannot be turned into a request (a local defect: nothing was sent)
   | "owner_unknown"; // a row from before P4.2b-0: it has no owner, so it can never be sent (`db/sql.ts` v2)
 
 /** The owner stored on a row that predates owner binding (`db/sql.ts` v2). It is the empty string, which is never a user id, so no signed-in
@@ -62,9 +63,13 @@ export interface OutboxItem {
   deadLetteredAt: number | null;
 }
 
+/** What one send attempt produced. `payload`, when present, REPLACES the item's stored payload together with the answer (the send step records
+ * what it learned, e.g. the check-in token it redeemed, `evidence/send.ts`); absent = unchanged. */
 export type ServerAnswer =
-  | { kind: "response"; status: number; code?: string | undefined; retryAfterSeconds?: number | undefined }
-  | { kind: "network_error"; message?: string | undefined };
+  | { kind: "response"; status: number; code?: string | undefined; retryAfterSeconds?: number | undefined; payload?: JsonValue | undefined }
+  | { kind: "network_error"; message?: string | undefined; payload?: JsonValue | undefined }
+  /** The item itself cannot be sent (its payload is not a valid evidence submission): no request was made. It is a dead letter, never a retry. */
+  | { kind: "unsendable"; code: string; message?: string | undefined };
 
 export interface NewOutboxItem {
   id: string;

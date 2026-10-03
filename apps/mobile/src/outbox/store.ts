@@ -28,7 +28,10 @@ export interface OutboxStore {
   update(item: OutboxItem): Promise<void>;
   /** Only the runner's 90-day dead-letter expiry calls this. */
   delete(id: string): Promise<void>;
-  /** Account deletion only (`account/delete.ts`): the outbox is the deleted player's own data, so it is wiped with the account. */
+  /** Account deletion (`account/delete.ts`): removes ONLY the rows of the given owners (the deleted user, and the ownerless legacy rows `UNOWNED`),
+   * never another user's dormant plays. */
+  deleteByOwners(ownerUserIds: readonly string[]): Promise<void>;
+  /** Wipes every owner's rows. Tests and tooling only: account deletion must not call it (it would erase other users' dormant plays). */
   deleteAll(): Promise<void>;
 }
 
@@ -80,6 +83,10 @@ export class MemoryOutboxStore implements OutboxStore {
   }
   delete(id: string): Promise<void> {
     this.byId.delete(id);
+    return Promise.resolve();
+  }
+  deleteByOwners(ownerUserIds: readonly string[]): Promise<void> {
+    for (const [id, item] of [...this.byId]) if (ownerUserIds.includes(item.ownerUserId)) this.byId.delete(id);
     return Promise.resolve();
   }
   deleteAll(): Promise<void> {
@@ -153,6 +160,12 @@ export class SqliteOutboxStore implements OutboxStore {
 
   async delete(id: string): Promise<void> {
     await this.db.run("DELETE FROM outbox WHERE id = ?", [id]);
+  }
+
+  async deleteByOwners(ownerUserIds: readonly string[]): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      for (const owner of ownerUserIds) await tx.run("DELETE FROM outbox WHERE owner_user_id = ?", [owner]);
+    });
   }
 
   async deleteAll(): Promise<void> {

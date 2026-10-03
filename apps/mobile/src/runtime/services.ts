@@ -15,6 +15,9 @@ import {
   type DeviceFlagStore,
 } from "../age";
 import type { ApiClient } from "../api";
+import { UnattestableAttestor, type Attestor } from "../attest";
+import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type ChallengeStore } from "../challenges";
+import { enqueueEvidence, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
 import type { AuthService } from "../auth";
 import { createSupabaseAuth } from "../auth/supabase-auth";
 import { createExpoFileSharer } from "../account/expo-share";
@@ -40,6 +43,7 @@ import { createExpoSecureStore } from "../secure/expo-secure-store";
 import type { SecureStore } from "../secure";
 import { createExpoAppleAdapter } from "../signin/apple-expo";
 import { expoRandomBytes } from "../signin/expo-random";
+import { randomUuid } from "../signin/nonce";
 import { notConfiguredGoogle, type AppleAdapter, type GoogleAdapter, type RandomBytes } from "../signin";
 import { buildIndex } from "../browse";
 import { Platform } from "react-native";
@@ -54,6 +58,14 @@ export interface AppServices {
   outboxRunner: OutboxRunner;
   /** The only way the UI adds to the outbox: the owner is the signed-in user (from the auth session), and signed out throws `OutboxEnqueueError`. */
   enqueueOutbox: (draft: OutboxDraft) => ReturnType<typeof enqueueOutboxItem>;
+  /** Prefetched check-in challenges, per owner (`challenges/store.ts`). */
+  challengeStore: ChallengeStore;
+  /** Prefetch and consume check-in challenges (`challenges/manager.ts`). */
+  challenges: ChallengeManager;
+  /** The device-attestation seam; this build ships `UnattestableAttestor` only (native modules are P4.2b-2). */
+  attestor: Attestor;
+  /** The only way a play enters the outbox: builds the payload, consumes one challenge per fix, enqueues for the signed-in user. */
+  enqueueEvidence: (input: EvidenceInput) => Promise<EvidenceEnqueued>;
   /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
   api: ApiClient;
   auth: AuthService;
@@ -87,11 +99,13 @@ export async function createServices(): Promise<AppServices> {
   let persistent = true;
   let catalogStore: ConstructorParameters<typeof CatalogManager>[0]["store"];
   let outboxStore: OutboxStore;
+  let challengeStore: ChallengeStore;
   let flags: DeviceFlagStore;
   try {
     const db = await openAppDatabase();
     catalogStore = new SqliteCatalogCacheStore(db);
     outboxStore = new SqliteOutboxStore(db);
+    challengeStore = new SqliteChallengeStore(db);
     flags = new SqliteDeviceFlagStore(db);
   } catch {
     // Never lose the app to a storage failure: browse with a memory cache.
@@ -101,6 +115,7 @@ export async function createServices(): Promise<AppServices> {
     persistent = false;
     catalogStore = new MemoryCatalogCacheStore();
     outboxStore = new MemoryOutboxStore();
+    challengeStore = new MemoryChallengeStore();
     flags = new MemoryDeviceFlagStore();
   }
 
@@ -136,7 +151,16 @@ export async function createServices(): Promise<AppServices> {
     ageStoreProblem = true;
   }
 
+  const attestor = new UnattestableAttestor();
   const backend = createBackend({
+    evidence: {
+      attestor,
+      // The check-in token a send redeems is written into the item's row before the evidence request (crash safety, `evidence/send.ts`).
+      persistEvidencePayload: async (item, payload) => {
+        const stored = await outboxStore.get(item.id);
+        if (stored) await outboxStore.update({ ...stored, payload });
+      },
+    },
     isDev: __DEV__,
     config,
     secure,
@@ -150,10 +174,16 @@ export async function createServices(): Promise<AppServices> {
   // fresh at every use. The runner's token comes from the same service and is requested FOR the item's owner (`forUserId`).
   const auth = backend.auth;
   const currentUserId = (): string | null => auth.current()?.userId ?? null;
+  const session = {
+    currentUserId,
+    accessTokenFor: (userId: string, o?: { forceRefresh?: boolean }) => auth.getAccessToken({ forUserId: userId, ...(o?.forceRefresh ? { forceRefresh: true } : {}) }),
+  };
+  const deviceId = createDeviceIdProvider(secure, expoRandomBytes);
+  const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, attestor, now: () => Date.now() });
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
     api,
-    session: { currentUserId, accessTokenFor: (userId) => auth.getAccessToken({ forUserId: userId }) },
+    session,
     now: () => Date.now(),
     rng: Math.random,
     refreshCatalog: async () => {
@@ -192,6 +222,21 @@ export async function createServices(): Promise<AppServices> {
     outboxStore,
     outboxRunner,
     enqueueOutbox: (draft) => enqueueOutboxItem({ store: outboxStore, currentUserId, now: () => Date.now() }, draft),
+    challengeStore,
+    challenges,
+    attestor,
+    enqueueEvidence: (input) =>
+      enqueueEvidence(
+        {
+          challenges,
+          currentUserId,
+          deviceId,
+          enqueue: (draft) => enqueueOutboxItem({ store: outboxStore, currentUserId, now: () => Date.now() }, draft),
+          existing: (owner) => outboxStore.listByOwner(owner),
+          newId: () => randomUuid(expoRandomBytes),
+        },
+        input,
+      ),
     api,
     auth,
     backend: backend.kind,
@@ -203,7 +248,7 @@ export async function createServices(): Promise<AppServices> {
     google: backend.demoAdapters?.google ?? notConfiguredGoogle(),
     random: expoRandomBytes,
     push: unavailablePushAdapter(),
-    deviceId: createDeviceIdProvider(secure, expoRandomBytes),
+    deviceId,
     sharer,
     platform: Platform.OS,
     ageStoreProblem,

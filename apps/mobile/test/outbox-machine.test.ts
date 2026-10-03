@@ -47,7 +47,7 @@ describe("§7.6 answer table", () => {
     [resp(503, undefined, 120), "retry"],
     [{ kind: "network_error" } as ServerAnswer, "retry"],
     [resp(400), "needs_attention"],
-    [resp(401), "needs_attention"],
+    [resp(401), "retry"], // a refused bearer says nothing about the play (the runner refreshes once first)
     [resp(403), "needs_attention"],
     [resp(404), "needs_attention"],
     [resp(422, "unknown_id"), "needs_attention"],

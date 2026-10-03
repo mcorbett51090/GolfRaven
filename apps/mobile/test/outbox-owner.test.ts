@@ -81,6 +81,9 @@ class HookedStore implements OutboxStore {
   delete(id: string) {
     return this.inner.delete(id);
   }
+  deleteByOwners(owners: readonly string[]) {
+    return this.inner.deleteByOwners(owners);
+  }
   deleteAll() {
     return this.inner.deleteAll();
   }
@@ -388,7 +391,19 @@ describe.each(STORES)("outbox ownership (%s)", (_n, makeStore) => {
     });
   });
 
-  it("account deletion's wipe (deleteAll) still removes EVERY owner's rows, and the store works afterwards", async () => {
+  it("account deletion removes ONLY the deleted user's rows and the ownerless legacy rows: another user's dormant plays stay (LOW-1)", async () => {
+    await add(1, A);
+    await add(2, B);
+    await add(3, A);
+    await inner.deleteByOwners([A, UNOWNED]);
+    expect((await inner.list()).map((i) => i.ownerUserId)).toEqual([B]);
+    await add(4, A);
+    expect(await inner.list()).toHaveLength(2);
+    await inner.deleteByOwners([]);
+    expect(await inner.list()).toHaveLength(2);
+  });
+
+  it("deleteAll (tests and tooling only) still empties every owner's rows, and the store works afterwards", async () => {
     await add(1, A);
     await add(2, B);
     await inner.deleteAll();
@@ -472,7 +487,7 @@ describe("the v1 -> v2 upgrade (legacy ownerless rows)", () => {
     const owner = (await cols()).find((c) => c.name === "owner_user_id");
     expect(owner).toMatchObject({ notnull: 1, dflt_value: null });
     expect((await db.all<{ user_version: number }>("PRAGMA user_version"))[0]?.user_version).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(2);
+    expect(SCHEMA_VERSION).toBe(3);
     // an ownerless INSERT is a hard SQL error, not a silent default
     await expect((async () => db.run("INSERT INTO outbox (id, source_ref, status, created_at, item_json) VALUES ('x', 'x', 'pending', 1, '{}')"))()).rejects.toThrow(/NOT NULL/i);
     await expect((async () => db.run("INSERT INTO outbox (id, source_ref, owner_user_id, status, created_at, item_json) VALUES ('y', 'y', NULL, 'pending', 1, '{}')"))()).rejects.toThrow(/NOT NULL/i);
@@ -544,12 +559,32 @@ describe("the v1 -> v2 upgrade (legacy ownerless rows)", () => {
 
   it("a failing upgrade rolls back whole: the old table and its rows are intact and the version unchanged", async () => {
     const db = await legacyDb();
-    // Corrupt one row's JSON so the data step throws after the new table was created.
-    await db.run("UPDATE outbox SET item_json = '{not json' WHERE id = 'l3'");
+    // A leftover `outbox_v2` makes the first statement of the upgrade fail, so the whole step must roll back (a corrupt row's JSON no longer fails
+    // it, LOW-5: see the next test).
+    await db.exec("CREATE TABLE outbox_v2 (x TEXT)");
     await expect(migrate(db)).rejects.toThrow();
     expect((await db.all<{ user_version: number }>("PRAGMA user_version"))[0]?.user_version).toBe(1);
     expect((await db.all("SELECT id FROM outbox")).length).toBe(5);
-    expect((await db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE name = 'outbox_v2'")).length).toBe(0);
+    expect((await db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE name = 'outbox_v2'")).length).toBe(1); // only the one this test made
+  });
+
+  it("LOW-5: a legacy row with corrupt item_json does not abort the upgrade: it becomes an owner_unknown dead letter with a stub item", async () => {
+    const db = await legacyDb();
+    await db.run("UPDATE outbox SET item_json = '{not json' WHERE id = 'l3'");
+    await db.run("UPDATE outbox SET item_json = '\"a string\"' WHERE id = 'l4'"); // valid JSON that is not an object
+    await migrate(db, { now: () => T0 + 99 });
+    expect((await db.all<{ user_version: number }>("PRAGMA user_version"))[0]?.user_version).toBe(SCHEMA_VERSION); // not stuck at 1
+    const store = new SqliteOutboxStore(db);
+    const all = await store.list();
+    expect(all).toHaveLength(5); // nothing dropped (FM-03)
+    for (const id of ["l3", "l4"]) {
+      const it = all.find((i) => i.id === id)!;
+      expect(it).toMatchObject({ ownerUserId: UNOWNED, status: "needs_attention", reason: "owner_unknown", deadLetteredAt: T0 + 99, payload: null, courseId: null, attempts: 0, rematch: false });
+      expect(it.sourceRef).toBeTruthy();
+    }
+    // a second start is a no-op, not another failure
+    await migrate(db);
+    expect((await store.list()).length).toBe(5);
   });
 });
 
@@ -558,7 +593,7 @@ describe("wiring (source checks: composition code that has no UI harness here)",
 
   it("services: the runner's token is requested FOR the item's owner and the owner comes from the auth session", () => {
     const src = read("../src/runtime/services.ts");
-    expect(src).toMatch(/accessTokenFor: \(userId\) => auth\.getAccessToken\(\{ forUserId: userId \}\)/);
+    expect(src).toMatch(/accessTokenFor: \(userId: string, o\?: \{ forceRefresh\?: boolean \}\) =>\s*auth\.getAccessToken\(\{ forUserId: userId,/);
     expect(src).toMatch(/currentUserId = \(\): string \| null => auth\.current\(\)\?\.userId \?\? null/);
     expect(src).toMatch(/enqueueOutboxItem\(\{ store: outboxStore, currentUserId,/);
   });
@@ -578,7 +613,9 @@ describe("wiring (source checks: composition code that has no UI harness here)",
     expect(src).not.toMatch(/outboxStore\.list\(\)/);
   });
 
-  it("account deletion still calls deleteAll on the outbox", () => {
-    expect(read("../src/account/delete.ts")).toMatch(/deps\.outbox\.deleteAll\(\)/);
+  it("account deletion removes the deleted user's rows (deleteByOwners) and never wipes every owner's (deleteAll)", () => {
+    const src = read("../src/account/delete.ts");
+    expect(src).toMatch(/deps\.outbox\.deleteByOwners\(owners\)/);
+    expect(src).not.toMatch(/deleteAll/);
   });
 });

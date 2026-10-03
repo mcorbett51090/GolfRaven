@@ -126,6 +126,8 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
   const syncOutbox = useCallback(async () => {
     await services.outboxRunner.run();
     await reloadOutbox();
+    // After the send, not before: redeeming a challenge at send time frees the server's cap of 10 open prefetched ones, which a top-up needs.
+    void services.challenges.prefetch();
   }, [services, reloadOutbox]);
 
   // The session follows the auth service (sign-in, sign-out, a refresh the server refused).
@@ -136,7 +138,9 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
   useEffect(() => {
     setOutboxLoaded([]);
     void reloadOutbox();
-  }, [userId, reloadOutbox]);
+    // Online and signed in: keep this user's pool of single-use check-in challenges topped up (offline check-ins consume them, FM-10).
+    if (userId !== null) void services.challenges.prefetch();
+  }, [userId, reloadOutbox, services]);
   const outboxItems = useMemo(() => filterVisibleOutboxItems(outboxLoaded, userId), [outboxLoaded, userId]);
 
   // Startup: stored session, stored language, cached catalog (re-verified), then one refresh.
@@ -198,6 +202,9 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
         api: services.api,
         auth: services.auth,
         outbox: services.outboxStore,
+        challenges: services.challengeStore,
+        sharer: services.sharer,
+        currentUserId: () => services.auth.current()?.userId ?? null,
         secure: services.secure,
         clearUserCaches: () => setProgrammes({}),
       });

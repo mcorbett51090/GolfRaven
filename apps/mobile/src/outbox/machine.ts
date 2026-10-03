@@ -7,10 +7,17 @@
  * | Server answer (§7.6)                       | Outbox action                                   |
  * |--------------------------------------------|-------------------------------------------------|
  * | `201` / `409 duplicate`                    | `accepted`                                      |
+ * | `200` `accepted` (what the server sends)   | `accepted` (see "server wins" below)            |
  * | `202 queued_catalog`                       | `queued`                                        |
  * | `422 catalog_stale`                        | `pending` + `rematch`: refresh, re-match, resubmit |
  * | `429` / `5xx` / network                    | `retry`: exponential backoff + jitter, Retry-After |
  * | any other 4xx, or re-match fails           | `needs_attention` (dead letter kept 90 days)    |
+ *
+ * The SERVER wins over the plan table where they differ (`supabase/functions/_shared/evidence/handler.ts`, `evidence/index.ts`, recorded in
+ * `test/fixtures/edge-contract.json`): a new or replayed submission answers `200 { status: "accepted", replay }` (never 201, and a replay is not a
+ * `409 duplicate`), `202 { status: "queued_catalog" }`, and a replay of a queued row the server's drain gave up on (7 days) answers
+ * `200 { status: "needs_attention" }`. `evidence/answer.ts` puts the body's `status` in `code`, so those three are matched here on (status, code).
+ * The plan's `201` and `409 duplicate` stay accepted: a server that follows the table would be understood too.
  *
  * Interpretation notes (the spec table is exhaustive only for the rows
  * above; these are the judgement calls, each one conservative):
@@ -18,10 +25,9 @@
  *  - `202` WITHOUT `code: "queued_catalog"` and any other 2xx/3xx are
  *    `needs_attention` (`unexpected_status`): a state the contract does not
  *    define must be visible, never silently treated as success.
- *  - `401`/`403` are "any other 4xx" and therefore dead-letter. The token
- *    refresh that should make a `401` unreachable is the P4.2 auth client's
- *    job (§7.8 "unauthenticated body is a final 4xx"); this slice does not
- *    pretend to cover it. `[owner/P4.2 decision if a 401 should instead retry]`
+ *  - `401` is NOT a rejection of the play: it says the bearer was not accepted (an expired or just-revoked token), which says nothing about the
+ *    evidence. It is `retry`; the runner first tries ONE token refresh for the item's owner and resends, and stops the pass if that fails too
+ *    (`runner.ts`). `403` is "any other 4xx" and dead-letters.
  *  - `408` is "any other 4xx" (the spec lists only 429/5xx/network as retry).
  */
 import { UNOWNED, type NeedsAttentionReason, type NewOutboxItem, type OutboxItem, type OutboxStatus, type ServerAnswer } from "./types";
@@ -123,8 +129,12 @@ type Classified =
 
 export function classifyAnswer(answer: ServerAnswer): Classified {
   if (answer.kind === "network_error") return { to: "retry" };
+  if (answer.kind === "unsendable") return { to: "needs_attention", reason: "unsendable" };
   const { status, code } = answer;
   if (status === 201) return { to: "accepted" };
+  if (status === 200 && code === "accepted") return { to: "accepted" };
+  if (status === 200 && code === "needs_attention") return { to: "needs_attention", reason: "queue_expired" };
+  if (status === 401) return { to: "retry" };
   if (status === 409 && code === "duplicate") return { to: "accepted" };
   if (status === 202 && code === "queued_catalog") return { to: "queued" };
   if (status === 422 && code === "catalog_stale") return { to: "rematch" };
@@ -143,7 +153,8 @@ export function applyAnswer(item: OutboxItem, answer: ServerAnswer, now: number,
   const base: OutboxItem = {
     ...item,
     lastHttpStatus: answer.kind === "response" ? answer.status : null,
-    lastServerCode: answer.kind === "response" ? (answer.code ?? null) : null,
+    lastServerCode: answer.kind === "response" ? (answer.code ?? null) : answer.kind === "unsendable" ? answer.code : null,
+    payload: answer.kind !== "unsendable" && answer.payload !== undefined ? answer.payload : item.payload,
     updatedAt: now,
   };
   const c = classifyAnswer(answer);

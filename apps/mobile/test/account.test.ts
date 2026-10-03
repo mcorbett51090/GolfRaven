@@ -11,7 +11,7 @@ import { FakeAuth, NOW } from "./support/fakes";
 import { openNodeSqlite } from "./support/node-sqlite";
 import { scriptedFetch, type Step } from "./support/edge-fixtures";
 
-const RESULT: DeleteAccountResult = { userId: "u1", deletedAt: "2026-10-03T00:00:00.000Z", authUserDeleted: true, authUserAlreadyGone: false, signinProvidersRevoked: [] };
+const RESULT: DeleteAccountResult = { userId: "user-a", deletedAt: "2026-10-03T00:00:00.000Z", authUserDeleted: true, authUserAlreadyGone: false, signinProvidersRevoked: [] };
 
 async function stores(): Promise<[string, () => Promise<OutboxStore>][]> {
   return [
@@ -20,8 +20,14 @@ async function stores(): Promise<[string, () => Promise<OutboxStore>][]> {
   ];
 }
 
-async function fill(store: OutboxStore): Promise<void> {
-  for (let i = 0; i < 3; i += 1) await store.insertIfAbsent(createItem({ id: `id${i}`, sourceRef: `ref${i}`, ownerUserId: i === 2 ? "user-b" : "user-a", courseId: "crs_1", catalogVersion: "1", payload: { i } }, 1000 + i));
+/** Two rows of `owner` and one of `user-b`. */
+async function fill(store: OutboxStore, owner = "user-a"): Promise<void> {
+  for (let i = 0; i < 3; i += 1) await store.insertIfAbsent(createItem({ id: `id${i}`, sourceRef: `ref${i}`, ownerUserId: i === 2 ? "user-b" : owner, courseId: "crs_1", catalogVersion: "1", payload: { i } }, 1000 + i));
+}
+
+/** The pieces a deletion needs besides the ones a test cares about. */
+function extra(over: Partial<DeleteDeps> = {}): Pick<DeleteDeps, "challenges" | "sharer" | "currentUserId"> {
+  return { challenges: { deleteOwner: () => Promise.resolve() }, sharer: { purgeStale: () => Promise.resolve() }, currentUserId: () => "user-a", ...over };
 }
 
 describe("DELETE /v1/me then the local wipe", () => {
@@ -29,12 +35,12 @@ describe("DELETE /v1/me then the local wipe", () => {
     ["memory outbox", async () => new MemoryOutboxStore() as OutboxStore],
     ["sqlite outbox", async () => new SqliteOutboxStore(await openNodeSqlite()) as OutboxStore],
   ] as const) {
-    it(`${name}: wipes the session, the outbox and the caches, and KEEPS the device-local age flag`, async () => {
+    it(`${name}: wipes the session, the DELETED USER's outbox rows, challenges and the caches, and KEEPS the device-local age flag`, async () => {
       const outbox = await make();
       await fill(outbox);
       expect(await outbox.list()).toHaveLength(3);
       const auth = new FakeAuth();
-      auth.session = { userId: "u1", provider: "email", stub: false };
+      auth.session = { userId: "user-a", provider: "email", stub: false };
       // the age flag is in the secure store, next to the session-less device id
       const secure = new MemorySecureStore();
       const ageGate = new AgeGate(new SecureDeviceFlagStore(secure), NOW);
@@ -43,10 +49,14 @@ describe("DELETE /v1/me then the local wipe", () => {
       await secure.set(SESSION_STORAGE_KEY, '{"refresh_token":"r"}');
       let cachesCleared = 0;
       const order: string[] = [];
+      const challengesWiped: string[] = [];
       const deps: DeleteDeps = {
         api: { deleteAccount: () => (order.push("server"), Promise.resolve(RESULT)) },
         auth: { clearLocalSession: () => (order.push("session"), auth.clearLocalSession()) },
-        outbox: { deleteAll: () => (order.push("outbox"), outbox.deleteAll()) },
+        outbox: { deleteByOwners: (o) => (order.push("outbox"), outbox.deleteByOwners(o)) },
+        challenges: { deleteOwner: (o) => (challengesWiped.push(o), Promise.resolve()) },
+        sharer: { purgeStale: () => (order.push("export-cache"), Promise.resolve()) },
+        currentUserId: () => "user-a",
         secure,
         clearUserCaches: () => {
           order.push("caches");
@@ -62,7 +72,10 @@ describe("DELETE /v1/me then the local wipe", () => {
       expect(auth.clearedLocal).toBe(1);
       expect(auth.signedOut).toBe(0); // no network sign-out call against a session that no longer exists
       expect(await secure.get(SESSION_STORAGE_KEY)).toBeNull(); // the session key itself is gone from the secure store
-      expect(await outbox.list()).toEqual([]);
+      // ONLY the deleted user's rows go: user-b's dormant play on this device stays (LOW-1)
+      expect((await outbox.list()).map((i) => [i.ownerUserId, i.id])).toEqual([["user-b", "id2"]]);
+      expect(challengesWiped).toEqual(["user-a"]);
+      expect(order).toContain("export-cache"); // a data export left in the cache is removed with the account (LOW-4)
       expect(cachesCleared).toBe(1);
       // KEPT: the O18 flag (an under-age player cannot delete the account and retry with another year), and the device id
       expect(await secure.get(SECURE_KEYS.ageGate)).toBe("eligible");
@@ -78,7 +91,8 @@ describe("DELETE /v1/me then the local wipe", () => {
     await deleteAccountAndWipeLocal({
       api: { deleteAccount: () => Promise.resolve(RESULT) },
       auth: { clearLocalSession: () => Promise.resolve() },
-      outbox: { deleteAll: () => Promise.resolve() },
+      outbox: { deleteByOwners: () => Promise.resolve() },
+      ...extra(),
       secure,
       clearUserCaches: () => undefined,
     });
@@ -87,18 +101,19 @@ describe("DELETE /v1/me then the local wipe", () => {
     expect(await gate.submitBirthYear(1980, 16)).toEqual({ status: "blocked" });
   });
 
-  it("the wipe never touches the age flag key: the only things it can reach are the session, the outbox and the caches", async () => {
+  it("the wipe never touches the age flag key: the only things it can reach are the session, the deleted user's outbox rows and challenges, the export cache and the caches", async () => {
     const secure = new MemorySecureStore();
     await secure.set(SECURE_KEYS.ageGate, "ineligible");
     const touched: string[] = [];
     await deleteAccountAndWipeLocal({
       api: { deleteAccount: () => Promise.resolve(RESULT) },
       auth: { clearLocalSession: () => (touched.push("session"), Promise.resolve()) },
-      outbox: { deleteAll: () => (touched.push("outbox"), Promise.resolve()) },
+      outbox: { deleteByOwners: () => (touched.push("outbox"), Promise.resolve()) },
+      ...extra({ sharer: { purgeStale: () => (touched.push("export-cache"), Promise.resolve()) }, challenges: { deleteOwner: () => (touched.push("challenges"), Promise.resolve()) } }),
       secure,
       clearUserCaches: () => void touched.push("caches"),
     });
-    expect(touched.sort()).toEqual(["caches", "outbox", "session"]);
+    expect(touched.sort()).toEqual(["caches", "challenges", "export-cache", "outbox", "session"]);
     expect(WIPED_SECURE_KEYS.some((k) => KEPT_SECURE_KEYS.includes(k))).toBe(false);
     expect(KEPT_SECURE_KEYS).toEqual(expect.arrayContaining([SECURE_KEYS.ageGate, SECURE_KEYS.deviceId]));
     expect(await secure.get(SECURE_KEYS.ageGate)).toBe("ineligible");
@@ -114,6 +129,7 @@ describe("DELETE /v1/me then the local wipe", () => {
         api: { deleteAccount: () => Promise.reject(error) },
         auth,
         outbox,
+        ...extra(),
         secure: new MemorySecureStore(),
         clearUserCaches: () => {
           throw new Error("must not run");
@@ -131,7 +147,8 @@ describe("DELETE /v1/me then the local wipe", () => {
     const r = await deleteAccountAndWipeLocal({
       api: { deleteAccount: () => Promise.resolve(RESULT) },
       auth: { clearLocalSession: () => Promise.reject(new Error("keychain locked")) },
-      outbox: { deleteAll: () => ((outboxWiped = true), Promise.resolve()) },
+      outbox: { deleteByOwners: () => ((outboxWiped = true), Promise.resolve()) },
+      ...extra(),
       secure: new MemorySecureStore(),
       clearUserCaches: () => undefined,
     });
@@ -144,7 +161,8 @@ describe("DELETE /v1/me then the local wipe", () => {
     const r = await deleteAccountAndWipeLocal({
       api: { deleteAccount: () => Promise.resolve(withRevocations) },
       auth: { clearLocalSession: () => Promise.resolve() },
-      outbox: { deleteAll: () => Promise.resolve() },
+      outbox: { deleteByOwners: () => Promise.resolve() },
+      ...extra(),
       secure: new MemorySecureStore(),
       clearUserCaches: () => undefined,
     });
@@ -171,6 +189,9 @@ describe("DELETE /v1/me then the local wipe", () => {
   });
 });
 
+/** The user id inside the recorded `delete_ok` answer. */
+const SERVER_USER = "aaaaaaaa-0000-4000-8000-000000000001";
+
 describe("a deletion the server may have executed (lost response, then the retry's 401) still wipes this device", () => {
   const BASE = "https://proj.supabase.co/functions/v1";
 
@@ -189,23 +210,23 @@ describe("a deletion the server may have executed (lost response, then the retry
 
   async function runDelete(api: ApiClient) {
     const outbox = new MemoryOutboxStore();
-    await fill(outbox); // two users' rows
+    await fill(outbox, SERVER_USER); // two rows of the deleting user, one of another user
     const secure = new MemorySecureStore();
     await secure.set(SESSION_STORAGE_KEY, "session");
     await secure.set(SECURE_KEYS.ageGate, "eligible");
     const auth = new FakeAuth();
-    auth.session = { userId: "user-a", provider: "email", stub: false };
+    auth.session = { userId: SERVER_USER, provider: "email", stub: false };
     let cachesCleared = 0;
-    const outcome = await deleteAccountAndWipeLocal({ api, auth, outbox, secure, clearUserCaches: () => void (cachesCleared += 1) });
+    const outcome = await deleteAccountAndWipeLocal({ api, auth, outbox, ...extra({ currentUserId: () => SERVER_USER }), secure, clearUserCaches: () => void (cachesCleared += 1) });
     return { outcome, outbox, secure, auth, cachesCleared };
   }
 
-  it("DELETE succeeds server-side, the response is lost, the retry gets 401 (user gone) and the refresh is refused => deleted_or_session_ended, FULL wipe, every owner's outbox rows", async () => {
+  it("DELETE succeeds server-side, the response is lost, the retry gets 401 (user gone) and the refresh is refused => deleted_or_session_ended, FULL wipe of the deleting user's rows (the session user, as the server's answer never arrived)", async () => {
     const { api, seen } = realClient([{ network: "connection reset" }, { respond: "err_401_unauthorized" }]);
     const r = await runDelete(api);
     expect(seen.map((x) => x.method)).toEqual(["DELETE", "DELETE"]); // attempt 1 (lost), attempt 2 (401); the refresh then yields no token
     expect(r.outcome).toEqual({ status: "deleted_or_session_ended", cause: "unauthenticated", localWipe: "complete", failedSteps: [] });
-    expect(await r.outbox.list()).toEqual([]); // user-a's AND user-b's rows
+    expect((await r.outbox.list()).map((i) => i.ownerUserId)).toEqual(["user-b"]); // the deleting user's rows are gone, user-b's stay
     expect(r.auth.session).toBeNull();
     expect(r.auth.clearedLocal).toBe(1);
     expect(await r.secure.get(SESSION_STORAGE_KEY)).toBeNull();
@@ -274,7 +295,7 @@ describe("a deletion the server may have executed (lost response, then the retry
   it("a normal success is unchanged", async () => {
     const r = await runDelete(realClient([{ respond: "delete_ok" }]).api);
     expect(r.outcome.status).toBe("deleted");
-    expect(await r.outbox.list()).toEqual([]);
+    expect((await r.outbox.list()).map((i) => i.ownerUserId)).toEqual(["user-b"]);
   });
 
   it("the error flag: set only on an error raised after a request that may have run; plain network/401 errors carry false", () => {

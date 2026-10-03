@@ -97,6 +97,7 @@ export const en = {
   "played.reason.unexpected_status": "The server gave an unexpected answer.",
   "played.reason.rematch_failed": "This play could not be matched to the updated catalog.",
   "played.reason.queue_expired": "New course data did not arrive in time.",
+  "played.reason.unsendable": "This play could not be prepared for sending.",
   "played.reason.owner_unknown": "This play was saved before plays were tied to an account, so it was not sent.",
 
   "achievements.earned": "Earned",
