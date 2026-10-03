@@ -11,7 +11,8 @@
 //                    run or a retry, and a runaway scheduler is answered 429 instead of hammering the database.
 //   Bounded          each step removes at most `batchLimit` rows per batch (the definer's own limit) and a run repeats a step at most
 //                    MAX_BATCHES_PER_STEP times, and starts no new batch after RUN_BUDGET_MS. What is left is reported as `truncated` and is picked up by
-//                    the next run (every purge is oldest-first, so the next run continues where this one stopped).
+//                    the next run (each purge deletes only what is already past its retention, so the next run simply continues: the fix-coordinate, tombstone and proof purges
+//                    go oldest-first, the revocation-queue, nonce and rate-limit purges in scan order, which they need no more than idempotence for).
 //   Idempotent       each purge deletes only what is already past its retention; running it twice removes nothing the first did not.
 //   Concurrent       a step's batch takes a try-lock first (privileged.ts#retentionPurgeSteps): a concurrent run reports `busy` for that step instead of
 //                    waiting on, or deadlocking over, the same rows.

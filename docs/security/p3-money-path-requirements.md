@@ -2477,7 +2477,7 @@ drain pass calls it where it calls the fix-coordinate purge (`drainRescoreBacklo
 - **E6.** Before launch: privacy-officer / PIA sign-off and a privacy-policy disclosure for the install-link tombstone; disclose the fix-coordinate re-pick
   exception in the privacy label (owner decisions above).
 - **E7 (PR3).** Run `import-catalog` entirely as edge_system with delegate binders; then `edge` mode needs one URL. **Closed by edge role PR3** (section "Edge role PR3" below).
-- **E5 (CLOSED in code by edge role PR4b; scheduling is a deploy step).** `retention-purge` runs all four retention classes as `edge_system`, independently of an import; schedule it hourly (design doc section 15). Two `service_role`-only TTL purges (`purge_consumed_nonce`, `purge_rate_limit_buckets`) stay unscheduled: an owner decision (design doc 14.4).
+- **E5 (CLOSED in code by edge role PR4b; scheduling is a deploy step).** `retention-purge` runs all four retention classes as `edge_system`, independently of an import; schedule it hourly (design doc section 15). The two `service_role`-only TTL purges (`purge_consumed_nonce`, `purge_rate_limit_buckets`) were left unscheduled as an owner decision; **closed by edge role PR4c / migration 0040** (owner decision 2026-10-02: `edge_system` EXECUTE on exactly those two, and two more `retention-purge` steps; design doc 14.8).
 
 ## Edge role PR3 (2026-10-02): the system path (follow-up 6, step 3 of 4)
 
@@ -3255,3 +3255,52 @@ New: `retention-purge.deno.test.ts` (10 cells: each class purged and a young row
 ### `[unverified]`
 
 Everything in the design doc's runbook (section 15): Supavisor transaction mode with `prepare: true`, the hosted `ALTER ROLE ... LOGIN` / tenant user / `pg_hba` for `edge_gateway`, `pg_cron` + `pg_net` as the scheduling mechanism, that the platform injects `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_DB_URL`, whether the hosted admin role may EXECUTE the two `service_role`-only purges, and the self-check interval (an unmeasured default).
+
+## Edge role PR4c (2026-10-03): the hygiene purges, the bounded sign-in purges, the lint's second pass (follow-up to PR4b)
+
+Design as built and the runbook additions: [`docs/security/edge-role-design.md`](edge-role-design.md) sections 14.8 and 15. **One migration, `0040_retention_hygiene_purges.sql`** (`check-migrations-immutable.sh --base d4ab836`: 39 files byte-identical). FORCE RLS, table and column grants, policies, `edge_policy_allowlist`, `definer_policy_allowlist`, their fixtures and checks 9-13 are untouched.
+
+- **The one new grant (owner decision 2026-10-02):** `GRANT EXECUTE ON FUNCTION private.purge_consumed_nonce() TO edge_system;` and `GRANT EXECUTE ON FUNCTION private.purge_rate_limit_buckets() TO edge_system;`. Nothing else is granted to anyone. The migration asserts it with `has_function_privilege` (`edge_system`, `service_role` yes; `edge_actor`, `anon`, `authenticated` no) and fails itself if it did not take; the inventory (`expected_edge_system = true` for exactly these two) is what proves no other function gained a grant.
+- **Redefinitions (all `private_definer`, `search_path = ''`, ownership bracket):** `purge_consumed_nonce()` (`CREATE OR REPLACE`, still `bigint`), `purge_signin_email_proofs()` and `purge_signin_revocation_queue(interval)` (`CREATE OR REPLACE`), each now bounded at 5000 rows per call by a constant inside the definer; **`purge_rate_limit_buckets()` is `DROP`ped and recreated** (same name, no arguments) because it returned `void` and a batched step needs the count (`CREATE OR REPLACE` cannot change a return type); its `service_role` grant was re-made (0007's), not widened. Why the two hygiene functions needed a bound at all: both were age-bounded and neither was row-bounded (one `DELETE` of the whole backlog; `purge_rate_limit_buckets` had never run).
+- **`retention-purge`:** two more steps (`consumed_nonce`, `rate_limit_buckets`); the two sign-in steps are batched (they were one pass each, LOW-3); the catalog import's own fix-coordinate and tombstone purges take the same per-step try-lock (NIT).
+- **`<uid>:me-delete:user`:** removed by `purge_rate_limit_buckets` once its window started more than 2 days ago (the me-delete window is one day: gone 1-2 days after its window ends, kept before). Proved against the real flow, not a hand-built row.
+- **LOW-1 (lint):** `openPool()` takes no parameter and reads `GOLFRAVEN_EDGE_DB_URL` itself; `privileged-env-access` is now an allow-list on `Deno`; `privileged-stray-pool` also covers non-call driver references, an `openPool` parameter or argument, and a driver call not fed the constant read inside `openPool`; three new rules (`privileged-global-access`, `privileged-computed-member`, `privileged-unsafe-sql`); a `+` chain of string literals is folded and scanned. Allow-lists, each with its reason, because the real file has them: `globalThis.addEventListener` (the closed-socket containment hook). No allow-list for computed members (all 101 in the real file are numeric literals) and none for `.unsafe(` (the real file has none).
+- **LOW-2:** `isServiceRoleBearer`'s `key === ""` guard is now covered (unset and empty key; NBSP, U+3000 and other trims-to-empty bearers; the function and the whole handler).
+- **LOW-4:** `me-export` and `me-push-token` added to the three CI `deno` lists, and `supabase/tests/unit/ci-function-lists.test.ts` fails if any `supabase/functions/*/index.ts` is missing from any of them.
+- **LOW-5:** runbook: deploy order, connection-limit sizing against 5 per worker, `verify_jwt` and the non-JWT secret keys, `SUPABASE_DB_URL` as a live credential, schedule notes for the six steps.
+
+### Tests
+
+New: `supabase/tests/matrix/20_retention_hygiene_purges.sql` (63 cells, every group a rolled-back transaction: who may execute what by name and by a real call as `edge_actor` unbound / user-bound / delegate-bound, `anon`, `authenticated`, `edge_system`, `service_role`; each purge removes only expired rows and a live row survives; the `<uid>:me-delete:user` flow; 5003 expired rows give 5000 / the rest / 0 for each of the four bounded purges; the two floors enforced twice are proved alone with the policies widened), 8 Deno cells in `retention-purge.deno.test.ts` (the me-delete bucket, a backlog over several batches for the four bounded steps, a full batch is exactly `RETENTION_DEFINER_BATCH_ROWS`, the import's purges honour the try-lock, LOW-2 x3, the hygiene steps fail without the grant), 3 unit cells (`retention-purge-handler.test.ts`), `ci-function-lists.test.ts` (6), and 26 lint cells + 17 must-fail fixtures.
+
+### Verification (final tree; nothing from before the last edit is counted)
+
+- **`tools/db/test.sh`, exit 0 in `HARNESS_MODE=superuser` AND `restricted`** (fresh clusters, ports 5717 / 5718, `DENO_DIR` unset, `npm_config_engine_strict=false`): pgTAP `Files=24, Tests=2075, Result: PASS` in both (was 23 / 2012: the new file is 63 cells); the 11 concurrency `PASS` lines in each; Deno integration **240 passed / 0 failed in each harness mode** (was 232; the superuser-only cells, now including the "without the grant" cell, print `skipped` under `restricted`); `verify-function-inventory.mjs: OK`; service-role lint clean.
+- **Unit:** `pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts` 44 files / 835 tests (was 43 / 826); lint package 5 files / 382 tests (was 356); `pnpm -r typecheck` exit 0 (`pnpm install --frozen-lockfile`, `@golfraven/catalog-tools...` built, `emit-indexability` first).
+- `deno check --frozen` and `deno cache --frozen` over the 14 CI entry points (13 functions and `_shared/privileged.ts`, taken from the CI step itself) on fresh `DENO_DIR`s: both exit 0. `gitleaks dir . --config .gitleaks.toml`: no leaks (13 MB). `check-migrations-immutable.sh --base d4ab836`: 39 of 39 byte-identical.
+- **Not run:** prettier (out of scope), any deploy, a real Supabase project, Supavisor, `pg_cron`, the full `pnpm -r build` before `gitleaks` (the working tree and the `dist/` directories that already existed were scanned).
+
+### Mutation proofs (each on a world-readable `/tmp` copy, deleted afterwards; never in the repo; every one CAUGHT)
+
+| Mutation | Caught by |
+|---|---|
+| `GRANT ... TO edge_system` dropped from 0040 (migration assertion left intact) | the migration itself (`0040: ... EXECUTE for edge_system is f but must be t`) |
+| the `service_role` re-grant of `purge_rate_limit_buckets` dropped | the migration itself |
+| the same two with the migration's own assertion disabled | matrix 20 (3 not ok, file aborts at 53 of 63) and the inventory gate |
+| an extra `edge_actor` grant on the nonce purge / an extra `anon` grant on the bucket purge | matrix 20 (3 / 1 not ok) and the inventory gate (`expected=f actual=t`) |
+| the inventory not updated for the two grants | the inventory gate (`verify-function-inventory.mjs`) |
+| `LIMIT` removed from each of the four purges | matrix 20 (2 not ok each) and the Deno exact-batch cell (4 x) |
+| `v_limit` 5000 to 4000 in one definer / `RETENTION_DEFINER_BATCH_ROWS` to 4000 | matrix 20 + 2 Deno cells / the exact-batch Deno cell |
+| the 7-day predicate dropped from the nonce body (policy still holds) / the 1-hour predicate dropped from the proof body / the nonce cutoff on `consumed_at` instead of the expiry | matrix 20 layered cells (the policy alone masks each otherwise) |
+| bucket purge `2 days` to `0 days` (purges the current window) | matrix 20 (3 not ok) and 3 Deno cells |
+| remove the `consumed_nonce` step / the `rate_limit_buckets` step from `retention-purge` | `retention-purge.deno` (4 / 5 failures) |
+| the two sign-in steps unbatched again | `retention-purge.deno` (2 failures) |
+| `isServiceRoleBearer`'s `key === ""` guard removed | `retention-purge.deno` (2 failures: key unset, key empty) |
+| the import's fix-coordinate / tombstone purge try-lock removed | `retention-purge.deno` (1 failure each) |
+| each lint rule (13 mutants of `privileged-lint.ts`: the `Deno` allow-list, the global object, `eval` / `Function`, `import()`, the non-call driver reference, the `openPool` parameter, the `openPool(arg)` call, the pool URL constant, `a[k]`, the computed destructure, `.unsafe(` arguments, a destructured `unsafe`, the concatenation fold) disabled | `privileged-lint.test.ts` (2 to 7 failures each; each fixture is flagged by exactly one finding so a neighbouring rule cannot mask it) |
+| the real `privileged.ts`, mutated (a copy): `const { env } = Deno` then a computed name; `globalThis.Deno.env.get(k)`; `const pg = postgres; pg(url)`; `openPool("postgres://...")`; `openPool(dbUrlArg?)`; the driver fed a literal URL; `db["be" + "gin"]`; `db[k]`; `t.unsafe("SET LOCAL " + "ROLE postgres")`; `eval(...)` | the lint on the copy (a finding of the matching rule each time; the unmutated copy has none) |
+| `me-export` / `me-push-token` dropped from a CI list; a new function directory listed nowhere | `ci-function-lists.test.ts` (2 / 2 / 2 / 3 failures) |
+
+### `[unverified]`
+
+The runbook additions in design section 15 (item 0 deploy order's isolate-recycling remark, 3a, 7): isolate counts and pooler pool sizes, `verify_jwt` defaults and the non-JWT secret keys against the bearer pattern, and whether the platform injects `SUPABASE_DB_URL`. Nothing was run against a real Supabase project, Supavisor or `pg_cron`; prettier was not run.

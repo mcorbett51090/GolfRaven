@@ -2,19 +2,23 @@
 //
 // Edge role PR4b (E5, launch-blocking): the independent retention schedule, `retention-purge`. The REAL handler over the REAL privileged.ts steps
 // (`retentionPurgeSteps`, `hitSystemRateLimit`, `isServiceRoleBearer`) against the harness cluster, as edge_system. Proved here:
-//   1. it purges EACH class (fix coordinates, install-link tombstones, sign-in email proofs, finished revocation rows) and keeps what is not yet
-//      past retention (a young row of each class, and a PENDING revocation row however old);
+//   1. it purges EACH class (fix coordinates, install-link tombstones, sign-in email proofs, finished revocation rows and, since 0040, consumed-nonce
+//      tombstones and rate-limit windows) and keeps what is not yet past retention (a young row of each class, a PENDING revocation row however old,
+//      a live nonce tombstone, a current-window rate-limit row); the `<uid>:me-delete:user` bucket delete_my_data keeps is removed once its window passed;
 //   2. it is BOUNDED per run (a batch limit, a batch cap) and a second run finishes the job;
 //   3. it refuses a bad bearer (and an absent service-role key) before it touches anything, rate limit included;
 //   4. it is idempotent and safe to run concurrently: overlapping runs never double-count, never deadlock, and a step another run holds is skipped;
 //   5. one class failing does not stop the others (needs a superuser harness to revoke a grant);
-//   6. the rate limit (12 per hour) holds.
+//   6. the rate limit (12 per hour) holds;
+//   7. (0040) the four SQL-bounded steps clear a backlog larger than one batch over several batches, a full batch is exactly RETENTION_DEFINER_BATCH_ROWS,
+//      and the catalog import's own purge calls honour the same per-step try-lock;
+//   8. (PR4b gate LOW-2) an empty service-role key admits nobody, even a bearer that only SEEMS empty (NBSP, U+3000) after normalisation.
 // The pure contract (ordering, truncation, busy, failure codes, no database text on the wire) is supabase/tests/unit/retention-purge-handler.test.ts.
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawCount } from "./_helpers.ts";
-import { hitSystemRateLimit, isServiceRoleBearer, resetPrivilegedConnectionsForTests, retentionPurgeSteps, retentionStepLockKeys } from "../../functions/_shared/privileged.ts";
+import { hitSystemRateLimit, isServiceRoleBearer, resetPrivilegedConnectionsForTests, RETENTION_DEFINER_BATCH_ROWS, retentionPurgeSteps, retentionStepLockKeys, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
 import { handleRetentionPurgeRequest, type RetentionDeps, RETENTION_RATE_BUCKET, MAX_BATCHES_PER_STEP } from "../../functions/_shared/retention/purge-handler.ts";
 import { sha256Hex } from "../../functions/_shared/signin/bytes.ts";
 import { facilityShard, freshSiteVersion, giveCoursePolygon, ids, mint, newPublisher, newUser, seedDwellAndScore } from "./_publisher.ts";
@@ -164,6 +168,24 @@ async function seedQueueRow(kind: { finishedDaysAgo: number } | "pending"): Prom
 }
 const queueRowExists = (id: string) => asDefiner(async (sql) => (await sql`select 1 from private.signin_revocation_queue where id = ${id}`).length === 1);
 
+/** A consumed-nonce tombstone (service_role may INSERT and SELECT it, nothing else): `expired` = 8 days past its source expiry, otherwise 1 hour past it. */
+async function seedNonce(expired: boolean): Promise<string> {
+  await ensureServiceRole();
+  const hash = `e5-nonce-${freshUuid()}`;
+  await adminSql()`insert into private.consumed_nonce (nonce_hash, source, consumed_at, expires_at)
+                   values (${hash}, 'checkin_challenge', now() - interval '31 days', now() - make_interval(hours => ${expired ? 192 : 1}::int))`;
+  return hash;
+}
+const nonceExists = async (hash: string) => (await rawCount(`select count(*)::int as n from private.consumed_nonce where nonce_hash = '${hash}'`)) === 1;
+
+/** A rate-limit bucket (private_definer is the only role with a policy on it): its window started `daysAgo` days ago (0 = the current window). */
+async function seedBucket(key: string, daysAgo: number): Promise<void> {
+  await asDefiner(async (sql) => {
+    await sql`insert into private.rate_limit_bucket (bucket_key, window_start, count) values (${key}, now() - make_interval(days => ${daysAgo}::int), 1)`;
+  });
+}
+const bucketExists = (key: string) => asDefiner(async (sql) => (await sql`select 1 from private.rate_limit_bucket where bucket_key = ${key}`).length === 1);
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // 1. each class
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -177,15 +199,23 @@ retentionTest("E5: one run purges EACH retention class past its retention, and k
   const oldQueue = await seedQueueRow({ finishedDaysAgo: 40 });
   const youngQueue = await seedQueueRow({ finishedDaysAgo: 5 });
   const pendingQueue = await seedQueueRow("pending");
+  const oldNonce = await seedNonce(true);
+  const liveNonce = await seedNonce(false);
+  const oldBucketKey = `e5-bucket-old-${freshUuid()}`;
+  const liveBucketKey = `e5-bucket-live-${freshUuid()}`;
+  await seedBucket(oldBucketKey, 3);
+  await seedBucket(liveBucketKey, 0);
   // controls: everything is there before the run
   assertEquals(await hasCoords(coords.aged), true);
   assertEquals(await tombstoneCount(oldTomb), 1);
   assertEquals(await proofExists(staleProof), true);
   assertEquals(await queueRowExists(oldQueue), true);
+  assertEquals(await nonceExists(oldNonce), true);
+  assertEquals(await bucketExists(oldBucketKey), true);
 
   const r = await run(realDeps());
   assertEquals(r.status, 200, JSON.stringify(r.raw));
-  assertEquals(r.steps.map((s) => s.name), ["fix_coords", "install_link_tombstones", "signin_email_proofs", "signin_revocation_queue"]);
+  assertEquals(r.steps.map((s) => s.name), ["fix_coords", "install_link_tombstones", "signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets"]);
   for (const s of r.steps) assert(s.purged >= 1, `${s.name} purged something: ${JSON.stringify(s)}`);
   assertEquals(r.complete, true);
 
@@ -194,12 +224,16 @@ retentionTest("E5: one run purges EACH retention class past its retention, and k
   assertEquals(await tombstoneCount(oldTomb), 0, "the 25-month-old tombstone is gone");
   assertEquals(await proofExists(staleProof), false, "the proof an hour past its expiry is gone");
   assertEquals(await queueRowExists(oldQueue), false, "the revocation row finished 40 days ago is gone");
+  assertEquals(await nonceExists(oldNonce), false, "the tombstone 8 days past its expiry is gone (0040: the nonce purge is a retention step)");
+  assertEquals(await bucketExists(oldBucketKey), false, "the rate-limit window that started 3 days ago is gone (0040: the bucket purge is a retention step)");
   // kept: not past retention
   assertEquals(await hasCoords(coords.young), true, "a young row at a re-pickable (stub) course keeps its coordinates");
   assertEquals(await tombstoneCount(youngTomb), 1, "the 23-month-old tombstone is kept");
   assertEquals(await proofExists(liveProof), true, "a live proof is kept");
   assertEquals(await queueRowExists(youngQueue), true, "a revocation row finished 5 days ago is kept");
   assertEquals(await queueRowExists(pendingQueue), true, "a PENDING revocation row is never purged, however old");
+  assertEquals(await nonceExists(liveNonce), true, "a tombstone only an hour past its expiry is kept (the floor is 7 days)");
+  assertEquals(await bucketExists(liveBucketKey), true, "a current-window rate-limit row is kept");
   // the evidence row itself survives: only the coordinates went
   assertEquals(await rawCount(`select count(*)::int as n from app.evidence where id = '${coords.aged}'`), 1);
 });
@@ -277,6 +311,216 @@ retentionTest("E5: with NO service-role key in the environment, nothing authenti
     const r = await run(realDeps(), post(bearer));
     assertEquals(r.status, 401, `bearer ${JSON.stringify(bearer)}`);
   }
+});
+
+/** A request whose Authorization header is exactly `value`. Deno's Headers refuse a value that is not a ByteString (U+3000 throws), so a value the
+ * real class cannot carry is handed over as the same two members the code under test reads: this is a test of the COMPARISON, which must not rest on
+ * the transport having already refused the byte. */
+function requestWithAuthorization(value: string): Request {
+  try {
+    return new Request("https://x.test/retention-purge", { method: "POST", headers: { authorization: value } });
+  } catch {
+    return { method: "POST", headers: { get: (name: string) => (name.toLowerCase() === "authorization" ? value : null) } } as unknown as Request;
+  }
+}
+
+// PR4b gate LOW-2: removing the `key === ""` guard in isServiceRoleBearer survived the mutation run. With an EMPTY configured key, a bearer that only LOOKS empty
+// (header normalisation strips space, tab, CR and LF but not NBSP / U+3000; the code's own .trim() then strips those) compared "" to "" and would have admitted
+// anyone. Each shape is asserted against the function and through the whole handler, with the key unset AND set to the empty string.
+for (const configured of ["unset", "empty"] as const) {
+  retentionTest(`E5/LOW-2: with the service-role key ${configured === "unset" ? "unset" : "set to the empty string"}, a bearer that trims to "" (NBSP, U+3000, ...) is 401, never admitted`, async () => {
+    if (configured === "unset") Deno.env.delete("SUPABASE_SERVICE_ROLE_KEY");
+    else Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "");
+    const oldTomb = await seedTombstone(33);
+    const shapes = ["\u00a0", "\u3000", "\u00a0\u3000", "\u2003", "\ufeff", "\u00a0\u00a0\u00a0"];
+    for (const shape of shapes) {
+      const auth = `Bearer ${shape}`;
+      // the control that makes this a test of the guard: after the comparison's own trim the presented token IS the (empty) configured key
+      assertEquals(auth.slice(auth.indexOf(" ") + 1).trim(), "", `control: ${JSON.stringify(shape)} trims to the empty string, equal to the empty key`);
+      assertEquals(isServiceRoleBearer(requestWithAuthorization(auth)), false, `isServiceRoleBearer admitted ${JSON.stringify(auth)}`);
+      const r = await run(realDeps(), requestWithAuthorization(auth));
+      assertEquals(r.status, 401, `the handler admitted ${JSON.stringify(auth)}`);
+    }
+    assertEquals(isServiceRoleBearer(requestWithAuthorization("Bearer ")), false, "a plain empty bearer too");
+    assertEquals(await tombstoneCount(oldTomb), 1, "nothing was purged by any of them");
+    // the control the other way: the real key admits, and clears it
+    Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", KEY);
+    assertEquals((await run(realDeps({ hitRateLimit: unlimited }))).status, 200);
+    assertEquals(await tombstoneCount(oldTomb), 0);
+  });
+}
+
+retentionTest("E5/LOW-2 control: with a real key configured the same function admits exactly that key (so the cells above are not vacuously false)", () => {
+  assertEquals(isServiceRoleBearer(requestWithAuthorization(`Bearer ${KEY}`)), true);
+  assertEquals(isServiceRoleBearer(requestWithAuthorization(`Bearer \u00a0`)), false);
+  assertEquals(isServiceRoleBearer(requestWithAuthorization(`Bearer ${KEY}x`)), false);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 1b. 0040: the two hygiene steps in the real flow, and the `<uid>:me-delete:user` bucket delete_my_data keeps
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+retentionTest("0040: the bucket private.delete_my_data KEEPS (<uid>:me-delete:user) is removed by the purge once its window is more than a day past, and not before", async () => {
+  await ensureServiceRole();
+  const uid = freshUuid();
+  await createTestUser(uid, `e5-del-${uid.slice(0, 8)}`);
+  const meDelete = `${uid}:me-delete:user`;
+  // the real shapes: the account hits its me-delete limit and an evidence limit (the same function the Edge runtime reaches through hit_actor_rate_limit), then deletes itself
+  await adminSql()`select private.hit_rate_limit(${meDelete}, interval '1 day', 5)`;
+  await adminSql()`select private.hit_rate_limit(${uid + ":evidence"}, interval '1 hour', 60)`;
+  await adminSql()`select private.delete_my_data(${uid}::uuid)`;
+  assertEquals(await bucketExists(meDelete), true, "control: delete_my_data kept the me-delete bucket (so a retry of the deletion stays limited)");
+  assertEquals(await bucketExists(`${uid}:evidence`), false, "control: ... and removed every other bucket of the account");
+
+  const during = await run(realDeps({ hitRateLimit: unlimited }));
+  assertEquals(during.status, 200);
+  assertEquals(await bucketExists(meDelete), true, "a purge while its window is current keeps it");
+
+  await asDefiner(async (sql) => {
+    await sql`update private.rate_limit_bucket set window_start = now() - interval '1 day 23 hours' where bucket_key = ${meDelete}`;
+  });
+  assertEquals(stepOf(await run(realDeps({ hitRateLimit: unlimited })), "rate_limit_buckets").status, "done");
+  assertEquals(await bucketExists(meDelete), true, "a day after its window ended it is still kept (windows are purged 2 days after they START)");
+
+  await asDefiner(async (sql) => {
+    await sql`update private.rate_limit_bucket set window_start = now() - interval '2 days 1 hour' where bucket_key = ${meDelete}`;
+  });
+  const after = await run(realDeps({ hitRateLimit: unlimited }));
+  assert(stepOf(after, "rate_limit_buckets").purged >= 1, JSON.stringify(stepOf(after, "rate_limit_buckets")));
+  assertEquals(await bucketExists(meDelete), false, "once its window is more than a day past the purge removes it: the 'nightly sweep' the requirements assumed is this step");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 2b. 0040: the four SQL-bounded steps (a constant inside each definer) clear a backlog larger than one batch
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+/** 5003 expired rows of each of the four classes the definers bound themselves (one more batch than RETENTION_DEFINER_BATCH_ROWS holds), plus one LIVE row of each. */
+async function seedBacklog(): Promise<{ liveProof: string; livePending: string; liveNonce: string; liveBucket: string }> {
+  await ensureServiceRole();
+  const caller = await newUser("e5-bl-c");
+  const target = await newUser("e5-bl-t");
+  const n = RETENTION_DEFINER_BATCH_ROWS + 3;
+  const tag = freshUuid().slice(0, 8);
+  const liveProof = await seedProof(true);
+  const livePending = await seedQueueRow("pending");
+  const liveNonce = await seedNonce(false);
+  const liveBucket = `e5-live-${tag}`;
+  await seedBucket(liveBucket, 0);
+  await adminSql()`insert into private.consumed_nonce (nonce_hash, source, consumed_at, expires_at)
+                   select ${"e5-bl-" + tag + "-"} || g, 'checkin_challenge', now() - interval '12 days', now() - interval '10 days' from generate_series(1, ${n}::int) g`;
+  await asDefiner(async (sql) => {
+    await sql`insert into private.rate_limit_bucket (bucket_key, window_start, count) select ${"e5-bl-" + tag + ":"} || g, now() - interval '5 days', 1 from generate_series(1, ${n}::int) g`;
+    await sql`insert into private.signin_revocation_queue (provider, source, token_fingerprint, status, created_at, completed_at)
+              select 'apple', 'unlink', ${"e5-bl-" + tag + "-"} || g, 'revoked', now() - interval '50 days', now() - interval '40 days' from generate_series(1, ${n}::int) g`;
+    // a proof is written one row at a time (its INSERT policy names the row's id in a GUC): a loop inside the database
+    await sql.unsafe(`do $d$ declare v uuid; begin
+        for i in 1..${n} loop
+          v := gen_random_uuid();
+          perform set_config('app.signin.proof_id', v::text, true);
+          insert into private.signin_email_proof (id, caller_user_id, target_user_id, provider, email_hash, sub_hash, created_at, expires_at)
+          values (v, '${caller.uid}', '${target.uid}', 'apple', repeat('a', 64), repeat('b', 64), now() - interval '3 hours', now() - interval '170 minutes');
+        end loop;
+        perform set_config('app.signin.proof_id', '', true);
+      end $d$`);
+  });
+  return { liveProof, livePending, liveNonce, liveBucket };
+}
+
+const BOUNDED_CLASSES = ["signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets"] as const;
+
+retentionTest("0040: a backlog larger than one batch is cleared over SEVERAL batches by one run, for each of the four SQL-bounded steps; a live row of each survives", async () => {
+  const live = await seedBacklog();
+  const r = await run(realDeps({ hitRateLimit: unlimited }));
+  assertEquals(r.status, 200, JSON.stringify(r.raw));
+  for (const name of BOUNDED_CLASSES) {
+    const st = stepOf(r, name);
+    assertEquals(st.status, "done", `${name}: ${JSON.stringify(st)}`);
+    assert(st.purged >= RETENTION_DEFINER_BATCH_ROWS + 3, `${name} cleared the whole backlog: ${JSON.stringify(st)}`);
+    assert(st.batches >= 2, `${name} needed more than one batch: ${JSON.stringify(st)}`);
+  }
+  assertEquals(await proofExists(live.liveProof), true, "the live proof survived every batch");
+  assertEquals(await queueRowExists(live.livePending), true, "the old pending revocation row survived every batch");
+  assertEquals(await nonceExists(live.liveNonce), true, "the live tombstone survived every batch");
+  assertEquals(await bucketExists(live.liveBucket), true, "the current-window bucket survived every batch");
+  // nothing expired is left, in any of the four tables
+  assertEquals(await rawCount(`select count(*)::int as n from private.consumed_nonce where coalesce(expires_at, consumed_at) < now() - interval '7 days'`), 0);
+  const left = await asDefiner(async (sql) => ({
+    buckets: Number((await sql`select count(*)::int as n from private.rate_limit_bucket where window_start < now() - interval '2 days'`)[0]!.n),
+    finished: Number((await sql`select count(*)::int as n from private.signin_revocation_queue where status <> 'pending' and completed_at < now() - interval '30 days'`)[0]!.n),
+    proofs: Number((await sql`select count(*)::int as n from private.signin_email_proof where expires_at < now() - interval '1 hour'`)[0]!.n),
+  }));
+  assertEquals(left, { buckets: 0, finished: 0, proofs: 0 });
+});
+
+retentionTest("0040: a FULL batch of each SQL-bounded step is exactly RETENTION_DEFINER_BATCH_ROWS (the TypeScript constant and the constant inside each definer cannot drift apart)", async () => {
+  await seedBacklog();
+  assertEquals(RETENTION_DEFINER_BATCH_ROWS, 5000);
+  const steps = retentionPurgeSteps();
+  for (const name of BOUNDED_CLASSES) {
+    const st = steps.find((x) => x.name === name)!;
+    assertEquals(st.batchLimit, RETENTION_DEFINER_BATCH_ROWS, `${name}'s batchLimit is the definer's bound`);
+    assertEquals(await st.runBatch(), RETENTION_DEFINER_BATCH_ROWS, `${name}: a batch against a larger backlog removes exactly that many rows`);
+  }
+  // leave the database clean for the cells after this one
+  const r = await run(realDeps({ hitRateLimit: unlimited }));
+  for (const name of BOUNDED_CLASSES) assertEquals(stepOf(r, name).status, "done");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 4b. PR4c (NIT): the catalog import's own fix-coordinate / tombstone purge takes the SAME per-step try-lock as the retention steps
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+/** Another session holding a retention step's advisory lock until released, exactly as a concurrent run's batch would. */
+async function holdStepLock(name: Parameters<typeof retentionStepLockKeys>[0]): Promise<() => Promise<void>> {
+  const [k1, k2] = retentionStepLockKeys(name);
+  const other = rawHarness();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let held!: () => void;
+  const heldSignal = new Promise<void>((r) => (held = r));
+  const holder = other.begin(async (trx: ReturnType<typeof postgres>) => {
+    await trx`select pg_advisory_xact_lock(${k1}, ${k2})`;
+    held();
+    await gate;
+  });
+  await heldSignal;
+  return async () => {
+    release();
+    await holder;
+    await other.end({ timeout: 1 });
+  };
+}
+
+retentionTest("PR4c: the import's own fix-coordinate purge skips (0 rows, no waiting) while the retention step's lock is held, and runs once it is released; the tombstone purge likewise", async () => {
+  const coords = await seedFixCoords();
+  const oldTomb = await seedTombstone(31);
+
+  const releaseCoords = await holdStepLock("fix_coords");
+  try {
+    const t0 = Date.now();
+    assertEquals(await withSystemCatalogImport((repo) => repo.rescoreBacklog.purgeFixCoords(30, 5000)), 0, "skipped while the retention step holds its lock");
+    assert(Date.now() - t0 < 4000, "the import's purge did not wait for the lock holder");
+    assertEquals(await hasCoords(coords.aged), true, "and removed nothing");
+    // a different step's lock is not held: the tombstone purge is unaffected
+    assert((await withSystemCatalogImport((repo) => repo.rescoreBacklog.purgeInstallLinkTombstones(100000))) >= 1, "the other step's purge ran");
+    assertEquals(await tombstoneCount(oldTomb), 0);
+  } finally {
+    await releaseCoords();
+  }
+  assert((await withSystemCatalogImport((repo) => repo.rescoreBacklog.purgeFixCoords(30, 5000))) >= 1, "released: the import's purge removes the coordinates");
+  assertEquals(await hasCoords(coords.aged), false);
+  assertEquals(await hasCoords(coords.young), true, "and only the aged row's");
+
+  const tomb2 = await seedTombstone(32);
+  const releaseTombs = await holdStepLock("install_link_tombstones");
+  try {
+    assertEquals(await withSystemCatalogImport((repo) => repo.rescoreBacklog.purgeInstallLinkTombstones(100000)), 0, "the tombstone purge skips while ITS step's lock is held");
+    assertEquals(await tombstoneCount(tomb2), 1);
+  } finally {
+    await releaseTombs();
+  }
+  assert((await withSystemCatalogImport((repo) => repo.rescoreBacklog.purgeInstallLinkTombstones(100000))) >= 1);
+  assertEquals(await tombstoneCount(tomb2), 0);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -370,6 +614,41 @@ retentionTest("E5: one class failing does not stop the others: with EXECUTE revo
   }
   assertEquals(stepOf(await run(realDeps({ hitRateLimit: unlimited })), "install_link_tombstones").status, "done");
   assertEquals(await tombstoneCount(oldTomb), 0, "restored: the next run purges it");
+});
+
+retentionTest("0040: without the owner-approved EXECUTE grant a hygiene step FAILS (42501) and every other step still runs: the grant is what the step needs, and nothing else substitutes for it", async () => {
+  if (!(await isSuperuserHarness())) {
+    console.log("0040 grant cell: skipped (the harness role is not a superuser; HARNESS_MODE=superuser runs it)");
+    return;
+  }
+  const oldNonce = await seedNonce(true);
+  const oldBucketKey = `e5-bucket-grant-${freshUuid()}`;
+  await seedBucket(oldBucketKey, 4);
+  const raw = rawHarness();
+  try {
+    await raw.unsafe("revoke execute on function private.purge_consumed_nonce() from edge_system");
+    await raw.unsafe("revoke execute on function private.purge_rate_limit_buckets() from edge_system");
+    const spy = console.error;
+    console.error = () => undefined;
+    try {
+      const r = await run(realDeps({ hitRateLimit: unlimited }));
+      assertEquals(r.status, 500);
+      for (const name of ["consumed_nonce", "rate_limit_buckets"]) assertEquals([stepOf(r, name).status, stepOf(r, name).error], ["failed", "42501"], name);
+      for (const name of ["fix_coords", "install_link_tombstones", "signin_email_proofs", "signin_revocation_queue"]) assertEquals(stepOf(r, name).status, "done", `${name} still ran`);
+      assertEquals(await nonceExists(oldNonce), true, "nothing was purged without the grant");
+      assertEquals(await bucketExists(oldBucketKey), true);
+    } finally {
+      console.error = spy;
+    }
+  } finally {
+    await raw.unsafe("grant execute on function private.purge_consumed_nonce() to edge_system");
+    await raw.unsafe("grant execute on function private.purge_rate_limit_buckets() to edge_system");
+    await raw.end({ timeout: 1 });
+  }
+  const after = await run(realDeps({ hitRateLimit: unlimited }));
+  assertEquals(after.status, 200);
+  assertEquals(await nonceExists(oldNonce), false, "restored: the next run purges both");
+  assertEquals(await bucketExists(oldBucketKey), false);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
