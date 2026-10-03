@@ -20,7 +20,7 @@ const text = (f: string): string => readFileSync(f, "utf8");
 const rel = (f: string): string => relative(root, f);
 
 describe("the evidence lane ships no mock or test strings", () => {
-  const lane = ["attest", "challenges", "evidence"].flatMap((d) => files(join(root, "src", d)));
+  const lane = ["attest", "challenges", "evidence", "offline-code", "rewards"].flatMap((d) => files(join(root, "src", d)));
   const wiring = ["src/api/http-client.ts", "src/api/evidence-answer.ts", "src/api/retry-after.ts", "src/api/unconfigured.ts", "src/outbox/runner.ts", "src/runtime/services.ts", "src/runtime/backend.ts"].map((p) => join(root, p));
 
   it("the scan is not vacuous", () => {

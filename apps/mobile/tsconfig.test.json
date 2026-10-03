@@ -4,7 +4,10 @@
   // fixtures, with @types/node available.
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    // The tests import a few pure server modules (the offline-code TOTP, the activation request shape and bindings) to compare the mobile code with the server's own
+    // output; those files import their siblings with the `.ts` extension (Deno style), which `tsc --noEmit` accepts only with this option.
+    "allowImportingTsExtensions": true
   },
   "include": ["app", "src", "test"],
   "exclude": ["node_modules", "dist"]

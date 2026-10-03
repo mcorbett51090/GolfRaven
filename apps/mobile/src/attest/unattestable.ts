@@ -25,4 +25,10 @@ export class UnattestableAttestor implements Attestor {
   integrityToken(): Promise<AttestResult<{ integrityToken: string }>> {
     return this.unattestable();
   }
+  deviceCheckToken(): Promise<AttestResult<{ token: string }>> {
+    return this.unattestable();
+  }
+  installLinkId(): Promise<AttestResult<{ installLinkId: string }>> {
+    return this.unattestable();
+  }
 }

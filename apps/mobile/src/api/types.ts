@@ -149,7 +149,82 @@ export interface CheckinApi {
   redeemCheckinChallenge(req: CheckinRedeemInput, credentials: EvidenceCredentials): Promise<CheckinTokenResult>;
 }
 
-export interface ApiClient extends EvidenceSubmitter, CheckinApi {
+/** `POST me-offline-seed` request (`parseOfflineSeedRequest`, `_shared/me/offline-seed-handler.ts`): STRICT, the two keys below and no others. */
+export interface OfflineSeedRequest {
+  /** The per-install device id (a UUID). The device must already be registered to this account (a 404 otherwise: this endpoint never creates one). */
+  deviceId: string;
+  /** `true`: a NEW seed and version; the old one stops working at once. Absent: the same seed as before (deterministic). */
+  rotate?: boolean;
+}
+
+/** `POST me-offline-seed` answer (`OfflineSeedResponse`). `seed` is a SECRET: RFC 4648 base32, upper case, no padding, of 32 bytes. Never logged, never stored anywhere but the secure store. */
+export interface OfflineSeedResult {
+  seed: string;
+  stepSeconds: 600;
+  digits: 6;
+  algorithm: "SHA256";
+  seedVersion: number;
+  /** The server's clock when the seed was issued (ISO-8601): the client's clock-offset estimate. */
+  issuedAt: string;
+}
+
+/** The two offline-code calls (P4.2b-3b). The bearer is `credentials.accessToken` (the owner's, never whoever is signed in by the time the request is made); not retried here. */
+export interface OfflineCodeApi {
+  provisionOfflineSeed(req: OfflineSeedRequest, credentials: EvidenceCredentials): Promise<OfflineSeedResult>;
+}
+
+/** The server's `RewardKind` (`_shared/rewards/types.ts`): an offer code, or an `entitlement` (the special marker; the table's own `kind` column calls it `special_marker`, the activation answer says `entitlement`). */
+export type RewardKind = "offer_code" | "entitlement";
+
+/** One reward earned on the server and not yet activated on a device (build plan §7.5). NO server endpoint lists them yet: `listEarnedRewards` answers `[]` without a request. */
+export interface EarnedReward {
+  id: string;
+  kind: RewardKind;
+}
+
+/** What `rewards-activate` answered with 200 (`ActivationResult`, `_shared/rewards/activate-handler.ts`). The matched table row and its reasons are server-side diagnostics and are never returned,
+ * and neither is the attestation GRADE: the client reads the outcome from `state` / `held` / `replay` only. */
+export interface ActivationAnswer {
+  id: string;
+  kind: RewardKind;
+  /** `issued` / `redeemable` (activated) or `held_review`. */
+  state: string;
+  held: boolean;
+  /** true when nothing was (re)written: the reward was already held, or already active on this very device. */
+  replay: boolean;
+}
+
+/** The activation attestation material, one of the server's three shapes (`request-shape.ts`). */
+export type ActivationAttestation =
+  | { kind: "ios"; keyId: string; assertion: string; deviceCheckToken: string }
+  | { kind: "android"; integrityToken: string }
+  | { kind: "none"; hardwareSupportsAttestation: false; deviceCheckToken?: string };
+
+/** The WIRE body of `POST rewards-activate/{id}`. STRICT at the server (an unknown key is a 400). The reward id is in the URL only. `attestation.kind: "none"` always claims
+ * `hardwareSupportsAttestation: false` (`attest/activator.ts` `activationWireRequest` is the only constructor: a claim of "I can attest" with no token is graded `failed` plus a fraud signal). */
+export interface ActivationWireRequest {
+  deviceId: string;
+  platform: "ios" | "android";
+  challengeId?: string;
+  nonce?: string;
+  installLinkId?: string;
+  attestation: ActivationAttestation;
+}
+
+/** What a caller gives to activate one reward: the attestation (and so the wire body) is built by the client's activator, bound to these. */
+export interface ActivateRewardInput {
+  rewardId: string;
+  deviceId: string;
+}
+
+export interface RewardsApi {
+  /** `POST rewards-activate/{id}` as the credentials' owner. Not retried here (a retry is safe at the server, which answers `replay: true`, but it costs a live challenge and an assertion). */
+  activateReward(req: ActivateRewardInput, credentials: EvidenceCredentials): Promise<ActivationAnswer>;
+  /** Earned, not yet activated rewards. `[no server endpoint serves this yet: the real client answers `[]` without a request]` */
+  listEarnedRewards(): Promise<EarnedReward[]>;
+}
+
+export interface ApiClient extends EvidenceSubmitter, CheckinApi, OfflineCodeApi, RewardsApi {
   /** Server policy constants the app must not hard-code (`MIN_AGE`, §7.8). `[no server endpoint exists yet: the real client answers the
    * compiled default (16) — see `http-client.ts`]` */
   getPolicy(): Promise<{ minAge: number }>;

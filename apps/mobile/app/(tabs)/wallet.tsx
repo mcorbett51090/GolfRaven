@@ -1,5 +1,7 @@
 import { useApp } from "../../src/runtime/AppProvider";
 import { trailName } from "../../src/browse";
+import { WALLET_ACTIVATION_UI_ENABLED } from "../../src/features";
+import { EarnedRewards } from "../../src/screens/EarnedRewards";
 import { walletTrailIds } from "../../src/wallet";
 import { Body, Card, H2, Screen } from "../../src/ui/components";
 
@@ -12,6 +14,7 @@ export default function WalletScreen() {
   return (
     <Screen>
       <Body muted>{t("wallet.intro")}</Body>
+      {WALLET_ACTIVATION_UI_ENABLED ? <EarnedRewards /> : null}
       {trailIds.map((id) => {
         const trail = index?.trails.get(id);
         return (

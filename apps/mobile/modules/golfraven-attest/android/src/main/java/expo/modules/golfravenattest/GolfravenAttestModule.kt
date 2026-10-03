@@ -10,6 +10,7 @@
 package expo.modules.golfravenattest
 
 import android.content.Context
+import android.provider.Settings
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.StandardIntegrityManager
 import com.google.android.play.core.integrity.StandardIntegrityException
@@ -56,6 +57,23 @@ class GolfravenAttestModule : Module() {
     }
     AsyncFunction("deviceCheckToken") { ->
       return@AsyncFunction failure("unsupported", "DeviceCheck is iOS only")
+    }
+
+    // P4.2b-3b, reward activation only: the install link id the server links device rows on for the Android substitute of the persistent bits (A20). The SSAID
+    // (Settings.Secure.ANDROID_ID: scoped to the app signing key, the user and the device, kept across a reinstall of an app signed with the same key, reset by a factory
+    // reset) [unverified: platform behaviour from the documented meaning, not observed]. It needs no permission. The server stores only its SHA-256 and the id is bound
+    // into the Play Integrity request hash. A null / empty value, or the known-broken constant some old emulators report, is "unsupported": no id is better than a shared one.
+    AsyncFunction("installLinkId") { ->
+      try {
+        val context: Context? = appContext.reactContext
+        val id: String? = if (context == null) null else Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        if (id == null || id.length < 16 || id == "9774d56d682e549c") {
+          return@AsyncFunction failure("unsupported", "no usable install link id on this device")
+        }
+        return@AsyncFunction mapOf("ok" to true, "installLinkId" to id)
+      } catch (e: Exception) {
+        return@AsyncFunction failure("other", e.message ?: "install link id threw")
+      }
     }
 
     AsyncFunction("integrityToken") { cloudProjectNumber: String, requestHash: String, promise: Promise ->

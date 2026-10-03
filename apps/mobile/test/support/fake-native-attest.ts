@@ -10,7 +10,8 @@ export type NativeEvent =
   | { op: "attestKey"; keyId: string; hashHex: string }
   | { op: "generateAssertion"; keyId: string; hashHex: string }
   | { op: "integrityToken"; cloud: string; requestHash: string }
-  | { op: "deviceCheckToken" };
+  | { op: "deviceCheckToken" }
+  | { op: "installLinkId" };
 
 const fail = (code: "unsupported" | "invalid_key" | "unavailable" | "other", message = code): NativeResult<never> => ({ ok: false, code, message });
 
@@ -77,9 +78,24 @@ export class FakeNativeAttestModule implements NativeAttestModule {
     return { ok: true, assertion: Buffer.from(`assertion:${keyId}:${counter}:${hashB64}`).toString("base64") };
   }
 
+  /** Scripted answer of the next `deviceCheckToken` call (then cleared), and the token it returns otherwise. */
+  nextDeviceCheck: NativeResult<never>[] = [];
+  deviceCheckValue = Buffer.from("devicecheck").toString("base64");
   deviceCheckToken(): Promise<NativeResult<{ token: string }>> {
     this.events.push({ op: "deviceCheckToken" });
-    return Promise.resolve({ ok: true, token: Buffer.from("devicecheck").toString("base64") });
+    const s = this.nextDeviceCheck.shift();
+    if (s) return Promise.resolve(s);
+    return Promise.resolve({ ok: true, token: this.deviceCheckValue });
+  }
+
+  /** The SSAID the fake Android device reports (16 hex characters), or a scripted failure. */
+  installLinkValue = "0123456789abcdef";
+  nextInstallLink: NativeResult<never>[] = [];
+  installLinkId(): Promise<NativeResult<{ installLinkId: string }>> {
+    this.events.push({ op: "installLinkId" });
+    const s = this.nextInstallLink.shift();
+    if (s) return Promise.resolve(s);
+    return Promise.resolve({ ok: true, installLinkId: this.installLinkValue });
   }
 
   integrityToken(cloud: string, requestHash: string): Promise<NativeResult<{ token: string }>> {

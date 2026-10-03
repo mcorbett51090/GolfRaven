@@ -201,7 +201,7 @@ describe("NativeAttestor over the (fake) module", () => {
   });
 
   it("a rejecting or malformed module is `failed`, not a crash", async () => {
-    const a = new NativeAttestor({ ...new FakeNativeAttestModule(), capability: async () => ({ supported: true }), generateKey: () => Promise.reject(new Error("bridge down")), attestKey: async () => ({ ok: true, attestation: "not base64 !!" }), generateAssertion: async () => ({ ok: true, assertion: 5 as never }), deviceCheckToken: async () => ({ ok: true, token: "dG9rZW4=" }), integrityToken: async () => ({ ok: true, token: "bad token with spaces" }) }, "ios", null);
+    const a = new NativeAttestor({ ...new FakeNativeAttestModule(), capability: async () => ({ supported: true }), generateKey: () => Promise.reject(new Error("bridge down")), attestKey: async () => ({ ok: true, attestation: "not base64 !!" }), generateAssertion: async () => ({ ok: true, assertion: 5 as never }), deviceCheckToken: async () => ({ ok: true, token: "dG9rZW4=" }), integrityToken: async () => ({ ok: true, token: "bad token with spaces" }), installLinkId: async () => ({ ok: true, installLinkId: "0123456789abcdef" }) }, "ios", null);
     expect(await a.generateKey()).toMatchObject({ kind: "failed", message: expect.stringContaining("bridge down") });
     expect(await a.attestKey("k", new Uint8Array(32))).toMatchObject({ kind: "failed" });
     expect(await a.assert("k", new Uint8Array(32))).toMatchObject({ kind: "failed" });

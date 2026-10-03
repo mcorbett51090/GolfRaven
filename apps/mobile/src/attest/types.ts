@@ -44,4 +44,8 @@ export interface Attestor {
   assert(keyId: string, clientDataHash: Uint8Array): Promise<AttestResult<{ assertion: string }>>;
   /** Android: a standard Play Integrity request whose `requestHash` is the 32 bytes given (base64url on the wire, the module's concern). */
   integrityToken(requestHash: Uint8Array): Promise<AttestResult<{ integrityToken: string }>>;
+  /** iOS: `DCDevice.current.generateToken` -> the base64 DeviceCheck token a reward activation carries (the assertion binds its SHA-256). Not used by check-in. */
+  deviceCheckToken(): Promise<AttestResult<{ token: string }>>;
+  /** Android: the install identifier the server links device rows on for the Android substitute of the persistent bits (A20; the SSAID, `ANDROID_ID`), for reward activation only. */
+  installLinkId(): Promise<AttestResult<{ installLinkId: string }>>;
 }

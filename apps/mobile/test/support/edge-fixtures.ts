@@ -32,6 +32,13 @@ export interface Vectors {
     };
     canonicalJsonSample: { input: unknown; output: string };
   };
+  /** Codes the SERVER's own `totp.ts` computed for the seed recorded in `responses.offlineseed_200` (P4.2b-3b). */
+  offlineCode: {
+    seedFrom: string;
+    stepSeconds: number;
+    times: Array<{ unixSeconds: number; step: number; code: string }>;
+    leadingZero: { step: number; unixSeconds: number; code: string };
+  };
 }
 export const VECTORS = file.vectors;
 

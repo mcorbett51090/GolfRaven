@@ -4,10 +4,12 @@ import { Alert } from "react-native";
 import { exportAndShare } from "../../src/account";
 import { ApiError } from "../../src/api";
 import { isTrustStateCorrupt } from "../../src/catalog/manager";
+import { OFFLINE_CODE_UI_ENABLED } from "../../src/features";
 import { enablePushNotifications } from "../../src/push";
 import { useApp } from "../../src/runtime/AppProvider";
 import { LOCALES, type MessageKey } from "../../src/i18n";
 import { CatalogBanners } from "../../src/screens/CatalogBanners";
+import { OfflineCodeCard } from "../../src/screens/OfflineCodeCard";
 import { Body, Button, Card, Chip, H2, Row, Screen } from "../../src/ui/components";
 
 /** Required lazily under `__DEV__` so Metro drops the panel (and what it imports)
@@ -120,6 +122,8 @@ export default function MeScreen() {
           <Button title={t("me.signIn")} onPress={() => router.push("/sign-in")} />
         )}
       </Card>
+
+      {OFFLINE_CODE_UI_ENABLED && session ? <OfflineCodeCard /> : null}
 
       <Card>
         <H2>{t("me.sources")}</H2>

@@ -108,9 +108,13 @@ public class GolfravenAttestModule: Module {
       }
     }
 
-    // Android-only operation: present so the JS contract is one shape on both platforms.
+    // Android-only operations: present so the JS contract is one shape on both platforms.
     AsyncFunction("integrityToken") { (cloudProjectNumber: String, requestHash: String) -> [String: Any] in
       return failure("unsupported", "Play Integrity is Android only")
+    }
+
+    AsyncFunction("installLinkId") { () -> [String: Any] in
+      return failure("unsupported", "The install link id is Android only")
     }
   }
 }

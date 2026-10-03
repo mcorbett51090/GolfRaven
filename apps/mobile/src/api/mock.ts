@@ -9,10 +9,16 @@ import { assertDevOnly, type DevOnly } from "../dev-guard";
 import type { EvidenceCredentials, OutboxItem, ServerAnswer } from "../outbox";
 import type { ProgrammeStatus } from "../wallet";
 import { ApiError } from "./errors";
+import { base32Encode } from "../offline-code/base32";
 import type {
   AchievementSummary,
+  ActivateRewardInput,
+  ActivationAnswer,
   ApiClient,
   DeleteAccountResult,
+  EarnedReward,
+  OfflineSeedRequest,
+  OfflineSeedResult,
   ExportResult,
   LinkSignInRequest,
   LinkSignInResult,
@@ -45,6 +51,8 @@ export type MockCall =
   | { op: "delete" }
   | { op: "export" }
   | { op: "push"; req: PushTokenRequest }
+  | { op: "offline_seed"; req: OfflineSeedRequest }
+  | { op: "activate"; req: ActivateRewardInput }
   | { op: "list" };
 
 export interface MockApi extends ApiClient {
@@ -73,6 +81,7 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
   const links: LinkSignInResult[] = [];
   let methods: SignInMethod[] = options.methods ?? [{ provider: "email", linkedAt: iso, isPrivateRelay: false, canUnlink: false }];
   const fallback: ServerAnswer = options.defaultAnswer ?? { kind: "response", status: 201 };
+  let demoSeedVersion = 1;
   const refresh = (): void => {
     methods = methods.map((m) => ({ ...m, canUnlink: methods.length > 1 }));
   };
@@ -140,6 +149,19 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
     },
     redeemCheckinChallenge(req: CheckinRedeemInput): Promise<CheckinTokenResult> {
       return Promise.resolve({ jti: `demo_jti_${req.challengeId}`.replace(/[^A-Za-z0-9_-]/g, "_"), expiresAt: iso, attestationGrade: "unattestable" });
+    },
+    // The demo's offline seed is an obviously fake, fixed pattern (never a real secret); a rotation moves the version.
+    provisionOfflineSeed(req: OfflineSeedRequest): Promise<OfflineSeedResult> {
+      calls.push({ op: "offline_seed", req });
+      maybeFail();
+      if (req.rotate === true) demoSeedVersion += 1;
+      return Promise.resolve({ seed: base32Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + demoSeedVersion) & 255)), stepSeconds: 600, digits: 6, algorithm: "SHA256", seedVersion: demoSeedVersion, issuedAt: new Date().toISOString() });
+    },
+    listEarnedRewards: (): Promise<EarnedReward[]> => Promise.resolve([]),
+    activateReward(req: ActivateRewardInput): Promise<ActivationAnswer> {
+      calls.push({ op: "activate", req });
+      maybeFail();
+      return Promise.resolve({ id: req.rewardId, kind: "offer_code", state: "issued", held: false, replay: false });
     },
     registerPushToken(req): Promise<PushTokenResult> {
       calls.push({ op: "push", req });

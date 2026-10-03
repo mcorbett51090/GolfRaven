@@ -7,7 +7,7 @@
  *     whose server deletion then failed, signed out of an account that still exists.
  *  2. Only after the server says it is done, the LOCAL wipe: the session (the server session is already gone, so no network call: `clearLocalSession`),
  *     the outbox and the prefetched check-in challenges (the deleted player's own data: nothing of it may be sent to a deleted account or carried to
- *     the next one), and the caches that hold the player's data (`clearUserCaches`) including a data export still sitting in the share cache.
+ *     the next one), the attestation records and the offline-code seed (secure store: the deleted user's only), and the caches that hold the player's data (`clearUserCaches`) including a data export still sitting in the share cache.
  *     ONLY the deleted user's rows go (plus the ownerless legacy rows, `UNOWNED`, which no account can ever see or send): another user's dormant
  *     plays on a shared device are theirs and stay (P4.2b-0 made rows per-owner so that sign-out leaves them alone; deletion must not undo it).
  *  3. KEPT on purpose: the device-local O18 age flag. It records "this install failed the age gate", not anything about the account; wiping it
@@ -40,6 +40,9 @@ export interface DeleteDeps {
   /** The attestation records this install keeps per user (`attest/state-store.ts`: the App Attest key id, the Android "has attested" mark): the deleted user's are removed.
    * Optional: absent in tests that do not exercise it. The device id and every other user's records stay. */
   attestState?: { wipeUser(userId: string): Promise<void> };
+  /** The offline-code seed this install keeps per user (`offline-code/store.ts`, secure store only): the deleted user's is removed (the seed is also derived server-side and the server forgets it
+   * with the device; a seed left here would keep showing codes for an account that no longer exists). Optional: absent in tests that do not exercise it. Another user's seed stays. */
+  offlineSeed?: { wipeUser(userId: string): Promise<void> };
   /** A data export left in the cache for a receiving app is deleted too (`FileSharer.purgeStale`, best effort, never throws). */
   sharer: Pick<FileSharer, "purgeStale">;
   /** The signed-in user's id, read BEFORE the server call (the fallback when the server's answer never arrived). */
@@ -94,6 +97,9 @@ export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<Delet
   });
   await attempt("attest-state", async () => {
     if (deletedUser !== null && deletedUser !== UNOWNED && deps.attestState) await deps.attestState.wipeUser(deletedUser);
+  });
+  await attempt("offline-seed", async () => {
+    if (deletedUser !== null && deletedUser !== UNOWNED && deps.offlineSeed) await deps.offlineSeed.wipeUser(deletedUser);
   });
   await attempt("export-cache", () => deps.sharer.purgeStale());
   await attempt("caches", () => deps.clearUserCaches());

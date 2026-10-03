@@ -1,3 +1,4 @@
+export * from "./activator";
 export * from "./binding";
 export * from "./jwt";
 export * from "./mutex";

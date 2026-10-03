@@ -17,6 +17,8 @@ import {
 import type { ApiClient } from "../api";
 import { createAttestation, type AttestStateStore, type Attestor } from "../attest";
 import { loadNativeAttestModule } from "../attest/native-module-loader";
+import { OfflineCodeManager, OfflineSeedStore } from "../offline-code";
+import { activateReward, type ActivationOutcome } from "../rewards";
 import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type ChallengeStore } from "../challenges";
 import { enqueueEvidence, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
 import type { AuthService } from "../auth";
@@ -68,6 +70,12 @@ export interface AppServices {
   attestor: Attestor;
   /** What this install remembers about its attestation, per user and device (`attest/state-store.ts`); account deletion wipes the deleted user's. */
   attestState: AttestStateStore;
+  /** The offline staff code (P4.2b-3b): provisioning the per-(account, device) seed into the secure store, and the 6-digit code computed from it with no network. Nothing user-visible
+   * uses it while `OFFLINE_CODE_UI_ENABLED` is false (`src/features.ts`). */
+  offlineCode: OfflineCodeManager;
+  /** Activates one earned reward on this device (P4.2b-3b; `POST rewards-activate`) under the assertion lock check-in shares. Never throws. Nothing user-visible uses it while
+   * `WALLET_ACTIVATION_UI_ENABLED` is false. */
+  activateReward: (rewardId: string) => Promise<ActivationOutcome>;
   /** The only way a play enters the outbox: builds the payload, consumes one challenge per fix, enqueues for the signed-in user. */
   enqueueEvidence: (input: EvidenceInput) => Promise<EvidenceEnqueued>;
   /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
@@ -171,6 +179,7 @@ export async function createServices(): Promise<AppServices> {
         if (stored) await outboxStore.update({ ...stored, payload });
       },
     },
+    rewards: { activator: attestation.activator, platform: Platform.OS },
     isDev: __DEV__,
     config,
     secure,
@@ -190,6 +199,7 @@ export async function createServices(): Promise<AppServices> {
   };
   const deviceId = createDeviceIdProvider(secure, expoRandomBytes);
   const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, now: () => Date.now() });
+  const offlineCode = new OfflineCodeManager({ store: new OfflineSeedStore(secure), api, session, deviceId, now: () => Date.now() });
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
     api,
@@ -236,6 +246,8 @@ export async function createServices(): Promise<AppServices> {
     challenges,
     attestor,
     attestState: attestation.state,
+    offlineCode,
+    activateReward: (rewardId) => activateReward({ api, session, deviceId }, rewardId),
     enqueueEvidence: (input) =>
       enqueueEvidence(
         {
