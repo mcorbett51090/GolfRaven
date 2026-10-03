@@ -276,6 +276,7 @@ export const frCA: Record<MessageKey, string> = {
   "offline.status.signedOut": "Connectez-vous pour obtenir votre code hors ligne.",
   "offline.status.failed": "Impossible de configurer votre code hors ligne. Réessayez.",
   "offline.status.notConfigured": "Non disponible dans cette version.",
+  "offline.status.staleSeed": "Ce code n'est plus à jour. Touchez « Réinitialiser le code » pour en obtenir un nouveau.",
 
   "wallet.rewards": "Récompenses obtenues",
   "wallet.rewards.empty": "Aucune récompense obtenue pour le moment.",

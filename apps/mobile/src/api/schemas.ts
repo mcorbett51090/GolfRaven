@@ -94,11 +94,15 @@ export const issuedChallengeSchema = z.object({
 });
 export const challengesResultSchema = z.object({ challenges: z.array(issuedChallengeSchema) });
 
-/** `IssuedToken`. The jti must be what the evidence endpoint accepts as `checkinTokenJti` (unpadded base64url, 1-128). */
+/** `IssuedToken`. The jti must be what the evidence endpoint accepts as `checkinTokenJti` (unpadded base64url, 1-128).
+ * `rekey` is the server's stale-App-Attest-key hint (`token-handler.ts`): present, and always `true`, ONLY when an iOS assertion was refused for a key-identity reason (`key_id_mismatch`
+ * graded `failed`, `key_not_registered` graded `unattestable`); omitted otherwise, never `false`. The token is valid whatever it says; `attest/redeemer.ts` is the one consumer.
+ * The schema stays non-strict (another unknown member is ignored), but this one is explicit: a `rekey: false` would break the contract and fails as `bad_response`, loudly. */
 export const checkinTokenResultSchema = z.object({
   jti: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
   expiresAt: z.string().min(1),
   attestationGrade: z.enum(["attested", "unattestable", "failed"]),
+  rekey: z.literal(true).optional(),
 });
 
 /** `POST devices-attest-key` answer (`attest-key-handler.ts`): 201 `registered`, 200 when it replaced an earlier key. */

@@ -577,8 +577,8 @@ describe("markAttestedActivation (Android 'attested before')", () => {
     expect(await a.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
     expect(a.activator).toBeInstanceOf(NativeActivator);
     const code = strip(src("../src/attest/activator.ts"));
-    expect(code).toMatch(/if \(!answer\.replay\) await this\.d\.markAttestedActivation/);
-    expect(code).toMatch(/if \(!isDefiniteNonApplication\(e\)\) await this\.d\.markAttestedActivation/);
+    expect(code).toMatch(/if \(!answer\.replay\) await g\.settle\(\(\) => this\.d\.markAttestedActivation/); // held through `settle`: the lock is not released mid-write
+    expect(code).toMatch(/if \(!isDefiniteNonApplication\(e\)\) await g\.settle\(\(\) => this\.d\.markAttestedActivation/);
   });
 });
 

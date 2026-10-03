@@ -111,6 +111,9 @@ export interface CheckinTokenResult {
   jti: string;
   expiresAt: string;
   attestationGrade: "attested" | "unattestable" | "failed";
+  /** Stale App Attest key hint: present, and only ever `true`, when an iOS assertion was refused because the key id is not the registered one (`failed`) or no key is registered (`unattestable`).
+   * The token is still valid with that grade; `attest/redeemer.ts` marks the local key stale and registers a FRESH one on the next need. Absent on every other answer. */
+  rekey?: true;
 }
 
 export interface CheckinChallengeRequest {

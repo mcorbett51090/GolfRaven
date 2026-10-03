@@ -42,7 +42,8 @@ export type ProvisionOutcome =
   | { status: "unavailable" }
   /** No network (or a timeout). */
   | { status: "offline" }
-  /** `stale_seed`: the server's answer carries a LOWER `seedVersion` than the record on this device, which is kept (a late answer must never take a seed back to an older one). */
+  /** `stale_seed`: a plain provisioning answer carries a LOWER `seedVersion` than the record on this device, which is kept (a late answer must never take a seed back to an older one). With
+   * per-user single-flight that can only mean the server's version went down (a restore): the line (`provisionMessage`) tells the player to use "Reset code", whose answer is authoritative. */
   | { status: "failed"; reason: "not_configured" | "rejected" | "bad_response" | "storage" | "no_device" | "account_mismatch" | "stale_seed" };
 
 export interface ClockSkew {
@@ -322,7 +323,8 @@ export class OfflineCodeManager {
     const issuedAtMs = Date.parse(result.issuedAt);
     let saved: SaveOutcome;
     try {
-      saved = await store.save(owner, deviceId, { seed, seedVersion: result.seedVersion, issuedAtMs, receivedAtMs, resyncNeeded: false });
+      // A rotation (an explicit "reset code") is authoritative: it overwrites even a higher stored version (the server's version went DOWN: a restore); a plain reveal never does.
+      saved = await store.save(owner, deviceId, { seed, seedVersion: result.seedVersion, issuedAtMs, receivedAtMs, resyncNeeded: false }, { authoritative: rotate });
     } catch {
       return { status: "failed", reason: "storage" };
     } finally {

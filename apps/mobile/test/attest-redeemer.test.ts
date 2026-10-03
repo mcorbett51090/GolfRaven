@@ -4,7 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AttestationDeferred, PlainRedeemer, assertionLockKey, attestKeyBinding, bytesToBase64Url, bytesToHex, iosCheckinBinding, withAssertionLock, wireRequest } from "../src/attest";
+import { AttestationDeferred, LockReentryError, PlainRedeemer, assertionLockKey, attestKeyBinding, bytesToBase64Url, bytesToHex, iosCheckinBinding, withAssertionLock, wireRequest } from "../src/attest";
 import { ApiError } from "../src/api/errors";
 import { apiError } from "./support/fakes";
 import { CHALLENGE, DEVICE, NONCE, USER, grade, input, makeRig, tokenFor } from "./support/attest-rig";
@@ -1018,6 +1018,109 @@ describe("rule 3 on ANDROID — check-in redemption takes the assertion lock (PR
     await expect(p1).resolves.toMatchObject({ attestationGrade: "attested" });
     expect(await rig.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
     await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+  });
+});
+
+describe("the state write that follows a SENT request is held by the lock (`settle`): the hold timeout cannot release it mid-write (PR #42 / #44 gate NITs)", () => {
+  const C1 = "cccccccc-cccc-4ccc-8ccc-cccccccccc01";
+  const C2 = "cccccccc-cccc-4ccc-8ccc-cccccccccc02";
+
+  it("Android: the attested mark is slow past the hold time: the lock stays held, the next check-in waits, the real answer is returned, the mark is written", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("android", { holdMs: 5_000 });
+    const gate = deferred();
+    const orig = rig.state.markAttestedAndroid.bind(rig.state);
+    let slow = true;
+    rig.state.markAttestedAndroid = async (u, d) => {
+      if (slow) {
+        slow = false;
+        await gate.promise;
+      }
+      return orig(u, d);
+    };
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const r1 = p1.then((r) => r, (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rig.posts).toHaveLength(1); // the second has not started: the lock was not released under the write
+    expect(rig.module.ops("integrityToken")).toHaveLength(1);
+    gate.resolve();
+    expect(await r1).toMatchObject({ attestationGrade: "attested" });
+    expect(await rig.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+  });
+
+  it("Android: the same for the mark written after a token whose outcome is UNKNOWN (the request failed): the error still reaches the caller, after the write", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("android", { holdMs: 5_000 });
+    const gate = deferred();
+    const orig = rig.state.markAttestedAndroid.bind(rig.state);
+    rig.state.markAttestedAndroid = async (u, d) => {
+      await gate.promise;
+      return orig(u, d);
+    };
+    const e = apiError("network", 0, null);
+    rig.postReplies = [e];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io()).then(() => "resolved", (x: unknown) => x);
+    await vi.advanceTimersByTimeAsync(20_000);
+    gate.resolve();
+    expect(await p1).toBe(e);
+    expect(await rig.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
+  });
+
+  it("iOS: the record of a registration that WAS applied is slow past the hold time: the lock stays held, so the next check-in finds the key it names (never a second registration)", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000 });
+    const gate = deferred();
+    const orig = rig.state.setIosKey.bind(rig.state);
+    rig.state.setIosKey = async (u, d, rec) => {
+      if (rec.state === "registered") await gate.promise;
+      return orig(u, d, rec);
+    };
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const r1 = p1.then((r) => r, (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rig.module.ops("generateAssertion")).toHaveLength(0);
+    gate.resolve();
+    // the first holder was told to stop (the hold time is long gone) and does not go on to assert; but its registration WAS applied, and the record it kept names it
+    expect(await r1).toMatchObject({ name: "AttestationDeferred", reason: "assertion_lock_timeout" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.registrations).toHaveLength(1);
+    expect(rig.posts.map((p) => (p.attestation as { keyId: string }).keyId)).toEqual([rig.registrations[0]!.keyId]);
+  });
+
+  it("iOS: the stale mark of a `rekey` answer is held the same way (the next holder reads the mark, never the stale key as registered)", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000 });
+    await rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const gate = deferred();
+    const orig = rig.state.setIosKey.bind(rig.state);
+    rig.state.setIosKey = async (u, d, rec) => {
+      if (rec.state === "stale") await gate.promise;
+      return orig(u, d, rec);
+    };
+    rig.postReplies = [grade("attested"), { ...grade("failed"), rekey: true }, grade("attested")]; // indexed by the number of posts so far: the first redemption's is #1
+    const p1 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    const r1 = p1.then((r) => r, (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc03" }), rig.io());
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rig.posts).toHaveLength(2); // the first registration's request is gone; the second check-in's assertion has NOT been made
+    gate.resolve();
+    expect(await r1).toMatchObject({ rekey: true });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.registrations).toHaveLength(2); // the first key, then the recovery's
+  });
+});
+
+describe("the assertion lock is not re-entrant: redeem / activate inside withAssertionLock is refused, not deadlocked", () => {
+  it.each(["ios", "android"] as const)("%s: `redeem` called from inside a holder of the same (user, device) rejects with LockReentryError at once and sends nothing", async (platform) => {
+    const rig = makeRig(platform);
+    const inner = withAssertionLock(rig.locks, USER, DEVICE, () => rig.redeemer.redeem(input(), rig.io()));
+    await expect(inner).rejects.toBeInstanceOf(LockReentryError);
+    expect(rig.posts).toEqual([]);
+    expect(rig.module.events.length).toBe(0);
+    await expect(rig.redeemer.redeem(input(), rig.io())).resolves.toMatchObject({ attestationGrade: "attested" }); // the lock is free again
   });
 });
 

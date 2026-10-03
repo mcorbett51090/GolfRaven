@@ -1,6 +1,6 @@
 /** The per-key assertion lock (PR #40 gate LOW-1): strictly sequential per key, released on success, on error AND on timeout, independent across keys. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KeyedMutex, LockAbortedError, LockTimeoutError, assertionLockKey, withAssertionLock } from "../src/attest";
+import { KeyedMutex, LockAbortedError, LockReentryError, LockTimeoutError, assertionLockKey, withAssertionLock } from "../src/attest";
 
 const deferred = <T = void>() => {
   let resolve!: (v: T) => void;
@@ -248,5 +248,109 @@ describe("KeyedMutex", () => {
     gate.resolve();
     await Promise.all([a, b]);
     expect(log).toEqual(["a", "b"]);
+  });
+});
+
+describe("the lock is NOT re-entrant, and says so", () => {
+  it("a nested acquisition of the SAME key that starts in the holder's synchronous start (`await redeem(...)` as its first step) is refused at once with LockReentryError: no deadlock, no waiting for the hold timeout", async () => {
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000 });
+    const key = assertionLockKey("u", "d");
+    let inner: unknown;
+    const outer = withAssertionLock(m, "u", "d", async () => {
+      inner = await withAssertionLock(m, "u", "d", async () => "never").then(() => "ran", (e: unknown) => e);
+      return "outer done";
+    });
+    await expect(outer).resolves.toBe("outer done");
+    expect(inner).toBeInstanceOf(LockReentryError);
+    expect((inner as LockReentryError).key).toBe(key);
+    expect((inner as Error).message).toMatch(/not re-entrant/);
+    expect(m.pendingKeys()).toEqual([]);
+  });
+
+  it("the refused inner call leaves no trace: nothing was queued, and the next holder runs normally", async () => {
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000 });
+    await m.run("k", async () => m.run("k", async () => 1).catch(() => 0));
+    expect(await m.run("k", async () => "next")).toBe("next");
+    expect(m.pendingKeys()).toEqual([]);
+  });
+
+  it("other flows legitimately queue for the same key (this is NOT re-entry): a second caller made while the holder is running waits and then runs", async () => {
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000 });
+    const gate = deferred();
+    const log: string[] = [];
+    const a = m.run("k", async () => {
+      await gate.promise;
+      log.push("a");
+    });
+    await tick();
+    const b = m.run("k", async () => {
+      log.push("b");
+    });
+    await tick();
+    gate.resolve();
+    await Promise.all([a, b]);
+    expect(log).toEqual(["a", "b"]);
+  });
+
+  it("a different key from inside a holder is fine", async () => {
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000 });
+    await expect(m.run("a", () => m.run("b", async () => "ok"))).resolves.toBe("ok");
+  });
+
+  it("a nested acquisition made after an await cannot be told from another flow: it is not detected, and ends at the hold timeout (the backstop)", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 5_000 });
+    const outer = m.run("k", async () => {
+      await tick();
+      await m.run("k", async () => "never");
+    });
+    const settled = outer.then(() => "resolved", (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await settled).toBeInstanceOf(LockTimeoutError);
+  });
+});
+
+describe("guard.settle: a state write that follows a sent request holds the lock but is never refused", () => {
+  it("the hold timeout does NOT release the lock while a settle write is pending, the holder's real result is kept, and the next holder waits", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 5_000 });
+    const gate = deferred();
+    const log: string[] = [];
+    const p1 = m.run("k", async (g) => {
+      await g.settle(async () => {
+        await gate.promise;
+        log.push("write");
+      });
+      return "answer";
+    });
+    const p2 = m.run("k", async () => {
+      log.push("second");
+      return 2;
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(log).toEqual([]);
+    gate.resolve();
+    await expect(p1).resolves.toBe("answer");
+    await expect(p2).resolves.toBe(2);
+    expect(log).toEqual(["write", "second"]);
+  });
+
+  it("unlike effect, settle runs after the abort (the write must follow the server); effect and check still refuse", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 5_000 });
+    const gate = deferred();
+    const seen: string[] = [];
+    const p = m.run("k", async (g) => {
+      await g.effect(() => gate.promise); // in flight past the hold time: the holder is aborted but kept
+      await g.settle(async () => void seen.push("settled"));
+      expect(g.aborted).toBe(true);
+      expect(() => g.check()).toThrow(LockAbortedError);
+      await expect(g.effect(async () => 1)).rejects.toBeInstanceOf(LockAbortedError);
+      return "kept";
+    });
+    await vi.advanceTimersByTimeAsync(6_000);
+    gate.resolve();
+    await expect(p).resolves.toBe("kept");
+    expect(seen).toEqual(["settled"]);
   });
 });

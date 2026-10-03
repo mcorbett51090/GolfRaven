@@ -3688,7 +3688,7 @@ KEY-IDENTITY reason, which is exactly two of the verifier's reasons (`attestatio
 
 Wire examples: `{"data":{"jti":"...","expiresAt":"...","attestationGrade":"failed","rekey":true}}` and `{"data":{"jti":"...","expiresAt":"...","attestationGrade":"unattestable","rekey":true}}`; every other answer is byte-for-byte what it was (the
 member is omitted, never `false`). The grade, the spent challenge (a failed attempt still spends it: there is no free second guess on one nonce) and the issued token are unchanged. Old clients ignore an unknown member (the mobile
-`checkinTokenResultSchema` is a non-strict `z.object`); nothing in `apps/mobile/src` consumes the hint yet.
+`checkinTokenResultSchema` is a non-strict `z.object`); the mobile client consumes the hint since the follow-up change (`apps/mobile/src/attest/redeemer.ts`, rule 6; contract in `apps/mobile/README.md`, "Stale App Attest key recovery").
 
 **Why `key_not_registered` (graded `unattestable`) carries it too.** The brief for this change named "no key is registered while an assertion was presented" as a rekey case, and it is the same family (the client holds a key the server does not):
 a database restore or an admin reset that cleared the key lands here, not on `key_id_mismatch`. The mobile redeemer already reads `unattestable` after a presented assertion as "the server has no key" (`redeemer.ts`), so the hint adds no
@@ -3729,7 +3729,7 @@ hash prefixes only. Rate limits: 10/user/hour and 10/device/day, hit before the 
 `attest-key.deno.test.ts` (replacement on the real SQL, counter restart, retired key cannot return, the lost-advance race with a mid-flight replacement). **New in this change** (`checkin-attest.deno.test.ts`, real database): register key A, present key B (`failed` + `rekey`, signal open with `key_id_mismatch`,
 counter untouched), re-register B through the real handler (200, `replaced`, counter 0), and the very next check-in with B (counter 1) is `attested` with no hint, the signal still open; the retired key A is then `failed` + `rekey` and cannot be registered again (409).
 
-**What the client must do with the hint (the mobile consumer comes later):** on `rekey: true`, generate a **fresh** App Attest key (Apple attests a key once, so the existing local key cannot simply be re-registered `[unverified — training knowledge of DCAppAttestService]`), register it through
+**What the client must do with the hint (implemented in `apps/mobile`, with a per-device 1 h cooldown so it registers at most once an hour):** on `rekey: true`, generate a **fresh** App Attest key (Apple attests a key once, so the existing local key cannot simply be re-registered `[unverified — training knowledge of DCAppAttestService]`), register it through
 `devices-attest-key` ONCE, then attest the next check-in with it; never loop (the budget is 10 registrations per device per day, and a refused registration is a 422 that spends a challenge). A 409 `key_previously_retired` means the key is already dead on this device: generate another.
 
 ### Limits, stated

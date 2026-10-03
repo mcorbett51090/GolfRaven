@@ -273,6 +273,7 @@ export const en = {
   "offline.status.signedOut": "Sign in to get your offline code.",
   "offline.status.failed": "Could not set up your offline code. Try again.",
   "offline.status.notConfigured": "Not available in this build.",
+  "offline.status.staleSeed": "This code is out of date. Tap Reset code to get a new one.",
 
   "wallet.rewards": "Earned rewards",
   "wallet.rewards.empty": "Nothing earned yet.",

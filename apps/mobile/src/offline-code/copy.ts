@@ -30,6 +30,7 @@ export function provisionMessage(o: ProvisionOutcome, rotated: boolean = false):
     case "offline":
       return "offline.status.offline";
     case "failed":
-      return o.reason === "not_configured" ? "offline.status.notConfigured" : "offline.status.failed";
+      if (o.reason === "not_configured") return "offline.status.notConfigured";
+      return o.reason === "stale_seed" ? "offline.status.staleSeed" : "offline.status.failed";
   }
 }
