@@ -147,14 +147,21 @@ see "What is gated"), and never commit a private key.
 - `pnpm export:ios` / `pnpm export:android` — `expo export` behind `scripts/check-public-env.mjs`, which refuses (exit 1, names the variable, never
   prints the value) a secret-shaped key (`service_role` JWT, `sb_secret_…`) or an unusable anon key in any `EXPO_PUBLIC_*` variable, in `process.env` or
   the `.env*` files, because Metro inlines those values into the bundle. The same guard is EAS Build's `eas-build-pre-install` hook. A bare
-  `npx expo export` does not run it.
+  `npx expo export` does not run it. The export scripts pass `--clear` (Metro's transform cache key ignores `EXPO_PUBLIC_*` values, so a value inlined
+  into an earlier export on the same machine could otherwise ship again after the variable was unset) and then run `scripts/scan-bundle.mjs` over
+  the output directory (`scripts/export-and-scan.mjs`, which forwards extra arguments such as `--output-dir` to `expo export` and scans the same
+  directory): it fails on a JWT whose payload `role` is not `anon`, and on an `sb_secret_…` key, printing the file and the kind, never the value.
+  The guard's exit codes: 1 a real finding, 2 the guard could not run (both block; the messages differ).
 - Metro runs the public-env guard (`metro.config.js`, P4.2b-1): every bundling path (`expo start`, `expo export`, `expo run:*`, `eas update`, Gradle,
-  Xcode) fails on a secret-shaped `EXPO_PUBLIC_*` value, naming the variable only. A guard that cannot run is a warning, not a blocked build.
+  Xcode) fails on a secret-shaped `EXPO_PUBLIC_*` value, naming the variable only. A guard that cannot run also blocks (fail closed), with its own message.
   The explicit scripts above remain.
 - Recorded evidence-lane fixtures: `pnpm --filter @golfraven/rules exec vitest run --config ../../apps/mobile/scripts/record-edge-contract.vitest.config.ts`
   re-runs the REAL server handlers over the server's fakes and **fails if `test/fixtures/edge-contract.json` is stale**; with `RECORD_EDGE_CONTRACT=1` it
   rewrites the evidence-lane entries (keys `challenge_*`, `token_*`, `evidence_*`, `batch_*`, and `vectors`; the P4.2a entries are kept byte for byte). See the
-  header of `scripts/record-edge-contract.rec.ts` for what is real and the one thing replaced (`privileged.ts`: it needs Postgres).
+  header of `scripts/record-edge-contract.rec.ts` for what is real and the one thing replaced (`privileged.ts`: it needs Postgres). CI runs the verify
+  mode in the `verify` job.
+- `CHECKIN_UI_ENABLED` (`src/features.ts`, `false` until P4.2b-2/3 add a check-in screen): while false the app does not prefetch check-in challenges at startup
+  or after a sync (they would only expire unused and count against the hourly limit). P4.2b-2/3 flips it with the screen.
 - Outbox ownership (P4.2b-0): every outbox item carries the `ownerUserId` of the Supabase session that created it (SQLite schema v2; rows from
   before it become `needs_attention` / `owner_unknown` and are never sent). Only that user's session sends or sees an item; sign-out leaves a
   user's items dormant, account deletion wipes all of them. Details: `src/outbox/runner.ts`, `src/outbox/enqueue.ts`, `src/db/sql.ts`.

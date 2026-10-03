@@ -17,6 +17,10 @@
  */
 import { sha256 } from "@noble/hashes/sha2.js";
 import { base64UrlToBytes, bytesToHex, utf8Encode } from "../catalog/bytes";
+import { bytesToBase64Url } from "../signin/nonce";
+
+// The repo's own unpadded base64url encoder (pure, Node-checked in signin-flow.test.ts): no global `btoa` is needed. Re-exported: callers import it from here.
+export { bytesToBase64Url };
 
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalize(value));
@@ -50,12 +54,6 @@ export function nonceBytesStrict(nonce: string): Uint8Array | null {
   } catch {
     return null;
   }
-}
-
-export function bytesToBase64Url(bytes: Uint8Array): string {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 export function concatBytes(...parts: Uint8Array[]): Uint8Array {

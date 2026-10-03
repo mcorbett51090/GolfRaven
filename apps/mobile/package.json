@@ -9,8 +9,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "check:public-env": "node scripts/check-public-env.mjs",
-    "export:ios": "node scripts/check-public-env.mjs && expo export --platform ios",
-    "export:android": "node scripts/check-public-env.mjs && expo export --platform android",
+    "export:ios": "node scripts/check-public-env.mjs && node scripts/export-and-scan.mjs --clear --platform ios",
+    "export:android": "node scripts/check-public-env.mjs && node scripts/export-and-scan.mjs --clear --platform android",
     "eas-build-pre-install": "node scripts/check-public-env.mjs"
   },
   "dependencies": {

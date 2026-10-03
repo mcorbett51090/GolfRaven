@@ -106,6 +106,17 @@ jobs:
         env:
           GOLFRAVEN_DEMO: "1"
 
+      - name: Mobile edge-contract fixture drift check (the recorder re-runs the real server handlers and fails if apps/mobile's committed fixture differs)
+        # P4.2b-1b / LOW-1: apps/mobile/test/fixtures/edge-contract.json is RECORDED from the real supabase/functions handlers by
+        # apps/mobile/scripts/record-edge-contract.rec.ts, and the mobile tests replay it. Nothing re-ran the recorder, so a server change to a wire
+        # shape could leave the fixture (and every mobile test built on it) quietly stale. This is the recorder's own VERIFY mode (no
+        # RECORD_EDGE_CONTRACT): deterministic, no network, no database; it fails when the committed fixture differs. Needs only `pnpm install`
+        # (the vitest config and the vendored scorer's aliases live in the tree); it runs from @golfraven/rules for that package's zod / @noble deps,
+        # exactly like the supabase unit step in the db-tests job. Plain step: no `if:`, no `continue-on-error:` (a skipped or non-fatal drift
+        # check reports success; apps/mobile/test/ci-recorder-step.test.ts pins that, as ci-function-lists.test.ts does for the deno steps). After
+        # `Build` on purpose: the rules package's dist exists by then.
+        run: pnpm --filter @golfraven/rules exec vitest run --config ../../apps/mobile/scripts/record-edge-contract.vitest.config.ts
+
       - name: verify-contract (contract/catalog.schema.json must match packages/catalog's Zod schema)
         run: node tools/catalog/dist/verify-contract.js
 

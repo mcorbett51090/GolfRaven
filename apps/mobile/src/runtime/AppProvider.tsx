@@ -4,6 +4,7 @@ import { ActivityIndicator, View } from "react-native";
 import { deleteAccountAndWipeLocal, type DeleteOutcome } from "../account";
 import type { Session } from "../api";
 import { buildIndex, type CatalogIndex } from "../browse";
+import { prefetchChallenges } from "../challenges/prefetch-gate";
 import { resetCatalogAndMaybeRedownload, type CatalogResetReport, type CatalogState, type RefreshOutcome } from "../catalog/manager";
 import type { CatalogSnapshot } from "../catalog/snapshot";
 import { resolveLocale, translate, plural, LOCALES, type Locale, type MessageKey, type Params, type PluralBase } from "../i18n";
@@ -127,7 +128,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     await services.outboxRunner.run();
     await reloadOutbox();
     // After the send, not before: redeeming a challenge at send time frees the server's cap of 10 open prefetched ones, which a top-up needs.
-    void services.challenges.prefetch();
+    void prefetchChallenges(services.challenges);
   }, [services, reloadOutbox]);
 
   // The session follows the auth service (sign-in, sign-out, a refresh the server refused).
@@ -139,7 +140,8 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     setOutboxLoaded([]);
     void reloadOutbox();
     // Online and signed in: keep this user's pool of single-use check-in challenges topped up (offline check-ins consume them, FM-10).
-    if (userId !== null) void services.challenges.prefetch();
+    // A no-op until a screen can use a challenge (`CHECKIN_UI_ENABLED`, src/features.ts): unused ones only expire and eat the hourly limit.
+    if (userId !== null) void prefetchChallenges(services.challenges);
   }, [userId, reloadOutbox, services]);
   const outboxItems = useMemo(() => filterVisibleOutboxItems(outboxLoaded, userId), [outboxLoaded, userId]);
 
