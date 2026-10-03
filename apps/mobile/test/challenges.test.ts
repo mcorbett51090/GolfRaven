@@ -12,10 +12,12 @@ import {
   MAX_PREFETCHED,
   MIN_REMAINING_MS,
   MemoryChallengeStore,
+  prefetchChallenges,
   SqliteChallengeStore,
   type ChallengeStore,
   type IssuedChallengeInput,
 } from "../src/challenges";
+import { CHECKIN_UI_ENABLED } from "../src/features";
 import { enqueueEvidence, evidencePenaltyApplies, parseEvidencePayload, newFixId, type EvidenceInput } from "../src/evidence";
 import { MemoryOutboxStore, createItem, OutboxEnqueueError, OutboxRunner, SqliteOutboxStore, enqueueOutboxItem, type OutboxSession, type OutboxStore } from "../src/outbox";
 import { recorded, scriptedFetch, type Step } from "./support/edge-fixtures";
@@ -201,6 +203,46 @@ describe("ChallengeManager.prefetch", () => {
     const rows = await r.store.listByOwner(A);
     expect(rows).toHaveLength(10);
     expect(rows.some((x) => x.id === "live1" || x.id === "old")).toBe(false);
+  });
+
+  it("each filter on its own, with the bad entries FIRST (so the count cap cannot hide them): wrong-kind, already-expired, expiring-this-instant and over-count entries are dropped", async () => {
+    const r = rig();
+    const good = (i: number): IssuedChallenge => ({ id: `g${i}`, nonce: `bm9uY2U${i}`, expiresAt: new Date(T + 24 * H).toISOString(), kind: "prefetched" });
+    r.api.next = async () => [
+      { id: "live1", nonce: "bm9uY2U", expiresAt: new Date(T + 24 * H).toISOString(), kind: "live" },
+      { id: "old", nonce: "bm9uY2U", expiresAt: new Date(T - 1).toISOString(), kind: "prefetched" },
+      { id: "now", nonce: "bm9uY2U", expiresAt: new Date(T).toISOString(), kind: "prefetched" },
+      ...Array.from({ length: 12 }, (_, i) => good(i)),
+    ];
+    expect(await r.manager.prefetch()).toMatchObject({ kind: "filled", added: 10, usable: 10 });
+    expect((await r.store.listByOwner(A)).map((x) => x.id).sort()).toEqual(Array.from({ length: 10 }, (_, i) => `g${i}`).sort()); // g10, g11: over the count
+
+    // a shortfall of 6 (6 consumed): a server that hands back 7 usable ones gets only 6 kept
+    for (let i = 0; i < 6; i += 1) await r.store.consumeOne(A, DEV, T, T);
+    r.api.next = async () => [{ id: "live2", nonce: "bm9uY2U", expiresAt: new Date(T + 24 * H).toISOString(), kind: "live" }, ...Array.from({ length: 7 }, (_, i) => ({ ...good(i), id: `h${i}` }))];
+    expect(await r.manager.prefetch()).toMatchObject({ kind: "filled", added: 6, usable: 10 }); // 4 still unconsumed + 6 added (h6 is over the count)
+    expect(r.api.requests.at(-1)!.req.prefetchCount).toBe(6);
+    expect((await r.store.listByOwner(A)).some((x) => x.id === "h6" || x.id === "live2")).toBe(false);
+  });
+
+  it("the manager itself hands the store at most the shortfall, only usable entries (the store's own cap of 10 is a second line, not this one)", async () => {
+    const handed: IssuedChallengeInput[][] = [];
+    class SpyStore extends MemoryChallengeStore {
+      override insertMany(owner: string, deviceId: string, items: readonly IssuedChallengeInput[], now: number): Promise<number> {
+        handed.push([...items]);
+        return super.insertMany(owner, deviceId, items, now);
+      }
+    }
+    const r = rig(() => new SpyStore());
+    const entry = (id: string, kind: IssuedChallenge["kind"] = "prefetched", expiresAt = T + 24 * H): IssuedChallenge => ({ id, nonce: "bm9uY2U", expiresAt: new Date(expiresAt).toISOString(), kind });
+    r.api.next = async () => [entry("live", "live"), entry("old", "prefetched", T - 1), ...Array.from({ length: 13 }, (_, i) => entry(`g${i}`))];
+    await r.manager.prefetch();
+    expect(handed).toHaveLength(1);
+    expect(handed[0]!.map((c) => c.id)).toEqual(Array.from({ length: 10 }, (_, i) => `g${i}`)); // exactly the shortfall (10), none of the bad ones
+    for (let i = 0; i < 3; i += 1) await r.store.consumeOne(A, DEV, T, T);
+    r.api.next = async () => Array.from({ length: 6 }, (_, i) => entry(`k${i}`));
+    await r.manager.prefetch();
+    expect(handed[1]!.map((c) => c.id)).toEqual(["k0", "k1", "k2"]); // a shortfall of 3: six offered, three kept
   });
 
   it("the TTL is the server's own (24 h in the recorded answer), read from each challenge's expiresAt", async () => {
@@ -528,6 +570,28 @@ describe("account deletion", () => {
   });
 });
 
+describe("the prefetch gate (NIT: release builds had no screen to use the challenges they prefetched at startup)", () => {
+  it("CHECKIN_UI_ENABLED is false in P4.2b-1", () => {
+    expect(CHECKIN_UI_ENABLED).toBe(false);
+  });
+
+  it("while the flag is false (the default) NO prefetch happens: no request, no token fetch, nothing stored", async () => {
+    const r = rig();
+    await prefetchChallenges(r.manager); // the app's own call shape
+    await prefetchChallenges(r.manager, CHECKIN_UI_ENABLED);
+    expect(r.api.requests).toEqual([]);
+    expect(r.tokens).toEqual([]);
+    expect(await r.store.listByOwner(A)).toEqual([]);
+  });
+
+  it("with the flag on it tops the pool up exactly like a direct prefetch", async () => {
+    const r = rig();
+    await prefetchChallenges(r.manager, true);
+    expect(r.api.requests).toEqual([{ req: { deviceId: DEV, prefetchCount: 10 }, token: `token-${A}` }]);
+    expect(await r.store.listByOwner(A)).toHaveLength(10);
+  });
+});
+
 describe("recorded challenge answers", () => {
   it("live: 120 s; prefetched: 24 h; the partial answer has fewer than asked; the cap and over-cap answers are the server's own", () => {
     const live = JSON.parse(recorded("challenge_live_201").body).data.challenges[0];
@@ -564,6 +628,15 @@ describe("wiring (source checks: composition code with no UI harness here)", () 
     expect(services).toMatch(/challengeStore = new SqliteChallengeStore\(db\)/);
     expect(services).toMatch(/new ChallengeManager\(\{ store: challengeStore, api, session, deviceId, attestor,/);
     const provider = read("../src/runtime/AppProvider.tsx");
-    expect(provider.indexOf("outboxRunner.run()")).toBeLessThan(provider.indexOf("challenges.prefetch()"));
+    expect(provider.indexOf("outboxRunner.run()")).toBeLessThan(provider.indexOf("prefetchChallenges(services.challenges)"));
+  });
+
+  it("NIT: the provider reaches the prefetch ONLY through the gate (no direct `.prefetch()` call), at both sites", () => {
+    const provider = read("../src/runtime/AppProvider.tsx");
+    expect(provider).not.toMatch(/\.prefetch\(/);
+    expect(provider.match(/prefetchChallenges\(services\.challenges\)/g)).toHaveLength(2); // after a sync, and at startup / on a user change
+    const gate = read("../src/challenges/prefetch-gate.ts");
+    expect(gate).toMatch(/enabled: boolean = CHECKIN_UI_ENABLED/);
+    expect(gate).toMatch(/if \(!enabled\) return;/);
   });
 });

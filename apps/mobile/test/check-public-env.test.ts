@@ -3,7 +3,7 @@
  * parser over the build environment before `expo export` / an EAS build and exits non-zero on one. Run here as a real child process.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,11 +92,31 @@ describe("scripts/check-public-env.mjs (a real child process)", () => {
   });
 });
 
+describe("a checker that cannot run exits 2, never 1 (LOW-2: a broken checker must not read as a leaked secret)", () => {
+  it("exits 2 with a 'could not run' message when the parser it imports cannot load (scratch copy with no src/)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gr-public-env-broken-"));
+    try {
+      mkdirSync(join(dir, "scripts"));
+      copyFileSync(SCRIPT, join(dir, "scripts", "check-public-env.mjs"));
+      const r = spawnSync(process.execPath, [join(dir, "scripts", "check-public-env.mjs"), "--root", dir], { env: { PATH: process.env.PATH ?? "" } as unknown as NodeJS.ProcessEnv, encoding: "utf8" });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toMatch(/guard could not run/);
+      expect(r.stderr).not.toMatch(/SECRET key/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still exits 1 (not 2) for a real finding", () => {
+    expect(run({ EXPO_PUBLIC_SUPABASE_ANON_KEY: SB_SECRET }).code).toBe(1);
+  });
+});
+
 describe("the guard is wired in front of export and EAS builds (package.json)", () => {
   const scripts = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> }).scripts;
   it("export:ios, export:android and the EAS pre-install hook run it first", () => {
-    expect(scripts["export:ios"]).toMatch(/^node scripts\/check-public-env\.mjs && expo export --platform ios$/);
-    expect(scripts["export:android"]).toMatch(/^node scripts\/check-public-env\.mjs && expo export --platform android$/);
+    expect(scripts["export:ios"]).toMatch(/^node scripts\/check-public-env\.mjs && node scripts\/export-and-scan\.mjs --clear --platform ios$/);
+    expect(scripts["export:android"]).toMatch(/^node scripts\/check-public-env\.mjs && node scripts\/export-and-scan\.mjs --clear --platform android$/);
     expect(scripts["eas-build-pre-install"]).toBe("node scripts/check-public-env.mjs");
     expect(scripts["check:public-env"]).toBe("node scripts/check-public-env.mjs");
   });

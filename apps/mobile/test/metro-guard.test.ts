@@ -48,7 +48,7 @@ describe("metro.config.js runs the public-env guard", () => {
     expect(r.out + r.err).not.toContain(value.slice(0, 20));
   });
 
-  it("a guard that cannot RUN is a warning, not a blocked build; only a real finding blocks (script stubbed in a scratch copy)", () => {
+  it("exit code 1 is a FINDING ('secret-shaped value'); exit 2 or anything else is 'could not run'; BOTH block the bundle (fail closed) (script stubbed in a scratch copy)", () => {
     const dir = mkdtempSync(join(tmpdir(), "gr-metro-"));
     try {
       symlinkSync(join(APP, "node_modules"), join(dir, "node_modules"));
@@ -57,14 +57,21 @@ describe("metro.config.js runs the public-env guard", () => {
       const stub = (body: string) => writeFileSync(join(dir, "scripts", "check-public-env.mjs"), body);
       stub("process.exit(0);");
       expect(load(join(dir, "metro.config.js"), {}).code).toBe(0);
-      stub("process.exit(2);");
-      const broken = load(join(dir, "metro.config.js"), {});
-      expect(broken.code).toBe(0);
-      expect(broken.err).toMatch(/could not run/);
+
       stub('console.error("check-public-env: EXPO_PUBLIC_X looks like a SECRET"); process.exit(1);');
-      const blocked = load(join(dir, "metro.config.js"), {});
-      expect(blocked.code).not.toBe(0);
-      expect(blocked.err).toMatch(/EXPO_PUBLIC_X/);
+      const found = load(join(dir, "metro.config.js"), {});
+      expect(found.code).not.toBe(0);
+      expect(found.err).toMatch(/EXPO_PUBLIC_X/);
+      expect(found.err).toMatch(/secret-shaped value/);
+      expect(found.err).not.toMatch(/could not run/);
+
+      for (const exit of ["process.exit(2);", "process.exit(3);", 'process.kill(process.pid, "SIGKILL");']) {
+        stub(exit);
+        const broken = load(join(dir, "metro.config.js"), {});
+        expect(broken.code, exit).not.toBe(0);
+        expect(broken.err, exit).toMatch(/env guard could not run/);
+        expect(broken.err, exit).not.toMatch(/secret-shaped value/);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

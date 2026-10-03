@@ -275,6 +275,18 @@ describe.each(STORES)("evidence through the runner (%s)", (_n, makeStore) => {
     expect(await get("ev1")).toMatchObject({ status: "accepted" });
   });
 
+  it("a 401 on the evidence request AFTER the redemption: the resend carries the jti the first attempt recorded and does NOT redeem the challenge again", async () => {
+    setup([{ respond: "token_201_unattestable" }, { respond: "err_401_unauthorized" }, { respond: "evidence_accepted_with_challenge" }]);
+    await add(itemFor(wireOf("evidence_accepted_no_challenge"), 1, A, held()));
+    expect(await runner.run()).toMatchObject({ aborted: null, accepted: 1 });
+    expect(seen.map(evUrl)).toEqual(["checkin-token", "evidence", "evidence"]); // ONE redemption
+    expect(seen.map((s) => s.headers["Authorization"])).toEqual([`Bearer token-${A}`, `Bearer token-${A}`, `Bearer fresh-${A}`]);
+    expect((seen[1]!.body as { fix: { checkinTokenJti?: string } }).fix.checkinTokenJti).toBe("jti_5");
+    expect((seen[2]!.body as { fix: { checkinTokenJti?: string } }).fix.checkinTokenJti).toBe("jti_5"); // the resend carries it
+    expect(seen[2]!.body).toEqual(seen[1]!.body);
+    expect(chOf(await stored("ev1"))).toMatchObject({ state: "redeemed", jti: "jti_5" });
+  });
+
   it("an EXPIRED held challenge is never redeemed or used: the fix goes with no challenge and the item says so", async () => {
     setup([{ respond: "evidence_accepted_no_challenge" }]);
     await add(itemFor(wireOf("evidence_accepted_no_challenge"), 1, A, held({ expiresAt: clock.now - 1 })));
@@ -412,6 +424,23 @@ describe.each(STORES)("evidence through the runner (%s)", (_n, makeStore) => {
     const r = await runner.run();
     expect(seen.map((s) => s.headers["Authorization"])).toEqual([`Bearer token-${A}`, `Bearer fresh-${A}`]);
     expect(r).toMatchObject({ accepted: 1, retry: 1 });
+  });
+
+  it("a whole-batch 401 whose refresh is refused (no token, or the same token) stops the pass with `unauthorized`: the live item behind the batch is NOT sent", async () => {
+    for (const refresh of [() => null, (u: string) => `token-${u}`]) {
+      store = await makeStore();
+      refreshResult = refresh;
+      setup([{ respond: "err_401_unauthorized" }, { respond: "evidence_accepted_no_challenge" }]);
+      await add(importItem(1, "2026-05-15"));
+      await add(importItem(2, "2026-05-14"));
+      await add(itemFor(wireOf("evidence_accepted_no_challenge"), 3, A, {}, T0 + 3)); // a live play, sent by the single-item lane AFTER the batch
+      const r = await runner.run();
+      expect(r.aborted).toBe("unauthorized");
+      expect(seen.map(evUrl)).toEqual(["evidence-batch"]); // one request: no resend, and the single-item lane never ran
+      expect((await get("ev1")).status).toBe("retry");
+      expect((await get("ev2")).status).toBe("retry");
+      expect(await get("ev3")).toMatchObject({ status: "pending", attempts: 0 });
+    }
   });
 
   it("a batch only ever holds the signed-in user's items, with that user's token", async () => {
