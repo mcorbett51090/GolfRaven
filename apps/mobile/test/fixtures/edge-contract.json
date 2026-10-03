@@ -858,6 +858,28 @@
         }
       }
     },
+    "attestkey_200_replaced": {
+      "status": 200,
+      "body": "{\"data\":{\"deviceId\":\"11111111-1111-4111-8111-111111111111\",\"keyId\":\"cbfLSVrhK7JKO+PBqIT01KFugzMElfzjLHaNEbD/pAw=\",\"replaced\":true}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4_wYNFBs",
+        "keyId": "cbfLSVrhK7JKO+PBqIT01KFugzMElfzjLHaNEbD/pAw=",
+        "attestation": "kPbo4yb-097-FpyLKLVqGrYkBIALACqDiwWLEl5d-Wk"
+      }
+    },
+    "attestkey_409_previously_retired": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"key_previously_retired\",\"message\":\"this key was retired on this device and cannot be registered again\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000003",
+        "nonce": "YWhvdn2Ei5KZoKeutbzDytHY3-bt9PsCCRAXHiUsMzo",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "KZvnK0TikoN7rlbNHKnaE8iUjvtTudZeLSwQ5_zYYek"
+      }
+    },
     "offlineseed_200": {
       "status": 200,
       "body": "{\"data\":{\"seed\":\"56AATDJCQZP4VCP3SV6WSY53LYSAKMCGSTHVLQEPNA2FWIFCCQ6A\",\"stepSeconds\":600,\"digits\":6,\"algorithm\":\"SHA256\",\"seedVersion\":1,\"issuedAt\":\"2026-06-01T12:00:00.000Z\"}}",

@@ -1041,7 +1041,7 @@ describe("the state write that follows a SENT request is held by the lock (`sett
     const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
     const r1 = p1.then((r) => r, (e: unknown) => e);
     const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(9_000); // past the 5 s hold time, inside the 10 s settle bound
     expect(rig.posts).toHaveLength(1); // the second has not started: the lock was not released under the write
     expect(rig.module.ops("integrityToken")).toHaveLength(1);
     gate.resolve();
@@ -1062,7 +1062,7 @@ describe("the state write that follows a SENT request is held by the lock (`sett
     const e = apiError("network", 0, null);
     rig.postReplies = [e];
     const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io()).then(() => "resolved", (x: unknown) => x);
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(9_000); // past the 5 s hold time, inside the 10 s settle bound
     gate.resolve();
     expect(await p1).toBe(e);
     expect(await rig.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
@@ -1080,7 +1080,7 @@ describe("the state write that follows a SENT request is held by the lock (`sett
     const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
     const r1 = p1.then((r) => r, (e: unknown) => e);
     const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(9_000); // past the 5 s hold time, inside the 10 s settle bound
     expect(rig.module.ops("generateAssertion")).toHaveLength(0);
     gate.resolve();
     // the first holder was told to stop (the hold time is long gone) and does not go on to assert; but its registration WAS applied, and the record it kept names it
@@ -1104,13 +1104,31 @@ describe("the state write that follows a SENT request is held by the lock (`sett
     const p1 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
     const r1 = p1.then((r) => r, (e: unknown) => e);
     const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc03" }), rig.io());
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(9_000); // past the 5 s hold time, inside the 10 s settle bound
     expect(rig.posts).toHaveLength(2); // the first registration's request is gone; the second check-in's assertion has NOT been made
     gate.resolve();
     expect(await r1).toMatchObject({ rekey: true });
     await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
     expect(rig.registrations).toHaveLength(2); // the first key, then the recovery's
   });
+});
+
+describe("a secure-store write that never settles cannot hold the assertion lock for ever (gate LOW-1)", () => {
+  it("the Android attested mark hangs: past the hold time and the 10 s bound the lock is released, the first check-in is deferred, and the next check-in runs", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("android", { holdMs: 5_000 });
+    const orig = rig.state.markAttestedAndroid.bind(rig.state);
+    let hang = true;
+    rig.state.markAttestedAndroid = (u, d) => (hang ? new Promise<void>(() => undefined) : orig(u, d));
+    const r1 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc01" }), rig.io()).then((r) => r, (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccc02" }), rig.io());
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(rig.posts).toHaveLength(1); // the second is still waiting inside the bound
+    hang = false;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await r1).toMatchObject({ name: "AttestationDeferred", reason: "assertion_lock_timeout" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+  }, 10_000);
 });
 
 describe("the assertion lock is not re-entrant: redeem / activate inside withAssertionLock is refused, not deadlocked", () => {

@@ -54,14 +54,22 @@ export interface LockGuard {
   check(): void;
   /** Runs a server-side effect: `check()`, then `f()`, and the lock cannot be released (nor the holder abandoned) while `f()` is pending. */
   effect<T>(f: () => Promise<T>): Promise<T>;
-  /** Runs a state write that MUST follow a request already sent (the server has applied it, so the record has to say so): no abort check, but the lock cannot be released (nor the holder
-   * abandoned, its real answer thrown away) while `f()` is pending. `f()` is the write only: it makes no request and starts nothing new. */
+  /** Runs a state write that MUST follow a request already sent (the server has applied it, so the record has to say so): no abort check, and the lock is not released (nor the holder
+   * abandoned, its real answer thrown away) while `f()` is pending, FOR AT MOST `settleBoundMs` (`SETTLE_BOUND_MS`, 10 s). `f()` is the write only: it makes no request and starts nothing new.
+   * Past the bound the write stops counting as in flight: if the hold time has also run out the lock is released and the holder abandoned (`LockTimeoutError`), so a secure-store write that
+   * never settles cannot hold the lock for ever. That reopens ONLY the accepted theoretical race (a write that finishes after the next holder has started could land after that holder's
+   * read); a secure-store write that takes more than 10 s is already a store that is not working. */
   settle<T>(f: () => Promise<T>): Promise<T>;
 }
+
+/** How long a `guard.settle` write may hold the lock past the hold time. */
+export const SETTLE_BOUND_MS = 10_000;
 
 export interface KeyedMutexOptions {
   /** Longest a holder may keep running its own steps before it is told to stop. */
   holdTimeoutMs: number;
+  /** Longest one `guard.settle` write counts as in flight (default `SETTLE_BOUND_MS`). */
+  settleBoundMs?: number;
 }
 
 export class KeyedMutex {
@@ -99,6 +107,7 @@ export class KeyedMutex {
           clearTimeout(timer);
           f();
         };
+        const settleBoundMs = this.opts.settleBoundMs ?? SETTLE_BOUND_MS;
         const guard: LockGuard = {
           get aborted() {
             return aborted;
@@ -117,22 +126,37 @@ export class KeyedMutex {
           },
           async settle<R>(f: () => Promise<R>): Promise<R> {
             inFlight += 1;
+            let counted = true;
+            const uncount = (): void => {
+              if (!counted) return;
+              counted = false;
+              inFlight -= 1;
+            };
+            // The bound: a write that has not settled by now stops holding the lock. If the hold time already ran out, the holder is abandoned right here (the hold timer will not fire again).
+            const bound = setTimeout(() => {
+              uncount();
+              abandonIfIdle();
+            }, settleBoundMs);
             try {
               return await f();
             } finally {
-              inFlight -= 1;
+              clearTimeout(bound);
+              uncount();
             }
           },
         };
-        const timer = setTimeout(() => {
-          aborted = true;
-          // With a server-side effect in flight the lock stays held until the holder settles. Otherwise the holder is abandoned (it stops at its next `check()`).
-          if (inFlight === 0) {
+        // With a server-side effect (or a bounded settle write) in flight the lock stays held until the holder settles. Otherwise the holder is abandoned (it stops at its next `check()`).
+        const abandonIfIdle = (): void => {
+          if (aborted && inFlight === 0) {
             finish(() => {
               cleanup();
               reject(new LockTimeoutError(key, this.opts.holdTimeoutMs));
             });
           }
+        };
+        const timer = setTimeout(() => {
+          aborted = true;
+          abandonIfIdle();
         }, this.opts.holdTimeoutMs);
         Promise.resolve()
           .then(() => {
