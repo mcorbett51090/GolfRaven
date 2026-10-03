@@ -70,3 +70,6 @@ x2-evidence/
 x4-verify-result/
 x2-verdict-result.*
 srv.pid
+
+# vitest run artifacts
+.vitest/
