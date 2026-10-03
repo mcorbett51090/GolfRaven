@@ -104,6 +104,58 @@ export async function computeRequestBinding(sha256: Sha256Fn, body: BoundBody, c
   return sha256(concatBytes(boundBodyBytes(body), challengeBytes));
 }
 
+// ---- the check-in token binding (checkin-token, build plan §4.5 G3-08 / §4.7.1a) ----------------------------------
+//
+// `POST /v1/checkin/token` may carry an App Attest assertion (iOS) or a Play Integrity token (Android) that
+// proves THIS device, for THIS server challenge, on behalf of THIS account. What the attestation commits to is
+// the check-in binding below. It is deliberately a different message from the reward-activation binding and the
+// key-registration binding, so an attestation made for one purpose can never verify as another:
+//   - the purpose string `golfraven/checkin-token/v1` is part of every check-in binding (a domain separator;
+//     activation uses "reward_activation", key registration "attest_key_registration");
+//   - the field SET differs too: activation binds a `rewardId`, a check-in binds a `userId`;
+//   - the challenge id, the device the challenge was issued to, and the account are bound, so a challenge or an
+//     assertion cannot be moved between devices or accounts; the raw nonce is bound, so the assertion proves
+//     possession of the nonce the server issued.
+//
+//   iOS      clientDataHash = SHA-256(UTF-8(S)),  S = canonical JSON string (string-binding.ts#iosCheckinChallengeString)
+//            {"challengeId","deviceId","nonce","platform":"ios","purpose":"golfraven/checkin-token/v1","userId"}
+//   Android  requestHash    = base64url(SHA-256(canonical_body ‖ RAW nonce bytes)),  canonical_body below
+//            {"challengeId","deviceId","platform":"android","purpose":"golfraven/checkin-token/v1","userId"}
+//
+// The device id is the one the challenge was ISSUED to (the server reads it from the challenge row; the client
+// sent it to POST /v1/checkin/challenge), so the token request does not need to repeat it.
+
+/** Domain separator for the check-in token attestation, both platforms. Distinct from activation and key registration. */
+export const CHECKIN_TOKEN_PURPOSE = "golfraven/checkin-token/v1";
+
+/** What a check-in attestation binds, apart from the nonce. UUIDs lowercase. */
+export interface CheckinBoundBody {
+  challengeId: string;
+  /** The device the challenge was issued to. */
+  deviceId: string;
+  /** The authenticated account (the JWT `sub`). */
+  userId: string;
+}
+
+/** The Android canonical body (UTF-8 JSON, keys sorted, no whitespace). The raw nonce bytes follow it in the hash input. */
+export function checkinAndroidBoundBodyBytes(body: CheckinBoundBody): Uint8Array {
+  return new TextEncoder().encode(
+    canonicalJson({
+      challengeId: body.challengeId,
+      deviceId: body.deviceId,
+      platform: "android",
+      purpose: CHECKIN_TOKEN_PURPOSE,
+      userId: body.userId,
+    }),
+  );
+}
+
+/** Android check-in `requestHash` (before base64url): SHA-256(canonical_body ‖ raw nonce bytes). Same layout as
+ * `computeRequestBinding`, over the check-in body. */
+export async function computeCheckinAndroidBinding(sha256: Sha256Fn, body: CheckinBoundBody, nonceBytes: Uint8Array): Promise<Uint8Array> {
+  return sha256(concatBytes(checkinAndroidBoundBodyBytes(body), nonceBytes));
+}
+
 // ---- base64 / base64url ----------------------------------------------------
 
 export function toBase64Url(bytes: Uint8Array): string {

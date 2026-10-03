@@ -71,11 +71,14 @@ import { makeSelfCheckGate, type SelfCheckGate } from "./edge-selfcheck-gate.ts"
 
 import type { OwnReward, RewardsRepo } from "./rewards/types.ts";
 import type { RewardsAttestationConfig } from "./rewards/production-ports.ts";
+import type { PlayIntegrityConfig } from "./rewards/play-integrity-client.ts";
+import type { VerificationConfig } from "./rewards/verification-ports.ts";
 import type {
   Actor,
   CatalogVersionRow,
   ChallengeRow,
   ConsumedCheckinToken,
+  IssuedCheckinTokenRow,
   ExistingEvidenceRow,
   ImporterCurrentVersionRow,
   ImporterLedgerRow,
@@ -1296,7 +1299,7 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         // SAME real device id now converge on ONE row, not two.
         const id = deviceId ?? crypto.randomUUID();
         const inserted = await trx`
-          insert into app.device (id, user_id, platform) values (${id}, ${uid}, ${platform ?? "ios"})
+          insert into app.device (id, user_id, platform) values (${id}, ${uid}, ${platform})
           on conflict (id) do nothing
           returning id`;
         if (inserted[0]) return { id: inserted[0].id };
@@ -1321,6 +1324,15 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       async countForUser(): Promise<number> {
         const rows = await trx`select count(*)::int as n from app.device where user_id = ${uid}`;
         return rows[0]?.n ?? 0;
+      },
+      async claimPlatform(deviceId: string, platform: "ios" | "android"): Promise<"ios" | "android" | null> {
+        // 0042: a device first seen by an endpoint that carries no platform has platform NULL (unknown). The first platform-bearing use sets it
+        // (first wins) through the definer; the platform now on record comes back, so the caller can refuse a mismatch. edge_actor holds no UPDATE
+        // on the column itself. The definer answers NULL (it does not raise) for a device that is not the actor's own, because an error raised
+        // here would abort the request's transaction.
+        const rows = await trx`select private.claim_device_platform_for_actor(${deviceId}::uuid, ${platform}) as platform`;
+        const p = rows[0]?.platform;
+        return p === "ios" || p === "android" ? p : null;
       },
     },
 
@@ -1413,6 +1425,25 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
           values (${input.challengeId}, ${uid}, ${input.deviceId}, ${input.facilityId}, ${input.attestationGrade}::app.attestation_grade, ${input.challengeKind}, clock_timestamp(), ${input.expiresAt})
           returning jti, expires_at`;
         return { jti: rows[0].jti, expiresAt: rows[0].expires_at.toISOString() };
+      },
+
+      async findByChallenge(challengeId: string): Promise<IssuedCheckinTokenRow | null> {
+        // Actor-scoped read of the one token (UNIQUE(challenge_id), 0019) a consumed challenge produced; `checkin-token` uses it to answer a
+        // repeat redemption with the ORIGINAL token. edge_actor's own-row SELECT policy on app.checkin_token (0031) is all this needs.
+        const rows = await trx`
+          select jti, expires_at, attestation_grade, consumed_at from app.checkin_token
+          where challenge_id = ${challengeId} and user_id = ${uid}`;
+        const r = rows[0];
+        if (!r) return null;
+        return { jti: r.jti, expiresAt: r.expires_at.toISOString(), attestationGrade: r.attestation_grade, consumedAt: r.consumed_at ? r.consumed_at.toISOString() : null };
+      },
+
+      async hasAttestedOnDevice(deviceId: string): Promise<boolean> {
+        const rows = await trx`
+          select exists (
+            select 1 from app.checkin_token where user_id = ${uid} and device_id = ${deviceId} and attestation_grade = 'attested'::app.attestation_grade
+          ) as attested`;
+        return Boolean(rows[0]?.attested);
       },
 
       async consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
@@ -2507,7 +2538,7 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
       if (!r) return null;
       return {
         id: r.id,
-        platform: r.platform as "ios" | "android",
+        platform: (r.platform ?? null) as "ios" | "android" | null,
         attestKeyId: r.attest_key_id ?? null,
         // bigint arrives as a string from postgres.js.
         attestCounter: Number(r.attest_counter),
@@ -2672,16 +2703,34 @@ export function loadRewardsAttestationConfig(): RewardsAttestationConfig {
   const environment = Deno.env.get("GR_APPLE_DEVICECHECK_ENV") ?? "";
   const appleComplete = teamId !== "" && bundleId !== "" && keyId !== "" && privateKeyPem !== "" && (environment === "production" || environment === "development");
 
+  return {
+    apple: appleComplete ? { teamId, bundleId, keyId, privateKeyPem, environment: environment as "production" | "development" } : null,
+    google: readPlayIntegrityConfigFromEnv(),
+  };
+}
+
+/** The Play Integrity half of the configuration, shared by `rewards-activate` and `checkin-token` (one reader, so the two can never disagree
+ * about what "configured" means): `null` unless EVERY value is present and non-empty. */
+function readPlayIntegrityConfigFromEnv(): PlayIntegrityConfig | null {
   const packageName = Deno.env.get("GR_PLAY_PACKAGE_NAME") ?? "";
   const digests = (Deno.env.get("GR_PLAY_CERT_SHA256") ?? "").split(",").map((d) => d.trim()).filter((d) => d !== "");
   const serviceAccountEmail = Deno.env.get("GR_PLAY_SERVICE_ACCOUNT_EMAIL") ?? "";
   const serviceAccountPrivateKeyPem = Deno.env.get("GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY") ?? "";
   const googleComplete = packageName !== "" && digests.length > 0 && serviceAccountEmail !== "" && serviceAccountPrivateKeyPem !== "";
+  return googleComplete ? { packageName, certificateSha256Digests: digests, serviceAccountEmail, serviceAccountPrivateKeyPem } : null;
+}
 
-  return {
-    apple: appleComplete ? { teamId, bundleId, keyId, privateKeyPem, environment: environment as "production" | "development" } : null,
-    google: googleComplete ? { packageName, certificateSha256Digests: digests, serviceAccountEmail, serviceAccountPrivateKeyPem } : null,
-  };
+/** The attestation VERIFICATION configuration for `checkin-token` (build plan §4.5 G3-08, §7.5). Verification only: no DeviceCheck credential is
+ * read (the check-in side reads and sets no persistent bit), so the iOS half needs just the App Attest `rpId` and the Android half is the same
+ * four Play Integrity values `rewards-activate` uses. `null` for a half means UNCONFIGURED: a request carrying that platform's attestation
+ * material then fails closed with a 503, and a request carrying none is graded exactly as before.
+ *   iOS:     GR_APPLE_TEAM_ID, GR_APPLE_BUNDLE_ID  (appId = `<team>.<bundle>`, the App Attest rpId; no whitespace)
+ *   Android: GR_PLAY_PACKAGE_NAME, GR_PLAY_CERT_SHA256, GR_PLAY_SERVICE_ACCOUNT_EMAIL, GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY */
+export function loadCheckinAttestationConfig(): VerificationConfig {
+  const teamId = (Deno.env.get("GR_APPLE_TEAM_ID") ?? "").trim();
+  const bundleId = (Deno.env.get("GR_APPLE_BUNDLE_ID") ?? "").trim();
+  const appId = teamId !== "" && bundleId !== "" && !/\s/.test(teamId + bundleId) ? `${teamId}.${bundleId}` : null;
+  return { appId, google: readPlayIntegrityConfigFromEnv() };
 }
 // ---- postgres.js closed-socket guard (P3f gate round 2, LOW) ----------------
 // When Postgres kills a connection mid-transaction (`transaction_timeout` is a
@@ -2760,7 +2809,7 @@ function buildAttestKeyRepo(trx: TxSql, uid: string): AttestKeyRepo {
       const rows = await trx`select platform, attest_key_id from app.device where id = ${deviceId} and user_id = ${uid}`;
       const r = rows[0];
       if (!r) return null;
-      return { platform: r.platform as "ios" | "android", keyId: (r.attest_key_id as string | null) ?? null };
+      return { platform: (r.platform ?? null) as "ios" | "android" | null, keyId: (r.attest_key_id as string | null) ?? null };
     },
 
     async register(input: { deviceId: string; keyId: string; publicKey: Uint8Array }): Promise<"registered" | "replaced"> {

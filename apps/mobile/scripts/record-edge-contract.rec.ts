@@ -47,6 +47,7 @@ vi.mock("../../../supabase/functions/_shared/privileged.ts", () => ({
 
 import { handleChallengeRequest, RATE_LIMIT_PER_USER_HOUR as CHALLENGE_RATE } from "../../../supabase/functions/_shared/checkin/challenge-handler.ts";
 import { handleTokenRequest } from "../../../supabase/functions/_shared/checkin/token-handler.ts";
+import { parseTokenBody } from "../../../supabase/functions/_shared/checkin/token-request-shape.ts";
 import { handleEvidenceBatchIntake, MAX_BATCH_ITEMS_PER_REQUEST } from "../../../supabase/functions/_shared/evidence/batch-handler.ts";
 import { computeInputHash, handleEvidenceIntake, planEvidenceRateLimitChecks } from "../../../supabase/functions/_shared/evidence/handler.ts";
 import { deriveSourceRef } from "../../../supabase/functions/_shared/evidence/source-ref.ts";
@@ -97,8 +98,15 @@ async function challengeEndpoint(state: FakeState, repo: ReturnType<typeof makeF
   return toEntry(res, body);
 }
 
+/** checkin-token/index.ts: the strict body parse (UUID challenge id, unknown keys refused at the top level and inside the attestation block, the two
+ * attestation shapes), then the handler with the attestation ports exactly as the entrypoint builds them. No platform is configured here, so a request
+ * that carries an attestation block would answer 503 `attestation_not_configured`; the recorded requests carry none. */
 async function tokenEndpoint(repo: ReturnType<typeof makeFakeRepo>, body: Record<string, unknown>): Promise<Entry> {
-  const res = await handleRequest(async () => okResponse(201, await handleTokenRequest(body as never, repo, digestHex)));
+  const res = await handleRequest(async () => {
+    const parsed = parseTokenBody(body);
+    if (!parsed.ok) throw Errors.badRequest("invalid checkin-token request", parsed.issues);
+    return okResponse(201, await handleTokenRequest(parsed.value, repo, digestHex, { userId: UID, ports: { ios: null, android: null }, sha256 }));
+  });
   return toEntry(res, body);
 }
 
@@ -183,9 +191,14 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
   const redeem = async (c: { id: string; nonce: string }): Promise<Entry> => tokenEndpoint(repo, { challengeId: c.id, nonce: c.nonce, hardwareSupportsAttestation: false });
   r.token_201_unattestable = await redeem(issued[0]!);
   const jti = JSON.parse(r.token_201_unattestable.body).data.jti as string;
-  r.token_422_challenge_used = await redeem(issued[0]!);
+  // A repeat redemption of the SAME challenge with the SAME nonce while the token is valid is idempotent (token-handler.ts): the original jti, expiry and grade, 201.
+  r.token_201_idempotent_replay = await redeem(issued[0]!);
+  // A REAL challenge_used: the challenge is spent and this request does not present its nonce (another challenge's nonce stands for "not the same request").
+  r.token_422_challenge_used = await tokenEndpoint(repo, { challengeId: issued[0]!.id, nonce: issued[3]!.nonce, hardwareSupportsAttestation: false });
+  r.token_400_unknown_key = await tokenEndpoint(repo, { challengeId: issued[1]!.id, nonce: issued[1]!.nonce, hardwareSupportsAttestation: false, deviceId: FAKE_DEVICE_ID });
+  r.token_400_not_a_uuid = await tokenEndpoint(repo, { challengeId: "chal_1", nonce: issued[1]!.nonce, hardwareSupportsAttestation: false });
   r.token_422_not_consumable_wrong_nonce = await tokenEndpoint(repo, { challengeId: issued[1]!.id, nonce: (issued[1]!.nonce[0] === "A" ? "B" : "A") + issued[1]!.nonce.slice(1), hardwareSupportsAttestation: false });
-  r.token_404_not_found = await tokenEndpoint(repo, { challengeId: "chal_999", nonce: issued[1]!.nonce, hardwareSupportsAttestation: false });
+  r.token_404_not_found = await tokenEndpoint(repo, { challengeId: "00000000-0000-4000-8000-0000000009ff", nonce: issued[1]!.nonce, hardwareSupportsAttestation: false });
   r.token_201_failed_grade = await tokenEndpoint(repo, { challengeId: issued[2]!.id, nonce: issued[2]!.nonce, hardwareSupportsAttestation: true });
   {
     const e = fresh();

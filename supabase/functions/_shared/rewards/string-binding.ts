@@ -21,7 +21,7 @@
 // values are ASCII with no quote or backslash (UUIDs, standard base64 which JSON does not escape, base64url, fixed
 // words), so a client can build it with a template literal as well as with `JSON.stringify` over sorted keys.
 
-import { canonicalJson, type Sha256Fn } from "./binding.ts";
+import { canonicalJson, CHECKIN_TOKEN_PURPOSE, type CheckinBoundBody, type Sha256Fn } from "./binding.ts";
 
 /** `fields` must be string-valued. UUIDs lowercase. */
 export function canonicalChallengeString(fields: Record<string, string>): string {
@@ -67,4 +67,32 @@ export function iosActivationChallengeString(body: IosActivationBoundBody): stri
  * unchanged and keeps binding.ts#computeRequestBinding. */
 export async function computeIosActivationBinding(sha256: Sha256Fn, body: IosActivationBoundBody): Promise<Uint8Array> {
   return sha256(new TextEncoder().encode(iosActivationChallengeString(body)));
+}
+
+// ---------------------------------------------------------------------------
+// The iOS check-in token binding (same construction, `purpose: "golfraven/checkin-token/v1"`)
+// ---------------------------------------------------------------------------
+
+export interface IosCheckinBoundBody extends CheckinBoundBody {
+  /** The nonce STRING exactly as POST /v1/checkin/challenge returned it (unpadded, canonical base64url). */
+  nonce: string;
+}
+
+/** The string the app passes as the `challenge` of `generateAssertionAsync(keyId, S)` for a check-in token:
+ * `{"challengeId":..,"deviceId":..,"nonce":..,"platform":"ios","purpose":"golfraven/checkin-token/v1","userId":..}`.
+ * Distinct from `iosActivationChallengeString` (a different purpose, and a `userId` where activation has a `rewardId` and a token hash). */
+export function iosCheckinChallengeString(body: IosCheckinBoundBody): string {
+  return canonicalChallengeString({
+    challengeId: body.challengeId,
+    deviceId: body.deviceId,
+    nonce: body.nonce,
+    platform: "ios",
+    purpose: CHECKIN_TOKEN_PURPOSE,
+    userId: body.userId,
+  });
+}
+
+/** iOS `clientDataHash` for a check-in assertion = SHA-256(UTF-8(iosCheckinChallengeString(body))). */
+export async function computeIosCheckinBinding(sha256: Sha256Fn, body: IosCheckinBoundBody): Promise<Uint8Array> {
+  return sha256(new TextEncoder().encode(iosCheckinChallengeString(body)));
 }

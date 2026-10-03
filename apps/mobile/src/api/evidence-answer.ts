@@ -18,7 +18,7 @@
  * `lastServerCode`). A 2xx with an unreadable body gets no code, which the machine files as `unexpected_status` (visible, never silently accepted).
  *
  * `POST evidence-batch` answers 200 for the request and puts the outcome of each item in `data.results[i]` as `{ok:true,result:{status,...}}` or
- * `{ok:false,error:{code,message}}`: there is NO per-item HTTP status. `batchItemAnswer` derives the status an item's error would have had
+ * `{ok:false,error:{code,message,details?}}` (a rate-limited item has `details.retryAfterSeconds`, honoured by `batchItemAnswer`): there is NO per-item HTTP status. `batchItemAnswer` derives the status an item's error would have had
  * as a single request from its `code` (`BATCH_CODE_STATUS`, built from `_shared/http.ts` `Errors.*` and the codes the handler throws): an
  * INFERENCE, kept to the codes the server defines; an unknown code becomes 422 (dead letter: visible, never retried blindly).
  */
@@ -83,16 +83,23 @@ const batchItemSchema = z.object({
   index: z.number().int().nonnegative(),
   ok: z.boolean(),
   result: z.object({ status: z.string() }).loose().optional(),
-  error: z.object({ code: z.string() }).loose().optional(),
+  error: z.object({ code: z.string(), details: z.unknown().optional() }).loose().optional(),
 });
 const batchDataSchema = z.object({ results: z.array(batchItemSchema) });
+
+const NO_HEADERS = new Headers();
 
 function batchItemAnswer(item: z.infer<typeof batchItemSchema>): ServerAnswer {
   if (item.ok && item.result) {
     // `accepted` / `needs_attention` are 200s and `queued_catalog` is a 202 in the single-request endpoint: the same pairs.
     return { kind: "response", status: item.result.status === "queued_catalog" ? 202 : 200, code: item.result.status };
   }
-  if (!item.ok && item.error) return { kind: "response", status: BATCH_CODE_STATUS[item.error.code] ?? 422, code: item.error.code };
+  if (!item.ok && item.error) {
+    // A rate-limited item carries the same wait hint as the single endpoint's 429, under `error.details.retryAfterSeconds` (batch-item-result.ts). There is no
+    // per-item header, so only the envelope's details are read.
+    const retryAfter = retryAfterSecondsFrom({ headers: NO_HEADERS }, item.error.details);
+    return { kind: "response", status: BATCH_CODE_STATUS[item.error.code] ?? 422, code: item.error.code, ...(retryAfter !== null ? { retryAfterSeconds: retryAfter } : {}) };
+  }
   return { kind: "network_error", message: "evidence-batch: an item result had neither a result nor an error" };
 }
 

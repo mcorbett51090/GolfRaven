@@ -608,6 +608,17 @@ Deno.test("AT 9: a FAILED verdict raises fraud_signal(attestation_failed) at int
   assertEquals((await activate(u, code3.id, await iosReq(u, dev), deps({ ios: iosPort({ bits: CLEAR }) }))).state, "held_review");
 });
 
+Deno.test("capability dodge: a device with a REGISTERED App Attest key that claims it cannot attest is `failed` (+ fraud_signal), not `unattestable`", DT, async () => {
+  const u = await freshUser("dodge");
+  const dev = await newDevice(u); // carries a registered key
+  const code = await newCode(u);
+  const out = await activate(u, code.id, { deviceId: dev, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } }, deps({}));
+  assertEquals(out.state, "held_review");
+  const sigs = await signals(u, "attestation_failed");
+  assertEquals(sigs.length, 1);
+  assertEquals((sigs[0]!.detail as Record<string, unknown>).reasons, ["no_attestation_token", "device_has_attested_before"]);
+});
+
 Deno.test("AT 9 / G3-08: no token -> failed on hardware that supports attestation, unattestable otherwise; neither reaches issued", DT, async () => {
   const capable = await freshUser("notoken-capable");
   const dev = await newDevice(capable);
@@ -617,7 +628,7 @@ Deno.test("AT 9 / G3-08: no token -> failed on hardware that supports attestatio
   assertEquals((await signals(capable, "attestation_failed")).length, 1);
 
   const incapable = await freshUser("notoken-incapable");
-  const dev2 = await newDevice(incapable);
+  const dev2 = await newDevice(incapable, "ios", false); // a device that never registered an App Attest key: its "cannot attest" is believed
   const c2 = await newCode(incapable);
   const out2 = await activate(incapable, c2.id, { deviceId: dev2, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } }, deps({}));
   assertEquals(out2.state, "held_review");
@@ -1150,7 +1161,7 @@ Deno.test("H2: a cleared reward is still held on a flagged device (row 1), when 
   assert((await signals(u, "flagged_device_activation")).length === 1);
 
   const u2 = await freshUser("h2-still-held-2");
-  const dev2 = await newDevice(u2);
+  const dev2 = await newDevice(u2, "ios", false);
   const b = await newCode(u2, { state: "held_review", restsOnUnattestable: true });
   await resolveHeld(b.id, true);
   const none = await activate(u2, b.id, { deviceId: dev2, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } }, deps({}));

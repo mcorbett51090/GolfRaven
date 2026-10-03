@@ -444,6 +444,8 @@ Status against this doc's own items:
 - **Attestation — out of scope, exactly as directed.** `checkin-token` grades every submission via
   the G3-08 "no token" rule (real App Attest/Play Integrity verification isn't built), so it can only
   ever produce `unattestable` or `failed` this round, never `attested`.
+  **[UPDATE 2026-10-03: closed for clients that send an attestation. `checkin-token` now verifies App Attest / Play Integrity and can
+  grade `attested`; see "checkin-token: real attestation verification" at the end of this document.]**
 - **Dependency pin bump:** `supabase/functions/deno.json`'s `"zod"` entry moved from `3.23.8` to
   `4.6.5` (matching `packages/rules`' own zod dependency, now that the scoring vendor tree actually
   imports it for real) — `tools/service-role-lint/pinned-import-targets.json` updated to match, plus
@@ -625,6 +627,11 @@ records the DECISIONS, not the diff.
    or `failed`, never `attested`. This is a genuine, standing gap (not merely a placeholder default) until
    real attestation verification is wired in; `checkin/token-handler.ts`'s own header carries the same
    note. Restated here per the P3c gate round 2 instruction to record it in this document too.
+   **[UPDATE 2026-10-03: the stub is gone. A request that carries an attestation is verified (iOS: registered key, signature, `rpIdHash`,
+   strictly increasing counter advanced atomically; Android: Play Integrity `requestHash`, package, certificate digest,
+   `deviceIntegrity`, freshness) and can grade `attested`; a request that carries none is `failed` when the claim says capable OR when the
+   server's own evidence says the device can attest (a registered key / a prior `attested` token), otherwise `unattestable`. What stays open:
+   a client that has never registered a key and claims `hardwareSupportsAttestation:false` is still believed.]**
 8. **`connect_iq`/`health_route`/`file_import` have no honest server-derivable signal yet (P3c gate round
    2, item 6).** Rejected outright at `POST /v1/evidence` (`request-shape.ts`'s `REJECTED_SOURCES`),
    the same as `staff_presence`/`booking`/`receipt_green_fee`/`arccos`/`garmin`/`ghin` — none of their own
@@ -756,6 +763,8 @@ entry is left as originally written; this is the CURRENT, more precise statement
    **no offer issuance or reward activation may rest on a P3c-graded fix until real App Attest/Play
    Integrity attestation verification ships.** This is not a hypothetical future tightening — it is the
    condition under which P3c's own scoring output is safe to build on top of at all.
+   **[UPDATE 2026-10-03: the verification now ships in code (not yet against a real device or Google: every vendor interaction is `[unverified]`
+   until the week-1 spike runs on hardware). The condition above is therefore met for the verifier and still unmet for live evidence.]**
 10. **`supabase/tests/deno.lock` does not govern `supabase functions deploy` (P3c gate round 3).** This
     lockfile is a TEST-time artifact only — `tools/db/test-deno-integration.sh` and the CI `deno check`/
     `deno cache` steps are the only things that read it. The real Supabase CLI's own deploy-time dependency
@@ -3372,3 +3381,164 @@ and `bind_actor(<any uid>)` (R6, unchanged); it still **cannot mint without the 
 - **`tools/db/test.sh`, exit 0 in `HARNESS_MODE=superuser` AND `restricted`** (ports 5742 / 5743, private log dir): pgTAP `Files=24, Tests=2161, Result: PASS` in each; `tools/db/test-signin-proof-concurrency.sh` PASS; `test-provision-edge-login.sh` OK (the new accept + five refusals); the H2 `no migration_owner` checks (both approximations) pass with the new `auth.sessions` grant; the Deno integration suite **248 passed / 0 failed** in each;
   `verify-function-inventory.mjs: OK`; service-role lint clean.
 - `deno check --frozen` and `deno cache --frozen` over the CI entry points on a fresh `DENO_DIR`: both exit 0; `supabase/tests/deno.lock` unchanged (no new import specifier). `check-migrations-immutable.sh --base ed2defe`: OK (40 files). `gitleaks dir . --config .gitleaks.toml`: no leaks.
+
+## checkin-token: real attestation verification (2026-10-03), replacing the STUB
+
+`checkin-token` (`POST /v1/checkin/token`) used to ignore any attestation token and grade every request from the client's own
+`hardwareSupportsAttestation` claim, so it could never produce `attested`. It now verifies a presented App Attest assertion (iOS) or Play
+Integrity token (Android) with the **same verifiers `rewards-activate` uses**, over a **check-in-specific binding**, and grades per §4.5 G3-08.
+No migration: the token row already records `attestation_grade`, and the counter advance, the signal insert and the token insert all run as
+`edge_actor` through statements `rewards-activate` already uses.
+
+### Request (strict: unknown keys are refused with 400, at the top level and inside the block)
+
+```
+POST /v1/checkin/token
+{ "challengeId": "<uuid>", "nonce": "<unpadded base64url, as the challenge returned it>", "hardwareSupportsAttestation": boolean,
+  "attestation": OPTIONAL, one of
+    { "platform": "ios",     "keyId": "<base64>", "assertion": "<base64 CBOR>" }
+    { "platform": "android", "integrityToken": "<token>" } }
+```
+
+`deviceId` is **not** a field: the server reads the device from the challenge row (the client sent it to `POST /v1/checkin/challenge`) and binds
+it. `challengeId` must now be a UUID (a non-UUID was an unhandled 500 before). With an attestation the nonce must be the **canonical** unpadded
+base64url spelling (400 otherwise), because the iOS binding carries the nonce as text and the Android binding as bytes.
+
+### The binding (what the attestation commits to); the mobile client must reproduce these exactly
+
+Purpose string (domain separator, a different message from activation `reward_activation` and registration `attest_key_registration`):
+`golfraven/checkin-token/v1`. All ids are the lowercase UUID strings; `userId` is the JWT `sub` verbatim; `deviceId` is the device the challenge
+was issued to; `nonce` is the string `POST /v1/checkin/challenge` returned.
+
+- **iOS.** `S` = canonical JSON (keys sorted, no whitespace, `JSON.stringify` escaping; `/` is not escaped):
+  `{"challengeId":"<c>","deviceId":"<d>","nonce":"<nonce text>","platform":"ios","purpose":"golfraven/checkin-token/v1","userId":"<u>"}`.
+  Pass `S` as the `challenge` of `generateAssertionAsync(keyId, S)` (the module hashes it with SHA-256: `clientDataHash = SHA-256(UTF-8(S))`).
+- **Android.** `canonical_body` = `{"challengeId":"<c>","deviceId":"<d>","platform":"android","purpose":"golfraven/checkin-token/v1","userId":"<u>"}`
+  (UTF-8). `requestHash = base64url_no_padding(SHA-256(canonical_body ‖ raw nonce bytes))` (the nonce decoded from its base64url text); pass it as
+  the Play Integrity `requestHash`.
+- **Recorded vectors** (computed independently with Python `hashlib`; `rewards-binding.test.ts`): challenge `cccccccc-cccc-4ccc-8ccc-cccccccccccc`,
+  device `bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`, user `uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu`, nonce bytes `01..20` hex = text
+  `AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA`: iOS `clientDataHash` = `3c695d6c71722843731e7a80e63d987d628181755c5925db5401f9d36b8077e5`;
+  Android `requestHash` = `8CGJ1X3iXQCcqYH4U7fjJrnceadzDEz5avKmy_idkl0` (hex `f02189d5...925d`).
+
+### Grading
+
+| Case | Grade | Signal |
+|---|---|---|
+| valid attestation over the binding | `attested` | none |
+| iOS: key registered to THIS user's device, signature valid, `rpIdHash` right, counter strictly greater, stored counter advanced atomically (`UPDATE ... WHERE attest_key_id = $key AND attest_counter < $new`) | `attested` | none |
+| attestation presented but invalid (wrong purpose / nonce / challenge / device / user, replayed or non-increasing counter, lost advance race, replaced key, key of another account, malformed, wrong Android `requestHash` / package / certificate / `deviceIntegrity` / freshness, Google's 400 "cannot decode") | `failed` | `fraud_signal(attestation_failed)` via `raiseAttestationFailedIfNone` (one open per account; detail = `{challengeId, deviceId, platform, reasons, source:"checkin-token"}`, no key material) |
+| iOS attestation on a device with NO registered key | `unattestable` (`key_not_registered`), as activation | none |
+| no attestation, and the claim says capable **or** the device has a registered key / a prior `attested` token | `failed` | `attestation_failed` (reason `hardware_supports_attestation_but_no_verified_token` / `device_has_attested_before_but_no_verified_token`) |
+| no attestation, claim says incapable, no such evidence | `unattestable` | none |
+
+A failed attempt **spends its challenge** (the failure is returned as a graded token, never thrown), so there is no free second guess on one nonce.
+
+**Vendor / transport errors never grade `failed`.** Play Integrity unreachable / 5xx / 429 / not JSON, a Google OAuth failure, our service-account credentials
+rejected, or a deployment with no configuration for the presented platform: `503 attestation_unavailable` / `503 attestation_not_configured` — the same choice
+`rewards-activate` makes (`activate-handler.ts#mapVendorError`). The transaction rolls back, so the challenge is **not** consumed, nothing is issued and no
+signal is raised; the client retries (a prefetched challenge lasts 24 h; a live one 120 s, so a live session fetches a new one). Grading `unattestable` on an
+outage was rejected: it would let an outage mint tokens that count as co-signals. App Attest assertion verification is local cryptography, so only the Android
+path can hit a vendor. DeviceCheck is not used here.
+
+### Idempotent redemption
+
+A repeat redemption of an **already consumed** challenge — same account, same nonce (its hash equals the stored hash; the device is the challenge's own),
+while the token it issued is **unexpired and not yet consumed by a fix** — returns that token: the **original jti, expiry and grade**, same 201, no new token.
+Nothing is re-verified, re-graded, re-counted or re-signalled: a repeat iOS assertion with the same counter is not a counter failure, and a better attestation in
+the repeat never upgrades a `failed` / `unattestable` first grade (a repeat answers even while the vendor is down or unconfigured). It works after the 120 s live
+challenge has expired, for as long as the 15 minute token lives. A request that loses the atomic consume to an identical concurrent one answers the same way.
+Everything else about a used challenge stays `422 challenge_used` (another nonce, an undecodable nonce, no token, an expired or consumed token); another account is 404.
+
+### The no-attestation rule, and activation
+
+`hardwareSupportsAttestation` is a self-report. A request without an attestation is `failed` whatever it claims when the server has evidence the device can attest:
+iOS, a **registered** App Attest key on the device (`deviceAttestState` returns a key only for a verified registration, 0034); Android, a token previously issued on
+the device graded `attested` (`Repo#checkinToken.hasAttestedOnDevice`; there is no Android device-level record without a migration). **Cost to an honest client:** once a
+device has a key or an attested token, a check-in that omits the attestation is `failed` and raises the signal, which holds the account's activations (§7.5 row 2).
+The same rule is applied in `rewards-activate`'s `kind:"none"` path (`activate-handler.ts#assessActivatingDevice`, a small local change; reason
+`device_has_attested_before`). **Still open:** a device that never registered a key and never attested can still claim `false` and be believed, as before.
+
+### Architecture
+
+- The earning side (`_shared/checkin`, `checkin-token`) may import only the verification-only rewards modules (`binding`, `string-binding`, `app-attest`,
+  `play-integrity`, `play-integrity-client`, `vendor-http`, `verification-ports`, `types`); none names a persistent-bit call. `production-ports.ts` (which holds the
+  DeviceCheck adapter) re-exports `buildAndroidPort` from the new `rewards/verification-ports.ts`, so both entrypoints grade a Play Integrity token with one
+  implementation. `rewards-isolation.test.ts` pins the allow-list, the absence of bit-reading names in it, and that only `checkin-token/index.ts` wires the ports.
+- Configuration is read only in `privileged.ts#loadCheckinAttestationConfig` (iOS: `GR_APPLE_TEAM_ID` + `GR_APPLE_BUNDLE_ID`; Android: the four `GR_PLAY_*`
+  values; no DeviceCheck credential). An unset platform answers 503 to a request carrying that platform's attestation. See the edge-role-design environment table.
+- The user id in the binding comes from the authenticated actor and is never used to address a row.
+
+### Not verified, and a finding
+
+- `[unverified]` everything the verifiers assume about Apple's assertion format and Google's verdict JSON (unchanged from `rewards-activate`); no device, Apple or Google
+  route exists here. The tests prove self-consistency, not conformance.
+- **Finding, since fixed (migration `0042`, next section):** `checkin-challenge` and `evidence` created unseen devices with `ensureOwn(deviceId, null)`, which stored
+  `platform = 'ios'`, so an Android device first seen there was refused its Android activation (422 `platform_mismatch`).
+
+### Related fixes in the same change
+
+- `evidence-batch` per-item rate-limit errors carry `error.details.retryAfterSeconds` (the window of the bucket that refused), like the single endpoint's 429
+  (`_shared/evidence/batch-item-result.ts`).
+- The unit-test fake `consumeForFix` now clamps to the **challenge's** window like the real statement (it clamped to the token's): a fix captured hours before the redemption
+  of a prefetched challenge is accepted, and the fake no longer passes a test for the wrong reason (`evidence-handler.test.ts` was updated to say so).
+
+### Tests and verification (checkin-token attestation)
+
+- **Unit** (`pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts`): **47 files / 926 tests** (was 44 / 842): `checkin-token-attestation.test.ts` (51: shape, iOS with the real
+  assertion verifier, Android with the real `buildAndroidPort` over a scripted `fetch`, vendor outages, configuration), `checkin-token-idempotency.test.ts` (18: repeat redemption, the no-attestation rule, the
+  fake `consumeForFix` window), `evidence-batch-item-result.test.ts` (3), the binding vectors in `rewards-binding.test.ts`, the boundary in `rewards-isolation.test.ts`, and the activation capability-dodge cells.
+- **Deno integration** (`checkin-attest.deno.test.ts`, 13 cells, real `withOwnership` / `Repo`): the atomic counter advance, the signal and its dedupe, purpose separation, another account's key, the lost advance race,
+  the vendor outage that ROLLS BACK (the challenge is not consumed and redeems on retry), idempotent repeats, the no-attestation rule, and `consumeForFix` accepting a fix captured hours before a prefetched challenge's
+  redemption. Whole suite **262** (was 248), both harness modes, with pgTAP `Files=24, Tests=2161` unchanged (no migration).
+- `deno check --frozen` and `deno cache --frozen` over every entrypoint: exit 0, `deno.lock` unchanged (no new specifier). `service-role-lint` clean, `verify-function-inventory` OK, `check-migrations-immutable.sh --base origin/main` OK,
+  `gitleaks dir .` clean. `pnpm -r typecheck` / `test`: every project passes except `tools/catalog` (`Cannot find module 'esbuild'`) and `apps/mobile` (its dependencies, e.g. `zod`, `expo-file-system`, are not installed in this
+  sandbox); both fail identically without this change and neither is touched by it.
+
+**Mutation proofs** (each applied to a `/tmp` copy, the unit suite run, success = a test that passes unmutated now fails; **36 of 36 caught**, copies deleted, no mutated text in the tree): the purpose constant replaced by the
+activation purpose; the purpose dropped from the iOS string / from the Android body; `userId` dropped from iOS; the nonce dropped from iOS and from Android; `deviceId` dropped from Android; the counter advance skipped; the verifier's
+`<=` loosened to `<`; the key-id owner check removed; the iOS nonce bound as `""`; the account bound as `""`; each Android check removed alone (`requestHash`, package, certificate digest, `deviceIntegrity`); a vendor error mapped to
+`failed` in the handler and, separately, in the port; the signal not raised; unknown keys accepted (attestation block and top level); idempotency: nonce check dropped, token expiry ignored, consumed token ignored, replay re-graded
+upward, the used-challenge replay removed, the lost-race replay removed; the dodge: the claim always believed, the Android half dropped, the iOS half dropped, the same in activation, the claim ignored; `retryAfterSeconds`
+dropped from the batch item; the fake's `consumeForFix` reverted to the token window; `production-ports` imported by the earning side; the not-configured pre-check removed.
+
+## Device platform: unknown until the first platform-bearing use (2026-10-03, migration `0042_device_platform_unknown.sql`)
+
+**The bug.** `app.device.platform` was `NOT NULL`, and `Repo#device.ensureOwn(id, null)` (called by `checkin-challenge` and `evidence`, whose requests carry no platform) stored
+`platform ?? 'ios'`. An Android device first seen there was labelled iOS, and `rewards-activate` (which refuses a request whose platform differs from the row's, 422
+`platform_mismatch`) then refused its Android activation.
+
+**Call sites** (`ensureOwn`): `checkin-challenge` (null), `evidence` (null), `me-push-token` (the optional `platform` of its body), `rewards-activate` (the request's `platform`).
+
+**The fix (option b).** `platform` is now nullable: NULL = unknown. It is set by the **first platform-bearing use**, and the first wins:
+
+| Use | Sets the platform |
+|---|---|
+| `rewards-activate` | the request's `platform`, after every earlier refusal; a mismatch with a set platform stays 422 `platform_mismatch` |
+| `devices-attest-key` | `ios`, **only after the attestation verified**; an Android device is still refused (422); a failed verification labels nothing |
+| `checkin-token` | the attestation block's platform, **only when it graded `attested`**; a failed or absent block labels nothing, and nothing is refused here |
+| `me-push-token` | its `platform`, when it names one |
+
+The write is `private.claim_device_platform_for_actor(device, platform)` (SECURITY DEFINER, EXECUTE for `edge_actor` only, `kind='user'` bindings only): `UPDATE ... WHERE platform IS NULL`
+(race-safe: the second writer re-evaluates the predicate), then it returns the platform on record, or **NULL** (it does not raise: an error would abort the request's transaction) for a device
+that is not the actor's own. `edge_actor` gained **no** privilege on the column (no UPDATE; it keeps `INSERT (id, user_id, platform)`); `private_definer` gained `UPDATE (platform)`, row-scoped by
+the existing `pd_edge_act_device_update` policy. No policy was added, `FORCE ROW LEVEL SECURITY` is untouched, the `ios`/`android` CHECK remains. Deploy order: apply `0042` before the Edge code that
+inserts a NULL platform.
+
+**Option (a) rejected:** adding `platform` to the challenge and evidence requests. The evidence body is strict and its input hash is the idempotency key of a replay, so a new field would turn a client's own
+replays into 409 `evidence_conflict`; and an old client would keep the bug. **No wire change is needed from the mobile client.** (Sending `platform` to `me-push-token`, which already accepts it, now also labels the device.)
+
+**Rows already mislabelled: no data migration.** A row labelled `ios` by the bug cannot be told from a real iOS device that has not registered an App Attest key yet (both: `ios`, no key), so
+the only safe relabelling is to *unknown*, never to `android`. That would be harmless (the first platform-bearing use re-claims it) but this repository's databases are pre-launch, and an UPDATE inside
+a migration is filtered by FORCE RLS for the table owner. Where such rows exist an operator can run, as `service_role`, `UPDATE app.device SET platform = NULL WHERE platform = 'ios' AND attest_key_id IS NULL;`
+(a row with a registered key is certainly iOS and is excluded).
+
+**Not closed at the database level:** `app.register_attest_key` (0034, unchanged) tests `platform <> 'ios'`, which is NULL (not true) for an unknown platform. The Edge handler claims `ios` first, so a key
+is only ever registered on a device labelled iOS; a direct service_role call is trusted.
+
+**Tests.** pgTAP `21_device_platform_claim.sql` (39 cells, as a real `edge_gateway` login: first wins, set platforms never change, the shape refusals, no direct UPDATE, another account's device, a system delegate
+refused, a stale binding, and the posture: no edge_actor grant or policy added, FORCE RLS kept); whole matrix 25 files / **2200** tests (was 2161). Deno `device-platform.deno.test.ts` (6 cells; whole suite **268**, was 262):
+an Android device first seen at `checkin-challenge` and then activated on Android is NOT refused, a device first seen as iOS and then activated as Android still is. Unit `device-platform.test.ts` (16): the same through
+the handlers, plus attest-key, push-token and check-in token, and a source guard that `ensureOwn` never defaults to `'ios'`. **Mutants (11, all caught, copies deleted):** unit suite: activation's claim replaced by the
+request's platform, the mismatch refusal removed, attest-key's claim removed, attest-key accepting Android, check-in token's claim removed, a failed block labelling, push-token's claim removed, `ensureOwn` defaulting
+to `'ios'`; real database: the `platform IS NULL` guard removed (last wins), `UPDATE (platform)` also granted to `edge_actor` (the migration's own assertion aborts), the `kind = 'user'` check removed.

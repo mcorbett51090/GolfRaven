@@ -14,7 +14,7 @@ import type { FakeState } from "./fake-repo.ts";
 export interface FakeAttestDevice {
   id: string;
   userId: string;
-  platform: Platform;
+  platform: Platform | null;
   keyId: string | null;
   publicKey: Uint8Array | null;
   counter: number;

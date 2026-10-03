@@ -55,7 +55,8 @@ export interface FakeReward {
 }
 
 export interface FakeDeviceAttest {
-  platform: "ios" | "android";
+  /** `null` = unknown (0042): first seen by an endpoint that carries no platform. */
+  platform: "ios" | "android" | null;
   attestKeyId: string | null;
   attestCounter: number;
   attestPublicKey: Uint8Array | null;
@@ -128,7 +129,7 @@ export function seedDevice(
   d: {
     id: string;
     userId: string;
-    platform: "ios" | "android";
+    platform: "ios" | "android" | null;
     attestKeyId?: string | null;
     attestCounter?: number;
     attestPublicKey?: Uint8Array | null;
@@ -149,6 +150,14 @@ export function seedDevice(
     installLinkHash: d.installLinkHash ?? null,
     fraudVoided: d.fraudVoided ?? false,
   });
+}
+
+/** What `Repo#device.ensureOwn(id, platform)` does to the rewards-side row: creates it with the platform it was given — `null` when the endpoint
+ * carries none (checkin-challenge, evidence), which stays UNKNOWN (0042) instead of being guessed. A device that already has a row is left alone. */
+export function registerFakeDevice(state: FakeState, id: string, platform: "ios" | "android" | null): void {
+  const rs = rewardsState(state);
+  if (rs.deviceAttest.has(id)) return;
+  rs.deviceAttest.set(id, { platform, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false });
 }
 
 export function openSignal(state: FakeState, userId: string, kind: string): void {
@@ -232,7 +241,7 @@ export function makeFakeRewardsRepo(state: FakeState, uid: string): RewardsRepo 
     async deviceAttestState(deviceId: string): Promise<DeviceAttestState | null> {
       const dev = state.devices.get(deviceId);
       if (!dev || dev.userId !== uid) return null;
-      const a = rs.deviceAttest.get(deviceId) ?? { platform: "ios" as const, attestKeyId: FAKE_ATTEST_KEY_ID, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false };
+      const a = rs.deviceAttest.get(deviceId) ?? { platform: null, attestKeyId: null, attestCounter: 0, attestPublicKey: null, integrityLast: null, tokenHash: null, installLinkHash: null, fraudVoided: false };
       return { id: deviceId, platform: a.platform, attestKeyId: a.attestKeyId, attestCounter: a.attestCounter, attestPublicKey: a.attestPublicKey };
     },
     async advanceAttestCounter(deviceId: string, keyId: string, counter: number): Promise<boolean> {

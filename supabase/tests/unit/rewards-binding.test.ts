@@ -138,7 +138,7 @@ describe("base64 helpers", () => {
 // The iOS activation binding is the STRING form (string-binding.ts); binding.ts above still serves Android.
 // ---------------------------------------------------------------------------
 import { computeAttestKeyBinding } from "../../functions/_shared/rewards/app-attest-registration.js";
-import { REWARD_ACTIVATION_PURPOSE, computeIosActivationBinding, iosActivationChallengeString } from "../../functions/_shared/rewards/string-binding.js";
+import { REWARD_ACTIVATION_PURPOSE, computeIosActivationBinding, computeStringBinding, iosActivationChallengeString } from "../../functions/_shared/rewards/string-binding.js";
 
 describe("iOS activation binding (string form)", () => {
   const body = {
@@ -169,5 +169,89 @@ describe("iOS activation binding (string form)", () => {
     expect(toHex(reg)).not.toBe(toHex(await computeIosActivationBinding(sha256, body)));
     const raw = await computeRequestBinding(sha256, { rewardId: body.rewardId, deviceId: body.deviceId, platform: "ios", challengeId: body.challengeId, deviceCheckTokenSha256: body.deviceCheckTokenSha256 }, new TextEncoder().encode(body.nonce));
     expect(toHex(raw)).not.toBe(toHex(await computeIosActivationBinding(sha256, body)));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The check-in token binding (checkin-token, G3-08): iOS string form, Android raw-bytes form.
+// The hard-coded vectors below were computed with Python's hashlib over the literal strings, independently of the code under test:
+//   python3 -c 'import hashlib; print(hashlib.sha256(S.encode()).hexdigest())'
+// A mobile client reproduces them with the same two literals.
+// ---------------------------------------------------------------------------
+import {
+  CHECKIN_TOKEN_PURPOSE,
+  checkinAndroidBoundBodyBytes,
+  computeCheckinAndroidBinding,
+  type CheckinBoundBody,
+} from "../../functions/_shared/rewards/binding.js";
+import { computeIosCheckinBinding, iosCheckinChallengeString } from "../../functions/_shared/rewards/string-binding.js";
+
+describe("check-in token binding", () => {
+  const body: CheckinBoundBody = {
+    challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    userId: "uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu",
+  };
+  const nonceBytes = new Uint8Array(32).map((_, i) => i + 1);
+  const nonce = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+
+  it("the purpose is a fixed, versioned domain separator distinct from the activation and registration purposes", () => {
+    expect(CHECKIN_TOKEN_PURPOSE).toBe("golfraven/checkin-token/v1");
+    expect(CHECKIN_TOKEN_PURPOSE).not.toBe(REWARD_ACTIVATION_PURPOSE);
+    expect(CHECKIN_TOKEN_PURPOSE).not.toBe("attest_key_registration");
+  });
+
+  it("iOS: S is the canonical string {challengeId, deviceId, nonce, platform, purpose, userId} and clientDataHash is SHA-256(UTF-8(S)) (recorded vector)", async () => {
+    const s = iosCheckinChallengeString({ ...body, nonce });
+    expect(s).toBe(
+      '{"challengeId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","deviceId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","nonce":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","platform":"ios","purpose":"golfraven/checkin-token/v1","userId":"uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu"}',
+    );
+    expect(toHex(await computeIosCheckinBinding(sha256, { ...body, nonce }))).toBe("3c695d6c71722843731e7a80e63d987d628181755c5925db5401f9d36b8077e5");
+  });
+
+  it("Android: canonical_body is {challengeId, deviceId, platform, purpose, userId}; requestHash = base64url(SHA-256(canonical_body ‖ raw nonce bytes)) (recorded vector)", async () => {
+    expect(new TextDecoder().decode(checkinAndroidBoundBodyBytes(body))).toBe(
+      '{"challengeId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","deviceId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","platform":"android","purpose":"golfraven/checkin-token/v1","userId":"uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu"}',
+    );
+    const h = await computeCheckinAndroidBinding(sha256, body, nonceBytes);
+    expect(toHex(h)).toBe("f02189d57de25d009ca981f853b7e326b9dc79a7730c4cf96af2a6cbf89d925d");
+    expect(toBase64Url(h)).toBe("8CGJ1X3iXQCcqYH4U7fjJrnceadzDEz5avKmy_idkl0");
+    expect(toBase64Url(nonceBytes)).toBe(nonce);
+  });
+
+  it("binds every field on both platforms: changing the challenge, device, account or nonce changes the hash", async () => {
+    const iosRef = toHex(await computeIosCheckinBinding(sha256, { ...body, nonce }));
+    for (const k of ["challengeId", "deviceId", "userId"] as const) {
+      expect(toHex(await computeIosCheckinBinding(sha256, { ...body, nonce, [k]: "x" })), `ios ${k}`).not.toBe(iosRef);
+    }
+    expect(toHex(await computeIosCheckinBinding(sha256, { ...body, nonce: "x" }))).not.toBe(iosRef);
+    const andRef = toHex(await computeCheckinAndroidBinding(sha256, body, nonceBytes));
+    for (const k of ["challengeId", "deviceId", "userId"] as const) {
+      expect(toHex(await computeCheckinAndroidBinding(sha256, { ...body, [k]: "x" }, nonceBytes)), `android ${k}`).not.toBe(andRef);
+    }
+    expect(toHex(await computeCheckinAndroidBinding(sha256, body, nonceBytes.map((b) => b ^ 1)))).not.toBe(andRef);
+  });
+
+  it("is domain-separated from the activation binding on both platforms (the same ids and nonce never produce the same hash)", async () => {
+    const act = await computeIosActivationBinding(sha256, {
+      rewardId: body.userId, // even with the user id standing in for the reward id
+      deviceId: body.deviceId,
+      challengeId: body.challengeId,
+      deviceCheckTokenSha256: "ab".repeat(32),
+      nonce,
+    });
+    expect(toHex(act)).not.toBe(toHex(await computeIosCheckinBinding(sha256, { ...body, nonce })));
+    const actAndroid = await computeRequestBinding(sha256, { rewardId: body.userId, deviceId: body.deviceId, platform: "android", challengeId: body.challengeId }, nonceBytes);
+    expect(toHex(actAndroid)).not.toBe(toHex(await computeCheckinAndroidBinding(sha256, body, nonceBytes)));
+  });
+
+  it("the iOS and Android check-in bindings differ (the platform is bound), and so does a different purpose string", async () => {
+    const ios = toHex(await computeIosCheckinBinding(sha256, { ...body, nonce }));
+    const android = toHex(await computeCheckinAndroidBinding(sha256, body, nonceBytes));
+    expect(ios).not.toBe(android);
+    const otherPurpose = toHex(await computeStringBinding(sha256, { challengeId: body.challengeId, deviceId: body.deviceId, nonce, platform: "ios", purpose: "golfraven/checkin-token/v2", userId: body.userId }));
+    expect(otherPurpose).not.toBe(ios);
+    const samePurpose = toHex(await computeStringBinding(sha256, { challengeId: body.challengeId, deviceId: body.deviceId, nonce, platform: "ios", purpose: CHECKIN_TOKEN_PURPOSE, userId: body.userId }));
+    expect(samePurpose).toBe(ios);
   });
 });

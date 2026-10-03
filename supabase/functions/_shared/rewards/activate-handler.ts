@@ -163,6 +163,13 @@ export async function consumeLiveChallenge(
   return nonceBytes;
 }
 
+/** Has this account's device shown it can attest? iOS: a registered App Attest key. Android: a check-in token graded `attested` on it. */
+async function deviceHasShownAttestation(deviceId: string, repo: Repo): Promise<boolean> {
+  const state = await repo.rewards.deviceAttestState(deviceId);
+  if (state !== null && state.attestKeyId !== null) return true;
+  return repo.checkinToken.hasAttestedOnDevice(deviceId);
+}
+
 async function assessActivatingDevice(rewardId: string, deviceId: string, req: ActivationRequest, repo: Repo, deps: ActivationDeps): Promise<Assessment> {
   const att = req.attestation;
 
@@ -173,9 +180,14 @@ async function assessActivatingDevice(rewardId: string, deviceId: string, req: A
   if (att.kind === "none") {
     const port = att.deviceCheckToken !== undefined ? deps.ports.ios : null;
     const token = att.deviceCheckToken;
+    // The claim is a self-report, so it counts only when the server has no evidence to the contrary (the same rule as checkin-token's
+    // no-attestation path, checkin/token-handler.ts): a device with a REGISTERED App Attest key (`deviceAttestState` returns a key only
+    // for a verified registration, 0034) or a check-in token previously graded `attested` on it CAN attest, so "I cannot" is `failed`.
+    const claimedCapable = att.hardwareSupportsAttestation;
+    const provenCapable = claimedCapable ? false : await deviceHasShownAttestation(deviceId, repo);
     return {
-      grade: att.hardwareSupportsAttestation ? "failed" : "unattestable",
-      reasons: ["no_attestation_token"],
+      grade: claimedCapable || provenCapable ? "failed" : "unattestable",
+      reasons: provenCapable ? ["no_attestation_token", "device_has_attested_before"] : ["no_attestation_token"],
       tokenHash: token !== undefined ? toHex(await deps.sha256(utf8(token))) : null,
       readBits: port && token !== undefined ? () => port.readBits(token) : null,
       setBit0: null,
@@ -287,7 +299,11 @@ export async function handleActivation(rewardId: string, req: ActivationRequest,
   const device = known ?? (await repo.device.ensureOwn(req.deviceId, req.platform));
   const deviceState = await repo.rewards.deviceAttestState(device.id);
   if (!deviceState) throw Errors.internal();
-  if (deviceState.platform !== req.platform) throw Errors.unprocessable("platform_mismatch", "this device is registered under a different platform");
+  // 0042: a device first seen without a platform (checkin-challenge, evidence) is UNKNOWN until its first platform-bearing use, and this request
+  // is one: the first platform wins, and a later request that names the other platform is refused, as before. Registering a platform is a
+  // write, so it happens only after every refusal above; a refusal below rolls it back with the rest of the transaction.
+  const platformOnRecord = deviceState.platform ?? (await repo.device.claimPlatform(device.id, req.platform));
+  if (platformOnRecord !== req.platform) throw Errors.unprocessable("platform_mismatch", "this device is registered under a different platform");
 
   // 5-6. Grade the activating device, then read the bits.
   let assessment: Assessment;

@@ -59,6 +59,13 @@ async function iosRequest(state: FakeState, over: { deviceId?: string; uid?: str
   };
 }
 
+/** D1 as a device that has NEVER registered an App Attest key (truly unable to attest): the "I cannot attest" claim is then believed. A device
+ * WITH a registered key is not believed (see "the self-reported capability dodge" below). */
+function keyless(state: FakeState): FakeState {
+  rewardsState(state).deviceAttest.get(D1)!.attestKeyId = null;
+  return state;
+}
+
 function deps(p: Parameters<typeof ports>[0]): ActivationDeps {
   return { ports: ports(p), sha256 };
 }
@@ -263,7 +270,7 @@ describe("AT (9): §7.5 golden fixtures", () => {
   });
 
   it("an unattestable DEVICE (no token, hardware cannot attest) routes the reward to held_review", async () => {
-    const state = newWorld();
+    const state = keyless(newWorld());
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const req: ActivationRequest = { deviceId: D1, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } };
     const out = await activate(state, R1, req, deps({}));
@@ -291,11 +298,38 @@ describe("AT (9): §7.5 golden fixtures", () => {
     expect((await activate(capable, R1, reqCapable, deps({}))).state).toBe("held_review");
     expect(signalKinds(capable)).toEqual(["attestation_failed"]); // omitting the token on capable hardware is `failed`
 
-    const incapable = newWorld();
+    const incapable = keyless(newWorld());
     seedReward(incapable, { id: R1, userId: USER_A, kind: "offer_code" });
     const reqIncapable: ActivationRequest = { deviceId: D1, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } };
     expect((await activate(incapable, R1, reqIncapable, deps({}))).state).toBe("held_review");
     expect(signalKinds(incapable)).toEqual([]); // `unattestable`: routing only
+  });
+
+  // The self-reported capability dodge: `hardwareSupportsAttestation:false` is a claim, and the server knows better for a device that has
+  // registered an App Attest key (iOS) or been issued an `attested` check-in token (Android).
+  it("the capability dodge: a device with a REGISTERED App Attest key that claims it cannot attest is `failed` (+ signal), not `unattestable`", async () => {
+    const state = newWorld(); // D1 carries a registered key
+    seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
+    const req: ActivationRequest = { deviceId: D1, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false } };
+    expect((await activate(state, R1, req, deps({}))).state).toBe("held_review");
+    expect(signalKinds(state)).toEqual(["attestation_failed"]);
+    expect(rewardsState(state).signals[0]!.detail).toMatchObject({ reasons: ["no_attestation_token", "device_has_attested_before"] });
+  });
+
+  it("the capability dodge, Android: a device with a prior `attested` check-in token that claims it cannot attest is `failed`; without one the claim is believed", async () => {
+    const without = newWorld();
+    seedDevice(without, { id: D2, userId: USER_A, platform: "android" });
+    seedReward(without, { id: R1, userId: USER_A, kind: "offer_code" });
+    const req: ActivationRequest = { deviceId: D2, platform: "android", attestation: { kind: "none", hardwareSupportsAttestation: false } };
+    expect((await activate(without, R1, req, deps({}))).state).toBe("held_review");
+    expect(signalKinds(without)).toEqual([]);
+
+    const withToken = newWorld();
+    seedDevice(withToken, { id: D2, userId: USER_A, platform: "android" });
+    seedReward(withToken, { id: R1, userId: USER_A, kind: "offer_code" });
+    withToken.checkinTokens.set("jti_prior", { jti: "jti_prior", userId: USER_A, deviceId: D2, facilityId: null, attestationGrade: "attested", challengeKind: "live", challengeId: "c", expiresAt: "2026-06-01T11:00:00.000Z", issuedAt: "2026-06-01T10:00:00.000Z", consumedAt: null });
+    expect((await activate(withToken, R1, req, deps({}))).state).toBe("held_review");
+    expect(signalKinds(withToken)).toEqual(["attestation_failed"]);
   });
 });
 
@@ -899,7 +933,7 @@ describe("vendor failure modes fail closed — never 'clean'", () => {
   });
 
   it("...and when it succeeds on a flagged device, the high-priority signal is still raised (precedence: row 1 first)", async () => {
-    const state = newWorld();
+    const state = keyless(newWorld());
     seedReward(state, { id: R1, userId: USER_A, kind: "offer_code" });
     const req: ActivationRequest = { deviceId: D1, platform: "ios", attestation: { kind: "none", hardwareSupportsAttestation: false, deviceCheckToken: "REVWSUNF" } };
     await activate(state, R1, req, deps({ ios: makeFakeIosPort({ bits: BIT1 }) }));

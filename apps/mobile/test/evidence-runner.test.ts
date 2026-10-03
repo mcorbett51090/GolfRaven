@@ -262,6 +262,25 @@ describe.each(STORES)("evidence through the runner (%s)", (_n, makeStore) => {
     expect(chOf(await stored("ev1"))).toMatchObject({ state: "redeemed", jti: "jti_5", grade: "unattestable", challengeId: "chal_9" });
   });
 
+  it("an idempotent REPLAY of the redemption (the first response was lost) is accepted exactly like a first redemption: the same jti rides on the evidence", async () => {
+    setup([{ respond: "token_201_idempotent_replay" }, { respond: "evidence_accepted_with_challenge" }]);
+    await add(itemFor(wireOf("evidence_accepted_no_challenge"), 1, A, held()));
+    expect(await runner.run()).toMatchObject({ accepted: 1 });
+    expect(seen.map(evUrl)).toEqual(["checkin-token", "evidence"]);
+    expect((seen[1]!.body as { fix: { checkinTokenJti?: string } }).fix.checkinTokenJti).toBe("jti_5"); // the ORIGINAL token the server replayed
+    expect(chOf(await stored("ev1"))).toMatchObject({ state: "redeemed", jti: "jti_5", grade: "unattestable" });
+  });
+
+  it("a REAL challenge_used drops the challenge and sends the fix without a co-signal (no retry of the redemption)", async () => {
+    expect(JSON.parse(recorded("token_422_challenge_used").body).error.code).toBe("challenge_used");
+    setup([{ respond: "token_422_challenge_used" }, { respond: "evidence_accepted_no_challenge" }]);
+    await add(itemFor(wireOf("evidence_accepted_no_challenge"), 1, A, held()));
+    await runner.run();
+    expect(seen.map(evUrl)).toEqual(["checkin-token", "evidence"]);
+    expect((seen[1]!.body as { fix: object }).fix).not.toHaveProperty("checkinTokenJti");
+    expect(chOf(await stored("ev1"))).toEqual({ state: "none", reason: "unusable" });
+  });
+
   it("a send that fails AFTER the redemption keeps the jti: the retry sends the SAME body without redeeming again (a changed replay would be a 409)", async () => {
     setup([{ respond: "token_201_unattestable" }, { respond: "err_500_internal" }, { respond: "evidence_accepted_with_challenge" }]);
     await add(itemFor(wireOf("evidence_accepted_no_challenge"), 1, A, held()));
@@ -406,6 +425,8 @@ describe.each(STORES)("evidence through the runner (%s)", (_n, makeStore) => {
     expect((seen[0]!.body as { items: { localDate: string }[] }).items.map((i) => i.localDate)).toEqual(["2026-05-14", "2026-05-15"]);
     expect(await get("ev2")).toMatchObject({ status: "accepted" }); // index 0 = the older item
     expect(await get("ev1")).toMatchObject({ status: "retry", lastHttpStatus: 429, lastServerCode: "rate_limited" });
+    // the item's own wait hint (error.details.retryAfterSeconds = 86400 in the recorded answer) sets the next attempt: a full day, not the ~seconds of the backoff
+    expect((await get("ev1")).nextAttemptAt).toBe(clock.now + 86_400_000);
   });
 
   it("a batch is never auto-retried by the client: one request for a 500, items go to retry", async () => {
