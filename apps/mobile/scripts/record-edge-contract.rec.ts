@@ -489,6 +489,22 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
     const binding = toBase64Url(await computeIosCheckinBinding(sha256, { challengeId: c1!.id, deviceId: FAKE_DEVICE_ID, userId: UID, nonce: c1!.nonce }));
     r.token_201_unattestable_rekey_ios = await tokenEndpoint(e.repo, { challengeId: c1!.id, nonce: c1!.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId, assertion: binding } }, { ios: scriptedIos(() => 1), android: null });
   }
+  {
+    // KEY REPLACEMENT (the recovery registration): the server holds key A, the client registers a FRESH key B at `devices-attest-key`: HTTP 200 `replaced: true` (the counter restarts at 0, A is
+    // retired). Registering the retired key A again is 409 `key_previously_retired`. Both answers come from the REAL handler over the fake repo (`fake-attest-key-repo.ts`). Kept LAST in the
+    // attestation section so that every earlier recorded entry keeps the deterministic ids it had.
+    const e = fresh();
+    seedUnknownDevice(e.state);
+    const keyA = b64(await sha256(PUBLIC_KEY));
+    const keyB = b64(await sha256(new Uint8Array(65).fill(5)));
+    const regBodyFor = async (keyId: string): Promise<Record<string, unknown>> => {
+      const [live] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID });
+      return { deviceId: FAKE_DEVICE_ID, challengeId: live!.id, nonce: live!.nonce, keyId, attestation: toBase64Url(await computeAttestKeyBinding(sha256, { challengeId: live!.id, deviceId: FAKE_DEVICE_ID, keyId, nonce: live!.nonce })) };
+    };
+    await attestKeyEndpoint(e.state, e.repo, await regBodyFor(keyA), scriptedRegistrationVerifier); // 201: the first key
+    r.attestkey_200_replaced = await attestKeyEndpoint(e.state, e.repo, await regBodyFor(keyB), scriptedRegistrationVerifier);
+    r.attestkey_409_previously_retired = await attestKeyEndpoint(e.state, e.repo, await regBodyFor(keyA), scriptedRegistrationVerifier);
+  }
 
   rbCounter = rbBeforeAttestation;
 
@@ -844,6 +860,10 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     expect(JSON.parse(responses.activate_200_issued_android_after_503!.body).data).toMatchObject({ state: "issued" });
     expect([responses.activate_409_not_activatable!.status, responses.activate_409_expired!.status, responses.activate_404_foreign_reward!.status, responses.activate_403_demo_account!.status, responses.activate_422_platform_mismatch!.status, responses.activate_422_device_limit!.status, responses.activate_422_challenge_not_consumable!.status, responses.activate_429_rate_limited!.status, responses.activate_503_attestation_unavailable!.status, responses.activate_503_attestation_not_configured!.status]).toEqual([409, 409, 404, 403, 422, 422, 422, 429, 503, 503]);
     expect(responses.attestkey_409_already_registered!.status).toBe(409);
+    expect(responses.attestkey_200_replaced!.status).toBe(200);
+    expect(JSON.parse(responses.attestkey_200_replaced!.body).data).toMatchObject({ replaced: true });
+    expect(responses.attestkey_409_previously_retired!.status).toBe(409);
+    expect(JSON.parse(responses.attestkey_409_previously_retired!.body).error.code).toBe("key_previously_retired");
     void errorResponse;
   });
 });

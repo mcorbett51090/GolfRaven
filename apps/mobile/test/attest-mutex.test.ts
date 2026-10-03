@@ -1,6 +1,6 @@
 /** The per-key assertion lock (PR #40 gate LOW-1): strictly sequential per key, released on success, on error AND on timeout, independent across keys. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KeyedMutex, LockAbortedError, LockReentryError, LockTimeoutError, assertionLockKey, withAssertionLock } from "../src/attest";
+import { KeyedMutex, LockAbortedError, LockReentryError, LockTimeoutError, SETTLE_BOUND_MS, assertionLockKey, withAssertionLock } from "../src/attest";
 
 const deferred = <T = void>() => {
   let resolve!: (v: T) => void;
@@ -327,7 +327,7 @@ describe("guard.settle: a state write that follows a sent request holds the lock
       log.push("second");
       return 2;
     });
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(9_000); // past the 5 s hold time, inside the 10 s settle bound
     expect(log).toEqual([]);
     gate.resolve();
     await expect(p1).resolves.toBe("answer");
@@ -352,5 +352,109 @@ describe("guard.settle: a state write that follows a sent request holds the lock
     gate.resolve();
     await expect(p).resolves.toBe("kept");
     expect(seen).toEqual(["settled"]);
+  });
+});
+
+describe("guard.settle is BOUNDED: a write that never settles cannot hold the lock for ever (gate LOW-1)", () => {
+  it("the bound is 10 s", () => {
+    expect(SETTLE_BOUND_MS).toBe(10_000);
+  });
+
+  it("a settle that hangs: after the hold time AND the bound the holder is abandoned (LockTimeoutError) and the NEXT holder runs", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 5_000 });
+    const hang = deferred();
+    const log: string[] = [];
+    const p1 = m.run("k", async (g) => {
+      await g.settle(() => hang.promise); // a secure-store write that never answers
+      g.check(); // the abandoned holder stops at its next step
+      log.push("p1 resumed");
+      return "p1";
+    });
+    const r1 = p1.then(() => "resolved", (e: unknown) => e);
+    const p2 = m.run("k", async () => {
+      log.push("p2");
+      return "p2";
+    });
+    await vi.advanceTimersByTimeAsync(SETTLE_BOUND_MS - 1_000); // hold time over, bound not yet
+    expect(log).toEqual([]);
+    expect(m.pendingKeys()).toEqual(["k"]);
+    await vi.advanceTimersByTimeAsync(1_500); // bound reached
+    expect(await r1).toBeInstanceOf(LockTimeoutError);
+    await expect(p2).resolves.toBe("p2");
+    expect(log).toEqual(["p2"]);
+    hang.resolve(); // the stuck write finally returns: the abandoned holder gets nothing more done
+    await vi.advanceTimersByTimeAsync(10);
+    expect(log).toEqual(["p2"]);
+  });
+
+  it("the bound runs from the START of the write: a settle begun late in the hold time is still released SETTLE_BOUND_MS later, not at the hold time", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 5_000, settleBoundMs: 2_000 });
+    const hang = deferred();
+    const r = m
+      .run("k", async (g) => {
+        await new Promise<void>((res) => setTimeout(res, 4_000));
+        await g.settle(() => hang.promise);
+      })
+      .then(() => "resolved", (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_500); // hold time over at 5 s, the write began at 4 s
+    expect(m.pendingKeys()).toEqual(["k"]);
+    await vi.advanceTimersByTimeAsync(600); // 4 s + 2 s bound = 6 s
+    expect(await r).toBeInstanceOf(LockTimeoutError);
+    expect(m.pendingKeys()).toEqual([]);
+  });
+
+  it("a settle that finishes inside the bound clears its timer: the lock is never released early and the holder's result is kept", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000, settleBoundMs: 2_000 });
+    const gate = deferred();
+    const p = m.run("k", async (g) => {
+      await g.settle(() => gate.promise);
+      return "kept";
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    gate.resolve();
+    await expect(p).resolves.toBe("kept");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(m.pendingKeys()).toEqual([]);
+  });
+
+  it("a hung settle does not abandon a holder whose hold time has NOT run out: the bound only counts the write as not in flight", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 60_000, settleBoundMs: 2_000 });
+    const gate = deferred();
+    const p = m.run("k", async (g) => {
+      await g.settle(() => gate.promise);
+      return "late but fine";
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(m.pendingKeys()).toEqual(["k"]); // still the holder's
+    gate.resolve();
+    await expect(p).resolves.toBe("late but fine");
+  });
+
+  it("a normal settle still holds the lock until it completes (inside the bound), the next holder waiting behind it", async () => {
+    vi.useFakeTimers();
+    const m = new KeyedMutex({ holdTimeoutMs: 1_000, settleBoundMs: 5_000 });
+    const gate = deferred();
+    const log: string[] = [];
+    const p1 = m.run("k", async (g) => {
+      await g.settle(async () => {
+        await gate.promise;
+        log.push("write");
+      });
+      return 1;
+    });
+    const p2 = m.run("k", async () => {
+      log.push("p2");
+      return 2;
+    });
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(log).toEqual([]);
+    gate.resolve();
+    await expect(p1).resolves.toBe(1);
+    await expect(p2).resolves.toBe(2);
+    expect(log).toEqual(["write", "p2"]);
   });
 });

@@ -76,7 +76,17 @@ describe("the schema: `rekey` is explicit, typed and optional", () => {
   it("an unknown member is still ignored (non-strict), and the recovery registration answer (201 registered / 200 replaced) parses", () => {
     expect(checkinTokenResultSchema.safeParse({ jti: "abc", expiresAt: "x", attestationGrade: "attested", somethingNew: 1 }).success).toBe(true);
     expect(attestKeyResultSchema.parse(data("attestkey_201_registered_for_rekey"))).toMatchObject({ replaced: false });
-    expect(attestKeyResultSchema.parse({ ...(data("attestkey_201_registered_for_rekey") as object), replaced: true })).toMatchObject({ replaced: true });
+    expect(recorded("attestkey_200_replaced").status).toBe(200);
+    expect(attestKeyResultSchema.parse(data("attestkey_200_replaced"))).toMatchObject({ replaced: true });
+  });
+
+  it("the recorded replace / retired answers are what the redeemer is written against: 200 `replaced: true` for a fresh key over a held one, 409 `key_previously_retired` for the retired one (the real handler's words)", () => {
+    expect(recorded("attestkey_200_replaced").status).toBe(200);
+    expect(recorded("attestkey_409_previously_retired").status).toBe(409);
+    const e = JSON.parse(recorded("attestkey_409_previously_retired").body) as { error: { code: string } };
+    expect(e.error.code).toBe("key_previously_retired");
+    // the redeemer reads that exact code from the ApiError the HTTP client builds (`conflict` + code), as the rig's scripted 409 does
+    expect(apiError("conflict", 409, e.error.code)).toMatchObject({ kind: "conflict", status: 409, code: "key_previously_retired" });
   });
 });
 
@@ -279,6 +289,23 @@ describe("never a loop: at most one recovery registration per cooldown", () => {
     expect(posted(rig, 0).keyId).toBe(rig.registrations[0]!.keyId);
   });
 
+  it("account deletion wipes the cooldown with the rest of the user's attestation record, and only THEIR record (gate NIT R14)", async () => {
+    const { rig, clock } = await registered();
+    rig.postReplies = [rekeyed()];
+    await rig.redeemer.redeem(input({ challengeId: ch(1) }), rig.io());
+    rig.postReplies = [grade("attested")];
+    await rig.redeemer.redeem(input({ challengeId: ch(2) }), rig.io()); // recovery: the cooldown is written
+    const OTHER = "99999999-9999-4999-8999-999999999999";
+    await rig.state.setRekeyCooldownUntil(OTHER, DEVICE, clock.t + HOUR);
+    expect(await rig.state.getRekeyCooldownUntil(USER, DEVICE)).toBe(clock.t + HOUR);
+    expect(rig.secure.keys().some((k) => k.startsWith(`gr.attest.ios_rekey_cooldown.${USER}.`))).toBe(true);
+
+    await rig.state.wipeUser(USER, DEVICE);
+    expect(await rig.state.getRekeyCooldownUntil(USER, DEVICE)).toBe(0);
+    expect(rig.secure.keys().filter((k) => k.includes(USER))).toEqual([]); // nothing of the deleted user's is left: key record, cooldown, backoff, unattested key
+    expect(await rig.state.getRekeyCooldownUntil(OTHER, DEVICE)).toBe(clock.t + HOUR); // another account on the install keeps theirs
+  });
+
   it("the cooldown survives a restart", async () => {
     const { rig, clock, keyA } = await registered();
     rig.postReplies = [rekeyed()];
@@ -368,7 +395,7 @@ describe("never a loop: at most one recovery registration per cooldown", () => {
   });
 });
 
-describe("409 key_previously_retired on the recovery registration: exactly ONE more fresh key, then the backoff", () => {
+describe("409 key_previously_retired on the recovery registration: exactly ONE more fresh key, then the backoff", { timeout: 5_000 }, () => { // a regression into a loop must fail, not hang
   const retired = () => apiError("conflict", 409, "key_previously_retired");
 
   it("the second key is accepted: two keys generated, two registrations (different keys), the assertion uses the second", async () => {
@@ -386,6 +413,24 @@ describe("409 key_previously_retired on the recovery registration: exactly ONE m
     expect(posted(rig, 0).keyId).toBe(rig.registrations[1]!.keyId);
     expect(await rig.state.getIosKey(USER, DEVICE)).toEqual({ state: "registered", keyId: rig.registrations[1]!.keyId });
   });
+
+  it("a regression into a loop fails CLEANLY instead of hanging: the server keeps answering 409 forever, and the registrations stop at exactly 2 (a third request would be refused by this script)", async () => {
+    const { rig, clear } = await registered();
+    rig.postReplies = [rekeyed()];
+    await rig.redeemer.redeem(input({ challengeId: ch(1) }), rig.io());
+    clear();
+    rig.registerReplies = [
+      async (n: number) => {
+        if (n > 3) throw new Error("LOOP: more than 3 registrations"); // not an ApiError: ends the redemption at once
+        throw retired();
+      },
+    ];
+    await expect(rig.redeemer.redeem(input({ challengeId: ch(2) }), rig.io())).rejects.toMatchObject({ reason: "registration_key_previously_retired" });
+    expect(rig.registrations.length).toBeLessThanOrEqual(2);
+    expect(rig.registrations).toHaveLength(2);
+    expect(gen(rig)).toBe(2);
+    expect(rig.timeline.filter((t) => t === "http:register")).toHaveLength(2);
+  }, 5_000);
 
   it("the second key is retired too: no third key; the registration backoff is set; the need defers; the key stays stale; nothing is sent token-less; and nothing is retried inside the cooldown", async () => {
     const { rig, clock, clear } = await registered();
@@ -531,7 +576,7 @@ describe("activation: no hint of its own; a stale mark set by a check-in is hono
   });
 });
 
-describe("end to end: the real HTTP client, the native redeemer over a fake module, the RECORDED rekey answers", () => {
+describe("end to end: the real HTTP client, the native redeemer over a fake module, the RECORDED rekey answers", { timeout: 10_000 }, () => {
   const CREDS = { userId: "user-a", accessToken: jwt({ sub: "user-a" }) };
   const BASE = "https://p.supabase.co/functions/v1";
   const SERVER_DEVICE = "11111111-1111-4111-8111-111111111111";
@@ -544,7 +589,8 @@ describe("end to end: the real HTTP client, the native redeemer over a fake modu
     p.challenges[k] = { state: "held", challengeId: ch(n), nonce: NONCE, kind: "prefetched", expiresAt: T0 + 20 * 3600_000 };
     return { ...createItem({ id: `ev${n}`, sourceRef: `r${n}`, ownerUserId: "user-a", courseId: base.courseId, catalogVersion: base.catalogVersion, payload: p as never }, T0), status: "sent" };
   }
-  const replaced200: Step = { status: 200, body: recorded("attestkey_201_registered_for_rekey").body.replace('"replaced":false', '"replaced":true') };
+  // Recorded from the REAL handler (`attestkey_200_replaced`: the server held a key, a fresh one replaced it; `attestkey_409_previously_retired`: that retired key registered again).
+  const replaced200: Step = { respond: "attestkey_200_replaced" };
 
   async function client(steps: Step[]) {
     const module = new FakeNativeAttestModule();
@@ -633,7 +679,7 @@ describe("end to end: the real HTTP client, the native redeemer over a fake modu
   });
 
   it("devices-attest-key answers 409 key_previously_retired twice: two fresh keys at most, then silence", async () => {
-    const retired: Step = { status: 409, body: JSON.stringify({ error: { code: "key_previously_retired", message: "this key was replaced on this device" } }) };
+    const retired: Step = { respond: "attestkey_409_previously_retired" };
     const { api, seen } = await client([{ respond: "token_201_failed_rekey_ios" }, { respond: "evidence_accepted_with_challenge" }, { respond: "challenge_live_201" }, retired, { respond: "challenge_live_201" }, retired]);
     await api.submitEvidence(held(1), CREDS);
     seen.length = 0;
