@@ -64,8 +64,9 @@ function resetButton(state: CatalogState, over: Record<string, unknown> = {}): E
     catalogState: state,
     refreshCatalog: async () => ({ kind: "up_to_date" }),
     resetCatalog: h.resetCatalog,
-    endSession: () => undefined,
-    services: { keysetProblem: null, config: { appVersion: "1.0.0" } },
+    signOut: () => Promise.resolve(),
+    deleteAccount: () => Promise.reject(new Error("not used here")),
+    services: { keysetProblem: null, config: { appVersion: "1.0.0" }, push: { isAvailable: () => false } },
     ...over,
   };
   return elements(MeScreen() as ReactNode).find((e) => e.type === Button && e.props.title === "me.catalog.reset");
@@ -99,7 +100,7 @@ describe("Me tab: the Reset catalog data button", () => {
       { snapshot: null, cacheDropped: null, updateRequired: null, outOfDateBanner: false, lastOutcome: null },
     ];
     for (const s of states) expect(resetButton(s), JSON.stringify(s)).toBeUndefined();
-    expect(resetButton(healthy, { services: { keysetProblem: "no valid keys", config: { appVersion: "1.0.0" } } })).toBeUndefined(); // keyset problem: still healthy data
+    expect(resetButton(healthy, { services: { keysetProblem: "no valid keys", config: { appVersion: "1.0.0" }, push: { isAvailable: () => false } } })).toBeUndefined(); // keyset problem: still healthy data
   });
 
   it("is SHOWN when the saved catalog was dropped for a corrupt trust state", () => {

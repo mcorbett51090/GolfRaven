@@ -29,7 +29,7 @@ describe("catalogue parity (EN / FR-CA)", () => {
   });
 
   it("French is actually translated, not copied: only brand names, endonyms and true cognates match English", () => {
-    const allowed = new Set<MessageKey>(["app.name", "me.language.en", "me.language.fr-CA", "facility.access.public", "facility.access.municipal", "me.catalog.version", "me.sources"]);
+    const allowed = new Set<MessageKey>(["app.name", "me.language.en", "me.language.fr-CA", "facility.access.public", "facility.access.municipal", "me.catalog.version", "me.sources", "me.notifications", "signIn.code.label", "methods.proof.codeLabel"]);
     const identical = keys.filter((k) => en[k] === frCA[k]);
     expect(identical.filter((k) => !allowed.has(k))).toEqual([]);
   });

@@ -1,4 +1,5 @@
 import { useRouter } from "expo-router";
+import type { MockApi } from "../api/mock";
 import { Platform } from "react-native";
 import { useApp } from "../runtime/AppProvider";
 import { createItem, type ServerAnswer } from "../outbox";
@@ -11,6 +12,8 @@ import { Body, Button, Card, H2 } from "../ui/components";
 export function DevPanel() {
   const { services, index, syncOutbox, reloadOutbox, snapshot } = useApp();
   const router = useRouter();
+  // Only the demo backend (a `__DEV__` build with no server configured) has a scriptable mock; `null` against a real server.
+  const mock = services.devHandle as MockApi | null;
   const answer = (status: number, code?: string, retryAfterSeconds?: number): ServerAnswer => ({ kind: "response", status, code, retryAfterSeconds });
 
   async function enqueue(listed: boolean): Promise<void> {
@@ -33,13 +36,17 @@ export function DevPanel() {
 
   return (
     <Card>
-      <H2>Developer tools (mock api)</H2>
-      <Body muted>Queue a server answer, then enqueue a play and sync.</Body>
-      <Button variant="secondary" title="Script next answer: 202 queued_catalog" onPress={() => services.api.script(answer(202, "queued_catalog"))} />
-      <Button variant="secondary" title="Script next answer: 422 catalog_stale" onPress={() => services.api.script(answer(422, "catalog_stale"))} />
-      <Button variant="secondary" title="Script next answer: 429 (Retry-After 60 s)" onPress={() => services.api.script(answer(429, undefined, 60))} />
-      <Button variant="secondary" title="Script next answer: 500" onPress={() => services.api.script(answer(500))} />
-      <Button variant="secondary" title="Script next answer: 422 unknown_id (dead letter)" onPress={() => services.api.script(answer(422, "unknown_id"))} />
+      <H2>Developer tools</H2>
+      <Body muted>Backend: {services.backend}. {mock ? "Queue a server answer, then enqueue a play and sync." : "Scriptable answers exist only in the demo backend."}</Body>
+      {mock ? (
+        <>
+          <Button variant="secondary" title="Script next answer: 202 queued_catalog" onPress={() => mock.script(answer(202, "queued_catalog"))} />
+          <Button variant="secondary" title="Script next answer: 422 catalog_stale" onPress={() => mock.script(answer(422, "catalog_stale"))} />
+          <Button variant="secondary" title="Script next answer: 429 (Retry-After 60 s)" onPress={() => mock.script(answer(429, undefined, 60))} />
+          <Button variant="secondary" title="Script next answer: 500" onPress={() => mock.script(answer(500))} />
+          <Button variant="secondary" title="Script next answer: 422 unknown_id (dead letter)" onPress={() => mock.script(answer(422, "unknown_id"))} />
+        </>
+      ) : null}
       <Button title="Enqueue a play" onPress={() => void enqueue(true)} />
       <Button title="Enqueue an unlisted-course play" onPress={() => void enqueue(false)} />
       <Button title="Run sync" onPress={() => void syncOutbox()} />

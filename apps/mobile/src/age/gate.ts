@@ -8,23 +8,13 @@
  * - Under the minimum: no account is created and ONLY a device-local "not
  *   eligible" flag is kept, so an immediate retry with another year is
  *   refused on that install `[inference: a common neutral-age-gate practice]`.
- *   The flag lives in the app's own SQLite file (`golfraven.db`), which an
- *   uninstall removes (hence "on that install"). It is meant to stay on the
- *   device: Android backup is OFF (`android.allowBackup: false` in app.json,
- *   asserted by `test/policy.test.ts`), so it is not copied to Google Drive.
- *   iOS is NOT closed: `expo-sqlite` 57.0.3 keeps the file under the app's
- *   Documents directory (`Documents/SQLite`), which iCloud / iTunes backups
- *   include, and the package has no backup-exclusion option
- *   `[checked 2026-10-02 in the installed expo-sqlite: its .d.ts and
- *   SQLiteModule.swift — no such API; the iOS backup behaviour itself is
- *   unverified, never run on a device; `test/ios-backup.test.ts` pins the
- *   source-level facts, and `expo-file-system` 57.0.7 has no such API either]`.
- *   Moving the DB does not help (Caches is purgeable, Application Support is
- *   backed up). P4.2, exact action: set `isExcludedFromBackup` on the
- *   `Documents/SQLite` directory from a small native module, or keep the flag in
- *   a `ThisDeviceOnly` Keychain item (`expo-secure-store`) — see README
- *   "Backups (P4.2, iOS)".
- *   Android device-to-device transfer on 12+ is also `[unverified]`.
+ *   The flag lives in the SECURE STORE (Keychain / Keystore), written with a `…ThisDeviceOnly` accessibility class, so it is excluded from
+ *   iCloud/iTunes backups and device migration on iOS (`age/secure-flags.ts`, `secure/expo-secure-store.ts`; a flag the old SQLite file held is
+ *   moved across once and deleted from SQLite). Android backup is OFF (`android.allowBackup: false` in app.json, asserted by
+ *   `test/policy.test.ts`). An uninstall removes it on Android and (Keychain items survive an uninstall on iOS
+ *   `[iOS Keychain-survives-reinstall: from the Keychain's documented behaviour, not observed on a device]`, which only strengthens
+ *   the "on that install" retry refusal). Account deletion keeps the flag on purpose (`account/delete.ts`).
+ *   `[unverified: never run on a device; Android 12+ device-to-device transfer also unverified]`
  * - The birth year itself is never stored or sent.
  * - `minAge` is NOT a constant here: it comes from the server policy
  *   (`MIN_AGE`, "one server constant, so counsel can raise it without a
@@ -61,7 +51,9 @@ export type SubmitResult =
   | { status: "blocked" } // already ineligible on this install: no retry
   | { status: "invalid" }; // not a plausible year; nothing recorded
 
-const FLAG = "age_gate";
+/** The key the gate keeps its verdict under, in whichever `DeviceFlagStore` it is given (the secure store in the app). */
+export const AGE_FLAG_KEY = "age_gate";
+const FLAG = AGE_FLAG_KEY;
 
 export class AgeGate {
   constructor(
