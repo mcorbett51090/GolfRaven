@@ -12,6 +12,10 @@
  *  - `GET /me-export`                  -> `{ generatedAt, userId, data }`                  `_shared/me/export-handler.ts` (`MeExportEnvelope`)
  *  - `POST /me-push-token`             -> `{ deviceId, updatedAt }`                        `_shared/me/push-token-handler.ts` (`PushTokenResult`)
  *
+ *  - `POST /checkin-challenge`         -> `{ challenges: IssuedChallenge[] }` (201)       `_shared/checkin/challenge-handler.ts`
+ *  - `POST /checkin-token`             -> `{ jti, expiresAt, attestationGrade }` (201)   `_shared/checkin/token-handler.ts`
+ *  - `POST /evidence`, `/evidence-batch` -> mapped to an outbox `ServerAnswer`, not validated here: `evidence-answer.ts`
+ *
  * A response that does not match is `bad_response`, never a partial success. Unknown EXTRA keys are ignored (zod's default "strip"): the
  * server may add fields without breaking an installed app; a missing or wrongly typed one is refused.
  */
@@ -77,3 +81,19 @@ export const attemptsDetailsSchema = z.object({ attemptsRemaining: z.number().in
 /** The success envelope `{ data: ... }`; the payload is then checked against the call's own schema (a missing `data` is `undefined`, which no
  * payload schema accepts). */
 export const successEnvelopeSchema = z.object({ data: z.unknown() });
+
+/** `IssuedChallenge`. The id is opaque; the nonce is unpadded base64url (the server mints 32 random bytes). */
+export const issuedChallengeSchema = z.object({
+  id: z.string().min(1).max(128),
+  nonce: z.string().regex(/^[A-Za-z0-9_-]{1,512}$/),
+  expiresAt: z.string().min(1).refine((s) => Number.isFinite(Date.parse(s))),
+  kind: z.enum(["live", "prefetched"]),
+});
+export const challengesResultSchema = z.object({ challenges: z.array(issuedChallengeSchema) });
+
+/** `IssuedToken`. The jti must be what the evidence endpoint accepts as `checkinTokenJti` (unpadded base64url, 1-128). */
+export const checkinTokenResultSchema = z.object({
+  jti: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  expiresAt: z.string().min(1),
+  attestationGrade: z.enum(["attested", "unattestable", "failed"]),
+});

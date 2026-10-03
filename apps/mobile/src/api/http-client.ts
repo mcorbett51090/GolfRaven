@@ -10,6 +10,10 @@
  * | `deleteAccount`         | `DELETE`                                             | `me-delete`         |
  * | `exportData`            | `GET`                                                | `me-export`         |
  * | `registerPushToken`     | `POST { deviceId, expoToken, platform? }`            | `me-push-token`     |
+ * | `submitEvidence`        | `POST <evidence body>` (`evidence/payload.ts`)       | `evidence`          |
+ * | `submitEvidenceBatch`   | `POST { items: [<evidence body>] }`                  | `evidence-batch`    |
+ * | `requestCheckinChallenges` | `POST { deviceId, facilityId?, prefetchCount? }`  | `checkin-challenge` |
+ * | `redeemCheckinChallenge`| `POST { challengeId, nonce, hardwareSupportsAttestation }` | `checkin-token` |
  *
  * Auth: `Authorization: Bearer <Supabase access token>` from `getAccessToken()` (the auth service refreshes an expired token itself); a `401`
  * forces ONE refresh and one repeat of the request, then surfaces as `unauthenticated`. No cookies, no redirects.
@@ -18,29 +22,40 @@
  * backoff, a server `Retry-After` is a floor), scaled down because a person is waiting: at most 3 attempts, 0.5 s base, 4 s cap, a `Retry-After`
  * above 10 s is surfaced instead of slept through. Only IDEMPOTENT calls are retried (`GET`s, `DELETE me`, the push-token upsert). `link` and
  * `unlink` are not: an Apple authorization code is single-use, every OTP proof attempt is counted against 5 per address per hour, and a second
- * unlink is a 404, so a blind repeat could turn one success into a visible failure or burn an attempt. Each attempt has a 20 s timeout (the
+ * unlink is a 404, so a blind repeat could turn one success into a visible failure or burn an attempt. The EVIDENCE and CHECK-IN calls are not retried
+ * either, and are made with the OWNER's credentials handed in by the caller (`credentials.accessToken`; the client never fetches or refreshes a token
+ * for them): the outbox owns evidence retries (backoff, jitter, `Retry-After`; `source_ref` makes a replay safe) and a challenge is single-use. Each attempt has a 20 s timeout (the
  * server's own request cap is 15 s).
  *
  * `[Request/response shapes are the handlers' own (see `schemas.ts`); the deployed URL layout (`/functions/v1/<name>`) is the Supabase
  * convention and is unverified against a real project: nothing here has ever called a server.]`
  */
 import { DEFAULT_MIN_AGE } from "../age/gate";
-import type { EvidenceCredentials, OutboxItem, ServerAnswer } from "../outbox";
+import { UnattestableAttestor, type Attestor } from "../attest";
+import { planBatches, selectBatchEntries } from "../evidence/batch";
+import { sendEvidenceBatch, sendEvidenceItem } from "../evidence/send";
+import type { WireBody } from "../evidence/payload";
+import type { EvidenceCredentials, JsonValue, OutboxItem, ServerAnswer } from "../outbox";
 import type { ProgrammeStatus } from "../wallet";
 import { ApiError, kindForStatus } from "./errors";
+import { answerFromHttp, answersFromBatchHttp } from "./evidence-answer";
+import { retryAfterSecondsFrom } from "./retry-after";
 import {
+  challengesResultSchema,
+  checkinTokenResultSchema,
   deleteResultSchema,
   errorEnvelopeSchema,
   exportResultSchema,
   linkResultSchema,
   listMethodsSchema,
   pushTokenResultSchema,
-  retryDetailsSchema,
   successEnvelopeSchema,
   unlinkResultSchema,
 } from "./schemas";
 import type { z } from "zod";
-import type { AchievementSummary, ApiClient, PlaySummary } from "./types";
+import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinTokenRequest, PlaySummary } from "./types";
+
+export { retryAfterSecondsFrom };
 
 /** The part of `fetch` this client uses. `expo/fetch` and the global `fetch` both satisfy it. */
 export type HttpFetch = (
@@ -68,6 +83,11 @@ export interface HttpApiOptions {
   rng?: () => number;
   sleep?: (ms: number) => Promise<void>;
   policy?: Partial<{ [K in keyof typeof HTTP_POLICY]: number }>;
+  /** Device attestation (`attest/`). Default: `UnattestableAttestor` (no native module in this build). */
+  attestor?: Attestor;
+  now?: () => number;
+  /** Writes an item's payload into its stored row (the redeemed check-in jti, `evidence/send.ts`). */
+  persistEvidencePayload?: (item: OutboxItem, payload: JsonValue) => Promise<void>;
 }
 
 interface CallSpec<T extends z.ZodType> {
@@ -77,16 +97,13 @@ interface CallSpec<T extends z.ZodType> {
   schema: T;
   /** Safe to repeat after a transport failure / 5xx. */
   idempotent: boolean;
+  /** The success status (default 200; the two check-in endpoints answer 201). */
+  okStatus?: number;
+  /** A bearer chosen by the caller: used as is, never replaced or refreshed (a `401` is surfaced, not retried with another user's token). */
+  accessToken?: string;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-export function retryAfterSecondsFrom(res: Pick<Response, "headers">, details: unknown): number | null {
-  const header = res.headers.get("retry-after");
-  if (header !== null && /^\d{1,7}$/.test(header.trim())) return Number(header.trim());
-  const d = retryDetailsSchema.safeParse(details);
-  return d.success ? d.data.retryAfterSeconds : null;
-}
 
 /** Backoff for attempt `n` (1 = the first retry): uniform in [d/2, d], `d = min(cap, base * 2^(n-1))`; a `Retry-After` is a floor. */
 export function backoffMs(attempt: number, rng: () => number, p: { backoffBaseMs: number; backoffCapMs: number }, retryAfterSeconds: number | null): number {
@@ -100,6 +117,8 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
   const rng = opts.rng ?? Math.random;
   const sleep = opts.sleep ?? realSleep;
   const base = opts.baseUrl.replace(/\/+$/, "");
+  const attestor = opts.attestor ?? new UnattestableAttestor();
+  const now = opts.now ?? Date.now;
 
   interface Raw {
     status: number;
@@ -182,12 +201,12 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     let refreshed = false;
     let last: ApiError | null = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      let token = await tokenOrThrow();
+      let token = spec.accessToken ?? (await tokenOrThrow());
       if (token === null) throw new ApiError({ kind: "unauthenticated", message: "not signed in" });
       let res: Raw;
       try {
         res = await once(url, spec, token, sent);
-        if (res.status === 401 && !refreshed) {
+        if (res.status === 401 && !refreshed && spec.accessToken === undefined) {
           refreshed = true;
           const fresh = await tokenOrThrow(true);
           if (fresh === null) throw new ApiError({ kind: "unauthenticated", status: 401, message: "session expired" });
@@ -203,22 +222,23 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         }
         throw e;
       }
-      if (res.status === 200) {
+      const okStatus = spec.okStatus ?? 200;
+      if (res.status === okStatus) {
         let json: unknown;
         try {
           json = JSON.parse(res.text);
         } catch {
-          throw new ApiError({ kind: "bad_response", status: 200, message: "response is not JSON" });
+          throw new ApiError({ kind: "bad_response", status: okStatus, message: "response is not JSON" });
         }
         const outer = successEnvelopeSchema.safeParse(json);
         const inner = outer.success ? spec.schema.safeParse(outer.data.data) : null;
         if (!inner || !inner.success) {
           const where = (inner && !inner.success ? inner.error.issues[0]?.path.join(".") : "") ?? "";
-          throw new ApiError({ kind: "bad_response", status: 200, message: `unexpected response shape${where ? ` at ${where}` : ""}` });
+          throw new ApiError({ kind: "bad_response", status: okStatus, message: `unexpected response shape${where ? ` at ${where}` : ""}` });
         }
         return inner.data;
       }
-      if (res.status >= 200 && res.status < 400) throw new ApiError({ kind: "bad_response", status: res.status, message: `unexpected success status ${res.status} (the contract answers 200)` });
+      if (res.status >= 200 && res.status < 400) throw new ApiError({ kind: "bad_response", status: res.status, message: `unexpected success status ${res.status} (the contract answers ${okStatus})` });
       const err = failure(res);
       last = err;
       const retryable = err.kind === "server" || err.kind === "unavailable" || err.kind === "rate_limited";
@@ -233,6 +253,20 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
       throw err;
     }
     throw last ?? new ApiError({ kind: "network", message: "no attempt was made" });
+  }
+
+  /** One POST, no retry, no token handling: the caller's bearer, the raw response, or `{ answer }` when the transport failed. */
+  async function rawPost(fn: string, body: unknown, accessToken: string): Promise<Raw | { answer: ServerAnswer }> {
+    try {
+      return await once(`${base}/${fn}`, { fn, method: "POST", body, schema: successEnvelopeSchema, idempotent: false }, accessToken, { maybeApplied: false });
+    } catch (e) {
+      return { answer: { kind: "network_error", message: e instanceof Error ? e.message : "network error" } };
+    }
+  }
+
+  async function postEvidence(fn: string, body: unknown, accessToken: string): Promise<ServerAnswer> {
+    const raw = await rawPost(fn, body, accessToken);
+    return "answer" in raw ? raw.answer : answerFromHttp(raw);
   }
 
   return {
@@ -281,13 +315,66 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
       });
     },
 
-    /** Evidence submission (`POST evidence` / `evidence-batch`) is P4.2b. Until then every send is a transport-level "not now": the outbox
-     * keeps the item in `retry` with backoff and loses nothing (FM-03); it is never reported as accepted.
-     * WHEN P4.2b builds this: the request's bearer MUST be `credentials.accessToken` (the OWNER's token, handed in by the outbox runner after
-     * it re-checked the owner), NOT a fresh `opts.getAccessToken()` (that is whoever is signed in by then), and `item.ownerUserId` is the
-     * `user_id` the server will attribute the play to. */
-    submitEvidence(_item: OutboxItem, _credentials: EvidenceCredentials): Promise<ServerAnswer> {
-      return Promise.resolve({ kind: "network_error", message: "evidence submission is not built in this app version (P4.2b)" });
+    requestCheckinChallenges(req: CheckinChallengeRequest, credentials: EvidenceCredentials) {
+      if (req.prefetchCount !== undefined && (!Number.isInteger(req.prefetchCount) || req.prefetchCount < 0 || req.prefetchCount > 10)) {
+        return Promise.reject(new RangeError("prefetchCount must be an integer from 0 to 10"));
+      }
+      return call({
+        fn: "checkin-challenge",
+        method: "POST",
+        body: { deviceId: req.deviceId, ...(req.facilityId !== undefined ? { facilityId: req.facilityId } : {}), ...(req.prefetchCount !== undefined ? { prefetchCount: req.prefetchCount } : {}) },
+        schema: challengesResultSchema,
+        idempotent: false,
+        okStatus: 201,
+        accessToken: credentials.accessToken,
+      }).then((r) => r.challenges);
+    },
+    redeemCheckinChallenge(req: CheckinTokenRequest, credentials: EvidenceCredentials) {
+      return call({
+        fn: "checkin-token",
+        method: "POST",
+        body: { challengeId: req.challengeId, nonce: req.nonce, hardwareSupportsAttestation: req.hardwareSupportsAttestation },
+        schema: checkinTokenResultSchema,
+        idempotent: false,
+        okStatus: 201,
+        accessToken: credentials.accessToken,
+      });
+    },
+
+    /** `POST evidence` (`evidence/send.ts`): ONE request, never retried here (the outbox owns retries; `source_ref` makes its replays safe); the
+     * bearer is `credentials.accessToken`, the owner's, and no other token is ever fetched for it. The answer is mapped to the §7.6 table by
+     * `evidence-answer.ts`; this method never throws for an HTTP outcome. */
+    submitEvidence(item: OutboxItem, credentials: EvidenceCredentials): Promise<ServerAnswer> {
+      return sendEvidenceItem(
+        {
+          attestor,
+          now,
+          redeem: (req, accessToken) =>
+            call({ fn: "checkin-token", method: "POST", body: req, schema: checkinTokenResultSchema, idempotent: false, okStatus: 201, accessToken }),
+          post: (body, accessToken) => postEvidence("evidence", body, accessToken),
+          ...(opts.persistEvidencePayload ? { persistPayload: opts.persistEvidencePayload } : {}),
+        },
+        item,
+        credentials,
+      ).catch((e: unknown): ServerAnswer => ({ kind: "network_error", message: e instanceof Error ? e.message : String(e) }));
+    },
+
+    planEvidenceBatches(items: readonly OutboxItem[]) {
+      return planBatches(selectBatchEntries(items)).batches.map((b) => b.map((e) => e.item));
+    },
+
+    /** `POST evidence-batch` for ONE planned chunk (`planEvidenceBatches`): historic imports, sorted and split by `evidence/batch.ts`. */
+    submitEvidenceBatch(items: readonly OutboxItem[], credentials: EvidenceCredentials): Promise<ServerAnswer[]> {
+      return sendEvidenceBatch(
+        {
+          postBatch: async (bodies: WireBody[], accessToken: string) => {
+            const raw = await rawPost("evidence-batch", { items: bodies }, accessToken);
+            return "answer" in raw ? bodies.map(() => raw.answer) : answersFromBatchHttp(raw, bodies.length);
+          },
+        },
+        items,
+        credentials,
+      ).catch((e: unknown): ServerAnswer[] => items.map(() => ({ kind: "network_error", message: e instanceof Error ? e.message : String(e) })));
     },
   };
 }

@@ -35,18 +35,24 @@ export interface EvidenceCredentials {
   accessToken: string;
 }
 
-/** The slice of `api.*` the outbox uses: `POST /v1/evidence`. Never throws
- * for an HTTP outcome; a transport failure is `{ kind: "network_error" }`. */
+/** The slice of `api.*` the outbox uses: `POST /v1/evidence` and, for historic imports, `POST /v1/evidence/batch`. Never throws for an HTTP
+ * outcome; a transport failure is `{ kind: "network_error" }`. Both calls must authenticate with `credentials.accessToken` ONLY. */
 export interface EvidenceSubmitter {
   submitEvidence(item: OutboxItem, credentials: EvidenceCredentials): Promise<ServerAnswer>;
+  /** Which of `items` (all due, all one owner's) go through the batch endpoint, already sorted by event time and split into requests, in the
+   * order they are to be sent. Absent (or no `submitEvidenceBatch`): everything is sent one by one. */
+  planEvidenceBatches?(items: readonly OutboxItem[]): OutboxItem[][];
+  /** ONE batch request for one planned chunk; the answers are aligned with `items`. */
+  submitEvidenceBatch?(items: readonly OutboxItem[], credentials: EvidenceCredentials): Promise<ServerAnswer[]>;
 }
 
 /** The runner's view of the auth session (`AuthService`, wired in `runtime/services.ts`). */
 export interface OutboxSession {
   /** The signed-in user's id, or `null` when signed out. Read fresh each time, never cached. */
   currentUserId(): string | null;
-  /** The access token of `userId`'s session, or `null` if that user is not the one signed in (or nobody is). May throw (a refresh that could not reach the server). */
-  accessTokenFor(userId: string): Promise<string | null>;
+  /** The access token of `userId`'s session, or `null` if that user is not the one signed in (or nobody is). May throw (a refresh that could not
+   * reach the server). `forceRefresh`: refresh regardless of expiry (used once, after a `401`). */
+  accessTokenFor(userId: string, opts?: { forceRefresh?: boolean }): Promise<string | null>;
 }
 
 export interface OutboxRunnerDeps {
@@ -65,8 +71,10 @@ export interface OutboxRunnerDeps {
   findCourseForUnlisted: (item: OutboxItem) => Promise<{ courseId: string; catalogVersion: string } | null>;
 }
 
-/** Why a pass stopped early: nobody is signed in (nothing was sent), the signed-in user changed during the pass, or the owner's token could not be had. */
-export type RunAborted = "signed_out" | "user_changed" | "no_token";
+/** Why a pass stopped early: nobody is signed in (nothing was sent), the signed-in user changed during the pass, the owner's token could not be had, or
+ * the server refused the owner's token with a `401` even after one refresh (the item is `retry`, never a dead letter, and the rest of the pass is
+ * left for when the session is good again). */
+export type RunAborted = "signed_out" | "user_changed" | "no_token" | "unauthorized";
 
 export interface RunReport {
   /** `null` = the pass ran to the end. */
@@ -144,6 +152,57 @@ export class OutboxRunner {
       }
     }
 
+    // 2b. Historic imports go through the batch endpoint, sorted by event time and split by the server's limits (FM-28). The submitter decides which
+    //     items those are (`planEvidenceBatches`); everything else, and whatever a batch hands back for a re-match, takes the single-item path below.
+    if (api.planEvidenceBatches && api.submitEvidenceBatch) {
+      const due = (await store.listByOwner(runUser)).filter((i) => !i.rematch && isDue(i, now()));
+      for (const planned of api.planEvidenceBatches(due)) {
+        if (userChanged()) return abort(session.currentUserId() === null ? "signed_out" : "user_changed");
+        const owner = planned[0]?.ownerUserId;
+        if (owner === undefined || !planned.every((i) => i.ownerUserId === owner)) continue; // never mix owners in one request
+        if (!isOwnedBy(planned[0] as OutboxItem, session.currentUserId())) return abort(session.currentUserId() === null ? "signed_out" : "user_changed");
+        const accessToken = await this.tokenFor(owner, false);
+        if (accessToken === null) return abort(userChanged() ? "user_changed" : "no_token");
+        const before = planned;
+        let sentItems: OutboxItem[] = [];
+        for (const it of planned) {
+          const s = beginSend(it, now());
+          await store.update(s); // durable BEFORE the request
+          sentItems.push(s);
+        }
+        if (!isOwnedBy(sentItems[0] as OutboxItem, session.currentUserId())) {
+          for (const b of before) await store.update({ ...b, updatedAt: now() });
+          return abort(session.currentUserId() === null ? "signed_out" : "user_changed");
+        }
+        report.sent += sentItems.length;
+        const post = (token: string): Promise<ServerAnswer[]> =>
+          (api.submitEvidenceBatch as NonNullable<EvidenceSubmitter["submitEvidenceBatch"]>)(sentItems, { userId: owner, accessToken: token }).catch(
+            (err: unknown): ServerAnswer[] => sentItems.map(() => ({ kind: "network_error", message: err instanceof Error ? err.message : String(err) })),
+          );
+        let answers = await post(accessToken);
+        let unauthorized = answers.some(isUnauthorized);
+        if (unauthorized && isOwnedBy(sentItems[0] as OutboxItem, session.currentUserId())) {
+          const fresh = await this.tokenFor(owner, true);
+          if (fresh !== null && fresh !== accessToken && isOwnedBy(sentItems[0] as OutboxItem, session.currentUserId())) {
+            answers = await post(fresh);
+            unauthorized = answers.some(isUnauthorized);
+          }
+        }
+        for (let k = 0; k < sentItems.length; k += 1) {
+          const done = applyAnswer(sentItems[k] as OutboxItem, answers[k] ?? { kind: "network_error", message: "no answer" }, now(), rng);
+          await store.update(done);
+          sentItems[k] = done;
+          if (done.status === "accepted") report.accepted += 1;
+          else if (done.status === "queued") report.queued += 1;
+          else if (done.status === "retry") report.retry += 1;
+          else if (done.status === "needs_attention") report.needsAttention += 1;
+        }
+        sentItems = [];
+        if (unauthorized) return abort("unauthorized");
+        if (userChanged()) return abort(session.currentUserId() === null ? "signed_out" : "user_changed");
+      }
+    }
+
     // 3. Send everything due, oldest event first. A 422 `catalog_stale`
     //    answer is followed, within the same pass, by one refresh + re-match
     //    + resubmit (§7.6); a second stale answer waits for the next pass so
@@ -170,12 +229,7 @@ export class OutboxRunner {
 
         // The owner's token, requested for the ITEM's owner (not for "whoever is signed in"). Checked first, so a sign-out never costs a refresh.
         if (!isOwnedBy(item, session.currentUserId())) return abort(session.currentUserId() === null ? "signed_out" : "user_changed");
-        let accessToken: string | null;
-        try {
-          accessToken = await session.accessTokenFor(item.ownerUserId);
-        } catch {
-          accessToken = null;
-        }
+        const accessToken = await this.tokenFor(item.ownerUserId, false);
         if (accessToken === null) return abort(userChanged() ? "user_changed" : "no_token");
 
         const before = item;
@@ -188,9 +242,23 @@ export class OutboxRunner {
           return abort(session.currentUserId() === null ? "signed_out" : "user_changed");
         }
         report.sent += 1;
-        const answer = await api.submitEvidence(item, { userId: item.ownerUserId, accessToken }).catch(
-          (err: unknown): ServerAnswer => ({ kind: "network_error", message: err instanceof Error ? err.message : String(err) }),
-        );
+        const send = (token: string, it: OutboxItem): Promise<ServerAnswer> =>
+          api.submitEvidence(it, { userId: it.ownerUserId, accessToken: token }).catch(
+            (err: unknown): ServerAnswer => ({ kind: "network_error", message: err instanceof Error ? err.message : String(err) }),
+          );
+        let answer = await send(accessToken, item);
+        // A 401 says the bearer was not accepted, not that the play is bad: ONE refresh for the item's owner, one resend (carrying whatever the first
+        // attempt already recorded, e.g. a redeemed check-in token); if that is refused too, the item is `retry` (never a dead letter) and the
+        // pass stops. The resend re-checks that the owner is still the signed-in user.
+        let unauthorized = isUnauthorized(answer);
+        if (unauthorized && isOwnedBy(item, session.currentUserId())) {
+          const fresh = await this.tokenFor(item.ownerUserId, true);
+          if (fresh !== null && fresh !== accessToken && isOwnedBy(item, session.currentUserId())) {
+            if (answer.kind !== "unsendable" && answer.payload !== undefined) item = { ...item, payload: answer.payload };
+            answer = await send(fresh, item);
+            unauthorized = isUnauthorized(answer);
+          }
+        }
         item = applyAnswer(item, answer, now(), rng);
         await store.update(item);
 
@@ -198,11 +266,25 @@ export class OutboxRunner {
         else if (item.status === "queued") report.queued += 1;
         else if (item.status === "retry") report.retry += 1;
         else if (item.status === "needs_attention") report.needsAttention += 1;
+        if (unauthorized) return abort("unauthorized");
         if (!(item.status === "pending" && item.rematch)) break;
       }
     }
     return report;
   }
+
+  /** The bearer of `owner`'s session (`null`: that user is not signed in, or the token could not be had). */
+  private async tokenFor(owner: string, forceRefresh: boolean): Promise<string | null> {
+    try {
+      return await this.deps.session.accessTokenFor(owner, forceRefresh ? { forceRefresh: true } : undefined);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function isUnauthorized(a: ServerAnswer): boolean {
+  return a.kind === "response" && a.status === 401;
 }
 
 function noop(): void {}

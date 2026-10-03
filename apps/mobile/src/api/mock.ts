@@ -16,6 +16,10 @@ import type {
   ExportResult,
   LinkSignInRequest,
   LinkSignInResult,
+  CheckinChallengeRequest,
+  CheckinTokenRequest,
+  CheckinTokenResult,
+  IssuedChallenge,
   PlaySummary,
   PushTokenRequest,
   PushTokenResult,
@@ -125,6 +129,17 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
       calls.push({ op: "export" });
       maybeFail();
       return Promise.resolve({ generatedAt: iso, userId: "mock-user", data: { demo: true } });
+    },
+    // The demo has no challenge service: it answers deterministic, obviously fake values so a `__DEV__` flow can run.
+    requestCheckinChallenges(req: CheckinChallengeRequest): Promise<IssuedChallenge[]> {
+      const n = req.prefetchCount && req.prefetchCount > 0 ? req.prefetchCount : 1;
+      const ttl = req.prefetchCount ? 24 * 3600_000 : 120_000;
+      return Promise.resolve(
+        Array.from({ length: n }, (_, i): IssuedChallenge => ({ id: `demo-challenge-${i}`, nonce: `demo_nonce_${i}`, expiresAt: new Date(Date.now() + ttl).toISOString(), kind: req.prefetchCount ? "prefetched" : "live" })),
+      );
+    },
+    redeemCheckinChallenge(req: CheckinTokenRequest): Promise<CheckinTokenResult> {
+      return Promise.resolve({ jti: `demo_jti_${req.challengeId}`.replace(/[^A-Za-z0-9_-]/g, "_"), expiresAt: iso, attestationGrade: "unattestable" });
     },
     registerPushToken(req): Promise<PushTokenResult> {
       calls.push({ op: "push", req });

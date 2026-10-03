@@ -21,7 +21,7 @@ export interface SqlDatabase extends SqlQueryable {
 }
 
 /** Bump with a new entry in `MIGRATIONS` below; never edit a shipped one. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** A migration is SQL, or (when it must rewrite data, not only shape) a function run in the same transaction. `now` is the migration clock. */
 type Migration = string | ((tx: SqlQueryable, now: () => number) => Promise<void>);
@@ -53,6 +53,24 @@ const MIGRATIONS: readonly Migration[] = [
   `,
   // v2 (P4.2b-0): every outbox row belongs to the user whose session created it.
   migrateOutboxToOwned,
+  // v3 (P4.2b-1): prefetched check-in challenges (build plan §7.6 "Offline attestation", FM-10), per owner AND per device, single-use.
+  // `consumed_at` is set in the same statement that selects the challenge for a check-in (`challenges/store.ts`), before it is used anywhere;
+  // a row is never un-consumed. `nonce` is the RAW challenge nonce the server returned (needed once, to redeem it).
+  `
+  CREATE TABLE checkin_challenge (
+    owner_user_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    facility_id TEXT,
+    nonce TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at INTEGER,
+    PRIMARY KEY (owner_user_id, id)
+  );
+  CREATE INDEX checkin_challenge_pick_idx ON checkin_challenge (owner_user_id, device_id, consumed_at, expires_at);
+  `,
 ];
 
 /** v2. SQLite cannot add a NOT NULL column without a default, and a DEFAULT would let a buggy insert silently create an ownerless row, so the
@@ -85,7 +103,7 @@ async function migrateOutboxToOwned(tx: SqlQueryable, now: () => number): Promis
   const at = now();
   for (const row of legacy) {
     const item = {
-      ...(JSON.parse(row.item_json) as Record<string, unknown>),
+      ...legacyItem(row, at),
       ownerUserId: "",
       status: "needs_attention",
       reason: "owner_unknown",
@@ -109,6 +127,31 @@ async function migrateOutboxToOwned(tx: SqlQueryable, now: () => number): Promis
     ALTER TABLE outbox_v2 RENAME TO outbox;
     CREATE INDEX outbox_owner_status_idx ON outbox (owner_user_id, status, next_attempt_at);
   `);
+}
+
+/** The parsed legacy `item_json`, or, when it is not a JSON object (a corrupt row must not abort the whole migration and leave `user_version`
+ * stuck at 1, so every later start would fail the same way), a minimal stub that still satisfies `OutboxItem`: the row is kept as a dead letter
+ * on the device (FM-03) with an empty payload. */
+function legacyItem(row: { id: string; source_ref: string; created_at: number; item_json: string }, at: number): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(row.item_json);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    // corrupt: fall through to the stub
+  }
+  return {
+    id: row.id,
+    sourceRef: row.source_ref,
+    courseId: null,
+    catalogVersion: null,
+    payload: null,
+    createdAt: row.created_at,
+    attempts: 0,
+    lastHttpStatus: null,
+    lastServerCode: null,
+    reported: false,
+    updatedAt: at,
+  };
 }
 
 export interface MigrateOptions {

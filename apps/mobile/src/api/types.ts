@@ -6,7 +6,7 @@
  * Every method that talks to the server THROWS an `ApiError` (`errors.ts`) on failure; the one exception is `submitEvidence`, which by the
  * outbox contract never throws for an HTTP outcome (it returns a `ServerAnswer`).
  */
-import type { EvidenceSubmitter } from "../outbox";
+import type { EvidenceCredentials, EvidenceSubmitter } from "../outbox";
 import type { SignInProviderId } from "../signin/providers";
 import type { ProgrammeStatus } from "../wallet";
 
@@ -97,7 +97,45 @@ export interface PushTokenResult {
   updatedAt: string;
 }
 
-export interface ApiClient extends EvidenceSubmitter {
+/** One challenge `POST checkin-challenge` issued (`IssuedChallenge`, `_shared/checkin/challenge-handler.ts`). `nonce` is the RAW nonce, shown once. */
+export interface IssuedChallenge {
+  id: string;
+  nonce: string;
+  /** ISO timestamp (live: 120 s after issue; prefetched: 24 h). */
+  expiresAt: string;
+  kind: "live" | "prefetched";
+}
+
+/** `POST checkin-token` answer (`IssuedToken`, `token-handler.ts`): the jti a fix then names as `checkinTokenJti`, valid 15 minutes. */
+export interface CheckinTokenResult {
+  jti: string;
+  expiresAt: string;
+  attestationGrade: "attested" | "unattestable" | "failed";
+}
+
+export interface CheckinChallengeRequest {
+  /** The per-install device id (a UUID). */
+  deviceId: string;
+  facilityId?: string;
+  /** Absent / 0: one LIVE challenge. 1..10: that many PREFETCHED ones (the server issues fewer when the device already holds some). */
+  prefetchCount?: number;
+}
+
+export interface CheckinTokenRequest {
+  challengeId: string;
+  nonce: string;
+  hardwareSupportsAttestation: boolean;
+}
+
+/** The check-in challenge endpoints. Both take the OWNER's credentials explicitly (the bearer is `credentials.accessToken`, never whatever is
+ * signed in by the time the request is made), neither is retried automatically (a challenge is single-use; the requests are rate limited at
+ * 30 and 60 per user per hour), and both throw `ApiError`. */
+export interface CheckinApi {
+  requestCheckinChallenges(req: CheckinChallengeRequest, credentials: EvidenceCredentials): Promise<IssuedChallenge[]>;
+  redeemCheckinChallenge(req: CheckinTokenRequest, credentials: EvidenceCredentials): Promise<CheckinTokenResult>;
+}
+
+export interface ApiClient extends EvidenceSubmitter, CheckinApi {
   /** Server policy constants the app must not hard-code (`MIN_AGE`, §7.8). `[no server endpoint exists yet: the real client answers the
    * compiled default (16) — see `http-client.ts`]` */
   getPolicy(): Promise<{ minAge: number }>;

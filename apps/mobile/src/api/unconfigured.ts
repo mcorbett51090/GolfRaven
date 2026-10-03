@@ -21,6 +21,8 @@ export function createUnconfiguredApi(): ApiClient {
     deleteAccount: refuse,
     exportData: refuse,
     registerPushToken: refuse,
+    requestCheckinChallenges: refuse,
+    redeemCheckinChallenge: refuse,
     submitEvidence: (): Promise<ServerAnswer> => Promise.resolve({ kind: "network_error", message: "this build has no API configured" }),
   };
 }

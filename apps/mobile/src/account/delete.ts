@@ -6,9 +6,10 @@
  *     idempotent, so on any failure nothing local is touched and the player simply tries again. Wiping local state first could strand a player
  *     whose server deletion then failed, signed out of an account that still exists.
  *  2. Only after the server says it is done, the LOCAL wipe: the session (the server session is already gone, so no network call: `clearLocalSession`),
- *     the outbox (the deleted player's own data: nothing of it may be sent to a deleted account or carried to the next one; `deleteAll` wipes EVERY owner's
- *     rows, not only the deleted user's, which is intended: this is the one place the outbox is emptied wholesale, and ordinary sign-out is not), and the caches that hold
- *     the player's data (`clearUserCaches`).
+ *     the outbox and the prefetched check-in challenges (the deleted player's own data: nothing of it may be sent to a deleted account or carried to
+ *     the next one), and the caches that hold the player's data (`clearUserCaches`) including a data export still sitting in the share cache.
+ *     ONLY the deleted user's rows go (plus the ownerless legacy rows, `UNOWNED`, which no account can ever see or send): another user's dormant
+ *     plays on a shared device are theirs and stay (P4.2b-0 made rows per-owner so that sign-out leaves them alone; deletion must not undo it).
  *  3. KEPT on purpose: the device-local O18 age flag. It records "this install failed the age gate", not anything about the account; wiping it
  *     with the account would let an under-age player delete their account and retry with another birth year (AT 20: "changing the year on the same
  *     install is refused"). Also kept: the language choice, the per-install device id (a random id, not personal data; the server tombstone and
@@ -20,7 +21,9 @@
 import { isApiError } from "../api/errors";
 import type { ApiClient, DeleteAccountResult } from "../api/types";
 import type { AuthService } from "../auth/types";
-import type { OutboxStore } from "../outbox";
+import type { ChallengeStore } from "../challenges";
+import { UNOWNED, type OutboxStore } from "../outbox";
+import type { FileSharer } from "./export";
 import { SECURE_KEYS, SESSION_STORAGE_KEY, type SecureStore } from "../secure";
 
 /** The secure-store keys the wipe removes: the session, and nothing else. */
@@ -31,7 +34,13 @@ export const KEPT_SECURE_KEYS: readonly string[] = [SECURE_KEYS.ageGate, SECURE_
 export interface DeleteDeps {
   api: Pick<ApiClient, "deleteAccount">;
   auth: Pick<AuthService, "clearLocalSession">;
-  outbox: Pick<OutboxStore, "deleteAll">;
+  outbox: Pick<OutboxStore, "deleteByOwners">;
+  /** The prefetched check-in challenges (`challenges/store.ts`): the deleted user's are removed. */
+  challenges: Pick<ChallengeStore, "deleteOwner">;
+  /** A data export left in the cache for a receiving app is deleted too (`FileSharer.purgeStale`, best effort, never throws). */
+  sharer: Pick<FileSharer, "purgeStale">;
+  /** The signed-in user's id, read BEFORE the server call (the fallback when the server's answer never arrived). */
+  currentUserId: () => string | null;
   /** Removes `WIPED_SECURE_KEYS` directly (the session key), so the session is gone even if the auth library still holds it. */
   secure: Pick<SecureStore, "delete">;
   /** Drops in-memory/cached per-user data (plays, achievements, programmes). */
@@ -47,6 +56,7 @@ export type DeleteOutcome =
   | { status: "failed"; error: unknown };
 
 export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<DeleteOutcome> {
+  const signedInUser = deps.currentUserId();
   let result: DeleteAccountResult | null = null;
   try {
     result = await deps.api.deleteAccount();
@@ -72,7 +82,14 @@ export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<Delet
   await attempt("session-key", async () => {
     for (const key of WIPED_SECURE_KEYS) await deps.secure.delete(key);
   });
-  await attempt("outbox", () => deps.outbox.deleteAll());
+  // The deleted user: the server's own answer when there is one, else the user who was signed in. With neither, only the ownerless rows can be removed.
+  const deletedUser = result?.userId ?? signedInUser;
+  const owners = deletedUser !== null && deletedUser !== UNOWNED ? [deletedUser, UNOWNED] : [UNOWNED];
+  await attempt("outbox", () => deps.outbox.deleteByOwners(owners));
+  await attempt("challenges", async () => {
+    if (deletedUser !== null && deletedUser !== UNOWNED) await deps.challenges.deleteOwner(deletedUser);
+  });
+  await attempt("export-cache", () => deps.sharer.purgeStale());
   await attempt("caches", () => deps.clearUserCaches());
   const localWipe = failedSteps.length === 0 ? "complete" : "partial";
   if (result === null) return { status: "deleted_or_session_ended", cause: "unauthenticated", localWipe, failedSteps };

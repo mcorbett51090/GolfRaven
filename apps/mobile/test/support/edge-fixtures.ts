@@ -9,9 +9,30 @@ import type { HttpFetch } from "../../src/api";
 interface Recorded {
   status: number;
   body: string;
+  /** The request the real handler was given (the evidence-lane entries only). */
+  request?: unknown;
 }
-const file = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/edge-contract.json", import.meta.url)), "utf8")) as { responses: Record<string, Recorded> };
+const file = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/edge-contract.json", import.meta.url)), "utf8")) as { responses: Record<string, Recorded>; vectors: Vectors };
 export const RECORDED = file.responses;
+
+/** Values the SERVER's own functions produced for fixed inputs (`scripts/record-edge-contract.rec.ts`). */
+export interface Vectors {
+  sourceRefs: Record<string, { request: Record<string, unknown>; sourceRef: string; inputHash: string }>;
+  binding: {
+    androidRequestBinding: { body: { rewardId: string; deviceId: string; platform: "android"; challengeId: string; installLinkId: string }; challengeBase64Url: string; canonicalBodyUtf8: string; canonicalBodyHex: string; hashHex: string };
+    androidRequestBindingNoInstallLink: { challengeBase64Url: string; hashHex: string };
+    iosActivation: { body: { rewardId: string; deviceId: string; challengeId: string; deviceCheckTokenSha256: string; nonce: string }; challengeString: string; hashHex: string };
+    iosAttestKey: { body: { challengeId: string; deviceId: string; keyId: string; nonce: string }; challengeString: string; hashHex: string };
+    canonicalJsonSample: { input: unknown; output: string };
+  };
+}
+export const VECTORS = file.vectors;
+
+export function recordedRequest<T = Record<string, unknown>>(name: string): T {
+  const r = recorded(name);
+  if (r.request === undefined) throw new Error(`recorded response ${name} has no request`);
+  return r.request as T;
+}
 
 export function recorded(name: string): Recorded {
   const r = RECORDED[name];

@@ -162,7 +162,8 @@ describe("every error status maps to an ApiError (recorded bodies)", () => {
   });
 
   it("the table covers every recorded error fixture", () => {
-    const errorFixtures = Object.entries(RECORDED).filter(([, r]) => r.status >= 400).map(([k]) => k);
+    // The evidence lane's fixtures (challenge_ / token_ / evidence_ / batch_) are covered by `evidence-wire.test.ts`.
+    const errorFixtures = Object.entries(RECORDED).filter(([k, r]) => r.status >= 400 && !/^(challenge|token|evidence|batch)_/.test(k)).map(([k]) => k);
     expect(table.map((t) => t[0]).sort()).toEqual(errorFixtures.sort());
   });
 
@@ -342,13 +343,6 @@ describe("retry policy (consistent with the outbox: 429 / 5xx / network are the 
 });
 
 describe("the rest of the interface", () => {
-  it("evidence submission is P4.2b: every send is a transport-level 'not now' (the outbox keeps the item), never 'accepted'", async () => {
-    const { api, seen } = client([{ respond: "list_single" }]);
-    const a = await api.submitEvidence({} as never, {} as never);
-    expect(a.kind).toBe("network_error");
-    expect(seen).toEqual([]);
-  });
-
   it("no server endpoint exists yet for policy / plays / achievements / programmes: the client answers the compiled default and 'nothing', with no request", async () => {
     const { api, seen } = client([{ respond: "list_single" }]);
     expect(await api.getPolicy()).toEqual({ minAge: 16 });

@@ -100,6 +100,7 @@ export const frCA: Record<MessageKey, string> = {
   "played.reason.unexpected_status": "Le serveur a donné une réponse inattendue.",
   "played.reason.rematch_failed": "Cette partie n'a pas pu être associée au catalogue mis à jour.",
   "played.reason.queue_expired": "Les nouvelles données de terrain ne sont pas arrivées à temps.",
+  "played.reason.unsendable": "Cette partie n'a pas pu être préparée pour l'envoi.",
   "played.reason.owner_unknown": "Cette partie a été enregistrée avant que les parties soient liées à un compte; elle n'a donc pas été envoyée.",
 
   "achievements.earned": "Obtenues",
