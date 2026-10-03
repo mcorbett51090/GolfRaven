@@ -8,13 +8,16 @@
  *  - Android: whether this (user, device) ever got a token graded `attested`. The server remembers the same fact (`hasAttestedOnDevice`) and from then on grades a
  *    request that carries no token `failed` plus a fraud signal, whatever it claims; the client keeps its own copy so it never sends one (`redeemer.ts`).
  *
- * `pending` and `registered` both mean "the server may already know this device can attest", so a token-less request is never sent while either exists.
+ * `stale` (stale App Attest key recovery) is a `registered` key the server said is not the one it holds (`checkin-token`'s `rekey: true`): it is never asserted with again, it is never
+ * reused (recovery generates a FRESH key), and like `pending` it means "the server may hold a key for this device", so no token-less request while it stands. It is kept until a
+ * replacement registration succeeds, and a persisted per-(user, device) recovery cooldown caps how often one is attempted (`getRekeyCooldownUntil`).
+ * `pending`, `stale` and `registered` all mean "the server may already know this device can attest", so a token-less request is never sent while any of them exists.
  * A record that cannot be read back (corrupt JSON, a wrong shape) is reported as `pending`, never as absent: forgetting a registered key is the unsafe direction.
  * A store that cannot be read or written throws; the caller treats that as "cannot attest now" (a retry), never as "has never attested".
  */
 import type { SecureStore } from "../secure";
 
-export type IosKeyRecord = { state: "pending" } | { state: "registered"; keyId: string };
+export type IosKeyRecord = { state: "pending" } | { state: "registered"; keyId: string } | { state: "stale"; keyId: string };
 
 const KEY_ID_RE = /^[A-Za-z0-9+/]{43}=$/;
 const PART_RE = /^[A-Za-z0-9-]{1,64}$/;
@@ -26,6 +29,7 @@ function part(name: string, v: string): string {
 
 const unattestedKey = (userId: string, deviceId: string): string => `gr.attest.ios_unattested.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 const backoffKey = (userId: string, deviceId: string): string => `gr.attest.ios_reg_backoff.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
+const rekeyCooldownKey = (userId: string, deviceId: string): string => `gr.attest.ios_rekey_cooldown.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 const iosKey = (userId: string, deviceId: string): string => `gr.attest.ios_key.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 const androidKey = (userId: string, deviceId: string): string => `gr.attest.android_attested.${part("userId", userId)}.${part("deviceId", deviceId.toLowerCase())}`;
 
@@ -39,6 +43,7 @@ export class AttestStateStore {
     try {
       const v = JSON.parse(raw) as { v?: unknown; state?: unknown; keyId?: unknown };
       if (v.v === 1 && v.state === "registered" && typeof v.keyId === "string" && KEY_ID_RE.test(v.keyId)) return { state: "registered", keyId: v.keyId };
+      if (v.v === 1 && v.state === "stale" && typeof v.keyId === "string" && KEY_ID_RE.test(v.keyId)) return { state: "stale", keyId: v.keyId };
       if (v.v === 1 && v.state === "pending") return { state: "pending" };
     } catch {
       // fall through: unreadable
@@ -47,7 +52,7 @@ export class AttestStateStore {
   }
 
   async setIosKey(userId: string, deviceId: string, rec: IosKeyRecord): Promise<void> {
-    await this.secure.set(iosKey(userId, deviceId), JSON.stringify(rec.state === "registered" ? { v: 1, state: "registered", keyId: rec.keyId } : { v: 1, state: "pending" }));
+    await this.secure.set(iosKey(userId, deviceId), JSON.stringify(rec.state === "pending" ? { v: 1, state: "pending" } : { v: 1, state: rec.state, keyId: rec.keyId }));
   }
 
   async clearIosKey(userId: string, deviceId: string): Promise<void> {
@@ -84,6 +89,17 @@ export class AttestStateStore {
     await this.secure.delete(backoffKey(userId, deviceId));
   }
 
+  /** Until when (epoch ms) another stale-key RECOVERY (a fresh key registered at `devices-attest-key`) must not be attempted: set right before a recovery's registration request is sent,
+   * whatever its outcome, so a `rekey: true` that comes back inside the cooldown (or a recovery whose answer was a 429, a refusal or a lost response) cannot loop. Persisted, per user and device. `0` = none. */
+  async getRekeyCooldownUntil(userId: string, deviceId: string): Promise<number> {
+    const n = Number(await this.secure.get(rekeyCooldownKey(userId, deviceId)));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  async setRekeyCooldownUntil(userId: string, deviceId: string, untilMs: number): Promise<void> {
+    await this.secure.set(rekeyCooldownKey(userId, deviceId), String(Math.trunc(untilMs)));
+  }
+
   async hasAttestedAndroid(userId: string, deviceId: string): Promise<boolean> {
     return (await this.secure.get(androidKey(userId, deviceId))) === "1";
   }
@@ -98,5 +114,6 @@ export class AttestStateStore {
     await this.secure.delete(androidKey(userId, deviceId));
     await this.secure.delete(unattestedKey(userId, deviceId));
     await this.secure.delete(backoffKey(userId, deviceId));
+    await this.secure.delete(rekeyCooldownKey(userId, deviceId));
   }
 }

@@ -18,6 +18,11 @@
  *     ever resumes, is stopped by its next `check()`. Its eventual native result is discarded.
  *   - A holder that finishes with a value after the abort (its last effect was in flight) still returns that value: the response of a request that was sent is not thrown away.
  * The lock is always released when `fn` settles, on error as well as on success.
+ *
+ * NOT RE-ENTRANT. A holder must never call `redeem` / `activate` / `withAssertionLock` for the SAME key from inside its own `fn` (each takes this lock, so the inner call would wait for the
+ * outer holder, which is waiting for it). A nested `run` that starts in the synchronous part of the holder (`await redeem(...)` as its first step: the common slip) is refused at once with
+ * `LockReentryError`; one that starts after an await cannot be told from another flow queueing for the lock (there is no async context to ask on Hermes), so it is not detected and ends at the
+ * hold timeout (`LockTimeoutError`). The holder gets its own steps through the `guard`, never through another entry point.
  */
 export class LockTimeoutError extends Error {
   constructor(readonly key: string, readonly holdTimeoutMs: number) {
@@ -34,6 +39,14 @@ export class LockAbortedError extends Error {
   }
 }
 
+/** `run` was called for a key whose holder is still in the synchronous start of its own `fn`: a nested acquisition, which would deadlock. Rejected, never waited on. */
+export class LockReentryError extends Error {
+  constructor(readonly key: string) {
+    super(`lock "${key}" was requested from inside its own holder: the assertion lock is not re-entrant (never call redeem / activate inside withAssertionLock)`);
+    this.name = "LockReentryError";
+  }
+}
+
 export interface LockGuard {
   /** True once the hold time has elapsed. */
   readonly aborted: boolean;
@@ -41,6 +54,9 @@ export interface LockGuard {
   check(): void;
   /** Runs a server-side effect: `check()`, then `f()`, and the lock cannot be released (nor the holder abandoned) while `f()` is pending. */
   effect<T>(f: () => Promise<T>): Promise<T>;
+  /** Runs a state write that MUST follow a request already sent (the server has applied it, so the record has to say so): no abort check, but the lock cannot be released (nor the holder
+   * abandoned, its real answer thrown away) while `f()` is pending. `f()` is the write only: it makes no request and starts nothing new. */
+  settle<T>(f: () => Promise<T>): Promise<T>;
 }
 
 export interface KeyedMutexOptions {
@@ -50,10 +66,13 @@ export interface KeyedMutexOptions {
 
 export class KeyedMutex {
   private readonly tails = new Map<string, Promise<void>>();
+  /** Keys whose holder is inside the synchronous start of `fn` right now (`LockReentryError`). */
+  private readonly starting = new Set<string>();
 
   constructor(private readonly opts: KeyedMutexOptions) {}
 
   run<T>(key: string, fn: (guard: LockGuard) => Promise<T>): Promise<T> {
+    if (this.starting.has(key)) return Promise.reject(new LockReentryError(key));
     const prev = this.tails.get(key) ?? Promise.resolve();
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -96,6 +115,14 @@ export class KeyedMutex {
               inFlight -= 1;
             }
           },
+          async settle<R>(f: () => Promise<R>): Promise<R> {
+            inFlight += 1;
+            try {
+              return await f();
+            } finally {
+              inFlight -= 1;
+            }
+          },
         };
         const timer = setTimeout(() => {
           aborted = true;
@@ -108,7 +135,14 @@ export class KeyedMutex {
           }
         }, this.opts.holdTimeoutMs);
         Promise.resolve()
-          .then(() => fn(guard))
+          .then(() => {
+            this.starting.add(key);
+            try {
+              return fn(guard);
+            } finally {
+              this.starting.delete(key); // the synchronous start is over: from here another flow may legitimately queue
+            }
+          })
           .then(
             (v) => finish(() => {
               cleanup();
@@ -137,7 +171,8 @@ export function assertionLockKey(userId: string, deviceId: string): string {
 }
 
 /** Runs `fn` while holding the assertion lock of (userId, deviceId): the one entry point reward activation (P4.2c) must use for its `generateAssertion`, so it shares
- * the EXACT lock check-in uses. `fn` must `guard.check()` before each side effect and run its sent request through `guard.effect`. */
+ * the EXACT lock check-in uses. `fn` must `guard.check()` before each side effect and run its sent request through `guard.effect`.
+ * NOT RE-ENTRANT: never call `redeem` or `activate` (or this function) from inside `fn`; they take this same lock and the call would wait for its own caller. See `KeyedMutex`. */
 export function withAssertionLock<T>(locks: KeyedMutex, userId: string, deviceId: string, fn: (guard: LockGuard) => Promise<T>): Promise<T> {
   return locks.run(assertionLockKey(userId, deviceId), fn);
 }

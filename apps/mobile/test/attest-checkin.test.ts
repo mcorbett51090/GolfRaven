@@ -126,7 +126,7 @@ describe("the requests the recorder built for the REAL challenges (accepted by t
 });
 
 describe("PR #42 gate (d): the checkin-token answer does NOT expose WHY an assertion was graded `failed`", () => {
-  it("a `failed` grade carries only jti / expiresAt / attestationGrade: `key_id_mismatch` (a stale local key) cannot be told from a counter replay, a wrong rpId or a wrong binding, so the client cannot recover from it without guessing (the reason goes only to the fraud signal's detail, `token-handler.ts`)", () => {
+  it("a `failed` grade carries only jti / expiresAt / attestationGrade (the reason goes only to the fraud signal's detail, `token-handler.ts`); the ONE exception is the `rekey: true` hint for a key-identity refusal (`test/attest-rekey.test.ts`), so a wrong binding, a counter replay or a wrong rpId still cannot be mistaken for a stale key", () => {
     for (const name of ["token_201_failed_wrong_binding_ios", "token_201_failed_wrong_binding_android", "token_201_failed_attested_before_no_token"]) {
       const data = JSON.parse(recorded(name).body).data as Record<string, unknown>;
       expect(Object.keys(data).sort(), name).toEqual(["attestationGrade", "expiresAt", "jti"]);

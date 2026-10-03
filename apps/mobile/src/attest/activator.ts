@@ -243,11 +243,11 @@ export class NativeActivator implements RewardActivator {
       answer = await g.effect(() => io.post(activationWireRequest(base, { kind: "android", challenge: { id: live.id, nonce: live.nonce }, integrityToken: token.value.integrityToken })));
     } catch (e) {
       // The token was SENT. Unless the request DEFINITELY did not take effect, the server may have graded it and recorded a verdict (a lost response, a 5xx, a 2xx body that could not be read).
-      if (!isDefiniteNonApplication(e)) await this.d.markAttestedActivation(ctx.userId, ctx.deviceId);
+      if (!isDefiniteNonApplication(e)) await g.settle(() => this.d.markAttestedActivation(ctx.userId, ctx.deviceId));
       throw e;
     }
     // A non-replay answer means the server graded the token (rule 5); a replay wrote nothing.
-    if (!answer.replay) await this.d.markAttestedActivation(ctx.userId, ctx.deviceId);
+    if (!answer.replay) await g.settle(() => this.d.markAttestedActivation(ctx.userId, ctx.deviceId)); // held through `settle`: the lock is not released mid-write
     return answer;
   }
 }

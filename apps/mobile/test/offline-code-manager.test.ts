@@ -731,7 +731,45 @@ describe("a stored record with a higher seedVersion is never replaced by a lower
     expect(await m.manager.provision()).toEqual({ status: "failed", reason: "stale_seed" });
     expect(m.secure.dump()).toBe(before);
     expect(await m.manager.view()).toMatchObject({ status: "ready", seedVersion: 2 });
-    expect(provisionMessage({ status: "failed", reason: "stale_seed" })).toBe("offline.status.failed");
+    expect(provisionMessage({ status: "failed", reason: "stale_seed" })).toBe("offline.status.staleSeed"); // its own line: it tells the player to reset
+    expect(en["offline.status.staleSeed"]).toContain("Reset code");
+    expect(frCA["offline.status.staleSeed"]).toContain(frCA["offline.reset"]);
+    expect(provisionMessage({ status: "failed", reason: "bad_response" })).toBe("offline.status.failed"); // every other failure keeps the generic line
+  });
+
+  it("the store: `authoritative: true` overwrites a HIGHER stored version (a server restore lowered it); without it the downgrade is still refused", async () => {
+    const m = make();
+    expect(await m.store.save(USER_A, DEVICE, { ...record(2), seedVersion: 5 })).toBe("saved");
+    expect(await m.store.save(USER_A, DEVICE, record(2))).toBe("kept_newer");
+    expect(await m.store.save(USER_A, DEVICE, record(2), { authoritative: false })).toBe("kept_newer");
+    expect(await m.store.save(USER_A, DEVICE, record(2), { authoritative: true })).toBe("saved");
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 2, seed: base32Decode(ROTATED.seed) });
+  });
+
+  it("the server's version went DOWN (a DR restore): a plain reveal stays `stale_seed` and changes nothing, but an explicit reset (rotate) is authoritative and un-sticks the device even though its answer is still below the stored version", async () => {
+    const m = make();
+    await m.store.save(USER_A, DEVICE, { ...record(2), seedVersion: 5 }); // the device holds version 5; the server was restored to 1
+    const before = m.secure.dump();
+    m.api.replies.push(ANSWER);
+    expect(await m.manager.provision()).toEqual({ status: "failed", reason: "stale_seed" });
+    expect(m.secure.dump()).toBe(before); // a reveal never overwrites a higher version
+    m.api.replies.push(ROTATED); // "reset code": the server rotates to 2 (n+1 of its own restored 1), still below 5
+    expect(await m.manager.provision({ rotate: true })).toMatchObject({ status: "ready", seedVersion: 2, rotated: true });
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 2, resyncNeeded: false, seed: base32Decode(ROTATED.seed) });
+    expect(await m.manager.view()).toMatchObject({ status: "ready", seedVersion: 2 });
+    // and from then on it is an ordinary device again: a reveal of the same version is fine, a lower one is refused again
+    m.api.replies.push(ROTATED);
+    expect(await m.manager.provision()).toMatchObject({ status: "ready", seedVersion: 2 });
+    m.api.replies.push(ANSWER);
+    expect(await m.manager.provision()).toEqual({ status: "failed", reason: "stale_seed" });
+  });
+
+  it("a rotation that is REFUSED (4xx) still restores the earlier record, higher version and all (authority applies to an answer, not to a refusal)", async () => {
+    const m = make();
+    await m.store.save(USER_A, DEVICE, { ...record(2), seedVersion: 5 });
+    m.api.replies.push(apiError("rate_limited", 429, "rate_limited", undefined, 100));
+    await m.manager.provision({ rotate: true });
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 5, resyncNeeded: false });
   });
 
   it("a restored record after a refused rotation is the same version, so the restore still works", async () => {

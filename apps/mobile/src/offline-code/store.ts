@@ -84,13 +84,15 @@ export class OfflineSeedStore {
    * Writes the record, EXCEPT that a record with a higher `seedVersion` is never replaced by one with a lower (PR #44 gate LOW-2, belt and braces next to the manager's per-user
    * single-flight): the server's version only grows, so a lower one is a stale answer that arrived late, and storing it would put the device on a seed the server no longer accepts.
    * Returns `"kept_newer"` (and writes nothing) in that case, `"saved"` otherwise. An equal or higher version is written, so a resync flag and the restore of an earlier record still work.
-   * Trade-off, accepted: if the server's seed version were ever reset BELOW what this device holds, the device would refuse the new seeds until its record is wiped (account deletion or a
-   * reinstall); the server never lowers a version, so that is a server reset, not a flow.
+   * The one exception is `authoritative: true`, used ONLY for the answer to an explicit user "reset code" (a rotation): the server's seed is what it just answered, whatever its version. The
+   * server never lowers a version in normal operation, but after a database restore (DR / point-in-time recovery) it can be BELOW what this device holds; without this the device would refuse
+   * every seed (a rotation gives n+1, still lower) until its record is wiped, and on iOS the Keychain survives a reinstall. The per-user single-flight (`manager.ts`) is what makes it safe: a
+   * rotation answer cannot be a late answer overtaken by another request of the same user, so a lower version there is the server's truth, not a stale reply.
    */
-  async save(userId: string, deviceId: string, s: StoredSeed): Promise<SaveOutcome> {
+  async save(userId: string, deviceId: string, s: StoredSeed, opts: { authoritative?: boolean } = {}): Promise<SaveOutcome> {
     if (s.seed.length !== OFFLINE_SEED_BYTES) throw new Error(`offline seed: the seed must be ${OFFLINE_SEED_BYTES} bytes`);
     const current = await this.load(userId, deviceId);
-    if (current !== null && current.seedVersion > s.seedVersion) {
+    if (current !== null && current.seedVersion > s.seedVersion && opts.authoritative !== true) {
       current.seed.fill(0);
       return "kept_newer";
     }

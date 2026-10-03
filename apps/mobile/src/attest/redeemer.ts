@@ -18,6 +18,14 @@
  *     (`evidence/send.ts` answers a retry and leaves the held challenge untouched); nothing here drops or consumes anything.
  *  5. iOS key lifecycle: no registered key -> `generateKey`, register at `devices-attest-key` (LIVE challenge, key id bound), keep it in the secure store; `DCError.invalidKey` on an
  *     assertion (a reinstall destroyed the key) -> drop it and register a fresh one, ONCE per redemption.
+ *  6. STALE KEY RECOVERY (the server's `rekey: true` hint on `checkin-token`; `docs/security/p3-money-path-requirements.md` "Stale App Attest key recovery"). The token is valid whatever grade
+ *     it carries (its jti is used as normal, never discarded). INSIDE the assertion lock the local key is marked `stale` (persisted, per user and device). At the NEXT iOS assertion need
+ *     (a check-in, or an activation: `obtainIosAssertion` is shared) a FRESH key is generated (the stale one is never asserted with or registered again; a key that Apple attested once
+ *     cannot be attested again), registered at `devices-attest-key` and used; the answer there is 200 `replaced: true` (counter restarts at 0) or 201. NEVER A LOOP: a recovery's
+ *     registration request is preceded by a persisted cooldown (`registrationBackoffMs`, 1 h), written whatever the outcome, so at most ONE recovery registration per cooldown: a second `rekey`
+ *     inside it (or a 429, a refusal, a lost answer) leaves the key `stale` and the need DEFERS (rule 2: the server holds a key, so never token-less) until the cooldown ends. A 409
+ *     `key_previously_retired` means that key is dead on the server: ONE more fresh key is tried, then the registration backoff is set and the need defers. `rewards-activate` carries no hint:
+ *     a stale key found there changes nothing; the next check-in's hint starts the recovery.
  */
 import { isApiError, type ApiError } from "../api/errors";
 import type { CheckinTokenRequest, CheckinTokenResult, IssuedChallenge } from "../api/types";
@@ -230,10 +238,11 @@ export class NativeRedeemer implements CheckinRedeemer {
       // The token was SENT. Unless the request DEFINITELY did not take effect (`isDefiniteNonApplication`), the server may have graded it `attested` (a lost response, a 5xx, a gateway
       // 502 / 504, a 503 without an `attestation_*` code, a 2xx body that could not be read): treat the device as having attested (the unsafe reading is "never"), so a later local
       // failure defers instead of sending a token-less request.
-      if (!isDefiniteNonApplication(e)) await this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined);
+      if (!isDefiniteNonApplication(e)) await g.settle(() => this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined));
       throw e;
     }
-    if (result.attestationGrade === "attested") await this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined);
+    // The mark follows the server: no abort check, but held through `settle`, so the hold timeout cannot release the lock (and throw the real answer away) while it is being written.
+    if (result.attestationGrade === "attested") await g.settle(() => this.d.state.markAttestedAndroid(ctx.userId, ctx.deviceId).catch(() => undefined));
     return result;
   }
 
@@ -259,10 +268,15 @@ export class NativeRedeemer implements CheckinRedeemer {
     if (got.kind === "none") return g.effect(() => io.post(wireRequest(ctx)));
 
     const result = await g.effect(() => io.post(wireRequest(ctx, { platform: "ios", keyId: got.keyId, assertion: got.assertion })));
-    if (result.attestationGrade === "unattestable") {
+    if (result.rekey === true) {
+      // Rule 6. The server says the key we just asserted with is not the one it holds (`failed`), or holds none (`unattestable`). The token and its grade are used as they are: the answer is
+      // returned untouched. The mark is written with no abort check, like the clears below: the request was SENT, its answer is real, the lock is still held (an effect kept it), and the
+      // state must follow the server. A store that cannot be written loses only the mark: the next assertion with this key brings the same hint.
+      await g.settle(() => state.setIosKey(ctx.userId, ctx.deviceId, { state: "stale", keyId: got.keyId }).catch(() => undefined));
+    } else if (result.attestationGrade === "unattestable") {
       // We presented a verifiable assertion and the server has no registered key for this device (`key_not_registered`): our record is wrong (the server was reset, or a
       // registration we believe succeeded did not). Drop it so the next redemption registers again.
-      await state.clearIosKey(ctx.userId, ctx.deviceId).catch(() => undefined);
+      await g.settle(() => state.clearIosKey(ctx.userId, ctx.deviceId).catch(() => undefined));
     }
     return result;
   }
@@ -297,15 +311,21 @@ export class NativeRedeemer implements CheckinRedeemer {
     let reregistered = false;
     if (rec?.state === "registered") keyId = rec.keyId;
     else {
+      // `stale`: a recovery (rule 6). The server holds a key for this device that is not the one we have, so a refusal below defers (`rec !== null`) instead of going token-less.
+      const recovering = rec?.state === "stale";
       let backoffUntil: number;
+      let cooldownUntil = 0;
       try {
         backoffUntil = await state.getRegistrationBackoffUntil(ctx.userId, ctx.deviceId);
+        if (recovering) cooldownUntil = await state.getRekeyCooldownUntil(ctx.userId, ctx.deviceId);
       } catch {
         throw new AttestationDeferred("key_state_unreadable");
       }
+      // At most one recovery registration per cooldown. A cooldown further away than the cooldown itself is a clock that moved: it is not honoured past one cooldown.
+      if (recovering && this.now() < cooldownUntil && cooldownUntil - this.now() <= this.backoffMs) throw new AttestationDeferred("rekey_cooldown");
       let reg: string | "refused";
       if (this.now() < backoffUntil) reg = "refused"; // the server (or the device) cannot hold a key: not asked again until the backoff ends
-      else reg = await this.registerKey(ctx, io, g, rec !== null);
+      else reg = await this.registerKey(ctx, io, g, rec !== null, recovering);
       if (reg === "refused") {
         // `rec` is `pending` when an earlier registration's outcome is unknown: the server may already hold a key for this device, so a refusal must not read as "none".
         if (rec !== null) throw new AttestationDeferred("key_registration_refused"); // the server may hold a key: no token-less request (rule 2)
@@ -331,7 +351,7 @@ export class NativeRedeemer implements CheckinRedeemer {
       } catch {
         throw new AttestationDeferred("key_state_unwritable");
       }
-      const reg = await this.registerKey(ctx, io, g, true);
+      const reg = await this.registerKey(ctx, io, g, true, false);
       if (reg === "refused") throw new AttestationDeferred("key_registration_refused"); // the server still holds the old key: no token-less request (rule 2)
       keyId = reg;
       r = await assertOnce(keyId);
@@ -347,8 +367,22 @@ export class NativeRedeemer implements CheckinRedeemer {
    *
    * ORDER, so that a failure never costs more than it must: the key is made (or the unattested one from an earlier try reused) BEFORE the live challenge is requested, so a local
    * failure never spends a live challenge (the 30/h limit is shared with live check-in); `pending` is written right before the registration request is sent, so a failure before it
-   * leaves no record. Every step first checks the lock guard (`mutex.ts`): an aborted holder does nothing more. */
-  private async registerKey(ctx: { userId: string; deviceId: string }, io: Pick<RedeemIo, "requestLiveChallenge" | "registerKey">, g: LockGuard, hadKey: boolean): Promise<string | "refused"> {
+   * leaves no record. Every step first checks the lock guard (`mutex.ts`): an aborted holder does nothing more.
+   *
+   * `recovering` (a `stale` key, rule 6): the stale record is KEPT through the attempt (it already says "the server holds a key": no token-less request) instead of being replaced by `pending`,
+   * and the recovery cooldown is written right before the request, whatever the outcome. A 409 `key_previously_retired` (the server remembers this key as dead on the device) burns that key
+   * and ONE more fresh key is registered; a second one sets the registration backoff and defers. */
+  private async registerKey(ctx: { userId: string; deviceId: string }, io: Pick<RedeemIo, "requestLiveChallenge" | "registerKey">, g: LockGuard, hadKey: boolean, recovering: boolean): Promise<string | "refused"> {
+    let r = await this.registerOnce(ctx, io, g, hadKey, recovering);
+    if (r === "retired") r = await this.registerOnce(ctx, io, g, hadKey, recovering); // exactly one more fresh key: the one just refused is burned (`clearUnattestedKey` ran), so this one is new
+    if (r === "retired") {
+      await g.settle(() => this.d.state.setRegistrationBackoffUntil(ctx.userId, ctx.deviceId, this.now() + this.backoffMs).catch(() => undefined));
+      throw new AttestationDeferred("registration_key_previously_retired"); // the server holds a key (a retired one proves it): never token-less
+    }
+    return r;
+  }
+
+  private async registerOnce(ctx: { userId: string; deviceId: string }, io: Pick<RedeemIo, "requestLiveChallenge" | "registerKey">, g: LockGuard, hadKey: boolean, recovering: boolean): Promise<string | "refused" | "retired"> {
     const { state, attestor } = this.d;
     const backoff = async (): Promise<void> => {
       await state.setRegistrationBackoffUntil(ctx.userId, ctx.deviceId, this.now() + this.backoffMs).catch(() => undefined);
@@ -398,7 +432,8 @@ export class NativeRedeemer implements CheckinRedeemer {
     //    BEFORE the request, and no token-less request is sent while it stands.
     g.check();
     try {
-      await state.setIosKey(ctx.userId, ctx.deviceId, { state: "pending" });
+      if (recovering) await state.setRekeyCooldownUntil(ctx.userId, ctx.deviceId, this.now() + this.backoffMs); // the cap: written BEFORE the request, so no outcome of it can be retried inside the cooldown
+      else await state.setIosKey(ctx.userId, ctx.deviceId, { state: "pending" });
     } catch {
       throw new AttestationDeferred("key_state_unwritable");
     }
@@ -407,23 +442,28 @@ export class NativeRedeemer implements CheckinRedeemer {
     } catch (e) {
       if (isApiError(e) && e.kind === "conflict" && e.code === "key_already_registered") {
         // The server already holds exactly this key (an earlier request of ours was applied and its answer was lost): it is registered.
+      } else if (isApiError(e) && e.kind === "conflict" && e.code === "key_previously_retired") {
+        // The server remembers this key as replaced on this device: it can never be registered. Nothing was applied; the caller tries ONE more fresh key. The record is untouched
+        // (`pending`, or `stale` in a recovery): the server holds a key.
+        return "retired";
       } else if ((isApiError(e) && e.kind === "rejected" && e.code !== null && KEY_REFUSED_CODES.has(e.code)) || isNotConfigured503(e)) {
         // Nothing was registered: a refusal of the key, or a deployment that cannot hold one (answered before anything is read or written). Without an earlier key the server holds none:
         // clear the mark; either way do not ask again for a while.
-        if (!hadKey) await state.clearIosKey(ctx.userId, ctx.deviceId).catch(() => undefined);
-        await backoff();
+        if (!hadKey) await g.settle(() => state.clearIosKey(ctx.userId, ctx.deviceId).catch(() => undefined));
+        await g.settle(backoff);
         return "refused";
       } else {
         throw this.registrationError(e);
       }
     }
     // The registration took effect: record it (no abort check: the lock is still held by this holder, and the state must follow the server).
+    // Held through `settle`: the hold timeout cannot release the lock mid-write (PR #42 gate NIT), or the next holder would read a record that does not yet name the key the server holds.
     try {
-      await state.setIosKey(ctx.userId, ctx.deviceId, { state: "registered", keyId });
+      await g.settle(() => state.setIosKey(ctx.userId, ctx.deviceId, { state: "registered", keyId }));
     } catch {
       throw new AttestationDeferred("key_state_unwritable");
     }
-    await state.clearRegistrationBackoff(ctx.userId, ctx.deviceId).catch(() => undefined);
+    await g.settle(() => state.clearRegistrationBackoff(ctx.userId, ctx.deviceId).catch(() => undefined));
     return keyId;
   }
 
