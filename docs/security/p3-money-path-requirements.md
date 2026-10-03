@@ -3427,8 +3427,8 @@ was issued to; `nonce` is the string `POST /v1/checkin/challenge` returned.
 |---|---|---|
 | valid attestation over the binding | `attested` | none |
 | iOS: key registered to THIS user's device, signature valid, `rpIdHash` right, counter strictly greater, stored counter advanced atomically (`UPDATE ... WHERE attest_key_id = $key AND attest_counter < $new`) | `attested` | none |
-| attestation presented but invalid (wrong purpose / nonce / challenge / device / user, replayed or non-increasing counter, lost advance race, replaced key, key of another account, malformed, wrong Android `requestHash` / package / certificate / `deviceIntegrity` / freshness, Google's 400 "cannot decode") | `failed` | `fraud_signal(attestation_failed)` via `raiseAttestationFailedIfNone` (one open per account; detail = `{challengeId, deviceId, platform, reasons, source:"checkin-token"}`, no key material). A counter LOWER than the stored one carries `counter_out_of_order`, an EQUAL one `counter_not_monotonic` / `counter_replay` (see "Attestation follow-ups") |
-| iOS attestation on a device with NO registered key | `unattestable` (`key_not_registered`), as activation | none |
+| attestation presented but invalid (wrong purpose / nonce / challenge / device / user, replayed or non-increasing counter, lost advance race, replaced key, key of another account (**`rekey: true`**, with the plain "key id is not the registered one" case: see "Stale App Attest key recovery"), malformed, wrong Android `requestHash` / package / certificate / `deviceIntegrity` / freshness, Google's 400 "cannot decode") | `failed` | `fraud_signal(attestation_failed)` via `raiseAttestationFailedIfNone` (one open per account; detail = `{challengeId, deviceId, platform, reasons, source:"checkin-token"}`, no key material). A counter LOWER than the stored one carries `counter_out_of_order`, an EQUAL one `counter_not_monotonic` / `counter_replay` (see "Attestation follow-ups") |
+| iOS attestation on a device with NO registered key | `unattestable` (`key_not_registered`), as activation. **The answer carries `rekey: true`** (below) | none |
 | no attestation, and the claim says capable **or** the device row has shown it can attest (a registered key, a prior `attested` token, or an `attested` activation verdict, 0043) | `failed` | `attestation_failed` via the SAME `raiseAttestationFailedIfNone` (one open per account; since the follow-ups the no-attestation path no longer inserts one per request); detail `{challengeId, deviceId, platform:null, reasons:["no_attestation_token"] (+ `"device_has_attested_before"` when the evidence, not the claim, decided), source:"checkin-token"}`, the same vocabulary as activation |
 | no attestation, claim says incapable, no such evidence | `unattestable` | none |
 
@@ -3667,6 +3667,96 @@ Control: a **type-only** `import type {} from "./devicecheck-client.ts"` in `ven
 - **NIT-3.** The residual cost of the capability claim is **one** device slot in total (a device id that never attests can be reused for the dodge indefinitely), not one per attempt.
 - **LOW-1, the walker missed imports behind regex literals.** A regex such as `/^\/*/` was read as the start of a block comment, hiding everything up to the next `*` + `/`, a real import included (the gate hid one in `_shared/http.ts` and the tests still passed). `import-closure.ts` now tokenises strings, templates (with `${}` nesting) and regex literals (the previous-token heuristic) before stripping comments, and also follows string-named re-exports, non-ASCII identifiers and `new URL("./x", import.meta.url)`. Fixtures: `/^\/*/` then an import, `/[//]/` and `/[///]/` then an import, an escaped slash in a regex, a string with `/*` and with an escaped quote, a template with `//` including a nested `${ }` template, and the gate's `http.ts` reproduction end to end.
 - **Mutation proofs:** INSERT arm removed from the trigger, INSERT arm keeping the assigned value, INSERT arm always stamping (all three caught by pgTAP, 3 of 3); the gate's `_shared/http.ts` reproduction applied to a copy (fails `rewards-isolation.test.ts`, with the chain printed), regex detection disabled, the character class ignored, template nesting not tracked, the unicode flag dropped, the `new URL` edge not recorded, string escapes ignored (all caught, 7 of 7).
+
+## Stale App Attest key recovery: the `rekey` hint on `checkin-token` (2026-10-03)
+
+**The problem.** `checkin-token` answered every refused iOS assertion with the same body, `{jti, expiresAt, attestationGrade: "failed"}`; the reason (`key_id_mismatch` and the rest) was written only to `fraud_signal.detail`. So the
+mobile client could not tell "my local App Attest key is not the one the server has on record" from a replay or a wrong binding. If the two ever diverge (a database restore, an admin key reset, a lost registration write) an honest device was
+graded `failed`, with a signal, on every check-in, forever, and nothing on the wire told it that registering a fresh key would end that. (The client-side cause, lock abandonment, was fixed in PR #42; this is the server half.)
+
+**The change (server only, no migration, no grant, no new statement).** `IssuedToken` (`checkin/token-handler.ts`) gains one OPTIONAL member, `rekey?: true`. It is present, and always `true`, **only** when an iOS assertion was refused for a
+KEY-IDENTITY reason, which is exactly two of the verifier's reasons (`attestation-evidence.ts#isKeyIdentityReason`, a two-element list pinned against the real verifier's output by a unit test):
+
+| Verifier reason | Meaning | Grade (unchanged) | `rekey` |
+|---|---|---|---|
+| `key_id_mismatch` | the key id the client named is not the key registered for THIS user's device (another key of its own, a key of another account, a retired key) | `failed` | **`true`** |
+| `key_not_registered` | an assertion was presented and the device has no registered key at all | `unattestable` | **`true`** |
+| `counter_not_monotonic` / `counter_out_of_order` / `counter_replay` / `key_replaced` (a lost atomic advance) | about THIS assertion's counter or a replacement that raced it | `failed` | absent |
+| `bad_signature_or_request_hash` (wrong purpose / nonce / challenge / device / user binding, or a signature by another key under the registered key id), `rp_id_mismatch`, `malformed_assertion`, `malformed_signature`, `bad_public_key` | about THIS assertion's content | `failed` | absent |
+| a valid assertion | | `attested` | absent |
+| no attestation at all (`failed` or `unattestable`), any Android answer | | unchanged | absent |
+
+Wire examples: `{"data":{"jti":"...","expiresAt":"...","attestationGrade":"failed","rekey":true}}` and `{"data":{"jti":"...","expiresAt":"...","attestationGrade":"unattestable","rekey":true}}`; every other answer is byte-for-byte what it was (the
+member is omitted, never `false`). The grade, the spent challenge (a failed attempt still spends it: there is no free second guess on one nonce) and the issued token are unchanged. Old clients ignore an unknown member (the mobile
+`checkinTokenResultSchema` is a non-strict `z.object`); nothing in `apps/mobile/src` consumes the hint yet.
+
+**Why `key_not_registered` (graded `unattestable`) carries it too.** The brief for this change named "no key is registered while an assertion was presented" as a rekey case, and it is the same family (the client holds a key the server does not):
+a database restore or an admin reset that cleared the key lands here, not on `key_id_mismatch`. The mobile redeemer already reads `unattestable` after a presented assertion as "the server has no key" (`redeemer.ts`), so the hint adds no
+information; it makes both cases one explicit field instead of a grade-reading convention. It is the only place the hint rides on a non-`failed` grade, and it raises no signal, as before.
+
+### Why the hint leaks nothing useful
+
+- **The caller already knows the one thing it says.** `key_id_mismatch` means "the key id you named is not the one on record". The caller chose that key id, so the negative statement is information it already has; the registered key id is **never**
+  revealed (the answer carries no key id, the signal's `detail` carries none, and a test asserts neither the registered nor the presented id appears in the answer). `key_not_registered` was already readable from the grade.
+- **It is not an oracle on other accounts.** Every row the verifier sees is the actor's own (`Repo` is actor-scoped; a foreign device is a 404 before any grading). Naming another account's key id is the same `key_id_mismatch` answer as naming a made-up one
+  (tested), so the hint does not say whether a key id exists anywhere.
+- **The residual: equality with the caller's own device's key, one bit per spent challenge.** Absence of the hint on a `failed` answer means the named key id equals the device's registered one (the failure was then something else). To use that, an attacker must
+  guess a 256-bit key id (SHA-256 of the public key) for a device of their OWN account (or, with a stolen session, a victim's), paying one challenge and one `checkin-token` rate-limit slot (60/user/hour) per guess, with a `failed` token and an `attestation_failed`
+  signal each time. A key id is not a secret in any case: it is sent in every request and returned by registration. Nothing is learnt that would let an assertion verify, which needs the private key.
+- **It cannot be forced on an honest request.** The hint depends only on the key id the request itself named, never on the binding, the nonce or the counter (the key-id comparison runs before every other check in `verifyAppAttestAssertion`), so no other
+  failure can be relabelled as a key problem and a replay stays indistinguishable from a wrong binding.
+
+### The fraud signal: still raised
+
+For `key_id_mismatch` the grade stays `failed` and `fraud_signal(attestation_failed)` is opened exactly as before (`raiseAttestationFailedIfNone`: one OPEN signal per account, serialised; `detail.reasons = ["key_id_mismatch"]`, no key material), so a reviewer still
+sees every stale-key event, **with the reason recorded**. `key_not_registered` stays `unattestable` and raises nothing. Rejected alternative: **suppress the signal when the device then re-registers and attests within a window.** It needs a time window, a
+read-after-write between two endpoints that share no transaction, and a rule for which earlier signal a later success clears, and it would make "a captured assertion followed by an honest re-registration" indistinguishable from recovery. The signal's job is to
+make a human look; a human clearing it after a legitimate recovery (the reason names it) is the same act as today. **Consequence, stated plainly:** recovery restores the GRADE on the next check-in, not the account's standing: the open signal keeps holding the
+account's activations (§7.5 row 2) until a reviewer clears it. That is the existing cost of any `failed`, unchanged.
+
+### `rewards-activate`: no hint (it has no such answer)
+
+The activation answer is `{id, kind, state, held, replay}`: it carries no grade and no reason ("the matched table row and its reasons are server-side diagnostics only and are never returned"), so there is no `failed` answer to extend. A key mismatch there grades
+`failed`, the reward is `held_review`, and a repeat of the request is the idempotent "already held" short-circuit that verifies nothing, so a client that registered a fresh key could not release it by retrying either. Adding a field to that answer would be a new shape
+for a case recovery cannot fix. The client learns the key is stale from its next check-in (`rekey: true`); the held reward waits for a human, as for any `failed`. **Not changed; no activation test changed.**
+
+### The recovery path: `POST /v1/devices/attest-key` replaces a key on the caller's OWN device (verified, not changed)
+
+Read and tested this session, nothing altered: the device must be the caller's own iOS (or not-yet-labelled) device; the key must be a **new** one (409 `key_already_registered` for the current key; 409 `key_previously_retired` for a key that was ever replaced on this device,
+the newest 16 are remembered, so an old key can never return); a live challenge is consumed (120 s, bound to device and user); Apple's chain, the nonce, the key id, the app id, the counter and the environment are verified; `app.register_attest_key` then answers `registered`
+(first key) or **`replaced`** (HTTP 200, `replaced: true`): the new key and public key are written, the **counter restarts at 0** (the old key's counter must not become the new key's floor), the old key's hash joins the retired list, and `device.attest_key_replaced` is audited with
+hash prefixes only. Rate limits: 10/user/hour and 10/device/day, hit before the transaction; a failed registration returns 422 `attestation_rejected`, spends its challenge, and raises NO signal. Existing coverage: `attest-key-handler.test.ts` (reinstall: replaced, counter 0, old key retired) and
+`attest-key.deno.test.ts` (replacement on the real SQL, counter restart, retired key cannot return, the lost-advance race with a mid-flight replacement). **New in this change** (`checkin-attest.deno.test.ts`, real database): register key A, present key B (`failed` + `rekey`, signal open with `key_id_mismatch`,
+counter untouched), re-register B through the real handler (200, `replaced`, counter 0), and the very next check-in with B (counter 1) is `attested` with no hint, the signal still open; the retired key A is then `failed` + `rekey` and cannot be registered again (409).
+
+**What the client must do with the hint (the mobile consumer comes later):** on `rekey: true`, generate a **fresh** App Attest key (Apple attests a key once, so the existing local key cannot simply be re-registered `[unverified — training knowledge of DCAppAttestService]`), register it through
+`devices-attest-key` ONCE, then attest the next check-in with it; never loop (the budget is 10 registrations per device per day, and a refused registration is a 422 that spends a challenge). A 409 `key_previously_retired` means the key is already dead on this device: generate another.
+
+### Limits, stated
+
+- **A repeat redemption of the same challenge answers the ORIGINAL token WITHOUT the hint.** The hint is a property of the answer, not of the stored token (no schema change, hence no migration), and an idempotent repeat re-verifies nothing. A client whose response was lost
+  therefore sees `failed` plain once; its next check-in (a new challenge) with the same stale key gets the hint. Persisting it would need a column (`0046`); not done, because the recovery does not depend on the lost answer.
+- **A key replaced mid-flight (`key_replaced`) carries no hint:** the assertion verified against the key that was on record when it was read; the replacement that raced it is, in the usual case, the same device's own re-registration.
+- **Honest limits of what is proved:** the verifier's wire format is still `[unverified]` against a real device (unchanged); the recovery was exercised end to end with synthetic attestations.
+
+### Tests and verification (the `rekey` hint)
+
+- **Unit** (`pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts`): **54 files / 1107 tests** (was 1097; all in `checkin-token-attestation.test.ts`, 54 -> 64): `rekey: true` on a mismatched key id (the
+  signal is raised with `["key_id_mismatch"]`, the challenge is spent, the counter untouched, the wire keys are exactly `jti, expiresAt, attestationGrade, rekey`), on another account's key (the same answer), and, as `unattestable`, when no key is registered; ABSENT on counter replay, counter
+  out of order, a bad signature, a wrong binding / purpose / nonce, an rpId mismatch, a malformed signature and assertion, each lost-advance race (higher counter, equal counter, key replaced mid-flight), `attested`, the no-attestation `unattestable` / `failed`, and an Android `failed` (each with the strict
+  key set); the registered key id with a signature by another key is `failed` WITHOUT the hint; the key-identity list pinned against the real verifier's output; repeated mismatches share ONE open signal; a repeat redemption answers the original token without the hint; the answer carries no key id.
+- **Deno integration** (`checkin-attest.deno.test.ts`, real `withOwnership` / `Repo`, both harness modes): **293 passed, 0 failed** (was 290; +3): register key A through the real handler, present key B (`failed` + `rekey`, signal open, counter untouched), re-register B (`replaced`, counter 0), the
+  next check-in `attested` with no hint and the signal still open, the retired key A `failed` + `rekey` and refused re-registration (409 `key_previously_retired`); no key + assertion (`unattestable` + `rekey`, then a first registration makes it `attested`); ABSENT on out-of-order, a signature by another key, a wrong
+  purpose, a wrong rpId and a no-attestation `failed`. Two existing cells gained an assertion (a counter replay carries no hint; another account's key does). pgTAP `Files=30, Tests=2441` unchanged (no migration).
+- **The mobile edge-contract recorder** (`apps/mobile/scripts/record-edge-contract.rec.ts`) was re-recorded (`RECORD_EDGE_CONTRACT=1`) and passes in verify mode. Its scripted iOS port now answers the verifier's own words for the two key-identity refusals (`key_not_registered` / `key_id_mismatch`)
+  instead of one generic reason. **The fixture diff is three ADDED entries and nothing else** (39 added lines, 0 changed or removed; every existing recorded answer is byte-identical): `attestkey_201_registered_for_rekey`, `token_201_failed_rekey_ios` (`"attestationGrade":"failed","rekey":true`) and
+  `token_201_unattestable_rekey_ios` (`"attestationGrade":"unattestable","rekey":true`). No other mobile source changed; `apps/mobile` passes (48 files / 1355 tests, 4 skipped).
+- `deno check --frozen` (every entrypoint and the integration test) and `deno cache --frozen`: exit 0, `deno.lock` unchanged. `verify-function-inventory` OK and `service-role-lint` clean (inside both `test.sh` runs); `tools/db/check-migrations-immutable.sh --base origin/main` OK (45 migrations byte-identical, none added);
+  `gitleaks dir .` no leaks; `GOLFRAVEN_DEMO=1 pnpm -r test` and `pnpm -r typecheck` exit 0.
+
+**Mutation proofs** (each applied to a world-readable `/tmp` copy, the unit suite and the recorder run, success = a test that passes unmutated now fails; **14 of 14 caught by the unit suite**, the copy deleted, a search of the repository for the mutation marker prints nothing): the hint on ANY `failed` grade
+(5 tests fail); the hint missing on a `key_id_mismatch` (6); missing when no key is registered (2); the hint on a counter replay / lost advance (1); on a key replaced mid-flight (1); on an rpId mismatch (2); on a bad signature (3); on a malformed assertion (2); on an `attested` answer (2); on an Android failure (1); on the
+no-attestation `failed` path (1); the member always present as `false` (12); the hint persisted into the repeat redemption (2); and the fraud-signal behaviour changed (the signal not raised when the hint is set: 4).
 
 ## Offline TOTP seed provisioning (P4.2b-3a, 2026-10-03): `me-offline-seed`, the replay table and the verification core (migration `0045_offline_totp_seed.sql`)
 

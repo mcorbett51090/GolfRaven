@@ -24,6 +24,9 @@ import { VendorUnavailableError, type AndroidPort } from "../../functions/_share
 import { buildIosAssertionPort, type VerificationPorts } from "../../functions/_shared/rewards/verification-ports.ts";
 import type { Repo } from "../../functions/_shared/types.ts";
 import { buildAssertion, generateP256, sha256, toB64, type TestKey } from "../unit/rewards-test-crypto.ts";
+import { createAttestationVerifier, computeAttestKeyBinding } from "../../functions/_shared/rewards/app-attest-registration.ts";
+import { handleAttestKey, type AttestKeyDeps } from "../../functions/_shared/rewards/attest-key-handler.ts";
+import { buildAttestation, buildTestPki, genPair, type Pair, type TestPki } from "../unit/attest-test-pki.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 const APP_ID = "TEAMID1234.com.example.golfraven";
@@ -99,6 +102,7 @@ Deno.test("checkin-attest: a replayed counter is `failed`, opens ONE fraud_signa
     const ch = await issue(u, dev.id);
     const out = await redeem(u, await iosReq(u, dev.id, dev.key, ch, 5), iosDeps(u));
     assertEquals(out.attestationGrade, "failed");
+    assertEquals("rekey" in out, false, "a counter replay is not a key-identity problem: no hint");
   }
   assertEquals(await counterOf(dev.id), 5);
   const sigs = await signals(u);
@@ -129,6 +133,7 @@ Deno.test("checkin-attest: another user's registered key is `failed` at check-in
   const ch = await issue(a, devA.id);
   const out = await redeem(a, await iosReq(a, devA.id, devB.key, ch, 41), iosDeps(a));
   assertEquals(out.attestationGrade, "failed");
+  assertEquals(out.rekey, true, "the presented key is not the one registered for this device");
   assertEquals(((await signals(a))[0]!.detail as Record<string, unknown>).reasons, ["key_id_mismatch"]);
   assertEquals(await counterOf(devB.id), 40);
   assertEquals(await counterOf(devA.id), 5);
@@ -384,4 +389,134 @@ Deno.test("checkin-attest: consumeForFix clamps to the CHALLENGE's window — a 
   await adminSql()`update app.checkin_challenge set kind = 'prefetched', issued_at = now() - interval '5 hours', expires_at = now() + interval '19 hours' where id = ${ch2.id}`;
   const tok2 = await redeem(u, { challengeId: ch2.id, nonce: ch2.nonce, hardwareSupportsAttestation: false }, none);
   assertEquals(await withOwnership(u.actor, (repo: Repo) => repo.checkinToken.consumeForFix(tok2.jti, dev, Date.now() - 6 * 60 * 60_000)), null);
+});
+
+// ---------------------------------------------------------------------------
+// stale App Attest key recovery: the `rekey` hint, and the replacement it points at (devices-attest-key), against the real database
+// ---------------------------------------------------------------------------
+let pki: TestPki;
+const pkiOnce = async (): Promise<TestPki> => (pki ??= await buildTestPki({ nowMs: Date.now() }));
+async function registrationDeps(): Promise<AttestKeyDeps> {
+  const p = await pkiOnce();
+  return { verifier: createAttestationVerifier({ appId: APP_ID, environment: "production", trustAnchorDer: p.rootDer }, { sha256 }), sha256 };
+}
+/** Registers `leaf` as the device's key through the REAL handler (a verified synthetic attestation bound to a fresh live challenge), as `devices-attest-key` does. */
+async function registerKey(u: User, deviceId: string, leaf: Pair) {
+  const ch = await issue(u, deviceId);
+  const keyId = toB64(await sha256(leaf.point));
+  const clientDataHash = await computeAttestKeyBinding(sha256, { challengeId: ch.id, deviceId, keyId, nonce: ch.nonce });
+  const built = await buildAttestation({ pki: await pkiOnce(), appId: APP_ID, environment: "production", clientDataHash, leaf });
+  const deps = await registrationDeps();
+  return withOwnership(u.actor, (repo: Repo) => handleAttestKey({ deviceId, challengeId: ch.id, nonce: ch.nonce, keyId, attestation: built.attestationB64 }, repo, deps));
+}
+const asKey = (leaf: Pair): TestKey => ({ privateKey: leaf.privateKey, publicKeyRaw: leaf.point });
+const deviceKeyRow = async (deviceId: string) => (await adminSql()`select attest_key_id, attest_counter, attest_retired_key_hashes from app.device where id = ${deviceId}`)[0]!;
+const openSignalCount = async (u: User) => (await signals(u)).filter((s) => s.cleared_at === null).length;
+
+Deno.test("checkin-attest (rekey): register key A, present key B -> `failed` + `rekey: true` (signal raised, challenge spent, counter untouched); re-register B (replaced) -> the next check-in is `attested`", DT, async () => {
+  const u = await freshUser("rekey");
+  const dev = await withOwnership(u.actor, async (repo: Repo) => (await repo.device.ensureOwn(freshUuid(), "ios")).id);
+  const leafA = await genPair("P-256");
+  const leafB = await genPair("P-256");
+  const keyA = asKey(leafA);
+  const keyB = asKey(leafB);
+
+  const first = await registerKey(u, dev, leafA);
+  assert(first.ok && first.status === 201 && first.body.replaced === false, "key A registered");
+  const ch0 = await issue(u, dev);
+  const ok0 = await redeem(u, await iosReq(u, dev, keyA, ch0, 1), iosDeps(u));
+  assertEquals(ok0.attestationGrade, "attested");
+  assertEquals("rekey" in ok0, false);
+  assertEquals(await counterOf(dev), 1);
+
+  // The client's local key is B (the server holds A): graded `failed`, but now it can tell why.
+  const ch1 = await issue(u, dev);
+  const stale = await redeem(u, await iosReq(u, dev, keyB, ch1, 1), iosDeps(u));
+  assertEquals(stale.attestationGrade, "failed");
+  assertEquals(stale.rekey, true);
+  assertEquals(Object.keys(stale).sort(), ["attestationGrade", "expiresAt", "jti", "rekey"]);
+  assertEquals(await counterOf(dev), 1, "a failed assertion never advances the counter");
+  assert((await usedAt(ch1.id)) !== null, "the failed attempt spent its challenge");
+  const sigs = await signals(u);
+  assertEquals(sigs.length, 1, "the fraud signal is still raised");
+  assertEquals((sigs[0]!.detail as Record<string, unknown>).reasons, ["key_id_mismatch"]);
+  assertEquals((await tokenRows(u)).map((r) => r.attestation_grade), ["attested", "failed"]);
+
+  // The recovery: devices-attest-key replaces the key on the caller's OWN device; the counter restarts at 0.
+  const replaced = await registerKey(u, dev, leafB);
+  assert(replaced.ok && replaced.status === 200 && replaced.body.replaced === true, "key B replaced key A");
+  const row = await deviceKeyRow(dev);
+  assertEquals(row.attest_key_id, toB64(await sha256(leafB.point)));
+  assertEquals(Number(row.attest_counter), 0);
+  assertEquals((row.attest_retired_key_hashes as string[]).length, 1);
+
+  // The very next check-in with B (counter 1, below A's old counter is irrelevant: new key, new counter) is attested, and carries no hint.
+  const ch2 = await issue(u, dev);
+  const recovered = await redeem(u, await iosReq(u, dev, keyB, ch2, 1), iosDeps(u));
+  assertEquals(recovered.attestationGrade, "attested");
+  assertEquals("rekey" in recovered, false);
+  assertEquals(await counterOf(dev), 1);
+  assertEquals(await openSignalCount(u), 1, "the signal stays open until a reviewer clears it (recovery does not hide the evidence)");
+
+  // The retired key is now the stale one, and cannot come back.
+  const ch3 = await issue(u, dev);
+  const old = await redeem(u, await iosReq(u, dev, keyA, ch3, 9), iosDeps(u));
+  assertEquals(old.attestationGrade, "failed");
+  assertEquals(old.rekey, true);
+  const back = await registerKey(u, dev, leafA).then(() => null, (e: unknown) => (e instanceof HttpError ? { status: e.status, code: e.code } : e));
+  assertEquals(back, { status: 409, code: "key_previously_retired" });
+});
+
+Deno.test("checkin-attest (rekey): NO key registered but an assertion presented -> `unattestable` + `rekey: true`, no signal; registering a key then makes the same device `attested`", DT, async () => {
+  const u = await freshUser("rekey-nokey");
+  const dev = await withOwnership(u.actor, async (repo: Repo) => (await repo.device.ensureOwn(freshUuid(), "ios")).id);
+  const leaf = await genPair("P-256");
+  const ch1 = await issue(u, dev);
+  const out = await redeem(u, await iosReq(u, dev, asKey(leaf), ch1, 1), iosDeps(u));
+  assertEquals(out.attestationGrade, "unattestable");
+  assertEquals(out.rekey, true);
+  assertEquals((await signals(u)).length, 0, "an unattestable answer raises no signal, as before");
+  const reg = await registerKey(u, dev, leaf);
+  assert(reg.ok && reg.status === 201 && reg.body.replaced === false, "a first registration, not a replacement");
+  const ch2 = await issue(u, dev);
+  const after = await redeem(u, await iosReq(u, dev, asKey(leaf), ch2, 1), iosDeps(u));
+  assertEquals(after.attestationGrade, "attested");
+  assertEquals("rekey" in after, false);
+});
+
+Deno.test("checkin-attest (rekey): ABSENT on counter out-of-order, a bad signature, a wrong purpose, a wrong rpId and a no-attestation `failed`, against the real database", DT, async () => {
+  const u = await freshUser("rekey-absent");
+  const dev = await deviceWithKey(u, 5);
+  const absent = (out: object, label: string) => assertEquals("rekey" in out, false, label);
+
+  const lower = await redeem(u, await iosReq(u, dev.id, dev.key, await issue(u, dev.id), 4), iosDeps(u));
+  assertEquals(lower.attestationGrade, "failed");
+  absent(lower, "out of order");
+
+  const other = await generateP256();
+  const ch = await issue(u, dev.id);
+  const hash = await computeIosCheckinBinding(sha256, { challengeId: ch.id, deviceId: dev.id, nonce: ch.nonce, userId: u.uid });
+  const forged = await buildAssertion({ key: other, appId: APP_ID, counter: 6, clientDataHash: hash });
+  const signedByAnother = await redeem(u, { challengeId: ch.id, nonce: ch.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId: await keyIdOf(dev.key), assertion: forged.assertionB64 } }, iosDeps(u));
+  assertEquals(signedByAnother.attestationGrade, "failed");
+  absent(signedByAnother, "registered key id, signature by another key");
+
+  const ch2 = await issue(u, dev.id);
+  const wrongPurpose = await computeIosActivationBinding(sha256, { rewardId: freshUuid(), deviceId: dev.id, challengeId: ch2.id, deviceCheckTokenSha256: "ab".repeat(32), nonce: ch2.nonce });
+  const wp = await redeem(u, await iosReq(u, dev.id, dev.key, ch2, 6, wrongPurpose), iosDeps(u));
+  assertEquals(wp.attestationGrade, "failed");
+  absent(wp, "wrong purpose");
+
+  const ch3 = await issue(u, dev.id);
+  const rpHash = await computeIosCheckinBinding(sha256, { challengeId: ch3.id, deviceId: dev.id, nonce: ch3.nonce, userId: u.uid });
+  const wrongRp = await buildAssertion({ key: dev.key, appId: "OTHERTEAM.com.evil.app", counter: 6, clientDataHash: rpHash });
+  const rp = await redeem(u, { challengeId: ch3.id, nonce: ch3.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId: await keyIdOf(dev.key), assertion: wrongRp.assertionB64 } }, iosDeps(u));
+  assertEquals(rp.attestationGrade, "failed");
+  absent(rp, "rpId mismatch");
+
+  const ch4 = await issue(u, dev.id);
+  const none = await redeem(u, { challengeId: ch4.id, nonce: ch4.nonce, hardwareSupportsAttestation: true }, iosDeps(u));
+  assertEquals(none.attestationGrade, "failed");
+  absent(none, "no attestation");
+  assertEquals(await counterOf(dev.id), 5);
 });

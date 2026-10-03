@@ -64,6 +64,16 @@
 // has shown it can attest, a check-in that omits the attestation is `failed` (and raises the signal); the client must send one, or accept that.
 // The signal is opened the same way as for a presented attestation (`raiseAttestationFailedIfNone`: one OPEN signal per account, serialised).
 //
+// STALE-KEY RECOVERY (the `rekey` hint). The grade is all the client used to learn, so an honest device whose local App Attest key is not the one the server
+// holds (a database restore, an admin key reset, a lost registration write) was graded `failed` on every check-in, forever, and could not tell that
+// from a replay. When an iOS assertion is refused for a KEY-IDENTITY reason only (`key_id_mismatch`: the key it names is not the one registered for this
+// user's device; `key_not_registered`: none is registered), the answer carries `rekey: true`. It is absent on every other answer: counter replay or
+// out of order, a bad signature, a wrong rpId, a binding that does not hash, a malformed assertion, a key replaced mid-flight, `attested`, and the
+// no-attestation `unattestable` / `failed`. The grade, the spent challenge and the fraud signal are exactly as before (`failed` still raises
+// `attestation_failed`, reasons `["key_id_mismatch"]`, so a reviewer sees it; `key_not_registered` stays `unattestable`, no signal). The recovery is
+// `POST /v1/devices/attest-key` with a freshly generated key (replacement, counter restarts at 0). Why the hint leaks nothing, and what it does not
+// recover: docs/security/p3-money-path-requirements.md, "Stale App Attest key recovery (the `rekey` hint)".
+//
 // OUT-OF-ORDER ASSERTIONS. The App Attest counter is shared by `checkin-token` and `rewards-activate` and is strictly monotonic. Two assertions of
 // one key in flight at once can commit out of order; the lower one then grades `failed` (never `attested`, strictness is unchanged) with the reason
 // `counter_out_of_order` rather than `counter_replay`, so a reviewer can tell an honest client's race from a replay. The mobile client's contract is
@@ -87,7 +97,7 @@ import { computeIosCheckinBinding } from "../rewards/string-binding.ts";
 import { VendorForbiddenError, VendorNotConfiguredError, VendorUnavailableError, type Grade } from "../rewards/types.ts";
 import { logVendorFault } from "../rewards/vendor-log.ts";
 import type { VerificationPorts } from "../rewards/verification-ports.ts";
-import { gradeNoAttestation, lostAdvanceReason, noAttestationReasons } from "../rewards/attestation-evidence.ts";
+import { gradeNoAttestation, isKeyIdentityReason, lostAdvanceReason, noAttestationReasons } from "../rewards/attestation-evidence.ts";
 import type { CheckinAttestation, TokenRequest } from "./token-request-shape.ts";
 
 export type { CheckinAttestation, TokenRequest } from "./token-request-shape.ts";
@@ -104,6 +114,11 @@ export interface IssuedToken {
   jti: string;
   expiresAt: string;
   attestationGrade: "attested" | "unattestable" | "failed";
+  /** Present (and always `true`) ONLY on the answer to an iOS check-in whose presented assertion named a key that is not the one registered for this
+   * (user, device), or when no key is registered at all: the client's local App Attest key is stale, and registering a fresh one
+   * (`POST /v1/devices/attest-key`) is what recovers. Absent on every other answer, including every other `failed` one. It is never persisted:
+   * a repeat redemption of the same challenge (idempotent redemption) answers the original token WITHOUT it. */
+  rekey?: true;
 }
 
 export interface DigestHexFn {
@@ -155,6 +170,8 @@ function mapVendorError(e: unknown): unknown {
 interface AttestationVerdict {
   grade: Grade;
   reasons: string[];
+  /** The refusal was a key-identity one (attestation-evidence.ts#isKeyIdentityReason). Only the iOS verifier-refusal path can set it. */
+  rekey: boolean;
 }
 
 /** Verifies a PRESENTED attestation over the check-in binding. Runs after the challenge was consumed, inside the transaction. */
@@ -175,20 +192,21 @@ async function gradePresentedAttestation(
     if (!device) throw Errors.internal();
     const clientDataHash = await computeIosCheckinBinding(deps.sha256, { ...bound, nonce: nonce.text });
     const verdict = await port.verifyAssertion({ assertionB64: att.assertion, keyId: att.keyId, clientDataHash, device });
-    if (!verdict.ok) return { grade: verdict.grade, reasons: [verdict.reason] };
+    if (!verdict.ok) return { grade: verdict.grade, reasons: [verdict.reason], rekey: isKeyIdentityReason(verdict.reason) };
     // Atomic, monotonic and key-bound (the activation path's own statement): a replayed or racing counter does not advance, and neither does an
     // assertion whose key was replaced after `deviceAttestState` read it. Zero rows is `failed`, never `attested`.
     if (device.attestKeyId !== null && (await repo.rewards.advanceAttestCounter(challenge.deviceId, device.attestKeyId, verdict.counter))) {
-      return { grade: "attested", reasons: [] };
+      return { grade: "attested", reasons: [], rekey: false };
     }
-    return { grade: "failed", reasons: [await lostAdvanceReason(challenge.deviceId, device.attestKeyId, verdict.counter, repo)] };
+    // A lost advance (counter replay / out of order / key replaced mid-flight) is about THIS assertion: never a rekey hint.
+    return { grade: "failed", reasons: [await lostAdvanceReason(challenge.deviceId, device.attestKeyId, verdict.counter, repo)], rekey: false };
   }
 
   const port = deps.ports.android;
   if (!port) throw fail503("attestation_not_configured", "Android device attestation is not configured on this deployment; no check-in token was issued");
   const binding = await computeCheckinAndroidBinding(deps.sha256, bound, nonce.bytes);
   const verdict = await port.verifyIntegrity({ integrityToken: att.integrityToken, expectedRequestHash: toBase64Url(binding), nowMs: repo.now().getTime() });
-  return { grade: verdict.grade, reasons: verdict.grade === "failed" ? verdict.reasons : [] };
+  return { grade: verdict.grade, reasons: verdict.grade === "failed" ? verdict.reasons : [], rekey: false };
 }
 
 /** The idempotent-redemption lookup (see the header). `null` unless EVERY condition holds: the presented nonce hashes to the challenge's
@@ -264,6 +282,7 @@ export async function handleTokenRequest(body: TokenRequest, repo: Repo, digestH
   }
 
   let attestationGrade: Grade;
+  let rekey = false;
   if (att) {
     let verdict: AttestationVerdict;
     try {
@@ -272,6 +291,7 @@ export async function handleTokenRequest(body: TokenRequest, repo: Repo, digestH
       throw mapVendorError(e);
     }
     attestationGrade = verdict.grade;
+    rekey = verdict.rekey;
     // 0042: a VERIFIED attestation is a platform-bearing use: it labels a device whose platform is still unknown (a device first seen by
     // checkin-challenge or evidence). First wins; an already-set platform is left as it is and nothing is refused here (the attestation block
     // names its own platform, and the token does not depend on the column). An unverified block labels nothing.
@@ -308,5 +328,6 @@ export async function handleTokenRequest(body: TokenRequest, repo: Repo, digestH
     challengeKind: challenge.kind,
     expiresAt,
   });
-  return { jti: issued.jti, expiresAt: issued.expiresAt, attestationGrade };
+  // The key-identity hint rides on the answer only, never on the stored token (no schema change): see `IssuedToken#rekey`.
+  return rekey ? { jti: issued.jti, expiresAt: issued.expiresAt, attestationGrade, rekey: true } : { jti: issued.jti, expiresAt: issued.expiresAt, attestationGrade };
 }
