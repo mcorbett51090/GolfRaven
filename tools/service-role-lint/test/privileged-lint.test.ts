@@ -36,6 +36,24 @@ describe("privileged-file pass: must-fail fixtures", () => {
     ["bad/current-setting.ts", "privileged-guc-in-ts"],
     ["bad/edge-db-mode.ts", "privileged-edge-db-mode"],
     ["bad/edge-db-mode-identifier.ts", "privileged-edge-db-mode"],
+    // edge role PR4c, LOW-1: the shapes the first version of the pass missed
+    ["bad/deno-destructured-env.ts", "privileged-env-access"],
+    ["bad/globalthis-deno-env.ts", "privileged-global-access"],
+    ["bad/globalthis-bracket.ts", "privileged-global-access"],
+    ["bad/eval-call.ts", "privileged-global-access"],
+    ["bad/dynamic-import.ts", "privileged-global-access"],
+    ["bad/driver-alias.ts", "privileged-stray-pool"],
+    ["bad/driver-passed-as-argument.ts", "privileged-stray-pool"],
+    ["bad/open-pool-url-arg.ts", "privileged-stray-pool"],
+    ["bad/open-pool-param.ts", "privileged-stray-pool"],
+    ["bad/open-pool-other-url.ts", "privileged-stray-pool"],
+    ["bad/computed-member-concat.ts", "privileged-computed-member"],
+    ["bad/computed-member-variable.ts", "privileged-computed-member"],
+    ["bad/computed-destructure.ts", "privileged-computed-member"],
+    ["bad/unsafe-concat-set-role.ts", "privileged-unsafe-sql"],
+    ["bad/unsafe-nonliteral.ts", "privileged-unsafe-sql"],
+    ["bad/unsafe-alias.ts", "privileged-unsafe-sql"],
+    ["bad/unsafe-destructured.ts", "privileged-unsafe-sql"],
   ];
 
   it("has a fixture for every file in bad/ (a fixture nobody asserts on proves nothing)", () => {
@@ -60,6 +78,26 @@ describe("privileged-file pass: must-fail fixtures", () => {
     expect(new Set(rulesOf(fixture("bad/set-role-quoted.ts")))).toEqual(new Set(["privileged-forbidden-role"]));
     expect(new Set(rulesOf(fixture("bad/stray-begin.ts")))).toEqual(new Set(["privileged-stray-transaction"]));
     expect(new Set(rulesOf(fixture("bad/set-config.ts")))).toEqual(new Set(["privileged-guc-in-ts"]));
+    // PR4c: the new rules each stand alone on their own fixture
+    for (const f of ["deno-destructured-env", "globalthis-deno-env", "driver-alias", "open-pool-url-arg", "open-pool-param", "open-pool-other-url", "computed-member-variable", "computed-destructure", "unsafe-nonliteral", "unsafe-alias", "unsafe-destructured", "eval-call", "dynamic-import"]) {
+      expect(rulesOf(fixture(`bad/${f}.ts`)).length, f).toBeGreaterThan(0);
+    }
+    expect(new Set(rulesOf(fixture("bad/deno-destructured-env.ts")))).toEqual(new Set(["privileged-env-access"]));
+    expect(new Set(rulesOf(fixture("bad/driver-alias.ts")))).toEqual(new Set(["privileged-stray-pool"]));
+    expect(new Set(rulesOf(fixture("bad/open-pool-url-arg.ts")))).toEqual(new Set(["privileged-stray-pool"]));
+    expect(new Set(rulesOf(fixture("bad/computed-member-variable.ts")))).toEqual(new Set(["privileged-computed-member"]));
+    expect(new Set(rulesOf(fixture("bad/unsafe-nonliteral.ts")))).toEqual(new Set(["privileged-unsafe-sql"]));
+  });
+
+  it("each openPool / driver fixture is flagged by exactly ONE finding, so a mutation of just that rule cannot be masked by a neighbouring one", () => {
+    for (const f of ["open-pool-url-arg", "open-pool-param", "open-pool-other-url", "driver-alias", "deno-destructured-env", "computed-member-variable", "computed-destructure", "unsafe-nonliteral", "unsafe-alias", "unsafe-destructured", "eval-call", "dynamic-import", "globalthis-bracket"]) {
+      expect(lintPrivilegedSource(fixture(`bad/${f}.ts`)), f).toHaveLength(1);
+    }
+  });
+
+  it("the two shapes that are inherently two findings say so: a concatenated SET ROLE is an unsafe-sql finding AND a forbidden-role finding on the folded text; db[\"be\" + \"gin\"] is a computed member AND a stray begin", () => {
+    expect(new Set(rulesOf(fixture("bad/unsafe-concat-set-role.ts")))).toEqual(new Set(["privileged-unsafe-sql", "privileged-forbidden-role"]));
+    expect(new Set(rulesOf(fixture("bad/computed-member-concat.ts")))).toEqual(new Set(["privileged-computed-member", "privileged-stray-transaction"]));
   });
 });
 
@@ -128,10 +166,101 @@ describe("privileged-file pass: edge cases of the rules themselves", () => {
     expect(rulesOf('async function withOwnership(db: any) { return db["begin"](async () => 1); }')).toEqual(["privileged-stray-transaction"]);
   });
 
-  it("a postgres() call is allowed in openPool only", () => {
-    expect(rulesOf('import postgres from "postgres"; function openPool(u: string) { return postgres(u); }')).toEqual([]);
-    expect(rulesOf('import postgres from "postgres"; function other(u: string) { return postgres(u); }')).toEqual(["privileged-stray-pool"]);
+  const OPEN_POOL = 'declare const Deno: any; import postgres from "postgres"; function openPool() { const u = Deno.env.get("GOLFRAVEN_EDGE_DB_URL"); return postgres(u); }';
+
+  it("a postgres() call is allowed in openPool only, and only with the constant read from GOLFRAVEN_EDGE_DB_URL inside it", () => {
+    expect(rulesOf(OPEN_POOL)).toEqual([]);
+    expect(rulesOf('declare const Deno: any; import postgres from "postgres"; function other() { const u = Deno.env.get("GOLFRAVEN_EDGE_DB_URL"); return postgres(u); }')).toEqual(["privileged-stray-pool"]);
     expect(rulesOf('import pg from "postgres"; function other(u: string) { return new pg(u); }')).toEqual(["privileged-stray-pool"]);
+    // inside openPool, but handed something else
+    expect(rulesOf('import postgres from "postgres"; function openPool() { return postgres("postgres://u@h/db"); }')).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf('declare const Deno: any; import postgres from "postgres"; function openPool() { const u = Deno.env.get("OTHER_URL"); return postgres(u); }')).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf('declare const Deno: any; import postgres from "postgres"; function openPool() { let u = Deno.env.get("GOLFRAVEN_EDGE_DB_URL"); return postgres(u); }')).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf('import postgres from "postgres"; function openPool() { return postgres(); }')).toEqual(["privileged-stray-pool"]);
+  });
+
+  it("openPool takes no parameter and no call of it passes an argument (LOW-1 a)", () => {
+    expect(rulesOf(`${OPEN_POOL} export const p = openPool();`)).toEqual([]);
+    expect(rulesOf(`${OPEN_POOL} export const p = (anyUrl: string) => openPool(anyUrl as never);`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${OPEN_POOL} export const p = openPool(...args);`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf('import postgres from "postgres"; function openPool(url: string) { return postgres(url); }')).toContain("privileged-stray-pool");
+    expect(rulesOf('import postgres from "postgres"; function openPool(url = "x") { return postgres(url); }')).toContain("privileged-stray-pool");
+  });
+
+  it("any reference to the driver that is not a call is a finding (LOW-1 c); import bindings and type positions are not references", () => {
+    const imp = 'import postgres from "postgres";';
+    expect(rulesOf(`${imp} const pg = postgres; export const p = pg("u");`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${imp} export const list = [postgres];`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${imp} export const o = { postgres };`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${imp} export const o = { driver: postgres };`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${imp} export { postgres };`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${imp} export const f = (postgres as any);`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf(`${imp} export const f = (x: any) => x(postgres);`)).toEqual(["privileged-stray-pool"]);
+    expect(rulesOf('import * as pgns from "postgres"; export const f = pgns.default("u");')).toEqual(["privileged-stray-pool"]);
+    // erased at run time: not references
+    expect(rulesOf(`${imp} export type A = ReturnType<typeof postgres>; export type B = postgres.TransactionSql; export const c = (d: ReturnType<typeof postgres>) => d;`)).toEqual([]);
+    // a member merely NAMED postgres is not the driver
+    expect(rulesOf(`${imp} export const n = (o: any) => o.postgres + { postgres: 1 }.postgres;`)).toEqual([]);
+  });
+
+  it("any reference to Deno other than Deno.env.get(<literal>) is a finding (LOW-1 b): destructuring, aliasing, computed names", () => {
+    expect(rulesOf('declare const Deno: any; const { env } = Deno; export const v = env.get("A" + k);')).toEqual(["privileged-env-access"]);
+    expect(rulesOf("declare const Deno: any; const d = Deno; export const v = d.env.get(k);")).toEqual(["privileged-env-access"]);
+    expect(rulesOf('declare const Deno: any; export const v = Deno["env"].get("A");')).toEqual(["privileged-env-access"]);
+    expect(rulesOf('declare const Deno: any; export const v = (Deno as any).env.get("A");')).toEqual(["privileged-env-access"]);
+    expect(rulesOf('declare const Deno: any; export const v = [Deno].map((d) => d.env.get("A"));')).toEqual(["privileged-env-access"]);
+    expect(rulesOf('declare const Deno: any; export const v = Deno.readTextFileSync("/etc/passwd");')).toEqual(["privileged-env-access"]);
+    expect(rulesOf('declare const Deno: any; export const v = { Deno };')).toEqual(["privileged-env-access"]);
+    // shapes that stay allowed
+    expect(rulesOf('declare const Deno: any; export const v = Deno.env.get("A") ?? "";')).toEqual([]);
+    expect(rulesOf('export const v = { Deno: 1 }.Deno + (globalThis as any).addEventListener;')).toEqual(["privileged-global-access"]); // (the second is globalThis outside the allow-list: `as`)
+    expect(rulesOf("export type D = typeof Deno;")).toEqual([]);
+  });
+
+  it("globalThis / self / window / eval / Function / import() are findings except globalThis.addEventListener (LOW-1 b)", () => {
+    for (const bad of ['globalThis.Deno.env.get(k)', 'globalThis["Deno"]', 'self.Deno', 'window.Deno', 'eval("1")', 'new Function("return 1")', 'Function("return 1")', 'globalThis', 'globalThis[k]', 'import("x")', 'globalThis.addEventListener.bind(globalThis)']) {
+      expect(rulesOf(`export const v = ${bad};`), bad).toContain("privileged-global-access");
+    }
+    expect(rulesOf('export const a = typeof globalThis.addEventListener === "function"; if (a) globalThis.addEventListener("error", () => 1);')).toEqual([]);
+    // a type named Function, and a member named eval, are not the code builders
+    expect(rulesOf("export type F = Function; export const m = { eval: 1 }.eval;")).toEqual([]);
+  });
+
+  it("a computed member access with a non-literal key is a finding (LOW-1 d); a literal key, a number and a hole-less template are not", () => {
+    expect(rulesOf('export const a = (db: any) => db["be" + "gin"];')).toContain("privileged-computed-member");
+    expect(rulesOf("export const a = (db: any, k: string) => db[k];")).toEqual(["privileged-computed-member"]);
+    expect(rulesOf("export const a = (db: any, k: string) => db[`x${k}`];")).toEqual(["privileged-computed-member"]);
+    expect(rulesOf("export const a = (db: any, i: number) => db[i + 1];")).toEqual(["privileged-computed-member"]);
+    expect(rulesOf("export const a = (db: any, k: string) => db?.[k];")).toEqual(["privileged-computed-member"]);
+    expect(rulesOf("export const a = (db: any, k: string) => { const { [k]: v } = db; return v; };")).toEqual(["privileged-computed-member"]);
+    expect(rulesOf('export const a = (rows: any[], r: any) => [rows[0], rows[12], r["n"], r[`n`]];')).toEqual([]);
+    // the template form is a literal, and a literal key spelling `begin` is still the stray-transaction rule's business
+    expect(rulesOf("async function w(db: any) { return db[`begin`](async () => 1); }")).toEqual(["privileged-stray-transaction"]);
+  });
+
+  it(".unsafe( takes one string literal and nothing else (LOW-1 e)", () => {
+    expect(rulesOf('export const a = (t: any) => t.unsafe("select 1");')).toEqual([]);
+    expect(rulesOf("export const a = (t: any) => t.unsafe(`select 1`);")).toEqual([]);
+    expect(rulesOf("export const a = (t: any, s: string) => t.unsafe(s);")).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf("export const a = (t: any, s: string) => t.unsafe(`select ${s}`);")).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf('export const a = (t: any) => t.unsafe("select " + "1");')).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf("export const a = (t: any) => t.unsafe();")).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf('export const a = (t: any) => t["unsafe"](x);')).toEqual(["privileged-unsafe-sql"]);
+    // a built member name is read as the name it spells (and is a computed-member finding on its own account), so the literal-argument form passes the unsafe rule and the other does not
+    expect(rulesOf('export const a = (t: any) => t["un" + "safe"]("select 1");')).toEqual(["privileged-computed-member"]);
+    expect(rulesOf('export const a = (t: any, s: string) => t["un" + "safe"](s);')).toEqual(["privileged-computed-member", "privileged-unsafe-sql"]);
+    expect(rulesOf("export const a = (t: any) => { const { unsafe } = t; return unsafe; };")).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf('export const a = (t: any) => { const u = t.unsafe; return u("select 1"); };')).toEqual(["privileged-unsafe-sql"]);
+  });
+
+  it("a SET ROLE spelled across two literals is read as the one string it forms (the concatenation is folded)", () => {
+    expect(rulesOf('export const a = "SET LOCAL " + "ROLE postgres";')).toEqual(["privileged-forbidden-role"]);
+    expect(rulesOf('export const a = "SET LOCAL " + "ROLE " + "edge_actor";')).toEqual([]);
+    expect(new Set(rulesOf('export const a = "SUPABASE_" + "DB_URL";'))).toEqual(new Set(["privileged-db-url"]));
+    expect(rulesOf('export const a = "SUPABASE_" + "DB" + "_URL";')).toContain("privileged-db-url"); // neither piece names it alone: only the folded text does
+    expect(rulesOf('export const a = "SET LOCAL " + "ROLE " + `service_` + "role";')).toContain("privileged-forbidden-role");
+    // one finding for the chain, not one per `+`
+    expect(rulesOf('export const a = "SET LOCAL " + "ROLE " + "postgres" + ";";')).toEqual(["privileged-forbidden-role"]);
   });
 
   it("set_config / current_setting are flagged in SQL text, any case, with a space before the paren", () => {
@@ -173,7 +302,7 @@ describe("privileged-file pass: wiring", () => {
   });
 
   it("the privileged.ts exemption from the GENERAL rules still holds (a driver import, a supabase-js client and an env read are not findings there)", () => {
-    const src = 'import postgres from "postgres"; import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4"; declare const Deno: any; function openPool(u: string) { return postgres(u); } const u = Deno.env.get("GOLFRAVEN_EDGE_DB_URL"); export { createClient, openPool, u };';
+    const src = 'import postgres from "postgres"; import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4"; declare const Deno: any; function openPool() { const u = Deno.env.get("GOLFRAVEN_EDGE_DB_URL"); return postgres(u); } const u = Deno.env.get("GOLFRAVEN_EDGE_DB_URL"); export { createClient, openPool, u };';
     expect(lintSource(src, exact)).toEqual([]);
   });
 });

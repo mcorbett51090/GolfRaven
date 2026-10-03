@@ -379,6 +379,8 @@ jobs:
             supabase/functions/rewards-activate/index.ts \
             supabase/functions/devices-attest-key/index.ts \
             supabase/functions/me-delete/index.ts \
+            supabase/functions/me-export/index.ts \
+            supabase/functions/me-push-token/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
@@ -432,6 +434,8 @@ jobs:
             supabase/functions/rewards-activate/index.ts \
             supabase/functions/devices-attest-key/index.ts \
             supabase/functions/me-delete/index.ts \
+            supabase/functions/me-export/index.ts \
+            supabase/functions/me-push-token/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
@@ -487,6 +491,8 @@ jobs:
             supabase/functions/rewards-activate/index.ts \
             supabase/functions/devices-attest-key/index.ts \
             supabase/functions/me-delete/index.ts \
+            supabase/functions/me-export/index.ts \
+            supabase/functions/me-push-token/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \

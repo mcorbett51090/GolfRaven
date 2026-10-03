@@ -147,7 +147,14 @@ type TxSql = postgres.TransactionSql;
 // input, `SIGNIN_SYSTEM_ACTOR` and the legacy rate-limit buckets are gone. The lint's privileged-file pass keeps them gone
 // (tools/service-role-lint `lintPrivilegedSource`).
 
-function openPool(dbUrl: string): ReturnType<typeof postgres> {
+function openPool(): ReturnType<typeof postgres> {
+  // The pool's ONLY input, read here and nowhere else: openPool takes no argument, so no caller can point a pool at another database, and the
+  // lint's privileged-file pass (tools/service-role-lint) rejects a declaration with a parameter, a call with an argument, and a driver call
+  // whose URL is anything but this constant (edge role PR4c, LOW-1).
+  const dbUrl = Deno.env.get("GOLFRAVEN_EDGE_DB_URL");
+  if (!dbUrl) {
+    throw new Error("privileged.ts: GOLFRAVEN_EDGE_DB_URL is not set (the edge_gateway connection string): every database path needs it");
+  }
   return postgres(dbUrl, {
     max: 5,
     prepare: true,
@@ -178,11 +185,7 @@ let _edgeSql: ReturnType<typeof postgres> | null = null;
 
 function edgeSql(): ReturnType<typeof postgres> {
   if (_edgeSql) return _edgeSql;
-  const dbUrl = Deno.env.get("GOLFRAVEN_EDGE_DB_URL");
-  if (!dbUrl) {
-    throw new Error("privileged.ts: GOLFRAVEN_EDGE_DB_URL is not set (the edge_gateway connection string): every database path needs it");
-  }
-  _edgeSql = openPool(dbUrl);
+  _edgeSql = openPool();
   return _edgeSql;
 }
 
@@ -2210,12 +2213,17 @@ function buildImporterRepo(trx: TxSql): ImporterRepo {
         // edge_system has no privilege on app.evidence: the work runs inside `private.purge_fix_coords` (0030/0032) as `private_definer`,
         // which can only remove the `fixCoords` key from rows that still carry it, with the retention pinned to 7..30 days and the limit to
         // 1..10000 (a violation raises 22023). The importer and the retention purge pass 30 days and 5000.
+        // The retention schedule's own try-lock (`retention:fix_coords`): while `retention-purge` is purging this class, the import's pass skips it
+        // (0 rows) instead of running a second purge over the same rows. A skipped pass loses nothing: the other run is doing exactly this work.
+        if (!(await tryRetentionStepLock(trx, "fix_coords"))) return 0;
         const purged = await trx`select private.purge_fix_coords(${retentionDays}::int, ${limit}::int) as n`;
         return Number(purged[0]?.n ?? 0);
       },
       async purgeInstallLinkTombstones(maxRows: number): Promise<number> {
         // F19 retention (owner decision 2026-10-02): the 24 months are `private.purge_install_link_tombstones`'s own.
         // edge_system holds EXECUTE (service_role does too, which nothing in this runtime uses any more).
+        // The same try-lock as the retention schedule's `install_link_tombstones` step (see purgeFixCoords above).
+        if (!(await tryRetentionStepLock(trx, "install_link_tombstones"))) return 0;
         const rows = await trx`select private.purge_install_link_tombstones(${maxRows}::int) as n`;
         return Number(rows[0]?.n ?? 0);
       },
@@ -2303,50 +2311,67 @@ export async function hitSystemRateLimit(bucketKey: string, windowSeconds: numbe
 /**
  * Edge role PR4b (E5, launch-blocking): the INDEPENDENT retention schedule. Before this, the fix-coordinate purge and the install-link tombstone
  * purge ran only inside a catalog import's drain pass, and the sign-in proof / revocation-queue purges only inside `signin-revocation-drain`, so a
- * quiet catalog (or an unscheduled drain) stopped retention. `retention-purge` runs all four classes, as `edge_system`, on its own schedule.
+ * quiet catalog (or an unscheduled drain) stopped retention. `retention-purge` runs the four promised classes (and, since 0040, the two hygiene classes), as `edge_system`, on its own schedule.
+ * Edge role PR4c (0040) adds the two TTL hygiene purges that nothing ran, and bounds the two sign-in purges that were single DELETEs.
  *
- * Each step is a bounded, row-narrow definer that edge_system already holds EXECUTE on (no migration, no grant added):
+ * Each step is a bounded, row-narrow definer that edge_system holds EXECUTE on (0040's owner-approved grant is on exactly the last two):
  *   fix_coords               `private.purge_fix_coords(30, 5000)`           removes only the `fixCoords` key from evidence rows, retention pinned to 7..30 days
  *   install_link_tombstones  `private.purge_install_link_tombstones(5000)`  24 months, the function's own constant; the policies repeat the cutoff
- *   signin_email_proofs      `private.purge_signin_email_proofs()`          proofs an hour past expiry
- *   signin_revocation_queue  `private.purge_signin_revocation_queue(30 d)`  finished (revoked / expired) rows older than 30 days; never a pending one
+ *   signin_email_proofs      `private.purge_signin_email_proofs()`          proofs an hour past expiry, 5000 per call (the definer's own bound, 0040)
+ *   signin_revocation_queue  `private.purge_signin_revocation_queue(30 d)`  finished (revoked / expired) rows older than 30 days, 5000 per call; never a pending one
+ *   consumed_nonce           `private.purge_consumed_nonce()`               nonce tombstones 7 days past their source expiry, 5000 per call (the policy repeats the floor)
+ *   rate_limit_buckets       `private.purge_rate_limit_buckets()`           windows older than 2 days (the kept `<uid>:me-delete:user` bucket included), 5000 per call
  * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
  * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
  *
  * Every batch is its own short edge_system transaction that first takes a `pg_try_advisory_xact_lock` on its step: a concurrent run skips
  * (returns null) instead of waiting or deadlocking on the same rows, and two runs never double-count a batch. Safe to run concurrently, idempotent, bounded.
+ * The catalog import's own pass over the same two purges (fix_coords, install_link_tombstones) takes the SAME try-lock (`tryRetentionStepLock`).
  */
 const RETENTION_FIX_COORDS_DAYS = 30;
 const RETENTION_SIGNIN_QUEUE_DAYS = 30;
 const RETENTION_BATCH_ROWS = 5000;
+/** The rows per call the four SQL-bounded purges remove (0040: a constant inside each definer, not a parameter). `RETENTION_BATCH_ROWS` above is the
+ * default for the two purges that take a limit; both are 5000, and a test proves a full batch of each kind is exactly that many rows. */
+export const RETENTION_DEFINER_BATCH_ROWS = 5000;
 
 /** The advisory-lock key a step's batch try-locks (namespace 6). Exported so a test can hold a step's lock from another session and prove a concurrent run skips it. */
 export function retentionStepLockKeys(name: RetentionStep["name"]): [number, number] {
   return advisoryLockKeys(6, `retention:${name}`);
 }
 
-/** `batchRows` is the rows per batch for the two batched classes (default 5000, the definers' own bound is 10000 / 100000). Only a test passes it, to
- * make "bounded per run" provable with a handful of rows instead of 50 000. */
+/** Take a retention step's try-lock for the rest of THIS transaction. `false` = another run (the retention schedule, or the import's drain pass) is
+ * doing that step's work right now: skip it, never wait. Shared by the retention steps and by the import's own purge calls so the two cannot overlap. */
+async function tryRetentionStepLock(trx: TxSql, name: RetentionStep["name"]): Promise<boolean> {
+  const [k1, k2] = retentionStepLockKeys(name);
+  const got = await trx`select pg_try_advisory_xact_lock(${k1}, ${k2}) as got`;
+  return got[0]?.got === true;
+}
+
+/** `batchRows` is the rows per batch for the two purges that take a limit (default 5000, the definers' own bound is 10000 / 100000). Only a test passes it, to
+ * make "bounded per run" provable with a handful of rows instead of 50 000. The four other steps' bound is inside their definers (5000). */
 export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): RetentionStep[] {
   const step = (name: RetentionStep["name"], batchLimit: number | null, run: (trx: TxSql) => Promise<number>): RetentionStep => ({
     name,
     batchLimit,
     runBatch: () =>
       openScopedTx("system", { expectedUid: null }, async (trx): Promise<number | null> => {
-        const [k1, k2] = retentionStepLockKeys(name);
-        const got = await trx`select pg_try_advisory_xact_lock(${k1}, ${k2}) as got`;
-        if (got[0]?.got !== true) return null;
+        if (!(await tryRetentionStepLock(trx, name))) return null;
         return run(trx);
       }).catch((err) => {
         throw mapPgTimeoutError(err);
       }),
   });
   const n = (rows: ReadonlyArray<Record<string, unknown>>) => Number(rows[0]?.n ?? 0);
+  const fixed = RETENTION_DEFINER_BATCH_ROWS;
   return [
     step("fix_coords", batchRows, async (trx) => n(await trx`select private.purge_fix_coords(${RETENTION_FIX_COORDS_DAYS}::int, ${batchRows}::int) as n`)),
     step("install_link_tombstones", batchRows, async (trx) => n(await trx`select private.purge_install_link_tombstones(${batchRows}::int) as n`)),
-    step("signin_email_proofs", null, async (trx) => n(await trx`select private.purge_signin_email_proofs() as n`)),
-    step("signin_revocation_queue", null, async (trx) => n(await trx`select private.purge_signin_revocation_queue(make_interval(days => ${RETENTION_SIGNIN_QUEUE_DAYS}::int)) as n`)),
+    step("signin_email_proofs", fixed, async (trx) => n(await trx`select private.purge_signin_email_proofs() as n`)),
+    step("signin_revocation_queue", fixed, async (trx) => n(await trx`select private.purge_signin_revocation_queue(make_interval(days => ${RETENTION_SIGNIN_QUEUE_DAYS}::int)) as n`)),
+    // 0040 (owner decision 2026-10-02): the two TTL hygiene purges. service_role-only until then; edge_system holds EXECUTE on exactly these two.
+    step("consumed_nonce", fixed, async (trx) => n(await trx`select private.purge_consumed_nonce() as n`)),
+    step("rate_limit_buckets", fixed, async (trx) => n(await trx`select private.purge_rate_limit_buckets() as n`)),
   ];
 }
 
