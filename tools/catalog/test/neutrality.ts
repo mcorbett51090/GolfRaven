@@ -36,15 +36,35 @@
  *        and string-as-code does not need to name either — `(() => {}).constructor("…")()`,
  *        `[].constructor.constructor("…")()` and the AsyncFunction / GeneratorFunction
  *        constructors reached via `Object.getPrototypeOf(async function () {}).constructor`
- *        all reach `Function` without it. So a property access `constructor` that is
- *        IMMEDIATELY CALLED (or tagged-template-called) is refused. This one IS a
- *        text search, but over esbuild's printed output rather than the author's source,
- *        so it sees one canonical spelling: comments are gone, whitespace is normal, and
- *        `x["constructor"]`, `x["construct" + "or"]` (folded) and `x?.constructor?.()`
- *        all print as one of two shapes. The real `manifest-core.ts` output has no such
- *        call (its only `"constructor"` is a string in a `Set`), so the rule has no
- *        false positive there; its only false-positive source is a STRING that contains
- *        the text `.constructor(`, which fails closed (a visible violation, never a miss).
+ *        all reach `Function` without it. The first version of this rule refused only a
+ *        constructor that is IMMEDIATELY CALLED, and the PR #30 gate walked nine spellings
+ *        through it with the constructor passed as a VALUE (`(0, fn.constructor)(…)`, a
+ *        ternary / `||` callee, `[fn.constructor][0](…)`, `({ f: fn.constructor }).f(…)`, a
+ *        default parameter, `(await fn.constructor)(…)`, a plain alias, `class X extends
+ *        fn.constructor {}`, `Object.getOwnPropertyDescriptor(proto, "constructor").value(…)`).
+ *        A call-shape can always be hidden behind one more expression, so the rule is no
+ *        longer about calls: it refuses the READ. In esbuild's printed output (a text search,
+ *        but over the printer's one canonical spelling: comments gone, whitespace normal,
+ *        `x["constructor"]`, `x["construct" + "or"]` and `x?.["constructor"]` all folded or
+ *        printed as a plain shape) it refuses:
+ *          a. any `.constructor` / `?.constructor` member access, whatever follows it;
+ *          b. any `"constructor"` / `'constructor'` / `` `constructor` `` string literal (the key
+ *             argument of `Reflect.get`, `getOwnPropertyDescriptor`, a `["constructor"]` access, a
+ *             `{ "constructor": F }` pattern, a `const k = "constructor"` later used as `x[k]`),
+ *             except the ONE narrow allowance in `ALLOWED_CONSTRUCTOR_LITERALS`;
+ *          c. an unquoted `constructor` as a key in an object pattern / literal or as a
+ *             shorthand (`{ constructor: F }`, `{ a, constructor }`, `{ constructor = d }`) —
+ *             the destructuring READ, which has neither a `.` nor a string;
+ *          d. the key-ENUMERATING reflection APIs (`getOwnPropertyNames`,
+ *             `getOwnPropertyDescriptors`, `ownKeys`): they hand back the non-enumerable
+ *             key `"constructor"` at runtime without the text ever appearing in the source.
+ *        A class or object-literal METHOD named `constructor` (a definition, not a read) is not
+ *        refused. The real `manifest-core.ts` output has no such read, so there is no false
+ *        positive there (its only `"constructor"` is the string in the key-blocklist `Set`, the
+ *        allowance). The rule's false-positive sources all fail closed (a visible violation,
+ *        never a miss): `x.constructor.name` and `x.constructor === Object` (refused by design:
+ *        the real code needs neither), a STRING that contains the text `.constructor`, and a
+ *        local variable that is itself named `constructor`.
  * 2. TYPES (the TypeScript checker with `lib: es2022` and NO `@types/node`).
  *    esbuild erases types, so `import type { X } from "node:buffer"` and a
  *    `Buffer` annotation vanish from the bundle; the checker cannot resolve
@@ -56,15 +76,19 @@
  *  - `import.meta` is deliberately allowed.
  *  - Reaching `Function` (and so evaluating a string as code) does NOT need the
  *    names `eval` / `Function`, so the sentinel alone does not close it; the
- *    `.constructor(` rule closes the spellings that CALL a `constructor` property.
- *    It does not see: a destructured `const { constructor: F } = fn; F("…")`, the
- *    constructor passed as a VALUE (`Reflect.apply(x.constructor, …)`, `.call`,
- *    `.bind`), a key that is not a literal at build time (`x[k]`, `Reflect.get(x, k)`,
- *    `Object.getOwnPropertyDescriptor(x, k)` with `k` assembled at runtime), or string-as-code
- *    through a host API the type layer does not know (the type layer, with no DOM and no
- *    Node types, does reject `setTimeout("…")`). No static check closes the
- *    runtime-assembled key; what keeps those out is that a module must import nothing,
- *    reach no global, and be reviewed. Pinned as known gaps in `manifest-core-neutral.test.ts`.
+ *    `constructor` rules above close every spelling in which the key is a LITERAL (or a
+ *    literal the bundler folds) at build time — including the destructured, passed-as-a-value,
+ *    aliased, extended and `Reflect.get` / `Reflect.apply` forms — and the key-enumerating
+ *    reflection APIs. What remains is a key that is NOT a literal at build time:
+ *      * a key ASSEMBLED at runtime from parts the bundler does not fold: a template with a
+ *        substitution (`` `constr${"uctor"}` ``), `"constr".concat("uctor")`, `["con", "structor"].join("")`,
+ *        `String.fromCharCode(…)`, `atob(…)`, a function's return value;
+ *      * a key that is DATA (`Reflect.get(fn, input.k)`, `x[k]` with `k` read from a parameter);
+ *      * a key taken from the allowed blocklist `Set` itself (`[...BLOCKLIST][1]`).
+ *    No static check closes a runtime-assembled key; what keeps those out is that a module must
+ *    import nothing, reach no global, and be reviewed. Also not seen: string-as-code through a
+ *    host API the type layer does not know (the type layer, with no DOM and no Node types, does
+ *    reject `setTimeout("…")`). All pinned as known gaps in `manifest-core-neutral.test.ts`.
  */
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -151,9 +175,38 @@ function report(meta: Metafile, output: string, warnings: string[]): BundleRepor
   return { errors: [], warnings, inputs: Object.keys(meta.inputs).map((p) => p.split(sep).join("/")), imports, output };
 }
 
-/** A `constructor` property that is called: `x.constructor(`, `x?.constructor?.(`, `x["constructor"](`, and the
- * tagged-template forms. Matched against esbuild's PRINTED output (see the header). */
-const CONSTRUCTOR_CALL_RES: readonly RegExp[] = [/(?:\.|\?\.)\s*constructor\s*(?:\?\.\s*)?[(`]/, /\[\s*(["'`])constructor\1\s*\]\s*(?:\?\.\s*)?[(`]/];
+/**
+ * The ONLY `"constructor"` string the bundled output may contain: the key blocklist of `manifest-core.ts`
+ * (`FORBIDDEN_KEYS`), whose every use is a `.has(key)` REFUSAL. Matched as exact printed text, so adding, removing or
+ * reordering an element fails closed and forces this line to be revisited. It is removed from the output before the
+ * `constructor` rules run. Residual: any code that READS a key out of that Set and uses it as a property key
+ * (`[...FORBIDDEN_KEYS][1]`) is not seen; a Set literal is indistinguishable, in text, from a blocklist.
+ */
+export const ALLOWED_CONSTRUCTOR_LITERALS: readonly { text: string; reason: string }[] = [
+  { text: 'new Set(["__proto__", "constructor", "prototype"])', reason: "manifest-core.ts FORBIDDEN_KEYS: the strict-JSON parser REFUSES these three object keys" },
+];
+
+/** A `constructor` member READ: `x.constructor`, `x?.constructor`, `x\n.constructor`. */
+const CONSTRUCTOR_MEMBER_RE = /\.\s*constructor(?![\w$])/;
+/** A `"constructor"` / `'constructor'` / `` `constructor` `` string literal (a computed key, a `Reflect.get` / `getOwnPropertyDescriptor` argument, a quoted pattern key). */
+const CONSTRUCTOR_STRING_RE = /(["'`])constructor\1/;
+/** An UNQUOTED `constructor` object-pattern / object-literal key or shorthand: `{ constructor: F }`, `{ a, constructor }`, `{ constructor = d }`. A method definition `constructor(…) {` is followed by `(` and is not matched. */
+const CONSTRUCTOR_KEY_RE = /[{,]\s*constructor\s*[:,}=]/;
+/** Reflection that lists an object's own keys, the non-enumerable `"constructor"` among them, without the text appearing. */
+const KEY_ENUMERATION_RE = /\b(?:getOwnPropertyNames|getOwnPropertyDescriptors|ownKeys)\b/;
+
+/** The `constructor` / key-enumeration rules over esbuild's printed output (the allowance removed first). */
+function constructorViolations(output: string): string[] {
+  let text = output;
+  for (const a of ALLOWED_CONSTRUCTOR_LITERALS) text = text.split(a.text).join("");
+  const out: string[] = [];
+  const why = "it reaches Function / AsyncFunction, so it evaluates a string as code without naming eval or Function";
+  if (CONSTRUCTOR_MEMBER_RE.test(text)) out.push(`a .constructor member access (${why}; refused whether or not it is called)`);
+  if (CONSTRUCTOR_STRING_RE.test(text)) out.push(`a "constructor" string literal (a computed key reaches the same constructor; only the manifest-core key blocklist Set is allowed)`);
+  if (CONSTRUCTOR_KEY_RE.test(text)) out.push(`an unquoted constructor object-pattern / shorthand key (a destructuring read of the constructor: ${why})`);
+  if (KEY_ENUMERATION_RE.test(text)) out.push(`a key-enumerating reflection API (getOwnPropertyNames / getOwnPropertyDescriptors / ownKeys return the non-enumerable "constructor" key at runtime)`);
+  return out;
+}
 
 /** Every reason the bundle says the source is not neutral, or `[]`. */
 export function bundleViolations(r: BundleReport, allowed: readonly string[]): string[] {
@@ -172,7 +225,7 @@ export function bundleViolations(r: BundleReport, allowed: readonly string[]): s
     }
   }
   for (const m of new Set([...r.output.matchAll(SENTINEL_RE)].map((x) => x[1]!))) out.push(`free identifier ${m} (a Node global or dynamic-code escape)`);
-  if (CONSTRUCTOR_CALL_RES.some((re) => re.test(r.output))) out.push("a call of a .constructor property (it reaches Function / AsyncFunction, so it evaluates a string as code without naming eval or Function)");
+  out.push(...constructorViolations(r.output));
   if (/\b__require\b/.test(r.output)) out.push("a dynamic import() / require() the bundler could not resolve statically (its __require helper was emitted)");
   return out;
 }

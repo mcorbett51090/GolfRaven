@@ -273,6 +273,32 @@ export interface CatalogResetReport {
   stillCorrupt: boolean;
 }
 
+/**
+ * Whether the app should fetch and verify the catalog again after a reset. Only when the reset actually ran
+ * (`performed`: a no-op reset deleted nothing, so there is nothing to replace) and the trust state is readable again
+ * (`!stillCorrupt`: a malformed compiled-in minimum is a build defect, and a refetch would just be rejected again).
+ */
+export function shouldRedownloadAfterReset(report: Pick<CatalogResetReport, "performed" | "stillCorrupt">): boolean {
+  return report.performed && !report.stillCorrupt;
+}
+
+/**
+ * The Me tab's "Reset catalog data" action, as the app runs it: reset, let the UI re-read the manager's state, then
+ * (per `shouldRedownloadAfterReset`) start a re-download. Kept as a plain function so the wiring is testable without a
+ * renderer; `AppProvider` passes its own state-sync and `refreshCatalog`. The re-download is started, not awaited
+ * (the reset's own report is what the caller shows), and its result is the caller's to handle.
+ */
+export async function resetCatalogAndMaybeRedownload(
+  catalog: Pick<CatalogManager, "resetCatalogData">,
+  syncState: () => void,
+  redownload: () => Promise<unknown>,
+): Promise<CatalogResetReport> {
+  const report = await catalog.resetCatalogData();
+  syncState();
+  if (shouldRedownloadAfterReset(report)) void redownload();
+  return report;
+}
+
 export interface CatalogManagerOptions {
   /** `https://host/` base; the artifact lives under `catalog/v1/`. `null`
    * disables network refresh (cache only). */
