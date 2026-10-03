@@ -45,8 +45,12 @@ export interface EvidenceInput {
   localDate: string;
   submission: SubmissionTemplate;
   manifestSig?: EvidencePayload["manifestSig"];
-  /** Online: ask for a live challenge first. */
+  /** Online: ask for a live challenge first. NOT for a fix that was already taken (the live challenge would be issued after the fix, outside its window: see
+   * `AcquireOptions.live`); use `challenge` for that. */
   live?: boolean;
+  /** P4.2c: a challenge acquired BEFORE the fix was taken (`ChallengeManager.acquireLive`, or `none`), used for the one fix of a `foreground_checkin` instead of
+   * asking the manager. Refused for any other source (a dwell has two fixes and each needs its own single-use challenge). */
+  challenge?: FixChallenge;
 }
 
 export interface EvidenceEnqueued {
@@ -87,9 +91,10 @@ export async function enqueueEvidence(deps: EvidenceEnqueueDeps, input: Evidence
   const dup = (await deps.existing(owner)).find((i) => i.sourceRef === sourceRef);
   if (dup) return { inserted: false, item: dup, penalty: penaltyOf(dup) };
 
+  if (input.challenge !== undefined && input.submission.source !== "foreground_checkin") throw new Error("a pre-acquired challenge covers the one fix of a foreground_checkin only");
   const challenges: Record<string, FixChallenge> = {};
   for (const f of fixes) {
-    challenges[f.fixId] = await deps.challenges.acquireForFix(owner, f.capturedAt, { live: input.live ?? false, facilityId: input.facilityId });
+    challenges[f.fixId] = input.challenge ?? (await deps.challenges.acquireForFix(owner, f.capturedAt, { live: input.live ?? false, facilityId: input.facilityId }));
   }
   const payload: EvidencePayload = { ...base, challenges };
   const result = await deps.enqueue({ id: deps.newId(), sourceRef, courseId: input.courseId, catalogVersion: input.catalogVersion, payload: toJsonValue(payload) });

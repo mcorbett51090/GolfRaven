@@ -17,6 +17,8 @@ import {
   lockfilePackageNames,
   ALLOWED_GRANTED_ANDROID_PERMISSIONS,
   ALLOWED_IOS_ENTITLEMENTS,
+  EXPO_LOCATION_REQUIRED_FALSE,
+  scanLocationDeclarations,
   grantedAndroidPermissions,
   normalizeAndroidPermission,
   scanAndroidGrantedPermissions,
@@ -65,6 +67,26 @@ describe("AT 5 — no Always / background location: app.json", () => {
     expect(blocked).toContain("android.permission.ACCESS_BACKGROUND_LOCATION");
     expect(blocked).toContain("android.permission.FOREGROUND_SERVICE_LOCATION");
     expect(blocked).toContain("android.permission.SYSTEM_ALERT_WINDOW");
+  });
+
+  it("P4.2c: foreground location is NOT blocked (the manifest merger would remove it and the check-in could never get a fix); the expo-location plugin is configured foreground-only", () => {
+    const blocked = appJson.expo?.android?.blockedPermissions ?? [];
+    expect(blocked).not.toContain("android.permission.ACCESS_FINE_LOCATION");
+    expect(blocked).not.toContain("android.permission.ACCESS_COARSE_LOCATION");
+    const entry = (appJson.expo?.plugins ?? []).find((p) => Array.isArray(p) && p[0] === "expo-location") as [string, Record<string, unknown>] | undefined;
+    expect(entry, "expo-location must be configured with props (a bare entry writes the Always usage strings)").toBeDefined();
+    for (const prop of EXPO_LOCATION_REQUIRED_FALSE) expect(entry![1][prop], prop).toBe(false);
+    expect(String(entry![1]["locationWhenInUsePermission"])).toMatch(/only while the app is open/i);
+    expect(String(entry![1]["locationWhenInUsePermission"])).toMatch(/never tracks you in the background/i);
+  });
+
+  it("P4.2c: the iOS usage description has a fr-CA translation that says the same two things", () => {
+    const locales = (appJson.expo as { locales?: Record<string, string> }).locales ?? {};
+    expect(locales["fr-CA"]).toBe("./locales/fr-CA.json");
+    const fr = JSON.parse(readFileSync(here("../locales/fr-CA.json"), "utf8")) as Record<string, string>;
+    expect(Object.keys(fr)).toEqual(["NSLocationWhenInUseUsageDescription"]);
+    expect(fr["NSLocationWhenInUseUsageDescription"]).toMatch(/seulement lorsque l'app est ouverte/);
+    expect(fr["NSLocationWhenInUseUsageDescription"]).toMatch(/jamais en arrière-plan/);
   });
 
   it("the real app.json turns Android backup off (the device-local under-age flag must not be copied off the device)", () => {
@@ -116,17 +138,39 @@ describe("AT 5 — no Always / background location: app.json", () => {
     expect(r).toContain("ios-background-modes");
   });
 
-  it("fails when expo-location is configured for background use (it is not even on the allow-list)", () => {
-    for (const props of [{ isAndroidBackgroundLocationEnabled: true }, { isIosBackgroundLocationEnabled: true }, { locationAlwaysAndWhenInUsePermission: "x" }]) {
-      const e = base();
-      e.plugins = [...(e.plugins ?? []), ["expo-location", props]];
-      expect(rules({ expo: e })).toContain("plugin-prop");
-      expect(rules({ expo: e })).toContain("plugin");
+  const withLocation = (over: Record<string, unknown>): ReturnType<typeof base> => {
+    const e = base();
+    e.plugins = (e.plugins ?? []).map((p) => (Array.isArray(p) && p[0] === "expo-location" ? ["expo-location", { ...(p[1] as Record<string, unknown>), ...over }] : p));
+    return e;
+  };
+
+  it("fails when expo-location is configured for background use, with the prop that did it named", () => {
+    for (const props of [{ isAndroidBackgroundLocationEnabled: true }, { isIosBackgroundLocationEnabled: true }, { locationAlwaysAndWhenInUsePermission: "x" }, { locationAlwaysPermission: "x" }, { isAndroidForegroundServiceEnabled: true }]) {
+      expect(rules({ expo: withLocation(props) }), JSON.stringify(props)).toContain("plugin-prop");
     }
   });
 
-  it("fails on ANY plugin outside the allow-list — even expo-location with no props, a background-geolocation library, or a local plugin", () => {
-    for (const p of ["expo-location", ["expo-location"], "react-native-background-geolocation", "@transistorsoft/react-native-background-geolocation", "expo-task-manager", "./plugins/with-anything"]) {
+  it("expo-location is allowed ONLY with every background / Always / motion prop explicitly false: absent, true or a string all fail (the plugin's defaults write the Always usage strings)", () => {
+    expect(rules({ expo: withLocation({}) })).toEqual([]);
+    for (const prop of EXPO_LOCATION_REQUIRED_FALSE) {
+      for (const v of [undefined, true, "x"]) {
+        const e = withLocation({ [prop]: v });
+        const r = rules({ expo: e });
+        expect(r.includes("plugin-prop-missing") || r.includes("plugin-prop"), `${prop}=${String(v)}`).toBe(true);
+      }
+    }
+    // bare entries, string or one-element array, are the defaults: refused
+    for (const bare of ["expo-location", ["expo-location"], ["expo-location", {}]]) {
+      const e = base();
+      e.plugins = [...(e.plugins ?? []).filter((p) => !(Array.isArray(p) && p[0] === "expo-location")), bare];
+      expect(rules({ expo: e }), JSON.stringify(bare)).toContain("plugin-prop-missing");
+    }
+    // an empty or missing usage string is refused too
+    for (const v of [undefined, "", "short"]) expect(rules({ expo: withLocation({ locationWhenInUsePermission: v }) }), String(v)).toContain("plugin-prop-missing");
+  });
+
+  it("fails on ANY plugin outside the allow-list — a background-geolocation library, a task manager, or a local plugin", () => {
+    for (const p of ["react-native-background-geolocation", "@transistorsoft/react-native-background-geolocation", "expo-task-manager", "./plugins/with-anything"]) {
       const e = base();
       e.plugins = [...(e.plugins ?? []), p];
       expect(rules({ expo: e }), JSON.stringify(p)).toContain("plugin");
@@ -210,7 +254,52 @@ describe("AT 5 — generated manifest and Info.plist scanners", () => {
   generated("the generated AndroidManifest.xml is clean (and has allowBackup=false)", here("../android/app/src/main/AndroidManifest.xml"), scanAndroidManifest);
   generated("the generated Info.plist is clean", here("../ios/GolfRaven/Info.plist"), scanInfoPlist);
   generated("the generated AndroidManifest.xml grants only the allow-listed permissions (a native module adds none; P4.2b-2)", here("../android/app/src/main/AndroidManifest.xml"), scanAndroidGrantedPermissions);
+  const readIf = (path: string): string | undefined => (existsSync(path) ? readFileSync(path, "utf8") : undefined);
+  const genLoc = (name: string, files: () => { infoPlist?: string; androidManifest?: string }, paths: string[]): void => {
+    const run = (): void => {
+      for (const p of paths) expect(existsSync(p), `${p} is missing: run \`expo prebuild --no-install\` in apps/mobile first (CI does)`).toBe(true);
+      expect(scanLocationDeclarations(files())).toEqual([]);
+    };
+    if (paths.every((p) => existsSync(p)) || inCi) it(name, run);
+    else it.skip(name, run);
+  };
+  genLoc("P4 AT 5 (iOS): the generated Info.plist has NSLocationWhenInUseUsageDescription, no NSLocationAlways* key, no motion string and no `location` background mode", () => ({ infoPlist: readIf(here("../ios/GolfRaven/Info.plist")) as string }), [here("../ios/GolfRaven/Info.plist")]);
+  genLoc("P4 AT 5 (Android): the generated manifest grants ACCESS_FINE_LOCATION and ACCESS_COARSE_LOCATION and NO other location permission (no ACCESS_BACKGROUND_LOCATION)", () => ({ androidManifest: readIf(here("../android/app/src/main/AndroidManifest.xml")) as string }), [here("../android/app/src/main/AndroidManifest.xml")]);
   generated("the generated entitlements are the allow-listed ones: Sign in with Apple and App Attest (development | production), nothing else (P4.2b-2)", here("../ios/GolfRaven/GolfRaven.entitlements"), scanEntitlements);
+});
+
+describe("P4.2c — the location declarations scanner (proved on failing fixtures as well as the real files)", () => {
+  const plist = (body: string): string => `<?xml version="1.0"?><plist version="1.0"><dict>${body}</dict></plist>`;
+  const WHEN = "<key>NSLocationWhenInUseUsageDescription</key><string>GolfRaven uses your location only while the app is open.</string>";
+  const man = (...perms: string[]): string => `<manifest xmlns:tools="x">${perms.map((p) => `<uses-permission android:name="${p}"/>`).join("")}</manifest>`;
+  const FINE = "android.permission.ACCESS_FINE_LOCATION";
+  const COARSE = "android.permission.ACCESS_COARSE_LOCATION";
+
+  it("iOS: a clean when-in-use file passes; an Always key, a motion string, a location background mode, or a missing / empty usage string each fail with their own rule", () => {
+    expect(scanLocationDeclarations({ infoPlist: plist(WHEN) })).toEqual([]);
+    expect(scanLocationDeclarations({ infoPlist: plist(WHEN + "<key>NSLocationAlwaysAndWhenInUseUsageDescription</key><string>x</string>") }).map((v) => v.rule)).toEqual(["ios-location-always"]);
+    expect(scanLocationDeclarations({ infoPlist: plist(WHEN + "<key>NSLocationAlwaysUsageDescription</key><string>x</string>") }).map((v) => v.rule)).toEqual(["ios-location-always"]);
+    expect(scanLocationDeclarations({ infoPlist: plist(WHEN + "<key>NSMotionUsageDescription</key><string>x</string>") }).map((v) => v.rule)).toEqual(["ios-motion"]);
+    expect(scanLocationDeclarations({ infoPlist: plist(WHEN + "<key>UIBackgroundModes</key><array><string>location</string></array>") }).map((v) => v.rule)).toEqual(["ios-background-modes"]);
+    expect(scanLocationDeclarations({ infoPlist: plist("") }).map((v) => v.rule)).toEqual(["ios-location-when-in-use"]);
+    expect(scanLocationDeclarations({ infoPlist: plist("<key>NSLocationWhenInUseUsageDescription</key><string></string>") }).map((v) => v.rule)).toEqual(["ios-location-when-in-use"]);
+  });
+
+  it("Android: FINE + COARSE only passes; a missing one, a background / foreground-service-location / activity-recognition permission fail; a tools:node=remove entry grants nothing", () => {
+    expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE) })).toEqual([]);
+    expect(scanLocationDeclarations({ androidManifest: man(FINE) }).map((v) => v.rule)).toEqual(["android-location-missing"]);
+    expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE, "android.permission.ACCESS_BACKGROUND_LOCATION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
+    expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE, "android.permission.FOREGROUND_SERVICE_LOCATION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
+    expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE, "android.permission.ACTIVITY_RECOGNITION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
+    const removed = `<manifest xmlns:tools="x"><uses-permission android:name="${FINE}"/><uses-permission android:name="${COARSE}"/><uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove"/></manifest>`;
+    expect(scanLocationDeclarations({ androidManifest: removed })).toEqual([]);
+    // the SHORT permission name is understood too
+    expect(scanLocationDeclarations({ androidManifest: man("ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "ACCESS_BACKGROUND_LOCATION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
+  });
+
+  it("the allow-lists carry the two foreground permissions and nothing background", () => {
+    expect([...ALLOWED_GRANTED_ANDROID_PERMISSIONS].filter((p) => /LOCATION/.test(p)).sort()).toEqual([COARSE, FINE]);
+  });
 });
 
 describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it must stay inside", () => {
@@ -268,7 +357,7 @@ describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it m
     const grant = (n: string): string => `<uses-permission android:name="${n}"/>`;
     expect(scanAndroidGrantedPermissions(m([...ALLOWED_GRANTED_ANDROID_PERMISSIONS].map(grant).join("")))).toEqual([]);
     expect(scanAndroidGrantedPermissions(m('<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'))).toEqual([]);
-    for (const bad of ["android.permission.CAMERA", "android.permission.READ_PHONE_STATE", "android.permission.ACCESS_FINE_LOCATION", "com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE", "READ_CONTACTS"]) {
+    for (const bad of ["android.permission.CAMERA", "android.permission.READ_PHONE_STATE", "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "android.permission.FOREGROUND_SERVICE_LOCATION", "com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE", "READ_CONTACTS"]) {
       expect(scanAndroidGrantedPermissions(m(grant(bad))).map((v) => v.rule), bad).toEqual(["android-new-permission"]);
     }
     expect(grantedAndroidPermissions(m(grant("VIBRATE") + grant("android.permission.INTERNET")))).toEqual(["android.permission.INTERNET", "android.permission.VIBRATE"]);

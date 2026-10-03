@@ -46,6 +46,10 @@ export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set([
   "react-native-health-connect",
   "expo-apple-authentication",
   "expo-build-properties",
+  // P4.2c: FOREGROUND location only (the check-in screen and the "Buying a marker" co-signal, build plan §7.1 / §7.4 step 5). Left to its defaults the plugin writes BOTH
+  // `NSLocationAlways*` usage strings and `NSMotionUsageDescription` into Info.plist, so it is allowed ONLY with every prop in `EXPO_LOCATION_REQUIRED_FALSE` set to `false` (the
+  // `plugin-prop-missing` rule below) and a non-empty `locationWhenInUsePermission`; what it generated is checked in the Info.plist and manifest (`scanLocationDeclarations`), not taken on trust.
+  "expo-location",
   // P4.2b-2: the local attestation module's config plugin. It sets the App Attest entitlement (development | production, from the build-time GOLFRAVEN_APP_ATTEST_ENV) and
   // nothing else: no Android permission, no Info.plist key. Its source is `modules/golfraven-attest/app.plugin.js`; what it writes is checked in the generated
   // entitlements file (`scanEntitlements`) and the generated manifest (`scanAndroidGrantedPermissions`), not taken on trust.
@@ -59,9 +63,16 @@ export const ALLOWED_IOS_ENTITLEMENTS: Readonly<Record<string, { values: readonl
   "com.apple.developer.devicecheck.appattest-environment": { values: ["development", "production"], why: "App Attest (P4.2b-2, `modules/golfraven-attest/app.plugin.js`)" },
 };
 
-/** The Android permissions the GENERATED manifest may GRANT (a `tools:node="remove"` entry grants nothing). Today: network, the vibrate of Expo's template, and the one Health
- * Connect read the X1 reader needs. P4.2b-2 added none (the Play Integrity library asks for no permission `[unverified: its merged manifest was not built here]`). */
-export const ALLOWED_GRANTED_ANDROID_PERMISSIONS: ReadonlySet<string> = new Set(["android.permission.INTERNET", "android.permission.VIBRATE", "android.permission.health.READ_EXERCISE"]);
+/** The Android permissions the GENERATED manifest may GRANT (a `tools:node="remove"` entry grants nothing). Today: network, the vibrate of Expo's template, the one Health
+ * Connect read the X1 reader needs, and (P4.2c) foreground location. P4.2b-2 added none (the Play Integrity library asks for no permission `[unverified: its merged manifest was not built here]`). */
+export const ALLOWED_GRANTED_ANDROID_PERMISSIONS: ReadonlySet<string> = new Set([
+  "android.permission.INTERNET",
+  "android.permission.VIBRATE",
+  "android.permission.health.READ_EXERCISE",
+  // P4.2c: foreground location (`expo-location`'s own manifest declares exactly these two). NEVER `ACCESS_BACKGROUND_LOCATION` / `FOREGROUND_SERVICE_LOCATION` (forbidden above).
+  "android.permission.ACCESS_FINE_LOCATION",
+  "android.permission.ACCESS_COARSE_LOCATION",
+]);
 
 /** Config-plugin props that turn background location on. */
 const BACKGROUND_PLUGIN_PROPS = new Set([
@@ -71,6 +82,17 @@ const BACKGROUND_PLUGIN_PROPS = new Set([
   "locationAlwaysAndWhenInUsePermission",
   "locationAlwaysPermission",
 ]);
+
+/** `expo-location` props that MUST be exactly `false`: the plugin's defaults would otherwise write the Always usage strings, a motion usage string, the background permission and a
+ * foreground-service permission. (Absent is NOT acceptable: absent means "the plugin's default", which for the three string props is a usage description.) */
+export const EXPO_LOCATION_REQUIRED_FALSE = [
+  "isIosBackgroundLocationEnabled",
+  "isAndroidBackgroundLocationEnabled",
+  "isAndroidForegroundServiceEnabled",
+  "locationAlwaysAndWhenInUsePermission",
+  "locationAlwaysPermission",
+  "motionUsagePermission",
+] as const;
 
 export interface Violation {
   rule: string;
@@ -127,6 +149,14 @@ export function scanAppConfig(config: ExpoConfig): Violation[] {
       for (const [prop, value] of Object.entries(props as Record<string, unknown>)) {
         if (BACKGROUND_PLUGIN_PROPS.has(prop) && value !== false) out.push({ rule: "plugin-prop", detail: `plugin ${name} sets ${prop}` });
       }
+    }
+    if (name === "expo-location") {
+      const p = props && typeof props === "object" ? (props as Record<string, unknown>) : {};
+      for (const prop of EXPO_LOCATION_REQUIRED_FALSE) {
+        if (p[prop] !== false) out.push({ rule: "plugin-prop-missing", detail: `plugin expo-location must set ${prop}: false (its default is to write the Always / motion usage strings or the background permissions)` });
+      }
+      const when = p["locationWhenInUsePermission"];
+      if (typeof when !== "string" || when.trim().length < 20) out.push({ rule: "plugin-prop-missing", detail: "plugin expo-location must set an honest locationWhenInUsePermission usage string" });
     }
   }
   return out;
@@ -218,6 +248,33 @@ export function scanInfoPlist(plist: string): Violation[] {
   for (const k of FORBIDDEN_IOS_INFOPLIST_KEYS) if (keys.includes(k)) out.push({ rule: "ios-infoplist", detail: `Info.plist has ${k}` });
   const modes = /<key>UIBackgroundModes<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1] ?? "";
   if (/<string>location<\/string>/.test(modes)) out.push({ rule: "ios-background-modes", detail: "Info.plist UIBackgroundModes contains location" });
+  return out;
+}
+
+/** P4.2c: what the GENERATED files must say about location, positively (the negative half is `scanInfoPlist` / `scanAndroidManifest`): the iOS Info.plist has a non-empty
+ * `NSLocationWhenInUseUsageDescription` and no `NSLocationAlways*` / `NSMotionUsageDescription` / location background mode; the Android manifest GRANTS `ACCESS_FINE_LOCATION` and
+ * `ACCESS_COARSE_LOCATION` and no other location-related permission (background, foreground-service-location, activity recognition). Each argument is optional so a test can scan one platform. */
+export function scanLocationDeclarations(files: { infoPlist?: string; androidManifest?: string }): Violation[] {
+  const out: Violation[] = [];
+  if (files.infoPlist !== undefined) {
+    const keys = [...files.infoPlist.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]!);
+    for (const k of keys) if (/^NSLocationAlways/.test(k)) out.push({ rule: "ios-location-always", detail: `Info.plist has ${k}` });
+    if (keys.includes("NSMotionUsageDescription")) out.push({ rule: "ios-motion", detail: "Info.plist has NSMotionUsageDescription (the app reads no motion data)" });
+    const when = new RegExp("<key>NSLocationWhenInUseUsageDescription</key>\\s*<string>([^<]*)</string>").exec(files.infoPlist)?.[1];
+    if (when === undefined || when.trim().length < 20) out.push({ rule: "ios-location-when-in-use", detail: "Info.plist must have a non-empty NSLocationWhenInUseUsageDescription" });
+    const modes = /<key>UIBackgroundModes<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(files.infoPlist)?.[1] ?? "";
+    if (/<string>location<\/string>/.test(modes)) out.push({ rule: "ios-background-modes", detail: "Info.plist UIBackgroundModes contains location" });
+  }
+  if (files.androidManifest !== undefined) {
+    const granted = grantedAndroidPermissions(files.androidManifest);
+    const location = granted.filter((p) => /LOCATION|ACTIVITY_RECOGNITION/i.test(p));
+    for (const need of ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"]) {
+      if (!granted.includes(need)) out.push({ rule: "android-location-missing", detail: `manifest does not grant ${need}` });
+    }
+    for (const p of location) {
+      if (p !== "android.permission.ACCESS_FINE_LOCATION" && p !== "android.permission.ACCESS_COARSE_LOCATION") out.push({ rule: "android-location-extra", detail: `manifest grants ${p}` });
+    }
+  }
   return out;
 }
 

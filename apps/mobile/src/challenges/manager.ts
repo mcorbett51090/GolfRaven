@@ -37,9 +37,25 @@ export type PrefetchOutcome =
   | { kind: "failed"; reason: "rate_limited" | "network" | "rejected" | "bad_response" | "no_device" };
 
 export interface AcquireOptions {
-  /** Online: try a live challenge first. Default false (use the pool). */
+  /** Online: try a live challenge first. Default false (use the pool).
+   *
+   * ⚠ CONTRACT (P4.2c): the server accepts a fix as a co-signal for a challenge only when `challenge.issued_at <= fix.capturedAt <= challenge.expires_at`
+   * (`consumeForFix`). A live challenge requested HERE is requested after the fix was taken, so its `issued_at` is later than `capturedAt` and the fix is
+   * outside its window: the evidence would carry a token the server cannot consume (no co-signal). The check-in flow therefore never passes `live` here; it takes
+   * the live challenge BEFORE the fix (`acquireLive`) and hands it to `enqueueEvidence` (`EvidenceInput.challenge`). `live: true` is kept only for a caller whose
+   * fix is taken after the call. */
   live?: boolean;
   facilityId?: string;
+}
+
+/** A live challenge taken BEFORE the fix it will cover (`acquireLive`). */
+export interface LiveChallenge {
+  /** `redeemed`: the token is already minted (online by construction). */
+  challenge: Extract<FixChallenge, { state: "redeemed" }>;
+  /** The device clock when the challenge was received: a fix captured at or after it is surely after the server's `issued_at` (clock skew aside). */
+  receivedAt: number;
+  /** The server's expiry (epoch ms): a fix captured after it is outside the window. */
+  expiresAt: number;
 }
 
 export class ChallengeManager {
@@ -108,23 +124,42 @@ export class ChallengeManager {
     }
     if (opts.live) {
       const live = await this.tryLive(owner, deviceId, opts.facilityId);
-      if (live) return live;
+      if (live) return live.challenge;
     }
     const c = await store.consumeOne(owner, deviceId, capturedAt, now());
     if (!c) return none;
     return { state: "held", challengeId: c.id, nonce: c.nonce, kind: c.kind, expiresAt: c.expiresAt };
   }
 
-  private async tryLive(owner: string, deviceId: string, facilityId: string | undefined): Promise<FixChallenge | null> {
+  /** A LIVE challenge for a fix that is about to be taken (P4.2c; see `AcquireOptions.live` for why it must come first). Online only: any failure (offline,
+   * rate limited, refused, signed out, a user switch) is `null` and the caller falls back to the pool. Never throws. The challenge is requested and redeemed on the
+   * spot (`redeemed`), so the evidence must be sent within the token's lifetime (15 minutes, server): use it only for a check-in that is enqueued right away. */
+  async acquireLive(owner: string, facilityId?: string): Promise<LiveChallenge | null> {
+    const { session } = this.deps;
+    if (owner === "" || session.currentUserId() !== owner) return null;
+    let deviceId: string;
+    try {
+      deviceId = await this.deps.deviceId();
+    } catch {
+      return null;
+    }
+    const live = await this.tryLive(owner, deviceId, facilityId);
+    // The user may have changed while the request was in flight: a challenge of `owner` is never handed to a screen now showing someone else.
+    return live !== null && session.currentUserId() === owner ? live : null;
+  }
+
+  private async tryLive(owner: string, deviceId: string, facilityId: string | undefined): Promise<LiveChallenge | null> {
     const { api, session, now } = this.deps;
     try {
       const accessToken = await session.accessTokenFor(owner);
       if (accessToken === null) return null;
       const credentials = { userId: owner, accessToken };
       const [c] = await api.requestCheckinChallenges({ deviceId, ...(facilityId !== undefined ? { facilityId } : {}) }, credentials);
-      if (!c || c.kind !== "live" || !(Date.parse(c.expiresAt) > now())) return null;
+      const receivedAt = now();
+      const expiresAt = c ? Date.parse(c.expiresAt) : Number.NaN;
+      if (!c || c.kind !== "live" || !(expiresAt > receivedAt)) return null;
       const token = await api.redeemCheckinChallenge({ challengeId: c.id, nonce: c.nonce, deviceId }, credentials);
-      return { state: "redeemed", challengeId: c.id, kind: "live", jti: token.jti, grade: token.attestationGrade };
+      return { challenge: { state: "redeemed", challengeId: c.id, kind: "live", jti: token.jti, grade: token.attestationGrade }, receivedAt, expiresAt };
     } catch {
       return null; // offline, rate limited, refused: fall back to the pool
     }

@@ -210,6 +210,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
         challenges: services.challengeStore,
         attestState: { wipeUser: async (userId) => services.attestState.wipeUser(userId, await services.deviceId()) },
         offlineSeed: { wipeUser: (userId) => services.offlineCode.wipeUser(userId) },
+        markerCosignals: services.markerStore,
         sharer: services.sharer,
         currentUserId: () => services.auth.current()?.userId ?? null,
         secure: services.secure,

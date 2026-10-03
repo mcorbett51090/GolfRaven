@@ -2,12 +2,16 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Alert, Linking } from "react-native";
 import { useApp } from "../../src/runtime/AppProvider";
 import { bookingLinks, courseName, facilityName } from "../../src/browse";
+import { checkinUiAvailable } from "../../src/checkin/gate";
+import { CheckInCard } from "../../src/screens/CheckInCard";
 import { Body, Button, Card, EmptyState, H1, H2, Row, Screen } from "../../src/ui/components";
 
 /** Course page: details, booking rail, and "I'm here" / "Done" (build plan
- * §7.2). The check-in itself (foreground location, matching, evidence) is
- * not built in this slice. A guest is asked to sign in only when they try to
- * record a play (Apple 5.1.1, §7.8), and sign-in goes through the age screen. */
+ * §7.2). "I'm here" is the foreground check-in (`CheckInCard`, P4.2c) while `CHECKIN_UI_ENABLED`
+ * is true; while it is false (every release build today) it is the old button that says recording
+ * is not available yet. "Done" (the dwell check-out) is not built: it is that same button.
+ * A guest is asked to sign in only when they try to record a play (Apple 5.1.1, §7.8),
+ * and sign-in goes through the age screen. */
 export default function CourseScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { t, tp, locale, index, session } = useApp();
@@ -49,10 +53,17 @@ export default function CourseScreen() {
         </>
       ) : null}
 
-      <Row>
-        <Button title={t("course.checkIn")} onPress={record} />
-        <Button variant="secondary" title={t("course.done")} onPress={record} />
-      </Row>
+      {checkinUiAvailable() ? (
+        <>
+          <CheckInCard entry={entry} />
+          <Button variant="secondary" title={t("course.done")} onPress={record} />
+        </>
+      ) : (
+        <Row>
+          <Button title={t("course.checkIn")} onPress={record} />
+          <Button variant="secondary" title={t("course.done")} onPress={record} />
+        </Row>
+      )}
       {session === null ? <Body muted>{t("course.guestNote")}</Body> : null}
     </Screen>
   );

@@ -6,7 +6,7 @@
  *     idempotent, so on any failure nothing local is touched and the player simply tries again. Wiping local state first could strand a player
  *     whose server deletion then failed, signed out of an account that still exists.
  *  2. Only after the server says it is done, the LOCAL wipe: the session (the server session is already gone, so no network call: `clearLocalSession`),
- *     the outbox and the prefetched check-in challenges (the deleted player's own data: nothing of it may be sent to a deleted account or carried to
+ *     the outbox, the prefetched check-in challenges and the marker co-signal records (the deleted player's own data: nothing of it may be sent to a deleted account or carried to
  *     the next one), the attestation records and the offline-code seed (secure store: the deleted user's only), and the caches that hold the player's data (`clearUserCaches`) including a data export still sitting in the share cache.
  *     ONLY the deleted user's rows go (plus the ownerless legacy rows, `UNOWNED`, which no account can ever see or send): another user's dormant
  *     plays on a shared device are theirs and stay (P4.2b-0 made rows per-owner so that sign-out leaves them alone; deletion must not undo it).
@@ -43,6 +43,8 @@ export interface DeleteDeps {
   /** The offline-code seed this install keeps per user (`offline-code/store.ts`, secure store only): the deleted user's is removed (the seed is also derived server-side and the server forgets it
    * with the device; a seed left here would keep showing codes for an account that no longer exists). Optional: absent in tests that do not exercise it. Another user's seed stays. */
   offlineSeed?: { wipeUser(userId: string): Promise<void> };
+  /** The "Buying a marker" co-signal records (`marker/store.ts`: a location fix per record): the deleted user's are removed. Optional: absent in tests that do not exercise it. */
+  markerCosignals?: { deleteOwner(userId: string): Promise<void> };
   /** A data export left in the cache for a receiving app is deleted too (`FileSharer.purgeStale`, best effort, never throws). */
   sharer: Pick<FileSharer, "purgeStale">;
   /** The signed-in user's id, read BEFORE the server call (the fallback when the server's answer never arrived). */
@@ -100,6 +102,9 @@ export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<Delet
   });
   await attempt("offline-seed", async () => {
     if (deletedUser !== null && deletedUser !== UNOWNED && deps.offlineSeed) await deps.offlineSeed.wipeUser(deletedUser);
+  });
+  await attempt("marker-cosignals", async () => {
+    if (deletedUser !== null && deletedUser !== UNOWNED && deps.markerCosignals) await deps.markerCosignals.deleteOwner(deletedUser);
   });
   await attempt("export-cache", () => deps.sharer.purgeStale());
   await attempt("caches", () => deps.clearUserCaches());

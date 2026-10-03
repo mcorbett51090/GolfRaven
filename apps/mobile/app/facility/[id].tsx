@@ -2,6 +2,8 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Linking } from "react-native";
 import { useApp } from "../../src/runtime/AppProvider";
 import { bookingLinks, courseName, facilityBlurb, facilityName, isSafeHttpsUrl } from "../../src/browse";
+import { markerCosignalUiAvailable } from "../../src/checkin/gate";
+import { MarkerCard } from "../../src/screens/MarkerCard";
 import { Banner, Body, Button, Card, Chip, EmptyState, H1, H2, Row, Screen } from "../../src/ui/components";
 
 /** Directory entry: a facility with its courses, access, booking rail and
@@ -49,6 +51,8 @@ export default function FacilityScreen() {
           ))}
         </>
       ) : null}
+
+      {markerCosignalUiAvailable() && facility.courses[0] ? <MarkerCard entry={{ course: facility.courses[0], facility }} /> : null}
     </Screen>
   );
 }

@@ -20,7 +20,10 @@ import { loadNativeAttestModule } from "../attest/native-module-loader";
 import { OfflineCodeManager, OfflineSeedStore, deviceRegistrationFor } from "../offline-code";
 import { activateReward, type ActivationOutcome } from "../rewards";
 import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type ChallengeStore } from "../challenges";
-import { enqueueEvidence, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
+import { enqueueEvidence, newFixId, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
+import { checkinUiAvailable, markerCosignalUiAvailable, picksFromItems, runCheckIn, type CheckInInput, type CheckInOutcome } from "../checkin";
+import { createExpoLocationPort } from "../checkin/expo-location";
+import { MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, captureMarkerCoSignal, type MarkerCaptureInput, type MarkerCaptureOutcome, type MarkerCosignalStore } from "../marker";
 import type { AuthService } from "../auth";
 import { createSupabaseAuth } from "../auth/supabase-auth";
 import { createExpoFileSharer } from "../account/expo-share";
@@ -76,6 +79,12 @@ export interface AppServices {
   /** Activates one earned reward on this device (P4.2b-3b; `POST rewards-activate`) under the assertion lock check-in shares. Never throws. Nothing user-visible uses it while
    * `WALLET_ACTIVATION_UI_ENABLED` is false. */
   activateReward: (rewardId: string) => Promise<ActivationOutcome>;
+  /** The foreground check-in (P4.2c, `checkin/flow.ts`): location, matching, challenge, evidence, outbox. Called from the "I'm here" button only; refuses (`disabled`, no prompt) while `CHECKIN_UI_ENABLED` is false. */
+  checkin: (input: CheckInInput) => Promise<CheckInOutcome>;
+  /** "Buying a marker" (P4.2c, `marker/capture.ts`): captures a co-signal into the LOCAL queue; nothing sends it (no server path yet). Refuses while `MARKER_COSIGNAL_UI_ENABLED` or `CHECKIN_UI_ENABLED` is false. */
+  markerCosignal: (input: MarkerCaptureInput) => Promise<MarkerCaptureOutcome>;
+  /** The local marker co-signal records (account deletion wipes the deleted user's). */
+  markerStore: MarkerCosignalStore;
   /** The only way a play enters the outbox: builds the payload, consumes one challenge per fix, enqueues for the signed-in user. */
   enqueueEvidence: (input: EvidenceInput) => Promise<EvidenceEnqueued>;
   /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
@@ -112,12 +121,14 @@ export async function createServices(): Promise<AppServices> {
   let catalogStore: ConstructorParameters<typeof CatalogManager>[0]["store"];
   let outboxStore: OutboxStore;
   let challengeStore: ChallengeStore;
+  let markerStore: MarkerCosignalStore;
   let flags: DeviceFlagStore;
   try {
     const db = await openAppDatabase();
     catalogStore = new SqliteCatalogCacheStore(db);
     outboxStore = new SqliteOutboxStore(db);
     challengeStore = new SqliteChallengeStore(db);
+    markerStore = new SqliteMarkerCosignalStore(db);
     flags = new SqliteDeviceFlagStore(db);
   } catch {
     // Never lose the app to a storage failure: browse with a memory cache.
@@ -128,6 +139,7 @@ export async function createServices(): Promise<AppServices> {
     catalogStore = new MemoryCatalogCacheStore();
     outboxStore = new MemoryOutboxStore();
     challengeStore = new MemoryChallengeStore();
+    markerStore = new MemoryMarkerCosignalStore();
     flags = new MemoryDeviceFlagStore();
   }
 
@@ -201,6 +213,20 @@ export async function createServices(): Promise<AppServices> {
   const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, now: () => Date.now() });
   const registerDevice = deviceRegistrationFor(api); // `undefined` while OFFLINE_CODE_UI_ENABLED is false (`offline-code/gate.ts`)
   const offlineCode = new OfflineCodeManager({ store: new OfflineSeedStore(secure), api, session, deviceId, now: () => Date.now(), ...(registerDevice ? { registerDevice } : {}) });
+  // Foreground location: constructing the port asks for nothing. The permission prompt is `requestPermission()`, called only from `runCheckIn` / `captureMarkerCoSignal`, i.e. from a button.
+  const location = createExpoLocationPort(Platform.OS);
+  const enqueueEvidenceNow = (input: EvidenceInput): Promise<EvidenceEnqueued> =>
+    enqueueEvidence(
+      {
+        challenges,
+        currentUserId,
+        deviceId,
+        enqueue: (draft) => enqueueOutboxItem({ store: outboxStore, currentUserId, now: () => Date.now() }, draft),
+        existing: (owner) => outboxStore.listByOwner(owner),
+        newId: () => randomUuid(expoRandomBytes),
+      },
+      input,
+    );
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
     api,
@@ -249,18 +275,38 @@ export async function createServices(): Promise<AppServices> {
     attestState: attestation.state,
     offlineCode,
     activateReward: (rewardId) => activateReward({ api, session, deviceId }, rewardId),
-    enqueueEvidence: (input) =>
-      enqueueEvidence(
+    enqueueEvidence: enqueueEvidenceNow,
+    checkin: (input) =>
+      runCheckIn(
         {
-          challenges,
+          enabled: checkinUiAvailable(),
+          location,
           currentUserId,
-          deviceId,
-          enqueue: (draft) => enqueueOutboxItem({ store: outboxStore, currentUserId, now: () => Date.now() }, draft),
-          existing: (owner) => outboxStore.listByOwner(owner),
-          newId: () => randomUuid(expoRandomBytes),
+          challenges,
+          enqueueEvidence: enqueueEvidenceNow,
+          existingPicks: async (owner) => picksFromItems(await outboxStore.listByOwner(owner)),
+          manifestSig: (catalogVersion) => catalog.cachedManifestSig(catalogVersion),
+          newFixId: () => newFixId(expoRandomBytes),
+          now: () => Date.now(),
         },
         input,
       ),
+    markerCosignal: (input) =>
+      captureMarkerCoSignal(
+        {
+          enabled: markerCosignalUiAvailable(),
+          location,
+          currentUserId,
+          challenges,
+          store: markerStore,
+          deviceId,
+          newId: () => randomUuid(expoRandomBytes),
+          newFixId: () => newFixId(expoRandomBytes),
+          now: () => Date.now(),
+        },
+        input,
+      ),
+    markerStore,
     api,
     auth,
     backend: backend.kind,
