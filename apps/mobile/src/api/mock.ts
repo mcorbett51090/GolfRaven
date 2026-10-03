@@ -6,7 +6,7 @@
  * (`runtime/dev-backend.ts` `require`s it under `__DEV__`; `api/index.ts` does not re-export it).
  */
 import { assertDevOnly, type DevOnly } from "../dev-guard";
-import type { OutboxItem, ServerAnswer } from "../outbox";
+import type { EvidenceCredentials, OutboxItem, ServerAnswer } from "../outbox";
 import type { ProgrammeStatus } from "../wallet";
 import { ApiError } from "./errors";
 import type {
@@ -46,6 +46,8 @@ export type MockCall =
 export interface MockApi extends ApiClient {
   /** Every `submitEvidence` call, in order. */
   readonly submissions: readonly OutboxItem[];
+  /** The credentials each `submitEvidence` call was made with, parallel to `submissions`. */
+  readonly submissionCredentials: readonly EvidenceCredentials[];
   /** Every account call, in order. */
   readonly calls: readonly MockCall[];
   script(...answers: ServerAnswer[]): void;
@@ -61,6 +63,7 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
   assertDevOnly(guard);
   const queue: ServerAnswer[] = [...(options.evidenceScript ?? [])];
   const submissions: OutboxItem[] = [];
+  const submissionCredentials: EvidenceCredentials[] = [];
   const calls: MockCall[] = [];
   const failures: ApiError[] = [];
   const links: LinkSignInResult[] = [];
@@ -75,6 +78,7 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
   };
   return {
     submissions,
+    submissionCredentials,
     calls,
     script: (...answers) => void queue.push(...answers),
     failNext: (e) => void failures.push(e),
@@ -83,8 +87,9 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
     listPlays: () => Promise.resolve([...(options.plays ?? [])]),
     listAchievements: () => Promise.resolve([...(options.achievements ?? [])]),
     listTrailProgrammes: () => Promise.resolve({ ...(options.programmes ?? {}) }),
-    submitEvidence(item: OutboxItem): Promise<ServerAnswer> {
+    submitEvidence(item: OutboxItem, credentials: EvidenceCredentials): Promise<ServerAnswer> {
       submissions.push(item);
+      submissionCredentials.push(credentials);
       return Promise.resolve(queue.shift() ?? fallback);
     },
     listSignInMethods() {

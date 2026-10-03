@@ -21,7 +21,8 @@ function queryable(db: DatabaseSync): SqlQueryable {
   };
 }
 
-export async function openNodeSqlite(): Promise<SqlDatabase & { raw: DatabaseSync }> {
+/** `upTo`: stop migrating at that schema version (to build an OLD database for the upgrade tests). */
+export async function openNodeSqlite(upTo?: number, now?: () => number): Promise<SqlDatabase & { raw: DatabaseSync }> {
   const raw = new DatabaseSync(":memory:");
   const q = queryable(raw);
   // One connection: overlapping `transaction()` calls must queue (expo-sqlite's
@@ -46,6 +47,6 @@ export async function openNodeSqlite(): Promise<SqlDatabase & { raw: DatabaseSyn
       return run;
     },
   };
-  await migrate(db);
+  await migrate(db, { ...(upTo === undefined ? {} : { upTo }), ...(now ? { now } : {}) });
   return db;
 }

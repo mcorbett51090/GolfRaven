@@ -97,6 +97,7 @@ export const en = {
   "played.reason.unexpected_status": "The server gave an unexpected answer.",
   "played.reason.rematch_failed": "This play could not be matched to the updated catalog.",
   "played.reason.queue_expired": "New course data did not arrive in time.",
+  "played.reason.owner_unknown": "This play was saved before plays were tied to an account, so it was not sent.",
 
   "achievements.earned": "Earned",
   "achievements.inProgress": "In progress",
@@ -192,7 +193,10 @@ export const en = {
   "me.delete.working": "Deleting your account…",
   "me.delete.done": "Your account was deleted.",
   "me.delete.partial": "Your account was deleted, but some data could not be cleared from this device. Uninstalling the app removes it.",
+  "me.delete.maybeDone": "We could not confirm that your account was deleted, and you have been signed out on this device (its saved plays and data were cleared). Sign in again to check: if your account is still there, delete it again.",
+  "me.delete.maybePartial": "We could not confirm that your account was deleted, and you have been signed out, but some data could not be cleared from this device. Sign in again to check: if your account is still there, delete it again. Uninstalling the app removes the rest.",
   "me.delete.failed": "Could not delete your account, and nothing was changed on this device. Try again.",
+  "me.delete.unreachable": "We could not reach the server, so we could not confirm whether your account was deleted. You are still signed in and nothing was changed on this device. Check your connection and try again.",
   "me.notifications": "Notifications",
   "me.notifications.enable": "Turn on notifications",
   "me.notifications.unavailable": "Notifications arrive in a later build.",

@@ -344,7 +344,7 @@ describe("retry policy (consistent with the outbox: 429 / 5xx / network are the 
 describe("the rest of the interface", () => {
   it("evidence submission is P4.2b: every send is a transport-level 'not now' (the outbox keeps the item), never 'accepted'", async () => {
     const { api, seen } = client([{ respond: "list_single" }]);
-    const a = await api.submitEvidence({} as never);
+    const a = await api.submitEvidence({} as never, {} as never);
     expect(a.kind).toBe("network_error");
     expect(seen).toEqual([]);
   });
@@ -371,6 +371,6 @@ describe("the rest of the interface", () => {
       expect((await failure(call())).kind).toBe("not_configured");
     }
     expect(await api.listPlays()).toEqual([]);
-    expect((await api.submitEvidence({} as never)).kind).toBe("network_error");
+    expect((await api.submitEvidence({} as never, {} as never)).kind).toBe("network_error");
   });
 });

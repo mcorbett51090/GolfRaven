@@ -25,7 +25,7 @@ export function createMockAuth(guard: DevOnly): MockAuth {
     emailCodesRequested: requested,
     restore: () => Promise.resolve(session),
     current: () => session,
-    getAccessToken: () => Promise.resolve(session ? "mock-access-token" : null),
+    getAccessToken: (o) => Promise.resolve(session && (o?.forUserId === undefined || o.forUserId === session.userId) ? "mock-access-token" : null),
     requestEmailCode(email, o) {
       requested.push({ email, createUser: o.createUser });
       return Promise.resolve();

@@ -1,8 +1,8 @@
 import { useRouter } from "expo-router";
 import type { MockApi } from "../api/mock";
-import { Platform } from "react-native";
+import { Alert, Platform } from "react-native";
 import { useApp } from "../runtime/AppProvider";
-import { createItem, type ServerAnswer } from "../outbox";
+import { OutboxEnqueueError, type ServerAnswer } from "../outbox";
 import { Body, Button, Card, H2 } from "../ui/components";
 
 /**
@@ -19,18 +19,22 @@ export function DevPanel() {
   async function enqueue(listed: boolean): Promise<void> {
     const course = index ? [...index.courses.keys()][0] : undefined;
     const now = Date.now();
-    await services.outboxStore.insertIfAbsent(
-      createItem(
-        {
-          id: `dev-${now}`,
-          sourceRef: `dev:${now}`,
-          courseId: listed ? (course ?? null) : null,
-          catalogVersion: snapshot?.catalogVersion ?? null,
-          payload: { dev: true },
-        },
-        now,
-      ),
-    );
+    try {
+      // The owner is the signed-in user, taken from the auth session inside `enqueueOutbox`; signed out, nothing is written.
+      await services.enqueueOutbox({
+        id: `dev-${now}`,
+        sourceRef: `dev:${now}`,
+        courseId: listed ? (course ?? null) : null,
+        catalogVersion: snapshot?.catalogVersion ?? null,
+        payload: { dev: true },
+      });
+    } catch (e) {
+      if (e instanceof OutboxEnqueueError) {
+        Alert.alert("Sign in first", "A play is queued for the signed-in player only; nothing was added.");
+        return;
+      }
+      throw e;
+    }
     await reloadOutbox();
   }
 

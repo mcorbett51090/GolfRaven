@@ -42,8 +42,11 @@ export interface AuthService {
   /** The session as last known (no I/O). */
   current(): Session | null;
   /** The access token to send as a bearer, refreshed if it is about to expire (`forceRefresh`: refresh regardless, after a 401).
-   * `null` = signed out. Throws `AuthError("network")` if a needed refresh could not reach the server. */
-  getAccessToken(opts?: { forceRefresh?: boolean }): Promise<string | null>;
+   * `null` = signed out. Throws `AuthError("network")` if a needed refresh could not reach the server.
+   * `forUserId`: the token is returned ONLY if the session it belongs to is that user's (read from the same session the token comes from,
+   * after any refresh, so a sign-out/sign-in cannot hand one user's token to another's request); any other user, or none, is `null`. The outbox
+   * always passes the item's owner (`outbox/runner.ts`). */
+  getAccessToken(opts?: { forceRefresh?: boolean; forUserId?: string }): Promise<string | null>;
   /** Sends a one-time code to `email`. `createUser: true` is a sign-in (creates the account on first use); `false` sends only to an
    * existing account (the cross-account proof of the linking flow). */
   requestEmailCode(email: string, opts: { createUser: boolean }): Promise<void>;

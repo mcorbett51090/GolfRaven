@@ -36,8 +36,8 @@ describe("persistence survives a restart (new store objects over the same databa
   it("outbox items, in event-time order", async () => {
     const db = await openNodeSqlite();
     const first = new SqliteOutboxStore(db);
-    await first.insertIfAbsent(createItem({ id: "b", sourceRef: "r:b", courseId: "crs_1", catalogVersion: "v1", payload: { n: 2 } }, 2_000));
-    await first.insertIfAbsent(createItem({ id: "a", sourceRef: "r:a", courseId: null, catalogVersion: null, payload: { n: 1 } }, 1_000));
+    await first.insertIfAbsent(createItem({ id: "b", sourceRef: "r:b", ownerUserId: "user-a", courseId: "crs_1", catalogVersion: "v1", payload: { n: 2 } }, 2_000));
+    await first.insertIfAbsent(createItem({ id: "a", sourceRef: "r:a", ownerUserId: "user-a", courseId: null, catalogVersion: null, payload: { n: 1 } }, 1_000));
     const second = new SqliteOutboxStore(db);
     expect((await second.list()).map((i) => i.id)).toEqual(["a", "b"]);
     expect((await second.get("a"))?.courseId).toBeNull();

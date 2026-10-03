@@ -65,7 +65,8 @@ export class FakeAuth implements AuthService {
   signedOut = 0;
   restore = () => Promise.resolve(this.session);
   current = () => this.session;
-  getAccessToken = () => Promise.resolve(this.session ? "access" : null);
+  getAccessToken = (o?: { forceRefresh?: boolean; forUserId?: string }) =>
+    Promise.resolve(this.session && (o?.forUserId === undefined || o.forUserId === this.session.userId) ? "access" : null);
   requestEmailCode(email: string, o: { createUser: boolean }): Promise<void> {
     this.emailCodeRequests.push({ email, createUser: o.createUser });
     return this.failWith ? Promise.reject(this.failWith) : Promise.resolve();

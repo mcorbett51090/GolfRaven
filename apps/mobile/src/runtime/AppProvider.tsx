@@ -7,7 +7,7 @@ import { buildIndex, type CatalogIndex } from "../browse";
 import { resetCatalogAndMaybeRedownload, type CatalogResetReport, type CatalogState, type RefreshOutcome } from "../catalog/manager";
 import type { CatalogSnapshot } from "../catalog/snapshot";
 import { resolveLocale, translate, plural, LOCALES, type Locale, type MessageKey, type Params, type PluralBase } from "../i18n";
-import type { OutboxItem } from "../outbox";
+import { filterVisibleOutboxItems, visibleOutboxItems, type OutboxItem } from "../outbox";
 import type { ProgrammeStatus } from "../wallet";
 import { walletTabVisible } from "../wallet";
 import { createServices, type AppServices } from "./services";
@@ -43,13 +43,15 @@ export interface AppContextValue {
   dismissUpdate: () => void;
 
   session: Session | null;
-  /** Ends the session (revoked at the server best-effort, removed from the secure store always). */
+  /** Ends the session (revoked at the server best-effort, removed from the secure store always). The signed-out user's queued plays are NOT deleted
+   * (they stay on the device, dormant: invisible and unsendable to anyone else, and back when that user signs in again). */
   signOut: () => Promise<void>;
   /** Me → Delete account: the server deletion, then the local wipe (session, outbox, caches; the age flag is kept). */
   deleteAccount: () => Promise<DeleteOutcome>;
   programmes: Record<string, ProgrammeStatus>;
   walletVisible: boolean;
 
+  /** The SIGNED-IN user's outbox items only; empty when signed out (`filterVisibleOutboxItems`). */
   outboxItems: OutboxItem[];
   reloadOutbox: () => Promise<void>;
   syncOutbox: () => Promise<void>;
@@ -94,7 +96,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
   const [catalogState, setCatalogState] = useState<CatalogState>(services.catalog.getState());
   const [session, setSession] = useState<Session | null>(services.auth.current());
   const [programmes, setProgrammes] = useState<Record<string, ProgrammeStatus>>({});
-  const [outboxItems, setOutboxItems] = useState<OutboxItem[]>([]);
+  const [outboxLoaded, setOutboxLoaded] = useState<OutboxItem[]>([]);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const deviceTags = useRef(getLocales().map((l) => l.languageTag));
 
@@ -103,7 +105,10 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
   const tp = useCallback((base: PluralBase, count: number, params?: Params) => plural(locale, base, count, params), [locale]);
 
   const reloadOutbox = useCallback(async () => {
-    setOutboxItems(await services.outboxStore.list());
+    const userId = services.auth.current()?.userId ?? null;
+    const items = await visibleOutboxItems(services.outboxStore, userId);
+    // The user may have changed while the read was in flight: a list read for one user is dropped, not shown to the next.
+    if ((services.auth.current()?.userId ?? null) === userId) setOutboxLoaded(items);
   }, [services]);
 
   const refreshCatalog = useCallback(async () => {
@@ -125,6 +130,14 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
 
   // The session follows the auth service (sign-in, sign-out, a refresh the server refused).
   useEffect(() => services.auth.subscribe(setSession), [services]);
+
+  // The outbox list follows the signed-in USER: a different user's items are never kept in state across a switch, and signed out shows none.
+  const userId = session?.userId ?? null;
+  useEffect(() => {
+    setOutboxLoaded([]);
+    void reloadOutbox();
+  }, [userId, reloadOutbox]);
+  const outboxItems = useMemo(() => filterVisibleOutboxItems(outboxLoaded, userId), [outboxLoaded, userId]);
 
   // Startup: stored session, stored language, cached catalog (re-verified), then one refresh.
   useEffect(() => {
@@ -176,6 +189,9 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     signOut: async () => {
       await services.auth.signOut();
       setSession(null);
+      // Deliberately NOT `outbox.deleteAll()` / any delete: the signing-out user's queued plays stay in the store, dormant. They are filtered out
+      // of every read (`listByOwner`) and never selected by the runner for anyone else, and they are theirs again when they sign back in (a
+      // sign-out is not an account deletion, and losing queued plays on sign-out would break FM-03). Only `deleteAccount` wipes the outbox.
     },
     deleteAccount: async () => {
       const outcome = await deleteAccountAndWipeLocal({
@@ -185,7 +201,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
         secure: services.secure,
         clearUserCaches: () => setProgrammes({}),
       });
-      if (outcome.status === "deleted") {
+      if (outcome.status === "deleted" || outcome.status === "deleted_or_session_ended") {
         setSession(null);
         await reloadOutbox();
       }

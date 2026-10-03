@@ -100,6 +100,7 @@ export const frCA: Record<MessageKey, string> = {
   "played.reason.unexpected_status": "Le serveur a donné une réponse inattendue.",
   "played.reason.rematch_failed": "Cette partie n'a pas pu être associée au catalogue mis à jour.",
   "played.reason.queue_expired": "Les nouvelles données de terrain ne sont pas arrivées à temps.",
+  "played.reason.owner_unknown": "Cette partie a été enregistrée avant que les parties soient liées à un compte; elle n'a donc pas été envoyée.",
 
   "achievements.earned": "Obtenues",
   "achievements.inProgress": "En cours",
@@ -195,7 +196,10 @@ export const frCA: Record<MessageKey, string> = {
   "me.delete.working": "Suppression de votre compte…",
   "me.delete.done": "Votre compte a été supprimé.",
   "me.delete.partial": "Votre compte a été supprimé, mais certaines données n'ont pas pu être effacées de cet appareil. Désinstaller l'application les supprime.",
+  "me.delete.maybeDone": "Nous n'avons pas pu confirmer la suppression de votre compte, et vous avez été déconnecté de cet appareil (ses parties enregistrées et ses données ont été effacées). Reconnectez-vous pour vérifier : si votre compte existe encore, supprimez-le de nouveau.",
+  "me.delete.maybePartial": "Nous n'avons pas pu confirmer la suppression de votre compte, et vous avez été déconnecté, mais certaines données n'ont pas pu être effacées de cet appareil. Reconnectez-vous pour vérifier : si votre compte existe encore, supprimez-le de nouveau. La désinstallation de l'application supprime le reste.",
   "me.delete.failed": "Impossible de supprimer votre compte, et rien n'a été modifié sur cet appareil. Réessayez.",
+  "me.delete.unreachable": "Nous n'avons pas pu joindre le serveur et n'avons donc pas pu confirmer la suppression de votre compte. Vous êtes toujours connecté et rien n'a été modifié sur cet appareil. Vérifiez votre connexion et réessayez.",
   "me.notifications": "Notifications",
   "me.notifications.enable": "Activer les notifications",
   "me.notifications.unavailable": "Les notifications arriveront dans une version ultérieure.",
