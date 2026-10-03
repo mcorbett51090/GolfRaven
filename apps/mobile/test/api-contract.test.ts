@@ -162,8 +162,8 @@ describe("every error status maps to an ApiError (recorded bodies)", () => {
   });
 
   it("the table covers every recorded error fixture", () => {
-    // The evidence lane's fixtures (challenge_ / token_ / evidence_ / batch_) are covered by `evidence-wire.test.ts`, the key-registration ones (attestkey_) by `attest-send.test.ts`, the offline-seed ones (offlineseed_) by `offline-code-manager.test.ts` and the reward-activation ones (activate_) by `rewards-activation.test.ts`.
-    const errorFixtures = Object.entries(RECORDED).filter(([k, r]) => r.status >= 400 && !/^(challenge|token|evidence|batch|attestkey|offlineseed|activate)_/.test(k)).map(([k]) => k);
+    // The evidence lane's fixtures (challenge_ / token_ / evidence_ / batch_) are covered by `evidence-wire.test.ts`, the key-registration ones (attestkey_) by `attest-send.test.ts`, the offline-seed ones (offlineseed_) by `offline-code-manager.test.ts` the reward-activation ones (activate_) by `rewards-activation.test.ts` and the check-in screen's (checkin_) by `checkin-wire.test.ts`.
+    const errorFixtures = Object.entries(RECORDED).filter(([k, r]) => r.status >= 400 && !/^(challenge|token|evidence|batch|attestkey|offlineseed|activate|checkin)_/.test(k)).map(([k]) => k);
     expect(table.map((t) => t[0]).sort()).toEqual(errorFixtures.sort());
   });
 

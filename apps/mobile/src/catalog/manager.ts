@@ -85,6 +85,8 @@
 import { compareCatalogVersions } from "@golfraven/catalog-tools/manifest-core";
 import { utf8DecodeStrict, utf8Encode } from "./bytes";
 import type { CatalogCrypto } from "./crypto";
+import type { z } from "zod";
+import { manifestSigSchema } from "../evidence/payload";
 import { MIN_CATALOG_VERSION, type TrustedKey } from "./keys";
 import { isBelowMinAppVersion } from "./semver";
 import { buildSnapshot, SnapshotParseError, type CatalogSnapshot } from "./snapshot";
@@ -352,6 +354,20 @@ export class CatalogManager {
 
   getState(): CatalogState {
     return this.state;
+  }
+
+  /** P4.2c: the fields of the cached `manifest.sig.json` for `catalogVersion`, in the shape an evidence submission's `manifestSig` takes (`evidence/payload.ts`), or `null`
+   * (nothing cached, another version, or a file that is not exactly that shape). Evidence for a catalog NEWER than the server's last import is queued by the server only when it
+   * carries this signature (otherwise `422 catalog_forged`), so a check-in made right after a catalog publish needs it. The cached file was verified when it was stored; this only reads it. */
+  async cachedManifestSig(catalogVersion: string): Promise<z.infer<typeof manifestSigSchema> | null> {
+    try {
+      const stored = await this.opts.store.loadCatalog();
+      if (!stored) return null;
+      const parsed = manifestSigSchema.safeParse(JSON.parse(stored.manifestSigText));
+      return parsed.success && parsed.data.catalogVersion === catalogVersion ? parsed.data : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Runs `fn` after everything queued before it; never concurrently. */

@@ -1,0 +1,3 @@
+{
+  "NSLocationWhenInUseUsageDescription": "GolfRaven utilise votre position seulement lorsque l'app est ouverte, quand vous touchez « Je suis ici » ou « J'achète un marqueur », pour confirmer que vous êtes au parcours ou à la boutique. L'app ne vous suit jamais en arrière-plan."
+}

@@ -80,7 +80,7 @@ import { computeIosCheckinBinding, iosCheckinChallengeString } from "../../../su
 import { handleTokenRequest } from "../../../supabase/functions/_shared/checkin/token-handler.ts";
 import { parseTokenBody } from "../../../supabase/functions/_shared/checkin/token-request-shape.ts";
 import { handleEvidenceBatchIntake, MAX_BATCH_ITEMS_PER_REQUEST } from "../../../supabase/functions/_shared/evidence/batch-handler.ts";
-import { computeInputHash, handleEvidenceIntake, planEvidenceRateLimitChecks } from "../../../supabase/functions/_shared/evidence/handler.ts";
+import { computeInputHash, handleEvidenceIntake, localDateInTz, planEvidenceRateLimitChecks } from "../../../supabase/functions/_shared/evidence/handler.ts";
 import { deriveSourceRef } from "../../../supabase/functions/_shared/evidence/source-ref.ts";
 import { canonicalStringify, MANIFEST_DOMAIN } from "../../../supabase/functions/_shared/catalog/manifest-artifact.ts";
 import { Errors, errorResponse, handleRequest, MAX_BODY_BYTES, okResponse } from "../../../supabase/functions/_shared/http.ts";
@@ -89,7 +89,7 @@ import { computeAttestKeyBinding, attestKeyChallengeString } from "../../../supa
 import { computeIosActivationBinding, iosActivationChallengeString } from "../../../supabase/functions/_shared/rewards/string-binding.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/edge-contract.json", import.meta.url));
-const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_", "offlineseed_", "activate_"];
+const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_", "offlineseed_", "activate_", "checkin_"];
 const UID = "user-a";
 /** The account the offline-seed entries are recorded for: the seed derivation names the account by UUID (as every real account id is). */
 const OFFLINE_UID = "11111111-aaaa-4aaa-8aaa-111111111111";
@@ -726,6 +726,87 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
   }
   rbCounter = rbBeforeP42b3b;
 
+  // ---------------- the foreground check-in screen (P4.2c) ----------------
+  // What the CHECK-IN SCREEN sends, recorded from the real handlers: a device-shaped fix (fractional coordinates and accuracy), the facility-local date taken from the fix's OWN time in the
+  // FACILITY's tz (here a fix at 23:59:30 on 06-01 in America/Chicago, which is already 06-02 in UTC), and the three ways a challenge can relate to a fix. The token's consumption is read from the
+  // server's own state after the REAL evidence handler ran (`consumeForFix` is the handler's own call), because the answer to the evidence request is the same either way: a fix that is not
+  // a co-signal is a normal, scoreable play. Recorded into `vectors.checkinWindow` / `vectors.localDate`.
+  const rbBeforeP42c = rbCounter;
+  const CHI = Date.parse("2026-06-02T04:59:30.000Z");
+  const screenFix = (id: string, at: number, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    fixId: id, lat: 36.14671234, lng: -86.78159876, accuracyMeters: 8.123, capturedAt: at, simulated: false, foreground: true, fromApp: true, ...extra,
+  });
+  const screenBody = (id: string, at: number, localDate: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ source: "foreground_checkin", ...common, localDate, fix: screenFix(id, at, extra) });
+  const issueAt = async (e: { state: FakeState; repo: ReturnType<typeof makeFakeRepo> }, at: number, body: Record<string, unknown>): Promise<{ id: string; nonce: string; expiresAt: string }> => {
+    e.state.now = new Date(at);
+    return (JSON.parse((await challengeEndpoint(e.state, e.repo, body)).body).data.challenges as Array<{ id: string; nonce: string; expiresAt: string }>)[0]!;
+  };
+  const redeemAt = async (e: { state: FakeState; repo: ReturnType<typeof makeFakeRepo> }, at: number, c: { id: string; nonce: string }): Promise<string> => {
+    e.state.now = new Date(at);
+    return JSON.parse((await tokenEndpoint(e.repo, { challengeId: c.id, nonce: c.nonce, hardwareSupportsAttestation: false })).body).data.jti as string;
+  };
+  const consumed = (e: { state: FakeState }, jti: string): boolean => e.state.checkinTokens.get(jti)?.consumedAt != null;
+  const window: Record<string, unknown> = {};
+  {
+    // (a) PREFETCHED: the pool was topped up an hour before the check-in; the fix is covered; redeemed (online) five minutes after it, evidence a minute later.
+    const e = fresh();
+    const c = await issueAt(e, CHI - 3600_000, { deviceId: FAKE_DEVICE_ID, prefetchCount: 1 });
+    const jti = await redeemAt(e, CHI + 300_000, c);
+    e.state.now = new Date(CHI + 360_000);
+    r.checkin_screen_prefetched_200 = await evidenceEndpoint(e.state, e.repo, screenBody("fixScr1", CHI, "2026-06-01", { checkinTokenJti: jti }));
+    window.prefetchedCovered = { consumed: consumed(e, jti) };
+  }
+  {
+    // (b) LIVE FIRST: the challenge was issued 20 s before the fix and redeemed at once; the fix is inside its 120 s window.
+    const e = fresh();
+    const c = await issueAt(e, CHI - 20_000, { deviceId: FAKE_DEVICE_ID, facilityId: "fac_x" });
+    const jti = await redeemAt(e, CHI - 19_000, c);
+    e.state.now = new Date(CHI + 1_000);
+    r.checkin_screen_live_first_200 = await evidenceEndpoint(e.state, e.repo, screenBody("fixScr2", CHI, "2026-06-01", { checkinTokenJti: jti }));
+    window.liveFirst = { consumed: consumed(e, jti) };
+  }
+  {
+    // (c) LIVE AFTER THE FIX (what `acquireForFix({ live: true })` would do): the challenge is issued 2 s AFTER the fix was captured. The evidence is accepted all the same, but the token is NOT consumed.
+    const e = fresh();
+    const c = await issueAt(e, CHI + 2_000, { deviceId: FAKE_DEVICE_ID, facilityId: "fac_x" });
+    const jti = await redeemAt(e, CHI + 3_000, c);
+    e.state.now = new Date(CHI + 4_000);
+    r.checkin_screen_live_after_fix_200 = await evidenceEndpoint(e.state, e.repo, screenBody("fixScr3", CHI, "2026-06-01", { checkinTokenJti: jti }));
+    window.liveAfterFix = { consumed: consumed(e, jti) };
+  }
+  {
+    // (d) the date is the FACILITY-LOCAL date of the fix's own time: labelling the same fix with its UTC date is refused.
+    const e = fresh();
+    e.state.now = new Date(CHI + 60_000);
+    r.checkin_422_local_date_utc = await evidenceEndpoint(e.state, e.repo, screenBody("fixScr4", CHI, "2026-06-02"));
+  }
+  {
+    // The window's edges, through the real evidence handler: for each challenge kind, a fix 1 ms before the issue, at the issue, at the expiry, 1 ms after it.
+    const cases: Array<{ kind: "prefetched" | "live"; offsetFromIssueMs: number; issuedAt: number; expiresAt: number; consumed: boolean; status: number }> = [];
+    for (const kind of ["prefetched", "live"] as const) {
+      const probe = fresh();
+      const p = await issueAt(probe, T0, kind === "live" ? { deviceId: FAKE_DEVICE_ID } : { deviceId: FAKE_DEVICE_ID, prefetchCount: 1 });
+      const ttl = Date.parse(p.expiresAt) - T0;
+      for (const offset of [-1, 0, ttl, ttl + 1]) {
+        const e = fresh();
+        const c = await issueAt(e, T0, kind === "live" ? { deviceId: FAKE_DEVICE_ID } : { deviceId: FAKE_DEVICE_ID, prefetchCount: 1 });
+        const jti = await redeemAt(e, T0, c);
+        const capturedAt = T0 + offset;
+        const res = await evidenceEndpoint(e.state, e.repo, screenBody(`fixW${kind}${offset}`.replace(/[^A-Za-z0-9]/g, "x"), capturedAt, localDateInTz(capturedAt, "America/Chicago"), { checkinTokenJti: jti }));
+        cases.push({ kind, offsetFromIssueMs: offset, issuedAt: T0, expiresAt: Date.parse(c.expiresAt), consumed: consumed(e, jti), status: res.status });
+      }
+    }
+    window.edges = cases;
+  }
+  rbCounter = rbBeforeP42c;
+  const localDateSamples = [
+    ["America/Chicago", "2026-06-02T04:59:30.000Z"], ["America/Chicago", "2026-06-02T05:00:00.000Z"], ["America/Chicago", "2026-03-08T07:59:59.000Z"], ["America/Chicago", "2026-03-08T08:00:00.000Z"],
+    ["America/Chicago", "2026-11-01T06:59:59.000Z"], ["America/Chicago", "2026-11-01T07:00:00.000Z"], ["America/Toronto", "2026-06-30T03:59:59.000Z"], ["America/Toronto", "2026-06-30T04:00:00.000Z"],
+    ["America/Vancouver", "2026-01-01T07:59:59.000Z"], ["America/Vancouver", "2026-01-01T08:00:00.000Z"], ["America/Halifax", "2026-07-15T02:59:59.000Z"], ["America/Halifax", "2026-07-15T03:00:00.000Z"],
+    ["America/St_Johns", "2026-12-31T03:29:59.000Z"], ["America/St_Johns", "2026-12-31T03:30:00.000Z"], ["Pacific/Honolulu", "2026-05-05T09:59:59.000Z"], ["Pacific/Honolulu", "2026-05-05T10:00:00.000Z"],
+    ["Europe/London", "2026-06-15T22:59:59.000Z"], ["Europe/London", "2026-06-15T23:00:00.000Z"], ["UTC", "2026-02-28T23:59:59.999Z"], ["UTC", "2026-03-01T00:00:00.000Z"],
+  ].map(([tz, iso]) => ({ tz: tz!, epochMs: Date.parse(iso!), localDate: localDateInTz(Date.parse(iso!), tz!) }));
+
   // ---------------- batch (the REAL handleEvidenceBatchIntake) ----------------
   {
     const e = fresh();
@@ -810,6 +891,11 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
     times: await Promise.all(offlineTimes.map(async (unixSeconds) => ({ unixSeconds, step: stepOf(unixSeconds), code: await codeAtStep(stepOf(unixSeconds)) }))),
     leadingZero: { step: leadingZeroStep, unixSeconds: leadingZeroStep * OFFLINE_CODE_STEP_SECONDS, code: await codeAtStep(leadingZeroStep) },
   };
+  (vectors as Record<string, unknown>).checkinWindow = {
+    note: "the server's `consumeForFix` window (`issued_at <= capturedAt <= expires_at` of the token's CHALLENGE), observed through the REAL evidence handler: `consumed` is read from the fake's token row afterwards",
+    ...window,
+  };
+  (vectors as Record<string, unknown>).localDate = { note: "the server's own `localDateInTz` (evidence/handler.ts)", samples: localDateSamples };
   // `undefined` must not leak into the JSON (`installLinkId: undefined` above is dropped by stringify)
   return { responses: r, vectors };
 }
@@ -825,6 +911,8 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
         "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_, attestkey_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token, devices-attest-key) and the real binding / source-ref code over the server's own fakes; the Apple / Google verification PORTS are scripted (accept exactly the base64url of the binding the real code computed; see the script's header), behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
       _provenance_p42b3b:
         "Entries starting offlineseed_ and activate_ (and `vectors.offlineCode`) were recorded by the same script (P4.2b-3b) from the REAL handlers: me-offline-seed (handleOfflineSeedRequest, over the server's in-memory offline-code repo; the seed is the server test suite's independent reference derivation under its TEST key, not a production secret) and rewards-activate (handleActivation, parseActivationBody, extractRewardId, enforceActivationRateLimits, over the in-memory rewards repo) with the scripted Apple / Google ports described above. Only privileged.ts is replaced (in-memory rate limits) and, as for checkin-token, the rollback of the handler's transaction on a thrown error is emulated. `vectors.offlineCode` holds codes the server's totp.ts computed.",
+      _provenance_p42c:
+        "Entries starting checkin_ and `vectors.checkinWindow` / `vectors.localDate` were recorded by the same script (P4.2c) from the REAL evidence, checkin-challenge and checkin-token handlers: the request the check-in screen builds (device-shaped fix, facility-local date from the fix's own time), and how the server's challenge window (`issued_at <= capturedAt <= expires_at`) treats a prefetched challenge, a live challenge taken before the fix and a live challenge taken after it. `consumed` flags are read from the server fake's token row after the real handler ran; `localDate` samples are the server's own `localDateInTz`.",
       responses: { ...kept, ...responses },
       vectors: JSON.parse(JSON.stringify(vectors)),
     };
@@ -864,6 +952,12 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     expect(JSON.parse(responses.attestkey_200_replaced!.body).data).toMatchObject({ replaced: true });
     expect(responses.attestkey_409_previously_retired!.status).toBe(409);
     expect(JSON.parse(responses.attestkey_409_previously_retired!.body).error.code).toBe("key_previously_retired");
+    // P4.2c: what the check-in screen's recording must have seen
+    expect([responses.checkin_screen_prefetched_200!.status, responses.checkin_screen_live_first_200!.status, responses.checkin_screen_live_after_fix_200!.status, responses.checkin_422_local_date_utc!.status]).toEqual([200, 200, 200, 422]);
+    expect(JSON.parse(responses.checkin_422_local_date_utc!.body).error.code).toBe("local_date_mismatch");
+    const cw = (vectors as unknown as { checkinWindow: { prefetchedCovered: { consumed: boolean }; liveFirst: { consumed: boolean }; liveAfterFix: { consumed: boolean }; edges: Array<{ consumed: boolean }> } }).checkinWindow;
+    expect([cw.prefetchedCovered.consumed, cw.liveFirst.consumed, cw.liveAfterFix.consumed]).toEqual([true, true, false]);
+    expect(cw.edges.map((x) => x.consumed)).toEqual([false, true, true, false, false, true, true, false]);
     void errorResponse;
   });
 });

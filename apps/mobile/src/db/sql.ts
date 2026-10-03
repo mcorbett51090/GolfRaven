@@ -21,7 +21,7 @@ export interface SqlDatabase extends SqlQueryable {
 }
 
 /** Bump with a new entry in `MIGRATIONS` below; never edit a shipped one. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** A migration is SQL, or (when it must rewrite data, not only shape) a function run in the same transaction. `now` is the migration clock. */
 type Migration = string | ((tx: SqlQueryable, now: () => number) => Promise<void>);
@@ -70,6 +70,19 @@ const MIGRATIONS: readonly Migration[] = [
     PRIMARY KEY (owner_user_id, id)
   );
   CREATE INDEX checkin_challenge_pick_idx ON checkin_challenge (owner_user_id, device_id, consumed_at, expires_at);
+  `,
+  // v4 (P4.2c): the "Buying a marker" co-signal records (build plan §7.6 G2-03), per owner. LOCAL ONLY: no server path accepts them yet, so nothing reads this table to send (`marker/store.ts`).
+  // `record_json` is the whole `MarkerCosignal`; the other columns are what a list / a wipe needs.
+  `
+  CREATE TABLE marker_cosignal (
+    owner_user_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    facility_id TEXT NOT NULL,
+    captured_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    record_json TEXT NOT NULL,
+    PRIMARY KEY (owner_user_id, id)
+  );
   `,
 ];
 

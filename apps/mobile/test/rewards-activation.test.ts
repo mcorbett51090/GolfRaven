@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createHttpApiClient, createUnconfiguredApi } from "../src/api";
 import { AttestationDeferred, PlainActivator, ActivationUnsupportedPlatform } from "../src/attest";
-import { CHECKIN_UI_ENABLED, OFFLINE_CODE_UI_ENABLED, WALLET_ACTIVATION_UI_ENABLED } from "../src/features";
+import { CHECKIN_UI_ENABLED, MARKER_COSIGNAL_UI_ENABLED, OFFLINE_CODE_UI_ENABLED, WALLET_ACTIVATION_UI_ENABLED } from "../src/features";
 import { en } from "../src/i18n/messages/en";
 import { frCA } from "../src/i18n/messages/fr-CA";
 import { activateReward, activationMessage, isRetryableActivation, outcomeFromAnswer, outcomeFromError, type ActivationOutcome, type ActivationOutcomeStatus } from "../src/rewards";
@@ -291,16 +291,18 @@ describe("FLAGS OFF: nothing of the offline code or the Wallet activation is rea
   const users = (needle: RegExp): string[] => app.filter((f) => needle.test(strip(readFileSync(f, "utf8")))).map(rel).sort();
 
   it("the three switches are literally false", () => {
-    expect([CHECKIN_UI_ENABLED, OFFLINE_CODE_UI_ENABLED, WALLET_ACTIVATION_UI_ENABLED]).toEqual([false, false, false]);
+    expect([CHECKIN_UI_ENABLED, OFFLINE_CODE_UI_ENABLED, WALLET_ACTIVATION_UI_ENABLED, MARKER_COSIGNAL_UI_ENABLED]).toEqual([false, false, false, false]);
     const features = strip(read("src/features.ts"));
-    for (const name of ["CHECKIN_UI_ENABLED", "OFFLINE_CODE_UI_ENABLED", "WALLET_ACTIVATION_UI_ENABLED"]) expect(features).toMatch(new RegExp(`export const ${name} = false;`));
-    expect(features.match(/export const \w+ =/g)).toHaveLength(3);
+    for (const name of ["CHECKIN_UI_ENABLED", "OFFLINE_CODE_UI_ENABLED", "WALLET_ACTIVATION_UI_ENABLED", "MARKER_COSIGNAL_UI_ENABLED"]) expect(features).toMatch(new RegExp(`export const ${name} = false;`));
+    expect(features.match(/export const \w+ =/g)).toHaveLength(4);
   });
 
   it("each switch is read in exactly the places that gate on it", () => {
     expect(users(/\bOFFLINE_CODE_UI_ENABLED\b/)).toEqual(["app/(tabs)/me.tsx", "src/features.ts", "src/offline-code/gate.ts"]);
     expect(users(/\bWALLET_ACTIVATION_UI_ENABLED\b/)).toEqual(["app/(tabs)/wallet.tsx", "src/features.ts"]);
-    expect(users(/\bCHECKIN_UI_ENABLED\b/)).toEqual(["src/challenges/prefetch-gate.ts", "src/features.ts"]);
+    // P4.2c: the check-in screen reads the switch through `checkinUiAvailable()` (`src/checkin/gate.ts`), the one place besides the prefetch gate; `test/checkin-flag.test.ts` pins the rest.
+    expect(users(/\bCHECKIN_UI_ENABLED\b/)).toEqual(["src/challenges/prefetch-gate.ts", "src/checkin/gate.ts", "src/features.ts"]);
+    expect(users(/\bMARKER_COSIGNAL_UI_ENABLED\b/)).toEqual(["src/checkin/gate.ts", "src/features.ts"]);
   });
 
   it("the cards are rendered only behind their switch, and imported by no one else", () => {

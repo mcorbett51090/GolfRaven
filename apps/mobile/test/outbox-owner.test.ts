@@ -487,7 +487,7 @@ describe("the v1 -> v2 upgrade (legacy ownerless rows)", () => {
     const owner = (await cols()).find((c) => c.name === "owner_user_id");
     expect(owner).toMatchObject({ notnull: 1, dflt_value: null });
     expect((await db.all<{ user_version: number }>("PRAGMA user_version"))[0]?.user_version).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(3);
+    expect(SCHEMA_VERSION).toBe(4);
     // an ownerless INSERT is a hard SQL error, not a silent default
     await expect((async () => db.run("INSERT INTO outbox (id, source_ref, status, created_at, item_json) VALUES ('x', 'x', 'pending', 1, '{}')"))()).rejects.toThrow(/NOT NULL/i);
     await expect((async () => db.run("INSERT INTO outbox (id, source_ref, owner_user_id, status, created_at, item_json) VALUES ('y', 'y', NULL, 'pending', 1, '{}')"))()).rejects.toThrow(/NOT NULL/i);

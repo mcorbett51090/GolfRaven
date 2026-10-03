@@ -41,17 +41,34 @@ export function Card({ children, onPress, style }: { children: ReactNode; onPres
   );
 }
 
-export function Button({ title, onPress, variant = "primary", disabled = false }: { title: string; onPress: () => void; variant?: "primary" | "secondary" | "danger"; disabled?: boolean }) {
+export function Button({
+  title,
+  onPress,
+  variant = "primary",
+  disabled = false,
+  busy = false,
+  accessibilityHint,
+}: {
+  title: string;
+  onPress: () => void;
+  variant?: "primary" | "secondary" | "danger";
+  disabled?: boolean;
+  /** An action is running: the button is disabled and says so to a screen reader. */
+  busy?: boolean;
+  accessibilityHint?: string;
+}) {
   const t = useTheme();
   const bg = variant === "primary" ? t.accent : "transparent";
   const fg = variant === "primary" ? t.onAccent : variant === "danger" ? t.danger : t.accent;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled }}
-      disabled={disabled}
+      accessibilityLabel={title}
+      {...(accessibilityHint !== undefined ? { accessibilityHint } : {})}
+      accessibilityState={{ disabled: disabled || busy, busy }}
+      disabled={disabled || busy}
       onPress={onPress}
-      style={({ pressed }) => [styles.button, { backgroundColor: bg, borderColor: variant === "primary" ? t.accent : t.border }, pressed && styles.pressed, disabled && styles.disabled]}
+      style={({ pressed }) => [styles.button, { backgroundColor: bg, borderColor: variant === "primary" ? t.accent : t.border }, pressed && styles.pressed, (disabled || busy) && styles.disabled]}
     >
       <Text style={[styles.buttonText, { color: fg }]}>{title}</Text>
     </Pressable>

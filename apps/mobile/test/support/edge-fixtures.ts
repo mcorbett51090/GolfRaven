@@ -32,6 +32,15 @@ export interface Vectors {
     };
     canonicalJsonSample: { input: unknown; output: string };
   };
+  /** P4.2c: the server's challenge window as observed through the REAL evidence handler (`consumed` = the token was consumed by the fix, i.e. the fix counted as a co-signal). */
+  checkinWindow: {
+    prefetchedCovered: { consumed: boolean };
+    liveFirst: { consumed: boolean };
+    liveAfterFix: { consumed: boolean };
+    edges: Array<{ kind: "prefetched" | "live"; offsetFromIssueMs: number; issuedAt: number; expiresAt: number; consumed: boolean; status: number }>;
+  };
+  /** P4.2c: the server's own `localDateInTz` for fixed instants. */
+  localDate: { samples: Array<{ tz: string; epochMs: number; localDate: string }> };
   /** Codes the SERVER's own `totp.ts` computed for the seed recorded in `responses.offlineseed_200` (P4.2b-3b). */
   offlineCode: {
     seedFrom: string;

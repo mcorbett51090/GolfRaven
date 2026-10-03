@@ -11,7 +11,7 @@ describe("SQLite schema", () => {
     await migrate(db);
     expect((await db.all<{ user_version: number }>("PRAGMA user_version"))[0]?.user_version).toBe(SCHEMA_VERSION);
     const tables = (await db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")).map((t) => t.name);
-    expect(tables).toEqual(["catalog_files", "catalog_meta", "checkin_challenge", "device_flags", "outbox"]);
+    expect(tables).toEqual(["catalog_files", "catalog_meta", "checkin_challenge", "device_flags", "marker_cosignal", "outbox"]);
   });
 
   it("refuses a database written by a newer build (never downgrades silently)", async () => {
