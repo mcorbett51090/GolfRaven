@@ -147,14 +147,14 @@
     },
     "challenge_live_201": {
       "status": 201,
-      "body": "{\"data\":{\"challenges\":[{\"id\":\"chal_1\",\"nonce\":\"LDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3_gU\",\"expiresAt\":\"2026-06-01T12:02:00.000Z\",\"kind\":\"live\"}]}}",
+      "body": "{\"data\":{\"challenges\":[{\"id\":\"00000000-0000-4000-8000-000000000001\",\"nonce\":\"LDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fD3_gU\",\"expiresAt\":\"2026-06-01T12:02:00.000Z\",\"kind\":\"live\"}]}}",
       "request": {
         "deviceId": "11111111-1111-4111-8111-111111111111"
       }
     },
     "challenge_prefetch_3_201": {
       "status": 201,
-      "body": "{\"data\":{\"challenges\":[{\"id\":\"chal_1\",\"nonce\":\"S1JZYGdudXyDipGYn6attLvCydDX3uXs8_oBCA8WHSQ\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_2\",\"nonce\":\"anF4f4aNlJuiqbC3vsXM09rh6O_2_QQLEhkgJy41PEM\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_3\",\"nonce\":\"iZCXnqWss7rByM_W3eTr8vkABw4VHCMqMTg_Rk1UW2I\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"}]}}",
+      "body": "{\"data\":{\"challenges\":[{\"id\":\"00000000-0000-4000-8000-000000000001\",\"nonce\":\"S1JZYGdudXyDipGYn6attLvCydDX3uXs8_oBCA8WHSQ\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000002\",\"nonce\":\"anF4f4aNlJuiqbC3vsXM09rh6O_2_QQLEhkgJy41PEM\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000003\",\"nonce\":\"iZCXnqWss7rByM_W3eTr8vkABw4VHCMqMTg_Rk1UW2I\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"}]}}",
       "request": {
         "deviceId": "11111111-1111-4111-8111-111111111111",
         "prefetchCount": 3
@@ -162,7 +162,7 @@
     },
     "challenge_prefetch_10_201": {
       "status": 201,
-      "body": "{\"data\":{\"challenges\":[{\"id\":\"chal_1\",\"nonce\":\"qK-2vcTL0tng5-71_AMKERgfJi00O0JJUFdeZWxzeoE\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_2\",\"nonce\":\"x87V3OPq8fj_Bg0UGyIpMDc-RUxTWmFob3Z9hIuSmaA\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_3\",\"nonce\":\"5u30-wIJEBceJSwzOkFIT1ZdZGtyeYCHjpWco6qxuL8\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_4\",\"nonce\":\"BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ194\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_5\",\"nonce\":\"JCsyOUBHTlVcY2pxeH-GjZSboqmwt77FzNPa4ejv9v0\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_6\",\"nonce\":\"Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6_L5AAcOFRw\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_7\",\"nonce\":\"Ymlwd36FjJOaoaivtr3Ey9LZ4Ofu9fwDChEYHyYtNDs\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_8\",\"nonce\":\"gYiPlp2kq7K5wMfO1dzj6vH4_wYNFBsiKTA3PkVMU1o\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_9\",\"nonce\":\"oKeutbzDytHY3-bt9PsCCRAXHiUsMzpBSE9WXWRrcnk\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_10\",\"nonce\":\"v8bN1Nvi6fD3_gUMExohKC82PURLUllgZ251fIOKkZg\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"}]}}",
+      "body": "{\"data\":{\"challenges\":[{\"id\":\"00000000-0000-4000-8000-000000000001\",\"nonce\":\"qK-2vcTL0tng5-71_AMKERgfJi00O0JJUFdeZWxzeoE\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000002\",\"nonce\":\"x87V3OPq8fj_Bg0UGyIpMDc-RUxTWmFob3Z9hIuSmaA\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000003\",\"nonce\":\"5u30-wIJEBceJSwzOkFIT1ZdZGtyeYCHjpWco6qxuL8\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000004\",\"nonce\":\"BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ194\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000005\",\"nonce\":\"JCsyOUBHTlVcY2pxeH-GjZSboqmwt77FzNPa4ejv9v0\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000006\",\"nonce\":\"Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6_L5AAcOFRw\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000007\",\"nonce\":\"Ymlwd36FjJOaoaivtr3Ey9LZ4Ofu9fwDChEYHyYtNDs\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000008\",\"nonce\":\"gYiPlp2kq7K5wMfO1dzj6vH4_wYNFBsiKTA3PkVMU1o\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000009\",\"nonce\":\"oKeutbzDytHY3-bt9PsCCRAXHiUsMzpBSE9WXWRrcnk\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000010\",\"nonce\":\"v8bN1Nvi6fD3_gUMExohKC82PURLUllgZ251fIOKkZg\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"}]}}",
       "request": {
         "deviceId": "11111111-1111-4111-8111-111111111111",
         "prefetchCount": 10
@@ -178,7 +178,7 @@
     },
     "challenge_prefetch_partial_201": {
       "status": 201,
-      "body": "{\"data\":{\"challenges\":[{\"id\":\"chal_9\",\"nonce\":\"1t3k6_L5AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK8\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"chal_10\",\"nonce\":\"9fwDChEYHyYtNDtCSVBXXmVsc3qBiI-WnaSrsrnAx84\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"}]}}",
+      "body": "{\"data\":{\"challenges\":[{\"id\":\"00000000-0000-4000-8000-000000000009\",\"nonce\":\"1t3k6_L5AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK8\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"},{\"id\":\"00000000-0000-4000-8000-000000000010\",\"nonce\":\"9fwDChEYHyYtNDtCSVBXXmVsc3qBiI-WnaSrsrnAx84\",\"expiresAt\":\"2026-06-02T12:00:00.000Z\",\"kind\":\"prefetched\"}]}}",
       "request": {
         "deviceId": "11111111-1111-4111-8111-111111111111",
         "prefetchCount": 8
@@ -196,7 +196,16 @@
       "status": 201,
       "body": "{\"data\":{\"jti\":\"jti_5\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"unattestable\"}}",
       "request": {
-        "challengeId": "chal_1",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0",
+        "hardwareSupportsAttestation": false
+      }
+    },
+    "token_201_idempotent_replay": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_5\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"unattestable\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000001",
         "nonce": "FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0",
         "hardwareSupportsAttestation": false
       }
@@ -205,8 +214,27 @@
       "status": 422,
       "body": "{\"error\":{\"code\":\"challenge_used\",\"message\":\"this challenge has already been consumed\"}}",
       "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "cXh_ho2Um6KpsLe-xczT2uHo7_b9BAsSGSAnLjU8Q0o",
+        "hardwareSupportsAttestation": false
+      }
+    },
+    "token_400_unknown_key": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid checkin-token request\",\"details\":[{\"path\":\"deviceId\",\"message\":\"unrecognised field\"}]}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "MzpBSE9WXWRrcnmAh46VnKOqsbi_xs3U2-Lp8Pf-BQw",
+        "hardwareSupportsAttestation": false,
+        "deviceId": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    "token_400_not_a_uuid": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid checkin-token request\",\"details\":[{\"path\":\"challengeId\",\"message\":\"must be a UUID\"}]}}",
+      "request": {
         "challengeId": "chal_1",
-        "nonce": "FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0",
+        "nonce": "MzpBSE9WXWRrcnmAh46VnKOqsbi_xs3U2-Lp8Pf-BQw",
         "hardwareSupportsAttestation": false
       }
     },
@@ -214,7 +242,7 @@
       "status": 422,
       "body": "{\"error\":{\"code\":\"challenge_not_consumable\",\"message\":\"this challenge could not be consumed (already used, expired, or the nonce did not match)\"}}",
       "request": {
-        "challengeId": "chal_2",
+        "challengeId": "00000000-0000-4000-8000-000000000002",
         "nonce": "AzpBSE9WXWRrcnmAh46VnKOqsbi_xs3U2-Lp8Pf-BQw",
         "hardwareSupportsAttestation": false
       }
@@ -223,7 +251,7 @@
       "status": 404,
       "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"no such challenge for this account\"}}",
       "request": {
-        "challengeId": "chal_999",
+        "challengeId": "00000000-0000-4000-8000-0000000009ff",
         "nonce": "MzpBSE9WXWRrcnmAh46VnKOqsbi_xs3U2-Lp8Pf-BQw",
         "hardwareSupportsAttestation": false
       }
@@ -232,7 +260,7 @@
       "status": 201,
       "body": "{\"data\":{\"jti\":\"jti_6\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"failed\"}}",
       "request": {
-        "challengeId": "chal_3",
+        "challengeId": "00000000-0000-4000-8000-000000000003",
         "nonce": "UllgZ251fIOKkZifpq20u8LJ0Nfe5ezz-gEIDxYdJCs",
         "hardwareSupportsAttestation": true
       }
@@ -241,7 +269,7 @@
       "status": 422,
       "body": "{\"error\":{\"code\":\"challenge_expired\",\"message\":\"this challenge has expired\"}}",
       "request": {
-        "challengeId": "chal_1",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
         "nonce": "kJeepayzusHIz9bd5Ovy-QAHDhUcIyoxOD9GTVRbYmk",
         "hardwareSupportsAttestation": false
       }
@@ -716,7 +744,7 @@
     },
     "batch_200_rate_limited_item": {
       "status": 200,
-      "body": "{\"data\":{\"results\":[{\"index\":0,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_5\",\"replay\":false,\"play\":{\"id\":\"play_6\",\"scoreBadge\":0.1,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":1,\"ok\":false,\"error\":{\"code\":\"rate_limited\",\"message\":\"evidence-batch daily rate limit exceeded\"}}],\"maxBodyBytes\":65536}}",
+      "body": "{\"data\":{\"results\":[{\"index\":0,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_5\",\"replay\":false,\"play\":{\"id\":\"play_6\",\"scoreBadge\":0.1,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":1,\"ok\":false,\"error\":{\"code\":\"rate_limited\",\"message\":\"evidence-batch daily rate limit exceeded\",\"details\":{\"retryAfterSeconds\":86400}}}],\"maxBodyBytes\":65536}}",
       "request": {
         "items": [
           {

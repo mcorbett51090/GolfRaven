@@ -276,6 +276,16 @@ export interface ConsumedCheckinToken {
   challengeKind: "live" | "prefetched";
 }
 
+/** The token an already-consumed challenge produced (`app.checkin_token` is UNIQUE(challenge_id): one token per challenge). Read by
+ * `checkin-token` to make a repeat redemption idempotent. */
+export interface IssuedCheckinTokenRow {
+  jti: string;
+  expiresAt: string;
+  attestationGrade: "attested" | "unattestable" | "failed";
+  /** Set once a fix consumed the token (`consumeForFix`): a consumed token is no longer a valid session. */
+  consumedAt: string | null;
+}
+
 /** The narrow repository object `withOwnership()` hands to its callback
  * (build plan §4.7.1a: "named methods over fixed tables... never the
  * supabase-js client"). Every method is already scoped to the `actor`
@@ -501,6 +511,10 @@ export interface Repo {
     /** How many `app.device` rows this actor already owns — P3c gate
      * round 2, item 7 ("cap the number of devices per user"). */
     countForUser(): Promise<number>;
+    /** 0042: sets this OWN device's platform iff it is still unknown (NULL) — the first platform-bearing use wins — and returns the platform on
+     * record afterwards, so the caller can refuse a mismatch. `null` for a device that is not the actor's own. Never changes a set platform.
+     * `ensureOwn(id, null)` (the challenge and evidence endpoints, which carry no platform) leaves the platform unknown. */
+    claimPlatform(deviceId: string, platform: "ios" | "android"): Promise<"ios" | "android" | null>;
   };
 
   challenge: {
@@ -529,6 +543,11 @@ export interface Repo {
      * `ConsumedCheckinToken`'s own doc for exactly what one call enforces
      * in a single statement. */
     consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null>;
+    /** The actor's own token for a CONSUMED challenge, or `null` (none was issued, or it is not this actor's). */
+    findByChallenge(challengeId: string): Promise<IssuedCheckinTokenRow | null>;
+    /** Has this actor ever been issued a token graded `attested` on this device? (The Android half of the "this device has shown it can
+     * attest" evidence the no-attestation grading rule uses; the iOS half is a registered key, `Repo#rewards.deviceAttestState`.) */
+    hasAttestedOnDevice(deviceId: string): Promise<boolean>;
   };
 
   /** P3d: `DELETE /v1/me` and `GET /v1/me/export` (build plan §4.7.1a

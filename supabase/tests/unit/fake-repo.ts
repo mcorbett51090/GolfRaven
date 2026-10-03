@@ -24,6 +24,7 @@ import type {
   ExistingEvidenceRow,
   ExportMyDataResult,
   InsertEvidenceResult,
+  IssuedCheckinTokenRow,
   LedgerRow,
   MatchResult,
   NewEvidenceRow,
@@ -35,8 +36,8 @@ import type {
   UpsertPlayInput,
   UpsertPlayResult,
 } from "../../functions/_shared/types.js";
-import { makeFakeAttestKeyRepo } from "./fake-attest-key-repo.ts";
-import { makeFakeRewardsRepo } from "./fake-rewards-repo.ts";
+import { fakeAttestDevices, makeFakeAttestKeyRepo } from "./fake-attest-key-repo.ts";
+import { makeFakeRewardsRepo, registerFakeDevice, rewardsState } from "./fake-rewards-repo.ts";
 import { deleteSigninRows, makeFakeSigninRepo } from "./fake-signin-repo.ts";
 
 const ABSOLUTE_ROW_CAP = 10_000; // mirrors packages/rules' own constant (score-play.ts) — see privileged.ts's own re-import of the SAME vendored value; hardcoded here rather than imported so this fake has zero dependency on the vendor tree's own layout.
@@ -76,6 +77,8 @@ interface FakeChallengeRow {
   facilityId: string | null;
   nonceHash: string;
   kind: "live" | "prefetched";
+  /** `app.checkin_challenge.issued_at` — the lower bound of the window `consumeForFix` clamps a fix's `capturedAt` to (0019/P3c gate round 3). */
+  issuedAt: string;
   expiresAt: string;
   usedAt: string | null;
 }
@@ -199,11 +202,11 @@ export const FAKE_DEVICE_ID = "11111111-1111-4111-8111-111111111111";
  * checks) call this directly, the same way a real Edge Function
  * entrypoint calls `hitRateLimitForActor` before ever opening
  * `withOwnership`. */
-export async function fakeHitRateLimitForActor(state: FakeState, actorUid: string, bucketKey: string, _windowSeconds: number, max: number): Promise<RateLimitResult> {
+export async function fakeHitRateLimitForActor(state: FakeState, actorUid: string, bucketKey: string, windowSeconds: number, max: number): Promise<RateLimitResult> {
   const key = `${actorUid}:${bucketKey}`;
   const count = (state.rateLimits.get(key) ?? 0) + 1;
   state.rateLimits.set(key, count);
-  if (count > max) return { ok: false, count, retryAfterSeconds: 3600 };
+  if (count > max) return { ok: false, count, retryAfterSeconds: windowSeconds };
   return { ok: true, count };
 }
 
@@ -536,14 +539,28 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         if (!row || row.userId !== uid) return null;
         return { id: row.id };
       },
-      async ensureOwn(deviceId: string | null, _platform: "ios" | "android" | null) {
+      async ensureOwn(deviceId: string | null, platform: "ios" | "android" | null) {
         if (deviceId) {
           const existing = state.devices.get(deviceId);
           if (existing && existing.userId === uid) return { id: existing.id };
         }
         const id = deviceId ?? freshId("dev");
         state.devices.set(id, { id, userId: uid });
+        registerFakeDevice(state, id, platform); // 0042: a null platform stays UNKNOWN (the old fake, like the old SQL, guessed 'ios')
         return { id };
+      },
+      async claimPlatform(deviceId: string, platform: "ios" | "android") {
+        // Mirrors private.claim_device_platform_for_actor (0042): the actor's own device only; sets the platform iff it is unknown; returns what is on record.
+        const row = state.devices.get(deviceId);
+        if (!row || row.userId !== uid) return null;
+        registerFakeDevice(state, deviceId, null);
+        const a = rewardsState(state).deviceAttest.get(deviceId)!;
+        const b = fakeAttestDevices(state).get(deviceId);
+        const current = a.platform ?? b?.platform ?? null;
+        if (current !== null) return current;
+        a.platform = platform;
+        if (b) b.platform = platform;
+        return platform;
       },
       async countForUser(): Promise<number> {
         let n = 0;
@@ -554,7 +571,9 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
 
     challenge: {
       async insert(input) {
-        const id = freshId("chal");
+        // UUID-shaped like the real `gen_random_uuid()` ids: the check-in token endpoint validates `challengeId` as a UUID (token-request-shape.ts),
+        // and the recorded edge contract (apps/mobile/test/fixtures/edge-contract.json) shows the shape a client really receives.
+        const id = `00000000-0000-4000-8000-${String(state.nextId++).padStart(12, "0")}`;
         // ⛔ FIX (P3c gate round 4): staffUserId removed from the real
         // input shape — every challenge is issued to the authenticated
         // actor themselves now, always.
@@ -566,6 +585,7 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
           facilityId: input.facilityId,
           nonceHash: input.nonceHash,
           kind: input.kind,
+          issuedAt: state.now.toISOString(),
           expiresAt: input.expiresAt,
           usedAt: null,
         });
@@ -609,22 +629,33 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         return { jti, expiresAt: input.expiresAt };
       },
       async consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
-        // ⛔ FIX (P3c gate round 2, item 4): mirrors privileged.ts's own
-        // single atomic UPDATE's WHERE clause — ownership, single-use,
-        // device match AND the issued_at <= capturedAt <= expires_at
-        // window clamp, all checked together so a fake test can never
-        // observe an intermediate state a real transaction wouldn't allow.
+        // ⛔ FIX (P3c gate round 2, item 4) + (round 3, "clamp to the CHALLENGE window, not the token's"): mirrors privileged.ts's own
+        // single atomic UPDATE ... FROM app.checkin_challenge cc — ownership, single use, the submitting-device match, the TOKEN's own
+        // `expires_at > now()`, AND `cc.issued_at <= capturedAt <= cc.expires_at` on the token's CHALLENGE (not the token's own
+        // issued_at: a prefetched challenge's window is 24 h while the token lives 15 min, so a fix captured hours before the redemption
+        // is valid in the real statement), all checked together so a fake test can never observe an intermediate state a real
+        // transaction wouldn't allow.
         const row = state.checkinTokens.get(jti);
         if (!row) return null;
         if (row.userId !== uid) return null;
         if (row.deviceId !== submittingDeviceId) return null;
         if (row.consumedAt !== null) return null;
-        const expiresAtMs = Date.parse(row.expiresAt);
-        const issuedAtMs = Date.parse(row.issuedAt);
-        if (!(expiresAtMs > state.now.getTime())) return null;
-        if (!(issuedAtMs <= capturedAtMs && capturedAtMs <= expiresAtMs)) return null;
+        const challenge = state.challenges.get(row.challengeId);
+        if (!challenge) return null; // the real statement is an inner join: no challenge row, no match
+        if (!(Date.parse(row.expiresAt) > state.now.getTime())) return null;
+        if (!(Date.parse(challenge.issuedAt) <= capturedAtMs && capturedAtMs <= Date.parse(challenge.expiresAt))) return null;
         row.consumedAt = state.now.toISOString();
         return { facilityId: row.facilityId, attestationGrade: row.attestationGrade, challengeKind: row.challengeKind };
+      },
+      async findByChallenge(challengeId: string): Promise<IssuedCheckinTokenRow | null> {
+        for (const row of state.checkinTokens.values()) {
+          if (row.userId === uid && row.challengeId === challengeId) return { jti: row.jti, expiresAt: row.expiresAt, attestationGrade: row.attestationGrade, consumedAt: row.consumedAt };
+        }
+        return null;
+      },
+      async hasAttestedOnDevice(deviceId: string): Promise<boolean> {
+        for (const row of state.checkinTokens.values()) if (row.userId === uid && row.deviceId === deviceId && row.attestationGrade === "attested") return true;
+        return false;
       },
     },
 

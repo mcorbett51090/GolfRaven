@@ -281,11 +281,25 @@ describe("batch answers: one HTTP 200, a result per item (recorded from the real
     expect(a.map((x) => classifyAnswer(x).to)).toEqual(["accepted", "accepted", "accepted", "needs_attention", "needs_attention", "needs_attention"]);
   });
 
-  it("the item-level daily cap is a retry; the code is kept", () => {
+  it("the item-level daily cap is a retry; the code is kept, and so is the server's wait hint (error.details.retryAfterSeconds, the single endpoint's 429 shape)", () => {
     const a = answersFromBatchHttp(raw("batch_200_rate_limited_item"), 2);
     expect(a[0]).toEqual({ kind: "response", status: 200, code: "accepted" });
-    expect(a[1]).toEqual({ kind: "response", status: 429, code: "rate_limited" });
-    expect(classifyAnswer(a[1]!).to).toBe("retry");
+    expect(a[1]).toEqual({ kind: "response", status: 429, code: "rate_limited", retryAfterSeconds: 86400 });
+    expect(classifyAnswer(a[1]!)).toEqual({ to: "retry", retryAfterSeconds: 86400 });
+    // the recorded item really carries the hint (the fixture, not this mapping, is the evidence)
+    const item = (JSON.parse(recorded("batch_200_rate_limited_item").body) as { data: { results: Array<{ error?: { details?: unknown } }> } }).data.results[1]!;
+    expect(item.error?.details).toEqual({ retryAfterSeconds: 86400 });
+    // the single endpoint's 429 hint is read the same way
+    expect(answerFromHttp({ status: recorded("evidence_429_rate_limited").status, headers: new Headers(), text: recorded("evidence_429_rate_limited").body })).toMatchObject({ status: 429, retryAfterSeconds: 3600 });
+  });
+
+  it("an item error with no usable hint carries none (a missing, non-numeric, zero or negative details value is ignored); other item errors never gain one", () => {
+    const one = (error: unknown) => answersFromBatchHttp({ status: 200, headers: new Headers(), text: JSON.stringify({ data: { results: [{ index: 0, ok: false, error }] } }) }, 1)[0];
+    expect(one({ code: "rate_limited", message: "m" })).toEqual({ kind: "response", status: 429, code: "rate_limited" });
+    expect(one({ code: "rate_limited", message: "m", details: { retryAfterSeconds: "soon" } })).toEqual({ kind: "response", status: 429, code: "rate_limited" });
+    expect(one({ code: "rate_limited", message: "m", details: { retryAfterSeconds: 0 } })).toEqual({ kind: "response", status: 429, code: "rate_limited" });
+    expect(one({ code: "rate_limited", message: "m", details: { retryAfterSeconds: 90 } })).toEqual({ kind: "response", status: 429, code: "rate_limited", retryAfterSeconds: 90 });
+    expect(one({ code: "unknown_id", message: "m" })).toEqual({ kind: "response", status: 422, code: "unknown_id" });
   });
 
   it("a whole-request failure is every item's answer; a 200 that is not the contract's is a retry for every item", () => {
@@ -314,5 +328,37 @@ describe("batch answers: one HTTP 200, a result per item (recorded from the real
   it("answerFromHttp unit: success body without a status string gives no code", () => {
     expect(answerFromHttp({ status: 200, headers: new Headers(), text: "{}" })).toEqual({ kind: "response", status: 200, code: undefined });
     expect(Object.keys(RECORDED).filter((k) => k.startsWith("batch_"))).toHaveLength(4);
+  });
+});
+
+describe("check-in token redemption answers (recorded from the real checkin-token handler)", () => {
+  const redeemWith = async (name: string) => {
+    const { api } = client([{ respond: name }]);
+    return api.redeemCheckinChallenge({ challengeId: "00000000-0000-4000-8000-000000000001", nonce: "AAAA", hardwareSupportsAttestation: false }, CREDS);
+  };
+
+  it("an idempotent replay (the first response was lost) has exactly the shape of a first redemption and carries the SAME token", async () => {
+    const first = await redeemWith("token_201_unattestable");
+    const replay = await redeemWith("token_201_idempotent_replay");
+    expect(replay).toEqual(first);
+    expect(recorded("token_201_idempotent_replay").status).toBe(201);
+    expect(JSON.parse(recorded("token_201_idempotent_replay").body)).toEqual(JSON.parse(recorded("token_201_unattestable").body));
+    // the same request was recorded for both: this is the replay of that very redemption
+    expect((recorded("token_201_idempotent_replay").request as { nonce: string; challengeId: string })).toEqual(recorded("token_201_unattestable").request);
+  });
+
+  it("a REAL challenge_used (the nonce is not the one presented the first time) is a refusal the client drops: ApiError rejected 422 challenge_used", async () => {
+    expect(JSON.parse(recorded("token_422_challenge_used").body).error.code).toBe("challenge_used"); // the scenario still records what its name says
+    await expect(redeemWith("token_422_challenge_used")).rejects.toMatchObject({ kind: "rejected", status: 422, code: "challenge_used" });
+  });
+
+  it("the recorded token requests are the strict shape the server accepts: UUID challenge id, no unknown key; the two 400s are what the server says about a violation", () => {
+    for (const name of ["token_201_unattestable", "token_201_idempotent_replay", "token_201_failed_grade", "token_422_challenge_used"]) {
+      const req = recorded(name).request as Record<string, unknown>;
+      expect(Object.keys(req).sort(), name).toEqual(["challengeId", "hardwareSupportsAttestation", "nonce"]);
+      expect(req["challengeId"], name).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    }
+    expect(JSON.parse(recorded("token_400_unknown_key").body).error.details).toEqual([{ path: "deviceId", message: "unrecognised field" }]);
+    expect(JSON.parse(recorded("token_400_not_a_uuid").body).error.details).toEqual([{ path: "challengeId", message: "must be a UUID" }]);
   });
 });

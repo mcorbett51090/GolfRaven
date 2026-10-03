@@ -32,7 +32,8 @@ export interface OwnReward {
 
 export interface DeviceAttestState {
   id: string;
-  platform: Platform;
+  /** `null` = unknown: the device was first seen by an endpoint that carries no platform (0042). */
+  platform: Platform | null;
   attestKeyId: string | null;
   attestCounter: number;
   /** Raw uncompressed P-256 point (65 bytes), or null: no key registered. */
@@ -221,7 +222,7 @@ export interface AttestationPorts {
 export interface AttestKeyRepo {
   /** The caller's OWN device: its platform and the key id registered on it (`null` = none). `null` for a
    * device that is not the caller's — nonexistent and someone else's are indistinguishable. */
-  deviceKey(deviceId: string): Promise<{ platform: Platform; keyId: string | null } | null>;
+  deviceKey(deviceId: string): Promise<{ platform: Platform | null; keyId: string | null } | null>;
   /** `app.register_attest_key` (0034): records the key a VERIFIED attestation attested on the caller's own
    * iOS device. `"registered"` = the device had no key; `"replaced"` = a reinstall's new key replaced the old
    * one (counter restarts at 0 for the new key; the old key is retired and the change is audited). Throws an

@@ -57,7 +57,7 @@ export async function enforceAttestKeyRateLimits(hit: RateLimitFn, deviceId: str
   return { ok: true };
 }
 
-export type AttestKeyHandlerRepo = Pick<Repo, "now" | "challenge" | "attestKey">;
+export type AttestKeyHandlerRepo = Pick<Repo, "now" | "challenge" | "attestKey" | "device">;
 
 export interface AttestKeyDeps {
   /** `null` = App Attest registration is not configured on this deployment (503). */
@@ -81,7 +81,9 @@ export async function handleAttestKey(req: AttestKeyRequest, repo: AttestKeyHand
     // The same answer as an unusable challenge: a foreign device id and a nonexistent one look alike.
     throw Errors.unprocessable("challenge_not_consumable", "this challenge could not be used (already used, expired, or not issued to this device)");
   }
-  if (device.platform !== "ios") throw Errors.unprocessable("platform_mismatch", "App Attest is available on iOS devices only");
+  // A device with an unknown platform (0042: first seen by checkin-challenge or evidence) may register a key: its platform becomes iOS below,
+  // once the attestation has VERIFIED. An Android device is refused, as before.
+  if (device.platform !== null && device.platform !== "ios") throw Errors.unprocessable("platform_mismatch", "App Attest is available on iOS devices only");
   if (device.keyId === req.keyId) {
     throw Errors.conflict("key_already_registered", "this key is already registered on this device");
   }
@@ -98,6 +100,12 @@ export async function handleAttestKey(req: AttestKeyRequest, repo: AttestKeyHand
     // Server-side diagnostic only (never echoed): which check refused, for which device. No key material.
     console.error(`devices-attest-key: attestation rejected (${verdict.reason}) for device ${req.deviceId}`);
     return { ok: false, status: 422, code: "attestation_rejected", message: "the attestation could not be verified" };
+  }
+
+  // 3b. Only a VERIFIED attestation labels an unknown device iOS (first platform-bearing use wins; app.register_attest_key itself refuses a non-iOS
+  //     row). A device that was claimed as Android between the read above and this write is refused, not relabelled.
+  if ((await repo.device.claimPlatform(req.deviceId, "ios")) !== "ios") {
+    throw Errors.unprocessable("platform_mismatch", "App Attest is available on iOS devices only");
   }
 
   // 4. Record the key it attested.

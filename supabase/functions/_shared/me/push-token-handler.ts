@@ -71,6 +71,9 @@ export async function handlePushTokenRequest(body: PushTokenRequest, repo: Repo)
     }
   }
   const device = await repo.device.ensureOwn(body.deviceId, body.platform ?? null);
+  // 0042: a registration that names a platform is a platform-bearing use: it labels a device whose platform is still unknown (first wins; a
+  // device that already has one keeps it).
+  if (body.platform) await repo.device.claimPlatform(device.id, body.platform);
 
   // "Register or update" (task instruction): app.push_token's own
   // ON CONFLICT (user_id, device_id) DO UPDATE (privileged.ts) means a

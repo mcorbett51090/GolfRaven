@@ -60,7 +60,7 @@
 // single, un-batched submission already does.
 
 import { hitRateLimitForActor, withOwnershipBatch } from "../privileged.ts";
-import { HttpError } from "../http.ts";
+import { rateLimitedItem, toErrorResult, type ItemResult } from "./batch-item-result.ts";
 import { finalizeScoringForKey, handleEvidenceIntake, planEvidenceRateLimitChecks, type EvidenceIntakeSuccess } from "./handler.ts";
 import type { Actor } from "../types.ts";
 import type { Repo } from "../types.ts";
@@ -68,18 +68,7 @@ import type { Repo } from "../types.ts";
 export const MAX_BATCH_ITEMS_PER_REQUEST = 100;
 export const RATE_LIMIT_PER_USER_DAY = 2000;
 
-export interface ItemResult {
-  index: number;
-  ok: boolean;
-  result?: unknown;
-  error?: { code: string; message: string };
-}
-
-function toErrorResult(index: number, err: unknown): ItemResult {
-  if (err instanceof HttpError) return { index, ok: false, error: { code: err.code, message: err.message } };
-  console.error(`evidence-batch: item ${index} failed unexpectedly`, err);
-  return { index, ok: false, error: { code: "internal_error", message: "internal error" } };
-}
+export type { ItemResult } from "./batch-item-result.ts";
 
 export async function handleEvidenceBatchIntake(actor: Actor, items: unknown[]): Promise<{ results: ItemResult[] }> {
   // ---- Phase 1: pre-transaction rate limiting, for EVERY item, in
@@ -91,7 +80,7 @@ export async function handleEvidenceBatchIntake(actor: Actor, items: unknown[]):
     // even a structurally-invalid item still consumes one unit of it.
     const batchRateLimit = await hitRateLimitForActor(actor, `evidence-batch:user`, 86400, RATE_LIMIT_PER_USER_DAY);
     if (!batchRateLimit.ok) {
-      results[i] = { index: i, ok: false, error: { code: "rate_limited", message: "evidence-batch daily rate limit exceeded" } };
+      results[i] = rateLimitedItem(i, "evidence-batch daily rate limit exceeded", batchRateLimit.retryAfterSeconds);
       continue;
     }
     let planned: ReturnType<typeof planEvidenceRateLimitChecks>;
@@ -102,15 +91,17 @@ export async function handleEvidenceBatchIntake(actor: Actor, items: unknown[]):
       continue;
     }
     let deviceRateLimitOk = true;
+    let deviceRetryAfter: number | undefined;
     for (const check of planned.checks) {
       const r = await hitRateLimitForActor(actor, check.bucketKey, check.windowSeconds, check.max);
       if (!r.ok) {
         deviceRateLimitOk = false;
+        deviceRetryAfter = r.retryAfterSeconds;
         break;
       }
     }
     if (!deviceRateLimitOk) {
-      results[i] = { index: i, ok: false, error: { code: "rate_limited", message: "evidence rate limit exceeded for this device" } };
+      results[i] = rateLimitedItem(i, "evidence rate limit exceeded for this device", deviceRetryAfter);
       continue;
     }
     readyIndices.push(i);

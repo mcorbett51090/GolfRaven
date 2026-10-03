@@ -99,6 +99,8 @@ Deno.test("P3c gate round 3, blocking MEDIUM 4: items after the per-user daily c
   for (let i = 3; i < items.length; i++) {
     assertEquals(results[i].ok, false, `item ${i} (past the cap) must be rejected`);
     assert(results[i].error?.code === "rate_limited", `item ${i} should be rate_limited, got ${JSON.stringify(results[i].error)}`);
+    // the per-item hint has the same shape as the single endpoint's 429 (`error.details.retryAfterSeconds`): the window of the bucket that refused
+    assertEquals(results[i].error?.details?.retryAfterSeconds, 86400, `item ${i} should carry retryAfterSeconds`);
   }
 });
 

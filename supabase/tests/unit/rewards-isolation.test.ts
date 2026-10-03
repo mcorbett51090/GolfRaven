@@ -6,10 +6,14 @@
 //
 //   1. "A reward earned by a server-side re-score reads no bits until
 //      activation" (§7.5; AT 9): nothing on the EARNING side (evidence intake,
-//      scoring, the check-in challenge/token, catalog skew, me-*) imports the
-//      rewards module or names a DeviceCheck / device-recall call. The only code
-//      that can read a persistent bit is under _shared/rewards/, and the only
-//      entrypoint that wires it is rewards-activate.
+//      scoring, the check-in challenge/token, catalog skew, me-*) names a
+//      DeviceCheck / device-recall call, and the ONLY rewards modules it may import
+//      are the VERIFICATION-ONLY ones (VERIFICATION_ONLY below: the assertion and
+//      Play Integrity verifiers, the bindings, the Play Integrity decode client, the
+//      HTTP shim, the verification-only port builder), none of which can read or
+//      write a persistent bit. `checkin-token` verifies an attestation (G3-08) with
+//      exactly those. The only code that can read a persistent bit is under
+//      _shared/rewards/, and the only entrypoint that wires it is rewards-activate.
 //   2. The rewards modules never reach the environment or a secret themselves:
 //      configuration arrives as an argument (privileged.ts reads it).
 //   3. The decision table imports nothing at all but types (it stays pure).
@@ -36,6 +40,14 @@ function walk(dir: string): string[] {
 const rel = (p: string) => p.slice(FUNCTIONS.length + 1);
 const src = (p: string) => readFileSync(p, "utf8");
 
+/** The only rewards modules the earning side may import: each can verify an attestation and none can reach DeviceCheck. `types.ts` is
+ * imported for the vendor error classes and the narrow port types (it declares the iOS port's bit methods as TYPES, which the earning side
+ * never names or implements: the per-file check below bans the NAMES in the earning files themselves). */
+const VERIFICATION_ONLY = ["binding.ts", "string-binding.ts", "app-attest.ts", "play-integrity.ts", "play-integrity-client.ts", "vendor-http.ts", "verification-ports.ts", "types.ts"];
+/** Names that mean "read or write a persistent device bit". */
+const BIT_NAMES = /query_two_bits|update_two_bits|queryTwoBits|updateTwoBits|readBits|setBit0|deviceRecall|api\.devicecheck|devicecheck-client/i;
+const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+
 const EARNING_SIDE = ["_shared/evidence", "_shared/scoring", "_shared/checkin", "_shared/catalog", "_shared/me", "evidence", "evidence-batch", "checkin-challenge", "checkin-token", "me-delete", "me-export", "me-push-token"];
 
 describe("the earning side never reads a persistent device bit", () => {
@@ -52,23 +64,54 @@ describe("the earning side never reads a persistent device bit", () => {
     expect(earningFiles.some((f) => rel(f) === "_shared/evidence/handler.ts")).toBe(true);
   });
 
-  it("none of them imports anything under _shared/rewards or the rewards-activate function", () => {
+  it("none of them imports the rewards-activate function, or any rewards module that is not verification-only", () => {
     for (const f of earningFiles) {
       const text = src(f);
-      expect(text, rel(f)).not.toMatch(/from\s+["'][^"']*rewards[^"']*["']/);
+      expect(text, rel(f)).not.toMatch(/from\s+["'][^"']*rewards-activate[^"']*["']/);
+      for (const m of text.matchAll(/from\s+["']([^"']*\/rewards\/([^"'/]+))["']/g)) {
+        expect(VERIFICATION_ONLY, `${rel(f)} imports ${m[1]}`).toContain(m[2]);
+      }
+      // the bare directory name, or a re-export, is not a way round it
+      for (const m of text.matchAll(/(?:from|import)\s+["'][^"']*rewards[^"']*["']/g)) {
+        expect(m[0], rel(f)).toMatch(/\/rewards\/(binding|string-binding|app-attest|play-integrity|play-integrity-client|vendor-http|verification-ports|types)\.ts["']/);
+      }
     }
+  });
+
+  it("the verification-only modules the earning side may import never name a persistent-bit call (types.ts, which types the iOS port, is the one exception)", () => {
+    for (const name of VERIFICATION_ONLY.filter((n) => n !== "types.ts")) {
+      const text = stripComments(src(join(FUNCTIONS, "_shared", "rewards", name)));
+      expect(text, name).not.toMatch(BIT_NAMES);
+    }
+  });
+
+  it("the earning side does import the verification-only verifiers it needs (checkin/token-handler.ts), so the allow-list above is not vacuous", () => {
+    const text = src(join(FUNCTIONS, "_shared", "checkin", "token-handler.ts"));
+    expect(text).toMatch(/rewards\/binding\.ts/);
+    expect(text).toMatch(/rewards\/string-binding\.ts/);
+    expect(text).toMatch(/rewards\/verification-ports\.ts/);
   });
 
   it("none of them names a DeviceCheck / device-recall / bit-reading call", () => {
     for (const f of earningFiles) {
-      const text = src(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-      expect(text, rel(f)).not.toMatch(/query_two_bits|update_two_bits|queryTwoBits|updateTwoBits|readBits|setBit0|deviceRecall|api\.devicecheck/i);
+      const text = stripComments(src(f));
+      expect(text, rel(f)).not.toMatch(BIT_NAMES);
     }
   });
 
   it("only rewards-activate/index.ts wires the vendor ports, and only privileged.ts loads their configuration", () => {
     const wiring = walk(FUNCTIONS).filter((f) => /buildAttestationPorts|loadRewardsAttestationConfig/.test(src(f)) && !rel(f).startsWith("_shared/rewards/"));
     expect(wiring.map(rel).sort()).toEqual(["_shared/privileged.ts", "rewards-activate/index.ts"]);
+  });
+
+  it("only checkin-token/index.ts wires the verification-only ports, and only privileged.ts loads their configuration", () => {
+    const wiring = walk(FUNCTIONS).filter((f) => /buildVerificationPorts|loadCheckinAttestationConfig/.test(src(f)) && !rel(f).startsWith("_shared/rewards/"));
+    expect(wiring.map(rel).sort()).toEqual(["_shared/privileged.ts", "checkin-token/index.ts"]);
+  });
+
+  it("checkin-token/index.ts never imports production-ports (the DeviceCheck adapter) or reads a rewards-activate configuration", () => {
+    const text = stripComments(src(join(FUNCTIONS, "checkin-token", "index.ts")));
+    expect(text).not.toMatch(/production-ports|loadRewardsAttestationConfig|buildAttestationPorts|devicecheck/i);
   });
 });
 
@@ -96,6 +139,7 @@ describe("the rewards modules", () => {
         "_shared/rewards/string-binding.ts",
         "_shared/rewards/types.ts",
         "_shared/rewards/vendor-http.ts",
+        "_shared/rewards/verification-ports.ts",
         "_shared/rewards/x509-lite.ts",
       ].sort(),
     );

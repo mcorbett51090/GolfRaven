@@ -28,7 +28,10 @@
 // `hardwareSupportsAttestation` is a client self-report (the standing gap
 // recorded in docs/security/p3-money-path-requirements.md follow-up 9): the
 // worst a lying client gains is `unattestable` instead of `failed`; both route
-// to `held_review`, neither can reach "activate".
+// to `held_review`, neither can reach "activate". It is NOT trusted against the
+// server's own evidence: a device with a REGISTERED App Attest key, or a check-in
+// token already graded `attested` on it, is `failed` whatever it claims
+// (activate-handler.ts#assessActivatingDevice; the same rule as checkin-token).
 
 export interface ParseIssue {
   path: string;

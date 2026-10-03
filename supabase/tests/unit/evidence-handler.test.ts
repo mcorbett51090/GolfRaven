@@ -341,6 +341,7 @@ describe("handleEvidenceIntake", () => {
       facilityId: "fac_x",
       nonceHash: "n1",
       kind: "live",
+      issuedAt: "2026-06-01T12:00:00.000Z",
       expiresAt: "2099-01-01T00:00:00.000Z",
       usedAt: null,
     });
@@ -372,10 +373,13 @@ describe("handleEvidenceIntake", () => {
     }
   });
 
-  // ⛔ FIX (P3c gate round 2, item 4): a token whose captured-at falls
-  // OUTSIDE its own [issued_at, expires_at] window is never a co-signal —
-  // even though the token itself is otherwise unconsumed and unexpired.
-  it("a fix captured OUTSIDE its own checkin-token's issued/expires window is never a co-signal", async () => {
+  // ⛔ FIX (P3c gate round 2, item 4; round 3): a token whose captured-at falls
+  // OUTSIDE its CHALLENGE's [issued_at, expires_at] window is never a co-signal —
+  // even though the token itself is otherwise unconsumed and unexpired. (The
+  // window is the challenge's, as in privileged.ts#consumeForFix; this fake used
+  // to clamp to the TOKEN's own window, which let this test pass for the wrong
+  // reason.)
+  it("a fix captured OUTSIDE its checkin-token's CHALLENGE window is never a co-signal", async () => {
     const state = makeFakeState();
     const chalId = "chal_2";
     state.challenges.set(chalId, {
@@ -386,7 +390,8 @@ describe("handleEvidenceIntake", () => {
       facilityId: "fac_x",
       nonceHash: "n2",
       kind: "live",
-      expiresAt: "2099-01-01T00:00:00.000Z",
+      issuedAt: "2026-06-01T12:00:00.000Z",
+      expiresAt: "2026-06-01T12:02:00.000Z",
       usedAt: null,
     });
     state.checkinTokens.set("jti_2", {
@@ -403,7 +408,7 @@ describe("handleEvidenceIntake", () => {
     });
     state.matches.set("crs_x1", { verificationTier: "play-verified", geometryKind: "polygon", insideBuffer: true });
     const repo = makeFakeRepo(state, "user-a");
-    // capturedAt well AFTER the token's own expires_at.
+    // capturedAt well AFTER the challenge's own expires_at.
     const result = await handleEvidenceIntake(
       checkinBody({ fix: { ...(checkinBody().fix as object), checkinTokenJti: "jti_2", capturedAt: Date.parse("2026-06-01T23:00:00.000Z") } }),
       repo,
@@ -451,7 +456,7 @@ describe("handleEvidenceIntake", () => {
   it("P3c gate round 3, blocking HIGH 2: an IDENTICAL retry of a token-bearing check-in succeeds with the same response, without re-consuming the token", async () => {
     const state = makeFakeState();
     const chalId = "chal_3";
-    state.challenges.set(chalId, { id: chalId, userId: "user-a", staffUserId: null, deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", nonceHash: "n3", kind: "live", expiresAt: "2099-01-01T00:00:00.000Z", usedAt: null });
+    state.challenges.set(chalId, { id: chalId, userId: "user-a", staffUserId: null, deviceId: FAKE_DEVICE_ID, facilityId: "fac_x", nonceHash: "n3", kind: "live", issuedAt: "2026-06-01T12:00:00.000Z", expiresAt: "2099-01-01T00:00:00.000Z", usedAt: null });
     state.checkinTokens.set("jti_3", {
       jti: "jti_3",
       userId: "user-a",

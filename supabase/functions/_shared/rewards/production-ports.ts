@@ -22,9 +22,9 @@
 
 import { type AppAttestCrypto, verifyAppAttestAssertion } from "./app-attest.ts";
 import { type DeviceCheckClient, type DeviceCheckConfig, createDeviceCheckClient, isCompleteDeviceCheckConfig } from "./devicecheck-client.ts";
-import { type PlayIntegrityConfig, createIntegrityDecoder, isCompletePlayIntegrityConfig } from "./play-integrity-client.ts";
-import { evaluateIntegrityPayload } from "./play-integrity.ts";
-import { type AttestationPorts, type AndroidPort, type IosPort, VendorRejectedError } from "./types.ts";
+import { type PlayIntegrityConfig, isCompletePlayIntegrityConfig } from "./play-integrity-client.ts";
+import { type AttestationPorts, type IosPort } from "./types.ts";
+import { buildAndroidPort } from "./verification-ports.ts";
 import type { VendorHttp } from "./vendor-http.ts";
 
 export interface AppleConfig extends DeviceCheckConfig {
@@ -36,10 +36,7 @@ export interface RewardsAttestationConfig {
   google: PlayIntegrityConfig | null;
 }
 
-/** A verdict older than this, or in the future by more than the skew, is not
- * a verdict for this request (the challenge itself lives 120 s). */
-export const INTEGRITY_MAX_AGE_MS = 5 * 60_000;
-export const INTEGRITY_MAX_FUTURE_SKEW_MS = 60_000;
+export { INTEGRITY_MAX_AGE_MS, INTEGRITY_MAX_FUTURE_SKEW_MS, buildAndroidPort } from "./verification-ports.ts";
 
 export function buildIosPort(apple: AppleConfig, http: VendorHttp, appAttestCrypto: AppAttestCrypto, client?: DeviceCheckClient): IosPort {
   const deviceCheck = client ?? createDeviceCheckClient(apple, http);
@@ -55,32 +52,6 @@ export function buildIosPort(apple: AppleConfig, http: VendorHttp, appAttestCryp
       // narrow that window by a few ms while adding a network round trip to a
       // request that holds a database transaction open.)
       await deviceCheck.updateTwoBits(token, { bit0: true, bit1: known.bit1 });
-    },
-  };
-}
-
-export function buildAndroidPort(google: PlayIntegrityConfig, http: VendorHttp): AndroidPort {
-  const decoder = createIntegrityDecoder(google, http);
-  return {
-    async verifyIntegrity(input) {
-      let payload: unknown;
-      try {
-        payload = await decoder.decode(input.integrityToken);
-      } catch (e) {
-        // Google understood the request and could not decode the token: that is
-        // a failed attestation. Unavailable / not-configured propagate.
-        if (e instanceof VendorRejectedError) return { grade: "failed", reasons: ["token_rejected_by_google"] };
-        throw e;
-      }
-      const evaluation = evaluateIntegrityPayload(payload, {
-        packageName: google.packageName,
-        certificateSha256Digests: google.certificateSha256Digests,
-        expectedRequestHash: input.expectedRequestHash,
-        nowMs: input.nowMs,
-        maxAgeMs: INTEGRITY_MAX_AGE_MS,
-        maxFutureSkewMs: INTEGRITY_MAX_FUTURE_SKEW_MS,
-      });
-      return evaluation;
     },
   };
 }

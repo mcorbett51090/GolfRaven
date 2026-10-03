@@ -98,10 +98,13 @@ describe("handleTokenRequest", () => {
     expect(state.fraudSignals.some((s) => s.kind === "attestation_failed")).toBe(true);
   });
 
-  it("consumes the challenge — a second call for the same challenge fails", async () => {
+  it("consumes the challenge: a second call with the SAME nonce is the idempotent repeat (the original token); a different nonce is still challenge_used", async () => {
     const { repo, challenge } = await issueChallenge();
-    await handleTokenRequest({ challengeId: challenge.id, nonce: challenge.nonce, hardwareSupportsAttestation: false }, repo, digestHex);
-    await expect(handleTokenRequest({ challengeId: challenge.id, nonce: challenge.nonce, hardwareSupportsAttestation: false }, repo, digestHex)).rejects.toMatchObject({
+    const first = await handleTokenRequest({ challengeId: challenge.id, nonce: challenge.nonce, hardwareSupportsAttestation: false }, repo, digestHex);
+    const again = await handleTokenRequest({ challengeId: challenge.id, nonce: challenge.nonce, hardwareSupportsAttestation: false }, repo, digestHex);
+    expect(again).toEqual(first);
+    const wrongNonce = (challenge.nonce[0] === "A" ? "B" : "A") + challenge.nonce.slice(1);
+    await expect(handleTokenRequest({ challengeId: challenge.id, nonce: wrongNonce, hardwareSupportsAttestation: false }, repo, digestHex)).rejects.toMatchObject({
       code: "challenge_used",
     });
   });
@@ -138,6 +141,7 @@ describe("handleTokenRequest", () => {
       facilityId: null,
       nonceHash: "irrelevant",
       kind: "live",
+      issuedAt: "2026-06-01T12:00:00.000Z",
       expiresAt: "2020-01-01T00:00:00.000Z",
       usedAt: null,
     });
