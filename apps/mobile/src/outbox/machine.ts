@@ -24,7 +24,7 @@
  *    pretend to cover it. `[owner/P4.2 decision if a 401 should instead retry]`
  *  - `408` is "any other 4xx" (the spec lists only 429/5xx/network as retry).
  */
-import type { NeedsAttentionReason, NewOutboxItem, OutboxItem, OutboxStatus, ServerAnswer } from "./types";
+import { UNOWNED, type NeedsAttentionReason, type NewOutboxItem, type OutboxItem, type OutboxStatus, type ServerAnswer } from "./types";
 
 export const OUTBOX_POLICY = {
   /** First retry delay before jitter. */
@@ -54,10 +54,19 @@ function assertStatus(item: OutboxItem, action: string, ...allowed: OutboxStatus
   if (!allowed.includes(item.status)) throw new InvalidTransition(item.status, action);
 }
 
+/** Is `item` the signed-in user's? `userId` is the current session's user id (`null` = signed out). Signed out, or an unowned legacy row
+ * (`UNOWNED`), is never a match: the answer for "no session" is "nobody's item is mine". */
+export function isOwnedBy(item: OutboxItem, userId: string | null): boolean {
+  return userId !== null && userId !== UNOWNED && item.ownerUserId === userId;
+}
+
 export function createItem(draft: NewOutboxItem, now: number): OutboxItem {
+  // Fail closed: an ownerless item must not exist anywhere (the SQLite column is NOT NULL too, and the store re-checks).
+  if (typeof draft.ownerUserId !== "string" || draft.ownerUserId === UNOWNED) throw new Error("outbox: an item needs an owner (the signed-in user)");
   return {
     id: draft.id,
     sourceRef: draft.sourceRef,
+    ownerUserId: draft.ownerUserId,
     courseId: draft.courseId,
     catalogVersion: draft.catalogVersion,
     payload: draft.payload,

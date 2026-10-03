@@ -1,3 +1,4 @@
+export * from "./enqueue";
 export * from "./machine";
 export * from "./runner";
 export * from "./store";

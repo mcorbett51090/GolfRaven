@@ -189,11 +189,16 @@ export function createSupabaseAuth(opts: SupabaseAuthOptions): AuthService {
       }
       const s = first.data.session;
       if (!s) return null;
+      if (o?.forUserId !== undefined && s.user.id !== o.forUserId) return null; // the stored session is someone else's: never hand out its token
       const stale = o?.forceRefresh === true || (s.expires_at !== undefined && s.expires_at * 1000 - Date.now() < expiryMarginMs);
       if (!stale) return s.access_token;
       const refreshed = await bounded(client.refreshSession());
       const failure = refreshed instanceof AuthError ? refreshed : refreshed.error ? mapAuthError(refreshed.error) : null;
-      if (failure === null && !(refreshed instanceof AuthError)) return refreshed.data.session?.access_token ?? null;
+      if (failure === null && !(refreshed instanceof AuthError)) {
+        const r = refreshed.data.session;
+        if (r && o?.forUserId !== undefined && r.user.id !== o.forUserId) return null;
+        return r?.access_token ?? null;
+      }
       if (failure?.kind === "network") {
         // Offline with a token that has not expired yet: use it (the server decides; a 401 comes back through the forced refresh).
         if (o?.forceRefresh !== true && s.expires_at !== undefined && s.expires_at * 1000 > Date.now()) return s.access_token;

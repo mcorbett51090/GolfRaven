@@ -25,6 +25,7 @@ const T0 = 1_800_000_000_000;
 const draft = (over: Partial<NewOutboxItem> = {}): NewOutboxItem => ({
   id: "o1",
   sourceRef: "health:abc",
+  ownerUserId: "user-a",
   courseId: "crs_01M39GMFJZ2P89V3ZZXPPH671T",
   catalogVersion: "20260101-aaaaaaa",
   payload: { insideRatio: 0.97 },

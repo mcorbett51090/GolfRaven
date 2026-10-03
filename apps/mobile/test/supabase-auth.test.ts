@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { createSupabaseAuth, mapAuthError } from "../src/auth/supabase-auth";
 import { AuthError } from "../src/auth";
 import { BrokenSecureStore, MemorySecureStore, SESSION_STORAGE_KEY } from "../src/secure";
-import { createFakeGoTrue, type FakeGoTrue } from "./support/gotrue";
+import { createFakeGoTrue, sessionBody, type FakeGoTrue } from "./support/gotrue";
 
 const URL_ = "https://proj.supabase.co";
 // A PUBLIC-shaped placeholder; the fake ignores it. Not a real key.
@@ -233,5 +233,47 @@ describe("subscribe", () => {
     off();
     await auth.verifyEmailCode("alice@example.test", "123456");
     expect(seen).toEqual(["11111111-2222-4333-8444-555555555555", null]);
+  });
+});
+
+describe("getAccessToken({ forUserId }): a token is only ever handed out for the user it belongs to (the outbox's owner binding)", () => {
+  const ALICE = "11111111-2222-4333-8444-555555555555";
+
+  it("the signed-in user's own id gets the token; any other id, or no session, gets null", async () => {
+    const { auth } = make();
+    expect(await auth.getAccessToken({ forUserId: ALICE })).toBeNull(); // signed out
+    await auth.verifyEmailCode("alice@example.test", "123456");
+    expect(await auth.getAccessToken({ forUserId: ALICE })).toBe("access-1");
+    expect(await auth.getAccessToken({ forUserId: "99999999-2222-4333-8444-555555555555" })).toBeNull();
+    expect(await auth.getAccessToken()).toBe("access-1"); // no forUserId: unchanged behaviour
+  });
+
+  it("another user's token is never returned, and no refresh is spent on a user who does not match", async () => {
+    const { auth, gotrue } = make();
+    await auth.verifyEmailCode("alice@example.test", "123456");
+    const n = gotrue.calls.length;
+    expect(await auth.getAccessToken({ forUserId: "someone-else", forceRefresh: true })).toBeNull();
+    expect(gotrue.calls).toHaveLength(n);
+  });
+
+  it("a refresh that comes back as a DIFFERENT user is not handed to the caller", async () => {
+    const gotrue = createFakeGoTrue();
+    gotrue.expiresIn = 1; // already about to expire, so the next call refreshes
+    const { auth } = make({ gotrue });
+    await auth.verifyEmailCode("alice@example.test", "123456");
+    gotrue.override = (call) => {
+      if (call.path !== "/auth/v1/token") return null;
+      const body = sessionBody(2, "email", 3600) as { user: { id: string } };
+      body.user.id = "99999999-2222-4333-8444-555555555555";
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    expect(await auth.getAccessToken({ forUserId: ALICE })).toBeNull();
+  });
+
+  it("after sign-out, the previous user's id gets null", async () => {
+    const { auth } = make();
+    await auth.verifyEmailCode("alice@example.test", "123456");
+    await auth.signOut();
+    expect(await auth.getAccessToken({ forUserId: ALICE })).toBeNull();
   });
 });

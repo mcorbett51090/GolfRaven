@@ -6,7 +6,8 @@
  *     idempotent, so on any failure nothing local is touched and the player simply tries again. Wiping local state first could strand a player
  *     whose server deletion then failed, signed out of an account that still exists.
  *  2. Only after the server says it is done, the LOCAL wipe: the session (the server session is already gone, so no network call: `clearLocalSession`),
- *     the outbox (the deleted player's own data: nothing of it may be sent to a deleted account or carried to the next one), and the caches that hold
+ *     the outbox (the deleted player's own data: nothing of it may be sent to a deleted account or carried to the next one; `deleteAll` wipes EVERY owner's
+ *     rows, not only the deleted user's, which is intended: this is the one place the outbox is emptied wholesale, and ordinary sign-out is not), and the caches that hold
  *     the player's data (`clearUserCaches`).
  *  3. KEPT on purpose: the device-local O18 age flag. It records "this install failed the age gate", not anything about the account; wiping it
  *     with the account would let an under-age player delete their account and retry with another birth year (AT 20: "changing the year on the same
@@ -16,6 +17,7 @@
  *
  * The result separates "the account is gone" from "this device still has leftovers" so the screen can say the true thing for each.
  */
+import { isApiError } from "../api/errors";
 import type { ApiClient, DeleteAccountResult } from "../api/types";
 import type { AuthService } from "../auth/types";
 import type { OutboxStore } from "../outbox";
@@ -38,14 +40,24 @@ export interface DeleteDeps {
 
 export type DeleteOutcome =
   | { status: "deleted"; result: DeleteAccountResult; localWipe: "complete" | "partial"; failedSteps: string[] }
+  /** The server never confirmed, but an earlier attempt of `DELETE me` may have been executed (its answer was lost) and the call then ended as
+   * `unauthenticated`: the retry's token was refused, which is evidence the user no longer exists. The account is probably gone and the session is
+   * unusable, so the local wipe ran anyway (the same steps, every owner's outbox rows included). The screen says exactly that. */
+  | { status: "deleted_or_session_ended"; cause: "unauthenticated"; localWipe: "complete" | "partial"; failedSteps: string[] }
   | { status: "failed"; error: unknown };
 
 export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<DeleteOutcome> {
-  let result: DeleteAccountResult;
+  let result: DeleteAccountResult | null = null;
   try {
     result = await deps.api.deleteAccount();
   } catch (error) {
-    return { status: "failed", error };
+    // `DELETE me` is idempotent, so the client retries it. The sequence this guards: the server deletes the account, the response is lost, the retry
+    // gets 401 (the user is gone), the refresh is refused => `unauthenticated`, and auth-js drops the session, so the player could not even try again.
+    // ONLY that combination (an earlier attempt may have run AND the final answer is `unauthenticated`) is treated as "probably deleted". Every
+    // other failure stays `failed` with nothing local touched and the session kept, so the player can retry: that includes plain offline or a
+    // server that is down (transport failures / 5xx on every attempt say nothing about whether the account exists) and a first-attempt 401.
+    if (isApiError(error) && error.mayHaveBeenApplied && error.kind === "unauthenticated") result = null;
+    else return { status: "failed", error };
   }
   const failedSteps: string[] = [];
   const attempt = async (name: string, fn: () => void | Promise<void>): Promise<void> => {
@@ -62,5 +74,7 @@ export async function deleteAccountAndWipeLocal(deps: DeleteDeps): Promise<Delet
   });
   await attempt("outbox", () => deps.outbox.deleteAll());
   await attempt("caches", () => deps.clearUserCaches());
-  return { status: "deleted", result, localWipe: failedSteps.length === 0 ? "complete" : "partial", failedSteps };
+  const localWipe = failedSteps.length === 0 ? "complete" : "partial";
+  if (result === null) return { status: "deleted_or_session_ended", cause: "unauthenticated", localWipe, failedSteps };
+  return { status: "deleted", result, localWipe, failedSteps };
 }

@@ -25,7 +25,16 @@ import { CatalogManager, createFetchBytes } from "../catalog/manager";
 import { MemoryCatalogCacheStore, SqliteCatalogCacheStore } from "../catalog/store";
 import { readAppConfig, type AppConfig } from "../config";
 import { openAppDatabase } from "../db/expo-sqlite-adapter";
-import { MemoryOutboxStore, OutboxRunner, SqliteOutboxStore, type OutboxItem, type OutboxStore, type RematchResult } from "../outbox";
+import {
+  MemoryOutboxStore,
+  OutboxRunner,
+  SqliteOutboxStore,
+  enqueueOutboxItem,
+  type OutboxDraft,
+  type OutboxItem,
+  type OutboxStore,
+  type RematchResult,
+} from "../outbox";
 import { unavailablePushAdapter, type PushAdapter } from "../push";
 import { createExpoSecureStore } from "../secure/expo-secure-store";
 import type { SecureStore } from "../secure";
@@ -43,6 +52,8 @@ export interface AppServices {
   catalog: CatalogManager;
   outboxStore: OutboxStore;
   outboxRunner: OutboxRunner;
+  /** The only way the UI adds to the outbox: the owner is the signed-in user (from the auth session), and signed out throws `OutboxEnqueueError`. */
+  enqueueOutbox: (draft: OutboxDraft) => ReturnType<typeof enqueueOutboxItem>;
   /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
   api: ApiClient;
   auth: AuthService;
@@ -135,9 +146,14 @@ export async function createServices(): Promise<AppServices> {
   });
   const api = backend.api;
 
+  // The owner of an outbox item is the Supabase session's user (`AuthService.current()`: the user of the GoTrue session, cleared by sign-out), read
+  // fresh at every use. The runner's token comes from the same service and is requested FOR the item's owner (`forUserId`).
+  const auth = backend.auth;
+  const currentUserId = (): string | null => auth.current()?.userId ?? null;
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
     api,
+    session: { currentUserId, accessTokenFor: (userId) => auth.getAccessToken({ forUserId: userId }) },
     now: () => Date.now(),
     rng: Math.random,
     refreshCatalog: async () => {
@@ -166,13 +182,18 @@ export async function createServices(): Promise<AppServices> {
     findCourseForUnlisted: () => Promise.resolve(null), // P4.1 STUB, see above
   });
 
+  // A data export left in the cache for the receiving app to read is deleted at the next export and here, at start (`account/export.ts`). Best effort.
+  const sharer = createExpoFileSharer();
+  void sharer.purgeStale().catch(() => undefined);
+
   return {
     config,
     catalog,
     outboxStore,
     outboxRunner,
+    enqueueOutbox: (draft) => enqueueOutboxItem({ store: outboxStore, currentUserId, now: () => Date.now() }, draft),
     api,
-    auth: backend.auth,
+    auth,
     backend: backend.kind,
     devHandle: backend.devHandle,
     ageGate: new AgeGate(ageFlags),
@@ -183,7 +204,7 @@ export async function createServices(): Promise<AppServices> {
     random: expoRandomBytes,
     push: unavailablePushAdapter(),
     deviceId: createDeviceIdProvider(secure, expoRandomBytes),
-    sharer: createExpoFileSharer(),
+    sharer,
     platform: Platform.OS,
     ageStoreProblem,
     persistent,

@@ -1,12 +1,14 @@
 import { Alert } from "react-native";
 import { useApp } from "../runtime/AppProvider";
-import { markReported, playedStatus, type OutboxItem } from "../outbox";
+import { isOwnedBy, markReported, playedStatus, type OutboxItem } from "../outbox";
 import { Body, Button, Card, Chip, Row } from "../ui/components";
 import { courseName } from "../browse";
 
 /** One outbox item as the player sees it in Played (build plan §7.6, right-hand column). */
 export function OutboxCard({ item }: { item: OutboxItem }) {
-  const { t, locale, index, services, reloadOutbox } = useApp();
+  const { t, locale, index, services, reloadOutbox, session } = useApp();
+  // Defence in depth: the list this card comes from is already the signed-in user's (`outboxItems`); a card is never drawn for anyone else's item.
+  if (!isOwnedBy(item, session?.userId ?? null)) return null;
   const status = playedStatus(item, Date.now());
   const entry = item.courseId && index ? index.courses.get(item.courseId) : undefined;
   const title = entry ? courseName(entry, locale) : t("played.status.unlisted_course");
@@ -15,6 +17,7 @@ export function OutboxCard({ item }: { item: OutboxItem }) {
   async function report(): Promise<void> {
     // The server half (`POST` the stored summary into a `review_item`) is P4.2;
     // locally the report is remembered so it is not offered twice.
+    if (!isOwnedBy(item, services.auth.current()?.userId ?? null)) return; // the user changed since this card was drawn: not theirs to act on
     await services.outboxStore.update(markReported(item, Date.now()));
     await reloadOutbox();
     Alert.alert(t("played.reported"));

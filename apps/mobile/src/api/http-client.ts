@@ -25,7 +25,7 @@
  * convention and is unverified against a real project: nothing here has ever called a server.]`
  */
 import { DEFAULT_MIN_AGE } from "../age/gate";
-import type { OutboxItem, ServerAnswer } from "../outbox";
+import type { EvidenceCredentials, OutboxItem, ServerAnswer } from "../outbox";
 import type { ProgrammeStatus } from "../wallet";
 import { ApiError, kindForStatus } from "./errors";
 import {
@@ -107,7 +107,7 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     text: string;
   }
 
-  async function once(url: string, spec: CallSpec<z.ZodType>, token: string): Promise<Raw> {
+  async function once(url: string, spec: CallSpec<z.ZodType>, token: string, sent: { maybeApplied: boolean }): Promise<Raw> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
     try {
@@ -120,10 +120,12 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
       const res = await opts.fetch(url, { method: spec.method, headers, ...(body !== undefined ? { body } : {}), redirect: "error", credentials: "omit", signal: controller.signal });
       // Read the body inside the timeout: a stalled body must not outlive it.
       const text = await res.text();
+      if (res.status >= 500) sent.maybeApplied = true; // a 5xx can follow a half-executed request
       if (text.length > policy.maxResponseChars) throw new ApiError({ kind: "bad_response", status: res.status, message: "response too large" });
       return { status: res.status, headers: res.headers, text };
     } catch (e) {
       if (e instanceof ApiError) throw e;
+      sent.maybeApplied = true; // the request was sent; whether the server ran it is unknown
       throw new ApiError({ kind: "network", message: controller.signal.aborted ? `timed out after ${policy.timeoutMs} ms` : e instanceof Error ? e.message : "network error" });
     } finally {
       clearTimeout(timer);
@@ -163,7 +165,18 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     }
   }
 
+  /** Runs the call; any error it throws is flagged `mayHaveBeenApplied` if an earlier request of the call may have been executed unseen. */
   async function call<T extends z.ZodType>(spec: CallSpec<T>): Promise<z.infer<T>> {
+    const sent = { maybeApplied: false };
+    try {
+      return await attemptCall(spec, sent);
+    } catch (e) {
+      if (e instanceof ApiError && sent.maybeApplied && !e.mayHaveBeenApplied) throw e.withMayHaveBeenApplied();
+      throw e;
+    }
+  }
+
+  async function attemptCall<T extends z.ZodType>(spec: CallSpec<T>, sent: { maybeApplied: boolean }): Promise<z.infer<T>> {
     const url = `${base}/${spec.fn}`;
     const attempts = spec.idempotent ? policy.maxAttempts : 1;
     let refreshed = false;
@@ -173,13 +186,13 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
       if (token === null) throw new ApiError({ kind: "unauthenticated", message: "not signed in" });
       let res: Raw;
       try {
-        res = await once(url, spec, token);
+        res = await once(url, spec, token, sent);
         if (res.status === 401 && !refreshed) {
           refreshed = true;
           const fresh = await tokenOrThrow(true);
           if (fresh === null) throw new ApiError({ kind: "unauthenticated", status: 401, message: "session expired" });
           token = fresh;
-          res = await once(url, spec, token);
+          res = await once(url, spec, token, sent);
         }
       } catch (e) {
         if (!(e instanceof ApiError)) throw e;
@@ -269,8 +282,11 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     },
 
     /** Evidence submission (`POST evidence` / `evidence-batch`) is P4.2b. Until then every send is a transport-level "not now": the outbox
-     * keeps the item in `retry` with backoff and loses nothing (FM-03); it is never reported as accepted. */
-    submitEvidence(_item: OutboxItem): Promise<ServerAnswer> {
+     * keeps the item in `retry` with backoff and loses nothing (FM-03); it is never reported as accepted.
+     * WHEN P4.2b builds this: the request's bearer MUST be `credentials.accessToken` (the OWNER's token, handed in by the outbox runner after
+     * it re-checked the owner), NOT a fresh `opts.getAccessToken()` (that is whoever is signed in by then), and `item.ownerUserId` is the
+     * `user_id` the server will attribute the play to. */
+    submitEvidence(_item: OutboxItem, _credentials: EvidenceCredentials): Promise<ServerAnswer> {
       return Promise.resolve({ kind: "network_error", message: "evidence submission is not built in this app version (P4.2b)" });
     },
   };

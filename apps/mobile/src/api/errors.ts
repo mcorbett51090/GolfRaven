@@ -43,8 +43,12 @@ export class ApiError extends Error {
   readonly details: unknown;
   /** From the server's `details.retryAfterSeconds` or a `Retry-After` header; `null` when absent. */
   readonly retryAfterSeconds: number | null;
+  /** `true` when an earlier request of THIS call may have been executed by the server although its answer never arrived (a transport failure
+   * after the request was sent, or a 5xx). It lets a caller read a LATER `unauthenticated` / `network` failure of an idempotent call correctly:
+   * `DELETE me` whose first response was lost and whose retry then gets a 401 (the user no longer exists) is "probably deleted", not "failed". */
+  readonly mayHaveBeenApplied: boolean;
 
-  constructor(init: { kind: ApiErrorKind; status?: number | null; code?: string | null; message?: string; details?: unknown; retryAfterSeconds?: number | null }) {
+  constructor(init: { kind: ApiErrorKind; status?: number | null; code?: string | null; message?: string; details?: unknown; retryAfterSeconds?: number | null; mayHaveBeenApplied?: boolean }) {
     super(init.message ?? `${init.kind}${init.code ? `: ${init.code}` : ""}`);
     this.name = "ApiError";
     this.kind = init.kind;
@@ -52,6 +56,12 @@ export class ApiError extends Error {
     this.code = init.code ?? null;
     this.details = init.details;
     this.retryAfterSeconds = init.retryAfterSeconds ?? null;
+    this.mayHaveBeenApplied = init.mayHaveBeenApplied ?? false;
+  }
+
+  /** The same error, flagged `mayHaveBeenApplied`. */
+  withMayHaveBeenApplied(): ApiError {
+    return new ApiError({ kind: this.kind, status: this.status, code: this.code, message: this.message, details: this.details, retryAfterSeconds: this.retryAfterSeconds, mayHaveBeenApplied: true });
   }
 }
 

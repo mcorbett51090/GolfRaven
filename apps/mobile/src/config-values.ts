@@ -66,3 +66,33 @@ export function parseSupabaseAnonKey(raw: string | undefined | null): string | n
   if (v.startsWith("sb_publishable_")) return /^sb_publishable_[A-Za-z0-9_-]+$/.test(v) ? v : null;
   return jwtRole(v) === "anon" ? v : null;
 }
+
+/** A value that is a Supabase SECRET key: an `sb_secret_…` key, or a JWT whose `role` is readable and is anything but `anon` (`service_role`,
+ * `authenticated`, ...). Never true for a public key, and never true for an arbitrary string. */
+export function isSecretShapedKey(raw: string | undefined | null): boolean {
+  if (!raw) return false;
+  const v = raw.trim();
+  if (v.startsWith("sb_secret_")) return true;
+  const role = jwtRole(v);
+  return role !== null && role !== "anon";
+}
+
+export interface PublicEnvProblem {
+  /** The variable's name (never its value: a secret must not be printed into build logs). */
+  name: string;
+  problem: "secret_shaped" | "unusable_anon_key";
+}
+
+/** The export-time guard's rule (`scripts/check-public-env.mjs`). Metro inlines every `EXPO_PUBLIC_*` value into the JS bundle as written, so a
+ * secret that reaches one ships to every device; the runtime parser (`parseSupabaseAnonKey`) only makes the app IGNORE such a key, which is too
+ * late. Problems: any `EXPO_PUBLIC_*` value that is secret-shaped, and a set `EXPO_PUBLIC_SUPABASE_ANON_KEY` the parser refuses. Unset / empty is
+ * fine (an unconfigured build is legitimate). */
+export function findPublicEnvProblems(env: Readonly<Record<string, string | undefined>>): PublicEnvProblem[] {
+  const problems: PublicEnvProblem[] = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (!name.startsWith("EXPO_PUBLIC_") || value === undefined || value.trim() === "") continue;
+    if (isSecretShapedKey(value)) problems.push({ name, problem: "secret_shaped" });
+    else if (name === "EXPO_PUBLIC_SUPABASE_ANON_KEY" && parseSupabaseAnonKey(value) === null) problems.push({ name, problem: "unusable_anon_key" });
+  }
+  return problems;
+}

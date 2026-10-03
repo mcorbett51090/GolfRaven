@@ -66,7 +66,10 @@ export default function MeScreen() {
     try {
       const r = await app.deleteAccount();
       if (r.status === "deleted") setPrivacyNote(r.localWipe === "complete" ? "me.delete.done" : "me.delete.partial");
-      else setPrivacyNote(r.error instanceof ApiError && r.error.kind === "not_configured" ? "me.notConfigured" : "me.delete.failed");
+      else if (r.status === "deleted_or_session_ended") setPrivacyNote(r.localWipe === "complete" ? "me.delete.maybeDone" : "me.delete.maybePartial");
+      else if (r.error instanceof ApiError && r.error.kind === "not_configured") setPrivacyNote("me.notConfigured");
+      else if (r.error instanceof ApiError && (r.error.kind === "network" || r.error.kind === "server" || r.error.kind === "unavailable")) setPrivacyNote("me.delete.unreachable");
+      else setPrivacyNote("me.delete.failed");
     } finally {
       setBusy(false);
     }

@@ -21,13 +21,21 @@ export type NeedsAttentionReason =
   | "rejected" // any other 4xx
   | "unexpected_status" // a status the contract does not define for this call
   | "rematch_failed" // 422 catalog_stale, and the stored summary no longer matches the new catalog
-  | "queue_expired"; // queued_catalog unresolved after 7 days (server-side decision, mirrored)
+  | "queue_expired" // queued_catalog unresolved after 7 days (server-side decision, mirrored)
+  | "owner_unknown"; // a row from before P4.2b-0: it has no owner, so it can never be sent (`db/sql.ts` v2)
+
+/** The owner stored on a row that predates owner binding (`db/sql.ts` v2). It is the empty string, which is never a user id, so no signed-in
+ * user ever matches it: such a row is neither sent nor shown. */
+export const UNOWNED = "";
 
 export interface OutboxItem {
   /** Local id (uuid). */
   readonly id: string;
-  /** The idempotency key. UNIQUE across the outbox; never changes. */
+  /** The idempotency key. UNIQUE per owner (the server's key is `(user_id, source, source_ref)`); never changes. */
   readonly sourceRef: string;
+  /** The Supabase user (`auth.users.id`) whose session created the item. Set once, from the auth session and never from a screen
+   * (`enqueueOutboxItem`); only that user's session may send or see the item. Immutable. */
+  readonly ownerUserId: string;
   /** `null` = "Unlisted course" (§7.4): stays `pending`, never sent, until a
    * catalog carrying that course arrives (G3-01). */
   courseId: string | null;
@@ -61,6 +69,8 @@ export type ServerAnswer =
 export interface NewOutboxItem {
   id: string;
   sourceRef: string;
+  /** Non-empty. Callers outside the outbox module never choose it: `enqueueOutboxItem` takes it from the auth session. */
+  ownerUserId: string;
   courseId: string | null;
   catalogVersion: string | null;
   payload: JsonValue;

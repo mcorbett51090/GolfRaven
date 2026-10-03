@@ -7,8 +7,9 @@ import { Body, Button, Card, Chip, Screen } from "../../src/ui/components";
 import { useRouter } from "expo-router";
 
 /** Played tab: the player's timeline. Guests see a sign-in prompt (sign-in is
- * requested only to record a play, Apple 5.1.1, build plan §7.8) and any
- * outbox items; "no item is dropped silently" (§7.6) so the outbox is always
+ * requested only to record a play, Apple 5.1.1, build plan §7.8) and NO outbox
+ * items: `outboxItems` is the signed-in user's own (P4.2b-0), empty when signed
+ * out. "No item is dropped silently" (§7.6) so the user's outbox is always
  * listed, newest first. */
 export default function PlayedScreen() {
   const { t, locale, index, session, outboxItems, syncOutbox, services } = useApp();

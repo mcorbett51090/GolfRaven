@@ -28,6 +28,7 @@ const COURSE = "crs_01M39GMFJZ2P89V3ZZXPPH671T";
 const mk = (n: number, over: Partial<NewOutboxItem> = {}): NewOutboxItem => ({
   id: `o${n}`,
   sourceRef: `health:r${n}`,
+  ownerUserId: "user-a",
   courseId: COURSE,
   catalogVersion: "20260101-aaaaaaa",
   payload: { n },
@@ -62,17 +63,20 @@ describe.each(STORES)("OutboxRunner (%s)", (_n, makeStore) => {
   let rematchResult: Awaited<ReturnType<OutboxRunnerDeps["rematch"]>>;
   let catalogCourse: { courseId: string; catalogVersion: string } | null;
   let runner: OutboxRunner;
+  let signedIn: { user: string | null };
 
   beforeEach(async () => {
     store = await makeStore();
     clock = { now: T0 };
     api = new ScriptedApi(clock);
+    signedIn = { user: "user-a" };
     refreshes = 0;
     rematchResult = { ok: true, courseId: COURSE, catalogVersion: "20260201-bbbbbbb", payload: { rematched: true } };
     catalogCourse = null;
     runner = new OutboxRunner({
       store,
       api,
+      session: { currentUserId: () => signedIn.user, accessTokenFor: async (u) => (signedIn.user === u ? `token-${u}` : null) },
       now: () => clock.now,
       rng: () => 0, // minimum jitter => deterministic
       refreshCatalog: async () => {
@@ -201,6 +205,7 @@ describe.each(STORES)("OutboxRunner (%s)", (_n, makeStore) => {
     const r = new OutboxRunner({
       store,
       api: throwing,
+      session: { currentUserId: () => signedIn.user, accessTokenFor: async (u) => `token-${u}` },
       now: () => clock.now,
       rng: () => 0,
       refreshCatalog: async () => {},
