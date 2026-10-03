@@ -215,7 +215,9 @@ GRANT ALL ON vault.decrypted_secrets TO migration_owner WITH GRANT OPTION;
 -- addition doesn't break lookups against rows keyed by an earlier one.
 INSERT INTO vault.secrets (id, name, secret) VALUES
   ('a0000000-1111-0000-0000-000000000001', 'pseudonym_hmac_v1', 'shim-test-only-pseudonym-hmac-one-32bytes-minimum-xxxxxxxxxxxxxxxxxxxx'),
-  ('a0000000-1111-0000-0000-000000000002', 'pseudonym_hmac_v2', 'shim-test-only-pseudonym-hmac-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy')
+  ('a0000000-1111-0000-0000-000000000002', 'pseudonym_hmac_v2', 'shim-test-only-pseudonym-hmac-two-32bytes-minimum-yyyyyyyyyyyyyyyyyyyyyy'),
+  -- 0045: the offline-code seed derivation key K (HMAC key, >= 32 bytes). Real deployments create it once with vault.create_secret(..., 'offline_seed_key').
+  ('a0000000-1111-0000-0000-0000000000f1', 'offline_seed_key', 'shim-test-only-offline-seed-key-32bytes-minimum-zzzzzzzzzzzzzzzzzzzzzzzz')
 ON CONFLICT (name) DO NOTHING;
 
 -- migration_owner (the pgTAP matrix's own connecting role under

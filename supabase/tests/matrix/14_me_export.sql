@@ -71,8 +71,8 @@ SELECT ok(
 );
 SELECT is(
   (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys((private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'device') -> 0) k),
-  ARRAY['attest_counter', 'attest_key_id', 'first_attested_at', 'first_seen', 'id', 'integrity_last', 'last_seen', 'platform', 'user_id'],
-  'the device block is exactly these columns (0044 added first_attested_at); never attest_public_key, devicecheck_token_hash, install_link_hash or the retired-key list'
+  ARRAY['attest_counter', 'attest_key_id', 'first_attested_at', 'first_seen', 'id', 'integrity_last', 'last_seen', 'offline_seed_version', 'platform', 'user_id'],
+  'the device block is exactly these columns (0044 added first_attested_at, 0045 offline_seed_version); never attest_public_key, devicecheck_token_hash, install_link_hash or the retired-key list'
 );
 SELECT ok(
   (private.export_my_data('00000000-0000-0000-0000-00000000000a'::uuid) -> 'push_token') @>
