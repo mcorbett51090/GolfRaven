@@ -30,6 +30,9 @@
 --      and exported) and the facility the step was accepted at. It never holds a seed or a code.
 --   3. private.offline_seed_derive(user, device, version): the internal core. EXECUTE for NO role: reachable only through the wrappers below and through the
 --      staff-lane wrapper P5 adds (docs/security/p3-money-path-requirements.md, "Offline TOTP seed provisioning").
+--   3'. (gate follow-up) private.offline_code_bound_staff(): the predicate behind pd_offline_code_device_select, keyed on the actor BINDING rather than a settable GUC
+--      (see its comment); and private.validate_and_register_pseudonym_hmac_id replaced (0018's body plus a `name LIKE 'pseudonym_hmac%'` predicate) so K's Vault id
+--      can never be registered as a pseudonym key.
 --   4. private.offline_seed_for_actor(device, rotate): edge_actor only. The BOUND actor's own device, else ZERO ROWS (never an error, so a request that is
 --      about to answer 404 does not abort its own transaction). Optionally rotates, atomically, under the device row lock.
 --   5. private.offline_code_record_step_for_actor(device, seed_version, step, facility): edge_actor only, the staff lane's atomic replay record. The bound actor
@@ -101,6 +104,12 @@ ALTER TABLE app.offline_code_step FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON app.offline_code_step FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON app.offline_code_step TO service_role;
 
+-- WHY THE GUC-KEYED POLICIES BELOW ARE SAFE, AND WHAT THEY ARE NOT: a policy `TO private_definer` is evaluated only while current_user is private_definer, i.e. inside a
+-- SECURITY DEFINER function; an edge_actor session cannot become private_definer, but it CAN set either GUC, so a GUC window is NOT an ownership boundary
+-- against edge_actor for any definer that reads these rows on behalf of a caller. Here it is safe because (1) the only definer touching app.offline_code_step is
+-- offline_code_record_step_for_actor, which sets the GUC itself from its own argument after its explicit scope check and ALSO filters every statement explicitly
+-- (`s.device_id = p_device_id`, the row it inserts), and (2) nothing is read FOR the caller from this table (no return value derives from another account's row).
+-- The explicit filters are mandatory; the policy only narrows what a bug could reach. Rule for P5: every _for_actor definer filters by the bound uid explicitly.
 -- private_definer: delete_my_data's generic pass (DELETE + the `_r` SELECT companion on user_id, the exact 0016 form) and the export read, and the record
 -- function's own INSERT and prune, scoped to ONE device by a transaction-local GUC the definer sets and clears (compared as TEXT in the exact nullif form of
 -- verify-function-inventory check 7, so a leftover '' on a reused pooled connection raises nothing and admits nothing).
@@ -115,11 +124,6 @@ CREATE POLICY pd_offline_code_step_prune ON app.offline_code_step
   FOR DELETE TO private_definer USING (device_id::text = nullif(current_setting('app.offline_code.target_device_id', true), ''));
 CREATE POLICY pd_offline_code_step_prune_r ON app.offline_code_step
   FOR SELECT TO private_definer USING (device_id::text = nullif(current_setting('app.offline_code.target_device_id', true), ''));
-
--- The staff lane reads the PLAYER's device row (owner and current seed version) for the one device the definer named in the GUC. The bound actor's own
--- devices are already visible through pd_edge_act_device_select (0032); this is the other account's, one id at a time, inside the definer only.
-CREATE POLICY pd_offline_code_device_select ON app.device
-  FOR SELECT TO private_definer USING (id::text = nullif(current_setting('app.offline_code.target_device_id', true), ''));
 
 -- ============================================================================
 -- 3. The definer functions (ownership bracket: 0020 / 0022 / 0030)
@@ -154,6 +158,37 @@ BEGIN
     pg_catalog.convert_to(v_key, 'UTF8'),
     'sha256');
 END;
+$$;
+
+-- 3a'. The visibility predicate behind pd_offline_code_device_select (below): true iff THIS transaction has a kind = 'user' actor bound AND that actor holds
+-- a staff or manager scope somewhere (or is an admin). Keyed on the actor BINDING (private.actor_binding: written only by private.bind_actor, one row per
+-- backend and transaction), NOT on a session GUC: any session, edge_actor included, can `set_config` a GUC to any value, so a policy keyed on one is not an
+-- ownership boundary against an edge_actor session (the gate planted the older app.delete_my_data.target_user_id GUC against pd_delete_device_user_id_r,
+-- 0016, and read another account's device). This one cannot be planted by a player: a player's binding is their own uid, which holds no staff scope.
+-- WHAT IT DOES NOT DO: it is not a per-device or per-facility boundary. It lets a bound staff member's definer SEE any device row; WHICH device and WHICH
+-- facility are the definer's explicit checks (offline_code_record_step_for_actor: the facility scope check, then `d.id = p_device_id`). Rule for every
+-- definer that reads app.device: filter explicitly by the bound uid (or by a scope check); never rely on a private_definer policy for ownership.
+CREATE FUNCTION private.offline_code_bound_staff()
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM private.actor_binding b
+    WHERE b.backend_pid = pg_catalog.pg_backend_pid()
+      AND b.xact = pg_catalog.pg_current_xact_id_if_assigned()
+      AND b.kind = 'user'
+      AND (
+        private.is_admin(b.actor_uid)
+        OR EXISTS (
+          SELECT 1
+          FROM app.partner_member pm
+          JOIN app.partner_scope ps ON ps.org_id = pm.org_id AND ps.facility_id IS NOT NULL
+          WHERE pm.user_id = b.actor_uid AND pm.revoked_at IS NULL AND pm.role IN ('staff', 'manager')
+        )
+      )
+  );
 $$;
 
 -- 3b. Provisioning, for the BOUND kind = 'user' actor (no uid argument). ZERO ROWS for a device that is not the actor's own or does not exist (the same
@@ -281,8 +316,38 @@ COMMENT ON FUNCTION private.offline_seed_for_actor(uuid, boolean) IS
 COMMENT ON FUNCTION private.offline_code_record_step_for_actor(uuid, integer, bigint, text) IS
   '0045. edge_actor only. Staff lane: atomically records an accepted (device, seed version, step) at a facility where the bound actor holds a staff or manager scope; refuses the actor''s own device (22023 self_attestation_refused). Returns recorded | replayed | stale_seed_version | step_out_of_window | no_such_device.';
 
+REVOKE EXECUTE ON FUNCTION private.offline_code_bound_staff() FROM PUBLIC;
+COMMENT ON FUNCTION private.offline_code_bound_staff() IS
+  '0045. Policy predicate for pd_offline_code_device_select: a kind=user actor is bound in THIS transaction and holds a staff / manager scope (or is admin). Keyed on the actor binding, not a settable GUC. No role holds EXECUTE (private_definer, the only role the policy applies to, owns it).';
+
+-- 3e. NIT-1 (the gate): private.validate_and_register_pseudonym_hmac_id (0018) accepted ANY Vault secret id of at least 32 bytes, with no check of the secret's
+-- NAME, so a writer allowed to set a pseudonym key id could have registered offline_seed_key's id as a pseudonym key (the registry then treats it as a key
+-- it may HMAC account ids with, 0027 / 0029 account_pseudonyms use `name LIKE 'pseudonym_hmac%'`). Now it requires that name too. CREATE OR REPLACE keeps the
+-- owner (private_definer), the ACL and the signature; the body is 0018's with exactly ONE added predicate (the name), and search_path stays ''.
+CREATE OR REPLACE FUNCTION private.validate_and_register_pseudonym_hmac_id(p_key_id uuid)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM vault.decrypted_secrets
+    WHERE id = p_key_id AND name LIKE 'pseudonym_hmac%' AND decrypted_secret IS NOT NULL AND length(decrypted_secret) >= 32
+  ) THEN
+    RAISE EXCEPTION 'pseudonym_hmac_id % does not resolve to a valid (present, >=32 byte) key in vault.decrypted_secrets -- cannot write a row referencing it', p_key_id
+      USING ERRCODE = '23514';
+  END IF;
+  INSERT INTO private.pseudonym_key_registry (key_id) VALUES (p_key_id) ON CONFLICT DO NOTHING;
+END;
+$$;
+
 RESET ROLE;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- 3f. The staff lane reads the PLAYER's device row (owner and current seed version). The policy is keyed on the actor BINDING through
+-- private.offline_code_bound_staff(), not on a GUC (see 3a'). It is created here, after the function it calls exists.
+CREATE POLICY pd_offline_code_device_select ON app.device
+  FOR SELECT TO private_definer USING (private.offline_code_bound_staff());
 
 -- ============================================================================
 -- 4. Export: private.export_my_data, rebuilt from 0044's FINAL body with exactly TWO changes (the device column list, and the offline_code_step block, both commented 0045)
@@ -515,7 +580,7 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'offline_code_step', 'pd_offline_code_step_insert', 'INSERT', true, 'offline_code_record_step_for_actor: the one row of the ONE device the definer named in app.offline_code.target_device_id, set and cleared inside the definer'),
   ('app', 'offline_code_step', 'pd_offline_code_step_prune', 'DELETE', true, 'offline_code_record_step_for_actor: that one device''s steps too old to be accepted again (more than 3 steps behind the database clock)'),
   ('app', 'offline_code_step', 'pd_offline_code_step_prune_r', 'SELECT', true, 'visibility companion to pd_offline_code_step_prune (DELETE ... WHERE needs SELECT-level visibility)'),
-  ('app', 'device', 'pd_offline_code_device_select', 'SELECT', true, 'offline_code_record_step_for_actor: the owner and current offline_seed_version of the ONE device named in app.offline_code.target_device_id (the staff lane reads the player''s device row; the bound actor''s own devices are pd_edge_act_device_select)');
+  ('app', 'device', 'pd_offline_code_device_select', 'SELECT', true, 'offline_code_record_step_for_actor: the staff lane reads the player''s device row (owner, current seed version); keyed on the actor BINDING via private.offline_code_bound_staff() (a kind=user actor with a staff / manager scope or admin), NOT on a settable GUC; which device and which facility are the definer''s explicit checks');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
@@ -552,6 +617,8 @@ VALUES
    '0045: trigger function (app.device_offline_seed_version_monotonic_trg, BEFORE UPDATE OF offline_seed_version) -- the seed version never decreases (a lower one would revive a rotated-out seed); never EXECUTEd directly by any role'),
   ('private', 'offline_seed_derive', 'p_user_id uuid, p_device_id uuid, p_seed_version integer', false, false, false, false, false,
    '0045: the ONLY reader of Vault secret offline_seed_key; HMAC-SHA256 derivation of the offline-code seed for ANY (user, device, version) it is handed, so NO role has EXECUTE: reachable only through the SECURITY DEFINER wrappers (and the staff-lane wrapper P5 adds)'),
+  ('private', 'offline_code_bound_staff', '', false, false, false, false, false,
+   '0045: policy predicate for pd_offline_code_device_select (app.device): a kind=user actor bound in this transaction holds a staff / manager scope, or is admin; keyed on the actor binding, not a GUC; no role holds EXECUTE'),
   ('private', 'offline_seed_for_actor', 'p_device_id uuid, p_rotate boolean', false, false, false, true, false,
    '0045: edge_actor only; the offline-code seed of the BOUND kind=user actor''s own device (zero rows for any other), optionally rotating (seed_version + 1) first'),
   ('private', 'offline_code_record_step_for_actor', 'p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text', false, false, false, true, false,
@@ -583,6 +650,11 @@ BEGIN
      OR has_function_privilege('authenticated', 'private.offline_seed_derive(uuid, uuid, integer)', 'EXECUTE')
      OR has_function_privilege('anon', 'private.offline_seed_derive(uuid, uuid, integer)', 'EXECUTE') THEN
     RAISE EXCEPTION '0045: no role may EXECUTE private.offline_seed_derive (the one reader of the derivation key)';
+  END IF;
+  IF has_function_privilege('edge_actor', 'private.offline_code_bound_staff()', 'EXECUTE') OR has_function_privilege('edge_system', 'private.offline_code_bound_staff()', 'EXECUTE')
+     OR has_function_privilege('service_role', 'private.offline_code_bound_staff()', 'EXECUTE') OR has_function_privilege('authenticated', 'private.offline_code_bound_staff()', 'EXECUTE')
+     OR has_function_privilege('anon', 'private.offline_code_bound_staff()', 'EXECUTE') THEN
+    RAISE EXCEPTION '0045: no role may EXECUTE private.offline_code_bound_staff (a policy predicate)';
   END IF;
   IF NOT has_function_privilege('edge_actor', 'private.offline_seed_for_actor(uuid, boolean)', 'EXECUTE')
      OR NOT has_function_privilege('edge_actor', 'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)', 'EXECUTE') THEN

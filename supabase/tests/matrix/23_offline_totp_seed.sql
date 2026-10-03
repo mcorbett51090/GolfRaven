@@ -10,7 +10,7 @@
 -- so a change to the derivation (the label, the field order, the encoding, the key, the hash) fails here, not in production. The key is a shim constant:
 -- no secret lives in this file.
 
-SELECT plan(58);
+SELECT plan(63);
 
 -- ----------------------------------------------------------------------------
 -- 0. Structure: the device column and the replay table
@@ -127,8 +127,8 @@ SET ROLE service_role;
 SELECT is((SELECT action::text FROM private.pii_retention_policy WHERE schema_name = 'app' AND table_name = 'offline_code_step' AND column_name = 'user_id'), 'delete_row',
   'registry: offline_code_step.user_id is classified delete_row (a personal table, deleted with the account)');
 SELECT is((SELECT action::text FROM private.pii_export_policy WHERE schema_name = 'app' AND table_name = 'offline_code_step'), 'export', 'registry: and exported to its subject');
-SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('offline_seed_derive', 'offline_seed_for_actor', 'offline_code_record_step_for_actor', 'device_offline_seed_version_monotonic')), 4,
-  'registry: all four new functions are in private.function_inventory');
+SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('offline_seed_derive', 'offline_seed_for_actor', 'offline_code_record_step_for_actor', 'device_offline_seed_version_monotonic', 'offline_code_bound_staff')), 5,
+  'registry: all five new functions are in private.function_inventory');
 SELECT is((SELECT array_agg(function_name ORDER BY function_name) FROM private.function_inventory
            WHERE function_name LIKE 'offline_%' AND expected_edge_actor), ARRAY['offline_code_record_step_for_actor', 'offline_seed_for_actor'], 'registry: edge_actor is expected on exactly the two wrappers');
 SELECT is((SELECT count(*)::int FROM private.function_inventory
@@ -146,5 +146,25 @@ SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.offline
 SELECT is((SELECT has_function_privilege('edge_actor', 'private.offline_seed_for_actor(uuid, boolean)', 'EXECUTE')
              AND has_function_privilege('edge_actor', 'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)', 'EXECUTE')), true, 'edge_actor holds EXECUTE on both wrappers');
 SELECT is((SELECT count(*)::int FROM pg_trigger t WHERE t.tgrelid = 'app.device'::regclass AND t.tgname = 'device_offline_seed_version_monotonic_trg' AND NOT t.tgisinternal), 1, 'the monotonic trigger exists on app.device');
+
+-- ----------------------------------------------------------------------------
+-- 6. Gate follow-up: the device policy is keyed on the actor binding, never a settable GUC; the pseudonym-key validator checks the secret's NAME
+-- ----------------------------------------------------------------------------
+SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)
+           WHERE has_function_privilege(r.n, 'private.offline_code_bound_staff()', 'EXECUTE')), 0, 'the policy predicate: no role may EXECUTE private.offline_code_bound_staff');
+SELECT is((SELECT pg_get_expr(p.polqual, p.polrelid) FROM pg_policy p WHERE p.polrelid = 'app.device'::regclass AND p.polname = 'pd_offline_code_device_select'), 'private.offline_code_bound_staff()',
+  'pd_offline_code_device_select is keyed on the actor-binding predicate: its expression names no current_setting() and no GUC');
+SET ROLE service_role;
+SELECT throws_ok($$SELECT private.validate_and_register_pseudonym_hmac_id('a0000000-1111-0000-0000-0000000000f1')$$, '23514', NULL,
+  'NIT-1: the Vault id of offline_seed_key (a >= 32-byte secret, but not a pseudonym_hmac key) can NOT be registered as a pseudonym key');
+BEGIN;
+SELECT lives_ok($$SELECT private.validate_and_register_pseudonym_hmac_id('a0000000-1111-0000-0000-000000000001')$$, 'control: a real pseudonym_hmac_v1 id still registers');
+ROLLBACK;
+RESET ROLE;
+SELECT is((SELECT p.proowner = 'private_definer'::regrole AND p.proconfig = ARRAY['search_path=""'] AND p.prosecdef AND p.prosrc LIKE '%name LIKE ''pseudonym_hmac%''%'
+             AND has_function_privilege('service_role', p.oid, 'EXECUTE') AND has_function_privilege('edge_actor', p.oid, 'EXECUTE')
+             AND NOT has_function_privilege('anon', p.oid, 'EXECUTE') AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE')
+           FROM pg_proc p WHERE p.oid = 'private.validate_and_register_pseudonym_hmac_id(uuid)'::regprocedure), true,
+  'the replaced validator keeps its owner (private_definer), search_path = '''', SECURITY DEFINER and its ACL (service_role, edge_actor), and carries the name predicate');
 
 SELECT * FROM finish();

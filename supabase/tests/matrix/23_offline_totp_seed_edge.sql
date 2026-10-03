@@ -59,7 +59,7 @@ REVOKE INSERT ON app.offline_code_step FROM CURRENT_USER;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(82);
+SELECT plan(91);
 SELECT floor(extract(epoch FROM clock_timestamp()) / 600)::bigint AS cur \gset
 CREATE FUNCTION pg_temp.cur() RETURNS bigint LANGUAGE sql AS $f$ SELECT floor(extract(epoch FROM clock_timestamp()) / 600)::bigint $f$;
 
@@ -130,6 +130,31 @@ SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-00
 SELECT is((SELECT encode(o_seed, 'hex') FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)),
   encode((SELECT o_seed FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)), 'hex'), 'control: PB gets a seed for PB''s own device');
 SELECT isnt((SELECT encode(o_seed, 'hex') FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)), 'add40558091437161f58c7fad32608775b39e7f79910f980924d6f26a10ddc04', 'and it is not PA''s seed');
+ROLLBACK;
+
+-- ============================================================================
+-- 3b. A settable GUC is NOT an ownership boundary (gate LOW-1). The older app.delete_my_data.target_user_id window (0016, pd_delete_device_user_id_r) and the
+-- device window this migration's record function uses can both be set by ANY session, edge_actor included, and `private_definer` policies keyed on them make
+-- another account's device row VISIBLE inside a definer. Provisioning must therefore be safe on its EXPLICIT filter (d.user_id = the bound uid), not on RLS:
+-- planted as PA, each of them must still give PB's device ZERO rows, for the read and for the rotate path. (The mutant that removes the explicit filter fails here.)
+-- ============================================================================
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee230000-0000-0000-0000-0000000000a0')$$, 'GUC plant: bind PA');
+SELECT set_config('app.offline_code.target_device_id', 'ee230000-0000-0000-0000-00000000b001', true);
+SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)), 0, 'GUC plant (the offline_code device window = PB''s device): PB''s device is still ZERO rows for PA');
+SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', true)), 0, 'GUC plant (offline_code device window): and the ROTATE path is zero rows too');
+SELECT set_config('app.delete_my_data.target_user_id', 'ee230000-0000-0000-0000-0000000000b0', true);
+SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)), 0, 'GUC plant (BOTH windows, the delete_my_data user window = PB): still zero rows');
+SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', true)), 0, 'GUC plant (both windows): the rotate path is zero rows');
+SELECT is((SELECT encode(o_seed, 'hex') FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000a001', false)), 'add40558091437161f58c7fad32608775b39e7f79910f980924d6f26a10ddc04', 'GUC plant: control, PA still gets PA''s own seed (derived with the BOUND uid, never the planted one)');
+SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000b001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'GUC plant: a non-staff PA planting the windows still cannot record a step (the scope check is explicit)');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee230000-0000-0000-0000-0000000000a0')$$, 'GUC plant 2: bind PA');
+SELECT set_config('app.delete_my_data.target_user_id', 'ee230000-0000-0000-0000-0000000000b0', true);
+SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)), 0, 'GUC plant (the delete_my_data user window ALONE = PB): zero rows');
 ROLLBACK;
 
 -- ============================================================================
