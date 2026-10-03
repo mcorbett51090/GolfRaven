@@ -15,11 +15,14 @@
  *  - `POST /checkin-challenge`         -> `{ challenges: IssuedChallenge[] }` (201)       `_shared/checkin/challenge-handler.ts`
  *  - `POST /checkin-token`             -> `{ jti, expiresAt, attestationGrade }` (201)   `_shared/checkin/token-handler.ts`
  *  - `POST /evidence`, `/evidence-batch` -> mapped to an outbox `ServerAnswer`, not validated here: `evidence-answer.ts`
+ *  - `POST /me-offline-seed`           -> `{ seed, stepSeconds, digits, algorithm, seedVersion, issuedAt }`  `_shared/me/offline-seed-handler.ts` (P4.2b-3b)
+ *  - `POST /rewards-activate/{id}`     -> `{ id, kind, state, held, replay }`              `_shared/rewards/activate-handler.ts` (P4.2b-3b)
  *
  * A response that does not match is `bad_response`, never a partial success. Unknown EXTRA keys are ignored (zod's default "strip"): the
  * server may add fields without breaking an installed app; a missing or wrongly typed one is refused.
  */
 import { z } from "zod";
+import { OFFLINE_CODE_ALGORITHM, OFFLINE_CODE_DIGITS, OFFLINE_CODE_STEP_SECONDS } from "../offline-code/params";
 
 export const providerSchema = z.enum(["apple", "google", "email"]);
 
@@ -100,3 +103,23 @@ export const checkinTokenResultSchema = z.object({
 
 /** `POST devices-attest-key` answer (`attest-key-handler.ts`): 201 `registered`, 200 when it replaced an earlier key. */
 export const attestKeyResultSchema = z.object({ deviceId: z.string().min(1), keyId: z.string().min(1), replaced: z.boolean() });
+
+/** `POST /me-offline-seed` -> `OfflineSeedResponse` (`_shared/me/offline-seed-handler.ts`). The three pinned parameters are literals: an answer that echoes another step, digit count or algorithm is
+ * `bad_response` ("a client built against another value fails loudly instead of computing wrong codes", `offline-code/params.ts`). `seed` is 52 base32 characters (32 bytes). */
+export const offlineSeedResultSchema = z.object({
+  seed: z.string().regex(/^[A-Z2-7]{52}$/),
+  stepSeconds: z.literal(OFFLINE_CODE_STEP_SECONDS),
+  digits: z.literal(OFFLINE_CODE_DIGITS),
+  algorithm: z.literal(OFFLINE_CODE_ALGORITHM),
+  seedVersion: z.number().int().min(1),
+  issuedAt: z.string().min(1).refine((s) => Number.isFinite(Date.parse(s))),
+});
+
+/** `POST /rewards-activate/{id}` -> `ActivationResult` (`_shared/rewards/activate-handler.ts`). `state` is open (the server may add one); the client reads `held` and the two active states. */
+export const activationResultSchema = z.object({
+  id: z.string().min(1).max(128),
+  kind: z.enum(["offer_code", "entitlement"]),
+  state: z.string().min(1).max(64),
+  held: z.boolean(),
+  replay: z.boolean(),
+});

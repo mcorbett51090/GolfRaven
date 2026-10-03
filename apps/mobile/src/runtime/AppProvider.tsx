@@ -5,6 +5,7 @@ import { deleteAccountAndWipeLocal, type DeleteOutcome } from "../account";
 import type { Session } from "../api";
 import { buildIndex, type CatalogIndex } from "../browse";
 import { prefetchChallenges } from "../challenges/prefetch-gate";
+import { provisionOfflineSeedOnLaunch } from "../offline-code/gate";
 import { resetCatalogAndMaybeRedownload, type CatalogResetReport, type CatalogState, type RefreshOutcome } from "../catalog/manager";
 import type { CatalogSnapshot } from "../catalog/snapshot";
 import { resolveLocale, translate, plural, LOCALES, type Locale, type MessageKey, type Params, type PluralBase } from "../i18n";
@@ -142,6 +143,8 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     // Online and signed in: keep this user's pool of single-use check-in challenges topped up (offline check-ins consume them, FM-10).
     // A no-op until a screen can use a challenge (`CHECKIN_UI_ENABLED`, src/features.ts): unused ones only expire and eat the hourly limit.
     if (userId !== null) void prefetchChallenges(services.challenges);
+    // Same shape for the offline code's seed: a no-op until a screen can show the code (`OFFLINE_CODE_UI_ENABLED`, src/features.ts).
+    if (userId !== null) void provisionOfflineSeedOnLaunch(services.offlineCode);
   }, [userId, reloadOutbox, services]);
   const outboxItems = useMemo(() => filterVisibleOutboxItems(outboxLoaded, userId), [outboxLoaded, userId]);
 
@@ -206,6 +209,7 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
         outbox: services.outboxStore,
         challenges: services.challengeStore,
         attestState: { wipeUser: async (userId) => services.attestState.wipeUser(userId, await services.deviceId()) },
+        offlineSeed: { wipeUser: (userId) => services.offlineCode.wipeUser(userId) },
         sharer: services.sharer,
         currentUserId: () => services.auth.current()?.userId ?? null,
         secure: services.secure,

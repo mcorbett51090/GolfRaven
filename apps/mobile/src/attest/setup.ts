@@ -3,6 +3,7 @@
  * Pure over its inputs (the loaded module, `Platform.OS`, the parsed config value, the secure store), so `test/attest-setup.test.ts` runs it under Node.
  */
 import type { SecureStore } from "../secure";
+import { NativeActivator, PlainActivator, type RewardActivator } from "./activator";
 import { KeyedMutex, withAssertionLock, type LockGuard } from "./mutex";
 import { NativeAttestor, selectAttestor, type SelectAttestorInput } from "./native";
 import { ASSERTION_LOCK_HOLD_MS, NativeRedeemer, PlainRedeemer, type CheckinRedeemer } from "./redeemer";
@@ -12,6 +13,8 @@ import type { Attestor } from "./types";
 export interface AttestationSetup {
   attestor: Attestor;
   redeemer: CheckinRedeemer;
+  /** Reward activation (P4.2b-3b): `NativeActivator` (over the same key lifecycle, lock and state as `redeemer`) where the module is linked and supported, `PlainActivator` (`kind: "none"`, claim `false`) elsewhere. */
+  activator: RewardActivator;
   /** The per-key assertion lock. `rewards-activate` (P4.2c) must take assertions through THIS instance: the counter is shared with check-in. */
   locks: KeyedMutex;
   state: AttestStateStore;
@@ -28,13 +31,10 @@ export async function createAttestation(input: SelectAttestorInput & { secure: S
   const attestor = await selectAttestor(input);
   const locks = new KeyedMutex({ holdTimeoutMs: input.lockHoldMs ?? ASSERTION_LOCK_HOLD_MS });
   const state = new AttestStateStore(input.secure);
-  const redeemer: CheckinRedeemer = attestor instanceof NativeAttestor ? new NativeRedeemer({ attestor, state, locks }) : new PlainRedeemer();
-  return {
-    attestor,
-    redeemer,
-    locks,
-    state,
-    withAssertionLock: (userId, deviceId, fn) => withAssertionLock(locks, userId, deviceId, fn),
-    markAttestedActivation: (userId, deviceId) => state.markAttestedAndroid(userId, deviceId).catch(() => undefined),
-  };
+  const nativeRedeemer = attestor instanceof NativeAttestor ? new NativeRedeemer({ attestor, state, locks }) : null;
+  const redeemer: CheckinRedeemer = nativeRedeemer ?? new PlainRedeemer();
+  const lock: AttestationSetup["withAssertionLock"] = (userId, deviceId, fn) => withAssertionLock(locks, userId, deviceId, fn);
+  const markAttestedActivation: AttestationSetup["markAttestedActivation"] = (userId, deviceId) => state.markAttestedAndroid(userId, deviceId).catch(() => undefined);
+  const activator: RewardActivator = nativeRedeemer ? new NativeActivator({ redeemer: nativeRedeemer, attestor, state, withLock: lock, markAttestedActivation }) : new PlainActivator(input.platform);
+  return { attestor, redeemer, activator, locks, state, withAssertionLock: lock, markAttestedActivation };
 }

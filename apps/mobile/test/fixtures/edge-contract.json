@@ -819,6 +819,474 @@
         "attestation": "DUt01CHGbLPb32RBpwBNvwG7jzOKPOQjKA_f6erJV9I"
       }
     },
+    "offlineseed_200": {
+      "status": 200,
+      "body": "{\"data\":{\"seed\":\"56AATDJCQZP4VCP3SV6WSY53LYSAKMCGSTHVLQEPNA2FWIFCCQ6A\",\"stepSeconds\":600,\"digits\":6,\"algorithm\":\"SHA256\",\"seedVersion\":1,\"issuedAt\":\"2026-06-01T12:00:00.000Z\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    "offlineseed_200_same_seed_again": {
+      "status": 200,
+      "body": "{\"data\":{\"seed\":\"56AATDJCQZP4VCP3SV6WSY53LYSAKMCGSTHVLQEPNA2FWIFCCQ6A\",\"stepSeconds\":600,\"digits\":6,\"algorithm\":\"SHA256\",\"seedVersion\":1,\"issuedAt\":\"2026-06-01T12:00:00.000Z\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    "offlineseed_200_rotate": {
+      "status": 200,
+      "body": "{\"data\":{\"seed\":\"MB2XDIWRTQUAZW4DPOSUJGOPOOPO6KKC64Q4TGEWKTLG7L6SFXCQ\",\"stepSeconds\":600,\"digits\":6,\"algorithm\":\"SHA256\",\"seedVersion\":2,\"issuedAt\":\"2026-06-01T12:00:00.000Z\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "rotate": true
+      }
+    },
+    "offlineseed_404_foreign_device": {
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"no such device on this account\"}}",
+      "request": {
+        "deviceId": "99999999-9999-4999-8999-999999999999"
+      }
+    },
+    "offlineseed_404_unknown_device": {
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"no such device on this account\"}}",
+      "request": {
+        "deviceId": "00000000-0000-4000-8000-0000000009ee"
+      }
+    },
+    "offlineseed_400_unknown_key": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"unknown field \\\"rotation\\\"\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "rotation": true
+      }
+    },
+    "offlineseed_400_not_a_uuid": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"deviceId must be a UUID\"}}",
+      "request": {
+        "deviceId": "device-1"
+      }
+    },
+    "offlineseed_429_reveal_limit": {
+      "status": 429,
+      "body": "{\"error\":{\"code\":\"rate_limited\",\"message\":\"me-offline-seed rate limit exceeded\",\"details\":{\"retryAfterSeconds\":3600}}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    "offlineseed_429_rotate_limit": {
+      "status": 429,
+      "body": "{\"error\":{\"code\":\"rate_limited\",\"message\":\"me-offline-seed rotation rate limit exceeded\",\"details\":{\"retryAfterSeconds\":3600}}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "rotate": true
+      }
+    },
+    "offlineseed_503_not_provisioned": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"offline_seed_unavailable\",\"message\":\"offline codes are not available right now\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    "activate_200_issued_ios": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"kind\":\"offer_code\",\"state\":\"issued\",\"held\":false,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "ztXc4-rx-P8GDRQbIikwNz5FTFNaYWhvdn2Ei5KZoKc",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "ZUbBDMSN3LeJ2-y3evwTmRhHoQXZCOlVYvo621sxwzM",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_replay_already_active": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"kind\":\"offer_code\",\"state\":\"issued\",\"held\":false,\"replay\":true}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8Y",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "NxyJmfUCWM42qeAKT53Ww__Aq6vQmC3_BJkk7B1zMbQ",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_redeemable_ios_entitlement": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000002\",\"kind\":\"entitlement\",\"state\":\"redeemable\",\"held\":false,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000003",
+        "nonce": "DBMaISgvNj1ES1JZYGdudXyDipGYn6attLvCydDX3uU",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "AdLTwu1ldqOVVYPFxk5WVSdXeMv9o3WKtgqhc_0G4RU",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_held_review_bit0_new_account": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000003\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "KzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O_2_QQ",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "Mr3CxieaffSm7eBRRutu56SAyCpL1ouyjun74IrM7qw",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_held_replay": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000003\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":true}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "SlFYX2ZtdHuCiZCXnqWss7rByM_W3eTr8vkABw4VHCM",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "eaiVN5tMR8LtDHNpOCN_lphRBlCxMJZ4lpnm07pJHwU",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_held_review_bit1": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000003\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "aXB3foWMk5qhqK-2vcTL0tng5-71_AMKERgfJi00O0I",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "NagOpdDXCxv_13veMl-bhth_0xBllfea61pG9T0vfIk",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_held_unattestable_none_ios": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000003\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_held_failed_claim_without_token": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000003\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": true,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_held_failed_attested_before_no_token": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000003\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_200_issued_android": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"kind\":\"offer_code\",\"state\":\"issued\",\"held\":false,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "iI-WnaSrsrnAx87V3OPq8fj_Bg0UGyIpMDc-RUxTWmE",
+        "installLinkId": "0123456789abcdef",
+        "attestation": {
+          "kind": "android",
+          "integrityToken": "it-o6fCNzFLfROFfHsL2lT-JGT8B3N1pVDagc1ju0GCSEM"
+        }
+      }
+    },
+    "activate_200_held_android_no_install_link": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "p661vMPK0djf5u30-wIJEBceJSwzOkFIT1ZdZGtyeYA",
+        "attestation": {
+          "kind": "android",
+          "integrityToken": "it-wXvCnTxkO8TO5gR8Cewhm-jXXwGurPy-GaJbmp4WSTg"
+        }
+      }
+    },
+    "activate_200_held_unattestable_none_android": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"kind\":\"offer_code\",\"state\":\"held_review\",\"held\":true,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "installLinkId": "0123456789abcdef",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false
+        }
+      }
+    },
+    "activate_503_attestation_unavailable": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"attestation_unavailable\",\"message\":\"device attestation is temporarily unavailable; the reward was not changed — retry\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "xs3U2-Lp8Pf-BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ8",
+        "installLinkId": "0123456789abcdef",
+        "attestation": {
+          "kind": "android",
+          "integrityToken": "it-f-a6s4Lpm-GEJ1Zqe5ifJesH_k2SN7o5w5QzXTFp5UE"
+        }
+      }
+    },
+    "activate_200_issued_android_after_503": {
+      "status": 200,
+      "body": "{\"data\":{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"kind\":\"offer_code\",\"state\":\"issued\",\"held\":false,\"replay\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "xs3U2-Lp8Pf-BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ8",
+        "installLinkId": "0123456789abcdef",
+        "attestation": {
+          "kind": "android",
+          "integrityToken": "it-f-a6s4Lpm-GEJ1Zqe5ifJesH_k2SN7o5w5QzXTFp5UE"
+        }
+      }
+    },
+    "activate_503_attestation_not_configured": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"attestation_not_configured\",\"message\":\"Android device attestation is not configured on this deployment; the reward was not changed\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "5ezz-gEIDxYdJCsyOUBHTlVcY2pxeH-GjZSboqmwt74",
+        "installLinkId": "0123456789abcdef",
+        "attestation": {
+          "kind": "android",
+          "integrityToken": "it-SAZVI6rt8gOvHZZLOW_flyZMIZcAW9fUcVsm_sCwOKw"
+        }
+      }
+    },
+    "activate_409_not_activatable": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"reward_not_activatable\",\"message\":\"this reward is redeemed and cannot be activated\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_409_expired": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"reward_expired\",\"message\":\"this reward has expired\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_404_foreign_reward": {
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"no such reward\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_404_unknown_reward": {
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"no such reward\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_404_unparseable_path": {
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"no such reward\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_403_demo_account": {
+      "status": 403,
+      "body": "{\"error\":{\"code\":\"forbidden\",\"message\":\"this account cannot activate rewards\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_422_platform_mismatch": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"platform_mismatch\",\"message\":\"this device is registered under a different platform\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "installLinkId": "0123456789abcdef",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false
+        }
+      }
+    },
+    "activate_422_device_limit": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"device_limit_exceeded\",\"message\":\"this account already has 20 devices on record\"}}",
+      "request": {
+        "deviceId": "eeeeeeee-0000-4000-8000-000000000001",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_422_challenge_not_consumable": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"challenge_not_consumable\",\"message\":\"this challenge could not be used (already used, expired, or not issued to this device)\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "BAsSGSAnLjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t0",
+        "attestation": {
+          "kind": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "L1WgtNb-m17vhtiGF7CtXXnbHGbAdws7enDm933uKaw",
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_429_rate_limited": {
+      "status": 429,
+      "body": "{\"error\":{\"code\":\"rate_limited\",\"message\":\"rewards-activate rate limit exceeded\",\"details\":{\"retryAfterSeconds\":3600}}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        }
+      }
+    },
+    "activate_400_reward_id_in_body": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid activation request\",\"details\":[{\"path\":\"rewardId\",\"message\":\"unrecognised field\"}]}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        },
+        "rewardId": "aaaaaaaa-0000-4000-8000-000000000001"
+      }
+    },
+    "activate_400_install_link_on_ios": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid activation request\",\"details\":[{\"path\":\"installLinkId\",\"message\":\"Android only\"}]}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "ios",
+        "attestation": {
+          "kind": "none",
+          "hardwareSupportsAttestation": false,
+          "deviceCheckToken": "REVWSUNFLVRPS0VO"
+        },
+        "installLinkId": "0123456789abcdef"
+      }
+    },
+    "activate_400_attestation_without_challenge": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid activation request\",\"details\":[{\"path\":\"challengeId\",\"message\":\"required when attestation material is sent\"},{\"path\":\"nonce\",\"message\":\"required when attestation material is sent\"}]}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "platform": "android",
+        "attestation": {
+          "kind": "android",
+          "integrityToken": "it-whatever"
+        }
+      }
+    },
     "batch_200_mixed": {
       "status": 200,
       "body": "{\"data\":{\"results\":[{\"index\":0,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_1\",\"replay\":false,\"play\":{\"id\":\"play_3\",\"scoreBadge\":0.1,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":1,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_2\",\"replay\":false,\"play\":{\"id\":\"play_4\",\"scoreBadge\":0.15,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":2,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_1\",\"replay\":true,\"play\":{\"id\":\"play_3\",\"scoreBadge\":0.1,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":3,\"ok\":false,\"error\":{\"code\":\"unknown_id\",\"message\":\"facilityId \\\"fac_ghost\\\" is not a known catalog facility id\"}},{\"index\":4,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"invalid evidence submission\"}},{\"index\":5,\"ok\":false,\"error\":{\"code\":\"local_date_out_of_window\",\"message\":\"localDate \\\"2026-02-01\\\" is outside the accepted window (facility-local today -30..+1 days)\"}}],\"maxBodyBytes\":65536}}",
@@ -1084,6 +1552,68 @@
         },
         "output": "{\"a\":null,\"b\":[2,{\"a\":\"x\",\"z\":1}],\"c\":true}"
       }
+    },
+    "offlineCode": {
+      "seedFrom": "responses.offlineseed_200.body (data.seed)",
+      "stepSeconds": 600,
+      "times": [
+        {
+          "unixSeconds": 0,
+          "step": 0,
+          "code": "709081"
+        },
+        {
+          "unixSeconds": 1,
+          "step": 0,
+          "code": "709081"
+        },
+        {
+          "unixSeconds": 599,
+          "step": 0,
+          "code": "709081"
+        },
+        {
+          "unixSeconds": 600,
+          "step": 1,
+          "code": "985659"
+        },
+        {
+          "unixSeconds": 601,
+          "step": 1,
+          "code": "985659"
+        },
+        {
+          "unixSeconds": 1790000000,
+          "step": 2983333,
+          "code": "277964"
+        },
+        {
+          "unixSeconds": 1790000399,
+          "step": 2983333,
+          "code": "277964"
+        },
+        {
+          "unixSeconds": 1790000400,
+          "step": 2983334,
+          "code": "634509"
+        },
+        {
+          "unixSeconds": 1790000999,
+          "step": 2983334,
+          "code": "634509"
+        },
+        {
+          "unixSeconds": 1790001000,
+          "step": 2983335,
+          "code": "304317"
+        }
+      ],
+      "leadingZero": {
+        "step": 8,
+        "unixSeconds": 4800,
+        "code": "099866"
+      }
     }
-  }
+  },
+  "_provenance_p42b3b": "Entries starting offlineseed_ and activate_ (and `vectors.offlineCode`) were recorded by the same script (P4.2b-3b) from the REAL handlers: me-offline-seed (handleOfflineSeedRequest, over the server's in-memory offline-code repo; the seed is the server test suite's independent reference derivation under its TEST key, not a production secret) and rewards-activate (handleActivation, parseActivationBody, extractRewardId, enforceActivationRateLimits, over the in-memory rewards repo) with the scripted Apple / Google ports described above. Only privileged.ts is replaced (in-memory rate limits) and, as for checkin-token, the rollback of the handler's transaction on a thrown error is emulated. `vectors.offlineCode` holds codes the server's totp.ts computed."
 }

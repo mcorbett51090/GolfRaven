@@ -38,4 +38,6 @@ export interface NativeAttestModule {
   // ---- Android: Play Integrity (standard requests) -------------------------------------------------------------------------------------
   /** `prepareIntegrityToken(cloudProjectNumber)` (once, cached) then `request(requestHash)` -> the integrity token. */
   integrityToken(cloudProjectNumber: string, requestHash: string): Promise<NativeResult<{ token: string }>>;
+  /** Android (P4.2b-3b, reward activation): `Settings.Secure.ANDROID_ID`, the SSAID, as the install link id the server links device rows on (A20). 16 hex characters; no permission needed. iOS: `unsupported`. */
+  installLinkId(): Promise<NativeResult<{ installLinkId: string }>>;
 }

@@ -14,6 +14,8 @@
  * | `submitEvidenceBatch`   | `POST { items: [<evidence body>] }`                  | `evidence-batch`    |
  * | `requestCheckinChallenges` | `POST { deviceId, facilityId?, prefetchCount? }`  | `checkin-challenge` |
  * | `redeemCheckinChallenge`| `POST { challengeId, nonce, hardwareSupportsAttestation, attestation? }` (`attest/redeemer.ts` builds it) | `checkin-token` |
+ * | `provisionOfflineSeed`  | `POST { deviceId, rotate? }` (strict; the answer carries a SECRET seed, never logged)  | `me-offline-seed`  |
+ * | `activateReward`        | `POST { deviceId, platform, challengeId?, nonce?, installLinkId?, attestation }` (`attest/activator.ts` builds it), the reward id in the PATH | `rewards-activate/<id>` |
  *
  * Auth: `Authorization: Bearer <Supabase access token>` from `getAccessToken()` (the auth service refreshes an expired token itself); a `401`
  * forces ONE refresh and one repeat of the request, then surfaces as `unauthenticated`. No cookies, no redirects.
@@ -31,7 +33,7 @@
  * convention and is unverified against a real project: nothing here has ever called a server.]`
  */
 import { DEFAULT_MIN_AGE } from "../age/gate";
-import { PlainRedeemer, type CheckinRedeemer, type RedeemIo } from "../attest";
+import { PlainActivator, PlainRedeemer, type ActivateIo, type CheckinRedeemer, type RedeemIo, type RewardActivator } from "../attest";
 import { planBatches, selectBatchEntries } from "../evidence/batch";
 import { sendEvidenceBatch, sendEvidenceItem } from "../evidence/send";
 import type { WireBody } from "../evidence/payload";
@@ -41,6 +43,7 @@ import { ApiError, kindForStatus } from "./errors";
 import { answerFromHttp, answersFromBatchHttp } from "./evidence-answer";
 import { retryAfterSecondsFrom } from "./retry-after";
 import {
+  activationResultSchema,
   attestKeyResultSchema,
   challengesResultSchema,
   checkinTokenResultSchema,
@@ -49,12 +52,13 @@ import {
   exportResultSchema,
   linkResultSchema,
   listMethodsSchema,
+  offlineSeedResultSchema,
   pushTokenResultSchema,
   successEnvelopeSchema,
   unlinkResultSchema,
 } from "./schemas";
 import type { z } from "zod";
-import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinRedeemInput, PlaySummary } from "./types";
+import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinRedeemInput, EarnedReward, PlaySummary } from "./types";
 
 export { retryAfterSecondsFrom };
 
@@ -86,6 +90,10 @@ export interface HttpApiOptions {
   policy?: Partial<{ [K in keyof typeof HTTP_POLICY]: number }>;
   /** How a check-in redemption is built and attested (`attest/redeemer.ts`). Default: `PlainRedeemer` (no attestation: `hardwareSupportsAttestation: false`). */
   redeemer?: CheckinRedeemer;
+  /** How a reward activation is built and attested (`attest/activator.ts`). Default: `PlainActivator` for `platform` (no attestation: `kind: "none"`, claim `false`). */
+  activator?: RewardActivator;
+  /** `Platform.OS`, for the default activator. */
+  platform?: string;
   now?: () => number;
   /** Writes an item's payload into its stored row (the redeemed check-in jti, `evidence/send.ts`). */
   persistEvidencePayload?: (item: OutboxItem, payload: JsonValue) => Promise<void>;
@@ -119,6 +127,7 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
   const sleep = opts.sleep ?? realSleep;
   const base = opts.baseUrl.replace(/\/+$/, "");
   const redeemer = opts.redeemer ?? new PlainRedeemer();
+  const activator = opts.activator ?? new PlainActivator(opts.platform ?? "none");
   const now = opts.now ?? Date.now;
 
   interface Raw {
@@ -286,6 +295,17 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     };
   }
 
+  /** The HTTP an activation needs, as the owner of `accessToken`: the three calls `attest/activator.ts` makes. None is retried here. The reward id is named ONLY by the path
+   * (`extractRewardId`, `request-shape.ts`: `/rewards-activate/<uuid>`), never the body. */
+  function activateIo(accessToken: string, rewardId: string, deviceId: string): ActivateIo {
+    const redeem = redeemIo(accessToken, deviceId);
+    return {
+      post: (wire) => call({ fn: `rewards-activate/${rewardId.toLowerCase()}`, method: "POST", body: wire, schema: activationResultSchema, idempotent: false, accessToken }),
+      requestLiveChallenge: redeem.requestLiveChallenge,
+      registerKey: redeem.registerKey,
+    };
+  }
+
   return {
     // No server endpoint serves these yet (no `api.*` views and no policy endpoint exist in `supabase/`): the honest answers are the
     // compiled default and "nothing". They make no request, so a build with a real client never shows data it did not get.
@@ -293,6 +313,7 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     listPlays: (): Promise<PlaySummary[]> => Promise.resolve([]),
     listAchievements: (): Promise<AchievementSummary[]> => Promise.resolve([]),
     listTrailProgrammes: (): Promise<Record<string, ProgrammeStatus>> => Promise.resolve({}),
+    listEarnedRewards: (): Promise<EarnedReward[]> => Promise.resolve([]),
 
     async listSignInMethods() {
       return (await call({ fn: "me-signin-methods", method: "GET", schema: listMethodsSchema, idempotent: true })).methods;
@@ -330,6 +351,23 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         schema: pushTokenResultSchema,
         idempotent: true,
       });
+    },
+
+    /** `POST me-offline-seed`: ONE request as the owner, never retried here (every call is a seed reveal and counts against 20 an hour; a rotation is not safe to repeat blindly). The answer carries a SECRET. */
+    provisionOfflineSeed(req, credentials) {
+      return call({
+        fn: "me-offline-seed",
+        method: "POST",
+        body: { deviceId: req.deviceId, ...(req.rotate === true ? { rotate: true } : {}) },
+        schema: offlineSeedResultSchema,
+        idempotent: false,
+        accessToken: credentials.accessToken,
+      });
+    },
+
+    /** `POST rewards-activate/<id>` (`attest/activator.ts`): the owner's credentials, the lock, the key lifecycle and the attestation are the activator's. */
+    activateReward(req, credentials) {
+      return activator.activate({ ...req, userId: credentials.userId, accessToken: credentials.accessToken }, activateIo(credentials.accessToken, req.rewardId, req.deviceId));
     },
 
     requestCheckinChallenges(req: CheckinChallengeRequest, credentials: EvidenceCredentials) {

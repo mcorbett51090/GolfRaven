@@ -54,6 +54,8 @@ export interface BackendDeps {
   loadDevMocks: (() => DevMocks) | null;
   /** Evidence-lane wiring for the real client (the check-in redeemer of `attest/`; the payload write the check-in redemption needs). */
   evidence?: Pick<HttpApiOptions, "redeemer" | "persistEvidencePayload">;
+  /** Reward-activation wiring for the real client (the activator of `attest/`, and `Platform.OS` for the plain one). */
+  rewards?: Pick<HttpApiOptions, "activator" | "platform">;
 }
 
 export interface Backend {
@@ -70,7 +72,7 @@ export function createBackend(deps: BackendDeps): Backend {
   if (kind === "real") {
     const { apiBaseUrl, supabaseUrl, supabaseAnonKey } = deps.config;
     const auth = deps.createAuth({ url: supabaseUrl as string, anonKey: supabaseAnonKey as string, storage: deps.secure });
-    const api = createHttpApiClient({ baseUrl: apiBaseUrl as string, fetch: deps.fetch, getAccessToken: (o) => auth.getAccessToken(o), ...deps.evidence });
+    const api = createHttpApiClient({ baseUrl: apiBaseUrl as string, fetch: deps.fetch, getAccessToken: (o) => auth.getAccessToken(o), ...deps.evidence, ...deps.rewards });
     return { kind, api, auth, demoAdapters: null, devHandle: null };
   }
   if (kind === "demo") {

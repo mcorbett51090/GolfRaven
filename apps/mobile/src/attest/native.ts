@@ -20,6 +20,8 @@ import { UnattestableAttestor } from "./unattestable";
 const KEY_ID_RE = /^[A-Za-z0-9+/]{43}=$/;
 const B64_RE = /^[A-Za-z0-9+/_-]+={0,2}$/;
 const TOKEN_RE = /^[A-Za-z0-9._~+/=-]+$/;
+/** The server's `INSTALL_LINK_RE` (`rewards/request-shape.ts`): an opaque id of 16-128 characters `[A-Za-z0-9._~-]`. */
+const INSTALL_LINK_RE = /^[A-Za-z0-9._~-]{16,128}$/;
 
 /** Standard base64 of bytes (the form `NativeAttestModule` takes a hash in). Pure; no `btoa` is needed. */
 export function bytesToBase64(bytes: Uint8Array): string {
@@ -105,6 +107,14 @@ export class NativeAttestor implements Attestor {
     const w = this.wrongPlatform<{ token: string }>("ios");
     if (w) return Promise.resolve(w);
     return this.call(() => this.mod.deviceCheckToken(), (r) => (isText(r.token, B64_RE) ? { token: r.token } : null), "deviceCheckToken");
+  }
+
+  /** Android install link id for reward activation (P4.2b-3b). A binary built before the module had this function answers `unattestable` (the activation then carries no link and is held). */
+  installLinkId(): Promise<AttestResult<{ installLinkId: string }>> {
+    const w = this.wrongPlatform<{ installLinkId: string }>("android");
+    if (w) return Promise.resolve(w);
+    if (typeof this.mod.installLinkId !== "function") return Promise.resolve({ kind: "unattestable", reason: "not_implemented" });
+    return this.call(() => this.mod.installLinkId(), (r) => (isText(r.installLinkId, INSTALL_LINK_RE) ? { installLinkId: r.installLinkId } : null), "installLinkId");
   }
 
   integrityToken(requestHash: Uint8Array): Promise<AttestResult<{ integrityToken: string }>> {

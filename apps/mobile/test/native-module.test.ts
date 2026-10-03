@@ -18,7 +18,7 @@ const config = JSON.parse(read("expo-module.config.json")) as { platforms: strin
 const contract = readFileSync(here("../src/attest/native-module.ts"), "utf8");
 
 /** The names the JS contract (`NativeAttestModule`) declares as methods. */
-const CONTRACT_FUNCTIONS = ["capability", "generateKey", "attestKey", "generateAssertion", "deviceCheckToken", "integrityToken"];
+const CONTRACT_FUNCTIONS = ["capability", "generateKey", "attestKey", "generateAssertion", "deviceCheckToken", "integrityToken", "installLinkId"];
 
 describe("the module is declared the way Expo autolinking finds a local module (modules/<name>/expo-module.config.json)", () => {
   it("expo-module.config.json names both platforms and the exact classes", () => {

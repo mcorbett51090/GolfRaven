@@ -7,3 +7,19 @@
  * screens and native attestation) flip it to `true` in the same change that adds the screen.
  */
 export const CHECKIN_UI_ENABLED = false;
+
+/**
+ * `OFFLINE_CODE_UI_ENABLED` (P4.2b-3b): whether the app shows the player's offline staff code (Me → "Offline code": the handle, the 6-digit code, a countdown, "reset code") and, with it,
+ * provisions the seed (`offline-code/gate.ts`). It is `false`: the staff side that ACCEPTS the code is P5 (the portal's verification endpoint), so a release build ships nothing
+ * user-visible and reveals no seed until that exists. The client (`src/offline-code/`: provisioning, the secure-store seed, the TOTP, the manager) is built and tested; this switch is the
+ * only thing between it and a player. Flip it to `true` in the same change that makes the code useful.
+ */
+export const OFFLINE_CODE_UI_ENABLED = false;
+
+/**
+ * `WALLET_ACTIVATION_UI_ENABLED` (P4.2b-3b): whether the Wallet shows earned rewards with an "Activate" action (`POST rewards-activate`). It is `false` because the rest of the path is not
+ * there: no server endpoint LISTS a player's earned rewards (`listEarnedRewards` answers `[]` without a request), nothing earns one yet outside tests (P5), and the Wallet tab itself is a
+ * placeholder. The activation client (`src/attest/activator.ts`, `src/rewards/`) is built and tested against the real handlers' recorded answers; this switch keeps the card out of a release
+ * build until a reward can exist. Flip it in the change that adds the listing endpoint.
+ */
+export const WALLET_ACTIVATION_UI_ENABLED = false;
