@@ -8,7 +8,7 @@
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { computeRequestBinding, toBase64Url, toHex } from "../../../supabase/functions/_shared/rewards/binding.ts";
 import { parseActivationBody } from "../../../supabase/functions/_shared/rewards/request-shape.ts";
 import { computeIosActivationBinding } from "../../../supabase/functions/_shared/rewards/string-binding.ts";
@@ -20,6 +20,7 @@ import {
   NativeAttestor,
   PlainActivator,
   UnattestableAttestor,
+  activationPhaseOf,
   activationWireRequest,
   androidRequestBinding,
   assertionLockKey,
@@ -29,12 +30,17 @@ import {
   iosActivationBinding,
   type ActivationProof,
 } from "../src/attest";
+import { activationMessage, outcomeFromError } from "../src/rewards";
+import { en } from "../src/i18n/messages/en";
+import { frCA } from "../src/i18n/messages/fr-CA";
 import { MemorySecureStore } from "../src/secure";
 import { FakeNativeAttestModule } from "./support/fake-native-attest";
 import { CHALLENGE, DEVICE, NONCE, USER, grade, input } from "./support/attest-rig";
 import { CLOUD, REWARD, REWARD2, actInput, answer, assertionsOf, held, integrityRequestsOf, makeActivationRig } from "./support/activation-rig";
 import { VECTORS, recorded, recordedRequest } from "./support/edge-fixtures";
 import { apiError, jwt } from "./support/fakes";
+
+afterEach(() => vi.useRealTimers());
 
 const sha256 = async (b: Uint8Array): Promise<Uint8Array> => new Uint8Array(await crypto.subtle.digest("SHA-256", b.slice().buffer));
 const settle = (ms = 25): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -392,6 +398,99 @@ describe("ONE ASSERTION IN FLIGHT PER KEY, across check-in and activation (PR #4
   });
 });
 
+describe("ANDROID: check-in redemption takes the same assertion lock as activation (PR #44 gate LOW-1)", () => {
+  const FAIL = { ok: false, code: "unavailable", message: "Play services is updating" } as const;
+
+  it("the gate's timeline: an activation whose token is in flight (its `attested` verdict not committed) and a check-in whose Play Integrity call fails locally can no longer interleave: the check-in WAITS, then defers, and no token-less request is ever sent", async () => {
+    const ar = makeActivationRig("android");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    ar.postReplies = [async () => (await gate, answer())];
+    const activation = ar.activator.activate(actInput(), ar.io());
+    await settle();
+    expect(ar.rig.timeline.at(-1)).toBe("http:act:start");
+    ar.rig.module.always.integrityToken = FAIL; // from now on the check-in's Play Integrity call fails locally
+    const checkin = ar.rig.redeemer.redeem(input(), ar.rig.io());
+    const checkinResult = checkin.then(() => "resolved", (e: unknown) => e);
+    await settle();
+    // the check-in did not even call Play Integrity, read the mark, or post: it is queued behind the activation
+    expect(ar.rig.timeline.filter((e) => e === "native:integrityToken")).toHaveLength(1);
+    expect(ar.rig.posts).toEqual([]);
+    expect(ar.rig.locks.pendingKeys()).toEqual([assertionLockKey(USER, DEVICE)]);
+    release();
+    await activation;
+    // the activation's verdict was recorded BEFORE the check-in read the mark, so the check-in defers instead of going token-less
+    expect(await checkinResult).toMatchObject({ name: "AttestationDeferred", reason: "integrity_token_unavailable" });
+    expect(ar.rig.posts, "no token-less (claim false) check-in request").toEqual([]);
+    expect(ar.marked).toHaveLength(1);
+    expect(ar.rig.locks.pendingKeys()).toEqual([]);
+  });
+
+  it("and the other way round: a check-in whose token request is in flight holds the lock against an activation, so the activation sees the check-in's `attested` mark", async () => {
+    const ar = makeActivationRig("android");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    ar.rig.postReplies = [async () => (await gate, grade("attested"))];
+    const checkin = ar.rig.redeemer.redeem(input(), ar.rig.io());
+    await settle();
+    expect(ar.rig.timeline).toEqual(["native:integrityToken", "http:post:start"]);
+    ar.rig.module.always.integrityToken = { ok: false, code: "unsupported", message: "no play" }; // the activation would go token-less if it read "never attested"
+    const activation = ar.activator.activate(actInput(), ar.io());
+    const activationResult = activation.then(() => "resolved", (e: unknown) => e);
+    await settle();
+    expect(ar.rig.timeline, "the activation waits").toEqual(["native:integrityToken", "http:post:start"]);
+    expect(ar.liveCalls).toBe(0);
+    release();
+    await checkin;
+    expect(await activationResult).toMatchObject({ name: "AttestationDeferred", reason: "integrity_token_unavailable" });
+    expect(ar.posts, "no token-less activation").toEqual([]);
+  });
+
+  it("an Android check-in and an Android activation are strictly sequential END TO END, in call order, whichever starts first", async () => {
+    for (const first of ["activation", "checkin"] as const) {
+      const ar = makeActivationRig("android");
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      ar.postReplies = [async () => (await gate, answer()), answer()];
+      ar.rig.postReplies = [async () => (await gate, grade("attested")), grade("attested")];
+      const start = {
+        activation: () => ar.activator.activate(actInput(), ar.io()),
+        checkin: () => ar.rig.redeemer.redeem(input(), ar.rig.io()),
+      };
+      const second = first === "activation" ? "checkin" : "activation";
+      const a = start[first]();
+      await settle();
+      const b = start[second]();
+      await settle();
+      const firstEvents = ar.rig.timeline.length;
+      expect(ar.rig.timeline.filter((e) => e === "native:integrityToken"), first).toHaveLength(1);
+      release();
+      await Promise.all([a, b]);
+      const t = ar.rig.timeline;
+      const ends = t.flatMap((e, i) => (e === "http:act:end" || e === "http:post:end" ? [i] : []));
+      const secondToken = t.indexOf("native:integrityToken", t.indexOf("native:integrityToken") + 1);
+      expect(t.filter((e) => e === "native:integrityToken"), first).toHaveLength(2);
+      expect(secondToken, first).toBeGreaterThan(ends[0]!);
+      expect(firstEvents, first).toBeLessThan(secondToken);
+      expect(ar.rig.locks.pendingKeys()).toEqual([]);
+    }
+  });
+
+  it("the hold timeout aborts a check-in stuck in Play Integrity instead of abandoning it: it defers (`assertion_lock_timeout`), the late token changes nothing (no state, no request), and the lock is free", async () => {
+    const ar = makeActivationRig("android", { holdMs: 40, nativeTimeoutMs: 10_000 });
+    let release!: () => void;
+    ar.rig.module.stall.integrityToken = [new Promise<void>((r) => (release = r))];
+    await expect(ar.rig.redeemer.redeem(input(), ar.rig.io())).rejects.toMatchObject({ name: "AttestationDeferred", reason: "assertion_lock_timeout" });
+    release();
+    await settle();
+    expect(ar.rig.posts).toEqual([]);
+    expect(await ar.rig.state.hasAttestedAndroid(USER, DEVICE)).toBe(false);
+    expect(ar.rig.locks.pendingKeys()).toEqual([]);
+    await ar.rig.redeemer.redeem(input(), ar.rig.io()); // the lock is free again
+    expect(ar.rig.posts).toHaveLength(1);
+  });
+});
+
 describe("markAttestedActivation (Android 'attested before')", () => {
   const markedAfter = async (reply: ActivationAnswer | Error, platform: "android" | "ios" = "android"): Promise<number> => {
     const ar = platform === "android" ? makeActivationRig("android") : await iosRig();
@@ -591,6 +690,172 @@ describe("iOS: the key lifecycle is the redeemer's, shared", () => {
     await expect(ar.activator.activate(actInput({ accessToken: "not-a-jwt" }), ar.io())).rejects.toMatchObject({ reason: "no_account_binding" });
     expect(ar.rig.timeline).toEqual([]);
     expect(ar.posts).toEqual([]);
+  });
+});
+
+describe("PR #44 gate NIT: the outcome of a failure BEFORE the activation request went out is labelled by the request that failed", () => {
+  const caught = async (p: Promise<unknown>): Promise<unknown> => p.then(() => undefined, (e: unknown) => e);
+
+  it("a network failure on the activation's OWN live challenge (iOS and Android) is `offline`: nothing was sent to the reward, so it is not 'we could not confirm'; the error object is the one the client threw", async () => {
+    for (const platform of ["ios", "android"] as const) {
+      const ar = platform === "ios" ? await iosRig() : makeActivationRig("android");
+      const e = apiError("network", 0, null);
+      ar.live.push(e);
+      const thrown = await caught(ar.activator.activate(actInput(), ar.io()));
+      expect(thrown, platform).toBe(e);
+      expect(activationPhaseOf(thrown), platform).toBe("challenge");
+      expect(outcomeFromError(thrown), platform).toEqual({ status: "offline" });
+      expect(ar.posts, platform).toEqual([]);
+    }
+  });
+
+  it("a network failure on the ACTIVATION request itself stays `unknown_outcome` (it may have been applied), and a reused error object is not mistaken for a pre-send one", async () => {
+    for (const platform of ["ios", "android"] as const) {
+      const ar = platform === "ios" ? await iosRig() : makeActivationRig("android");
+      const e = apiError("network", 0, null);
+      ar.live.push(e); // the challenge fails with `e`: tagged
+      expect(outcomeFromError(await caught(ar.activator.activate(actInput(), ar.io()))), platform).toEqual({ status: "offline" });
+      ar.postReplies = [e]; // the SAME object now fails the activation post
+      const thrown = await caught(ar.activator.activate(actInput(), ar.io()));
+      expect(thrown, platform).toBe(e);
+      expect(activationPhaseOf(thrown), platform).toBeNull();
+      expect(outcomeFromError(thrown), platform).toEqual({ status: "unknown_outcome" });
+    }
+  });
+
+  it("a network failure on the key REGISTRATION (iOS, first use) is `offline` as well", async () => {
+    const ar = makeActivationRig("ios");
+    const e = apiError("network", 0, null);
+    ar.registerReplies = [e];
+    const thrown = await caught(ar.activator.activate(actInput(), ar.io()));
+    expect(thrown).toBe(e);
+    expect(activationPhaseOf(thrown)).toBe("registration");
+    expect(outcomeFromError(thrown)).toEqual({ status: "offline" });
+    expect(ar.posts).toEqual([]);
+  });
+
+  it("a 429 from checkin-challenge (the activation's live challenge) or devices-attest-key (the registration) is NOT the activation's limit: it names its own source and has its own line, with and without a Retry-After", async () => {
+    const cases: Array<{ name: string; make: () => Promise<{ ar: Awaited<ReturnType<typeof iosRig>>; e: ReturnType<typeof apiError> }>; source: "challenge" | "registration" }> = [
+      { name: "ios live challenge", source: "challenge", make: async () => { const ar = await iosRig(); const e = apiError("rate_limited", 429, "rate_limited", undefined, 125); ar.live.push(e); return { ar, e }; } },
+      { name: "android live challenge", source: "challenge", make: async () => { const ar = makeActivationRig("android"); const e = apiError("rate_limited", 429, "rate_limited", undefined, 125); ar.live.push(e); return { ar, e }; } },
+      { name: "ios key registration", source: "registration", make: async () => { const ar = makeActivationRig("ios"); const e = apiError("rate_limited", 429, "rate_limited", undefined, 125); ar.registerReplies = [e]; return { ar, e }; } },
+    ];
+    for (const c of cases) {
+      const { ar, e } = await c.make();
+      const thrown = await caught(ar.activator.activate(actInput(), ar.io()));
+      expect(thrown, c.name).toBe(e);
+      const o = outcomeFromError(thrown);
+      expect(o, c.name).toEqual({ status: "rate_limited", retryAfterSeconds: 125, source: c.source });
+      const m = activationMessage(o);
+      expect(m.key, c.name).toBe(`wallet.activate.outcome.rate_limited.${c.source}`);
+      expect(m.params, c.name).toEqual({ minutes: 3 });
+      expect(en[m.key]).toMatch(c.source === "challenge" ? /security checks/i : /set-up/i);
+      expect(frCA[m.key]).toBeTruthy();
+      expect(activationMessage({ ...(o as object), retryAfterSeconds: null } as typeof o).key, c.name).toBe(`wallet.activate.outcome.rate_limited.${c.source}.later`);
+    }
+  });
+
+  it("a 429 from the activation request itself is the activation's own limit: no source, the original line (a reused error object is not mistaken for a pre-send one)", async () => {
+    const ar = makeActivationRig("android");
+    const e = apiError("rate_limited", 429, "rate_limited", undefined, 60);
+    ar.live.push(e);
+    expect(outcomeFromError(await caught(ar.activator.activate(actInput(), ar.io())))).toMatchObject({ source: "challenge" });
+    ar.postReplies = [e];
+    const o = outcomeFromError(await caught(ar.activator.activate(actInput(), ar.io())));
+    expect(o).toEqual({ status: "rate_limited", retryAfterSeconds: 60 });
+    expect(activationMessage(o)).toEqual({ key: "wallet.activate.outcome.rate_limited", params: { minutes: 1 } });
+  });
+
+  it("every new line exists in en and fr-CA with the {minutes} parameter exactly where the key says so", () => {
+    for (const source of ["challenge", "registration"] as const) {
+      const withMinutes = `wallet.activate.outcome.rate_limited.${source}` as const;
+      const later = `wallet.activate.outcome.rate_limited.${source}.later` as const;
+      for (const table of [en, frCA]) {
+        expect(table[withMinutes]).toMatch(/\{minutes\}/);
+        expect(table[later]).toBeTruthy();
+        expect(table[later]).not.toMatch(/\{/);
+      }
+    }
+  });
+
+  it("an error from a call that is neither (a local failure, an error with no phase) is untouched: a plain network ApiError outside an activation stays `unknown_outcome`", () => {
+    expect(activationPhaseOf(apiError("network", 0, null))).toBeNull();
+    expect(activationPhaseOf("a string")).toBeNull();
+    expect(activationPhaseOf(null)).toBeNull();
+    expect(outcomeFromError(apiError("network", 0, null))).toEqual({ status: "unknown_outcome" });
+    expect(outcomeFromError(apiError("rate_limited", 429, null, undefined, 60))).toEqual({ status: "rate_limited", retryAfterSeconds: 60 });
+  });
+});
+
+describe("test gaps from the PR #44 gate (behaviour-equivalent survivors, now pinned)", () => {
+  it("A11: installLinkId is Android-only. The wire constructor drops it on iOS whatever it is given (the server refuses it there), keeps it on Android on a token AND a token-less request; and an iOS activation never even asks the module for it", async () => {
+    const link = "0123456789abcdef";
+    const ios = { deviceId: DEVICE, platform: "ios" as const, installLinkId: link };
+    const android = { deviceId: DEVICE, platform: "android" as const, installLinkId: link };
+    const dc = { kind: "ios", challenge: { id: CHALLENGE, nonce: NONCE }, keyId: "k", assertion: "a", deviceCheckToken: "t" } as const;
+    expect(activationWireRequest(ios, dc)).not.toHaveProperty("installLinkId");
+    expect(activationWireRequest(ios, { kind: "none" })).not.toHaveProperty("installLinkId");
+    expect(activationWireRequest(android, { kind: "none" })).toHaveProperty("installLinkId", link);
+    expect(activationWireRequest(android, { kind: "android", challenge: { id: CHALLENGE, nonce: NONCE }, integrityToken: "t" })).toHaveProperty("installLinkId", link);
+    expect(activationWireRequest({ deviceId: DEVICE, platform: "android" }, { kind: "none" })).not.toHaveProperty("installLinkId");
+    // end to end: iOS never reads it (no module call), Android reads it once and sends it
+    const i = await iosRig();
+    await i.activator.activate(actInput(), i.io());
+    expect(i.rig.module.ops("installLinkId")).toHaveLength(0);
+    expect(i.posts[0]).not.toHaveProperty("installLinkId");
+    const a = makeActivationRig("android");
+    await a.activator.activate(actInput(), a.io());
+    expect(a.rig.module.ops("installLinkId")).toHaveLength(1);
+    expect(a.posts[0]).toHaveProperty("installLinkId", a.rig.module.installLinkValue);
+    const n = makeActivationRig("android");
+    n.rig.module.always.integrityToken = { ok: false, code: "unsupported", message: "no play" };
+    await n.activator.activate(actInput(), n.io());
+    expect(n.posts[0]!.attestation.kind).toBe("none");
+    expect(n.posts[0]).toHaveProperty("installLinkId", n.rig.module.installLinkValue); // a token-less Android request carries the link hint too
+  });
+
+  it("A14: the reward id is lower-cased in the iOS activation binding (`lower(rewardId)`), as the server does: any spelling gives the same hash, the server's included, and the activator signs the same bytes for either spelling", async () => {
+    const base = { deviceId: DEVICE, challengeId: CHALLENGE, deviceCheckTokenSha256: "ab".repeat(32), nonce: NONCE };
+    const lower = iosActivationBinding({ ...base, rewardId: REWARD });
+    const upper = iosActivationBinding({ ...base, rewardId: REWARD.toUpperCase() });
+    expect(bytesToHex(upper)).toBe(bytesToHex(lower));
+    expect(bytesToHex(lower)).toBe(toHex(await computeIosActivationBinding(sha256, { ...base, rewardId: REWARD })));
+    expect(bytesToHex(upper)).toBe(toHex(await computeIosActivationBinding(sha256, { ...base, rewardId: REWARD })));
+    // and each of the four lower-cased ids matters on its own
+    for (const field of ["rewardId", "deviceId", "challengeId"] as const) {
+      const body = { ...base, rewardId: REWARD };
+      expect(bytesToHex(iosActivationBinding({ ...body, [field]: body[field].toUpperCase() })), field).toBe(bytesToHex(iosActivationBinding(body)));
+    }
+    // through the activator: the assertion is over the same hash whichever way the reward id is spelled
+    const hashes: string[] = [];
+    for (const id of [REWARD, REWARD.toUpperCase()]) {
+      const ar = await iosRig();
+      await ar.activator.activate(actInput({ rewardId: id }), ar.io());
+      hashes.push(assertionsOf(ar)[0]!.hashHex);
+    }
+    expect(hashes[1]).toBe(hashes[0]);
+  });
+
+  it("A16: an activation's token-less (`none`) request is a SENT request held through `effect`: one still in flight past the hold time keeps the lock (the next activation waits) and its real answer is returned, on iOS and on Android", async () => {
+    for (const platform of ["ios", "android"] as const) {
+      vi.useFakeTimers();
+      const ar = platform === "ios" ? makeActivationRig("ios", { holdMs: 5_000 }) : makeActivationRig("android", { holdMs: 5_000 });
+      if (platform === "ios") ar.rig.module.next.generateKey = [{ ok: false, code: "unsupported", message: "featureUnsupported" }];
+      else ar.rig.module.always.integrityToken = { ok: false, code: "unsupported", message: "no play" };
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      ar.postReplies = [async () => (await gate, held()), answer({ id: REWARD2 })];
+      const first = ar.activator.activate(actInput(), ar.io());
+      const second = ar.activator.activate(actInput({ rewardId: REWARD2 }), ar.io());
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(ar.posts, platform).toHaveLength(1);
+      expect(ar.posts[0]!.attestation.kind, platform).toBe("none");
+      expect(ar.rig.locks.pendingKeys(), platform).toEqual([assertionLockKey(USER, DEVICE)]);
+      release();
+      await expect(first, platform).resolves.toMatchObject({ held: true });
+      await expect(second, platform).resolves.toMatchObject({ id: REWARD2 });
+      vi.useRealTimers();
+    }
   });
 });
 

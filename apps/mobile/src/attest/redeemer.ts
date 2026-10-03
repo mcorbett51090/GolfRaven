@@ -9,8 +9,9 @@
  *     does not send a token-less request in those states: it throws `AttestationDeferred` and the send is retried later (the held challenge stays). `evidence/send.ts`
  *     counts the deferrals on the held challenge and, after `ATTEST_MAX_DEFERRALS`, drops the challenge: the play goes with no challenge (x0.6, no co-signal, no fraud
  *     signal) rather than as a token-less request that would raise one. A device that has never shown it can attest sends token-less with `false` (`unattestable`).
- *  3. ONE ASSERTION IN FLIGHT PER KEY (iOS). The lock for (user, device) is taken before the key is read or registered and released when the HTTP response of the request that
- *     carries the assertion returns or fails: `mutex.ts`. The hold timeout does not abandon a running holder: it ABORTS it. The holder calls `guard.check()` before every side
+ *  3. ONE ASSERTION IN FLIGHT PER KEY (iOS), AND ONE CHECK-IN OR ACTIVATION AT A TIME PER DEVICE (Android). The lock for (user, device) is taken before the key is read or registered
+ *     (iOS) / before the Play Integrity call (Android) and released when the HTTP response of the request that carries the assertion or token returns or fails: `mutex.ts`. On Android
+ *     there is no counter; the lock makes "read the attested-before mark, send token-less, write the mark" atomic against a concurrent activation or check-in (PR #44 gate LOW-1). The hold timeout does not abandon a running holder: it ABORTS it. The holder calls `guard.check()` before every side
  *     effect (state write, native call, HTTP request), runs a SENT request through `guard.effect` (the lock is kept until it settles), and each native call has its own timeout.
  *     An aborted holder therefore performs no further effect, so it can never register a key or send a request outside the lock (PR #42 gate HIGH-1).
  *  4. A 503 `attestation_unavailable` / `attestation_not_configured` from `checkin-token` is the vendor being down: the challenge was NOT consumed. It is rethrown as the ApiError it is
@@ -179,17 +180,39 @@ export class NativeRedeemer implements CheckinRedeemer {
 
   // ---- Android ----------------------------------------------------------------------------------------------------------------------------
 
-  private async redeemAndroid(ctx: RedeemInput, io: RedeemIo): Promise<CheckinTokenResult> {
-    let token: string | null = null;
+  /**
+   * Android check-in, under the SAME assertion lock as iOS and as every activation (`assertionLockKey`; PR #44 gate LOW-1). Android has no counter to keep in order, but it has a
+   * read-then-act race on the "attested before" mark: an activation whose request carries a token is in flight and its `attested` verdict has not committed yet; a check-in whose
+   * Play Integrity call fails locally reads "never attested" and sends a TOKEN-LESS request; the verdict commits first, and the server grades that check-in `failed` + fraud signal
+   * (rule 2). Two concurrent Android check-ins have the same shape. Under the lock the read of the mark, the token-less request and the write of the mark are one critical
+   * section, so the later holder always sees what the earlier one recorded. Abort semantics are iOS's: `check()` before each native call, state read and write-before-send, a SENT
+   * request through `effect`, and the mark written after a sent token is recorded without an abort check (the state must follow the server).
+   */
+  private redeemAndroid(ctx: RedeemInput, io: RedeemIo): Promise<CheckinTokenResult> {
+    return withAssertionLock(this.d.locks, ctx.userId, ctx.deviceId, (g) => this.redeemAndroidLocked(ctx, io, g)).catch((e: unknown) => {
+      if (e instanceof LockTimeoutError) throw new AttestationDeferred("assertion_lock_timeout");
+      throw e;
+    });
+  }
+
+  private async redeemAndroidLocked(ctx: RedeemInput, io: RedeemIo, g: LockGuard): Promise<CheckinTokenResult> {
+    let hash: Uint8Array | null;
     try {
-      const hash = androidCheckinRequestBinding({ challengeId: ctx.challengeId, deviceId: ctx.deviceId, userId: ctx.userId }, ctx.nonce);
-      const r = await this.native(() => this.d.attestor.integrityToken(hash));
-      if (r.kind === "ok") token = r.value.integrityToken;
+      hash = androidCheckinRequestBinding({ challengeId: ctx.challengeId, deviceId: ctx.deviceId, userId: ctx.userId }, ctx.nonce);
     } catch {
-      token = null; // a non-canonical nonce (the binding refuses it): the same local failure
+      hash = null; // a non-canonical nonce (the binding refuses it): the same local failure
+    }
+    let token: string | null = null;
+    if (hash !== null) {
+      const h = hash;
+      g.check();
+      const r = await this.native(() => this.d.attestor.integrityToken(h));
+      g.check(); // a native call that returned after the lock gave up on this holder changes nothing
+      if (r.kind === "ok") token = r.value.integrityToken;
     }
     if (token === null) {
       // A LOCAL failure. Rule 2: if this device ever attested, a token-less request is graded `failed` + fraud signal: retry later instead.
+      g.check();
       let attestedBefore: boolean;
       try {
         attestedBefore = await this.d.state.hasAttestedAndroid(ctx.userId, ctx.deviceId);
@@ -197,11 +220,12 @@ export class NativeRedeemer implements CheckinRedeemer {
         attestedBefore = true; // cannot tell: the unsafe reading is "never attested"
       }
       if (attestedBefore) throw new AttestationDeferred("integrity_token_unavailable");
-      return io.post(wireRequest(ctx));
+      return g.effect(() => io.post(wireRequest(ctx)));
     }
+    const sent = token;
     let result: CheckinTokenResult;
     try {
-      result = await io.post(wireRequest(ctx, { platform: "android", integrityToken: token }));
+      result = await g.effect(() => io.post(wireRequest(ctx, { platform: "android", integrityToken: sent })));
     } catch (e) {
       // The token was SENT. Unless the request DEFINITELY did not take effect (`isDefiniteNonApplication`), the server may have graded it `attested` (a lost response, a 5xx, a gateway
       // 502 / 504, a 503 without an `attestation_*` code, a 2xx body that could not be read): treat the device as having attested (the unsafe reading is "never"), so a later local

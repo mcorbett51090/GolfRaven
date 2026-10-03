@@ -17,11 +17,13 @@
  * | 422 `device_limit_exceeded`                                          | `device_limit`           | "Too many devices on this account"                |
  * | 422 `challenge_not_consumable` (a live challenge lasts 120 s)        | `challenge_expired`      | "Took too long: try again"                        |
  * | 429 (10 an hour per account, 20 a day per device)                    | `rate_limited`           | "Try again in N minutes"                          |
+ * | 429 from the activation's own live challenge / key registration      | `rate_limited` + `source`| "Too many security checks" / "...set-up attempts" |
  * | 503 `attestation_unavailable` (Apple / Google unreachable)           | `vendor_unavailable`     | "Try again later" (nothing changed)               |
  * | 503 `attestation_not_configured`, 501                                | `not_available`          | "Activation isn't available right now"            |
  * | 401, or no session / no token                                        | `sign_in_required`       | "Sign in again"                                   |
  * | 400 and any other 4xx                                                | `rejected`               | "Couldn't activate" (a client / server mismatch)  |
  * | network, 5xx, 502 / 504, a 2xx that could not be read (AFTER a send) | `unknown_outcome`        | "Couldn't confirm: try again" (a retry is safe)   |
+ * | network failure on the challenge / registration request (BEFORE it)  | `offline`                | "No connection" (nothing was sent to the reward)  |
  * | the client could not produce the attestation now (local)             | `deferred`               | "Try again in a moment" (nothing was sent)        |
  * | no token could be fetched / no network before anything was sent      | `offline`                | "No connection"                                   |
  * | this build has no API                                                | `not_configured`         | "Not available in this build"                     |
@@ -33,7 +35,7 @@
  */
 import { isApiError } from "../api/errors";
 import type { ActivationAnswer, RewardKind } from "../api/types";
-import { ActivationUnsupportedPlatform } from "../attest/activator";
+import { ActivationUnsupportedPlatform, activationPhaseOf } from "../attest/activator";
 import { AttestationDeferred } from "../attest/redeemer";
 
 export type ActivationOutcome =
@@ -48,7 +50,8 @@ export type ActivationOutcome =
   | { status: "platform_mismatch" }
   | { status: "device_limit" }
   | { status: "challenge_expired" }
-  | { status: "rate_limited"; retryAfterSeconds: number | null }
+  /** `source` is set only when the 429 came from a request BEFORE the activation was sent: the live challenge (`checkin-challenge`) or the key registration (`devices-attest-key`). Absent: the activation's own limit. */
+  | { status: "rate_limited"; retryAfterSeconds: number | null; source?: "challenge" | "registration" }
   | { status: "vendor_unavailable" }
   | { status: "not_available" }
   | { status: "sign_in_required" }
@@ -88,16 +91,20 @@ export function outcomeFromError(e: unknown): ActivationOutcome {
       return { status: "not_found" };
     case "conflict":
       return e.code === "reward_not_activatable" ? { status: "not_activatable" } : e.code === "reward_expired" ? { status: "expired" } : { status: "conflict" };
-    case "rate_limited":
-      return { status: "rate_limited", retryAfterSeconds: e.retryAfterSeconds };
+    case "rate_limited": {
+      const phase = activationPhaseOf(e);
+      return phase === null ? { status: "rate_limited", retryAfterSeconds: e.retryAfterSeconds } : { status: "rate_limited", retryAfterSeconds: e.retryAfterSeconds, source: phase };
+    }
     case "not_supported":
       return { status: "not_available" };
     case "unavailable":
       if (e.status === 503 && e.code === "attestation_unavailable") return { status: "vendor_unavailable" };
       if (e.status === 503 && e.code === "attestation_not_configured") return { status: "not_available" };
       return { status: "unknown_outcome" }; // a gateway's 502 / 504, or a bare 503: the request may have been applied
-    case "server":
     case "network":
+      // Before the activation request went out (its own live challenge, a key registration) nothing was sent to the reward: that is "no connection", not "we could not confirm".
+      return activationPhaseOf(e) !== null ? { status: "offline" } : { status: "unknown_outcome" };
+    case "server":
     case "bad_response":
       return { status: "unknown_outcome" };
     case "not_configured":

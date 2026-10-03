@@ -872,6 +872,193 @@ describe("rule 3 — ONE ASSERTION IN FLIGHT PER KEY: held from generateAssertio
   });
 });
 
+describe("rule 3 on ANDROID — check-in redemption takes the assertion lock (PR #44 gate LOW-1)", () => {
+  const FAIL = { ok: false, code: "unavailable", message: "no network to Google" } as const;
+  const C1 = "cccccccc-cccc-4ccc-8ccc-cccccccccc01";
+  const C2 = "cccccccc-cccc-4ccc-8ccc-cccccccccc02";
+
+  it("two concurrent Android check-ins are strictly sequential END TO END: the second does not call Play Integrity until the first request has answered", async () => {
+    const rig = makeRig("android");
+    const gate1 = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => gate1.promise, grade("attested")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await tick();
+    expect(rig.timeline).toEqual(["native:integrityToken", "http:post:start"]);
+    expect(rig.locks.pendingKeys()).toEqual([assertionLockKey(USER, DEVICE)]);
+    gate1.resolve(grade("attested"));
+    await Promise.all([p1, p2]);
+    expect(rig.timeline).toEqual(["native:integrityToken", "http:post:start", "http:post:end", "native:integrityToken", "http:post:start", "http:post:end"]);
+    expect(rig.posts.map((p) => p.challengeId)).toEqual([C1, C2]);
+    expect(rig.locks.pendingKeys()).toEqual([]);
+  });
+
+  it("the lock is held while Play Integrity is being asked too (a slow platform call): nothing overlaps", async () => {
+    const rig = makeRig("android");
+    const gate = deferred();
+    rig.module.stall.integrityToken = [gate.promise];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await tick();
+    expect(rig.module.ops("integrityToken")).toHaveLength(1);
+    gate.resolve();
+    await Promise.all([p1, p2]);
+    expect(rig.module.ops("integrityToken")).toHaveLength(2);
+  });
+
+  it("the gate's race between two Android check-ins: the first has a token in flight, the second fails locally; the second reads the mark only AFTER the first's `attested` grade is recorded, so it defers", async () => {
+    const rig = makeRig("android");
+    const gate = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => gate.promise];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    await tick();
+    rig.module.always.integrityToken = FAIL;
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    const r2 = p2.then(() => "resolved", (e: unknown) => e);
+    await tick();
+    expect(rig.posts).toHaveLength(1); // the second has sent nothing, token-less or otherwise
+    gate.resolve(grade("attested"));
+    await p1;
+    expect(await r2).toMatchObject({ name: "AttestationDeferred", reason: "integrity_token_unavailable" });
+    expect(rig.posts).toHaveLength(1);
+  });
+
+  it("the attested-before READ and the token-less POST happen inside the lock: a holder paused in the read, or with its token-less request in flight, keeps the next check-in out", async () => {
+    const rig = makeRig("android");
+    rig.module.always.integrityToken = FAIL; // never attested: the first goes token-less
+    const readGate = deferred();
+    const postGate = deferred<ReturnType<typeof grade>>();
+    const realRead = rig.state.hasAttestedAndroid.bind(rig.state);
+    rig.state.hasAttestedAndroid = async (u, d) => {
+      rig.timeline.push("state:read");
+      await readGate.promise;
+      return realRead(u, d);
+    };
+    rig.postReplies = [() => postGate.promise, grade("unattestable")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await tick();
+    // the first is inside its read; the second has not started at all (no native call, no read)
+    expect(rig.timeline).toEqual(["native:integrityToken", "state:read"]);
+    readGate.resolve();
+    await tick();
+    // the first's TOKEN-LESS request is in flight; the second is still queued
+    expect(rig.timeline).toEqual(["native:integrityToken", "state:read", "http:post:start"]);
+    expect(rig.posts).toEqual([{ challengeId: C1, nonce: NONCE, hardwareSupportsAttestation: false }]);
+    postGate.resolve(grade("unattestable"));
+    await Promise.all([p1, p2]);
+    expect(rig.timeline).toEqual([
+      "native:integrityToken", "state:read", "http:post:start", "http:post:end",
+      "native:integrityToken", "state:read", "http:post:start", "http:post:end",
+    ]);
+  });
+
+  it("released on ERROR, on a LOCAL failure (a deferral) and on a thrown read: the next check-in still runs", async () => {
+    const rig = makeRig("android");
+    const net = apiError("network", 0, null);
+    rig.postReplies = [net, grade("attested")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await expect(p1).rejects.toBe(net);
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    // now attested-before: a local failure defers (inside the lock) and still releases it
+    rig.module.always.integrityToken = FAIL;
+    await expect(rig.redeemer.redeem(input({ challengeId: C1 }), rig.io())).rejects.toBeInstanceOf(AttestationDeferred);
+    delete rig.module.always.integrityToken;
+    await expect(rig.redeemer.redeem(input({ challengeId: C2 }), rig.io())).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.locks.pendingKeys()).toEqual([]);
+  });
+
+  it("the lock is the activation's EXACT lock (same key as iOS, device id case-folded): a different device does not wait, the same device in upper case does", async () => {
+    const rig = makeRig("android");
+    const holder = deferred();
+    const seam = withAssertionLock(rig.locks, USER, DEVICE.toUpperCase(), async (g) => {
+      g.check();
+      await holder.promise;
+      return "activated";
+    });
+    const waiting = rig.redeemer.redeem(input(), rig.io());
+    const other = rig.redeemer.redeem(input({ deviceId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }), rig.io());
+    await expect(other).resolves.toMatchObject({ attestationGrade: "attested" });
+    await tick();
+    expect(rig.module.ops("integrityToken")).toHaveLength(1); // only the other device's
+    holder.resolve();
+    expect(await seam).toBe("activated");
+    await expect(waiting).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.module.ops("integrityToken")).toHaveLength(2);
+  });
+
+  it("an aborted Android holder (stuck in Play Integrity past the hold time) defers, sends nothing and writes nothing when the call finally returns; the next check-in is not blocked", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("android", { holdMs: 5_000, nativeTimeoutMs: 600_000 });
+    const gate = deferred();
+    rig.module.stall.integrityToken = [gate.promise];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const r1 = p1.then(() => "resolved", (e: unknown) => e);
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await r1).toMatchObject({ name: "AttestationDeferred", reason: "assertion_lock_timeout" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.posts.map((p) => p.challengeId)).toEqual([C2]);
+    gate.resolve(); // the stuck call finally returns a token
+    await vi.advanceTimersByTimeAsync(10);
+    expect(rig.posts.map((p) => p.challengeId), "the aborted holder sent nothing").toEqual([C2]);
+  });
+
+  it("a request that was SENT is never abandoned by the hold timeout, and its real answer (and the attested mark) is kept", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("android", { holdMs: 5_000 });
+    const gate = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => gate.promise, grade("attested")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rig.posts).toHaveLength(1); // the second is still waiting
+    gate.resolve(grade("attested"));
+    await expect(p1).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(await rig.state.hasAttestedAndroid(USER, DEVICE)).toBe(true);
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+  });
+});
+
+describe("PR #44 gate test gap A16: a check-in's token-less (`none`) request is a SENT request held through `effect`", () => {
+  const C1 = "cccccccc-cccc-4ccc-8ccc-cccccccccc01";
+  const C2 = "cccccccc-cccc-4ccc-8ccc-cccccccccc02";
+
+  it("iOS, a device that cannot do App Attest (the server holds no key): the `none` request in flight past the hold time keeps the lock, the next check-in waits, and its real answer is returned (not a lock timeout)", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("ios", { holdMs: 5_000 });
+    rig.module.next.generateKey = [{ ok: false, code: "unsupported", message: "featureUnsupported" }];
+    const gate = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => gate.promise, grade("attested")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rig.posts).toEqual([{ challengeId: C1, nonce: NONCE, hardwareSupportsAttestation: false }]); // the second is still waiting
+    expect(rig.locks.pendingKeys()).toEqual([assertionLockKey(USER, DEVICE)]);
+    gate.resolve(grade("unattestable"));
+    await expect(p1).resolves.toMatchObject({ attestationGrade: "unattestable" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "attested" });
+    expect(rig.locks.pendingKeys()).toEqual([]);
+  });
+
+  it("Android, never attested and Play Integrity failing: the same for the token-less request", async () => {
+    vi.useFakeTimers();
+    const rig = makeRig("android", { holdMs: 5_000 });
+    rig.module.always.integrityToken = { ok: false, code: "unavailable", message: "x" };
+    const gate = deferred<ReturnType<typeof grade>>();
+    rig.postReplies = [() => gate.promise, grade("unattestable")];
+    const p1 = rig.redeemer.redeem(input({ challengeId: C1 }), rig.io());
+    const p2 = rig.redeemer.redeem(input({ challengeId: C2 }), rig.io());
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(rig.posts).toHaveLength(1);
+    gate.resolve(grade("unattestable"));
+    await expect(p1).resolves.toMatchObject({ attestationGrade: "unattestable" });
+    await expect(p2).resolves.toMatchObject({ attestationGrade: "unattestable" });
+    expect(rig.posts).toHaveLength(2);
+  });
+});
+
 describe("sanity of the rig itself", () => {
   it("the recorded iOS hash is what the redeemer hands the module (independent SHA-256 of S)", () => {
     const S = `{"challengeId":"${CHALLENGE}","deviceId":"${DEVICE}","nonce":"${NONCE}","platform":"ios","purpose":"golfraven/checkin-token/v1","userId":"${USER}"}`;

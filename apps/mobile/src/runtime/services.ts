@@ -17,7 +17,7 @@ import {
 import type { ApiClient } from "../api";
 import { createAttestation, type AttestStateStore, type Attestor } from "../attest";
 import { loadNativeAttestModule } from "../attest/native-module-loader";
-import { OfflineCodeManager, OfflineSeedStore } from "../offline-code";
+import { OfflineCodeManager, OfflineSeedStore, deviceRegistrationFor } from "../offline-code";
 import { activateReward, type ActivationOutcome } from "../rewards";
 import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type ChallengeStore } from "../challenges";
 import { enqueueEvidence, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
@@ -199,7 +199,8 @@ export async function createServices(): Promise<AppServices> {
   };
   const deviceId = createDeviceIdProvider(secure, expoRandomBytes);
   const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, now: () => Date.now() });
-  const offlineCode = new OfflineCodeManager({ store: new OfflineSeedStore(secure), api, session, deviceId, now: () => Date.now() });
+  const registerDevice = deviceRegistrationFor(api); // `undefined` while OFFLINE_CODE_UI_ENABLED is false (`offline-code/gate.ts`)
+  const offlineCode = new OfflineCodeManager({ store: new OfflineSeedStore(secure), api, session, deviceId, now: () => Date.now(), ...(registerDevice ? { registerDevice } : {}) });
   const outboxRunner = new OutboxRunner({
     store: outboxStore,
     api,
