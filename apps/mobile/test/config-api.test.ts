@@ -79,7 +79,7 @@ describe("no secrets in the repo or the bundle (rule: every key and URL comes fr
   it("the only environment variables read are the documented PUBLIC ones", () => {
     const names = new Set<string>();
     for (const f of shipped) for (const m of text(f).matchAll(/process\.env\.([A-Z0-9_]+)/g)) names.add(m[1]!);
-    expect([...names].sort()).toEqual(["EXPO_PUBLIC_API_BASE_URL", "EXPO_PUBLIC_CATALOG_BASE_URL", "EXPO_PUBLIC_STORE_URL", "EXPO_PUBLIC_SUPABASE_ANON_KEY", "EXPO_PUBLIC_SUPABASE_URL"]);
+    expect([...names].sort()).toEqual(["EXPO_PUBLIC_API_BASE_URL", "EXPO_PUBLIC_CATALOG_BASE_URL", "EXPO_PUBLIC_PLAY_CLOUD_PROJECT_NUMBER", "EXPO_PUBLIC_STORE_URL", "EXPO_PUBLIC_SUPABASE_ANON_KEY", "EXPO_PUBLIC_SUPABASE_URL"]);
     expect([...names].filter((n) => !n.startsWith("EXPO_PUBLIC_"))).toEqual([]);
   });
 

@@ -52,8 +52,8 @@ export interface BackendDeps {
   createAuth: (opts: { url: string; anonKey: string; storage: SecureStore }) => AuthService;
   /** Loads the dev mocks. Called ONLY for `demo`; the app passes a loader that is `null` outside `__DEV__` (`runtime/dev-backend.ts`). */
   loadDevMocks: (() => DevMocks) | null;
-  /** Evidence-lane wiring for the real client (`attest/` seam; the payload write the check-in redemption needs). */
-  evidence?: Pick<HttpApiOptions, "attestor" | "persistEvidencePayload">;
+  /** Evidence-lane wiring for the real client (the check-in redeemer of `attest/`; the payload write the check-in redemption needs). */
+  evidence?: Pick<HttpApiOptions, "redeemer" | "persistEvidencePayload">;
 }
 
 export interface Backend {

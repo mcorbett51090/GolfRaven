@@ -64,6 +64,7 @@ export const NO_CHALLENGE_REASONS = [
   "none_available", // no unexpired, unconsumed prefetched challenge was left at check-in time, and no live one could be had
   "expired", // a challenge was consumed offline but had expired before the item was sent: never used
   "unusable", // the server refused to redeem it (already used / expired / not ours): never used
+  "attestation_unavailable", // the device had shown it can attest but the attestation could not be produced after `ATTEST_MAX_DEFERRALS` tries: dropped, not sent token-less (that would raise a fraud signal)
 ] as const;
 export type NoChallengeReason = (typeof NO_CHALLENGE_REASONS)[number];
 
@@ -77,6 +78,8 @@ export const fixChallengeSchema = z.discriminatedUnion("state", [
       nonce: z.string().regex(/^[A-Za-z0-9_-]{1,512}$/),
       kind: z.enum(["live", "prefetched"]),
       expiresAt: z.number().finite(),
+      /** How many sends were deferred because the attestation could not be produced yet (`attest/redeemer.ts` `AttestationDeferred`). Absent = 0. */
+      attestDeferrals: z.number().int().gte(0).lte(1000).optional(),
     })
     .strict(),
   /** Redeemed: the server minted `jti` for it. The body of every later send carries this exact jti (a replay with different content is a 409). */

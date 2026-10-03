@@ -5,7 +5,6 @@
 import { describe, expect, it } from "vitest";
 import { createHttpApiClient, type ApiClient } from "../src/api";
 import { answerFromHttp, answersFromBatchHttp, BATCH_CODE_STATUS } from "../src/api/evidence-answer";
-import { UnattestableAttestor } from "../src/attest";
 import {
   buildEvidenceBody,
   deriveEvidenceSourceRef,
@@ -40,7 +39,6 @@ function client(steps: Step[], over: { now?: () => number; persist?: (i: OutboxI
       sleeps.push(ms);
       return Promise.resolve();
     },
-    attestor: new UnattestableAttestor(),
     ...(over.now ? { now: over.now } : {}),
     ...(over.persist ? { persistEvidencePayload: over.persist as never } : {}),
   });
@@ -334,7 +332,7 @@ describe("batch answers: one HTTP 200, a result per item (recorded from the real
 describe("check-in token redemption answers (recorded from the real checkin-token handler)", () => {
   const redeemWith = async (name: string) => {
     const { api } = client([{ respond: name }]);
-    return api.redeemCheckinChallenge({ challengeId: "00000000-0000-4000-8000-000000000001", nonce: "AAAA", hardwareSupportsAttestation: false }, CREDS);
+    return api.redeemCheckinChallenge({ challengeId: "00000000-0000-4000-8000-000000000001", nonce: "AAAA", deviceId: "00000000-0000-4000-8000-0000000000d1" }, CREDS);
   };
 
   it("an idempotent replay (the first response was lost) has exactly the shape of a first redemption and carries the SAME token", async () => {

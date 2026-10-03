@@ -18,6 +18,11 @@ export function parseCatalogBaseUrl(raw: string | undefined | null, opts: { allo
   return null;
 }
 
+/** The Supabase secret-key prefix, built from two parts so the full literal never appears in the bundle (`scripts/scan-bundle.mjs` flags ANY occurrence of it in an
+ * export, so the app's own parser must not be the thing that trips it). A minifier could fold `"sb_" + "secret_"` back into one string; the export scan in `test/` and the
+ * real `expo export` check it did not: see `test/scan-bundle.test.ts` and the README. */
+const SB_SECRET_PREFIX = ["sb", "secret", ""].join("_");
+
 /** The contract MAJOR this build reads (`CONTRACT_VERSION` in
  * `@golfraven/catalog`; pinned equal by `test/wallet-config.test.ts`). The M-freeze
  * (build plan §10 P1) moves it to 1 — and moving it is a deliberate edit
@@ -42,6 +47,16 @@ export function parseSupabaseUrl(raw: string | undefined | null, opts: { allowLo
   return v !== null && /^https?:\/\/[^/]+$/.test(v) ? v : null;
 }
 
+/** The Google Cloud project NUMBER Play Integrity standard requests are made for (`EXPO_PUBLIC_PLAY_CLOUD_PROJECT_NUMBER`): 1 to 18 digits, no leading zero (real ones have
+ * about 12; 18 digits always fit the `long` the Android API takes). It is PUBLIC (it names a project, it authorises nothing: access is by the app's signing certificate and the server's own
+ * Google credentials), so it may live in an `EXPO_PUBLIC_*` variable; it is neither a JWT nor an `sb_secret_` key, so the public-env guard has nothing to flag.
+ * `null` = not configured (an Android build then cannot attest: `selectAttestor`). */
+export function parsePlayCloudProjectNumber(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const v = raw.trim();
+  return /^[1-9][0-9]{0,17}$/.test(v) ? v : null;
+}
+
 function jwtRole(token: string): string | null {
   const parts = token.split(".");
   const payload = parts[1];
@@ -62,7 +77,7 @@ export function parseSupabaseAnonKey(raw: string | undefined | null): string | n
   if (!raw) return null;
   const v = raw.trim();
   if (v.length < 20 || v.length > 2048 || /\s/.test(v)) return null;
-  if (v.startsWith("sb_secret_")) return null;
+  if (v.startsWith(SB_SECRET_PREFIX)) return null;
   if (v.startsWith("sb_publishable_")) return /^sb_publishable_[A-Za-z0-9_-]+$/.test(v) ? v : null;
   return jwtRole(v) === "anon" ? v : null;
 }
@@ -72,7 +87,7 @@ export function parseSupabaseAnonKey(raw: string | undefined | null): string | n
 export function isSecretShapedKey(raw: string | undefined | null): boolean {
   if (!raw) return false;
   const v = raw.trim();
-  if (v.startsWith("sb_secret_")) return true;
+  if (v.startsWith(SB_SECRET_PREFIX)) return true;
   const role = jwtRole(v);
   return role !== null && role !== "anon";
 }

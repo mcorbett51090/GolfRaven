@@ -675,6 +675,150 @@
         }
       }
     },
+    "token_503_attestation_not_configured": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"attestation_not_configured\",\"message\":\"device attestation is not available on this deployment; no check-in token was issued\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "ztXc4-rx-P8GDRQbIikwNz5FTFNaYWhvdn2Ei5KZoKc",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "android",
+          "integrityToken": "it-whatever"
+        }
+      }
+    },
+    "token_503_attestation_unavailable": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"attestation_unavailable\",\"message\":\"device attestation is temporarily unavailable; no check-in token was issued — retry\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "ztXc4-rx-P8GDRQbIikwNz5FTFNaYWhvdn2Ei5KZoKc",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "android",
+          "integrityToken": "it-Ro6AkUMs4dgIDL2PBdbn8nDH5-8vyk8srUsjyvA54JU"
+        }
+      }
+    },
+    "token_201_attested_android": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_4\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"attested\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "ztXc4-rx-P8GDRQbIikwNz5FTFNaYWhvdn2Ei5KZoKc",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "android",
+          "integrityToken": "it-Ro6AkUMs4dgIDL2PBdbn8nDH5-8vyk8srUsjyvA54JU"
+        }
+      }
+    },
+    "token_201_failed_attested_before_no_token": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_5\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"failed\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "7fT7AgkQFx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8Y",
+        "hardwareSupportsAttestation": false
+      }
+    },
+    "token_201_failed_wrong_binding_android": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_6\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"failed\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000003",
+        "nonce": "DBMaISgvNj1ES1JZYGdudXyDipGYn6attLvCydDX3uU",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "android",
+          "integrityToken": "it-not-the-binding"
+        }
+      }
+    },
+    "attestkey_503_not_configured": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"attestation_not_configured\",\"message\":\"App Attest key registration is not available on this deployment\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "KzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O_2_QQ",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "5lapw1pcD2IG26CernLzf2g_cSFF--dP1Snw7vlRPr0"
+      }
+    },
+    "attestkey_201_registered": {
+      "status": 201,
+      "body": "{\"data\":{\"deviceId\":\"11111111-1111-4111-8111-111111111111\",\"keyId\":\"m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=\",\"replaced\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "KzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O_2_QQ",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "5lapw1pcD2IG26CernLzf2g_cSFF--dP1Snw7vlRPr0"
+      }
+    },
+    "attestkey_409_already_registered": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"key_already_registered\",\"message\":\"this key is already registered on this device\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "KzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O_2_QQ",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "5lapw1pcD2IG26CernLzf2g_cSFF--dP1Snw7vlRPr0"
+      }
+    },
+    "token_201_attested_ios": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_4\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"attested\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "SlFYX2ZtdHuCiZCXnqWss7rByM_W3eTr8vkABw4VHCM",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "bEnrcceIQjr2DkJx9X4Hsf-APcs20bJW1FBhOh_XkDM"
+        }
+      }
+    },
+    "token_201_failed_wrong_binding_ios": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_5\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"failed\"}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000003",
+        "nonce": "aXB3foWMk5qhqK-2vcTL0tng5-71_AMKERgfJi00O0I",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk"
+        }
+      }
+    },
+    "attestkey_422_rejected": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"attestation_rejected\",\"message\":\"the attestation could not be verified\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "iI-WnaSrsrnAx87V3OPq8fj_Bg0UGyIpMDc-RUxTWmE",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
+      }
+    },
+    "attestkey_422_challenge_not_consumable": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"challenge_not_consumable\",\"message\":\"this challenge could not be used (already used, expired, or not issued to this device)\"}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "p661vMPK0djf5u30-wIJEBceJSwzOkFIT1ZdZGtyeYA",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "DUt01CHGbLPb32RBpwBNvwG7jzOKPOQjKA_f6erJV9I"
+      }
+    },
     "batch_200_mixed": {
       "status": 200,
       "body": "{\"data\":{\"results\":[{\"index\":0,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_1\",\"replay\":false,\"play\":{\"id\":\"play_3\",\"scoreBadge\":0.1,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":1,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_2\",\"replay\":false,\"play\":{\"id\":\"play_4\",\"scoreBadge\":0.15,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":2,\"ok\":true,\"result\":{\"status\":\"accepted\",\"evidenceId\":\"ev_1\",\"replay\":true,\"play\":{\"id\":\"play_3\",\"scoreBadge\":0.1,\"scoreMonetary\":0,\"presenceSignal\":false,\"money\":false,\"heldReview\":false}}},{\"index\":3,\"ok\":false,\"error\":{\"code\":\"unknown_id\",\"message\":\"facilityId \\\"fac_ghost\\\" is not a known catalog facility id\"}},{\"index\":4,\"ok\":false,\"error\":{\"code\":\"bad_request\",\"message\":\"invalid evidence submission\"}},{\"index\":5,\"ok\":false,\"error\":{\"code\":\"local_date_out_of_window\",\"message\":\"localDate \\\"2026-02-01\\\" is outside the accepted window (facility-local today -30..+1 days)\"}}],\"maxBodyBytes\":65536}}",
@@ -767,7 +911,7 @@
       }
     }
   },
-  "_provenance_p42b1": "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token) and the real binding / source-ref code over the server's own fakes, behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
+  "_provenance_p42b1": "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_, attestkey_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token, devices-attest-key) and the real binding / source-ref code over the server's own fakes; the Apple / Google verification PORTS are scripted (accept exactly the base64url of the binding the real code computed; see the script's header), behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
   "vectors": {
     "sourceRefs": {
       "checkin": {
@@ -909,6 +1053,22 @@
         },
         "challengeString": "{\"challengeId\":\"33333333-1111-4111-8111-333333333333\",\"deviceId\":\"22222222-1111-4111-8111-222222222222\",\"keyId\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq=\",\"nonce\":\"r7a9xMvS2eDn7vX8AwoRGB8mLTQ7QklQV15lbHN6gYg\",\"platform\":\"ios\",\"purpose\":\"attest_key_registration\"}",
         "hashHex": "8fb17847b0cad4078a7fed9585ed73ed3b9293757c2f270b655d1851b391f588"
+      },
+      "checkin": {
+        "body": {
+          "challengeId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "userId": "uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu"
+        },
+        "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+        "ios": {
+          "challengeString": "{\"challengeId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"deviceId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"nonce\":\"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA\",\"platform\":\"ios\",\"purpose\":\"golfraven/checkin-token/v1\",\"userId\":\"uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu\"}",
+          "clientDataHashHex": "3c695d6c71722843731e7a80e63d987d628181755c5925db5401f9d36b8077e5"
+        },
+        "android": {
+          "canonicalBodyUtf8": "{\"challengeId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"deviceId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"platform\":\"android\",\"purpose\":\"golfraven/checkin-token/v1\",\"userId\":\"uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu\"}",
+          "requestHash": "8CGJ1X3iXQCcqYH4U7fjJrnceadzDEz5avKmy_idkl0"
+        }
       },
       "canonicalJsonSample": {
         "input": {

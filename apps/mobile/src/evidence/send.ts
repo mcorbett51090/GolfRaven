@@ -5,11 +5,16 @@
  * ORDER FOR A FIX WITH A CHALLENGE (`FixChallenge`, `payload.ts`):
  *   held (consumed locally at check-in, not yet redeemed)
  *     -> expired?        `none / expired` and the fix goes with NO challenge (the x0.6 penalty): an expired challenge is never used;
- *     -> `checkin-token` redeem it with the attestor's capability (`hardwareSupportsAttestation`), authenticated as the ITEM'S OWNER
- *        (`credentials.accessToken`, never a token fetched here);
+ *     -> `checkin-token` redeem it WITH the device attestation the redeemer builds (`attest/redeemer.ts`: bound to this challenge, device, account and nonce,
+ *        one assertion in flight per key), authenticated as the ITEM'S OWNER (`credentials.accessToken`, never a token fetched here);
  *          ok                          -> `redeemed { jti }`, persisted BEFORE the evidence request (`persistPayload`), so a crash between the
  *                                         two cannot lose the jti the server has already bound;
- *          transport / 5xx / 429 / 401 -> stop and answer that (retry; the challenge is untouched and may still be redeemed next time);
+ *          transport / 5xx / 429 / 401 -> stop and answer that (retry; the challenge is untouched and may still be redeemed next time). This includes the
+ *                                         503 `attestation_unavailable` / `attestation_not_configured` of a vendor outage: the server did NOT consume the
+ *                                         challenge, so it stays `held` and the same one is redeemed on the retry; it is never a dead letter;
+ *          attestation deferred        -> the device has shown it can attest but no attestation could be produced now, and a token-less request would be graded
+ *                                         `failed` + fraud signal: stop and answer a retry, counting the deferral on the held challenge. After
+ *                                         `ATTEST_MAX_DEFERRALS` the challenge is dropped (`none / attestation_unavailable`) and the fix goes with no challenge;
  *          any other refusal           -> `none / unusable` (already used, expired, not ours...): the fix goes with no challenge;
  *   redeemed -> its jti rides on the fix, in EVERY later send, byte for byte: the server hashes the whole submission, so a replay of a
  *               play that was in fact recorded must be identical or it is a 409 `evidence_conflict`.
@@ -20,15 +25,16 @@
 import { isApiError } from "../api/errors";
 import { answersFromBatchHttp } from "../api/evidence-answer";
 import type { CheckinTokenResult } from "../api/types";
-import type { Attestor } from "../attest";
+import { ATTEST_MAX_DEFERRALS, AttestationDeferred } from "../attest";
 import type { EvidenceCredentials, JsonValue, OutboxItem, ServerAnswer } from "../outbox";
 import { buildEvidenceBody, fixesOf, parseEvidencePayload, toJsonValue, type EvidencePayload, type WireBody } from "./payload";
 
 export interface SendDeps {
-  attestor: Attestor;
   now: () => number;
-  /** `POST checkin-token`; throws `ApiError`. Authenticated with exactly `accessToken`. */
-  redeem(req: { challengeId: string; nonce: string; hardwareSupportsAttestation: boolean }, accessToken: string): Promise<CheckinTokenResult>;
+  /** `POST checkin-token` with the device attestation (`attest/redeemer.ts`); throws `ApiError`, or `AttestationDeferred` when the attestation cannot be produced now and a
+   * token-less request must not be sent instead. Authenticated as `credentials.userId` with exactly `credentials.accessToken`. `deviceId` is the device the challenge was
+   * issued to. */
+  redeem(req: { challengeId: string; nonce: string; deviceId: string }, credentials: EvidenceCredentials): Promise<CheckinTokenResult>;
   /** `POST evidence`: never throws for an HTTP outcome. */
   post(body: WireBody, accessToken: string): Promise<ServerAnswer>;
   /** Writes `payload` into the item's stored row now (crash safety for the redeemed jti). Optional. */
@@ -73,12 +79,22 @@ export async function sendEvidenceItem(deps: SendDeps, item: OutboxItem, credent
     }
     let next: EvidencePayload;
     try {
-      const token = await deps.redeem(
-        { challengeId: c.challengeId, nonce: c.nonce, hardwareSupportsAttestation: deps.attestor.capability.hardwareSupportsAttestation },
-        credentials.accessToken,
-      );
+      const token = await deps.redeem({ challengeId: c.challengeId, nonce: c.nonce, deviceId: payload.deviceId }, credentials);
       next = { ...payload, challenges: { ...payload.challenges, [fix.fixId]: { state: "redeemed", challengeId: c.challengeId, kind: c.kind, jti: token.jti, grade: token.attestationGrade } } };
     } catch (e) {
+      if (e instanceof AttestationDeferred) {
+        const deferrals = (c.attestDeferrals ?? 0) + 1;
+        if (deferrals > ATTEST_MAX_DEFERRALS) {
+          // Bound reached: no co-signal for this fix (x0.6), but no fraud signal either. The challenge is spent locally, as an expired one is.
+          payload = { ...payload, challenges: { ...payload.challenges, [fix.fixId]: { state: "none", reason: "attestation_unavailable" } } };
+          changed = true;
+          if (deps.persistPayload) await deps.persistPayload(item, toJsonValue(payload)).catch(() => undefined);
+          continue;
+        }
+        payload = { ...payload, challenges: { ...payload.challenges, [fix.fixId]: { ...c, attestDeferrals: deferrals } } };
+        if (deps.persistPayload) await deps.persistPayload(item, toJsonValue(payload)).catch(() => undefined);
+        return withPayload({ kind: "network_error", message: `attestation deferred (${e.reason}); retry ${deferrals} of ${ATTEST_MAX_DEFERRALS}` }, payload);
+      }
       const answer = answerForRedeemError(e);
       if (answer !== null) return withPayload(answer, changed ? payload : null);
       next = { ...payload, challenges: { ...payload.challenges, [fix.fixId]: { state: "none", reason: "unusable" } } };

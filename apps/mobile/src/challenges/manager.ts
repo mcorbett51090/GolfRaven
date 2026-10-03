@@ -18,7 +18,6 @@
  */
 import { isApiError } from "../api/errors";
 import type { CheckinApi, IssuedChallenge } from "../api/types";
-import type { Attestor } from "../attest";
 import type { FixChallenge } from "../evidence/payload";
 import type { OutboxSession } from "../outbox";
 import { MAX_PREFETCHED, type ChallengeStore } from "./store";
@@ -28,7 +27,6 @@ export interface ChallengeManagerDeps {
   api: CheckinApi;
   session: OutboxSession;
   deviceId: () => Promise<string>;
-  attestor: Attestor;
   now: () => number;
 }
 
@@ -125,7 +123,7 @@ export class ChallengeManager {
       const credentials = { userId: owner, accessToken };
       const [c] = await api.requestCheckinChallenges({ deviceId, ...(facilityId !== undefined ? { facilityId } : {}) }, credentials);
       if (!c || c.kind !== "live" || !(Date.parse(c.expiresAt) > now())) return null;
-      const token = await api.redeemCheckinChallenge({ challengeId: c.id, nonce: c.nonce, hardwareSupportsAttestation: this.deps.attestor.capability.hardwareSupportsAttestation }, credentials);
+      const token = await api.redeemCheckinChallenge({ challengeId: c.id, nonce: c.nonce, deviceId }, credentials);
       return { state: "redeemed", challengeId: c.id, kind: "live", jti: token.jti, grade: token.attestationGrade };
     } catch {
       return null; // offline, rate limited, refused: fall back to the pool

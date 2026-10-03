@@ -3,13 +3,22 @@
  *   supabase/functions/_shared/evidence/handler.ts           (POST /v1/evidence)
  *   supabase/functions/_shared/evidence/batch-handler.ts     (POST /v1/evidence/batch; the REAL `handleEvidenceBatchIntake`)
  *   supabase/functions/_shared/checkin/challenge-handler.ts  (POST /v1/checkin/challenge)
- *   supabase/functions/_shared/checkin/token-handler.ts      (POST /v1/checkin/token)
+ *   supabase/functions/_shared/checkin/token-handler.ts      (POST /v1/checkin/token; since P4.2b-2 also WITH an attestation block, see below)
+ *   supabase/functions/_shared/rewards/attest-key-handler.ts (POST /v1/devices/attest-key: App Attest key registration)
  *   supabase/functions/_shared/evidence/source-ref.ts, rewards/binding.ts, rewards/string-binding.ts, rewards/app-attest-registration.ts
  * behind the real envelope code (`_shared/http.ts` handleRequest / okResponse / HttpError), over the server's own unit-test fakes
  * (`supabase/tests/unit/fake-repo.ts`). The only thing replaced is `_shared/privileged.ts` (it needs a live Postgres): `hitRateLimitForActor`
  * and `withOwnershipBatch` are swapped for their in-memory equivalents, so `handleEvidenceBatchIntake` itself runs unmodified.
  * The small bodies of each `<function>/index.ts` (rate-limit pre-checks, status mapping, `maxBodyBytes`) are replicated below exactly as those files
  * write them.
+ *
+ * ATTESTATION (P4.2b-2): the check-in and key-registration handlers verify an Apple / Google artifact through PORTS (`VerificationPorts`, `AttestationRegistrationVerifier`).
+ * No Apple chain or Google decode is available here, so those ports are SCRIPTED: each accepts an artifact if and only if it is the base64url of the exact hash the REAL
+ * binding code computed for the REAL challenge (an assertion / registration attestation = base64url(clientDataHash); an integrity token = "it-" + the requestHash the handler
+ * expects). Everything else (the binding functions, the strict request parser, the grading table, the counter advance, the 503 mapping, the "attested before" rule, challenge
+ * consumption) is the server's own code. So a recorded request proves the client's binding bytes against the server's, and a recorded answer is the server's real answer for it;
+ * what is NOT proven is Apple's / Google's own verification (`[unverified]`: no device, no credentials). The one database behaviour the in-memory fake lacks, the
+ * rollback of the handler's transaction when it throws (a 503 leaves the challenge unconsumed), is emulated in `tokenEndpoint` and says so there.
  *
  * HOW TO RUN (from the repo root; needs `pnpm install`):
  *   pnpm --filter @golfraven/rules exec vitest run --config ../../apps/mobile/scripts/record-edge-contract.vitest.config.ts            # verify: fails if the committed fixture differs
@@ -46,6 +55,15 @@ vi.mock("../../../supabase/functions/_shared/privileged.ts", () => ({
 }));
 
 import { handleChallengeRequest, RATE_LIMIT_PER_USER_HOUR as CHALLENGE_RATE } from "../../../supabase/functions/_shared/checkin/challenge-handler.ts";
+import { seedDevice, rewardsState } from "../../../supabase/tests/unit/fake-rewards-repo.ts";
+import { fakeAttestDevices, seedAttestDevice } from "../../../supabase/tests/unit/fake-attest-key-repo.ts";
+import { enforceAttestKeyRateLimits, handleAttestKey } from "../../../supabase/functions/_shared/rewards/attest-key-handler.ts";
+import { parseAttestKeyBody } from "../../../supabase/functions/_shared/rewards/attest-key-request.ts";
+import type { AttestationRegistrationVerifier } from "../../../supabase/functions/_shared/rewards/app-attest-registration.ts";
+import { type AndroidPort, VendorUnavailableError } from "../../../supabase/functions/_shared/rewards/types.ts";
+import type { VerificationPorts } from "../../../supabase/functions/_shared/rewards/verification-ports.ts";
+import { checkinAndroidBoundBodyBytes, computeCheckinAndroidBinding, fromBase64UrlStrict } from "../../../supabase/functions/_shared/rewards/binding.ts";
+import { computeIosCheckinBinding, iosCheckinChallengeString } from "../../../supabase/functions/_shared/rewards/string-binding.ts";
 import { handleTokenRequest } from "../../../supabase/functions/_shared/checkin/token-handler.ts";
 import { parseTokenBody } from "../../../supabase/functions/_shared/checkin/token-request-shape.ts";
 import { handleEvidenceBatchIntake, MAX_BATCH_ITEMS_PER_REQUEST } from "../../../supabase/functions/_shared/evidence/batch-handler.ts";
@@ -58,7 +76,7 @@ import { computeAttestKeyBinding, attestKeyChallengeString } from "../../../supa
 import { computeIosActivationBinding, iosActivationChallengeString } from "../../../supabase/functions/_shared/rewards/string-binding.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/edge-contract.json", import.meta.url));
-const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_"];
+const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_"];
 const UID = "user-a";
 const CURRENT = "20260520-a000001";
 const NEWER = "20260601-b000002";
@@ -99,16 +117,54 @@ async function challengeEndpoint(state: FakeState, repo: ReturnType<typeof makeF
 }
 
 /** checkin-token/index.ts: the strict body parse (UUID challenge id, unknown keys refused at the top level and inside the attestation block, the two
- * attestation shapes), then the handler with the attestation ports exactly as the entrypoint builds them. No platform is configured here, so a request
- * that carries an attestation block would answer 503 `attestation_not_configured`; the recorded requests carry none. */
-async function tokenEndpoint(repo: ReturnType<typeof makeFakeRepo>, body: Record<string, unknown>): Promise<Entry> {
+ * attestation shapes), then the handler with the attestation ports exactly as the entrypoint builds them. By default no platform is configured, so a request
+ * that carries an attestation block answers 503 `attestation_not_configured`; the attestation scenarios below pass SCRIPTED ports (see the header). */
+const NO_PORTS: VerificationPorts = { ios: null, android: null };
+async function tokenEndpoint(repo: ReturnType<typeof makeFakeRepo>, body: Record<string, unknown>, ports: VerificationPorts = NO_PORTS): Promise<Entry> {
+  // The ONE emulation of the database here: the real entrypoint runs the handler inside `withOwnership`, a transaction, and a thrown error (the 503s) ROLLS IT BACK, so the
+  // challenge the handler consumed is not consumed (proved against real Postgres by supabase/tests/integration/checkin-attest.deno.test.ts: "the challenge was not consumed
+  // (the transaction rolled back)"). The in-memory fake has no transaction, so the consumption is undone here when the handler throws, and only then.
+  const state = hoisted.current.state as FakeState;
+  const usedBefore = new Map([...state.challenges].map(([id, c]) => [id, c.usedAt]));
   const res = await handleRequest(async () => {
     const parsed = parseTokenBody(body);
     if (!parsed.ok) throw Errors.badRequest("invalid checkin-token request", parsed.issues);
-    return okResponse(201, await handleTokenRequest(parsed.value, repo, digestHex, { userId: UID, ports: { ios: null, android: null }, sha256 }));
+    return okResponse(201, await handleTokenRequest(parsed.value, repo, digestHex, { userId: UID, ports, sha256 }));
+  });
+  if (res.status === 503) for (const [id, usedAt] of usedBefore) state.challenges.get(id)!.usedAt = usedAt;
+  return toEntry(res, body);
+}
+
+/** devices-attest-key/index.ts: 503 before anything when no verifier is configured, the strict parse, the two rate limits, then the handler; a verification failure is
+ * RETURNED by the handler (the transaction commits with the challenge consumed), everything else is thrown. */
+async function attestKeyEndpoint(state: FakeState, repo: ReturnType<typeof makeFakeRepo>, body: Record<string, unknown>, verifier: AttestationRegistrationVerifier | null): Promise<Entry> {
+  const res = await handleRequest(async () => {
+    if (!verifier) return errorResponse(503, "attestation_not_configured", "App Attest key registration is not available on this deployment");
+    const parsed = parseAttestKeyBody(body);
+    if (!parsed.ok) throw Errors.badRequest("invalid attest-key request", parsed.issues);
+    const limit = await enforceAttestKeyRateLimits((bucketKey, windowSeconds, max) => fakeHitRateLimitForActor(state, UID, bucketKey, windowSeconds, max), parsed.value.deviceId);
+    if (!limit.ok) return Errors.tooManyRequests("devices-attest-key rate limit exceeded", limit.retryAfterSeconds).toResponse();
+    const outcome = await handleAttestKey(parsed.value, repo, { verifier, sha256 });
+    return outcome.ok ? okResponse(outcome.status, outcome.body) : errorResponse(outcome.status, outcome.code, outcome.message);
   });
   return toEntry(res, body);
 }
+
+// --- scripted vendor ports (see the header) -----------------------------------------------------------------------------------------------------
+const PUBLIC_KEY = new Uint8Array(65).fill(4);
+const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
+/** Accepts an integrity token iff it is "it-" + the requestHash the handler computed from ITS binding of the challenge. */
+const scriptedAndroid: AndroidPort = { verifyIntegrity: async ({ integrityToken, expectedRequestHash }) => (integrityToken === `it-${expectedRequestHash}` ? { grade: "attested" } : { grade: "failed", reasons: ["request_hash_mismatch"] }) };
+const unavailableAndroid: AndroidPort = { verifyIntegrity: async () => { throw new VendorUnavailableError("scripted vendor outage"); } };
+/** Accepts an iOS assertion iff it is base64url(clientDataHash) for the registered key; the counter is 1, then 2, ... (the handler's own atomic advance decides). */
+const scriptedIos = (counter: () => number): NonNullable<VerificationPorts["ios"]> => ({
+  verifyAssertion: async ({ assertionB64, keyId, clientDataHash, device }) =>
+    device.attestKeyId === keyId && assertionB64 === toBase64Url(clientDataHash) ? { ok: true, counter: counter() } : { ok: false, grade: "failed", reason: "scripted_hash_mismatch" },
+});
+/** Accepts a key attestation iff it is base64url(clientDataHash) (the registration binding the REAL handler computes). */
+const scriptedRegistrationVerifier: AttestationRegistrationVerifier = {
+  verify: async ({ attestationB64, keyId, clientDataHash }) => (attestationB64 === toBase64Url(clientDataHash) ? { ok: true, keyId, publicKeyRaw: PUBLIC_KEY.slice() } : { ok: false, reason: "scripted_hash_mismatch" as never }),
+};
 
 async function evidenceEndpoint(state: FakeState, repo: ReturnType<typeof makeFakeRepo>, body: unknown): Promise<Entry> {
   const res = await handleRequest(async () => {
@@ -138,6 +194,8 @@ async function batchEndpoint(body: unknown): Promise<Entry> {
 
 // --- bodies -----------------------------------------------------------------------------------------------------------------------------------
 const T0 = Date.parse("2026-06-01T12:00:00.000Z");
+const CHECKIN_VECTOR_BODY = { challengeId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", userId: "uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu" };
+const CHECKIN_VECTOR_NONCE = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA"; // base64url of the bytes 1..32
 const fix = (id: string, extra: Record<string, unknown> = {}, at = T0): Record<string, unknown> => ({
   fixId: id, lat: 36.1467, lng: -86.7816, accuracyMeters: 10, capturedAt: at, simulated: false, foreground: true, fromApp: true, ...extra,
 });
@@ -261,6 +319,81 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
     r.evidence_429_rate_limited.request = checkin("fixR60");
   }
 
+  // ---------------- check-in attestation + App Attest key registration (P4.2b-2) ----------------
+  // The challenges below draw from the same deterministic counter as everything after them; restore it at the end so the `vectors` (and the batch entries) keep the values they
+  // had before this section existed (the diff of a re-recording then shows only what is new).
+  const rbBeforeAttestation = rbCounter;
+  const challengesOf = async (e: { state: FakeState; repo: ReturnType<typeof makeFakeRepo> }, body: Record<string, unknown>): Promise<Array<{ id: string; nonce: string }>> =>
+    JSON.parse((await challengeEndpoint(e.state, e.repo, body)).body).data.challenges as Array<{ id: string; nonce: string }>;
+  const androidToken = async (c: { id: string; nonce: string }): Promise<string> =>
+    `it-${toBase64Url(await computeCheckinAndroidBinding(sha256, { challengeId: c.id, deviceId: FAKE_DEVICE_ID, userId: UID }, fromBase64UrlStrict(c.nonce)!))}`;
+  const androidBody = (c: { id: string; nonce: string }, integrityToken: string): Record<string, unknown> => ({ challengeId: c.id, nonce: c.nonce, hardwareSupportsAttestation: true, attestation: { platform: "android", integrityToken } });
+  {
+    const e = fresh();
+    const [c1, c2, c3] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID, prefetchCount: 3 });
+    // No Play configuration on the deployment: 503 before the challenge is touched.
+    r.token_503_attestation_not_configured = await tokenEndpoint(e.repo, androidBody(c1!, "it-whatever"));
+    // Play Integrity unreachable: 503, the transaction rolls back, the challenge is NOT consumed ...
+    r.token_503_attestation_unavailable = await tokenEndpoint(e.repo, androidBody(c1!, await androidToken(c1!)), { ios: null, android: unavailableAndroid });
+    // ... so the SAME challenge redeems once the vendor is back: a valid attestation over the check-in binding is `attested`.
+    r.token_201_attested_android = await tokenEndpoint(e.repo, androidBody(c1!, await androidToken(c1!)), { ios: null, android: scriptedAndroid });
+    // The no-attestation rule: this device has now shown it can attest, so a token-less request is `failed` whatever it claims (and raises the fraud signal) ...
+    r.token_201_failed_attested_before_no_token = await tokenEndpoint(e.repo, { challengeId: c2!.id, nonce: c2!.nonce, hardwareSupportsAttestation: false }, { ios: null, android: scriptedAndroid });
+    // ... and a token over the WRONG binding is `failed` too.
+    r.token_201_failed_wrong_binding_android = await tokenEndpoint(e.repo, androidBody(c3!, "it-not-the-binding"), { ios: null, android: scriptedAndroid });
+  }
+  /** The device a first-ever iOS install has: known to the account, platform still UNKNOWN (0042), no key. Both fakes keep a device table of their own. */
+  const seedUnknownDevice = (state: FakeState): void => {
+    seedDevice(state, { id: FAKE_DEVICE_ID, userId: UID, platform: null });
+    seedAttestDevice(state, { id: FAKE_DEVICE_ID, userId: UID, platform: null });
+  };
+  {
+    // iOS: register a key (LIVE challenge, key id bound), then redeem a check-in with an assertion over the check-in binding.
+    const e = fresh();
+    seedUnknownDevice(e.state);
+    const keyId = b64(await sha256(PUBLIC_KEY));
+    const [live] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID });
+    const regBody = async (c: { id: string; nonce: string }, att?: string): Promise<Record<string, unknown>> => ({
+      deviceId: FAKE_DEVICE_ID, challengeId: c.id, nonce: c.nonce, keyId,
+      attestation: att ?? toBase64Url(await computeAttestKeyBinding(sha256, { challengeId: c.id, deviceId: FAKE_DEVICE_ID, keyId, nonce: c.nonce })),
+    });
+    r.attestkey_503_not_configured = await attestKeyEndpoint(e.state, e.repo, await regBody(live!), null);
+    r.attestkey_201_registered = await attestKeyEndpoint(e.state, e.repo, await regBody(live!), scriptedRegistrationVerifier);
+    // The same key again (an earlier request was applied and its answer lost): 409, nothing consumed.
+    r.attestkey_409_already_registered = await attestKeyEndpoint(e.state, e.repo, await regBody(live!), scriptedRegistrationVerifier);
+    // The fake rewards repo keeps its own device table: copy the key the REAL registration handler just stored, so the check-in verifier sees a registered key.
+    const stored = fakeAttestDevices(e.state).get(FAKE_DEVICE_ID)!;
+    expect(stored.keyId, "the real registration handler recorded the key").toBe(keyId);
+    // copy what the REAL handler stored (key id, public key, registration time), not a constant of this script
+    Object.assign(rewardsState(e.state).deviceAttest.get(FAKE_DEVICE_ID)!, { attestKeyId: stored.keyId, attestPublicKey: stored.publicKey });
+    let counter = 0;
+    const ports: VerificationPorts = { ios: scriptedIos(() => (counter += 1)), android: null };
+    const [c1, c2] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID, prefetchCount: 2 });
+    const iosBody = async (c: { id: string; nonce: string }, assertion?: string): Promise<Record<string, unknown>> => ({
+      challengeId: c.id, nonce: c.nonce, hardwareSupportsAttestation: true,
+      attestation: { platform: "ios", keyId, assertion: assertion ?? toBase64Url(await computeIosCheckinBinding(sha256, { challengeId: c.id, deviceId: FAKE_DEVICE_ID, userId: UID, nonce: c.nonce })) },
+    });
+    r.token_201_attested_ios = await tokenEndpoint(e.repo, await iosBody(c1!), ports);
+    r.token_201_failed_wrong_binding_ios = await tokenEndpoint(e.repo, await iosBody(c2!, toBase64Url(new Uint8Array(32).fill(9))), ports);
+  }
+  {
+    const e = fresh();
+    seedUnknownDevice(e.state);
+    const keyId = b64(await sha256(PUBLIC_KEY));
+    const [live] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID });
+    // The registration attestation does not verify: one generic 422, the challenge is spent, nothing is registered, no fraud signal.
+    r.attestkey_422_rejected = await attestKeyEndpoint(e.state, e.repo, { deviceId: FAKE_DEVICE_ID, challengeId: live!.id, nonce: live!.nonce, keyId, attestation: toBase64Url(new Uint8Array(32).fill(1)) }, scriptedRegistrationVerifier);
+    // A PREFETCHED challenge cannot register a key (live only), and a spent live one cannot be used again.
+    const [pre] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID, prefetchCount: 1 });
+    r.attestkey_422_challenge_not_consumable = await attestKeyEndpoint(
+      e.state, e.repo,
+      { deviceId: FAKE_DEVICE_ID, challengeId: pre!.id, nonce: pre!.nonce, keyId, attestation: toBase64Url(await computeAttestKeyBinding(sha256, { challengeId: pre!.id, deviceId: FAKE_DEVICE_ID, keyId, nonce: pre!.nonce })) },
+      scriptedRegistrationVerifier,
+    );
+  }
+
+  rbCounter = rbBeforeAttestation;
+
   // ---------------- batch (the REAL handleEvidenceBatchIntake) ----------------
   {
     const e = fresh();
@@ -319,6 +452,16 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
       },
       iosActivation: { body: ios, challengeString: iosActivationChallengeString(ios), hashHex: toHex(await computeIosActivationBinding(sha256, ios)) },
       iosAttestKey: { body: reg, challengeString: attestKeyChallengeString(reg), hashHex: toHex(await computeAttestKeyBinding(sha256, reg)) },
+      // The check-in binding (P4.2b-2), for the fixed inputs of docs/security/p3-money-path-requirements.md (the newest section, "check-in attestation"): the server's own output.
+      checkin: {
+        body: CHECKIN_VECTOR_BODY,
+        nonce: CHECKIN_VECTOR_NONCE,
+        ios: { challengeString: iosCheckinChallengeString({ ...CHECKIN_VECTOR_BODY, nonce: CHECKIN_VECTOR_NONCE }), clientDataHashHex: toHex(await computeIosCheckinBinding(sha256, { ...CHECKIN_VECTOR_BODY, nonce: CHECKIN_VECTOR_NONCE })) },
+        android: {
+          canonicalBodyUtf8: new TextDecoder().decode(checkinAndroidBoundBodyBytes(CHECKIN_VECTOR_BODY)),
+          requestHash: toBase64Url(await computeCheckinAndroidBinding(sha256, CHECKIN_VECTOR_BODY, fromBase64UrlStrict(CHECKIN_VECTOR_NONCE)!)),
+        },
+      },
       canonicalJsonSample: { input: { b: [2, { z: 1, a: "x" }], a: null, c: true }, output: canonicalJson({ b: [2, { z: 1, a: "x" }], a: null, c: true }) },
     },
   };
@@ -334,7 +477,7 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     const next = {
       ...file,
       _provenance_p42b1:
-        "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token) and the real binding / source-ref code over the server's own fakes, behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
+        "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_, attestkey_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token, devices-attest-key) and the real binding / source-ref code over the server's own fakes; the Apple / Google verification PORTS are scripted (accept exactly the base64url of the binding the real code computed; see the script's header), behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
       responses: { ...kept, ...responses },
       vectors: JSON.parse(JSON.stringify(vectors)),
     };
@@ -348,6 +491,12 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     expect(responses.evidence_409_conflict!.status).toBe(409);
     expect(responses.evidence_429_rate_limited!.status).toBe(429);
     expect(responses.batch_200_mixed!.status).toBe(200);
+    expect([responses.token_503_attestation_not_configured!.status, responses.token_503_attestation_unavailable!.status]).toEqual([503, 503]);
+    expect(JSON.parse(responses.token_201_attested_android!.body).data.attestationGrade).toBe("attested");
+    expect(JSON.parse(responses.token_201_attested_ios!.body).data.attestationGrade).toBe("attested");
+    expect(JSON.parse(responses.token_201_failed_attested_before_no_token!.body).data.attestationGrade).toBe("failed");
+    expect(responses.attestkey_201_registered!.status).toBe(201);
+    expect(responses.attestkey_409_already_registered!.status).toBe(409);
     void errorResponse;
   });
 });

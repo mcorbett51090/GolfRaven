@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.golfravenattest'
+version = '0.0.0'
+
+android {
+  namespace "expo.modules.golfravenattest"
+  defaultConfig {
+    versionCode 1
+    versionName "0.0.0"
+  }
+}
+
+dependencies {
+  // Play Integrity API, STANDARD requests (StandardIntegrityManager). Pinned to an exact version (no ranges, no "+"): 1.6.0 is the `release` in Google's
+  // Maven metadata (https://dl.google.com/dl/android/maven2/com/google/android/play/integrity/maven-metadata.xml, read 2026-10-03, lastUpdated 20251120173431).
+  implementation 'com.google.android.play:integrity:1.6.0'
+}

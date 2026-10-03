@@ -4,7 +4,7 @@
  * runs it after `expo export` over the same directory. Run here as real child processes on temp directories.
  */
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,9 +49,33 @@ describe("scripts/scan-bundle.mjs", () => {
     expect(scan({ "index.js": BUNDLE(jwt("anon")) }).code).toBe(0);
   });
 
-  it("the bare `sb_secret_` prefix is not a finding: the app's own parser contains the literal, and Hermes packs it next to its neighbouring string", () => {
-    expect(scan({ "index.js": `if(v.startsWith("sb_secret_"))return null;` }).code).toBe(0);
-    expect(scan({ "index.android.bundle.hbc": Buffer.from("Missing default exportsb_secret_shapedThe 'responseT", "latin1") }).code).toBe(0);
+  it("ANY occurrence of `sb_secret_` is a finding (no length threshold): the bare prefix, a short body, a body of any characters, anywhere in a text or a Hermes-style packed binary", () => {
+    for (const text of [`if(v.startsWith("sb_secret_"))return null;`, "sb_secret_", "sb_secret_x", "xx sb_secret_ yy", `{"k":"sb_secret_shaped"}`, "SB_SECRET_NOT"]) {
+      const r = scan({ "index.js": text });
+      expect(r.code, text).toBe(text === "SB_SECRET_NOT" ? 0 : 1); // case-sensitive: only the real prefix
+      if (r.code === 1) {
+        expect(r.out).toContain("index.js: sb_secret_key");
+        expect(r.out).not.toContain("sb_secret_x");
+      }
+    }
+    const packed = scan({ "index.android.bundle.hbc": Buffer.from("Missing default exportsb_secret_shapedThe 'responseT", "latin1") });
+    expect(packed.code).toBe(1);
+    expect(packed.out).toContain("sb_secret_key");
+  });
+
+  it("the app's own sources build the prefix from parts, so a clean export has no occurrence: no code line of src/ or app/ contains the literal", () => {
+    const strip = (t: string): string => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (/\.(ts|tsx|js|jsx)$/.test(e.name) && strip(readFileSync(p, "utf8")).includes("sb_secret_")) offenders.push(p);
+      }
+    };
+    walk(fileURLToPath(new URL("../src", import.meta.url)));
+    walk(fileURLToPath(new URL("../app", import.meta.url)));
+    expect(offenders).toEqual([]);
   });
 
   it("a JWT with no role claim, or a payload that is not JSON, passes (not a Supabase key)", () => {
@@ -132,12 +156,29 @@ process.exit(${exitCode});
     expect(r.out).toContain("scan-bundle: ok");
   });
 
-  it("scans the directory the caller chose, in all three spellings, not just `dist`", () => {
-    for (const flags of [["--output-dir", "out1"], ["--output-dir=out2"], ["-o", "out3"]]) {
+  it("scans the directory the caller chose, in both spellings `expo export` has, not just `dist`", () => {
+    for (const flags of [["--output-dir", "out1"], ["--output-dir=out2"]]) {
       const r = runExport(["--clear", "--platform", "android", ...flags], BUNDLE(SB_SECRET));
       expect(r.code, flags.join(" ")).toBe(1);
       expect(r.out).toContain("index.js: sb_secret_key");
     }
+  });
+
+  it("`-o` is not a flag of `expo export` (its help lists only --output-dir), so it no longer redirects the scan", async () => {
+    const { outputDirOf } = (await import(EXPORT)) as { outputDirOf: (argv: string[]) => string };
+    expect(outputDirOf(["--output-dir", "a"])).toBe("a");
+    expect(outputDirOf(["--output-dir=b"])).toBe("b");
+    expect(outputDirOf(["-o", "c"])).toBe("dist");
+    expect(readFileSync(EXPORT, "utf8")).not.toMatch(/"-o"/);
+  });
+
+  it("no `expo` on PATH (ENOENT): says so, names the cause, exits 2 (could not run) and scans nothing", () => {
+    const cwd = tmp();
+    const r = spawnSync(process.execPath, [EXPORT, "--platform", "ios"], { cwd, encoding: "utf8", env: { PATH: join(cwd, "empty-bin") } as unknown as NodeJS.ProcessEnv });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toMatch(/could not run `expo export`/);
+    expect(r.stderr).toMatch(/ENOENT/);
+    expect(r.stdout + r.stderr).not.toContain("scan-bundle");
   });
 
   it("a failed export keeps expo's exit code and does not scan", () => {
