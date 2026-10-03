@@ -25,8 +25,8 @@ export class FakeNativeAttestModule implements NativeAttestModule {
   /** `generateAssertion` waits for this before it answers (to make the platform slow). */
   assertionGate: Promise<void> | null = null;
   /** The next call of that op (once) waits for this before it answers, then answers as usual (a stuck platform call that finally returns). */
-  stall: Partial<Record<"generateKey" | "attestKey" | "generateAssertion", Promise<void>[]>> = {};
-  private async maybeStall(op: "generateKey" | "attestKey" | "generateAssertion"): Promise<void> {
+  stall: Partial<Record<"generateKey" | "attestKey" | "generateAssertion" | "integrityToken", Promise<void>[]>> = {};
+  private async maybeStall(op: "generateKey" | "attestKey" | "generateAssertion" | "integrityToken"): Promise<void> {
     const g = this.stall[op]?.shift();
     if (g) await g;
   }
@@ -98,11 +98,12 @@ export class FakeNativeAttestModule implements NativeAttestModule {
     return Promise.resolve({ ok: true, installLinkId: this.installLinkValue });
   }
 
-  integrityToken(cloud: string, requestHash: string): Promise<NativeResult<{ token: string }>> {
+  async integrityToken(cloud: string, requestHash: string): Promise<NativeResult<{ token: string }>> {
     this.events.push({ op: "integrityToken", cloud, requestHash });
+    await this.maybeStall("integrityToken");
     const s = this.scripted("integrityToken");
-    if (s) return Promise.resolve(s);
-    return Promise.resolve({ ok: true, token: `it.${requestHash}` });
+    if (s) return s;
+    return { ok: true, token: `it.${requestHash}` };
   }
 
   /** A reinstall: the Secure Enclave keys are gone. */

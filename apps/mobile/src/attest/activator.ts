@@ -7,7 +7,8 @@
  *  1. ONE ASSERTION IN FLIGHT PER KEY, ACROSS BOTH ENDPOINTS (PR #40 gate LOW-1; mandatory). `rewards-activate` shares its App Attest counter with `checkin-token`: two assertions that
  *     arrive out of order grade an honest client `failed` plus a fraud signal. Every activation therefore runs inside `withAssertionLock(locks, userId, deviceId, ...)`, the lock check-in
  *     redemption takes (`assertionLockKey`), from the key lookup until the HTTP response of the request that carries the assertion has returned or failed. It is taken on Android too: an
- *     activation there has no counter, but "an activation runs under the (user, device) lock" is then true without exception. The lock's cooperative abort (`mutex.ts`) applies unchanged.
+ *     activation there has no counter, but its "attested" verdict and a check-in's token-less request race on the "attested before" mark, so Android check-in redemption
+ *     (`redeemer.ts` `redeemAndroid`) takes the same lock (PR #44 gate LOW-1). "Every activation and every check-in runs under the (user, device) lock" is then true without exception. The lock's cooperative abort (`mutex.ts`) applies unchanged.
  *  2. HONEST CAPABILITY. `attestation.kind: "none"` always claims `hardwareSupportsAttestation: false`; `activationWireRequest` is the only constructor of the wire body, so there is one
  *     place to check (a claim of "I can attest" with no token is graded `failed` plus a fraud signal, `attestation-evidence.ts`). A token is sent as `kind: "ios"` / `"android"`, never as `none`.
  *  3. A DEVICE THAT CAN ATTEST NEVER SENDS A TOKEN-LESS ACTIVATION BECAUSE OF A LOCAL FAILURE. An activation that is held waits for a HUMAN and activation never releases it (`handleActivation`
@@ -51,6 +52,42 @@ export interface ActivateIo {
   requestLiveChallenge(): Promise<IssuedChallenge>;
   /** `POST devices-attest-key`. */
   registerKey(req: AttestKeyRegistration): Promise<void>;
+}
+
+/**
+ * Which pre-send call of an activation an error came from. An activation makes up to three requests: the live challenge (`checkin-challenge`), a key registration (`devices-attest-key`,
+ * iOS, first use) and the activation itself (`rewards-activate`). The first two happen BEFORE anything is sent to the reward, and an `ApiError` carries only its own kind, so on its own
+ * it cannot say which request failed. The activator therefore notes it, WITHOUT changing the error (the same object reaches the caller; `rejects.toBe(e)` still holds), and
+ * `rewards/outcome.ts` reads it: a network failure before the activation was sent is "offline" (nothing happened), not "unknown outcome" (it might have); a 429 from the challenge or the
+ * registration endpoint is not the activation's own limit and gets its own line (PR #44 gate NIT).
+ */
+export type ActivationPhase = "challenge" | "registration";
+const PHASE = new WeakMap<object, ActivationPhase>();
+
+/** The pre-send phase an error thrown by `NativeActivator.activate` came from, or `null` (the activation request itself, or a local failure). */
+export function activationPhaseOf(e: unknown): ActivationPhase | null {
+  return typeof e === "object" && e !== null ? (PHASE.get(e) ?? null) : null;
+}
+
+async function inPhase<T>(phase: ActivationPhase | null, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (e) {
+    if (typeof e === "object" && e !== null) {
+      if (phase === null) PHASE.delete(e); // the activation request itself: never mistaken for an earlier phase's error
+      else if (!PHASE.has(e)) PHASE.set(e, phase);
+    }
+    throw e;
+  }
+}
+
+/** The same `io`, with the error of each call noted by phase (`activationPhaseOf`). */
+function withPhases(io: ActivateIo): ActivateIo {
+  return {
+    post: (req) => inPhase(null, () => io.post(req)),
+    requestLiveChallenge: () => inPhase("challenge", () => io.requestLiveChallenge()),
+    registerKey: (req) => inPhase("registration", () => io.registerKey(req)),
+  };
 }
 
 export interface RewardActivator {
@@ -123,8 +160,9 @@ export class NativeActivator implements RewardActivator {
     const platform = this.d.attestor.capability.platform;
     if (platform !== "ios" && platform !== "android") throw new ActivationUnsupportedPlatform();
     const ctx = { ...input, userId: sub };
+    const phased = withPhases(io);
     try {
-      return await this.d.withLock(ctx.userId, ctx.deviceId, (g) => (platform === "ios" ? this.activateIos(ctx, io, g) : this.activateAndroid(ctx, io, g)));
+      return await this.d.withLock(ctx.userId, ctx.deviceId, (g) => (platform === "ios" ? this.activateIos(ctx, phased, g) : this.activateAndroid(ctx, phased, g)));
     } catch (e) {
       if (e instanceof LockTimeoutError) throw new AttestationDeferred("assertion_lock_timeout");
       throw e;

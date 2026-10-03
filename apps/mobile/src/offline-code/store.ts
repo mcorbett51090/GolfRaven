@@ -45,6 +45,8 @@ function fromHex(h: string): Uint8Array {
   return out;
 }
 
+export type SaveOutcome = "saved" | "kept_newer";
+
 export class OfflineSeedStore {
   constructor(private readonly secure: SecureStore) {}
 
@@ -78,10 +80,23 @@ export class OfflineSeedStore {
     return null;
   }
 
-  async save(userId: string, deviceId: string, s: StoredSeed): Promise<void> {
+  /**
+   * Writes the record, EXCEPT that a record with a higher `seedVersion` is never replaced by one with a lower (PR #44 gate LOW-2, belt and braces next to the manager's per-user
+   * single-flight): the server's version only grows, so a lower one is a stale answer that arrived late, and storing it would put the device on a seed the server no longer accepts.
+   * Returns `"kept_newer"` (and writes nothing) in that case, `"saved"` otherwise. An equal or higher version is written, so a resync flag and the restore of an earlier record still work.
+   * Trade-off, accepted: if the server's seed version were ever reset BELOW what this device holds, the device would refuse the new seeds until its record is wiped (account deletion or a
+   * reinstall); the server never lowers a version, so that is a server reset, not a flow.
+   */
+  async save(userId: string, deviceId: string, s: StoredSeed): Promise<SaveOutcome> {
     if (s.seed.length !== OFFLINE_SEED_BYTES) throw new Error(`offline seed: the seed must be ${OFFLINE_SEED_BYTES} bytes`);
+    const current = await this.load(userId, deviceId);
+    if (current !== null && current.seedVersion > s.seedVersion) {
+      current.seed.fill(0);
+      return "kept_newer";
+    }
     const record = { v: 1, userId, deviceId: deviceId.toLowerCase(), seedHex: toHex(s.seed), seedVersion: s.seedVersion, issuedAtMs: s.issuedAtMs, receivedAtMs: s.receivedAtMs, resyncNeeded: s.resyncNeeded };
     await this.secure.set(offlineSeedKey(userId, deviceId), JSON.stringify(record));
+    return "saved";
   }
 
   /** Account deletion: removes this user's seed for this device (another user's, and the device id, stay). */

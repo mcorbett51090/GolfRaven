@@ -9,8 +9,17 @@ export function activationMessage(o: ActivationOutcome): { key: MessageKey; para
       return { key: o.alreadyActive ? "wallet.activate.outcome.activated.already" : "wallet.activate.outcome.activated" };
     case "held_review":
       return { key: o.alreadyHeld ? "wallet.activate.outcome.held_review.already" : "wallet.activate.outcome.held_review" };
-    case "rate_limited":
-      return o.retryAfterSeconds === null ? { key: "wallet.activate.outcome.rate_limited.later" } : { key: "wallet.activate.outcome.rate_limited", params: { minutes: Math.max(1, Math.ceil(o.retryAfterSeconds / 60)) } };
+    case "rate_limited": {
+      // Three limits, three lines: the activation's own, and (BEFORE the activation was sent) the live challenge's and the key registration's (`outcome.ts`, `source`).
+      const minutes = o.retryAfterSeconds === null ? null : Math.max(1, Math.ceil(o.retryAfterSeconds / 60));
+      const keys = {
+        activation: ["wallet.activate.outcome.rate_limited", "wallet.activate.outcome.rate_limited.later"],
+        challenge: ["wallet.activate.outcome.rate_limited.challenge", "wallet.activate.outcome.rate_limited.challenge.later"],
+        registration: ["wallet.activate.outcome.rate_limited.registration", "wallet.activate.outcome.rate_limited.registration.later"],
+      } as const;
+      const [withMinutes, later] = keys[o.source ?? "activation"];
+      return minutes === null ? { key: later } : { key: withMinutes, params: { minutes } };
+    }
     case "unexpected_state":
       return { key: "wallet.activate.outcome.unexpected_state" };
     case "not_activatable":

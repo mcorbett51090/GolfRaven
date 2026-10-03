@@ -20,6 +20,7 @@ import {
   base32Decode,
   clockSkewOf,
   codeAt,
+  deviceRegistrationFor,
   formatCountdown,
   offlineSeedKey,
   provisionMessage,
@@ -203,7 +204,6 @@ describe("per-user isolation, sign-out, deletion", () => {
     const a = await m.store.load(USER_A, DEVICE);
     m.session.current = USER_B;
     expect(await m.manager.view()).toEqual({ status: "no_seed" });
-    expect(await m.manager.loadSeed()).toBeNull();
     expect(await m.store.load(USER_B, DEVICE)).toBeNull();
     m.api.fallback = ROTATED; // B's seed is a different one (the server derives it per account)
     expect(await m.manager.provision()).toMatchObject({ status: "ready" });
@@ -242,7 +242,6 @@ describe("per-user isolation, sign-out, deletion", () => {
     const before = m.secure.dump();
     m.session.current = null; // signed out
     expect(await m.manager.view()).toEqual({ status: "signed_out" });
-    expect(await m.manager.loadSeed()).toBeNull();
     expect(await m.manager.provision()).toEqual({ status: "signed_out" });
     expect(await m.manager.provisionIfMissing()).toEqual({ status: "signed_out" });
     expect(m.secure.dump()).toBe(before);
@@ -583,5 +582,301 @@ describe("automatic provisioning is gated by OFFLINE_CODE_UI_ENABLED", () => {
     expect(m.api.calls).toEqual([]);
     expect(m.session.tokenFetches).toEqual([]);
     expect(m.secure.keys()).toEqual([]);
+  });
+});
+
+// ---- PR #44 gate LOW-2: a reveal and a rotation can never land out of order -------------------------------------------------------------------------------
+
+describe("single-flight is per USER, whatever the mode (PR #44 gate LOW-2)", () => {
+  /** An API whose answers are held until released, so a test decides the order they ARRIVE in. */
+  function gated(m: ReturnType<typeof make>) {
+    const held: Array<{ req: OfflineSeedRequest; release: (r: OfflineSeedResult) => void; reject: (e: unknown) => void }> = [];
+    m.api.provisionOfflineSeed = (req, credentials) => {
+      m.api.calls.push({ req, credentials });
+      return new Promise<OfflineSeedResult>((resolve, reject) => held.push({ req, release: resolve, reject }));
+    };
+    return held;
+  }
+  const settle = async (n = 30): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await Promise.resolve();
+  };
+
+  it("the gate's scenario: an automatic reveal is in flight and the user taps Reset: the rotation WAITS (one request in flight), then runs, and the version-2 seed is what ends up stored whichever answer is slow", async () => {
+    const m = make();
+    const held = gated(m);
+    const reveal = m.manager.provisionIfMissing();
+    await settle();
+    expect(held).toHaveLength(1);
+    expect(held[0]!.req).toEqual({ deviceId: DEVICE });
+    const rotation = m.manager.provision({ rotate: true });
+    await settle();
+    expect(held, "the rotation has not been sent while the reveal is in flight").toHaveLength(1);
+    expect(m.api.calls).toHaveLength(1);
+    held[0]!.release(ANSWER); // the reveal answers (version 1)...
+    expect(await reveal).toMatchObject({ status: "ready", seedVersion: 1, rotated: false });
+    await settle();
+    expect(held, "...and only now is the rotation sent").toHaveLength(2);
+    expect(held[1]!.req).toEqual({ deviceId: DEVICE, rotate: true });
+    held[1]!.release(ROTATED);
+    expect(await rotation).toMatchObject({ status: "ready", seedVersion: 2, rotated: true });
+    const now = (await m.store.load(USER_A, DEVICE))!;
+    expect(now).toMatchObject({ seedVersion: 2, resyncNeeded: false });
+    expect(now.seed).toEqual(base32Decode(ROTATED.seed));
+  });
+
+  it("the rotation also runs when the reveal FAILS (a queued rotation is never dropped), and a rotation asked twice while a reveal runs is ONE request", async () => {
+    const m = make();
+    const held = gated(m);
+    const reveal = m.manager.provision();
+    await settle();
+    const r1 = m.manager.provision({ rotate: true });
+    const r2 = m.manager.provision({ rotate: true });
+    held[0]!.reject(apiError("network", 0, null));
+    expect(await reveal).toEqual({ status: "offline" });
+    await settle();
+    expect(held).toHaveLength(2);
+    expect(held[1]!.req).toEqual({ deviceId: DEVICE, rotate: true });
+    held[1]!.release(ROTATED);
+    expect(await r1).toMatchObject({ status: "ready", seedVersion: 2, rotated: true });
+    expect(await r2).toEqual(await r1);
+    expect(m.api.calls).toHaveLength(2);
+  });
+
+  it("a reveal asked while a rotation is in flight (or queued) shares it: it never runs after, or beside, the rotation", async () => {
+    const m = make();
+    await m.manager.provision(); // a seed exists
+    m.api.calls.length = 0;
+    const held = gated(m);
+    const rotation = m.manager.provision({ rotate: true });
+    await settle();
+    const reveal = m.manager.provision();
+    const reveal2 = m.manager.provisionIfMissing(); // have a seed with resyncNeeded set by the rotation: it joins too
+    await settle();
+    expect(held).toHaveLength(1);
+    held[0]!.release(ROTATED);
+    expect(await rotation).toMatchObject({ status: "ready", seedVersion: 2, rotated: true });
+    expect(await reveal).toEqual(await rotation);
+    expect(await reveal2).toEqual(await rotation);
+    expect(m.api.calls).toHaveLength(1);
+    expect((await m.store.load(USER_A, DEVICE))!.seedVersion).toBe(2);
+  });
+
+  it("two reveals share one request, as before; and after every flight settles (answer, failure) the user's slot is free again", async () => {
+    const m = make();
+    const held = gated(m);
+    const a = m.manager.provision();
+    const b = m.manager.provision();
+    await settle();
+    expect(held).toHaveLength(1);
+    held[0]!.reject(apiError("server", 500, "internal_error"));
+    expect(await a).toEqual({ status: "unavailable" });
+    expect(await b).toEqual({ status: "unavailable" });
+    const c = m.manager.provision({ rotate: true }); // nothing is stuck behind the failed one
+    await settle();
+    expect(held).toHaveLength(2);
+    held[1]!.release(ROTATED);
+    expect(await c).toMatchObject({ status: "ready", rotated: true });
+    const d = m.manager.provision();
+    await settle();
+    expect(held).toHaveLength(3);
+    held[2]!.release(ROTATED);
+    expect(await d).toMatchObject({ status: "ready", rotated: false });
+  });
+
+  it("different users do not wait for each other", async () => {
+    const m = make();
+    const held = gated(m);
+    const a = m.manager.provision();
+    await settle();
+    m.session.current = USER_B;
+    const b = m.manager.provision({ rotate: true });
+    await settle();
+    expect(held).toHaveLength(2); // B's rotation is not held behind A's reveal
+    expect(m.api.calls.map((c) => c.credentials.userId)).toEqual([USER_A, USER_B]);
+    held[0]!.release(ANSWER);
+    held[1]!.release(ROTATED);
+    await Promise.all([a, b]);
+    expect((await m.store.load(USER_A, DEVICE))!.seedVersion).toBe(1);
+    expect((await m.store.load(USER_B, DEVICE))!.seedVersion).toBe(2);
+  });
+});
+
+describe("a stored record with a higher seedVersion is never replaced by a lower one (PR #44 gate LOW-2, belt and braces)", () => {
+  const record = (seedVersion: number, resyncNeeded = false) => ({ seed: base32Decode(seedVersion === 1 ? ANSWER.seed : ROTATED.seed)!, seedVersion, issuedAtMs: T0, receivedAtMs: T0, resyncNeeded });
+
+  it("the store refuses the downgrade (and says so), accepts an equal version (a resync mark, a restore) and a higher one", async () => {
+    const m = make();
+    expect(await m.store.save(USER_A, DEVICE, record(2))).toBe("saved");
+    expect(await m.store.save(USER_A, DEVICE, record(1))).toBe("kept_newer");
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 2, seed: base32Decode(ROTATED.seed) });
+    expect(await m.store.save(USER_A, DEVICE, record(2, true))).toBe("saved");
+    expect((await m.store.load(USER_A, DEVICE))!.resyncNeeded).toBe(true);
+    expect(await m.store.save(USER_A, DEVICE, { ...record(2), seedVersion: 3 })).toBe("saved");
+    expect((await m.store.load(USER_A, DEVICE))!.seedVersion).toBe(3);
+  });
+
+  it("a record that cannot be read back (corrupt) is replaced by whatever arrives, whatever its version: forgetting an unreadable record is safe", async () => {
+    const m = make();
+    await m.secure.set(offlineSeedKey(USER_A, DEVICE), "{not json");
+    expect(await m.store.save(USER_A, DEVICE, record(1))).toBe("saved");
+    expect((await m.store.load(USER_A, DEVICE))!.seedVersion).toBe(1);
+  });
+
+  it("the manager: a late answer older than the stored seed is `failed` / `stale_seed` and changes nothing (the seed, the version, the resync flag)", async () => {
+    const m = make();
+    m.api.replies.push(ROTATED);
+    expect(await m.manager.provision()).toMatchObject({ status: "ready", seedVersion: 2 });
+    const before = m.secure.dump();
+    m.api.replies.push(ANSWER); // version 1 arrives after version 2 is stored
+    expect(await m.manager.provision()).toEqual({ status: "failed", reason: "stale_seed" });
+    expect(m.secure.dump()).toBe(before);
+    expect(await m.manager.view()).toMatchObject({ status: "ready", seedVersion: 2 });
+    expect(provisionMessage({ status: "failed", reason: "stale_seed" })).toBe("offline.status.failed");
+  });
+
+  it("a restored record after a refused rotation is the same version, so the restore still works", async () => {
+    const m = make();
+    await m.manager.provision();
+    m.api.replies.push(apiError("rate_limited", 429, "rate_limited", undefined, 100));
+    await m.manager.provision({ rotate: true });
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 1, resyncNeeded: false });
+  });
+});
+
+// ---- PR #44 gate NIT: the seed never leaves the manager ---------------------------------------------------------------------------------------------------
+
+describe("the seed is read, used and dropped inside the manager: view() hands out digits, never the seed (PR #44 gate NIT)", () => {
+  it("a view carries the code, countdown, version, clock and resync flag, and NOTHING from which the seed could be read: no bytes, no hex, no base32", async () => {
+    const m = make();
+    await m.manager.provision();
+    const v = await m.manager.view(T0);
+    expect(v).toEqual({ status: "ready", code: codeAt(base32Decode(ANSWER.seed)!, T0), secondsRemaining: expect.any(Number), seedVersion: 1, clock: expect.any(Object), resyncNeeded: false });
+    expect(Object.keys(v).sort()).toEqual(["clock", "code", "resyncNeeded", "secondsRemaining", "seedVersion", "status"]);
+    const text = JSON.stringify(v);
+    expect(text).not.toContain(Buffer.from(base32Decode(ANSWER.seed)!).toString("hex"));
+    expect(text).not.toContain(ANSWER.seed);
+    const walk = (x: unknown): void => {
+      expect(x instanceof Uint8Array).toBe(false);
+      if (typeof x === "object" && x !== null) Object.values(x).forEach(walk);
+    };
+    walk(v);
+  });
+
+  it("the manager has no accessor that returns the stored seed (the screen cannot ask for it), and `view(nowMs)` is for the screen's own clock", async () => {
+    const m = make();
+    await m.manager.provision();
+    const api = m.manager as unknown as Record<string, unknown>;
+    expect(api.loadSeed).toBeUndefined();
+    const at = T0 + 7 * 600_000;
+    const v = await m.manager.view(at);
+    expect(v).toMatchObject({ status: "ready", code: codeAt(base32Decode(ANSWER.seed)!, at) });
+    expect((await m.manager.view(at + 600_000) as { code: string }).code).not.toBe((v as { code: string }).code);
+  });
+});
+
+// ---- PR #44 gate NIT: the offline code never becomes ready (device registration) -----------------------------------------------------------------------
+
+describe("device registration: a 404 from the seed endpoint registers this device (only while the flag is on) and asks again once", () => {
+  const notFound = () => apiError("not_found", 404, "not_found");
+  function withRegistration(over: { registerDevice?: (r: { deviceId: string; userId: string; accessToken: string }) => Promise<void> } = {}) {
+    const m = make();
+    const registrations: Array<{ deviceId: string; userId: string; accessToken: string }> = [];
+    const registerDevice = over.registerDevice ?? (async () => undefined);
+    const manager = new OfflineCodeManager({ store: m.store, api: m.api, session: m.session, deviceId: async () => DEVICE, now: m.now, registerDevice: async (r) => { registrations.push(r); await registerDevice(r); } });
+    return { ...m, manager, registrations };
+  }
+
+  it("404 -> register (as the OWNER, with the owner's token) -> the SAME request again -> ready", async () => {
+    const m = withRegistration();
+    m.api.replies.push(notFound(), ANSWER);
+    expect(await m.manager.provision()).toMatchObject({ status: "ready", seedVersion: 1 });
+    expect(m.registrations).toEqual([{ deviceId: DEVICE, userId: USER_A, accessToken: tokenOf(USER_A) }]);
+    expect(m.api.calls.map((c) => c.req)).toEqual([{ deviceId: DEVICE }, { deviceId: DEVICE }]);
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 1 });
+  });
+
+  it("a registration that does not help (the seed endpoint still answers 404) is `not_ready`: ONE registration and ONE retry, never a loop", async () => {
+    const m = withRegistration();
+    m.api.replies.push(notFound(), notFound());
+    expect(await m.manager.provision()).toEqual({ status: "not_ready" });
+    expect(m.registrations).toHaveLength(1);
+    expect(m.api.calls).toHaveLength(2);
+  });
+
+  it("at most one registration per cooldown per user: a second tap inside it does not register again; after it, it may", async () => {
+    const m = withRegistration();
+    m.api.replies.push(notFound(), notFound(), notFound());
+    await m.manager.provision();
+    m.advance(AUTO_PROVISION_COOLDOWN_MS - 1);
+    expect(await m.manager.provision()).toEqual({ status: "not_ready" }); // 404 again: no new registration, no retry
+    expect(m.registrations).toHaveLength(1);
+    expect(m.api.calls).toHaveLength(3);
+    m.advance(2);
+    m.api.replies.push(notFound(), ANSWER);
+    expect(await m.manager.provision()).toMatchObject({ status: "ready" });
+    expect(m.registrations).toHaveLength(2);
+  });
+
+  it("a registration that fails is reported with the line of ITS failure: 429 (Retry-After), no network, 401, a refusal such as device_limit_exceeded; the seed request is not repeated", async () => {
+    const cases: Array<[ApiError | Error, ProvisionOutcome]> = [
+      [apiError("rate_limited", 429, "rate_limited", undefined, 90), { status: "rate_limited", retryAfterSeconds: 90 }],
+      [apiError("network", 0, null), { status: "offline" }],
+      [apiError("unauthenticated", 401, null), { status: "sign_in_required" }],
+      [apiError("rejected", 422, "device_limit_exceeded"), { status: "failed", reason: "rejected" }],
+      [apiError("server", 500, "internal_error"), { status: "unavailable" }],
+      [new Error("boom"), { status: "offline" }],
+    ];
+    for (const [e, expected] of cases) {
+      const m = withRegistration({ registerDevice: () => Promise.reject(e) });
+      m.api.replies.push(notFound());
+      expect(await m.manager.provision(), String(e)).toEqual(expected);
+      expect(m.api.calls).toHaveLength(1);
+    }
+  });
+
+  it("with NO registration path (the flag off: `registerDevice` absent) a 404 stays `not_ready`, exactly as before, and nothing else is requested", async () => {
+    const m = make();
+    m.api.replies.push(notFound());
+    expect(await m.manager.provision()).toEqual({ status: "not_ready" });
+    expect(m.api.calls).toHaveLength(1);
+  });
+
+  it("a rotation refused with 404 restores the earlier record and, with registration on, registers and retries the SAME rotation", async () => {
+    const m = withRegistration();
+    await m.manager.provision();
+    m.api.replies.push(notFound(), ROTATED);
+    expect(await m.manager.provision({ rotate: true })).toMatchObject({ status: "ready", seedVersion: 2, rotated: true });
+    expect(m.api.calls.slice(-2).map((c) => c.req)).toEqual([{ deviceId: DEVICE, rotate: true }, { deviceId: DEVICE, rotate: true }]);
+    expect(await m.store.load(USER_A, DEVICE)).toMatchObject({ seedVersion: 2, resyncNeeded: false });
+  });
+
+  it("deviceRegistrationFor: `undefined` while the flag is off (and the shipped default is off), else ONE live challenge request for this device as the owner (no prefetchCount, no facility)", async () => {
+    const calls: Array<{ req: unknown; c: unknown }> = [];
+    const api = { requestCheckinChallenges: async (req: unknown, c: unknown) => (calls.push({ req, c }), []) };
+    expect(OFFLINE_CODE_UI_ENABLED).toBe(false);
+    expect(deviceRegistrationFor(api)).toBeUndefined();
+    expect(deviceRegistrationFor(api, false)).toBeUndefined();
+    const reg = deviceRegistrationFor(api, true)!;
+    await reg({ deviceId: DEVICE, userId: USER_A, accessToken: "tok" });
+    expect(calls).toEqual([{ req: { deviceId: DEVICE }, c: { userId: USER_A, accessToken: "tok" } }]);
+  });
+
+  const BASE = "https://x.test/functions/v1";
+  it("over the real client: the registration is `POST checkin-challenge {deviceId}` as the owner, the server's own request shape (a live challenge, no prefetch)", async () => {
+    const f = scriptedFetch({ status: 201, body: JSON.stringify({ data: { challenges: [{ id: "dddddddd-dddd-4ddd-8ddd-000000000001", nonce: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA", expiresAt: "2026-06-01T12:02:00.000Z", kind: "live" }] } }) });
+    const api = createHttpApiClient({ baseUrl: BASE, fetch: f.fetch, getAccessToken: async () => "session-token", sleep: async () => undefined });
+    await deviceRegistrationFor(api, true)!({ deviceId: DEVICE, userId: USER_A, accessToken: "owner-token" });
+    expect(f.seen).toHaveLength(1);
+    expect(f.seen[0]).toMatchObject({ url: `${BASE}/checkin-challenge`, method: "POST", body: { deviceId: DEVICE }, redirect: "error", credentials: "omit" });
+    expect(f.seen[0]!.headers.Authorization).toBe("Bearer owner-token");
+  });
+
+  it("the composition wires it through `deviceRegistrationFor(api)` (the flag decides), and no other code registers a device for the offline code", () => {
+    const services = readFileSync(fileURLToPath(new URL("../src/runtime/services.ts", import.meta.url)), "utf8");
+    expect(services).toMatch(/const registerDevice = deviceRegistrationFor\(api\);/);
+    expect(services).toMatch(/\.\.\.\(registerDevice \? \{ registerDevice \} : \{\}\)/);
+    const gate = readFileSync(fileURLToPath(new URL("../src/offline-code/gate.ts", import.meta.url)), "utf8");
+    expect(gate).toMatch(/if \(!enabled\) return undefined;/);
+    expect(gate).toMatch(/enabled: boolean = OFFLINE_CODE_UI_ENABLED/);
   });
 });
