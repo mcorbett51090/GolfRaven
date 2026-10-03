@@ -55,6 +55,8 @@ export type CheckInOutcome =
   | { kind: "queued"; item: OutboxItem; penalty: boolean; challenge: "live" | "prefetched" | "none"; geometryKind: "polygon" | "radius"; capturedAt: number; accuracyMeters: number }
   | { kind: "disabled" }
   | { kind: "signed_out" }
+  /** The signed-in account changed while the check-in ran (the fix can take seconds): nothing was recorded for either account (P4.2c-1). */
+  | { kind: "account_changed" }
   | { kind: "no_geometry" }
   | { kind: "no_catalog" }
   | { kind: "no_timezone" }
@@ -106,7 +108,13 @@ async function within<T>(p: Promise<T>, ms: number): Promise<T | null> {
 }
 
 /** True when a fix captured at `capturedAt` lies inside the window of a live challenge received at `receivedAt` and expiring at `expiresAt`: the server's
- * `issued_at <= capturedAt <= expires_at`, where `receivedAt` stands for `issued_at` (it is never earlier than it, so a fix at or after it is after the issue). */
+ * `issued_at <= capturedAt <= expires_at`, where `receivedAt` stands for `issued_at` (it is never earlier than it, so a fix at or after it is after the issue).
+ *
+ * CLOCK SKEW (known limit, behaviour kept): `receivedAt` is the DEVICE clock and the fix's `capturedAt` is the device clock too, while `issued_at` / `expires_at` are the SERVER's
+ * clock. The comparison with `receivedAt` is therefore skew-free; the one against `expiresAt` (the server's clock, read from the response) is not: a device clock that runs fast
+ * by more than the slack in the 120 s window would call a covered fix uncovered (the check-in then falls back to the pool, never to a wrong co-signal), and one that runs slow could call
+ * an expired window open (the server then refuses the co-signal and the play counts without it). `IssuedChallenge` carries no `issuedAt` (id, nonce, expiresAt, kind), so there is no server
+ * issue time to use instead of `receivedAt`; deriving one as `expiresAt - 120 s` would read the same skewed clock. */
 export function liveCovers(live: Pick<LiveChallenge, "receivedAt" | "expiresAt">, capturedAt: number): boolean {
   return live.receivedAt <= capturedAt && capturedAt <= live.expiresAt;
 }
@@ -141,7 +149,7 @@ export async function runCheckIn(deps: CheckInDeps, input: CheckInInput): Promis
   try {
     return await run(deps, input);
   } catch (e) {
-    if (e instanceof OutboxEnqueueError) return { kind: "signed_out" };
+    if (e instanceof OutboxEnqueueError) return { kind: e.code };
     return { kind: "failed", message: e instanceof Error ? e.message : String(e) };
   }
 }
@@ -197,15 +205,19 @@ async function run(deps: CheckInDeps, input: CheckInInput): Promise<CheckInOutco
   // The live challenge covers this fix only if the fix lies inside its window; otherwise it is dropped and the pool is used (`challenge` absent).
   const challenge = live !== null && liveCovers(live, fix.capturedAt) ? live.challenge : undefined;
   const manifestSig = await deps.manifestSig(input.catalogVersion).catch(() => null);
+  // The owner is bound for the WHOLE run: a different account signed in during the fix gets nothing (and never A's live token).
+  const now = deps.currentUserId();
+  if (now !== owner) return { kind: now === null || now === "" ? "signed_out" : "account_changed" };
   const enqueued = await deps.enqueueEvidence({
     origin: "live",
+    owner,
     facilityId: entry.facility.id,
     courseId: entry.course.id,
     catalogVersion: input.catalogVersion,
     localDate,
     ...(manifestSig ? { manifestSig } : {}),
     submission: { source: "foreground_checkin", fix: { fixId, lat: fix.lat, lng: fix.lng, accuracyMeters: fix.accuracyMeters, capturedAt: fix.capturedAt, simulated: false, foreground: true, fromApp: true } },
-    ...(challenge ? { challenge } : {}),
+    ...(challenge && live ? { challenge, challengeFor: { ownerUserId: live.ownerUserId, deviceId: live.deviceId } } : {}),
   });
   return { kind: "queued", item: enqueued.item, penalty: enqueued.penalty, challenge: challengeKindOf(enqueued.item, fixId), geometryKind: match.geometryKind, capturedAt: fix.capturedAt, accuracyMeters: fix.accuracyMeters };
 }

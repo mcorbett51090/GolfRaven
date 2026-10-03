@@ -23,7 +23,7 @@ import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type Chal
 import { enqueueEvidence, newFixId, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
 import { checkinUiAvailable, markerCosignalUiAvailable, picksFromItems, runCheckIn, type CheckInInput, type CheckInOutcome } from "../checkin";
 import { createExpoLocationPort } from "../checkin/expo-location";
-import { MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, captureMarkerCoSignal, type MarkerCaptureInput, type MarkerCaptureOutcome, type MarkerCosignalStore } from "../marker";
+import { MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, captureMarkerCoSignal, type MarkerCaptureInput, type MarkerCaptureOutcome, type MarkerCosignalStore, heldOpenCount } from "../marker";
 import type { AuthService } from "../auth";
 import { createSupabaseAuth } from "../auth/supabase-auth";
 import { createExpoFileSharer } from "../account/expo-share";
@@ -210,7 +210,7 @@ export async function createServices(): Promise<AppServices> {
     accessTokenFor: (userId: string, o?: { forceRefresh?: boolean }) => auth.getAccessToken({ forUserId: userId, ...(o?.forceRefresh ? { forceRefresh: true } : {}) }),
   };
   const deviceId = createDeviceIdProvider(secure, expoRandomBytes);
-  const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, now: () => Date.now() });
+  const challenges = new ChallengeManager({ store: challengeStore, api, session, deviceId, now: () => Date.now(), openElsewhere: (owner, device, now) => heldOpenCount(markerStore, owner, device, now) });
   const registerDevice = deviceRegistrationFor(api); // `undefined` while OFFLINE_CODE_UI_ENABLED is false (`offline-code/gate.ts`)
   const offlineCode = new OfflineCodeManager({ store: new OfflineSeedStore(secure), api, session, deviceId, now: () => Date.now(), ...(registerDevice ? { registerDevice } : {}) });
   // Foreground location: constructing the port asks for nothing. The permission prompt is `requestPermission()`, called only from `runCheckIn` / `captureMarkerCoSignal`, i.e. from a button.

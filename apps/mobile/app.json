@@ -56,7 +56,8 @@
           }
         }
       ],
-      "./modules/golfraven-attest/app.plugin.js"
+      "./modules/golfraven-attest/app.plugin.js",
+      "./plugins/with-no-location-service.js"
     ],
     "locales": {
       "fr-CA": "./locales/fr-CA.json"

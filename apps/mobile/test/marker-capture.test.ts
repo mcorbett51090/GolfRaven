@@ -9,10 +9,10 @@ import { describe, expect, it } from "vitest";
 import { deleteAccountAndWipeLocal } from "../src/account";
 import { MemoryChallengeStore, SqliteChallengeStore } from "../src/challenges";
 import { markerCosignalUiAvailable } from "../src/checkin";
-import { captureMarkerCoSignal, MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, type MarkerCaptureDeps, type MarkerCosignalStore } from "../src/marker";
+import { MARKER_LIMITS, captureMarkerCoSignal, heldOpenCount, MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, type MarkerCaptureDeps, type MarkerCosignalStore } from "../src/marker";
 import { MemoryOutboxStore } from "../src/outbox";
 import { MemorySecureStore } from "../src/secure";
-import { DEVICE, NASHVILLE, NOW0, SITE_VERSION, entryOf, facility, makeRig, rawFix } from "./support/checkin-rig";
+import { FakeCheckinApi, DEVICE, NASHVILLE, NOW0, SITE_VERSION, entryOf, facility, makeRig, rawFix } from "./support/checkin-rig";
 import { FakeAuth } from "./support/fakes";
 import { openNodeSqlite } from "./support/node-sqlite";
 
@@ -46,7 +46,7 @@ describe.each(STORES)("capture (%s)", (_n, make) => {
   it("captures the fix against a PREFETCHED challenge (offline: no live one is ever asked for) and stores it for the signed-in user", async () => {
     const { rig, run } = rigWith(await make());
     rig.api.online = false;
-    await rig.seedPool(3, NOW0 - 2 * H);
+    await rig.seedPool(10, NOW0 - 2 * H);
     rig.location.fixes = [{ ok: true, fix: rawFix(NOW0 - 1_000, { latitude: 36.14671234, longitude: -86.78159876, accuracyMeters: 9.5 }) }];
     const o = await run();
     expect(o.kind).toBe("captured");
@@ -61,35 +61,37 @@ describe.each(STORES)("capture (%s)", (_n, make) => {
       challenge: { state: "held", kind: "prefetched" },
     });
     expect(rig.api.requests).toEqual([]); // never a live challenge request
-    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(2);
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(9);
   });
 
   it("the record's challenge window contains the fix: it was consumed with the fix's own time", async () => {
     const { rig, run } = rigWith(await make());
     rig.api.online = false;
-    await rig.seedPool(1, NOW0 + 10_000); // received AFTER the fix: cannot cover it
+    await rig.seedPool(10, NOW0 + 10_000); // received AFTER the fix: cannot cover it
     rig.location.fixes = [{ ok: true, fix: rawFix(NOW0) }];
     expect((await run()).kind).toBe("no_challenge");
-    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0 + 20_000)).toBe(1); // not consumed
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0 + 20_000)).toBe(10); // not consumed
   });
 
-  it("no prefetched challenge left: refused (a co-signal without one is worth nothing) and NOTHING is stored", async () => {
+  it("an empty pool: refused as 'reserved' BEFORE the prompt (a co-signal without a challenge is worth nothing) and NOTHING is stored", async () => {
     const store = await make();
     const { rig, run } = rigWith(store);
+    rig.location.perm = { status: "undetermined" };
     rig.location.fixes = [{ ok: true, fix: rawFix(NOW0) }];
-    expect(await run()).toEqual({ kind: "no_challenge" });
+    expect(await run()).toEqual({ kind: "reserved" });
+    expect(rig.location.calls).toEqual({ permission: 0, request: 0, services: 0, fix: 0 });
     expect(await store.listByOwner("user-a")).toEqual([]);
   });
 
   it("the player must be AT the facility: a fix outside its circle plus the 50 m buffer is 'not here', no challenge spent, nothing stored", async () => {
     const store = await make();
     const { rig, run } = rigWith(store);
-    await rig.seedPool(2, NOW0 - H);
+    await rig.seedPool(10, NOW0 - H);
     rig.location.fixes = [{ ok: true, fix: rawFix(NOW0, { latitude: NASHVILLE.lat + 0.01 }) }]; // ~1.1 km
     const o = await run();
     expect(o).toMatchObject({ kind: "not_here" });
     expect(await store.listByOwner("user-a")).toEqual([]);
-    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(2);
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(10);
   });
 
   it.each([
@@ -105,13 +107,18 @@ describe.each(STORES)("capture (%s)", (_n, make) => {
     expect(await store.listByOwner("user-a")).toEqual([]);
   });
 
-  it("an unverified facility (no geometry on the device) is refused after the fix, with the matcher's reason, nothing stored", async () => {
-    const store = await make();
-    const { rig, run } = rigWith(store);
-    await rig.seedPool(1, NOW0 - H);
-    rig.location.fixes = [{ ok: true, fix: rawFix(NOW0) }];
-    expect((await run(undefined, entryOf(facility({ status: "unverified" })))).kind).toBe("no_geometry");
-    expect(await store.listByOwner("user-a")).toEqual([]);
+  it("NIT: an unverified or approximate facility (no geometry on the device) is refused BEFORE the permission prompt, as the check-in does; nothing is asked, spent or stored", async () => {
+    for (const f of [facility({ status: "unverified" }), facility({ approx: true }), facility({ lat: null, lng: null })]) {
+      const store = await make();
+      const { rig, run } = rigWith(store);
+      await rig.seedPool(10, NOW0 - H);
+      rig.location.perm = { status: "undetermined" };
+      rig.location.fixes = [{ ok: true, fix: rawFix(NOW0) }];
+      expect((await run(undefined, entryOf(f))).kind).toBe("no_geometry");
+      expect(rig.location.calls).toEqual({ permission: 0, request: 0, services: 0, fix: 0 });
+      expect(await store.listByOwner("user-a")).toEqual([]);
+      expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(10);
+    }
   });
 
   it.each([
@@ -119,6 +126,7 @@ describe.each(STORES)("capture (%s)", (_n, make) => {
     ["approximate", { status: "granted", approximate: true } as const, { kind: "permission", status: "approximate" }],
   ])("permission %s: refused with the same outcome as the check-in", async (_l, perm, expected) => {
     const { rig, run } = rigWith(await make());
+    await rig.seedPool(10, NOW0 - H);
     rig.location.perm = perm;
     expect(await run()).toEqual(expected);
   });
@@ -126,7 +134,7 @@ describe.each(STORES)("capture (%s)", (_n, make) => {
   it("refuses a simulated, inaccurate, stale or missing fix like the check-in does (no challenge spent)", async () => {
     const store = await make();
     const { rig, run } = rigWith(store);
-    await rig.seedPool(2, NOW0 - H);
+    await rig.seedPool(10, NOW0 - H);
     for (const [attempt, kind] of [
       [{ ok: true, fix: rawFix(NOW0, { simulated: true }) }, "simulated"],
       [{ ok: true, fix: rawFix(NOW0, { accuracyMeters: 120 }) }, "inaccurate"],
@@ -136,7 +144,7 @@ describe.each(STORES)("capture (%s)", (_n, make) => {
       rig.location.fixes = [attempt];
       expect((await run()).kind).toBe(kind);
     }
-    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(2);
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(10);
     expect(await store.listByOwner("user-a")).toEqual([]);
   });
 });
@@ -208,7 +216,8 @@ describe("NOTHING SENDS A MARKER CO-SIGNAL (no server path exists yet): the queu
   it("the queue is read by nobody: the only code that touches the store is the capture (insert), the composition root (wiring) and account deletion (deleteOwner)", () => {
     expect(all.filter((f) => /\bmarkerStore\b/.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f)).sort()).toEqual(["src/runtime/AppProvider.tsx", "src/runtime/services.ts"]);
     for (const f of all) expect(strip(readFileSync(f, "utf8")), relative(root, f)).not.toMatch(/\bmarkerStore\s*\.\s*listByOwner|\bstore\s*\.\s*listByOwner[^;]*marker/);
-    expect(code("src/marker/capture.ts")).not.toMatch(/listByOwner/);
+    // the capture READS the store, for its persisted caps only (P4.2c-1); it never hands a record to anything that sends
+    expect(all.filter((f) => /\blistByOwner\b/.test(strip(readFileSync(f, "utf8"))) && /marker/i.test(f)).map((f) => relative(root, f)).sort()).toEqual(["src/marker/capture.ts", "src/marker/store.ts"]);
     for (const f of ["src/api/http-client.ts", "src/api/types.ts", "src/outbox/runner.ts", "src/evidence/send.ts", "src/evidence/payload.ts"]) expect(code(f), f).not.toMatch(/marker/i);
   });
 
@@ -220,5 +229,166 @@ describe("NOTHING SENDS A MARKER CO-SIGNAL (no server path exists yet): the queu
   it("it is behind BOTH switches: the marker one and the check-in one", () => {
     expect([markerCosignalUiAvailable(true, true), markerCosignalUiAvailable(true, false), markerCosignalUiAvailable(false, true), markerCosignalUiAvailable(false, false)]).toEqual([true, false, false, false]);
     expect(markerCosignalUiAvailable()).toBe(false); // today: both are false
+  });
+});
+
+describe.each(STORES)("LOW-2: marker captures must not starve the check-ins' prefetch slots (%s)", (_n, make) => {
+  const B = entryOf(facility({ id: "fac_b", courses: [{ id: "crs_b1", holes: 18 }] }));
+  const C = entryOf(facility({ id: "fac_c", courses: [{ id: "crs_c1", holes: 18 }] }));
+  const at = (rig: ReturnType<typeof rigWith>["rig"], t: number) => {
+    rig.clock.now = t;
+    rig.location.fixes = [{ ok: true, fix: rawFix(t) }];
+  };
+
+  it("the limits are the documented ones", () => {
+    expect(MARKER_LIMITS).toEqual({ perFacilityPerDay: 1, per24h: 2, reserveForCheckins: 8 });
+  });
+
+  it("(a) at most ONE capture per facility per facility-local day; the next local day is allowed; a refused capture consumes nothing", async () => {
+    const store = await make();
+    const { rig, run } = rigWith(store);
+    rig.api.online = false;
+    await rig.seedPool(10, NOW0 - H, 48 * H);
+    at(rig, NOW0);
+    expect((await run()).kind).toBe("captured");
+    const usable = await rig.challengeStore.countUsable("user-a", DEVICE, NOW0);
+    rig.location.calls.fix = 0;
+    at(rig, NOW0 + 60_000);
+    expect(await run()).toEqual({ kind: "limit", scope: "facility_day" });
+    expect(rig.location.calls).toMatchObject({ request: 0, fix: 0 }); // refused before the prompt and the fix
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0 + 60_000)).toBe(usable);
+    expect(await store.listByOwner("user-a")).toHaveLength(1);
+    // the next local day (Chicago), more than 24 h on: allowed again
+    at(rig, NOW0 + 25 * H);
+    expect((await run()).kind).toBe("captured");
+  });
+
+  it("(a) at most TWO captures per rolling 24 h overall (any facility); allowed again once the first is 24 h old", async () => {
+    const store = await make();
+    const { rig, run } = rigWith(store);
+    rig.api.online = false;
+    await rig.seedPool(10, NOW0 - H, 48 * H);
+    at(rig, NOW0);
+    expect((await run(undefined, entryOf(facility()))).kind).toBe("captured");
+    at(rig, NOW0 + 1_000);
+    expect((await run(undefined, B)).kind).toBe("captured");
+    at(rig, NOW0 + 2_000);
+    expect(await run(undefined, C)).toEqual({ kind: "limit", scope: "overall" });
+    expect(await store.listByOwner("user-a")).toHaveLength(2);
+    await rig.seedPool(2, NOW0 + 24 * H + 500, 24 * H, "later");
+    at(rig, NOW0 + 24 * H + 500); // the first record is now 24 h + 0.5 s old
+    expect((await run(undefined, C)).kind).toBe("captured");
+  });
+
+  it("(a) the caps are PERSISTED: a new capture over the same stored records (a restart) still counts them; another user's records do not count", async () => {
+    const store = await make();
+    const first = rigWith(store);
+    first.rig.api.online = false;
+    await first.rig.seedPool(10, NOW0 - H);
+    at(first.rig, NOW0);
+    expect((await first.run()).kind).toBe("captured");
+    const second = rigWith(store); // a fresh rig, the same store: the app restarted
+    second.rig.api.online = false;
+    await second.rig.seedPool(10, NOW0 - H);
+    at(second.rig, NOW0 + 5_000);
+    expect(await second.run()).toEqual({ kind: "limit", scope: "facility_day" });
+    const other = rigWith(store);
+    other.rig.who.user = "user-b";
+    other.rig.api.online = false;
+    await other.rig.seedPool(10, NOW0 - H);
+    at(other.rig, NOW0 + 5_000);
+    expect((await other.run()).kind).toBe("captured");
+  });
+
+  it("(c) a capture never takes the last 8 usable challenges: with 9 usable it may (leaving 8); with 8 or fewer it is refused 'reserved' BEFORE the prompt, nothing consumed", async () => {
+    const store = await make();
+    const { rig, run } = rigWith(store);
+    rig.api.online = false;
+    await rig.seedPool(9, NOW0 - H);
+    at(rig, NOW0);
+    expect((await run()).kind).toBe("captured");
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(8);
+    rig.location.perm = { status: "undetermined" };
+    rig.location.calls.request = 0;
+    at(rig, NOW0 + 1_000);
+    expect(await run(undefined, B)).toEqual({ kind: "reserved" });
+    expect(rig.location.calls.request).toBe(0);
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(8);
+    expect(await store.listByOwner("user-a")).toHaveLength(1);
+  });
+
+  it("(c) the reserve is checked again right before consuming: check-ins that used the pool during the fix leave the capture refused", async () => {
+    const store = await make();
+    const { rig, run } = rigWith(store);
+    rig.api.online = false;
+    await rig.seedPool(9, NOW0 - H);
+    rig.location.onFix = async () => {
+      await rig.challengeStore.consumeOne("user-a", DEVICE, NOW0, NOW0); // a check-in took one while the fix was being read
+    };
+    at(rig, NOW0);
+    expect(await run()).toEqual({ kind: "reserved" });
+    expect(await store.listByOwner("user-a")).toEqual([]);
+  });
+
+  it("(c) at the end of the day: of 10 usable, two captures (the caps) leave 8 for check-ins, and a check-in can still take every one of them", async () => {
+    const store = await make();
+    const { rig, run } = rigWith(store);
+    rig.api.online = false;
+    await rig.seedPool(10, NOW0 - H);
+    at(rig, NOW0);
+    await run();
+    at(rig, NOW0 + 1_000);
+    await run(undefined, B);
+    expect(await rig.challengeStore.countUsable("user-a", DEVICE, NOW0)).toBe(8);
+    for (let i = 0; i < 8; i += 1) expect(await rig.challengeStore.consumeOne("user-a", DEVICE, NOW0 + 2_000, NOW0 + 2_000)).not.toBeNull();
+  });
+
+  it("(b) heldOpenCount: only this owner's, this device's, UNEXPIRED, still-held challenges (the ones the server keeps counting as open)", async () => {
+    const s = await make();
+    const rec = (owner: string, id: string, device: string, challenge: unknown) => ({ id, ownerUserId: owner, facilityId: "fac_x", catalogVersion: SITE_VERSION, deviceId: device, fix: { fixId: `f${id}`, lat: 1, lng: 2, accuracyMeters: 5, capturedAt: NOW0, simulated: false, foreground: true, fromApp: true }, challenge: challenge as never, createdAt: NOW0 });
+    const held = (exp: number) => ({ state: "held", challengeId: "c", nonce: "bm9uY2U", kind: "prefetched", expiresAt: exp });
+    await s.insert(rec("user-a", "1", DEVICE, held(NOW0 + H)));
+    await s.insert(rec("user-a", "2", DEVICE, held(NOW0 + 2 * H)));
+    await s.insert(rec("user-a", "3", DEVICE, held(NOW0 - 1))); // expired: the server no longer counts it
+    await s.insert(rec("user-a", "4", DEVICE, { state: "none", reason: "none_available" }));
+    await s.insert(rec("user-a", "5", "22222222-2222-4222-8222-222222222222", held(NOW0 + H))); // another device
+    await s.insert(rec("user-b", "6", DEVICE, held(NOW0 + H))); // another user
+    expect(await heldOpenCount(s, "user-a", DEVICE, NOW0)).toBe(2);
+    expect(await heldOpenCount(s, "user-a", DEVICE, NOW0 + 90 * 60_000)).toBe(1);
+  });
+
+  it("(b) the prefetch top-up subtracts the held marker challenges: the client's room estimate matches the server's cap of 10 open", async () => {
+    const { ChallengeManager, MemoryChallengeStore } = await import("../src/challenges");
+    const mk = (held: number, withHook = true) => {
+      const api = new FakeCheckinApi();
+      const store = new MemoryChallengeStore();
+      const m = new ChallengeManager({
+        store,
+        api,
+        session: { currentUserId: () => "user-a", accessTokenFor: () => Promise.resolve("t") },
+        deviceId: () => Promise.resolve(DEVICE),
+        now: () => NOW0,
+        ...(withHook ? { openElsewhere: () => Promise.resolve(held) } : {}),
+      });
+      return { api, store, m };
+    };
+    const seven = async (x: ReturnType<typeof mk>) => x.store.insertMany("user-a", DEVICE, Array.from({ length: 7 }, (_, i) => ({ id: `p${i}`, nonce: "bm9uY2U", kind: "prefetched" as const, facilityId: null, expiresAt: NOW0 + 24 * H })), NOW0 - 1);
+    const a = mk(2);
+    await seven(a);
+    expect(await a.m.prefetch()).toMatchObject({ kind: "filled", added: 1 }); // 10 - 7 usable - 2 held marker challenges
+    expect(a.api.requests).toEqual([{ deviceId: DEVICE, prefetchCount: 1 }]);
+    const b = mk(3);
+    await seven(b);
+    expect(await b.m.prefetch()).toEqual({ kind: "full", usable: 7 }); // 7 + 3 held = 10 open at the server: no request at all
+    expect(b.api.requests).toEqual([]);
+    const c = mk(0, false);
+    await seven(c);
+    await c.m.prefetch();
+    expect(c.api.requests).toEqual([{ deviceId: DEVICE, prefetchCount: 3 }]); // no hook: unchanged behaviour
+    const d = mk(0);
+    d.m["deps"].openElsewhere = () => Promise.reject(new Error("boom")); // a failing estimate never blocks the top-up
+    await seven(d);
+    await d.m.prefetch();
+    expect(d.api.requests).toEqual([{ deviceId: DEVICE, prefetchCount: 3 }]);
   });
 });

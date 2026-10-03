@@ -352,6 +352,10 @@ export const en = {
   "marker.err.not_here": "You do not seem to be at {facility}.",
   "marker.err.no_challenge": "No saved security check was available. Connect to the internet for a moment, then try again.",
   "marker.err.signed_out": "Sign in to use this.",
+  "checkin.err.account_changed": "The signed-in account changed during the check-in, so nothing was recorded. Try again.",
+  "marker.err.reserved": "Your saved security checks are kept for check-ins. Connect to the internet for a moment to get more, then try again.",
+  "marker.err.limit.facility_day": "You already saved a marker check at this facility today.",
+  "marker.err.limit.overall": "You have saved as many marker checks as are allowed for now. Try again tomorrow.",
 } as const;
 
 export type MessageKey = keyof typeof en;
