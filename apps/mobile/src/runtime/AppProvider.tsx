@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ActivityIndicator, View } from "react-native";
 import type { Session } from "../api";
 import { buildIndex, type CatalogIndex } from "../browse";
-import type { CatalogResetReport, CatalogState, RefreshOutcome } from "../catalog/manager";
+import { resetCatalogAndMaybeRedownload, type CatalogResetReport, type CatalogState, type RefreshOutcome } from "../catalog/manager";
 import type { CatalogSnapshot } from "../catalog/snapshot";
 import { resolveLocale, translate, plural, LOCALES, type Locale, type MessageKey, type Params, type PluralBase } from "../i18n";
 import type { OutboxItem } from "../outbox";
@@ -109,12 +109,11 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
     return outcome;
   }, [services]);
 
-  const resetCatalog = useCallback(async () => {
-    const report = await services.catalog.resetCatalogData();
-    setCatalogState(services.catalog.getState());
-    if (report.performed && !report.stillCorrupt) void refreshCatalog(); // fetch and verify the catalog again (a no-op reset deleted nothing)
-    return report;
-  }, [services, refreshCatalog]);
+  const resetCatalog = useCallback(
+    // fetch and verify the catalog again after a reset that deleted something (the decision lives in `shouldRedownloadAfterReset`)
+    () => resetCatalogAndMaybeRedownload(services.catalog, () => setCatalogState(services.catalog.getState()), refreshCatalog),
+    [services, refreshCatalog],
+  );
 
   const syncOutbox = useCallback(async () => {
     await services.outboxRunner.run();
