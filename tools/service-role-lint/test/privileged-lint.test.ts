@@ -54,6 +54,21 @@ describe("privileged-file pass: must-fail fixtures", () => {
     ["bad/unsafe-nonliteral.ts", "privileged-unsafe-sql"],
     ["bad/unsafe-alias.ts", "privileged-unsafe-sql"],
     ["bad/unsafe-destructured.ts", "privileged-unsafe-sql"],
+    // PR #34 gate LOW-1: the shapes the second version of the pass missed
+    ["bad/driver-import-url.ts", "privileged-driver-import"],
+    ["bad/driver-import-twice.ts", "privileged-driver-import"],
+    ["bad/driver-reexport.ts", "privileged-driver-import"],
+    ["bad/create-require.ts", "privileged-driver-import"],
+    ["bad/deno-current-target.ts", "privileged-global-access"],
+    ["bad/deno-this-member.ts", "privileged-global-access"],
+    ["bad/deno-destructure-key.ts", "privileged-global-access"],
+    ["bad/sql-file.ts", "privileged-unsafe-sql"],
+    // edge role PR #35 (migration 0041): the minter scope
+    ["bad/mint-role-outside.ts", "privileged-mint-scope"],
+    ["bad/mint-role-literal.ts", "privileged-mint-scope"],
+    ["bad/mint-kind-outside.ts", "privileged-mint-scope"],
+    ["bad/mint-kind-computed.ts", "privileged-mint-scope"],
+    ["bad/mint-scoped-alias.ts", "privileged-mint-scope"],
   ];
 
   it("has a fixture for every file in bad/ (a fixture nobody asserts on proves nothing)", () => {
@@ -90,9 +105,15 @@ describe("privileged-file pass: must-fail fixtures", () => {
   });
 
   it("each openPool / driver fixture is flagged by exactly ONE finding, so a mutation of just that rule cannot be masked by a neighbouring one", () => {
-    for (const f of ["open-pool-url-arg", "open-pool-param", "open-pool-other-url", "driver-alias", "deno-destructured-env", "computed-member-variable", "computed-destructure", "unsafe-nonliteral", "unsafe-alias", "unsafe-destructured", "eval-call", "dynamic-import", "globalthis-bracket"]) {
+    for (const f of ["open-pool-url-arg", "open-pool-param", "open-pool-other-url", "driver-alias", "deno-destructured-env", "computed-member-variable", "computed-destructure", "unsafe-nonliteral", "unsafe-alias", "unsafe-destructured", "eval-call", "dynamic-import", "driver-import-url", "driver-import-twice", "driver-reexport", "deno-current-target", "deno-this-member", "deno-destructure-key", "sql-file", "mint-role-outside", "mint-role-literal", "mint-kind-outside", "mint-kind-computed", "mint-scoped-alias"]) {
       expect(lintPrivilegedSource(fixture(`bad/${f}.ts`)), f).toHaveLength(1);
     }
+  });
+
+  it("`globalThis[\"Deno\"]` is two findings by design (the global object outside the allow-list, and the member named Deno); create-require is several of one rule", () => {
+    expect(new Set(rulesOf(fixture("bad/globalthis-bracket.ts")))).toEqual(new Set(["privileged-global-access"]));
+    expect(lintPrivilegedSource(fixture("bad/globalthis-bracket.ts"))).toHaveLength(2);
+    expect(new Set(rulesOf(fixture("bad/create-require.ts")))).toEqual(new Set(["privileged-driver-import"]));
   });
 
   it("the two shapes that are inherently two findings say so: a concatenated SET ROLE is an unsafe-sql finding AND a forbidden-role finding on the folded text; db[\"be\" + \"gin\"] is a computed member AND a stray begin", () => {
@@ -113,6 +134,63 @@ describe("privileged-file pass: what must still pass", () => {
 
   it("the REAL supabase/functions/_shared/privileged.ts passes", () => {
     expect(lintPrivilegedSource(readFileSync(PRIVILEGED_PATH, "utf8"))).toEqual([]);
+  });
+});
+
+describe("privileged-file pass: PR #34 LOW-1 shapes and the minter scope (edge cases)", () => {
+  it("exactly one driver import, by the specifier `postgres`; any other specifier that names the driver is a finding (static, re-export, require, dynamic import)", () => {
+    expect(rulesOf('import postgres from "postgres"; export const n = 1;')).toEqual([]);
+    expect(rulesOf('import pg3 from "https://deno.land/x/postgresjs@v3.4.5/mod.js"; export const n = 1;')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('import pg3 from "npm:postgres@3.4.5"; export const n = 1;')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('import * as pg3 from "jsr:@x/postgres"; export const n = 1;')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('export * from "https://deno.land/x/postgresjs@v3.4.5/mod.js";')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('import postgres from "postgres"; import again from "postgres";')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('declare const require: any; export const p = require("postgres");')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('declare const require: any; export const p = require(name);')).toEqual(["privileged-driver-import"]);
+    expect(rulesOf('export const p = import("https://deno.land/x/postgresjs@v3.4.5/mod.js");')).toContain("privileged-global-access");
+    // a TYPE-only import is erased at run time: not a handle
+    expect(rulesOf('import postgres from "postgres"; import type { Sql } from "https://deno.land/x/postgresjs@v3.4.5/mod.js"; export type S = Sql;')).toEqual([]);
+    // an unrelated import that merely mentions nothing of the kind
+    expect(rulesOf('import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4"; export const c = createClient;')).toEqual([]);
+  });
+
+  it("createRequire and node:module are findings in every shape", () => {
+    expect(rulesOf('import { createRequire } from "node:module"; export const r = 1;')).toContain("privileged-driver-import");
+    expect(rulesOf('import * as m from "node:module"; export const r = m.createRequire("file:///x")("postgres");')).toContain("privileged-driver-import");
+    expect(rulesOf('export const r = (x: any) => x.createRequire(import.meta.url)("postgres");')).toEqual(["privileged-driver-import"]);
+  });
+
+  it("a member named `Deno` is a finding wherever it appears: x.Deno, x?.Deno, x[\"Deno\"], this.Deno, e.currentTarget.Deno, a destructure key", () => {
+    for (const bad of ["x.Deno", "x?.Deno", 'x["Deno"]', "x.currentTarget.Deno.env", "x.y.z.Deno"]) {
+      expect(rulesOf(`export const f = (x: any) => ${bad};`), bad).toContain("privileged-global-access");
+    }
+    expect(rulesOf("export function f(this: any) { return this.Deno; }")).toEqual(["privileged-global-access"]);
+    expect(rulesOf('export const f = (x: any) => { const { "Deno": d } = x; return d; };')).toEqual(["privileged-global-access"]);
+    // a property merely CONTAINING the word is not it
+    expect(rulesOf("export const f = (x: any) => x.DenoVersion + x.deno;")).toEqual([]);
+  });
+
+  it(".file( and a destructured `file` are findings; .files / .filename are not", () => {
+    expect(rulesOf('export const q = (t: any) => t.file("a.sql");')).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf('export const q = (t: any) => t["file"]("a.sql");')).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf("export const q = (t: any) => { const { file } = t; return file; };")).toEqual(["privileged-unsafe-sql"]);
+    expect(rulesOf("export const q = (t: any) => t.files + t.filename;")).toEqual([]);
+  });
+
+  it("the minter role is named only inside openScopedTx; the kind only inside openScopedTx and signinEmailProofs; every kind is a literal; openScopedTx is never aliased", () => {
+    const tag = "declare const t: any;";
+    expect(rulesOf(`${tag} async function openScopedTx(kind: string) { await t\`set local role edge_signin_minter\`; }`)).toEqual([]);
+    expect(rulesOf(`${tag} async function somethingElse() { await t\`set local role edge_signin_minter\`; }`)).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf('export const R = "EDGE_SIGNIN_MINTER";')).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf('declare function openScopedTx(k: string): void; function signinEmailProofs() { openScopedTx("signin_mint"); }')).toEqual([]);
+    expect(rulesOf('declare function openScopedTx(k: string): void; function signinEmailProof() { openScopedTx("signin_mint"); }')).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf('declare function openScopedTx(k: string): void; export const k = "signin_" + "mint";')).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf("declare function openScopedTx(k: string): void; export const x = (k: string) => openScopedTx(k);")).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf('declare function openScopedTx(k: string): void; export const x = [openScopedTx];')).toEqual(["privileged-mint-scope"]);
+    // a role that merely STARTS with the minter's name is not the minter, and is not an allowed role
+    expect(rulesOf(`${tag} async function openScopedTx() { await t\`set local role edge_signin_minter_x\`; }`)).toContain("privileged-forbidden-role");
+    // the three ordinary kinds are unaffected
+    expect(rulesOf('declare function openScopedTx(k: string): void; export const a = () => openScopedTx("actor"); export const b = () => openScopedTx("system");')).toEqual([]);
   });
 });
 
@@ -213,7 +291,8 @@ describe("privileged-file pass: edge cases of the rules themselves", () => {
     expect(rulesOf('declare const Deno: any; export const v = { Deno };')).toEqual(["privileged-env-access"]);
     // shapes that stay allowed
     expect(rulesOf('declare const Deno: any; export const v = Deno.env.get("A") ?? "";')).toEqual([]);
-    expect(rulesOf('export const v = { Deno: 1 }.Deno + (globalThis as any).addEventListener;')).toEqual(["privileged-global-access"]); // (the second is globalThis outside the allow-list: `as`)
+    // (PR #34: a member NAMED Deno is a finding wherever it is, an object literal's included; and the second is globalThis outside the allow-list: `as`)
+    expect(rulesOf('export const v = { Deno: 1 }.Deno + (globalThis as any).addEventListener;')).toEqual(["privileged-global-access", "privileged-global-access"]);
     expect(rulesOf("export type D = typeof Deno;")).toEqual([]);
   });
 

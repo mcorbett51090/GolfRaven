@@ -101,6 +101,53 @@ Deno.test("self-check: the harness role's own flags are reported (a SUPERUSER / 
   }
 });
 
+edgeTest("self-check (0041): edge_signin_minter is part of edge_gateway's membership closure and the check ACCEPTS it; the minter made BYPASSRLS is refused by the self-check AND by the signin_mint transaction's own role assertion (needs a superuser harness; reverted afterwards)", async () => {
+  const raw = rawHarness();
+  try {
+    // the closure the self-check walks (the same recursive query), read as the harness role: exactly the four roles of the model
+    const closure = (await raw`
+      with recursive clo(oid) as (
+        select oid from pg_catalog.pg_roles where rolname = 'edge_gateway'
+        union
+        select m.roleid from pg_catalog.pg_auth_members m join clo c on m.member = c.oid
+      )
+      select array_agg(r.rolname::text order by r.rolname::text) as names from clo join pg_catalog.pg_roles r on r.oid = clo.oid`)[0]!.names as string[];
+    assertEquals(closure, ["edge_actor", "edge_gateway", "edge_signin_minter", "edge_system"], "edge_gateway reaches exactly the three roles it may SET into (and nothing a membership could smuggle in)");
+    // accepted: a transaction of the new kind opens and runs as the minter, behind the same self-check gate
+    await withEdgeUrl(GOOD_EDGE_URL, async () => {
+      assertEquals(await openScopedTx("signin_mint", { expectedUid: null }, async (trx) => (await trx`select current_user::text as u`)[0]!.u), "edge_signin_minter");
+    });
+    const me = await raw`select rolsuper from pg_roles where rolname = session_user`;
+    if (!me[0]?.rolsuper) {
+      console.log("edge-role minter self-check mutation cell: skipped (the harness role is not a superuser; HARNESS_MODE=superuser runs it)");
+      return;
+    }
+    try {
+      // (1) the gate: a fresh connection walks the closure, which now holds a BYPASSRLS role
+      await raw.unsafe("alter role edge_signin_minter bypassrls");
+      await withEdgeUrl(GOOD_EDGE_URL, async () => {
+        const err = await assertRejects(() => openScopedTx("signin_mint", { expectedUid: null }, async () => "must never run")) as Error;
+        assert(err.message.includes("a role in its membership closure is SUPERUSER or BYPASSRLS"), err.message);
+      });
+      await raw.unsafe("alter role edge_signin_minter nobypassrls");
+      // (2) the per-transaction assertion on its own: the gate has already trusted the connection (inside its interval), then the role changes
+      await withEdgeUrl(GOOD_EDGE_URL, async () => {
+        assertEquals(await openScopedTx("signin_mint", { expectedUid: null }, async () => "first"), "first");
+        await raw.unsafe("alter role edge_signin_minter bypassrls");
+        const err = await assertRejects(() => openScopedTx("signin_mint", { expectedUid: null }, async () => "must never run")) as Error;
+        assert(err.message.includes("role 'edge_signin_minter' is SUPERUSER or BYPASSRLS"), err.message);
+      });
+    } finally {
+      await raw.unsafe("alter role edge_signin_minter nobypassrls");
+    }
+    await withEdgeUrl(GOOD_EDGE_URL, async () => {
+      assertEquals(await openScopedTx("signin_mint", { expectedUid: null }, async (trx) => (await trx`select current_user::text as u`)[0]!.u), "edge_signin_minter", "recovered after the fixture was reverted");
+    });
+  } finally {
+    await raw.end({ timeout: 1 });
+  }
+});
+
 edgeTest("self-check: edge_gateway made BYPASSRLS, or a member of service_role / authenticated, is REFUSED (needs a superuser harness; reverted afterwards)", async () => {
   const raw = rawHarness();
   try {

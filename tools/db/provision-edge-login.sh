@@ -140,4 +140,24 @@ if [ "$CHECK" != "t" ]; then
   echo "provision-edge-login.sh: edge_gateway is not in the expected state after provisioning (LOGIN, NOSUPERUSER, NOBYPASSRLS)" >&2
   exit 1
 fi
+# The minting role (migration 0041): edge_gateway reaches `private.signin_record_email_proof` only through `SET ROLE edge_signin_minter`. This script gives
+# the login nothing and creates no role, but a login provisioned next to a MISCONFIGURED minter (a role that can log in, holds SUPERUSER / BYPASSRLS /
+# INHERIT, is a member of another role, or that edge_gateway holds with INHERIT, without SET, or with ADMIN) is not a state to bless: refuse. Before
+# 0041 is applied the role does not exist yet: that is a note, not an error (the proof mint refuses until the migration is applied; nothing else needs it).
+MINTER="$(printf '%s\n' "SELECT CASE
+  WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'edge_signin_minter') THEN 'absent'
+  WHEN (SELECT r.rolcanlogin OR r.rolsuper OR r.rolbypassrls OR r.rolinherit OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication FROM pg_roles r WHERE r.rolname = 'edge_signin_minter')
+    OR EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member WHERE m.rolname = 'edge_signin_minter')
+    OR NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles r ON r.oid = am.roleid
+                   WHERE r.rolname = 'edge_signin_minter' AND m.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option)
+    OR EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles r ON r.oid = am.roleid
+               WHERE r.rolname = 'edge_signin_minter' AND m.rolname = 'edge_gateway' AND (NOT am.set_option OR am.inherit_option OR am.admin_option))
+    OR EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles r ON r.oid = am.roleid
+               WHERE r.rolname = 'edge_signin_minter' AND m.rolname NOT IN ('edge_gateway') AND (am.set_option OR am.inherit_option OR NOT (m.rolsuper OR m.rolcreaterole)))
+  THEN 'bad' ELSE 'ok' END" | "$PSQL_BIN" -X -q -A -t -v ON_ERROR_STOP=1)"
+case "$MINTER" in
+  ok) ;;
+  absent) echo "provision-edge-login.sh: note: role edge_signin_minter does not exist (supabase/migrations/0041_signin_proof_hardening.sql is not applied): the cross-account email-proof link will refuse until it is" >&2 ;;
+  *) echo "provision-edge-login.sh: edge_signin_minter is not in the expected state (NOLOGIN, no SUPERUSER / BYPASSRLS / INHERIT, a member of nothing, edge_gateway its only SET TRUE / INHERIT FALSE / non-admin member): refusing to bless this login" >&2; exit 1 ;;
+esac
 echo "provision-edge-login.sh: edge_gateway can now log in (SCRAM-SHA-256 verifier set; the password was never sent to the server)"

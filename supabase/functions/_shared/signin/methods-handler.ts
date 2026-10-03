@@ -192,7 +192,10 @@ async function proveEmail(
   subject: string,
   deps: SigninDeps,
 ): Promise<{ userId: string; proofId: string }> {
-  const hash = await sha256Hex(email.trim().toLowerCase());
+  // The failure counter's bucket is the TARGET ACCOUNT the database resolved (`ownerUid`, from the database's own lower(btrim()) lookup), not a JavaScript
+  // spelling of the address: two spellings the database treats as one mailbox (U+0130, a different case mapping) share one bucket, so a spelling cannot
+  // buy a fresh five attempts (0041, L2). The hash is of the uid, so the bucket still names no address.
+  const hash = await sha256Hex(`signin-otp-target:${ownerUid}`);
   if (deps.emailOtp === null) throw notConfigured("Email proof");
   if (!deps.emailProofs) throw notConfigured("Email proof");
   // The attempt is TAKEN before the code is checked, atomically (cap check + increment in one statement), so N parallel wrong proofs
@@ -223,15 +226,26 @@ async function proveEmail(
     throw Errors.unprocessable("email_proof_invalid", "that code is not valid", { attemptsRemaining: Math.max(0, OTP_FAILURES_PER_EMAIL_PER_HOUR - used) });
   }
   await giveBack();
-  if (result.userId !== ownerUid) {
-    // The address changed hands between the lookup and the proof. Refuse; never link to a different account than was looked up.
-    throw Errors.conflict("email_proof_mismatch", "the proven account is not the account that was looked up; try again");
+  // verifyOtp left a live GoTrue session for the proven account. The proof is bound to it (the database checks it exists, for the target, fresh), so it
+  // is signed out AFTER the mint and on EVERY path out of here, the refusals included: exactly that session, scope local (security gate F5, 0041 (b)).
+  try {
+    if (result.userId !== ownerUid) {
+      // The address changed hands between the lookup and the proof. Refuse; never link to a different account than was looked up.
+      throw Errors.conflict("email_proof_mismatch", "the proven account is not the account that was looked up; try again");
+    }
+    if (result.sessionId === null) {
+      // A proof cannot be bound to a session it cannot name. Fail closed (the same answer as any other refusal to mint).
+      deps.log({ event: "signin_otp_session_id_missing" });
+      throw Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
+    }
+    // The OTP verified. Record it in the database as a single-use proof bound to THIS caller, THIS target, THIS address, THIS Apple subject and THIS
+    // session: the database re-checks the address against the target's own auth.users row, GoTrue's sign-in stamp and the session, and only the link
+    // that redeems the proof can attach the identity (to the proof's target, never to the caller). A refusal (409 email_proof_refused) means no proof.
+    const proofId = await deps.emailProofs.record({ callerUserId: actorUid, targetUserId: result.userId, email, provider: "apple", subject, sessionId: result.sessionId });
+    return { userId: result.userId, proofId };
+  } finally {
+    await result.closeSession();
   }
-  // The OTP verified. Record it in the database as a single-use proof bound to THIS caller, THIS target, THIS address and THIS Apple subject: the
-  // database re-checks the address against the target's own auth.users row and GoTrue's sign-in stamp, and only the link that redeems the proof
-  // can attach the identity (to the proof's target, never to the caller). A refusal (409 email_proof_refused) means the proof was not minted.
-  const proofId = await deps.emailProofs.record({ callerUserId: actorUid, targetUserId: result.userId, email, provider: "apple", subject });
-  return { userId: result.userId, proofId };
 }
 
 async function bestEffortRevoke(apple: AppleSigninPort, refreshToken: string, deps: SigninDeps): Promise<void> {

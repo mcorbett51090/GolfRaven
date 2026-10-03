@@ -84,6 +84,8 @@ export type RuleId =
   | "privileged-global-access"
   | "privileged-computed-member"
   | "privileged-unsafe-sql"
+  | "privileged-driver-import"
+  | "privileged-mint-scope"
   // ⛔ FIX (BLOCKING, post-P3a re-gate round 4): "the mere presence of any
   // node_modules directory under the functions root [is] a finding."
   // Emitted by index.ts's own directory walker (listFiles), not by this

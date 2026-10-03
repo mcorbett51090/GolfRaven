@@ -325,6 +325,20 @@ CREATE TABLE IF NOT EXISTS auth.identities (
 );
 CREATE INDEX IF NOT EXISTS identities_user_id_idx ON auth.identities (user_id);
 
+-- `auth.sessions` (0041, the session binding of the proof-bound link): one row per GoTrue session, created when a sign-in (a password, an OTP
+-- verification) issues one and deleted when it is signed out. Only the three columns migration 0041 reads are certain to matter here; real GoTrue's table
+-- also carries updated_at, factor_id, aal, not_after, refreshed_at, user_agent, ip and tag, which nothing in this repo reads.
+-- `[unverified — training knowledge of GoTrue's auth.sessions shape: id, user_id and created_at, the ON DELETE CASCADE from auth.users, and that
+-- verifyOtp creates a row whose id is the `session_id` claim of the access token it returns, are recalled, not read from a live project; migration
+-- 0041's header names this as a verify-on-a-real-branch item]`.
+CREATE TABLE IF NOT EXISTS auth.sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON auth.sessions (user_id);
+
 -- [unverified — training knowledge of Supabase internals] `auth.uid()` and
 -- `auth.role()` read the `sub` / `role` claims out of the current session's
 -- JWT, which PostgREST makes available as the Postgres GUC
@@ -367,6 +381,8 @@ GRANT UPDATE (last_sign_in_at) ON auth.users TO service_role;
 -- Test seeding only (supabase/tests/matrix/17_signin_providers.sql and the Deno suite create and read identity
 -- rows the way GoTrue would); no migration grants this to service_role.
 GRANT SELECT, INSERT, DELETE ON auth.identities TO service_role;
+-- Test seeding only (the 0041 suites create a session the way GoTrue would after a verifyOtp, and sign it out); no migration grants this to service_role.
+GRANT SELECT, INSERT, DELETE ON auth.sessions TO service_role;
 -- migration_owner gets its OWN, separate WITH GRANT OPTION grants (S1,
 -- gate round 3), not folded into the lines above, so only migration_owner
 -- (never anon/authenticated/service_role) can re-grant these onward. It
@@ -386,6 +402,8 @@ GRANT SELECT ON auth.users TO migration_owner WITH GRANT OPTION;
 -- 0035_signin_providers.sql grants private_definer a narrow slice of auth.identities; same GRANT OPTION reasoning as
 -- auth.users above (without it the later GRANT silently no-ops with a WARNING).
 GRANT SELECT, INSERT, DELETE ON auth.identities TO migration_owner WITH GRANT OPTION;
+-- 0041_signin_proof_hardening.sql grants private_definer SELECT on three columns of auth.sessions; same GRANT OPTION reasoning as above.
+GRANT SELECT ON auth.sessions TO migration_owner WITH GRANT OPTION;
 -- INSERT (not UPDATE/DELETE — helpers.sql never does either): fixture
 -- account seeding in supabase/tests/helpers.sql now runs `SET ROLE
 -- service_role` first (tools/db/test.sh, S1 gate round 3), matching how a

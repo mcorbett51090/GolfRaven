@@ -303,7 +303,8 @@ export function delegateBind(ref: DelegateRef, expectedUid: string): ScopedBind 
 
 /**
  * THE one way an edge-mode transaction is opened (design §6): in order,
- *   1. `SET LOCAL ROLE edge_actor | edge_system` (the session user, `edge_gateway`, may SET into both);
+ *   1. `SET LOCAL ROLE edge_actor | edge_system | edge_signin_minter` (the session user, `edge_gateway`, may SET into each; the minter kind is for the email-proof
+ *      minter only, design §12.1);
  *   2. the three timeouts (`statement`, `lock`, and `transaction` where PG17+ has it);
  *   3. the bind (`private.bind_actor(uid)`; the system kind binds nothing; the DELEGATE kind starts as `edge_system`, calls a delegate
  *      binder, and only then switches to `edge_actor`: `bind_delegate_*` is `edge_system`-only, and the work that follows is the owner's);
@@ -311,14 +312,18 @@ export function delegateBind(ref: DelegateRef, expectedUid: string): ScopedBind 
  *      BYPASSRLS, and (actor / delegate kinds) `private.actor_uid()` equals the expected uid.
  * Any failure throws before `op` runs. The self-check has already passed on this pool (and repeats, see `edgeChecked`).
  */
-export async function openScopedTx<T>(kind: "actor" | "system" | "delegate", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
+export async function openScopedTx<T>(kind: "actor" | "system" | "delegate" | "signin_mint", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
   await edgeChecked();
   const db = edgeSql();
   const txTimeoutSupported = await supportsTransactionTimeout(db);
-  const role = kind === "system" ? "edge_system" : "edge_actor";
+  // `signin_mint` (migration 0041) is the ONE kind that runs as `edge_signin_minter`: the only role holding EXECUTE on private.signin_record_email_proof. It binds
+  // nothing (the definer refuses inside an actor-bound transaction), and the privileged lint (privileged-mint-scope) lets only `signinEmailProofs` ask for it.
+  const role = kind === "system" ? "edge_system" : kind === "signin_mint" ? "edge_signin_minter" : "edge_actor";
+  if (kind === "signin_mint" && (bind.run !== undefined || bind.expectedUid !== null)) throw new Error("openScopedTx: the signin_mint kind binds no actor (the minter refuses inside an actor-bound transaction)");
   return await (db.begin(async (trx: TxSql) => {
     // Literal SQL text (no `${...}`): SET LOCAL takes no bind parameter — see the note above STATEMENT_TIMEOUT.
     if (kind === "actor") await trx`set local role edge_actor`;
+    else if (kind === "signin_mint") await trx`set local role edge_signin_minter`;
     else await trx`set local role edge_system`;
     await trx`set local statement_timeout = '10s'`;
     await trx`set local lock_timeout = '5s'`;
@@ -327,7 +332,7 @@ export async function openScopedTx<T>(kind: "actor" | "system" | "delegate", bin
     // A delegate acts as the owner it just bound: from here on the transaction is edge_actor's (the binding stays: it is keyed on the
     // backend and the transaction, not on the role).
     if (kind === "delegate") await trx`set local role edge_actor`;
-    if (kind !== "system") {
+    if (kind !== "system" && kind !== "signin_mint") {
       const check = await trx`
         select current_user::text as u,
                (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged,
@@ -2809,7 +2814,7 @@ export function loadAttestKeyVerifierConfig(): RegistrationVerifierConfig | null
 import { kekFromBase64, type Kek } from "./signin/envelope.ts";
 import type { AppleSecretConfig } from "./signin/apple-client-secret.ts";
 import { NotConfiguredError } from "./signin/errors.ts";
-import { constantTimeEqual, sha256Hex } from "./signin/bytes.ts";
+import { constantTimeEqual } from "./signin/bytes.ts";
 import type { ClaimedRevocation, EmailOtpResult, EmailOtpVerifier, EmailProofInput, EmailProofMinter, LinkIdentityInput, OtpFailureCounter, OtpReservation, RevocationDb, RevocationJob, SigninMethodRow, SigninRepo, SigninSystemOps } from "./signin/types.ts";
 
 /** The Sign in with Apple server configuration, or `null` when ANY of the four values is absent or blank (a half-set configuration is
@@ -3051,20 +3056,21 @@ export function signinOtpFailuresFor(actor: Actor): OtpFailureCounter {
   };
 }
 
-/** The minter of the single-use email-OTP link proof (0039): `private.signin_record_email_proof`, run as **edge_system** in its
- * OWN transaction (`openScopedTx("system")`, no actor bound: the definer refuses inside an actor-bound transaction), committed before the link
- * transaction that redeems the proof. The address and the subject are hashed here; the database re-derives both and checks the address against the
- * target's own `auth.users.email` and the target's GoTrue sign-in stamp. Not a per-user operation: it is `edge_system` because the edge runtime has no
- * `service_role` pool to mint with and the per-user lane (`edge_actor`) must never write the proof table. */
+/** The minter of the single-use email-OTP link proof (0039 / 0041): `private.signin_record_email_proof`, run as **edge_signin_minter** in its OWN transaction
+ * (`openScopedTx("signin_mint")`, no actor bound: the definer refuses inside an actor-bound transaction), committed before the link transaction that redeems the
+ * proof. It is NOT `edge_system` (0041, L1): the drain, queue, import and retention lanes run as edge_system and can no longer mint; the minter role holds
+ * EXECUTE on this one function and nothing else, and the privileged lint (privileged-mint-scope) lets only this function ask for the kind. The address and
+ * the subject go in RAW: the database normalises and hashes them, with the expression the redemption uses (0041, L2: one rule, in one place), and checks
+ * the address against the target's own `auth.users.email`, the target's GoTrue sign-in stamp and a fresh `auth.sessions` row of that id for the target (the
+ * session verifyOtp created: the one secret an injected mint cannot know). */
 export function signinEmailProofs(): EmailProofMinter {
   return {
     async record(input: EmailProofInput): Promise<string> {
-      const emailHash = await sha256Hex(input.email.trim().toLowerCase());
-      const subHash = await sha256Hex(`${input.provider}:${input.subject}`);
+      if (!SIGNIN_UUID_RE.test(input.sessionId)) throw Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
       try {
-        return await openScopedTx("system", { expectedUid: null }, async (trx) => {
+        return await openScopedTx("signin_mint", { expectedUid: null }, async (trx) => {
           const rows = await trx`
-            select private.signin_record_email_proof(${input.callerUserId}::uuid, ${input.targetUserId}::uuid, ${emailHash}, ${input.provider}, ${subHash}) as id`;
+            select private.signin_record_email_proof(${input.callerUserId}::uuid, ${input.targetUserId}::uuid, ${input.email}, ${input.provider}, ${input.subject}, ${input.sessionId}::uuid) as id`;
           const id = rows[0]?.id;
           if (typeof id !== "string" || !SIGNIN_UUID_RE.test(id)) throw Errors.internal();
           return id;
@@ -3087,15 +3093,33 @@ export const purgeSigninEmailProofs = (): Promise<number> => withSigninSystem((s
  * THROWS, so it is not counted against the address. `[unverified — training knowledge of GoTrue's verifyOtp error statuses]`. */
 export interface OtpAuthClient {
   auth: {
-    verifyOtp(args: { email: string; token: string; type: "email" }): Promise<{ data: { user?: { id?: string } | null } | null; error: { status?: number } | null }>;
+    verifyOtp(args: { email: string; token: string; type: "email" }): Promise<{ data: { user?: { id?: string } | null; session?: { access_token?: string } | null } | null; error: { status?: number } | null }>;
     signOut(opts: { scope: "local" }): Promise<{ error: unknown }>;
   };
 }
 
-/** Builds the verifier over a client factory (the real one below; a recording fake in the integration suite). verifyOtp ESTABLISHES a live GoTrue
- * session for the proven account on the client it is called on; this server never hands it to anyone, so it is signed out (scope local: that one
- * session) the moment the proof is read, on success. A sign-out that fails is logged (no secret in the line) and does not fail the proof: the
- * session is in memory only and never leaves this function (security gate F5). */
+/** The `session_id` claim of a GoTrue access token (a JWT), or null. The token is read here only for the id of the session it belongs to: it was handed to this
+ * process by GoTrue over TLS in the verifyOtp response, and the DATABASE is what verifies the id (the session must exist for the target and be fresh), so the
+ * signature is not checked. `[unverified — training knowledge: GoTrue puts `session_id` in every access token it issues; its own /logout identifies the
+ * session by that claim]`. Anything that is not a three-part JWT with a uuid `session_id` is null (the handler then refuses to mint). */
+export function sessionIdOfAccessToken(token: unknown): string | null {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[1] === "") return null;
+  try {
+    const b64 = parts[1]!.replace(/-/g, "+").replace(/_/g, "/");
+    const claims = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "="))) as { session_id?: unknown };
+    return typeof claims.session_id === "string" && SIGNIN_UUID_RE.test(claims.session_id) ? claims.session_id.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Builds the verifier over a client factory (the real one below; a recording fake in the integration suite). verifyOtp ESTABLISHES a live GoTrue session for the
+ * proven account on the client it is called on; this server never hands it to anyone. Since 0041 the proof is BOUND to that session (the minter checks it
+ * exists, for the target, fresh), so a success returns its id (`sessionId`) and a `closeSession` that signs out EXACTLY that session (scope local, on the client
+ * that holds it): the caller runs it after the mint, on every path. A sign-out that fails is logged (no secret in the line) and does not fail the proof: the
+ * session is in memory only and never leaves this function (security gate F5). A response with no user is a failure that still signs the session out. */
 export function makeEmailOtpVerifier(newClient: () => OtpAuthClient): EmailOtpVerifier {
   return {
     async verify(email: string, code: string): Promise<EmailOtpResult> {
@@ -3106,15 +3130,20 @@ export function makeEmailOtpVerifier(newClient: () => OtpAuthClient): EmailOtpVe
         if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) return { ok: false };
         throw new Error("supabase auth verifyOtp failed");
       }
+      const closeSession = async (): Promise<void> => {
+        try {
+          const out = await client.auth.signOut({ scope: "local" });
+          if (out.error) console.warn(JSON.stringify({ event: "signin_otp_session_signout_failed" }));
+        } catch {
+          console.warn(JSON.stringify({ event: "signin_otp_session_signout_failed" }));
+        }
+      };
       const id = data?.user?.id;
-      try {
-        const out = await client.auth.signOut({ scope: "local" });
-        if (out.error) console.warn(JSON.stringify({ event: "signin_otp_session_signout_failed" }));
-      } catch {
-        console.warn(JSON.stringify({ event: "signin_otp_session_signout_failed" }));
+      if (!id) {
+        await closeSession();
+        throw new Error("supabase auth verifyOtp returned no user");
       }
-      if (!id) throw new Error("supabase auth verifyOtp returned no user");
-      return { ok: true, userId: id };
+      return { ok: true, userId: id, sessionId: sessionIdOfAccessToken(data?.session?.access_token), closeSession };
     },
   };
 }

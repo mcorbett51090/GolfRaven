@@ -1,14 +1,15 @@
 -- 19_signin_proof_link.sql
 -- 0039_signin_proof_bound_link.sql, the structural invariants and the harness-role lane: the private.signin_email_proof table (FORCE RLS, no
 -- edge grant, scoped private_definer policies, TTL / cross-account / hash CHECKs, FK cascade), its registry classification, what service_role
--- and the client roles can and cannot execute, the purge, and private.delete_my_data removing the account's proofs. The edge lane (the minter as
--- edge_system, the redeemer as a bound edge_actor, every refusal) is 19_signin_proof_link_edge.sql: it must reconnect as a real edge_gateway
+-- and the client roles can and cannot execute, the purge, and private.delete_my_data removing the account's proofs. 0041 (PR #35) adds the minter role edge_signin_minter (attributes, membership, the nothing-else
+-- privilege proof), the session binding's column grant and the narrowed stale-row window (N2). The edge lane (the minter as
+-- edge_signin_minter, the redeemer as a bound edge_actor, every refusal) is 19_signin_proof_link_edge.sql: it must reconnect as a real edge_gateway
 -- login, so it is its own file.
 --
 -- No secret in this file: ids are synthetic constants starting 5a5a1900-, the hashes are sha256 of fixed strings.
 -- Every group is its own BEGIN ... ROLLBACK except the session-reuse group, which commits and cleans up after itself.
 
-SELECT plan(58);
+SELECT plan(78);
 
 -- ----------------------------------------------------------------------------
 -- 0. Structure
@@ -16,11 +17,11 @@ SELECT plan(58);
 SELECT is((SELECT c.relrowsecurity AND c.relforcerowsecurity FROM pg_class c WHERE c.oid = 'private.signin_email_proof'::regclass), true,
   'structure: private.signin_email_proof has RLS enabled AND forced');
 SELECT is((SELECT array_agg(a.attname::text ORDER BY a.attname) FROM pg_attribute a WHERE a.attrelid = 'private.signin_email_proof'::regclass AND a.attnum > 0 AND NOT a.attisdropped),
-  ARRAY['caller_user_id', 'consumed_at', 'created_at', 'email_hash', 'expires_at', 'id', 'provider', 'sub_hash', 'target_user_id'],
-  'structure: the proof holds two user ids, a provider, two HASHES and three timestamps: no address and no provider subject is a column');
+  ARRAY['caller_user_id', 'consumed_at', 'created_at', 'email_hash', 'expires_at', 'id', 'provider', 'session_id', 'sub_hash', 'target_user_id'],
+  'structure: the proof holds two user ids, a provider, two HASHES, the (0041) session id and three timestamps: no address and no provider subject is a column');
 SELECT is((SELECT count(*)::int FROM pg_constraint k WHERE k.conrelid = 'private.signin_email_proof'::regclass AND k.contype = 'f' AND k.confrelid = 'auth.users'::regclass AND k.confdeltype = 'c'), 2,
   'structure: both user ids are foreign keys to auth.users ON DELETE CASCADE (an Auth user deletion takes the proofs with it)');
-SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)
+SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter')) r(n)
            WHERE has_table_privilege(r.n, 'private.signin_email_proof', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
               OR has_any_column_privilege(r.n, 'private.signin_email_proof', 'SELECT,INSERT,UPDATE,REFERENCES')), 0,
   'structure: no role but private_definer holds ANY privilege on the proof table (no edge grant of any kind, in either mode)');
@@ -37,24 +38,62 @@ SELECT is(has_column_privilege('private_definer', 'auth.users', 'last_sign_in_at
 SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname = 'private' AND p.proname IN ('signin_record_email_proof', 'signin_link_identity_with_proof_for_actor', 'purge_signin_email_proofs')
              AND p.prosecdef AND pg_get_userbyid(p.proowner) = 'private_definer' AND 'search_path=""' = ANY (p.proconfig)), 3,
-  'structure: the three new functions are SECURITY DEFINER, owned by private_definer, with search_path = ''''');
+  'structure: the three functions are SECURITY DEFINER, owned by private_definer, with search_path = ''''');
 
 -- function privileges, per role, by name (the inventory check proves the same against the manifest; these are the behaviours)
 CREATE FUNCTION pg_temp.can_exec(p_role text, p_names text[]) RETURNS int LANGUAGE sql STABLE AS $f$
   SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname = 'private' AND p.proname = ANY (p_names) AND has_function_privilege(p_role, p.oid, 'EXECUTE')
 $f$;
-SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_record_email_proof']), 1, 'privileges: edge_system CAN mint a proof (the narrowest role the Edge runtime holds that is not the per-user lane)');
+SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_record_email_proof']), 0, 'privileges: edge_system can NOT mint a proof any more (0041, L1: the drain, queue, import and retention lanes run as edge_system)');
+SELECT is(pg_temp.can_exec('edge_signin_minter', ARRAY['signin_record_email_proof']), 1, 'privileges: edge_signin_minter CAN mint a proof (the one role that can, 0041)');
 SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_record_email_proof']), 0, 'privileges: edge_actor can NOT mint a proof (the per-user lane never writes the proof table)');
 SELECT is(pg_temp.can_exec('service_role', ARRAY['signin_record_email_proof']), 0, 'privileges: service_role (the legacy lane) can not mint either: nothing in legacy uses the proof path');
 SELECT is(pg_temp.can_exec('anon', ARRAY['signin_record_email_proof', 'signin_link_identity_with_proof_for_actor', 'purge_signin_email_proofs'])
         + pg_temp.can_exec('authenticated', ARRAY['signin_record_email_proof', 'signin_link_identity_with_proof_for_actor', 'purge_signin_email_proofs']), 0,
   'privileges: no client role can execute any of the three');
 SELECT is(pg_temp.can_exec('edge_actor', ARRAY['signin_link_identity_with_proof_for_actor']), 1, 'privileges: edge_actor CAN redeem a proof (through the bound-actor definer)');
-SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_link_identity_with_proof_for_actor']) + pg_temp.can_exec('service_role', ARRAY['signin_link_identity_with_proof_for_actor']), 0,
-  'privileges: neither edge_system nor service_role can redeem: the link is only ever the bound user''s');
+SELECT is(pg_temp.can_exec('edge_system', ARRAY['signin_link_identity_with_proof_for_actor']) + pg_temp.can_exec('service_role', ARRAY['signin_link_identity_with_proof_for_actor']) + pg_temp.can_exec('edge_signin_minter', ARRAY['signin_link_identity_with_proof_for_actor']), 0,
+  'privileges: neither edge_system, service_role nor the minter can redeem: the link is only ever the bound user''s');
 SELECT is(pg_temp.can_exec('service_role', ARRAY['purge_signin_email_proofs']) + pg_temp.can_exec('edge_system', ARRAY['purge_signin_email_proofs']), 2, 'privileges: the purge is system work (service_role, edge_system)');
-SELECT is(pg_temp.can_exec('edge_actor', ARRAY['purge_signin_email_proofs']), 0, 'privileges: ... and never edge_actor');
+SELECT is(pg_temp.can_exec('edge_actor', ARRAY['purge_signin_email_proofs']) + pg_temp.can_exec('edge_signin_minter', ARRAY['purge_signin_email_proofs']), 0, 'privileges: ... and never edge_actor, nor the minter');
+
+-- 0041: the minter role, by what the catalog says
+SELECT is((SELECT r.rolcanlogin OR r.rolsuper OR r.rolbypassrls OR r.rolinherit OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication FROM pg_roles r WHERE r.rolname = 'edge_signin_minter'), false,
+  'minter: edge_signin_minter is NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION');
+SELECT is((SELECT count(*)::int FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles r ON r.oid = am.roleid WHERE m.rolname = 'edge_signin_minter'), 0,
+  'minter: it is a member of NO role (nothing to inherit or SET into)');
+SELECT is((SELECT count(*)::int FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles r ON r.oid = am.roleid
+           WHERE r.rolname = 'edge_signin_minter' AND m.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option AND NOT am.admin_option), 1,
+  'minter: edge_gateway is a SET TRUE, INHERIT FALSE, non-admin member (exactly as edge_actor / edge_system, 0030)');
+SELECT is((SELECT count(*)::int FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles r ON r.oid = am.roleid
+           WHERE r.rolname = 'edge_signin_minter' AND m.rolname <> 'edge_gateway' AND (am.set_option OR am.inherit_option)), 0,
+  'minter: no other role can SET ROLE to it or inherit from it (edge_actor and edge_system included)');
+SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_signin_minter', p.oid, 'EXECUTE')), 1,
+  'minter: it can execute exactly ONE function in app / api / private (signin_record_email_proof)');
+SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
+             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+             AND (has_any_column_privilege('edge_signin_minter', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege('edge_signin_minter', c.oid, 'DELETE,TRUNCATE,TRIGGER'))), 0,
+  'minter: it holds NO privilege on any table, view or column, in any schema (extension-owned relations, such as postgis'' own PUBLIC views, are exempt, as in check 12)');
+SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT LIKE 'pg\_temp%' AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege('edge_signin_minter', c.oid, 'USAGE,SELECT,UPDATE') ELSE false END), 0,
+  'minter: ... nor on any sequence');
+SELECT is((SELECT count(*)::int FROM pg_namespace n WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%' AND has_schema_privilege('edge_signin_minter', n.oid, 'CREATE')), 0,
+  'minter: it can CREATE in no schema');
+SELECT is((SELECT count(*)::int FROM pg_namespace n WHERE n.nspname IN ('app', 'api', 'auth', 'storage', 'vault') AND has_schema_privilege('edge_signin_minter', n.oid, 'USAGE')), 0,
+  'minter: its only schema privilege of substance is USAGE on private: no USAGE on app, api, auth, storage or vault');
+SELECT is(has_schema_privilege('edge_signin_minter', 'private', 'USAGE'), true, 'minter: ... and USAGE on private (name resolution for the one function)');
+SELECT is((SELECT count(*)::int FROM pg_policy p WHERE (SELECT oid FROM pg_roles WHERE rolname = 'edge_signin_minter') = ANY (p.polroles)), 0, 'minter: no RLS policy names it');
+SELECT is(to_regprocedure('private.signin_record_email_proof(uuid, uuid, text, text, text)'), NULL::regprocedure, 'minter: the 0039 five-argument minter (a JavaScript hash, no session, edge_system EXECUTE) is gone');
+SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'private' AND p.proname = 'signin_record_email_proof'), 1, 'minter: ... and there is exactly one function of that name');
+SELECT is((SELECT array_agg(a.attname::text ORDER BY a.attname) FROM pg_attribute a WHERE a.attrelid = 'auth.sessions'::regclass AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('private_definer', a.attrelid, a.attnum, 'SELECT')),
+  ARRAY['created_at', 'id', 'user_id'], 'session binding: private_definer reads exactly (id, user_id, created_at) of auth.sessions, nothing else');
+SELECT is((SELECT count(*)::int FROM pg_roles r JOIN pg_class c ON c.oid = 'auth.sessions'::regclass
+           WHERE r.rolname IN ('anon', 'authenticated', 'edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND (has_any_column_privilege(r.rolname, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, c.oid, 'DELETE,TRUNCATE,TRIGGER'))), 0,
+  'session binding: no client or edge role (the minter included) can read or write auth.sessions: the session id is a secret only verifyOtp''s caller holds');
+SELECT is((SELECT count(*)::int FROM pg_indexes WHERE schemaname = 'private' AND tablename = 'signin_email_proof' AND indexname = 'signin_email_proof_session_uidx' AND indexdef LIKE 'CREATE UNIQUE INDEX%'), 1,
+  'session binding: one session, one proof (a UNIQUE index on session_id)');
 
 -- registries (read as service_role: the registries are FORCE RLS, and under HARNESS_MODE=restricted the harness role would read zero rows)
 SET ROLE service_role;
@@ -160,15 +199,22 @@ SELECT pg_temp.put('5a5a1900-0000-0000-0000-0000000000a4', '5a5a1900-0000-0000-0
 SELECT set_config('app.signin.proof_id', '', true);
 SELECT set_config('app.delete_my_data.target_user_id', '', true);
 
+SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), NULL::text[],
+  'select (0041, N2): with no window open private_definer sees NOTHING, not even the stale proof (any private_definer code used to see the stale ones)');
+SELECT set_config('app.signin.proof_purge', 'on', true);
 SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), ARRAY['5a5a1900-0000-0000-0000-0000000000a3'],
-  'select: with no window open private_definer sees NO live proof, only the stale one (the purge''s)');
+  'select (0041, N2): ... the purge window shows the stale proof, and ONLY the stale one (a live proof is never visible to the purge)');
+SELECT set_config('app.signin.proof_purge', 'yes', true);
+SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), NULL::text[],
+  'select (0041, N2): ... and only the exact value ''on'' opens it');
+SELECT set_config('app.signin.proof_purge', '', true);
 SELECT set_config('app.signin.proof_id', '5a5a1900-0000-0000-0000-0000000000a1', true);
-SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), ARRAY['5a5a1900-0000-0000-0000-0000000000a1', '5a5a1900-0000-0000-0000-0000000000a3'],
-  'select: the proof-id window shows exactly that one proof (plus the stale one)');
+SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), ARRAY['5a5a1900-0000-0000-0000-0000000000a1'],
+  'select: the proof-id window shows exactly that one proof');
 SELECT set_config('app.signin.proof_id', '', true);
 SELECT set_config('app.delete_my_data.target_user_id', '5a5a1900-0000-0000-0000-00000000000b', true);
-SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), ARRAY['5a5a1900-0000-0000-0000-0000000000a1', '5a5a1900-0000-0000-0000-0000000000a2', '5a5a1900-0000-0000-0000-0000000000a3'],
-  'select: the delete window for B shows the proofs B is the TARGET of (and the stale one), not C -> A');
+SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), ARRAY['5a5a1900-0000-0000-0000-0000000000a1', '5a5a1900-0000-0000-0000-0000000000a2'],
+  'select: the delete window for B shows the proofs B is the TARGET of, not C -> A');
 SELECT set_config('app.delete_my_data.target_user_id', '5a5a1900-0000-0000-0000-00000000000a', true);
 SELECT is((SELECT array_agg(id::text ORDER BY id) FROM private.signin_email_proof), ARRAY['5a5a1900-0000-0000-0000-0000000000a1', '5a5a1900-0000-0000-0000-0000000000a3', '5a5a1900-0000-0000-0000-0000000000a4'],
   'select: ... and for A the proofs A is the CALLER of or the target of');
@@ -188,8 +234,12 @@ SELECT is(pg_temp.consume('5a5a1900-0000-0000-0000-0000000000a2'), 1,
 SELECT is(pg_temp.del_by_id('5a5a1900-0000-0000-0000-0000000000a2'), 0,
   'delete: the proof-id window cannot DELETE a live proof (only an account deletion or the purge can)');
 SELECT set_config('app.signin.proof_id', '', true);
+SELECT is(pg_temp.del_all(), NULL::text[],
+  'delete (0041, N2): with no window open a DELETE reaches NOTHING (it used to reach every stale row)');
+SELECT set_config('app.signin.proof_purge', 'on', true);
 SELECT is(pg_temp.del_all(), ARRAY['5a5a1900-0000-0000-0000-0000000000a3'],
-  'delete: with no window open the only rows a DELETE can reach are the stale ones');
+  'delete (0041, N2): ... inside the purge window it reaches the stale rows only');
+SELECT set_config('app.signin.proof_purge', '', true);
 SELECT set_config('app.delete_my_data.target_user_id', '5a5a1900-0000-0000-0000-00000000000c', true);
 SELECT is(pg_temp.del_all(), ARRAY['5a5a1900-0000-0000-0000-0000000000a2', '5a5a1900-0000-0000-0000-0000000000a4'],
   'delete: the account-deletion window for C reaches the proofs C is a party to and NOT A -> B');

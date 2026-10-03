@@ -30,14 +30,14 @@ ROUNDS=6
 CALLER="5a5a1902-0000-0000-0000-0000000000c1"
 TARGET="5a5a1902-0000-0000-0000-0000000000a1"
 TARGET_EMAIL="p19c-pt@signin.test"
+TARGET_SESSION="5a5a1902-0000-0000-0000-0000000005a1"
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/golfraven-proof-conc.XXXXXX")"
 cleanup() {
-  "${HARNESS_PSQL[@]}" -c "SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id IN ('$CALLER', '$TARGET'); DELETE FROM auth.identities WHERE user_id IN ('$CALLER', '$TARGET');" >/dev/null 2>&1 || true
+  "${HARNESS_PSQL[@]}" -c "SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id IN ('$CALLER', '$TARGET'); DELETE FROM auth.identities WHERE user_id IN ('$CALLER', '$TARGET'); DELETE FROM auth.sessions WHERE user_id IN ('$CALLER', '$TARGET');" >/dev/null 2>&1 || true
   rm -rf "$OUT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-h() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 count() { "${HARNESS_PSQL[@]}" -c "$1" | tr -d '[:space:]'; }
 
 seed() {
@@ -45,15 +45,17 @@ seed() {
   "${HARNESS_PSQL[@]}" -c "
     SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id IN ('$CALLER', '$TARGET');
     DELETE FROM auth.identities WHERE user_id IN ('$CALLER', '$TARGET');
+    DELETE FROM auth.sessions WHERE user_id IN ('$CALLER', '$TARGET');
     INSERT INTO auth.users (id, email) VALUES ('$CALLER', 'p19c-pc@signin.test'), ('$TARGET', '$TARGET_EMAIL') ON CONFLICT (id) DO NOTHING;
     INSERT INTO auth.identities (provider_id, user_id, identity_data, provider) VALUES
       ('p19c-pc@signin.test', '$CALLER', '{\"email\":\"p19c-pc@signin.test\"}', 'email'),
       ('$TARGET_EMAIL', '$TARGET', '{\"email\":\"$TARGET_EMAIL\"}', 'email');
-    UPDATE auth.users SET last_sign_in_at = clock_timestamp() WHERE id = '$TARGET';" >/dev/null
+    UPDATE auth.users SET last_sign_in_at = clock_timestamp() WHERE id = '$TARGET';
+    INSERT INTO auth.sessions (id, user_id, created_at) VALUES ('$TARGET_SESSION', '$TARGET', clock_timestamp());" >/dev/null
 }
 
-mint() { # $1 = subject; prints the proof id (minted as edge_system in its own committed transaction)
-  "${EDGE_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE edge_system; SELECT private.signin_record_email_proof('$CALLER', '$TARGET', '$(h "$TARGET_EMAIL")', 'apple', '$(h "apple:$1")'); COMMIT;" | grep -E '^[0-9a-f-]{36}$'
+mint() { # $1 = subject; prints the proof id (minted as edge_signin_minter in its own committed transaction; the address and the subject go in RAW, 0041)
+  "${EDGE_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE edge_signin_minter; SELECT private.signin_record_email_proof('$CALLER', '$TARGET', '$TARGET_EMAIL', 'apple', '$1', '$TARGET_SESSION'); COMMIT;" | grep -E '^[0-9a-f-]{36}$'
 }
 
 redeem_sql() { # $1 = proof id, $2 = subject, $3 = seconds to hold the transaction open after the link (0 = none)

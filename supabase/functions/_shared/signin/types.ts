@@ -130,19 +130,35 @@ export interface EmailProofInput {
   provider: "apple" | "google";
   /** The provider's stable subject (the Apple `sub`) of the identity that triggered the proof. */
   subject: string;
+  /** The id of the GoTrue session the OTP verification created for the target (0041, (b)): the database refuses unless that session exists, for the
+   * target, fresh. The id is the one secret the minter's statement carries that no other edge path can know. */
+  sessionId: string;
 }
 
-/** Mints the single-use, short-lived proof of a verified email OTP (`private.signin_record_email_proof`, 0039). Runs in its OWN transaction as
- * `edge_system`, never as the per-user actor, and the database refuses unless the target's own address and GoTrue's sign-in stamp agree. Returns
- * the proof id (a random uuid that never leaves the server). */
+/** Mints the single-use, short-lived proof of a verified email OTP (`private.signin_record_email_proof`, 0039 / 0041). Runs in its OWN transaction as
+ * `edge_signin_minter` (the one role with EXECUTE on it), never as the per-user actor or `edge_system`, and the database refuses unless the target's own
+ * address, GoTrue's sign-in stamp and a fresh session of the target with the given id agree. The address and the subject go in RAW: the database
+ * normalises and hashes them (one rule, 0041 L2); nothing here hashes either. Returns the proof id (a random uuid that never leaves the server). */
 export interface EmailProofMinter {
   record(input: EmailProofInput): Promise<string>;
 }
 
-export type EmailOtpResult = { ok: true; userId: string } | { ok: false };
+export type EmailOtpResult =
+  | {
+      ok: true;
+      userId: string;
+      /** The id of the session verifyOtp created (the `session_id` claim of its access token), or null when the response carried none (the handler then
+       * refuses: a proof cannot be bound to a session it cannot name). */
+      sessionId: string | null;
+      /** Signs out exactly that session (scope local, on the client that holds it). The CALLER runs it after the mint, whatever the outcome: until then the
+       * session must exist, because the database checks it. Never throws; a failed sign-out is logged and the session is in memory only (security gate F5). */
+      closeSession(): Promise<void>;
+    }
+  | { ok: false };
 
 /** Proves control of a mailbox by an email OTP (Supabase Auth's verifyOtp). Resolves `{ ok: false }` for a wrong or expired code
- * (counted against the 5-per-email-per-hour limit); THROWS for a transport failure (not counted: it says nothing about the code). */
+ * (counted against the 5-per-target-per-hour limit); THROWS for a transport failure (not counted: it says nothing about the code). A SUCCESS leaves the
+ * GoTrue session it created OPEN and hands the caller `closeSession`: the proof is bound to that session, so it is signed out after the mint, not before. */
 export interface EmailOtpVerifier {
   verify(email: string, code: string): Promise<EmailOtpResult>;
 }

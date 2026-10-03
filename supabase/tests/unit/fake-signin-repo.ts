@@ -47,8 +47,15 @@ export interface FakeProof {
   provider: string;
   emailHash: string;
   subHash: string;
+  /** The GoTrue session the proof is bound to (0041, (b)). */
+  sessionId: string;
   expiresAtMs: number;
   consumed: boolean;
+}
+/** A row of auth.sessions: who it belongs to and when GoTrue created it, in ms. */
+export interface FakeSession {
+  userId: string;
+  createdMs: number;
 }
 export interface SigninFake {
   identities: FakeIdentity[];
@@ -56,6 +63,8 @@ export interface SigninFake {
   proofs: FakeProof[];
   /** auth.users.last_sign_in_at (GoTrue's stamp), per user id, in ms. The minter refuses unless it is within 60 s of the fake clock. */
   lastSignInMs: Map<string, number>;
+  /** auth.sessions (0041): the sessions verifyOtp created and that nobody has signed out yet, by id. */
+  sessions: Map<string, FakeSession>;
   /** lower-cased email -> user id (auth.users.email). */
   accounts: Map<string, string>;
   tokens: FakeToken[];
@@ -75,7 +84,7 @@ const fakes = new WeakMap<FakeState, SigninFake>();
 export function signinFake(state: FakeState): SigninFake {
   let f = fakes.get(state);
   if (!f) {
-    f = { identities: [], proofs: [], lastSignInMs: new Map(), accounts: new Map(), tokens: [], queue: [], keks: new Map(), calls: [], nextId: 1, failNext: new Map(), otpFailures: new Map() };
+    f = { identities: [], proofs: [], lastSignInMs: new Map(), sessions: new Map(), accounts: new Map(), tokens: [], queue: [], keks: new Map(), calls: [], nextId: 1, failNext: new Map(), otpFailures: new Map() };
     fakes.set(state, f);
   }
   return f;
@@ -108,6 +117,14 @@ export function stampSignIn(state: FakeState, userId: string, atMs: number = sta
   signinFake(state).lastSignInMs.set(userId, atMs);
 }
 
+/** What verifyOtp leaves behind besides the stamp: a live GoTrue session of the proven account (auth.sessions), returned by id. */
+export function addSession(state: FakeState, userId: string, atMs: number = state.now.getTime()): string {
+  const f = signinFake(state);
+  const id = `00000000-0000-4000-a000-${String(f.nextId++).padStart(12, "0")}`;
+  f.sessions.set(id, { userId, createdMs: atMs });
+  return id;
+}
+
 const fingerprint = (e: Envelope) => toHex(e.ciphertext);
 
 function maybeFail(f: SigninFake, name: string): void {
@@ -133,10 +150,12 @@ function enqueueInternal(state: FakeState, userId: string, provider: string | nu
   return jobs;
 }
 
-const normEmail = (e: string) => e.trim().toLowerCase();
+/** The database's ONE normalisation (0041, L2): lower(btrim(x)), btrim stripping SPACES only. The fake mirrors it so a unit test cannot pass on JavaScript's wider trim(). */
+const normEmail = (e: string) => e.replace(/^ +/, "").replace(/ +$/, "").toLowerCase();
 
-/** Mirrors private.signin_record_email_proof (0039): the address must hash to the TARGET's own, the target must have signed in within 60 s, caller
- * and target differ. It runs in its own transaction as edge_system, so it is not a SigninRepo method. */
+/** Mirrors private.signin_record_email_proof (0039 / 0041): the address must match the TARGET's own (the database's lower(btrim())), the target must have signed in
+ * within 60 s, AND a session with the given id must exist for the target, created within 60 s and not already used by a proof; caller and target differ. It runs in
+ * its own transaction as edge_signin_minter, so it is not a SigninRepo method. */
 export function makeFakeEmailProofs(state: FakeState): EmailProofMinter {
   const f = signinFake(state);
   const refused = () => Errors.conflict("email_proof_refused", "that email proof cannot be used; request a new code and try again");
@@ -146,18 +165,21 @@ export function makeFakeEmailProofs(state: FakeState): EmailProofMinter {
       maybeFail(f, "proof.record");
       if (input.callerUserId === input.targetUserId) throw Errors.internal();
       const targetEmail = [...f.accounts.entries()].find(([, id]) => id === input.targetUserId)?.[0] ?? null;
-      const emailHash = await sha256Hex(normEmail(input.email));
-      if (targetEmail === null || (await sha256Hex(normEmail(targetEmail))) !== emailHash) throw refused();
+      if (targetEmail === null || normEmail(targetEmail) !== normEmail(input.email)) throw refused();
       const last = f.lastSignInMs.get(input.targetUserId);
       if (last === undefined || Math.abs(state.now.getTime() - last) > 60_000) throw refused();
+      const session = f.sessions.get(input.sessionId);
+      if (!session || session.userId !== input.targetUserId || Math.abs(state.now.getTime() - session.createdMs) > 60_000) throw refused();
+      if (f.proofs.some((p) => p.sessionId === input.sessionId)) throw refused();
       const id = `00000000-0000-4000-9000-${String(f.nextId++).padStart(12, "0")}`;
       f.proofs.push({
         id,
         callerUserId: input.callerUserId,
         targetUserId: input.targetUserId,
         provider: input.provider,
-        emailHash,
+        emailHash: await sha256Hex(normEmail(input.email)),
         subHash: await sha256Hex(`${input.provider}:${input.subject}`),
+        sessionId: input.sessionId,
         expiresAtMs: state.now.getTime() + 5 * 60_000,
         consumed: false,
       });

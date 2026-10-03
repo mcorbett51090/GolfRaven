@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(53);
+SELECT plan(70);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -530,6 +530,28 @@ BEGIN
 END
 $$;
 SELECT pass('every function''s actual edge_system EXECUTE grant matches private.function_inventory.expected_edge_system');
+DO $$
+DECLARE
+  v_row record;
+  v_oid oid;
+  v_mismatches text[] := '{}';
+BEGIN
+  FOR v_row IN SELECT * FROM private.function_inventory LOOP
+    SELECT p.oid INTO v_oid
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = v_row.schema_name AND p.proname = v_row.function_name
+      AND pg_get_function_identity_arguments(p.oid) = v_row.identity_args;
+    IF has_function_privilege('edge_signin_minter', v_oid, 'EXECUTE') <> v_row.expected_edge_signin_minter THEN
+      v_mismatches := v_mismatches || format('%s.%s: edge_signin_minter expected=%s actual=%s', v_row.schema_name, v_row.function_name, v_row.expected_edge_signin_minter, has_function_privilege('edge_signin_minter', v_oid, 'EXECUTE'));
+    END IF;
+  END LOOP;
+  IF array_length(v_mismatches, 1) > 0 THEN
+    RAISE EXCEPTION 'edge_signin_minter EXECUTE mismatches: %', array_to_string(v_mismatches, '; ');
+  END IF;
+END
+$$;
+SELECT pass('every function''s actual edge_signin_minter EXECUTE grant matches private.function_inventory.expected_edge_signin_minter (0041: exactly one function)');
+SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE expected_edge_signin_minter), 1, 'edge_signin_minter: the inventory expects it to execute exactly ONE function');
 SELECT is(
   (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = 'private' AND c.relname IN ('actor_binding', 'edge_policy_allowlist') AND c.relrowsecurity AND c.relforcerowsecurity),
@@ -539,7 +561,7 @@ SELECT is(
 CREATE FUNCTION pg_temp.edge_check_9() RETURNS text[] LANGUAGE sql AS $f$
   SELECT array_agg(v ORDER BY v) FROM (
 WITH RECURSIVE edge AS (
-  SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')
+  SELECT oid, rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter')
 ), closure(roleid, path) AS (
   SELECT e.oid, ARRAY[e.oid] FROM edge e
   UNION
@@ -551,22 +573,36 @@ UNION ALL
 SELECT 'edge role attribute: ' || r.rolname || ' has ' || a.attr
 FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('CREATEROLE', r.rolcreaterole),
   ('CREATEDB', r.rolcreatedb), ('REPLICATION', r.rolreplication), ('INHERIT', r.rolinherit)) AS a(attr, is_on)
-WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND a.is_on
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND a.is_on
 UNION ALL
-SELECT 'edge role can log in but must not: ' || rolname FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system') AND rolcanlogin
+SELECT 'edge role can log in but must not: ' || rolname FROM pg_roles WHERE rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter') AND rolcanlogin
 UNION ALL
 SELECT 'role ' || m.rolname || ' can SET ROLE to / inherit from edge role ' || r.rolname
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system') AND (am.set_option OR am.inherit_option)
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND m.rolname NOT IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND (am.set_option OR am.inherit_option)
 UNION ALL
 SELECT 'edge role membership holds ADMIN OPTION for a role that is neither a superuser nor a CREATEROLE role (only the migrating role may): ' || m.rolname || ' -> ' || r.rolname
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system') AND am.admin_option AND NOT (m.rolsuper OR m.rolcreaterole)
+WHERE r.rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter') AND am.admin_option AND NOT (m.rolsuper OR m.rolcreaterole)
 UNION ALL
 SELECT 'edge_gateway is not a SET TRUE, INHERIT FALSE member of ' || t.rolname
-FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system')
+FROM pg_roles t WHERE t.rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter')
   AND NOT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.member
                   WHERE am.roleid = t.oid AND g.rolname = 'edge_gateway' AND am.set_option AND NOT am.inherit_option)
+UNION ALL
+SELECT 'edge_gateway membership of ' || r.rolname || ' has INHERIT or lacks SET (every grant row must be SET TRUE, INHERIT FALSE)'
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE m.rolname = 'edge_gateway' AND r.rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter') AND (am.inherit_option OR NOT am.set_option)
+UNION ALL
+SELECT 'edge role is missing (migration 0041 creates edge_signin_minter): ' || n.rolname
+FROM (VALUES ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter')) n(rolname) WHERE NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = n.rolname)
+UNION ALL
+SELECT 'edge_signin_minter is a member of ' || r.rolname || ' (the minter must be a member of nothing)'
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member WHERE m.rolname = 'edge_signin_minter'
+UNION ALL
+SELECT 'edge role ' || m.rolname || ' is a member of edge_signin_minter (only edge_gateway may be)'
+FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
+WHERE r.rolname = 'edge_signin_minter' AND m.rolname IN ('edge_actor', 'edge_system')
   ) AS t(v)
 $f$;
 
@@ -600,6 +636,10 @@ WHERE NOT EXISTS (
   WHERE al.schema_name = l.schema_name AND al.table_name = l.table_name AND al.policy_name = l.policy_name
     AND al.command = l.command AND al.role_name = l.role_name
     AND al.using_expr IS NOT DISTINCT FROM l.using_expr AND al.with_check_expr IS NOT DISTINCT FROM l.with_check_expr)
+UNION ALL
+SELECT 'a policy applies to edge_signin_minter (it may have none): ' || n.nspname || '.' || cl.relname || '.' || pol.polname
+FROM pg_policy pol JOIN pg_class cl ON cl.oid = pol.polrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE (SELECT oid FROM pg_roles WHERE rolname = 'edge_signin_minter') = ANY (pol.polroles)
   ) AS t(v)
 $f$;
 
@@ -661,7 +701,7 @@ WHERE has_any_column_privilege('edge_system', cl.oid, 'SELECT,INSERT,UPDATE,REFE
 UNION ALL
 SELECT 'an edge role holds a privilege on a table outside app, or on an app table without FORCE ROW LEVEL SECURITY: ' || n.nspname || '.' || cl.relname || ' (' || r.rolname || ')'
 FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
-CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter')) r
 WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.deptype = 'e')
   AND (has_any_column_privilege(r.rolname, cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.rolname, cl.oid, 'DELETE,TRUNCATE,TRIGGER'))
@@ -669,9 +709,16 @@ WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname NOT IN ('pg_catalog'
 UNION ALL
 SELECT 'an edge role can CREATE in schema ' || n.nspname || ' (' || r.rolname || ')'
 FROM pg_namespace n
-CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system')) r
+CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('edge_gateway', 'edge_actor', 'edge_system', 'edge_signin_minter')) r
 WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
   AND has_schema_privilege(r.rolname, n.oid, 'CREATE')
+UNION ALL
+SELECT 'edge_signin_minter holds a privilege on a relation (it may hold none, in any schema): ' || n.nspname || '.' || cl.relname
+FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE cl.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = cl.oid AND d.deptype = 'e')
+  AND CASE WHEN cl.relkind = 'S' THEN has_sequence_privilege('edge_signin_minter', cl.oid, 'USAGE,SELECT,UPDATE')
+           ELSE has_any_column_privilege('edge_signin_minter', cl.oid, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege('edge_signin_minter', cl.oid, 'DELETE,TRUNCATE,TRIGGER') END
   ) AS t(v)
 $f$;
 
@@ -794,6 +841,91 @@ SELECT tests.clear_actor();
 DROP SCHEMA zz_edge_schema CASCADE;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12: clean again after the schema fixtures are dropped (postgis'' own public tables are exempt)');
+
+-- ---- 0041 (PR #35): the proof-minter role edge_signin_minter, in checks 2, 9, 10 and 12 ----
+CREATE FUNCTION pg_temp.minter_exec_mismatches() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+    SELECT r.rolname || ' EXECUTE on ' || fi.function_name || ': expected=' || r.exp || ' actual=' || has_function_privilege(r.rolname, p.oid, 'EXECUTE')
+    FROM private.function_inventory fi
+    JOIN pg_namespace n ON n.nspname = fi.schema_name
+    JOIN pg_proc p ON p.pronamespace = n.oid AND p.proname = fi.function_name AND pg_get_function_identity_arguments(p.oid) = fi.identity_args
+    CROSS JOIN LATERAL (VALUES ('edge_system', fi.expected_edge_system), ('edge_actor', fi.expected_edge_actor), ('edge_signin_minter', fi.expected_edge_signin_minter), ('service_role', fi.expected_service_role)) r(rolname, exp)
+    WHERE has_function_privilege(r.rolname, p.oid, 'EXECUTE') <> r.exp
+  ) AS t(v)
+$f$;
+SELECT is(pg_temp.minter_exec_mismatches(), NULL::text[], 'check 2 (0041): edge_system, edge_actor, service_role and edge_signin_minter hold EXECUTE on exactly what the inventory expects');
+SELECT tests.clear_actor();
+SET ROLE private_definer;
+GRANT EXECUTE ON FUNCTION private.signin_record_email_proof(uuid, uuid, text, text, text, uuid) TO edge_system;
+RESET ROLE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_system EXECUTE on signin_record_email_proof: expected=false actual=true') FROM unnest(pg_temp.minter_exec_mismatches()) v), true,
+  'check 2 MUST FAIL (0041, L1): the mint EXECUTE re-granted to edge_system (any unbound system lane could mint again)');
+SELECT tests.clear_actor();
+SET ROLE private_definer;
+REVOKE EXECUTE ON FUNCTION private.signin_record_email_proof(uuid, uuid, text, text, text, uuid) FROM edge_system;
+GRANT EXECUTE ON FUNCTION private.purge_signin_email_proofs() TO edge_signin_minter;
+RESET ROLE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_signin_minter EXECUTE on purge_signin_email_proofs: expected=false actual=true') FROM unnest(pg_temp.minter_exec_mismatches()) v), true,
+  'check 2 MUST FAIL (0041): the minter given EXECUTE on a second function');
+SELECT tests.clear_actor();
+SET ROLE private_definer;
+REVOKE EXECUTE ON FUNCTION private.purge_signin_email_proofs() FROM edge_signin_minter;
+RESET ROLE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.minter_exec_mismatches(), NULL::text[], 'check 2 (0041): clean again after the grant fixtures are undone');
+
+SELECT tests.clear_actor();
+GRANT edge_actor TO edge_signin_minter;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_signin_minter is a member of edge_actor%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0041): the minter made a member of edge_actor (the minter must be a member of nothing)');
+SELECT tests.clear_actor();
+REVOKE edge_actor FROM edge_signin_minter;
+GRANT edge_signin_minter TO edge_actor;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge role edge_actor is a member of edge_signin_minter%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0041): edge_actor made a member of the minter (an actor could SET ROLE into it)');
+SELECT tests.clear_actor();
+REVOKE edge_signin_minter FROM edge_actor;
+ALTER ROLE edge_signin_minter LOGIN;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge role can log in but must not: edge_signin_minter') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0041): the minter given LOGIN');
+SELECT tests.clear_actor();
+ALTER ROLE edge_signin_minter NOLOGIN;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_9(), NULL::text[], 'check 9 (0041): clean again with the minter in the set (edge_gateway is its one SET TRUE, INHERIT FALSE member)');
+
+SELECT tests.clear_actor();
+GRANT edge_signin_minter TO edge_gateway WITH INHERIT TRUE, SET TRUE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_gateway membership of edge_signin_minter has INHERIT or lacks SET%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0041): edge_gateway holds the minter WITH INHERIT (it would hold the minter''s privilege in every lane, not only after a SET ROLE)');
+SELECT tests.clear_actor();
+GRANT edge_signin_minter TO edge_gateway WITH INHERIT FALSE, SET TRUE;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_9(), NULL::text[], 'check 9 (0041): clean again after the membership is restored');
+
+SELECT tests.clear_actor();
+CREATE POLICY zz_minter_probe ON app.play FOR SELECT TO edge_signin_minter USING (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'a policy applies to edge_signin_minter%app.play.zz_minter_probe') FROM unnest(pg_temp.edge_check_10()) v), true, 'check 10 MUST FAIL (0041): a policy for the minter (it may have none)');
+SELECT tests.clear_actor();
+DROP POLICY zz_minter_probe ON app.play;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_10(), NULL::text[], 'check 10 (0041): clean again');
+
+SELECT tests.clear_actor();
+GRANT SELECT ON app.play TO edge_signin_minter;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_signin_minter holds a privilege on a relation%app.play') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL (0041): the minter granted SELECT on a FORCE-RLS app table (the generic rule allows that for the other roles; the minter may hold none)');
+SELECT tests.clear_actor();
+REVOKE SELECT ON app.play FROM edge_signin_minter;
+GRANT SELECT ON private.signin_email_proof TO edge_signin_minter;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE 'edge_signin_minter holds a privilege on a relation%private.signin_email_proof') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL (0041): the minter granted the proof table itself (only the definer may write it)');
+SELECT tests.clear_actor();
+REVOKE SELECT ON private.signin_email_proof FROM edge_signin_minter;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_12(), NULL::text[], 'check 12 (0041): clean again');
 
 -- ---- check 13 (0032, L1): no SECURITY DEFINER function reads an unqualified pg_* relation ----
 SELECT is(pg_temp.edge_check_13(), NULL::text[], 'check 13: no SECURITY DEFINER function in app/api/private reads an unqualified pg_* relation (private.delete_my_data qualified them in 0032)');
