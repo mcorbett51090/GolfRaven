@@ -207,8 +207,16 @@ const scriptedAndroid: AndroidPort = { verifyIntegrity: async ({ integrityToken,
 const unavailableAndroid: AndroidPort = { verifyIntegrity: async () => { throw new VendorUnavailableError("scripted vendor outage"); } };
 /** Accepts an iOS assertion iff it is base64url(clientDataHash) for the registered key; the counter is 1, then 2, ... (the handler's own atomic advance decides). */
 const scriptedIos = (counter: () => number): NonNullable<VerificationPorts["ios"]> => ({
+  // The key-identity refusals are the REAL verifier's own words and grades (rewards/app-attest.ts: no key on record -> `unattestable` `key_not_registered`; a key id that is not the
+  // recorded one -> `failed` `key_id_mismatch`), because the server derives its `rekey` hint from exactly those reasons; the hash comparison stands in for the signature check.
   verifyAssertion: async ({ assertionB64, keyId, clientDataHash, device }) =>
-    device.attestKeyId === keyId && assertionB64 === toBase64Url(clientDataHash) ? { ok: true, counter: counter() } : { ok: false, grade: "failed", reason: "scripted_hash_mismatch" },
+    !device.attestKeyId
+      ? { ok: false, grade: "unattestable", reason: "key_not_registered" }
+      : device.attestKeyId !== keyId
+        ? { ok: false, grade: "failed", reason: "key_id_mismatch" }
+        : assertionB64 === toBase64Url(clientDataHash)
+          ? { ok: true, counter: counter() }
+          : { ok: false, grade: "failed", reason: "scripted_hash_mismatch" },
 });
 /** The activation iOS port: accepts an assertion iff it is base64url(clientDataHash) for the registered key (counter 1, 2, ... as the handler's own atomic advance decides), and models the two DeviceCheck
  * bits: `readBits` answers the current ones, `setBit0` (row 6) sets bit0, so a second activation on the same device sees a "repeat user" device exactly as the real vendor would. */
@@ -449,6 +457,37 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
       { deviceId: FAKE_DEVICE_ID, challengeId: pre!.id, nonce: pre!.nonce, keyId, attestation: toBase64Url(await computeAttestKeyBinding(sha256, { challengeId: pre!.id, deviceId: FAKE_DEVICE_ID, keyId, nonce: pre!.nonce })) },
       scriptedRegistrationVerifier,
     );
+  }
+
+  {
+    // STALE KEY RECOVERY (the `rekey` hint). The server holds key A for this device; the client presents an assertion naming ANOTHER key (its local key is not the registered one):
+    // `failed` + `rekey: true`. Same with NO key on record: `unattestable` + `rekey: true`. A wrong binding under the registered key (recorded above as
+    // `token_201_failed_wrong_binding_ios`) stays hint-free.
+    const e = fresh();
+    seedUnknownDevice(e.state);
+    const keyId = b64(await sha256(PUBLIC_KEY));
+    const otherKeyId = b64(await sha256(new Uint8Array(65).fill(5)));
+    const [live] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID });
+    r.attestkey_201_registered_for_rekey = await attestKeyEndpoint(
+      e.state, e.repo,
+      { deviceId: FAKE_DEVICE_ID, challengeId: live!.id, nonce: live!.nonce, keyId, attestation: toBase64Url(await computeAttestKeyBinding(sha256, { challengeId: live!.id, deviceId: FAKE_DEVICE_ID, keyId, nonce: live!.nonce })) },
+      scriptedRegistrationVerifier,
+    );
+    const stored = fakeAttestDevices(e.state).get(FAKE_DEVICE_ID)!;
+    Object.assign(rewardsState(e.state).deviceAttest.get(FAKE_DEVICE_ID)!, { attestKeyId: stored.keyId, attestPublicKey: stored.publicKey });
+    let counter = 0;
+    const ports: VerificationPorts = { ios: scriptedIos(() => (counter += 1)), android: null };
+    const [c1] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID, prefetchCount: 1 });
+    const binding = toBase64Url(await computeIosCheckinBinding(sha256, { challengeId: c1!.id, deviceId: FAKE_DEVICE_ID, userId: UID, nonce: c1!.nonce }));
+    r.token_201_failed_rekey_ios = await tokenEndpoint(e.repo, { challengeId: c1!.id, nonce: c1!.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId: otherKeyId, assertion: binding } }, ports);
+  }
+  {
+    const e = fresh();
+    seedUnknownDevice(e.state);
+    const keyId = b64(await sha256(PUBLIC_KEY));
+    const [c1] = await challengesOf(e, { deviceId: FAKE_DEVICE_ID, prefetchCount: 1 });
+    const binding = toBase64Url(await computeIosCheckinBinding(sha256, { challengeId: c1!.id, deviceId: FAKE_DEVICE_ID, userId: UID, nonce: c1!.nonce }));
+    r.token_201_unattestable_rekey_ios = await tokenEndpoint(e.repo, { challengeId: c1!.id, nonce: c1!.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId, assertion: binding } }, { ios: scriptedIos(() => 1), android: null });
   }
 
   rbCounter = rbBeforeAttestation;
@@ -787,6 +826,9 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     expect(JSON.parse(responses.token_201_attested_android!.body).data.attestationGrade).toBe("attested");
     expect(JSON.parse(responses.token_201_attested_ios!.body).data.attestationGrade).toBe("attested");
     expect(JSON.parse(responses.token_201_failed_attested_before_no_token!.body).data.attestationGrade).toBe("failed");
+    expect(JSON.parse(responses.token_201_failed_rekey_ios!.body).data).toMatchObject({ attestationGrade: "failed", rekey: true });
+    expect(JSON.parse(responses.token_201_unattestable_rekey_ios!.body).data).toMatchObject({ attestationGrade: "unattestable", rekey: true });
+    expect(JSON.parse(responses.token_201_failed_wrong_binding_ios!.body).data.rekey).toBeUndefined();
     expect(responses.attestkey_201_registered!.status).toBe(201);
     // P4.2b-3b: what the recording must have seen
     expect(responses.offlineseed_200!.status).toBe(200);

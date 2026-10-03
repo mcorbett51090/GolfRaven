@@ -819,6 +819,45 @@
         "attestation": "DUt01CHGbLPb32RBpwBNvwG7jzOKPOQjKA_f6erJV9I"
       }
     },
+    "attestkey_201_registered_for_rekey": {
+      "status": 201,
+      "body": "{\"data\":{\"deviceId\":\"11111111-1111-4111-8111-111111111111\",\"keyId\":\"m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=\",\"replaced\":false}}",
+      "request": {
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "xs3U2-Lp8Pf-BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ8",
+        "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+        "attestation": "EmZHwfpKr7AcV1s2BNL4EVzzdoKZkcpfsj5D4FSpm38"
+      }
+    },
+    "token_201_failed_rekey_ios": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_3\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"failed\",\"rekey\":true}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000002",
+        "nonce": "5ezz-gEIDxYdJCsyOUBHTlVcY2pxeH-GjZSboqmwt74",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "ios",
+          "keyId": "cbfLSVrhK7JKO+PBqIT01KFugzMElfzjLHaNEbD/pAw=",
+          "assertion": "BXLZTsK2Cvl7pM75vgN_7ixLXHM70p4EPqq6ILECgXQ"
+        }
+      }
+    },
+    "token_201_unattestable_rekey_ios": {
+      "status": 201,
+      "body": "{\"data\":{\"jti\":\"jti_2\",\"expiresAt\":\"2026-06-01T12:15:00.000Z\",\"attestationGrade\":\"unattestable\",\"rekey\":true}}",
+      "request": {
+        "challengeId": "00000000-0000-4000-8000-000000000001",
+        "nonce": "BAsSGSAnLjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t0",
+        "hardwareSupportsAttestation": true,
+        "attestation": {
+          "platform": "ios",
+          "keyId": "m9qVvaHvjxth9tRyI/ShGQuZUH122OQ0l7t7F25Zy2U=",
+          "assertion": "JplWVfXV4ePbUdhxJWOzzAyhwAfsWcDakFbDTTtPRFw"
+        }
+      }
+    },
     "offlineseed_200": {
       "status": 200,
       "body": "{\"data\":{\"seed\":\"56AATDJCQZP4VCP3SV6WSY53LYSAKMCGSTHVLQEPNA2FWIFCCQ6A\",\"stepSeconds\":600,\"digits\":6,\"algorithm\":\"SHA256\",\"seedVersion\":1,\"issuedAt\":\"2026-06-01T12:00:00.000Z\"}}",

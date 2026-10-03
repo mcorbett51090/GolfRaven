@@ -58,6 +58,21 @@ export function noAttestationReasons(g: NoAttestationGrade): string[] {
   return g.provenCapable ? ["no_attestation_token", "device_has_attested_before"] : ["no_attestation_token"];
 }
 
+// 3. THE KEY-IDENTITY CLASS (the `rekey` hint). Of everything `verifyAppAttestAssertion` can refuse, exactly two reasons say "the key the client named is not
+//    the key this server holds for this device, or it holds none": `key_id_mismatch` (graded `failed`) and `key_not_registered` (graded `unattestable`).
+//    Everything else (a counter that did not advance, a bad signature, a wrong rpId, a binding that does not hash, a malformed assertion, a key replaced
+//    mid-flight) says something about THIS assertion, not about which key is on record, and stays indistinguishable from the outside. The set is one
+//    function so the two spellings cannot drift apart from the verifier's vocabulary (a unit test pins each against the real verifier's output).
+//    See docs/security/p3-money-path-requirements.md, "Stale App Attest key recovery (the `rekey` hint)".
+
+/** The assertion-verification reasons that mean "your key is not the one on record". */
+export const KEY_IDENTITY_REASONS: readonly string[] = ["key_id_mismatch", "key_not_registered"];
+
+/** True when a refused assertion's `reason` is a key-identity one: the one case in which `checkin-token` adds `rekey: true` to its answer. */
+export function isKeyIdentityReason(reason: string): boolean {
+  return KEY_IDENTITY_REASONS.includes(reason);
+}
+
 export type LostAdvanceReason = "key_replaced" | "counter_out_of_order" | "counter_replay";
 
 /** Names why `advanceAttestCounter` updated zero rows, for the diagnostic only (the grade is `failed` either way). Reads the device again, and

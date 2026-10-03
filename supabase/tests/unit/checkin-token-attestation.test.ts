@@ -733,3 +733,213 @@ describe("configuration and the no-attestation path", () => {
     expect(tokens(state)[0]).toMatchObject({ deviceId: D1, challengeKind: "live", challengeId: ch.id, userId: USER_A });
   });
 });
+
+// ---------------------------------------------------------------------------
+// the `rekey` hint: stale App Attest key recovery
+// ---------------------------------------------------------------------------
+describe("the `rekey` hint: present ONLY when the presented key is not the registered one (or none is registered)", () => {
+  /** The answer's exact wire keys: the strict shape. */
+  const keysOf = (out: object) => Object.keys(out).sort();
+  const BASE_KEYS = ["attestationGrade", "expiresAt", "jti"];
+  const REKEY_KEYS = [...BASE_KEYS, "rekey"];
+
+  it("a presented key that is NOT the one registered on this device: `failed` + `rekey: true`, the signal is still raised with the reason, the challenge is spent, the counter is untouched", async () => {
+    const { state } = await iosWorld(5); // the device holds key A
+    const keyB = await generateP256(); // the client's (stale / different) local key
+    const ch = await issueChallenge(state);
+    const out = await runIos(state, await iosToken(ch, { key: keyB, counter: 6 }));
+    expect(out.attestationGrade).toBe("failed");
+    expect(out.rekey).toBe(true);
+    expect(keysOf(out)).toEqual(REKEY_KEYS);
+    expect(JSON.parse(JSON.stringify(out)).rekey).toBe(true); // survives the wire encoding
+    // the fraud signal decision: still raised (a reviewer sees it), reason recorded, no key material
+    expect(openSignals(state)).toHaveLength(1);
+    expect(openSignals(state)[0]!.detail).toMatchObject({ source: "checkin-token", reasons: ["key_id_mismatch"], platform: "ios", deviceId: D1, challengeId: ch.id });
+    expect(JSON.stringify(openSignals(state)[0]!.detail)).not.toContain(await keyIdOf(keyB));
+    // the grade, the spent challenge and the token are exactly as before
+    expect(tokens(state).map((t) => t.attestationGrade)).toEqual(["failed"]);
+    expect(challengeUsed(state, ch.id)).toBe(true);
+    expect(counterOf(state)).toBe(5);
+  });
+
+  it("another account's key presented on this device is the same answer (`key_id_mismatch`): the hint says nothing about whose key it is", async () => {
+    const { state } = await iosWorld(5);
+    const keyOther = await generateP256();
+    seedDevice(state, { id: D2, userId: USER_B, platform: "ios", attestKeyId: await keyIdOf(keyOther), attestCounter: 40, attestPublicKey: keyOther.publicKeyRaw });
+    const ch = await issueChallenge(state);
+    const out = await runIos(state, await iosToken(ch, { key: keyOther, counter: 41 }));
+    expect(out).toMatchObject({ attestationGrade: "failed", rekey: true });
+    expect(counterOf(state, D2)).toBe(40);
+  });
+
+  it("the key id decides, not the signature: the registered key's id with a signature by ANOTHER key is `failed` WITHOUT the hint", async () => {
+    const { state, key } = await iosWorld(5);
+    const keyB = await generateP256();
+    const ch = await issueChallenge(state);
+    const out = await runIos(state, await iosToken(ch, { key: keyB, counter: 6, keyId: await keyIdOf(key) }));
+    expect(out.attestationGrade).toBe("failed");
+    expect(out.rekey).toBeUndefined();
+    expect(keysOf(out)).toEqual(BASE_KEYS);
+    expect(openSignals(state)[0]!.detail).toMatchObject({ reasons: ["bad_signature_or_request_hash"] });
+  });
+
+  it("NO key registered but an assertion presented: `rekey: true` (the grade stays `unattestable`, `key_not_registered`, and no signal is raised, as before)", async () => {
+    const state = makeFakeState();
+    seedDevice(state, { id: D1, userId: USER_A, platform: "ios", attestKeyId: null, attestPublicKey: null });
+    const key = await generateP256();
+    const ch = await issueChallenge(state);
+    const out = await runIos(state, await iosToken(ch, { key, counter: 1 }));
+    expect(out.attestationGrade).toBe("unattestable");
+    expect(out.rekey).toBe(true);
+    expect(keysOf(out)).toEqual(REKEY_KEYS);
+    expect(openSignals(state)).toEqual([]);
+    expect(state.fraudSignals).toEqual([]);
+    expect(challengeUsed(state, ch.id)).toBe(true);
+  });
+
+  it("the hint is derived from the verifier's own reasons: exactly `key_id_mismatch` and `key_not_registered` are key-identity reasons", async () => {
+    const { isKeyIdentityReason, KEY_IDENTITY_REASONS } = await import("../../functions/_shared/rewards/attestation-evidence.js");
+    const real = buildIosAssertionPort(APP_ID, crypt);
+    const keyA = await generateP256();
+    const keyB = await generateP256();
+    const hash = new Uint8Array(32);
+    const built = await buildAssertion({ key: keyA, appId: APP_ID, counter: 6, clientDataHash: hash });
+    const device = (over: object) => ({ id: D1, platform: "ios" as const, attestCounter: 5, attestKeyId: null as string | null, attestPublicKey: null as Uint8Array | null, ...over });
+    const mismatch = await real.verifyAssertion({ assertionB64: built.assertionB64, keyId: await keyIdOf(keyB), clientDataHash: hash, device: device({ attestKeyId: await keyIdOf(keyA), attestPublicKey: keyA.publicKeyRaw }) });
+    const none = await real.verifyAssertion({ assertionB64: built.assertionB64, keyId: await keyIdOf(keyA), clientDataHash: hash, device: device({}) });
+    expect(mismatch).toEqual({ ok: false, grade: "failed", reason: "key_id_mismatch" });
+    expect(none).toEqual({ ok: false, grade: "unattestable", reason: "key_not_registered" });
+    expect([...KEY_IDENTITY_REASONS].sort()).toEqual(["key_id_mismatch", "key_not_registered"]);
+    for (const r of ["malformed_assertion", "rp_id_mismatch", "malformed_signature", "bad_public_key", "bad_signature_or_request_hash", "counter_out_of_order", "counter_not_monotonic", "counter_replay", "key_replaced", "scripted_hash_mismatch", ""]) {
+      expect(isKeyIdentityReason(r), r).toBe(false);
+    }
+  });
+
+  it("ABSENT on every other `failed` iOS refusal: counter replay / out of order, bad signature, wrong binding / purpose / nonce, rpId mismatch, malformed assertion and signature", async () => {
+    const cases: Array<[string, (s: FakeState, key: TestKey, ch: { id: string; nonce: string }) => Promise<TokenRequest>, string]> = [
+      ["counter replay (equal)", (_s, key, ch) => iosToken(ch, { key, counter: 5 }), "counter_not_monotonic"],
+      ["counter out of order (lower)", (_s, key, ch) => iosToken(ch, { key, counter: 4 }), "counter_out_of_order"],
+      ["wrong binding (another device)", (_s, key, ch) => iosToken(ch, { key, counter: 6, bind: { deviceId: D2 } }), "bad_signature_or_request_hash"],
+      ["wrong purpose (activation)", async (_s, key, ch) =>
+        iosToken(ch, { key, counter: 6, hash: await computeIosActivationBinding(sha256, { rewardId: "aaaaaaaa-0000-4000-8000-000000000001", deviceId: D1, challengeId: ch.id, deviceCheckTokenSha256: "ab".repeat(32), nonce: ch.nonce }) }), "bad_signature_or_request_hash"],
+      ["wrong nonce signed", (_s, key, ch) => iosToken(ch, { key, counter: 6, bind: { nonce: toBase64Url(randomBytes(32)) } }), "bad_signature_or_request_hash"],
+      ["rpId mismatch", async (_s, key, ch) => {
+        const hash = await computeIosCheckinBinding(sha256, { challengeId: ch.id, deviceId: D1, nonce: ch.nonce, userId: USER_A });
+        const built = await buildAssertion({ key, appId: "OTHERTEAM.com.evil.app", counter: 6, clientDataHash: hash });
+        return { challengeId: ch.id, nonce: ch.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId: await keyIdOf(key), assertion: built.assertionB64 } };
+      }, "rp_id_mismatch"],
+      ["malformed signature", async (_s, key, ch) => {
+        const hash = await computeIosCheckinBinding(sha256, { challengeId: ch.id, deviceId: D1, nonce: ch.nonce, userId: USER_A });
+        const built = await buildAssertion({ key, appId: APP_ID, counter: 6, clientDataHash: hash, mutateSignature: (sig) => sig.slice(0, 10) });
+        return { challengeId: ch.id, nonce: ch.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId: await keyIdOf(key), assertion: built.assertionB64 } };
+      }, "malformed_signature"],
+      ["malformed assertion", async (_s, key, ch) => ({ challengeId: ch.id, nonce: ch.nonce, hardwareSupportsAttestation: true, attestation: { platform: "ios", keyId: await keyIdOf(key), assertion: "AAAA" } }), "malformed_assertion"],
+    ];
+    for (const [label, build, reason] of cases) {
+      const { state, key } = await iosWorld(5);
+      const ch = await issueChallenge(state);
+      const out = await runIos(state, await build(state, key, ch));
+      expect(out.attestationGrade, label).toBe("failed");
+      expect(out.rekey, label).toBeUndefined();
+      expect(keysOf(out), label).toEqual(BASE_KEYS);
+      expect(openSignals(state)[0]!.detail, label).toMatchObject({ reasons: [reason] });
+    }
+  });
+
+  it("ABSENT on a lost atomic advance: a higher counter committed first, an equal one, and a key replaced mid-flight (`key_replaced` is about THIS assertion, not the stale key)", async () => {
+    const real = buildIosAssertionPort(APP_ID, crypt);
+    const mid: Array<[string, (row: ReturnType<typeof rewardsState>["deviceAttest"] extends Map<string, infer R> ? R : never) => void, string]> = [
+      ["higher counter first", (row) => void (row.attestCounter = 9), "counter_out_of_order"],
+      ["equal counter first", (row) => void (row.attestCounter = 6), "counter_replay"],
+      ["key replaced", (row) => { row.attestKeyId = "A-NEW-KEY-ID"; row.attestCounter = 0; }, "key_replaced"],
+    ];
+    for (const [label, mutate, reason] of mid) {
+      const { state, key } = await iosWorld(5);
+      const ch = await issueChallenge(state);
+      const racing = {
+        verifyAssertion: async (input: Parameters<typeof real.verifyAssertion>[0]): Promise<AssertionResult> => {
+          const r = await real.verifyAssertion(input);
+          mutate(rewardsState(state).deviceAttest.get(D1)!);
+          return r;
+        },
+      };
+      const out = await runIos(state, await iosToken(ch, { key, counter: 6 }), deps({ ios: racing }));
+      expect(out.attestationGrade, label).toBe("failed");
+      expect(out.rekey, label).toBeUndefined();
+      expect(keysOf(out), label).toEqual(BASE_KEYS);
+      expect(openSignals(state)[0]!.detail, label).toMatchObject({ reasons: [reason] });
+    }
+  });
+
+  it("ABSENT on `attested`, on the no-attestation answers (`unattestable` and `failed`), and on an Android `failed`", async () => {
+    const { state, key } = await iosWorld(5);
+    const attested = await runIos(state, await iosToken(await issueChallenge(state), { key, counter: 6 }));
+    expect(attested.attestationGrade).toBe("attested");
+    expect(keysOf(attested)).toEqual(BASE_KEYS);
+
+    const bare = makeFakeState();
+    const c1 = await issueChallenge(bare);
+    const unattestable = await handleTokenRequest({ challengeId: c1.id, nonce: c1.nonce, hardwareSupportsAttestation: false }, makeFakeRepo(bare, USER_A), digestHex, iosDeps());
+    expect(unattestable.attestationGrade).toBe("unattestable");
+    expect(keysOf(unattestable)).toEqual(BASE_KEYS);
+    const c2 = await issueChallenge(bare);
+    const noneFailed = await handleTokenRequest({ challengeId: c2.id, nonce: c2.nonce, hardwareSupportsAttestation: true }, makeFakeRepo(bare, USER_A), digestHex, iosDeps());
+    expect(noneFailed.attestationGrade).toBe("failed");
+    expect(keysOf(noneFailed)).toEqual(BASE_KEYS);
+
+    // a device with a REGISTERED key sending no attestation is `failed` too, and is not a key-identity problem
+    const c3 = await issueChallenge(state);
+    const dodge = await handleTokenRequest({ challengeId: c3.id, nonce: c3.nonce, hardwareSupportsAttestation: false }, makeFakeRepo(state, USER_A), digestHex, iosDeps());
+    expect(dodge.attestationGrade).toBe("failed");
+    expect(keysOf(dodge)).toEqual(BASE_KEYS);
+
+    const android = makeFakeState();
+    seedDevice(android, { id: D1, userId: USER_A, platform: "android" });
+    const c4 = await issueChallenge(android);
+    const rejecting: AndroidPort = { verifyIntegrity: async () => ({ grade: "failed", reasons: ["key_id_mismatch"] }) }; // even a look-alike reason from Android is not the iOS key class
+    const out = await handleTokenRequest(
+      { challengeId: c4.id, nonce: c4.nonce, hardwareSupportsAttestation: true, attestation: { platform: "android", integrityToken: "TOKEN.abc_def-1" } },
+      makeFakeRepo(android, USER_A),
+      digestHex,
+      deps({ android: rejecting }),
+    );
+    expect(out.attestationGrade).toBe("failed");
+    expect(keysOf(out)).toEqual(BASE_KEYS);
+  });
+
+  it("the signal is NOT suppressed for the hint: repeated mismatches share ONE open signal (deduped), exactly as any other failure", async () => {
+    const { state } = await iosWorld(5);
+    const keyB = await generateP256();
+    for (let i = 0; i < 3; i++) {
+      const out = await runIos(state, await iosToken(await issueChallenge(state), { key: keyB, counter: 1 + i }));
+      expect(out.rekey).toBe(true);
+    }
+    expect(openSignals(state)).toHaveLength(1);
+    expect(state.fraudSignals.filter((s) => s.kind === "attestation_failed")).toHaveLength(1);
+    expect(tokens(state).map((t) => t.attestationGrade)).toEqual(["failed", "failed", "failed"]);
+  });
+
+  it("a REPEAT redemption of the same challenge answers the original token WITHOUT the hint (it is not persisted); nothing is re-verified or re-signalled", async () => {
+    const { state } = await iosWorld(5);
+    const keyB = await generateP256();
+    const ch = await issueChallenge(state);
+    const req = await iosToken(ch, { key: keyB, counter: 6 });
+    const first = await runIos(state, req);
+    expect(first.rekey).toBe(true);
+    const again = await runIos(state, req);
+    expect(again).toEqual({ jti: first.jti, expiresAt: first.expiresAt, attestationGrade: "failed" });
+    expect(keysOf(again)).toEqual(BASE_KEYS);
+    expect(openSignals(state)).toHaveLength(1);
+    expect(tokens(state)).toHaveLength(1);
+  });
+
+  it("the hint carries no information beyond what the caller sent: a MATCHING key id never gets it, and the answer never contains a key id or key material", async () => {
+    const { state, key } = await iosWorld(5);
+    const keyB = await generateP256();
+    const out = await runIos(state, await iosToken(await issueChallenge(state), { key: keyB, counter: 6 }));
+    const wire = JSON.stringify(out);
+    expect(wire).not.toContain(await keyIdOf(key)); // the REGISTERED key id is never revealed
+    expect(wire).not.toContain(await keyIdOf(keyB));
+    expect(Object.values(out).filter((v) => typeof v === "boolean")).toEqual([true]);
+  });
+});
