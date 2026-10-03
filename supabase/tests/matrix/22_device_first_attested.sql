@@ -1,22 +1,30 @@
 -- 22_device_first_attested.sql
 -- 0043: app.device.first_attested_at is a STICKY mark that an `attested` verdict was once recorded on the device, stamped only by the trigger
--- app.device_first_attested_stamp when `integrity_last ->> 'grade'` is 'attested'. The no-attestation rule (Edge:
+-- app.device_first_attested_stamp (BEFORE INSERT OR UPDATE) when `integrity_last ->> 'grade'` is 'attested'. The no-attestation rule (Edge:
 -- supabase/functions/_shared/rewards/attestation-evidence.ts) reads it so an Android device that attested at ACTIVATION cannot later claim it cannot
 -- attest, even after a later `failed` / `unattestable` verdict overwrites integrity_last. The service_role lane (what the trigger normalises) runs
 -- here; the edge_actor lane (the real recordDeviceVerdict / hasAttestedVerdictOnDevice statements under an edge_gateway login) is
 -- 22_device_first_attested_edge.sql, which has to reconnect.
 
 BEGIN;
-SELECT plan(34);
+SELECT plan(40);
 
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
--- Devices (user A from helpers.sql): a1 the main subject, a2 never attested, a3 a row written the way a pre-0043 database holds it.
+-- Devices (user A from helpers.sql): a1 the main subject, a2 never attested, a3 a row written the way a pre-0043 database holds it (trigger off for that one INSERT).
 INSERT INTO app.device (id, user_id, platform) VALUES
   ('22000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000000a', 'android'),
   ('22000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-00000000000a', 'android');
+-- a3 simulates a row written BEFORE 0043 (an `attested` integrity_last and no stamp): since the INSERT arm it can no longer be made through the trigger,
+-- so the trigger is switched off for this one INSERT (as the table owner, which this file's session user is) and back on straight after.
+RESET ROLE;
+ALTER TABLE app.device DISABLE TRIGGER device_first_attested_stamp_trg;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 INSERT INTO app.device (id, user_id, platform, integrity_last) VALUES
   ('22000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-00000000000a', 'android', '{"grade":"attested","at":"2026-01-01T00:00:00Z"}'::jsonb);
+RESET ROLE;
+ALTER TABLE app.device ENABLE TRIGGER device_first_attested_stamp_trg;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 
 -- ============================================================================
 -- 1. Schema and registry
@@ -65,9 +73,28 @@ UPDATE app.device SET first_attested_at = now(), integrity_last = '{"grade":"una
 SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000a2'), true, '... not even next to a non-attested verdict');
 UPDATE app.device SET integrity_last = NULL WHERE id = '22000000-0000-0000-0000-0000000000a2';
 SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000a2'), true, 'a NULL integrity_last (no verdict) stamps nothing and does not error');
-SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000a3'), true, 'a row written before 0043 with an `attested` integrity_last carries no stamp (no backfill: the Edge read treats integrity_last as evidence too)');
+SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000a3'), true, 'a row written before 0043 with an `attested` integrity_last carries no stamp (no backfill; trigger-off simulation: the Edge read treats integrity_last as evidence too)');
 UPDATE app.device SET integrity_last = '{"grade":"attested"}'::jsonb WHERE id = '22000000-0000-0000-0000-0000000000a3';
 SELECT is((SELECT first_attested_at IS NOT NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000a3'), true, '... and its next attested verdict stamps it');
+
+-- ============================================================================
+-- 4b. INSERT (PR #41 gate NIT-1): the stamp is derived from the inserted verdict, never taken from the statement
+-- ============================================================================
+INSERT INTO app.device (id, user_id, platform, first_attested_at) VALUES
+  ('22000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-00000000000a', 'android', '2001-01-01');
+SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000b1'), true, 'a service_role INSERT with a bogus stamp (2001-01-01) and no verdict stores NULL');
+UPDATE app.device SET first_attested_at = NULL, integrity_last = '{"grade":"failed"}'::jsonb WHERE id = '22000000-0000-0000-0000-0000000000b1';
+SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000b1'), true, '... and the bogus value was not made permanent: the row is still unstamped after a later verdict');
+INSERT INTO app.device (id, user_id, platform, first_attested_at, integrity_last) VALUES
+  ('22000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-00000000000a', 'android', '2001-01-01', '{"grade":"attested"}'::jsonb);
+SELECT is((SELECT first_attested_at = now() FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000b2'), true, 'an INSERT with an `attested` integrity_last is stamped with now(), NOT with the value the statement assigned');
+INSERT INTO app.device (id, user_id, platform, integrity_last) VALUES
+  ('22000000-0000-0000-0000-0000000000b3', '00000000-0000-0000-0000-00000000000a', 'android', '{"grade":"unattestable"}'::jsonb),
+  ('22000000-0000-0000-0000-0000000000b4', '00000000-0000-0000-0000-00000000000a', 'android', '{"grade":"failed"}'::jsonb);
+SELECT is((SELECT count(*)::int FROM app.device WHERE id IN ('22000000-0000-0000-0000-0000000000b3', '22000000-0000-0000-0000-0000000000b4') AND first_attested_at IS NULL), 2, 'an INSERT with a non-attested integrity_last (unattestable, failed) stores NULL');
+INSERT INTO app.device (id, user_id, platform, integrity_last) VALUES ('22000000-0000-0000-0000-0000000000b5', '00000000-0000-0000-0000-00000000000a', 'android', NULL);
+SELECT is((SELECT first_attested_at IS NULL FROM app.device WHERE id = '22000000-0000-0000-0000-0000000000b5'), true, 'an INSERT with no verdict at all (NULL integrity_last) stores NULL and does not error');
+SELECT is((SELECT count(*)::int FROM pg_trigger WHERE tgrelid = 'app.device'::regclass AND tgname = 'device_first_attested_stamp_trg' AND (tgtype & 4) = 4 AND (tgtype & 16) = 16), 1, 'the trigger fires on INSERT and on UPDATE');
 
 -- ============================================================================
 -- 5. Posture: nothing was broadened

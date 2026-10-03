@@ -10,7 +10,9 @@
 //   - `import { type A } from "..."` (only inline `type` specifiers) COUNTS: under `verbatimModuleSyntax` it is preserved as a side-effect import
 //   - a dynamic `import("...")` with a string-literal argument; a dynamic import with a NON-literal argument is reported (`dynamicNonLiteral`), because
 //     it can reach anything and cannot be resolved here.
+//   - `new URL("./x", import.meta.url)` with a literal relative path
 //   NOT an edge: `import type ...` and `export type ... from ...` (erased at compile time), anything inside a comment or a string literal.
+//   Comments, strings, templates (with `${}` nesting) and regular-expression literals are tokenised, so none of them can hide an import or invent one.
 //
 // Only RELATIVE specifiers are followed (`./`, `../`). Bare specifiers (`postgres`, `std/http/server`), `https:`, `npm:`, `jsr:` are recorded as
 // `external` and not entered. A relative specifier that does not resolve to a file is reported (`unresolved`), never silently skipped.
@@ -18,14 +20,62 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-/** Removes comments, and blanks the CONTENT of string/template literals' comment-like text correctly: `"https://x"` is a string, not a comment. */
+/** Words after which a `/` starts a regular expression, not a division. */
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "void", "throw", "delete", "new", "yield", "await", "instanceof"]);
+/** Punctuation after which a `/` starts a regular expression (an operator, an opening bracket, a separator, or nothing at all). */
+const REGEX_AFTER_CHAR = "(,=:[!&|?{};+-*%<>~^";
+const isWordChar = (ch: string) => /[\p{L}\p{N}_$]/u.test(ch);
+
+/**
+ * Removes comments and keeps every string, template and REGULAR-EXPRESSION literal intact (`"https://x"` is a string, not a comment; `/^\/*\/` is a
+ * regex, not the start of a block comment, which would otherwise swallow everything up to the next `*` + `/`, a real import included).
+ *
+ * A small tokenizer, not a parser: it decides regex-versus-division by the usual heuristic, a `/` begins a regex when the previous significant token is
+ * an operator, `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, one of a few keywords (`return`, `typeof`, ...), or nothing (the start of the file);
+ * after an identifier, a number, `)`, `]` or a literal it is a division. `/` + `*` and `/` + `/` are always comments (a regex cannot start with either).
+ * Templates track `${ ... }` nesting, so a template inside an expression inside a template is read correctly. Known limit: `if (x) /re/.test(y)` (a regex
+ * after `)`) is read as a division: if that regex's body also contains `/*` or `//`, the text after it can still be swallowed as a comment. Not handled.
+ */
 export function stripComments(text: string): string {
   let out = "";
   let i = 0;
   const n = text.length;
+  let prev = ""; // last significant character in code mode; "" = nothing yet
+  let prevWord = ""; // the identifier that just ended, if the last token was one
+  let depth = 0; // `{` nesting in code mode
+  const templateDepths: number[] = []; // the `depth` at which each open `${` resumes its template
+  let inTemplate = false;
+
+  const regexAllowed = () => (prev === "" || (prevWord === "" && REGEX_AFTER_CHAR.includes(prev)) || (prevWord !== "" && REGEX_AFTER_WORD.has(prevWord)));
+
   while (i < n) {
     const c = text[i]!;
     const d = text[i + 1];
+
+    if (inTemplate) {
+      if (c === "\\" && i + 1 < n) {
+        out += c + text[i + 1]!;
+        i += 2;
+      } else if (c === "$" && d === "{") {
+        out += "${";
+        i += 2;
+        templateDepths.push(depth);
+        inTemplate = false;
+        prev = "{";
+        prevWord = "";
+      } else if (c === "`") {
+        out += c;
+        i++;
+        inTemplate = false;
+        prev = "a";
+        prevWord = "";
+      } else {
+        out += c;
+        i++;
+      }
+      continue;
+    }
+
     if (c === "/" && d === "/") {
       while (i < n && text[i] !== "\n") i++;
     } else if (c === "/" && d === "*") {
@@ -35,11 +85,10 @@ export function stripComments(text: string): string {
         i++;
       }
       i += 2;
-    } else if (c === '"' || c === "'" || c === "`") {
-      const quote = c;
+    } else if (c === '"' || c === "'") {
       out += c;
       i++;
-      while (i < n && text[i] !== quote) {
+      while (i < n && text[i] !== c && text[i] !== "\n") {
         if (text[i] === "\\" && i + 1 < n) {
           out += text[i]! + text[i + 1]!;
           i += 2;
@@ -48,11 +97,67 @@ export function stripComments(text: string): string {
         out += text[i]!;
         i++;
       }
-      out += quote;
+      if (i < n && text[i] === c) {
+        out += c;
+        i++;
+      }
+      prev = "a";
+      prevWord = "";
+    } else if (c === "`") {
+      out += c;
       i++;
+      inTemplate = true;
+    } else if (c === "/" && regexAllowed()) {
+      // A regular-expression literal: up to the closing unescaped `/` outside a character class, on one line. If there is none, it was a division after all.
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < n && text[j] !== "\n") {
+        const r = text[j]!;
+        if (r === "\\") {
+          j += 2;
+          continue;
+        }
+        if (r === "[") inClass = true;
+        else if (r === "]") inClass = false;
+        else if (r === "/" && !inClass) {
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        out += text.slice(i, j + 1);
+        i = j + 1;
+        prev = "a";
+        prevWord = "";
+      } else {
+        out += c;
+        i++;
+        prev = "/";
+        prevWord = "";
+      }
+    } else if (isWordChar(c)) {
+      let j = i;
+      while (j < n && isWordChar(text[j]!)) j++;
+      prevWord = text.slice(i, j);
+      prev = "a";
+      out += prevWord;
+      i = j;
     } else {
       out += c;
       i++;
+      if (c === "{") depth++;
+      if (c === "}") {
+        if (templateDepths.length > 0 && templateDepths[templateDepths.length - 1] === depth) {
+          templateDepths.pop();
+          inTemplate = true; // the `${ ... }` ended: back inside the template
+        } else if (depth > 0) depth--;
+      }
+      if (!/\s/.test(c)) {
+        prev = c;
+        prevWord = "";
+      }
     }
   }
   return out;
@@ -74,7 +179,8 @@ export function scanImports(source: string): ImportScan {
 
   // `import ... from "x"` / `export ... from "x"`. The clause is made only of identifiers, braces, commas, `*` and whitespace (an import/export clause
   // never contains `=`, `:`, `(` or `;`), so the match cannot run on from an unrelated `export interface ... {` into a later statement's `from`.
-  const fromRe = /(?:^|[;}\n])\s*(import|export)\s+(type\s+)?([\w$\s{},*]*?)\bfrom\s*(["'])([^"'\n]+)\4/g;
+  // A quoted name is allowed in the clause for string-named imports/re-exports (`export { a as "b-c" } from "./c.ts"`); identifiers may be non-ASCII.
+  const fromRe = /(?:^|[;}\n])\s*(import|export)\s+(type\s+)?((?:[\p{L}\p{N}_$\s{},*]|"[^"\n]*"|'[^'\n]*')*?)\bfrom\s*(["'])([^"'\n]+)\4/gu;
   for (const m of text.matchAll(fromRe)) {
     // `export type Foo = ...` never has `from`; `import type` / `export type {..} from` are erased.
     // (`type` as an imported NAME, `import type from "x"`, is a default import named `type`: its clause is empty after `type`, so it falls to runtime below.)
@@ -83,6 +189,8 @@ export function scanImports(source: string): ImportScan {
   }
   // Side-effect import: `import "x"`.
   for (const m of text.matchAll(/(?:^|[;}\n])\s*import\s*(["'])([^"'\n]+)\1/g)) runtime.push(m[2]!);
+  // `new URL("./x.ts", import.meta.url)` (a worker or an asset module resolved relative to this file) is a runtime edge too.
+  for (const m of text.matchAll(/\bnew\s+URL\(\s*(["'])(\.{1,2}\/[^"'\n]+)\1\s*,\s*import\.meta\.url\s*\)/g)) runtime.push(m[2]!);
   // Dynamic imports. A literal argument is a plain quoted string or a backtick string WITHOUT interpolation; anything else cannot be resolved here.
   const literalDynamic = [...text.matchAll(/\bimport\s*\(\s*(?:(["'])([^"'\n]+)\1|`([^`$\n]+)`)\s*\)/g)];
   for (const m of literalDynamic) runtime.push((m[2] ?? m[3])!);

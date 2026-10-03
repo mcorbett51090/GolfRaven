@@ -29,8 +29,19 @@ INSERT INTO app.device (id, user_id, platform) VALUES
   ('ee220000-0000-0000-0000-00000000a001', 'ee220000-0000-0000-0000-0000000000a0', 'android'),
   ('ee220000-0000-0000-0000-00000000a002', 'ee220000-0000-0000-0000-0000000000a0', 'android'),
   ('ee220000-0000-0000-0000-00000000b001', 'ee220000-0000-0000-0000-0000000000b0', 'android');
+-- a3: the pre-0043 shape, which the INSERT arm of the trigger no longer produces: switch the trigger off (as the table owner) for this INSERT only.
+COMMIT;
+RESET ROLE;
+ALTER TABLE app.device DISABLE TRIGGER device_first_attested_stamp_trg;
+SET ROLE service_role;
+BEGIN;
 INSERT INTO app.device (id, user_id, platform, integrity_last) VALUES
   ('ee220000-0000-0000-0000-00000000a003', 'ee220000-0000-0000-0000-0000000000a0', 'android', '{"grade":"attested"}'::jsonb);
+COMMIT;
+RESET ROLE;
+ALTER TABLE app.device ENABLE TRIGGER device_first_attested_stamp_trg;
+SET ROLE service_role;
+BEGIN;
 UPDATE app.device SET integrity_last = '{"grade":"attested"}'::jsonb WHERE id = 'ee220000-0000-0000-0000-00000000b001';
 COMMIT;
 RESET ROLE;

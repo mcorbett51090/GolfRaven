@@ -11,13 +11,16 @@
 --
 -- WHAT IS ADDED, and what is not:
 --   1. app.device.first_attested_at timestamptz, NULL = no `attested` verdict has ever been recorded on this device.
---   2. A BEFORE UPDATE trigger (app.device_first_attested_stamp) that is the ONLY thing that ever writes it:
+--   2. A BEFORE INSERT OR UPDATE trigger (app.device_first_attested_stamp) that is the ONLY thing that ever writes it:
 --        - the first time `integrity_last ->> 'grade'` is 'attested' the column is stamped with now();
---        - once set it is never cleared and never moved: whatever an UPDATE assigns to the column, the trigger puts the old value back.
---      Nothing but a verdict write can set it, by any role: edge_actor has NO UPDATE on this column (its UPDATE grant is unchanged: attest_counter,
---      devicecheck_token_hash, integrity_last, last_seen, install_link_hash), and a role that does have UPDATE (service_role) is normalised by the
---      trigger. The trigger is SECURITY INVOKER with an empty search_path and needs no privilege on the column, because Postgres checks column
---      privileges on the columns an UPDATE NAMES, not on columns a BEFORE trigger changes.
+--        - once set it is never cleared and never moved: whatever an UPDATE assigns to the column, the trigger puts the old value back;
+--        - on INSERT whatever the statement assigned is discarded and the column is derived from the inserted `integrity_last` the same way
+--          (stamped now() if that verdict is `attested`, NULL otherwise). Without the INSERT arm a service_role INSERT could write any stamp
+--          (the gate wrote '2001-01-01'), and the UPDATE arm would then have made it permanent.
+--      So nothing but a verdict can set it, by any role, on INSERT or UPDATE: edge_actor has NO UPDATE (and no INSERT) on this column (its UPDATE
+--      grant is unchanged: attest_counter, devicecheck_token_hash, integrity_last, last_seen, install_link_hash), and a role that does have
+--      UPDATE or INSERT (service_role) is normalised by the trigger. The trigger is SECURITY INVOKER with an empty search_path and needs no
+--      privilege on the column, because Postgres checks column privileges on the columns a statement NAMES, not on columns a BEFORE trigger changes.
 --   3. The registry row in private.function_inventory (the trigger function is EXECUTEd by no role, as for every trigger function in this schema).
 --
 -- NOT DONE, on purpose:
@@ -26,8 +29,8 @@
 --   - No backfill. A row written before 0043 that holds an `attested` verdict has no stamp, and the Edge read treats `integrity_last` itself as evidence
 --     too (privileged.ts#hasAttestedVerdictOnDevice), so such a row still counts until its next verdict. (An UPDATE inside a migration is filtered by
 --     FORCE ROW LEVEL SECURITY for the table owner, so a backfill here would be unreliable; this repository's databases are pre-launch.)
---   - Not added to GET /v1/me/export (private.export_my_data lists device columns by name). `integrity_last` (grade + time of the last verdict) is
---     already exported; this column is a derived internal mark of the same fact. Recorded as a follow-up in the security doc.
+--   - Not exported by THIS migration; 0044_export_first_attested.sql adds it to GET /v1/me/export (private.export_my_data lists device columns by
+--     name), as a timestamp about the account's own device, like `integrity_last`, `first_seen` and `last_seen`.
 --
 -- Deploy order: apply this migration BEFORE the Edge code that reads `first_attested_at` (an older schema would fail the read with 42703).
 
@@ -40,8 +43,13 @@ LANGUAGE plpgsql
 SET search_path = ''
 AS $$
 BEGIN
-  -- Sticky: an existing stamp is restored whatever the statement assigned (clearing, moving it later, moving it earlier). Otherwise it is stamped
-  -- only by an `attested` verdict arriving in integrity_last; any other assignment to the column on a never-attested device is discarded.
+  IF TG_OP = 'INSERT' THEN
+    -- Whatever the INSERT assigned is discarded: the stamp is derived from the verdict being inserted. (OLD does not exist on INSERT and is not read.)
+    NEW.first_attested_at := CASE WHEN NEW.integrity_last OPERATOR(pg_catalog.->>) 'grade' = 'attested' THEN pg_catalog.now() END;
+    RETURN NEW;
+  END IF;
+  -- UPDATE. Sticky: an existing stamp is restored whatever the statement assigned (clearing, moving it later, moving it earlier). Otherwise it is
+  -- stamped only by an `attested` verdict arriving in integrity_last; any other assignment to the column on a never-attested device is discarded.
   NEW.first_attested_at := COALESCE(
     OLD.first_attested_at,
     CASE WHEN NEW.integrity_last OPERATOR(pg_catalog.->>) 'grade' = 'attested' THEN pg_catalog.now() END
@@ -50,14 +58,14 @@ BEGIN
 END;
 $$;
 CREATE TRIGGER device_first_attested_stamp_trg
-BEFORE UPDATE OF integrity_last, first_attested_at ON app.device
+BEFORE INSERT OR UPDATE OF integrity_last, first_attested_at ON app.device
 FOR EACH ROW EXECUTE FUNCTION app.device_first_attested_stamp();
 
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, expected_edge_actor, expected_edge_system, note)
 VALUES
   ('app', 'device_first_attested_stamp', '', false, false, false, false, false,
-   '0043: trigger function (app.device_first_attested_stamp_trg) -- stamps app.device.first_attested_at once, when an attested verdict is written to integrity_last, and never clears or moves it; never EXECUTEd directly by any role');
+   '0043: trigger function (app.device_first_attested_stamp_trg, BEFORE INSERT OR UPDATE) -- stamps app.device.first_attested_at once, when an attested verdict is written to integrity_last (on INSERT it derives the stamp from the inserted verdict and discards any assigned value), and never clears or moves it; never EXECUTEd directly by any role');
 
 DO $assert_0043$
 BEGIN

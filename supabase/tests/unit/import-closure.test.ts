@@ -85,6 +85,71 @@ import real from "./real.ts"; // trailing import "./trailing.ts"
     expect(s.typeOnly).toEqual(["./t.ts"]);
   });
 
+  // LOW-1 (PR #41 gate): `/^\/*/` is a regex literal, not the start of a block comment that swallows everything up to the next `*` + `/`.
+  it("a REGEX LITERAL containing `/*` does not start a comment: the import after it is found (the gate's `_shared/http.ts` reproduction)", () => {
+    const s = scanImports(["const hide = /^\\/*/;", 'import "./rewards/devicecheck-client.ts";', "/* an ordinary comment that closes the 'comment' the old scanner thought it was in */"].join("\n"));
+    expect(s.runtime).toEqual(["./rewards/devicecheck-client.ts"]);
+  });
+
+  it("a regex with a `//` inside a character class (`/[//]/`) does not start a line comment", () => {
+    const s = scanImports('const r = /[//]/g; import "./after-class.ts";');
+    expect(s.runtime).toEqual(["./after-class.ts"]);
+    expect(scanImports('const r = /[///]/g; import "./after-class-3.ts";').runtime).toEqual(["./after-class-3.ts"]);
+    expect(scanImports(["if (/[/*]/.test(x)) y();", 'import "./after-class-2.ts";'].join("\n")).runtime).toEqual(["./after-class-2.ts"]);
+  });
+
+  it("an ESCAPED slash (and a quote after it) inside a regex does not end the regex early: `/\\/\"/` then an import on the same line", () => {
+    expect(scanImports('const r = /\\/"/; import "./after-escape.ts"; const q = 1;').runtime).toEqual(["./after-escape.ts"]);
+  });
+
+  it("regex position is told from division: after an operator, `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, a keyword or the line start it is a regex; after an identifier, a number or `)` it is a division", () => {
+    for (const lead of ["x = ", "f(", "[a, ", "o = { k: ", "!", "a && ", "a || ", "c ? ", "{ ", "; ", "return ", "typeof ", "case ", ""]) {
+      expect(scanImports(`${lead}/\\/*/.test(s);\nimport "./r.ts";\n/* */`).runtime, `after ${JSON.stringify(lead)}`).toEqual(["./r.ts"]);
+    }
+    // division: the `/*` below is a real block comment start after `a /`? No: `a / b` then a comment; the import inside the comment must NOT be seen.
+    expect(scanImports('const q = a / b; /* import "./in-comment.ts"; */ import "./real.ts";').runtime).toEqual(["./real.ts"]);
+    expect(scanImports('const q = (a) / 2; const w = arr[0] / 3; /* import "./c.ts"; */ import "./real2.ts";').runtime).toEqual(["./real2.ts"]);
+  });
+
+  it("a string containing `/*` or `//` does not start a comment", () => {
+    const s = scanImports(['const a = "/*";', "const b = '//';", 'import "./after-strings.ts";', "const c = '*/';"].join("\n"));
+    expect(s.runtime).toEqual(["./after-strings.ts"]);
+  });
+
+  it("an escaped quote inside a string does not end it early (so a `/*` after it is still string text)", () => {
+    expect(scanImports('const a = "x\\"/*"; import "./esc.ts"; const b = 1; /* */').runtime).toEqual(["./esc.ts"]);
+  });
+
+  it("a template containing `//` or `/*`, including inside a nested `${ }` (with its own template), does not start a comment", () => {
+    const s = scanImports(["const a = `see http://x and /* here`;", "const b = `a ${ `b // ${ c } /*` } d`;", 'import "./after-templates.ts";'].join("\n"));
+    expect(s.runtime).toEqual(["./after-templates.ts"]);
+  });
+
+  it("a `}` that closes a template expression resumes the template; an object literal's braces do not", () => {
+    const s = scanImports(['const a = `x ${ { k: 1 }.k } // still template`;', 'import "./after-braces.ts";'].join("\n"));
+    expect(s.runtime).toEqual(["./after-braces.ts"]);
+  });
+
+  it("an import inside a regex literal's text is not an edge (the regex is kept as text and starts no statement)", () => {
+    expect(scanImports('const r = /import "x"/;').runtime).toEqual([]);
+  });
+
+  // The other blind spots the gate listed, cheap ones covered:
+  it("a STRING-NAMED re-export (`export { a as \"b\" } from`) is an edge", () => {
+    expect(scanImports('export { a as "b-c" } from "./string-named.ts";').runtime).toEqual(["./string-named.ts"]);
+    expect(scanImports("import { \"x-y\" as z } from './string-named-2.ts';").runtime).toEqual(["./string-named-2.ts"]);
+  });
+
+  it("`new URL(\"./x\", import.meta.url)` (a worker or module resolved relative to the file) is an edge; a non-relative or computed one is not guessed at", () => {
+    expect(scanImports('const w = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });').runtime).toEqual(["./worker.ts"]);
+    expect(scanImports('const u = new URL("https://example.test/x", import.meta.url);').runtime).toEqual([]);
+  });
+
+  it("NON-ASCII identifiers in an import clause do not hide it", () => {
+    expect(scanImports('import { café, naïve as nä } from "./unicode.ts";').runtime).toEqual(["./unicode.ts"]);
+    expect(scanImports('export { 名前 } from "./unicode-2.ts";').runtime).toEqual(["./unicode-2.ts"]);
+  });
+
   it("stripComments keeps string contents and line structure", () => {
     expect(stripComments('a // c\n"x // y" /* z\n */ b')).toBe('a \n"x // y" \n b');
   });
@@ -122,6 +187,15 @@ describe("runtimeClosure: transitive, runtime-only", () => {
     expect(names(r)).toEqual(["t3/a.ts", "t3/b.ts"]);
     expect([...r.external.keys()]).toEqual(["postgres"]);
     expect(r.unresolved.map((u) => u.specifier)).toEqual(["./missing.ts"]);
+  });
+
+  it("finds a transitive import hidden behind a regex literal (the gate's reproduction, end to end)", () => {
+    const p = graph({
+      "t5/http.ts": 'export const hide = /^\\/*/;\nimport "../t5b/devicecheck-client.ts";\n/* later comment */\nexport const ok = 1;',
+      "t5/entry.ts": 'import { ok } from "./http.ts";',
+      "t5b/devicecheck-client.ts": "export const bit = 1;",
+    });
+    expect(names(runtimeClosure([p("t5/entry.ts")]))).toEqual(["t5/entry.ts", "t5/http.ts", "t5b/devicecheck-client.ts"]);
   });
 
   it("maps a `.js` specifier to its `.ts` source, and reports a dynamic import it cannot read against the file that has it", () => {
