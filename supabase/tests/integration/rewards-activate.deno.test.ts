@@ -619,6 +619,23 @@ Deno.test("capability dodge: a device with a REGISTERED App Attest key that clai
   assertEquals((sigs[0]!.detail as Record<string, unknown>).reasons, ["no_attestation_token", "device_has_attested_before"]);
 });
 
+Deno.test("capability dodge, Android (0043): a device whose ACTIVATION verdict was `attested` is `failed` when it later activates with no attestation and claims it cannot attest — even after a later `failed` verdict overwrote integrity_last", DT, async () => {
+  const u = await freshUser("dodge-android");
+  const dev = await newDevice(u, "android");
+  // What a successful Android activation records (privileged.ts#recordDeviceVerdict), then a LATER failed verdict.
+  await withOwnership(u.actor, (repo: Repo) => repo.rewards.recordDeviceVerdict(dev, { grade: "attested", tokenHash: null }));
+  await withOwnership(u.actor, (repo: Repo) => repo.rewards.recordDeviceVerdict(dev, { grade: "failed", tokenHash: null }));
+  const row = (await adminSql()`select integrity_last, first_attested_at from app.device where id = ${dev}`)[0]!;
+  assertEquals((row.integrity_last as Record<string, unknown>).grade, "failed", "integrity_last is the LAST verdict");
+  assert(row.first_attested_at !== null, "the sticky mark survived it");
+  const code = await newCode(u);
+  const out = await activate(u, code.id, { deviceId: dev, platform: "android", attestation: { kind: "none", hardwareSupportsAttestation: false } }, deps({}));
+  assertEquals(out.state, "held_review");
+  const sigs = await signals(u, "attestation_failed");
+  assertEquals(sigs.length, 1);
+  assertEquals((sigs[0]!.detail as Record<string, unknown>).reasons, ["no_attestation_token", "device_has_attested_before"]);
+});
+
 Deno.test("AT 9 / G3-08: no token -> failed on hardware that supports attestation, unattestable otherwise; neither reaches issued", DT, async () => {
   const capable = await freshUser("notoken-capable");
   const dev = await newDevice(capable);
@@ -733,7 +750,40 @@ Deno.test("AT 5: a counter that passes verification but loses the ATOMIC advance
   const out = await activate(u, code.id, req, deps({ ios: racing }));
   assertEquals(out.state, "held_review");
   assertEquals(await counterOf(dev), 9, "the lost race did not overwrite the newer counter with the older one");
+  assertEquals(((await signals(u, "attestation_failed"))[0]!.detail as Record<string, unknown>).reasons, ["counter_out_of_order"]);
+});
+
+Deno.test("AT 5 (LOW-1): an assertion that loses the atomic advance to an EQUAL counter stays `counter_replay`", DT, async () => {
+  const u = await freshUser("at5-race-equal");
+  const dev = await newDevice(u);
+  const { key, port } = await registerKey(dev, 5);
+  const code = await newCode(u);
+  const req = await signedReq(u, dev, key, { rewardId: code.id, counter: 6 });
+  const racing: IosPort = {
+    ...port,
+    verifyAssertion: async (input) => {
+      const r = await port.verifyAssertion(input);
+      await adminSql()`update app.device set attest_counter = 6 where id = ${dev}`; // an identical request advanced it to the very same counter
+      return r;
+    },
+  };
+  assertEquals((await activate(u, code.id, req, deps({ ios: racing }))).state, "held_review");
+  assertEquals(await counterOf(dev), 6);
   assertEquals(((await signals(u, "attestation_failed"))[0]!.detail as Record<string, unknown>).reasons, ["counter_replay"]);
+});
+
+Deno.test("AT 5 (LOW-1): OUT-OF-ORDER assertions of one key (counter 7 committed, then 6): 7 is attested, 6 is held with `counter_out_of_order` (not a replay), the counter stays 7", DT, async () => {
+  const u = await freshUser("at5-ooo");
+  const dev = await newDevice(u);
+  const { key, port } = await registerKey(dev, 5);
+  const c7 = await newCode(u);
+  const c6 = await newCode(u);
+  const r7 = await signedReq(u, dev, key, { rewardId: c7.id, counter: 7 });
+  const r6 = await signedReq(u, dev, key, { rewardId: c6.id, counter: 6 });
+  assertEquals((await activate(u, c7.id, r7, deps({ ios: port }))).state, "issued");
+  assertEquals((await activate(u, c6.id, r6, deps({ ios: port }))).state, "held_review");
+  assertEquals(await counterOf(dev), 7, "strict monotonicity: the lower counter did not lower the stored one");
+  assertEquals(((await signals(u, "attestation_failed"))[0]!.detail as Record<string, unknown>).reasons, ["counter_out_of_order"]);
 });
 
 Deno.test("H1: a VALID assertion next to a SWAPPED DeviceCheck token is failed -> signal + held; the token's bits are never trusted and nothing is issued", DT, async () => {

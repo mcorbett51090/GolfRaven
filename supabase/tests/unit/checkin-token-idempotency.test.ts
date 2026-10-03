@@ -1,7 +1,7 @@
 // supabase/tests/unit/checkin-token-idempotency.test.ts
 //
-// checkin/token-handler.ts: (1) idempotent redemption (a lost response must not lose the co-signal), (2) the no-attestation rule that closes the
-// self-reported capability dodge, and (3) the fake Repo's `consumeForFix` mirroring the real statement's CHALLENGE window (privileged.ts).
+// checkin/token-handler.ts: (1) idempotent redemption (a lost response must not lose the co-signal), (2) the no-attestation rule that NARROWS the
+// self-reported capability claim for honest clients, and (3) the fake Repo's `consumeForFix` mirroring the real statement's CHALLENGE window (privileged.ts).
 
 import { describe, expect, it } from "vitest";
 import { handleChallengeRequest } from "../../functions/_shared/checkin/challenge-handler.js";
@@ -197,7 +197,7 @@ describe("idempotent redemption (a lost response must not lose the co-signal)", 
   });
 });
 
-describe("the no-attestation rule: a self-reported `cannot attest` is not believed for a device that has attested", () => {
+describe("the no-attestation rule: a self-reported `cannot attest` is not believed for a device that has attested (narrowed for honest clients, not closed: the device id is client-chosen)", () => {
   const dodgeSignal = (s: FakeState) => s.fraudSignals.filter((x) => x.kind === "attestation_failed");
 
   it("iOS: a device with a REGISTERED App Attest key that sends no attestation is `failed` + signal, whatever it claims", async () => {
@@ -207,7 +207,14 @@ describe("the no-attestation rule: a self-reported `cannot attest` is not believ
       const out = await run(state, noAtt(ch, claim));
       expect(out.attestationGrade, `claim ${claim}`).toBe("failed");
       expect(dodgeSignal(state)).toHaveLength(1);
-      expect(dodgeSignal(state)[0]!.detail.reason).toBe(claim ? "hardware_supports_attestation_but_no_verified_token" : "device_has_attested_before_but_no_verified_token");
+      // The same vocabulary as rewards-activate (one `reasons` array, source named), and the proven case is told apart from the claimed one.
+      expect(dodgeSignal(state)[0]!.detail).toMatchObject({
+        challengeId: ch.id,
+        deviceId: D1,
+        platform: null,
+        source: "checkin-token",
+        reasons: claim ? ["no_attestation_token"] : ["no_attestation_token", "device_has_attested_before"],
+      });
     }
   });
 
@@ -244,6 +251,83 @@ describe("the no-attestation rule: a self-reported `cannot attest` is not believ
     state.checkinTokens.set("jti_other", { jti: "jti_other", userId: USER_B, deviceId: D1, facilityId: null, attestationGrade: "attested", challengeKind: "live", challengeId: "x", expiresAt: "2099-01-01T00:00:00.000Z", issuedAt: "2026-01-01T00:00:00.000Z", consumedAt: null });
     const c3 = await issue(state);
     expect((await run(state, noAtt(c3, false))).attestationGrade).toBe("unattestable");
+  });
+
+  // NIT-2: the no-attestation `failed` path used to INSERT a signal every time; it now opens ONE per account, like the presented-attestation path.
+  it("the no-attestation `failed` path opens ONE signal per account, however many such check-ins follow (deduplicated like a presented-attestation failure)", async () => {
+    const { state } = await iosWorld(5);
+    for (let i = 0; i < 4; i++) {
+      const ch = await issue(state);
+      expect((await run(state, noAtt(ch, i % 2 === 0))).attestationGrade).toBe("failed");
+    }
+    expect(tokens(state)).toHaveLength(4); // every one still issued its (failed) token
+    expect(attestationSignals(state)).toHaveLength(1);
+    expect(dodgeSignal(state)).toHaveLength(1);
+  });
+
+  it("... and it shares that single open signal with a presented-attestation failure (either order), and a CLEARED signal lets the next failure open a new one", async () => {
+    const { state, key } = await iosWorld(5);
+    const c1 = await issue(state);
+    expect((await run(state, noAtt(c1, true))).attestationGrade).toBe("failed");
+    const c2 = await issue(state);
+    expect((await run(state, await iosReq(c2, key, 5), iosDeps())).attestationGrade).toBe("failed"); // a non-increasing counter
+    expect(attestationSignals(state)).toHaveLength(1);
+    for (const sig of rewardsState(state).signals) sig.cleared = true;
+    const c3 = await issue(state);
+    expect((await run(state, noAtt(c3, true))).attestationGrade).toBe("failed");
+    expect(attestationSignals(state).filter((x) => !x.cleared)).toHaveLength(1);
+    expect(attestationSignals(state)).toHaveLength(2);
+  });
+
+  it("the signal is scoped to the ACCOUNT: another account's open signal does not suppress this one's", async () => {
+    const { state } = await iosWorld(5);
+    rewardsState(state).signals.push({ userId: USER_B, kind: "attestation_failed", detail: {}, cleared: false, onceKey: null, at: 1 });
+    const ch = await issue(state);
+    expect((await run(state, noAtt(ch, true))).attestationGrade).toBe("failed");
+    expect(rewardsState(state).signals.filter((x) => x.kind === "attestation_failed" && x.userId === USER_A)).toHaveLength(1);
+  });
+
+  // NIT-3 (0043): an activation that graded `attested` counts as Android evidence of capability, and it is sticky.
+  it("Android: a device whose ACTIVATION verdict was `attested` (no attested check-in token at all) is `failed` when it sends no attestation and claims it cannot attest", async () => {
+    const state = makeFakeState();
+    seedDevice(state, { id: D1, userId: USER_A, platform: "android" });
+    await makeFakeRepo(state, USER_A).rewards.recordDeviceVerdict(D1, { grade: "attested", tokenHash: "h" });
+    expect(tokens(state)).toEqual([]); // the only evidence is the activation's
+    const ch = await issue(state);
+    const out = await run(state, noAtt(ch, false));
+    expect(out.attestationGrade).toBe("failed");
+    expect(dodgeSignal(state)).toHaveLength(1);
+    expect(dodgeSignal(state)[0]!.detail).toMatchObject({ reasons: ["no_attestation_token", "device_has_attested_before"] });
+  });
+
+  it("... and the evidence survives a later `failed` activation verdict (integrity_last is overwritten, the mark is not); a device with no `attested` verdict is still believed", async () => {
+    const state = makeFakeState();
+    seedDevice(state, { id: D1, userId: USER_A, platform: "android" });
+    const repo = makeFakeRepo(state, USER_A);
+    await repo.rewards.recordDeviceVerdict(D1, { grade: "attested", tokenHash: null });
+    await repo.rewards.recordDeviceVerdict(D1, { grade: "failed", tokenHash: null });
+    expect(rewardsState(state).deviceAttest.get(D1)!.integrityLast).toEqual({ grade: "failed" });
+    const c1 = await issue(state);
+    expect((await run(state, noAtt(c1, false))).attestationGrade).toBe("failed");
+
+    const other = makeFakeState();
+    seedDevice(other, { id: D1, userId: USER_A, platform: "android" });
+    await makeFakeRepo(other, USER_A).rewards.recordDeviceVerdict(D1, { grade: "unattestable", tokenHash: null });
+    const c2 = await issue(other);
+    expect((await run(other, noAtt(c2, false))).attestationGrade).toBe("unattestable");
+    expect(dodgeSignal(other)).toEqual([]);
+  });
+
+  it("the account-level variant is NOT applied: a second device of an account whose OTHER device attested still gets its honest `cannot attest` believed (an old iPad, an Android without Play services)", async () => {
+    const state = makeFakeState();
+    const D_OLD = "44444444-4444-4444-8444-444444444444";
+    seedDevice(state, { id: D1, userId: USER_A, platform: "android" });
+    seedDevice(state, { id: D_OLD, userId: USER_A, platform: "android" });
+    await makeFakeRepo(state, USER_A).rewards.recordDeviceVerdict(D1, { grade: "attested", tokenHash: null });
+    const [c] = await handleChallengeRequest({ deviceId: D_OLD }, makeFakeRepo(state, USER_A), randomBytes, digestHex);
+    const out = await run(state, noAtt({ id: c!.id, nonce: c!.nonce }, false));
+    expect(out.attestationGrade).toBe("unattestable");
+    expect(dodgeSignal(state)).toEqual([]);
   });
 
   it("a PRESENTED attestation is unaffected by the rule (it is graded on its merits)", async () => {

@@ -29,9 +29,15 @@
 // recorded in docs/security/p3-money-path-requirements.md follow-up 9): the
 // worst a lying client gains is `unattestable` instead of `failed`; both route
 // to `held_review`, neither can reach "activate". It is NOT trusted against the
-// server's own evidence: a device with a REGISTERED App Attest key, or a check-in
-// token already graded `attested` on it, is `failed` whatever it claims
-// (activate-handler.ts#assessActivatingDevice; the same rule as checkin-token).
+// server's own evidence about THAT DEVICE ROW: a device with a REGISTERED App
+// Attest key, a check-in token already graded `attested` on it, or an
+// activation verdict of `attested` recorded on it (0043) is `failed` whatever
+// it claims (rewards/attestation-evidence.ts#gradeNoAttestation, the one rule
+// shared with checkin-token). That NARROWS the claim for honest clients; it does
+// not close it for an attacker: the device id is chosen by the client (up to 20
+// per account), so "incapable" on a device id that has never attested is still
+// believed. The account-level variant was evaluated and left as an owner
+// decision (security doc, "Attestation follow-ups").
 
 export interface ParseIssue {
   path: string;

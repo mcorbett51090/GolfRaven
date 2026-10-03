@@ -260,15 +260,29 @@ describe("iOS: App Attest assertion over the check-in binding", () => {
   });
 
   // --- counter -------------------------------------------------------------
-  it("a REPLAYED or NON-INCREASING counter grades `failed` (counter_not_monotonic), is not advanced, and opens the signal", async () => {
-    for (const counter of [5, 4, 0]) {
+  it("a REPLAYED or NON-INCREASING counter grades `failed`, is not advanced, and opens the signal: EQUAL is `counter_not_monotonic`, LOWER is `counter_out_of_order` (LOW-1)", async () => {
+    for (const [counter, reason] of [[5, "counter_not_monotonic"], [4, "counter_out_of_order"], [0, "counter_out_of_order"]] as const) {
       const { state, key } = await iosWorld(5);
       const ch = await issueChallenge(state);
       const out = await runIos(state, await iosToken(ch, { key, counter }));
       expect(out.attestationGrade, `counter ${counter}`).toBe("failed");
       expect(counterOf(state)).toBe(5);
-      expect(openSignals(state)[0]!.detail).toMatchObject({ reasons: ["counter_not_monotonic"] });
+      expect(openSignals(state)[0]!.detail, `counter ${counter}`).toMatchObject({ reasons: [reason], source: "checkin-token" });
     }
+  });
+
+  it("two assertions of one key in flight, committed OUT OF ORDER (counter 7 first, then 6): 7 is `attested`, 6 is `failed` with `counter_out_of_order`, the counter stays 7, strictness unchanged", async () => {
+    const { state, key } = await iosWorld(5);
+    const c6 = await issueChallenge(state);
+    const c7 = await issueChallenge(state);
+    const r6 = await iosToken(c6, { key, counter: 6 });
+    const r7 = await iosToken(c7, { key, counter: 7 });
+    expect((await runIos(state, r7)).attestationGrade).toBe("attested"); // 7 commits first
+    expect(counterOf(state)).toBe(7);
+    expect((await runIos(state, r6)).attestationGrade).toBe("failed"); // then 6 arrives
+    expect(counterOf(state)).toBe(7); // never lowered
+    expect(openSignals(state)).toHaveLength(1);
+    expect(openSignals(state)[0]!.detail).toMatchObject({ reasons: ["counter_out_of_order"] }); // an honest race, distinct from a replay
   });
 
   it("an assertion bound to a PREVIOUS challenge, replayed on a fresh challenge, grades `failed` and does not advance the counter", async () => {
@@ -282,7 +296,7 @@ describe("iOS: App Attest assertion over the check-in binding", () => {
     expect(counterOf(state)).toBe(6);
   });
 
-  it("a counter that verifies but LOSES the atomic advance (a concurrent request moved it) grades `failed` (counter_replay), never `attested`", async () => {
+  it("a counter that verifies but LOSES the atomic advance to a HIGHER one (a concurrent request moved it) grades `failed` (counter_out_of_order), never `attested`", async () => {
     const { state, key } = await iosWorld(5);
     const ch = await issueChallenge(state);
     const real = buildIosAssertionPort(APP_ID, crypt);
@@ -296,6 +310,23 @@ describe("iOS: App Attest assertion over the check-in binding", () => {
     const out = await runIos(state, await iosToken(ch, { key, counter: 6 }), deps({ ios: racing }));
     expect(out.attestationGrade).toBe("failed");
     expect(counterOf(state)).toBe(9);
+    expect(openSignals(state)[0]!.detail).toMatchObject({ reasons: ["counter_out_of_order"] });
+  });
+
+  it("a counter that verifies but loses the atomic advance to an EQUAL one (the same assertion presented twice at once) stays `counter_replay`", async () => {
+    const { state, key } = await iosWorld(5);
+    const ch = await issueChallenge(state);
+    const real = buildIosAssertionPort(APP_ID, crypt);
+    const racing = {
+      verifyAssertion: async (input: Parameters<typeof real.verifyAssertion>[0]): Promise<AssertionResult> => {
+        const r = await real.verifyAssertion(input);
+        rewardsState(state).deviceAttest.get(D1)!.attestCounter = 6; // an identical request advanced it to the very same counter
+        return r;
+      },
+    };
+    const out = await runIos(state, await iosToken(ch, { key, counter: 6 }), deps({ ios: racing }));
+    expect(out.attestationGrade).toBe("failed");
+    expect(counterOf(state)).toBe(6);
     expect(openSignals(state)[0]!.detail).toMatchObject({ reasons: ["counter_replay"] });
   });
 

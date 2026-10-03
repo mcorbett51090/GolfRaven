@@ -14,14 +14,21 @@
 //   - the OAuth token comes from the service-account JWT-bearer flow (RS256
 //     JWT -> POST https://oauth2.googleapis.com/token, scope
 //     https://www.googleapis.com/auth/playintegrity);
-//   - 400 = the token is not decodable; 401/403 = our credentials rejected;
-//     429/5xx = try later.
+//   - 400 = the token is not decodable; 401 = our credentials rejected;
+//     429/5xx = try later;
+//   - 403 on `decodeIntegrityToken` is AMBIGUOUS and not verified: it may mean our service account lacks access to
+//     the app, or that the token was minted for ANOTHER app or project (a caller can send one; whether Google then
+//     answers 400 or 403 was not checked). It is therefore a `VendorForbiddenError` (a `VendorNotConfiguredError`:
+//     same 503, same non-grading) that the handlers log at warn level, rate-limited, instead of as "our credentials
+//     are wrong"; and it does NOT discard the cached OAuth token (a fresh token would be refused the same way, and an
+//     attacker could otherwise force an OAuth exchange per request). Grading is unchanged. A 403 on the OAuth
+//     exchange itself (below) is still "our credentials".
 //
 // FAIL CLOSED: no/incomplete config, or an unusable key, throws
 // `VendorNotConfiguredError` on every call.
 
 import { pemToDer, signJwtRs256, type VendorHttp } from "./vendor-http.ts";
-import { VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "./types.ts";
+import { VendorForbiddenError, VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "./types.ts";
 
 export interface PlayIntegrityConfig {
   packageName: string;
@@ -114,9 +121,14 @@ export function createIntegrityDecoder(config: PlayIntegrityConfig | null, http:
       }
       const text = await res.text().catch(() => "");
       if (res.status === 400) throw new VendorRejectedError("Play Integrity could not decode the token");
-      if (res.status === 401 || res.status === 403) {
+      if (res.status === 401) {
         cached = null;
-        throw notConfigured(`Google rejected our credentials (${res.status})`);
+        throw notConfigured("Google rejected our credentials (401)");
+      }
+      if (res.status === 403) {
+        throw new VendorForbiddenError(
+          "Play Integrity decodeIntegrityToken answered 403: our service account lacks access to this app, OR the token was minted for another app or project [unverified which; a caller can send the latter]",
+        );
       }
       if (res.status !== 200) throw new VendorUnavailableError(`Play Integrity decodeIntegrityToken answered ${res.status}`);
       let parsed: unknown;

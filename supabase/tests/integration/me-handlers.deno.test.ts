@@ -86,6 +86,32 @@ Deno.test("me-export: returns only the caller's own evidence/device/push_token r
   assert(!evidenceB.some((r) => r.source_ref === sourceRef), "actor B's export must NEVER include actor A's evidence row");
 });
 
+Deno.test("me-export (0044): the device block carries first_attested_at: JSON null until an `attested` verdict, then the stamp, and it survives a later `failed` verdict; never another actor's", DT, async () => {
+  const a = await withFreshUser("export-attested-a");
+  const b = await withFreshUser("export-attested-b");
+  const devId = await withOwnership(a.actor, async (repo: Repo) => (await repo.device.ensureOwn(null, "android")).id);
+  const deviceRow = async () =>
+    ((await withOwnership(a.actor, (repo: Repo) => handleMeExport(repo, a.uid))).data.device as Array<Record<string, unknown>>).find((r) => r.id === devId)!;
+
+  const before = await deviceRow();
+  assert("first_attested_at" in before, "the key is present, not omitted");
+  assertEquals(before.first_attested_at, null);
+
+  await withOwnership(a.actor, (repo: Repo) => repo.rewards.recordDeviceVerdict(devId, { grade: "attested", tokenHash: null }));
+  const stamped = (await deviceRow()).first_attested_at;
+  assert(typeof stamped === "string" && !Number.isNaN(Date.parse(stamped)), "an ISO-8601 timestamp string, like first_seen");
+  const column = (await adminSql()`select first_attested_at from app.device where id = ${devId}`)[0]!.first_attested_at as Date;
+  assertEquals(Date.parse(stamped), column.getTime(), "it is the column's own value");
+
+  await withOwnership(a.actor, (repo: Repo) => repo.rewards.recordDeviceVerdict(devId, { grade: "failed", tokenHash: null }));
+  const after = await deviceRow();
+  assertEquals(after.first_attested_at, stamped, "a later failed verdict did not move or clear it");
+  assertEquals((after.integrity_last as Record<string, unknown>).grade, "failed");
+
+  const exportB = await withOwnership(b.actor, (repo: Repo) => handleMeExport(repo, b.uid));
+  assert(!(exportB.data.device as Array<Record<string, unknown>>).some((r) => r.id === devId), "actor B's export never includes A's device");
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // DELETE /v1/me — AT 6: personal rows gone, push tokens gone, retry is
 // idempotent, cross-user isolation.
