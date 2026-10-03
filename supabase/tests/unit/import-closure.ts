@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 /** Words after which a `/` starts a regular expression, not a division. */
-const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "void", "throw", "delete", "new", "yield", "await", "instanceof"]);
+const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "do", "else", "in", "of", "void", "throw", "delete", "new", "yield", "await", "instanceof", "default"]);
 /** Punctuation after which a `/` starts a regular expression (an operator, an opening bracket, a separator, or nothing at all). */
 const REGEX_AFTER_CHAR = "(,=:[!&|?{};+-*%<>~^";
 const isWordChar = (ch: string) => /[\p{L}\p{N}_$]/u.test(ch);

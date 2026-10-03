@@ -98,6 +98,12 @@ import real from "./real.ts"; // trailing import "./trailing.ts"
     expect(scanImports(["if (/[/*]/.test(x)) y();", 'import "./after-class-2.ts";'].join("\n")).runtime).toEqual(["./after-class-2.ts"]);
   });
 
+  // PR #41 delta re-verify NIT: `export default /^\/*/;` must read the regex as a regex, not a block-comment start that hides the import below it.
+  it("a regex after `export default` does not start a comment: the import after it is found", () => {
+    const s = scanImports(["export default /^\\/*/;", 'import "./rewards/devicecheck-client.ts";', "/* closes the old scanner's false comment */"].join("\n"));
+    expect(s.runtime).toEqual(["./rewards/devicecheck-client.ts"]);
+  });
+
   it("an ESCAPED slash (and a quote after it) inside a regex does not end the regex early: `/\\/\"/` then an import on the same line", () => {
     expect(scanImports('const r = /\\/"/; import "./after-escape.ts"; const q = 1;').runtime).toEqual(["./after-escape.ts"]);
   });
