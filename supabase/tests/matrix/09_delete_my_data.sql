@@ -152,7 +152,7 @@ SELECT is(
 
 -- S1.1a gate L4: the skip below is by PRIVILEGE (a table service_role cannot read cannot be counted here), so a future table that loses service_role's SELECT by accident would silently
 -- drop out of this pass. The skipped set is therefore an explicit list: a table added to it needs a line here AND a proof that its rows are really gone (partner_pin / partner_totp
--- of S1.3 / S1.4 must be added deliberately, with their own cells in 24_partner_auth_spine.sql PA-1b).
+-- of S1.3 / S1.4 must be added deliberately, with their own cells in 25_partner_auth_spine.sql PA-1b).
 SELECT is(
   (SELECT array_agg(DISTINCT table_name::text ORDER BY table_name::text) FROM private.pii_retention_policy
    WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null') AND NOT has_any_column_privilege('service_role', format('app.%I', table_name), 'SELECT')),
@@ -175,7 +175,7 @@ BEGIN
     FROM private.pii_retention_policy
     WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null')
       -- 0047: the partner-auth tables hold credential material, so service_role (this test's identity) deliberately holds NO privilege on them; it cannot count their rows.
-      -- Their rows are proved gone by 24_partner_auth_spine.sql, which seeds a real account's rows in every one of them, deletes the account through delete_my_data and reads
+      -- Their rows are proved gone by 25_partner_auth_spine.sql, which seeds a real account's rows in every one of them, deletes the account through delete_my_data and reads
       -- each table back through a temporary harness-role policy (PA-1b).
       AND has_any_column_privilege('service_role', format('app.%I', table_name), 'SELECT')
   LOOP

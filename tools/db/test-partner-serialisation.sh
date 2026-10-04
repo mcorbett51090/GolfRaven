@@ -16,7 +16,7 @@
 #      lock, and when the revoke commits it SEES the revoke and is refused (42501) -- it never acts on stale authority.
 #   4. THE PLANTED GUC: while an action is open the change session plants every GUC the repository has ever keyed a policy on; the action's reach is unchanged
 #      (it still reads only its own session) -- an edge-reachable policy keyed on a settable GUC is the hard rule, and the single-connection half is PA-4c in
-#      supabase/tests/matrix/24_partner_auth_spine.sql.
+#      supabase/tests/matrix/25_partner_auth_spine.sql.
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the signin concurrency step, against the same throwaway cluster and database.)

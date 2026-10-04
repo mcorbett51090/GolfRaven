@@ -1,7 +1,7 @@
--- 24_partner_auth_spine_edge.sql
+-- 25_partner_auth_spine_edge.sql
 -- P5.1a S1.1a (0047), the edge_partner lane, run as a REAL `edge_gateway` login that SET LOCAL ROLEs into `edge_partner` / `edge_partner_minter` / `edge_actor`
 -- (read 21_device_platform_claim.sql: `SET ROLE` is judged by the SESSION user, so every assertion lives in the edge_gateway session, reached by `\c`).
--- The structure, the semantics and the catalog sweeps are 24_partner_auth_spine.sql (run as the harness, which can seed and read FORCE-RLS tables).
+-- The structure, the semantics and the catalog sweeps are 25_partner_auth_spine.sql (run as the harness, which can seed and read FORCE-RLS tables).
 --
 --   * the binder (private.bind_partner_session) from the real lane: a good hash binds; an unknown, malformed, expired-idle and expired-absolute hash are the SAME refusal;
 --     a second bind in one transaction is refused; partner_binding() / partner_binding_kind() read the binding back (the Edge's post-bind assertion);
@@ -11,7 +11,7 @@
 --   * a POOLED connection: partner then user then partner then user binds on one backend, one per transaction, each clean (the stale row of the previous transaction is
 --     never honoured, and a user bind clears the previous partner's session_id so the CHECK holds).
 --
--- This file COMMITS two credentials and three sessions (for staff_x, a helpers.sql principal) in phase 0; 24_partner_auth_spine_edge_cleanup.sql (the next file, run by the
+-- This file COMMITS two credentials and three sessions (for staff_x, a helpers.sql principal) in phase 0; 25_partner_auth_spine_edge_cleanup.sql (the next file, run by the
 -- harness) deletes them and proves they are gone. All new ids start ee24e000-. Test hashes are random per run (nothing here is a secret, but nothing is a constant either).
 
 \set QUIET 1

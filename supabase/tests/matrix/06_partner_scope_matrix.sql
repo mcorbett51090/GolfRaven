@@ -10,7 +10,7 @@
 -- (§4.7 item 4, line 1292-1294), and (until 0047) the api views/RLS built on
 -- them. Since 0047 (partner-auth-design D12) the partner-lane api views and
 -- their base tables are REVOKED from `authenticated`: the cells that read
--- them are "denied" cells now, and 24_partner_auth_spine.sql sweeps the list.
+-- them are "denied" cells now, and 25_partner_auth_spine.sql sweeps the list.
 
 BEGIN;
 SELECT plan(27);
@@ -99,7 +99,7 @@ SELECT tests.clear_actor();
 -- staff_shift_log — "staff and managers of that facility" (line 842, 1366).
 -- ⛔ 0047 (partner-auth-design D12 / 5.5, S1.1a): THE POSTGREST PARTNER READ SURFACE IS REVOKED. Before it, a staff member's Supabase JWT (reachable by email OTP alone)
 -- read this view with NO passkey (G1). The two cells that asserted the old answers ("staff@X sees 1 row", "staff@Y sees 0 rows") are now "denied" cells: every actor,
--- the in-scope staff member included, is refused at the grant (42501). The partner read moves to an Edge function (S3). 24_partner_auth_spine.sql (PA-6) sweeps the whole list.
+-- the in-scope staff member included, is refused at the grant (42501). The partner read moves to an Edge function (S3). 25_partner_auth_spine.sql (PA-6) sweeps the whole list.
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
 SELECT throws_ok(
   'SELECT count(*) FROM api.staff_shift_log',

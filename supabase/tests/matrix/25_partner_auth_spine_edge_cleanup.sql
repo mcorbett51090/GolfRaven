@@ -1,5 +1,5 @@
--- 24_partner_auth_spine_edge_cleanup.sql
--- Deletes what 24_partner_auth_spine_edge.sql committed (two sessions' worth of fixtures: one credential, three sessions) and proves they are gone, so the file stays
+-- 25_partner_auth_spine_edge_cleanup.sql
+-- Deletes what 25_partner_auth_spine_edge.sql committed (two sessions' worth of fixtures: one credential, three sessions) and proves they are gone, so the file stays
 -- re-runnable on one cluster and nothing leaks into a later file. Run by the harness role (pg_prove runs the matrix in file order). Same shape as
 -- 23_offline_totp_seed_rows.sql: a temporary CURRENT_USER policy on each FORCE-RLS table.
 \set QUIET 1

@@ -109,6 +109,14 @@ import type {
   RetentionStep,
   RosterVersionInput,
   OfflineSeedProvision,
+  CourseQrPublicKey,
+  MarkerCosignalAttachInput,
+  MarkerCosignalAttachResult,
+  MarkerPurchaseView,
+  MarkerScanRecordInput,
+  MarkerScanRecordResult,
+  MarkerScanRefusal,
+  PinAttemptResult,
 } from "./types.ts";
 // Type-only: erased at runtime, so this does NOT make ABSOLUTE_ROW_CAP a
 // second source of truth — it re-reads the SAME constant score-play.ts
@@ -711,6 +719,23 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         };
       },
 
+      // P5.1a S2a (course-QR scan): a facility has no geometry of its own, only its courses do. A fix is "inside the facility" when it is inside the polygon + 50 m of ANY of
+      // its play-verified polygon courses (the same ST_DWithin and the same 50 m as `matchFix`, §4.5). Anything else is the conservative default: never a co-signal.
+      async matchFacilityFix(facilityId: string, lat: number, lng: number): Promise<MatchResult> {
+        const rows = await trx`
+          select exists (
+            select 1 from app.catalog_course c
+            where c.facility_id = ${facilityId}
+              and c.verification_status = 'play-verified'
+              and c.geometry_kind = 'polygon'
+              and c.boundary is not null
+              and ST_DWithin(c.boundary::geography, ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geography, 50)
+          ) as inside`;
+        return rows[0]?.inside === true
+          ? { verificationTier: "play-verified", geometryKind: "polygon", insideBuffer: true }
+          : { verificationTier: "unverified", geometryKind: "radius", insideBuffer: false };
+      },
+
       async signingKey(kid: string): Promise<SigningKeyRow | null> {
         const rows = await trx`select k.kid, k.public_key_b64url,
             coalesce(k.revoked_at, (select r.recorded_at from app.catalog_kid_revocation r where r.kid = k.kid)) as revoked_at
@@ -1257,6 +1282,7 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
 
     // P4.2b-3a: the offline staff code (migration 0045) — implemented in the delimited "Offline staff code" section at the END of this file (one seam here).
     offlineCode: buildOfflineCodeRepo(trx),
+    markerScan: buildMarkerScanRepo(trx),
 
     device: {
       async findOwn(deviceId: string) {
@@ -1494,6 +1520,25 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
             and cc.issued_at <= ${capturedAt}
             and ${capturedAt} <= cc.expires_at
           returning checkin_token.facility_id, checkin_token.attestation_grade, checkin_token.challenge_kind`;
+        const r = rows[0];
+        if (!r) return null;
+        return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
+      },
+
+      /** The read-only twin of `consumeForFix` (same predicates, no UPDATE): see `Repo#checkinToken.peekForFix`. */
+      async peekForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
+        const capturedAt = new Date(capturedAtMs);
+        const rows = await trx`
+          select checkin_token.facility_id, checkin_token.attestation_grade, checkin_token.challenge_kind
+          from app.checkin_token
+          join app.checkin_challenge cc on checkin_token.challenge_id = cc.id
+          where checkin_token.jti = ${jti}
+            and checkin_token.user_id = ${uid}
+            and checkin_token.device_id = ${submittingDeviceId}
+            and checkin_token.consumed_at is null
+            and checkin_token.expires_at > now()
+            and cc.issued_at <= ${capturedAt}
+            and ${capturedAt} <= cc.expires_at`;
         const r = rows[0];
         if (!r) return null;
         return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
@@ -3256,6 +3301,128 @@ function buildOfflineCodeRepo(trx: TxSql): Repo["offlineCode"] {
         seedVersion: Number(r.o_seed_version),
         issuedAt: r.o_issued_at instanceof Date ? r.o_issued_at.toISOString() : String(r.o_issued_at),
       };
+    },
+  };
+}
+
+// ============================================================================
+// Course QR, the player lane (P5.1a S2a, migration 0046): the scan, the PIN gate, the co-signal intake and the public-key read
+// ============================================================================
+// Four `_for_actor` definers (edge_actor, the bound kind = 'user' actor; no user argument), so a wrong uid cannot even be expressed. `private.course_pin_derive` (the only reader
+// of the PIN pepper) has no EXECUTE for anyone, edge_actor included: nothing in this file can obtain a PIN, only learn whether one was right.
+
+/** The SQLSTATEs 0046's definers raise, as the HTTP answers a client may see. 55000 is "the PIN pepper is not provisioned in Vault": a 503 with a stable code and no message from
+ * the database. 23505 is a lost race on the (user, trail, ref) uniqueness of a printed-QR scan: the same player scanning the same shop twice at once is a duplicate (409).
+ * 22023 is a bad argument the Edge parser should have caught (a deploy skew, not a client error the caller can fix); 42501 is "no actor bound", a server bug. */
+function markerScanDbError(err: unknown): unknown {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "55000") return new HttpError(503, "course_pin_unavailable", "marker purchases by printed QR are not available right now");
+  if (code === "23505") return Errors.conflict("duplicate_scan", "you already recorded a purchase at this facility today");
+  if (code === "22023") return Errors.unprocessable("invalid_scan", "the scan could not be recorded as sent");
+  return mapPgTimeoutError(err);
+}
+
+const MARKER_SCAN_REFUSALS: ReadonlySet<string> = new Set([
+  "no_facility",
+  "no_programme",
+  "variant_disabled",
+  "qr_unknown",
+  "qr_wrong_facility",
+  "qr_used",
+  "qr_expired",
+  "qr_revoked",
+  "pin_wrong",
+  "duplicate",
+  "cosignal_invalid",
+  "cosignal_used",
+]);
+
+const PURCHASE_STATUSES: ReadonlySet<string> = new Set(["valid", "pending", "held_review"]);
+const CREDIT_STATUSES: ReadonlySet<string> = new Set(["credited", "pending", "held_review", "void"]);
+
+function toDateOnly(v: unknown): string {
+  return v instanceof Date ? v.toISOString().slice(0, 10) : String(v);
+}
+
+// deno-lint-ignore no-explicit-any
+function toPurchaseView(r: any): MarkerPurchaseView {
+  if (!PURCHASE_STATUSES.has(String(r.o_purchase_status)) || !CREDIT_STATUSES.has(String(r.o_credit_status ?? "void"))) {
+    throw new Error("markerScan: the database returned an unexpected purchase or credit status");
+  }
+  return {
+    purchaseId: String(r.o_purchase_id),
+    trailId: String(r.o_trail_id),
+    purchaseStatus: r.o_purchase_status as MarkerPurchaseView["purchaseStatus"],
+    creditId: r.o_credit_id === null || r.o_credit_id === undefined ? null : String(r.o_credit_id),
+    creditStatus: (r.o_credit_status ?? "void") as MarkerPurchaseView["creditStatus"],
+  };
+}
+
+function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
+  return {
+    async publicKey(kid: string, purpose: "rotating_token" | "printed_qr"): Promise<CourseQrPublicKey | null> {
+      let rows;
+      try {
+        rows = await trx`select o_public_key_b64url, o_revoked from private.course_qr_public_key_for_actor(${kid}::text, ${purpose}::text)`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      const r = rows[0];
+      if (!r) return null;
+      return { publicKeyB64Url: String(r.o_public_key_b64url), revoked: r.o_revoked === true };
+    },
+
+    async attemptPin(input: { facilityId: string; pin: string; at: Date }): Promise<PinAttemptResult> {
+      let rows;
+      try {
+        rows = await trx`select o_result, o_retry_after_seconds from private.course_pin_attempt_for_actor(${input.facilityId}::text, ${input.pin}::text, ${input.at.toISOString()}::timestamptz)`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      const r = rows[0];
+      const result = String(r?.o_result);
+      if (result === "locked") return { result: "locked", retryAfterSeconds: r?.o_retry_after_seconds === null || r?.o_retry_after_seconds === undefined ? null : Number(r.o_retry_after_seconds) };
+      if (result === "ok" || result === "wrong" || result === "no_facility" || result === "no_programme") return { result, retryAfterSeconds: null };
+      throw new Error("markerScan.attemptPin: private.course_pin_attempt_for_actor returned an unexpected result");
+    },
+
+    async record(input: MarkerScanRecordInput): Promise<MarkerScanRecordResult> {
+      let rows;
+      try {
+        rows = await trx`
+          select o_result, o_purchase_id, o_trail_id, o_purchase_status, o_credit_id, o_credit_status, o_local_date
+          from private.marker_scan_for_actor(
+            ${input.facilityId}::text, ${input.variant}::text, ${input.nonceHash}::text, ${input.qrKid}::text, ${input.pin}::text, ${input.at.toISOString()}::timestamptz,
+            ${input.cosignal?.grade ?? null}::text, ${input.cosignal?.fixId ?? null}::text, ${input.cosignal?.evidenceId ?? null}::uuid)
+          order by o_trail_id`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      const first = rows[0];
+      const status = String(first?.o_result);
+      if (status !== "accepted") {
+        if (!MARKER_SCAN_REFUSALS.has(status)) throw new Error("markerScan.record: private.marker_scan_for_actor returned an unexpected result");
+        return { status: status as MarkerScanRefusal };
+      }
+      return { status: "accepted", localDate: toDateOnly(first?.o_local_date), purchases: rows.map(toPurchaseView) };
+    },
+
+    async attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult> {
+      let rows;
+      try {
+        rows = await trx`
+          select o_result, o_purchase_id, o_trail_id, o_purchase_status, o_credit_id, o_credit_status
+          from private.marker_cosignal_attach_for_actor(
+            ${input.facilityId}::text, ${input.at.toISOString()}::timestamptz, ${input.cosignal.grade}::text, ${input.cosignal.fixId}::text, ${input.cosignal.evidenceId}::uuid)
+          order by o_trail_id`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      const first = rows[0];
+      const status = String(first?.o_result);
+      if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used") return { status };
+      if (status !== "attached") throw new Error("markerScan.attachCosignal: private.marker_cosignal_attach_for_actor returned an unexpected result");
+      return { status: "attached", purchases: rows.map(toPurchaseView) };
     },
   };
 }

@@ -204,7 +204,7 @@ describe("the SQLite table is created by the v4 migration and survives a re-open
   });
 });
 
-describe("NOTHING SENDS A MARKER CO-SIGNAL (no server path exists yet): the queue has a producer and no consumer", () => {
+describe("NOTHING SENDS A MARKER CO-SIGNAL (the server path exists since P5.1a S2a, the sender does not): the queue has a producer and no consumer", () => {
   const root = dirname(dirname(fileURLToPath(import.meta.url)));
   const files = (dir: string): string[] => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? files(join(dir, n)) : /\.tsx?$/.test(n) ? [join(dir, n)] : []));
   const all = [...files(join(root, "src")), ...files(join(root, "app"))];
@@ -218,12 +218,17 @@ describe("NOTHING SENDS A MARKER CO-SIGNAL (no server path exists yet): the queu
     for (const f of all) expect(strip(readFileSync(f, "utf8")), relative(root, f)).not.toMatch(/\bmarkerStore\s*\.\s*listByOwner|\bstore\s*\.\s*listByOwner[^;]*marker/);
     // the capture READS the store, for its persisted caps only (P4.2c-1); it never hands a record to anything that sends
     expect(all.filter((f) => /\blistByOwner\b/.test(strip(readFileSync(f, "utf8"))) && /marker/i.test(f)).map((f) => relative(root, f)).sort()).toEqual(["src/marker/capture.ts", "src/marker/store.ts"]);
-    for (const f of ["src/api/http-client.ts", "src/api/types.ts", "src/outbox/runner.ts", "src/evidence/send.ts", "src/evidence/payload.ts"]) expect(code(f), f).not.toMatch(/marker/i);
+    for (const f of ["src/outbox/runner.ts", "src/evidence/send.ts", "src/evidence/payload.ts"]) expect(code(f), f).not.toMatch(/marker/i);
+    // the API surface names a marker purchase ONLY through the P5.1a S2a client (`api.scanMarker`, its request / answer types and its schema): nothing else
+    const S2A_CLIENT = /MarkerScan\w*|scanMarker|markerScanResultSchema|marker-scan/g;
+    for (const f of ["src/api/http-client.ts", "src/api/types.ts"]) expect(code(f).replace(S2A_CLIENT, ""), f).not.toMatch(/marker/i);
   });
 
   it("no API member, evidence source or wire name for a marker purchase exists on the client (no wire shape is invented)", () => {
-    const needle = /marker_purchase|marker-scan|purchase_evidence|staff_presence/;
+    const needle = /marker_purchase|purchase_evidence|staff_presence/;
     expect(all.filter((f) => needle.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f))).toEqual([]);
+    // P5.1a S2a: the ONE wire name that now exists is the `marker-scan` function, named in the HTTP client alone (`api.scanMarker`; nothing calls it: test/marker-scan-wire.test.ts)
+    expect(all.filter((f) => /marker-scan/.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f))).toEqual(["src/api/http-client.ts"]);
   });
 
   it("it is behind BOTH switches: the marker one and the check-in one", () => {

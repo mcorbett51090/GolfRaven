@@ -1,4 +1,4 @@
--- 24_partner_auth_spine.sql
+-- 25_partner_auth_spine.sql
 -- P5.1a S1.1a (0047): the DATABASE SPINE of partner authentication, from docs/security/partner-auth-design.md section 12.1 "S1.1": PA-1, PA-1b, PA-2, PA-3, PA-3b, PA-4 (the single-connection half;
 -- the two-connection half is tools/db/test-partner-serialisation.sh), PA-4b, PA-4c, PA-4d, PA-5, PA-6 and PA-9c (its other half is 10_function_inventory.sql check 14 (b) and
 -- 23_offline_totp_seed_record.sql).
@@ -14,7 +14,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(295);
+SELECT plan(388);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
