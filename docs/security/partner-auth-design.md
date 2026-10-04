@@ -1200,3 +1200,12 @@ The S0 spike passed (15.2): **database-side signature verification is the plan o
 | NIT A2 / A4 | idle, absolute expiry and demo are re-checked by `partner_authorize`, now proven there | cells: a session that goes idle, expires or becomes the demo account after the bind is refused by the next authorize |
 | Departure 10 | the flagger role, its policies and the flag columns are removed from 0047 | role lists in checks 9 and 12, the fixtures and the cells updated |
 | S2a merge | 0046 merged; it has no GUC-keyed policy (nothing to close; the catalog cells cover it automatically); its four binding readers reviewed and listed; matrix files renamed `25_*` | matrix, check 14 and the Deno suite on the merged tree |
+
+### 16.8 Verification run after the gate (on the tree merged with S2a, 0046)
+
+| Check | Result |
+|---|---|
+| `HARNESS_MODE=superuser tools/db/test.sh`, then `HARNESS_MODE=restricted tools/db/test.sh` (sequentially, a fresh cluster each) | each: 37 pgTAP files, **3503 tests, PASS** (`25_partner_auth_spine.sql` 388, `_edge` 34, `_edge_cleanup` 3, `10_function_inventory.sql` 134, `09_delete_my_data.sql` 34); the replay, money-path, sign-in and **partner serialisation** scripts pass (now incl. 2b, 3b, 3c and 5); the Deno integration suite 314 passed, 0 failed; the function-inventory check, the service-role lint and the H2 run pass |
+| Unit, recorder, lint, typecheck | vitest 60 files / 1207 tests; recorder verify 1 test; service-role lint 401; `pnpm -r typecheck` clean |
+| Migrations immutable | `--base 7a55b03`: 45 files byte-identical; `--base origin/main` (which now holds 0046): 46 files byte-identical |
+| Mutation pass (scratch copy; each mutant on a fresh database; the pgTAP files, the CLI check, the parity test and the serialisation script run) | 53 mutants: the gate's survivors (idle and demo at authorize, the member trigger's `role` column and OLD uid, the three `partner_sessions_revoke` branches and its audit row, the scope invariant's advisory lock) and the new code (insert guards, the TRUNCATE and `admin_user` UPDATE triggers, PEEK, READ COMMITTED, the `app.offer` grant, section 8c, the invite `IS NULL` leg, the check 14 / 15 clauses) plus the first pass's 28; **all killed**. One mutant (PEEK taking the write-path lock) is equivalent in behaviour (`last_seen_at` is guarded separately) and was split into the lock-only variant (equivalent) and the advance variant (killed). One (section 8c closing WITH CHECK only) is killed by the migration's own fail-loud assertion |
