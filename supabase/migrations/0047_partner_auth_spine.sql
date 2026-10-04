@@ -6,11 +6,11 @@
 --
 -- WHAT THIS ADDS
 --   1. Roles. edge_partner (the partner lane: NO privilege on any table; EXECUTE on exactly the binder and the two read-only binding helpers),
---      edge_partner_minter (the minting lane, S1.1b: USAGE on schema private and nothing else yet), the three session-writer roles of section 4.3
---      (partner_session_toucher / _issuer / _flagger) and, decided by gate round 5 (R5-L1), three VERIFIER-OWNER roles (partner_pin_verifier /
+--      edge_partner_minter (the minting lane, S1.1b: USAGE on schema private and nothing else yet), the two session-writer roles of section 4.3
+--      (partner_session_toucher / _issuer; the third, _flagger, was dropped at the S1.1a gate: the S1.6 re-verifier is moot) and, decided by gate round 5 (R5-L1), three VERIFIER-OWNER roles (partner_pin_verifier /
 --      partner_totp_verifier / partner_reauth_verifier) so a verification fact is a ROLE (the only role that can write the column), never an `xmin`
 --      comparison and never a GUC. Every one is NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS, a member of nothing; edge_gateway is the only member of the two
---      edge roles (SET TRUE, INHERIT FALSE); the six owner roles have NO member at all (the migrating role holds one only for the length of this file, to create
+--      edge roles (SET TRUE, INHERIT FALSE); the five owner roles have NO member at all (the migrating role holds one only for the length of this file, to create
 --      their functions, and loses SET and INHERIT again: R5-L3, the 0041 form).
 --   2. The binding. private.actor_binding.kind gains 'partner' (and session_id); private.actor_uid() returns NULL for it (so every edge_actor policy and every
 --      user-lane definer is blind to a partner binding); private.bind_partner_session(token_hash) is the only producer; private.partner_binding() /
@@ -30,7 +30,7 @@
 --      api.my_offers() answer live offers with NULL budget and eligibility columns to EVERYONE, offer_read is narrowed to live offers.
 --   8. X9: REVOKE EXECUTE on private.offline_code_record_step_for_actor FROM edge_actor (the function and its proofs stay).
 --   9. Registries: function_inventory (two new role columns), definer_policy_allowlist (a role_name column: the policies of the new owner roles are registered
---      too), pii_retention_policy / pii_export_policy, and a registry of the exact privileges the six owner roles may hold.
+--      too), pii_retention_policy / pii_export_policy, and a registry of the exact privileges the five owner roles may hold.
 --
 -- THE HARD RULE (docs/security/p3-money-path-requirements.md, "What P5 must do"): no policy on an edge-reachable path is keyed on a settable GUC. The ONLY GUC-keyed
 -- policies below are the delete_my_data window pairs (DELETE and its SELECT companion, and the set_null UPDATE pair) the registry-driven generic pass REQUIRES for every
@@ -50,7 +50,7 @@ DECLARE
 BEGIN
   FOREACH v_role IN ARRAY ARRAY[
     'edge_partner', 'edge_partner_minter',
-    'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger',
+    'partner_session_toucher', 'partner_session_issuer',
     'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'
   ] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
@@ -68,9 +68,9 @@ GRANT edge_partner_minter TO edge_gateway WITH INHERIT FALSE, SET TRUE;
 -- Name resolution only: every function in `private` has had PUBLIC EXECUTE revoked, so USAGE reaches only what is granted below. NO USAGE on schema app.
 GRANT USAGE ON SCHEMA private TO edge_partner, edge_partner_minter;
 
--- The six owner roles: USAGE on app and private (R5-L4: a function owned by a role runs with that role's schema privileges).
+-- The five owner roles: USAGE on app and private (R5-L4: a function owned by a role runs with that role's schema privileges).
 GRANT USAGE ON SCHEMA app, private TO
-  partner_session_toucher, partner_session_issuer, partner_session_flagger,
+  partner_session_toucher, partner_session_issuer,
   partner_pin_verifier, partner_totp_verifier, partner_reauth_verifier;
 
 -- The migrating role must be able to SET ROLE to an owner for the bracket below (and ALTER ... OWNER); the membership is dropped again at the end of this
@@ -85,7 +85,7 @@ BEGIN
   SELECT string_agg(r.rolname || ' has ' || a.attr, ', ') INTO v_bad
   FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('REPLICATION', r.rolreplication),
     ('CREATEROLE', r.rolcreaterole), ('CREATEDB', r.rolcreatedb), ('INHERIT', r.rolinherit), ('LOGIN', r.rolcanlogin)) AS a(attr, is_on)
-  WHERE r.rolname IN ('edge_partner', 'edge_partner_minter', 'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger',
+  WHERE r.rolname IN ('edge_partner', 'edge_partner_minter', 'partner_session_toucher', 'partner_session_issuer',
                       'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.is_on;
   IF v_bad IS NOT NULL THEN
     RAISE EXCEPTION '0047: a new role holds an attribute it must not (%)', v_bad;
@@ -180,8 +180,6 @@ CREATE TABLE app.partner_session (
   mint_client_data_json bytea NOT NULL CHECK (octet_length(mint_client_data_json) BETWEEN 2 AND 4096),
   -- NULL for a `register` mint (an `attestation: none` create ceremony carries no signature, R-P1); present for a `sign_in` mint
   mint_signature bytea CHECK (mint_signature IS NULL OR octet_length(mint_signature) BETWEEN 8 AND 1024),
-  flagged_at timestamptz,
-  flag_reason text CHECK (flag_reason IS NULL OR length(flag_reason) <= 80),
   CHECK ((mint_kind = 'register') = (mint_signature IS NULL)),
   CHECK (expires_at > created_at)
 );
@@ -190,7 +188,7 @@ CREATE INDEX partner_session_credential_idx ON app.partner_session (credential_i
 -- R5-L1 (as 0041): one GoTrue session proves at most one OTP proof
 CREATE UNIQUE INDEX partner_session_otp_proof_gotrue_uidx ON app.partner_session (otp_proof_gotrue_session_id) WHERE otp_proof_gotrue_session_id IS NOT NULL;
 COMMENT ON TABLE app.partner_session IS
-  '0047 (5.1, 4.3). Opaque partner sessions: the token is 256 random bits and only its SHA-256 is stored. Written by NAMED roles only (partner_session_toucher / _issuer / _flagger, the three verifier roles, and private_definer through ONE binding-keyed policy for its own row); every column that proves a verification can be written only by that verifier''s role; partner_session_guard enforces what no grant can.';
+  '0047 (5.1, 4.3). Opaque partner sessions: the token is 256 random bits and only its SHA-256 is stored. Written by NAMED roles only (partner_session_toucher / _issuer, the three verifier roles, and private_definer through ONE binding-keyed policy for its own row); every column that proves a verification can be written only by that verifier''s role; partner_session_guard enforces what no grant can.';
 
 -- 3d. app.partner_enrolment_token: recovery and admin enrolment (a person, no org).
 CREATE TABLE app.partner_enrolment_token (
@@ -327,7 +325,7 @@ FOR EACH ROW EXECUTE FUNCTION app.partner_credential_guard();
 --   three columns an action or a sign-out legitimately writes. pin_grant_until / aal / mfa_until / reauth_until are NOT here (R5-L1: only the verifier roles hold them);
 --   otp_proof_* are, behind the guard (which checks the GoTrue session).
 GRANT SELECT (id, user_id, credential_id, aal, created_at, last_seen_at, expires_at, pin_grant_until, reauth_until, otp_proof_until, enrolment_until, mfa_until,
-              revoked_at, revoke_reason, authority_touched_at, otp_proof_gotrue_session_id, mint_kind, flagged_at) ON app.partner_session TO private_definer;
+              revoked_at, revoke_reason, authority_touched_at, otp_proof_gotrue_session_id, mint_kind) ON app.partner_session TO private_definer;
 GRANT UPDATE (last_seen_at, revoked_at, revoke_reason, otp_proof_until, otp_proof_gotrue_session_id) ON app.partner_session TO private_definer;
 GRANT DELETE ON app.partner_session TO private_definer;  -- delete_my_data's generic pass ONLY (the policies below admit nothing else)
 --   the delete_my_data registry pass: DELETE (+ the SELECT companion) on delete_row columns, and the single nulled column on set_null columns
@@ -340,9 +338,9 @@ GRANT SELECT (accepted_by, revoked_by), UPDATE (accepted_by, revoked_by) ON app.
 --   the role-to-org-kind and one-facility-scope invariants read the org's kind
 GRANT SELECT (id, kind) ON app.partner_org TO private_definer;
 
--- 5b. The six owner roles. Every privilege below is registered in private.partner_owner_privilege (section 12) and re-derived from the catalog by checks 9 and 12.
+-- 5b. The five owner roles. Every privilege below is registered in private.partner_owner_privilege (section 12) and re-derived from the catalog by checks 9 and 12.
 --   toucher: revokes and touches sessions; reads authority; (S1.5) revokes credentials
-GRANT SELECT (id, user_id, credential_id, token_hash, aal, created_at, last_seen_at, expires_at, revoked_at, revoke_reason, authority_touched_at, flagged_at) ON app.partner_session TO partner_session_toucher;
+GRANT SELECT (id, user_id, credential_id, token_hash, aal, created_at, last_seen_at, expires_at, revoked_at, revoke_reason, authority_touched_at) ON app.partner_session TO partner_session_toucher;
 GRANT UPDATE (revoked_at, revoke_reason, authority_touched_at) ON app.partner_session TO partner_session_toucher;
 GRANT SELECT (user_id, org_id, role, revoked_at) ON app.partner_member TO partner_session_toucher;
 GRANT SELECT (id, org_id, facility_id, trail_id) ON app.partner_scope TO partner_session_toucher;
@@ -351,9 +349,6 @@ GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON app.partner_credential T
 --   issuer (S1.1b): mints sessions and registers the first credential
 GRANT SELECT (id, user_id, token_hash, revoked_at, created_at), INSERT ON app.partner_session TO partner_session_issuer;
 GRANT SELECT (id, user_id, credential_id, revoked_at), INSERT ON app.partner_credential TO partner_session_issuer;
---   flagger (S1.6): flags a live session; touches nothing else
-GRANT SELECT (id, revoked_at, flagged_at, flag_reason) ON app.partner_session TO partner_session_flagger;
-GRANT UPDATE (flagged_at, flag_reason) ON app.partner_session TO partner_session_flagger;
 --   the three verifiers (R5-L1): each is the ONLY role that can write its columns
 GRANT SELECT (id, pin_grant_until) ON app.partner_session TO partner_pin_verifier;
 GRANT UPDATE (pin_grant_until) ON app.partner_session TO partner_pin_verifier;
@@ -447,12 +442,13 @@ $$;
 -- 6d. The assurance and idle policy of a person: the HIGHEST role they hold decides (admin > operator > manager or staff), recomputed on every call (4.1).
 -- EXECUTE for nobody: bind_partner_session and partner_authorize (same owner) call it.
 CREATE FUNCTION private.partner_session_policy(p_uid uuid)
-RETURNS TABLE (required_aal smallint, idle interval)
+RETURNS TABLE (required_aal smallint, idle interval, absolute interval)
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = ''
 AS $$
   SELECT (CASE WHEN a.is_admin OR a.is_op THEN 2 ELSE 1 END)::smallint,
-         CASE WHEN a.is_admin THEN interval '10 minutes' WHEN a.is_op THEN interval '15 minutes' ELSE interval '30 minutes' END
+         CASE WHEN a.is_admin THEN interval '10 minutes' WHEN a.is_op THEN interval '15 minutes' ELSE interval '30 minutes' END,
+         CASE WHEN a.is_admin THEN interval '1 hour' WHEN a.is_op THEN interval '4 hours' ELSE interval '8 hours' END
   FROM (
     SELECT private.is_admin(p_uid) AS is_admin,
            EXISTS (SELECT 1 FROM app.partner_member m WHERE m.user_id = p_uid AND m.revoked_at IS NULL AND m.role = 'operator') AS is_op
@@ -529,7 +525,8 @@ $$;
 -- 6g. THE ONE AUTHORIZATION SEAM (4.3). SECURITY DEFINER, VOLATILE, search_path = '', EXECUTE for nobody (called only from sibling definers: the
 -- offline_seed_derive shape). Every refusal is 42501 (the handler maps it to 403, or 404 where the plan says a foreign id must not be probeable).
 --
--- Classes: SESSION (sign-out, lock, GET session: a live session, no scope, no aal gate: 4.1), A0 (a live session at the required aal), A0_KEEPALIVE (A0 that never
+-- Classes: SESSION (sign-out, lock: a live session, no scope, no aal gate: 4.1; advances last_seen_at like any user-initiated call), PEEK (GET session: SESSION that NEVER
+-- advances last_seen_at, so reading one's own session does not keep it alive: 4.2), A0 (a live session at the required aal), A0_KEEPALIVE (A0 that never
 -- advances last_seen_at: the keep-alive-exempt routes of 4.2), A1 (A0 + a single-use PIN grant, consumed here), A2 and A3 (FAIL CLOSED until S1.3 / S1.4: PA-4b).
 CREATE FUNCTION private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)
 RETURNS uuid
@@ -543,8 +540,13 @@ DECLARE
   v_pol record;
   v_write boolean;
 BEGIN
-  IF p_class IS NULL OR p_class NOT IN ('SESSION', 'A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') THEN
+  IF p_class IS NULL OR p_class NOT IN ('SESSION', 'PEEK', 'A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') THEN
     RAISE EXCEPTION 'partner_authorize: unknown action class' USING ERRCODE = '22023';
+  END IF;
+  -- 0. READ COMMITTED only (S1.1a gate, NIT): every guarantee below (a revoke that committed while we waited for the lock is SEEN by the next statement; the scope re-read) relies on a fresh
+  -- snapshot per statement. A REPEATABLE READ or SERIALIZABLE transaction would read stale authority, so it is refused, fail closed.
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'partner_authorize: requires a READ COMMITTED transaction' USING ERRCODE = '42501';
   END IF;
   -- 1. a partner binding in THIS transaction
   SELECT b.actor_uid, b.session_id INTO v_uid, v_sid
@@ -558,13 +560,13 @@ BEGIN
   IF p_class IN ('A2', 'A3') THEN
     RAISE EXCEPTION 'partner_authorize: class % is not enabled (fails closed until its prerequisite exists)', p_class USING ERRCODE = '42501';
   END IF;
-  IF p_class <> 'SESSION' AND (p_roles IS NULL OR cardinality(p_roles) = 0 OR p_roles && ARRAY['sponsor']::app.partner_role[]) THEN
+  IF p_class NOT IN ('SESSION', 'PEEK') AND (p_roles IS NULL OR cardinality(p_roles) = 0 OR p_roles && ARRAY['sponsor']::app.partner_role[]) THEN
     RAISE EXCEPTION 'partner_authorize: an explicit, non-empty role list without sponsor is required' USING ERRCODE = '22023';
   END IF;
   -- 2. lock the session row FIRST, and ONLY it (R3-M1 option a). FOR SHARE for a call that will not write it, FOR NO KEY UPDATE for a call that will (two FOR SHARE
   -- holders that both then UPDATE deadlock). The policy this needs is pd_partner_session_action (a lock is invisible without it under FORCE RLS, R2-M2).
   SELECT s.last_seen_at INTO v_s FROM app.partner_session s WHERE s.id = v_sid;
-  v_write := p_class = 'A1' OR (p_class <> 'A0_KEEPALIVE' AND (v_s.last_seen_at IS NULL OR v_s.last_seen_at < clock_timestamp() - interval '1 minute'));
+  v_write := p_class = 'A1' OR (p_class NOT IN ('A0_KEEPALIVE', 'PEEK') AND (v_s.last_seen_at IS NULL OR v_s.last_seen_at < clock_timestamp() - interval '1 minute'));
   IF v_write THEN
     SELECT s.user_id, s.credential_id, s.aal, s.last_seen_at, s.expires_at, s.revoked_at INTO v_s
     FROM app.partner_session s WHERE s.id = v_sid FOR NO KEY UPDATE;
@@ -591,7 +593,7 @@ BEGIN
   IF v_s.last_seen_at + v_pol.idle <= clock_timestamp() THEN
     RAISE EXCEPTION 'partner_authorize: the session is not live' USING ERRCODE = '42501';
   END IF;
-  IF p_class <> 'SESSION' THEN
+  IF p_class NOT IN ('SESSION', 'PEEK') THEN
     -- 4. aal gates EVERY class including A0 (M2): an aal 1 session of an operator or admin is refused
     IF v_s.aal < v_pol.required_aal THEN
       RAISE EXCEPTION 'partner_authorize: the session''s assurance level is below the member''s required level' USING ERRCODE = '42501';
@@ -614,8 +616,8 @@ BEGIN
       RAISE EXCEPTION 'partner_authorize: a PIN verified in the last minute and not yet used is required' USING ERRCODE = '42501';
     END IF;
   END IF;
-  -- idle is extended only by user-initiated calls, at most once a minute (4.2); A0_KEEPALIVE never
-  IF v_write AND p_class <> 'A0_KEEPALIVE' AND v_s.last_seen_at < clock_timestamp() - interval '1 minute' THEN
+  -- idle is extended only by user-initiated calls, at most once a minute (4.2); A0_KEEPALIVE and PEEK never
+  IF v_write AND p_class NOT IN ('A0_KEEPALIVE', 'PEEK') AND v_s.last_seen_at < clock_timestamp() - interval '1 minute' THEN
     UPDATE app.partner_session s SET last_seen_at = clock_timestamp() WHERE s.id = v_sid;
   END IF;
   RETURN v_uid;
@@ -658,7 +660,7 @@ BEGIN
   IF NEW.reauth_until IS DISTINCT FROM OLD.reauth_until AND NEW.reauth_until IS NOT NULL AND NEW.reauth_until > clock_timestamp() + interval '5 minutes' THEN
     RAISE EXCEPTION 'partner_session_guard: reauth_until is at most now + 5 minutes (id=%)', OLD.id USING ERRCODE = '23514';
   END IF;
-  -- the OTP proof: a NEW proof needs a NEW GoTrue session id that exists for this user and is fresh; the window is at most now + 10 minutes; clearing is always allowed
+  -- the OTP proof: a NEW proof needs a NEW GoTrue session id that exists for this user and is fresh; the window is at most now + 10 minutes; the GoTrue session id itself is never cleared or re-pointed without a new fresh one (only otp_proof_until may be cleared or shortened)
   IF NEW.otp_proof_gotrue_session_id IS DISTINCT FROM OLD.otp_proof_gotrue_session_id THEN
     IF NEW.otp_proof_gotrue_session_id IS NULL
        OR NEW.otp_proof_until IS NULL OR NEW.otp_proof_until > clock_timestamp() + interval '10 minutes'
@@ -673,6 +675,58 @@ BEGIN
   END IF;
   IF NEW.last_seen_at < OLD.last_seen_at OR NEW.last_seen_at > clock_timestamp() + interval '1 minute' THEN
     RAISE EXCEPTION 'partner_session_guard: last_seen_at is monotone and at most now + 1 minute (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- 6h2. The INSERT guards (S1.1a gate M2). The issuer holds a relation-wide INSERT with WITH CHECK (true) (it is the mint's role), so WHAT may be inserted is the guard's
+-- business, exactly as the UPDATE guard's: a session is born at aal 1 with no verification fact, no revocation, no OTP proof and no touch; its clocks are the database's (created_at and
+-- last_seen_at within a minute of now); an enrolment window exists only on a `register` mint and is at most 15 minutes; and its absolute life is at most the person's role ceiling
+-- (staff and manager 8 h, operator 4 h, admin 1 h, 4.1). Without it the issuer could insert an aal 2 session of 10 years with a PIN grant, and partner_authorize would pass it.
+CREATE FUNCTION private.partner_session_insert_guard()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_pol record;
+BEGIN
+  IF NEW.aal <> 1 THEN
+    RAISE EXCEPTION 'partner_session_insert_guard: a session is born at aal 1 (id=%)', NEW.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.pin_grant_until IS NOT NULL OR NEW.reauth_until IS NOT NULL OR NEW.mfa_until IS NOT NULL OR NEW.otp_proof_until IS NOT NULL OR NEW.otp_proof_gotrue_session_id IS NOT NULL
+     OR NEW.revoked_at IS NOT NULL OR NEW.revoke_reason IS NOT NULL OR NEW.authority_touched_at IS NOT NULL THEN
+    RAISE EXCEPTION 'partner_session_insert_guard: a new session carries no verification fact, revocation, OTP proof or touch (id=%)', NEW.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.enrolment_until IS NOT NULL
+     AND (NEW.mint_kind <> 'register' OR NEW.enrolment_until <= clock_timestamp() - interval '1 minute' OR NEW.enrolment_until > clock_timestamp() + interval '15 minutes') THEN
+    RAISE EXCEPTION 'partner_session_insert_guard: an enrolment window belongs to a register mint and is at most 15 minutes (id=%)', NEW.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.created_at < clock_timestamp() - interval '1 minute' OR NEW.created_at > clock_timestamp() + interval '1 minute'
+     OR NEW.last_seen_at < clock_timestamp() - interval '1 minute' OR NEW.last_seen_at > clock_timestamp() + interval '1 minute' THEN
+    RAISE EXCEPTION 'partner_session_insert_guard: created_at and last_seen_at are the database''s own clock (id=%)', NEW.id USING ERRCODE = '23514';
+  END IF;
+  SELECT p.* INTO v_pol FROM private.partner_session_policy(NEW.user_id) p;
+  IF NEW.expires_at > NEW.created_at + v_pol.absolute THEN
+    RAISE EXCEPTION 'partner_session_insert_guard: the absolute life of this person''s sessions is at most % (id=%)', v_pol.absolute, NEW.id USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- the credential's twin: the issuer may insert a credential, but a credential is BORN live, never used, never revoked, on the database's clock
+CREATE FUNCTION private.partner_credential_insert_guard()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF NEW.revoked_at IS NOT NULL OR NEW.revoked_by IS NOT NULL OR NEW.revoke_reason IS NOT NULL OR NEW.last_used_at IS NOT NULL THEN
+    RAISE EXCEPTION 'partner_credential_insert_guard: a new credential is live and unused (id=%)', NEW.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.created_at < clock_timestamp() - interval '1 minute' OR NEW.created_at > clock_timestamp() + interval '1 minute' THEN
+    RAISE EXCEPTION 'partner_credential_insert_guard: created_at is the database''s own clock (id=%)', NEW.id USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
@@ -719,7 +773,11 @@ BEGIN
     IF NEW.facility_id IS NULL OR NEW.trail_id IS NOT NULL OR NEW.sponsorship_id IS NOT NULL THEN
       RAISE EXCEPTION 'partner_scope: a facility org holds only a facility scope (org %)', NEW.org_id USING ERRCODE = '23514';
     END IF;
-    -- serialise concurrent writers for ONE org, so the count below cannot be raced past (each statement then sees the other's committed row)
+    -- serialise concurrent writers for ONE org, so the count below cannot be raced past (each statement then sees the other's committed row). That RELIES on READ COMMITTED
+    -- (a fresh snapshot per statement): under REPEATABLE READ or SERIALIZABLE the count would not see the winner's commit, so those isolation levels are refused, fail closed.
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+      RAISE EXCEPTION 'partner_scope: a facility org scope is written under READ COMMITTED only (org %)', NEW.org_id USING ERRCODE = '25000';
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('partner_scope:' || NEW.org_id::text, 47));
     IF EXISTS (SELECT 1 FROM app.partner_scope s WHERE s.org_id = NEW.org_id AND s.id <> NEW.id) THEN
       RAISE EXCEPTION 'partner_scope: a facility org holds at most one scope row (org %)', NEW.org_id USING ERRCODE = '23514';
@@ -760,7 +818,8 @@ AS $$
 $$;
 
 -- 7b. R5-L2: SUBJECT-based. `kind` is user (a uid), org (every member of an org: the panic button) or credential (every session that credential minted); the sessions are
--- DERIVED here, never passed in. One audit_log row per call, carrying the caller's binding. EXECUTE for private_definer ONLY: it is called by the member-revoke, recover,
+-- DERIVED here, never passed in. An org revoke reaches the org's ACTIVE members only (a revoked member's sessions already died with the revoke, and they may be active in another
+-- org: their sessions there stay). One audit_log row per call, naming the SUBJECT'S own table, carrying the caller's binding. EXECUTE for private_definer ONLY: it is called by the member-revoke, recover,
 -- revoke-all, credential-revoke and TOTP-reset definers AFTER their own reach-rule and scope checks (S1.5 / S1.4). Revoking the session that makes the call is intended:
 -- a revoke-all kills the revoker's own session too.
 CREATE FUNCTION private.partner_sessions_revoke(p_kind text, p_id uuid, p_reason text)
@@ -778,11 +837,12 @@ BEGIN
   WHERE s.revoked_at IS NULL
     AND CASE p_kind
           WHEN 'user' THEN s.user_id = p_id
-          WHEN 'org' THEN s.user_id IN (SELECT m.user_id FROM app.partner_member m WHERE m.org_id = p_id)
+          WHEN 'org' THEN s.user_id IN (SELECT m.user_id FROM app.partner_member m WHERE m.org_id = p_id AND m.revoked_at IS NULL)
           ELSE s.credential_id = p_id
         END;
   GET DIAGNOSTICS v_n = ROW_COUNT;
-  PERFORM private.partner_audit_write('partner.sessions_revoke', 'app.partner_session', p_id::text,
+  PERFORM private.partner_audit_write('partner.sessions_revoke',
+                                      CASE p_kind WHEN 'user' THEN 'auth.users' WHEN 'org' THEN 'app.partner_org' ELSE 'app.partner_credential' END, p_id::text,
                                       jsonb_build_object('kind', p_kind, 'reason', p_reason, 'revoked', v_n));
   RETURN v_n;
 END;
@@ -839,6 +899,17 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION private.partner_authority_truncate_revoke()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  UPDATE app.partner_session s SET revoked_at = clock_timestamp(), revoke_reason = 'authority_changed' WHERE s.revoked_at IS NULL;
+  RETURN NULL;
+END;
+$$;
+
 RESET ROLE;
 SET ROLE partner_pin_verifier;
 
@@ -879,6 +950,15 @@ CREATE TRIGGER admin_user_authority_ins_trg AFTER INSERT ON app.admin_user
 FOR EACH ROW EXECUTE FUNCTION private.partner_authority_revoke_sessions();
 CREATE TRIGGER admin_user_authority_del_trg AFTER DELETE ON app.admin_user
 FOR EACH ROW EXECUTE FUNCTION private.partner_authority_revoke_sessions();
+CREATE TRIGGER admin_user_authority_upd_trg AFTER UPDATE ON app.admin_user
+FOR EACH ROW EXECUTE FUNCTION private.partner_authority_revoke_sessions();
+-- TRUNCATE fires no row trigger: a statement trigger revokes EVERY live session (a truncated authority table leaves no per-person record to reason about)
+CREATE TRIGGER partner_member_authority_trunc_trg BEFORE TRUNCATE ON app.partner_member
+FOR EACH STATEMENT EXECUTE FUNCTION private.partner_authority_truncate_revoke();
+CREATE TRIGGER admin_user_authority_trunc_trg BEFORE TRUNCATE ON app.admin_user
+FOR EACH STATEMENT EXECUTE FUNCTION private.partner_authority_truncate_revoke();
+CREATE TRIGGER partner_scope_authority_trunc_trg BEFORE TRUNCATE ON app.partner_scope
+FOR EACH STATEMENT EXECUTE FUNCTION private.partner_authority_truncate_revoke();
 CREATE TRIGGER partner_scope_authority_upd_trg AFTER UPDATE ON app.partner_scope
 FOR EACH ROW EXECUTE FUNCTION private.partner_scope_authority_touch();
 CREATE TRIGGER partner_scope_authority_del_trg AFTER DELETE ON app.partner_scope
@@ -886,11 +966,16 @@ FOR EACH ROW EXECUTE FUNCTION private.partner_scope_authority_touch();
 
 CREATE TRIGGER partner_session_guard_trg BEFORE UPDATE ON app.partner_session
 FOR EACH ROW EXECUTE FUNCTION private.partner_session_guard();
+CREATE TRIGGER partner_session_insert_guard_trg BEFORE INSERT ON app.partner_session
+FOR EACH ROW EXECUTE FUNCTION private.partner_session_insert_guard();
+CREATE TRIGGER partner_credential_insert_guard_trg BEFORE INSERT ON app.partner_credential
+FOR EACH ROW EXECUTE FUNCTION private.partner_credential_insert_guard();
 
--- 8a. private_definer's policies. The delete_my_data window pairs on the four tables THIS migration creates carry one extra conjunct, `private.partner_binding_kind() IS DISTINCT FROM 'partner'`:
+-- 8a. private_definer's policies. The delete_my_data window pairs on the four tables THIS migration creates carry (from the start; 8c does the same for every other window in the schema) one extra conjunct, `private.partner_binding_kind() IS DISTINCT FROM 'partner'`:
 -- under a partner binding the window is CLOSED, so a planted app.delete_my_data.target_user_id cannot make another person's session, credential, enrolment token or used challenge
 -- readable, deletable or redactable by a definer a partner transaction reaches (probed 2026-10-04: without it a partner-bound private_definer DELETEd another user's session). The
--- delete_my_data pass itself runs under no partner binding, so it is unaffected. (The pre-existing 0016 tables keep the 0016 form; partner_invite's two new pairs follow it.)
+-- delete_my_data pass itself runs under no partner binding, so it is unaffected. The "IS NULL" legs of the set-null SELECT companions are tied to an OPEN window (the setting is non-empty),
+-- so without a window private_definer sees none of those rows (S1.1a gate M1: it used to see every pending invite's address and token hash).
 -- partner_session: its OWN row only, keyed on the transaction's binding (the ONE lock-and-write policy of R3-M1 option a, and its row-visibility
 -- companion: 0016 "_r companion" finding); the delete_my_data pairs follow the 0016 form (the registry pass requires them: check 8).
 CREATE POLICY pd_partner_session_action ON app.partner_session
@@ -909,7 +994,7 @@ CREATE POLICY pd_delete_partner_credential_user_id_r ON app.partner_credential
 CREATE POLICY pd_setnull_partner_credential_revoked_by ON app.partner_credential
   FOR UPDATE TO private_definer USING (revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner') WITH CHECK (revoked_by IS NULL);
 CREATE POLICY pd_setnull_partner_credential_revoked_by_r ON app.partner_credential
-  FOR SELECT TO private_definer USING (((revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (revoked_by IS NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+  FOR SELECT TO private_definer USING (((revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (revoked_by IS NULL AND nullif(current_setting('app.delete_my_data.target_user_id', true), '') IS NOT NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_delete_partner_enrolment_token_user_id ON app.partner_enrolment_token
   FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
@@ -918,7 +1003,7 @@ CREATE POLICY pd_delete_partner_enrolment_token_user_id_r ON app.partner_enrolme
 CREATE POLICY pd_setnull_partner_enrolment_token_issued_by ON app.partner_enrolment_token
   FOR UPDATE TO private_definer USING (issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner') WITH CHECK (issued_by IS NULL);
 CREATE POLICY pd_setnull_partner_enrolment_token_issued_by_r ON app.partner_enrolment_token
-  FOR SELECT TO private_definer USING (((issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (issued_by IS NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+  FOR SELECT TO private_definer USING (((issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (issued_by IS NULL AND nullif(current_setting('app.delete_my_data.target_user_id', true), '') IS NOT NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_delete_partner_auth_challenge_user_id ON app.partner_auth_challenge
   FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
@@ -926,18 +1011,18 @@ CREATE POLICY pd_delete_partner_auth_challenge_user_id_r ON app.partner_auth_cha
   FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_setnull_partner_invite_accepted_by ON app.partner_invite
-  FOR UPDATE TO private_definer USING (accepted_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (accepted_by IS NULL);
+  FOR UPDATE TO private_definer USING (accepted_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner') WITH CHECK (accepted_by IS NULL);
 CREATE POLICY pd_setnull_partner_invite_accepted_by_r ON app.partner_invite
-  FOR SELECT TO private_definer USING ((accepted_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (accepted_by IS NULL));
+  FOR SELECT TO private_definer USING (((accepted_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (accepted_by IS NULL AND nullif(current_setting('app.delete_my_data.target_user_id', true), '') IS NOT NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_setnull_partner_invite_revoked_by ON app.partner_invite
-  FOR UPDATE TO private_definer USING (revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (revoked_by IS NULL);
+  FOR UPDATE TO private_definer USING (revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner') WITH CHECK (revoked_by IS NULL);
 CREATE POLICY pd_setnull_partner_invite_revoked_by_r ON app.partner_invite
-  FOR SELECT TO private_definer USING ((revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (revoked_by IS NULL));
+  FOR SELECT TO private_definer USING (((revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (revoked_by IS NULL AND nullif(current_setting('app.delete_my_data.target_user_id', true), '') IS NOT NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 -- the invariant triggers read the org's kind (id, kind only: column-level grant)
 CREATE POLICY pd_read_partner_org_kind ON app.partner_org FOR SELECT TO private_definer USING (true);
 
--- 8b. The six owner roles' policies (R5-L4). Per ROLE: a policy of one role never applies to another, so there is no cross-role OR; the column grants of section 5 are the real limit.
+-- 8b. The five owner roles' policies (R5-L4). Per ROLE: a policy of one role never applies to another, so there is no cross-role OR; the column grants of section 5 are the real limit.
 CREATE POLICY pst_read_partner_member ON app.partner_member FOR SELECT TO partner_session_toucher USING (true);
 CREATE POLICY pst_read_partner_scope ON app.partner_scope FOR SELECT TO partner_session_toucher USING (true);
 CREATE POLICY pst_read_partner_credential ON app.partner_credential FOR SELECT TO partner_session_toucher USING (true);
@@ -950,8 +1035,6 @@ CREATE POLICY psi_insert_partner_session ON app.partner_session FOR INSERT TO pa
 CREATE POLICY psi_read_partner_credential ON app.partner_credential FOR SELECT TO partner_session_issuer USING (true);
 CREATE POLICY psi_insert_partner_credential ON app.partner_credential FOR INSERT TO partner_session_issuer WITH CHECK (true);
 
-CREATE POLICY psf_read_partner_session ON app.partner_session FOR SELECT TO partner_session_flagger USING (revoked_at IS NULL);
-CREATE POLICY psf_update_partner_session ON app.partner_session FOR UPDATE TO partner_session_flagger USING (revoked_at IS NULL) WITH CHECK (revoked_at IS NULL);
 
 CREATE POLICY ppv_read_partner_session ON app.partner_session FOR SELECT TO partner_pin_verifier USING (id = private.partner_binding_session());
 CREATE POLICY ppv_update_partner_session ON app.partner_session FOR UPDATE TO partner_pin_verifier
@@ -962,6 +1045,52 @@ CREATE POLICY ptv_update_partner_session ON app.partner_session FOR UPDATE TO pa
 CREATE POLICY prv_read_partner_session ON app.partner_session FOR SELECT TO partner_reauth_verifier USING (id = private.partner_binding_session());
 CREATE POLICY prv_update_partner_session ON app.partner_session FOR UPDATE TO partner_reauth_verifier
   USING (id = private.partner_binding_session()) WITH CHECK (id = private.partner_binding_session());
+
+-- 8c. THE WINDOWS (S1.1a gate H1). Every GUC-keyed private_definer policy in the schema is a "window": a transaction-local setting that some definer sets and a policy then reads
+-- (delete_my_data's target user, the sign-in proof, the device link, the purge windows, the guards). A GUC is settable by ANY session, including edge_partner, and it persists into a
+-- later SECURITY DEFINER call (R4-M1), so none of these may be open inside a PARTNER-bound transaction: with the window open and a partner binding, a private_definer-owned
+-- definer a partner transaction can reach could un-revoke and promote a member (R3-M1), delete a membership or an admin_user row, or read pending invites. No window needs to be open under a partner
+-- binding (delete_my_data, the purges and the guards all run under a user binding, a system delegate or none), so the one conjunct below is added to EVERY such policy, discovered from
+-- the catalog (not named), in USING and in WITH CHECK wherever the policy has one. The tables of a slice that merges later are covered in two ways: a policy that exists when this
+-- migration runs is closed here; a policy added afterwards must carry the conjunct itself, and verify-function-inventory check 15 (and PA-4c) fail the build until it does.
+DO $close_windows_0047$
+DECLARE
+  v_pd oid := (SELECT oid FROM pg_roles WHERE rolname = 'private_definer');
+  v_pol record;
+  v_using text;
+  v_check text;
+  v_sql text;
+  v_n integer := 0;
+BEGIN
+  FOR v_pol IN
+    SELECT n.nspname, c.relname, pol.polname,
+           pg_get_expr(pol.polqual, pol.polrelid) AS qual, pg_get_expr(pol.polwithcheck, pol.polrelid) AS wcheck
+    FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polroles = ARRAY[v_pd]
+      AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%')
+      AND coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') NOT LIKE '%partner_binding_kind()%'
+    ORDER BY n.nspname, c.relname, pol.polname
+  LOOP
+    v_sql := format('ALTER POLICY %I ON %I.%I', v_pol.polname, v_pol.nspname, v_pol.relname);
+    IF v_pol.qual IS NOT NULL THEN
+      v_sql := v_sql || format(' USING ((%s) AND private.partner_binding_kind() IS DISTINCT FROM ''partner'')', v_pol.qual);
+    END IF;
+    IF v_pol.wcheck IS NOT NULL THEN
+      v_sql := v_sql || format(' WITH CHECK ((%s) AND private.partner_binding_kind() IS DISTINCT FROM ''partner'')', v_pol.wcheck);
+    END IF;
+    EXECUTE v_sql;
+    v_n := v_n + 1;
+  END LOOP;
+  -- fail loudly: no GUC-keyed private_definer policy may remain open
+  IF EXISTS (SELECT 1 FROM pg_policy pol
+             WHERE pol.polroles = ARRAY[v_pd]
+               AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%')
+               AND coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') NOT LIKE '%partner_binding_kind()%') THEN
+    RAISE EXCEPTION '0047: a GUC-keyed private_definer policy is still open under a partner binding';
+  END IF;
+  RAISE NOTICE '0047: closed % GUC-keyed private_definer window polic(ies) under a partner binding', v_n;
+END
+$close_windows_0047$;
 
 -- ============================================================================
 -- 9. EXECUTE grants (PUBLIC revoked first: a function created by a role other than the migrating role defaults to PUBLIC EXECUTE). Each as its OWNER.
@@ -975,6 +1104,8 @@ REVOKE EXECUTE ON FUNCTION private.bind_partner_session(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_audit_write(text, text, text, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_authorize(text, text, app.partner_role[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_session_guard() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.partner_session_insert_guard() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.partner_credential_insert_guard() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_member_role_invariant() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_scope_invariant() FROM PUBLIC;
 -- edge_partner: EXACTLY the binder and the two read-only binding helpers (4.3, 5.3)
@@ -997,6 +1128,7 @@ REVOKE EXECUTE ON FUNCTION private.partner_credential_live(uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_sessions_revoke(text, uuid, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_authority_revoke_sessions() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.partner_scope_authority_touch() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.partner_authority_truncate_revoke() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.partner_session_by_hash(text) TO private_definer;
 GRANT EXECUTE ON FUNCTION private.partner_credential_live(uuid) TO private_definer;
 GRANT EXECUTE ON FUNCTION private.partner_sessions_revoke(text, uuid, text) TO private_definer;
@@ -1064,6 +1196,10 @@ $$;
 
 -- The row policy: live offers only. The scope legs are REMOVED (narrowed, never broadened): a scoped member's JWT no longer sees a draft, an approved or an ended offer.
 ALTER POLICY offer_read ON app.offer USING (status = 'live');
+-- (S1.1a gate L7, the 0009:15-31 / L10 reasoning applied to the one base table the masked view reads) `authenticated` keeps SELECT only on the columns api.offer and api.my_offers() expose,
+-- never budget_cap / budget_used / budget_reserved / eligibility / max_redemptions: a whole-row grant would give a future non-invoker view, or a direct app.offer read, the operator's budget.
+REVOKE SELECT ON app.offer FROM authenticated;
+GRANT SELECT (id, terms_id, trail_id, facility_id, funder, sponsorship_id, valid_from, valid_to, status) ON app.offer TO authenticated;
 
 -- ============================================================================
 -- 11. X9: staff authority under a plain user binding is revoked from the Edge (the function and its atomic-replay proofs STAY)
@@ -1325,20 +1461,23 @@ VALUES
   ('private', 'partner_binding', '', false, false, false, false, false, true, '0047: edge_partner; read-only: the kind and session id of THIS transaction''s binding'),
   ('private', 'partner_binding_kind', '', false, false, false, false, false, true, '0047: edge_partner; read-only: the kind of THIS transaction''s binding (the Edge''s post-bind assertion reads it)'),
   ('private', 'partner_binding_session', '', false, false, false, false, false, false, '0047: the predicate inside every own-session policy of app.partner_session; EXECUTE for private_definer (owner) and the toucher / verifier roles whose policy or trigger calls it, nobody else (private.partner_owner_privilege)'),
-  ('private', 'partner_session_policy', 'p_uid uuid', false, false, false, false, false, false, '0047: required aal and idle timeout of a person (highest role wins); no role has EXECUTE: bind_partner_session and partner_authorize call it'),
+  ('private', 'partner_session_policy', 'p_uid uuid', false, false, false, false, false, false, '0047: required aal, idle timeout and absolute session ceiling of a person (highest role wins); no role has EXECUTE: bind_partner_session and partner_authorize call it'),
   ('private', 'partner_audit_write', 'p_action text, p_subject_table text, p_subject_id text, p_detail jsonb', false, false, false, false, false, false, '0047: one audit_log row for a partner action, the actor taken from the binding; EXECUTE for partner_session_toucher only (private.partner_owner_privilege)'),
   ('private', 'partner_authorize', 'p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text', false, false, false, false, false, false, '0047: THE authorization seam; no role has EXECUTE (called only from sibling *_for_partner definers, whose first statement must call it: check 14)'),
   ('private', 'partner_session_guard', '', false, false, false, false, false, false, '0047: trigger function (BEFORE UPDATE on app.partner_session): immutability, monotonicity and now + N caps for every writer; never EXECUTEd directly by any role'),
+  ('private', 'partner_session_insert_guard', '', false, false, false, false, false, false, '0047 (S1.1a gate M2): trigger function (BEFORE INSERT on app.partner_session): born at aal 1 with no verification fact, the database clock, the role ceiling on the absolute life; never EXECUTEd directly by any role'),
+  ('private', 'partner_credential_insert_guard', '', false, false, false, false, false, false, '0047 (S1.1a gate M2): trigger function (BEFORE INSERT on app.partner_credential): born live, unused, on the database clock; never EXECUTEd directly by any role'),
   ('private', 'partner_member_role_invariant', '', false, false, false, false, false, false, '0047: trigger function (BEFORE INSERT OR UPDATE OF role, org_id on app.partner_member): the role must match the org kind; never EXECUTEd directly by any role'),
   ('private', 'partner_scope_invariant', '', false, false, false, false, false, false, '0047: trigger function (BEFORE INSERT OR UPDATE on app.partner_scope): a facility org holds exactly one facility scope; never EXECUTEd directly by any role'),
   ('private', 'partner_session_by_hash', 'p_token_hash text', false, false, false, false, false, false, '0047: owned by partner_session_toucher; the session and credential facts the binder needs; EXECUTE for private_definer only (private.partner_owner_privilege is for the owner; the grant to private_definer is checked by the inventory)'),
   ('private', 'partner_credential_live', 'p_credential_id uuid', false, false, false, false, false, false, '0047: owned by partner_session_toucher; is the credential present and not revoked; called by partner_authorize; no role but private_definer'),
   ('private', 'partner_sessions_revoke', 'p_kind text, p_id uuid, p_reason text', false, false, false, false, false, false, '0047 (R5-L2): owned by partner_session_toucher; SUBJECT-based (user, org, credential), derives the sessions itself, one audit_log row per call; callable by private_definer only, from the reach-checked definers'),
-  ('private', 'partner_authority_revoke_sessions', '', false, false, false, false, false, false, '0047: trigger function (partner_member INSERT / UPDATE / DELETE, admin_user INSERT / DELETE) owned by partner_session_toucher: revokes the user''s sessions in the same transaction; never EXECUTEd directly by any role'),
+  ('private', 'partner_authority_revoke_sessions', '', false, false, false, false, false, false, '0047: trigger function (partner_member INSERT / UPDATE / DELETE, admin_user INSERT / UPDATE / DELETE) owned by partner_session_toucher: revokes the user''s sessions in the same transaction; never EXECUTEd directly by any role'),
   ('private', 'partner_scope_authority_touch', '', false, false, false, false, false, false, '0047: trigger function (partner_scope UPDATE / DELETE) owned by partner_session_toucher: touches the sessions of the org''s members; never EXECUTEd directly by any role'),
+  ('private', 'partner_authority_truncate_revoke', '', false, false, false, false, false, false, '0047 (S1.1a gate L6): statement trigger function (BEFORE TRUNCATE on partner_member, admin_user, partner_scope) owned by partner_session_toucher: revokes every live session; never EXECUTEd directly by any role'),
   ('private', 'partner_pin_grant_consume', '', false, false, false, false, false, false, '0047 (R5-L1): owned by partner_pin_verifier; atomically consumes the bound session''s single-use PIN grant; EXECUTE for private_definer only');
 
--- 13b. private.definer_policy_allowlist: the policies of the six NEW owner roles are registered too. A role_name column (default private_definer: every existing row keeps its meaning) says
+-- 13b. private.definer_policy_allowlist: the policies of the five NEW owner roles are registered too. A role_name column (default private_definer: every existing row keeps its meaning) says
 -- which role a row is for; checks 5 / 6 / 9 / 10 and the fixture compare it.
 GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_seed_definer_policy_allowlist_0047 ON private.definer_policy_allowlist
@@ -1374,8 +1513,6 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'partner_session', 'psi_insert_partner_session', 'INSERT', false, 'S1.1b mint / register_first insert the session row; nobody can become partner_session_issuer', 'partner_session_issuer'),
   ('app', 'partner_credential', 'psi_read_partner_credential', 'SELECT', true, 'S1.1b register_first (column-level grant); nobody can become partner_session_issuer', 'partner_session_issuer'),
   ('app', 'partner_credential', 'psi_insert_partner_credential', 'INSERT', false, 'S1.1b register_first inserts the first credential; nobody can become partner_session_issuer', 'partner_session_issuer'),
-  ('app', 'partner_session', 'psf_read_partner_session', 'SELECT', true, 'R5-L4 / S1.6: the flagger sees live sessions only (column-level grant: id, revoked_at, flagged_at, flag_reason)', 'partner_session_flagger'),
-  ('app', 'partner_session', 'psf_update_partner_session', 'UPDATE', true, 'S1.6 partner_reverify_flag: flagged_at and flag_reason ONLY (column grant), live sessions only', 'partner_session_flagger'),
   ('app', 'partner_session', 'ppv_read_partner_session', 'SELECT', true, 'R5-L1: the PIN verifier sees its own bound session (column-level grant: id, pin_grant_until), keyed on the binding', 'partner_pin_verifier'),
   ('app', 'partner_session', 'ppv_update_partner_session', 'UPDATE', true, 'R5-L1: the ONLY writer of pin_grant_until (column grant), its own bound session only, keyed on the binding', 'partner_pin_verifier'),
   ('app', 'partner_session', 'ptv_read_partner_session', 'SELECT', true, 'R5-L1: the TOTP verifier sees its own bound session (column-level grant: id, aal, mfa_until)', 'partner_totp_verifier'),
@@ -1389,8 +1526,10 @@ FROM pg_policy pol
 JOIN pg_class cl ON cl.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = cl.relnamespace
 WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
-  AND (pol.polname LIKE 'pd\_%partner\_%' OR pol.polname LIKE 'pst\_%' OR pol.polname LIKE 'psi\_%' OR pol.polname LIKE 'psf\_%'
-       OR pol.polname LIKE 'ppv\_%' OR pol.polname LIKE 'ptv\_%' OR pol.polname LIKE 'prv\_%')
+  -- the 0047 policies, and EVERY policy section 8c closed under a partner binding (its stored expression is a snapshot of the live one; checks 5 / 6 compare the two)
+  AND (pol.polname LIKE 'pd\_%partner\_%' OR pol.polname LIKE 'pst\_%' OR pol.polname LIKE 'psi\_%'
+       OR pol.polname LIKE 'ppv\_%' OR pol.polname LIKE 'ptv\_%' OR pol.polname LIKE 'prv\_%'
+       OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%partner_binding_kind()%')
   AND al.role_name <> '';
 DO $assert_0047_allowlist$
 BEGIN
@@ -1427,7 +1566,7 @@ INSERT INTO private.pii_export_policy (schema_name, table_name, action, reason) 
   ('app', 'partner_auth_challenge', 'exclude', 'used challenge nonce hashes: replay-protection state of a login flow, not the subject''s own data');
 DROP POLICY current_user_seed_pii_export_policy_0047 ON private.pii_export_policy;
 
--- 13d. The exact privileges the six owner roles may hold (5.4 item 5): re-derived from the catalog by checks 9 and 12, both directions, and compared with a checked-in fixture by the node check
+-- 13d. The exact privileges the five owner roles may hold (5.4 item 5): re-derived from the catalog by checks 9 and 12, both directions, and compared with a checked-in fixture by the node check
 CREATE TABLE private.partner_owner_privilege (
   role_name text NOT NULL,
   object_kind text NOT NULL CHECK (object_kind IN ('schema', 'relation', 'column', 'function')),
@@ -1456,7 +1595,6 @@ INSERT INTO private.partner_owner_privilege (role_name, object_kind, object_name
   ('partner_session_toucher', 'column', 'app.partner_session', 'SELECT', 'revoked_at'),
   ('partner_session_toucher', 'column', 'app.partner_session', 'SELECT', 'revoke_reason'),
   ('partner_session_toucher', 'column', 'app.partner_session', 'SELECT', 'authority_touched_at'),
-  ('partner_session_toucher', 'column', 'app.partner_session', 'SELECT', 'flagged_at'),
   ('partner_session_toucher', 'column', 'app.partner_session', 'UPDATE', 'revoked_at'),
   ('partner_session_toucher', 'column', 'app.partner_session', 'UPDATE', 'revoke_reason'),
   ('partner_session_toucher', 'column', 'app.partner_session', 'UPDATE', 'authority_touched_at'),
@@ -1489,14 +1627,6 @@ INSERT INTO private.partner_owner_privilege (role_name, object_kind, object_name
   ('partner_session_issuer', 'column', 'app.partner_credential', 'SELECT', 'credential_id'),
   ('partner_session_issuer', 'column', 'app.partner_credential', 'SELECT', 'revoked_at'),
   ('partner_session_issuer', 'relation', 'app.partner_credential', 'INSERT', NULL),
-  ('partner_session_flagger', 'schema', 'app', 'USAGE', NULL),
-  ('partner_session_flagger', 'schema', 'private', 'USAGE', NULL),
-  ('partner_session_flagger', 'column', 'app.partner_session', 'SELECT', 'id'),
-  ('partner_session_flagger', 'column', 'app.partner_session', 'SELECT', 'revoked_at'),
-  ('partner_session_flagger', 'column', 'app.partner_session', 'SELECT', 'flagged_at'),
-  ('partner_session_flagger', 'column', 'app.partner_session', 'SELECT', 'flag_reason'),
-  ('partner_session_flagger', 'column', 'app.partner_session', 'UPDATE', 'flagged_at'),
-  ('partner_session_flagger', 'column', 'app.partner_session', 'UPDATE', 'flag_reason'),
   ('partner_pin_verifier', 'schema', 'app', 'USAGE', NULL),
   ('partner_pin_verifier', 'schema', 'private', 'USAGE', NULL),
   ('partner_pin_verifier', 'column', 'app.partner_session', 'SELECT', 'id'),
@@ -1519,4 +1649,4 @@ INSERT INTO private.partner_owner_privilege (role_name, object_kind, object_name
   ('partner_reauth_verifier', 'function', 'private.partner_binding_session()', 'EXECUTE', NULL);
 DROP POLICY current_user_seed_partner_owner_privilege_0047 ON private.partner_owner_privilege;
 COMMENT ON TABLE private.partner_owner_privilege IS
-  '0047. The registry of EXACTLY the privileges partner_session_toucher / _issuer / _flagger and partner_pin_verifier / partner_totp_verifier / partner_reauth_verifier may hold (schema USAGE, table and column privileges, EXECUTE). tools/db/verify-function-inventory.mjs check 9 and the matrix re-derive the real set from the catalog and compare both ways; supabase/tests/fixtures/partner_owner_privileges.txt is its checked-in twin.';
+  '0047. The registry of EXACTLY the privileges partner_session_toucher / _issuer and partner_pin_verifier / partner_totp_verifier / partner_reauth_verifier may hold (schema USAGE, table and column privileges, EXECUTE). tools/db/verify-function-inventory.mjs check 9 and the matrix re-derive the real set from the catalog and compare both ways; supabase/tests/fixtures/partner_owner_privileges.txt is its checked-in twin.';

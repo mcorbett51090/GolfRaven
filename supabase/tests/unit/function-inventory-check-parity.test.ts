@@ -15,6 +15,7 @@ const ROOT = join(import.meta.dirname, "..", "..", "..");
 const mjs = readFileSync(join(ROOT, "tools", "db", "verify-function-inventory.mjs"), "utf8");
 const matrix = readFileSync(join(ROOT, "supabase", "tests", "matrix", "10_function_inventory.sql"), "utf8");
 const kindFixture = readFileSync(join(ROOT, "supabase", "tests", "fixtures", "partner_kind_readers.txt"), "utf8");
+const sessionClassFixture = readFileSync(join(ROOT, "supabase", "tests", "fixtures", "partner_session_class_functions.txt"), "utf8");
 
 const squash = (s: string) => s.replace(/\s+/g, " ").trim();
 
@@ -41,25 +42,34 @@ describe("edge-role checks: the .mjs and the matrix 10 copies are one SQL", () =
   const a = mjsChecks();
   const b = matrixChecks();
   it("both files are parsed (the extraction itself is not silently empty)", () => {
-    expect([...a.keys()].sort((x, y) => x - y)).toEqual(expect.arrayContaining([9, 10, 11, 12, 13, 14]));
-    expect([...b.keys()].sort((x, y) => x - y)).toEqual(expect.arrayContaining([9, 10, 11, 12, 13, 14]));
+    expect([...a.keys()].sort((x, y) => x - y)).toEqual(expect.arrayContaining([9, 10, 11, 12, 13, 14, 15]));
+    expect([...b.keys()].sort((x, y) => x - y)).toEqual(expect.arrayContaining([9, 10, 11, 12, 13, 14, 15]));
   });
-  for (const n of [9, 10, 11, 12, 13, 14]) {
+  for (const n of [9, 10, 11, 12, 13, 14, 15]) {
     it(`check ${n}: identical SQL in verify-function-inventory.mjs and 10_function_inventory.sql`, () => {
       expect(a.has(n), `the .mjs has no check ${n}`).toBe(true);
       expect(b.has(n), `matrix 10 embeds no check ${n}`).toBe(true);
       expect(squash(b.get(n)!)).toBe(squash(a.get(n)!));
     });
   }
-  it("check 14: the literal default kind-exception list is the fixture's own entry (the matrix cell and the build check the same list)", () => {
-    const entries = kindFixture.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-    expect(entries).toEqual(["private.actor_uid()"]);
-    expect(a.get(14)!).toContain("ARRAY['private.actor_uid()']");
+  /** The SQL text between `/* marker *\/` and `/* end_marker *\/`, and the quoted strings inside its ARRAY[...] (a quote is doubled inside a string). */
+  function inlineList(sql: string, marker: string): string[] {
+    const m = sql.match(new RegExp(`/\\* ${marker} \\*/(.*?)/\\* end_${marker} \\*/`, "s"));
+    expect(m, `check 14 carries no /* ${marker} */ ... /* end_${marker} */ block`).not.toBeNull();
+    return [...m![1]!.matchAll(/'((?:[^']|'')*)'/g)].map((x) => x[1]!.replaceAll("''", "'")).sort();
+  }
+  const fixtureEntries = (text: string) => text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).sort();
+  it("check 14: the inline lists in the check's SQL (the matrix twin's defaults) ARE the checked-in fixtures, entry for entry", () => {
+    expect(inlineList(a.get(14)!, "kind_readers")).toEqual(fixtureEntries(kindFixture));
+    expect(inlineList(a.get(14)!, "session_class_functions")).toEqual(fixtureEntries(sessionClassFixture));
+    expect(inlineList(b.get(14)!, "kind_readers")).toEqual(fixtureEntries(kindFixture));
+    expect(inlineList(b.get(14)!, "session_class_functions")).toEqual(fixtureEntries(sessionClassFixture));
   });
-  it("check 14: the .mjs's substitution constant IS that literal (a drifted constant would make the run-time replace a silent no-op, leaving the default list in force)", () => {
-    const m = mjs.match(/const PARTNER_KIND_DEFAULT = "([^"]*)";/);
-    expect(m, "PARTNER_KIND_DEFAULT is not declared as a plain string constant").not.toBeNull();
-    expect(m![1]).toBe("ARRAY['private.actor_uid()']");
-    expect(a.get(14)!.split(m![1]!).length - 1, "the constant must occur exactly once in check 14's SQL").toBe(1);
+  it("check 14: the .mjs substitutes both fixtures between exactly these markers (a drifted marker would make the run-time replace a silent no-op, leaving the default list in force)", () => {
+    for (const marker of ["kind_readers", "session_class_functions"]) {
+      expect(mjs, `${marker}: the .mjs does not substitute this marker`).toContain(`"${marker}"`);
+      expect(a.get(14)!.split(`/* ${marker} */`).length - 1, `${marker} must open exactly once in check 14`).toBe(1);
+      expect(a.get(14)!.split(`/* end_${marker} */`).length - 1, `${marker} must close exactly once in check 14`).toBe(1);
+    }
   });
 });

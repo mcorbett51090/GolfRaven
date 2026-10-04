@@ -156,7 +156,7 @@ const misplacedOrMisowned = psql(`
   WHERE p.prokind IN ('f', 'p') AND p.prosecdef
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
     AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e' AND e.extname IN ('postgis', 'pgtap', 'pgcrypto') AND (e.extname, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) IN (SELECT NULL::text, NULL::text, NULL::text, NULL::text WHERE false))
-    AND (n.nspname <> 'private' OR NOT (coalesce(r.rolname, '') = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])))
+    AND (n.nspname <> 'private' OR NOT (coalesce(r.rolname, '') = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])))
 `);
 for (const [fn, schema, owner] of misplacedOrMisowned) {
   failures.push(`SECURITY DEFINER function outside private/not owned by private_definer (or one of the six 0047 owner roles): ${fn} (schema=${schema}, owner=${owner})`);
@@ -173,7 +173,7 @@ const unregisteredPolicies = psql(`
   JOIN pg_class cl ON cl.oid = pol.polrelid
   JOIN pg_namespace n ON n.oid = cl.relnamespace
   CROSS JOIN pg_roles pr
-  WHERE pr.rolname = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])
+  WHERE pr.rolname = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])
     AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
     AND NOT EXISTS (
       SELECT 1 FROM private.definer_policy_allowlist al
@@ -515,7 +515,7 @@ for (const [schema, table, column] of missingRCompanion) {
 //     SET TRUE / INHERIT FALSE membership of the other two, and (0032, L2) no membership of an edge role carries
 //     ADMIN OPTION unless its holder is a superuser or a CREATEROLE role (the migrating role).
 //     (0047) The same closure covers edge_partner and edge_partner_minter (NOLOGIN, a member of nothing, edge_gateway their only member), and the six OWNER
-//     roles partner_session_toucher / _issuer / _flagger / partner_pin_verifier / _totp_verifier / _reauth_verifier: NOLOGIN, none of the attributes, a member of
+//     roles partner_session_toucher / _issuer / partner_pin_verifier / _totp_verifier / _reauth_verifier: NOLOGIN, none of the attributes, a member of
 //     nothing and with NO member (R5-L3, the 0041 form: the migrating role may keep ADMIN, never SET or INHERIT).
 //  10 every RLS policy that applies to edge_actor or edge_system (directly or through PUBLIC) is in
 //     private.edge_policy_allowlist with the same role, command and deparsed text, and every allowlist row
@@ -579,21 +579,21 @@ FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON 
 WHERE r.rolname IN ('edge_signin_minter', 'edge_partner', 'edge_partner_minter') AND m.rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter', 'edge_partner', 'edge_partner_minter')
 UNION ALL
 SELECT 'owner role is missing (migration 0047 creates it): ' || n.rolname
-FROM (VALUES ('partner_session_toucher'), ('partner_session_issuer'), ('partner_session_flagger'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) n(rolname)
+FROM (VALUES ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) n(rolname)
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = n.rolname)
 UNION ALL
 SELECT 'owner role attribute: ' || r.rolname || ' has ' || a.attr
 FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('CREATEROLE', r.rolcreaterole),
   ('CREATEDB', r.rolcreatedb), ('REPLICATION', r.rolreplication), ('INHERIT', r.rolinherit), ('LOGIN', r.rolcanlogin)) AS a(attr, is_on)
-WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.is_on
+WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.is_on
 UNION ALL
 SELECT 'owner role ' || m.rolname || ' is a member of ' || r.rolname || ' (an owner role must be a member of nothing)'
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE m.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+WHERE m.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
 UNION ALL
 SELECT 'role ' || m.rolname || ' is a member of owner role ' || r.rolname || ' (an owner role has no member; the migrating role may keep ADMIN only, never SET or INHERIT)'
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
   AND NOT m.rolsuper AND (NOT m.rolcreaterole OR am.set_option OR am.inherit_option)`],
   [10, "policy allowlist, both directions", `WITH live AS (
   SELECT n.nspname AS schema_name, cl.relname AS table_name, pol.polname AS policy_name, pol.oid AS pol_oid,
@@ -705,21 +705,21 @@ SELECT 'owner role holds a privilege that private.partner_owner_privilege does n
 FROM (
   SELECT o.rolname::text AS role_name, 'schema'::text AS object_kind, n.nspname::text AS object_name, a.privilege_type::text AS privilege, NULL::text AS column_name
   FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a JOIN pg_roles o ON o.oid = a.grantee
-  WHERE o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.grantee <> n.nspowner
+  WHERE o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.grantee <> n.nspowner
   UNION ALL
   SELECT o.rolname::text, 'relation', n.nspname || '.' || c.relname, a.privilege_type::text, NULL
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles o ON o.oid = a.grantee
   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND a.grantee <> c.relowner
-    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
   UNION ALL
   SELECT o.rolname::text, 'column', n.nspname || '.' || c.relname, a.privilege_type::text, att.attname::text
   FROM pg_attribute att JOIN pg_class c ON c.oid = att.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(att.attacl) a JOIN pg_roles o ON o.oid = a.grantee
   WHERE att.attnum > 0 AND NOT att.attisdropped
-    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
   UNION ALL
   SELECT o.rolname::text, 'function', p.oid::regprocedure::text, a.privilege_type::text, NULL
   FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a JOIN pg_roles o ON o.oid = a.grantee
-  WHERE a.grantee <> p.proowner AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+  WHERE a.grantee <> p.proowner AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
 ) a
 WHERE NOT EXISTS (SELECT 1 FROM private.partner_owner_privilege e
                   WHERE e.role_name = a.role_name AND e.object_kind = a.object_kind AND e.object_name = a.object_name AND e.privilege = a.privilege AND e.column_name IS NOT DISTINCT FROM a.column_name)
@@ -747,15 +747,19 @@ WHERE NOT EXISTS (
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\\n]*', '', 'g'), '(?:\\m(?:from|join|update|into|table|using)\\s+|,\\s*)(pg_[a-z_]+)\\M(?!\\.|\\s*\\()', 'gi') AS m
 WHERE p.prosecdef AND n.nspname IN ('app', 'api', 'private')`],
-  [14, "partner family: first-statement rule, no user-lane partner scope, no stray kind reader", `WITH RECURSIVE fam AS (
-  SELECT p.oid, n.nspname, p.proname, l.lanname,
-         trim(lower(regexp_replace(regexp_replace(regexp_replace(regexp_replace(p.prosrc, '/\\*.*?\\*/', ' ', 'g'), '--[^\\n]*', ' ', 'g'), '''([^'']|'''')*''', '''''', 'g'), '\\s+', ' ', 'g'))) AS body
+  [14, "partner family: first-statement rule, lexing limits, no EXCEPTION, class literal, no user-lane partner scope, no stray kind reader, lane-only EXECUTE", `WITH RECURSIVE fam AS (
+  SELECT p.oid, n.nspname, p.proname, l.lanname, p.prosrc AS raw,
+         n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS ident,
+         regexp_replace(p.prosrc, '((?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*))|(''(?:[^'']|'''')*'')', ' \\2', 'g') AS kept
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
   WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname LIKE '%\\_for\\_partner'
+), body AS (
+  SELECT f.*, trim(lower(regexp_replace(regexp_replace(f.kept, '''(?:[^'']|'''')*''', '''''', 'g'), '\\s+', ' ', 'g'))) AS b
+  FROM fam f
 ), first AS (
   SELECT f.oid, f.nspname, f.proname,
-         trim(split_part(CASE WHEN f.lanname = 'plpgsql' THEN coalesce(substring(f.body from '(?:^| )begin (.*)$'), '') ELSE f.body END, ';', 1)) AS stmt
-  FROM fam f
+         trim(split_part(CASE WHEN f.lanname = 'plpgsql' THEN coalesce(substring(f.b from '(?:^| )begin (.*)$'), '') ELSE f.b END, ';', 1)) AS stmt
+  FROM body f
 ), collapse(oid, nspname, proname, s, n) AS (
   SELECT oid, nspname, proname, stmt, 0 FROM first
   UNION ALL
@@ -766,39 +770,81 @@ FROM collapse c
 WHERE c.n = (SELECT max(c2.n) FROM collapse c2 WHERE c2.oid = c.oid)
   AND c.s !~ '^(perform |[a-z_][a-z0-9_]* := |select )private\\.partner_authorize\\s*( into [a-z_][a-z0-9_]*)?\\s*$'
 UNION ALL
+SELECT '(a0) a *_for_partner function body contains a dollar quote, a double-quoted identifier, a backslash, an E-string or a nested comment, which the first-statement check cannot lex: ' || f.ident
+FROM fam f
+WHERE strpos(f.raw, chr(36)) > 0 OR strpos(f.raw, chr(34)) > 0 OR strpos(f.raw, chr(92)) > 0 OR f.raw ~* '(^|[^a-z0-9_])e'''
+   OR strpos(f.kept, '/*') > 0 OR strpos(f.kept, '*/') > 0
+UNION ALL
+SELECT '(a2) a *_for_partner function has an EXCEPTION ... WHEN block, which could swallow the 42501 of private.partner_authorize: ' || f.ident
+FROM body f
+WHERE f.b ~ '\\mexception\\s+when\\M'
+UNION ALL
+SELECT '(a3) a *_for_partner function whose private.partner_authorize class is not a string literal in A0 / A0_KEEPALIVE / A1 / A2 / A3 (SESSION and PEEK only for a function named in supabase/tests/fixtures/partner_session_class_functions.txt): ' || c.ident
+FROM (
+  SELECT f.ident,
+         (regexp_match((regexp_match(f.kept, 'private\\.partner_authorize\\s*\\(([^;]*)\\)\\s*(?:;|$)', 'i'))[1], ',\\s*''([A-Za-z0-9_]+)''\\s*$'))[1] AS cls
+  FROM fam f
+) c
+WHERE c.cls IS NULL
+   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY[]::text[] /* end_session_class_functions */)))
+UNION ALL
 SELECT '(b) an edge_actor-executable definer outside the *_for_partner family evaluates partner scope: ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.prosecdef AND has_function_privilege('edge_actor', p.oid, 'EXECUTE')
-  AND p.proname NOT LIKE '%\\_for\\_partner' AND p.proname NOT LIKE 'partner\\_%' AND p.proname NOT LIKE 'bind\\_partner\\_%' AND p.proname NOT LIKE 'hit\\_partner\\_%'
-  AND (regexp_replace(regexp_replace(regexp_replace(p.prosrc, '/\\*.*?\\*/', ' ', 'g'), '--[^\\n]*', ' ', 'g'), '''([^'']|'''')*''', '''''', 'g')
-         ~* '\\m(has_facility_scope|has_trail_scope|has_sponsorship_scope|is_staff_or_manager_of_facility|is_manager_or_operator_of_facility|is_operator_of_facility|is_org_member|is_admin)\\M'
-       OR regexp_replace(regexp_replace(regexp_replace(p.prosrc, '/\\*.*?\\*/', ' ', 'g'), '--[^\\n]*', ' ', 'g'), '''([^'']|'''')*''', '''''', 'g') ~* '\\mpartner_(member|scope)\\M')
+  AND p.proname NOT LIKE '%\\_for\\_partner'
+  AND regexp_replace(p.prosrc, '(?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*)|(?:''(?:[^'']|'''')*'')', ' ', 'g')
+        ~* '\\m(has_facility_scope|has_trail_scope|has_sponsorship_scope|is_staff_or_manager_of_facility|is_manager_or_operator_of_facility|is_operator_of_facility|is_org_member|is_admin|partner_member|partner_scope)\\M'
 UNION ALL
-SELECT '(c) a function outside the *_for_partner family reads kind = ''partner'' (put it in the family, or name it in supabase/tests/fixtures/partner_kind_readers.txt): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+SELECT '(c) a function outside the *_for_partner family reads the actor binding or kind = ''partner'' (put it in the family, or name it in supabase/tests/fixtures/partner_kind_readers.txt after review): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f'
-  AND p.proname NOT LIKE '%\\_for\\_partner' AND p.proname NOT LIKE 'partner\\_%' AND p.proname NOT LIKE 'bind\\_partner\\_%' AND p.proname NOT LIKE 'hit\\_partner\\_%'
-  AND regexp_replace(regexp_replace(p.prosrc, '/\\*.*?\\*/', ' ', 'g'), '--[^\\n]*', ' ', 'g') ~ '''partner'''
-  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (ARRAY['private.actor_uid()'])`],
+  AND p.proname NOT LIKE '%\\_for\\_partner'
+  AND (regexp_replace(p.prosrc, '((?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*))|(''(?:[^'']|'''')*'')', ' \\2', 'g') ~ '''partner'''
+       OR regexp_replace(p.prosrc, '((?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*))|(''(?:[^'']|'''')*'')', ' \\2', 'g') ~* '\\m(actor_binding|partner_binding(_kind|_session)?)\\M')
+  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (/* kind_readers */ ARRAY['private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.actor_uid()', 'private.bind_actor_internal(p_uid uuid, p_kind text)', 'private.bind_partner_session(p_token_hash text)', 'private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)', 'private.delete_my_data_for_actor()', 'private.export_my_data_for_actor()', 'private.offline_code_bound_staff()', 'private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)', 'private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)', 'private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)', 'private.partner_authority_revoke_sessions()', 'private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.partner_binding_session()', 'private.partner_pin_grant_consume()', 'private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)', 'private.signin_bound_user(p_who text)', 'private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)'] /* end_kind_readers */)
+UNION ALL
+SELECT '(d) a *_for_partner function is EXECUTE-able by edge_actor, edge_system or PUBLIC (the partner lane is edge_partner alone): ' || n.nspname || '.' || p.proname
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname LIKE '%\\_for\\_partner'
+  AND (has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_system', p.oid, 'EXECUTE')
+       OR EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))
+`],
+  [15, "every GUC-keyed private_definer policy is closed under a partner binding", `SELECT '(15) a GUC-keyed private_definer policy is OPEN under a partner binding (add AND private.partner_binding_kind() IS DISTINCT FROM ''partner'' to the USING / WITH CHECK that reads the setting): ' || n.nspname || '.' || c.relname || '.' || pol.polname
+FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
+  AND ((coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%'
+        AND pg_get_expr(pol.polqual, pol.polrelid) NOT LIKE '%partner_binding_kind() IS DISTINCT FROM ''partner''%')
+       OR (coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%'
+           AND pg_get_expr(pol.polwithcheck, pol.polrelid) NOT LIKE '%partner_binding_kind() IS DISTINCT FROM ''partner''%'))`],
 ];
-// 14 (c): the named exception list (supabase/tests/fixtures/partner_kind_readers.txt, one `schema.name(identity args)` per line, '#' comments): functions OUTSIDE the *_for_partner
-// family that may read kind = 'partner'. Today that is private.actor_uid() alone (it returns NULL for a partner binding). The check's SQL carries the SAME default list inline (so the
-// matrix twin in 10_function_inventory.sql is textually identical); this reader substitutes the fixture's list for it, and the matrix twin is held to the fixture by
-// supabase/tests/unit/function-inventory-check-parity.test.ts.
-const partnerKindFixturePath = join(import.meta.dirname, "..", "..", "supabase", "tests", "fixtures", "partner_kind_readers.txt");
-let partnerKindExceptions = [];
-try {
-  partnerKindExceptions = readFileSync(partnerKindFixturePath, "utf8")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"));
-} catch (err) {
-  failures.push(`could not read ${partnerKindFixturePath}: ${err.message}`);
+// 14 (c) and (a3): two named lists, each a checked-in fixture (one `schema.name(identity args)` per line, '#' comments).
+//   * supabase/tests/fixtures/partner_kind_readers.txt: functions OUTSIDE the *_for_partner family that may read the actor binding or kind = 'partner' (the binders and their
+//     helpers, the user-lane `_for_actor` definers that refuse a non-user binding, actor_uid()). Every entry was reviewed; a new reader is added HERE, after review, or put in the family.
+//   * supabase/tests/fixtures/partner_session_class_functions.txt: the *_for_partner functions that may use the SESSION or PEEK class (no scope, no aal gate: sign-out, lock, GET
+//     session). Empty today. A function acting on an object must use A0 / A0_KEEPALIVE / A1 / A2 / A3 with a facility or trail.
+// The check's SQL carries the SAME lists inline between marker comments (so the matrix twin in 10_function_inventory.sql is textually identical); this reader substitutes each fixture's
+// list between its markers, and the matrix twin is held to the fixtures by supabase/tests/unit/function-inventory-check-parity.test.ts.
+// KNOWN LIMIT of (c): it is a TRIPWIRE, not a proof. It lexes the body (comments dropped, strings kept) and looks for the literal 'partner', the table actor_binding and the helpers
+// partner_binding*; a body that assembles those names at run time (EXECUTE 'private.actor_' || 'binding') evades it, as does one that reads the kind through a function it calls (which
+// is itself on the list, or flagged). Closing that would mean forbidding dynamic SQL in every definer; it is documented, and review reads each new list entry.
+function readFixtureList(name) {
+  const path = join(import.meta.dirname, "..", "..", "supabase", "tests", "fixtures", name);
+  try {
+    return readFileSync(path, "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"));
+  } catch (err) {
+    failures.push(`could not read ${path}: ${err.message}`);
+    return [];
+  }
 }
-const PARTNER_KIND_DEFAULT = "ARRAY['private.actor_uid()']";
-const partnerKindArray = partnerKindExceptions.length > 0 ? `ARRAY[${partnerKindExceptions.map((e) => `'${e.replaceAll("'", "''")}'`).join(", ")}]` : "ARRAY[]::text[]";
+const sqlArray = (items) => (items.length > 0 ? `ARRAY[${items.map((e) => `'${e.replaceAll("'", "''")}'`).join(", ")}]` : "ARRAY[]::text[]");
+const withList = (sql, marker, items) => sql.replace(new RegExp(`/\\* ${marker} \\*/.*?/\\* end_${marker} \\*/`, "s"), () => `/* ${marker} */ ${sqlArray(items)} /* end_${marker} */`);
+const partnerKindExceptions = readFixtureList("partner_kind_readers.txt");
+const partnerSessionClassFunctions = readFixtureList("partner_session_class_functions.txt");
 for (const [num, label, rawSql] of edgeChecks) {
-  const sql = num === 14 ? rawSql.replace(PARTNER_KIND_DEFAULT, partnerKindArray) : rawSql;
+  const sql = num === 14 ? withList(withList(rawSql, "kind_readers", partnerKindExceptions), "session_class_functions", partnerSessionClassFunctions) : rawSql;
   for (const [violation] of psql(sql)) {
     failures.push(`edge-role check ${num} (${label}): ${violation}`);
   }

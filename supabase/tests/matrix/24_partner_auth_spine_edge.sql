@@ -27,6 +27,8 @@ SELECT encode(digest(gen_random_uuid()::text, 'sha256'), 'hex') AS h_ok,
        encode(digest(gen_random_uuid()::text, 'sha256'), 'hex') AS h_idle,
        encode(digest(gen_random_uuid()::text, 'sha256'), 'hex') AS h_abs,
        encode(digest(gen_random_uuid()::text, 'sha256'), 'hex') AS h_unknown \gset
+-- the INSERT guards (S1.1a gate M2) refuse a back-dated session: switched off for the seeding only, switched back on right after (the cleanup file proves they are on)
+ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
 INSERT INTO app.partner_credential (id, user_id, credential_id, public_key, alg)
 VALUES ('ee24e000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-1000000000a1', decode(repeat('e1', 32), 'hex'), decode(repeat('e2', 77), 'hex'), -7);
 INSERT INTO app.partner_session (id, token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind, mint_nonce_hash,
@@ -37,6 +39,7 @@ VALUES ('ee24e000-0000-0000-0000-0000000000a1', :'h_ok', '00000000-0000-0000-000
         'sign_in', decode(repeat('e4', 32), 'hex'), decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex')),
        ('ee24e000-0000-0000-0000-0000000000a3', :'h_abs', '00000000-0000-0000-0000-1000000000a1', 'ee24e000-0000-0000-0000-0000000000c1', 1, now() - interval '9 hours', now(), now() - interval '1 minute',
         'sign_in', decode(repeat('e5', 32), 'hex'), decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'));
+ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;
 DROP POLICY zz24e_cred ON app.partner_credential;
 DROP POLICY zz24e_sess ON app.partner_session;
 REVOKE SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session FROM CURRENT_USER;

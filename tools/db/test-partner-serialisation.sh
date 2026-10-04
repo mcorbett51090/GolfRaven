@@ -54,6 +54,7 @@ epoch() { hq "SELECT extract(epoch FROM clock_timestamp())"; }
 cleanup() {
   set +e
   # one statement batch per concern: a refusal in one must not roll back the others
+  hx "ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;" 2>/dev/null
   hx "SET ROLE private_definer; DROP FUNCTION IF EXISTS private.zz24s_action(text, text); DROP FUNCTION IF EXISTS private.zz24s_writer(uuid);" 2>/dev/null
   hx "DELETE FROM app.partner_session WHERE id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_credential WHERE id::text LIKE 'ee24f000-%';" 2>/dev/null
   hx "SET ROLE service_role; DELETE FROM app.partner_member WHERE org_id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_scope WHERE org_id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_org WHERE id::text LIKE 'ee24f000-%';" 2>/dev/null
@@ -101,6 +102,8 @@ hx "
   INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG1', 'fac_x'), ('$ORG2', 'fac_x'), ('$ORG3', 'fac_x'), ('$ORG4', 'fac_x'), ('$ORG5', 'fac_x');
   INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$U1', '$ORG1', 'staff'), ('$U2', '$ORG2', 'staff'), ('$U3', '$ORG3', 'staff'), ('$U4', '$ORG1', 'staff'), ('$U5', '$ORG4', 'staff'), ('$U6', '$ORG5', 'staff');
   RESET ROLE;"
+# the INSERT guards (S1.1a gate M2) refuse a back-dated session (S5 and S6 are last seen 5 minutes ago): off for the seeding only, back on right after
+hx "ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;"
 for n in 1 2 3 4 5 6; do
   eval "u=\$U$n; c=\$C$n; s=\$S$n; h=\$H$n"
   seen="now()"; { [ "$n" = 5 ] || [ "$n" = 6 ]; } && seen="now() - interval '5 minutes'"  # S5's last_seen_at is old enough that the action WRITES it (FOR NO KEY UPDATE path)
@@ -112,6 +115,7 @@ for n in 1 2 3 4 5 6; do
     VALUES ('$s', '$h', '$u', '$c', 1, now() - interval '1 hour', $seen, now() + interval '8 hours', 'sign_in', decode(md5('ser-n$n') || md5('ser-nb$n'), 'hex'),
             decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'));"
 done
+hx "ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;"
 
 action_sql() { # $1 = token hash, $2 = seconds to hold the transaction open after the authorize, $3 = optional extra statement
   cat <<SQL

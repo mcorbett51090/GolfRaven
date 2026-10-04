@@ -4,7 +4,7 @@
 -- 23_offline_totp_seed_rows.sql: a temporary CURRENT_USER policy on each FORCE-RLS table.
 \set QUIET 1
 BEGIN;
-SELECT plan(2);
+SELECT plan(3);
 GRANT SELECT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
 CREATE POLICY zz24e_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz24e_sess ON app.partner_session FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
@@ -12,6 +12,7 @@ SELECT is((SELECT count(*)::int FROM app.partner_session WHERE id::text LIKE 'ee
 DELETE FROM app.partner_session WHERE id::text LIKE 'ee24e000-%';
 DELETE FROM app.partner_credential WHERE id::text LIKE 'ee24e000-%';
 SELECT is((SELECT count(*)::int FROM app.partner_session WHERE id::text LIKE 'ee24e000-%') + (SELECT count(*)::int FROM app.partner_credential WHERE id::text LIKE 'ee24e000-%'), 0, 'the edge file''s committed fixtures are deleted');
+SELECT is((SELECT count(*)::int FROM pg_trigger WHERE tgrelid IN ('app.partner_session'::regclass, 'app.partner_credential'::regclass) AND tgname IN ('partner_session_insert_guard_trg', 'partner_credential_insert_guard_trg') AND tgenabled = 'O'), 2, 'the INSERT guards are enabled again after the edge file''s seeding');
 DROP POLICY zz24e_cred ON app.partner_credential;
 DROP POLICY zz24e_sess ON app.partner_session;
 REVOKE SELECT, UPDATE, DELETE ON app.partner_credential, app.partner_session FROM CURRENT_USER;

@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(115);
+SELECT plan(134);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -201,7 +201,7 @@ SELECT is(
           SELECT NULL::text, NULL::text, NULL::text, NULL::text WHERE false
         )
       )
-      AND (n.nspname <> 'private' OR NOT (coalesce(r.rolname, '') = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])))
+      AND (n.nspname <> 'private' OR NOT (coalesce(r.rolname, '') = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])))
   ),
   0,
   'every non-allowlisted-extension SECURITY DEFINER function anywhere lives in schema private AND is owned by private_definer (or, 0047, one of the six partner owner roles)'
@@ -269,7 +269,7 @@ SELECT is(
     JOIN pg_class cl ON cl.oid = pol.polrelid
     JOIN pg_namespace n ON n.oid = cl.relnamespace
     CROSS JOIN pg_roles pr
-    WHERE pr.rolname = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])
+    WHERE pr.rolname = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])
       AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
       AND NOT EXISTS (
         SELECT 1 FROM private.definer_policy_allowlist al
@@ -606,21 +606,21 @@ FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON 
 WHERE r.rolname IN ('edge_signin_minter', 'edge_partner', 'edge_partner_minter') AND m.rolname IN ('edge_actor', 'edge_system', 'edge_signin_minter', 'edge_partner', 'edge_partner_minter')
 UNION ALL
 SELECT 'owner role is missing (migration 0047 creates it): ' || n.rolname
-FROM (VALUES ('partner_session_toucher'), ('partner_session_issuer'), ('partner_session_flagger'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) n(rolname)
+FROM (VALUES ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) n(rolname)
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = n.rolname)
 UNION ALL
 SELECT 'owner role attribute: ' || r.rolname || ' has ' || a.attr
 FROM pg_roles r CROSS JOIN LATERAL (VALUES ('SUPERUSER', r.rolsuper), ('BYPASSRLS', r.rolbypassrls), ('CREATEROLE', r.rolcreaterole),
   ('CREATEDB', r.rolcreatedb), ('REPLICATION', r.rolreplication), ('INHERIT', r.rolinherit), ('LOGIN', r.rolcanlogin)) AS a(attr, is_on)
-WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.is_on
+WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.is_on
 UNION ALL
 SELECT 'owner role ' || m.rolname || ' is a member of ' || r.rolname || ' (an owner role must be a member of nothing)'
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE m.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+WHERE m.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
 UNION ALL
 SELECT 'role ' || m.rolname || ' is a member of owner role ' || r.rolname || ' (an owner role has no member; the migrating role may keep ADMIN only, never SET or INHERIT)'
 FROM pg_auth_members am JOIN pg_roles r ON r.oid = am.roleid JOIN pg_roles m ON m.oid = am.member
-WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+WHERE r.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
   AND NOT m.rolsuper AND (NOT m.rolcreaterole OR am.set_option OR am.inherit_option)
   ) AS t(v)
 $f$;
@@ -747,21 +747,21 @@ SELECT 'owner role holds a privilege that private.partner_owner_privilege does n
 FROM (
   SELECT o.rolname::text AS role_name, 'schema'::text AS object_kind, n.nspname::text AS object_name, a.privilege_type::text AS privilege, NULL::text AS column_name
   FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a JOIN pg_roles o ON o.oid = a.grantee
-  WHERE o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.grantee <> n.nspowner
+  WHERE o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier') AND a.grantee <> n.nspowner
   UNION ALL
   SELECT o.rolname::text, 'relation', n.nspname || '.' || c.relname, a.privilege_type::text, NULL
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles o ON o.oid = a.grantee
   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND a.grantee <> c.relowner
-    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
   UNION ALL
   SELECT o.rolname::text, 'column', n.nspname || '.' || c.relname, a.privilege_type::text, att.attname::text
   FROM pg_attribute att JOIN pg_class c ON c.oid = att.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace CROSS JOIN LATERAL aclexplode(att.attacl) a JOIN pg_roles o ON o.oid = a.grantee
   WHERE att.attnum > 0 AND NOT att.attisdropped
-    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+    AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
   UNION ALL
   SELECT o.rolname::text, 'function', p.oid::regprocedure::text, a.privilege_type::text, NULL
   FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a JOIN pg_roles o ON o.oid = a.grantee
-  WHERE a.grantee <> p.proowner AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
+  WHERE a.grantee <> p.proowner AND o.rolname IN ('partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier')
 ) a
 WHERE NOT EXISTS (SELECT 1 FROM private.partner_owner_privilege e
                   WHERE e.role_name = a.role_name AND e.object_kind = a.object_kind AND e.object_name = a.object_name AND e.privilege = a.privilege AND e.column_name IS NOT DISTINCT FROM a.column_name)
@@ -801,14 +801,18 @@ $f$;
 CREATE FUNCTION pg_temp.edge_check_14() RETURNS text[] LANGUAGE sql AS $f$
   SELECT array_agg(v ORDER BY v) FROM (
 WITH RECURSIVE fam AS (
-  SELECT p.oid, n.nspname, p.proname, l.lanname,
-         trim(lower(regexp_replace(regexp_replace(regexp_replace(regexp_replace(p.prosrc, '/\*.*?\*/', ' ', 'g'), '--[^\n]*', ' ', 'g'), '''([^'']|'''')*''', '''''', 'g'), '\s+', ' ', 'g'))) AS body
+  SELECT p.oid, n.nspname, p.proname, l.lanname, p.prosrc AS raw,
+         n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS ident,
+         regexp_replace(p.prosrc, '((?:/\*(?:[^*]|\*+[^*/])*\*+/)|(?:--[^\n]*))|(''(?:[^'']|'''')*'')', ' \2', 'g') AS kept
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
   WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname LIKE '%\_for\_partner'
+), body AS (
+  SELECT f.*, trim(lower(regexp_replace(regexp_replace(f.kept, '''(?:[^'']|'''')*''', '''''', 'g'), '\s+', ' ', 'g'))) AS b
+  FROM fam f
 ), first AS (
   SELECT f.oid, f.nspname, f.proname,
-         trim(split_part(CASE WHEN f.lanname = 'plpgsql' THEN coalesce(substring(f.body from '(?:^| )begin (.*)$'), '') ELSE f.body END, ';', 1)) AS stmt
-  FROM fam f
+         trim(split_part(CASE WHEN f.lanname = 'plpgsql' THEN coalesce(substring(f.b from '(?:^| )begin (.*)$'), '') ELSE f.b END, ';', 1)) AS stmt
+  FROM body f
 ), collapse(oid, nspname, proname, s, n) AS (
   SELECT oid, nspname, proname, stmt, 0 FROM first
   UNION ALL
@@ -819,20 +823,57 @@ FROM collapse c
 WHERE c.n = (SELECT max(c2.n) FROM collapse c2 WHERE c2.oid = c.oid)
   AND c.s !~ '^(perform |[a-z_][a-z0-9_]* := |select )private\.partner_authorize\s*( into [a-z_][a-z0-9_]*)?\s*$'
 UNION ALL
+SELECT '(a0) a *_for_partner function body contains a dollar quote, a double-quoted identifier, a backslash, an E-string or a nested comment, which the first-statement check cannot lex: ' || f.ident
+FROM fam f
+WHERE strpos(f.raw, chr(36)) > 0 OR strpos(f.raw, chr(34)) > 0 OR strpos(f.raw, chr(92)) > 0 OR f.raw ~* '(^|[^a-z0-9_])e'''
+   OR strpos(f.kept, '/*') > 0 OR strpos(f.kept, '*/') > 0
+UNION ALL
+SELECT '(a2) a *_for_partner function has an EXCEPTION ... WHEN block, which could swallow the 42501 of private.partner_authorize: ' || f.ident
+FROM body f
+WHERE f.b ~ '\mexception\s+when\M'
+UNION ALL
+SELECT '(a3) a *_for_partner function whose private.partner_authorize class is not a string literal in A0 / A0_KEEPALIVE / A1 / A2 / A3 (SESSION and PEEK only for a function named in supabase/tests/fixtures/partner_session_class_functions.txt): ' || c.ident
+FROM (
+  SELECT f.ident,
+         (regexp_match((regexp_match(f.kept, 'private\.partner_authorize\s*\(([^;]*)\)\s*(?:;|$)', 'i'))[1], ',\s*''([A-Za-z0-9_]+)''\s*$'))[1] AS cls
+  FROM fam f
+) c
+WHERE c.cls IS NULL
+   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY[]::text[] /* end_session_class_functions */)))
+UNION ALL
 SELECT '(b) an edge_actor-executable definer outside the *_for_partner family evaluates partner scope: ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.prosecdef AND has_function_privilege('edge_actor', p.oid, 'EXECUTE')
-  AND p.proname NOT LIKE '%\_for\_partner' AND p.proname NOT LIKE 'partner\_%' AND p.proname NOT LIKE 'bind\_partner\_%' AND p.proname NOT LIKE 'hit\_partner\_%'
-  AND (regexp_replace(regexp_replace(regexp_replace(p.prosrc, '/\*.*?\*/', ' ', 'g'), '--[^\n]*', ' ', 'g'), '''([^'']|'''')*''', '''''', 'g')
-         ~* '\m(has_facility_scope|has_trail_scope|has_sponsorship_scope|is_staff_or_manager_of_facility|is_manager_or_operator_of_facility|is_operator_of_facility|is_org_member|is_admin)\M'
-       OR regexp_replace(regexp_replace(regexp_replace(p.prosrc, '/\*.*?\*/', ' ', 'g'), '--[^\n]*', ' ', 'g'), '''([^'']|'''')*''', '''''', 'g') ~* '\mpartner_(member|scope)\M')
+  AND p.proname NOT LIKE '%\_for\_partner'
+  AND regexp_replace(p.prosrc, '(?:/\*(?:[^*]|\*+[^*/])*\*+/)|(?:--[^\n]*)|(?:''(?:[^'']|'''')*'')', ' ', 'g')
+        ~* '\m(has_facility_scope|has_trail_scope|has_sponsorship_scope|is_staff_or_manager_of_facility|is_manager_or_operator_of_facility|is_operator_of_facility|is_org_member|is_admin|partner_member|partner_scope)\M'
 UNION ALL
-SELECT '(c) a function outside the *_for_partner family reads kind = ''partner'' (put it in the family, or name it in supabase/tests/fixtures/partner_kind_readers.txt): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+SELECT '(c) a function outside the *_for_partner family reads the actor binding or kind = ''partner'' (put it in the family, or name it in supabase/tests/fixtures/partner_kind_readers.txt after review): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f'
-  AND p.proname NOT LIKE '%\_for\_partner' AND p.proname NOT LIKE 'partner\_%' AND p.proname NOT LIKE 'bind\_partner\_%' AND p.proname NOT LIKE 'hit\_partner\_%'
-  AND regexp_replace(regexp_replace(p.prosrc, '/\*.*?\*/', ' ', 'g'), '--[^\n]*', ' ', 'g') ~ '''partner'''
-  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (ARRAY['private.actor_uid()'])
+  AND p.proname NOT LIKE '%\_for\_partner'
+  AND (regexp_replace(p.prosrc, '((?:/\*(?:[^*]|\*+[^*/])*\*+/)|(?:--[^\n]*))|(''(?:[^'']|'''')*'')', ' \2', 'g') ~ '''partner'''
+       OR regexp_replace(p.prosrc, '((?:/\*(?:[^*]|\*+[^*/])*\*+/)|(?:--[^\n]*))|(''(?:[^'']|'''')*'')', ' \2', 'g') ~* '\m(actor_binding|partner_binding(_kind|_session)?)\M')
+  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (/* kind_readers */ ARRAY['private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.actor_uid()', 'private.bind_actor_internal(p_uid uuid, p_kind text)', 'private.bind_partner_session(p_token_hash text)', 'private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)', 'private.delete_my_data_for_actor()', 'private.export_my_data_for_actor()', 'private.offline_code_bound_staff()', 'private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)', 'private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)', 'private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)', 'private.partner_authority_revoke_sessions()', 'private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.partner_binding_session()', 'private.partner_pin_grant_consume()', 'private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)', 'private.signin_bound_user(p_who text)', 'private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)'] /* end_kind_readers */)
+UNION ALL
+SELECT '(d) a *_for_partner function is EXECUTE-able by edge_actor, edge_system or PUBLIC (the partner lane is edge_partner alone): ' || n.nspname || '.' || p.proname
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname LIKE '%\_for\_partner'
+  AND (has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_system', p.oid, 'EXECUTE')
+       OR EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))
+
+  ) AS t(v)
+$f$;
+
+CREATE FUNCTION pg_temp.edge_check_15() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(v ORDER BY v) FROM (
+SELECT '(15) a GUC-keyed private_definer policy is OPEN under a partner binding (add AND private.partner_binding_kind() IS DISTINCT FROM ''partner'' to the USING / WITH CHECK that reads the setting): ' || n.nspname || '.' || c.relname || '.' || pol.polname
+FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
+  AND ((coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%'
+        AND pg_get_expr(pol.polqual, pol.polrelid) NOT LIKE '%partner_binding_kind() IS DISTINCT FROM ''partner''%')
+       OR (coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%'
+           AND pg_get_expr(pol.polwithcheck, pol.polrelid) NOT LIKE '%partner_binding_kind() IS DISTINCT FROM ''partner''%'))
   ) AS t(v)
 $f$;
 
@@ -1138,16 +1179,16 @@ SELECT tests.clear_actor();
 ALTER ROLE partner_session_toucher NOLOGIN;
 ALTER ROLE partner_totp_verifier NOCREATEROLE;
 CREATE ROLE zz_owner_member NOLOGIN;
-GRANT partner_session_flagger TO zz_owner_member WITH SET TRUE;
+GRANT partner_totp_verifier TO zz_owner_member WITH SET TRUE;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v LIKE 'role zz_owner_member is a member of owner role partner_session_flagger%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0047, R5-L3): an ordinary role holds an owner role WITH SET (it could become the owner of every flagger function)');
+SELECT is((SELECT bool_or(v LIKE 'role zz_owner_member is a member of owner role partner_totp_verifier%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0047, R5-L3): an ordinary role holds an owner role WITH SET (it could become the owner of every flagger function)');
 SELECT tests.clear_actor();
-REVOKE partner_session_flagger FROM zz_owner_member;
-GRANT partner_session_flagger TO zz_owner_member WITH ADMIN TRUE, SET FALSE, INHERIT FALSE;
+REVOKE partner_totp_verifier FROM zz_owner_member;
+GRANT partner_totp_verifier TO zz_owner_member WITH ADMIN TRUE, SET FALSE, INHERIT FALSE;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v LIKE 'role zz_owner_member is a member of owner role partner_session_flagger%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0047): an ordinary role holds ADMIN on an owner role (it could re-grant SET to itself)');
+SELECT is((SELECT bool_or(v LIKE 'role zz_owner_member is a member of owner role partner_totp_verifier%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0047): an ordinary role holds ADMIN on an owner role (it could re-grant SET to itself)');
 SELECT tests.clear_actor();
-REVOKE partner_session_flagger FROM zz_owner_member;
+REVOKE partner_totp_verifier FROM zz_owner_member;
 GRANT zz_owner_member TO partner_pin_verifier;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE 'owner role partner_pin_verifier is a member of zz_owner_member%') FROM unnest(pg_temp.edge_check_9()) v), true, 'check 9 MUST FAIL (0047): an owner role made a member of another role');
@@ -1205,11 +1246,11 @@ SELECT tests.clear_actor();
 REVOKE SELECT ON app.partner_credential FROM partner_session_issuer;
 -- (a table-level REVOKE removes the COLUMN-level grants too: put the issuer's own back)
 GRANT SELECT (id, user_id, credential_id, revoked_at) ON app.partner_credential TO partner_session_issuer;
-GRANT USAGE ON SCHEMA public TO partner_session_flagger;
+GRANT USAGE ON SCHEMA public TO partner_totp_verifier;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v = 'owner role holds a privilege that private.partner_owner_privilege does not list: partner_session_flagger USAGE ON schema public') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL (0047): the flagger granted USAGE on a schema');
+SELECT is((SELECT bool_or(v = 'owner role holds a privilege that private.partner_owner_privilege does not list: partner_totp_verifier USAGE ON schema public') FROM unnest(pg_temp.edge_check_12()) v), true, 'check 12 MUST FAIL (0047): the flagger granted USAGE on a schema');
 SELECT tests.clear_actor();
-REVOKE USAGE ON SCHEMA public FROM partner_session_flagger;
+REVOKE USAGE ON SCHEMA public FROM partner_totp_verifier;
 SET LOCAL ROLE private_definer;
 GRANT EXECUTE ON FUNCTION private.partner_authorize(text, text, app.partner_role[], text) TO partner_totp_verifier;
 RESET ROLE;
@@ -1238,7 +1279,7 @@ CREATE FUNCTION pg_temp.definer_policy_unregistered() RETURNS int LANGUAGE sql A
   JOIN pg_class cl ON cl.oid = pol.polrelid
   JOIN pg_namespace n ON n.oid = cl.relnamespace
   CROSS JOIN pg_roles pr
-  WHERE pr.rolname = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_session_flagger', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])
+  WHERE pr.rolname = ANY (ARRAY['private_definer', 'partner_session_toucher', 'partner_session_issuer', 'partner_pin_verifier', 'partner_totp_verifier', 'partner_reauth_verifier'])
     AND (pr.oid = ANY (pol.polroles) OR pol.polroles @> ARRAY[0]::oid[])
     AND NOT EXISTS (
       SELECT 1 FROM private.definer_policy_allowlist al
@@ -1256,7 +1297,7 @@ SELECT tests.clear_actor();
 DROP POLICY zz_toucher_probe ON app.partner_session;
 CREATE POLICY zz_public_partner_probe ON app.partner_credential FOR SELECT TO PUBLIC USING (true);
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is(pg_temp.definer_policy_unregistered(), 7, 'definer policies MUST FAIL (0047): a PUBLIC policy applies to private_definer AND all six owner roles, and none of the seven has a row');
+SELECT is(pg_temp.definer_policy_unregistered(), 6, 'definer policies MUST FAIL (0047): a PUBLIC policy applies to private_definer AND all five owner roles, and none of the six has a row');
 SELECT tests.clear_actor();
 DROP POLICY zz_public_partner_probe ON app.partner_credential;
 -- a row registered for the WRONG role does not satisfy the policy of another (the role_name is part of the match)
@@ -1291,10 +1332,12 @@ DECLARE
   v_uid uuid;
 BEGIN
   -- a comment first is fine: comments are stripped before the statement is read
-  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], coalesce('SESSION', 'A0'));
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A1');
   RETURN v_uid;
 END
 $z$;
+REVOKE EXECUTE ON FUNCTION private.zz_ok1_for_partner() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.zz_ok2_for_partner() FROM PUBLIC;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_14(), NULL::text[], 'check 14 (a): a PERFORM and an assignment of private.partner_authorize as the first statement (after a comment) both pass');
 SELECT tests.clear_actor();
@@ -1381,20 +1424,192 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(c)%private.zz_kind_probe()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (c) MUST FAIL: a function outside the family that reads kind = ''partner''');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_kind_probe();
-CREATE FUNCTION private.partner_zz_kind_probe() RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$
-  SELECT EXISTS (SELECT 1 FROM private.actor_binding b WHERE b.backend_pid = pg_backend_pid() AND b.kind = 'partner')
+CREATE FUNCTION private.zz_kindread_for_partner() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0');
+  RETURN EXISTS (SELECT 1 FROM private.actor_binding b WHERE b.backend_pid = pg_backend_pid() AND b.kind = 'partner');
+END
 $z$;
+REVOKE EXECUTE ON FUNCTION private.zz_kindread_for_partner() FROM PUBLIC;
 CREATE FUNCTION private.zz_kind_probe() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$
   SELECT 1 /* b.kind = 'partner' only in a comment */
 $z$;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_14(), NULL::text[], 'check 14 (c): the same read INSIDE the partner family, and the literal only in a comment, are clean (controls)');
 SELECT tests.clear_actor();
-DROP FUNCTION private.partner_zz_kind_probe();
+DROP FUNCTION private.zz_kindread_for_partner();
 DROP FUNCTION private.zz_kind_probe();
+-- ---- S1.1a gate L2: the evasions the first version of check 14 let through ----
+-- (a0) text the first-statement reader cannot lex is refused outright: a dollar-quoted string, a quoted identifier, a backslash / E-string, a nested comment
+CREATE FUNCTION private.zz_dq_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+DECLARE
+  v_x text := $q$ begin perform private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0'); $q$;
+BEGIN
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a0)%private.zz_dq_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a0) MUST FAIL: a dollar-quoted string in DECLARE that spells ''begin perform private.partner_authorize(...)'' (it used to satisfy the first-statement reader)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_dq_for_partner();
+CREATE FUNCTION private.zz_qi_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+DECLARE
+  "x begin perform private.partner_authorize(NULL, NULL, NULL, 'A0');" int := 1;
+BEGIN
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a0)%private.zz_qi_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a0) MUST FAIL: a double-quoted identifier that spells the call');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_qi_for_partner();
+CREATE FUNCTION private.zz_nc_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  /* outer /* inner */ PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0'); */
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a0)%private.zz_nc_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a0) MUST FAIL: a NESTED block comment that hides the call from a naive comment stripper (a comment to PostgreSQL, a first statement to a regex)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_nc_for_partner();
+CREATE FUNCTION private.zz_es_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+DECLARE
+  v_x text := E'it\'s';
+BEGIN
+  PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0');
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a0)%private.zz_es_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a0) MUST FAIL: an E-string with a backslash escape (it would end the string early for the quote stripper)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_es_for_partner();
+-- (a2) an EXCEPTION block can swallow the 42501 the seam raises
+CREATE FUNCTION private.zz_ex_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0');
+  RETURN 1;
+EXCEPTION WHEN OTHERS THEN
+  RETURN 0;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a2)%private.zz_ex_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a2) MUST FAIL: the call is first, but an outer EXCEPTION WHEN OTHERS swallows its refusal');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_ex_for_partner();
+-- (a3) the class: a literal, and SESSION / PEEK only for a named function (a class-SESSION call is a scope no-op)
+CREATE FUNCTION private.zz_sess_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  PERFORM private.partner_authorize(NULL, NULL, NULL, 'SESSION');
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a3)%private.zz_sess_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a3) MUST FAIL: an unlisted *_for_partner function calling the seam with class SESSION (no scope, no aal gate)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_sess_for_partner();
+CREATE FUNCTION private.zz_peek_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  PERFORM private.partner_authorize(NULL, NULL, NULL, 'PEEK');
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a3)%private.zz_peek_for_partner()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a3) MUST FAIL: the same with class PEEK');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_peek_for_partner();
+CREATE FUNCTION private.zz_var_for_partner(p_class text) RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], p_class);
+  RETURN 1;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(a3)%private.zz_var_for_partner(p_class text)') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (a3) MUST FAIL: a class that is a variable, not a literal (the caller would choose the gate)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_var_for_partner(text);
+-- (b) is no longer exempt by NAME: a partner_-named edge_actor-executable function that evaluates scope is a finding
+CREATE FUNCTION private.partner_zz_scope_probe() RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT private.has_facility_scope('00000000-0000-0000-0000-000000000000'::uuid, 'fac_x') $z$;
+GRANT EXECUTE ON FUNCTION private.partner_zz_scope_probe() TO edge_actor;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(b)%private.partner_zz_scope_probe') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (b) MUST FAIL: a function NAMED partner_* (it used to be exempt) that evaluates scope and is executable by edge_actor');
+SELECT tests.clear_actor();
+DROP FUNCTION private.partner_zz_scope_probe();
+-- (c) also catches a reader that goes through the binding table or the helpers, with no 'partner' literal in the body; and a partner_-named function is no longer exempt by name
+CREATE FUNCTION private.zz_helper_probe() RETURNS text LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT private.partner_binding_kind() $z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(c)%private.zz_helper_probe()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (c) MUST FAIL: a function outside the family that reads the kind through private.partner_binding_kind() (no ''partner'' literal)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_helper_probe();
+CREATE FUNCTION private.partner_zz_kind_probe() RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$
+  SELECT EXISTS (SELECT 1 FROM private.actor_binding b WHERE b.backend_pid = pg_backend_pid() AND b.kind = 'partner')
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(c)%private.partner_zz_kind_probe()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (c) MUST FAIL: a function named partner_* outside the family (it used to be exempt by name) reading the binding');
+SELECT tests.clear_actor();
+DROP FUNCTION private.partner_zz_kind_probe();
+-- KNOWN LIMIT of (c), pinned: a body that ASSEMBLES the names at run time is not seen (the check is a tripwire; the limit is stated in verify-function-inventory.mjs and the design)
+CREATE FUNCTION private.zz_dyn_probe() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+DECLARE
+  v_t text := 'private.actor_' || 'binding';
+  v_k text := 'part' || 'ner';
+  v_r boolean;
+BEGIN
+  EXECUTE 'SELECT EXISTS (SELECT 1 FROM ' || v_t || ' WHERE kind = ' || quote_literal(v_k) || ')' INTO v_r;
+  RETURN v_r;
+END
+$z$;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(c)%private.zz_dyn_probe()') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (c) KNOWN LIMIT: a body that assembles ''private.actor_'' || ''binding'' and ''part'' || ''ner'' at run time is NOT found (pinned: the tripwire''s stated limit)');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_dyn_probe();
+-- (d) a *_for_partner function must not be executable by edge_actor, edge_system or PUBLIC
+CREATE FUNCTION private.zz_pub_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
+BEGIN
+  PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0');
+  RETURN 1;
+END
+$z$;
+GRANT EXECUTE ON FUNCTION private.zz_pub_for_partner() TO PUBLIC;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(d)%private.zz_pub_for_partner') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (d) MUST FAIL: a *_for_partner function left with the default PUBLIC EXECUTE');
+SELECT tests.clear_actor();
+REVOKE EXECUTE ON FUNCTION private.zz_pub_for_partner() FROM PUBLIC;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(d)%private.zz_pub_for_partner') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (d): the same function with PUBLIC revoked is clean (control)');
+SELECT tests.clear_actor();
+GRANT EXECUTE ON FUNCTION private.zz_pub_for_partner() TO edge_actor;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(d)%private.zz_pub_for_partner') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (d) MUST FAIL: a *_for_partner function executable by edge_actor');
+SELECT tests.clear_actor();
+DROP FUNCTION private.zz_pub_for_partner();
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_14(), NULL::text[], 'check 14: clean again after every fixture function is dropped');
 SELECT tests.clear_actor();
+
+-- ---- check 15 (S1.1a gate H1): every GUC-keyed private_definer policy is closed under a partner binding ----
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(pg_temp.edge_check_15(), NULL::text[], 'check 15: every GUC-keyed private_definer policy in the schema carries the partner conjunct (section 8c of 0047 closed 102 of them)');
+SELECT tests.clear_actor();
+CREATE TABLE app.zz15_t (id int, owner_id uuid);
+ALTER TABLE app.zz15_t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY zz15_open ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_open') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: a new GUC-keyed private_definer SELECT policy with no partner conjunct (what a later slice''s window would look like)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_open ON app.zz15_t;
+CREATE POLICY zz15_wc ON app.zz15_t FOR INSERT TO private_definer WITH CHECK (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_wc') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: the same in a WITH CHECK only (an INSERT window)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_wc ON app.zz15_t;
+CREATE POLICY zz15_closed ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_closed') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: the same policy WITH the conjunct is clean (control)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_closed ON app.zz15_t;
+DROP TABLE app.zz15_t;
 
 SELECT * FROM finish();
 ROLLBACK;

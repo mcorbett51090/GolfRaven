@@ -19,9 +19,12 @@ SELECT plan(291);
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
 -- ----------------------------------------------------------------------------
-GRANT edge_partner, edge_partner_minter, edge_actor, partner_session_toucher, partner_session_issuer, partner_session_flagger,
+GRANT edge_partner, edge_partner_minter, edge_actor, partner_session_toucher, partner_session_issuer,
       partner_pin_verifier, partner_totp_verifier, partner_reauth_verifier, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_enrolment_token, app.partner_auth_challenge, app.partner_rp_config TO CURRENT_USER;
+-- the INSERT guards (S1.1a gate M2) refuse a back-dated or pre-revoked fixture: they are switched off for the SEEDING below and switched back on, with their own cells, in PA-4e
+ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
 CREATE POLICY zz24_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz24_sess ON app.partner_session FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz24_tok ON app.partner_enrolment_token FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
@@ -98,7 +101,7 @@ SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure, 'private.partner_session_policy(uuid)'::regprocedure,
              'private.partner_session_guard()'::regprocedure, 'private.partner_member_role_invariant()'::regprocedure, 'private.partner_scope_invariant()'::regprocedure)
            AND (SELECT count(*) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
-                                            ('partner_session_toucher'), ('partner_session_issuer'), ('partner_session_flagger'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
+                                            ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
                 WHERE has_function_privilege(r.n, p.oid, 'EXECUTE')) = 0), 5,
   'PA-1: partner_authorize, the policy helper and the three trigger functions are executable by NO role at all but their owner');
 SELECT is((SELECT p.provolatile::text FROM pg_proc p WHERE p.oid = 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure), 'v',
@@ -108,7 +111,7 @@ SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND p.pr
 -- the guard is SECURITY DEFINER with an empty search_path, owned by a role that owns no table and so cannot disable it (R5-N1)
 SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] FROM pg_proc p WHERE p.oid = 'private.partner_session_guard()'::regprocedure), true, 'R5-N1: partner_session_guard is SECURITY DEFINER with search_path = ''''');
 SELECT is((SELECT count(*)::int FROM pg_class c WHERE c.relnamespace IN ('app'::regnamespace, 'private'::regnamespace) AND c.relkind = 'r'
-           AND c.relowner IN ('private_definer'::regrole, 'partner_session_toucher'::regrole, 'partner_session_issuer'::regrole, 'partner_session_flagger'::regrole,
+           AND c.relowner IN ('private_definer'::regrole, 'partner_session_toucher'::regrole, 'partner_session_issuer'::regrole,
                               'partner_pin_verifier'::regrole, 'partner_totp_verifier'::regrole, 'partner_reauth_verifier'::regrole)), 0,
   'R5-N1: private_definer and the six owner roles own NO table in app or private, so none of them can ALTER TABLE ... DISABLE TRIGGER');
 SELECT throws_ok($$SET LOCAL ROLE private_definer; ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_guard_trg$$, '42501', NULL, 'R5-N1: private_definer (the guard''s owner) cannot disable the guard');
@@ -785,10 +788,10 @@ SET LOCAL ROLE partner_reauth_verifier;
 SELECT is(pg_temp.upd_rows(format($$UPDATE app.partner_session SET reauth_until = clock_timestamp() + interval '4 minutes' WHERE id = %L$$, :'s_mx')), 0, 'PA-4c (ii): the reauth verifier role, planted: manager_x''s session: 0 rows');
 SELECT is(pg_temp.upd_rows(format($$UPDATE app.partner_session SET reauth_until = clock_timestamp() + interval '4 minutes' WHERE id = %L$$, :'s_sx')), 1, 'PA-4c (ii): control: its own bound session: 1 row');
 RESET ROLE;
--- the authority triggers and the toucher / flagger / issuer have NO GUC in any policy: the planted values change nothing about THEIR reach (the toucher's policy is USING (true): its reach is its COLUMN grants)
-SET LOCAL ROLE partner_session_flagger;
-SELECT is(pg_temp.upd_rows(format($$UPDATE app.partner_session SET flagged_at = clock_timestamp(), flag_reason = 'planted' WHERE id = %L$$, :'s_mx')), 1, 'PA-4c (ii): the flagger (S1.6) reaches any live session by DESIGN (flagged_at / flag_reason only): its reach is a column grant, identical with and without the GUCs');
-SELECT throws_ok(format($$UPDATE app.partner_session SET revoked_at = clock_timestamp() WHERE id = %L$$, :'s_mx'), '42501', NULL, 'PA-4c (ii): ... but it cannot REVOKE (no column grant)');
+-- the authority triggers and the toucher / issuer have NO GUC in any policy: the planted values change nothing about THEIR reach (the toucher's policy is USING (true): its reach is its COLUMN grants)
+SET LOCAL ROLE partner_session_toucher;
+SELECT is(pg_temp.upd_rows(format($$UPDATE app.partner_session SET authority_touched_at = clock_timestamp() WHERE id = %L$$, :'s_mx')), 1, 'PA-4c (ii): the toucher reaches any live session by DESIGN (revoke / touch columns only): its reach is a column grant, identical with and without the GUCs');
+SELECT throws_ok(format($$UPDATE app.partner_session SET aal = 2 WHERE id = %L$$, :'s_mx'), '42501', NULL, 'PA-4c (ii): ... but it cannot raise aal (no column grant)');
 RESET ROLE;
 -- the policies themselves: not one policy on partner_session for any role names current_setting except the delete_my_data pair
 SELECT is((SELECT array_agg(pol.polname::text ORDER BY pol.polname::text) FROM pg_policy pol WHERE pol.polrelid = 'app.partner_session'::regclass
