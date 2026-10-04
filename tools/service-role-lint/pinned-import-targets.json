@@ -3,6 +3,8 @@
   "npm:@noble/hashes@2.4.0/utils.js",
   "npm:@noble/hashes@2.4.0/sha2.js",
   "npm:tz-lookup@6.1.25",
+  "npm:@simplewebauthn/server@14.0.3",
+  "npm:@simplewebauthn/server@14.0.3/helpers",
   "https://deno.land/std@0.224.0/http/server.ts",
   "https://deno.land/x/postgresjs@v3.4.5/mod.js"
 ]

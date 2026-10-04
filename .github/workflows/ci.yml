@@ -397,7 +397,8 @@ jobs:
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
-            supabase/functions/_shared/privileged.ts
+            supabase/functions/_shared/privileged.ts \
+            supabase/functions/_shared/partner/webauthn.ts
 
       - name: deno cache --frozen (proves the pinned hashes, tamper-evident)
         # P3c gate round 3, should-fix: "deno check --frozen doesn't
@@ -454,7 +455,24 @@ jobs:
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
-            supabase/functions/_shared/privileged.ts
+            supabase/functions/_shared/privileged.ts \
+            supabase/functions/_shared/partner/webauthn.ts
+
+      - name: Run supabase/tests/deno-unit (Deno, network denied, cached packages only)
+        # Partner auth S0 (docs/security/partner-auth-design.md, PA-0a and PA-0b): the software-authenticator suite for the partner-lane WebAuthn
+        # wrapper (supabase/functions/_shared/partner/webauthn.ts). It is PURE (no database, no network), so it runs apart from the Deno integration
+        # suite that tools/db/test.sh runs against a cluster with --allow-net. `deno cache --frozen` first puts the lockfile-pinned graph (the 25
+        # packages of @simplewebauthn/server and the std assert module) in the cache; the test run then uses `--cached-only --deny-net`, so it
+        # proves BOTH that nothing is fetched while the tests run (a download would fail here) and that no test opens a socket (a socket would be
+        # a permission error). Never add --allow-net to this step; the last test in the suite also fails if net access was granted. The step must
+        # always run and its failure must fail the job: supabase/tests/unit/ci-function-lists.test.ts pins both (no step-level `if:` or
+        # `continue-on-error:`), and pins the flags.
+        run: |
+          set -euo pipefail
+          deno cache --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen \
+            supabase/tests/deno-unit/partner-webauthn.deno.test.ts
+          deno test --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen --cached-only --deny-net \
+            supabase/tests/deno-unit/
 
       - name: deno cache --frozen tamper test (proves the pin-proof step itself catches a real tamper)
         # P3c gate round 4: "Add a real tamper test to CI: copy the lock
@@ -513,7 +531,8 @@ jobs:
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
-            supabase/functions/_shared/privileged.ts 2>&1)
+            supabase/functions/_shared/privileged.ts \
+            supabase/functions/_shared/partner/webauthn.ts 2>&1)
           TAMPER_EXIT=$?
           set -e
           echo "$TAMPER_OUTPUT"
@@ -599,6 +618,49 @@ jobs:
             exit 1
           fi
           echo "deno cache --frozen npm tamper test: PASS (tampered npm integrity rejected: exit code $NPM_TAMPER_EXIT)"
+
+      - name: deno cache --frozen npm tamper test (partner auth S0, PA-0b - the @simplewebauthn/server pin and a transitive of its graph, fresh DENO_DIR)
+        # Partner auth S0 (docs/security/partner-auth-design.md, section 7 and PA-0b): "the tamper step still fails on a changed hash". The
+        # zod-only npm tamper test above proves the MECHANISM; this one proves it for the new graph, which is five times the size of the old one (30
+        # npm entries, 25 of them new): a flipped integrity on the DIRECT pin, and on one TRANSITIVE package (@levischuck/tiny-cbor, which the
+        # wrapper's own `decodeAttestationObject` runs on client bytes), must each be rejected by `deno cache --frozen` over the wrapper. Same two
+        # rules as the step above: a FRESH, empty DENO_DIR per target (npm integrity is checked only when a tarball is DOWNLOADED, so a warm cache
+        # would let a tampered lock through and this step would fail for the wrong reason), and the SPECIFIC "Tarball checksum did not match"
+        # message that names the tampered package (not just any non-zero exit, which a network failure would also give). Needs the npm registry,
+        # exactly as the zod test above does.
+        run: |
+          set -euo pipefail
+          export TAMPER_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TAMPER_DIR"' EXIT
+          for TARGET in "@simplewebauthn/server@14.0.3" "@levischuck/tiny-cbor@0.2.11"; do
+          SLUG="$(echo "$TARGET" | tr -c 'A-Za-z0-9.\n' '_')"
+          export TAMPER_TARGET="$TARGET" TAMPER_LOCK="$TAMPER_DIR/$SLUG.lock"
+          python3 - <<'PY'
+          import json, os, sys
+          f = open("supabase/tests/deno.lock"); data = json.load(f); f.close()
+          npm = data["npm"]
+          target = os.environ["TAMPER_TARGET"]
+          if target not in npm: sys.exit(f"npm tamper test setup: {target!r} not found in supabase/tests/deno.lock npm table -- the pin moved; update this step's own target list to match")
+          orig = npm[target]["integrity"]
+          npm[target]["integrity"] = orig[:7] + ("A" if orig[7] != "A" else "B") + orig[8:]
+          out = open(os.environ["TAMPER_LOCK"], "w"); json.dump(data, out); out.close()
+          PY
+          set +e
+          PARTNER_TAMPER_OUTPUT=$(DENO_DIR="$TAMPER_DIR/deno-dir-$SLUG" deno cache --config supabase/functions/deno.json --lock="$TAMPER_LOCK" --frozen \
+            supabase/functions/_shared/partner/webauthn.ts 2>&1)
+          PARTNER_TAMPER_EXIT=$?
+          set -e
+          echo "$PARTNER_TAMPER_OUTPUT"
+          if [ "$PARTNER_TAMPER_EXIT" -eq 0 ]; then
+            echo "FAILED: 'deno cache --frozen' exited 0 against a lockfile with a deliberately tampered integrity hash for $TARGET (fresh DENO_DIR) -- the partner-auth npm pins are not actually verified." >&2
+            exit 1
+          fi
+          if ! echo "$PARTNER_TAMPER_OUTPUT" | grep -F "Tarball checksum did not match" | grep -qF "$TARGET"; then
+            echo "FAILED: 'deno cache --frozen' exited $PARTNER_TAMPER_EXIT against the lockfile tampered for $TARGET but without a 'Tarball checksum did not match ... $TARGET' message -- this does not look like the integrity failure this step exists to prove (could be a network error). Output above." >&2
+            exit 1
+          fi
+          echo "deno cache --frozen partner npm tamper test: PASS for $TARGET (tampered integrity rejected: exit code $PARTNER_TAMPER_EXIT)"
+          done
 
   gitleaks:
     name: gitleaks scan (git history + working tree/bundles)
