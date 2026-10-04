@@ -10,7 +10,7 @@
 -- reduced as int.from_bytes(mac[:4], 'big') % 10000, zero padded to 4 digits, so a change to the derivation (the label, the field order, the separators, the encoding,
 -- the reduction, the key, the hash) fails here, not in production. supabase/tests/unit/course-qr-pin-vector.test.ts pins the same vectors from the TypeScript side.
 
-SELECT plan(113);
+SELECT plan(126);
 
 -- ----------------------------------------------------------------------------
 -- 0. Structure: the two new tables
@@ -35,7 +35,7 @@ SELECT has_table('app', 'course_pin_epoch_log', 'app.course_pin_epoch_log exists
 SELECT columns_are('app', 'course_pin_epoch_log', ARRAY['facility_id', 'pin_epoch', 'previous_epoch', 'effective_from'], 'the epoch log holds no user id and no PIN');
 SELECT col_is_pk('app', 'course_pin_epoch_log', ARRAY['facility_id', 'pin_epoch'], 'one log row per (facility, epoch)');
 SELECT has_table('private', 'course_pin_proof', 'private.course_pin_proof exists (the PIN gate passed in this transaction)');
-SELECT columns_are('private', 'course_pin_proof', ARRAY['backend_pid', 'xact', 'actor_uid', 'facility_id', 'local_date'], 'the proof holds the actor, the facility and the date, never the PIN');
+SELECT columns_are('private', 'course_pin_proof', ARRAY['backend_pid', 'xact', 'actor_uid', 'facility_id', 'local_date', 'pin_at'], 'the proof holds the actor, the facility, the date and the instant, never the PIN');
 SELECT is((SELECT bool_and(c.relrowsecurity AND c.relforcerowsecurity) FROM pg_class c WHERE c.oid IN ('app.course_pin_epoch_log'::regclass, 'private.course_pin_proof'::regclass)), true, 'both have RLS enabled AND forced');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n), (VALUES ('app.course_pin_epoch_log'), ('private.course_pin_proof')) t(n)
            WHERE has_any_column_privilege(r.n, t.n, 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, t.n, 'DELETE,TRUNCATE,TRIGGER')), 0,
@@ -44,6 +44,19 @@ SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid IN ('app.cours
   'the epoch log and the proof have policies for private_definer ONLY');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_epoch_log' AND p.proname NOT IN ('course_pin_epoch_log_write', 'course_pin_epoch_at')), 0,
   'no function but the log''s trigger function (the only writer) and the epoch reader names the epoch log');
+SELECT has_table('app', 'course_pin_pepper_epoch', 'app.course_pin_pepper_epoch exists (WHEN the current pepper took effect: the operator writes it, never inferred from Vault timestamps)');
+SELECT columns_are('app', 'course_pin_pepper_epoch', ARRAY['effective_from', 'recorded_at'], 'the pepper epoch holds a time only: no user id, no secret');
+SELECT is((SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'app.course_pin_pepper_epoch'::regclass), true, 'the pepper epoch has RLS enabled AND forced');
+SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)
+           WHERE has_any_column_privilege(r.n, 'app.course_pin_pepper_epoch', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, 'app.course_pin_pepper_epoch', 'DELETE,TRUNCATE,TRIGGER')), 0, 'no client role and no edge role holds ANY privilege on the pepper epoch');
+SELECT is((has_table_privilege('service_role', 'app.course_pin_pepper_epoch', 'SELECT') AND has_table_privilege('service_role', 'app.course_pin_pepper_epoch', 'INSERT') AND NOT has_table_privilege('service_role', 'app.course_pin_pepper_epoch', 'UPDATE,DELETE')), true, 'service_role (the operator) may read and INSERT the pepper epoch, never rewrite or delete a row of it');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_pepper_epoch' AND p.proname <> 'course_pin_matches'), 0, 'only the matcher reads the pepper epoch');
+-- the proof's lifetime is ENFORCED: a deferred constraint trigger deletes the backend's rows at COMMIT (the real-commit proof is in the rows file)
+SELECT is((SELECT count(*)::int FROM pg_trigger t WHERE t.tgrelid = 'private.course_pin_proof'::regclass AND NOT t.tgisinternal AND t.tgname = 'course_pin_proof_expire_trg' AND t.tgconstraint <> 0 AND t.tgdeferrable AND t.tginitdeferred
+             AND t.tgfoid = 'private.course_pin_proof_expire()'::regprocedure AND (t.tgtype & 4) = 4), 1, 'the proof table has a DEFERRABLE INITIALLY DEFERRED constraint trigger on INSERT that runs the expiry function');
+-- the two trigger functions: the migrating role's loan of EXECUTE (needed once, for CREATE TRIGGER) is taken back: the ACL is EXACTLY the owner's, in both harness modes, for every role that ran the migration
+SELECT is((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = 'private.course_pin_epoch_log_write()'::regprocedure), '{private_definer=X/private_definer}', 'course_pin_epoch_log_write: the ACL is exactly the owner''s (no lend left for postgres or migration_owner)');
+SELECT is((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = 'private.course_pin_proof_expire()'::regprocedure), '{private_definer=X/private_definer}', 'course_pin_proof_expire: the ACL is exactly the owner''s (no lend left for postgres or migration_owner)');
 -- the key table's CHECKs (seeded the way 0035 / 0039 / 0045 seed a FORCE-RLS table with no policy for the harness role: a temporary CURRENT_USER policy, rolled back)
 BEGIN;
 CREATE POLICY current_user_seed_course_qr_key_24 ON app.course_qr_key FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
@@ -83,7 +96,7 @@ SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge
 SELECT is((SELECT count(*)::int FROM pg_class c WHERE c.oid IN ('app.purchase_evidence'::regclass, 'app.marker_credit'::regclass, 'app.course_qr_token'::regclass, 'app.facility_qr'::regclass,
            'app.facility_programme'::regclass, 'app.trail_programme'::regclass, 'app.catalog_facility'::regclass) AND NOT (c.relrowsecurity AND c.relforcerowsecurity)), 0,
   'FORCE ROW LEVEL SECURITY is intact on every existing table the scan touches');
-SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polname LIKE 'pd\_marker\_scan\_%' AND p.polroles = ARRAY['private_definer'::regrole::oid]), 21, 'the migration added exactly 21 policies, every one for private_definer only');
+SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polname LIKE 'pd\_marker\_scan\_%' AND p.polroles = ARRAY['private_definer'::regrole::oid]), 22, 'the migration added exactly 22 policies, every one for private_definer only');
 SELECT is((SELECT array_agg(p.polname || ' ' || coalesce(pg_get_expr(p.polqual, p.polrelid), '-') || ' / ' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '-') ORDER BY p.polname) FROM pg_policy p WHERE p.polname LIKE 'pd\_marker\_scan\_%'), ARRAY[
   'pd_marker_scan_alarm_insert - / (private.actor_uid() IS NOT NULL)',
   'pd_marker_scan_alarm_select (private.actor_uid() IS NOT NULL) / -',
@@ -97,6 +110,7 @@ SELECT is((SELECT array_agg(p.polname || ' ' || coalesce(pg_get_expr(p.polqual, 
   'pd_marker_scan_facility_qr_read (private.actor_uid() IS NOT NULL) / -',
   'pd_marker_scan_facility_read (private.actor_uid() IS NOT NULL) / -',
   'pd_marker_scan_key_read (private.actor_uid() IS NOT NULL) / -',
+  'pd_marker_scan_pepper_epoch_select true / -',
   'pd_marker_scan_proof_delete (backend_pid = pg_backend_pid()) / -',
   'pd_marker_scan_proof_insert - / ((backend_pid = pg_backend_pid()) AND (actor_uid = private.actor_uid()))',
   'pd_marker_scan_proof_select ((backend_pid = pg_backend_pid()) AND (actor_uid = private.actor_uid())) / -',
@@ -107,12 +121,12 @@ SELECT is((SELECT array_agg(p.polname || ' ' || coalesce(pg_get_expr(p.polqual, 
   'pd_marker_scan_token_update (private.actor_uid() IS NOT NULL) / ((used_by_user = private.actor_uid()) AND (used_at IS NOT NULL))',
   'pd_marker_scan_trail_programme_read (private.actor_uid() IS NOT NULL) / -'
 ],
-  'the 21 policies, expression for expression (a broadened USING or WITH CHECK fails here: the token UPDATE may only mark a token used BY THE BOUND ACTOR, the purchase and credit writes are the bound actor''s own rows)');
+  'the 22 policies, expression for expression (a broadened USING or WITH CHECK fails here: the token UPDATE may only mark a token used BY THE BOUND ACTOR, the purchase and credit writes are the bound actor''s own rows)');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polname LIKE 'pd\_marker\_scan\_%'
              AND (coalesce(pg_get_expr(p.polqual, p.polrelid), '') || ' ' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')) ~* 'current_setting|set_config'), 0,
   'HARD RULE: not one of them is keyed on a settable GUC (each is keyed on the actor BINDING, private.actor_uid())');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polname LIKE 'pd\_marker\_scan\_%'
-             AND (coalesce(pg_get_expr(p.polqual, p.polrelid), '') || ' ' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')) NOT LIKE '%private.actor_uid()%'), 3, 'every one of them names private.actor_uid() but three: the epoch log''s SELECT and INSERT (the logging trigger runs with no actor on an operator rotation) and the proof''s DELETE (this backend''s own dead rows)');
+             AND (coalesce(pg_get_expr(p.polqual, p.polrelid), '') || ' ' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')) NOT LIKE '%private.actor_uid()%'), 4, 'every one of them names private.actor_uid() but four: the epoch log''s SELECT and INSERT (the logging trigger runs with no actor on an operator rotation), the pepper epoch''s SELECT (no personal data) and the proof''s DELETE (keyed on THIS BACKEND, never a GUC: the proof''s own expiry deletes the backend''s rows at COMMIT)');
 
 -- ----------------------------------------------------------------------------
 -- 2. The pepper: readable by nobody but the one derivation function; the function posture
@@ -122,7 +136,7 @@ SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p W
   'the pepper: private.course_pin_derive (the current pepper) and private.course_pin_matches (which also reads the previous one)');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n), (VALUES
              ('private.course_pin_derive(text, date, integer)'), ('private.course_pin_from_key(text, text, date, integer)'), ('private.course_pin_matches(text, date, integer, text, timestamptz)'),
-             ('private.course_pin_epoch_at(text, timestamptz)'), ('private.course_pin_epoch_log_write()'), ('private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)')) f(n)
+             ('private.course_pin_epoch_at(text, timestamptz)'), ('private.course_pin_epoch_log_write()'), ('private.course_pin_proof_expire()'), ('private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)')) f(n)
            WHERE has_function_privilege(r.n, f.n, 'EXECUTE')), 0, 'the pepper: no role at all may EXECUTE the derivation, the pure core, the matcher, the epoch reader, the log writer or the co-signal check');
 SELECT is((SELECT bool_and(p.proacl::text !~ '(^\{|,)=') FROM pg_proc p WHERE p.oid IN ('private.course_pin_derive(text, date, integer)'::regprocedure, 'private.course_pin_matches(text, date, integer, text, timestamptz)'::regprocedure,
              'private.course_pin_from_key(text, text, date, integer)'::regprocedure, 'private.course_pin_epoch_at(text, timestamptz)'::regprocedure, 'private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)'::regprocedure)),
@@ -207,12 +221,24 @@ SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, NULL, now()), fal
 SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '9072', now() - interval '1 hour'), true, 'matches: with NO previous pepper an earlier instant is judged under the current one (the plain consequence of a rotation without one)');
 ROLLBACK;
 BEGIN;
+-- a previous pepper ALONE does nothing: with no pepper_epoch row nothing says when the current one took effect, so every instant is judged under the current pepper
 INSERT INTO vault.secrets (name, secret) VALUES ('course_pin_pepper', repeat('p', 40)), ('course_pin_pepper_previous', repeat('q', 40));
 SET LOCAL ROLE private_definer;
-SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '6623', now() - interval '1 hour'), true, 'PEPPER ROTATION: an instant BEFORE the current pepper took effect is judged under the previous pepper (a queued scan still verifies)');
+SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '6623', now() - interval '1 hour'), false, 'PEPPER ROTATION: a previous pepper with NO app.course_pin_pepper_epoch row is never used (the old pepper is not a standing second key)');
+SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '9072', now() - interval '1 hour'), true, 'PEPPER ROTATION: ... the current pepper judges every instant');
+ROLLBACK;
+BEGIN;
+INSERT INTO vault.secrets (name, secret) VALUES ('course_pin_pepper', repeat('p', 40)), ('course_pin_pepper_previous', repeat('q', 40));
+SET LOCAL ROLE service_role;
+INSERT INTO app.course_pin_pepper_epoch (effective_from) VALUES (now() - interval '30 minutes');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '6623', now() - interval '1 hour'), true, 'PEPPER ROTATION: an instant BEFORE the current pepper took effect (the operator-written effective time) is judged under the previous pepper (a queued scan still verifies)');
 SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '9072', now() - interval '1 hour'), false, 'PEPPER ROTATION: ... and the current pepper''s PIN is not what was displayed then');
 SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '9072', now()), true, 'PEPPER ROTATION: an instant after it is judged under the current pepper');
 SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '6623', now()), false, 'PEPPER ROTATION: ... and the previous pepper''s PIN no longer verifies for a scan made now');
+SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '9072', now() - interval '20 minutes'), true, 'PEPPER ROTATION: the effective time is the TABLE''s, not Vault''s created_at (the secrets were created just now, yet an instant 20 minutes ago, after the effective time, is judged under the current pepper)');
+SELECT is(private.course_pin_matches('fac_x', '2030-01-02', 0, '6623', now() - interval '20 minutes'), false, 'PEPPER ROTATION: ... and the previous pepper does not verify there');
 ROLLBACK;
 BEGIN;
 INSERT INTO vault.secrets (name, secret) VALUES ('course_pin_pepper', repeat('p', 40)), ('course_pin_pepper_previous', repeat('q', 31));
@@ -296,16 +322,16 @@ ROLLBACK;
 -- ----------------------------------------------------------------------------
 SET ROLE service_role;
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('course_pin_derive', 'course_qr_public_key_for_actor', 'course_pin_attempt_for_actor', 'marker_scan_for_actor', 'marker_cosignal_attach_for_actor',
-             'facility_programme_pin_epoch_monotonic', 'course_qr_token_single_use', 'course_pin_from_key', 'course_pin_matches', 'course_pin_epoch_at', 'course_pin_epoch_log_write', 'marker_cosignal_check')), 12, 'registry: all twelve new functions are in private.function_inventory');
+             'facility_programme_pin_epoch_monotonic', 'course_qr_token_single_use', 'course_pin_from_key', 'course_pin_matches', 'course_pin_epoch_at', 'course_pin_epoch_log_write', 'course_pin_proof_expire', 'marker_cosignal_check')), 13, 'registry: all thirteen new functions are in private.function_inventory');
 SELECT is((SELECT array_agg(function_name ORDER BY function_name) FROM private.function_inventory
            WHERE function_name IN ('course_pin_derive', 'course_qr_public_key_for_actor', 'course_pin_attempt_for_actor', 'marker_scan_for_actor', 'marker_cosignal_attach_for_actor') AND expected_edge_actor),
   ARRAY['course_pin_attempt_for_actor', 'course_qr_public_key_for_actor', 'marker_cosignal_attach_for_actor', 'marker_scan_for_actor'], 'registry: edge_actor is expected on exactly the four wrappers (not the derivation core)');
 SELECT is((SELECT count(*)::int FROM private.function_inventory
-           WHERE function_name IN ('course_pin_derive', 'course_qr_public_key_for_actor', 'course_pin_attempt_for_actor', 'marker_scan_for_actor', 'marker_cosignal_attach_for_actor', 'facility_programme_pin_epoch_monotonic', 'course_qr_token_single_use', 'course_pin_from_key', 'course_pin_matches', 'course_pin_epoch_at', 'course_pin_epoch_log_write', 'marker_cosignal_check')
+           WHERE function_name IN ('course_pin_derive', 'course_qr_public_key_for_actor', 'course_pin_attempt_for_actor', 'marker_scan_for_actor', 'marker_cosignal_attach_for_actor', 'facility_programme_pin_epoch_monotonic', 'course_qr_token_single_use', 'course_pin_from_key', 'course_pin_matches', 'course_pin_epoch_at', 'course_pin_epoch_log_write', 'course_pin_proof_expire', 'marker_cosignal_check')
              AND (expected_anon OR expected_authenticated OR expected_service_role OR expected_edge_system)), 0, 'registry: no other role is expected on any of them');
-SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd\_marker\_scan\_%' AND scoped), 21, 'registry: all 21 private_definer policies are in the allow-list, each scoped');
+SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd\_marker\_scan\_%' AND scoped), 22, 'registry: all 22 private_definer policies are in the allow-list, each scoped');
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd\_marker\_scan\_%' AND using_expr IS NULL AND with_check_expr IS NULL), 0, 'registry: and each carries its recorded expression');
-SELECT is((SELECT count(*)::int FROM private.pii_retention_policy WHERE table_name IN ('course_qr_key', 'course_pin_alarm', 'course_pin_epoch_log', 'course_pin_proof')), 0, 'registry: none of the new tables holds personal data at rest (the proof lives one transaction), so none is in the retention policy');
+SELECT is((SELECT count(*)::int FROM private.pii_retention_policy WHERE table_name IN ('course_qr_key', 'course_pin_alarm', 'course_pin_epoch_log', 'course_pin_pepper_epoch', 'course_pin_proof')), 0, 'registry: none of the new tables holds personal data at rest (the proof is deleted at COMMIT: a real-commit cell in the rows file proves the table empty), so none is in the retention policy');
 RESET ROLE;
 
 SELECT * FROM finish();

@@ -146,8 +146,14 @@ INSERT INTO app.marker_credit (id, user_id, trail_id, facility_id, purchase_evid
 -- The co-signals' EVIDENCE ROWS (what the Edge writes before it calls the scan: the database reads each one back, private.marker_cosignal_check). One accepted, facility-level foreground_checkin row
 -- per fix id used below, owned by the player that uses it, at its facility, with the claimed grade and the fix's captured time (the same `now()` the tokens above were issued at: t0).
 SELECT now() AS t0 \gset
+-- The DERIVED FIX a qualifying co-signal's evidence row carries (what the Edge's gradeFix writes into summary.fix): from the app, not simulated, foreground, a live challenge, 10 m accuracy, a
+-- polygon geometry of a play-verified facility, inside the buffer, with an attestation token of the row's grade. The database checks every one of these (marker_cosignal_check).
+CREATE FUNCTION pg_temp.qfix(p_fix text, p_fac text, p_grade text, p_at timestamptz, p_ld date) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $f$
+  SELECT jsonb_build_object('fixId', p_fix, 'facilityId', p_fac, 'fromApp', true, 'simulated', false, 'foreground', true, 'challenge', 'live', 'token', jsonb_build_object('present', true, 'grade', p_grade),
+    'verificationTier', 'play-verified', 'geometryKind', 'polygon', 'insideBuffer', true, 'accuracyMeters', 10, 'capturedAt', (extract(epoch FROM p_at) * 1000)::bigint, 'localDate', p_ld::text)
+$f$;
 INSERT INTO app.evidence (id, user_id, source, source_ref, facility_id, summary, attestation_grade, local_date, input_hash, status)
-SELECT v.ev, v.u::uuid, 'foreground_checkin', 'fix:' || v.fix, v.fac, jsonb_build_object('localDate', ((v.at AT TIME ZONE f.tz)::date)::text, 'fix', jsonb_build_object('fixId', v.fix, 'capturedAt', (extract(epoch FROM v.at) * 1000)::bigint)),
+SELECT v.ev, v.u::uuid, 'foreground_checkin', 'fix:' || v.fix, v.fac, jsonb_build_object('localDate', ((v.at AT TIME ZONE f.tz)::date)::text, 'fix', pg_temp.qfix(v.fix, v.fac, v.grade, v.at, (v.at AT TIME ZONE f.tz)::date)),
        v.grade::app.attestation_grade, (v.at AT TIME ZONE f.tz)::date, 'h-' || v.fix, 'accepted'
 FROM (VALUES
   ('fixA1', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', (now())::timestamptz, 'ee240000-0000-0000-0000-00000000f001'),
@@ -214,14 +220,14 @@ FROM (VALUES
   ('fixN9', 'ee240000-0000-0000-0000-000000000020', 'fac_s24e', 'attested', (now())::timestamptz, md5('ev-fixN9')::uuid)
 ) v(fix, u, fac, grade, at, ev) JOIN app.catalog_facility f ON f.id = v.fac;
 -- extra evidence rows: pg_temp.seed_ev(fix, user, facility, grade, captured at[, source, source_ref, status, local date, course]); the deviations the database must REFUSE are the M2 negatives (fixZ_*)
-CREATE FUNCTION pg_temp.seed_ev(p_fix text, p_u uuid, p_fac text, p_grade text, p_cap timestamptz, p_src text DEFAULT 'foreground_checkin', p_ref text DEFAULT NULL, p_st text DEFAULT 'accepted', p_ld date DEFAULT NULL, p_crs text DEFAULT NULL)
+CREATE FUNCTION pg_temp.seed_ev(p_fix text, p_u uuid, p_fac text, p_grade text, p_cap timestamptz, p_src text DEFAULT 'foreground_checkin', p_ref text DEFAULT NULL, p_st text DEFAULT 'accepted', p_ld date DEFAULT NULL, p_crs text DEFAULT NULL, p_patch jsonb DEFAULT '{}'::jsonb)
 RETURNS void LANGUAGE plpgsql AS $f$
 DECLARE v_ld date;
 BEGIN
   v_ld := COALESCE(p_ld, (p_cap AT TIME ZONE (SELECT f.tz FROM app.catalog_facility f WHERE f.id = p_fac))::date);
   INSERT INTO app.evidence (id, user_id, source, source_ref, facility_id, course_id, summary, attestation_grade, local_date, input_hash, status)
   VALUES (md5('ev-' || p_fix)::uuid, p_u, p_src::app.evidence_source, COALESCE(p_ref, 'fix:' || p_fix), p_fac, p_crs,
-          jsonb_build_object('localDate', v_ld::text, 'fix', jsonb_build_object('fixId', p_fix, 'capturedAt', (extract(epoch FROM p_cap) * 1000)::bigint)), p_grade::app.attestation_grade, v_ld, 'h-' || p_fix, p_st::app.evidence_status);
+          jsonb_build_object('localDate', v_ld::text, 'fix', pg_temp.qfix(p_fix, p_fac, p_grade, p_cap, v_ld) || p_patch), p_grade::app.attestation_grade, v_ld, 'h-' || p_fix, p_st::app.evidence_status);
 END
 $f$;
 -- M1: fac_s24r, one scan per player, each fix captured while a DIFFERENT epoch was live (t0 - 4 h: epoch 0; t0 - 2 h: epoch 1; t0: epoch 2; yesterday: epoch 0)
@@ -246,6 +252,35 @@ SELECT pg_temp.seed_ev('fixZ_date', 'ee240000-0000-0000-0000-0000000000a0', 'fac
 SELECT pg_temp.seed_ev('fixZ_time', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz + interval '5 seconds');
 SELECT pg_temp.seed_ev('fixZ_course', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, 'foreground_checkin', NULL, 'accepted', NULL, 'crs_s24a1');
 SELECT pg_temp.seed_ev('fixZ_owner', 'ee240000-0000-0000-0000-0000000000b0', 'fac_s24a', 'attested', :'t0'::timestamptz);
+-- LOW 1 (the read-back checks QUALIFICATION, not only identity): PA's evidence rows whose DERIVED FIX is wrong in ONE way each (every other field qualifying), and the controls that qualify
+SELECT pg_temp.seed_ev('fixQ_radius', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"geometryKind":"radius"}');
+SELECT pg_temp.seed_ev('fixQ_unver', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"verificationTier":"unverified"}');
+SELECT pg_temp.seed_ev('fixQ_listed', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"verificationTier":"listed-verified"}');
+SELECT pg_temp.seed_ev('fixQ_outside', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"insideBuffer":false}');
+SELECT pg_temp.seed_ev('fixQ_sim', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"simulated":true}');
+SELECT pg_temp.seed_ev('fixQ_bg', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"foreground":false}');
+SELECT pg_temp.seed_ev('fixQ_app', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"fromApp":false}');
+SELECT pg_temp.seed_ev('fixQ_none', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"challenge":"none"}');
+SELECT pg_temp.seed_ev('fixQ_acc80', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"accuracyMeters":80}');
+SELECT pg_temp.seed_ev('fixQ_acc505', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"accuracyMeters":50.5}');
+SELECT pg_temp.seed_ev('fixQ_accneg', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"accuracyMeters":-1}');
+SELECT pg_temp.seed_ev('fixQ_accstr', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"accuracyMeters":"10"}');
+SELECT pg_temp.seed_ev('fixQ_notok', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"token":{"present":false,"hardwareSupportsAttestation":true}}');
+SELECT pg_temp.seed_ev('fixQ_notokg', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"token":{"present":false,"grade":"attested"}}');
+SELECT pg_temp.seed_ev('fixQ_tokgrade', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"token":{"present":true,"grade":"unattestable"}}');
+SELECT pg_temp.seed_ev('fixQ_facs', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"facilityId":"fac_s24b"}');
+SELECT pg_temp.seed_ev('fixQ_fixid', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"fixId":"another-fix"}');
+SELECT pg_temp.seed_ev('fixQ_endpoint', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"geometryKind":"radius","verificationTier":"unverified","insideBuffer":false}');
+SELECT pg_temp.seed_ev('fixQ_nofix', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz);
+UPDATE app.evidence SET summary = summary - 'fix' WHERE source_ref = 'fix:fixQ_nofix';
+SELECT pg_temp.seed_ev('fixQ_pref', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz, p_patch => '{"challenge":"prefetched"}');
+SELECT pg_temp.seed_ev('fixQ_acc50', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'unattestable', :'t0'::timestamptz, p_patch => '{"accuracyMeters":50}');
+-- LOW 2 (the +5 minute future bound WITH a co-signal): tokens issued, and co-signal rows captured, 4.5 and 6 minutes from now: everything else valid, so only the bound decides
+INSERT INTO app.course_qr_token (nonce_hash, facility_id, issued_by_staff, kid, issued_at, expires_at)
+VALUES (encode(sha256(convert_to('s24-tok-50', 'UTF8')), 'hex'), 'fac_s24a', '00000000-0000-0000-0000-1000000000a1', 'rk1', :'t0'::timestamptz + interval '270 seconds', :'t0'::timestamptz + interval '6 minutes'),
+       (encode(sha256(convert_to('s24-tok-51', 'UTF8')), 'hex'), 'fac_s24a', '00000000-0000-0000-0000-1000000000a1', 'rk1', :'t0'::timestamptz + interval '6 minutes', :'t0'::timestamptz + interval '8 minutes');
+SELECT pg_temp.seed_ev('fixFut4', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz + interval '270 seconds');
+SELECT pg_temp.seed_ev('fixFut6', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz + interval '6 minutes');
 -- L2 m12: the 120 s boundary, judged against the FIX time (each at fac_s24a, one token each)
 SELECT pg_temp.seed_ev('fixT_p120', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz + interval '120 seconds');
 SELECT pg_temp.seed_ev('fixT_p121', 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24a', 'attested', :'t0'::timestamptz + interval '121 seconds');
@@ -319,7 +354,7 @@ RESET ROLE;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(310);
+SELECT plan(348);
 CREATE FUNCTION pg_temp.h(s text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$ SELECT encode(sha256(convert_to(s, 'UTF8')), 'hex') $f$;
 -- t0: the instant phase 0 ran (the tokens were issued, and each co-signal's evidence row was captured, AT t0); a co-signal's p_at is expressed relative to it (the database ties p_at to the evidence row's
 -- captured time, so a cell cannot use its own now()). ev(fix): the evidence row's id for a fix id (phase 0 inserted it with the same formula).
@@ -483,10 +518,12 @@ ROLLBACK;
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000c0')$$, 'bind PC');
-SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), 'ok', 'today''s PIN for the facility: ok');
-SELECT is((SELECT o_retry_after_seconds FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), NULL, 'an ok carries no retry hint');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', pg_temp.t0())), 'ok', 'today''s PIN for the facility: ok');
+SELECT is((SELECT o_retry_after_seconds FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', pg_temp.t0())), NULL, 'an ok carries no retry hint');
 SELECT is((SELECT array_agg(o_result || '/' || o_purchase_status || '/' || o_credit_status) FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', :'pin_e', pg_temp.t0(), 'attested', 'fixG1', pg_temp.ev('fixG1'))),
   ARRAY['accepted/valid/credited'], 'AT(19): the printed QR + today''s PIN + an attested fix: valid / credited');
+SELECT throws_ok($$SELECT * FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', pg_temp.p('pin_e'), pg_temp.t0(), 'attested', 'fixG2', pg_temp.ev('fixG2'))$$, '42501', 'marker_scan_for_actor: a printed-QR scan needs course_pin_attempt_for_actor to have accepted the PIN in this transaction', 'the accepted scan CONSUMED its proof: a second scan in the same transaction needs a second gate (one gate, one scan)');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', pg_temp.t0())), 'ok', 'the gate again');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', :'pin_e', pg_temp.t0(), 'attested', 'fixG2', pg_temp.ev('fixG2'))), 'duplicate', 'the same player scanning the same shop on the same local day again: duplicate (409)');
 ROLLBACK;
 BEGIN;
@@ -494,13 +531,13 @@ SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000c0')$$, 'bind PC (second transaction)');
 SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e_yday', now())), 'wrong', 'AT(19): YESTERDAY''s PIN -> wrong (422)');
 SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_a', now())), 'wrong', 'AT(19): ANOTHER facility''s PIN -> wrong (422)');
-SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), 'ok', 'the right PIN for today: ok (and the PIN gate''s proof the scan below requires)');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', pg_temp.t0())), 'ok', 'the right PIN for today: ok (and the PIN gate''s proof the scan below requires)');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', :'pin_e_yday', pg_temp.t0(), 'attested', 'fixG3', pg_temp.ev('fixG3'))), 'pin_wrong', 'the scan itself re-checks the PIN: yesterday''s is refused there too (the gate is not only the counter)');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', :'pin_a', pg_temp.t0(), 'attested', 'fixG4', pg_temp.ev('fixG4'))), 'pin_wrong', 'and another facility''s PIN');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq9', :'pin_e', pg_temp.t0(), 'attested', 'fixG5', pg_temp.ev('fixG5'))), 'qr_revoked', 'a printed QR with a kid that is not the facility''s current one: qr_revoked (a reprint revokes the old kid)');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24f', 'static_pin', NULL, 'pq0', :'pin_f', pg_temp.t0(), 'attested', 'fixG6', pg_temp.ev('fixG6'))), 'qr_revoked', 'a revoked printed QR is refused even with the right PIN');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24b', 'static_pin', NULL, 'pq1', :'pin_a', pg_temp.t0(), 'attested', 'fixG7', pg_temp.ev('fixG7'))), 'variant_disabled', 'a facility that takes only the rotating token');
-SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24g', :'pin_g', now())), 'ok', 'the New Zealand local-date PIN passes the gate (the proof)');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24g', :'pin_g', pg_temp.t0())), 'ok', 'the New Zealand local-date PIN passes the gate (the proof)');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24g', 'static_pin', NULL, 'pq1', :'pin_g_utcday', pg_temp.t0(), 'attested', 'fixG8', pg_temp.ev('fixG8'))), 'pin_wrong', 'the PIN''s day is the FACILITY''s local date, not the UTC date or another zone''s (fac_s24g is in New Zealand)');
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24g', 'static_pin', NULL, 'pq1', :'pin_g', pg_temp.t0(), 'attested', 'fixG9', pg_temp.ev('fixG9'))), 'accepted', 'control: the New Zealand local-date PIN is accepted there');
 SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24h', :'pin_h', pg_temp.t0() - interval '1 day')), 'wrong', 'a fix dated YESTERDAY needs YESTERDAY''s PIN: today''s is a wrong PIN for it (the gate)');
@@ -770,6 +807,50 @@ SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotat
 SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-30'), 'rk1', NULL, pg_temp.t0(), 'unattestable', 'fixZ_ok', pg_temp.ev('fixZ_ok')) LIMIT 1), 'cosignal_invalid', 'M2: the row says attested, the call says unattestable: refused (the grade is the row''s, not the caller''s)');
 SELECT is((SELECT count(*)::int FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-30'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixZ_ok', pg_temp.ev('fixZ_ok')) WHERE o_result = 'qr_used'), 0, 'M2: none of those refusals consumed the token');
 ROLLBACK;
+-- LOW 1. THE READ-BACK CHECKS QUALIFICATION. Each row below is accepted, facility-level, PA's own, for this fix and facility, with the right grade, date and time: wrong in exactly ONE field of its derived fix.
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000a0')$$, 'bind PA');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_radius', pg_temp.ev('fixQ_radius')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a RADIUS-fallback geometry (no polygon match): refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_unver', pg_temp.ev('fixQ_unver')) LIMIT 1), 'cosignal_invalid', 'LOW 1: an `unverified` facility tier: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_listed', pg_temp.ev('fixQ_listed')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a `listed-verified` (not play-verified) facility tier: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_outside', pg_temp.ev('fixQ_outside')) LIMIT 1), 'cosignal_invalid', 'LOW 1: outside the polygon plus buffer (insideBuffer false): refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_sim', pg_temp.ev('fixQ_sim')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a simulated fix: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_bg', pg_temp.ev('fixQ_bg')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a background fix: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_app', pg_temp.ev('fixQ_app')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a fix not from the app: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_none', pg_temp.ev('fixQ_none')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a fix bound to NO challenge: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_acc80', pg_temp.ev('fixQ_acc80')) LIMIT 1), 'cosignal_invalid', 'LOW 1: 80 m accuracy (over the 50 m ceiling): refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_acc505', pg_temp.ev('fixQ_acc505')) LIMIT 1), 'cosignal_invalid', 'LOW 1: 50.5 m accuracy (just over the ceiling): refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_accneg', pg_temp.ev('fixQ_accneg')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a negative accuracy: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_accstr', pg_temp.ev('fixQ_accstr')) LIMIT 1), 'cosignal_invalid', 'LOW 1: an accuracy that is a string, not a number: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_notok', pg_temp.ev('fixQ_notok')) LIMIT 1), 'cosignal_invalid', 'LOW 1: no attestation token on the fix: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_notokg', pg_temp.ev('fixQ_notokg')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a token marked NOT present that still carries the claimed grade: refused (present is checked on its own)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_tokgrade', pg_temp.ev('fixQ_tokgrade')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a derived fix whose token grade (unattestable) is not the rows and the calls (attested): refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_facs', pg_temp.ev('fixQ_facs')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a derived fix naming another facility than the row: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_fixid', pg_temp.ev('fixQ_fixid')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a derived fix with another fix id: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_endpoint', pg_temp.ev('fixQ_endpoint')) LIMIT 1), 'cosignal_invalid', 'LOW 1: the evidence-endpoint shape (radius + unverified + outside the buffer): a real, accepted check-in that is NO co-signal: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_nofix', pg_temp.ev('fixQ_nofix')) LIMIT 1), 'cosignal_invalid', 'LOW 1: a summary with no derived fix at all: refused (the row''s own derived fix must QUALIFY, not merely exist)');
+SELECT is((SELECT count(*)::int FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-40'), 'rk1', NULL, pg_temp.t0(), 'attested', 'fixQ_pref', pg_temp.ev('fixQ_pref')) WHERE o_result = 'accepted'), 2, 'LOW 1 control: a PREFETCHED challenge qualifies (accepted on both trails)');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000a0')$$, 'bind PA');
+SELECT is((SELECT array_agg(o_result || '/' || o_purchase_status) FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-41'), 'rk1', NULL, pg_temp.t0(), 'unattestable', 'fixQ_acc50', pg_temp.ev('fixQ_acc50'))), ARRAY['accepted/held_review', 'accepted/held_review'], 'LOW 1 control: accuracy of exactly 50 m qualifies (the ceiling is inclusive), an unattestable grade stays held_review');
+ROLLBACK;
+-- LOW 2. The scan's +5 minute future bound WITH a co-signal: 4.5 minutes ahead (a co-signal row, a token issued then) is accepted, 6 minutes ahead is refused outright, whatever else is valid.
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000a0')$$, 'bind PA');
+SELECT is((SELECT array_agg(o_result) FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-50'), 'rk1', NULL, pg_temp.t0() + interval '270 seconds', 'attested', 'fixFut4', pg_temp.ev('fixFut4'))), ARRAY['accepted', 'accepted'], 'LOW 2 (m08) control: a scan 4.5 minutes ahead of now, backed by a co-signal, is inside the bound');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000a0')$$, 'bind PA');
+SELECT throws_ok($$SELECT * FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-51'), 'rk1', NULL, pg_temp.t0() + interval '6 minutes', 'attested', 'fixFut6', pg_temp.ev('fixFut6'))$$, '22023',
+  'marker_scan_for_actor: invalid arguments (a facility, rotating+nonce hash+kid or static_pin+kid+PIN, a time within 7 days, a complete co-signal or none, and a time within 5 minutes of now without a co-signal)', 'LOW 2 (m08): 6 minutes ahead is refused even with a complete, valid co-signal and token: the future bound holds WITH a co-signal');
+SELECT throws_ok($$SELECT * FROM private.marker_scan_for_actor('fac_s24a', 'rotating', pg_temp.h('s24-tok-51'), 'rk1', NULL, pg_temp.t0() + interval '2 days', 'attested', 'fixFut6', pg_temp.ev('fixFut6'))$$, '22023',
+  'marker_scan_for_actor: invalid arguments (a facility, rotating+nonce hash+kid or static_pin+kid+PIN, a time within 7 days, a complete co-signal or none, and a time within 5 minutes of now without a co-signal)', 'LOW 2: and 2 days ahead');
+ROLLBACK;
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000a0')$$, 'bind PA');
@@ -855,7 +936,23 @@ ROLLBACK;
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000c0')$$, 'bind PC');
-SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), 'ok', 'the gate passes in this transaction (which COMMITS: a failed gate counts nothing, a right one writes only the proof) ...');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), 'ok', 'the gate passes at the instant now()');
+SELECT throws_ok($$SELECT * FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', pg_temp.p('pin_e'), now() + interval '1 second', NULL, NULL, NULL)$$, '42501', 'marker_scan_for_actor: a printed-QR scan needs course_pin_attempt_for_actor to have accepted the PIN in this transaction', 'NIT: the proof is for ONE INSTANT: a scan judged one second later than the gate is refused (the gate and the scan never judge two instants)');
+SELECT is((SELECT array_agg(o_result) FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', pg_temp.p('pin_e'), now(), NULL, NULL, NULL)), ARRAY['accepted'], 'NIT: control: the same instant is accepted');
+ROLLBACK;
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000c0')$$, 'bind PC');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), 'ok', 'a gate at now() ...');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now() + interval '1 second')), 'ok', '... and a second gate one second later REPLACES the first proof (the proof is for the LAST instant judged)');
+SELECT throws_ok($$SELECT * FROM private.marker_scan_for_actor('fac_s24e', 'static_pin', NULL, 'pq1', pg_temp.p('pin_e'), now(), NULL, NULL, NULL)$$, '42501', 'marker_scan_for_actor: a printed-QR scan needs course_pin_attempt_for_actor to have accepted the PIN in this transaction', 'NIT: so the scan at the FIRST instant is refused');
+ROLLBACK;
+-- THE PIN PROOF DOES NOT OUTLIVE ITS TRANSACTION (the medium of the second review): this gate COMMITS with no scan after it; the rows file reads private.course_pin_proof afterwards as the owner and finds NO row
+-- (a deferred constraint trigger deletes the backend's rows at COMMIT), and the next transaction of this backend still has no proof.
+BEGIN;
+SET LOCAL ROLE edge_actor;
+SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000c0')$$, 'bind PC');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24e', :'pin_e', now())), 'ok', 'the gate passes in this transaction (which COMMITS with no scan after it: a failed gate counts nothing, a right one writes only the proof) ...');
 COMMIT;
 BEGIN;
 SET LOCAL ROLE edge_actor;

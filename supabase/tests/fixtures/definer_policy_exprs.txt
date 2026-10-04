@@ -196,3 +196,4 @@
 {"command": "DELETE", "table_name": "course_pin_proof", "using_expr": "(backend_pid = pg_backend_pid())", "policy_name": "pd_marker_scan_proof_delete", "schema_name": "private", "with_check_expr": null}
 {"command": "INSERT", "table_name": "course_pin_proof", "using_expr": null, "policy_name": "pd_marker_scan_proof_insert", "schema_name": "private", "with_check_expr": "((backend_pid = pg_backend_pid()) AND (actor_uid = private.actor_uid()))"}
 {"command": "SELECT", "table_name": "course_pin_proof", "using_expr": "((backend_pid = pg_backend_pid()) AND (actor_uid = private.actor_uid()))", "policy_name": "pd_marker_scan_proof_select", "schema_name": "private", "with_check_expr": null}
+{"command": "SELECT", "table_name": "course_pin_pepper_epoch", "using_expr": "true", "policy_name": "pd_marker_scan_pepper_epoch_select", "schema_name": "app", "with_check_expr": null}

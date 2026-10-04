@@ -6,7 +6,22 @@
 -- Scenarios C1..C8 are listed in the edge file (section 11a). Today's date is the facility-LOCAL date (America/Chicago for fac_s24a / b / e / h).
 
 \set QUIET 1
-SELECT plan(88);
+SELECT plan(90);
+
+-- ----------------------------------------------------------------------------
+-- C0. THE PIN PROOF IS EMPTY AT REST (the second review's medium). Read as the table's owner under a temporary FOR ALL policy (FORCE RLS leaves the owner no rows otherwise; a POLICY only, never
+-- a GRANT or REVOKE: in HARNESS_MODE=restricted this role OWNS the table). The edge file COMMITTED printed-QR scans (C4, C6, C9) and a PIN gate that passed with NO scan after it (L5): had a
+-- proof outlived its transaction on any of those backends, it would be here. The control proves the probe CAN see a row of the table (an empty answer from a blind probe is the same bytes).
+-- ----------------------------------------------------------------------------
+BEGIN;
+CREATE POLICY s24_proof_probe ON private.course_pin_proof FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.course_pin_proof (backend_pid, xact, actor_uid, facility_id, local_date, pin_at) VALUES (pg_backend_pid(), pg_current_xact_id(), 'ee240000-0000-0000-0000-0000000000a0', 'fac_s24e', current_date, now());
+SELECT is((SELECT count(*)::int FROM private.course_pin_proof), 1, 'C0 control: the probe sees a row of private.course_pin_proof (so an empty answer below means empty)');
+ROLLBACK;
+BEGIN;
+CREATE POLICY s24_proof_probe ON private.course_pin_proof FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+SELECT is((SELECT count(*)::int FROM private.course_pin_proof), 0, 'C0: after the edge file''s COMMITTED scans and its committed PIN gate with no scan after it, private.course_pin_proof holds NO row (a deferred trigger deletes the backend''s rows at COMMIT): the table is empty at rest, so there is nothing for DELETE /v1/me to purge');
+ROLLBACK;
 SET ROLE service_role;
 
 -- ----------------------------------------------------------------------------
@@ -170,7 +185,7 @@ SELECT is((SELECT count(*)::int FROM app.course_qr_key), 3, 'delete: the PUBLIC 
 SELECT lives_ok($$SELECT private.delete_my_data(u) FROM (VALUES ('ee240000-0000-0000-0000-0000000000b0'::uuid), ('ee240000-0000-0000-0000-0000000000c0'), ('ee240000-0000-0000-0000-0000000000d0'), ('ee240000-0000-0000-0000-0000000000e0'),
   ('ee240000-0000-0000-0000-0000000000f0'), ('ee240000-0000-0000-0000-000000000010'), ('ee240000-0000-0000-0000-000000000020'), ('ee240000-0000-0000-0000-000000000030'), ('ee240000-0000-0000-0000-000000000040')) v(u)$$, 'cleanup: delete_my_data for the remaining ee240000- accounts');
 DELETE FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:pin-fail:%';
-DELETE FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 49) n);
+DELETE FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 60) n);
 DELETE FROM app.facility_qr WHERE facility_id LIKE 'fac\_s24%';
 DELETE FROM app.facility_programme WHERE facility_id LIKE 'fac\_s24%';
 DELETE FROM app.trail_programme WHERE trail_id LIKE 'trl\_s24%';
@@ -193,7 +208,7 @@ DELETE FROM app.catalog_facility WHERE id LIKE 'fac\_s24%';
 DELETE FROM app.catalog_trail WHERE id LIKE 'trl\_s24%';
 DELETE FROM app.catalog_id_ledger WHERE id LIKE 'fac\_s24%' OR id LIKE 'trl\_s24%' OR id LIKE 'crs\_s24%';
 SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE user_id::text LIKE 'ee240000-%' OR facility_id LIKE 'fac\_s24%'), 0, 'cleanup: no purchase row of this file survives');
-SELECT is((SELECT count(*)::int FROM app.catalog_facility WHERE id LIKE 'fac\_s24%') + (SELECT count(*)::int FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 49) n)), 0, 'cleanup: no catalog facility and no token of this file survives');
+SELECT is((SELECT count(*)::int FROM app.catalog_facility WHERE id LIKE 'fac\_s24%') + (SELECT count(*)::int FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 60) n)), 0, 'cleanup: no catalog facility and no token of this file survives');
 SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:%'), 0, 'cleanup: no counter survives');
 RESET ROLE;
 

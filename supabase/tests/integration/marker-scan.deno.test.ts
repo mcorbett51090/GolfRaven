@@ -632,6 +632,36 @@ Deno.test("L5: the scan definer is never an uncounted PIN oracle: a printed-QR r
   assertEquals(await rawCount(`select count(*)::int as n from private.rate_limit_bucket where bucket_key like 'marker-scan:pin-fail:u:${p.uid}:%'`), 0);
 });
 
+Deno.test("the PIN proof is empty at rest: a COMMITTED printed-QR scan, and a COMMITTED PIN gate with no scan after it, leave no row of private.course_pin_proof (read back as the owner; the probe is proven able to see a row)", DT, async () => {
+  const e = await env();
+  const shop = await createShop("proof", "static_pin");
+  const a = await freshPlayer("proof-a");
+  const b = await freshPlayer("proof-b");
+  const pin = await referencePin(e.pepper, shop.fac, localDateOf(Date.now()), 0);
+  const count = () => withOwnerPolicy("private.course_pin_proof", async (sql) => (await sql`select count(*)::int as n from private.course_pin_proof`)[0]!.n as number);
+  // the control: the owner connection CAN see (and here plants and removes) a row, so a zero below is not a blind probe
+  const planted = await withOwnerPolicy("private.course_pin_proof", async (sql) => {
+    await sql`insert into private.course_pin_proof (backend_pid, xact, actor_uid, facility_id, local_date, pin_at) values (0, '1'::xid8, ${a.uid}, ${shop.fac}, current_date, now())`;
+    const n = (await sql`select count(*)::int as n from private.course_pin_proof`)[0]!.n as number;
+    await sql`delete from private.course_pin_proof where backend_pid = 0`;
+    return n;
+  });
+  assertEquals(planted, 1, "control: the probe sees a planted row");
+  assertEquals(await count(), 0);
+  // a PIN gate that passes and COMMITS, with nothing after it
+  const gate = await withOwnership(a.actor, (repo: Repo) => repo.markerScan.attemptPin({ facilityId: shop.fac, pin, at: new Date() }));
+  assertEquals(gate.result, "ok");
+  assertEquals(await count(), 0, "a committed gate with no scan after it left no proof");
+  // a committed scan (gate + scan in one request transaction), by another player on the same pooled connections
+  ok(await scan(b, shop, { qr: await printedQr(shop, pin) }));
+  assertEquals((await purchases(b.uid)).length, 1);
+  assertEquals(await count(), 0, "a committed scan left no proof");
+  // and a refused scan (rolled back by the handler) leaves none either
+  const refused = await httpError(scan(b, shop, { qr: await printedQr(shop, pin) }));
+  assertEquals(refused?.code, "duplicate_scan");
+  assertEquals(await count(), 0, "a refused scan left no proof");
+});
+
 Deno.test("M2: the database reads the co-signal back: an invented evidence id is cosignal_invalid, and a real evidence row cannot back a second scan (cosignal_used)", DT, async () => {
   const e = await env();
   const shop = await createShop("m2");
