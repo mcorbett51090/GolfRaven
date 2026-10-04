@@ -7,11 +7,15 @@
 //
 // THE ORDER, and why it is the order (read with 0046's header):
 //   1. validate the facility and the fix's clock window                       (nothing written)
+//   1b. decide the scan's INSTANT: does the fix QUALIFY as a co-signal? (a READ-ONLY check of the check-in token, `peekForFix`, and the geometry). Only a qualifying fix's time may drive the
+//       120 s rule, the PIN's date and the purchase's local date; without one the instant is NOW (a photographed token cannot be burned days later, and the client cannot pick the PIN date)
 //   2. verify the QR's signature                                              (a FORGED one writes a fraud_signal and answers 422: the ONE refusal that commits, with 3)
 //   3. Q2 only: the wrong-PIN gate, `private.course_pin_attempt_for_actor`     (a wrong PIN must COUNT, so its refusal commits too: it is RETURNED, never thrown)
 //   4. the fix: consume the check-in token, grade it, write its `foreground_checkin` evidence row    (only if it qualifies as a co-signal)
 //   5. the scan: `private.marker_scan_for_actor`, or the co-signal join       (every refusal here is THROWN: the request transaction rolls back, so the token the fix
 //                                                                              consumed and the evidence row it wrote are undone and the player may retry)
+// The database re-checks all of it: the printed-QR scan needs the PIN gate's proof in the same transaction, a co-signal is read back from its evidence row, and a time far from now is refused
+// without one.
 // A refusal that has to persist (2, 3) is therefore decided BEFORE anything is consumed, which is what makes "throw to roll back" safe for everything after.
 //
 // THE FIX IS COUNTED ONCE (plan §4.5, A2-20b): a qualifying fix becomes exactly one `foreground_checkin` evidence row, keyed `fix:<fixId>` like a check-in's, facility-level
@@ -98,6 +102,11 @@ function mapRecordRefusal(status: string): HttpError {
       return Errors.unprocessable("invalid_pin", "that PIN is not today's PIN for this facility");
     case "duplicate":
       return Errors.conflict("duplicate_scan", "you already recorded a purchase at this facility today");
+    case "cosignal_invalid":
+      // the database read the co-signal's evidence row back and it does not describe this fix here: an Edge bug or a forged call, never a state the player can fix by retrying
+      return Errors.unprocessable("invalid_cosignal", "the location fix does not match its record");
+    case "cosignal_used":
+      return Errors.conflict("fix_already_used", "this location fix has already been recorded");
     case "no_programme":
       return Errors.unprocessable("marker_programme_inactive", "this facility is not running a marker programme right now");
     case "variant_disabled":
@@ -121,17 +130,9 @@ async function resolveDevice(repo: Repo, deviceId: string): Promise<{ id: string
   return repo.device.ensureOwn(deviceId, null);
 }
 
-/** Step 4. `null` when the request carries no fix or the fix does not qualify as a co-signal (including a `failed` grade). */
-async function countCoSignal(repo: Repo, deps: MarkerScanDeps, body: MarkerScanBody, facilityId: string, tz: string): Promise<CountedCoSignal | null> {
-  const fix = body.fix;
-  if (fix === undefined) return null;
-  // A fix is counted ONCE: if this fix id already has its row the request is a replay (409, which the outbox treats as accepted), and nothing below runs, so a retry never
-  // re-consumes a token or re-writes a row.
-  const sourceRef = `${FIX_ID_PREFIX}${fix.fixId}`;
-  if (await repo.evidence.findExisting("foreground_checkin", sourceRef)) throw Errors.conflict("fix_already_used", "this location fix has already been recorded");
-
-  const device = await resolveDevice(repo, body.deviceId!);
-  const consumed = body.jti ? await repo.checkinToken.consumeForFix(body.jti, device.id, fix.capturedAt) : null;
+/** The derived fix and its co-signal grade for a (possibly absent) consumed token. Pure but for the geometry read (`matchFacilityFix`, a SELECT). */
+async function gradeFix(repo: Repo, body: MarkerScanBody, facilityId: string, tz: string, consumed: { facilityId: string | null; attestationGrade: "attested" | "unattestable" | "failed"; challengeKind: "live" | "prefetched" } | null): Promise<{ derived: DerivedFix; grade: CoSignalGrade | null; localDate: string }> {
+  const fix = body.fix!;
   // A token bound to ANOTHER facility is not this facility's presence proof (a challenge may be facility-less: then it binds none). It is consumed either way.
   const token = consumed !== null && consumed.facilityId !== null && consumed.facilityId !== facilityId ? null : consumed;
   const match = await repo.catalog.matchFacilityFix(facilityId, fix.lat, fix.lng);
@@ -143,7 +144,33 @@ async function countCoSignal(repo: Repo, deps: MarkerScanDeps, body: MarkerScanB
     match,
     consumedToken: token === null ? null : { attestationGrade: token.attestationGrade, challengeKind: token.challengeKind },
   });
-  const grade = coSignalGrade(derived, facilityId);
+  return { derived, grade: coSignalGrade(derived, facilityId), localDate };
+}
+
+/** Step 1b. Would this request's fix qualify as a co-signal? READ-ONLY: nothing is consumed or written, so it can run before the PIN gate commits. A replayed fix id is the same 409 as in
+ * `countCoSignal`. `false` when there is no fix, no known device, no token the fix may consume, or a fix that does not qualify. */
+async function fixQualifies(repo: Repo, body: MarkerScanBody, facilityId: string, tz: string): Promise<boolean> {
+  const fix = body.fix;
+  if (fix === undefined) return false;
+  if (await repo.evidence.findExisting("foreground_checkin", `${FIX_ID_PREFIX}${fix.fixId}`)) throw Errors.conflict("fix_already_used", "this location fix has already been recorded");
+  const device = await repo.device.findOwn(body.deviceId!);
+  if (!device) return false; // a device this account has never used holds no token
+  const peeked = body.jti ? await repo.checkinToken.peekForFix(body.jti, device.id, fix.capturedAt) : null;
+  return (await gradeFix(repo, body, facilityId, tz, peeked)).grade !== null;
+}
+
+/** Step 4. `null` when the request carries no fix or the fix does not qualify as a co-signal (including a `failed` grade). */
+async function countCoSignal(repo: Repo, deps: MarkerScanDeps, body: MarkerScanBody, facilityId: string, tz: string): Promise<CountedCoSignal | null> {
+  const fix = body.fix;
+  if (fix === undefined) return null;
+  // A fix is counted ONCE: if this fix id already has its row the request is a replay (409, which the outbox treats as accepted), and nothing below runs, so a retry never
+  // re-consumes a token or re-writes a row.
+  const sourceRef = `${FIX_ID_PREFIX}${fix.fixId}`;
+  if (await repo.evidence.findExisting("foreground_checkin", sourceRef)) throw Errors.conflict("fix_already_used", "this location fix has already been recorded");
+
+  const device = await resolveDevice(repo, body.deviceId!);
+  const consumed = body.jti ? await repo.checkinToken.consumeForFix(body.jti, device.id, fix.capturedAt) : null;
+  const { derived, grade, localDate } = await gradeFix(repo, body, facilityId, tz, consumed);
   if (grade === null) return null;
 
   const currentVersion = await repo.catalog.currentVersion();
@@ -188,16 +215,20 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
   const tz = await repo.catalog.facilityTz(facilityId);
   if (!tz) throw Errors.unprocessable("unknown_id", `facilityId "${facilityId.slice(0, 64)}" has a ledger entry but no catalog_facility row`);
   if (body.fix) requireFixWindow(body.fix, now);
-  // the instant the 120 s rule and the PIN's date are judged at: the FIX's time (an offline scan is uploaded days later), or now when there is no fix
-  const at = body.fix ? new Date(body.fix.capturedAt) : now;
+  // 1b. The instant the 120 s rule, the PIN's date and the purchase's local date are judged at: the FIX's time (an offline scan is uploaded days later) ONLY when that fix qualifies as a co-signal,
+  // else now. An unqualified fix is a client-chosen number: it must not pick the PIN date or let a photographed token be burned days later. The database refuses the same combination.
+  const qualifies = await fixQualifies(repo, body, facilityId, tz);
+  const at = qualifies ? new Date(body.fix!.capturedAt) : now;
 
   // THE CO-SIGNAL INTAKE (no QR): only the fix, tied to the player's own pending purchase.
   if (body.qr === undefined) {
+    // a fix that is not a co-signal completes nothing: refuse (nothing was consumed: this is decided read-only, so the check-in token stays usable)
+    if (!qualifies) throw Errors.unprocessable("not_a_cosignal", "this location fix does not qualify as a presence co-signal");
     const counted = await countCoSignal(repo, deps, body, facilityId, tz);
-    // a fix that is not a co-signal completes nothing: refuse (and, thrown, roll back: the token the fix consumed stays usable)
-    if (counted === null) throw Errors.unprocessable("not_a_cosignal", "this location fix does not qualify as a presence co-signal");
+    if (counted === null) throw Errors.conflict("fix_not_consumable", "this location fix could not be counted; capture a new one");
     const attached = await repo.markerScan.attachCosignal({ facilityId, at, cosignal: { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId } });
     if (attached.status === "no_pending_purchase") throw Errors.unprocessable("no_pending_purchase", "no pending marker purchase at this facility is waiting for this location fix");
+    if (attached.status !== "attached") throw mapRecordRefusal(attached.status);
     return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, attached.purchases) };
   }
 
@@ -209,11 +240,14 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     const parsed = parseRotatingToken(body.qr.token);
     if (parsed === null) throw Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility");
     const key = await repo.markerScan.publicKey(parsed.claims.kid, "rotating_token");
-    const genuine = key !== null && !key.revoked && (await verifyRotatingToken(parsed, key.publicKeyB64Url));
+    const genuine = key !== null && (await verifyRotatingToken(parsed, key.publicKeyB64Url));
     if (!genuine) {
-      await repo.fraudSignal.insert("course_qr_forged", { variant: "rotating", facilityId, reason: key === null ? "unknown_kid" : key.revoked ? "revoked_kid" : "bad_signature" });
+      await repo.fraudSignal.insert("course_qr_forged", { variant: "rotating", facilityId, reason: key === null ? "unknown_kid" : "bad_signature" });
       return { kind: "refused", error: Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility") };
     }
+    // a GENUINE token under a kid that has since been revoked is a stale token, not an attack: the same answer, no fraud signal (and nothing committed)
+    if (key.revoked) throw Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility");
+    qrKid = parsed.claims.kid;
     // a genuine token minted for ANOTHER facility is a mismatch, not a forgery
     if (parsed.claims.fac !== facilityId) throw Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility");
     nonceHash = await nonceHashHex(parsed.claims.nonce, deps.sha256Hex);
@@ -221,12 +255,14 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     const parsed = parsePrintedQr(body.qr.kid, body.qr.sig);
     if (parsed === null) throw Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility");
     const key = await repo.markerScan.publicKey(parsed.kid, "printed_qr");
-    const genuine = key !== null && !key.revoked && (await verifyPrintedQr(parsed, facilityId, key.publicKeyB64Url));
+    const genuine = key !== null && (await verifyPrintedQr(parsed, facilityId, key.publicKeyB64Url));
     if (!genuine) {
       // "a forged printed-QR signature gives 422 plus a fraud_signal" (AT(19)); the facility id is bound into the signed bytes, so the QR of X presented for Y lands here too
-      await repo.fraudSignal.insert("course_qr_forged", { variant: "static_pin", facilityId, reason: key === null ? "unknown_kid" : key.revoked ? "revoked_kid" : "bad_signature" });
+      await repo.fraudSignal.insert("course_qr_forged", { variant: "static_pin", facilityId, reason: key === null ? "unknown_kid" : "bad_signature" });
       return { kind: "refused", error: Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility") };
     }
+    // a genuine printed QR whose key was revoked (a reprint after a suspected compromise) is a stale QR, not an attack: no fraud signal
+    if (key.revoked) throw Errors.unprocessable("invalid_qr", "this QR code is not valid for this facility");
     qrKid = parsed.kid;
     pin = body.qr.pin;
 
@@ -248,6 +284,8 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
 
   // 4. The fix (if any): the check-in token, the grade, the evidence row.
   const counted = await countCoSignal(repo, deps, body, facilityId, tz);
+  // the instant above assumed the fix would count: if it did not (a concurrent request consumed the token between the read-only check and now) the scan must not go on at the fix's time
+  if (qualifies && counted === null) throw Errors.conflict("fix_not_consumable", "this location fix could not be counted; capture a new one");
 
   // 5. The scan itself.
   const recorded = await repo.markerScan.record({

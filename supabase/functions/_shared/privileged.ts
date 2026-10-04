@@ -1526,6 +1526,25 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
         if (!r) return null;
         return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
       },
+
+      /** The read-only twin of `consumeForFix` (same predicates, no UPDATE): see `Repo#checkinToken.peekForFix`. */
+      async peekForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
+        const capturedAt = new Date(capturedAtMs);
+        const rows = await trx`
+          select checkin_token.facility_id, checkin_token.attestation_grade, checkin_token.challenge_kind
+          from app.checkin_token
+          join app.checkin_challenge cc on checkin_token.challenge_id = cc.id
+          where checkin_token.jti = ${jti}
+            and checkin_token.user_id = ${uid}
+            and checkin_token.device_id = ${submittingDeviceId}
+            and checkin_token.consumed_at is null
+            and checkin_token.expires_at > now()
+            and cc.issued_at <= ${capturedAt}
+            and ${capturedAt} <= cc.expires_at`;
+        const r = rows[0];
+        if (!r) return null;
+        return { facilityId: r.facility_id, attestationGrade: r.attestation_grade, challengeKind: r.challenge_kind };
+      },
     },
 
     // P3d: DELETE /v1/me, GET /v1/me/export. Both DB functions this
@@ -3336,6 +3355,8 @@ const MARKER_SCAN_REFUSALS: ReadonlySet<string> = new Set([
   "qr_revoked",
   "pin_wrong",
   "duplicate",
+  "cosignal_invalid",
+  "cosignal_used",
 ]);
 
 const PURCHASE_STATUSES: ReadonlySet<string> = new Set(["valid", "pending", "held_review"]);
@@ -3421,7 +3442,7 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
       }
       const first = rows[0];
       const status = String(first?.o_result);
-      if (status === "no_pending_purchase") return { status: "no_pending_purchase" };
+      if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used") return { status };
       if (status !== "attached") throw new Error("markerScan.attachCosignal: private.marker_cosignal_attach_for_actor returned an unexpected result");
       return { status: "attached", purchases: rows.map(toPurchaseView) };
     },

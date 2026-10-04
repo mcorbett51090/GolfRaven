@@ -88,6 +88,6 @@ export async function seedRotating(w: World, o: { iatOffsetSec?: number; facilit
   const iat = Math.floor(w.nowMs / 1000) + (o.iatOffsetSec ?? -5);
   const m = await mintRotatingToken({ key: o.key ?? w.rotKey, kid: o.kid ?? "rk1", facilityId: o.facilityId ?? FAC, iat, ...(o.nonce ? { nonce: o.nonce } : {}) });
   const hash = createHash("sha256").update(Buffer.from(m.nonce)).digest("hex");
-  w.ms.tokens.set(hash, { facilityId: FAC, issuedAtMs: iat * 1000, used: false });
+  w.ms.tokens.set(hash, { facilityId: FAC, kid: o.kid ?? "rk1", issuedAtMs: iat * 1000, used: false });
   return { token: m.token, hash };
 }

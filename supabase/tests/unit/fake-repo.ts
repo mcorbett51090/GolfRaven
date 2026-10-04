@@ -661,6 +661,19 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         row.consumedAt = state.now.toISOString();
         return { facilityId: row.facilityId, attestationGrade: row.attestationGrade, challengeKind: row.challengeKind };
       },
+      async peekForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
+        // the read-only twin of consumeForFix: the same predicates, nothing written
+        const row = state.checkinTokens.get(jti);
+        if (!row) return null;
+        if (row.userId !== uid) return null;
+        if (row.deviceId !== submittingDeviceId) return null;
+        if (row.consumedAt !== null) return null;
+        const challenge = state.challenges.get(row.challengeId);
+        if (!challenge) return null;
+        if (!(Date.parse(row.expiresAt) > state.now.getTime())) return null;
+        if (!(Date.parse(challenge.issuedAt) <= capturedAtMs && capturedAtMs <= Date.parse(challenge.expiresAt))) return null;
+        return { facilityId: row.facilityId, attestationGrade: row.attestationGrade, challengeKind: row.challengeKind };
+      },
       async findByChallenge(challengeId: string): Promise<IssuedCheckinTokenRow | null> {
         for (const row of state.checkinTokens.values()) {
           if (row.userId === uid && row.challengeId === challengeId) return { jti: row.jti, expiresAt: row.expiresAt, attestationGrade: row.attestationGrade, consumedAt: row.consumedAt };

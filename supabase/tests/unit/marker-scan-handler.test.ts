@@ -170,14 +170,33 @@ describe("the QR's signature is verified BEFORE anything is consumed; a forged o
     expect(w.ms.tokens.get(t.hash)!.used).toBe(false);
   });
 
-  it("an unknown or REVOKED kid is the same refusal with its own reason", async () => {
+  it("an UNKNOWN kid, or a bad signature under a revoked kid, is a forgery (signal, committed); a GENUINE token under a revoked kid is stale, not an attack (422, no signal, nothing committed)", async () => {
     const w = await world();
     const a = await seedRotating(w, { kid: "rk-unknown" });
     expect(refused(await handleMarkerScan(body({ qr: { variant: "rotating", token: a.token } }), w.repo, deps))).toMatchObject({ code: "invalid_qr" });
     w.ms.keys.set("rotating_token:rk1", { publicKeyB64Url: w.rotKey.publicKeyB64Url, revoked: true });
+    // a genuine token (signed by the revoked key itself): thrown, no signal
     const b = await seedRotating(w);
-    expect(refused(await handleMarkerScan(body({ qr: { variant: "rotating", token: b.token } }), w.repo, deps))).toMatchObject({ code: "invalid_qr" });
-    expect(w.state.fraudSignals.map((s) => s.detail.reason)).toEqual(["unknown_kid", "revoked_kid"]);
+    expect(await thrown(handleMarkerScan(body({ qr: { variant: "rotating", token: b.token } }), w.repo, deps))).toMatchObject({ status: 422, code: "invalid_qr" });
+    expect(w.state.fraudSignals.map((s) => s.detail.reason)).toEqual(["unknown_kid"]);
+    // a token claiming the revoked kid with a signature the key does NOT make is a forgery
+    const attacker = await generateTestSigningKey();
+    const c = await seedRotating(w, { key: attacker });
+    expect(refused(await handleMarkerScan(body({ qr: { variant: "rotating", token: c.token } }), w.repo, deps))).toMatchObject({ code: "invalid_qr" });
+    expect(w.state.fraudSignals.map((s) => s.detail.reason)).toEqual(["unknown_kid", "bad_signature"]);
+    expect(w.ms.tokens.get(b.hash)!.used).toBe(false);
+  });
+
+  it("the same for a revoked PRINTED-QR key: a genuine one is stale (no signal), a forged one is an attack", async () => {
+    const w = await world();
+    w.ms.keys.set("printed_qr:pq1", { publicKeyB64Url: w.prtKey.publicKeyB64Url, revoked: true });
+    const genuine = await mintPrintedQrSig(w.prtKey, FAC, "pq1");
+    expect(await thrown(handleMarkerScan(body({ qr: { variant: "static_pin", kid: "pq1", sig: genuine, pin: "4321" } }), w.repo, deps))).toMatchObject({ status: 422, code: "invalid_qr" });
+    expect(w.state.fraudSignals).toHaveLength(0);
+    const forged = await mintPrintedQrSig(await generateTestSigningKey(), FAC, "pq1");
+    expect(refused(await handleMarkerScan(body({ qr: { variant: "static_pin", kid: "pq1", sig: forged, pin: "4321" } }), w.repo, deps))).toMatchObject({ code: "invalid_qr" });
+    expect(w.state.fraudSignals).toHaveLength(1);
+    expect(w.ms.calls).toEqual(["publicKey:printed_qr:pq1", "publicKey:printed_qr:pq1"]);
   });
 
   it("a GENUINE token minted for another facility is 422 invalid_qr but is not a forgery (no fraud signal)", async () => {
@@ -226,7 +245,7 @@ describe("the printed QR and today's PIN (Q2)", () => {
     const out = ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
     expect(out.body).toMatchObject({ outcome: "credited", cosignal: "counted" });
     expect(w.ms.calls).toEqual(["publicKey:printed_qr:pq1", "attemptPin", "record"]);
-    expect(w.ms.purchases[0]).toMatchObject({ qrVariant: "static_pin", refId: "pin:fac_x:2026-06-01:0" });
+    expect(w.ms.purchases[0]).toMatchObject({ qrVariant: "static_pin", refId: "pin:fac_x:2026-06-01" });
   });
 
   it("AT(19): a WRONG PIN is a REFUSED outcome (422 invalid_pin) that commits (it must count), BEFORE the check-in token is consumed", async () => {
@@ -412,5 +431,104 @@ describe("request parsing (strict)", () => {
 describe("what the strings cannot carry", () => {
   it("base64url of random bytes never contains a dot (so a token's three parts cannot be re-split)", () => {
     for (let i = 0; i < 50; i++) expect(base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))).not.toContain(".");
+  });
+});
+
+describe("the scan's INSTANT is the fix's only when the fix QUALIFIES (review L1)", () => {
+  async function printed(w: World, pin: string, extra: Record<string, unknown> = {}) {
+    const sig = await mintPrintedQrSig(w.prtKey, FAC, "pq1");
+    return body({ qr: { variant: "static_pin", kid: "pq1", sig, pin }, ...extra });
+  }
+  const YESTERDAY = -26 * 3_600_000;
+
+  it("a photographed rotating token cannot be burned days later: with NO fix, or an UNQUALIFIED one dated inside its window, the instant is now and it is qr_expired", async () => {
+    const w = await world();
+    const t = await seedRotating(w, { iatOffsetSec: -3 * 86_400 }); // issued three days ago
+    expect(await thrown(handleMarkerScan(body({ qr: { variant: "rotating", token: t.token } }), w.repo, deps))).toMatchObject({ status: 422, code: "qr_expired" });
+    // a fabricated fix time inside the token's window, but simulated (no co-signal): still judged at NOW
+    const fabricated = fixAt(w, -3 * 86_400_000 + 20_000, { simulated: true });
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fabricated, jti: seedToken(w, { challengeIssuedAgoMs: 4 * 86_400_000 }) }), w.repo, deps))).toMatchObject({ status: 422, code: "qr_expired" });
+    expect(w.ms.tokens.get(t.hash)!.used).toBe(false);
+    expect(w.ms.recordInputs.every((r) => r.at.getTime() === w.nowMs)).toBe(true);
+    // ... and a fix with no check-in token at all
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w, -3 * 86_400_000 + 20_000) }), w.repo, deps))).toMatchObject({ status: 422, code: "qr_expired" });
+  });
+
+  it("the client cannot pick the printed-QR PIN DATE: a non-qualifying fix dated yesterday is judged at NOW (the PIN gate and the scan both see now)", async () => {
+    const w = await world();
+    for (const extra of [{}, { deviceId: FAKE_DEVICE_ID, fix: fixAt(w, YESTERDAY) }, { deviceId: FAKE_DEVICE_ID, fix: fixAt(w, YESTERDAY), jti: seedToken(w, { grade: "failed", challengeIssuedAgoMs: 3 * 86_400_000 }) }]) {
+      const out = ok(await handleMarkerScan(await printed(w, "4321", extra), w.repo, deps));
+      expect(out.body.cosignal).toBe("none");
+      w.ms.purchases.length = 0;
+    }
+    expect(w.ms.attemptAts).toEqual([w.nowMs, w.nowMs, w.nowMs]);
+    expect(w.ms.recordInputs.map((r) => r.at.getTime())).toEqual([w.nowMs, w.nowMs, w.nowMs]);
+  });
+
+  it("a QUALIFYING fix dated yesterday sets the instant for the PIN gate and the scan (an offline scan uploaded the next day)", async () => {
+    const w = await world();
+    const fix = fixAt(w, YESTERDAY);
+    const out = ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix, jti: seedToken(w, { challengeIssuedAgoMs: 3 * 86_400_000 }) }), w.repo, deps));
+    expect(out.body).toMatchObject({ outcome: "credited", cosignal: "counted" });
+    expect(w.ms.attemptAts).toEqual([fix.capturedAt]);
+    expect(w.ms.recordInputs.map((r) => r.at.getTime())).toEqual([fix.capturedAt]);
+  });
+
+  it("the qualification check is READ-ONLY and runs before the PIN gate: a wrong PIN consumes nothing, even for a fix that qualifies", async () => {
+    const w = await world();
+    const jti = seedToken(w);
+    const out = await handleMarkerScan(await printed(w, "0000", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti }), w.repo, deps);
+    expect(out.kind).toBe("refused");
+    expect(w.state.checkinTokens.get(jti)!.consumedAt).toBeNull();
+    expect(w.state.evidence.size).toBe(0);
+    expect(w.ms.attemptAts).toEqual([w.state.now.getTime() - 10_000]); // the (qualifying) fix's time
+  });
+
+  it("a replayed fix id is the same 409 before anything else, and the intake of a fix that does not qualify is refused without touching the token", async () => {
+    const w = await world();
+    const t = await seedRotating(w);
+    const req = body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w), jti: seedToken(w) });
+    ok(await handleMarkerScan(req, w.repo, deps));
+    expect(await thrown(handleMarkerScan(req, w.repo, deps))).toMatchObject({ status: 409, code: "fix_already_used" });
+    const jti = seedToken(w);
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w, -10_000, { simulated: true }), jti }), w.repo, deps))).toMatchObject({ status: 422, code: "not_a_cosignal" });
+    expect(w.state.checkinTokens.get(jti)!.consumedAt).toBeNull();
+  });
+});
+
+describe("the database's own refusals of a co-signal and the rotating token's kid (review M2, NIT)", () => {
+  it("the Edge passes the kid the signature was verified under for a rotating token, and the database's cosignal_invalid / cosignal_used are 422 invalid_cosignal / 409 fix_already_used", async () => {
+    const w = await world();
+    const t = await seedRotating(w);
+    w.ms.recordOverride = { status: "cosignal_invalid" };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps))).toMatchObject({ status: 422, code: "invalid_cosignal" });
+    expect(w.ms.recordInputs[0]).toMatchObject({ variant: "rotating", qrKid: "rk1" });
+    w.ms.recordOverride = { status: "cosignal_used" };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps))).toMatchObject({ status: 409, code: "fix_already_used" });
+    w.ms.recordOverride = null;
+    // the intake maps them the same way
+    const w2 = await world();
+    w2.ms.attachOverride = { status: "cosignal_invalid" };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w2), jti: seedToken(w2) }), w2.repo, deps))).toMatchObject({ status: 422, code: "invalid_cosignal" });
+    w2.ms.attachOverride = { status: "cosignal_used" };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w2), jti: seedToken(w2) }), w2.repo, deps))).toMatchObject({ status: 409, code: "fix_already_used" });
+  });
+
+  it("a fix that qualified at the read-only check but whose token a concurrent request consumed first is a 409 fix_not_consumable, with nothing written (the scan never goes on at the fix's time without a counted co-signal)", async () => {
+    const w = await world();
+    const t = await seedRotating(w);
+    const repo = { ...w.repo, checkinToken: { ...w.repo.checkinToken, consumeForFix: async () => null } };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w), jti: seedToken(w) }), repo, deps))).toMatchObject({ status: 409, code: "fix_not_consumable" });
+    expect(w.ms.calls).toEqual(["publicKey:rotating_token:rk1"]);
+    expect(w.state.evidence.size).toBe(0);
+    // the intake the same way
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), repo, deps))).toMatchObject({ status: 409, code: "fix_not_consumable" });
+  });
+
+  it("a token presented under a kid it was not minted under is invalid_qr (the database cross-checks the row's kid)", async () => {
+    const w = await world();
+    const t = await seedRotating(w);
+    w.ms.tokens.get(t.hash)!.kid = "rk0";
+    expect(await thrown(handleMarkerScan(body({ qr: { variant: "rotating", token: t.token } }), w.repo, deps))).toMatchObject({ status: 422, code: "invalid_qr" });
   });
 });

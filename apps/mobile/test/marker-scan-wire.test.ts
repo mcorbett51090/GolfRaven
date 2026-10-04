@@ -73,6 +73,7 @@ describe("api.scanMarker against the real handler's recorded answers", () => {
       ["markerscan_422_not_a_cosignal", "rejected", 422, "not_a_cosignal"],
       ["markerscan_422_fix_out_of_window", "rejected", 422, "fix_out_of_window"],
       ["markerscan_422_programme_inactive", "rejected", 422, "marker_programme_inactive"],
+      ["markerscan_422_invalid_cosignal", "rejected", 422, "invalid_cosignal"],
       ["markerscan_400_unknown_key", "rejected", 400, "bad_request"],
       ["markerscan_400_fix_without_device", "rejected", 400, "bad_request"],
       ["markerscan_503_pin_unavailable", "unavailable", 503, "course_pin_unavailable"],

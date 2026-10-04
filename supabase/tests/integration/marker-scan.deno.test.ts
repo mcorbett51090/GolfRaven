@@ -423,21 +423,28 @@ Deno.test("Q2 race: the SAME player scanning the same printed QR 6 times at once
   assertEquals((await purchases(p.uid)).length, 1);
 });
 
-Deno.test("Q2 race at the database: the repo's record() called 8 times at once for ONE player and one shop yields ONE purchase; a lost race is the mapped 409 duplicate_scan (unique index), never a 500", DT, async () => {
-  // The scan endpoint cannot reach this race (its PIN gate holds an advisory lock per user and facility through the commit), so this drives `record` directly: the unique index is the backstop.
+Deno.test("Q2 race at the database: the SAME player scanning one shop 8 times at once (gate + record in one transaction each) records ONE purchase; the rest are `duplicate` (the PIN gate's advisory lock serialises them)", DT, async () => {
+  // The unique index (user, trail, ref) stays as the backstop; since the scan REQUIRES the PIN gate's proof, whose per-user advisory lock is held to the commit, a same-player race is serialised before it.
   const e = await env();
   const shop = await createShop("q2r", "static_pin");
   const p = await freshPlayer("q2r");
   const pin = await referencePin(e.pepper, shop.fac, localDateOf(Date.now()), 0);
   const input = { facilityId: shop.fac, variant: "static_pin" as const, nonceHash: null, qrKid: e.prtKid, pin, at: new Date(), cosignal: null };
-  const results = await Promise.allSettled(Array.from({ length: 8 }, () => withOwnership(p.actor, (repo: Repo) => repo.markerScan.record(input))));
+  const results = await Promise.allSettled(
+    Array.from({ length: 8 }, () =>
+      withOwnership(p.actor, async (repo: Repo) => {
+        const gate = await repo.markerScan.attemptPin({ facilityId: shop.fac, pin, at: input.at });
+        assertEquals(gate.result, "ok");
+        return repo.markerScan.record(input);
+      }),
+    ),
+  );
   let accepted = 0;
   for (const r of results) {
+    assertEquals(r.status, "fulfilled", r.status === "rejected" ? String((r.reason as Error).message) : "");
     if (r.status === "fulfilled") {
       if (r.value.status === "accepted") accepted += 1;
       else assertEquals(r.value.status, "duplicate");
-    } else {
-      assertEquals([(r.reason as HttpError).status, (r.reason as HttpError).code], [409, "duplicate_scan"]);
     }
   }
   assertEquals(accepted, 1);
@@ -505,6 +512,150 @@ Deno.test("Q2 caps: 30 wrong PINs at one facility in a day ROTATE its PIN (epoch
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // what edge_actor can and cannot reach; the pepper's absence
 // ---------------------------------------------------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// the gate's follow-ups: M1 (a rotation must not break a queued scan), M2 (the co-signal is read back), L1, L5, L6
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+Deno.test("M1 end to end: a printed-QR scan CAPTURED before a rotation and uploaded after it is accepted and counts NOTHING against the honest player; the same old PIN tried now is a wrong guess", DT, async () => {
+  const e = await env();
+  const shop = await createShop("m1", "static_pin");
+  const honest = await freshPlayer("m1h");
+  const jti = await checkinToken(honest, shop);
+  const fix = fixOf(); // captured now, BEFORE the rotation below
+  const pin0 = await referencePin(e.pepper, shop.fac, localDateOf(fix.capturedAt), 0);
+  await sleep(60);
+  // six other accounts, five wrong guesses each: the 30th rotates the PIN
+  const guesses: string[] = [];
+  for (let k = 1; guesses.length < 30; k++) {
+    const g = wrongOf(pin0, k);
+    if (g !== pin0) guesses.push(g);
+  }
+  const players = await Promise.all(Array.from({ length: 6 }, (_, i) => freshPlayer(`m1-${i}`)));
+  await Promise.all(players.map(async (p, pi) => {
+    for (let i = 0; i < 5; i++) await scan(p, shop, { qr: await printedQr(shop, guesses[pi * 5 + i]!) });
+  }));
+  const epoch = await adminSql()`select max(pin_epoch)::int as epoch from app.facility_programme where facility_id = ${shop.fac}`;
+  assertEquals(epoch[0]!.epoch, 1, "the PIN rotated");
+  assertEquals(await rawCount(`select count(*)::int as n from app.course_pin_epoch_log where facility_id = '${shop.fac}' and pin_epoch = 1 and previous_epoch = 0`), 1, "and the rotation is logged");
+  // the honest upload, after the rotation: the PIN displayed when the fix was taken (epoch 0)
+  const res = ok(await scan(honest, shop, { qr: await printedQr(shop, pin0), fix, jti }));
+  assertEquals([res.status, res.body.outcome], [201, "credited"]);
+  assertEquals(await rawCount(`select count(*)::int as n from private.rate_limit_bucket where bucket_key like 'marker-scan:pin-fail:u:${honest.uid}:%'`), 0, "nothing was counted against the honest player");
+  // the same OLD PIN tried now (no fix: the instant is now, epoch 1 is live) is a wrong guess
+  const late = await freshPlayer("m1-late");
+  const wrong = await scan(late, shop, { qr: await printedQr(shop, pin0) });
+  assertEquals(wrong.kind, "refused");
+  assertEquals(await rawCount(`select count(*)::int as n from private.rate_limit_bucket where bucket_key like 'marker-scan:pin-fail:u:${late.uid}:%'`), 1, "a rotated-out PIN tried now IS counted");
+});
+
+Deno.test("L6: a co-signal that arrives BEFORE the staff row exists is 422 no_pending_purchase and rolled back; the SAME request succeeds once the row exists (the client retries until the 7-day bound)", DT, async () => {
+  const shop = await createShop("l6", "both");
+  const p = await freshPlayer("l6");
+  const jti = await checkinToken(p, shop);
+  const fix = fixOf();
+  const early = await httpError(scan(p, shop, { fix, jti }));
+  assertEquals([early?.status, early?.code], [422, "no_pending_purchase"]);
+  assertEquals(await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${jti}' and consumed_at is not null`), 0, "the refused intake did not spend the check-in token");
+  assertEquals(await rawCount(`select count(*)::int as n from app.evidence where source_ref = 'fix:${fix.fixId}'`), 0, "nor leave an evidence row");
+  // later, S3's staff lane records the offline-code purchase (pending, with its +-10 minute window around the code's step and the 7-day deadline)
+  const iso = (ms: number) => new Date(ms).toISOString();
+  await ensureServiceRole();
+  const sql = adminSql();
+  const awaiting = { awaiting: { from: iso(fix.capturedAt - 10 * 60_000), to: iso(fix.capturedAt + 10 * 60_000), until: iso(Date.now() + 7 * 86_400_000) } };
+  const [row] = await sql`
+    insert into app.purchase_evidence (user_id, facility_id, trail_id, method, ref_id, offline, cosignal, local_date, status)
+    values (${p.uid}, ${shop.fac}, ${shop.trails[0]!}, 'staff_scan', ${"offline:" + p.deviceId + ":1:1"}, true, ${sql.json(awaiting)}, ${localDateOf(fix.capturedAt)}, 'pending') returning id`;
+  await sql`insert into app.marker_credit (user_id, trail_id, facility_id, purchase_evidence_id, status) values (${p.uid}, ${shop.trails[0]!}, ${shop.fac}, ${row!.id}, 'pending')`;
+  const retried = ok(await scan(p, shop, { fix, jti }));
+  assertEquals([retried.status, retried.body.outcome, retried.body.cosignal], [200, "credited", "counted"]);
+  const rows = await purchases(p.uid);
+  assertEquals([rows[0]!.method, rows[0]!.status, rows[0]!.credit_status], ["staff_scan", "valid", "credited"]);
+});
+
+Deno.test("L1 end to end: a photographed rotating token cannot be burned days later (no fix, or a simulated one dated inside its window): qr_expired, token unspent", DT, async () => {
+  const shop = await createShop("l1");
+  const p = await freshPlayer("l1");
+  const old = await rotatingToken(shop, { ageSec: 3 * 86_400 });
+  const none = await httpError(scan(p, shop, { qr: { variant: "rotating", token: old.token } }));
+  assertEquals([none?.status, none?.code], [422, "qr_expired"]);
+  const jti = await checkinToken(p, shop);
+  const fabricated = await httpError(scan(p, shop, { qr: { variant: "rotating", token: old.token }, fix: fixOf({ capturedAt: old.issuedAtMs + 20_000, simulated: true }), jti }));
+  assertEquals([fabricated?.status, fabricated?.code], [422, "qr_expired"]);
+  assertEquals(await rawCount(`select count(*)::int as n from app.course_qr_token where nonce_hash = '${old.hash}' and used_at is not null`), 0);
+  assertEquals((await purchases(p.uid)).length, 0);
+  // and at the database: no co-signal and a time far from now is refused outright
+  const e = await env();
+  const t = await rotatingToken(shop);
+  const direct = await httpError(withOwnership(p.actor, (repo: Repo) => repo.markerScan.record({ facilityId: shop.fac, variant: "rotating", nonceHash: t.hash, qrKid: e.rotKid, pin: null, at: new Date(Date.now() - 86_400_000), cosignal: null })));
+  assertEquals(direct?.code, "invalid_scan");
+});
+
+Deno.test("a check-in token that does not fit the fix (already spent, another device's, or a fix captured before its challenge) is NO co-signal: the scan is `pending`, never a refusal, and the read-only check consumed nothing", DT, async () => {
+  const shop = await createShop("peek");
+  const p = await freshPlayer("peek");
+  // 1. a token a first scan already spent
+  const jti = await checkinToken(p, shop);
+  ok(await scan(p, shop, { qr: { variant: "rotating", token: (await rotatingToken(shop)).token }, fix: fixOf(), jti }));
+  const spent = ok(await scan(p, shop, { qr: { variant: "rotating", token: (await rotatingToken(shop)).token }, fix: fixOf(), jti }));
+  assertEquals([spent.status, spent.body.outcome, spent.body.cosignal], [201, "pending", "none"]);
+  // 2. another device's token (the same account): the token is bound to its own device
+  const q = await freshPlayer("peek-b");
+  const jtiB = await checkinToken(q, shop);
+  const otherDevice = freshUuid();
+  await withOwnership(q.actor, (repo: Repo) => repo.device.ensureOwn(otherDevice, "android"));
+  const wrongDevice = ok(await scan({ ...q, deviceId: otherDevice }, shop, { qr: { variant: "rotating", token: (await rotatingToken(shop)).token }, fix: fixOf(), jti: jtiB }));
+  assertEquals([wrongDevice.body.outcome, wrongDevice.body.cosignal], ["pending", "none"]);
+  assertEquals(await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${jtiB}' and consumed_at is not null`), 0, "the unconsumed token of the right device is untouched");
+  // 3. a fix captured an hour BEFORE the challenge was issued (outside its window)
+  const r = await freshPlayer("peek-c");
+  const jtiC = await checkinToken(r, shop);
+  const early = ok(await scan(r, shop, { qr: { variant: "rotating", token: (await rotatingToken(shop)).token }, fix: fixOf({ capturedAt: Date.now() - 3_600_000 }), jti: jtiC }));
+  assertEquals([early.body.outcome, early.body.cosignal], ["pending", "none"]);
+  assertEquals(await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${jtiC}' and consumed_at is not null`), 0);
+});
+
+Deno.test("L5: the scan definer is never an uncounted PIN oracle: a printed-QR record() without the PIN gate's proof in the same transaction is refused, with a right or a wrong PIN", DT, async () => {
+  const e = await env();
+  const shop = await createShop("l5", "static_pin");
+  const p = await freshPlayer("l5");
+  const pin = await referencePin(e.pepper, shop.fac, localDateOf(Date.now()), 0);
+  for (const guess of [pin, wrongOf(pin)]) {
+    let code = "no error";
+    try {
+      await withOwnership(p.actor, (repo: Repo) => repo.markerScan.record({ facilityId: shop.fac, variant: "static_pin", nonceHash: null, qrKid: e.prtKid, pin: guess, at: new Date(), cosignal: null }));
+    } catch (err) {
+      code = String((err as { code?: unknown }).code);
+    }
+    assertEquals(code, "42501");
+  }
+  assertEquals(await rawCount(`select count(*)::int as n from private.rate_limit_bucket where bucket_key like 'marker-scan:pin-fail:u:${p.uid}:%'`), 0);
+});
+
+Deno.test("M2: the database reads the co-signal back: an invented evidence id is cosignal_invalid, and a real evidence row cannot back a second scan (cosignal_used)", DT, async () => {
+  const e = await env();
+  const shop = await createShop("m2");
+  const p = await freshPlayer("m2");
+  const t1 = await rotatingToken(shop);
+  const t2 = await rotatingToken(shop);
+  const invented = await withOwnership(p.actor, (repo: Repo) =>
+    repo.markerScan.record({ facilityId: shop.fac, variant: "rotating", nonceHash: t1.hash, qrKid: e.rotKid, pin: null, at: new Date(), cosignal: { grade: "attested", fixId: "invented-fix", evidenceId: freshUuid() } }));
+  assertEquals(invented.status, "cosignal_invalid");
+  // a real, counted fix backs the first scan ...
+  const jti = await checkinToken(p, shop);
+  const fix = fixOf();
+  ok(await scan(p, shop, { qr: { variant: "rotating", token: t1.token }, fix, jti }));
+  const ev = await adminSql()`select id from app.evidence where user_id = ${p.uid} and source_ref = ${"fix:" + fix.fixId}`;
+  // ... and the SAME evidence row offered for a second scan is refused by the database
+  const reused = await withOwnership(p.actor, (repo: Repo) =>
+    repo.markerScan.record({ facilityId: shop.fac, variant: "rotating", nonceHash: t2.hash, qrKid: e.rotKid, pin: null, at: new Date(fix.capturedAt), cosignal: { grade: "attested", fixId: fix.fixId, evidenceId: ev[0]!.id as string } }));
+  assertEquals(reused.status, "cosignal_used");
+  // another account's evidence row is not the actor's: invalid
+  const other = await freshPlayer("m2o");
+  const stolen = await withOwnership(other.actor, (repo: Repo) =>
+    repo.markerScan.record({ facilityId: shop.fac, variant: "rotating", nonceHash: t2.hash, qrKid: e.rotKid, pin: null, at: new Date(fix.capturedAt), cosignal: { grade: "attested", fixId: fix.fixId, evidenceId: ev[0]!.id as string } }));
+  assertEquals(stolen.status, "cosignal_invalid");
+});
 
 Deno.test("as the real edge_actor: the key table, the alarm table, the purchase table and the PIN derivation core are out of reach", DT, async () => {
   await env();

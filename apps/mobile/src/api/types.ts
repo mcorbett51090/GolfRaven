@@ -214,7 +214,7 @@ export interface MarkerScanResult {
 }
 
 /** The player's half of a marker purchase (P5.1a S2a). The bearer is `credentials.accessToken` (the owner's); NOT retried here (a scan is single-use: a repeat answers 409). Behind `MARKER_COSIGNAL_UI_ENABLED`, which stays false:
- * nothing in the app calls it yet. Refusals the UI must tell apart: 409 `qr_used` / `fix_already_used` / `duplicate_scan`, 422 `qr_expired` / `invalid_qr` / `invalid_pin` / `no_pending_purchase`, 429 (a rate limit or `locked` PINs, with Retry-After). */
+ * nothing in the app calls it yet. Refusals the UI must tell apart: 409 `qr_used` / `fix_already_used` / `duplicate_scan`, 422 `qr_expired` / `invalid_qr` / `invalid_pin` / `no_pending_purchase` (retryable for the 7 days after the fix: the staff row may land after the player's sync, and the refusal is rolled back, so the same request succeeds once it does), 429 (a rate limit or `locked` PINs, with Retry-After). */
 export interface MarkerScanApi {
   scanMarker(req: MarkerScanRequest, credentials: EvidenceCredentials): Promise<MarkerScanResult>;
 }

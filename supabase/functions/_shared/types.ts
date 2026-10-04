@@ -547,6 +547,10 @@ export interface Repo {
      * `ConsumedCheckinToken`'s own doc for exactly what one call enforces
      * in a single statement. */
     consumeForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null>;
+    /** The READ-ONLY twin of `consumeForFix` (P5.1a S2a, review L1): would `consumeForFix` consume this token for this fix right now? The same predicates (the caller's own, the submitting device,
+     * unconsumed, unexpired, the fix inside the challenge window), nothing written. The marker scan needs to know whether the fix QUALIFIES before it decides the scan's instant (a client-chosen
+     * time may drive the 120 s rule and the PIN date only for a qualifying fix), and it must decide that BEFORE the PIN gate commits and before anything is consumed. */
+    peekForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null>;
     /** The actor's own token for a CONSUMED challenge, or `null` (none was issued, or it is not this actor's). */
     findByChallenge(challengeId: string): Promise<IssuedCheckinTokenRow | null>;
     /** Has this actor ever been issued a token graded `attested` on this device? (The Android half of the "this device has shown it can
@@ -682,7 +686,11 @@ export type MarkerScanRefusal =
   | "qr_expired"
   | "qr_revoked"
   | "pin_wrong"
-  | "duplicate";
+  | "duplicate"
+  /** The co-signal's evidence row failed the database's read-back (not the actor's, not this fix / facility / grade / local date / captured time, not accepted). */
+  | "cosignal_invalid"
+  /** The evidence row already backs another scan. */
+  | "cosignal_used";
 
 export type MarkerScanRecordResult = { status: "accepted"; localDate: string; purchases: MarkerPurchaseView[] } | { status: MarkerScanRefusal };
 
@@ -692,7 +700,7 @@ export interface MarkerCosignalAttachInput {
   cosignal: MarkerCosignalInput;
 }
 
-export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" };
+export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" | "cosignal_invalid" | "cosignal_used" };
 
 /** What `Repo#offlineCode.provisionSeed` returns: the raw 32-byte seed, its version, and the database clock at issue (ISO-8601). */
 export interface OfflineSeedProvision {

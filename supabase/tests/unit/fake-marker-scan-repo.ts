@@ -13,6 +13,8 @@ import type { FakeState } from "./fake-repo.ts";
 
 export interface FakeToken {
   facilityId: string;
+  /** The kid the token was minted under (the database cross-checks it against the kid the Edge verified under). Absent: not checked. */
+  kid?: string;
   issuedAtMs: number;
   used: boolean;
 }
@@ -56,6 +58,12 @@ export interface FakeMarkerScanState {
   pinOverride: PinAttemptResult | null;
   /** `false` simulates "the PIN pepper is not provisioned in Vault" (a 503 `course_pin_unavailable`). */
   pepperProvisioned: boolean;
+  /** The `at` of every `attemptPin` and every `record` call, in order (the scan's instant: now, or a qualifying fix's time). */
+  attemptAts: number[];
+  recordInputs: MarkerScanRecordInput[];
+  /** Force the database's answer (e.g. `cosignal_invalid`) for the next `record` / `attachCosignal`. */
+  recordOverride: MarkerScanRecordResult | null;
+  attachOverride: MarkerCosignalAttachResult | null;
 }
 
 const states = new WeakMap<FakeState, FakeMarkerScanState>();
@@ -63,7 +71,7 @@ const states = new WeakMap<FakeState, FakeMarkerScanState>();
 export function markerScanState(state: FakeState): FakeMarkerScanState {
   let s = states.get(state);
   if (!s) {
-    s = { keys: new Map(), tokens: new Map(), facilityQr: new Map(), pins: new Map(), programme: new Map(), qrMode: new Map(), pinFailures: new Map(), purchases: [], calls: [], pinOverride: null, pepperProvisioned: true };
+    s = { keys: new Map(), tokens: new Map(), facilityQr: new Map(), pins: new Map(), programme: new Map(), qrMode: new Map(), pinFailures: new Map(), purchases: [], calls: [], pinOverride: null, pepperProvisioned: true, attemptAts: [], recordInputs: [], recordOverride: null, attachOverride: null };
     states.set(state, s);
   }
   return s;
@@ -86,6 +94,7 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
 
     async attemptPin(input): Promise<PinAttemptResult> {
       m.calls.push("attemptPin");
+      m.attemptAts.push(input.at.getTime());
       if (!m.pepperProvisioned) throw new HttpError(503, "course_pin_unavailable", "marker purchases by printed QR are not available right now");
       if (m.pinOverride) return m.pinOverride;
       if (!state.facilityTz.has(input.facilityId)) return { result: "no_facility", retryAfterSeconds: null };
@@ -101,6 +110,8 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
 
     async record(input: MarkerScanRecordInput): Promise<MarkerScanRecordResult> {
       m.calls.push("record");
+      m.recordInputs.push(input);
+      if (m.recordOverride) return m.recordOverride;
       const tz = state.facilityTz.get(input.facilityId);
       if (!tz) return { status: "no_facility" };
       const trails = m.programme.get(input.facilityId) ?? [];
@@ -112,7 +123,7 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
       let awaiting: { fromMs: number; toMs: number };
       if (input.variant === "rotating") {
         const t = input.nonceHash ? m.tokens.get(input.nonceHash) : undefined;
-        if (!t) return { status: "qr_unknown" };
+        if (!t || (t.kid !== undefined && t.kid !== input.qrKid)) return { status: "qr_unknown" };
         if (t.facilityId !== input.facilityId) return { status: "qr_wrong_facility" };
         if (t.used) return { status: "qr_used" };
         if (Math.abs(atMs - t.issuedAtMs) > 120_000) return { status: "qr_expired" };
@@ -124,7 +135,7 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
         if (!kid) return { status: "qr_unknown" };
         if (kid !== input.qrKid) return { status: "qr_revoked" };
         if (m.pins.get(input.facilityId) !== input.pin) return { status: "pin_wrong" };
-        ref = `pin:${input.facilityId}:${localDateOf(atMs, tz)}:0`;
+        ref = `pin:${input.facilityId}:${localDateOf(atMs, tz)}`;
         if (m.purchases.some((p) => p.userId === uid && p.method === "course_qr" && p.refId === ref)) return { status: "duplicate" };
         awaiting = { fromMs: atMs - 12 * 3_600_000, toMs: atMs + 12 * 3_600_000 };
       }
@@ -155,6 +166,7 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
 
     async attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult> {
       m.calls.push("attachCosignal");
+      if (m.attachOverride) return m.attachOverride;
       const atMs = input.at.getTime();
       const match = m.purchases
         .filter((p) => p.userId === uid && p.facilityId === input.facilityId && p.status === "pending" && p.awaiting !== null && p.awaiting.fromMs <= atMs && atMs <= p.awaiting.toMs && state.now.getTime() <= p.awaiting.untilMs)

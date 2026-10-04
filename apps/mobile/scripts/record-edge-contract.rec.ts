@@ -967,6 +967,13 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
       for (let i = 0; i <= MARKER_SCAN_PER_USER_DAY; i += 1) last = await markerScanEndpoint(w, { facilityId: MARKER_FAC, qr: { variant: "rotating", token: "not.a.token" } });
       r.markerscan_429_rate_limited = last!;
     }
+    {
+      const w = await mk();
+      const t = await seedRot(w);
+      // the database read the co-signal's evidence row back and refused it (an Edge bug or a forged call, never a state the player can fix): 422, rolled back
+      markerScanState(w.state).recordOverride = { status: "cosignal_invalid" };
+      r.markerscan_422_invalid_cosignal = await markerScanEndpoint(w, scanBody(w, { variant: "rotating", token: t.token }, withFix(w)));
+    }
   }
 
   // ---------------- vectors ----------------
@@ -1112,7 +1119,7 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     expect(JSON.parse(ms("markerscan_201_held_review_unattestable").body).data).toMatchObject({ outcome: "held_review" });
     expect([ms("markerscan_409_fix_already_used").status, ms("markerscan_409_qr_used").status]).toEqual([409, 409]);
     expect([ms("markerscan_409_fix_already_used").body, ms("markerscan_409_qr_used").body, ms("markerscan_409_qr_used_retry").body].map((b) => JSON.parse(b).error.code)).toEqual(["fix_already_used", "qr_used", "qr_used"]);
-    expect([ms("markerscan_422_invalid_pin").status, ms("markerscan_429_pin_locked").status, ms("markerscan_422_qr_expired").status, ms("markerscan_422_invalid_qr_forged").status, ms("markerscan_422_no_pending_purchase").status, ms("markerscan_422_not_a_cosignal").status, ms("markerscan_422_fix_out_of_window").status, ms("markerscan_422_programme_inactive").status]).toEqual([422, 429, 422, 422, 422, 422, 422, 422]);
+    expect([ms("markerscan_422_invalid_pin").status, ms("markerscan_429_pin_locked").status, ms("markerscan_422_qr_expired").status, ms("markerscan_422_invalid_qr_forged").status, ms("markerscan_422_no_pending_purchase").status, ms("markerscan_422_not_a_cosignal").status, ms("markerscan_422_fix_out_of_window").status, ms("markerscan_422_programme_inactive").status, ms("markerscan_422_invalid_cosignal").status]).toEqual([422, 429, 422, 422, 422, 422, 422, 422, 422]);
     expect([ms("markerscan_400_unknown_key").status, ms("markerscan_400_fix_without_device").status, ms("markerscan_503_pin_unavailable").status, ms("markerscan_429_rate_limited").status]).toEqual([400, 400, 503, 429]);
     void errorResponse;
   });
