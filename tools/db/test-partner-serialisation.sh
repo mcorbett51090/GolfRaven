@@ -18,6 +18,16 @@
 #      (it still reads only its own session) -- an edge-reachable policy keyed on a settable GUC is the hard rule, and the single-connection half is PA-4c in
 #      supabase/tests/matrix/25_partner_auth_spine.sql.
 #
+#   6. THE SIGN-IN MINT (S1.1b, 0048): real concurrent sessions as edge_gateway -> edge_partner_minter calling private.partner_session_mint with REAL ES256 assertions generated at run time by
+#      supabase/tests/partner-sign-helpers.sql (no key is stored anywhere):
+#        6a  PA-7: TWELVE concurrent mints of ONE challenge give exactly one `ok` and eleven `replayed`: one session, one used nonce, the counter advanced once.
+#        6b  PA-9: the counter compare-and-set. A mints counter 9 and holds its transaction open; B (counter 8, a different challenge) WAITS on the credential row (pg_locks), then, once A commits,
+#            is refused as `counter_regression`: the counter ends at 9, never 8. The refusal's alarm and audit rows are COMMITTED (read from another connection afterwards).
+#        6c  PA-9: the same race with the HIGHER second counter (12, then 13): both succeed, in order; the counter ends at 13 and each made its session.
+#        6d  the signature alarm commits with the refusal: a tampered signature returns `signature_invalid` and its alarm and audit rows are visible to another connection (a status, not a RAISE:
+#            nothing rolled back), while no nonce was spent and no session exists.
+#      The audit_log rows these write cannot be deleted (the table is insert-only by trigger); the other rows are removed by the EXIT trap.
+#
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the signin concurrency step, against the same throwaway cluster and database.)
 # No secret: ids are synthetic; the session token hashes are random per run and the edge login is trust-authenticated in this cluster. Re-runnable: everything it
@@ -59,6 +69,10 @@ cleanup() {
   hx "DELETE FROM app.partner_session WHERE id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_credential WHERE id::text LIKE 'ee24f000-%';" 2>/dev/null
   hx "SET ROLE service_role; DELETE FROM app.partner_member WHERE org_id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_scope WHERE org_id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_org WHERE id::text LIKE 'ee24f000-%';" 2>/dev/null
   hx "SET ROLE service_role; SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id::text LIKE 'ee24f000-%';" 2>/dev/null
+  hx "DELETE FROM app.partner_session WHERE user_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_auth_challenge WHERE user_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_auth_alarm WHERE credential_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_credential WHERE user_id::text LIKE 'ee26f000-%';" 2>/dev/null
+  hx "SET ROLE service_role; SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id::text LIKE 'ee26f000-%';" 2>/dev/null
+  if [ "${RP_INSERTED:-0}" = 1 ]; then hx "DELETE FROM app.partner_rp_config;" 2>/dev/null; fi
+  hx "DROP POLICY IF EXISTS zz26s_chal ON app.partner_auth_challenge; DROP POLICY IF EXISTS zz26s_alarm ON app.partner_auth_alarm; DROP POLICY IF EXISTS zz26s_rp ON app.partner_rp_config; DROP POLICY IF EXISTS zz26s_audit ON app.audit_log; REVOKE ALL ON app.partner_auth_challenge, app.partner_auth_alarm, app.partner_rp_config FROM CURRENT_USER;" 2>/dev/null
   hx "DROP POLICY IF EXISTS zz24s_cred ON app.partner_credential; DROP POLICY IF EXISTS zz24s_sess ON app.partner_session; REVOKE ALL ON app.partner_credential, app.partner_session FROM CURRENT_USER;" 2>/dev/null
   rm -rf "$OUT_DIR" 2>/dev/null || true
 }
@@ -284,6 +298,157 @@ elif ! printf '%s' "$RR1B" | grep -q "rc_ok:"; then fail "authorize under READ C
 elif ! printf '%s' "$RR2" | grep -q "written under READ COMMITTED only"; then fail "a facility scope insert under REPEATABLE READ was not refused: $RR2"
 elif [ "$(hq "SET ROLE service_role; SELECT count(*) FROM app.partner_scope WHERE org_id = '$ORG7'" | tail -1)" != "1" ]; then fail "the READ COMMITTED control scope insert did not land exactly once: $RR2B"
 else echo "PASS: REPEATABLE READ is refused by partner_authorize and by the scope invariant; READ COMMITTED (control) passes"; fi
+
+# ---------------------------------------------------------------------------
+# 6. THE SIGN-IN MINT (S1.1b): real concurrent sessions, real signatures
+# ---------------------------------------------------------------------------
+echo "tools/db/test-partner-serialisation.sh: 6. the sign-in mint: concurrent replays, the counter race, the alarm that commits"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MU1="ee26f000-0000-0000-0000-0000000000b1"; MU2="ee26f000-0000-0000-0000-0000000000b2"; MU3="ee26f000-0000-0000-0000-0000000000b3"; MU4="ee26f000-0000-0000-0000-0000000000b4"
+RP_INSERTED=0
+hx "
+  GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_auth_challenge, app.partner_auth_alarm, app.partner_rp_config TO CURRENT_USER;
+  DROP POLICY IF EXISTS zz26s_chal ON app.partner_auth_challenge; CREATE POLICY zz26s_chal ON app.partner_auth_challenge FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+  DROP POLICY IF EXISTS zz26s_alarm ON app.partner_auth_alarm; CREATE POLICY zz26s_alarm ON app.partner_auth_alarm FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+  DROP POLICY IF EXISTS zz26s_rp ON app.partner_rp_config; CREATE POLICY zz26s_rp ON app.partner_rp_config FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+  DROP POLICY IF EXISTS zz26s_audit ON app.audit_log; CREATE POLICY zz26s_audit ON app.audit_log FOR SELECT TO CURRENT_USER USING (true);"
+RP_COUNT=$(hq "SELECT count(*) FROM app.partner_rp_config")
+if [ "$RP_COUNT" = "0" ]; then hx "INSERT INTO app.partner_rp_config (rp_id, origin) VALUES ('partners.example.test', 'https://partners.example.test');"; RP_INSERTED=1; fi
+RP_ID="$(hq "SELECT rp_id FROM app.partner_rp_config")"; RP_ORIGIN="$(hq "SELECT origin FROM app.partner_rp_config")"
+
+# One psql session: load the signer helpers (pg_temp, so they vanish with it), make four credentials (each for its own person) with fresh keys, and print one line per assertion:
+#   label|credential id|nonce|exp|mac|authenticatorData|clientDataJSON|signature     (all hex but exp)
+# The private keys exist only inside this session.
+PREP_OUT="$OUT_DIR/prep.txt"
+# (the helpers are loaded AS private_definer: they are called as it, and a function in the temp schema is not executable by another role)
+( cd "$ROOT_DIR" && "${HARNESS_PSQL[@]}" -c 'SET ROLE private_definer' -f supabase/tests/partner-sign-helpers.sql -c 'RESET ROLE' -f - ) >"$PREP_OUT" <<SQL
+SET ROLE service_role;
+INSERT INTO auth.users (id, email) VALUES ('$MU1', 'mint1@partner.test'), ('$MU2', 'mint2@partner.test'), ('$MU3', 'mint3@partner.test'), ('$MU4', 'mint4@partner.test') ON CONFLICT (id) DO NOTHING;
+RESET ROLE;
+CREATE TEMP TABLE mk (label text, uid uuid, d numeric, cred_id bytea);
+CREATE FUNCTION pg_temp.mkcred(p_label text, p_uid uuid) RETURNS void LANGUAGE plpgsql AS \$f\$
+DECLARE d numeric; pub numeric[]; cose bytea; cid bytea := public.gen_random_bytes(32);
+BEGIN
+  EXECUTE 'SET LOCAL ROLE private_definer';
+  d := private.partner_sig_os2ip(public.gen_random_bytes(32)) % (private.partner_sig_p256_n() - 1) + 1;
+  pub := pg_temp.ps_pub(d);
+  cose := pg_temp.ps_cose_es256(pub[1], pub[2]);
+  EXECUTE 'RESET ROLE';
+  INSERT INTO app.partner_credential (id, user_id, credential_id, public_key, alg) VALUES (('ee26f000-0000-0000-0000-0000000000c' || right(p_label, 1))::uuid, p_uid, cid, cose, -7);
+  INSERT INTO mk VALUES (p_label, p_uid, d, cid);
+END
+\$f\$;
+CREATE FUNCTION pg_temp.emit(p_label text, p_mk text, p_counter bigint, p_opts jsonb DEFAULT '{}'::jsonb) RETURNS text LANGUAGE plpgsql AS \$f\$
+DECLARE m record; a record;
+BEGIN
+  SELECT * INTO m FROM mk WHERE label = p_mk;
+  EXECUTE 'SET LOCAL ROLE private_definer';
+  SELECT * INTO a FROM pg_temp.ps_assertion(m.d, '$RP_ID', '$RP_ORIGIN', p_counter, p_opts);
+  EXECUTE 'RESET ROLE';
+  RETURN p_label || '|' || encode(m.cred_id, 'hex') || '|' || encode(a.o_nonce, 'hex') || '|' || a.o_exp || '|' || encode(a.o_mac, 'hex') || '|' || encode(a.o_ad, 'hex') || '|' || encode(a.o_cd, 'hex') || '|' || encode(a.o_sig, 'hex');
+END
+\$f\$;
+SELECT pg_temp.mkcred('m1', '$MU1'); SELECT pg_temp.mkcred('m2', '$MU2'); SELECT pg_temp.mkcred('m3', '$MU3'); SELECT pg_temp.mkcred('m4', '$MU4');
+SELECT pg_temp.emit('race', 'm1', 1);
+SELECT pg_temp.emit('lose_a', 'm2', 9);
+SELECT pg_temp.emit('lose_b', 'm2', 8);
+SELECT pg_temp.emit('win_a', 'm3', 12);
+SELECT pg_temp.emit('win_b', 'm3', 13);
+SELECT pg_temp.emit('bad_sig', 'm4', 1, '{"sig_tamper": true}');
+SQL
+declare -A A_CRED A_NONCE A_EXP A_MAC A_AD A_CD A_SIG
+while IFS='|' read -r lbl cred nonce exp mac ad cd sig; do
+  case "$lbl" in race|lose_a|lose_b|win_a|win_b|bad_sig) A_CRED[$lbl]=$cred; A_NONCE[$lbl]=$nonce; A_EXP[$lbl]=$exp; A_MAC[$lbl]=$mac; A_AD[$lbl]=$ad; A_CD[$lbl]=$cd; A_SIG[$lbl]=$sig;; esac
+done < "$PREP_OUT"
+if [ -z "${A_SIG[race]:-}" ] || [ -z "${A_SIG[bad_sig]:-}" ]; then fail "the mint cases: the assertion preparation produced no assertions: $(cat "$PREP_OUT" | head -c 600)"; fi
+
+mint_sql() { # $1 = assertion label, $2 = token hash, $3 = seconds to hold the transaction open AFTER the mint
+  local l="$1"
+  cat <<SQL
+BEGIN;
+SET LOCAL ROLE edge_partner_minter;
+SELECT 'status:' || o_status FROM private.partner_session_mint('$2', '\\x${A_CRED[$l]}', '\\x${A_NONCE[$l]}', ${A_EXP[$l]}, '\\x${A_MAC[$l]}', '\\x${A_AD[$l]}', '\\x${A_CD[$l]}', '\\x${A_SIG[$l]}');
+SELECT pg_sleep($3);
+COMMIT;
+SQL
+}
+tokhash() { printf '%s' "mint-$1-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1; }
+status_of() { sed -n 's/^status://p' "$1" | head -1; }
+
+# 6a. TWELVE concurrent mints of ONE challenge: exactly one wins
+if [ -n "${A_SIG[race]:-}" ]; then
+  RPIDS=()
+  for i in $(seq 1 12); do
+    mint_sql race "$(tokhash "race$i")" 0 | edge "ser_m$i" >"$OUT_DIR/m$i.out" 2>"$OUT_DIR/m$i.err" &
+    RPIDS+=($!)
+  done
+  for pid in "${RPIDS[@]}"; do wait "$pid" || true; done
+  OKN=0; REPN=0; OTHERN=0
+  for i in $(seq 1 12); do
+    st="$(status_of "$OUT_DIR/m$i.out")"
+    case "$st" in ok) OKN=$((OKN + 1));; replayed) REPN=$((REPN + 1));; *) OTHERN=$((OTHERN + 1)); echo "  mint $i: '${st}' $(head -c 300 "$OUT_DIR/m$i.err")" >&2;; esac
+  done
+  SESS=$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$MU1'")
+  NONC=$(hq "SELECT count(*) FROM app.partner_auth_challenge WHERE user_id = '$MU1'")
+  CNT=$(hq "SELECT sign_count FROM app.partner_credential WHERE user_id = '$MU1'")
+  if [ "$OKN" -ne 1 ] || [ "$REPN" -ne 11 ] || [ "$OTHERN" -ne 0 ]; then fail "6a: twelve concurrent mints of one challenge gave ok=$OKN replayed=$REPN other=$OTHERN, expected 1 / 11 / 0"
+  elif [ "$SESS" != "1" ] || [ "$NONC" != "1" ] || [ "$CNT" != "1" ]; then fail "6a: expected one session, one used nonce and a counter of 1, got sessions=$SESS nonces=$NONC counter=$CNT"
+  else echo "PASS: 12 concurrent mints of one challenge -> exactly one ok and eleven replayed; one session, one used nonce, the counter advanced once (PA-7)"; fi
+fi
+
+# 6b. The counter race, the LOWER second counter: A (9) holds its transaction, B (8) waits on the credential row and is refused
+aud_count() { hq "SELECT count(*) FROM app.audit_log WHERE action = '$1' AND subject_id LIKE 'ee26f000-%'"; }  # audit_log is insert-only: rows of an earlier run stay, so compare before and after
+if [ -n "${A_SIG[lose_a]:-}" ]; then
+  AUD0=$(aud_count partner.mint.counter_regression)
+  mint_sql lose_a "$(tokhash la)" 3.5 | edge ser_ma >"$OUT_DIR/ma.out" 2>"$OUT_DIR/ma.err" &
+  PA=$!
+  sleep 1.2 # A has verified, recorded its nonce, advanced the counter to 9 and is sleeping with the credential row locked
+  mint_sql lose_b "$(tokhash lb)" 0 | edge ser_mb >"$OUT_DIR/mb.out" 2>"$OUT_DIR/mb.err" &
+  PB=$!
+  W=$(waits ser_mb)
+  set +e; wait "$PA"; SA=$?; wait "$PB"; SB=$?; set -e
+  CNT=$(hq "SELECT sign_count FROM app.partner_credential WHERE user_id = '$MU2'")
+  ALM=$(hq "SELECT count(*) FROM app.partner_auth_alarm WHERE kind = 'counter_regression' AND credential_id = (SELECT id FROM app.partner_credential WHERE user_id = '$MU2')")
+  AUD=$(( $(aud_count partner.mint.counter_regression) - AUD0 ))
+  if [ "$SA" -ne 0 ] || [ "$SB" -ne 0 ]; then fail "6b: a mint session failed: A=$SA B=$SB $(cat "$OUT_DIR/ma.err" "$OUT_DIR/mb.err")"
+  elif [ "$W" != "yes" ]; then fail "6b: the second mint was never seen WAITING in pg_locks (no compare-and-set row lock)"
+  elif [ "$(status_of "$OUT_DIR/ma.out")" != "ok" ] || [ "$(status_of "$OUT_DIR/mb.out")" != "counter_regression" ]; then fail "6b: expected A=ok and B=counter_regression, got A=$(status_of "$OUT_DIR/ma.out") B=$(status_of "$OUT_DIR/mb.out")"
+  elif [ "$CNT" != "9" ]; then fail "6b: the stored counter ended at $CNT, expected 9 (it must never go DOWN to 8)"
+  elif [ "$ALM" != "1" ] || [ "$AUD" != "1" ]; then fail "6b: the regression's alarm and audit rows were not COMMITTED (alarms=$ALM audits=$AUD, each expected 1)"
+  else echo "PASS: counter race (9 then 8) -> the second mint waited on the credential row, was refused as counter_regression, the counter stayed 9, and its alarm and audit rows are committed (PA-9)"; fi
+fi
+
+# 6c. The counter race, the HIGHER second counter: both succeed, in order
+if [ -n "${A_SIG[win_a]:-}" ]; then
+  mint_sql win_a "$(tokhash wa)" 3.5 | edge ser_ma >"$OUT_DIR/ma.out" 2>"$OUT_DIR/ma.err" &
+  PA=$!
+  sleep 1.2
+  mint_sql win_b "$(tokhash wb)" 0 | edge ser_mb >"$OUT_DIR/mb.out" 2>"$OUT_DIR/mb.err" &
+  PB=$!
+  W=$(waits ser_mb)
+  set +e; wait "$PA"; SA=$?; wait "$PB"; SB=$?; set -e
+  CNT=$(hq "SELECT sign_count FROM app.partner_credential WHERE user_id = '$MU3'")
+  SESS=$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$MU3'")
+  if [ "$SA" -ne 0 ] || [ "$SB" -ne 0 ]; then fail "6c: a mint session failed: A=$SA B=$SB $(cat "$OUT_DIR/ma.err" "$OUT_DIR/mb.err")"
+  elif [ "$W" != "yes" ]; then fail "6c: the second mint was never seen WAITING in pg_locks"
+  elif [ "$(status_of "$OUT_DIR/ma.out")" != "ok" ] || [ "$(status_of "$OUT_DIR/mb.out")" != "ok" ]; then fail "6c: expected both ok, got A=$(status_of "$OUT_DIR/ma.out") B=$(status_of "$OUT_DIR/mb.out")"
+  elif [ "$CNT" != "13" ] || [ "$SESS" != "2" ]; then fail "6c: expected counter 13 and two sessions, got counter=$CNT sessions=$SESS"
+  else echo "PASS: counter race (12 then 13) -> the second mint waited, then succeeded; the counter is 13 and both made a session (PA-9)"; fi
+fi
+
+# 6d. The signature alarm COMMITS with the refusal (a status, not a RAISE)
+if [ -n "${A_SIG[bad_sig]:-}" ]; then
+  AUD0=$(aud_count partner.mint.signature_invalid)
+  mint_sql bad_sig "$(tokhash bs)" 0 | edge ser_md >"$OUT_DIR/md.out" 2>"$OUT_DIR/md.err" || true
+  ALM=$(hq "SELECT count(*) FROM app.partner_auth_alarm WHERE kind = 'signature_invalid' AND credential_id = (SELECT id FROM app.partner_credential WHERE user_id = '$MU4')")
+  AUD=$(( $(aud_count partner.mint.signature_invalid) - AUD0 ))
+  SESS=$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$MU4'")
+  NONC=$(hq "SELECT count(*) FROM app.partner_auth_challenge WHERE user_id = '$MU4'")
+  if [ "$(status_of "$OUT_DIR/md.out")" != "signature_invalid" ]; then fail "6d: expected signature_invalid, got '$(status_of "$OUT_DIR/md.out")': $(cat "$OUT_DIR/md.err")"
+  elif [ "$ALM" != "1" ] || [ "$AUD" != "1" ]; then fail "6d: the alarm and audit rows did not survive the refusal (alarms=$ALM audits=$AUD)"
+  elif [ "$SESS" != "0" ] || [ "$NONC" != "0" ]; then fail "6d: a refused signature left a session or spent a nonce (sessions=$SESS nonces=$NONC)"
+  else echo "PASS: a tampered signature -> signature_invalid, and its alarm and audit rows are committed and visible to another connection; no session, no spent nonce (PA-9b / the 0020 lesson)"; fi
+fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "tools/db/test-partner-serialisation.sh: FAILED" >&2

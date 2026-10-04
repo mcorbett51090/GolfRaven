@@ -793,11 +793,13 @@ REVOKE EXECUTE ON FUNCTION
   private.partner_challenge_core(smallint, bigint, bytea, uuid, bytea), private.partner_challenge_issue_sign_in(), private.partner_challenge_verify(smallint, bigint, bytea, uuid, bytea),
   private.partner_mint_alarm_write(text, uuid, jsonb)
 FROM PUBLIC;
--- the issuer (the mint's owner) may call exactly these four; the helpers above them are reached only from inside these definers, as private_definer
+-- the issuer (the mint's owner) may call exactly these five; the helpers above them are reached only from inside these definers, as private_definer
 GRANT EXECUTE ON FUNCTION private.partner_sig_verify(smallint, bytea, bytea, bytea) TO partner_session_issuer;
 GRANT EXECUTE ON FUNCTION private.partner_challenge_verify(smallint, bigint, bytea, uuid, bytea) TO partner_session_issuer;
 GRANT EXECUTE ON FUNCTION private.partner_mint_alarm_write(text, uuid, jsonb) TO partner_session_issuer;
 GRANT EXECUTE ON FUNCTION private.partner_session_policy(uuid) TO partner_session_issuer;
+-- the mint refuses inside any bound transaction (the 0041 rule), which it reads from the binding helper edge_partner already has
+GRANT EXECUTE ON FUNCTION private.partner_binding_kind() TO partner_session_issuer;
 -- the sign-in challenge issuer: the minter role, and nobody else
 GRANT EXECUTE ON FUNCTION private.partner_challenge_issue_sign_in() TO edge_partner_minter;
 COMMENT ON FUNCTION private.partner_challenge_issue_sign_in() IS
@@ -898,7 +900,8 @@ INSERT INTO private.partner_owner_privilege (role_name, object_kind, object_name
   ('partner_session_issuer', 'function', 'private.partner_sig_verify(smallint,bytea,bytea,bytea)', 'EXECUTE', NULL),
   ('partner_session_issuer', 'function', 'private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea)', 'EXECUTE', NULL),
   ('partner_session_issuer', 'function', 'private.partner_mint_alarm_write(text,uuid,jsonb)', 'EXECUTE', NULL),
-  ('partner_session_issuer', 'function', 'private.partner_session_policy(uuid)', 'EXECUTE', NULL);
+  ('partner_session_issuer', 'function', 'private.partner_session_policy(uuid)', 'EXECUTE', NULL),
+  ('partner_session_issuer', 'function', 'private.partner_binding_kind()', 'EXECUTE', NULL);
 DROP POLICY current_user_seed_partner_owner_privilege_0048 ON private.partner_owner_privilege;
 
 -- ============================================================================

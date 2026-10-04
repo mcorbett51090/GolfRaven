@@ -43,6 +43,7 @@
 {"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "token_hash", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_kind()"}
 {"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea)"}
 {"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_mint_alarm_write(text,uuid,jsonb)"}
 {"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_session_policy(uuid)"}
