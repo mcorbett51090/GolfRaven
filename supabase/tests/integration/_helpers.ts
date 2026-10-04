@@ -109,7 +109,7 @@ let _rawOwner: AdminSql | null = null;
  * does), so even `migration_owner` needs the SAME self-granting
  * temporary-policy dance 0016/0017/0019 themselves already use for this
  * exact shape of problem (`withTemporaryOwnerAccess` below). */
-function rawOwnerSql(): AdminSql {
+export function rawOwnerSql(): AdminSql {
   if (_rawOwner) return _rawOwner;
   _rawOwner = postgres({
     host: PGHOST,

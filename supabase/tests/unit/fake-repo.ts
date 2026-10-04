@@ -40,6 +40,7 @@ import { fakeAttestDevices, makeFakeAttestKeyRepo } from "./fake-attest-key-repo
 import { makeFakeRewardsRepo, registerFakeDevice, rewardsState } from "./fake-rewards-repo.ts";
 import { deleteSigninRows, makeFakeSigninRepo } from "./fake-signin-repo.ts";
 import { makeFakeOfflineCodeRepo } from "./fake-offline-code-repo.ts";
+import { makeFakeMarkerScanRepo } from "./fake-marker-scan-repo.ts";
 
 const ABSOLUTE_ROW_CAP = 10_000; // mirrors packages/rules' own constant (score-play.ts) — see privileged.ts's own re-import of the SAME vendored value; hardcoded here rather than imported so this fake has zero dependency on the vendor tree's own layout.
 
@@ -113,6 +114,8 @@ export interface FakeState {
   courseFacility: Map<string, string>;
   courseHoles: Map<string, number>;
   matches: Map<string, MatchResult>;
+  /** P5.1a S2a: facility id (or `${facility}:${lat}:${lng}`) -> the containment answer of `catalog.matchFacilityFix`. Absent: the conservative default (never a co-signal). */
+  facilityMatches: Map<string, MatchResult>;
   signingKeys: Map<string, SigningKeyRow>;
   evidence: Map<string, FakeEvidenceRow>;
   plays: Map<string, FakePlayRow>;
@@ -161,6 +164,7 @@ export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
     courseFacility: new Map([["crs_x1", "fac_x"]]),
     courseHoles: new Map([["crs_x1", 18]]),
     matches: new Map(),
+    facilityMatches: new Map(),
     signingKeys: new Map(),
     evidence: new Map(),
     plays: new Map(),
@@ -278,6 +282,9 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
       async matchFix(courseId: string, lat: number, lng: number) {
         const key = `${courseId}:${lat}:${lng}`;
         return state.matches.get(key) ?? state.matches.get(courseId) ?? null;
+      },
+      async matchFacilityFix(facilityId: string, lat: number, lng: number): Promise<MatchResult> {
+        return state.facilityMatches.get(`${facilityId}:${lat}:${lng}`) ?? state.facilityMatches.get(facilityId) ?? { verificationTier: "unverified", geometryKind: "radius", insideBuffer: false };
       },
       async signingKey(kid: string) {
         return state.signingKeys.get(kid) ?? null;
@@ -537,6 +544,9 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
     // P4.2b-3a: the offline staff code (supabase/tests/unit/fake-offline-code-repo.ts).
     offlineCode: makeFakeOfflineCodeRepo(state, uid),
 
+    // P5.1a S2a: the course-QR player lane (supabase/tests/unit/fake-marker-scan-repo.ts).
+    markerScan: makeFakeMarkerScanRepo(state, uid),
+
     device: {
       async findOwn(deviceId: string) {
         const row = state.devices.get(deviceId);
@@ -649,6 +659,19 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
         if (!(Date.parse(row.expiresAt) > state.now.getTime())) return null;
         if (!(Date.parse(challenge.issuedAt) <= capturedAtMs && capturedAtMs <= Date.parse(challenge.expiresAt))) return null;
         row.consumedAt = state.now.toISOString();
+        return { facilityId: row.facilityId, attestationGrade: row.attestationGrade, challengeKind: row.challengeKind };
+      },
+      async peekForFix(jti: string, submittingDeviceId: string, capturedAtMs: number): Promise<ConsumedCheckinToken | null> {
+        // the read-only twin of consumeForFix: the same predicates, nothing written
+        const row = state.checkinTokens.get(jti);
+        if (!row) return null;
+        if (row.userId !== uid) return null;
+        if (row.deviceId !== submittingDeviceId) return null;
+        if (row.consumedAt !== null) return null;
+        const challenge = state.challenges.get(row.challengeId);
+        if (!challenge) return null;
+        if (!(Date.parse(row.expiresAt) > state.now.getTime())) return null;
+        if (!(Date.parse(challenge.issuedAt) <= capturedAtMs && capturedAtMs <= Date.parse(challenge.expiresAt))) return null;
         return { facilityId: row.facilityId, attestationGrade: row.attestationGrade, challengeKind: row.challengeKind };
       },
       async findByChallenge(challengeId: string): Promise<IssuedCheckinTokenRow | null> {
