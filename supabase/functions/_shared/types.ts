@@ -602,16 +602,12 @@ export interface Repo {
   };
 
   /** P4.2b-3a: the offline staff code (build plan §7.6 "Offline staff path (G-P1-07)"; migration 0045). Nothing per-device is stored: the seed is
-   * DERIVED inside Postgres (HMAC-SHA256 under a Vault key that never leaves it), so these two methods are the only DB surface the Edge code has. */
+   * DERIVED inside Postgres (HMAC-SHA256 under a Vault key that never leaves it), so `provisionSeed` is the only DB surface the Edge code has. (The staff lane's replay record, `private.offline_code_record_step_for_actor`, is not an Edge capability since 0047: partner authority, S3.) */
   offlineCode: {
     /** `POST /v1/me/offline-seed`: the TOTP seed of the CALLER'S OWN device, optionally rotating it first (seed version + 1, which invalidates every
      * code from the old seed). `null` = not the caller's device (another account's, or none: the same answer, no oracle on device ids). Never creates a
      * device. A missing derivation key is a 503 `offline_seed_unavailable`. The returned bytes are a secret: the caller must not log them. */
     provisionSeed(deviceId: string, rotate: boolean): Promise<OfflineSeedProvision | null>;
-    /** The staff lane's ATOMIC replay record (P5 composes: derive the player's seed -> `verifyOfflineCode` -> THIS -> evidence). Records an accepted
-     * (device, seed version, step) at `facilityId`, where the CALLER must hold a staff or manager scope (403 otherwise); the caller's own device is a
-     * 422 `self_attestation_refused` (A2-21). Concurrent callers racing on the same step get exactly one `"recorded"`; the rest `"replayed"`. */
-    recordStep(input: OfflineStepInput): Promise<OfflineStepRecordResult>;
   };
 }
 
@@ -622,6 +618,8 @@ export interface OfflineSeedProvision {
   issuedAt: string;
 }
 
+/** The arguments of the database's replay record, `private.offline_code_record_step_for_actor` (0045; X9 in 0047: not an Edge capability, called by S3's partner definer).
+ * Kept as the unit tests' vocabulary for the fake that models it (supabase/tests/unit/fake-offline-code-repo.ts). */
 export interface OfflineStepInput {
   deviceId: string;
   seedVersion: number;

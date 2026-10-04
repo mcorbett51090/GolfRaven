@@ -109,8 +109,6 @@ import type {
   RetentionStep,
   RosterVersionInput,
   OfflineSeedProvision,
-  OfflineStepInput,
-  OfflineStepRecordResult,
 } from "./types.ts";
 // Type-only: erased at runtime, so this does NOT make ABSOLUTE_ROW_CAP a
 // second source of truth — it re-reads the SAME constant score-play.ts
@@ -3228,26 +3226,19 @@ export const supabaseEmailOtpVerifier: EmailOtpVerifier = makeEmailOtpVerifier((
 // ============================================================================
 // Offline staff code (P4.2b-3a, migration 0045): the seed is DERIVED inside Postgres under a Vault key that never leaves it
 // ============================================================================
-// Both operations are `_for_actor` definers (edge_actor, the bound kind = 'user' actor; no user argument), so a wrong uid cannot even be expressed.
-// `private.offline_seed_derive` (the only reader of the key) has no EXECUTE for anyone, edge_actor included.
+// The provisioning operation is a `_for_actor` definer (edge_actor, the bound kind = 'user' actor; no user argument), so a wrong uid cannot even be expressed.
+// `private.offline_seed_derive` (the only reader of the key) has no EXECUTE for anyone, edge_actor included. The staff lane's replay record
+// (`private.offline_code_record_step_for_actor`) is NOT here any more: 0047 (X9) revoked it from edge_actor, because "this user holds a staff scope" is partner
+// authority, not a player-lane capability. The primitive stays in the database; S3's partner-attest calls it from a `_for_partner` definer.
 
-/** The SQLSTATEs 0045's definers raise, as the HTTP answers a client may see. 55000 is "the derivation key is not provisioned in Vault": a 503 with a
- * stable code, and no message from the database (it would only name the secret). 42501 on the replay record is "no staff scope at that facility" (or no
- * user binding, which is a server bug the same refusal covers). */
-function offlineCodeDbError(err: unknown, context: "provision" | "record"): unknown {
+/** The SQLSTATEs 0045's provisioning definer raises, as the HTTP answers a client may see. 55000 is "the derivation key is not provisioned in Vault": a 503
+ * with a stable code, and no message from the database (it would only name the secret). */
+function offlineCodeDbError(err: unknown): unknown {
   const code = (err as { code?: unknown } | null)?.code;
-  const message = String((err as { message?: unknown } | null)?.message ?? "");
   if (code === "55000") return new HttpError(503, "offline_seed_unavailable", "offline codes are not available right now");
-  if (code === "42501") return Errors.forbidden(context === "record" ? "you hold no staff scope at that facility" : "forbidden");
-  if (code === "22023" && message.startsWith("self_attestation_refused")) {
-    return Errors.unprocessable("self_attestation_refused", "a staff member cannot attest their own account");
-  }
-  // an unknown facility id (reachable only by an admin, the one principal the scope check passes for any facility): the FK is immediate
-  if (code === "23503" && context === "record") return Errors.unprocessable("unknown_facility", "no such facility");
+  if (code === "42501") return Errors.forbidden("forbidden");
   return mapPgTimeoutError(err);
 }
-
-const OFFLINE_STEP_RESULTS: ReadonlySet<string> = new Set(["recorded", "replayed", "stale_seed_version", "step_out_of_window", "no_such_device"]);
 
 function buildOfflineCodeRepo(trx: TxSql): Repo["offlineCode"] {
   return {
@@ -3256,7 +3247,7 @@ function buildOfflineCodeRepo(trx: TxSql): Repo["offlineCode"] {
       try {
         rows = await trx`select o_seed, o_seed_version, o_issued_at from private.offline_seed_for_actor(${deviceId}::uuid, ${rotate}::boolean)`;
       } catch (e) {
-        throw offlineCodeDbError(e, "provision");
+        throw offlineCodeDbError(e);
       }
       const r = rows[0];
       if (!r) return null;
@@ -3265,19 +3256,6 @@ function buildOfflineCodeRepo(trx: TxSql): Repo["offlineCode"] {
         seedVersion: Number(r.o_seed_version),
         issuedAt: r.o_issued_at instanceof Date ? r.o_issued_at.toISOString() : String(r.o_issued_at),
       };
-    },
-    async recordStep(input: OfflineStepInput): Promise<OfflineStepRecordResult> {
-      let rows;
-      try {
-        rows = await trx`select private.offline_code_record_step_for_actor(${input.deviceId}::uuid, ${input.seedVersion}::integer, ${input.step}::bigint, ${input.facilityId}::text) as result`;
-      } catch (e) {
-        throw offlineCodeDbError(e, "record");
-      }
-      const result = rows[0]?.result;
-      if (typeof result !== "string" || !OFFLINE_STEP_RESULTS.has(result)) {
-        throw new Error("offlineCode.recordStep: private.offline_code_record_step_for_actor returned an unexpected result");
-      }
-      return result as OfflineStepRecordResult;
     },
   };
 }
