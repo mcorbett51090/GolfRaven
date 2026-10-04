@@ -91,6 +91,68 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
     expect(c).toEqual(a);
   });
 
+  // Partner auth S0 (PA-0a, PA-0b): the WebAuthn wrapper is a shared module, not an entrypoint, so the loops above do not reach it; it is named in all three lists
+  // (type-checked, hash-proved, and run under the tampered lock), and the pure Deno suite over it runs with the network denied.
+  for (const step of STEPS) {
+    it(`"${step}" lists the partner WebAuthn wrapper`, () => {
+      expect(listedPaths(step)).toContain("supabase/functions/_shared/partner/webauthn.ts");
+    });
+  }
+
+  const DENO_UNIT_STEP = "Run supabase/tests/deno-unit";
+  const PARTNER_NPM_TAMPER_STEP = "deno cache --frozen npm tamper test (partner auth S0";
+
+  /** The shell lines of a step's run block with the YAML comments and line continuations removed, so a flag is matched where it is really passed. */
+  function runText(stepNamePrefix: string): string {
+    const block = stepBlock(stepNamePrefix);
+    return block.slice(block.indexOf("\n        run:")).replace(/\\\n\s*/g, " ");
+  }
+
+  it("the pure Deno suite step runs `deno test` over supabase/tests/deno-unit with --deny-net and --cached-only, against the committed frozen lock, and never grants net", () => {
+    const run = runText(DENO_UNIT_STEP);
+    const testLine = run.split("\n").find((l) => /^\s+deno test /.test(l));
+    expect(testLine, "a `deno test` line").toBeDefined();
+    expect(testLine).toContain("--deny-net");
+    expect(testLine).toContain("--cached-only");
+    expect(testLine).toContain("--frozen");
+    expect(testLine).toContain("--lock=supabase/tests/deno.lock");
+    expect(testLine).toContain("--config supabase/functions/deno.json");
+    expect(testLine).toContain("supabase/tests/deno-unit/");
+    expect(run).not.toMatch(/--allow-(net|all)|\s-A\b/);
+    expect(run).toMatch(/deno cache [^\n]*--frozen/);
+  });
+
+  for (const step of [DENO_UNIT_STEP, PARTNER_NPM_TAMPER_STEP]) {
+    it(`"${step}..." has no step-level if: and no continue-on-error: (it always runs, and its failure fails the job)`, () => {
+      const keys = stepBlock(step)
+        .split("\n")
+        .filter((l) => !/^\s*#/.test(l))
+        .filter((l) => /^ {8}[A-Za-z_-]+:/.test(l) || /^ {6}- [A-Za-z_-]+:/.test(l))
+        .map((l) => l.trim().replace(/^- /, "").split(":")[0]!);
+      expect(keys).toContain("run");
+      expect(keys).not.toContain("if");
+      expect(keys).not.toContain("continue-on-error");
+    });
+  }
+
+  it("the partner npm tamper step names the direct pin, uses a fresh DENO_DIR per target and requires the specific checksum message", () => {
+    const run = runText(PARTNER_NPM_TAMPER_STEP);
+    expect(run).toContain("@simplewebauthn/server@14.0.3");
+    expect(run).toMatch(/DENO_DIR="\$TAMPER_DIR\/deno-dir-\$SLUG"/);
+    expect(run).toContain("Tarball checksum did not match");
+    expect(run).toContain("--frozen");
+  });
+
+  it("every deno test file under supabase/tests/deno-unit is a pure suite: no database, no network, no process or file access", () => {
+    const dir = join(REPO_ROOT, "supabase", "tests", "deno-unit");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".ts"));
+    expect(files).toContain("partner-webauthn.deno.test.ts");
+    for (const f of files) {
+      const text = readFileSync(join(dir, f), "utf8");
+      expect(text, f).not.toMatch(/\bfetch\(|Deno\.connect|Deno\.listen|WebSocket|postgres|Deno\.(readFile|writeFile|Command|env)|Deno\.run/);
+    }
+  });
+
   it("the parser reads a block the way the workflow writes it (a self-test on a made-up CI text is not possible here, so pin the real shape)", () => {
     expect(listedPaths("deno check (frozen lockfile)")).toContain("supabase/functions/evidence/index.ts");
     expect(listedPaths("deno check (frozen lockfile)")).not.toContain("supabase/functions/evidence/");
