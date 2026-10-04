@@ -617,6 +617,7 @@ Reuses `private.hit_actor_rate_limit` and `hit_system_rate_limit` (E11). Pre-aut
 | `session/options` | IP hash; global | **alert at** 600/h per IP hash and 20,000/h global; no block. It **writes nothing** (stateless challenge, 5.1), so there is no growth to bound |
 | `session` (verify) | credential | 5 failures per credential per hour, then a 15 min credential cooldown (a status, not a RAISE) |
 | `session` (verify) | IP hash | alert at 100 failures/h; no block |
+| `session` (mint, S0-L5; built in 0048) | credential | **60 successful sign-ins per credential per hour**, counted from `app.partner_session` (`mint_kind = 'sign_in'`, `created_at` within the hour) and checked **before** any signature verification, so a holder of a valid credential cannot loop mints and a refusal here costs the database only that count; the status is `rate_limited` (a status, not a RAISE). The 60 is the sessions' own `created_at`, so it cannot be reset by anything but time |
 | any partner call | member | 1,200/h (alert, not block) |
 | PIN verify | member | the in-row rules of 6.3 (3 / 4 / 5 consecutive; 20 a day) |
 | TOTP verify | member | 5 failures/h, 15 min lock; a step cannot be reused |
