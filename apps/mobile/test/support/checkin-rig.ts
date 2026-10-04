@@ -125,7 +125,7 @@ export interface Rig {
   deps: (over?: Partial<CheckInDeps>) => CheckInDeps;
   fixIds: string[];
   /** Puts `n` prefetched challenges in the signed-in user's pool, received at `at` and expiring `ttl` later (the store stamps its own `issuedAt` = `at`). */
-  seedPool: (n: number, at?: number, ttl?: number) => Promise<number>;
+  seedPool: (n: number, at?: number, ttl?: number, prefix?: string) => Promise<number>;
   run: (entry: CourseEntry, over?: Partial<CheckInDeps>, extra?: { index?: CatalogIndex | null; catalogVersion?: string }) => ReturnType<typeof runCheckIn>;
 }
 
@@ -190,11 +190,11 @@ export function makeRig(o: { challengeStore?: ChallengeStore; outbox?: OutboxSto
     enqueue,
     deps,
     fixIds,
-    seedPool: (n, at = clock.now, ttl = 24 * 3600_000) =>
+    seedPool: (n, at = clock.now, ttl = 24 * 3600_000, prefix = "pool") =>
       challengeStore.insertMany(
         who.user ?? "user-a",
         DEVICE,
-        Array.from({ length: n }, (_, i) => ({ id: `pool${i + 1}`, nonce: `cG9vbG5vbmNl${i + 1}`, kind: "prefetched" as const, facilityId: null, expiresAt: at + ttl })),
+        Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i + 1}`, nonce: `cG9vbG5vbmNl${i + 1}`, kind: "prefetched" as const, facilityId: null, expiresAt: at + ttl })),
         at,
       ),
     run: (entry, over, extra) => runCheckIn(deps(over), { entry, catalogVersion: extra?.catalogVersion ?? SITE_VERSION, index: extra?.index ?? null }),

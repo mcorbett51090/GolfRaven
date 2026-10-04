@@ -51,6 +51,11 @@ export interface EvidenceInput {
   /** P4.2c: a challenge acquired BEFORE the fix was taken (`ChallengeManager.acquireLive`, or `none`), used for the one fix of a `foreground_checkin` instead of
    * asking the manager. Refused for any other source (a dwell has two fixes and each needs its own single-use challenge). */
   challenge?: FixChallenge;
+  /** P4.2c-1: whose challenge `challenge` is and which device it was issued to (`LiveChallenge.ownerUserId` / `.deviceId`). Required with `challenge`: it is refused for any other signed-in user or device. */
+  challengeFor?: { ownerUserId: string; deviceId: string };
+  /** P4.2c-1: the user the caller started this play for (a check-in binds the owner for its whole run: the fix can take seconds). When present and not the signed-in user NOW, nothing is
+   * written and no challenge is spent (`OutboxEnqueueError("account_changed")`). */
+  owner?: string;
 }
 
 export interface EvidenceEnqueued {
@@ -67,7 +72,14 @@ export function newFixId(random: RandomBytes): string {
 export async function enqueueEvidence(deps: EvidenceEnqueueDeps, input: EvidenceInput): Promise<EvidenceEnqueued> {
   const owner = deps.currentUserId();
   if (owner === null || owner === "") throw new OutboxEnqueueError("signed_out");
+  if (input.owner !== undefined && input.owner !== owner) throw new OutboxEnqueueError("account_changed");
   const deviceId = await deps.deviceId();
+  if (input.challenge !== undefined) {
+    if (input.submission.source !== "foreground_checkin") throw new Error("a pre-acquired challenge covers the one fix of a foreground_checkin only");
+    if (input.challengeFor === undefined) throw new Error("a pre-acquired challenge must name its owner and device");
+    if (input.challengeFor.ownerUserId !== owner) throw new OutboxEnqueueError("account_changed");
+    if (input.challengeFor.deviceId !== deviceId) throw new Error("the pre-acquired challenge was issued to another device");
+  }
   const fixes: FixTemplate[] = fixesOf(input.submission);
   if (input.origin === "import" && fixes.length > 0) throw new Error("a historic import carries no fixes");
 
@@ -91,7 +103,6 @@ export async function enqueueEvidence(deps: EvidenceEnqueueDeps, input: Evidence
   const dup = (await deps.existing(owner)).find((i) => i.sourceRef === sourceRef);
   if (dup) return { inserted: false, item: dup, penalty: penaltyOf(dup) };
 
-  if (input.challenge !== undefined && input.submission.source !== "foreground_checkin") throw new Error("a pre-acquired challenge covers the one fix of a foreground_checkin only");
   const challenges: Record<string, FixChallenge> = {};
   for (const f of fixes) {
     challenges[f.fixId] = input.challenge ?? (await deps.challenges.acquireForFix(owner, f.capturedAt, { live: input.live ?? false, facilityId: input.facilityId }));

@@ -28,6 +28,10 @@ export interface ChallengeManagerDeps {
   session: OutboxSession;
   deviceId: () => Promise<string>;
   now: () => number;
+  /** P4.2c-1: how many of this owner's challenges the SERVER still counts as open although the device has consumed them locally and will not redeem them soon (the marker co-signal
+   * records hold a prefetched challenge for 24 h: `marker/store.ts` `heldOpenCount`). The top-up subtracts it, so the client's room estimate matches the server's cap of 10 open
+   * prefetched challenges per device. Absent = 0. */
+  openElsewhere?: (owner: string, deviceId: string, now: number) => Promise<number>;
 }
 
 export type PrefetchOutcome =
@@ -56,6 +60,9 @@ export interface LiveChallenge {
   receivedAt: number;
   /** The server's expiry (epoch ms): a fix captured after it is outside the window. */
   expiresAt: number;
+  /** Whose challenge it is and which device it was issued to (P4.2c-1): `enqueueEvidence` refuses it for any other signed-in user or device. */
+  ownerUserId: string;
+  deviceId: string;
 }
 
 export class ChallengeManager {
@@ -84,7 +91,13 @@ export class ChallengeManager {
     }
     await store.purgeExpired(now());
     const usable = await store.countUsable(owner, deviceId, now());
-    const want = MAX_PREFETCHED - usable;
+    let held = 0;
+    try {
+      held = this.deps.openElsewhere ? await this.deps.openElsewhere(owner, deviceId, now()) : 0;
+    } catch {
+      held = 0;
+    }
+    const want = MAX_PREFETCHED - usable - held;
     if (want <= 0) return { kind: "full", usable };
     let accessToken: string | null;
     try {
@@ -131,6 +144,17 @@ export class ChallengeManager {
     return { state: "held", challengeId: c.id, nonce: c.nonce, kind: c.kind, expiresAt: c.expiresAt };
   }
 
+  /** How many prefetched challenges `owner` could consume right now on this device (unconsumed, unexpired). 0 for a user who is not signed in or when the device id is unavailable. */
+  async usableCount(owner: string): Promise<number> {
+    const { store, session, now } = this.deps;
+    if (owner === "" || session.currentUserId() !== owner) return 0;
+    try {
+      return await store.countUsable(owner, await this.deps.deviceId(), now());
+    } catch {
+      return 0;
+    }
+  }
+
   /** A LIVE challenge for a fix that is about to be taken (P4.2c; see `AcquireOptions.live` for why it must come first). Online only: any failure (offline,
    * rate limited, refused, signed out, a user switch) is `null` and the caller falls back to the pool. Never throws. The challenge is requested and redeemed on the
    * spot (`redeemed`), so the evidence must be sent within the token's lifetime (15 minutes, server): use it only for a check-in that is enqueued right away. */
@@ -159,7 +183,7 @@ export class ChallengeManager {
       const expiresAt = c ? Date.parse(c.expiresAt) : Number.NaN;
       if (!c || c.kind !== "live" || !(expiresAt > receivedAt)) return null;
       const token = await api.redeemCheckinChallenge({ challengeId: c.id, nonce: c.nonce, deviceId }, credentials);
-      return { challenge: { state: "redeemed", challengeId: c.id, kind: "live", jti: token.jti, grade: token.attestationGrade }, receivedAt, expiresAt };
+      return { challenge: { state: "redeemed", challengeId: c.id, kind: "live", jti: token.jti, grade: token.attestationGrade }, receivedAt, expiresAt, ownerUserId: owner, deviceId };
     } catch {
       return null; // offline, rate limited, refused: fall back to the pool
     }

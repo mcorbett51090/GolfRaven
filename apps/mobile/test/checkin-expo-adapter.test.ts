@@ -29,7 +29,7 @@ vi.mock("expo-location", () => ({
 
 import { createExpoLocationPort } from "../src/checkin/expo-location";
 
-const resp = (o: Partial<{ granted: boolean; status: string; canAskAgain: boolean; android: { accuracy: string } }>) => ({ granted: false, status: "denied", canAskAgain: true, expires: "never", ...o });
+const resp = (o: Partial<{ granted: boolean; status: string; canAskAgain: boolean; android: { accuracy: string }; ios: { scope: string; accuracy: string } }>) => ({ granted: false, status: "denied", canAskAgain: true, expires: "never", ...o });
 const pos = (over: Record<string, unknown> = {}, coords: Record<string, unknown> = {}) => ({
   coords: { latitude: 36.1, longitude: -86.7, accuracy: 7.5, altitude: null, altitudeAccuracy: null, heading: null, speed: null, ...coords },
   timestamp: 1_800_000_000_000,
@@ -53,6 +53,19 @@ describe("permission mapping", () => {
     expect(await port.permission()).toEqual({ status: "denied", canAskAgain: true });
     native.getForegroundPermissionsAsync.mockResolvedValueOnce(resp({ status: "denied", canAskAgain: false }));
     expect(await port.permission()).toEqual({ status: "denied", canAskAgain: false });
+  });
+
+  it("LOW-3: iOS 14+ 'Precise Location: Off' (`ios.accuracy: 'reduced'`) is approximate; 'full' is not; an iOS grant with no accuracy field (below iOS 14) is not", async () => {
+    const port = createExpoLocationPort("ios");
+    native.getForegroundPermissionsAsync.mockResolvedValueOnce(resp({ granted: true, status: "granted", ios: { scope: "whenInUse", accuracy: "reduced" } }));
+    expect(await port.permission()).toEqual({ status: "granted", approximate: true });
+    native.getForegroundPermissionsAsync.mockResolvedValueOnce(resp({ granted: true, status: "granted", ios: { scope: "whenInUse", accuracy: "full" } }));
+    expect(await port.permission()).toEqual({ status: "granted", approximate: false });
+    native.getForegroundPermissionsAsync.mockResolvedValueOnce(resp({ granted: true, status: "granted" }));
+    expect(await port.permission()).toEqual({ status: "granted", approximate: false });
+    // the same through the prompt
+    native.requestForegroundPermissionsAsync.mockResolvedValueOnce(resp({ granted: true, status: "granted", ios: { scope: "whenInUse", accuracy: "reduced" } }));
+    expect(await port.requestPermission()).toEqual({ status: "granted", approximate: true });
   });
 
   it("reading the permission NEVER shows the prompt; only `requestPermission` does, and it uses the FOREGROUND request", async () => {

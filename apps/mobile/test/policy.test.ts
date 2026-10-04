@@ -271,7 +271,8 @@ describe("AT 5 — generated manifest and Info.plist scanners", () => {
 describe("P4.2c — the location declarations scanner (proved on failing fixtures as well as the real files)", () => {
   const plist = (body: string): string => `<?xml version="1.0"?><plist version="1.0"><dict>${body}</dict></plist>`;
   const WHEN = "<key>NSLocationWhenInUseUsageDescription</key><string>GolfRaven uses your location only while the app is open.</string>";
-  const man = (...perms: string[]): string => `<manifest xmlns:tools="x">${perms.map((p) => `<uses-permission android:name="${p}"/>`).join("")}</manifest>`;
+  const SERVICE_REMOVED = '<application><service android:name="expo.modules.location.services.LocationTaskService" tools:node="remove"/></application>';
+  const man = (...perms: string[]): string => `<manifest xmlns:tools="x">${perms.map((p) => `<uses-permission android:name="${p}"/>`).join("")}${SERVICE_REMOVED}</manifest>`;
   const FINE = "android.permission.ACCESS_FINE_LOCATION";
   const COARSE = "android.permission.ACCESS_COARSE_LOCATION";
 
@@ -291,10 +292,39 @@ describe("P4.2c — the location declarations scanner (proved on failing fixture
     expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE, "android.permission.ACCESS_BACKGROUND_LOCATION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
     expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE, "android.permission.FOREGROUND_SERVICE_LOCATION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
     expect(scanLocationDeclarations({ androidManifest: man(FINE, COARSE, "android.permission.ACTIVITY_RECOGNITION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
-    const removed = `<manifest xmlns:tools="x"><uses-permission android:name="${FINE}"/><uses-permission android:name="${COARSE}"/><uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove"/></manifest>`;
+    const removed = `<manifest xmlns:tools="x"><uses-permission android:name="${FINE}"/><uses-permission android:name="${COARSE}"/><uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove"/>${SERVICE_REMOVED}</manifest>`;
     expect(scanLocationDeclarations({ androidManifest: removed })).toEqual([]);
     // the SHORT permission name is understood too
     expect(scanLocationDeclarations({ androidManifest: man("ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "ACCESS_BACKGROUND_LOCATION") }).map((v) => v.rule)).toEqual(["android-location-extra"]);
+  });
+
+  it("P4.2c-1: expo-location's LocationTaskService must be REMOVED from the merged manifest: absent, present-and-kept, a relative name (matches nothing in the app manifest) or another node action all fail", () => {
+    const base = `<manifest xmlns:tools="x"><uses-permission android:name="${FINE}"/><uses-permission android:name="${COARSE}"/>`;
+    const rules = (svc: string): string[] => scanLocationDeclarations({ androidManifest: `${base}<application>${svc}</application></manifest>` }).map((v) => v.rule);
+    const NAME = "expo.modules.location.services.LocationTaskService";
+    expect(rules(`<service android:name="${NAME}" tools:node="remove"/>`)).toEqual([]);
+    expect(rules(`<service tools:node='remove' android:name='${NAME}' />`)).toEqual([]);
+    expect(rules("")).toEqual(["android-location-service"]);
+    expect(rules(`<service android:name="${NAME}" android:foregroundServiceType="location"/>`)).toEqual(["android-location-service"]);
+    expect(rules(`<service android:name="${NAME}" tools:node="replace"/>`)).toEqual(["android-location-service"]);
+    expect(rules('<service android:name=".services.LocationTaskService" tools:node="remove"/>')).toEqual(["android-location-service"]);
+    expect(rules('<service android:name="com.other.Service" tools:node="remove"/>')).toEqual(["android-location-service"]);
+  });
+
+  it("P4.2c-1: the config plugin writes exactly that entry (idempotent, adds the tools namespace, keeps other services) and is the second allow-listed local plugin", () => {
+    const require = createRequire(import.meta.url);
+    const plugin = require("../plugins/with-no-location-service.js") as { applyToManifest: (m: unknown) => { manifest: { $: Record<string, string>; application: { service?: { $: Record<string, string> }[] }[] } }; SERVICE: string };
+    expect(plugin.SERVICE).toBe("expo.modules.location.services.LocationTaskService");
+    const file = { manifest: { $: {}, application: [{ $: { "android:name": ".MainApplication" }, service: [{ $: { "android:name": "com.keep.Me" } }] }] } };
+    const once = plugin.applyToManifest(structuredClone(file));
+    expect(once.manifest.$["xmlns:tools"]).toBe("http://schemas.android.com/tools");
+    expect(once.manifest.application[0]!.service).toEqual([{ $: { "android:name": "com.keep.Me" } }, { $: { "android:name": plugin.SERVICE, "tools:node": "remove" } }]);
+    expect(plugin.applyToManifest(structuredClone(once))).toEqual(once);
+    const kept = structuredClone(file);
+    kept.manifest.application[0]!.service.push({ $: { "android:name": plugin.SERVICE } });
+    expect(plugin.applyToManifest(kept).manifest.application[0]!.service!.at(-1)!.$["tools:node"]).toBe("remove");
+    expect([...ALLOWED_PLUGINS].filter((p) => p.startsWith(".")).sort()).toEqual(["./modules/golfraven-attest/app.plugin.js", "./plugins/with-no-location-service.js"]);
+    expect((appJson.expo?.plugins ?? []).map((p) => (Array.isArray(p) ? p[0] : p))).toContain("./plugins/with-no-location-service.js");
   });
 
   it("the allow-lists carry the two foreground permissions and nothing background", () => {
@@ -344,9 +374,9 @@ describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it m
     expect(rules({ expo: e })).not.toContain("ios-entitlement");
   });
 
-  it("the local attestation plugin is the one allow-listed local plugin, and it is in the real app.json", () => {
-    const local = [...ALLOWED_PLUGINS].filter((p) => p.startsWith("."));
-    expect(local).toEqual(["./modules/golfraven-attest/app.plugin.js"]);
+  it("the local attestation plugin is an allow-listed local plugin, and it is in the real app.json", () => {
+    const local = [...ALLOWED_PLUGINS].filter((p) => p.startsWith(".")).sort();
+    expect(local).toEqual(["./modules/golfraven-attest/app.plugin.js", "./plugins/with-no-location-service.js"]);
     const used = (appJson.expo?.plugins ?? []).map((p) => (Array.isArray(p) ? p[0] : p));
     expect(used).toContain("./modules/golfraven-attest/app.plugin.js");
     expect(existsSync(here("../modules/golfraven-attest/app.plugin.js"))).toBe(true);
