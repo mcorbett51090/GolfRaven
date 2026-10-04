@@ -119,6 +119,25 @@ export const offlineSeedResultSchema = z.object({
   issuedAt: z.string().min(1).refine((s) => Number.isFinite(Date.parse(s))),
 });
 
+/** `POST /marker-scan` -> `MarkerScanResponse` (`_shared/course-qr/scan-handler.ts`): 201 for a scan, 200 for a co-signal intake. Non-strict (a member the server adds is ignored); the closed sets are literals so a
+ * state the client cannot interpret fails as `bad_response` instead of being shown as a purchase. */
+export const markerScanResultSchema = z.object({
+  outcome: z.enum(["credited", "pending", "held_review"]),
+  facilityId: z.string().min(1).max(128),
+  localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  cosignal: z.enum(["counted", "none"]),
+  purchases: z
+    .array(
+      z.object({
+        purchaseId: z.string().min(1).max(128),
+        trailId: z.string().min(1).max(128),
+        status: z.enum(["valid", "pending", "held_review"]),
+        credit: z.object({ id: z.string().min(1).max(128).nullable(), status: z.enum(["credited", "pending", "held_review", "void"]) }),
+      }),
+    )
+    .max(64),
+});
+
 /** `POST /rewards-activate/{id}` -> `ActivationResult` (`_shared/rewards/activate-handler.ts`). `state` is open (the server may add one); the client reads `held` and the two active states. */
 export const activationResultSchema = z.object({
   id: z.string().min(1).max(128),
